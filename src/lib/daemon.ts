@@ -1567,6 +1567,11 @@ export async function runDaemon(
   // daemon-lifetime state: sweeps keep owning the open PR, and a restart may safely reconstruct the
   // same fact from the status projection rather than introducing another durable queue.
   const parkedBlockers = new Map<string, { prUrl?: string; dependents: string[] }>();
+  // Library fallback for callers that do not wire the status projection: independent failures are
+  // still recorded in the ledger, but the same in-process loop must not re-spend on the id before a
+  // projection reader has a chance to observe that row. Not a Task mutation, so plan reloads cannot
+  // erase it.
+  const independentFailureBlocksThisRun = new Set<string>();
   // The cross-task counterpart to the map above — content-keyed on whether the last transient verdict
   // was a different task id, never on one task's own retry budget (W1-T2517).
   let apiWindowHoldState: ApiWindowHoldState = INITIAL_API_WINDOW_HOLD_STATE;
@@ -1761,6 +1766,7 @@ export async function runDaemon(
         // Independent failure: nothing in the plan transitively depends on this task, so skipping it cannot
         // leave a dependent building on a gap. Record the block in the ledger, so a plan reload or daemon
         // restart derives the same skip instead of trusting this tick's Task object.
+        independentFailureBlocksThisRun.add(task.id);
         log("dispatch.blocked_independent", {
           task_id: task.id,
           task: task.id,
@@ -2542,7 +2548,8 @@ export async function runDaemon(
           }
         }
       },
-      isIndependentFailureBlocked: deps.isIndependentFailureBlocked,
+      isIndependentFailureBlocked: (taskId) =>
+        independentFailureBlocksThisRun.has(taskId) || deps.isIndependentFailureBlocked?.(taskId) === true,
     };
 
     // The dispatch set, adopting drain.ts's lane machinery rather than a second implementation. A console
