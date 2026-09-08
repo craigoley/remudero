@@ -1,0 +1,108 @@
+- id: W1-T3194
+  title: "A SUCCESSFUL ARTIFACT UPLOAD THAT 403S ONLY WHILE FINALIZING STALLS THE WHOLE QUEUE — two independent GitHub Actions runs uploaded every byte and then failed `FinalizeArtifact` through an intermediary, but Remudero treated both as product defects: one PR stayed red and main health opened a manual incident instead of re-running the exact failed job once"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files:
+    - src/lib/classify.ts
+    - src/lib/sweep.ts
+    - src/lib/main-health-rung.ts
+    - src/run-task.ts
+    - test/failed-ci-infrastructure-requeue.test.ts
+    - test/main-health-wiring.test.ts
+  origin: "fleet-incident#github-artifact-finalization-403-2026-09-08"
+  plan_refs: ["W1-T7", "W1-T1223", "W1-T2403", "W1-T2787"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED TWICE ON 2026-09-08, ON DIFFERENT WORKFLOWS AND REPOSITORY SURFACES. PR #4671's CI
+    run 34249290033 uploaded coverage-shard (2/4)'s 153-byte artifact and then failed while
+    finalizing it with `Failed to FinalizeArtifact ... (403) Forbidden: Error from intermediary`.
+    Its OSV run 34249290951 independently uploaded multiple artifacts and failed with the same
+    finalization response. A targeted manual retry passed. Minutes later main sha
+    e0838eb6e0702ff1a35bd5d9c240e8c7bbf6fd25 failed Scorecard run 34250017967 after uploading all
+    16,719 bytes of `SARIF file.zip`; finalization returned the same 403. Re-running only the
+    failed job produced a passing second attempt. GitHub's public status API said All Systems
+    Operational during the incident, so status-page health is not a sufficient discriminator.
+
+    THE CURRENT CONTROL LOOP MISCLASSIFIES BOTH SURFACES. `fetchCiFailures` already captures each
+    failed PR job's log tail, but `runSweep` only gives deterministic no-worker requeue treatment
+    to CANCELLED required checks. A literal FAILURE always falls through to an LLM fix worker and
+    can consume a strike even when the log positively proves an infrastructure-only result.
+    `buildMainHealthRung` reads main's failing check names but discards their log evidence and
+    immediately opens MAIN-HEALTH. Because daemon admission requires healthy main, one artifact
+    service transient can therefore leave every otherwise-ready review and build waiting until a
+    human notices and re-runs it.
+
+    THIS IS THE SAME CHEAP EFFECT ALREADY PROVEN SAFE. W1-T1223 and W1-T2403 established the
+    single-job endpoint `POST /actions/jobs/{job_id}/rerun`, never the whole-run endpoint, and the
+    durable `${head_sha}@${check_name}` ledger bound. The missing work is a narrow positive
+    classifier and wiring it before either a worker strike or a main-health escalation. It is not
+    a general "403 means retry" rule: permission failures and product failures must remain red.
+  design: |
+    Add one pure failed-CI-infrastructure classifier over a check conclusion and captured log
+    evidence. Its first registry entry is the exact conjunction observed here: conclusion
+    FAILURE, artifact content upload completed, finalization began, and `Failed to
+    FinalizeArtifact` reports the intermediary 403. The terminal error line alone is insufficient;
+    absent, truncated, permission-shaped, test-failure, compiler, and ordinary HTTP 403 evidence
+    all fail closed to a genuine failure. Keep the registry named and table-driven so later
+    measured signatures can be added one at a time without widening generic transient matching.
+
+    Preserve the job id on `CiFailure` from the same `detailsUrl` already parsed for cancelled
+    checks. In `runSweep`, before ordinary blocked-CI fix dispatch, re-run each positively
+    classified job through the existing single-job effect. Write the durable requeue ledger row
+    before the API call and permit at most one retry per exact head and check. A second matching
+    failure on that head escalates with both attempts named; it never spends a fix strike and never
+    dispatches a code worker. Mixed evidence remains mixed: requeue the proven infrastructure job,
+    while genuine sibling failures continue through their existing repair path.
+
+    Give the main-health rung the same evidence producer and bounded job effect rather than a
+    second classifier. When every failing main check is positively classified and has a resolvable
+    job id, re-run each once and record `main.health.ci_requeued`; do not open MAIN-HEALTH on that
+    first observation. If any sibling is genuine or unreadable, if the job id is absent, if the
+    API call fails, or if the same `${sha}@${check}` is observed failing again, preserve today's
+    fail-closed escalation. Pending and green behavior, issue resolution, dispatch admission,
+    Serve's zero-GitHub-read boundary, and all existing cancellation handling remain unchanged.
+
+    Emit queue telemetry for surface (PR/main), check, signature, head, job id, attempt outcome,
+    and whether a worker strike was avoided. Never include the unbounded log body. The console can
+    then explain that the queue is waiting on one bounded infrastructure retry rather than showing
+    an unexplained red board.
+  acceptance:
+    - claim: "the exact successful-upload then intermediary-403 FinalizeArtifact transcript classifies as retryable CI infrastructure, while generic 403, permission, test, compiler, missing and truncated evidence all fail closed"
+      proof: "unit test: test/failed-ci-infrastructure-requeue.test.ts"
+    - claim: "a matching failed PR job is re-run through the single-job endpoint before any fix worker or strike, and the durable head-and-check row is written before that call"
+      proof: "integration test: test/failed-ci-infrastructure-requeue.test.ts"
+    - claim: "a second matching failure on the same PR head escalates once instead of re-running forever, while a new head receives a fresh one-retry allowance"
+      proof: "integration test: test/failed-ci-infrastructure-requeue.test.ts"
+    - claim: "a mixed PR re-runs only the positively classified infrastructure job and retains genuine sibling failures for the ordinary fix route"
+      proof: "integration test: test/failed-ci-infrastructure-requeue.test.ts"
+    - claim: "main with only matching failures receives bounded per-job re-runs before escalation, but unreadable, unaddressable, mixed or repeated main failures still open the existing MAIN-HEALTH incident"
+      proof: "integration test: test/main-health-wiring.test.ts"
+    - claim: "Serve still performs no GitHub read or Actions mutation, and pending, green, cancellation, issue-resolution and queue-admission behavior are unchanged"
+      proof: "regression tests: test/main-health-wiring.test.ts and test/failed-ci-infrastructure-requeue.test.ts"
+    - claim: "telemetry names the surface, check, signature, head, job id and outcome without copying the failed job log into the ledger"
+      proof: "unit test: test/failed-ci-infrastructure-requeue.test.ts"
+  falsifier: |
+    Close without implementation if either failed run contains an earlier deterministic product
+    error, or if a targeted retry of the same job fails identically. The observed controls go the
+    other way: both logs reached a completed content upload before the finalization-only 403, and
+    the targeted retries passed without a source change.
+
+    Prove the implementation load-bearing by deleting only the positive classifier entry: neither
+    PR nor main may call the requeue effect. Restore it and delete only the durable ledger write:
+    the repeated-head test must expose an unbounded second requeue. Finally mutate the endpoint
+    from `/actions/jobs/{job_id}/rerun` to a workflow-run endpoint: the recorder must fail. If any
+    of those mutations remains green, the suite does not prove the production control loop.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` observed remote plan ids through W1-T3193 and
+    atomically RESERVED W1-T3194 at `refs/rmd-id/W1-T3194`; that reserved id is authoritative.
+    ONE CONCERN: convert positively identified failed-CI infrastructure into one bounded job retry
+    on both surfaces where the same incident currently stalls the queue. This does not diagnose or
+    suppress any product failure, change retry timing, poll GitHub status, or broaden lifecycle
+    authority.
