@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { gitRepo } from "./helpers/git-repo.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
+  defaultCountPrunable,
   defaultLooseObjectCount,
   LOOSE_OBJECT_FLOOR,
   OBJECT_PRUNE_EXPIRY,
@@ -205,18 +207,36 @@ test("W1-T3090: against a REAL git repo the default probes agree it is quiet and
 // exercise the real thing against a real repository and a real non-repository.
 
 test("W1-T3090: the default counter reads a REAL repository rather than being replaced by a fake", () => {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}loose-count-`));
-  const git = (...args: string[]): string =>
-    execFileSync("git", ["-C", dir, ...args], {
-      encoding: "utf8",
-      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.invalid" },
-    });
-  git("init", "--quiet", "-b", "main");
+  // The SHARED fixture (test/helpers/git-repo.ts), not a hand-rolled one: the fixture-copy census
+  // names it as the migration target, and a call site that uses it drops out of the counts.
+  const { dir, git } = gitRepo({ kind: "loose-count" });
   writeFileSync(join(dir, "a.txt"), "one\n");
   git("add", "-A");
   git("commit", "-q", "-m", "seed");
   // A fresh commit leaves loose objects (blob, tree, commit) — unpacked until a gc runs.
   assert.ok(defaultLooseObjectCount(dir) > 0, "a just-committed repo has loose objects to count");
+});
+
+test("W1-T3092: the default PRUNABLE counter shells out to a REAL repository rather than being replaced by a fake", () => {
+  // The survey seam's own default. Every other test here supplies `countPrunable`, so without this
+  // case `defaultCountPrunable` never executes at all — the all-fakes shape CLAUDE.md records, and
+  // the same gap #4527's review closed for `defaultLooseObjectCount` directly above.
+  const { dir } = gitRepo({ kind: "prunable-count" });
+  // An unreferenced blob is exactly what a prune removes; `--expire=now` makes it eligible at once.
+  const dangling = execFileSync("git", ["-C", dir, "hash-object", "-w", "--stdin"], { encoding: "utf8", input: "orphan\n" }).trim();
+  assert.match(dangling, /^[0-9a-f]{40}$/, "the fixture really wrote a loose object");
+  assert.ok(
+    defaultCountPrunable(dir, ["prune", "-n", "--expire=now"]) > 0,
+    "a repo holding an unreferenced object reports a non-zero would-prune count",
+  );
+});
+
+test("W1-T3092: an unreadable PRUNABLE count reads as 0, never a throw — the safe direction for a survey", () => {
+  // The catch arm. 0 is what a survey reports when it cannot measure; the value is ledgered and
+  // never compared against a threshold, so reporting nothing can never authorise a prune.
+  const notARepo = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prunable-norepo-`));
+  assert.equal(defaultCountPrunable(notARepo, ["prune", "-n", "--expire=now"]), 0);
+  assert.equal(defaultCountPrunable("/no/such/path/at/all", ["prune", "-n"]), 0, "a missing path is unreadable, not a throw");
 });
 
 test("W1-T3090: an unreadable count reads as 0, which can only ever cause a SKIP", () => {
