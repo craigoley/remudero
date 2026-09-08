@@ -796,6 +796,14 @@ function dialectGrepSelfLineRe(pattern: string, path: string): RegExp {
   return new RegExp(`${escapeRegExp(pattern)}\\s+in\\s+${escapeRegExp(path)}`, "i");
 }
 
+/** W1-T3208 is the plan-shard self-certification hazard W1-T2983 measured. The public proof
+ *  executor does not know the criterion's source position, and existing callers still use it to
+ *  assert legacy monolith retirement records in `plan/tasks.yaml`. Keep the runtime exclusion on
+ *  the shard population that owns this defect until a wider position-aware proof context exists. */
+function dialectGrepSelfLineFilteringApplies(path: string): boolean {
+  return /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path);
+}
+
 /** (W1-T3208) Re-read a PASSING dialect `grep:` proof's own already-clean stdout (`-arn` gives
  *  `<lineno>:<content>` for a single-file target) and drop the ONE line that carries this proof's
  *  own declaration ({@link dialectGrepSelfLineRe}) before deciding pass/fail. A proof whose only
@@ -1444,7 +1452,7 @@ export function execWhitelistedProof(
     // `args[2]` is the compiled pattern, so the two are read together rather than re-deriving one
     // shape check twice.
     const dialectPath = dialectGrepTargetPath(whitelisted);
-    if (whitelisted.kind === "grep" && dialectPath !== undefined) {
+    if (whitelisted.kind === "grep" && dialectPath !== undefined && dialectGrepSelfLineFilteringApplies(dialectPath)) {
       return dialectGrepOutcomeExcludingSelfLine(whitelisted.args[2]!, dialectPath, stdout);
     }
     return "pass";

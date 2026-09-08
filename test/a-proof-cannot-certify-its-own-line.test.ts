@@ -122,6 +122,15 @@ test("CLAIM 3: a proof targeting an ORDINARY (non-self) file still FAILS on a ge
   assert.equal(execWhitelistedProof(whitelisted!, dir), "fail");
 });
 
+test("CLAIM 3: the legacy monolith plan path keeps direct-executor grep behavior", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w3208-monolith-plan-"));
+  mkdirSync(join(dir, "plan"), { recursive: true });
+  writeFileSync(join(dir, "plan", "tasks.yaml"), '      proof: "grep: MONOLITH_SELF_TOKEN in plan/tasks.yaml"\n');
+  const whitelisted = parseWhitelistedProof("grep: MONOLITH_SELF_TOKEN in plan/tasks.yaml");
+  assert.ok(whitelisted);
+  assert.equal(execWhitelistedProof(whitelisted!, dir), "pass");
+});
+
 test("CLAIM 3: text that reads like 'pattern in path' inside an UNRELATED file's genuine content is not mistaken for a self-declaration and still PASSES", () => {
   // A control against over-matching: the exclusion regex is anchored to THIS proof's own compiled
   // pattern+path, so ordinary prose that happens to contain "<pattern> in <path>" for a DIFFERENT
