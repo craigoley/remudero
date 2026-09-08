@@ -67,7 +67,7 @@ import {
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, type DispatchGovernorVerdict, type QuietHoursHoldResult } from "./dispatch-governor.js";
-import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { RetroTriggerDecision } from "./retro.js";
@@ -1613,6 +1613,10 @@ export async function runDaemon(
   // projection reader has a chance to observe that row. Not a Task mutation, so plan reloads cannot
   // erase it.
   const independentFailureBlocksThisRun = new Set<string>();
+  // A task can become non-runnable after this process loaded its selector snapshot but before its
+  // worker reaches the current-plan admission gate. Keep that expected freshness race out of the
+  // fatal-error path, and keep the stale snapshot from immediately offering the same id again.
+  const invalidatedAdmissionsThisRun = new Set<string>();
   // The cross-task counterpart to the map above — content-keyed on whether the last transient verdict
   // was a different task id, never on one task's own retry budget (W1-T2517).
   let apiWindowHoldState: ApiWindowHoldState = INITIAL_API_WINDOW_HOLD_STATE;
@@ -2513,7 +2517,7 @@ export async function runDaemon(
       isOpenPr: deps.isOpenPr,
       // A parked blocker is excluded before the open-PR check, so the existing idle census names it
       // as `continued-this-pass`. Its descendants remain excluded independently by `unmet-deps`.
-      excludeIds: new Set(parkedBlockers.keys()),
+      excludeIds: new Set([...parkedBlockers.keys(), ...invalidatedAdmissionsThisRun]),
       // The daemon's own target, threaded to the gate. The refusal it enables is counted by the row that
       // already carries every other decline — no new step and no new signal (W1-T988).
       targetRepo: deps.targetRepo,
@@ -2932,6 +2936,13 @@ export async function runDaemon(
       const outcome = settled[i];
       if (outcome.status === "rejected") {
         const err = outcome.reason;
+        if (err instanceof TaskAdmissionError) {
+          invalidatedAdmissionsThisRun.add(t.id);
+          const rawReason = String(err.message).replace(/[\r\n\t]+/g, " ");
+          const reason = rawReason.length <= 240 ? rawReason : `${rawReason.slice(0, 239)}…`;
+          log("daemon.admission_stood_down", { task: t.id, reason });
+          continue;
+        }
         const transientTransport = transientGhDispatchFailure(err);
         if (!isSpawnInfraBlocked(err) && transientTransport === undefined) {
           // First observed wins the summary detail, mirroring `runDrainLanes`' identical choice. Every other

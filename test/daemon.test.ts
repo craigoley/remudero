@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
+import { assertRunnable, loadPlan, PlanError, TaskAdmissionError, type Plan, type Task } from "../src/lib/plan.js";
 import { daemonCommand, ledgerPathFor, runInflightLockSweepRung, type RunResult } from "../src/run-task.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, claudeExecutableCache } from "../src/lib/worker.js";
 import { HEADROOM_LIMIT_PCT, type UsageSnapshot } from "../src/lib/headroom.js";
@@ -1882,6 +1882,87 @@ test("an unexpected error from runOne is a terminal 'error' stop, naming the tas
   });
   assert.equal(s.stopReason, "error");
   assert.match(s.stopDetail ?? "", /A: boom/);
+});
+
+test("W1-T3214: a retired-after-selection lane stands down without losing its successful sibling", async () => {
+  const plan = fixturePlan();
+  let admission: unknown;
+  try {
+    assertRunnable(plan, { ...plan.byId.get("A")!, status: "blocked", note: "retired after this batch was selected" });
+  } catch (error) {
+    admission = error;
+  }
+  assert.ok(admission instanceof TaskAdmissionError, "the final runnable refusal has its own machine-readable type");
+  assert.ok(admission instanceof PlanError, "the narrow type retains every existing PlanError catch");
+  assert.equal(admission.kind, "plan");
+  assert.equal(admission.exitCode, 1);
+  assert.equal(admission.message, "task A is blocked: retired after this batch was selected");
+
+  const merged = new Set<string>();
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        if (id === "A") {
+          const selected = plan.byId.get(id)!;
+          assertRunnable(plan, { ...selected, status: "blocked", note: "retired after this batch was selected" });
+        }
+        merged.add(id);
+        return okResult(id);
+      },
+      sleep: async () => {},
+      log: (step, extra = {}) => rows.push({ step, extra }),
+    },
+    { laneCount: 2, max: 2 },
+  );
+
+  assert.equal(s.stopReason, "max_reached", "the expected admission refusal stays in process");
+  assert.deepEqual(s.attempted, ["A", "D"], "both concurrently admitted lanes settled");
+  assert.deepEqual(s.merged, ["D"], "the successful sibling was processed after the refusal");
+  const stoodDown = rows.find((row) => row.step === "daemon.admission_stood_down");
+  assert.equal(stoodDown?.extra.task, "A");
+  assert.match(String(stoodDown?.extra.reason), /retired after this batch was selected/);
+  assert.ok(String(stoodDown?.extra.reason).length <= 240, "the refusal detail is bounded in telemetry");
+});
+
+test("W1-T3214: an invalidated admission is not selected twice from one daemon plan snapshot", async () => {
+  const plan = fixturePlan();
+  const calls: string[] = [];
+  const merged = new Set<string>();
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        calls.push(id);
+        if (id === "A") {
+          const selected = plan.byId.get(id)!;
+          assertRunnable(plan, { ...selected, status: "blocked", note: "retired after selection" });
+        }
+        merged.add(id);
+        return okResult(id);
+      },
+      sleep: async () => {},
+    },
+    { laneCount: 1, max: 2 },
+  );
+
+  assert.equal(s.stopReason, "max_reached");
+  assert.deepEqual(calls, ["A", "D"], "the stale snapshot moved past A instead of offering it again");
+});
+
+test("W1-T3214: an ordinary PlanError from a worker lane remains fatal", async () => {
+  const s = await runDaemon(fixturePlan(), {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => { throw new PlanError("corrupt plan control"); },
+    sleep: async () => {},
+  });
+
+  assert.equal(s.stopReason, "error");
+  assert.match(s.stopDetail ?? "", /A: corrupt plan control/);
+  assert.ok(!(new PlanError("control") instanceof TaskAdmissionError), "generic plan errors stay outside the narrow admission class");
 });
 
 test("W1-T3165: a GitHub rate-limit rejection holds in process with bounded backoff instead of exiting", async () => {
