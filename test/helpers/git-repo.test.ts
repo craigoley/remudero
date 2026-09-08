@@ -36,13 +36,20 @@ test("gitRepo: THE FALSIFIER — a bare `git commit` with NO identity env, strip
   delete strippedEnv.GIT_AUTHOR_EMAIL;
   delete strippedEnv.GIT_COMMITTER_NAME;
   delete strippedEnv.GIT_COMMITTER_EMAIL;
+  // AND FORBID AUTO-DETECTION, which is what makes this falsifier PLATFORM-INDEPENDENT. Stripping
+  // config is not enough on macOS: git happily invents `user@hostname` and the commit SUCCEEDS,
+  // where a Linux runner refuses with "Author identity unknown". MEASURED 2026-09-08 — this test
+  // passed in CI and failed locally on exactly that difference, which made `rmd review` post a
+  // false FAIL for the whole pull request. `user.useConfigOnly` makes "no identity" mean the same
+  // thing on both, so the falsifier proves the fixture's env rather than the host's.
+  execFileSync("git", ["-C", repo.dir, "config", "user.useConfigOnly", "true"], { encoding: "utf8" });
   assert.throws(
     () =>
       execFileSync("git", ["-C", repo.dir, "commit", "--quiet", "--allow-empty", "-m", "no identity"], {
         encoding: "utf8",
         env: strippedEnv,
       }),
-    /Author identity unknown|unable to auto-detect/,
+    /Author identity unknown|unable to auto-detect|no name was given|user\.useConfigOnly/,
     "a commit with genuinely no identity anywhere must refuse — the control for the test above",
   );
 });
