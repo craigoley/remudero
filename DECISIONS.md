@@ -2089,3 +2089,209 @@ set, prefer (d) alone and leave the registry hand-written.
 
 **Rollback:** delete this entry. No code was written and no registry changed; W1-T2790 returns to
 `status: queued` with its question open.
+
+## 2026-09-08 — RECOMMENDATION (W1-T3075): order the frontier by MEASURED EXPECTED VALUE per class after `priority`, dependency fan-out as the tie-break, gated on W1-T3074's closure table (PREPARED FOR RATIFICATION, NOT YET RULED)
+
+- **Chosen (RECOMMENDED, auto):** shape (b) — measured expected value per class, with (c) as its
+  tie-break. Recorded here as what it is and nothing more: the machine's §4 auto-choose resolution
+  of the DECISION_REQUEST this task raised. W1-T3075 is `verify: human`, so the RULING is the
+  operator's and this entry is not it — see the header's own "NOT YET RULED". Per the
+  decision-authority ruling (fb-1785882211812-bafd8f) an agent may recommend a ruling and may never
+  record one; a ratification, or an override, lands beneath this line as an amendment, the same
+  shape every auto-chosen entry above takes when the operator later rules on it. The provenance
+  genre is stated because the floor requires every new entry to name who authored it (W1-T352);
+  it says nothing about whether the entry binds.
+
+**W1-T3075 chosen ordering: (b) MEASURED EXPECTED VALUE, then (c) DEPENDENCY FAN-OUT.** The term is
+`mergeRate(class) / costPerMerge(class)`, computed from the ledger union (`aggregateByClass` in
+`src/lib/retro.ts`, over all three rotation forms — never one glob) under a population floor of
+**5 runs per class**; a class below the floor carries NO term and sorts as "unmeasured", which is
+P48's rule that an absence is an absence and never a rate. The term is applied inside
+`compareDispatch` (`src/lib/drain.ts`) AFTER `priority` and BEFORE `idOrdinal`, so an explicit
+`priority:` still wins outright, a class that never merges sinks below every measured class, and a
+class that merges cheaply rises above the July tranche. Where two candidates carry the same term,
+or both are unmeasured, the tie-break is (c): the count of OPEN shards whose `depends_on` names the
+candidate, descending — pure plan data, rewarding the task that unblocks the most — and only then
+the lowest id. The change is GATED: it is not built until W1-T3074's closure-by-class table exists
+in the retro, because that table is the artifact the operator reads, and an ordering term the
+operator cannot audit from the same numbers is an ordering the operator cannot falsify.
+
+**WHERE THE ORDERING TERM LIVES, AND WHO SETS IT.** The ordering term lives in two places and in no
+third. The **floor** is a `plan/policy.yaml` row (proposed `dispatch.valueTermPopulationFloor`,
+value 5, bounds 3–20, `origin: net-new` because no source literal exists to lift it from), set by
+the operator through a reviewed plan PR like every other constant in that file. The
+**measurement** lives in the ledger and nowhere else: `aggregateByClass` reads it, the retro's
+W1-T3074 table renders it, and `compareDispatch` consumes the same figure — three readers of one
+number, so a disagreement between what the operator sees and what the selector did is a bug, not a
+policy question. Nobody hand-sets a value per shard: a filer states `priority:` (as today) and a
+class earns its term by merging. The floor is policy; the term is evidence.
+
+**THE FIVE-OF-1,204 PRIORITY FIGURE, DISPOSED.** The five-of-1,204 priority adoption figure is the
+reason option (a) is refused rather than left as the silent default. (a) — operator tiers only,
+plus a lint that every new shard states its tier — asks the filer to supply the value judgement at
+filing time. MEASURED at this head (`af68d076`, 2026-09-08): the corpus is now **1,219** shards and
+`priority:` is still present on exactly **5** (W1-T418, W1-T419, W1-T420, W1-T2276, W1-T2862) —
+the same five the shard counted, with fifteen filings since and none carrying one. That is seven
+weeks of evidence that filers do not state a priority when nothing forces them to, and a lint that
+forces them would reproduce the field mechanically, not the judgement: the fleet files most shards
+itself (rule 27), and a tier a triage worker assigns to its own filing is not an operator's tier.
+So (a) alone reproduces the 5-of-1,204 adoption today and a wall of identical tiers tomorrow. (b)
+needs no filer to say anything; the term is earned.
+
+**WHY NOT THE OTHER SHAPES.** (c) alone — fan-out first — is the cheapest and is kept, but as the
+tie-break, not the term: MEASURED at this head, 1,052 of 1,219 shards carry `depends_on: []`, so
+fan-out is zero for the bulk of the population and an order keyed on it collapses back to id order for almost every
+candidate; it discriminates only among the few tasks that are dependency roots. (d) — age decay
+with a P46 premise re-lint — answers a different question (is this shard still true?) and belongs
+to the plan-health sweep, not the selector; ordering by age would also be the ONLY term here that
+penalises a task for the fleet's own throughput, which is the premise of W1-T3076 and is ruled
+there. (a) is disposed above.
+
+**WHAT THIS DOES NOT DECIDE.** It does not name the class key. `aggregateByClass` keys on the run's
+`taskClass` today (`"unknown"` when a run carries none); whether the selector's term keys on that
+partition or on `origin:` is W1-T3074's table to settle, because the term must be read off
+that table. It does not touch `packDisjointFirst` (`src/lib/drain.ts`): the disjoint-scope pack
+still runs over the ordered list and still prefers the earliest disjoint candidate, so scope
+packing may still promote a lower-value task ahead of a blocked higher-value one — accepted, and
+named. It does not decide what happens to the 2026-07-21 tranche if its class measures well: under
+(b) it stays at the head, which is correct — the ruling is that AGE is not the term, not that old
+work is wrong to run. And it does not change `undeclaredScopeLast` (W1-T476), which stays between
+`priority` and the value term.
+
+**MEASURED 2026-09-08 at `af68d076`.** `compareDispatch` is still the strict three-key order the
+shard describes (`priority`, `undeclaredScopeLast`, `idOrdinal`; lines cited by symbol, not
+number). `pooledPriorFor` (`src/lib/routing-prior.ts`) still has one consumer,
+`mount-recommender.ts`; nothing about class, cost or fan-out reaches `compareDispatch`. The
+falsifier the shard asked for — that the frontier is id-ordered in practice — was re-read on the
+shard's own 2026-09-07 measurement and not re-run here: this entry edits DECISIONS.md only and
+must not execute the selector. A build task re-runs it first.
+
+**HOW TO FALSIFY THIS RECOMMENDATION.** It is wrong if `aggregateByClass` over the full ledger
+union yields FEWER than two classes at or above the floor of 5 — then every class is "unmeasured",
+the term never separates anything, and the order is id order with an extra pass; in that case
+prefer (c) alone until the ledger fills. It is also wrong if the per-class merge rate is not
+STABLE across two consecutive retro cycles for the classes above the floor: an order that re-sorts
+the frontier every six hours because a class moved from 40% to 60% on three runs is churn, not
+value, and the floor should rise before the term ships. **Take both measurements from W1-T3074's
+table before building**, which is what the gate is for.
+
+**Rollback:** delete this entry. No code was written, no policy row was added and no shard was
+re-ordered; W1-T3075 returns to `status: queued` with its question open.
+
+## 2026-09-08 — RECOMMENDATION (W1-T3076): give retirement a real effect FIRST, then admit automatic filing per class by closure rate — no global throttle, and the governor reads the corpus, never the commit ratio (PREPARED FOR RATIFICATION, NOT YET RULED)
+
+- **Chosen (RECOMMENDED, auto):** shape (a) first, then (c). Recorded here as what it is and
+  nothing more: the machine's §4 auto-choose resolution of the DECISION_REQUEST this task raised.
+  W1-T3076 is `verify: human`, so the RULING is the operator's and this entry is not it — see the
+  header's own "NOT YET RULED". Per the decision-authority ruling (fb-1785882211812-bafd8f) an
+  agent may recommend and may never record a ruling; the ratification, or an override, lands
+  beneath this line as an amendment, the same shape every auto-chosen entry above takes when the
+  operator later rules on it. Provenance is stated for the W1-T352 floor; it says nothing about
+  whether the entry binds.
+
+**W1-T3076 chosen bound: (a) RETIREMENT WITH EFFECT, THEN (c) CLOSURE-RATE ADMISSION PER CLASS.**
+Two increments, in this order and not the reverse. **(a):** a shard carrying `retirement:` leaves
+the selector's population and the retro's plan-health sweep — not only the dispatch FILTER, where
+W1-T2474 already refuses it by name (`isDispatchEligible`, `src/lib/drain.ts`, `onFiltered(t,
+"retired")`), but the CENSUS the selector walks and the re-lint `planHealthSweep`
+(`src/lib/retro.ts`) performs every cycle, which today skips only what `isMerged` derives as
+shipped: MEASURED at this head, the sweep's body has no `retirement` branch, so 31 retired shards
+are re-linted every cycle and count in every "how much is open" figure. (a) is the precondition for (c), because a governor that reads
+"open" while open includes retired and shipped work would be measuring the bookkeeping, not the
+backlog. **(c):** once the corpus can state its own size, an AUTOMATIC filing (triage, plan,
+ci-learning, the follow-up router) into a task class whose W1-T3074 closure rate reads ZERO over N
+cycles, at or above the P48 population floor, is refused until a human files into that class;
+hand filings are never refused, the refusal is ledgered and rendered on the console in the cost
+ceiling's shape. This retires dead classes instead of taxing the classes that close.
+
+**WHAT THE FILING GOVERNOR READS, AND WHY.** The filing governor reads the CORPUS — the count of
+open, unmerged, unretired shards against trailing merged throughput over the same window — and
+never the commit ratio the shard's table was built from. The shard's `filed/ship` series is
+evidence that filing outran shipping; it is not a control signal. `filed` counts commits whose
+subject starts `chore(plan)`, and one such commit files anywhere from one shard to ten (#4516
+filed ten in two commits); `ship` counts conventional-commit prefixes, and a ship-class commit
+closes a shard only when its body carries a trailer or its head is `run-*`-shaped (CLAUDE.md's two
+credit paths). Neither side of that ratio counts shards. The corpus does: after (a), "open" is a
+`git ls-tree` of `plan/tasks.d/` minus the credit projection minus `retirement:`, and "merged" is
+the trailer-and-head-ref union the fleet already uses to credit work. A governor on those two
+numbers measures the thing the question is about.
+
+**THE HEALTHY-CONDITION HAZARD, DISPOSED.** The healthy-condition hazard is CLAUDE.md's standing
+warning — "a bound that fires on a healthy condition is this repo's recurring defect" — and it is
+the reason (b), a global `open_unmerged > k × trailing_14d_merged` throttle, is not recommended,
+and the reason the commit ratio is refused as an input. The shard's own series makes the case: the
+weekly `filed/ship` ratio read **0.13, 0.74, 1.20, 1.03, 0.75** across 2026-W31..W36. A fixed
+threshold at any value between 0.75 and 1.20 would have FIRED in W34 and W35 and gone SILENT in
+W36 — on a corpus that doubled from 601 to 1,204 either way. That is the defect in one row: the
+signal moved by a factor of nine in five weeks while the condition it was meant to detect
+(append-only growth) held constant throughout. (c) avoids the hazard structurally rather than by
+tuning: a closure rate of ZERO over N cycles above a population floor is not a threshold on a
+moving ratio; it is the absence of any closure at all, and a class in which nothing has ever
+closed is not a healthy condition by any reading. The population floor is what keeps a class with
+two filings and no time to close from being refused as dead.
+
+**TWO FACTS THAT MOVED SINCE FILING, AND WHAT EACH CHANGES.** First, **PR #4510** —
+`chore(plan): reconcile 930 credited-merged shards from queued to merged`, the fleet's
+`rmd plan-reconcile` output (W1-T3043) — is OPEN at the time of writing (created 2026-09-08T00:16Z,
+`mergeable_state: blocked`, not yet merged), and flips exactly one line, `status: queued` →
+`status: merged`, in 930 shards; 106 of the verb's 1,036 candidates were held back, 83 by the
+sweep's own `creditIsImplementation` filter and 16 with no implementing commit anywhere on main.
+When it lands, the shard's premise that "the corpus cannot state its own size" weakens materially
+— 930 of the population read `merged` in the file — without touching the finding it reasons from:
+605 files added and 2 deleted in fourteen days is still true, because #4510 deletes nothing. It
+also shows the size of the term (a) is about: most of what the selector walks is shipped work
+wearing `queued`, and a governor measuring "open" before #4510 and (a) would have been counting
+it. Second, **the W1-T3073 double-filing race of 2026-09-08** is a live member of the P66 family
+(*two authoring lanes draw from ONE task board*), and it bears on option (d). OBSERVED:
+`refs/rmd-id/W1-T3073` is `26be7495`, message `reserve W1-T3073
+Craigs-Mac-mini-99577-2026-09-08T00:25:37Z` — a hand-shaped message, unlike the tool's own
+`rmd-id reservation <pid>@<host> <ts>` shape that `refs/rmd-id/W1-T3088` (`0e334a77`, 00:39:31Z)
+carries; PR #4513 (head `codex/plan-w1t3073-invalid-proof-shape`, the operator's Codex lane)
+opened at 00:33:15Z filing W1-T3073 for the path-title proof-grammar task; PR #4516 opened at
+00:35:54Z and its body records renumbering its own W1-T3073 shard to W1-T3088 in commit `716ecb2a`
+"after #4513 claimed W1-T3073". INFERRED from the message shapes and the eight-minute gap: the ref
+was hand-minted for #4516's session, and the second lane on the same host read the pool as free
+because the ref carries no identity field (the 2026-08-18 hazard in CLAUDE.md, in as many words).
+The loser renumbered, as that rule requires. What it changes here: (d) — every automatic filing
+must retire or supersede a shard — would put a second write into exactly the race that just
+occurred, and a net-zero rule enforced at `lint-plan`'s changed-tasks pass cannot see the sibling
+lane's unpushed retirement any more than the id sweep can see its unpushed shard. (d) is refused
+on that ground, not on its arithmetic.
+
+**WHY NOT THE OTHER SHAPES.** (b), the global corpus throttle: it is the right INPUT (corpus, not
+ratio) with the wrong SHAPE — one `k` for every class means the class that closes at 80% is
+throttled by the class that closes at 0%, and `k` is a tuned number on a moving series, which is
+the healthy-condition hazard re-entering by the policy row. It also requires the credit projection
+at filing time, a GitHub round-trip inside a filing path that today needs none. (b) is the correct
+FALLBACK if (c) cannot be keyed because W1-T3074's classes prove too coarse; it is not the first
+increment. (d) is disposed above. "None, and no (a) either" — leaving the corpus append-only — is
+refused because the 2026-09-04 ruling on W1-T1260 withdrew archive-from-location
+(W1-T2657/W1-T2658) as unauthorised and left the RETIREMENT-effect line open; (a) is that line,
+not an archive: the file stays, and only the readers change.
+
+**WHAT THIS DOES NOT DECIDE.** It does not set N (the cycles of zero closure) or the floor; both
+are `plan/policy.yaml` rows for the build task, bounded, and they must be sized against a class's
+OBSERVED time-to-close from W1-T3074's table, not chosen round — the same bound-on-a-healthy-
+condition discipline. It does not decide whether a class with a non-zero but tiny closure rate is
+throttled: under (c) it is not, deliberately; that is (b)'s question and it is deferred to (b)'s
+fallback. It does not touch the per-run block sizes (`TRIAGE_MAX_NEW_TASKS`, `PLAN_MAX_NEW_TASKS`)
+or `planFilingAdmissionBound` (`src/lib/sweep.ts`, 3 per pass), which bound a run's OUTPUT and a
+pass's ADMISSION and were never rates. And it does not reopen the archive question W1-T1260 closed.
+
+**MEASURED 2026-09-08 at `af68d076`.** `plan/tasks.d/` holds **1,219** shards (1,204 at filing;
+#4513 and #4516 account for eleven of the fifteen). `retirement:` is present on **31** — the
+shard's figure, unchanged. `grep -n retirement src/lib/retro.ts` names only the follow-up
+retirement (W1-T2563) and the harvest carve-outs; the plan-health sweep body carries no such
+branch. `isDispatchEligible` refuses a retired shard at the filter under the name `"retired"` and
+NOT at the census, which is the W1-T2474 split this entry's (a) proposes to move one step earlier.
+
+**HOW TO FALSIFY THIS RECOMMENDATION.** (a) is wrong if a retired shard is already absent from the
+plan-health sweep's population — re-read `planHealthSweep`'s filter at head; a `retirement` branch
+there means (a) is a no-op and the entry should say so. (c) is wrong if W1-T3074's table, once it
+exists, shows NO class at zero closure above the floor: then there is no dead class to refuse, the
+growth is spread across classes that all close slowly, and (b)'s fallback — the global corpus
+bound — is the honest shape. **Read that table before building the refusal**, and if it shows
+every class closing, ratify (a) alone and re-file the governor question with the table attached.
+
+**Rollback:** delete this entry. No code was written, no shard was retired and no filing was
+refused; W1-T3076 returns to `status: queued` with its question open.

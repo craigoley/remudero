@@ -1,0 +1,126 @@
+- id: W1-T3090
+  title: "GIT OBJECTS ARE THE ONE DISK CONSUMER NO RUNG RECLAIMS — `logDiskReclaimRung` sweeps temp dirs, review clones and worker homes, but nothing has ever removed an unreachable git object, so the worker clone carries 16,747 loose objects and a `.git/gc.log` whose presence SUPPRESSES git's own auto-cleanup, leaving the repair permanently manual and permanently deferred because it is unsafe while any worker is live"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 16.00
+  files:
+    - src/lib/object-reaper.ts
+    - test/object-reaper.test.ts
+  origin: "operator-session#can-the-reaper-do-this-instead-of-me-2026-09-07"
+  plan_refs: ["W1-T3065", "W1-T2493"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE RUNG ALREADY EXISTS AND ALREADY HAS THREE SWEEPS. This task adds a fourth to
+    `logDiskReclaimRung` (src/run-task.ts:26433), which today runs `sweepStaleTempDirs`,
+    `logCloneReapSurvey` and `sweepStaleWorkerHomes`, each best-effort-guarded, and emits one
+    `run.disk_reclaim` ledger line. Nothing about that structure changes.
+
+    WHAT IS ABSENT, CONFIRMED BY READING RATHER THAN INFERRED. `grep -rnE '"gc"|"prune"|git gc|git
+    prune|repack' src/ --include=*.ts` returns exactly TWO hits, both `git worktree prune`
+    (src/lib/worker.ts:3305 and :3631). That is WORKTREE ADMIN cleanup — it removes stale
+    registration files — and touches no object. No rung, script or workflow has ever run `git gc` or
+    `git prune`. The object store has never been reclaimed by anything.
+
+    MEASURED 2026-09-07 on the fleet host, in the worker clone /home/node/Remudero/repos/remudero:
+
+        git count-objects -vH   ->  count: 16747, size: 136.09 MiB
+        .git/gc.log             ->  "There are too many unreachable loose objects; run 'git prune'"
+        git prune -n --expire=24.hours.ago  ->  9649 objects would be removed
+
+    The canonical checkout showed 19,049 loose objects on the same day, up from 13,870 six hours
+    earlier — this GROWS with fleet activity.
+
+    THE SECOND-ORDER FAILURE IS THE REASON THIS IS URGENT, AND IT IS NOT ABOUT DISK. `.git/gc.log`
+    exists, and while it exists git REFUSES its own automatic cleanup: "Automatic cleanup will not
+    be performed until the file is removed." So the one condition that would fix itself is the
+    condition that disables the fixer. Worse, git prints that warning on STDERR from every command
+    that shells git in that repo, which is how it reached a test assertion: `doctor-node-pin` asserts
+    rmd emits exactly one stderr line, and this warning is a second one. A disk-hygiene defect became
+    a red test suite, and this session initially misattributed those failures TO this warning before
+    finding the real cause was a token mint (W1-T3071) — that misattribution was only possible
+    because the warning really is there on every invocation.
+
+    WHY IT HAS NEVER BEEN DONE: IT IS ONLY SAFE WHEN THE FLEET IS QUIET, AND NOBODY IS WATCHING FOR
+    QUIET. The standing operator rule is "do NOT run `git prune`/`gc` while any worker worktree is
+    live", and it is a correct rule — a prune racing a worker can remove an object that worktree is
+    about to reference. On this host the fleet is essentially never idle: at the moment of writing,
+    four worktrees created within the previous 30 minutes and two live locks. A human can only act in
+    a window they happen to catch. THE DAEMON KNOWS WHEN IT IS QUIET; that is the whole argument for
+    moving this into a rung rather than a runbook.
+
+    TWO INDEPENDENT PROTECTIONS, NOT ONE, WHICH IS THE clone-reaper DISCIPLINE. That module's header
+    states why age alone is insufficient — "an mtime age test alone is what made those two
+    destructions possible: a tree can be idle for hours while a process still holds it" — and it
+    requires BOTH an `lsof` liveness probe AND an age ceiling, fail-closed if `lsof` cannot run. This
+    task mirrors it:
+      (1) QUIET: no registered worktree, no inflight lock, and no open handle under `.git`. Any one
+          of these failing REFUSES, and an unreadable probe refuses rather than authorising.
+      (2) EXPIRY: `git prune --expire=24.hours.ago`, never a bare `git prune`. Even if the quiet
+          check were somehow wrong, an object created by a live worker in the last day is not
+          eligible. The two protections are independent, so both must fail to cause harm.
+
+    NEVER `git gc`. Only `prune`. `gc` repacks and can rewrite refs and reflogs — far more invasive,
+    far more to go wrong, and unnecessary: `prune` removes UNREACHABLE objects, which is exactly the
+    16,747 problem. A builder tempted to "just run gc since we are here" should not.
+
+    `gc.log` IS REMOVED ONLY IMMEDIATELY BEFORE A PRUNE THAT IS ACTUALLY GOING TO RUN, never as
+    housekeeping on its own. Removing it while the loose-object condition persists simply re-arms
+    git's automatic cleanup — the unsupervised, unscheduled `gc` this whole rule exists to prevent.
+    That ordering is load-bearing and a test must pin it.
+
+    THE OBJECTION, STATED AT FULL STRENGTH. This puts a destructive git operation inside an automatic
+    loop that runs unattended, on the fleet's own repository, and the operator's standing rule
+    currently makes it a human decision. If the quiet predicate is wrong, the failure is silent
+    corruption of a worker's checkout — much worse than a full disk. That objection is why the
+    expiry window exists as a SECOND barrier rather than a nicety, why the probe fails closed, and
+    why this shard proposes prune-only. It remains a real transfer of authority from human to loop
+    and the operator should ratify it as such, not wave it through as housekeeping.
+
+    The weaker half, not argued away: the loose-object count is not currently costing much disk —
+    136 MiB in the worker clone. The real costs are the suppressed auto-cleanup and the stderr noise.
+    A builder who concludes the disk argument is thin is right; the argument rests on the second-order
+    effects, and if the operator would rather keep this manual, the honest alternative is a
+    NON-DESTRUCTIVE rung that only REPORTS the condition, and that fallback should be built instead
+    of silently weakening the guard.
+  acceptance:
+    - claim: the reap REFUSES with a named cause when any worktree is registered, any inflight lock exists, or the liveness probe cannot be read, so quiet is proven and never assumed
+      proof: "unit test: test/object-reaper.test.ts::each refusal arm names its cause"
+    - claim: prune is invoked with an expiry window and never bare, so an object a live worker created in the last day is ineligible even if the quiet check were wrong
+      proof: "unit test: test/object-reaper.test.ts::prune always carries its expiry"
+    - claim: gc.log is removed only immediately before a prune that actually runs, so a refused pass leaves git's automatic cleanup suppressed rather than re-arming it
+      proof: "unit test: test/object-reaper.test.ts::a refused pass leaves gc.log in place"
+    - claim: the reap never invokes git gc or repack, so no ref or reflog is rewritten by this rung
+      proof: "unit test: test/object-reaper.test.ts::only prune is ever spawned"
+    - claim: a throw anywhere in the reap cannot fail the dispatch or the other three sweeps, matching the guard the existing three already carry
+      proof: "unit test: test/object-reaper.test.ts::a throwing reap does not break the rung"
+  falsifier: |
+    Close without implementation if object housekeeping already exists. Look, do not trust this
+    shard: `grep -rnE '"gc"|"prune"|git gc|git prune|repack' src/ --include=*.ts` and read every hit.
+    If anything other than `git worktree prune` appears, this finding is wrong and the shard is void.
+
+    Close it also if the loose objects turn out to be reachable — run `git prune -n
+    --expire=24.hours.ago` and read the count. If it is near zero, there is nothing to reclaim and
+    the premise is wrong.
+
+    RUNNING `git gc` DOES NOT SATISFY THIS TASK. It repacks and can rewrite refs and reflogs; the
+    finding is about UNREACHABLE objects, which `prune` alone removes. A builder who reaches for gc
+    has widened a destructive operation without arguing for it.
+
+    A BARE `git prune` DOES NOT SATISFY IT EITHER. The expiry window is the second of two independent
+    protections and the whole reason this is safe to automate. Removing it because "the quiet check
+    already covers that" collapses two barriers into one, which is the exact reasoning clone-reaper's
+    header rejects.
+
+    Removing `.git/gc.log` unconditionally does NOT satisfy it and is actively harmful: it re-arms
+    git's unsupervised automatic cleanup, which is the thing the operator's standing rule exists to
+    prevent. It may only be removed on a pass that is about to prune.
+
+    If a builder concludes the fleet is never quiet enough for this to fire, do not loosen the
+    predicate to make it fire. Report that measurement and build the REPORT-ONLY rung named in the
+    rationale instead.
