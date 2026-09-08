@@ -1,0 +1,144 @@
+- id: W1-T3116
+  title: "THE OPEN OBJECT-REAPER IMPLEMENTATION WOULD ADD A SURVEY TO EVERY DISPATCH BUT CAN NEVER REPAIR THIS FLEET — IT REFUSES WHILE ANY LINKED WORKTREE EXISTS, DEFAULTS THE UNWIRED OPEN-HANDLE PROBE TO HELD, DELETES `gc.log` BEFORE SUCCESS AND SHELLS RAW SYNCHRONOUS `git prune`; replace that direction with one autonomous cadence controller"
+  repo: remudero
+  depends_on: [W1-T2529]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 24.00
+  files: [src/lib/object-reaper.ts, src/lib/policy.ts, plan/policy.yaml, src/run-task.ts, src/lib/status-board.ts, test/repository-maintenance-controller.test.ts]
+  origin: "operator-session#remove-routine-fleet-maintenance-2026-09-08"
+  plan_refs: ["W1-T175", "W1-T320", "W1-T942", "W1-T2529", "W1-T2694", "W1-T3090", "W1-T3092"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE LIVE AZURE FLEET, READ-ONLY, AT 2026-09-08T03:37Z. The container runs Git
+    2.39.5. Its daemon checkout reports `count: 18142`, `size: 277.74 MiB`, 13 packs / 52.26 MiB,
+    one `tmp_obj_*` garbage entry, and a `.git/gc.log` last written at
+    2026-09-07T05:16:44Z whose own message is `There are too many unreachable loose objects`.
+    Disk is healthy (93 GiB free, 23% used), 12 worktrees are registered, none is prunable and none
+    is locked. This is accumulated debt, not a disk emergency and not a reason to delay admission.
+
+    THE CURRENT MAIN DETECTS BUT CANNOT RECOVER. W1-T2529 added the heartbeat's `gc_verdict`,
+    deliberately as signal only. The container entrypoint repeats an operator recipe on every
+    in-process freshness restart: remove `.git/gc.log`, then run `git gc --prune=now`. No production
+    daemon path owns a safe action, records before/after object counts, backs off after a failure or
+    verifies recovery. Routine object hygiene therefore becomes an SSH maintenance session after
+    the failure has already made automatic GC self-sustainingly unavailable.
+
+    TWO OPEN IMPLEMENTATION HEADS ATTEMPT THIS, AND THIS TASK CORRECTS RATHER THAN DUPLICATES THEM.
+    W1-T3090 / #4527 head `520f9d8e` adds synchronous raw `git prune --expire=24.hours.ago`, removes
+    `.git/gc.log` immediately BEFORE the child succeeds, refuses whenever ANY linked worktree is
+    registered, and defaults its `openFileCount` seam to `() => 1`. W1-T3092 / #4532 head `26a53a22`
+    wires that function into `logDiskReclaimRung`, called before EACH task worktree is added; the
+    call injects no real open-handle reader, targets only the worker clone, and defaults the action
+    off while still proposing a dry-run subprocess per eligible dispatch. The live canonical clone
+    has 12 registered, non-prunable worktrees. Thus the open implementation cannot act even if its
+    flag is armed, and its placement adds recurring work before useful queue work. Those are material
+    head facts; the merged W1-T3090/W1-T3092 plan records are intent, not proof that recovery exists.
+
+    DO NOT MERGE OR ARM THOSE OPEN HEADS UNCHANGED AND DO NOT ADD A THIRD REAPER. Keep
+    `src/lib/object-reaper.ts` as the single module name, replacing its raw-prune contract if an old
+    head lands first, or implementing the corrected controller there if neither does. The old PRs
+    may be closed as superseded after this task is accepted; code worth retaining must first conform
+    to this task's command, cadence, admission and verification contract.
+
+    CURRENT GIT DOCUMENTATION CHANGES THE REMEDY. The Git 2.39 manual says `git maintenance`
+    tasks take the repository object-database lock, recommends `git maintenance run --task=gc`
+    instead of combining raw `git gc` with maintenance, and classifies `gc` as expensive and
+    potentially disruptive because it deletes stale data. The incremental strategy instead runs
+    commit-graph/prefetch hourly and loose-objects/incremental-repack daily; those tasks are designed
+    for background concurrency, and `loose-objects` batches at 50,000. The fleet's exact installed
+    binary confirms `maintenance run --task=<task>` is available. A scratch repository under that
+    exact Git 2.39.5 binary also proved `git maintenance run --task=gc` returns zero and removes a
+    pre-existing non-empty `gc.log` itself. The entrypoint's unconditional `--prune=now` and the open
+    head's pre-success unlink are therefore the wrong primitives: the first removes Git's age safety
+    margin and the second can erase the failure evidence without repairing anything.
+
+    THE OPERATING GOAL IS ZERO ROUTINE OPERATOR WORK. Startup should publish the condition and admit
+    queue work. A daemon-lifetime maintenance controller should compact ordinary growth on cadence,
+    perform the heavier recovery only at a proven quiet boundary, and escalate only if its bounded
+    retries cannot restore health. SSH remains incident recovery, never the normal path.
+  design: |
+    (i) ONE CONTROLLER, ONE CADENCE, NO PER-DISPATCH SUBPROCESS. Evolve `object-reaper.ts` into a
+    repository-maintenance controller; remove or make unreachable the raw-prune API and the
+    `logDiskReclaimRung` call. A pure decision consumes one repository survey (`git count-objects
+    -v`, gc-log presence/content, last attempt state, active RMD lane count and disk verdict) and
+    returns `healthy`, `incremental-due`, `full-gc-due`, `deferred` or `escalate`, with its reason
+    and next eligible time. An unreadable survey never authorizes a destructive action.
+
+    (ii) REMOVE MAINTENANCE FROM BOOT AND RUN ADMISSION. Boot may read and ledger the already-cheap
+    failure signal, but starts no Git maintenance child and awaits no object census or cleanup. The
+    controller is wired once on the daemon-lifetime cadence side after PR reconciliation and task
+    admission have had their first chance. No review, fix or build call site invokes it. A busy queue
+    defers heavy GC without resetting its due time; ordinary incremental work runs at most daily
+    under the configured low-load policy. Maintenance can never make first review or first task
+    admission slower.
+
+    (iii) USE THE INSTALLED GIT CONTRACT. Ordinary cadence executes bounded, asynchronous
+    `git maintenance run --task=commit-graph --task=loose-objects --task=incremental-repack`.
+    A persistent failed-GC marker may select `git maintenance run --task=gc` only when the survey
+    proves zero ACTIVE RMD workers/reviewers/fix lanes and no other repository maintenance is active.
+    Registered but idle linked worktrees are not activity and never create a permanently false
+    prerequisite. Never invoke raw `git gc`, `git prune`, `--prune=now`, `maintenance start`, cron
+    or systemd; the daemon remains the one scheduler and Git remains the object-database lock owner.
+
+    (iv) NEVER MANIPULATE GIT'S FAILURE MARKER. RMD does not unlink, truncate, rename or rewrite
+    `gc.log`. The pinned Git binary proved that a successful explicit maintenance GC clears it.
+    Therefore success requires BOTH child exit zero and a post-survey showing the marker absent and
+    object state readable. Any non-zero exit, timeout, surviving/replaced marker or unverifiable
+    post-survey is failure and enters backoff; RMD preserves Git's evidence byte-for-byte.
+
+    (v) CADENCE AND FAILURE BOUNDS ARE POLICY DATA, NOT AN ARMING CEREMONY. The controller ships
+    autonomous with conservative cadence, load and timeout limits; it does not wait for an operator
+    to flip the W1-T3092 survey flag. Success records the next daily incremental window. Failure uses
+    bounded exponential backoff with jitter and a fixed escalation threshold; a daemon restart reads
+    durable state and continues the episode instead of retrying immediately. The child has a
+    wall-clock bound and process-group teardown, so maintenance cannot become a hidden occupied lane.
+
+    (vi) MAKE THE RESULT OPERABLE WITHOUT SSH. Ledger start/complete/defer/fail/escalate rows carry
+    command kind, duration, before/after loose-object bytes/counts, gc-log verdict, active-lane count
+    and next retry. The existing status/console projection exposes current verdict, last success or
+    failure and whether an automatic retry is pending. Keep W1-T2529's off-box heartbeat signal; it
+    becomes the independent detector for a controller that stopped making progress.
+  acceptance:
+    - claim: "daemon boot reads only the cheap existing failure signal, and neither boot nor any per-review/per-task dispatch path starts, awaits or surveys a repository-maintenance subprocess before useful queue work"
+      proof: "unit test: test/repository-maintenance-controller.test.ts"
+    - claim: "one daemon-lifetime cadence invokes the installed Git maintenance tasks asynchronously at most daily and never shells raw `git gc`, `git prune`, `--prune=now` or an external scheduler"
+      proof: "unit test: test/repository-maintenance-controller.test.ts"
+    - claim: "full GC is authorized only with a persistent failed-GC marker, zero active RMD lanes and a complete survey; idle registered worktrees do not refuse it, while busy or unreadable state defers without losing the due episode"
+      proof: "unit test: test/repository-maintenance-controller.test.ts"
+    - claim: "RMD never writes or removes `gc.log`; full-maintenance success requires Git to return zero and the post-survey to find the marker absent, while a failed run, timeout or surviving marker enters backoff"
+      proof: "unit test: test/repository-maintenance-controller.test.ts"
+    - claim: "autonomous daily success cadence and bounded failure backoff survive daemon restarts, and repeated failure escalates once rather than retrying or paging every poll"
+      proof: "unit test: test/repository-maintenance-controller.test.ts"
+    - claim: "the ledger and status projection expose before/after object counts, duration, outcome and next retry, while the W1-T2529 heartbeat remains an independent off-box signal"
+      proof: "unit test: test/repository-maintenance-controller.test.ts"
+    - claim: "the production daemon composition has exactly one repository-maintenance cadence call and no `logDiskReclaimRung` or dispatch call reaches the old object reaper"
+      proof: "grep: runRepositoryMaintenanceRung( in src/run-task.ts"
+  falsifier: |
+    Close without implementation if a production daemon path already owns Git object maintenance,
+    runs only on daemon-lifetime cadence after useful admission, gates heavy work on ACTIVE lanes,
+    executes through Git's maintenance lock, never touches gc.log itself, verifies before/after
+    state and retries durably. Checked at origin/main ccf3153df: W1-T2529 only reads `.git/gc.log`,
+    the entrypoint only prints a raw manual recipe, and no `git maintenance` invocation exists under
+    `src/`, `scripts/` or `deploy/`.
+
+    W1-T3090/#4527 AND W1-T3092/#4532 DO NOT FALSIFY THIS TASK AS INSPECTED. Re-check their material
+    heads before building: close W1-T3116 if they have changed to satisfy every condition above.
+    Heads 520f9d8e and 26a53a22 instead use raw synchronous prune, pre-success marker deletion,
+    a permanently-held default probe, any-registered-worktree refusal and per-dispatch wiring. If
+    either lands unchanged first, replace that implementation rather than layering another module.
+
+    Also close if the live clone is healthy: its direct `git count-objects -vH` and gc-log read
+    produced the counts/message above. Do not falsify from free disk alone; the defect is recurring
+    manual recovery and disabled automatic maintenance, not current ENOSPC.
+  note: |
+    `W1-T3116` was atomically reserved at `refs/rmd-id/W1-T3116` after a complete GraphQL read of
+    all nine open PRs; REST core was exhausted, so the normal mint correctly refused and no blind
+    reservation was made. One concern only: replace the two structurally inert/expensive open object-
+    reaper heads and the startup SSH recipe with one autonomous, observable, fail-closed maintenance
+    cadence. It does not alter worktree eligibility/reaping, queue selection, container recycling
+    or deployment.
