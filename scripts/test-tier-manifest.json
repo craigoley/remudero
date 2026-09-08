@@ -145,6 +145,7 @@
     "test/an-abandoned-sweep-does-not-stop-the-review-clock.test.ts": 1632,
     "test/an-absent-browser-reads-as-a-repo-full-of-broken-tests.test.ts": 955,
     "test/an-advisory-id-from-a-stale-checkout-says-so.test.ts": 257,
+    "test/an-agent-records-a-ruling-behind-a-judge.test.ts": 1190,
     "test/an-availability-probe-reads-the-limit-that-stops-it.test.ts": 0,
     "test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts": 1360,
     "test/an-escalation-and-its-reply-are-one-thread.test.ts": 1455,

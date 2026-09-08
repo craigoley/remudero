@@ -372,6 +372,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // ALREADY absent here: a demotion is the one outcome invisible on the needs-human board, so
   // rotating it away loses the only evidence the judge acted.
   "escalation.judged",
+  // W1-T3212: `ruling.judged` is the ONLY record of what the ruling judge decided and why, on
+  // both arms. Nothing else writes it, and no measurement yet establishes that this judge
+  // calibrates well — reading the first weeks of these rows is what will settle that, so a
+  // rotation that dropped them would erase the evidence before it could be read.
+  "ruling.judged",
   "escalation.demoted",
   // impl-FL: daemon.ts counts these back to decide whether a reset string was already announced,
   // so the line IS the dedup key. Registered by exact name — a dotted child inherits nothing.

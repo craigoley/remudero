@@ -31,6 +31,31 @@
  */
 
 /**
+ * WHAT THE FLEET MAY DO TO THE GOVERNANCE RECORD ITSELF (W1-T3212, operator ruling 2026-09-08).
+ * The rows below enumerate outward GITHUB/GIT writes. They are not the whole answer to this
+ * module's own question, because one authority an agent has is not a write to GitHub at all: as
+ * of W1-T3212 an agent may RECORD A RULING into `plan/decisions.d/`, where the operator's own
+ * decisions live. `fb-1785882211812-bafd8f`'s "an agent may recommend a ruling and may never
+ * record a ruling" is SUPERSEDED, by the operator, in that ruling.
+ *
+ * WHAT GATES IT, since no row here does. `routeRuling` (src/run-task.ts) puts every authored
+ * ruling through `judgeRulingRisk` (src/lib/ruling-judge.ts) first, and that judge FAILS CLOSED:
+ * an unreadable, throwing or unparseable verdict escalates, and a ruling that declares it
+ * supersedes a standing record reaches the operator without the judge being asked at all. A
+ * refused ruling lands NOTHING and becomes an ordinary inbox proposal, so the operator's bit
+ * still travels the `rmd approve` path `open-ratification-pr-single` below already describes.
+ * The landing itself reaches GitHub through `src/lib/feedback-landing.ts`, whose rows
+ * (`open-landing-pr`, `arm-landing-pr-automerge`, `force-push-landing-branch`) are already in
+ * this table and are unchanged — no new external write site exists, which is exactly why the
+ * source-derived enumeration below does not and should not grow a row for this.
+ *
+ * CAVEAT WITH EQUAL WEIGHT: this widens what an agent may do to the repo's own governance
+ * record. No measurement establishes that the judge assesses ruling risk WELL — the
+ * `ruling.judged` rows it writes on both arms are what will settle that, and the first weeks of
+ * them should be READ rather than assumed.
+ */
+
+/**
  * WHAT DOES NOT CHANGE (design note v). No gate moves, no action gains or loses authority. Two
  * rows below (`post-review-status`/`post-review-pr-comment`, `triage-claim-ref-push`) name real
  * gaps — a write with no `assertLiveWriteAllowed` guard at all — because the report's job is to
