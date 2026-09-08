@@ -1,3 +1,4 @@
+// @source-text-subject — this suite's subject is the parser's handling of baseline source text.
 /**
  * W1-T3182. W1-T3133's Rule 25 carve-out says an instrument change that only TIGHTENS is not
  * entanglement, so a PR may cut something and lower the ceiling that measured it in one diff.
