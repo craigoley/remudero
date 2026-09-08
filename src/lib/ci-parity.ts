@@ -1876,7 +1876,10 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
       "same-class (W1-T2488/W1-T2734) — a deterministic npm-script signal: refreshes origin/main, measures only changed " +
       "src/**/*.ts files from the merge base to HEAD, and publishes human plus schema-versioned JSON hotspot evidence. " +
       "Positive growth remains PASS because line count is a review-risk signal rather than a correctness verdict; only an " +
-      "unreadable base or failed measurement refuses the step. The historical shared baseline is not read or written",
+      "unreadable base or failed measurement refuses the step. The historical shared baseline is not read or written. " +
+      "W1-T3140: deliberately no `remedyFiles` — a red here means the base was unreadable or the measurement failed, " +
+      "neither of which a baseline edit can repair, so this step must never enter the recordable-ratchet auto-repair rung. " +
+      "The absence is a decision, not an omission",
   },
   // W1-T2643: the four census entries are no longer hand-written here — they are
   // CENSUS_ADMITTED_MEMBERS's own projection (see CENSUS_POPULATION above). Editing a census
