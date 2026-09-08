@@ -54,6 +54,11 @@
     "legacy": 0,
     "newDate": 1
   },
+  "src/lib/console-shell-client.ts": {
+    "dateNow": 14,
+    "legacy": 0,
+    "newDate": 7
+  },
   "src/lib/console-shell-script.ts": {
     "dateNow": 2,
     "legacy": 0,
@@ -305,9 +310,9 @@
     "newDate": 4
   },
   "src/lib/serve.ts": {
-    "dateNow": 16,
+    "dateNow": 2,
     "legacy": 7,
-    "newDate": 8
+    "newDate": 1
   },
   "src/lib/service.ts": {
     "dateNow": 2,

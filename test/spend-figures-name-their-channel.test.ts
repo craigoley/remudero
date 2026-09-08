@@ -73,7 +73,9 @@ test("W1-T2240: mergedToday is untouched by this task -- still counts verdict:'m
 });
 
 test("W1-T2240: the existing refusal to fabricate an unknown spend still holds -- serve.ts's latestSpend ? costLabel(...) : \"…\" guard is untouched by this task", () => {
-  const src = readFileSync(fileURLToPath(new URL("../src/lib/serve.ts", import.meta.url)), "utf8");
+  // W1-T2902: this guard's actual call site moved out of serve.ts's template literal into
+  // lib/console-shell-client.ts, a real module — see that file's own header.
+  const src = readFileSync(fileURLToPath(new URL("../src/lib/console-shell-client.ts", import.meta.url)), "utf8");
   assert.match(
     src,
     /latestSpend \? latestSpend\.mergedToday : "…"/,

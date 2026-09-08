@@ -1,0 +1,28 @@
+{
+  "//": [
+    "W1-T2902: apps/dashboard could not load as shipped -- index.html's <script src=\"./main.js\">",
+    "expected a compiled file BESIDE it, but the root tsconfig.json (outDir: dist, rootDir: .)",
+    "only ever emitted to dist/apps/dashboard/src/main.js, and nothing copied index.html there.",
+    "This package-local tsconfig is the 'a build that emits beside index.html' half of that fix",
+    "(the other half is index.html's own <script type=\"importmap\"> for the bare",
+    "@remudero/api-client/client specifier, since a browser -- unlike tsx/Node -- cannot resolve",
+    "a package.json 'exports' map on its own). `rootDir` is the repo root because this package's",
+    "one real dependency, packages/api-client/src/client.ts, lives outside apps/dashboard/ -- the",
+    "narrowest rootDir TypeScript accepts is their common ancestor. `outDir: build` keeps the",
+    "compiled tree out of apps/dashboard/src (never mixed with hand-written sources) while still",
+    "landing everything UNDER apps/dashboard/, i.e. beside index.html, not in the monorepo's",
+    "shared dist/. See index.html's own script/importmap tags for the exact resulting paths."
+  ],
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM"],
+    "strict": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "rootDir": "../..",
+    "outDir": "build"
+  },
+  "include": ["src/**/*.ts", "../../packages/api-client/src/client.ts"]
+}

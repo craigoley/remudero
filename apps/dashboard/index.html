@@ -6,16 +6,22 @@
   submit feedback, answer grills, accept/reject a proposal.
 
   No bundler by design (the W3-T2 decision): src/main.ts is plain TypeScript, typechecked
-  and compiled by the repo's existing `tsc -p tsconfig.json` build alongside every other
-  package -- no new build tooling. This page loads its compiled output as a plain ES module.
+  and compiled by `apps/dashboard`'s own `npm run build` (tsc -p tsconfig.json) -- no new
+  build tooling, just this package's own tsconfig rather than the repo root's (which emits
+  to the shared `dist/`, not beside this file -- W1-T2902). This page loads that compiled
+  output as a plain ES module, resolving the one bare specifier it imports
+  (`@remudero/api-client/client`) through the import map below -- a browser, unlike
+  tsx/Node, cannot read a package.json `exports` map on its own.
 
   Wiring the daemon to actually SERVE this directory as static files over Tailscale (the
   "browser" half of shell 0) is explicit follow-on work, same as the other design panels
   this v0 slice defers (plan-doc render, worker stream tails, DECISIONS feed, a rendered
-  question/MANUAL backlog -- see this task's PR body). Until then, open this file against a
-  `tsc`-built `main.js` next to it, pointed at a reachable daemon via `?daemon=<url>` with a
-  WRITE-scoped `?token=` (the same query-param placeholder W3-T2 shipped -- a bearer token
-  belongs in a query string even less than in localStorage; a real auth UX is later work).
+  question/MANUAL backlog -- see this task's PR body). Until then: `npm run build` in this
+  directory, then open this file (served, not `file://` -- a module script's import map is
+  subject to the same CORS rules as any other module fetch), pointed at a reachable daemon
+  via `?daemon=<url>` with a WRITE-scoped `?token=` (the same query-param placeholder W3-T2
+  shipped -- a bearer token belongs in a query string even less than in localStorage; a real
+  auth UX is later work).
 -->
 <html lang="en">
   <head>
@@ -88,6 +94,12 @@
       <div id="trace-graph"></div>
     </section>
 
-    <script type="module" src="./main.js"></script>
+    <!-- W1-T2902: resolves the ONE bare specifier build/apps/dashboard/src/main.js imports
+         (@remudero/api-client/client) to this same build's compiled copy of it -- must appear
+         before the module script below; a document may carry only one import map. -->
+    <script type="importmap">
+      { "imports": { "@remudero/api-client/client": "./build/packages/api-client/src/client.js" } }
+    </script>
+    <script type="module" src="./build/apps/dashboard/src/main.js"></script>
   </body>
 </html>
