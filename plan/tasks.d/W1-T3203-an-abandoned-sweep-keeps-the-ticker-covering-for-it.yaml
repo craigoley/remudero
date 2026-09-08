@@ -1,0 +1,71 @@
+- id: W1-T3203
+  title: "THE WALL-CLOCK BOUND STOPS THE IN-FLIGHT TICKER AT THE EXACT MOMENT IT BECOMES THE ONLY REVIEW PATH — `liveness.inFlight` is cleared on SETTLE so a detached pass excludes the next one, but `stopSweepTicker()` sits in a `finally` that runs on ABANDON, so from abandon to settle there is no `sweepLight` anywhere and no pass may start: review throughput goes to zero for the whole window"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [src/lib/daemon.ts, test/an-abandoned-sweep-keeps-the-ticker-covering-for-it.test.ts]
+  origin: "operator-session#daemon-review-throughput-2026-09-08"
+  plan_refs: ["W1-T2582", "W1-T2981", "W1-T463", "W1-T1272"]
+  status: queued
+  attempts: 0
+  rationale: |
+    TWO LIFETIMES THAT MUST MATCH, AND DO NOT. In `runGatedSweep` (src/lib/daemon.ts):
+
+      liveness.inFlight   cleared when the PASS PROMISE SETTLES — deliberately, and its comment says
+                          so: "Cleared on settle, never on abandon ... what keeps the flag true
+                          through the abandon-to-settle window every observed re-entry landed in."
+      stopSweepTicker()   awaited in the outer `finally` — which runs when the AWAIT ends, i.e. at
+                          ABANDON. The same comment names that finally as the thing it is avoiding.
+
+    So the moment the bound trips, three things are simultaneously true:
+
+      1. the in-flight ticker is STOPPED, and it is the thing that fires `deps.sweepLight` on the
+         poll cadence — W1-T463's concurrent per-PR review path, built for exactly this;
+      2. `liveness.inFlight` is still TRUE, so every subsequent `runGatedSweep` logs
+         `daemon.sweep.skipped_concurrent` and RETURNS — at the guard, BEFORE `startInFlightTicker`
+         on the next line, so no replacement ticker starts either;
+      3. therefore no review runs by any route until the detached pass settles.
+
+    THE WINDOW IS NOT SMALL. The bound is `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000` (9.3
+    minutes). The sweep's own draft rung is measured at "3 sequential drafts at a measured 316s
+    median, ~948s end to end" (its comment in run-task.ts), so a pass carrying one is abandoned by
+    construction and the dead window is minutes long every cycle.
+
+    MEASURED 2026-09-08 on the live fleet, off-host:
+
+      heartbeat-azure   daemon_verdict=live, daemon_last_step=daemon.sweep.skipped_concurrent
+      14:44 escalation  issue #4653, "daemon STALE — last poll 41m ago", daemon_last_step=daemon.headroom
+
+      PR creation -> first remudero-review, from the GitHub status API:
+        #4616  21s        #4610  73s          <- a pass that completed inside the bound
+        #4621  ~37m       #4619  ~42m
+        #4622  ~49m       #4612  ~59m
+        #4603  1h57m      #4611  2h07m        <- passes that did not
+        #4689  still ABSENT at 14.5m, posted by hand
+
+    THE FIX IS THE ONE-LINE VERSION OF THE INVARIANT: the ticker's lifetime is the PASS's, not the
+    AWAIT's. Stop it when the pass settles, exactly as `inFlight` is cleared, so `sweepLight` keeps
+    firing for the whole detached window. Nothing about the exclusion changes: an abandoned pass may
+    still hold a live worker, so the next pass must still decline. What changes is that declining no
+    longer means going blind.
+
+    NOT IN SCOPE: raising `reviewLanes` (already at its schema max of 3), raising the bound, moving
+    the draft rung out of the sweep, or cancelling an abandoned pass. Each is a separate decision,
+    and none of them is needed for a declined pass to stop costing every review behind it.
+
+    ONE INTERACTION TO STATE HONESTLY: `inFlightTickerOwner` is process-wide single (W1-T2981), and
+    its takeover rule admits only dispatch-over-retro. A ticker that now outlives an abandoned sweep
+    means a same-tick dispatch receives the inert stub it would previously have owned. That is
+    acceptable and is the lesser loss — the surviving ticker fires the same `sweepLight` and updates
+    the same shared headroom sampler object — but it must be asserted, not assumed.
+  acceptance:
+    - claim: "the in-flight ticker keeps firing sweepLight through the whole abandon-to-settle window, so an abandoned pass no longer blinds the review path"
+      proof: "unit test: test/an-abandoned-sweep-keeps-the-ticker-covering-for-it.test.ts"
+    - claim: "the ticker is stopped when the pass SETTLES, matching the lifetime liveness.inFlight already uses"
+      proof: "grep: settles, not when the await ends in src/lib/daemon.ts"
+    - claim: "exclusion is unchanged: a pass that is still executing is still declined, and a pass that completes inside the bound still stops its ticker at once"
+      proof: "grep: MUTANT in test/an-abandoned-sweep-keeps-the-ticker-covering-for-it.test.ts"
