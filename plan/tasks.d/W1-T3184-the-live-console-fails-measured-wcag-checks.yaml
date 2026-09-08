@@ -1,0 +1,111 @@
+- id: W1-T3184
+  title: "THE LIVE CONSOLE FAILS MEASURED WCAG CHECKS — axe-core reports 2 SERIOUS violations (`aria-prohibited-attr` x5, `listitem` x5), 5 form controls have no accessible name, 17 interactive targets are under 24x24, 67 elements render text at 11px, and the heading order skips h1 to h3"
+  repo: remudero
+  depends_on: [W1-T3185]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/serve.ts, test/the-console-meets-its-stated-a11y-bars.test.ts]
+  origin: "operator-session#console-live-review-2026-09-08"
+  plan_refs: ["W1-T153", "W1-T3185", "W1-T3183", "W1-T2718"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 against the LIVE console (`rmd serve` at `ec3c69d9a`), headless Chromium
+    plus `@axe-core/playwright` — both already devDependencies of this repo. Identical results at
+    1440x900 and 1024x768, so none of it is a narrow-viewport artefact.
+
+      axe-core (wcag2a, wcag2aa, wcag21a, wcag21aa):  2 violations, 28 passes
+        - aria-prohibited-attr  (SERIOUS)  x5 nodes  "Elements must only use permitted ARIA attributes"
+        - listitem              (SERIOUS)  x5 nodes  "<li> elements must be contained in a <ul> or <ol>"
+      form controls with no accessible name                    5
+      interactive targets under 24x24 (WCAG 2.2 AA 2.5.8)     17
+        e.g. "view issue" 75x22 (x5), "PR #4637" 77x19, "#4522" 42x17, "Needs me…›" 998x22
+      elements rendering text under 12px                       67  (all at 11px)
+      heading order                                            skips h1 -> h3 at "Self-measurement"
+      landmark elements                                        2
+      horizontal overflow                                      none (this one is CORRECT — W1-T153's bar holds)
+
+    WHY THE EXISTING SUITE DID NOT CATCH THESE. `test/serve.shell-ux.test.ts` already runs axe-core
+    and passes 18/18 — against a FIXTURE server with a handful of synthetic rows. Every violation
+    above is a property of the shell rendering REAL content at REAL volume: five unlabelled controls
+    are the five per-escalation reply boxes, and the ten serious axe nodes are five list items and
+    five prohibited ARIA attributes on rows that only exist when real escalations do. A fixture with
+    one escalation renders one of each and trips no threshold. This is exactly the gap W1-T3185
+    exists to close, which is why this shard depends on it.
+
+    THE 11px TEXT IS THE LEGIBILITY HALF, and it is the operator's actual complaint in numbers. The
+    type scale in use is 171 elements at 14px, 106 at 16px, 67 at 11px, 67 at 13px, 3 at 12px, and
+    exactly ONE at 20px. One element on the entire page is larger than 16px. That is not a
+    hierarchy; it is a single size with rounding, and it is why a dense board reads as a wall.
+  design: |
+    (i) FIX THE TWO SERIOUS AXE VIOLATIONS AT THEIR SOURCE, not by suppressing a rule. `listitem`
+    means `<li>` is being emitted outside `<ul>`/`<ol>` — the markup is wrong, not the checker.
+    `aria-prohibited-attr` means an ARIA attribute is on an element whose role forbids it; the
+    remedy is the right element or the right role, never dropping the attribute to silence it.
+    (ii) EVERY FORM CONTROL GETS AN ACCESSIBLE NAME. Five reply boxes with placeholder text and no
+    label is the measured shape; a placeholder is not a name and disappears on focus.
+    (iii) INTERACTIVE TARGETS MEET 24x24, which for the measured set means padding, not font size —
+    "view issue" at 75x22 needs two more pixels of height, not a redesign. WCAG 2.2 AA 2.5.8 is the
+    stated bar so the criterion is checkable rather than a matter of taste.
+    (iv) A REAL TYPE SCALE, with the smallest rendered size stated and enforced. The 11px tier must
+    go; what replaces it is a design decision, but "no text below the stated floor" is testable and
+    is what this criterion asserts.
+    (v) HEADING ORDER IS CONTIGUOUS. h1 -> h3 is one skip in one section and is a small fix, but it
+    is the kind that multiplies as sections are added, so it gets a criterion rather than a note.
+  acceptance:
+    - claim: "axe-core over the LIVE-SHAPED fixture reports ZERO violations at wcag2a/wcag2aa/wcag21a/wcag21aa — the two serious ones are fixed at their source, not suppressed by rule exclusion"
+      proof: "unit test: test/the-console-meets-its-stated-a11y-bars.test.ts"
+    - claim: "every form control on the rendered shell has an accessible name; a fixture carrying five reply boxes yields five named controls"
+      proof: "unit test: test/the-console-meets-its-stated-a11y-bars.test.ts"
+    - claim: "no interactive target renders under 24x24 at 1440x900 or 1024x768"
+      proof: "unit test: test/the-console-meets-its-stated-a11y-bars.test.ts"
+    - claim: "no rendered text falls below the stated minimum size, and the fixture that measured 67 elements at 11px reports zero"
+      proof: "unit test: test/the-console-meets-its-stated-a11y-bars.test.ts"
+    - claim: "heading levels are contiguous — no skip in the rendered document order"
+      proof: "unit test: test/the-console-meets-its-stated-a11y-bars.test.ts"
+  falsifier: |
+    CLOSE IF the live console already passes: run axe-core over the running shell and count
+    violations, unlabelled controls, sub-24px targets and sub-12px text.
+    MEASURED 2026-09-08: 2 serious violations (10 nodes), 5 unlabelled controls, 17 small targets,
+    67 elements at 11px, one h1->h3 skip.
+    POSITIVE CONTROL, required because "zero violations" is a claim a broken harness also makes:
+    the same axe run must report **28 passes**. A run reporting 0 violations AND 0 passes has not
+    executed.
+    PROVE IT LOAD-BEARING: the fixture must carry the VOLUME that produced these — five escalation
+    rows with reply boxes, not one. A single-row fixture renders one node per rule and passes today
+    without any fix, which is precisely how these survived a suite that already runs axe.
+    DO NOT satisfy this by adding axe rule exclusions, `disableRules`, or a violations-allowlist.
+    That converts a measured failure into a recorded opinion and the next reader cannot tell them
+    apart.
+    DO NOT satisfy the size criteria by shrinking the viewport or the fixture until nothing trips.
+    Both viewports are named in the criterion for that reason.
+  note: |
+    DUPLICATE-SURFACE RULED ON, NOT NARROWED AWAY (lint-plan flagged W1-T2718). Both shards edit
+    `src/lib/serve.ts` and both are live, so the dispatcher could build the surface twice. THEY ARE
+    DIFFERENT WORK: W1-T2718 ADDS A SECTION — a whole open-PR queue with sweep disposition, review
+    state and wait reason, none of which exists today. This shard ADDS NO MARKUP: it repairs
+    attributes, names and sizes on rows the shell ALREADY renders. Neither subsumes the other, and
+    the overlap is one file rather than a shared concern. IF BOTH ARE IN FLIGHT AT ONCE, this one
+    should land FIRST and be small: a PR-queue section built on top of markup with ten serious axe
+    nodes inherits every one of them, and W1-T2718's own criteria say nothing about accessibility.
+    PROOFS DELIBERATELY NAME A NEW SUITE. An earlier revision proved these criteria with
+    `test/serve.shell-ux.test.ts`, which EXISTS AT BASE — `lint-plan`'s proof-base-discrimination
+    check warned that such a proof passes on both trees, grades `executed_stale`, and lets the
+    criterion fall back to the keyword floor SILENTLY, with no red check naming it. The new suite
+    cannot exist at base, so each proof discriminates. The 18 cases in `serve.shell-ux.test.ts`
+    stay untouched.
+    Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src; the new a11y suite is this task's own.
+    DEPENDS ON W1-T3185 for a real reason: without a live-shaped fixture the criteria above can be
+    satisfied by a fixture too small to trip them, which is how the current 18/18 green coexists
+    with ten serious violations in production.
+    CAVEAT WITH EQUAL WEIGHT: axe-core catches a defined subset of WCAG and is not a substitute for
+    judgement — 28 passes is not "accessible", it is "28 named checks passed". Contrast ratios,
+    focus order and keyboard traps are NOT claimed here; W1-T153's contrast bar is separate and
+    already covered.
+    SECOND CAVEAT: the phone-390 viewport was NOT measured. The harness timed out at 60s on that
+    pass because the review ran over a single SSH tunnel that the console's own SSE stream
+    saturates — a limitation of the observing setup, not a finding about the console. Mobile
+    remains unmeasured and this shard claims nothing about it.
