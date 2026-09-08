@@ -590,6 +590,12 @@
       "grepHint": "`src/lib/worker.ts` — comment forensics"
     },
     {
+      "path": "docs/ledger-steps.md",
+      "title": "Ledger step registry",
+      "summary": "Every ledger step this repo has DECODED, rendered from the same `LEDGER_STEPS` registry `meaningOfStep` reads (W1-T2764) -- this file cannot name a meaning the…",
+      "grepHint": "Ledger step registry"
+    },
+    {
       "path": "docs/open-decisions.md",
       "title": "Open decisions — the rulings only the operator makes",
       "summary": "Three things are currently undecided, and each one blocks work that is otherwise ready. They are",
