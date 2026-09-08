@@ -13,6 +13,7 @@ import {
   type PanelActionDeps,
 } from "../src/lib/panel-actions.js";
 import type { GitHub } from "../src/lib/status.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import {
   consumeDrainNow,
   isPaused,
@@ -73,10 +74,6 @@ function readLedgerLines(path: string): Array<Record<string, unknown>> {
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.parse(l) as Record<string, unknown>);
-}
-
-function fakeGitHub(): GitHub {
-  return { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
 }
 
 function fakeIssueCloser(): IssueCloser & { closed: string[] } {
@@ -417,11 +414,6 @@ test("POST /v1/quiet-hours: missing boolean enabled -> 400, no side effect", asy
   assert.equal(isQuietHours(root), false);
   assert.equal(readLedgerLines(deps.ledgerPath).length, 0);
 });
-
-
-
-
-
 
 // ── POST /v1/questions/answer (acceptance criterion 1) ────────────────────────
 

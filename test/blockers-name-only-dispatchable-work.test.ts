@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildStatusBoard, type CircuitBrokenBlocker, type StatusBoardDeps } from "../src/lib/status-board.js";
 import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
 import { DEFAULT_MAX_TASK_DISPATCHES, isDispatchBreakerTripped, type GitHub } from "../src/lib/status.js";
+import { writeLedger as writeLedgerFixture } from "./helpers/ledger-fixture.js";
 
 // ── W1-T2335: BLOCKERS BY CLASS must not render `circuit_broken` for a task dispatch will NEVER
 // take. `isDispatchEligible` (drain.ts) refuses a plan-declared `status: "blocked"` task and a
@@ -41,9 +42,7 @@ function ledgerLine(overrides: Record<string, unknown>): Record<string, unknown>
 }
 
 function writeLedger(lines: Record<string, unknown>[]): string {
-  const ledgerPath = join(mkdtempSync(join(tmpdir(), "blockers-name-only-ledger-")), "ledger.ndjson");
-  writeFileSync(ledgerPath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
-  return ledgerPath;
+  return writeLedgerFixture(lines).path;
 }
 
 /** A tripped-breaker ledger fixture for `taskId`: exactly `DEFAULT_MAX_TASK_DISPATCHES`
