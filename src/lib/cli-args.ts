@@ -10,6 +10,11 @@
  * arguments. Its sibling stays anchored in `run-task.ts`: it looks up a command's usage line in
  * the registry that IS the CLI's identity, and moving it would drag that registry lookup along,
  * which is a redesign this task does not make.
+ *
+ * `flagValue` (W1-T2888) joins it for the identical reason: a pure function of its own
+ * arguments, with no dependency on the `COMMANDS` registry or anything else `run-task.ts`-local.
+ * `src/lib/report-commands.ts`'s moved report verbs need it; `run-task.ts` re-imports it under
+ * its original name for its own ~45 call sites.
  */
 
 /**
@@ -37,4 +42,10 @@ export function unknownArgError(
     return `rmd ${command}: unexpected argument '${tok}' — see \`rmd --help\``;
   }
   return null;
+}
+
+/** `--flag value` lookup over a raw argv tail; undefined if the flag is absent. */
+export function flagValue(rest: string[], flag: string): string | undefined {
+  const i = rest.indexOf(flag);
+  return i >= 0 ? rest[i + 1] : undefined;
 }
