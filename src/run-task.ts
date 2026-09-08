@@ -804,6 +804,11 @@ import {
   EMISSIONS_ALLOWLIST,
 } from "./lib/emissions.js";
 import { cloneReapRoots, reapStaleClones, tallyDispositions, type CloneReapSummary } from "./lib/clone-reaper.js";
+import { reapGitObjects } from "./lib/object-reaper.js";
+
+/** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
+ *  rather than authorising something the operator never read. */
+export const OBJECT_REAP_CONTRACT_VERSION = "1";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { guardZeroStreakRecord } from "./lib/retro-closure.js";
 import {
@@ -818,6 +823,15 @@ import {
   type RiskJudgeVerdict,
 } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
+import {
+  describeWorkerSkillReachability,
+  loadInjectableSkills,
+  renderSkillsPart,
+  selectSkillsForTask,
+  skillsInjectedEvent,
+  stageSkillDrafts,
+  workerAllowlistFromSettings,
+} from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
 import { parse as parseYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
@@ -858,6 +872,7 @@ import {
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
   explainGrepProofRefusal,
+  explainUnitTestProofRefusal,
   materialiseBaseProofBlobs,
   REVIEW_CONTEXT,
   REVIEW_ENGINE_REVISION,
@@ -11710,7 +11725,19 @@ async function runTask(
       ? false
       : opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy().values.workerRuleHeadlines.enabled;
     const ruleHeadlinesPart = buildRuleHeadlinesPart(ruleHeadlinesEnabled, join(worktreePath, "CLAUDE.md"));
-    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart);
+    // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
+    // matchedLearnings already spends. Empty for every task until an operator approves a skill that
+    // declares `applies-to:`, so today this changes no prompt by a single byte.
+    const injectableSkills = selectSkillsForTask(
+      loadInjectableSkills(join(repoRoot, ".claude", "skills")),
+      task.type,
+      DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+    );
+    const skillsPart = renderSkillsPart(injectableSkills);
+    // Same shape as learnings.injected above, and same status: analytics, never a decision input.
+    const skillsEvent = skillsInjectedEvent(injectableSkills, task.type, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
+    if (skillsEvent) log("skills.injected", skillsEvent);
+    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -17257,7 +17284,7 @@ export function checkProofCommand(
     console.log("parse:      REFUSED — parseWhitelistedProof returned null.");
     // R-12: name the cause when the parser can — a directory-shaped target, a missing `in <path>`
     // clause, a traversal — instead of only the generic hint below.
-    const why = explainGrepProofRefusal(proof);
+    const why = explainGrepProofRefusal(proof) ?? explainUnitTestProofRefusal(proof);
     if (why !== undefined) console.log(`            reason: ${why}`);
     console.log(
       "            A `grep:` proof needs an explicit `in <path>` clause; a `unit test:` proof needs a\n" +
@@ -19872,6 +19899,10 @@ export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
   scratchReap: SCRATCH_REAP_CONTRACT_VERSION,
   worktreeReapBoot: WORKTREE_REAP_BOOT_CONTRACT_VERSION,
   workerRuleHeadlines: WORKER_RULE_HEADLINES_CONTRACT_VERSION,
+  // W1-T3092: GATED_RUNGS is DERIVED from EXPECTED_ORIGIN_KIND, so adding `objectReap.enabled`
+  // to the policy schema enrols the rung here automatically and the walk over GATED_RUNGS then
+  // refuses it as unpinnable until this entry exists. That guard working is what caught it.
+  objectReap: OBJECT_REAP_CONTRACT_VERSION,
 };
 
 /** Ledger one rung's refusal (design (ii): "a refusal ledgers `rung.unratified` with the diff").
@@ -21592,6 +21623,19 @@ async function retroCommand(
   const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: the singleton lane the collision was observed on
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
+
+  // W1-T3101 — THE CALLER stageSkillDraft NEVER HAD. Its own suite drove it; nothing in production
+  // did, so `skill.staged` had fired ZERO times across three days of ledger. Staging writes a
+  // PROPOSAL and nothing else: the operator still releases it with `rmd approve`, and only that
+  // writes under .claude/skills/. Best-effort — a throw here must never fail the retro, whose
+  // report is the thing the operator actually came for.
+  stageSkillDrafts(
+    followupRegistryPath,
+    gather.skillDrafts,
+    workerAllowlistFromSettings(undefined),
+    describeWorkerSkillReachability([]),
+    log,
+  );
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
@@ -22818,10 +22862,9 @@ export function dailyCostCeilingReloader(deps: { policy?: Policy; env?: NodeJS.P
  * and never invoked from any dispatch path; this supplies that call site for `drainCommand`'s and
  * `daemonCommand`'s `DrainDeps`/`DaemonDeps.checkQueueGovernor` fields (drain.ts/daemon.ts).
  * Mirrors {@link costGovernorGateFor} immediately above: `openPrCount` is a caller-supplied
- * closure (drainCommand's own `openPrCount`, already re-derived fresh from the SAME
- * `refreshMerged` projection each call for the W1-T172 lanes budget; daemonCommand's own
- * equivalent, added by this task) rather than a ledger read — the governor's input is the LIVE
- * open-PR count, never a ledgered figure.
+ * closure over the COMPLETE open-board batch already read by `projectPlan`, rather than a second
+ * GitHub request or a ledger read. The governor therefore sees PRs whose task shard is not yet on
+ * main while drain and daemon retain one coherent observation per projection (W1-T3144).
  *
  * A deferred consultation LEDGERS ITSELF (`logQueueGovernorDeferral`, sweep.ts) before returning,
  * so drain.ts/daemon.ts never need `ledgerPath`/`runId`/`appendLedger` just to report it — the
@@ -22845,6 +22888,34 @@ function queueGovernorGateFor(
     if (!result.deferred) return undefined;
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
+  };
+}
+
+/** W1-T3144 — bridge the complete open-board observation already made inside `projectPlan` to the
+ * dispatch governor. Gateways without the optional batch method retain the historical projection
+ * fallback; a batch method that ran and failed throws so W1-T342's existing governor wrapper fails
+ * admission closed. One helper serves drain and daemon so their queue definitions cannot drift. */
+function createOpenPrCountObservation(): {
+  reset: () => void;
+  observe: (count: number | undefined) => void;
+  read: (projectionCount: () => number) => number;
+} {
+  let observed = false;
+  let count: number | undefined;
+  return {
+    reset: () => {
+      observed = false;
+      count = undefined;
+    },
+    observe: (next) => {
+      observed = true;
+      count = next;
+    },
+    read: (projectionCount) => {
+      if (!observed) return projectionCount();
+      if (count === undefined) throw new Error("open PR board count is unreadable");
+      return count;
+    },
   };
 }
 
@@ -23278,14 +23349,16 @@ async function drainCommand(
   // construction in `daemonCommand` (its own doc carries the full argument, and the two must not
   // drift apart again — #1532).
   const projectionGithub = githubFactory(owner, repo);
+  const boardOpenPrCount = createOpenPrCountObservation();
   const refreshMerged: () => MergedSet = () => {
     // R-24: the ONE thing a per-tick instance used to buy, bought without the cold walk that came
     // with it — see `GitHub.resetFailureFlags`. A gateway that omits the method (`ghGateway`, every
     // pre-existing fixture) no-ops here and keeps exactly the verdict lifetime it already had.
     projectionGithub.resetFailureFlags?.();
+    boardOpenPrCount.reset();
     const proj = projectPlan(
       plan,
-      { ledgerPath, github: projectionGithub },
+      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe },
       statusPath,
     );
     lastProj = proj;
@@ -23302,14 +23375,14 @@ async function drainCommand(
   const isCreditIndeterminate = (id: string): boolean => lastProj?.get(id)?.indeterminate === true;
   // W1-T2397: the observation, built ONCE for both lanes — see {@link openSiblingObservation}.
   const { openSiblingBuildFor, onOpenSiblingBuild } = openSiblingObservation("drain", () => lastProj, log);
-  // W1-T172: the queue governor's other input (alongside DrainOpts.wipLimit) —
-  // OPEN entries in the SAME projection `isOpenPr` just read, never a second
-  // GitHub read path. Only consulted by the multi-lane path.
-  const openPrCount = () => {
-    let n = 0;
-    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") n++;
-    return n;
-  };
+  // W1-T3144: the queue governor counts the COMPLETE open-board batch `projectPlan` already read,
+  // including PRs whose task shard is not yet on main. A gateway without that optional batch keeps
+  // the prior projection fallback; a failed batch throws into W1-T342's fail-closed wrapper.
+  const openPrCount = () => boardOpenPrCount.read(() => {
+    let projected = 0;
+    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
+    return projected;
+  });
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -23774,12 +23847,21 @@ export function logDiskReclaimRung(
     cloneReapDeps?: Parameters<typeof logCloneReapSurvey>[2];
     sweepWorkerHomes?: typeof sweepStaleWorkerHomes;
     workerHomeRoot?: () => string;
+    /** W1-T3092: the object reaper. Seams mirror the three sweeps above — appended LAST so no
+     *  positional caller shifts. `policy` and `ratifications` follow logWorktreeReapBootSurvey. */
+    reapObjects?: typeof reapGitObjects;
+    objectRepoDir?: () => string;
+    objectInflightDir?: () => string;
+    objectPolicy?: () => { enabled: boolean };
+    ratifications?: Ratifications;
   } = {},
 ): {
   tempDirsRemoved: number;
   clonesReaped: number;
   cloneBytesReclaimed: number;
   workerHomesRemoved: number;
+  objectsPruned: number;
+  objectsWouldPrune: number;
 } {
   const sweepTempDirs = deps.sweepTempDirs ?? sweepStaleTempDirs;
   const reapClonesSurvey = deps.reapClonesSurvey ?? logCloneReapSurvey;
@@ -23813,16 +23895,48 @@ export function logDiskReclaimRung(
     // best-effort — a throw here must never block the dispatch or the other two sweeps
   }
 
-  if (tempDirsRemoved || clonesReaped || workerHomesRemoved) {
+  // W1-T3092 — THE FOURTH SWEEP. Guarded exactly like the three above: a throw here can never
+  // block the dispatch or its siblings. DRY BY DEFAULT behind `objectReap.enabled`, the posture
+  // plan/policy.yaml prescribes for rungs that delete — while off this runs EVERY quiet probe the
+  // armed path runs and reports what a prune WOULD remove, spawning nothing. One predicate, two
+  // outcomes: a survey that reached different probes would describe a decision nobody will make.
+  let objectsPruned = 0;
+  let objectsWouldPrune = 0;
+  let objectRefusal: string | undefined;
+  try {
+    const readPolicy = deps.objectPolicy ?? (() => loadPolicy(policyPath(config.root)).values.objectReap);
+    const policyBlock = readPolicy();
+    const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
+    const pin = ratificationPinCheck("objectReap", policyBlock, OBJECT_REAP_CONTRACT_VERSION, pins);
+    if (!pin.fire) log("rung.unratified", { rung: "objectReap", diff: pin.diff });
+    const enabled = pin.fire && policyBlock.enabled;
+    const repoDir = (deps.objectRepoDir ?? (() => join(config.root, "repos", "remudero")))();
+    const inflight = (deps.objectInflightDir ?? (() => join(config.root, "state", "inflight")))();
+    const r = (deps.reapObjects ?? reapGitObjects)(repoDir, inflight, { dryRun: !enabled });
+    objectsPruned = r.pruned;
+    objectsWouldPrune = r.wouldPrune ?? 0;
+    objectRefusal = r.refusedBecause;
+  } catch {
+    // best-effort — a throw here must never block the dispatch or the other three sweeps
+  }
+
+  if (tempDirsRemoved || clonesReaped || workerHomesRemoved || objectsPruned || objectsWouldPrune) {
     log("run.disk_reclaim", {
       tmp_dirs_removed: tempDirsRemoved,
       clones_reaped: clonesReaped,
       clone_bytes_reclaimed: cloneBytesReclaimed,
       worker_homes_removed: workerHomesRemoved,
+      objects_pruned: objectsPruned,
+      // SURVEY ESTIMATE, at survey time — the armed pass runs later against a repo that has moved.
+      objects_would_prune: objectsWouldPrune,
     });
   }
+  // The refusal is the survey RESULT, not an error: "how often is the fleet quiet" is the number
+  // that decides whether arming this rung is worth anything at all, and it is unreadable unless
+  // the declines are ledgered too.
+  if (objectRefusal !== undefined) log("run.disk_reclaim.objects_declined", { reason: objectRefusal });
 
-  return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved };
+  return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved, objectsPruned, objectsWouldPrune };
 }
 
 /**
@@ -24253,13 +24367,15 @@ export async function daemonCommand(
   // delta cache alongside it — see that method's own doc for why a failed half's EMPTY rows are
   // dropped WITH its verdict rather than left behind under a healthy label.
   const projectionGithub = githubFactory(target.owner, target.repo);
+  const boardOpenPrCount = createOpenPrCountObservation();
   const refreshMerged: () => MergedSet = () => {
     // R-24: called once per tick, because `refreshMerged` is called once per tick — `runDaemon`'s
     // loop body opens with `deps.refreshMerged()` (lib/daemon.ts) exactly as `runDrain`'s two do.
     projectionGithub.resetFailureFlags?.();
+    boardOpenPrCount.reset();
     const proj = projectPlan(
       plan,
-      { ledgerPath, github: projectionGithub },
+      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe },
       statusPath,
     );
     lastProj = proj;
@@ -24280,13 +24396,13 @@ export async function daemonCommand(
   // `lastProj`, the same projection `isOpenPr` just above and `openPrCount` just below read, so it
   // adds no fetch of its own.
   const { openSiblingBuildFor, onOpenSiblingBuild } = openSiblingObservation("daemon", () => lastProj, log);
-  // W1-T321: the queue governor's live input, mirroring drainCommand's identical `openPrCount` —
-  // OPEN entries in the SAME projection `refreshMerged` just read, never a second GitHub read path.
-  const openPrCount = () => {
-    let n = 0;
-    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") n++;
-    return n;
-  };
+  // W1-T3144: identical to drainCommand — complete board depth from the projection's existing
+  // batch read, with the old projection count retained only for gateways that omit that method.
+  const openPrCount = () => boardOpenPrCount.read(() => {
+    let projected = 0;
+    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
+    return projected;
+  });
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never

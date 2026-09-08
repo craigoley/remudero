@@ -11,7 +11,8 @@
   files: [src/lib/github-event-wake.ts, test/a-settle-window-matches-the-burst-it-absorbs.test.ts]
   origin: "operator-session#daemon-telemetry-2026-09-08"
   plan_refs: ["W1-T2568"]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
     THIS TASK DOES NOT PROPOSE COALESCING. COALESCING ALREADY EXISTS, and saying otherwise would be
@@ -77,6 +78,43 @@
     DO NOT raise the constant without the measurement. A number chosen to make the 43% look better
     is a number that will need choosing again.
   note: |
+    CLOSED 2026-09-08 BY ITS OWN FALSIFIER. That falsifier reads: "CLOSE ALSO IF the single-edge
+    settles turn out to be genuinely isolated edges rather than truncated bursts ... if it comes
+    back 'these were lone edges', this shard's premise is wrong and it should be closed saying so."
+    It came back lone edges.
+
+    THE PREMISE, MEASURED AND REFUTED. This shard asserted that "a CI run's shard edges arrive over
+    MINUTES", so a 10 000 ms window was an order of magnitude too short. Over the 6 188 accepted
+    `check_run` wakes in the 2026-09-05..09-08 ledger, the inter-edge gap distribution is:
+
+      p10 0.06s · p25 0.25s · MEDIAN 0.86s · p75 3.39s · p90 10.22s · p99 74.83s
+
+      <= 1s   3294 (53.2%)      <= 30s   5974 (96.6%)
+      <= 5s   5016 (81.1%)      <= 60s   6099 (98.6%)
+      <= 10s  5557 (89.8%)      <= 300s  6187 (100.0%)
+
+    Edges arrive SUB-SECOND TO SECONDS apart, not minutes. The existing 10 000 ms window already
+    spans 89.8% of them. The window is well matched to the burst; the 43% of settles that coalesce
+    exactly one edge are bursts OF SIZE ONE, which is the shard's own closing condition.
+
+    A LIMIT ON THAT MEASUREMENT, STATED RATHER THAN GLOSSED. It is the GLOBAL gap between
+    consecutive check_run wakes, not the per-(PR, head_sha) gap design (i) asked for. That stronger
+    measurement CANNOT BE MADE from the ledger as it stands: a `github.wake.accepted` row carries
+    `delivery_id`, `event`, `action` and `repository` — and no PR number and no head sha. With
+    several PRs active their edges interleave, so a per-PR gap is necessarily LARGER than the global
+    one measured here. That direction weakens the refutation but does not reverse it: to overturn
+    this closure a per-PR gap would have to be roughly an order of magnitude above the global
+    median, and the p99 of 74.83s bounds how much room there is for that.
+
+    ANYONE REVISITING THIS MUST FIRST add pr_number and head_sha to the wake row. Without them the
+    measurement design (i) demands is not available, and a window retuned on the global figure
+    would be tuned against the wrong distribution.
+
+    PRIOR ART, FOUND AFTER FILING: W1-T2741 ("GITHUB CHECK FANOUT IS A FULL-SWEEP STORM") is the
+    original task for this defect and is already `retirement: closed`. Its falsifier names the exact
+    condition that closed it — "Close ... if a temporal settle already exists in policy or wake
+    wiring" — which W1-T2568's `checkSettleMs` then satisfied. This shard re-opened the same ground
+    on a claim about that settle's SIZE, and the claim does not hold.
     Rule 25 CHECKED BEFORE FILING: `src/lib/github-event-wake.ts` is ordinary src, so the build PR
     is a src+test pair.
     I NEARLY FILED THIS AS "ADD DEBOUNCING". One grep of `github-event-wake.ts` showed the

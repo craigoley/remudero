@@ -1,0 +1,115 @@
+- id: W1-T3167
+  title: "AN ESCALATION IS JUDGED AT MOST ONCE, AT BIRTH — nothing ever re-reads an item that has been sitting on the NEEDS ME board, so an escalation that was right when it opened stays there after it stops being true"
+  repo: remudero
+  depends_on: [W1-T3166]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/sweep.ts, test/stale-escalation-rejudge.test.ts]
+  origin: "operator-session#console-visibility-2026-09-08"
+  plan_refs: ["W1-T349", "W1-T162", "W1-T3166"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR ASK, VERBATIM, 2026-09-08: "It seems like we need an llm as a judge to sweep those,
+    especially if they've been sitting a while."
+
+    THE DETERMINISTIC HALF ALREADY EXISTS AND IS NOT THE GAP. `runEscalationReconcile`
+    (src/lib/sweep.ts:6109) closes an open escalation once its REFERENT goes terminal — merged, or
+    closed without merging (`EscalationReconcileCandidate.derived.merged | .closed`, sweep.ts:6007).
+    It is bounded at 20 closes per cycle and each close is ledgered. That machinery works and this
+    task must not duplicate it.
+
+    THE GAP IS THE ESCALATION WHOSE REFERENT IS STILL OPEN AND WHICH STILL NEEDS NOBODY. MEASURED,
+    from the operator's own board on 2026-09-08: issues #4541, #4568, #4595 and #4604 all referenced
+    PR #4532, which was — and is — OPEN. `runEscalationReconcile` correctly declined to close any of
+    them, because its predicate is referent-terminality and the referent was live. All four were
+    nonetheless the SAME condition, none needed a human, and a human closed all four by hand.
+
+    AND IT RE-ACCRUES WITHIN THE HOUR. After that hand-closure, `gh issue list --label needs-human
+    --state open` returned 8 items, of which #4623 (11:51:29Z) and #4624 (11:51:34Z) were the same
+    class again, five seconds apart, minutes old. Age over the open set: p50 0.27 d, p90 2.62 d,
+    max 2.62 d — this is not an ancient backlog, it is a live refill.
+
+    WHY A JUDGE RATHER THAN A WIDER DETERMINISTIC RULE. The closable-ness of these is not a function
+    of any field the reconciler reads. "PR #4532's coverage-ratchet failure is being worked and needs
+    no decision from you today" is a reading of the issue's own prose against current repo state. A
+    predicate that captured it would have to encode the judgement, and would then close live items
+    with the same confidence — which is the costly direction (see the polarity note).
+
+    THIS IS A DIFFERENT MECHANISM FROM W1-T3166 AND DEPENDS ON IT. W1-T3166 wires the judge at
+    CREATION. This one re-reads what is ALREADY OPEN. Neither subsumes the other: a creation-time
+    judge cannot know what six hours will reveal, and a re-judge sweep cannot un-notify an operator
+    who was already pinged.
+  design: |
+    (i) AGE IS THE ADMISSION GATE, NOT THE VERDICT. An item is eligible for re-judging only after it
+    has been open longer than a stated dwell, so a fresh escalation is never second-guessed before
+    the operator has had a chance to see it. THE DWELL IS PART OF THE CLAIM and must be a declared
+    constant with a stated reason, not a magic number.
+    (ii) DEMOTE-ONLY, EXACTLY AS AT BIRTH. The re-judge may move an item to `fleet-notice` and may
+    never close it and never delete it. Closure stays the deterministic reconciler's job, keyed on a
+    terminal referent — a judge that can close is a judge that can lose work.
+    (iii) REUSE `buildEscalationJudgePrompt`'s ASYMMETRY, EXTEND ITS EVIDENCE. The re-judge prompt is
+    the birth prompt PLUS what only time can supply: how long it has been open, what the referent's
+    state is NOW, and whether sibling escalations name the same condition. If the prompt cannot state
+    those three, the re-judge has no more information than the birth judge did and is pure cost.
+    (iv) BOUNDED PER CYCLE, LIKE ITS SIBLING. `MAX_ESCALATION_CLOSES_PER_CYCLE` bounds the write
+    burst at 20; the re-judge needs its own bound for the same reason, and additionally because each
+    verdict is a model spawn — an unbounded re-judge over a 94-open backlog is a token event, not a
+    sweep.
+    (v) JUDGE ONCE PER OBSERVED STATE, NEVER ONCE PER PASS. Re-judging the same issue at the same
+    referent state every poll spends a spawn to reach the identical verdict. Key the re-judge so a
+    second pass over unchanged state is a no-op, and let a CHANGE in the referent re-open the
+    question.
+  acceptance:
+    - claim: "an open escalation older than the declared dwell, whose referent is NOT terminal, is re-judged — the case runEscalationReconcile structurally cannot reach"
+      proof: "unit test: test/stale-escalation-rejudge.test.ts"
+    - claim: "an escalation younger than the dwell is never re-judged, no matter what a stub judge would say"
+      proof: "unit test: test/stale-escalation-rejudge.test.ts"
+    - claim: "the re-judge can DEMOTE to fleet-notice and can never close or delete an issue; a stub judge attempting anything else leaves the issue open and needs-human"
+      proof: "unit test: test/stale-escalation-rejudge.test.ts"
+    - claim: "a second pass over UNCHANGED state spawns no second judge — the #4541/#4568/#4595/#4604 shape costs one verdict per condition, not one per poll"
+      proof: "unit test: test/stale-escalation-rejudge.test.ts"
+    - claim: "a judge throw, timeout or unparseable verdict leaves the item on needs-human, unchanged — fail-open, the same polarity as at birth"
+      proof: "unit test: test/stale-escalation-rejudge.test.ts"
+  falsifier: |
+    CLOSE IF anything already re-reads an OPEN escalation after creation. THE COMMAND RETURNS HITS
+    AND THEY DO NOT REFUTE THIS SHARD — recorded in full so a future reader does not close it on a
+    misread:
+      `grep -rniE 'rejudge|re-judge|reJudge' src/`
+    MEASURED 2026-09-08 → ten lines, of two kinds, neither a re-judge mechanism:
+      (a) `ensureJudgeableBody` / `bodyNeedsAcceptanceRepair` (run-task.ts:586, 2146, 4352, 4368,
+          14770, 14775) — PR-BODY repair so an acceptance gate can parse a header. Nothing to do with
+          escalations.
+      (b) `re-judge` as a HUMAN OPTION LABEL on the review-decision-conflict escalation
+          (run-task.ts:10184/10187 and 10255/10262): `{ label: "re-judge", detail: "inspect the two
+          evaluator records and post an operator decision" }`. That is an instruction TO THE OPERATOR
+          printed in an issue body — the opposite of an automatic re-read, and itself an item that
+          would be eligible for the rung this shard proposes.
+    THE SECOND HALF OF THE FALSIFIER IS THE LOAD-BEARING ONE: read `runEscalationReconcile`
+    (sweep.ts:6109) and confirm its predicate keys ONLY on referent terminality.
+    MEASURED 2026-09-08: it keys on `derived.merged | derived.closed` (sweep.ts:6007), with
+    `derived.indeterminate` treated as neither. No age input, no prose read, no verdict.
+    PROVE IT LOAD-BEARING: the fixture must be the MEASURED shape — four open escalations naming ONE
+    still-OPEN referent PR. Today's reconciler leaves all four live; this rung must demote them on
+    ONE verdict. If the test passes with a referent that is merged or closed, it is testing the
+    reconciler's job and proves nothing about this one.
+    DO NOT let the re-judge close issues. If a criterion here is satisfied by a closure, the demote-
+    only invariant has been traded for a passing test and the mechanism can now lose operator work.
+    DO NOT re-judge on a timer alone. An item whose referent state has not moved yields the same
+    verdict; a design that re-asks every poll is billed per poll and design (v) is unmet.
+  note: |
+    Rule 25 CHECKED: `src/lib/sweep.ts` is ordinary src.
+    DEPENDS ON W1-T3166 FOR A REAL REASON, not for tidiness: until the judge has a production caller
+    at all, a re-judge rung would be the FIRST consumer of a spawn path that has never run once in
+    production (measured: no `escalation_judge` step name exists anywhere in the ledger union). Wire
+    the simple case first, watch it, then add the one that re-reads history.
+    POLARITY (escalate.ts:440-445): a false negative hides work the operator cannot know to look for
+    — the costly direction. WHEN IN DOUBT, DELIVER. This holds MORE strongly on a re-judge than at
+    birth, because an item that has survived a dwell has already been implicitly triaged once.
+    CAVEAT WITH EQUAL WEIGHT: the four-duplicates-of-one-condition shape (#4541/#4568/#4595/#4604)
+    has a SECOND, independent cause — the same condition re-escalating without dedup across passes.
+    A re-judge that demotes all four is treating a symptom; the dedup defect is separate work and is
+    NOT claimed here. Both are real and fixing one does not close the other.

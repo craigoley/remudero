@@ -1,0 +1,47 @@
+- id: W1-T3165
+  title: "A TRANSIENT GITHUB READ AFTER A WORKER RUN EXITS THE WHOLE DAEMON"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: |
+    OBSERVED 2026-09-08 on the Azure fleet: W1-T2895 completed its worker and pushed PR #4620,
+    then the post-run check rollup threw `Command failed: gh api .../check-runs`. `runDaemon`
+    returned `stopReason: error`; the entrypoint slept 120 seconds and restarted the container.
+    Reviews and repairs had no scheduler during that interval while the board grew to 15 PRs.
+
+    The failure was GitHub backpressure, not a code verdict. The primary `/rate_limit` buckets were
+    full while `/pulls` returned the secondary-limit 403. W1-T1007 already retries and bounds one
+    paced call; after that bound, the final rejection still reaches `runDaemon` as a rejected
+    `runOne`. The daemon currently treats every rejection except `blocked_toolchain` as a software
+    crash. `classifyFailure` already distinguishes rate-limit/network evidence from auth and unknown
+    failures, but this settlement path does not consult it.
+
+    This does not duplicate the overlapping daemon tasks: W1-T254 keeps reviews moving during a
+    live worker, W1-T197 governs provider headroom, W1-T484 defines liveness sensing, and W1-T976
+    credits a task whose PR merged after its run. None classifies a rejected GitHub transport at
+    the worker-settlement boundary addressed here.
+  design: |
+    At the admitted-worker settlement boundary, join the Error message, stderr, and code into the
+    evidence already accepted by `classifyFailure`. Degrade only when the failed command is `gh`
+    and the evidence is positively transient. Keep the daemon in process, log the affected task and
+    evidence class, and use the existing API-window ceiling for exponential bounded backoff. Reset
+    the streak after any normally settled worker. Authentication, permissions, arbitrary worker
+    prose, and unknown errors retain the current fatal path and nonzero crash exit.
+  acceptance:
+    - claim: "a rate-limited gh check-rollup rejection stays in process and backs off exponentially up to the existing API-window ceiling"
+      proof: "unit test: W1-T3165: a GitHub rate-limit rejection holds in process with bounded backoff instead of exiting"
+    - claim: "a timed-out gh child stays in process even when stderr is empty"
+      proof: "unit test: W1-T3165: a timed-out gh child is transport backpressure even when stderr is empty"
+    - claim: "an authentication refusal still exits as an error"
+      proof: "unit test: W1-T3165: auth refusals and non-GitHub transient prose remain fatal software-visible errors"
+    - claim: "transient-looking prose from a non-GitHub worker cannot be swallowed by this narrow transport carve-out"
+      proof: "unit test: W1-T3165: auth refusals and non-GitHub transient prose remain fatal software-visible errors"
+  risk: high
+  origin: "oper#queue-lag-daemon-check-rollup-exit-2026-09-08"
+  plan_refs: ["W1-T197", "W1-T254", "W1-T484", "W1-T976", "W1-T1007", "W1-T2537", "W1-T2546"]
+  files: [src/lib/daemon.ts, test/daemon.test.ts]
+  status: queued
+  attempts: 0

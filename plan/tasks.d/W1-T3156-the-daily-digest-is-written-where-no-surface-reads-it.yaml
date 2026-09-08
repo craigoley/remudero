@@ -1,0 +1,79 @@
+- id: W1-T3156
+  title: "THE DAILY DIGEST IS DELIVERED TO A FILE NO SURFACE READS — `digestCadence` fires on schedule and `inboxNotifyChannel` appends to `state/inbox-digests.json`, a channel that deliberately has NO `unavailable()` because \"a file write is always available\", so every digest reports success while reaching nobody; fourteen are stored, the console never opens the file, and the operator learned of the reports' existence only by asking why no email arrived"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 1
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files: [src/lib/serve.ts, test/a-digest-reaches-a-surface-the-operator-reads.test.ts]
+  origin: "operator-session#console-visibility-2026-09-08"
+  plan_refs: ["W1-T2497", "W1-T144"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08.
+
+    THE DIGEST RUNS. `last-digest-cadence.json` records a fire at 2026-09-08T06:17:17.581Z, and the
+    daemon evaluates the rung every poll — `digest_cadence.skipped … only 243.x min since the last
+    run (min 1440)` at 10:20Z. Nothing about the schedule is broken.
+
+    IT IS DELIVERED NOWHERE A HUMAN LOOKS. `runDigestCadenceReport`'s channel defaults to
+    `inboxNotifyChannel(config.root)` (src/run-task.ts), which appends to
+    `state/inbox-digests.json`. FOURTEEN ENTRIES are stored there today, newest
+    2026-09-08T06:17:27.164Z, carrying the merged/blocked split the operator wants.
+
+    THE CHANNEL CANNOT REPORT FAILURE, BY DESIGN. `inboxNotifyChannel` (src/lib/digest.ts:1147)
+    omits `unavailable()` entirely, and says why: "a file write is always available on every
+    platform this fleet runs on … omitting it means `notify()` always attempts the send, never
+    reports a false 'not delivered'." That reasoning is sound for DELIVERY and silent about
+    READERSHIP: the write always succeeds, so nothing anywhere can notice that no one reads it.
+
+    NO SURFACE OPENS THE FILE. MEASURED: `grep -rn "inboxDigestsPath|readInboxDigests|inbox-digests"
+    src/lib/serve.ts` returns NOTHING. The console has never read a digest.
+
+    THE MAILBOX CANNOT CARRY ONE EITHER. `buildMailboxThreads` (serve.ts:3156) skips any row without
+    `needsHuman && escalationTitle && taskId` — it is one thread per NEEDS ME escalation, by
+    construction. A digest is not an escalation and has no task id, so there is no shape for it.
+
+    WHY EMAIL IS NOT THE FIX, AND IS NOT THIS TASK. `emailChannel` exists and `notifyRecipient`
+    defaults to the operator's address (config.ts:154), but the digest path never consults either,
+    and `RMD_MAIL_COMMAND` is unset on the daemon. Wiring email would add a second delivery to a
+    report the console still would not show. The console is where the operator already looks.
+  design: |
+    (i) A DIGEST IS A MAILBOX MESSAGE CLASS, not a second inbox. `buildMailboxThreads` gains a
+    source for report-shaped messages beside its escalation source; the thread key is the digest's
+    own timestamp, since it has no task id.
+    (ii) READ THE FILE THE CADENCE ALREADY WRITES. No new producer, no second store: `state/
+    inbox-digests.json` is the record and this task adds its first reader.
+    (iii) BOUNDED. The file grows one entry per day forever; the surface shows a bounded recent
+    window and says how many it did not show, rather than rendering fourteen — and eventually
+    hundreds — of full reports.
+    (iv) AN UNREADABLE OR ABSENT FILE RENDERS NOTHING AND BREAKS NOTHING. It is absent on a fresh
+    install and that is not an error.
+  acceptance:
+    - claim: "a stored digest appears in the console's mailbox, so a report the cadence already writes reaches the operator"
+      proof: "unit test: test/a-digest-reaches-a-surface-the-operator-reads.test.ts"
+    - claim: "digests and escalations coexist in one mailbox, and an escalation thread is unchanged by the addition"
+      proof: "unit test: test/a-digest-reaches-a-surface-the-operator-reads.test.ts"
+    - claim: "the rendered window is bounded and states how many older digests it omitted"
+      proof: "unit test: test/a-digest-reaches-a-surface-the-operator-reads.test.ts"
+    - claim: "an absent or unparseable inbox-digests.json renders no digests and throws nothing"
+      proof: "unit test: test/a-digest-reaches-a-surface-the-operator-reads.test.ts"
+  falsifier: |
+    CLOSE IF a surface already reads the digests: `grep -rn "inboxDigestsPath\|readInboxDigests\|
+    inbox-digests" src/` and read every hit outside digest.ts itself. MEASURED 2026-09-08: serve.ts
+    has none.
+    PROVE IT LOAD-BEARING: with the digest source removed, the digest probe must vanish from the
+    rendered mailbox while the escalation probe still renders — so the test discriminates the new
+    source, not the mailbox as a whole.
+    DO NOT satisfy this by wiring `emailChannel`. That is a DIFFERENT delivery decision, it needs
+    `RMD_MAIL_COMMAND` on the host, and it would leave the console — where the operator already
+    looks — still showing nothing.
+    DO NOT add a second inbox panel. The operator's stated complaint is that the console is hard to
+    use; a fifth place to look is not a fix.
+  note: |
+    Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src, so the build PR is a src+test pair.

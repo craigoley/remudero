@@ -153,7 +153,7 @@ test("ACCEPTANCE 6: the acceptance freeze is untouched — appending a criterion
   const baseAcceptance = [{ claim: "status regresses to queued on a read failure is fixed", proof: "unit test: test/status.test.ts" }];
   const amended = task({
     id: "W1-T155",
-    acceptance: [...baseAcceptance, { claim: "a brand new, never-agreed-to criterion", proof: "unit test: test/status.test.ts::new" }],
+    acceptance: [...baseAcceptance, { claim: "a brand new, never-agreed-to criterion", proof: "unit test: new" }],
   });
   const res = lintTask(amended, {
     postMergeAmendment: { statusResolvable: true, merged: true, baseAcceptance, followUpFiled: false },

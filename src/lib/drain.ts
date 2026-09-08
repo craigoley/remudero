@@ -954,9 +954,9 @@ export interface DrainDeps {
   checkPause?: () => string | undefined;
   /** One ledger line per task + terminal reason (reuses run-task's ledger). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
-  /** W1-T172: the CURRENT observed open-PR count — the queue governor's other input alongside
-   *  `DrainOpts.wipLimit`. Re-derive it fresh each call, counting OPEN entries in the SAME projection
-   *  `refreshMerged` just built, never a second GitHub read path. Only used on the multi-lane path. */
+  /** W1-T172/W1-T3144: CURRENT complete open-board count, re-derived from the SAME board batch
+   *  `refreshMerged` read, including PRs not attributable to a task on current main, never a second
+   *  GitHub read. Sizes only the multi-lane path alongside `DrainOpts.wipLimit`. */
   openPrCount?: () => number;
 }
 
