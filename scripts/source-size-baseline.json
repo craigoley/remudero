@@ -120,6 +120,7 @@
   "src/lib/producer-identity.ts": 500,
   "src/lib/project-init.ts": 991,
   "src/lib/prompt-manifest.ts": 102,
+  "src/lib/prompt-render.ts": 1000,
   "src/lib/proof-grammar.ts": 46,
   "src/lib/proof-queue-audit.ts": 372,
   "src/lib/provenance.ts": 125,
@@ -183,6 +184,6 @@
   "src/lib/worker.ts": 4500,
   "src/lib/workflow-run.ts": 28,
   "src/lib/worktree-sites.ts": 500,
-  "src/run-task.ts": 40500,
+  "src/run-task.ts": 39500,
   "src/spike.ts": 311
 }
