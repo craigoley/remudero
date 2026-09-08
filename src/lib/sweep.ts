@@ -571,6 +571,36 @@ export interface ActionableGateFailure {
   reason: string;
 }
 
+/** W1-T3172 — the two independently recorded halves of a Rule-25 refusal. These paths are
+ * authority to launch W1-T2436's prerequisite worker only after
+ * {@link usableInstrumentEntanglementPaths} validates both bounded, non-empty arrays. */
+export interface InstrumentEntanglementPaths {
+  instrumentPaths: string[];
+  srcPaths: string[];
+}
+
+const MAX_INSTRUMENT_ENTANGLEMENT_PATHS = 64;
+const MAX_INSTRUMENT_ENTANGLEMENT_PATH_LENGTH = 512;
+
+/** Validate ledger-originated Rule-25 path evidence at every routing boundary. The ledger is
+ * durable input, not trusted TypeScript memory: malformed, empty, or unbounded data must fail
+ * closed to the existing ambiguous disposition rather than launch a worker with invented scope. */
+export function usableInstrumentEntanglementPaths(value: unknown): value is InstrumentEntanglementPaths {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Partial<InstrumentEntanglementPaths>;
+  const usable = (paths: unknown): paths is string[] =>
+    Array.isArray(paths) &&
+    paths.length > 0 &&
+    paths.length <= MAX_INSTRUMENT_ENTANGLEMENT_PATHS &&
+    paths.every(
+      (path) =>
+        typeof path === "string" &&
+        path.trim().length > 0 &&
+        path.length <= MAX_INSTRUMENT_ENTANGLEMENT_PATH_LENGTH,
+    );
+  return usable(candidate.instrumentPaths) && usable(candidate.srcPaths);
+}
+
 /** One open PR's OBSERVED state, as the sweep sees it — the input to the pure predicate. The real
  *  gateway builds this from `gh pr list --state open --json …` plus the review/CI derivation
  *  status.ts already does; tests inject fixtures. */
@@ -618,6 +648,12 @@ export interface OpenPrView {
    *  offering a CHOICE is EXCLUDED entirely, because a worker picking wrong misattributes a
    *  ratified ruling. NEVER KEYED ON `failure_class`. // Why: #1991 named its exact remedy. */
   actionableGateFailures?: ActionableGateFailure[];
+  /** W1-T3172 — exact-head, exact-input structured Rule-25 failure authority recovered from the
+   *  latest matching `review.posted` row. Absent for stale, malformed, or other failure classes. */
+  instrumentEntangled?: true;
+  /** The validated path evidence paired with {@link instrumentEntangled}; both arrays are
+   *  non-empty and bounded. Consumers still validate this field rather than trusting its type. */
+  instrumentEntanglementPaths?: InstrumentEntanglementPaths;
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
   priorStrikes: number;
   /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
@@ -2040,6 +2076,20 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `no further strike can add information — escalating before the cap`,
   },
   {
+    // W1-T3172 — Rule 25's refusal is structurally fixable only through W1-T2436's prerequisite
+    // worker, never an in-place strike. The exact-head/input board producer supplies both path
+    // sets; this boundary validates them again. Ordered AFTER exhaustion so the configured cap
+    // still wins, but BEFORE ordinary review routing because this arm spends zero ordinary
+    // strikes and reconstructs a different first effect.
+    disposition: "blocked-fixable",
+    when: (pr) =>
+      pr.reviewState === "failure" &&
+      pr.instrumentEntangled === true &&
+      usableInstrumentEntanglementPaths(pr.instrumentEntanglementPaths),
+    reason: () =>
+      "structured instrument entanglement — dispatching W1-T2436 prerequisite split worker with zero ordinary strikes",
+  },
+  {
     // Reached only when checks are NOT red (row 5 claimed that) and the unmet set is not a proven
     // repeat (row 5.5 claimed that) — a pure review-shaped block. Genuinely REACHABLE for a review
     // failure (W1-T394): `checksState` never goes red off `remudero-review` alone, so a
@@ -2824,6 +2874,10 @@ export interface FixDispatchEvidence {
   mergeConflict?: MergeConflictEvidence;
   /** W1-T2236: see this interface's own doc, above. Populated ONLY when `unmetCriteria` is empty. */
   actionableGateFailures?: ActionableGateFailure[];
+  /** W1-T3172: cold-sweep authority for W1-T2436's prerequisite-worker route. */
+  instrumentEntangled?: true;
+  /** W1-T3172: exact validated path sets from the authoritative review ledger row. */
+  instrumentEntanglementPaths?: InstrumentEntanglementPaths;
 }
 
 /** TERMINAL-STATE PREDICATE (W1-T177) — the ONE definition every spending site and the operator
@@ -4552,7 +4606,12 @@ export async function runSweep(
               // `actionableGateFailures`. W1-T2231: the dedup gate reads `acted`, never `spent`.
               const fixEvidence = isBlockedCi(pr)
                 ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
-                : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures };
+                : {
+                    unmetCriteria: pr.unmetCriteria,
+                    actionableGateFailures: pr.actionableGateFailures,
+                    instrumentEntangled: pr.instrumentEntangled,
+                    instrumentEntanglementPaths: pr.instrumentEntanglementPaths,
+                  };
               // W1-T2752 — a delivered terminal decision for this EXACT PR@head is FINAL:
               // `dispatchFix` already declines it internally (W1-T2723's `priorTerminal?.escalated`
               // check), but only after being invoked, so an unmoved head still recorded a phantom
