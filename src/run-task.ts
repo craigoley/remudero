@@ -798,6 +798,7 @@ import {
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
   explainGrepProofRefusal,
+  explainUnitTestProofRefusal,
   materialiseBaseProofBlobs,
   REVIEW_CONTEXT,
   REVIEW_ENGINE_REVISION,
@@ -18503,7 +18504,7 @@ export function checkProofCommand(
     console.log("parse:      REFUSED — parseWhitelistedProof returned null.");
     // R-12: name the cause when the parser can — a directory-shaped target, a missing `in <path>`
     // clause, a traversal — instead of only the generic hint below.
-    const why = explainGrepProofRefusal(proof);
+    const why = explainGrepProofRefusal(proof) ?? explainUnitTestProofRefusal(proof);
     if (why !== undefined) console.log(`            reason: ${why}`);
     console.log(
       "            A `grep:` proof needs an explicit `in <path>` clause; a `unit test:` proof needs a\n" +

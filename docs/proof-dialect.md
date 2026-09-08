@@ -77,6 +77,7 @@ Refusals:
 
 - REFUSED (empty body) -- empty `unit test:` body — nothing to run
 - REFUSED (an exact test-file path escaping the checkout (`..`)) -- no path traversal out of the checkout
+- REFUSED (a test-file path and a title joined by `::` — a THIRD form that does not exist) -- `test/cli-verbs-mint-the-app-token.test.ts::every help arm carries the token` is not a supported `unit test:` form — there are exactly two, and this is neither. Use the WHOLE FILE, `unit test: test/cli-verbs-mint-the-app-token.test.ts`, or the exact test TITLE on its own, `unit test: every help arm carries the token`. Written together they are escaped into ONE --test-name-pattern, which no test is named, so the proof matches zero tests and the criterion degrades to the keyword floor without saying so
 
 ## Scenario-narrative bounds (`SCENARIO_NARRATIVE_BOUNDS`)
 
