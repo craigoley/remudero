@@ -415,7 +415,7 @@ import {
   type FeedbackOrigin,
   type SummarizeDeps,
 } from "./lib/feedback.js";
-import { findPendingLandingPr, recordDecision, sweepFeedbackLanding } from "./lib/feedback-landing.js";
+import { findPendingLandingPr, recordDecision, recordRuling, sweepFeedbackLanding } from "./lib/feedback-landing.js";
 // renderTraceChain/traceForward/traceReverse: only traceCommand read them, and it moved to
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
@@ -653,6 +653,7 @@ import {
   markDaemonProcessActor,
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
+import { systemClock, type Clock } from "./lib/clock.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
 import {
@@ -770,6 +771,16 @@ import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, 
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
+import {
+  RULING_JUDGED_STEP,
+  judgeRulingRisk,
+  proposalFromRefusedRuling,
+  realRulingJudge,
+  rulingRecordContent,
+  rulingRecordRelPath,
+  type AgentRuling,
+  type RulingJudgeVerdict,
+} from "./lib/ruling-judge.js";
 import { mountRecommendationProposalCandidate, recommendMounts, type MountHeadroomCell } from "./lib/mount-recommender.js";
 import {
   DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS,
@@ -34020,6 +34031,172 @@ function loadProposalsForRatify(
   return { found, unknown };
 }
 
+// ── The ruling judge's production call site (W1-T3212) ────────────────────────────────────────
+//
+// W1-T349 built a complete, tested escalation judge that had ZERO production callers until
+// W1-T3166 wired it fourteen months later. That is this pattern's documented failure mode, so
+// this judge's call site ships in the same change as the judge, and the shard's own acceptance
+// greps for it here rather than trusting that someone will come back for it.
+
+/** `routeRuling`'s outward effects, every one injectable — so the fail-closed paths this
+ *  function exists for are provable at the CALL SITE without a repo, a spawn or a network.
+ *  `standingDecisions` is the decision record's current text, READ BY THE CALLER: keeping the
+ *  file read out here is what lets the contradiction check be unit-tested. */
+export interface RouteRulingDeps {
+  judge: (r: AgentRuling) => Promise<RulingJudgeVerdict>;
+  standingDecisions: string;
+  /** Lands the recorded entry. Called ONLY on the `record` arm. */
+  land: (relPath: string, content: string) => void;
+  /** Stages the refused ruling as an inbox proposal. Called ONLY on the `escalate` arm. */
+  stageProposal: (proposal: Proposal) => void;
+  /** Writes the {@link RULING_JUDGED_STEP} row. Called on BOTH arms, always. Typed as a
+   *  {@link LedgerLine} rather than a loose record so a row missing `step`/`task_id`/`run_id` —
+   *  the three fields every reader of this row joins on — cannot compile. */
+  appendRow: (row: LedgerLine) => void;
+  /** The Clock PORT, never a bespoke `now`-shaped field: clock-signature-census.test.ts
+   *  ratchets exactly that declaration shape per file, because four incompatible ones had already
+   *  accumulated across this repo before the port existed. */
+  clock: Clock;
+}
+
+/** What one routed ruling did: the verdict, and which arm it actually took. */
+export interface RouteRulingResult {
+  decision: RulingJudgeVerdict["decision"];
+  reason: string;
+  /** Set only when the ruling was RECORDED. */
+  landedPath?: string;
+  /** Set only when the ruling was ESCALATED. */
+  proposalId?: string;
+}
+
+/**
+ * Route ONE agent-authored ruling: judge it, ledger the verdict, and take exactly one arm.
+ *
+ * THE LEDGER WRITE IS UNCONDITIONAL AND HAPPENS BEFORE EITHER ARM, so a crash between the
+ * verdict and its effect leaves the verdict readable rather than leaving a silent gap — the
+ * exact residue that made proving the escalation judge had never run take three reads.
+ *
+ * THE ARMS ARE EXCLUSIVE BY CONSTRUCTION: there is one `if` and it returns. Nothing lands on
+ * the escalate arm, and nothing is staged on the record arm; the suite asserts both directions,
+ * because "records AND also asks" would quietly re-create the duplicated audit trail design
+ * clause (iii) exists to prevent.
+ */
+export async function routeRuling(ruling: AgentRuling, deps: RouteRulingDeps): Promise<RouteRulingResult> {
+  const verdict = await judgeRulingRisk(ruling, { judge: deps.judge, standingDecisions: deps.standingDecisions });
+  deps.appendRow({
+    step: RULING_JUDGED_STEP,
+    task_id: ruling.taskId,
+    run_id: ruling.runId,
+    author: ruling.author,
+    judge_decision: verdict.decision,
+    judge_reason: verdict.reason,
+  });
+  if (verdict.decision === "record") {
+    const relPath = rulingRecordRelPath(ruling.taskId, ruling.runId);
+    deps.land(relPath, rulingRecordContent(ruling, verdict, deps.clock.iso()));
+    return { decision: verdict.decision, reason: verdict.reason, landedPath: relPath };
+  }
+  const proposal = proposalFromRefusedRuling(ruling, verdict);
+  deps.stageProposal(proposal);
+  return { decision: verdict.decision, reason: verdict.reason, proposalId: proposal.id };
+}
+
+/** Everything the decision record currently says, as ONE string for the contradiction check:
+ *  `DECISIONS.md` plus every landed `plan/decisions.d/**` shard, since a record that landed
+ *  through the bridge but has not been folded into the root file is no less standing. An
+ *  unreadable path contributes nothing rather than throwing — and contributing nothing is the
+ *  SAFE direction here only because an unresolvable `supersedes` escalates anyway. */
+export function readStandingDecisions(root: string): string {
+  const parts: string[] = [];
+  try {
+    parts.push(readFileSync(join(root, "DECISIONS.md"), "utf8"));
+  } catch {
+    // no root decision file in this checkout — the shards below are still consulted
+  }
+  const dir = join(root, "plan", "decisions.d");
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    // no plan/decisions.d in this checkout — DECISIONS.md alone is the whole standing record here,
+    // which is a real state (a fresh clone before the first landing), not a read failure to report
+    return parts.join("\n");
+  }
+  for (const name of entries) {
+    if (!name.endsWith(".md")) continue;
+    try {
+      parts.push(readFileSync(join(dir, name), "utf8"));
+    } catch {
+      // one unreadable shard never hides the rest
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
+ * `rmd rule` — an agent records a ruling, behind the judge (W1-T3212, operator ruling
+ * 2026-09-08). The thin real-world glue around {@link routeRuling}, mirroring
+ * `approveCommand`/`inboxCommand`'s split: every seam below is the REAL one, and the pure
+ * routing above is what the suite drives.
+ *
+ * EVERY FIELD IS REQUIRED and the usage error names the missing one. That is design clause (iv)
+ * at the CLI: there is no invocation of this verb that produces an entry a reader cannot
+ * attribute, chase or undo.
+ */
+export async function ruleCommand(
+  rest: string[],
+  deps: { root?: string; route?: typeof routeRuling; clock?: Clock } = {},
+): Promise<number> {
+  const root = deps.root ?? repoRoot;
+  const flag = (name: string): string | undefined => {
+    const i = rest.indexOf(`--${name}`);
+    return i === -1 ? undefined : rest[i + 1];
+  };
+  const evidence = rest.flatMap((t, i) => (t === "--evidence" && rest[i + 1] ? [rest[i + 1]!] : []));
+  const supersedes = rest.flatMap((t, i) => (t === "--supersedes" && rest[i + 1] ? [rest[i + 1]!] : []));
+  const ruling: AgentRuling = {
+    taskId: flag("task") ?? "",
+    runId: flag("run") ?? `RULE-${flag("task") ?? "unknown"}`,
+    title: flag("title") ?? "",
+    ruling: flag("ruling") ?? "",
+    evidence,
+    rollback: flag("rollback") ?? "",
+    author: flag("author") ?? "",
+    ...(supersedes.length > 0 ? { supersedes } : {}),
+  };
+  if (!ruling.taskId) {
+    console.error(`rmd rule: --task <W#-T#> is required — usage: ${commandSyntax("rule")}\n` + USAGE);
+    return 2;
+  }
+
+  const route = deps.route ?? routeRuling;
+  const ledgerPath = join(root, "state", "ledger.jsonl");
+  const registryPath = join(root, "state", "inbox-proposals.json");
+  const result = await route(ruling, {
+    judge: realRulingJudge({
+      mounts: loadMounts(mountsPath(root)),
+      cwd: root,
+      settingsFile: join(root, ".claude", "settings.json"),
+    }),
+    standingDecisions: readStandingDecisions(root),
+    land: (relPath, content) => void recordRuling(root, relPath, content),
+    stageProposal: (proposal) =>
+      void updateProposalRegistry(registryPath, (current) =>
+        current.some((existing) => existing.id === proposal.id) ? null : [...current, proposal],
+      ),
+    appendRow: (row) => appendLedger(ledgerPath, row),
+    clock: deps.clock ?? systemClock,
+  });
+
+  if (result.decision === "record") {
+    console.log(`recorded: ${result.landedPath} — ${result.reason}`);
+    return 0;
+  }
+  console.log(`escalated to the inbox as ${result.proposalId} — ${result.reason}`);
+  console.log(`the operator ratifies it with: rmd approve ${result.proposalId}`);
+  return 0;
+}
+
 /**
  * `rmd approve <P##>` — the operator's ONE BIT (MASTER-PLAN P25 ii, W1-T111). Refuses
  * anything not currently READY (re-classified live, against the SAME facts `rmd inbox`
@@ -36583,6 +36760,13 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies each named <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line per named proposal. NAMING TWO OR MORE ids (W1-T2471) batches them into ONE branch/commit/MASTER-PLAN block/PR instead of one PR lifecycle each — an unready member is SKIPPED (its own reason ledgered) without blocking or aborting the rest; this is an EXPLICIT set only, never an implicit approve-everything-ready",
   },
   {
+    name: "rule",
+    syntax: 'rmd rule --task <W#-T#> --author <name> --title "<line>" --ruling "<text>" --evidence "<text>" [--evidence ...] --rollback "<text>" [--supersedes <anchor>]',
+    summary: "An agent records a ruling, behind an LLM judge that routes the risky ones to the operator.",
+    detail:
+      "an agent records a ruling behind a judge (W1-T3212, operator ruling 2026-09-08): the judge assesses whether THIS ruling is safe for an agent to land — reversible, inside its competence, evidenced, narrow — never whether it is RIGHT, which is what the operator's bit is for when the answer is no. On record, the entry lands in plan/decisions.d/ through the same bridge decision records already use, attributed to its agent author with its evidence and a rollback line. On escalate it lands NOTHING and stages an ordinary inbox proposal the operator ratifies with `rmd approve` — the same gated, ledgered, one-bit path, never a second channel. FAILS CLOSED, the opposite polarity to the escalation judge: a throwing, timing-out or unparseable verdict escalates, because the costly direction here is installing a decision nobody reviewed. A ruling that declares it supersedes a standing record goes to the operator unconditionally, without the judge being asked. Every verdict writes one ruling.judged ledger row naming decision and reason, on both arms",
+  },
+  {
     name: "reframe",
     syntax: "rmd reframe <P##> --feedback \"<text>\" [--supersedes <rounds>]",
     summary: "The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.",
@@ -37442,6 +37626,10 @@ export async function main(
   }
   if (cmd === "approve" && arg) {
     process.exit(await approveCommand(rest));
+  }
+  if (cmd === "rule") {
+    /* c8 ignore next -- process-boundary dispatch; ruleCommand is exercised directly above. */
+    process.exit(await ruleCommand(rest));
   }
   if (cmd === "reframe" && arg) {
     process.exit(await reframeCommand(rest));

@@ -138,7 +138,8 @@ const BASELINE_COMMAND_NAMES = [
   "emissions", "escalate", "feedback", "fix", "hand-runs", "inbox", "init", "install-checkout", "issues",
   "learnings", "ledger-grep", "lint-plan", "merge-hold", "next-task-id", "notify", "onboard", "ops", "pause",
   "peek", "plan", "plan-reconcile", "preflight", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
-  "reframe", "relay", "replay", "replay-goldens", "resume", "retro", "review", "rule-efficacy", "run-task",
+  "reframe",
+  "rule", "relay", "replay", "replay-goldens", "resume", "retro", "review", "rule-efficacy", "run-task",
   "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "up",
   "verdict-calibration", "wipe-test",
 ].sort();
@@ -152,7 +153,7 @@ const BASELINE_COMMAND_NAMES = [
 test("COMMANDS carries the established command names plus the operator merge-hold writer", () => {
   // ONE literal, deliberately: this is the reviewed count, and a verb joining the registry should
   // cost exactly one considered edit here beside its line above.
-  assert.equal(BASELINE_COMMAND_NAMES.length, 73);
+  assert.equal(BASELINE_COMMAND_NAMES.length, 74);
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
   // DERIVED from that list, not a second literal. Two copies of the same number meant a new verb
   // reddened this twice and reported "expected 71, got 72", which names nothing about what changed;
