@@ -1534,9 +1534,15 @@ test("escalateWithJudge: a demote verdict opens a fleet-notice-labelled issue wi
   assert.equal(comments[0].body, "this class of storm always self-resolves");
 
   const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  assert.equal(lines.length, 1);
-  assert.equal(lines[0].step, "escalation.demoted");
+  // W1-T3166 added a SECOND row ahead of this one: `escalation.judged`, written on BOTH arms so
+  // "has the judge ever run, and what did it decide" is answerable with one grep. The demotion row
+  // below is unchanged; only its index moved.
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].step, "escalation.judged");
+  assert.equal(lines[0].judge_decision, "demote");
   assert.equal(lines[0].judge_reason, "this class of storm always self-resolves");
+  assert.equal(lines[1].step, "escalation.demoted");
+  assert.equal(lines[1].judge_reason, "this class of storm always self-resolves");
 });
 
 test("escalateWithJudge: a deliver verdict opens a needs-human-labelled issue exactly like escalate()", async () => {
@@ -1552,7 +1558,12 @@ test("escalateWithJudge: a deliver verdict opens a needs-human-labelled issue ex
   assert.equal(issues.calls.length, 1);
   assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked", "needs-question"]);
   const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  assert.equal(lines[0].step, "escalation.issue_opened");
+  // W1-T3166: the judged row precedes the delivery row. THE DELIVER ARM IS LEDGERED TOO — a judge
+  // that only leaves a trace when it demotes cannot be calibrated against what it let through.
+  assert.equal(lines[0].step, "escalation.judged");
+  assert.equal(lines[0].judge_decision, "deliver");
+  assert.equal(lines[0].judge_reason, "needs the operator now");
+  assert.equal(lines[1].step, "escalation.issue_opened");
   assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
 });
 
