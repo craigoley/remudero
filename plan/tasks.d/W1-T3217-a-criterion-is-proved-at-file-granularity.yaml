@@ -1,0 +1,90 @@
+- id: W1-T3217
+  title: "A SHARD'S CRITERIA ARE PROVED AT FILE GRANULARITY, SO 76% OF MERGED SHARDS CARRY A CRITERION THE GATE CANNOT DISTINGUISH FROM A SIBLING — bind each criterion to the test that proves IT, and refuse a proof target no test in it names"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 30.00
+  files: [src/lib/task-linter.ts, test/a-criterion-names-the-test-that-proves-it.test.ts]
+  origin: "operator-request#is-the-gap-general-2026-09-08"
+  plan_refs: ["W1-T3216", "W1-T3206", "W1-T352", "W1-T2597"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    THE OPERATOR ASKED WHETHER W1-T3206's DEFECT WAS GENERAL. It is. MEASURED 2026-09-08 over
+    plan/tasks.d (1,585 task records, 7,204 acceptance criteria):
+      - 1,019 of 1,585 shards (64.3%) carry at least one criterion sharing its PROOF TARGET with a
+        sibling; of MERGED shards, 723 of 946 (76.4%).
+      - 3,721 of 7,204 criteria (51.7%) cannot be told apart from a sibling by the executor.
+      - 748 shards prove EVERY criterion with ONE target. The extreme: W1-T2473, W1-T2476,
+        W1-T2477 and W1-T2511 each carry 10 criteria proved by a single file.
+    WHY THAT IS A GATE PROBLEM AND NOT A STYLE ONE. `judgeCriterion` (src/lib/review.ts) runs a
+    proof TARGET, not a criterion: for `unit test: test/x.test.ts` it executes that FILE. If the
+    file passes, EVERY criterion naming it grades `executed_pass`. Six criteria, one file, one
+    execution, six passes. `checkAcceptanceCommand` (src/run-task.ts) cannot help — read it: it is
+    a PARSER LINT that checks criteria are parseable and proofs non-empty, and never executes a
+    proof at all.
+    THE CONFIRMED INSTANCE. W1-T3206 declared 6 criteria, all naming
+    test/an-operator-verdict-releases-a-parked-task.test.ts. #4715 merged with criterion 1 (the
+    `approveCommand` admission path) UNBUILT. The file carried 6 tests and passed. All six are
+    about `releasedTaskIds`; NONE exercises `approveCommand`. W1-T3216 recovers that work.
+    THE CHEAP ARITHMETIC CHECK IS NOT ENOUGH, AND THIS IS THE MOST IMPORTANT LINE HERE. Counting
+    tests-in-file against criteria-in-shard finds 34 of 489 single-file merged shards (7.0%). It
+    does NOT find W1-T3206, which had exactly as many tests as criteria and still missed one. So
+    7.0% is a FLOOR from a heuristic that provably misses the motivating case; the true incidence
+    is unmeasured and higher. A builder must not report the 7% as the answer.
+  design: |
+    (i) BIND, DO NOT COUNT. The check is not "are there >= N tests" — that is the heuristic already
+    shown to miss the real case. It is: for each criterion, does SOME test in the named target
+    NAME it? The cheapest honest binding is a per-criterion marker the author already writes: this
+    repo's suites overwhelmingly title tests `"<TASK-ID>: <what it proves>"`. Require the shard's
+    criterion INDEX or a declared tag to appear in exactly one test title.
+    (ii) LINT-TIME, NOT REVIEW-TIME. `lint-plan` already refuses proof SHAPE and RESOLVABILITY;
+    this belongs beside it, so an author learns before a CI cycle, not after. Reuse
+    `src/lib/task-linter.ts`'s existing violation vocabulary rather than minting a second one.
+    (iii) ADVISORY FIRST, MEASURED, THEN ENFORCING. 3,721 existing criteria would trip this on day
+    one. It must land as a WARNING with a recorded baseline, exactly as comment-load and
+    catch-erasure did, so the corpus ratchets down instead of the gate being switched off.
+    (iv) NEVER GRADE A CRITERION MET FROM ANOTHER CRITERION'S EXECUTION. That is the defect in one
+    sentence, and it is the invariant a reviewer must not trade away for a smaller diff.
+  acceptance:
+    - claim: "a shard whose two criteria share one proof target and whose target names only one of them is reported, naming the unbound criterion"
+      proof: "unit test: test/a-criterion-names-the-test-that-proves-it.test.ts"
+    - claim: "a shard whose every criterion is named by a distinct test in its target passes with no violation"
+      proof: "unit test: test/a-criterion-names-the-test-that-proves-it.test.ts"
+    - claim: "a file's unbound-criterion count above its recorded baseline fails, and at or below it warns — the ratchet, not a cliff"
+      proof: "unit test: test/a-criterion-names-the-test-that-proves-it.test.ts"
+    - claim: "W1-T3206's own shard is reported by this check, using its real six criteria and its real proof file as the fixture"
+      proof: "unit test: test/a-criterion-names-the-test-that-proves-it.test.ts"
+    - claim: "the check is reachable from the linter, not only from its own test"
+      proof: "grep: unboundCriterionViolations( in src/lib/task-linter.ts"
+  falsifier: |
+    CLOSE IF a criterion is already bound to a specific test: read `judgeCriterion` in
+    src/lib/review.ts and `checkAcceptanceCommand` in src/run-task.ts.
+    MEASURED 2026-09-08: `judgeCriterion` executes a proof TARGET and applies the outcome to every
+    criterion naming it; `checkAcceptanceCommand` never executes a proof at all.
+    POSITIVE CONTROL, because a percentage with no denominator proves nothing: the census must
+    report the WHOLE distribution, not just the tail — MEASURED {1 distinct target: 748 shards,
+    2: 315, 3: 243, 4: 139, 5: 79, 6: 34, 7: 14, 8: 9, 10: 1, 13: 1, 14: 2} over 1,585 records
+    carrying 7,204 criteria. A walk returning only the worst offenders has not read the corpus.
+    DO NOT ship the tests-per-file COUNT as the check. It is the first thing a builder will reach
+    for, it is what produced the 7.0% floor, and it grades W1-T3206 — the case this task exists
+    for — as CLEAN. A check that passes its own motivating example is decorative.
+    DO NOT make this enforcing on the first PR. 3,721 criteria trip it today; a gate that turns the
+    whole corpus red is switched off within a week, and then the defect is invisible AND unmeasured.
+    DO NOT "fix" the corpus by rewriting old shards' proofs. Merged records are history; the
+    baseline records where the corpus stood and new work ratchets it down.
+  note: |
+    Rule 25 CHECKED: `src/lib/task-linter.ts` is ordinary src.
+    CAVEAT WITH EQUAL WEIGHT, and it bounds this whole shard: the 76.4% figure measures what the
+    gate CANNOT DISTINGUISH, not how often an author actually left a criterion unbuilt. A diligent
+    author writes one test per criterion in one file and is counted here. The only confirmed
+    incidence figure is 7.0% from a heuristic that misses the motivating case, so the real rate is
+    UNKNOWN — somewhere above 7% and below 76%. This task closes the capability gap; it does not
+    establish the defect rate, and its first weeks of warnings are what would.
+    SECOND CAVEAT: design (i)'s title-matching binding is a CONVENTION, not a proof. A test titled
+    for a criterion can still assert nothing about it — that is `assertion-discrimination`'s
+    problem, already a separate gate, and this task must not try to absorb it.
