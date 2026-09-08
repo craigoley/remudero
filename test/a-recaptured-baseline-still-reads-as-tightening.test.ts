@@ -10,8 +10,6 @@
  * tightening, because that entry IS an allowance.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import test from "node:test";
 
 import { classifyInstrumentChange } from "../src/lib/review.js";
@@ -93,20 +91,22 @@ test("the live instance: PR #4620's real cycle-baseline.json hunk classifies as 
   assert.equal(classify(body), "tightening");
 });
 
-test("MUTANT: restoring the unconditional bail makes the re-captured baseline unclassifiable again", () => {
-  // The falsifier is load-bearing only if the fix is what moves the verdict, so re-run the
-  // pre-fix predicate over the same input rather than asserting the new one twice. This is the
-  // exact line the fix replaced: bail whenever the added line carries no numeric row.
-  const source = readFileSync(join(import.meta.dirname, "..", "src", "lib", "review.ts"), "utf8");
-  assert.match(
-    source,
-    /keys\.every\(isInstrumentProvenanceKey\)\) continue;/,
-    "the provenance skip is what this suite proves; if it is gone the tests below are vacuous",
+test("MUTANT: the pre-fix rule, re-run over the same input, cannot classify the re-captured baseline", () => {
+  // The falsifier is load-bearing only if the fix is what moves the verdict, so reproduce the
+  // PRE-FIX rule here and show the two answers disagree on one input — no source-text read, which
+  // would only assert that a line still exists rather than that the behaviour still holds.
+  const preFixWouldBail = (addedLine: string): boolean =>
+    !/"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)/.test(addedLine); // "no numeric row" => return "undetermined"
+
+  const provenance = '+  "capturedAt": "2026-09-08",';
+  assert.equal(preFixWouldBail(provenance), true, "the pre-fix rule refuses to classify this line");
+  assert.equal(
+    classify('-  "capturedAt": "2026-08-26",\n-  "maxCycles": 13,\n+  "capturedAt": "2026-09-08",\n+  "maxCycles": 0,\n'),
+    "tightening",
+    "the shipped rule classifies the same input — the two cannot both hold, so the skip is load-bearing",
   );
 
-  const added = '+  "capturedAt": "2026-09-08",';
-  const numericRow = /"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)/.test(added);
-  assert.equal(numericRow, false, "the provenance line carries no numeric row");
-  // Pre-fix, that false was an immediate `return "undetermined"` — which is what the first test
-  // measures as `tightening` now. The two cannot both hold, so the skip is load-bearing.
+  // And the skip stayed narrow: the same line shape with a non-provenance key still bails.
+  assert.equal(preFixWouldBail('+  "path": "src/new.ts",'), true);
+  assert.equal(classify('-  "maxCycles": 13,\n+  "maxCycles": 0,\n+  "path": "src/new.ts",\n'), "undetermined");
 });
