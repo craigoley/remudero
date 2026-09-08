@@ -1,0 +1,83 @@
+- id: W1-T3096
+  title: "THE MOUNT RECOMMENDER RUNS ON EVERY DAEMON POLL AND RE-READS THE ENTIRE LEDGER UNION EACH TIME — `runMountRecommenderRung` is the one rung on the sweep composite with NO cadence marker, so 959 sweeps have each rebuilt a 4.1-million-row corpus to reproduce a byte-identical `filed: 0, refused: 33` while the sibling rung directly above it is gated to once a week"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: span
+  budget_usd: 12.00
+  files: [src/run-task.ts, test/the-mount-recommender-re-scans-the-whole-ledger-every-poll.test.ts]
+  origin: "operator-session#router-efficiency-2026-09-08"
+  plan_refs: ["P53", "W1-T436", "W1-T2560", "W1-T2575"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 at 847e551c. In `buildSweepHook` the rungs are wired in sequence and every
+    expensive one carries its own throttle. The rung immediately above this one says so in its own
+    comment: "W1-T436 — the weekly feedback docket rung ... a `state/last-feedback-docket.json`
+    marker keeps this a no-op on every poll but the first one due each week." The very next line is
+    `await runMountRecommenderRung(config, runId, log);` with no marker, no interval and no
+    early-out.
+
+    WHAT THAT RUNG DOES PER CALL. It dynamically imports `scripts/mount-headroom-sweep.mjs` and
+    calls `buildMountHeadroomSweep(stateDir)`, which opens every ledger form — MEASURED: 450
+    archives plus 2 plain rotations plus the live file, 4,131,278 run-tagged rows deduped to 915
+    distinct runs — and then runs `recommendMounts` over the result. Running it by hand needed
+    `--max-old-space-size=12000`; at the default heap it dies with "Ineffective mark-compacts near
+    heap limit ... JavaScript heap out of memory". That is the work being done on a poll cadence,
+    inside the daemon process that also dispatches workers.
+
+    WHAT IT PRODUCES PER CALL. `mount_recommendation.swept` has 959 retained rows and every one of
+    them reads `filed: 0, refused: 33, cells: 10, objective_fallbacks: 0`. Sampled rows 11 and 51
+    minutes apart on 2026-09-07 are byte-identical apart from `ts`.
+
+    WHY THE ANSWER CANNOT MOVE AT THAT CADENCE. The corpus gains roughly 30 settled runs a day
+    against a per-arm floor of `DEFAULT_MIN_SAMPLE_N = 30`, so the evidence that could flip any of
+    the 33 refusals changes on a scale of days. A poll-rate recommender is not more responsive; it
+    is the same answer recomputed several hundred times between two inputs that could differ.
+
+    THIS IS NOT THE SAME DEFECT AS W1-T3095. That task is about the recommender having no
+    comparable arms to read; this one is about how often it reads them, and the two are independent:
+    fixing the cadence without exploration still files nothing, and adding exploration without a
+    cadence makes the full-corpus rebuild MORE expensive, not less, because the arms grow.
+  design: |
+    (i) THE MARKER SHAPE ALREADY IN THIS FILE, NOT A NEW ONE. `runFeedbackDocketRung`'s
+    `state/last-feedback-docket.json` is the precedent: record the fire BEFORE the work, so a crash
+    mid-rung costs one skipped window rather than a re-gather storm on the next poll. This rung gets
+    the same treatment at its own interval.
+    (ii) DAILY, AND SAY WHY IN THE CONSTANT. The interval is POLICY DATA with a declared kind and a
+    stated derivation from the evidence-accrual rate above — never a literal chosen because it
+    sounded reasonable.
+    (iii) A SKIPPED POLL IS A READING, NOT SILENCE. The rung must remain distinguishable from a
+    wedged one: a poll that declines to sweep says so, the same way `inbox.draft_batch` writes
+    `deferred: 0` on an uncapped poll rather than staying quiet.
+    (iv) AN OPERATOR FORCE STAYS AVAILABLE. The cadence governs the unattended rung; it must not
+    remove the ability to run the sweep on demand.
+    (v) NOTHING ABOUT THE REFUSALS CHANGES. This task alters WHEN `recommendMounts` is consulted and
+    nothing about what it decides; the 33 refusals are correct and stay correct.
+  acceptance:
+    - claim: "the recommender rung is a no-op on a poll inside its interval and runs on the first poll due after it, with the marker written before the sweep rather than after"
+      proof: "unit test: test/the-mount-recommender-re-scans-the-whole-ledger-every-poll.test.ts"
+    - claim: "a poll that declines to sweep is observable rather than silent, so a throttled rung is distinguishable from a wedged one"
+      proof: "unit test: test/the-mount-recommender-re-scans-the-whole-ledger-every-poll.test.ts"
+    - claim: "the interval is a declared policy constant carrying its own kind tag, not a literal at the call site"
+      proof: "unit test: test/the-mount-recommender-re-scans-the-whole-ledger-every-poll.test.ts"
+    - claim: "a crash inside the rung still leaves the marker recorded, costing one skipped window rather than re-sweeping every poll"
+      proof: "unit test: test/the-mount-recommender-re-scans-the-whole-ledger-every-poll.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if the rung already carries a cadence gate: read `buildSweepHook` around the
+    `runMountRecommenderRung` call. MEASURED 2026-09-08 at 847e551c: the call is a bare
+    `await runMountRecommenderRung(config, runId, log);` and `grep -n "runMountRecommenderRung"
+    src/run-task.ts` returns exactly two lines, its definition and that call. CLOSE IT ALSO if the
+    swept rows show the answer actually moving between polls, which would make the cadence
+    load-bearing: MEASURED, 959 rows all `filed: 0, refused: 33`.
+    PROVE IT LOAD-BEARING: remove the marker check and the first criterion's in-interval fixture
+    must fail.
+  note: |
+    risk:medium, not high: one call site in one file, no change to any decision the recommender
+    makes, and the failure direction is a delayed recommendation rather than a wrong one. Deliberately
+    NOT bundled with W1-T3095 (Rule 19) — they are independent defects on the same rung and the
+    rationale above states why neither substitutes for the other. Id reserved at
+    `refs/rmd-id/W1-T3096` before filing.
