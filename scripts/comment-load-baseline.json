@@ -196,6 +196,7 @@
   "src/lib/mount-recommender.ts": 195,
   "src/lib/mounts.ts": 194,
   "src/lib/notify.ts": 123,
+  "src/lib/object-reaper.ts": 250,
   "src/lib/onboard/inventory.ts": 165,
   "src/lib/onboard/recon.ts": 167,
   "src/lib/onboard/session.ts": 121,
