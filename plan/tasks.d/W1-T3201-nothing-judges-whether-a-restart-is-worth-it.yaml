@@ -61,6 +61,20 @@
     plan-only change contributes exactly 0, decided by that predicate, spending no spawn and
     exerting no pressure whatsoever — the operator was explicit: "we definitely shouldn't have any
     pressure to restart from plan-only changes". A model must not be able to score it above zero.
+    (ii-CALIBRATED) MEASURED AGAINST 1 496 MERGES OVER 14 DAYS (2026-08-25 to 2026-09-08), and the
+    measurement CHANGED THIS DESIGN. Commit population: 107.0 merges/day; 598 (39.9%) plan-only;
+    638 (42.6%) touch `src/`; 90 more touch `scripts/` without `src/`; 45 test-only; 19 docs-only.
+    THE SCORER TO START WITH IS RUNTIME REACH, FLAT — plan-only 0, anything touching `src/` or
+    `scripts/` scores 1, everything else 0. That scores 727 of 1 496 commits (48.6%), leaving 51.4%
+    at zero. `scripts/` MUST count: gates and instruments are read fresh at invocation but from the
+    same stale checkout, so they are inert until a recycle exactly as `src/` is.
+    A TYPED SCORER WAS TESTED AND DID NOT EARN ITS COST. Weighting fix=3 / feat=2 / other=1 with
+    docs-on-src=0, replayed over the same sequence at MATCHED restart rates, produced waits within
+    ~0.3h of the flat scorer and a WORSE maximum at two of three rates (at ~2.2 restarts/day: flat
+    p90 11.3h / max 26.6h versus typed p90 10.5h / max 36.0h). At 45.6 src-commits a day the
+    fix/feat mix is near-constant over any window long enough to reach a threshold, so weighting
+    reorders within a burst and does not move the cadence. START FLAT; a weighting must be justified
+    by measurement, not by intuition.
     (ii-b) THE JUDGE SCORES IMPACT, IT DOES NOT DECIDE RESTARTS. Its question is narrow and
     answerable — how much does THIS change alter running daemon behaviour — which is a far better
     use of a model than a whole-fleet timing call, and it makes each verdict reviewable in isolation.
@@ -77,6 +91,21 @@
     this often, whatever the score says". W1-T3199 makes "not too much" a requirement; a bound
     outside the score enforces it, so a miscalibrated scorer cannot thrash the fleet however
     confident it is. Hitting the ceiling is itself a ledgered event.
+    (iv-CALIBRATED) THE STARTING THRESHOLD IS 12, chosen from a replay of the real 14-day sequence
+    under the flat scorer. The full sensitivity, recorded so the first tuning has a baseline rather
+    than a guess (wait = how long a scoring change sits before it is live):
+        thr   restarts/day   mean    p50    p90     max
+          6           8.66   1.1h   0.7h   2.5h   12.3h
+          8           6.44   1.6h   1.0h   3.9h   22.0h
+         10           5.15   2.0h   1.3h   4.5h   23.0h
+         12           4.29   2.5h   1.7h   5.3h   20.5h     <- start here
+         15           3.43   3.3h   2.3h   7.2h   33.3h
+         18           2.86   3.9h   2.8h   8.2h   30.8h
+         25           2.07   5.4h   4.3h  10.9h   40.0h
+    At 12 a daemon-affecting change is live in 1.7h median and 5.3h at p90, for ~4.3 restarts a day.
+    NOTE 12 BEATS 15 ON THE WORST CASE (20.5h vs 33.3h) while costing 0.9 more restarts a day — the
+    maximum is driven by quiet stretches, not by the threshold, so it is NOT monotonic and a tuner
+    must not assume raising the number only trades latency for calmness.
     (iv-a) THE THRESHOLD IS RECORDED AND TUNABLE, and its current value carries the reason it holds
     that value. The operator's own words: "that threshold can be adjusted if we're restarting too
     much or too little". A magic number with no recorded rationale cannot be tuned by anyone who
@@ -147,6 +176,14 @@
     little" is fixed by moving one recorded number; a holistic verdict offers nothing to turn. It
     also narrows the model's question to something answerable in isolation and removes the judge
     from the plan-only path entirely.
+    THE CALIBRATION CHANGED THE JUDGE'S ROLE, and this is the most important thing the measurement
+    produced. A model scoring EVERY change would spend 727 spawns per 14 days to produce outcomes
+    a path predicate reproduces within 0.3h. So the judge is NOT the ordinary path: classification
+    is deterministic, and the judge earns its place only as an EXCEPTION ESCALATOR — the rare change
+    whose urgency is out of proportion to its paths and type (a one-line fix ending a live
+    escalation storm). Whether to call it at all in v1 is a live question; shipping the deterministic
+    accumulator alone is a defensible first cut and the ledgered scores are what would justify
+    adding the model later.
     Rule 25 CHECKED: `src/lib/` is ordinary src.
     THE CALL-SITE CRITERION IS DELIBERATE AND IS THE LESSON OF W1-T3166 AND W1-T3188. W1-T349 built
     a complete, tested judge that nothing called; `lint-plan` refused W1-T3188 earlier the same day
