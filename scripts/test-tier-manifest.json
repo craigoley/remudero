@@ -888,6 +888,7 @@
     "test/replay.test.ts": 290,
     "test/repo-root-identity.test.ts": 3766,
     "test/repo-root-test-fixtures-are-ignored.test.ts": 390,
+    "test/report-commands.test.ts": 0,
     "test/requeue-count-reads-the-surface.test.ts": 872,
     "test/required-gate-pin-precondition.test.ts": 1128,
     "test/reset-instant-dst.test.ts": 2926,
