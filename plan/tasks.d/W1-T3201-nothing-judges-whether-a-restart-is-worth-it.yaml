@@ -75,6 +75,28 @@
     fix/feat mix is near-constant over any window long enough to reach a threshold, so weighting
     reorders within a burst and does not move the cadence. START FLAT; a weighting must be justified
     by measurement, not by intuition.
+    (ii-UPLIFT) THE JUDGE RAISES A DETERMINISTIC BASE, IT NEVER SETS THE SCORE ALONE — the operator's
+    refinement (2026-09-08): "have the judge also up the points if the change is truly an impactful
+    update to the daemon, not just a basic: did it touch script and src or not — but what did it
+    change and how impactful". The path predicate sets a FLOOR; the judge may raise it after reading
+    what actually changed.
+    THE MEASUREMENT DID NOT REJECT THIS, AND THE DISTINCTION MATTERS. What was tested and rejected
+    (see ii-CALIBRATED) is COMMIT TYPE AS A PROXY — fix=3 / feat=2 from the subject line. A type
+    prefix is a label the author chose, not a reading of the diff, and it carried no signal. Nothing
+    here measures whether a model reading the change itself does better, because that cannot be
+    measured without one in the loop. It is an open bet, and the ledgered scores are how it gets
+    settled.
+    THE SCALE, chosen so the top rung is expressible rather than arbitrary:
+        1   the deterministic floor: any change reaching src/ or scripts/
+        3   notable — alters behaviour an operator would notice
+        9   significant — changes a decision path, a gate, or a rung's disposition
+       18   URGENT — clears a live defect, or wires a mechanism that is currently unreached
+    18 EQUALS THE THRESHOLD BY CONSTRUCTION, so "this one change justifies a restart on its own" is
+    a verdict the scale can express. A scale whose maximum is below the threshold cannot say it.
+    UPLIFT-ONLY, NEVER REDUCTION, and this is the safety property: the judge cannot score a
+    src-touching change below 1, and cannot touch plan-only at all. A miscalibrated judge can
+    therefore only make restarts MORE frequent — bounded by the rate ceiling (iv) — and can never
+    hide a change from the operator. Failing closed (iii) here means NO UPLIFT, base score stands.
     (ii-b) THE JUDGE SCORES IMPACT, IT DOES NOT DECIDE RESTARTS. Its question is narrow and
     answerable — how much does THIS change alter running daemon behaviour — which is a far better
     use of a model than a whole-fleet timing call, and it makes each verdict reviewable in isolation.
@@ -91,7 +113,18 @@
     this often, whatever the score says". W1-T3199 makes "not too much" a requirement; a bound
     outside the score enforces it, so a miscalibrated scorer cannot thrash the fleet however
     confident it is. Hitting the ceiling is itself a ledgered event.
-    (iv-CALIBRATED) THE STARTING THRESHOLD IS 12, chosen from a replay of the real 14-day sequence
+    (iv-UPLIFT) UPLIFT MOVES THE THRESHOLD, AND IGNORING THAT WOULD SILENTLY TRIPLE RESTARTS.
+    Modelled over the same 14-day sequence (52.0 base points/day), holding the flat baseline's ~4.3
+    restarts/day:
+        uplift        T=12   T=15   T=18   T=24     (restarts/day)
+        none (flat)   4.29   3.43   2.86   2.15
+        10% -> 9      6.15   4.94   4.22   3.22
+        20% -> 9      8.94   6.94   5.72   4.79
+    SO WITH UPLIFT THE STARTING THRESHOLD IS 18, NOT 12 — a judge raising ~10% of scoring changes to
+    9 reproduces the flat cadence at 18. If the judge turns out to uplift far more often than 10%,
+    the threshold rises with it; that is the tuning loop, and the ledgered scores (vi) are what make
+    the actual uplift rate observable instead of assumed.
+    (iv-CALIBRATED-FLAT) WITHOUT UPLIFT THE THRESHOLD IS 12, chosen from a replay of the real 14-day sequence
     under the flat scorer. The full sensitivity, recorded so the first tuning has a baseline rather
     than a guess (wait = how long a scoring change sits before it is live):
         thr   restarts/day   mean    p50    p90     max
@@ -123,6 +156,10 @@
     - claim: "scores ACCUMULATE and a restart is wanted only when the running total crosses the threshold — N sub-threshold changes want none, and the change that crosses it wants exactly one"
       proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
     - claim: "a completed restart RESETS the running total, so the next restart requires a fresh build-up rather than firing again immediately"
+      proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
+    - claim: "the judge may only RAISE a score, never lower one: a stub returning a value below the deterministic base leaves the base in force, and a stub asked about a plan-only change is never invoked at all"
+      proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
+    - claim: "an uplift equal to the threshold fires a restart on that change ALONE, so 'this one justifies it' is expressible"
       proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
     - claim: "the threshold is a recorded value, and raising it demonstrably reduces restarts over the same change sequence while lowering it increases them — it is tunable, not decorative"
       proof: "unit test: test/a-restart-is-worth-its-interruption.test.ts"
