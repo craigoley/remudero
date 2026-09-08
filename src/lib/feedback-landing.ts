@@ -624,6 +624,19 @@ export function recordDecision(
   return landContent(root, DECISIONS_LANDING_KIND, [{ relPath, content: decisionRecordContent(params) }], opts);
 }
 
+/** Land one agent-authored RULING record (W1-T3212) via {@link landContent} — the governance
+ *  sibling of {@link recordDecision}, on the SAME branch, PR and landing kind so no second audit
+ *  trail exists. Separate from it only because the CONTENT differs (rulingRecordContent,
+ *  lib/ruling-judge.ts). */
+export function recordRuling(
+  root: string,
+  relPath: string,
+  content: string,
+  opts: LandFeedbackOpts = {},
+): LandFeedbackResult {
+  return landContent(root, DECISIONS_LANDING_KIND, [{ relPath, content }], opts);
+}
+
 /** Land one feedback entry's already-serialized YAML via {@link landContent} — the write-site-2
  *  sibling of {@link recordDecision}. `setFeedbackStatus` calls this instead of `writeFileSync`
  *  when `opts.land` is set, so a status flip never shows up as `M`-modified in
