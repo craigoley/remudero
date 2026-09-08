@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import { loadPlan, type Task } from "../src/lib/plan.js";
 import { lintTask, literalTestTitlesIn, unboundCriterionViolations } from "../src/lib/task-linter.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const REPO_ROOT = process.cwd();
 const TARGET = "test/a-criterion-names-the-test-that-proves-it.fixture.test.ts";
@@ -131,6 +132,6 @@ test("W1-T3217 round 2: an unterminated quoted title with a long backslash run d
 
   const titles = literalTestTitlesIn(evil);
 
-  assert.ok(Date.now() - start < 2000, "the scan must stay linear, not exponential, on an unterminated backslash run");
+  assertWallClockBound(Date.now() - start, 2000, "the scan must stay linear, not exponential, on an unterminated backslash run");
   assert.deepEqual(titles, [], "no closing quote is ever found, so no title is extracted");
 });
