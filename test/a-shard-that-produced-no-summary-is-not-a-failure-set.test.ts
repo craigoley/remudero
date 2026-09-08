@@ -99,6 +99,10 @@ function runRenderedStep(runText: string, nodeStubScript: string): { status: num
     env: {
       ...process.env,
       PATH: `${binDir}:${process.env.PATH}`,
+      // W1-T3207 removes this duplicate harness only from SOURCE pull requests. Pushes still
+      // execute it, so these diagnostics remain a live contract instead of exercising the new
+      // PR fast exit and passing without ever reaching the controlled node process below.
+      GITHUB_EVENT_NAME: "push",
       GITHUB_STEP_SUMMARY: summaryPath,
       RMD_REAL_NODE: process.execPath,
       RMD_TEST_WITH_RETRY_SCRIPT: TEST_WITH_RETRY_SCRIPT,
