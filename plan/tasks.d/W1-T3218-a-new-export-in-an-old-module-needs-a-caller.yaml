@@ -1,0 +1,101 @@
+- id: W1-T3218
+  title: "THE CALL-SITE RULE ONLY FIRES FOR A NEW MODULE, SO A NEW EXPORTED FUNCTION IN AN EXISTING ONE SHIPS WITH NO CALLER REQUIRED — `if (created.length === 0) return []` is how a reader with ZERO callers merged as done"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 25.00
+  files: [src/lib/task-linter.ts, test/a-new-export-in-an-old-module-needs-a-caller.test.ts]
+  origin: "operator-request#is-the-gap-general-2026-09-08"
+  plan_refs: ["W1-T3216", "W1-T3217", "W1-T3206", "W1-T267", "W1-T2735"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 on 31d8e8324. `callSiteViolations` (src/lib/task-linter.ts:2531) opens:
+
+        const created = (task.files ?? []).filter(
+          (f) => f.startsWith("src/") && f.endsWith(".ts") && !f.includes("*") && !opts.moduleExists!(f),
+        );
+        if (created.length === 0) return [];
+
+    THE RULE FIRES ONLY WHEN A TASK CREATES A src/ MODULE. A task that adds a brand-new EXPORTED
+    FUNCTION to an EXISTING module is not covered at all, and the surrounding comment is explicit
+    that this is deliberate: "NO PREDICATE ⇒ NO OPINION. Whether a module already exists is the
+    caller's to answer, and a wrong guess here would flag every task that merely EDITS a module."
+    That caution is right about EDITS and wrong about ADDITIONS, and the distinction is
+    mechanically decidable from the diff.
+    THE CONFIRMED COST. W1-T3206 declared src/lib/plan.ts and src/lib/drain.ts — both existing — so
+    `created` was empty and no call-site criterion was ever required. #4715 merged. On main today
+    `releasedTaskIds` has ZERO callers and `releasedIds` has ZERO producers: a complete feature,
+    tested and merged, that no production path can reach (W1-T3216).
+    THIS IS NOT THE FIRST TIME AND THE REPO ALREADY SAYS SO. W1-T349 built a complete, tested
+    escalation judge with ZERO production callers until W1-T3166 wired it — cited in W1-T3212's own
+    filing as "this pattern's documented failure mode". W1-T2735's `unwired-gate:check` was built
+    for the same disease in a different organ and its header records the same story
+    ("scripts/credit-surface-gate.mjs sat unwired until a PR reached review uncaught"). Three
+    instances, two of them already written down, and the general predicate was never built.
+    WHAT DOES NOT COVER IT, both checked rather than assumed: `unwired-gate:check` scans
+    gate-shaped scripts/ executables and package.json scripts, never library functions.
+    `checkAcceptanceCommand` is a parser lint that never executes a proof. Neither has jurisdiction.
+  design: |
+    (i) THE PREDICATE IS "A NEW EXPORT", NOT "A NEW MODULE". Decidable from the diff the linter is
+    already handed: a `+export function|const|class <name>` line in a src/ file that is not itself
+    newly created. No guessing about whether a module exists — that question is what the current
+    caution is really about, and it is not this one.
+    (ii) REUSE THE EXISTING REMEDY VERBATIM. `callSiteViolations` already knows how to demand
+    `grep: <symbol>( in <a DIFFERENT file>` and already refuses a pattern without the open paren (a
+    pattern without it passes on a COMMENT — W1-T267's original finding). Widen the TRIGGER; do not
+    invent a second vocabulary, a second violation kind, or a second remedy string.
+    (iii) WARN, WITH THE SAME SEVERITY SEAM. `opts.callSite ?? "warn"` already exists; the widened
+    trigger must ride it rather than hardcoding a refusal, so the corpus can be measured before
+    anything is blocked.
+    (iv) A TEST FILE IS NOT A CALL SITE. The existing rule already requires a file OTHER than the
+    module being created, "since a module calling itself proves nothing about whether the rest of
+    the program reaches it". The same reasoning excludes test/ — that is exactly the hole
+    W1-T3206's fully-tested, fully-unreachable reader fell through.
+  acceptance:
+    - claim: "a task adding a new exported function to an EXISTING src/ module with no call-site criterion is reported"
+      proof: "unit test: test/a-new-export-in-an-old-module-needs-a-caller.test.ts"
+    - claim: "the same task carrying a `grep: fn( in <other src file>` criterion is NOT reported"
+      proof: "unit test: test/a-new-export-in-an-old-module-needs-a-caller.test.ts"
+    - claim: "a criterion naming only a test/ file does NOT satisfy the requirement — a test is not a call site"
+      proof: "unit test: test/a-new-export-in-an-old-module-needs-a-caller.test.ts"
+    - claim: "a task that merely EDITS existing exports, adding none, is NOT reported — the caution the current comment states is preserved"
+      proof: "unit test: test/a-new-export-in-an-old-module-needs-a-caller.test.ts"
+    - claim: "W1-T3206's real declared files and real criteria are the fixture, and this check reports it"
+      proof: "unit test: test/a-new-export-in-an-old-module-needs-a-caller.test.ts"
+  falsifier: |
+    CLOSE IF a new export in an existing module already needs a caller: read `callSiteViolations`
+    in src/lib/task-linter.ts.
+    MEASURED 2026-09-08: it returns `[]` unconditionally when the task creates no src/ module.
+    POSITIVE CONTROL, because "the rule never fires" is unfalsifiable without the denominator: the
+    census must report how many OPEN tasks declare only existing src/ files — a walk that reports
+    only the tasks it would newly flag has not established the blast radius, and design (iii)'s
+    warn-first cannot be sized without it.
+    PROVE IT LOAD-BEARING WITH BOTH ARMS: the suite needs a task the widened trigger reports AND an
+    edits-only task it does not. A suite exercising only the reporting arm cannot distinguish "the
+    trigger widened correctly" from "the trigger now fires on everything", which is precisely the
+    failure the current comment's caution predicts.
+    DO NOT make it refuse on the first PR. The blast radius is unmeasured until (iii)'s warn arm
+    has run; a linter that refuses a large fraction of filings is disabled, not obeyed.
+    DO NOT accept a test/ path as a call site. That is the exact hole: W1-T3206's reader was fully
+    tested and completely unreachable.
+    DO NOT try to verify the eventual grep hit is CODE rather than a comment. The existing rule
+    states that limit plainly and enforces proof SHAPE only; inheriting the limit is correct, and
+    widening scope AND strengthening the check in one task is how both get reverted together.
+  note: |
+    Rule 25 CHECKED: `src/lib/task-linter.ts` is ordinary src.
+    RELATIONSHIP TO W1-T3217, which is a SIBLING and not a duplicate: that task is about criteria
+    proved at FILE granularity, so the gate cannot tell two criteria apart. This one is about a
+    criterion that is never REQUIRED in the first place. W1-T3206 was hit by both, which is why it
+    merged with a dead feature and a green board.
+    CAVEAT WITH EQUAL WEIGHT: three instances (W1-T349, the credit-surface gate, W1-T3206) is a
+    pattern, not a rate. Nothing here measures how many merged tasks shipped an unreachable export
+    — that census is the positive control above and should be READ before (iii)'s warn is promoted
+    to a refusal.
+    SECOND CAVEAT: the current comment's caution is CORRECT about edits and this task must keep it.
+    A widened trigger that fires on ordinary edits would be reverted within a week and would take
+    the real finding with it.
