@@ -1634,6 +1634,16 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // W1-T2647's OWN proof file — self-reference shape as its siblings above; only real git call
   // is `git grep`, never `git ls-files`, so it fails clause (a).
   refusedForPredicate("test/census-population-is-derived-not-counted.test.ts", "a", "this file — W1-T2647's falsifier; its one real git call is `git grep`, never `git ls-files`"),
+  // W1-T2916's suite. The recognizer matches it on `src/` text that is its import of
+  // src/lib/settings.js plus prose ("src runtime package uses are dependencies"), but the
+  // population it actually enumerates is package.json's own dependency maps read against
+  // .dependency-cruiser.cjs — two fixed config files. The tracked `src/` population it never reads.
+  refusedForPredicate(
+    "test/dependency-declarations-match-use.test.ts",
+    "a",
+    "enumerates package.json's dependency/override maps and .dependency-cruiser.cjs, two fixed config files, " +
+      "never the tracked src/ population; the src/ text the recognizer matches is its settings.js import and its prose",
+  ),
   // Recon 2026-09-05 R-18's proof file. It shells a REAL `git ls-files` — unlike the four
   // self-referential entries directly above, whose only real git call is `git grep` — but against
   // a THROWAWAY fixture repo it builds in a temp dir, naming ONE path, purely to prove that
