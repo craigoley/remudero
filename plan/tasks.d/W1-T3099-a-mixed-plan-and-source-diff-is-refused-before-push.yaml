@@ -1,0 +1,84 @@
+- id: W1-T3099
+  title: "STANDING RULE 15 IS ONLY ENFORCED BY THE JUDGE, SO AN AUTHOR LEARNS IT AFTER A FULL CI CYCLE — `checkSatisfiedByGuard` computes `criterionFieldTampered(diff)` and prints a two-half remedy at review time, but `rmd preflight` (src/lib/ci-parity.ts) contains the string `criterionFieldTampered` ZERO times and `lint-plan --base` reads plan records without ever looking at the diff's src/ or test/ paths, so the one refusal whose remedy is 'split this into two PRs' is the one nothing tells you before you push"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 1
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files: [src/lib/ci-parity.ts, src/lib/task-linter.ts, test/a-mixed-plan-and-source-diff-is-refused-before-push.test.ts]
+  origin: "operator-session#next-wave-2026-09-08"
+  plan_refs: ["W1-T385", "W1-T245", "W1-T3070"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at a0b6ba81e.
+
+    THE JUDGE HAS THE CHECK. `checkSatisfiedByGuard` (src/lib/review.ts:5597) opens
+    `if (!criterionFieldTampered(diff))` and, when a criterion field was added or edited outside a
+    plan-only human PR, prints a remedy whose first half is verbatim: "file the shard in its own
+    plan-only PR (no src/ or test/ file in that diff), then build it in a second PR" (:5626-5628).
+    The comment above it records that the remedy has two halves BECAUSE ONE IS NOT ENOUGH, citing
+    #3626, #3631, #3636 and #3669 — four PRs that split correctly and were refused anyway.
+
+    NEITHER AUTHOR-TIME VERB HAS IT. MEASURED with `grep -cE "criterionFieldTampered|planOnly"`:
+      src/lib/ci-parity.ts   -> 0
+      src/lib/task-linter.ts -> 0 for the predicate; the only two hits for "rule 15" (:1904, :1955)
+                                are PROSE in comments describing the reviewer's behaviour, not a check.
+    So `rmd preflight` can pass a diff the judge will refuse, and `lint-plan --base` lints the plan
+    record in isolation while the src/ file sitting beside it in the same diff is invisible to it.
+
+    IT COSTS A FULL CI CYCLE, MEASURED ON A REAL PR. #4509 (`feat(retro): join the failure census
+    and the implement lane's model to the run, not the row`) carries the guard's refusal in its own
+    comments — the `satisfied-by-guard` line quoting "acceptance criteria were added/edited ... in a
+    PR that" — and the author's reply names the fix: "the ten shards are moving to their own
+    plan-only PR ... cherry-picked from this branch's second commit". The PR merged with NO
+    `plan/` path in its final file list, i.e. the split happened, after the cycle rather than before
+    it. The information was available at `git diff` time.
+
+    THIS IS THE SAME SHAPE W1-T3070 REMOVED FROM THE ID GATE: a fact the tooling can compute
+    locally, deferred to a network round trip that refuses. There the fix was to ask the authority;
+    here it is to ask earlier.
+  design: |
+    (i) ONE PREDICATE, TWO CALLERS. Extract the decision once and share it — `rmd preflight` and
+    `lint-plan --base` must not acquire two implementations that can drift, which is the failure
+    W1-T245 records for shard-blindness in this same verb pair.
+    (ii) THE PREDICATE IS THE JUDGE'S, NOT A REIMPLEMENTATION. It consumes
+    `criterionFieldTampered(diff)` as the judge does; a second notion of "a criterion moved" would
+    let the two disagree, and an author-time check that refuses what the judge allows is worse than
+    no check.
+    (iii) IT PRINTS THE JUDGE'S REMEDY VERBATIM — the two-half string at src/lib/review.ts:5626. An
+    author who reads a different sentence at preflight than at review has to reconcile them; the
+    comment at :5622 records that telling an author only to SPLIT converts one refusal into another.
+    (iv) THE PLAN-ONLY CARVE-OUT RIDES THROUGH UNCHANGED. `checkSatisfiedByGuard` passes a
+    `planOnly && humanAuthored` PR (:5605-5610); the author-time check must carve out the same case
+    or it will refuse exactly the filing PRs this repo requires.
+    (v) REFUSE, DO NOT WARN, at preflight — a warning at author time is a line in a scroll-back. The
+    verb already exits non-zero for parity failures and this joins them.
+  acceptance:
+    - claim: "a diff that adds a criterion beside a src/ or test/ file is refused by rmd preflight before push, naming the shard and the file that entangled it"
+      proof: "unit test: test/a-mixed-plan-and-source-diff-is-refused-before-push.test.ts"
+    - claim: "the same diff with no src/ or test/ path passes, so a plan-only filing PR is never refused by the new check"
+      proof: "unit test: test/a-mixed-plan-and-source-diff-is-refused-before-push.test.ts"
+    - claim: "lint-plan --base reaches the identical verdict on the identical diff, because both verbs call one predicate"
+      proof: "unit test: test/a-mixed-plan-and-source-diff-is-refused-before-push.test.ts"
+    - claim: "the refusal prints the judge's own two-half remedy, so the author reads one sentence at preflight and at review"
+      proof: "grep: file the shard in its own plan-only PR in src/lib/ci-parity.ts"
+  falsifier: |
+    CLOSE IF either verb already refuses this: `grep -cE "criterionFieldTampered|planOnly"
+    src/lib/ci-parity.ts src/lib/task-linter.ts` and read every hit. MEASURED 2026-09-08 at
+    a0b6ba81e: ci-parity 0, and task-linter's two "rule 15" hits are comment prose at :1904 and
+    :1955, neither reachable as a check.
+    PROVE IT LOAD-BEARING: with the shared predicate stubbed to return false, the mixed-diff probe
+    must PASS preflight — the check must go blind — while the plan-only probe passes either way, so
+    the suite discriminates the predicate rather than the fixture.
+    DO NOT satisfy this with a path-shape heuristic ("the diff touches plan/ and src/"). A shard
+    whose `files:` list legitimately names a generator artifact would be refused by that rule, and
+    the judge's predicate is field-level for exactly that reason.
+  note: |
+    Rule 25 CHECKED BEFORE FILING: `src/lib/ci-parity.ts` and `src/lib/task-linter.ts` are ordinary
+    src, so the build PR is a src+test pair. It must not carry a plan record — which is the rule
+    this task is about, and a build PR that broke it would be its own counter-example.
