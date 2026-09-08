@@ -109,7 +109,21 @@ test("implementPromptParts: rule_headlines sits DIRECTLY AFTER doctrine — the 
   const part = buildRuleHeadlinesPart(true, "CLAUDE.md", readFixture);
   const parts = implementPromptParts(task(), "recon text", "RUN-1", "learnings text", "notes text", part);
   const names = parts.map((p) => p.name);
-  assert.deepEqual(names, ["doctrine", "rule_headlines", "task_claims", "recon", "operator_notes", "matched_learnings", "task_body"]);
+  // W1-T3101 inserts `skills` between the volatile tail and the task body. The invariant this
+  // test guards is unchanged and still asserted by position: `rule_headlines` sits DIRECTLY
+  // after `doctrine`, ahead of every per-task/volatile part.
+  assert.deepEqual(names, [
+    "doctrine",
+    "rule_headlines",
+    "task_claims",
+    "recon",
+    "operator_notes",
+    "matched_learnings",
+    "skills",
+    "task_body",
+  ]);
+  assert.equal(names[0], "doctrine");
+  assert.equal(names[1], "rule_headlines", "the stable prefix is what this test exists for");
 });
 
 test("renderImplementPrompt: with the row on, headlines land BEFORE the task/recon/learnings text, and no body text ever appears", () => {

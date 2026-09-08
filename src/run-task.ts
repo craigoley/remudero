@@ -744,6 +744,11 @@ import {
   EMISSIONS_ALLOWLIST,
 } from "./lib/emissions.js";
 import { cloneReapRoots, reapStaleClones, tallyDispositions, type CloneReapSummary } from "./lib/clone-reaper.js";
+import { reapGitObjects } from "./lib/object-reaper.js";
+
+/** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
+ *  rather than authorising something the operator never read. */
+export const OBJECT_REAP_CONTRACT_VERSION = "1";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { guardZeroStreakRecord } from "./lib/retro-closure.js";
 import {
@@ -758,6 +763,15 @@ import {
   type RiskJudgeVerdict,
 } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
+import {
+  describeWorkerSkillReachability,
+  loadInjectableSkills,
+  renderSkillsPart,
+  selectSkillsForTask,
+  skillsInjectedEvent,
+  stageSkillDrafts,
+  workerAllowlistFromSettings,
+} from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
 import { parse as parseYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
@@ -12957,7 +12971,19 @@ async function runTask(
       ? false
       : opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy().values.workerRuleHeadlines.enabled;
     const ruleHeadlinesPart = buildRuleHeadlinesPart(ruleHeadlinesEnabled, join(worktreePath, "CLAUDE.md"));
-    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart);
+    // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
+    // matchedLearnings already spends. Empty for every task until an operator approves a skill that
+    // declares `applies-to:`, so today this changes no prompt by a single byte.
+    const injectableSkills = selectSkillsForTask(
+      loadInjectableSkills(join(repoRoot, ".claude", "skills")),
+      task.type,
+      DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+    );
+    const skillsPart = renderSkillsPart(injectableSkills);
+    // Same shape as learnings.injected above, and same status: analytics, never a decision input.
+    const skillsEvent = skillsInjectedEvent(injectableSkills, task.type, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
+    if (skillsEvent) log("skills.injected", skillsEvent);
+    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -21119,6 +21145,10 @@ export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
   scratchReap: SCRATCH_REAP_CONTRACT_VERSION,
   worktreeReapBoot: WORKTREE_REAP_BOOT_CONTRACT_VERSION,
   workerRuleHeadlines: WORKER_RULE_HEADLINES_CONTRACT_VERSION,
+  // W1-T3092: GATED_RUNGS is DERIVED from EXPECTED_ORIGIN_KIND, so adding `objectReap.enabled`
+  // to the policy schema enrols the rung here automatically and the walk over GATED_RUNGS then
+  // refuses it as unpinnable until this entry exists. That guard working is what caught it.
+  objectReap: OBJECT_REAP_CONTRACT_VERSION,
 };
 
 /** Ledger one rung's refusal (design (ii): "a refusal ledgers `rung.unratified` with the diff").
@@ -22839,6 +22869,19 @@ async function retroCommand(
   const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: the singleton lane the collision was observed on
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
+
+  // W1-T3101 — THE CALLER stageSkillDraft NEVER HAD. Its own suite drove it; nothing in production
+  // did, so `skill.staged` had fired ZERO times across three days of ledger. Staging writes a
+  // PROPOSAL and nothing else: the operator still releases it with `rmd approve`, and only that
+  // writes under .claude/skills/. Best-effort — a throw here must never fail the retro, whose
+  // report is the thing the operator actually came for.
+  stageSkillDrafts(
+    followupRegistryPath,
+    gather.skillDrafts,
+    workerAllowlistFromSettings(undefined),
+    describeWorkerSkillReachability([]),
+    log,
+  );
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
@@ -25021,12 +25064,21 @@ export function logDiskReclaimRung(
     cloneReapDeps?: Parameters<typeof logCloneReapSurvey>[2];
     sweepWorkerHomes?: typeof sweepStaleWorkerHomes;
     workerHomeRoot?: () => string;
+    /** W1-T3092: the object reaper. Seams mirror the three sweeps above — appended LAST so no
+     *  positional caller shifts. `policy` and `ratifications` follow logWorktreeReapBootSurvey. */
+    reapObjects?: typeof reapGitObjects;
+    objectRepoDir?: () => string;
+    objectInflightDir?: () => string;
+    objectPolicy?: () => { enabled: boolean };
+    ratifications?: Ratifications;
   } = {},
 ): {
   tempDirsRemoved: number;
   clonesReaped: number;
   cloneBytesReclaimed: number;
   workerHomesRemoved: number;
+  objectsPruned: number;
+  objectsWouldPrune: number;
 } {
   const sweepTempDirs = deps.sweepTempDirs ?? sweepStaleTempDirs;
   const reapClonesSurvey = deps.reapClonesSurvey ?? logCloneReapSurvey;
@@ -25060,16 +25112,48 @@ export function logDiskReclaimRung(
     // best-effort — a throw here must never block the dispatch or the other two sweeps
   }
 
-  if (tempDirsRemoved || clonesReaped || workerHomesRemoved) {
+  // W1-T3092 — THE FOURTH SWEEP. Guarded exactly like the three above: a throw here can never
+  // block the dispatch or its siblings. DRY BY DEFAULT behind `objectReap.enabled`, the posture
+  // plan/policy.yaml prescribes for rungs that delete — while off this runs EVERY quiet probe the
+  // armed path runs and reports what a prune WOULD remove, spawning nothing. One predicate, two
+  // outcomes: a survey that reached different probes would describe a decision nobody will make.
+  let objectsPruned = 0;
+  let objectsWouldPrune = 0;
+  let objectRefusal: string | undefined;
+  try {
+    const readPolicy = deps.objectPolicy ?? (() => loadPolicy(policyPath(config.root)).values.objectReap);
+    const policyBlock = readPolicy();
+    const pins = deps.ratifications ?? loadRatifications(ratificationsPath(config.root));
+    const pin = ratificationPinCheck("objectReap", policyBlock, OBJECT_REAP_CONTRACT_VERSION, pins);
+    if (!pin.fire) log("rung.unratified", { rung: "objectReap", diff: pin.diff });
+    const enabled = pin.fire && policyBlock.enabled;
+    const repoDir = (deps.objectRepoDir ?? (() => join(config.root, "repos", "remudero")))();
+    const inflight = (deps.objectInflightDir ?? (() => join(config.root, "state", "inflight")))();
+    const r = (deps.reapObjects ?? reapGitObjects)(repoDir, inflight, { dryRun: !enabled });
+    objectsPruned = r.pruned;
+    objectsWouldPrune = r.wouldPrune ?? 0;
+    objectRefusal = r.refusedBecause;
+  } catch {
+    // best-effort — a throw here must never block the dispatch or the other three sweeps
+  }
+
+  if (tempDirsRemoved || clonesReaped || workerHomesRemoved || objectsPruned || objectsWouldPrune) {
     log("run.disk_reclaim", {
       tmp_dirs_removed: tempDirsRemoved,
       clones_reaped: clonesReaped,
       clone_bytes_reclaimed: cloneBytesReclaimed,
       worker_homes_removed: workerHomesRemoved,
+      objects_pruned: objectsPruned,
+      // SURVEY ESTIMATE, at survey time — the armed pass runs later against a repo that has moved.
+      objects_would_prune: objectsWouldPrune,
     });
   }
+  // The refusal is the survey RESULT, not an error: "how often is the fleet quiet" is the number
+  // that decides whether arming this rung is worth anything at all, and it is unreadable unless
+  // the declines are ledgered too.
+  if (objectRefusal !== undefined) log("run.disk_reclaim.objects_declined", { reason: objectRefusal });
 
-  return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved };
+  return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved, objectsPruned, objectsWouldPrune };
 }
 
 /**
