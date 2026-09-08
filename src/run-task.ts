@@ -37970,6 +37970,7 @@ export async function main(
       console.error(freshness.message);
       process.exit(1);
     }
+    if (freshness.status === "synced") return;
   }
   // W1-T86: checked directly after the (mandatory, every-call) help preamble above -- NOT
   // in its "natural" alphabetical/registration spot further down, beside fix. A behavioral
