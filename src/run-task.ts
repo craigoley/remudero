@@ -51,6 +51,8 @@ import {
   workerZdotdir,
   type Config,
 } from "./lib/config.js";
+// W1-T2884: this compatibility surface imports from the lib/ledger-path" module; NodeNext keeps
+// the runtime specifier below on its emitted `.js` form.
 import { ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
 export { ledgerPathFor, nextLaneEpochMs };
 import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
