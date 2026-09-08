@@ -208,6 +208,70 @@ test("an unreadable --table argument fails closed (exit 2), never a silent OK", 
   assert.match(result.stderr, /MEASUREMENT FAILED/);
 });
 
+// ── measurement failures: readJsonAtRef / readJsonFromWorkingTree's own throw arms, and the ──────
+// ── per-entry catch in main() that turns any of them into a fail-closed exit 2 ───────────────────
+
+/** Same repo/table shape as {@link ceilingFixture}, but lets each commit's `cycle-baseline.json`
+ *  content be set directly (raw, possibly non-JSON, text) at `origin/main` and, independently, in
+ *  the working tree — `workingTreeText === undefined` removes the file from the working tree
+ *  commit entirely instead. This is the shape needed to drive readJsonAtRef's and
+ *  readJsonFromWorkingTree's own MEASUREMENT-FAILED throws (corrupt JSON at either end, or a file
+ *  origin/main can read but the working tree cannot), which main()'s per-entry try/catch turns
+ *  into a fail-closed exit 2 — never a silent OK. */
+function rawContentFixture(originText: string, workingTreeText: string | undefined): { repo: string; table: string } {
+  const outer = mkdtempSync(join(tmpdir(), "rmd-baseline-monotonic-raw-"));
+  const remote = join(outer, "origin.git");
+  const repo = join(outer, "repo");
+  git(outer, "init", "--bare", remote);
+  git(outer, "init", "-b", "main", repo);
+  git(repo, "config", "user.name", "RMD Baseline Monotonic Test");
+  git(repo, "config", "user.email", "baseline-monotonic@example.invalid");
+  writeFileSync(join(repo, "cycle-baseline.json"), originText);
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "base");
+  git(repo, "remote", "add", "origin", remote);
+  git(repo, "push", "-u", "origin", "main");
+
+  if (workingTreeText === undefined) {
+    git(repo, "rm", "cycle-baseline.json");
+  } else {
+    writeFileSync(join(repo, "cycle-baseline.json"), workingTreeText);
+    git(repo, "add", ".");
+  }
+  git(repo, "commit", "-m", "open PR: touch the ceiling file");
+
+  const table = join(outer, "table.json");
+  writeFileSync(table, JSON.stringify([{ path: "cycle-baseline.json", field: "maxCycles", direction: "decrease" }]));
+  return { repo, table };
+}
+
+test("origin/main's baseline JSON is corrupt: MEASUREMENT FAILED (exit 2), never a silent pass", () => {
+  const { repo, table } = rawContentFixture("{ not valid json", JSON.stringify({ maxCycles: 10 }));
+  const result = run(repo, table);
+  assert.equal(result.status, 2, "corrupt JSON at origin/main must fail closed, never silently pass");
+  assert.match(result.stderr, /is not valid JSON/);
+});
+
+test("the working tree's baseline JSON is corrupt: MEASUREMENT FAILED (exit 2)", () => {
+  const { repo, table } = rawContentFixture(JSON.stringify({ maxCycles: 13 }), "{ not valid json");
+  const result = run(repo, table);
+  assert.equal(result.status, 2, "corrupt JSON in the working tree must fail closed, never silently pass");
+  assert.match(result.stderr, /is not valid JSON/);
+});
+
+test("a baseline file readable at origin/main but missing from the working tree fails closed (exit 2)", () => {
+  const { repo, table } = rawContentFixture(JSON.stringify({ maxCycles: 13 }), undefined);
+  const result = run(repo, table);
+  assert.equal(result.status, 2, "a file origin/main can read but the working tree cannot must fail closed");
+  assert.match(result.stderr, /cannot read/);
+});
+
+test("an unrecognised CLI argument fails closed (exit 2), never a silent OK", () => {
+  const result = spawnSync(process.execPath, [SCRIPT, "--this-flag-does-not-exist"], { encoding: "utf8" });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /invalid arguments/);
+});
+
 // ── the real gate, as it runs against this repo's own SCORE_TABLE and its own origin/main ───────
 
 test("PROPERTY: this repo's own SCORE_TABLE reads clean against its own origin/main (no baseline in this diff regresses)", () => {
