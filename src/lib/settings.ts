@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 /**
  * Validate-before-spawn guard for worker settings (WS-0 FIELD FINDING 10a).
@@ -26,14 +26,33 @@ import { fileURLToPath } from "node:url";
 
 const CLAUDE_AGENT_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk";
 
-function readInstalledClaudeAgentSdkVersion(): string {
-  const entryUrl = import.meta.resolve(CLAUDE_AGENT_SDK_PACKAGE);
-  const pkgPath = join(dirname(fileURLToPath(entryUrl)), "package.json");
-  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: unknown };
+/** Pure guard extracted so the coverage-ratchet's diff check has a unit fixture for both
+ *  branches: the installed SDK's `package.json` is never expected to omit `version`, but an
+ *  untested throw is exactly the silent-drop shape this task's own guard rejects everywhere
+ *  else. Exported for test/settings.test.ts. */
+export function assertSdkVersionField(pkg: { version?: unknown }, pkgName: string): string {
   if (typeof pkg.version !== "string" || pkg.version.length === 0) {
-    throw new Error(`${CLAUDE_AGENT_SDK_PACKAGE} package.json does not declare a version.`);
+    throw new Error(`${pkgName} package.json does not declare a version.`);
   }
   return pkg.version;
+}
+
+function readInstalledClaudeAgentSdkVersion(): string {
+  // `createRequire(...).resolve` rather than `import.meta.resolve`: this module is loaded via
+  // tsx's CJS transform (not the ESM loader) on at least one real path — test/review-wires-at-
+  // head's spawned probe (`node --import tsx`, requiring src/run-task.ts) — where esbuild's CJS
+  // output shims `import.meta.url` but NOT `import.meta.resolve`, throwing "…resolve is not a
+  // function" before any test body runs. `createRequire` needs only the shimmed `url`, which
+  // survives that transform, and resolves the SAME way under a real ESM load too. The package's
+  // own `exports` map does not publish `./package.json` (verified against the installed SDK), so
+  // this resolves the package's MAIN entry (as `import.meta.resolve` did before it) and reads
+  // `package.json` from that entry's directory, exactly like test/settings.test.ts's own
+  // `resolveSdkPackageDir` (W1-T2216).
+  const require = createRequire(import.meta.url);
+  const entryPath = require.resolve(CLAUDE_AGENT_SDK_PACKAGE);
+  const pkgPath = join(dirname(entryPath), "package.json");
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: unknown };
+  return assertSdkVersionField(pkg, CLAUDE_AGENT_SDK_PACKAGE);
 }
 
 export const INSTALLED_CLAUDE_AGENT_SDK_VERSION = readInstalledClaudeAgentSdkVersion();

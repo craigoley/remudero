@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
+  assertSdkVersionField,
   INSTALLED_CLAUDE_AGENT_SDK_VERSION,
   SANDBOX_KEYS,
   validateWorkerSettings,
@@ -418,4 +419,26 @@ test("W1-T2216: settings guard reports the installed SDK version, never a stale 
       (e as Error).message.includes(`installed SDK ${version} SandboxSettingsSchema`),
     "the error must cite the version read from the installed SDK package",
   );
+});
+
+// W1-T2916: assertSdkVersionField is the extracted guard readInstalledClaudeAgentSdkVersion()
+// calls after reading the SDK's package.json — a branch no fixture drove before this task,
+// which diff-coverage caught as an added, uncovered line.
+test("W1-T2916: assertSdkVersionField rejects a package.json with no usable version string", () => {
+  assert.throws(
+    () => assertSdkVersionField({}, "@x/y"),
+    /@x\/y package\.json does not declare a version\./,
+  );
+  assert.throws(
+    () => assertSdkVersionField({ version: "" }, "@x/y"),
+    /@x\/y package\.json does not declare a version\./,
+  );
+  assert.throws(
+    () => assertSdkVersionField({ version: 3 }, "@x/y"),
+    /@x\/y package\.json does not declare a version\./,
+  );
+});
+
+test("W1-T2916: assertSdkVersionField returns a real version string unchanged", () => {
+  assert.equal(assertSdkVersionField({ version: "1.2.3" }, "@x/y"), "1.2.3");
 });
