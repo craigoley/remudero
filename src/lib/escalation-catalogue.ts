@@ -20,6 +20,7 @@ import type { PostReviewStallVerdict } from "./sweep.js";
  * written, for an unrelated reason) — mirrors ops.ts's alert-escalation dedup
  * discipline (a ledger line as the dedup key), never a second store.
  */
+
 /**
  * THE DEDUP KEY IS WRITTEN WHETHER OR NOT DELIVERY SUCCEEDS. The ledger-derived,
  * cross-boot dedup above was already the right shape; its defect was that the
@@ -163,6 +164,7 @@ export function escalateLifetimeCapExceeded(
  * carrying the verdict's own evidence (the densest window's boot timestamps), so the loop is
  * legible the moment it exists instead of after a hand-read of raw ledger timestamps.
  */
+
 /**
  * CROSS-BOOT DEDUP keyed on the STORM, not a task (there is none) and not a per-process flag
  * (every relaunch IS a new process — a process flag would open one issue per boot, ~one a
@@ -251,6 +253,7 @@ export function escalateCrashLoop(
  * full session. That is the week's recurring shape: a mechanism failing correctly and saying
  * nothing. A transport fix removes this CAUSE; only a signal removes the CLASS.
  */
+
 /**
  * WHY A NEW CLASS RATHER THAN AN EXISTING ONE. A decision-authority audit found the escalation
  * funnel INVERTED — of 369 needs-human issues, roughly 80% were things the machine resolved itself
@@ -262,6 +265,7 @@ export function escalateCrashLoop(
  * outside the fleet's power to fix. Reusing `daemon.crashloop` would misname it and reusing a
  * per-task class would file one issue per stuck PR, which is the inversion again.
  */
+
 /**
  * DEDUP IS THE WHOLE DESIGN, NOT A DETAIL. `escalate()` gates its entire dedup block on
  * `if (prRef && deps.issues.listOpen)`, so an escalation naming no PR skips dedup and opens a FRESH
@@ -424,6 +428,7 @@ export function escalateHeadroomReserve(
  * 512 MiB), judged by the SAME `judgeDiskHeadroom` `rmd doctor` reports against (doctor.ts) —
  * imported, never re-derived, so the two surfaces cannot disagree mid-incident.
  */
+
 /**
  * ESCALATES AT WARN, NOT ONLY FAIL, AND THAT IS THE WHOLE POINT (design (iv)). By FAIL, the
  * issue body, this function's OWN dedup marker below and the ledger row it lives on are all
@@ -432,6 +437,7 @@ export function escalateHeadroomReserve(
  * recorded by a write that ENOSPC rejects is structurally incapable of being the FIRST signal;
  * it is the autopsy." This fires while writes still succeed.
  */
+
 /**
  * DEDUP IS TWO LAYERS, NOT ONE. `runDaemon`'s own in-process latch (daemon.ts's
  * `diskHeadroomLatch`, shared across every phase this daemon run ticks) already calls this hook
@@ -603,6 +609,7 @@ export function escalateHeadroomParkCeiling(
  * push boundary (the a2b904d recon this task cites: W1-T333 lost ~40 minutes of completed
  * work that way, silently, because nothing observed the crossing).
  */
+
 /**
  * CROSS-BOOT DEDUP keyed on (bucket, resetsAt) — the SAME "episode key = the window's own
  * reset instant" discipline `escalateHeadroomReserve` documents just above, kept PER BUCKET
@@ -611,6 +618,7 @@ export function escalateHeadroomParkCeiling(
  * its own reset (a genuinely new episode) escalates again rather than staying silenced by a
  * stale marker from the PRIOR window.
  */
+
 /**
  * SELF-CLEARING, STATED IN THE BODY ITSELF (design (v)): a quota exhaustion clears on its own
  * bucket's hourly reset, so this notice names its own expiry (`resetsAt`) rather than asking
@@ -618,6 +626,7 @@ export function escalateHeadroomParkCeiling(
  * on; until it lands (or if it never does), the reset timestamp alone tells a human reading
  * this later that no action closes it.
  */
+
 /**
  * W1-T2305 — `deps.provenanceBracket` is THE BRACKET RULE (design (ii)), applied at the one
  * place this task's own design (iv) names as consequential: when a caller HAS two provenanced
@@ -712,6 +721,7 @@ export function escalateQuotaExhaustion(
  * `escalateCircuitBreak`/`escalateHeadroomReserve` immediately above rather than a second
  * mechanism.
  */
+
 /**
  * CROSS-BOOT DEDUP, KEYED ON "has anything actually dispatched since this last escalated" —
  * never a fixed key (there is only ever one starvation state at a time, unlike
