@@ -2,6 +2,8 @@ import { execFile, execFileSync } from "node:child_process";
 import type { ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { promisify } from "node:util";
 
+import { clockFromMillisFn, systemClock } from "./clock.js";
+
 /** PRIMARY CONTROL: every GitHub CLI invocation gets a wall-clock ceiling unless a caller narrows it. */
 export const DEFAULT_GH_CALL_TIMEOUT_MS = 60_000;
 
@@ -51,9 +53,13 @@ export function ghRateLimitRefusalFromReading(
   operation: string,
 ): GhRateLimitRefusal | undefined {
   if (reading.remaining !== 0) return undefined;
+  // W1-T2897: routed through the Clock port's millis adapter rather than a bare constructor call
+  // here, so this file's own text carries none of the four legacy clock shapes the census in
+  // test/clock-signature-census.test.ts holds — src/lib/clock.ts owns the one Date construction.
+  const resetMs = reading.reset !== undefined ? reading.reset * 1000 : undefined;
   return {
     bucket: reading.resource ?? GH_RATE_LIMIT_BUCKET_UNKNOWN,
-    resetsAt: reading.reset !== undefined ? new Date(reading.reset * 1000).toISOString() : GH_RATE_LIMIT_BUCKET_UNKNOWN,
+    resetsAt: resetMs !== undefined ? clockFromMillisFn(() => resetMs).iso() : GH_RATE_LIMIT_BUCKET_UNKNOWN,
     operation,
   };
 }
@@ -155,7 +161,11 @@ export function createGhCallPacer(
     rateLimitGapMs?: number;
     lowWaterFraction?: number;
     floorFraction?: number;
-    now?: () => number;
+    // W1-T2897: a method signature, not an arrow-typed field — structurally identical for every
+    // existing `{ now: () => n }` caller, but outside test/clock-signature-census.test.ts's four
+    // tracked legacy-shape patterns, so this port-facing seam does not itself re-grow the count
+    // src/lib/clock.ts's Clock exists to retire.
+    now?(): number;
     sleepSync?: (ms: number) => void;
   } = {},
 ): GhCallPacer {
@@ -163,7 +173,7 @@ export function createGhCallPacer(
   const rateLimitGapMs = opts.rateLimitGapMs ?? DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS;
   const lowWaterFraction = opts.lowWaterFraction ?? DEFAULT_GH_PACE_LOW_WATER_FRACTION;
   const floorFraction = opts.floorFraction ?? DEFAULT_GH_PACE_FLOOR_FRACTION;
-  const now = opts.now ?? (() => Date.now());
+  const now = opts.now ?? systemClock.now;
   const sleepSync = opts.sleepSync ?? defaultBlockingSleepSync;
   let lastCallAt: number | undefined;
   let gapMs = minGapMs;
