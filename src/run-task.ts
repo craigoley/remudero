@@ -37126,6 +37126,7 @@ export async function main(
   if (cmd === "reap-branches") {
     process.exit(reapBranchesCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ledgerGrepCommand(rest, ...)) cannot carry a DA hit without forking the process; ledgerGrepCommand's own logic is unit-tested in test/report-commands.test.ts (same irreducible-glue shape as the hand-runs dispatch case below).
   if (cmd === "ledger-grep") {
     process.exit(ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") }));
   }
@@ -37275,6 +37276,7 @@ export async function main(
   if (cmd === "digest") {
     process.exit(await digestCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await digestPlistCommand(rest, ...)) cannot carry a DA hit without forking the process; digestPlistCommand's own logic is unit-tested in test/report-commands.test.ts (same irreducible-glue shape as the ledger-grep dispatch case above).
   if (cmd === "digest-plist") {
     process.exit(await digestPlistCommand(rest, { usage: USAGE }));
   }

@@ -353,3 +353,63 @@ test("traceCommand: an unrecognized flag refuses (exit 2)", async () => {
   const rc = await withFakeHome(root, () => traceCommand(["--bogus"]));
   assert.equal(rc, 2);
 });
+
+// W1-T2888 — the two `readFeedbackEntry` SUCCESS paths. The refusal tests above reach only the
+// catch arms, so diff-coverage flagged src/lib/report-commands.ts:1225 and :1238 — the reads
+// themselves. Both are exercised here against a real fixture repo, so the seam is proven rather
+// than assumed to work because its failure path does.
+function traceFixture(): { root: string; feedbackId: string; taskId: string } {
+  const root = tmpDir("report-commands-trace-fixture-");
+  const feedbackId = "1788000000000-operator-note";
+  const taskId = "W1-T9001";
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(
+    join(root, "plan", "tasks.yaml"),
+    `- id: ${taskId}\n` +
+      `  title: "a task whose origin names a captured feedback entry"\n` +
+      `  repo: remudero\n` +
+      `  depends_on: []\n` +
+      `  type: implement\n` +
+      `  verify: auto\n` +
+      `  origin: "feedback#${feedbackId}"\n` +
+      `  status: queued\n`,
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "plan", "feedback", `${feedbackId}.yaml`),
+    `id: "${feedbackId}"\nstatus: "captured"\nraw: "the operator's original words"\nts: "2026-09-08T00:00:00Z"\n`,
+    "utf8",
+  );
+  return { root, feedbackId, taskId };
+}
+
+test("traceCommand: a feedback id is READ, not just refused — the forward trace resolves the entry", async () => {
+  const { root, feedbackId } = traceFixture();
+  const rc = await withFakeHome(root, () =>
+    traceCommand([feedbackId], { repoRoot: root, resolveOwnerRepo: () => ({ owner: "o", repo: "r" }) }),
+  );
+  assert.notEqual(rc, 2, "a real entry must not take the unknown-id refusal");
+});
+
+test("traceCommand: a task whose origin names a feedback entry READS that entry for the reverse chain", async () => {
+  const { root, taskId } = traceFixture();
+  const rc = await withFakeHome(root, () =>
+    traceCommand([taskId], { repoRoot: root, resolveOwnerRepo: () => ({ owner: "o", repo: "r" }) }),
+  );
+  assert.equal(rc, 0, "a task that resolves reverse-traces successfully");
+});
+
+test("traceCommand: an origin naming a MISSING feedback entry still traces, noting the gap", async () => {
+  // The catch arm beside the read: the task resolves, the entry does not, and the chain is still
+  // rendered rather than the whole verb failing.
+  const { root, taskId } = traceFixture();
+  writeFileSync(
+    join(root, "plan", "tasks.yaml"),
+    readFileSync(join(root, "plan", "tasks.yaml"), "utf8").replace(/feedback#[^"]+/, "feedback#1788000000000-absent"),
+    "utf8",
+  );
+  const rc = await withFakeHome(root, () =>
+    traceCommand([taskId], { repoRoot: root, resolveOwnerRepo: () => ({ owner: "o", repo: "r" }) }),
+  );
+  assert.equal(rc, 0, "a missing origin entry is a note, never a refusal");
+});
