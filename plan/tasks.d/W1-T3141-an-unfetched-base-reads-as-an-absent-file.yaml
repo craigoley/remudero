@@ -22,7 +22,7 @@
     file at `origin/main` and tells the author which reds they INHERITED rather than grew. The
     helper is careful — it separates "absent at the ref" from "could not ask", and its own comment
     explains that reading the second as the first is what once reported an INHERITED violation as
-    INTRODUCED. Eleven tests cover it. None of that reaches CI.
+    INTRODUCED. Ten tests cover it. None of that reaches CI.
 
     THE JOB CANNOT SEE THE REF IT MEASURES AGAINST. `.github/workflows/ci.yml`'s `source-size` job
     checks out with a BARE `actions/checkout` — no `with:` block at all, so the default
@@ -55,7 +55,7 @@
     question nobody asked — and the notice's absence looks identical to "nothing was inherited".
 
     WHY IT SURVIVED. The split runs only when the ratchet BLOCKS, which is rare and is exactly the
-    moment nobody is reading closely; the helper's eleven tests all inject a `run`, so no test ever
+    moment nobody is reading closely; the helper's ten tests all inject a `run`, so no test ever
     exercises a real checkout; and the failure is SILENT — a missing sentence, not a red.
   design: |
     (i) PROVISION THE REF THE JOB ALREADY DEPENDS ON. `source-size`'s checkout takes
@@ -70,7 +70,7 @@
     `refPresent` predicate; when it is supplied and answers false, every violation is `undetermined`
     and none is `introduced`.
 
-    (iii) THE OPTION IS OPTIONAL ON PURPOSE. W1-T3037's contract and all eleven of its tests stay
+    (iii) THE OPTION IS OPTIONAL ON PURPOSE. W1-T3037's contract and all ten of its tests stay
     byte-identical: a caller that passes no predicate behaves exactly as it does today. This task
     does not get to redefine a merged task's helper out from under its falsifiers; it adds the seam
     the real caller needs and wires the real caller to it.
@@ -122,5 +122,5 @@
     does not satisfy it either. The gate's verdict is not in question here; only whether the author
     is told the truth about whose red it is.
 
-    A change that edits W1-T3037's eleven existing tests to accommodate a new required argument
+    A change that edits W1-T3037's ten existing tests to accommodate a new required argument
     does not satisfy it: the seam is additive precisely so that those falsifiers keep holding.
