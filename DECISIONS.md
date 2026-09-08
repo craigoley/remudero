@@ -2295,3 +2295,122 @@ every class closing, ratify (a) alone and re-file the governor question with the
 
 **Rollback:** delete this entry. No code was written, no shard was retired and no filing was
 refused; W1-T3076 returns to `status: queued` with its question open.
+
+## 2026-09-08 — OPERATOR RULING (W1-T3173): the operator console is a BUNDLED REACT SPA in `apps/dashboard`, served by `rmd serve`
+
+*Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. The ruling is
+his ("I am good with all of your recommendations", 2026-09-08, on a recommendation that named this
+shard explicitly); this entry transcribes it. Per the decision-authority ruling
+(fb-1785882211812-bafd8f) an agent may recommend a ruling and may never record one of its own.*
+
+**REVERSED, ONE CLAUSE.** `apps/dashboard/index.html`'s **"No bundler by design (the W3-T2
+decision)"** — that clause and only that clause. W3-T2's other half (real `.ts` compiled by the
+repo's own `tsc`) was never the problem and is superseded rather than refuted.
+
+**NOT REVERSED, AND RE-AFFIRMED.** `DECISIONS.md`'s "W12-T1: THE SITE IS A SEPARATE REPOSITORY. THE
+CONSOLE IS NOT", and MASTER-PLAN D-5's monorepo resolution, which already names `apps/dashboard`
+(web) as a member. **WS-12 IS THE SITE, NOT THE CONSOLE** — the Astro Starlight on Vercel decision
+belongs to `remudero-site` and has never applied to `rmd serve`. These were conflated in
+conversation on 2026-09-08 and the record exists so the next reader cannot repeat it.
+
+**THE MEASUREMENT.** `src/lib/serve.ts` is 6,927 lines: 1,041 code lines of server TS (24.2%), **2515
+code lines of browser JavaScript inside one template literal (58.4%)**, 754 of HTML/CSS (17.5%).
+`<script type="module">` opens at :1522 and closes at :5286. The typechecker is provably blind to the
+majority of it — the identical line `const x: number = "not a number"` yields
+`src/lib/serve.ts(6928,7): error TS2322` at file scope and **no output at all** at line 2500. The
+duplication is already drifting: `console-freshness.ts` exports a tested four-tier `formatAge` and
+its header claims the browser "mirrors" it; the browser's copy at `serve.ts:4936` has one tier.
+
+**COSTS ADMITTED.** The first build artifact this system has ever had (`bin/rmd` execs `tsx
+src/run-task.ts`; there is no `dist/`), and a second test runner alongside `node --test`.
+
+**Rollback:** revert this entry and W1-T3174-3177 return to blocked-on-ruling.
+
+## 2026-09-08 — OPERATOR RULING (W1-T3186): THE INBOX IS THE ONLY FRONT DOOR for an ask; change management is its own area; NEEDS ME is dissolved
+
+*Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. His words,
+2026-09-08: "Anything that truly needs me should come in through the inbox... Maybe we need a
+separate area for pr management that is not NEEDS ME or Inbox."*
+
+**THE MEASUREMENT.** `renderNeedsMe` emits EIGHT row kinds across four unrelated concerns:
+`needsMeTaskRowHtml` (escalations), `needsMeVerifyRowHtml` (a 53-shard plan backlog),
+**needsMeBlockedPrRowHtml** and `needsMeBlockedPrUnverifiedHtml` (PR lifecycle — `prNumber`,
+`mergeHold`), `needsMeInboxHtml`/`needsMeDraftingHtml` (ratification proposals), and
+`needsMeGrillHtml`/`needsMeProposedHtml` (feedback). One heading, one badge, one count.
+
+**AND THE MAILBOX IS A STRICT SUBSET.** `renderNeedsMe` filters `if (!t.needsHuman) continue`;
+`buildMailboxThreads` filters that PLUS two field checks. Containment by construction, so every
+escalation renders twice — measured: MAIN-HEALTH, W1-T2902, W1-T2904, W1-T3102, W1-T3131 in both at
+once — under two different verbs: **Mark handled** (a server POST) versus Open/Resolve
+(localStorage, per browser). Neither reflects the other.
+
+**DISSOLVED, NOT RENAMED.** A rename preserves the mixing. Every one of the eight kinds is rehomed
+explicitly and nothing becomes invisible — W1-T507 exists because a queue nobody could see was the
+prior defect.
+
+**SEQUENCING.** W1-T3187 (the duplicate render) ships NOW: it is wrong under any shape. The
+dissolution rides with W1-T3173, so the IA is not built twice.
+
+**Rollback:** revert this entry; W1-T3187 stands on its own regardless.
+
+## 2026-09-08 — OPERATOR RULING (W1-T3196): THE READ SIDE IS A MATERIALIZED PROJECTION, not a recompute
+
+*Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. Raised by him,
+2026-09-08: "are we sure this is the right setup for fetching the backend data? Should we use CQRS
+patterns or make the API more industry standard and have the data it fetches be more readily
+accessible?"*
+
+**THE SYSTEM IS EVENT-SOURCED IN ALL BUT NAME.** `state/ledger.ndjson` is an append-only log (3.9 MB,
+7,682 live lines, 579 gz archives), the daemon is the command side, and
+`DECISION_RELEVANT_LEDGER_STEPS` already declares which events matter. The missing half is the read
+model.
+
+**WHAT A READ COSTS TODAY.** On every cache miss `projectPlan` recomputes a **1550-task projection**,
+reads the whole ledger, builds an index, and reads a 20 MB prior-state file; `/v1/status` then
+serialises 881,619 bytes. That is replay-the-log-on-read, which materialized views exist to replace.
+
+**IT HAS BEEN PATCHED TWICE WITHOUT CHANGING SHAPE** — W1-T187 ("5-8s per projection") and R-23 ("an
+N-task plan scanned it ~10N times"). Each was correct; each left the recompute.
+A fourth pass at the loop would not hold: **a third optimisation would not hold** either, and that is the reason this is a shape change rather than a
+fourth pass at the loop.
+
+**WHAT IS NOT CHANGING: the ledger stays the sole source of truth and the write path is untouched.**
+The read model is rebuildable and never authoritative; if a projection and the log disagree, the log
+wins. W1-T179's monotonic-under-darkness guarantee survives.
+
+**SEQUENCING: LAST.** W1-T3192 and W1-T3193 deliver most of the felt improvement at a fraction of the
+risk. This introduces a derived store that can silently drift, and drift in a board the operator
+trusts is worse than latency he can see.
+
+**Rollback:** revert this entry. No behaviour changes until an implementation ships.
+
+## 2026-09-08 — OPERATOR RULING (W1-T3199): a deploy is CHANGE-AND-RISK GATED, not human gated
+
+*Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. His words,
+2026-09-08: "the judge should not be human gated, it should be change and risk gated... The llm
+judge can decide that much better than a human can in the moment."*
+
+**REVERSED.** `rmd deploy`'s recorded rule — "human-gated ... keeps Craig's control over WHEN a
+merged fix goes live". The operator's marker stops being REQUIRED; an explicit `rmd deploy` remains
+SUFFICIENT, because a human who has decided must not have to persuade a model.
+
+**WHY.** Across the entire ledger archive the deployer emitted 15 rows, all `deploy.skip`, 14 naming
+**no operator marker** — six of them diagnosing "daemon running stale code" correctly and acting on
+none. The last was 2026-08-13, which is when the fleet moved to Azure: `deployer.ts` restarts via
+`launchctl kickstart`, and `command -v launchctl` on the host is ABSENT while `uname -s` reports
+Linux. The status quo is not human control; it is no control.
+
+**THE SAFETY GATES STAY DETERMINISTIC and no judge may override them.** `daemonIsIdle`,
+`evaluateIdleGate`, `DEPLOY_IDLE_DEFER_CEILING_MS`, the health check and the rollback all still run
+and still refuse. The judge chooses whether and when to WANT a restart; the gates decide whether it
+is SAFE to have one.
+
+**THE SCORER, MEASURED OVER 1,496 MERGES (14 days).** Plan-only scores a deterministic 0 (39.9% of
+merges); anything reaching `src/` or `scripts/` scores 1; everything else 0. A typed fix/feat
+weighting was tested and rejected — at matched restart rates it produced waits within 0.3h and a
+worse maximum. A judge may UPLIFT (1 → 3 → 9 → 18) and may never reduce, so a miscalibrated judge can
+only restart more often, never hide a change. **Starting threshold 18 with uplift** (12 without), and
+a **restart-rate ceiling** the accumulator cannot argue with, distinct from the threshold.
+
+**Rollback:** revert this entry; W1-T3200 (the host-adaptable seam) stands on its own regardless and
+is worth shipping either way.
