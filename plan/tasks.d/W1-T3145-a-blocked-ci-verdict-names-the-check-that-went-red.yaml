@@ -1,0 +1,83 @@
+- id: W1-T3145
+  title: "THE VERDICT THAT ENDS THE PLURALITY OF FLEET RUNS DOES NOT SAY WHAT WENT RED — `CiGateOutcome` is `{ state, sha? }`, so `waitForCiGreen` reads the whole check rollup and `ciGateState` collapses it to one word before the terminal `blocked_ci` row is written, leaving 23 of the 26 most recent blocks recorded as the bare string `ci red before review` with no way to tell one cause from twenty-three"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 15.00
+  files: [src/run-task.ts, test/a-blocked-ci-verdict-names-the-check-that-went-red.test.ts]
+  origin: "operator-session#router-efficiency-2026-09-08"
+  plan_refs: ["P53", "W1-T1D", "W1-T2804", "W1-T382"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 over the ledger union at the daemon state root (450 gz archives + 2 plain
+    rotations + the live file; 915 distinct runs; newest row 2026-09-08T01:15:28.635Z).
+
+    (1) THIS IS THE MOST COMMON TERMINAL VERDICT IN THE FLEET. Of 753 retained terminal `verdict`
+    rows, `blocked_ci` is 266 — more than `merged` (258) — and carries $1,920 of the $4,179 in
+    terminal-row notional spend.
+
+    (2) IT IS NOT A FAILURE TO SHIP, WHICH IS EXACTLY WHY THE DIAGNOSTIC MATTERS. Joining those
+    rows' `pr_url` against `verdict.merged`: 249 of 266 (94%) later merged. `blocked_ci` is the
+    NORMAL path — the run ends, the PR stays open, the sweep/fix lane drives it green. So this row
+    is not an error report; it is the handoff record for the lane that does the redriving, and
+    `fix.done` spends $1,340 across 604 runs doing it.
+
+    (3) THE HANDOFF RECORD NAMES NOTHING. Of the 26 `blocked_ci` verdicts since 2026-09-05 — 26
+    DISTINCT tasks, no repeats — 23 read exactly `ci red before review`, 2 read `ci timeout before
+    review`, and 1 names a check (`required check red: coverage-ratchet`). Nothing distinguishes
+    23 different causes from one cause 23 times.
+
+    (4) THE NAMES EXIST; THE TYPE DISCARDS THEM. `CiGateOutcome` is declared
+    `{ state: "green" | "red" | "timeout"; sha?: string }` (`src/run-task.ts`). `waitForCiGreen`
+    polls the rollup, `ciGateState(r)` returns `r.state`, and the verdict site writes the template
+    `` `ci ${ci} before review` ``. The other path proves the data is available: 52 older rows read
+    `required check red: <name>`, formatted through `src/lib/block-reason.ts`.
+
+    (5) THERE IS DIRECT PRECEDENT FOR THE SHAPE OF THE FIX. W1-T2804 added `sha?` to this SAME type
+    for the same class of reason, and its own comment states the fail-open contract: "Undefined
+    PINS NOTHING and every consumer falls back to its own read ... so a stub that returns a bare
+    verdict changes no behavior." A `checks?` field follows that contract exactly.
+
+    (6) IT BLOCKS EVERY DOWNSTREAM QUESTION. Whether the redrive lane is absorbing a systemic gate
+    problem or a long tail of one-offs is unanswerable from the corpus today, and any work aimed at
+    that lane would be sized against a number nobody can compute.
+  design: |
+    (i) WIDEN THE OUTCOME TYPE, NOT THE CALL GRAPH. `CiGateOutcome` gains an optional field naming
+    the checks that were red or still pending at the moment the gate gave up. Optional and
+    fail-open per W1-T2804's own precedent: a caller or stub that supplies nothing behaves exactly
+    as it does today.
+    (ii) THE STRING STAYS PARSEABLE. `ci red before review` is what the fleet's own history is
+    written in; the added names must EXTEND that row rather than replace it, so a reader spanning
+    the change does not see two incompatible formats for one verdict.
+    (iii) BOUND WHAT IS WRITTEN. A rollup can carry many checks; the row records a bounded, ordered
+    set with a count, never an unbounded splat into the ledger.
+    (iv) A GATE THAT COULD NOT READ THE ROLLUP SAYS SO. "No names available" and "no checks were
+    red" must not render identically — the same distinction W1-T3097 draws at the capability seam.
+    (v) NOTHING ABOUT THE VERDICT CHANGES. Still `blocked_ci`, still leaves the PR open, still
+    hands off to the fix lane. This task adds an attribute to a row; it moves no decision.
+  acceptance:
+    - claim: "a blocked_ci verdict written after a red rollup names the checks that were red, bounded and counted rather than splatted"
+      proof: "unit test: test/a-blocked-ci-verdict-names-the-check-that-went-red.test.ts"
+    - claim: "a gate outcome that carries no check names still writes its verdict and is distinguishable from one where no check was red"
+      proof: "unit test: test/a-blocked-ci-verdict-names-the-check-that-went-red.test.ts"
+    - claim: "the existing reason wording is extended rather than replaced, so a reader spanning the change sees one format"
+      proof: "unit test: test/a-blocked-ci-verdict-names-the-check-that-went-red.test.ts"
+    - claim: "a timeout is still reported as a timeout and names what was still pending"
+      proof: "unit test: test/a-blocked-ci-verdict-names-the-check-that-went-red.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if the verdict already names a check on this path: read the `blocked_ci` write
+    site in `runTaskBody`. MEASURED 2026-09-08: it writes ``reason: `ci ${ci} before review` `` and
+    `CiGateOutcome` is `{ state, sha? }` with no check field. CLOSE IT ALSO if the recent corpus
+    already discriminates: MEASURED, 23 of 26 rows since 2026-09-05 are the bare string over 26
+    distinct tasks.
+    PROVE IT LOAD-BEARING: drop the new field from the outcome the gate returns and the first
+    criterion must fail — a fixture that still passes is asserting the template, not the plumbing.
+  note: |
+    risk:high on Rule 19 SPAN — one file, but the edit is on the dispatch path's terminal-verdict
+    writer, which every run crosses. Fail-open by design point (i), following W1-T2804's precedent
+    on this exact type. Id reserved at `refs/rmd-id/W1-T3145` before filing.
