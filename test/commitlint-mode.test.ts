@@ -103,7 +103,7 @@ test("commitlint CI wiring: no gh pr merge --squash call site overrides --subjec
     ["src/lib/arm-auto-merge.ts", armAutoMergeTs],
     ["src/lib/worker.ts", workerTs],
   ] as const) {
-    const squashCalls = src.match(/execFileSync\("gh",\s*\[[^\]]*"--squash"[^\]]*\]/g) ?? [];
+    const squashCalls = src.match(/(?:execFileSync\("gh",\s*|ghExec\(\s*)\[[^\]]*"--squash"[^\]]*\]/g) ?? [];
     assert.ok(squashCalls.length > 0, `${name} must call gh pr merge --squash somewhere`);
     for (const call of squashCalls) {
       assert.doesNotMatch(
