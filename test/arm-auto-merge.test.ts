@@ -21,10 +21,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
   armAutoMerge,
   armIfVerdictPermits,
+  attemptArm,
   disarmAutoMerge,
+  fixRebaseMergeFactsFromRest,
+  ghUpdateBranch,
+  readHeadShaRest,
   type ArmDeps,
 } from "../src/lib/arm-auto-merge.js";
 
@@ -159,4 +164,54 @@ test("disarmAutoMerge, driven through the lib module directly, issues the SAME g
   assert.equal(outcome, "disarmed");
   assert.deepEqual(h.ghCalls, [{ verb: "disableAuto", prUrl: PR }]);
   h.cleanup();
+});
+
+// ── W1-T2887 round 1: the three PRIVATE REST mirrors realArmDeps() wires with no injectable
+// fetch/exec of their own — see this module's own header comment for why they are duplicates
+// rather than imports. Each is exported for exactly this reason: their fail-soft/fail-loud
+// branches are otherwise unreachable from a test, since realArmDeps()'s closures never forward an
+// override to them (they always call the module-default `ghJson`/`execFileSync`).
+
+test("fixRebaseMergeFactsFromRest fails soft to {} when the REST fetch throws — readMergeFacts must degrade, never crash, on an unreadable read", () => {
+  const facts = fixRebaseMergeFactsFromRest("craigoley", "remudero", 2887, () => {
+    throw new Error("simulated REST outage");
+  });
+
+  assert.deepEqual(facts, {}, "an unreadable pr/compare read must yield no facts, not a thrown error");
+});
+
+test("ghUpdateBranch reports ok:false with the caught error text when the update-branch exec throws", () => {
+  const result = withLiveWritesAllowed(() =>
+    ghUpdateBranch("craigoley", "remudero", 2887, () => {
+      throw new Error("simulated gh api failure");
+    }),
+  );
+
+  assert.deepEqual(result, { ok: false, error: "simulated gh api failure" });
+});
+
+test("readHeadShaRest refuses an empty head sha rather than reporting one", () => {
+  assert.throws(() => readHeadShaRest(PR, () => ({ head: {} })), /returned no head sha/);
+});
+
+test("attemptArm's direct-merge-preflight update-branch write: a throwing updateBranch is caught and reported as direct-merge-update-failed, never an uncaught throw", () => {
+  const said: string[] = [];
+  const ghCalls: Array<{ verb: string; prUrl: string }> = [];
+  const result = attemptArm(PR, {
+    armAuto: () => {
+      throw { stderr: "Pull request is in clean status" };
+    },
+    mergeDirect: (prUrl) => void ghCalls.push({ verb: "mergeDirect", prUrl }),
+    isMerged: () => false,
+    say: (m) => void said.push(m),
+    readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 3 }),
+    updateBranch: () => {
+      throw new Error("simulated update-branch outage");
+    },
+  });
+
+  assert.equal(result.outcome, "direct-merge-update-failed");
+  assert.deepEqual(ghCalls, [], "an updateBranch that throws must never fall through to mergeDirect");
+  assert.equal(result.directMergePreflight?.error, "simulated update-branch outage");
+  assert.ok(said.some((m) => m.includes("automerge.direct_merge_update_failed")));
 });

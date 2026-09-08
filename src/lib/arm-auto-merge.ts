@@ -97,8 +97,10 @@ function mergeFactsFromRest(pr: unknown, compare: unknown): ArmMergeFacts {
   };
 }
 
-/** Private mirror of run-task.ts's `fixRebaseMergeFactsFromRest`. */
-function fixRebaseMergeFactsFromRest(
+/** Private mirror of run-task.ts's `fixRebaseMergeFactsFromRest`. Exported for test: the closure
+ *  in {@link realArmDeps} that calls this never forwards an injectable `fetch`, so the only way
+ *  to drive its catch branch (a REST read that throws) is to call this function directly. */
+export function fixRebaseMergeFactsFromRest(
   owner: string,
   repo: string,
   prNumber: number,
@@ -126,8 +128,11 @@ function ghUpdateBranchArgv(owner: string, repo: string, prNumber: number): stri
   return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/update-branch`];
 }
 
-/** Private mirror of run-task.ts's `ghUpdateBranch`. */
-function ghUpdateBranch(
+/** Private mirror of run-task.ts's `ghUpdateBranch`. Exported for test: same reasoning as
+ *  {@link fixRebaseMergeFactsFromRest} — the `realArmDeps` closure that calls this never forwards
+ *  an injectable `exec`, so its catch branch (an update-branch call that throws) is only
+ *  reachable by calling this function directly with a throwing `exec`. */
+export function ghUpdateBranch(
   owner: string,
   repo: string,
   prNumber: number,
@@ -154,8 +159,10 @@ function headShaRestArgs(prUrl: string): string[] {
   return singlePrRestArgs(target.owner, target.repo, target.number);
 }
 
-/** Private mirror of run-task.ts's `readHeadShaRest`. */
-function readHeadShaRest(prUrl: string, fetch: GhApiFetcher = ghJson): string {
+/** Private mirror of run-task.ts's `readHeadShaRest`. Exported for test: same reasoning as
+ *  {@link fixRebaseMergeFactsFromRest} — the `realArmDeps` closure that calls this never forwards
+ *  an injectable `fetch`, so its empty-sha refusal is only reachable by calling this directly. */
+export function readHeadShaRest(prUrl: string, fetch: GhApiFetcher = ghJson): string {
   const sha = mapRestPr(fetch(headShaRestArgs(prUrl)) as RestPullRow).headRefOid;
   if (!sha) {
     throw new Error(`head-sha read: ${prUrl} returned no head sha — refusing to report an empty head`);
