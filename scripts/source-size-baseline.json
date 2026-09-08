@@ -78,6 +78,7 @@
   "src/lib/launchd.ts": 775,
   "src/lib/learnings.ts": 1500,
   "src/lib/ledger-grep.ts": 354,
+  "src/lib/ledger-path.ts": 500,
   "src/lib/ledger-replay.ts": 181,
   "src/lib/ledger.ts": 1500,
   "src/lib/live-write-guard.ts": 200,
