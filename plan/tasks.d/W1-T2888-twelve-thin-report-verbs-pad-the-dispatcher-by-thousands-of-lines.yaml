@@ -57,7 +57,7 @@
     every file its already-specified extraction requires.
   acceptance:
     - claim: "run-task.ts imports the report verbs from lib instead of defining them"
-      proof: "grep: lib/report-commands\" in src/run-task.ts"
+      proof: 'grep: from "\./lib/report-commands\.js" in src/run-task.ts'
     - claim: "each moved verb prints the same output and exit code from a fixed state directory"
       proof: "unit test: test/report-commands.test.ts"
     - claim: "the status verb is invoked through the lib module in the test"
