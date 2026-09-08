@@ -73,7 +73,7 @@
   origin: recon#portability-and-upstream-2026-08-07
   plan_refs: ["W1-T394"]
   files: [src/lib/fs-race-safe.ts, test/stale-lock-host-ordering.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is a pure predicate assertion over isHolderStale with injected
     isPidAlive/hostname/getProcessStartTime probes, decidable in-process with no second machine.

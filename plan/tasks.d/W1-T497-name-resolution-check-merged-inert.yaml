@@ -91,7 +91,7 @@
   origin: oper#dormant-checks-recon-2026-08-14
   plan_refs: ["W1-T488", "W1-T485", "W1-T471"]
   files: [src/run-task.ts, test/task-linter-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS SET UP FRONT. `files:` spans src/ and test/, and `sizingViolation`
     (src/lib/task-linter.ts) blocks at >=2 subsystems below that band; it is independently

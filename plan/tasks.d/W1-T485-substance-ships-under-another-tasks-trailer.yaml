@@ -150,7 +150,7 @@
   origin: recon#substance-under-another-trailer-2026-08-14
   plan_refs: ['W1-T458', 'W1-T472', 'W1-T467']
   files: [src/lib/status.ts, test/status.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `files:` spans `src/lib/` and `test/`, and `sizingViolation`
     (`src/lib/task-linter.ts`) blocks at >=2 subsystems below that band. The band is Rule 19's SPAN,

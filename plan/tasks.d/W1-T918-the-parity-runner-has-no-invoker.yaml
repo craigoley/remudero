@@ -73,7 +73,7 @@
   origin: oper#parity-baseline-stale-2026-08-16
   plan_refs: ["W1-T517"]
   files: [scripts/host-parity.ts, test/host-parity.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the reachability and unbaselined-pole assertions are decidable from
     fixtures with no network, no spawn and no second host.

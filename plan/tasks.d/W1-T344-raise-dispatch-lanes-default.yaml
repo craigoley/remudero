@@ -62,7 +62,7 @@
   origin: oper#build-daemon-parallelism-2026-08-04
   plan_refs: ["W1-T325", "W1-T326", "W1-T343"]
   files: [plan/policy.yaml, test/policy.test.ts, test/policy-consumers.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a real policy load against the shipped file.
     risk:high — the diff is one number and the consequence is doubling the fleet's dispatch rate

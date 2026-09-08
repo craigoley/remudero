@@ -121,7 +121,7 @@
   origin: "recon#followup-ledger-rotation-2026-08-17"
   plan_refs: ["W1-T105"]
   files: [src/lib/ledger.ts, test/ledger-rotation.test.ts, test/followup-rotation-idempotency.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify: human IS SET UP FRONT. Design item (i) requires a JUDGEMENT no test can make — which of

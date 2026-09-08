@@ -70,7 +70,7 @@
   origin: recon#fix-rung-trigger-is-not-blind-2026-08-14
   plan_refs: ["W1-T457", "W1-T474", "W1-T438"]
   files: [src/run-task.ts, test/escalation-evidence-floor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. The band is Rule 19's SPAN across `src/` and `test/`, not blast
     radius — the runtime effect is the text of one notification.

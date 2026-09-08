@@ -81,7 +81,7 @@
   origin: oper#d10-measurement-2026-08-07
   plan_refs: ["§11 D-10", "§5E", "P38", "P48", "W1-T108", "W1-T133", "W1-T358"]
   files: [src/lib/retro.ts, test/mutation-gate-lifetime.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS — recorded so a later reader does not over-read
     it. The rung is read-only and advisory: it cannot change a verdict, gate a PR or alter dispatch,

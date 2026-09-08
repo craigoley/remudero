@@ -97,7 +97,7 @@
   origin: feedback#fb-1784842083584-6cc22a
   plan_refs: ["§7B", "§5D"]
   files: [src/lib/sweep.ts, src/lib/feedback.ts, src/run-task.ts, plan/policy.yaml, test/sweep-repair-filing.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "TRIAGE RECORD for fb-1784842083584-6cc22a, so a later reader knows what was deliberately NOT
     filed. The feedback's first half (repair verbs + classify/route) is either SHIPPED (post-review lane

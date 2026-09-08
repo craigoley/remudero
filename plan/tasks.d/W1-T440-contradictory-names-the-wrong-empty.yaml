@@ -62,7 +62,7 @@
     - claim: "no PR changes disposition — only the reason text distinguishes the two empties"
       proof: "unit test: test/fix-rung-no-task.test.ts"
   files: [src/lib/sweep.ts, src/run-task.ts, test/sweep.test.ts, test/escalate.test.ts, test/fix-rung-no-task.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "DESIGN, and the two grep proofs are BINDING on these exact strings (the W1-T365/W1-T383
     no-third-option form; both are 0 hits at 76f2e33 by construction, verified with `git grep -a`

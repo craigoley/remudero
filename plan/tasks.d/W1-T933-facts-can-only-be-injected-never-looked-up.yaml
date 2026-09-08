@@ -105,7 +105,7 @@
   origin: recon#injected-not-retrievable-2026-08-16
   plan_refs: ["W1-T420", "W1-T503", "W1-T38"]
   files: [src/lib/skill.ts, test/skill.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: medium` IS SET UP FRONT. This adds a read-only primitive and refactors one existing
     caller onto it; it changes no gate, no disposition and no policy. The declared span is one module

@@ -78,7 +78,7 @@
   origin: feedback#fb-1784814429463-9652bd
   plan_refs: ["§7B", "W1-T437", "W1-T424", "W1-T230"]
   files: [src/run-task.ts, test/run-task.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "THE REFUTED HALF, RECORDED SO IT IS NOT RE-INVESTIGATED. The originating feedback tested the
     hypothesis that the clean-status direct-squash-merge path completes an unattributed PR by bypassing the

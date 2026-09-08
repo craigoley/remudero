@@ -144,7 +144,7 @@
   origin: recon#emitter-commitlint-rule-coverage-2026-08-10
   plan_refs: ["W1-T136", "W1-T137", "W1-T221", "W1-T327"]
   files: [src/lib/commit-message.ts, test/commit-message.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is decidable in-process. The parity assertion spawns the
     project's own commitlint binary, which test/commit-message.test.ts already does today; nothing

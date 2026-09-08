@@ -98,7 +98,7 @@
   origin: recon#diff-coverage-fnda-keying-2026-08-14
   plan_refs: ["W1-T421", "W1-T143"]
   files: [scripts/diff-coverage.mjs, test/diff-coverage.test.ts, test/fixtures/diff-coverage/fnda-shared-decl.lcov, test/fixtures/diff-coverage/fnda-shared-decl.diff]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at
     `>=2 subsystems while risk<high`, and `files:` spans `scripts/` and `test/`. The band is Rule 19's

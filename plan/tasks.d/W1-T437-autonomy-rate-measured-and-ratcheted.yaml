@@ -58,7 +58,7 @@
   origin: oper#warp-podcast-2026-08-11
   plan_refs: ["W1-T424", "W1-T418", "W1-T141"]
   files: [src/run-task.ts, src/lib/autonomy.ts, test/autonomy-ratchet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the classifier is pure over injected readers and both falsifier
     directions are fixture-decidable offline. risk:high — the files: span (new autonomy

@@ -67,7 +67,7 @@
   origin: oper#build-daemon-parallelism-2026-08-04
   plan_refs: ["W1-T326", "§4B"]
   files: [src/lib/daemon.ts, test/daemon-plan-freshness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a mid-batch reload and two dispatch decisions, both assertable in-process.
     risk:high — it touches the dispatch hot path of the persistent loop, and the failure it prevents is

@@ -159,7 +159,7 @@
   origin: "oper#durable-risk-judge-refusal-2026-08-17"
   plan_refs: ["W1-T514", "W1-T254"]
   files: [src/lib/sweep.ts, src/lib/risk-judge.ts, src/lib/ledger.ts, src/run-task.ts, test/sweep-arm-parity.test.ts, test/risk-judge.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`

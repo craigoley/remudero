@@ -73,7 +73,7 @@
   origin: oper#plan-review-direction-2026-08-11
   plan_refs: ["§Self-improvement", "W1-T400", "W1-T401", "W1-T387"]
   files: [test/golden-verdicts.test.ts, test/fixtures/golden-verdicts/README.md]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every assertion is a deterministic judge over canned inputs.
     risk:high — NOT blast radius (zero src/ lines change) but consequence: these goldens become

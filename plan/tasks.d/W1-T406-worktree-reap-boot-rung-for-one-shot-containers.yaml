@@ -52,7 +52,7 @@
   origin: azure-container-2026-08-08#worktree-accumulation
   plan_refs: ["§8A"]
   files: [src/lib/worker.ts, src/run-task.ts, src/lib/policy.ts, plan/policy.yaml, test/worktree-reap-boot-rung.test.ts, test/worktree-reap-pid-reuse.test.ts, test/worktree-reap-boot-survey.test.ts, test/worktree-reap-boot-nonblocking.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "FOUR DECISIONS, MADE HERE RATHER THAN LEFT TO THE IMPLEMENTER.
     (i) IT MUST NOT RE-IMPLEMENT AN AGE CHECK — IT CALLS THE EXISTING REAPER. `reapStaleWorktrees`

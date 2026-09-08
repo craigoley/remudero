@@ -47,7 +47,7 @@
   origin: oper#architecture-2026-08-11
   plan_refs: ["W1-T371", "W1-T398", "W1-T404"]
   files: [src/lib/service.ts, src/lib/serve.ts, test/identity-provider-seam.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the seam, both providers and both falsifier directions are
     fixture-decidable offline. risk:high — it refactors the authentication gate itself; the

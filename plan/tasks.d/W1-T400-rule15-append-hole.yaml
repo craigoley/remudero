@@ -107,7 +107,7 @@
   origin: recon#rule15-coverage-2026-08-07
   plan_refs: ["W1-T58", "W1-T352", "W1-T384", "W1-T389", "W1-T399"]
   files: [src/lib/review.ts, test/rule15-append-hole.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is a predicate assertion over synthetic diffs, decidable
     in-process with no operator and no network.

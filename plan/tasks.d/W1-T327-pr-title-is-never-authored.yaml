@@ -63,7 +63,7 @@
   origin: oper#remaining-items-2026-08-04
   plan_refs: ["§5", "W1-T221"]
   files: [src/run-task.ts, test/live-write-guard-leaves.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — an argv assertion plus a real-CLI commitlint run, both machine-checkable.
     risk:high — it changes the argv of EVERY harness-opened PR. A malformed title fails a required

@@ -92,7 +92,7 @@
   origin: recon-unbuildable-exit#implement-followups-discarded
   plan_refs: ["§8A", "P38"]
   files: [src/run-task.ts, test/no-pr-followups-harvested.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS, set up front rather than raised after a lint.
     `subsystemsOf` counts two concerns — the dispatcher and its suite — so risk:medium would fail

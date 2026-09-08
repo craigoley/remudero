@@ -114,7 +114,7 @@
   origin: feedback#fb-1785237583569-3304ae
   plan_refs: ["§5D", "§10", "W1-T366", "W1-T901", "W1-T119", "W1-T147", "W1-T926"]
   files: [scripts/recovery-drill.mjs, test/recovery-drill.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     THE WORKFLOW IS DELIBERATELY NOT DECLARED. `.github/workflows/recovery-drill.yml` already runs

@@ -98,7 +98,7 @@
   origin: codeql#1436-js-regex-injection-2026-08-06
   plan_refs: ["W1-T379", "W1-T312", "W1-T380", "W1-T382"]
   files: [src/lib/ledger-grep.ts, src/run-task.ts, test/ledger-grep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is an in-process assertion over resolveLedgerUnion and
     ledgerGrepCommand against a synthetic state root, decidable with no operator present.

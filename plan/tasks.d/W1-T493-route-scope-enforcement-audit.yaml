@@ -89,7 +89,7 @@
   origin: recon#console-hosting-step-one-2026-08-14
   plan_refs: ["W1-T430", "W1-T404", "W1-T431"]
   files: [src/lib/serve.ts, test/route-scope-matrix.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`. Blast radius is one
     completeness guard plus a test; the enforcement path itself is already correct and this task must

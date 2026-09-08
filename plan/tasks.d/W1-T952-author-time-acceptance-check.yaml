@@ -97,7 +97,7 @@
   origin: "recon#author-time-acceptance-check-2026-08-17"
   plan_refs: ["#2040", "#2042", "#2053"]
   files: [src/lib/review.ts, src/lib/plan-pr-emitter.ts, src/run-task.ts, test/acceptance-block-diagnostics.test.ts, test/plan-pr-emitter.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify: human IS SET UP FRONT. Design item (i) requires a JUDGEMENT that no test can make —

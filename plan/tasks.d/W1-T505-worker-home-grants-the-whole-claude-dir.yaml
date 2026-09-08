@@ -91,7 +91,7 @@
   origin: oper#credential-mount-2026-08-15
   plan_refs: ["W1-T293", "W1-T496"]
   files: [src/lib/worker-home.ts, test/worker-home.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS SET UP FRONT. `files:` spans src/ and test/, which `sizingViolation`
     (`src/lib/task-linter.ts`) blocks at >=2 subsystems below that band, and it is independently

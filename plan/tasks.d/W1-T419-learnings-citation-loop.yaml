@@ -68,7 +68,7 @@
   origin: oper#learning-system-research-2026-08-10
   plan_refs: ["§8A", "P48", "W1-T33", "W1-T38"]
   files: [src/run-task.ts, src/lib/learnings.ts, src/lib/retro.ts, scripts/learnings-budget-ratchet.mjs, test/learnings-citation-loop.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every deliverable is fixture-drivable: a log payload, a miner over synthetic
     ledgers, a message shape.

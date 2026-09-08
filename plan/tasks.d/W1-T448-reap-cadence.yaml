@@ -63,7 +63,7 @@
   origin: recon#branch-accumulation-2026-08-12
   plan_refs: ["W1-T447"]
   files: [src/run-task.ts, docs/operator-guide.md, test/reap-cadence.test.ts, test/sweep.test.ts, test/branch-reaper-dry-run.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the cost question has a MEASURED answer, so no operator ruling is needed to
     reject per-pass wiring. The autonomy question that WOULD need one belongs to W1-T447 and is held

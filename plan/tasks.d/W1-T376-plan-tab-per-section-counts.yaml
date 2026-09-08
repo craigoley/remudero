@@ -67,7 +67,7 @@
   origin: oper#recon-plan-tab-overview-2026-08-05
   plan_refs: ["§7", "W1-T315", "W1-T375"]
   files: [src/lib/panel-graph.ts, src/lib/serve.ts, test/plan-view.test.ts, test/plan-sections-render.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a pure reduction plus a renderer, both assertable without a browser.
     risk:high — set by Rule 19's span, not blast radius: the change must exist end-to-end (normalise

@@ -50,7 +50,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T331", "W1-T332", "W1-T333"]
   files: [src/run-task.ts, test/cost-governor.test.ts, test/policy.test.ts, test/config-reader-seams.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — reloader readings over fixture roots and policies, in-process.
     risk:high — it changes what value gates the fleet's daily spend; wrong in either direction is
