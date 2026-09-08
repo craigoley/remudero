@@ -150,6 +150,7 @@
   "src/lib/emissions.ts": 113,
   "src/lib/env.ts": 140,
   "src/lib/escalate.ts": 400,
+  "src/lib/escalation-catalogue.ts": 500,
   "src/lib/feedback-docket.ts": 102,
   "src/lib/feedback-landing.ts": 150,
   "src/lib/feedback.ts": 225,
@@ -223,6 +224,7 @@
   "src/lib/producer-identity.ts": 70,
   "src/lib/project-init.ts": 176,
   "src/lib/prompt-manifest.ts": 65,
+  "src/lib/prompt-render.ts": 500,
   "src/lib/proof-grammar.ts": 30,
   "src/lib/proof-queue-audit.ts": 93,
   "src/lib/provenance.ts": 33,
@@ -286,6 +288,6 @@
   "src/lib/worker.ts": 1250,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 17000,
+  "src/run-task.ts": 16250,
   "src/spike.ts": 18
 }

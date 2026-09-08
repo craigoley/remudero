@@ -1,0 +1,109 @@
+- id: W1-T3122
+  title: "A DEPENDENCY-BEARING BLOCKER RESTARTS THE WHOLE DAEMON ONCE PER MINUTE — `runDaemon` returns `blocked`, exit 76 makes the entrypoint fetch/reboot, and the next lifetime rediscovers the same open head instead of parking only its dependent subtree and continuing independent work"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 24.00
+  files: [src/lib/daemon.ts, test/a-genuine-blocker-does-not-restart-the-daemon.test.ts]
+  origin: "operator-session#remove-routine-fleet-maintenance-2026-09-08"
+  plan_refs: ["W1-T46", "W1-T77", "W1-T174", "W1-T2537", "W1-T2568", "W1-T2964", "W1-T2965"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED LIVE ON AZURE AT 2026-09-08T03:58Z. One completed daemon lifetime attempted W1-T2885
+    and W1-T2898, merged nothing, correctly reviewed the newly-green #4549 and #4550, then reported
+    `blocked — W1-T2885 → blocked_ci (#4551) — blocks W1-T2886..W1-T2894`. The entrypoint classified
+    that normal queue fact as exit 76, slept 60 seconds, fetched/checked out the same main and started
+    another full daemon lifetime; this was already restart 3/100. The new lifetime reprinted the
+    stale-gc warning and re-entered the complete boot/reconciliation path while the material blocker
+    remained the same open PR head. Container liveness was healthy throughout. This is churn, not
+    recovery.
+
+    THE FULL RESOLUTION CHAIN AT origin/main 3514b1cc IS DIRECT. `processDispatchResult` returns
+    `genuine_blocker` for a non-merged task with real dependents after its fix/escalation path is
+    exhausted. The settlement loop captures its detail and immediately returns
+    `summary("blocked", ...)`. `daemonExitCode` maps that to 76. `deploy/entrypoint.sh` treats 76 as
+    an in-container restart: sleep, `sync_tree`, checkout and execute the daemon again. No material
+    input is required to change, so the same task may buy another boot every minute.
+
+    W1-T2537 CORRECTLY STOPPED THIS CONDITION FROM SPENDING DOCKER'S CRASH BUDGET, BUT PRESERVED THE
+    RESTART. That fixed the outage caused by exhausting `on-failure`; it did not establish that a
+    completed blocked pass needs a new process. W1-T2964 and W1-T2965 also already shipped and fix
+    different freshness loops. The live restart above is neither crash nor freshness: the resident
+    code is current and one queue subtree is waiting for its PR to change.
+
+    THE PERSISTENT DAEMON ALREADY HAS THE RIGHT WAITING MACHINERY. Its empty-frontier arm stays alive,
+    runs the same full/light PR reconciliation, and wakes early on signed GitHub events. Eligibility
+    already supports `excludeIds`; unmet dependencies already keep descendants out while unrelated
+    work remains eligible. The missing operation is to turn a terminal genuine blocker into a
+    daemon-lifetime parked runtime fact instead of a process-lifetime exit. No new scheduler, poller,
+    GitHub read or durable queue is needed.
+
+    THIS DOES NOT BUILD THROUGH A GAP. A parked task remains unmerged, so the existing dependency
+    predicate continues to refuse every descendant. It only stops that blocked subtree from killing
+    the scheduler that could review/fix its PR and build independent tasks. Direct `rmd drain` stays
+    one-shot and keeps its terminal blocked result; only the persistent daemon changes.
+  design: |
+    (i) PARK AT THE EXISTING BLOCK DECISION. After the existing fix attempt and one deduped escalation,
+    a genuine blocker records one runtime park keyed by task id and the open-PR ownership fact. It does
+    not return a `blocked` summary. The settlement loop finishes every already-admitted sibling and
+    begins another daemon cycle in the same process.
+
+    (ii) EXCLUDE THE PARKED TASK, NOT THE DAEMON. Thread the daemon-lifetime parked-id set through the
+    existing `NextRunnableOpts.excludeIds` eligibility seam. The task's unmerged state naturally keeps
+    its descendants behind `unmetDependencies`; unrelated frontier tasks remain eligible and can fill
+    every available lane. Do not mutate the on-disk plan or add `status: blocked` to declarative state.
+
+    (iii) LET THE EXISTING PR PIPELINE OWN THE OPEN HEAD. Full and light sweeps continue on their normal
+    event/timer clocks while a task is parked. A still-open PR is never handed back to `runOne`; review,
+    CI repair, conflict resolution and merge remain sweep actions. The same-cycle cached `isMerged` /
+    `isOpenPr` projection is the re-arm source, with zero new GitHub calls.
+
+    (iv) RE-ARM ONLY ON MATERIAL OWNERSHIP CHANGE. A credited merge removes the task from the park and
+    unlocks its descendants. A confirmed terminal close/no-open-PR removes the park so the task may be
+    rebuilt. An unreadable projection preserves the park fail-closed; a timer alone never re-dispatches
+    the identical head. A signed GitHub event already wakes reconciliation early, so no second event
+    consumer is introduced.
+
+    (v) KEEP REAL PROCESS BOUNDARIES. STOP and PAUSE keep their current priority. A material source or
+    dependency advance still exits through the existing freshness path after the forward-progress
+    guard. A real error still exits as a crash. `DAEMON_EXIT_BLOCKED` and the entrypoint's exit-76 arm
+    may remain as defensive compatibility, but an ordinary persistent-daemon blocker cannot reach it.
+
+    (vi) MAKE THE SAVED WORK MEASURABLE. Emit one `daemon.block.parked` row with task, PR and dependent
+    count, one `daemon.block.rearmed` row with the material reason, and expose parked ids through the
+    existing dispatch-filter/idle census. Do not emit one park/escalation row per poll. This makes the
+    removed restarts and still-blocked subtree visible without another status walk.
+  acceptance:
+    - claim: "a dependency-bearing blocked_ci fixture parks the task and completes another daemon cycle in the same process instead of returning a blocked summary"
+      proof: "unit test: test/a-genuine-blocker-does-not-restart-the-daemon.test.ts"
+    - claim: "the parked task and its descendants are not re-dispatched across unchanged ticks, while an independent task still enters an available lane"
+      proof: "unit test: test/a-genuine-blocker-does-not-restart-the-daemon.test.ts"
+    - claim: "an unchanged open PR produces one park and one escalation for the episode rather than one of each per poll"
+      proof: "unit test: test/a-genuine-blocker-does-not-restart-the-daemon.test.ts"
+    - claim: "a credited merge unlocks dependents and a confirmed closed/no-open-PR state re-arms the task using the existing projection, while an unreadable state remains parked fail-closed"
+      proof: "unit test: test/a-genuine-blocker-does-not-restart-the-daemon.test.ts"
+    - claim: "event-driven full/light reconciliation remains active while every runnable task belongs to a parked subtree, with no new GitHub reader or timer-based re-dispatch"
+      proof: "unit test: test/a-genuine-blocker-does-not-restart-the-daemon.test.ts"
+    - claim: "STOP, PAUSE, material freshness, real-error exit and direct one-shot drain semantics remain unchanged"
+      proof: "unit test: test/a-genuine-blocker-does-not-restart-the-daemon.test.ts"
+  falsifier: |
+    Close without implementation if a dependency-bearing non-merged result does not terminate the
+    persistent daemon or if exit 76 does not start a new in-container lifetime. Checked at
+    origin/main 3514b1cc: `src/lib/daemon.ts` returns `summary("blocked", blockedDetail)` after the
+    settlement loop, `daemonExitCode("blocked")` returns 76, and `deploy/entrypoint.sh` sleeps,
+    syncs and restarts on 76. The live 03:58Z log showed that exact chain at restart 3/100.
+
+    Also close if an existing runtime park already excludes only the blocker while keeping its PR
+    reconciliation and independent frontier alive. `NextRunnableOpts.excludeIds` exists in
+    `src/lib/drain.ts`, but `runDaemon` supplies no daemon-lifetime set and instead returns. Do not
+    falsify this from W1-T2537, W1-T2964 or W1-T2965: their merged tests preserve exit-76 restart,
+    content-aware freshness and first-cycle progress respectively; none parks a queue subtree.
+  note: |
+    `W1-T3122` is the id actually held by `refs/rmd-id/W1-T3122`; the reservation walk advanced over
+    W1-T3117..W1-T3121 and those ids must not be reused. One concern only: make a normal queue blocker
+    an in-process scheduler state rather than a whole-process maintenance cycle. No deploy, container
+    recycle, queue-policy change, provider-routing change or object maintenance is part of this task.
