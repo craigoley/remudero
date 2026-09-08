@@ -1080,7 +1080,7 @@ test("W1-T345: distinct classes on the same taskId, no PR, never dedup against e
   assert.equal(issues.calls.length, 2);
 });
 
-test("W1-T345: a listOpen read failure files rather than suppresses, for a referent-less escalation exactly as it already does for a PR-keyed one", () => {
+test("W1-T2912: a listOpen read failure refuses to create rather than falling through to create(), for a referent-less escalation exactly as it does for a PR-keyed one", () => {
   const path = ledgerPath();
   const store = fakeIssueStore();
   const boom: IssueGateway = {
@@ -1094,8 +1094,12 @@ test("W1-T345: a listOpen read failure files rather than suppresses, for a refer
     ledgerPath: path,
     runId: "RUN-1",
   });
-  assert.ok(url, "an unreadable open-issue listing still files the escalation rather than suppressing it");
-  assert.equal(store.calls.length, 1, "the failed read falls through to create(), never a silent drop");
+  assert.equal(url, "", "an unreadable open-issue listing must not manufacture an issue URL — none was opened");
+  assert.equal(store.calls.length, 0, "the failed read refuses to create — a REST outage must never flood the inbox");
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].step, "escalation.dedup_unreadable");
+  assert.match(lines[0].error, /HTTP 502/);
 });
 
 test("ghIssueGateway.comment: posts a plain comment without closing the issue", () => {

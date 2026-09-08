@@ -463,6 +463,7 @@
     "test/escalate.test.ts": 1748,
     "test/escalation-answer-links.test.ts": 1182,
     "test/escalation-catalogue.test.ts": 1526,
+    "test/escalation-dedup-fails-closed-on-list-error.test.ts": 0,
     "test/escalation-evidence-floor.test.ts": 1041,
     "test/escalation-issue-list-rest.test.ts": 1171,
     "test/escalation-judge-is-wired.test.ts": 0,
