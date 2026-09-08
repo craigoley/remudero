@@ -9,10 +9,18 @@
   risk: high
   origin: retro#recon-2026-09-05
   plan_refs: ["§6", "§8", "W1-T934"]
-  files: [package.json, package-lock.json, .dependency-cruiser.cjs, src/lib/settings.ts, src/lib/review.ts, test/dependency-declarations-match-use.test.ts]
+  files: [.dependency-cruiser.cjs, package.json, package-lock.json, scripts/source-size-baseline.json, scripts/test-tier-manifest.json, src/lib/ci-parity.ts, src/lib/settings.ts, src/lib/review.ts, test/dependency-declarations-match-use.test.ts, test/settings.test.ts]
   status: queued
   attempts: 0
   rationale: |
+    SCOPE AMENDMENT 2026-09-08. The implementation necessarily updates the existing settings
+    regression suite and the mandatory test-tier and source-size registries. Its new dependency
+    declaration test calls `git ls-files` over `src/`, so `censusPopulationDrift` discovered it as
+    census-shaped and all four CI shards refused the undisclosed member. Registering that explicit
+    refusal requires `src/lib/ci-parity.ts`; the failing CI log is the evidence for the widening,
+    not an adjacent cleanup. These four paths make the filed scope match the source branch's
+    actual diff and the repository gates needed to validate it.
+
     Audit recon-2026-09-05 R-55 (OBSERVED). At f7ceb86: `package.json:91` lists `playwright`
     under `devDependencies` while `src/lib/review.ts:1856,1872` requires it at runtime for the
     review's browser step — a production install (`npm ci --omit=dev`, the shape the container

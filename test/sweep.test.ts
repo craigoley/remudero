@@ -4774,11 +4774,11 @@ test("W1-T2998: a recordable ratchet failure is repaired without dispatching a w
   const deps = ratchetDeps({
     repairRecordableRatchet: (p2, scripts) => { repaired.push({ pr: p2.prNumber, scripts }); return true; },
   });
-  await runSweep([ratchetRedPr(["comment-load-ratchet", "source-size"])], deps, {
+  await runSweep([ratchetRedPr(["comment-load-ratchet"])], deps, {
     ...DEFAULT_SWEEP_POLICY,
     recordableRatchetRepairEnabled: true,
   });
-  assert.deepEqual(repaired, [{ pr: 4330, scripts: ["comment-load-ratchet", "source-size-ratchet"] }]);
+  assert.deepEqual(repaired, [{ pr: 4330, scripts: ["comment-load-ratchet"] }]);
   assert.deepEqual(deps.fixed, [], "a repaired ratchet must NOT also spend a fix dispatch");
   assert.equal(deps.steps.filter((l) => l.step === "sweep.ratchet_repaired").length, 1, "the repair is ledgered so the digest can see it");
 });
@@ -4847,7 +4847,7 @@ test("W1-T2998 (falsifier): DISABLED is the shipped default — no repair is tak
 test("W1-T2998: the admitted set is DERIVED from the artifact registry, never hand-listed", () => {
   const admitted = recordableRatchetScripts();
   assert.ok(admitted.has("comment-load-ratchet"));
-  assert.ok(admitted.has("source-size-ratchet"));
+  assert.ok(admitted.has("source-size-baseline:legacy"), "legacy conflict recovery remains declared under a non-gate name");
   // Structural, not remembered: these own no baseline artifact, so they are absent from the
   // registry and cannot be admitted by forgetting to exclude them.
   assert.equal(admitted.has("negative-reachability-ratchet"), false);
@@ -4855,6 +4855,7 @@ test("W1-T2998: the admitted set is DERIVED from the artifact registry, never ha
   // The --no-record twin regenerates nothing and must never match by substring.
   assert.equal(admitted.has("source-size-signal"), false);
   assert.equal(recordableRatchetRepairFor({ redRequiredChecks: ["source-size-signal"] } as never), undefined);
+  assert.equal(recordableRatchetRepairFor({ redRequiredChecks: ["source-size"] } as never), undefined);
 });
 
 test("W1-T2998 (falsifier): nothing to record is not a repair — empty and dirty both decline", () => {

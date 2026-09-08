@@ -1,0 +1,58 @@
+- id: W1-T3205
+  title: "EVERY PR THAT ADDS A TEST FILE IS BORN RED, BECAUSE NOTHING SEEDS THE TIER MANIFEST BEFORE THE PUSH — W1-T2904 made an untiered test file refuse EVERY ci-shard, but `hooks/pre-push` does not check it, `ci-parity` does not carry it, and no worker prompt names it: the remedy is one flag and it is discoverable only from a failed CI cycle"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 8.00
+  files: [hooks/pre-push, test/a-worker-that-adds-a-test-file-is-born-red.test.ts]
+  origin: "operator-session#fleet-throughput-2026-09-08"
+  plan_refs: ["W1-T2904", "W1-T3072", "W1-T3057"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T2904's refusal is correct and this task does not touch it: a test file the manifest has
+    never heard of cannot be trusted by the fast/slow split, so `--run` refuses. What is missing is
+    any way to learn that BEFORE a full CI cycle has been spent.
+
+    THREE SURFACES THAT COULD CARRY IT, AND NONE DOES:
+      hooks/pre-push        runs `scripts/rule15-precheck.mjs` and a census subset. Not this.
+      src/lib/ci-parity.ts  mentions the manifest only as the slow-tier SUBSET a job runs, not as a gate.
+      the worker prompt     never names `test-tier-manifest` at all (grep over src/lib/prompt*: 0).
+
+    SO THE FAILURE IS DISCOVERABLE ONLY FROM CI, AND IT IS EXPENSIVE THERE. The refusal fires inside
+    the test runner, so it reddens EVERY ci-shard plus test-slow at once — a PR that added one file
+    burns a full matrix, and the fix rung then spends a strike on a diff whose only defect is a
+    missing one-line placeholder.
+
+    MEASURED 2026-09-08 on the live board, reading each PR's own ci-shard log:
+
+      #4698  "test-tier-manifest: refusing to run — 1 test file(s) are untiered (see --check)"
+      #4692  same refusal, same shape
+      #4681, #4684  (operator PRs earlier the same day) same refusal, same shape
+
+    Four PRs, one cause, all of them adding exactly one test file — which is what a TDD task does by
+    construction, so this is the COMMON case for this fleet, not an edge.
+
+    THE REMEDY ALREADY EXISTS AND IS ONE FLAG: `node scripts/test-tier-manifest.mjs --seed` records a
+    placeholder at duration 0 — "seeded, unmeasured, defaults to fast", replaced by a real number on
+    the next `--record-evidence` pass. Nothing is invented and no tier decision is made.
+
+    PUT THE CHECK WHERE THE SIBLING REFUSAL ALREADY LIVES. `hooks/pre-push` already runs
+    `rule15-precheck.mjs` for exactly this reason — CLAUDE.md's own note on it reads "catches it
+    locally in about a second and names the remedy — run it before pushing". This is the same shape,
+    one file over: refuse the push, print the `--seed` line, cost a second instead of a CI matrix.
+
+    NOT IN SCOPE: seeding AUTOMATICALLY from the hook. A hook that writes a tracked baseline behind
+    the author's back is the W1-T3180 hazard (a gate that mutates the tree it judges, whose value
+    then rides along in `git add -A` unnoticed). REFUSE AND NAME THE COMMAND; let the author run it.
+    Also not in scope: changing when `--run` refuses, or the manifest format.
+  acceptance:
+    - claim: "a push adding a test file the manifest has never heard of is refused locally, naming the --seed command, before any CI cycle is spent"
+      proof: "unit test: test/a-worker-that-adds-a-test-file-is-born-red.test.ts"
+    - claim: "the check rides hooks/pre-push beside the rule15 precheck rather than a new surface"
+      proof: "grep: hooks/pre-push in test/a-worker-that-adds-a-test-file-is-born-red.test.ts"
+    - claim: "the hook REFUSES and names the command rather than seeding the tracked manifest itself"
+      proof: "grep: MUTANT in test/a-worker-that-adds-a-test-file-is-born-red.test.ts"

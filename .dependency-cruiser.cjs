@@ -54,7 +54,8 @@ module.exports = {
     // tsc-based extractor only supports typescript >=2 <7, and this repo runs
     // typescript@7 (src/lib/config.ts et al target ES2022/nodenext). swc has
     // no such ceiling, so it — not the project's own tsc version — drives
-    // extraction here.
+    // extraction here. The parser setting silently requires the @swc/core npm
+    // package even though no src file imports it.
     parser: "swc",
     enhancedResolveOptions: {
       exportsFields: ["exports"],

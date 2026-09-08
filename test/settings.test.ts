@@ -5,6 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
+  assertSdkVersionField,
+  INSTALLED_CLAUDE_AGENT_SDK_VERSION,
   SANDBOX_KEYS,
   validateWorkerSettings,
   WorkerSettingsError,
@@ -407,12 +409,36 @@ test("W1-T2216: the guard still refuses an unknown or misplaced sandbox key exac
   );
 });
 
-test("W1-T2216: the pin marker records what was verified and when, not a bare version", () => {
-  const settingsSrcPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "settings.ts");
-  const src = readFileSync(settingsSrcPath, "utf8");
-  assert.match(
-    src,
-    /verified equal to SandboxSettingsSchema at SDK \d+\.\d+\.\d+, \d{4}-\d{2}-\d{2}/,
-    "the pin marker must record the SDK version AND the date it was verified, not a bare version number",
+test("W1-T2216: settings guard reports the installed SDK version, never a stale literal", () => {
+  const version = readInstalledSdkVersion();
+  assert.equal(INSTALLED_CLAUDE_AGENT_SDK_VERSION, version);
+  assert.throws(
+    () => validateWorkerSettings({ ...GOOD, sandbox: { ...GOOD.sandbox, notARealKey: true } }),
+    (e: unknown) =>
+      e instanceof WorkerSettingsError &&
+      (e as Error).message.includes(`installed SDK ${version} SandboxSettingsSchema`),
+    "the error must cite the version read from the installed SDK package",
   );
+});
+
+// W1-T2916: assertSdkVersionField is the extracted guard readInstalledClaudeAgentSdkVersion()
+// calls after reading the SDK's package.json — a branch no fixture drove before this task,
+// which diff-coverage caught as an added, uncovered line.
+test("W1-T2916: assertSdkVersionField rejects a package.json with no usable version string", () => {
+  assert.throws(
+    () => assertSdkVersionField({}, "@x/y"),
+    /@x\/y package\.json does not declare a version\./,
+  );
+  assert.throws(
+    () => assertSdkVersionField({ version: "" }, "@x/y"),
+    /@x\/y package\.json does not declare a version\./,
+  );
+  assert.throws(
+    () => assertSdkVersionField({ version: 3 }, "@x/y"),
+    /@x\/y package\.json does not declare a version\./,
+  );
+});
+
+test("W1-T2916: assertSdkVersionField returns a real version string unchanged", () => {
+  assert.equal(assertSdkVersionField({ version: "1.2.3" }, "@x/y"), "1.2.3");
 });

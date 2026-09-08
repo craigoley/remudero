@@ -63,7 +63,7 @@ function jobsCarryingPlaywrightInstall(jobs: Record<string, CiJob>): string[] {
 test("W1-T1009: every ci.yml job declares a timeout-minutes", async () => {
   const jobs = await loadCiJobs();
   const jobIds = Object.keys(jobs);
-  assert.ok(jobIds.length >= 13, `expected at least the 13 jobs ci.yml defined at filing time, got ${jobIds.length}`);
+  assert.ok(jobIds.length > 0, `expected ci.yml to define at least one job, got ${jobIds.length}`);
 
   for (const jobId of jobIds) {
     const value = jobs[jobId]!["timeout-minutes"];

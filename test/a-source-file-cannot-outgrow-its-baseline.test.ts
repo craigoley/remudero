@@ -278,8 +278,13 @@ test("W1-T2734 prerequisite: source-size-signal is callable while the blocking c
   assert.equal(pkg.scripts["source-size-signal"], "node scripts/source-size-ratchet.mjs");
   assert.equal(
     pkg.scripts["source-size-ratchet"],
+    "node scripts/source-size-ratchet.mjs",
+    "the worker-contract command name remains callable but now runs the nonblocking signal mode",
+  );
+  assert.equal(
+    pkg.scripts["source-size-baseline:legacy"],
     "node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json",
-    "the historical gate remains reproducible without owning the default signal path",
+    "the historical fixture remains reproducible under an explicit non-gate name",
   );
 });
 

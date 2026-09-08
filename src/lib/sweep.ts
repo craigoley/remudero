@@ -231,7 +231,7 @@ export function isPureConcurrentAddition(files: readonly ConflictFileDiff[]): bo
  *  A path absent from the table stays refused: admission is bounded by a list a human wrote. Each
  *  value is the `package.json` script name — DATA (rule 2). // Why: docs/forensics/sweep.md. */
 export const REGENERABLE_ARTIFACT_GENERATORS: Readonly<Record<string, string>> = Object.freeze({
-  "scripts/source-size-baseline.json": "source-size-ratchet",
+  "scripts/source-size-baseline.json": "source-size-baseline:legacy",
   // W1-T3015 — THE TWIN GATE, REGISTERED AT LAST. `comment-load-ratchet` prints
   // "record it in scripts/comment-load-baseline.json" as its own remedy, exactly as the
   // source-size gate above prints its own, but that path was absent here — so committing the edit
@@ -1331,11 +1331,10 @@ export function recordableRatchetRepairFor(
   return scripts.length > 0 ? scripts.sort() : undefined;
 }
 
-/** W1-T2998 — a CI check name to the npm script that regenerates its artifact. The registry keys on
- *  SCRIPT names and CI names them jobs, so the two agree exactly (`comment-load-ratchet`) or the job
- *  drops the suffix (`source-size` for `source-size-ratchet`). Both forms are matched EXPLICITLY
- *  against the derived set — never by substring, which would let `source-size-signal` (the
- *  `--no-record` twin that regenerates nothing) match `source-size-ratchet`. */
+/** W1-T2998 — a CI check name to the npm script that regenerates its artifact. Exact names and the
+ *  historical `<check>-ratchet` form are matched; W1-T3140 renamed source-size's compatibility
+ *  generator to `source-size-baseline:legacy`, so the stable `source-size` sensor can no longer be
+ *  mistaken for a mechanically recordable failure. */
 function resolveRatchetScript(checkName: string, admitted: ReadonlySet<string>): string | undefined {
   if (admitted.has(checkName)) return checkName;
   const suffixed = `${checkName}-ratchet`;
