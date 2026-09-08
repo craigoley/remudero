@@ -406,8 +406,24 @@ async function waitForStubValue(elements: Map<string, StubElement>, id: string, 
   assert.fail(`timed out waiting for ${id}`);
 }
 
+/** Poll a stub element's innerHTML. `waitForStubValue` reads textContent, which the
+ *  self-measurement list never sets — it writes markup, so asserting on it needs its own wait or
+ *  the assertion lands before the first refresh has rendered anything. */
+async function waitForStubHtml(
+  elements: Map<string, StubElement>,
+  id: string,
+  predicate: (html: string) => boolean,
+): Promise<string> {
+  for (let i = 0; i < 50; i += 1) {
+    const html = String(elements.get(id)?.innerHTML ?? "");
+    if (predicate(html)) return html;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`timed out waiting for ${id} innerHTML`);
+}
+
 async function withStubbedBoot(
-  payloads: { accountUsage?: unknown; providerRouting?: unknown },
+  payloads: { accountUsage?: unknown; providerRouting?: unknown; selfMeasurement?: unknown },
   fn: (elements: Map<string, StubElement>) => Promise<void>,
 ): Promise<void> {
   const { document, elements } = makeStubDocument();
@@ -447,7 +463,7 @@ async function withStubbedBoot(
     "/v1/account-usage": payloads.accountUsage ?? null,
     "/v1/provider-routing": payloads.providerRouting ?? { version: 1, state: "unknown", freshness: "unknown" },
     "/v1/plan/view": null,
-    "/v1/self-measurement": null,
+    "/v1/self-measurement": payloads.selfMeasurement ?? null,
   };
 
   try {
@@ -589,4 +605,35 @@ test("bootConsoleShellClient's GLANCE strip actually USES isBlockedRow (test/con
     assert.equal(blocked, "1", "the one escalated (needsHuman) task must count as blocked on the glance strip");
     await page.close();
   });
+});
+
+// ── W1-T2902: the self-measurement panel, driven through the SAME boot harness ──────────────
+//
+// `renderSelfMeasurement` is an inner function of `bootConsoleShellClient`, so no direct import
+// reaches it and `diff-coverage` named its whole body as added-and-uncovered. It IS reachable from
+// boot — the refresh cycle fetches GET /v1/self-measurement and calls it — so the harness that
+// already boots the client is the instrument, not a new one.
+
+test("W1-T2902: an unreadable self-measurement response renders AS unreadable, never as an empty list", async () => {
+  // The W1-T119 distinction this panel exists to preserve: "the ledger union could not be read" is
+  // not "the fleet has never measured itself". A quietly-empty list would state the second.
+  await withStubbedBoot(
+    { selfMeasurement: { status: "unreadable", reason: "ledger union unreadable" } },
+    async (elements) => {
+      await waitForStubValue(elements, "self-measurement-summary", (v) => v === "unreadable");
+      const list = elements.get("self-measurement-list");
+      assert.match(String(list?.innerHTML ?? ""), /self-measurement-unreadable/);
+      assert.match(String(list?.innerHTML ?? ""), /ledger union unreadable/, "the reason is shown, not swallowed");
+    },
+  );
+});
+
+test("W1-T2902: an ok response renders one row per verb rather than only the verbs that ran", async () => {
+  await withStubbedBoot(
+    { selfMeasurement: { status: "ok", rows: [{ ts: new Date().toISOString(), verb: "retro", result: {} }] } },
+    async (elements) => {
+      const html = await waitForStubHtml(elements, "self-measurement-list", (h) => h.length > 0);
+      assert.doesNotMatch(html, /self-measurement-unreadable/, "an ok response is not the unreadable branch");
+    },
+  );
 });
