@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
-import { spawn, execFileSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, execFileSync, type ChildProcessByStdio } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SELF_SYNC_IMPORT = pathToFileURL(join(REPO_ROOT, "src", "lib", "self-sync.ts")).href;
+type ReexecParentProcess = ChildProcessByStdio<null, Readable, Readable>;
 
 function gitFixture(): { originDir: string; localDir: string } {
   const root = mkdtempSync(join(tmpdir(), "rmd-reexec-signal-"));
@@ -78,7 +80,7 @@ function cleanEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   return env;
 }
 
-function spawnParent(scriptPath: string, env: NodeJS.ProcessEnv): ChildProcessWithoutNullStreams {
+function spawnParent(scriptPath: string, env: NodeJS.ProcessEnv): ReexecParentProcess {
   return spawn(process.execPath, ["--import", "tsx", scriptPath], {
     cwd: REPO_ROOT,
     env,
@@ -87,7 +89,7 @@ function spawnParent(scriptPath: string, env: NodeJS.ProcessEnv): ChildProcessWi
 }
 
 async function waitForExit(
-  child: ChildProcessWithoutNullStreams,
+  child: ReexecParentProcess,
   timeoutMs = 8_000,
 ): Promise<{ status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
   let stdout = "";
