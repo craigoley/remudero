@@ -55,7 +55,7 @@
   origin: oper#needs-me-filings-2026-08-04
   plan_refs: ["W1-T182", "W1-T313", "§7B"]
   files: [src/lib/escalate.ts, src/lib/serve.ts, test/escalate.test.ts, test/serve.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a pure classifier plus rendered HTML, both assertable in-process.
     risk:high — set by Rule 19's span, not blast radius: the type must exist end-to-end (classify in

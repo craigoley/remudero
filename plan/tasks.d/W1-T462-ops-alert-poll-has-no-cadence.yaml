@@ -86,7 +86,7 @@
   origin: recon#osv-advisories-unwatched-2026-08-13
   plan_refs: ["W1-T55"]
   files: [src/run-task.ts, src/lib/daemon.ts, plan/alert-policy.yaml, test/ops-alert-cadence.test.ts, test/ops.test.ts, test/daemon.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT, AND IT WAS MEASURED RATHER THAN PREDICTED. This shard was first
     written at `medium` and `rmd lint-plan` REFUSED it in as many words: `spans 4 distinct

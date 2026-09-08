@@ -70,7 +70,7 @@
   origin: recon#idle-gated-rung-invisible-2026-08-13
   plan_refs: ["W1-T341", "W1-T318"]
   files: [src/lib/daemon.ts, src/lib/auto-triage.ts, test/auto-triage-rung.test.ts, test/auto-triage-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — the band is Rule 19's SPAN across `src/lib/daemon.ts` and
     `src/lib/auto-triage.ts` plus their suites, not blast radius; `sizingViolation`

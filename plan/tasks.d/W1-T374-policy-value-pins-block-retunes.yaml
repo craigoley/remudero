@@ -72,7 +72,7 @@
       proof: "unit test: test/policy.test.ts"
     - claim: "the shipped policy file is asserted by shape and bounds rather than by hand-written figures"
       proof: "unit test: test/policy.test.ts"
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is an assertion over the policy loader against the shipped file and
     fixtures, with no operator present. It touches no DECISIONS.md, so W1-T353's verify:human

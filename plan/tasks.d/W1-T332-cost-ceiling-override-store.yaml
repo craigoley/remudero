@@ -65,7 +65,7 @@
   origin: oper#runtime-config-slice-2026-08-04
   plan_refs: ["§5", "W1-T330", "W1-T331"]
   files: [src/lib/policy.ts, src/lib/config.ts, test/policy.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — precedence, bounds and fallback are pure decisions over a file, all
     machine-checkable without an operator present.

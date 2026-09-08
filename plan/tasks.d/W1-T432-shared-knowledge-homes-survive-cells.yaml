@@ -47,7 +47,7 @@
   origin: oper#architecture-2026-08-11
   plan_refs: ["W1-T425", "W1-T419"]
   files: [src/lib/config.ts, src/run-task.ts, test/learnings-homes-config.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — path resolution and both falsifier directions are fixture-decidable
     offline. risk:high — the files: span (config seam plus its run-task consumers) is Rule

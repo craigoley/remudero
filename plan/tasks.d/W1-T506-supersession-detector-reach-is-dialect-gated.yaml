@@ -92,7 +92,7 @@
   origin: recon#supersession-detector-reach-2026-08-15
   plan_refs: ["W1-T485", "W1-T497", "W1-T458", "W1-T471"]
   files: [src/lib/status.ts, test/status.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, so `sizingViolation`
     (`src/lib/task-linter.ts`) returns early before `subsystemsOf` is consulted. THE BAND IS THE SPAN,

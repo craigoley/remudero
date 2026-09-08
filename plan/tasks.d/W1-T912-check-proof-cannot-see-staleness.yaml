@@ -55,7 +55,7 @@
   origin: oper#check-proof-staleness-2026-08-16
   plan_refs: ["W1-T273", "W1-T362"]
   files: [src/run-task.ts, test/check-proof-base.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the comparison is decidable from two fixture trees with no network and
     no spawn beyond the executor this verb already drives.

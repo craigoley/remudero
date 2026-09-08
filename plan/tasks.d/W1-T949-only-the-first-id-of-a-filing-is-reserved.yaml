@@ -142,7 +142,7 @@
   origin: oper#multi-id-mint-gap-2026-08-17
   plan_refs: ["W1-T509", "W1-T518", "W1-T311"]
   files: [src/lib/task-id-reservation.ts, src/run-task.ts, src/lib/triage.ts, src/lib/ledger.ts, test/task-id-reservation.test.ts, test/plan-lane-mint.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify: human IS SET UP FRONT AND IS THE POINT OF THE SHARD, NOT A HEDGE. This task changes the

@@ -89,7 +89,7 @@
   origin: oper#uncreditable-owned-branch-2026-08-07
   plan_refs: ["W1-T64", "W1-T69", "W1-T149", "W1-T256", "P29", "P33", "P47"]
   files: [src/lib/status.ts, test/owned-branch-slug-credit.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high on BLAST RADIUS, not span — two files, one predicate. The band is inherited from
     W1-T377's own note: this rung GATES DISPATCH, and status.ts's header states that a false credit

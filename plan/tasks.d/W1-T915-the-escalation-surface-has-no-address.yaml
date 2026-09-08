@@ -83,7 +83,7 @@
   origin: "oper#console-has-no-address-2026-08-16"
   plan_refs: ["W1-T531", "W1-T507", "W1-T500", "W1-T152"]
   files: [src/lib/serve.ts, test/serve-reachability.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS SET UP FRONT — Rule 19 SPAN across src/ and test/, and independently warranted:
     this changes what can reach an authenticated control surface, so a wrong widening does not fail

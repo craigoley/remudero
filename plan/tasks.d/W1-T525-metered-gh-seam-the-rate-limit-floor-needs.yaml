@@ -137,7 +137,7 @@
   origin: "oper#rate-limit-floor-recon-2026-08-15"
   plan_refs: ["W1-T522", "W1-T523", "W1-T468", "W1-T494", "W1-T203"]
   files: [src/lib/open-prs-rest.ts, src/lib/worker.ts, test/open-prs-rest.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high is set UP FRONT and it is Rule 19's SPAN, not blast radius: the files: list
     crosses two source modules because the meter is read in one and consumed in the other.

@@ -93,7 +93,7 @@
   origin: pr#1631-limit-one-followup
   plan_refs: ["W1-T69", "W1-T256", "W1-T413", "P16"]
   files: [src/lib/status.ts, src/run-task.ts, test/trailer-multi-hit-preference.test.ts, test/already-satisfied-exit.test.ts, test/already-satisfied-unverifiable.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — nothing here needs an operator ruling. Design (iii) leaves ONE choice open and
     names the condition that decides it (does `ownsOwnRunBranch` discriminate the W1-T254 shape),

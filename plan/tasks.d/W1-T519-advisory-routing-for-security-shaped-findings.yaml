@@ -73,7 +73,7 @@
   origin: "oper#public-exposure-recon-2026-08-15"
   plan_refs: ["W1-T61", "W1-T493", "§5D"]
   files: [src/lib/task-linter.ts, test/task-linter.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:medium is Rule 19's SPAN, matching W1-T504's precedent for a single linter rule
     plus its falsifier — two files, one concern; blast radius is smaller still because the rule

@@ -72,7 +72,7 @@
   origin: oper#build-daemon-parallelism-2026-08-04
   plan_refs: ["W1-T326", "W1-T172", "W1-T325", "P19"]
   files: [src/lib/daemon.ts, src/run-task.ts, test/daemon-plan-freshness.test.ts, test/drain.test.ts, test/drain-lock.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — dispatch counts and concurrency are assertable in-process against the real lane
     path.

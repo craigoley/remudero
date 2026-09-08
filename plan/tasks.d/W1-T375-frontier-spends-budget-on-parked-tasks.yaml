@@ -69,7 +69,7 @@
   origin: oper#recon-plan-tab-overview-2026-08-05
   plan_refs: ["§7", "W1-T315"]
   files: [src/lib/panel-graph.ts, test/plan-view.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — the whole change is one predicate in a pure function with an existing test file.
     risk:high IS SET BY RULE 19's SPAN, NOT BY BLAST RADIUS, and the distinction is recorded so a

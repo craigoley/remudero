@@ -107,7 +107,7 @@
   origin: recon#access-jwt-grantor-2026-08-16
   plan_refs: ["W1-T500", "W1-T430", "W1-T404", "W1-T495", "W1-T431"]
   files: [src/lib/service.ts, test/identity-provider-seam.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and independently
     warranted twice over: this adds a way to obtain a write grant, and it lands in a function whose

@@ -72,7 +72,7 @@
   origin: oper#guard-complements-2026-08-11
   plan_refs: ["W1-T421", "W1-T246", "W1-T324"]
   files: [src/lib/task-linter.ts, src/run-task.ts, test/changed-tasks-raw-text.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — block splitting, union scope and both falsifier directions are all
     fixture-decidable offline.

@@ -124,7 +124,7 @@
   origin: recon#supersession-disposition-2026-08-16
   plan_refs: ["W1-T919", "W1-T916", "W1-T528", "W1-T494"]
   files: [src/lib/sweep.ts, src/run-task.ts, src/lib/policy.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across three source modules and a suite, and
     independently warranted: this is the first disposition that can CLOSE a pull request on the

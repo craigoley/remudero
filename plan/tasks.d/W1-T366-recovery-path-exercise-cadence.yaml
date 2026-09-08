@@ -79,7 +79,7 @@
   origin: oper#ruling-production-path-proofs-2026-08-05
   plan_refs: ["§5", "§5D", "W1-T212"]
   files: [.github/workflows/recovery-drill.yml, scripts/recovery-drill.mjs, test/recovery-drill.test.ts, test/awareness-surface-ratchet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is an assertion over a drill's own output against a fixture, with no
     operator present. NOT ruling-shaped: it builds an instrument and touches no DECISIONS.md, so

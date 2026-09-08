@@ -77,7 +77,7 @@
   origin: recon#triage-throttle-wrong-depth-2026-08-13
   plan_refs: ["W1-T469", "W1-T471"]
   files: [src/lib/daemon.ts, src/lib/auto-triage.ts, test/auto-triage-rung.test.ts, test/auto-triage-policy-seam.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/lib/daemon.ts` and
     `src/lib/auto-triage.ts` plus their suites; `sizingViolation` (`src/lib/task-linter.ts`) refuses

@@ -81,7 +81,7 @@
   origin: recon#proof-harness-env-leak-2026-08-14
   plan_refs: ["W1-T488"]
   files: [src/lib/review.ts, test/proof-spawner-env-isolation.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and `src/lib/review.ts`
     is the highest-consequence file this could touch.

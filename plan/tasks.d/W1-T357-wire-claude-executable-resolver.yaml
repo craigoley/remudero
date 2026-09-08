@@ -43,7 +43,7 @@
   origin: oper#followups-2026-08-05
   plan_refs: ["W1-T236", "W1-T215", "§4A"]
   files: [src/run-task.ts, test/daemon.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a boot-record assertion through the real daemonCommand, loop-stub seam only.
     risk:high — set by Rule 19's span (daemon, run-task), not blast radius: the slot lives in

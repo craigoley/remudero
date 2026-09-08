@@ -78,7 +78,7 @@
   origin: review#1709-confirm-nonce-store
   plan_refs: ["W1-T404"]
   files: [src/lib/service.ts, test/confirm-nonce-expiry.test.ts, test/write-tier-second-factor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every clause here is an engineering question with a derivable answer. The one
     question that WOULD need the operator (whether the fleet may enforce write tiers in production at

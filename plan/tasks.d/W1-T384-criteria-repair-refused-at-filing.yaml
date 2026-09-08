@@ -113,7 +113,7 @@
   origin: oper#ruling-rule15-class-2026-08-06
   plan_refs: ["W1-T353", "W1-T324", "W1-T369", "W1-T370"]
   files: [src/lib/task-linter.ts, test/task-linter.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is a linter verdict over a fixture task, decided in-process with no
     operator present and no network. This task is NOT ruling-shaped: it writes a linter, not a ruling,

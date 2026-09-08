@@ -103,7 +103,7 @@
   origin: recon#frontier-decline-reasons-2026-08-10
   plan_refs: ["W1-T1", "W1-T206", "W1-T271", "W1-T119"]
   files: [src/lib/status.ts, src/run-task.ts, test/breaker-reset-corroborated.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is decidable in-process against a seeded ledger file and an
     injected branch resolver. No network, nothing spawned, no operator present.

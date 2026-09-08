@@ -91,7 +91,7 @@
   origin: oper#gstack-recon-2026-08-15
   plan_refs: ["W1-T452", "W1-T494"]
   files: [src/lib/compaction.ts, test/worker-checkpoint-contract.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS SET UP FRONT because `files:` spans src/ and test/ and `sizingViolation`
     (src/lib/task-linter.ts) blocks at >=2 subsystems below that band — the band is Rule 19's SPAN,

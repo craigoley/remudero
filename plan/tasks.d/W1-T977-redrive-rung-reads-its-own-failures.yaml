@@ -133,7 +133,7 @@
   origin: "oper#redrive-rung-blind-to-pending-2026-08-18"
   plan_refs: ["W1-T124", "W1-T474", "W1-T123", "W1-T100", "W1-T471"]
   files: [src/lib/sweep.ts, src/run-task.ts, test/post-fix-reverification.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     src/run-task.ts IS DECLARED, AND THE COST IS ACCEPTED IN WRITING RATHER THAN WAVED AWAY.

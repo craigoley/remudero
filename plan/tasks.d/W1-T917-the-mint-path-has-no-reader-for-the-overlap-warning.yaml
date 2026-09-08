@@ -81,7 +81,7 @@
   origin: oper#mint-path-overlap-reader-2026-08-16
   plan_refs: ["W1-T533", "W1-T471", "W1-T494", "W1-T534"]
   files: [src/run-task.ts, test/next-task-id-overlap-warning.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and independently
     warranted: this adds network I/O to the verb an operator runs before every filing, so a wrong

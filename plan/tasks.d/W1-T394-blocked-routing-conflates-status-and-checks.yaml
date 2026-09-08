@@ -77,7 +77,7 @@
   origin: session-review#1441-blocked-routing-2026-08-07
   plan_refs: ["W1-T100", "W1-T138", "W1-T186", "W1-T389"]
   files: [src/lib/sweep.ts, test/sweep-blocked-routing.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is an in-process assertion over the rung table against synthetic
     OpenPrView fixtures, decidable with no operator present and no network.

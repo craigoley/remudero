@@ -67,7 +67,7 @@
   origin: oper#arm-path-irreversibility-2026-08-17
   plan_refs: ["W1-T919", "W1-T936"]
   files: [src/lib/review.ts, src/run-task.ts, test/arm-at-open.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify: human IS DELIBERATE AND IS NOT NEGOTIABLE FOR THIS SHARD. This task modifies the

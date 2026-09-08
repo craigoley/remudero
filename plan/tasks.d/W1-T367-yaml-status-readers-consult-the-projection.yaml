@@ -81,7 +81,7 @@
   origin: oper#status-readers-ruling-2026-08-05
   plan_refs: ["W1-T322", "W1-T324", "§12"]
   files: [src/lib/retro.ts, src/run-task.ts, src/lib/task-card.ts, test/retro.test.ts, test/ships-unwired-floor.test.ts, test/lint-plan-open-only.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is an assertion over a projection-fed decision, machine-checkable.
     risk:high — Rule 19 counts retro, run-task and task-card as distinct subsystems, and (ii) changes

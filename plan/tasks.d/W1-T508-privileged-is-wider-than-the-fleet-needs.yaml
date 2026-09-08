@@ -118,7 +118,7 @@
   origin: recon#privileged-is-wider-than-needed-2026-08-15
   plan_refs: ["W1-T496", "W1-T471"]
   files: [deploy/host-update.sh, deploy/Dockerfile, test/entrypoint-boot.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `deploy/` and `test/`, and the blast radius
     is genuinely high: a wrong flag set makes `containmentHolds` fail closed and STOPS EVERY DISPATCH,

@@ -81,7 +81,7 @@
   origin: oper#file-preflight-enobufs-2026-08-04
   plan_refs: ["§5", "§5C", "W1-T294"]
   files: [src/lib/commit-message.ts, src/lib/ci-parity.ts, test/preflight.test.ts, test/preflight-ci-parity.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — both claims are assertions over a real child process's status and output, fully
     machine-checkable with no operator present.

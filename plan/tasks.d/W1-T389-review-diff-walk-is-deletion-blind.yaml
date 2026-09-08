@@ -85,7 +85,7 @@
   origin: pr#1441-deletion-blind-changedfiles-2026-08-07
   plan_refs: ["W1-T58", "W1-T205", "W1-T274", "W1-T297", "W1-T386", "W1-T387"]
   files: [src/lib/review.ts, test/review-deletion-blind.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is an in-process assertion over walkDiff/changedFiles and the
     judge's own rollup against synthetic diffs, decidable with no operator present.

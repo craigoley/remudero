@@ -131,7 +131,7 @@
   origin: recon#fix-rung-never-reaches-a-session-pr-2026-08-16
   plan_refs: ["W1-T456", "W1-T516", "W1-T527", "W1-T440", "W1-T919"]
   files: [src/lib/sweep.ts, src/run-task.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across two source modules and a suite, and
     independently warranted: this widens what the fleet will dispatch a worker AT, and a wrong

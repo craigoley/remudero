@@ -119,7 +119,7 @@
   origin: "oper#empty-triage-merge-2026-08-17"
   plan_refs: ["#2075", "#2077", "#2078", "#2082"]
   files: [src/lib/triage.ts, src/lib/review.ts, src/run-task.ts, test/triage-proof-dialect.test.ts, test/empty-diff-merge-gate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify: human IS SET UP FRONT. Design items (i) and (ii) require determinations from source

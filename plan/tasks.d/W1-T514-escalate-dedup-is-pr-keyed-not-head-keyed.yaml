@@ -98,7 +98,7 @@
   origin: recon#red-prs-sat-unfixed-2026-08-15
   plan_refs: ["W1-T195", "W1-T513", "W1-T511", "W1-T382", "W1-T114"]
   files: [src/lib/sweep.ts, test/sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and the blast radius
     is independently high: this changes when the fleet opens a needs-human issue, so getting it wrong

@@ -72,7 +72,7 @@
   origin: recon#ledger-union-glob-2026-08-12
   plan_refs: ["P48", "W1-T119"]
   files: [src/lib/ledger-grep.ts, src/run-task.ts, test/ledger-corpus-both-forms.test.ts, test/ledger-grep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — no operator ruling is needed. Which files exist is measured, and that both
     verbs should read all of them is not a policy question.

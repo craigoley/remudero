@@ -66,7 +66,7 @@
   origin: oper#split-w1-t314-2026-08-04
   plan_refs: ["§7", "W1-T314"]
   files: [src/lib/serve.ts, test/serve.shell-ux.test.ts, test/serve.live-state.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — tab presence, URL round-trip and fetch counting are all machine-checkable
     against the real Chromium shell the serve.* suites already drive.

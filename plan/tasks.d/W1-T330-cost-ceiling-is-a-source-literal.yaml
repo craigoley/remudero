@@ -68,7 +68,7 @@
   origin: oper#console-governor-surface-2026-08-04
   plan_refs: ["§5", "W1-T252", "W1-T253"]
   files: [src/lib/policy.ts, src/lib/sweep.ts, plan/policy.yaml, test/policy.test.ts, test/policy-consumers.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — a loader field, a data row and two test locks.
     risk:high — it edits the substrate every other bounded row depends on; a loader mistake fails EVERY

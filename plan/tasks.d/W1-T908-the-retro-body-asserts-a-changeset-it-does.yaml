@@ -77,7 +77,7 @@
   origin: "recon#retro-body-changeset-2026-08-16"
   plan_refs: ["W1-T274", "W1-T494", "W1-T287"]
   files: [src/run-task.ts, test/retro-acceptance-repair.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "risk:high IS SET UP FRONT — Rule 19 SPAN across src/ and test/, and independently warranted:
     this edits a PR body automatically, so a wrong repair rewrites a human-visible claim without

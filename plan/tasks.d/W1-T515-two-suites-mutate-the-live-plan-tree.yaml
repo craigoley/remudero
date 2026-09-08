@@ -86,7 +86,7 @@
   origin: recon#suites-write-live-plan-2026-08-15
   plan_refs: ["W1-T494", "W1-T501", "W1-T120", "W1-T497"]
   files: [test/task-linter-wiring.test.ts, test/changed-tasks-raw-text.test.ts, test/fixtures/live-plan-writers/tasks.yaml]
-  status: queued
+  status: merged
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — `moduleIdFromPath` folds a `.test` basename onto its source,
     so `task-linter-wiring` and `changed-tasks-raw-text` are TWO subsystems and `sizingViolation`

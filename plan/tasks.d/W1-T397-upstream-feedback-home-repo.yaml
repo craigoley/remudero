@@ -85,7 +85,7 @@
   origin: oper#ruling-portability-recon-2026-08-07
   plan_refs: ["W1-T40", "W1-T396"]
   files: [src/lib/feedback.ts, src/run-task.ts, test/upstream-feedback-routing.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "verify:auto — every claim is decidable in-process against a synthetic checkout with an
     injected transport; no second machine and no live push are required to prove routing.
