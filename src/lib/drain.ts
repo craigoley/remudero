@@ -418,7 +418,11 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     opts.onFiltered?.(t, "continued-this-pass");
     return false;
   }
-  if (t.verify !== "auto" && !opts.releasedIds?.has(t.id)) {
+  // W1-T3206: the two states are SEPARATED rather than conflated by a negated optional chain —
+  // "no released set was supplied" and "this id is not in it" both refuse, but they are
+  // different facts and the catch-erasure census refuses the shape that hides that.
+  const released = opts.releasedIds !== undefined && opts.releasedIds.has(t.id);
+  if (t.verify !== "auto" && !released) {
     opts.onFiltered?.(t, "verify-not-auto");
     return false;
   }
