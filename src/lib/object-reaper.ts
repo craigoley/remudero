@@ -38,11 +38,20 @@ export interface ObjectReapDeps {
   looseObjectCount?: (repoDir: string) => number;
   /** Runs the prune. Injected so a test can assert the ARGV, which is where the expiry lives. */
   runPrune?: (repoDir: string, args: readonly string[]) => void;
+  /** SURVEY MODE. Every check the armed path runs still runs; nothing is spawned and nothing is
+   *  removed. ONE PREDICATE, TWO OUTCOMES — a survey that reached different probes would report a
+   *  decision nobody will ever make, which is the whole point of reading dispositions first. */
+  dryRun?: boolean;
+  /** Counts what a prune WOULD remove, for the survey. An ESTIMATE AT SURVEY TIME: the armed pass
+   *  runs later, against a repo that has moved. */
+  countPrunable?: (repoDir: string, args: readonly string[]) => number;
 }
 
 export interface ObjectReapResult {
-  /** Objects removed, or 0 when refused. */
+  /** Objects removed, or 0 when refused OR surveying. */
   pruned: number;
+  /** SURVEY ONLY: what a prune would have removed. Undefined on an armed pass. An estimate. */
+  wouldPrune?: number;
   /** Present iff nothing was pruned. Names the cause in the operator's own vocabulary. */
   refusedBecause?: string;
   looseBefore: number;
@@ -87,9 +96,9 @@ export function defaultLooseObjectCount(repoDir: string): number {
     const m = /^count: (\d+)$/m.exec(out);
     return m ? Number(m[1]) : 0;
   } catch {
-    // Unreadable reads as 0, and 0 is BELOW the floor, so an unreadable count can only ever cause a
-    // SKIP — never a prune. That is the safe direction for THIS input, unlike the probes above where
-    // unreadable must read as "held".
+    // Unreadable reads as 0, and 0 is BELOW the floor, so an unreadable count can only ever cause
+    // a SKIP — never a prune. That is the safe direction for this input, unlike the probes above,
+    // where unreadable must read as "held".
     return 0;
   }
 }
@@ -125,6 +134,23 @@ export function objectReapRefusal(
  * it on a refused pass would re-arm git's UNSUPERVISED automatic cleanup, which is precisely what
  * the operator's standing rule exists to prevent — the opposite of this function's purpose.
  */
+/** How many objects `git prune -n` would remove. Unreadable reads as 0 — a survey that cannot
+ *  measure reports nothing, and reporting nothing is never mistaken for authorising something. */
+export function defaultCountPrunable(repoDir: string, args: readonly string[]): number {
+  try {
+    const out = execFileSync("git", ["-C", repoDir, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return out.split("\n").filter((l) => l.trim().length > 0).length;
+  } catch {
+    // A survey that cannot measure reports nothing. Reporting nothing is never mistaken for
+    // authorising something: this value is ledgered, never compared against a threshold.
+    return 0;
+  }
+}
+
 export function reapGitObjects(
   repoDir: string,
   inflightDir: string,
@@ -137,6 +163,12 @@ export function reapGitObjects(
   const refusal = objectReapRefusal(repoDir, inflightDir, deps);
   if (refusal !== undefined) return { pruned: 0, looseBefore, refusedBecause: refusal };
 
+  // SURVEY: past every refusal above, so the disposition reported is the decision the armed path
+  // would have made. Returns BEFORE gc.log is touched and before anything is spawned.
+  if (deps.dryRun === true) {
+    const count = deps.countPrunable ?? defaultCountPrunable;
+    return { pruned: 0, wouldPrune: count(repoDir, ["prune", "-n", `--expire=${OBJECT_PRUNE_EXPIRY}`]), looseBefore };
+  }
   // Only now, with the prune committed to, does the auto-gc suppressor come off.
   try {
     rmSync(join(repoDir, ".git", "gc.log"), { force: true });

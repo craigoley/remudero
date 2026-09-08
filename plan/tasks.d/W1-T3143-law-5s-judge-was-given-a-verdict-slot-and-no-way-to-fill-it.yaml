@@ -1,0 +1,133 @@
+- id: W1-T3143
+  title: "LAW 5's JUDGE HAS A VERDICT SLOT AND NO WAY TO FILL IT — W1-T2977 shipped the consumer, the schema and the drift pin so a recorded `risk_ruling` can release a machine-authored shard at verify:auto, and shipped NO PRODUCER: `risk_ruling` appears in exactly three files across the tree (its type, its one linter read, and its own shard), no verb writes one, and no task in plan/tasks.d has ever carried one, so the only reachable rows in that refusal ladder are the blocking ones"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 18.00
+  files: [src/lib/risk-judge.ts, src/run-task.ts, test/a-filing-time-ruling-nothing-produces.test.ts]
+  origin: "operator-session#verify-flexibility-2026-09-08"
+  plan_refs: ["W1-T2977", "W1-T2959", "W1-T2694", "W1-T186", "W1-T248"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 at origin/main (41231c67), with a positive control on the same search shape.
+
+    (1) THE HALF THAT SHIPPED. W1-T2977 replaced Law 5's unconditional refusal with a ladder whose
+    last row reads: `machine` + `auto` + a ruling with action `proceed` and a matching pin -> PASS.
+    `machineAuthorVerifyViolation` (src/lib/task-linter.ts) implements every row. `TaskRiskRuling`
+    (src/lib/plan.ts) carries verdict, action, confidence, observed reasons, judged_at and a pin.
+    `taskRulingPin` digests what the task may DO — id, title, type, verify, risk, prompt, files,
+    acceptance — so a record edited after judgment drifts and re-blocks.
+
+    (2) THE HALF THAT DID NOT. `grep -ran risk_ruling src/ scripts/ bin/ plan/ .github/` returns
+    THREE lines: the type on plan.ts:144, the single read on task-linter.ts:1803, and W1-T2977's own
+    shard describing it. Positive control, same search shape: `author_class` appears across 9 files.
+    `grep -rl 'risk_ruling:' plan/tasks.d/` returns 0 — no task has ever carried one. `rmd --help`
+    names no verb for judging or ruling. NOTHING IN THIS REPO CAN WRITE THE FIELD, so the passing
+    row of the ladder is unreachable and the arm behaves exactly as it did before W1-T2977: every
+    machine-authored record at verify:auto blocks, benign or not, which is the defect that task
+    exists to remove.
+
+    (3) THE JUDGE EXISTS BUT JUDGES A DIFFERENT THING AT A DIFFERENT TIME. `runRiskJudge`
+    (run-task.ts) runs after a worker has produced a diff, over a `RiskJudgeChange` of changed files
+    plus gates state, and its `escalate` blocks that run. W1-T2977's design (i) says the ruling judge
+    runs "at FILING time" over the RECORD: "The judge runs at FILING time; the linter reads what the
+    filer recorded. That split is the whole design." Those are different inputs — a record has no
+    diff — which is why the existing call site cannot be pointed at this and why nothing was.
+
+    (3B) THE W1-T248 OVERLAP, RULED RATHER THAN NARROWED. `duplicate-surface` reports that this
+    shard declares a superset of W1-T248 on `src/lib/risk-judge.ts` and `src/run-task.ts`. W1-T248 is
+    the task that BUILT the review-time judge; it carries nine `Remudero-Task:` merges and lives in
+    the monolith, so it is shipped and cannot be re-dispatched against this surface. What this task
+    does that W1-T248 does not: W1-T248 judges a candidate CHANGE on the dispatch path and its
+    verdict routes that run; this one judges a filed RECORD at filing time and its verdict is
+    PERSISTED as `risk_ruling` for a synchronous linter to read later. Different input, different
+    lifetime, different consumer — and W1-T248's own constraint on the `risk:` field is carried into
+    design (i) rather than re-litigated. The `files:` list is deliberately NOT narrowed to hide the
+    overlap, which the check's own message names as the wrong remedy.
+
+    (4) WHY THIS IS THE OPERATOR'S OWN ASK, RECORDED. Ruled 2026-09-08: a record must not be parked
+    on a person by its author's caution; it should be parked only when a judge deems the change
+    risky. Today an author has exactly two moves — `verify: human` (always parks) or `verify: auto`
+    (blocks outright if the record is machine-marked). The judged middle is designed, pinned,
+    consumed, and unbuildable.
+  design: |
+    (i) BUILD THE INPUT FROM THE RECORD, NOT FROM A DIFF. A new exported builder in risk-judge.ts
+    renders a `RiskJudgeInput` from a `Task` — what it may DO: type, verify, declared `files:`,
+    acceptance criteria and prompt — reusing `buildRiskJudgePrompt`, `parseRiskJudgeVerdict` and
+    `planRiskJudgeAction` unchanged. NEVER A SECOND JUDGE: two prompts that drift is a defect this
+    repo has already paid for, and `planRiskJudgeAction`'s `proceed`/`escalate` mapping is the one
+    the linter already trusts.
+
+    THE `risk:` FIELD IS NOT AN INPUT TO THE VERDICT, and this is W1-T248's constraint honoured
+    rather than rediscovered. That task's own title binds the judge to "each candidate CHANGE (never
+    the static risk: field, a sizing artifact)" — `risk:` is set by Rule 19's subsystem count, so
+    feeding it to the judge would launder a sizing band into a safety verdict. It stays out of the
+    prompt. It remains inside `taskRulingPin`, because the pin's job is to notice ANY change to what
+    the task may do, which is a different question from what the judge is asked.
+
+    (ii) THE VERB WRITES THE RULING, PINNED BY THE EXISTING FUNCTION. A filing-time entry point runs
+    the judge over a named task and records `risk_ruling` with `taskRulingPin(task)` — IMPORTED, never
+    re-derived, so a pin computed here and a pin checked by the linter cannot diverge.
+
+    (iii) FAIL CLOSED, IN BOTH DIRECTIONS. A judge that errors, times out, returns unparseable text,
+    or cannot be spawned writes NOTHING — never a `proceed`, never a partial record. An `escalate`
+    verdict IS written, because the linter's escalate row quotes the judge's reasons verbatim to the
+    operator (W1-T186: observed reasons), and a refusal that can be read without the ledger is worth
+    more than an absent field. Absence must keep meaning "unjudged", which is already a block.
+
+    (iv) THE LADDER IS NOT WIDENED. No row changes. `verify: human` still parks unconditionally;
+    an unruled machine record at auto still blocks; a drifted pin still blocks. The only new fact is
+    that the last row becomes reachable.
+
+    (v) OUT OF SCOPE, DELIBERATELY: changing what `verify: human` exempts a task from (it currently
+    short-circuits `rulingVerifyViolation`, `declaredScopeViolation`, `rule15FilingViolation` and
+    `proofDialectViolations` — a coupling worth its own ruling, not a rider on this); auto-flipping
+    any existing record; and the review-time `runRiskJudge` call site, which keeps its own job.
+  acceptance:
+    - claim: "a filing-time judge run over a machine-authored record writes a risk_ruling whose pin matches taskRulingPin, and the linter then clears that record at verify:auto"
+      proof: "unit test: test/a-filing-time-ruling-nothing-produces.test.ts"
+    - claim: "an escalate verdict is recorded and still blocks, quoting the judge's own reasons rather than an inferred summary"
+      proof: "unit test: test/a-filing-time-ruling-nothing-produces.test.ts"
+    - claim: "a judge that errors or returns unparseable text writes no ruling at all, so absence keeps meaning unjudged and never reads as a pass"
+      proof: "unit test: test/a-filing-time-ruling-nothing-produces.test.ts"
+    - claim: "editing the record after it is judged drifts the pin and re-blocks, so a ruling cannot be earned on one text and spent on another"
+      proof: "unit test: test/a-filing-time-ruling-nothing-produces.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF A PRODUCER ALREADY EXISTS. Re-run both before building:
+    `grep -ran risk_ruling src/ scripts/ bin/` must return only the type declaration and the linter's
+    read, and `grep -rl 'risk_ruling:' plan/tasks.d/` must return 0. Either reading coming back
+    larger means another lane built this and the task was measured against a stale tree.
+
+    AND THE CLEARING TEST MUST DRIVE THE REAL LINTER. Assert through `machineAuthorVerifyViolation`
+    itself over a record carrying the produced ruling — not through a local re-implementation of the
+    ladder. A test that hand-builds a ruling object and asserts the linter accepts it proves the
+    CONSUMER works, which W1-T2977 already proved; it does not prove anything can produce one. The
+    ruling under test must come from the producer.
+
+    AND THE FAIL-CLOSED ARM MUST BE ABLE TO FAIL. Drive it with a judge seam that throws and one that
+    returns garbage, and assert the record is byte-identical afterwards. An arm asserted only by
+    "no proceed was written" would pass if the producer wrote a malformed ruling that the linter
+    happened to reject for a different reason.
+  note: |
+    FILED 2026-09-08 on the operator's ruling that verify:human should be a judge's conclusion rather
+    than an author's caution.
+
+    NO RESERVATION MINTED. Every `refs/rmd-id/*` push from this container fails (`send-pack:
+    unexpected disconnect`, probed directly) — the W1-T2203 lane class, and the reason
+    `rmd next-task-id --reserve` correctly REFUSED rather than minting optimistically. The id is the
+    one `rmd next-task-id` itself named as "the first id no reservation holds" (origin's rmd-id
+    namespace holds through W1-T3142), swept against reservation refs, origin/main's plan and every
+    open PR before use.
+
+    risk:high with band_meaning:span because the declared files span the judge library, the CLI entry
+    point and a test. The blast radius is narrower than the span: no ladder row moves, and the only
+    behaviour that changes is that a row already written and already tested becomes reachable.
+
+    verify:auto under the same ruling that produced this task. Every acceptance criterion is
+    mechanical and drives the real linter; the design deliberately keeps the ladder fixed, so there is
+    no policy choice inside this build for an operator to make.

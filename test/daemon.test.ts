@@ -1570,7 +1570,16 @@ test("W1-T46 INDEPENDENT-FAILURE: a block on a task with NO transitive dependent
     verdict: "blocked_review",
     pr_url: "https://github.com/o/r/pull/11",
   });
-  assert.equal(plan.byId.get("D")?.status, "blocked", "D is flagged in-memory — nextRunnable never reconsiders it this run");
+  const durableBlockLine = lines.find((l) => l.step === "dispatch.blocked_independent");
+  assert.ok(durableBlockLine, "a dispatch.blocked_independent ledger line was emitted");
+  assert.deepEqual(durableBlockLine?.extra, {
+    task_id: "D",
+    task: "D",
+    verdict: "blocked_review",
+    pr_url: "https://github.com/o/r/pull/11",
+    run_id: "D-run",
+  });
+  assert.equal(plan.byId.get("D")?.status, "queued", "D is recorded in the ledger, not mutated in memory");
   assert.ok(!lines.some((l) => l.step === "daemon.blocked"), "an independent failure never triggers a genuine-blocker halt");
 });
 
@@ -1873,6 +1882,103 @@ test("an unexpected error from runOne is a terminal 'error' stop, naming the tas
   });
   assert.equal(s.stopReason, "error");
   assert.match(s.stopDetail ?? "", /A: boom/);
+});
+
+test("W1-T3165: a GitHub rate-limit rejection holds in process with bounded backoff instead of exiting", async () => {
+  const plan = fixturePlan();
+  const sleeps: number[] = [];
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let stopped = false;
+  const refusal = Object.assign(
+    new Error("Command failed: gh api repos/craigoley/remudero/commits/deadbeef/check-runs?per_page=100"),
+    { stderr: "gh: API rate limit exceeded for installation 155256285 (HTTP 403)" },
+  );
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async () => { throw refusal; },
+      checkStop: () => (stopped ? "test completed" : undefined),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        if (sleeps.length === 3) stopped = true;
+      },
+      log: (step, extra = {}) => rows.push({ step, extra }),
+    },
+    { pollIntervalMs: 1_000, maxApiWindowHoldMs: 2_500 },
+  );
+  assert.equal(s.stopReason, "stopped");
+  assert.deepEqual(sleeps, [1_000, 2_000, 2_500]);
+  assert.equal(rows.filter((row) => row.step === "daemon.dispatch_transport_backoff").length, 3);
+  assert.ok(rows.every((row) => row.step !== "daemon.summary" || row.extra.stopReason !== "error"));
+});
+
+test("W1-T3165: one settled worker resets the transient GitHub backoff episode", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let calls = 0;
+  let stopped = false;
+  const refusal = Object.assign(new Error("Command failed: gh api repos/craigoley/remudero/pulls"), {
+    stderr: "gh: API rate limit exceeded (HTTP 403)",
+  });
+  const s = await runDaemon(
+    fixturePlan(),
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => {
+        calls++;
+        if (calls === 2) return okResult(id);
+        throw refusal;
+      },
+      checkStop: () => (stopped ? "test completed" : undefined),
+      sleep: async () => {
+        if (rows.filter((row) => row.step === "daemon.dispatch_transport_backoff").length === 2) stopped = true;
+      },
+      log: (step, extra = {}) => rows.push({ step, extra }),
+    },
+    { pollIntervalMs: 1, maxApiWindowHoldMs: 10 },
+  );
+  assert.equal(s.stopReason, "stopped");
+  assert.deepEqual(
+    rows.filter((row) => row.step === "daemon.dispatch_transport_backoff").map((row) => row.extra.consecutive),
+    [1, 1],
+  );
+});
+
+test("W1-T3165: a timed-out gh child is transport backpressure even when stderr is empty", async () => {
+  const plan = fixturePlan();
+  let stopped = false;
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async () => {
+        throw Object.assign(new Error("Command failed: gh api repos/craigoley/remudero/pulls"), {
+          code: "ETIMEDOUT",
+          stderr: "",
+        });
+      },
+      checkStop: () => (stopped ? "test completed" : undefined),
+      sleep: async () => { stopped = true; },
+    },
+    { pollIntervalMs: 1 },
+  );
+  assert.equal(s.stopReason, "stopped");
+});
+
+test("W1-T3165: auth refusals and non-GitHub transient prose remain fatal software-visible errors", async () => {
+  for (const rejection of [
+    Object.assign(new Error("Command failed: gh api repos/craigoley/remudero/pulls"), {
+      stderr: "gh: Bad credentials (HTTP 401)",
+    }),
+    new Error("worker wrote: internal server error"),
+  ]) {
+    const s = await runDaemon(fixturePlan(), {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async () => { throw rejection; },
+      sleep: async () => {},
+    });
+    assert.equal(s.stopReason, "error");
+  }
 });
 
 // ── W1-T113 DEGRADE, DON'T DIE (the vanished-binary incident): a spawn-

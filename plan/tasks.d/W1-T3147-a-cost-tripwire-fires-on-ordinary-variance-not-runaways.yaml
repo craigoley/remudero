@@ -1,0 +1,94 @@
+- id: W1-T3147
+  title: "THE COST TRIPWIRE FIRES ON ORDINARY VARIANCE, NOT RUNAWAYS — `costAnomaly.multiplier: 3` flags 5.1% of settled implement runs (537 `cost.anomaly` rows retained) against a policy comment that names ~10x as the INCIDENT signature and admits its own 3 was chosen 'without inventing a number this fleet has not yet ledgered enough class-scoped runs to measure directly'; those runs now exist"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: span
+  budget_usd: 10.00
+  files: [plan/policy.yaml, test/a-cost-tripwire-fires-on-runaways-not-ordinary-variance.test.ts]
+  origin: "operator-directive#tripwires-are-for-runaways-2026-09-08"
+  plan_refs: ["P53", "W1-T931", "§9"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR DIRECTIVE, 2026-09-08, verbatim in substance: "our cost anomaly is set too low ... the
+    trip wires need to be more for runaways, not every day tasks." This task is that ruling applied
+    to the row the evidence points at, with the measurement the row itself asked for.
+
+    (1) THE ROW SAYS IT WAS A PLACEHOLDER. `plan/policy.yaml`'s `costAnomaly.multiplier` comment
+    states its own basis: it anchored on `autoTriage.maxPerDay`'s record of one class's
+    "WORST-BUT-LEGITIMATE run at 2.04x its class median (n=27)" and on `dailyCostCeilingUsd`'s
+    incident day at "roughly 10x, the INCIDENT signature", then chose 3 as sitting "with daylight
+    above the 2.04x ordinary-variance ceiling and well below the ~10x incident signature — ...
+    without inventing a number this fleet has not yet ledgered enough class-scoped runs to measure
+    directly (design ii's own diagnosis: the per-class contrast has been under-sampled for ten
+    cycles)."
+
+    (2) THE CLASS-SCOPED RUNS NOW EXIST. MEASURED 2026-09-08 over 647 settled `implement.done` rows
+    with a positive cost, median $4.23:
+
+        multiplier 3  (> $12.68):  33 runs flagged  (5.1%)
+        multiplier 4  (> $16.91):  16 runs          (2.5%)
+        multiplier 5  (> $21.13):  10 runs          (1.5%)
+        multiplier 6  (> $25.36):   5 runs          (0.8%)
+        multiplier 8  (> $33.81):   2 runs          (0.3%)
+        multiplier 10 (> $42.26):   1 run           (0.2%)
+
+    (3) 5.1% IS ORDINARY VARIANCE, WHICH IS THE FAILURE THE ROW'S OWN DESIGN NOTE NAMES. Design
+    note ii is quoted in the file: "a sentinel that cries wolf ... trains the operator to skim the
+    queue." 537 retained `cost.anomaly` rows at a p50 flagged cost of $16.37 is that outcome. The
+    row's stated target — well below the ~10x incident signature — is satisfied at 3 only in the
+    sense that everything is below 10x; the ordinary-variance ceiling it meant to clear was
+    measured at 2.04x on n=27, and 3 leaves almost no daylight above it once a real 647-run
+    distribution is in hand.
+
+    (4) A COMMITTED BOUND CONSTRAINS THE ANSWER AND MUST BE PART OF THE RULING. The row declares
+    `min: 2, max: 8` and `loadCostAnomalyPolicy` enforces it, so the ~10x figure the comment itself
+    calls the incident signature is NOT reachable without moving `max` in the same change. This
+    task must either land inside the committed bound or move the bound explicitly and say why —
+    never silently.
+
+    (5) THE DETECTOR HAS NO TEETH, AND THAT IS WHY THIS IS A THRESHOLD TASK AND NOT A GATE TASK.
+    `cost.anomaly`'s only consumers are `status-board.ts`'s sentinel line and a sweep read; the
+    module's own header says it "never kills a worker, or blocks a merge; the runaway guards
+    (`budget_usd`, the per-run turn limit) are" elsewhere. So the cost of a bad threshold is paid
+    entirely in operator attention, which is exactly what the directive is about, and moving it
+    changes no dispatch outcome.
+  design: |
+    (i) A DATA EDIT WITH ITS MEASUREMENT, NOT A CODE CHANGE. `multiplier` is policy data read
+    through `loadCostAnomalyPolicy`; this task edits the row and its comment so the next reader
+    inherits the 647-run distribution instead of the placeholder reasoning.
+    (ii) THE NEW FIGURE CITES THE TABLE IN RATIONALE (2). Whatever value lands must be justified by
+    the flag rate it produces against the observed distribution, in the row's own comment, in the
+    same measured style the existing comment set.
+    (iii) MOVE `max` ONLY IF THE CHOSEN VALUE NEEDS IT, AND SAY SO. Point (4) is a live constraint,
+    not a footnote: a change that quietly widens the committed bound to fit its own answer defeats
+    the purpose of having one.
+    (iv) DO NOT TOUCH `minSamples`. The thin-class rule is a separate control with its own measured
+    basis and no evidence against it.
+    (v) THE SENTINEL'S BEHAVIOUR IS UNCHANGED. Still post-hoc, still advisory, still a board line.
+    Giving it teeth is a separate ruling this task does not take.
+  acceptance:
+    - claim: "the committed multiplier flags a materially smaller share of the observed implement distribution than the placeholder 3 did, and the row records the flag rate that justified it"
+      proof: "unit test: test/a-cost-tripwire-fires-on-runaways-not-ordinary-variance.test.ts"
+    - claim: "the committed value satisfies the row's own declared min and max, or the bound is moved in the same change with a stated reason"
+      proof: "unit test: test/a-cost-tripwire-fires-on-runaways-not-ordinary-variance.test.ts"
+    - claim: "minSamples is unchanged, so the thin-class rule is not altered by a threshold edit"
+      proof: "unit test: test/a-cost-tripwire-fires-on-runaways-not-ordinary-variance.test.ts"
+    - claim: "the policy still loads and still refuses a multiplier outside its committed bound"
+      proof: "unit test: test/a-cost-tripwire-fires-on-runaways-not-ordinary-variance.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if the current threshold already discriminates runaways: MEASURED 2026-09-08,
+    multiplier 3 flags 33 of 647 settled implement runs (5.1%) and the corpus retains 537
+    `cost.anomaly` rows at a p50 flagged cost of $16.37 against a $4.23 median. CLOSE IT ALSO if
+    the row was ever set from class-scoped data: its own comment says the opposite in as many words.
+    PROVE IT LOAD-BEARING: hold the fixture distribution fixed and re-run at the old value — the
+    first criterion's flag count must differ, or the edit moved nothing.
+  note: |
+    risk:medium: one policy row, advisory sentinel, no dispatch outcome changes. FILED UNDER AN
+    OPERATOR DIRECTIVE and the evidence is cited rather than the directive alone. DISTINCT FROM
+    W1-T3148, which moves a TURN cap on a different rung, and from W1-T3146, which is about a bound
+    that has never fired. Id reserved at `refs/rmd-id/W1-T3147` before filing.

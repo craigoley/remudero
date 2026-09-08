@@ -20,7 +20,7 @@ import type { Task } from "../src/lib/plan.js";
 
 const BASE_ACCEPTANCE = [
   { claim: "the widget renders", proof: "unit test: test/widget.test.ts" },
-  { claim: "the widget survives a reload", proof: "unit test: test/widget.test.ts::reload" },
+  { claim: "the widget survives a reload", proof: "unit test: reload" },
 ];
 
 const BASE_TASK: Task = {
@@ -127,7 +127,7 @@ test("(helper) criteriaProofChanged: same claim + same proof draws nothing; same
   assert.equal(changed[0].current.proof, "grep: widget in src/lib/widget.ts");
   const withNewClaim = criteriaProofChanged(BASE_ACCEPTANCE, [
     ...BASE_ACCEPTANCE,
-    { claim: "a brand new promise", proof: "unit test: test/widget.test.ts::new" },
+    { claim: "a brand new promise", proof: "unit test: new" },
   ]);
   assert.deepEqual(withNewClaim, []);
 });
@@ -182,7 +182,7 @@ test("(helper) mergedFieldChangeViolations: title/note/rationale/hand_built chan
 // ── ACCEPTANCE 6: the existing acceptance guard is UNCHANGED — all five early exits stay EMPTY ─
 
 test("ACCEPTANCE 6 (i): no context at all -> EMPTY", () => {
-  const t = current({ acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: test/widget.test.ts::new" }] });
+  const t = current({ acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: new" }] });
   assert.deepEqual(postMergeAmendmentViolations(t), []);
 });
 
@@ -215,14 +215,14 @@ test("ACCEPTANCE 6 (v): followUpFiled: true -> EMPTY for the acceptance-added ca
   // W1-T2375: the escape now has TWO conditions — a follow-up AND a stated parent disposition.
   // The fixture states it (status: blocked); the ASSERTION is unchanged, because the escape still
   // works. Adding the disposition is what a real PR must now do, not a weakening of the test.
-  const t = current({ status: "blocked", acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: test/widget.test.ts::new" }] });
+  const t = current({ status: "blocked", acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: new" }] });
   const res = lintTask(t, { postMergeAmendment: ctx({ followUpFiled: true }) });
   assert.equal(res.ok, true);
   assert.ok(!res.violations.some((v) => v.check === "post-merge-amendment"));
 });
 
 test("ACCEPTANCE 6 (v, W1-T2375): followUpFiled: true with the parent left DISPATCHABLE now refuses — the second condition", () => {
-  const t = current({ acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: test/widget.test.ts::new" }] });
+  const t = current({ acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: new" }] });
   const res = lintTask(t, { postMergeAmendment: ctx({ followUpFiled: true }) });
   assert.equal(res.ok, false, "a follow-up alone no longer buys the escape");
   assert.ok(res.violations.some((v) => v.check === "post-merge-amendment" && v.severity === "block"));
@@ -230,7 +230,7 @@ test("ACCEPTANCE 6 (v, W1-T2375): followUpFiled: true with the parent left DISPA
 
 // The original blocking control still fires exactly as before this task.
 test("(control) a genuinely new/changed claim on a merged task with no follow-up still BLOCKS, unchanged by this task", () => {
-  const t = current({ acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: test/widget.test.ts::new" }] });
+  const t = current({ acceptance: [...BASE_ACCEPTANCE, { claim: "a genuinely new claim", proof: "unit test: new" }] });
   const res = lintTask(t, { postMergeAmendment: ctx() });
   assert.equal(res.ok, false);
   const v = res.violations.find((x) => x.check === "post-merge-amendment");

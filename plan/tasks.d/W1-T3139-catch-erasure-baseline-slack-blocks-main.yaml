@@ -1,0 +1,25 @@
+- id: W1-T3139
+  title: "CURRENT MAIN FAILS ITS CATCH-ERASURE SHRINKING CENSUS — two reviewed allowances exceed the source counts and every branch inherits the red gate: lower only those stale rows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: low
+  origin: operator#maintenance-efficiency-2026-09-08
+  plan_refs: ["§5", "§9"]
+  files: [test/catch-erasure-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main 41231c670: the isolated catch-erasure suite reports 25 pass / 1 fail.
+    Its shrinking property measures `src/lib/analytics-route.ts` at 0 bare erasures against an
+    allowance of 1, and `src/lib/status.ts` at 6 against 7. This is not product growth and not a
+    detector change: both source files are untouched by this repair. Lower the two stale rows so
+    the ratchet preserves improvements instead of making every newer branch maintain main's debt.
+  acceptance:
+    - claim: "the current source tree has no slack catch-erasure allowance"
+      proof: "unit test: test/catch-erasure-ratchet.test.ts::PROPERTY no tracked src/**/*.ts file's baseline allowance sits slack above its actual bare-catch count"
+    - claim: "the repair changes no product source or catch-erasure detector logic"
+      proof: "git diff: only this task shard and the two numeric allowance rows in test/catch-erasure-ratchet.test.ts"

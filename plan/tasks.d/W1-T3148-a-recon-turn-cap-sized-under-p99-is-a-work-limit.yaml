@@ -1,0 +1,87 @@
+- id: W1-T3148
+  title: "THE RECON TURN CAP IS THE ONE ROW THAT VIOLATES ITS OWN FILE'S RULING — `routes.recon.*.max_turns: 20` sits BELOW the rung's observed p99 of 21 (p50 6, max 26), 10 of 680 recon runs reach or exceed it, and the only `error_max_turns` wall the fleet has ever ledgered was a recon run at 21 turns that exhausted its retries and left `implement` to proceed with NO recon context at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: span
+  budget_usd: 10.00
+  files: [.remudero/mounts.yaml, test/a-recon-turn-cap-sized-under-p99-is-a-work-limit.test.ts]
+  origin: "operator-directive#tripwires-are-for-runaways-2026-09-08"
+  plan_refs: ["P7", "§9", "W1-T54b", "W1-T167"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR DIRECTIVE, 2026-09-08: the tripwires "need to be more for runaways, not every day
+    tasks." MEASURED 2026-09-08, that directive lands on exactly one row — and NOT the one the
+    file's own history is about.
+
+    (1) THE IMPLEMENT CAP IS CORRECTLY SIZED AND MUST NOT MOVE. `max_turns: 400` against 668
+    retained `implement.done` rows: p50 72, p90 135, p95 156, p99 228, max 380. ZERO runs reached
+    390 or 400. The cap sits at 5.6x the median and 1.75x p99 — a genuine runaway cliff, exactly
+    what the file's `max_turns` section claims for it, and the W1-T54b ruling that set it (a
+    maxTurns=60 wall mid-campaign) stands unchallenged by this evidence. This task changes it in no
+    way, and says so here so a later reader does not mistake the scope.
+
+    (2) THE RECON CAP IS NOT. `routes.recon.*.max_turns: 20` against 680 retained `recon.done` rows:
+    p50 6, p90 10, p95 13, **p99 21**, max 26. The cap is BELOW p99. Ten runs (1.5%) reached or
+    exceeded it. A bound beneath the 99th percentile of the population it governs is not a cliff;
+    it is a work limit — "a cap set NEAR expected work is a work limit masquerading as a safety
+    limit", this file's own words, written about a different row.
+
+    (3) THE WALL HAS FIRED, AND ITS COST IS NOT A RETRY. `error_max_turns` appears 8 raw times in
+    the whole ledger union (POSITIVE CONTROL on the identical query: `error_codex` reads 255, so
+    this is a real count). Every one of the 8 belongs to a single run, W1-T399-1786332701794, on the
+    RECON rung, at 21 turns. It walled, retried, walled again, and ledgered
+    `recon.degraded`: "recon errored twice in a row (error_max_turns) — bounded retry exhausted;
+    implement proceeds wi[thout recon]". So the failure mode is not a lost recon; it is an
+    implement stage running WITHOUT the context the recon rung exists to produce, which is a quality
+    cost that no cost or turn metric records.
+
+    (4) THE ASYMMETRY IS THE FINDING. Both caps live in the same table under the same section
+    header, which states a single doctrine for both. One row honours it at 1.75x p99; the other
+    violates it at 0.95x p99. Nothing in the file distinguishes them, and nothing has ever measured
+    either until now.
+
+    (5) SCOPE IS THE SIX `recon` ROWS. `routes.recon` declares `max_turns: 20` on low/src,
+    low/docs, low/plan-lint, medium/src, medium/docs, medium/plan-lint and high/src — every recon
+    cell. No other rung in the table is under review here.
+  design: |
+    (i) SIZE THE NEW CAP OFF THE MEASURED TAIL, IN THE ROW'S OWN COMMENT. Whatever value lands must
+    be stated as a multiple of the rung's observed p99, in the same measured style rationale (1)
+    applies to the implement row, so the two rows can be read against one doctrine.
+    (ii) STILL A CLIFF, NOT A BUDGET. The point is not "more turns"; it is that a runaway guard must
+    sit far enough above real work that reaching it means something has gone wrong. A value chosen
+    to accommodate the observed max is still a work limit.
+    (iii) THE IMPLEMENT ROW IS OUT OF SCOPE BY EVIDENCE, NOT BY OMISSION. Rationale (1) is the
+    reason; a change that also moves 400 would be unmeasured in exactly the way this task exists to
+    correct.
+    (iv) `context_budget` IS NOT TOUCHED. Recon's context budgets differ per class and no evidence
+    here bears on them.
+    (v) THE DEGRADATION PATH STAYS. `recon.degraded` is the correct behaviour when recon genuinely
+    cannot finish; this task changes when it is reached, never whether it exists.
+  acceptance:
+    - claim: "every recon cell's turn cap sits above the rung's measured p99 by a stated margin, and the table records the distribution that justified it"
+      proof: "unit test: test/a-recon-turn-cap-sized-under-p99-is-a-work-limit.test.ts"
+    - claim: "the implement turn cap is unchanged, and the table records the measurement showing it is already sized as a cliff"
+      proof: "unit test: test/a-recon-turn-cap-sized-under-p99-is-a-work-limit.test.ts"
+    - claim: "the table still loads and the Tier Invariant still holds after the edit"
+      proof: "unit test: test/a-recon-turn-cap-sized-under-p99-is-a-work-limit.test.ts"
+    - claim: "the recon degradation path is reachable as before, so a genuine runaway is still bounded"
+      proof: "unit test: test/a-recon-turn-cap-sized-under-p99-is-a-work-limit.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if the recon cap already clears its own tail: MEASURED 2026-09-08 over 680
+    `recon.done` rows, p99 is 21 against a cap of 20, max 26, and 10 runs reach or exceed the cap.
+    CLOSE IT ALSO if the wall has never fired: `zgrep` the union for `error_max_turns` — 8 raw rows,
+    all one recon run at 21 turns, with `error_codex` at 255 on the identical query as the positive
+    control.
+    PROVE IT LOAD-BEARING: hold the fixture distribution fixed and assert the OLD cap fails the
+    first criterion; a suite that passes at 20 and at the new value is asserting neither.
+  note: |
+    risk:medium: a data edit to one rung's caps, no code change, and the degradation path is
+    preserved by design point (v). DELIBERATELY EXCLUDES the implement 400 cap on measured grounds
+    (rationale (1)) rather than by oversight. DISTINCT FROM W1-T3147, which moves a COST threshold
+    in `plan/policy.yaml`; splitting them keeps a plan-machinery edit and a mounts edit out of one
+    diff. Id reserved at `refs/rmd-id/W1-T3148` before filing.

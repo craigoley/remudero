@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: investigate
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: medium
   budget_usd: 12.00
@@ -71,6 +71,11 @@
   note: |
     FILED 2026-09-08. NO RESERVATION MINTED — see W1-T3134's note.
 
-    type:investigate AND verify:human because the deliverable is a ruling on this repo's most
-    contested file. A worker given `implement` would restructure CLAUDE.md on its own reading, and
-    every rule in it exists because someone lost a cycle to its absence.
+    type:investigate AND verify:auto. `investigate` is the load-bearing half and is unchanged: the
+    DELIVERABLE is the measurement test in `files:`, not a restructure of CLAUDE.md, and design (ii)
+    keeps the ruling itself with the operator. verify was flipped human -> auto BY OPERATOR RULING
+    2026-09-08 — an author's caution is not a reason to park a record on a person; only a judge that
+    deems a change risky should. No gate required human here (this shard carries no `author_class`,
+    so Law 5's arm never applied). A worker building this produces a test that pins three numbers;
+    it does not get to rewrite the file, because no acceptance criterion asks it to. The durable
+    mechanism is filed as W1-T3143.

@@ -14,4 +14,4 @@
   files: [test/run-task.test.ts]
   acceptance:
     - claim: "the fixture's original criterion"
-      proof: "unit test: test/run-task.test.ts::LINTDI-1 original criterion proof"
+      proof: "unit test: test/run-task.test.ts"

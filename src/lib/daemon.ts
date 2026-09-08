@@ -595,6 +595,8 @@ export interface DaemonDeps {
   /** True when a task's own read is indeterminate — a genuine read failure rather than a clean
    *  absence of evidence — re-derived from the same projection. Optional (W1-T119). */
   isIndeterminate?: (taskId: string) => boolean;
+  /** True when status.ts derives a durable independent-failure block from the ledger. */
+  isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
   /** Run ONE task through the existing run-task path (default = runTask). */
@@ -813,6 +815,22 @@ export interface DaemonDeps {
  * must not learn to swallow every crash, only the one named infrastructure class (W1-T113). */
 function isSpawnInfraBlocked(err: unknown): err is { reasonClass: "blocked_toolchain"; message: string } {
   return typeof err === "object" && err !== null && (err as { reasonClass?: unknown }).reasonClass === "blocked_toolchain";
+}
+
+/** A rejected worker may be reporting GitHub backpressure from its post-run PR/check polling rather
+ * than a software crash. Keep this carve-out deliberately narrower than {@link classifyFailure}:
+ * the command evidence must name `gh`, and the joined message/stderr/code must positively classify
+ * transient. This prevents arbitrary worker prose such as "internal server error" from being
+ * swallowed while retaining the stderr/code fields Node does not always copy into Error.message. */
+function transientGhDispatchFailure(err: unknown): { detail: string } | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const failure = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
+  const message = String(failure.message ?? "");
+  if (!/(?:^|\s)gh(?:\s|$)/i.test(message)) return undefined;
+  const detail = [message, failure.stderr == null ? "" : String(failure.stderr), failure.code ?? ""]
+    .filter((part) => part.length > 0)
+    .join("\n");
+  return classifyFailure({ text: detail }) === "transient" ? { detail } : undefined;
 }
 
 /** BACKSTOP — the maximum time the inter-phase review clock's stop may wait for an idle wait to notice its phase
@@ -1472,8 +1490,9 @@ export { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch
 /** The daemon's scheduler loop. Deterministic; no model decisions. Each tick: check the two operator holds, check
  * headroom, pick the next runnable in DAG order (reusing drain.ts's own selector), run it, then reason about the
  * verdict (W1-T46). Block reasoning has four outcomes: a transient retries with no strike, an independent failure is
- * flagged and skipped, a fixable blocker gets a bounded fix attempt (W1-T174), and a genuine blocker halts and
- * escalates. Idling is an in-process state, never a process exit. Forensics: docs/forensics/daemon.md. */
+ * flagged and skipped, a fixable blocker gets a bounded fix attempt (W1-T174), and a genuine blocker escalates once
+ * and parks until its PR ownership materially changes. Idling is an in-process state, never a process exit.
+ * Forensics: docs/forensics/daemon.md. */
 export async function runDaemon(
   plan: Plan,
   deps: DaemonDeps,
@@ -1558,6 +1577,17 @@ export async function runDaemon(
   // Per-task transient retry state, threaded across ticks for the same task id. Dropped once a task's
   // disposition is no longer a transient retry (W1-T46).
   const blockRetryStates = new Map<string, RetryState>();
+  // A genuine blocker is a queue-subtree state, not a process-lifetime failure (W1-T3122). The task
+  // itself is excluded below; because it remains unmerged, the existing dependency predicate keeps
+  // every descendant behind `unmet-deps` while unrelated work continues. This is intentionally
+  // daemon-lifetime state: sweeps keep owning the open PR, and a restart may safely reconstruct the
+  // same fact from the status projection rather than introducing another durable queue.
+  const parkedBlockers = new Map<string, { prUrl?: string; dependents: string[] }>();
+  // Library fallback for callers that do not wire the status projection: independent failures are
+  // still recorded in the ledger, but the same in-process loop must not re-spend on the id before a
+  // projection reader has a chance to observe that row. Not a Task mutation, so plan reloads cannot
+  // erase it.
+  const independentFailureBlocksThisRun = new Set<string>();
   // The cross-task counterpart to the map above — content-keyed on whether the last transient verdict
   // was a different task id, never on one task's own retry budget (W1-T2517).
   let apiWindowHoldState: ApiWindowHoldState = INITIAL_API_WINDOW_HOLD_STATE;
@@ -1576,6 +1606,10 @@ export async function runDaemon(
   // CONSECUTIVE spawn-infra failures — backs the backoff below; reset by any
   // runOne call that does NOT throw this class (success or an unrelated verdict).
   let consecutiveSpawnInfraFailures = 0;
+  // The GitHub-transport counterpart to the spawn-infra streak. A worker can finish useful work,
+  // push a PR, and then lose its post-run rollup read; that must slow dispatch without exiting the
+  // scheduler that owns every review and repair lane (W1-T3165).
+  let consecutiveDispatchTransportFailures = 0;
   // Headroom reserve escalation dedup — the same per-episode bound as the breaker above. A sustained
   // breach is read fresh every tick, so without this the hook would fire on every idle poll. Cleared
   // the moment a read reports the window back under the reserve (P34 (c), W1-T249).
@@ -1683,15 +1717,19 @@ export async function runDaemon(
 
   // One per-task block-reasoning processor, shared by the single-task tick and the multi-lane batch, so how a solo
   // dispatch's result is judged cannot fork from how one lane's is judged. Extracted verbatim from the earlier loop
-  // body: every log line, field and ordering decision is byte-identical. The plan value is a parameter, never closed
-  // over, because the binding is rebound every tick; and it returns a disposition so a caller can finish every
-  // sibling's bookkeeping before halting. Forensics: docs/forensics/daemon.md.
+  // body. The plan value is a parameter, never closed over, because the binding is rebound every tick; and it
+  // returns a disposition so a caller can finish every sibling's bookkeeping before parking the affected subtree.
+  // Forensics: docs/forensics/daemon.md.
   const processDispatchResult = async (
     planForBatch: Plan,
     task: Task,
     result: RunResult,
     isMerged: MergedSet,
-  ): Promise<{ kind: "merged" } | { kind: "continue" } | { kind: "genuine_blocker"; detail: string }> => {
+  ): Promise<
+    | { kind: "merged" }
+    | { kind: "continue" }
+    | { kind: "genuine_blocker"; detail: string; dependents: string[] }
+  > => {
     // The verdict describes how THIS RUN ended, not whether the pull request is merged: a PR that
     // merges gate-side after the run stopped leaves the result unmerged even though the task is done.
     // The tick's already-resolved merged projection — never a second lookup — answers the question
@@ -1746,9 +1784,16 @@ export async function runDaemon(
 
       if (disposition.kind === "independent_failure") {
         // Independent failure: nothing in the plan transitively depends on this task, so skipping it cannot
-        // leave a dependent building on a gap. Flag it, so selection never reconsiders it this run, and
-        // keep draining everything else.
-        task.status = "blocked";
+        // leave a dependent building on a gap. Record the block in the ledger, so a plan reload or daemon
+        // restart derives the same skip instead of trusting this tick's Task object.
+        independentFailureBlocksThisRun.add(task.id);
+        log("dispatch.blocked_independent", {
+          task_id: task.id,
+          task: task.id,
+          verdict: result.verdict,
+          pr_url: result.prUrl,
+          run_id: result.runId,
+        });
         log("daemon.block.independent_failure", {
           task: task.id,
           verdict: result.verdict,
@@ -1758,9 +1803,9 @@ export async function runDaemon(
       }
 
       // Genuine blocker: real downstream work transitively needs this task merged, so "never continue into
-      // the gap" is absolute. Halt and escalate, exactly as stop-on-block halted, but with the dependents
-      // named. Reached by a genuine blocker, by a fixable one whose strike bound is exhausted, and by a
-      // fixable one with no fix rung wired (W1-T174).
+      // the gap" is absolute. Escalate once, then let the caller park this task while its unmerged state
+      // continues to dependency-gate every descendant. Reached by a genuine blocker, by a fixable one whose
+      // strike bound is exhausted, and by a fixable one with no fix rung wired (W1-T174, W1-T3122).
       log("daemon.blocked", {
         task: task.id,
         verdict: result.verdict,
@@ -1773,6 +1818,7 @@ export async function runDaemon(
       return {
         kind: "genuine_blocker",
         detail: `${task.id} → ${result.verdict}${result.prUrl ? ` (${result.prUrl})` : ""} — blocks ${disposition.dependents.join(", ")}`,
+        dependents: disposition.dependents,
       };
     }
     merged.push(task.id);
@@ -1877,6 +1923,27 @@ export async function runDaemon(
     }
 
     const isMerged = deps.refreshMerged();
+
+    // Reconcile the daemon-lifetime parks from the SAME cached projection dispatch uses below. A
+    // credited merge is conclusive. A confirmed absence of an open PR is conclusive only when both
+    // ownership readers are wired and the credit read is readable; omitted or indeterminate evidence
+    // preserves the park fail-closed. A timer alone never buys the identical blocked head again.
+    for (const [taskId, park] of parkedBlockers) {
+      let reason: "merged" | "no-open-pr" | undefined;
+      if (isMerged(taskId)) {
+        reason = "merged";
+      } else if (
+        deps.isOpenPr !== undefined &&
+        deps.isCreditIndeterminate !== undefined &&
+        !deps.isCreditIndeterminate(taskId) &&
+        deps.isOpenPr(taskId) === undefined
+      ) {
+        reason = "no-open-pr";
+      }
+      if (!reason) continue;
+      parkedBlockers.delete(taskId);
+      log("daemon.block.rearmed", { task: taskId, pr_url: park.prUrl, reason });
+    }
 
     // The level-triggered PR-pipeline reconciler, once per iteration: re-derive every open PR's disposition
     // and take its gated action, alongside dispatch rather than instead of it (W1-T77, ratifies P22).
@@ -2419,6 +2486,9 @@ export async function runDaemon(
         : undefined;
       const dispatchOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // A parked blocker is excluded before the open-PR check, so the existing idle census names it
+      // as `continued-this-pass`. Its descendants remain excluded independently by `unmet-deps`.
+      excludeIds: new Set(parkedBlockers.keys()),
       // The daemon's own target, threaded to the gate. The refusal it enables is counted by the row that
       // already carries every other decline — no new step and no new signal (W1-T988).
       targetRepo: deps.targetRepo,
@@ -2498,6 +2568,8 @@ export async function runDaemon(
           }
         }
       },
+      isIndependentFailureBlocked: (taskId) =>
+        independentFailureBlocksThisRun.has(taskId) || deps.isIndependentFailureBlocked?.(taskId) === true,
     };
 
     // The dispatch set, adopting drain.ts's lane machinery rather than a second implementation. A console
@@ -2823,22 +2895,32 @@ export async function runDaemon(
     await stopTicker();
     restartInterphaseReviewClock();
 
-    // Classify every lane's settlement before this tick decides anything, mirroring `runDrainLanes`. A
-    // genuine, non-spawn-infra throw is fatal for the whole daemon, exactly as it always was for a lone
-    // dispatch; a spawn-infra throw degrades into backoff; a normal settlement is queued for the same
-    // block reasoning every dispatch has always gone through.
+    // Classify every lane's settlement before this tick decides anything, mirroring `runDrainLanes`.
+    // A positively transient gh transport failure and a spawn-infra failure degrade into their bounded
+    // backoffs; every other throw stays fatal. A normal settlement enters the existing block reasoning.
     let fatalError: { taskId: string; message: string } | undefined;
     let spawnInfraSeenThisTick = false;
+    let dispatchTransportSeenThisTick = false;
     const toProcess: Array<{ task: Task; result: RunResult }> = [];
     for (let i = 0; i < admitted.length; i++) {
       const t = admitted[i];
       const outcome = settled[i];
       if (outcome.status === "rejected") {
         const err = outcome.reason;
-        if (!isSpawnInfraBlocked(err)) {
+        const transientTransport = transientGhDispatchFailure(err);
+        if (!isSpawnInfraBlocked(err) && transientTransport === undefined) {
           // First observed wins the summary detail, mirroring `runDrainLanes`' identical choice. Every other
           // already-settled lane is still classified and processed before this tick returns.
           if (!fatalError) fatalError = { taskId: t.id, message: String((err as Error)?.message ?? err) };
+          continue;
+        }
+        if (transientTransport !== undefined) {
+          dispatchTransportSeenThisTick = true;
+          log("daemon.dispatch_transport_deferred", {
+            task: t.id,
+            consecutive: consecutiveDispatchTransportFailures + 1,
+            error: transientTransport.detail,
+          });
           continue;
         }
         // Degrade, do not die: a spawn-infrastructure failure is never a fatal crash. The pre-fix shape was
@@ -2870,11 +2952,16 @@ export async function runDaemon(
 
     // A successful lane — including one returning a non-spawn-infra blocked verdict — clears the backoff
     // streak, exactly as the lone dispatch always did.
-    if (toProcess.length > 0) consecutiveSpawnInfraFailures = 0;
+    if (toProcess.length > 0) {
+      consecutiveSpawnInfraFailures = 0;
+      consecutiveDispatchTransportFailures = 0;
+    }
 
-    // Block reasoning, per lane. First observed genuine blocker wins the summary detail, mirroring the
-    // fatal-error choice above and `runDrainLanes`' stop-on-block-at-pass-granularity doctrine, but every
-    // lane's own bookkeeping still runs.
+    // Block reasoning, per lane. Every genuine blocker is parked only after all admitted siblings
+    // settle, so one blocked subtree can neither abort useful work already in flight nor restart the
+    // persistent scheduler. A library caller that omitted the ownership projection cannot safely
+    // reconcile a park, so it retains the defensive terminal result; the real daemon wiring always
+    // supplies `isOpenPr` from the same status projection as `refreshMerged`.
     let blockedDetail: string | undefined;
     // Updated alongside block reasoning, never inside it — a pure additional observation over the same per-lane loop.
     // Lane order is the settlement order fixed above, so a batch is walked deterministically (W1-T2517).
@@ -2884,8 +2971,19 @@ export async function runDaemon(
       apiWindowHoldState = apiWindowDisposition.state;
       apiWindowHoldMs = apiWindowDisposition.holdMs;
       const outcome = await processDispatchResult(planForBatch, task, result, isMerged);
-      if (outcome.kind === "genuine_blocker" && blockedDetail === undefined) {
-        blockedDetail = outcome.detail;
+      if (outcome.kind === "genuine_blocker") {
+        if (deps.isOpenPr === undefined || deps.isCreditIndeterminate === undefined) {
+          blockedDetail ??= outcome.detail;
+        } else {
+          parkedBlockers.set(task.id, { prUrl: result.prUrl, dependents: outcome.dependents });
+          log("daemon.block.parked", {
+            task: task.id,
+            verdict: result.verdict,
+            pr_url: result.prUrl,
+            dependent_count: outcome.dependents.length,
+            dependents: outcome.dependents,
+          });
+        }
       }
     }
     if (blockedDetail !== undefined) {
@@ -2918,6 +3016,23 @@ export async function runDaemon(
       consecutiveSpawnInfraFailures++;
       const backoffMs = Math.min(pollIntervalMs * 2 ** (consecutiveSpawnInfraFailures - 1), maxSpawnInfraBackoffMs);
       log("daemon.spawn_infra_backoff", { tick: ticks, backoff_ms: backoffMs, consecutive: consecutiveSpawnInfraFailures });
+      if (await stopInterphaseReviewClock()) continue;
+      await sleepUntilSweepWake(backoffMs);
+    }
+
+    if (dispatchTransportSeenThisTick && !spawnInfraSeenThisTick && toProcess.length === 0) {
+      ticks++;
+      consecutiveDispatchTransportFailures++;
+      const backoffMs = Math.min(
+        pollIntervalMs * 2 ** (consecutiveDispatchTransportFailures - 1),
+        maxApiWindowHoldMs,
+      );
+      log("daemon.dispatch_transport_backoff", {
+        tick: ticks,
+        backoff_ms: backoffMs,
+        consecutive: consecutiveDispatchTransportFailures,
+        reason: "transient gh transport refusal after worker dispatch — holding in process",
+      });
       if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(backoffMs);
     }

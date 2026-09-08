@@ -1,0 +1,108 @@
+- id: W1-T3149
+  title: "A PLAN-ONLY PR CARRYING AN IMPLEMENTATION TASK'S `Remudero-Task:` TRAILER IS JUDGED AGAINST CRITERIA IT CANNOT SATISFY — the deterministic floor resolves the shard's proofs, none of them can execute against a diff with no source in it, and on merge the trailer would credit the task as BUILT"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/review.ts, test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts]
+  origin: "operator-session#root-cause-pass-2026-09-08"
+  plan_refs: ["W1-T952", "W1-T2297", "W1-T2737", "W1-T3043", "W1-T3101"]
+  status: queued
+  attempts: 0
+  rationale: |
+    A `Remudero-Task:` trailer does TWO things: it resolves the criteria review judges against, and it
+    credits the task as built on merge. On a plan-only PR that names an IMPLEMENTATION task, both are
+    wrong, and nothing refuses the combination.
+
+    MEASURED 2026-09-08 — FIVE PRs IN ONE SESSION, all of them plan-only, all refused:
+      - #4573, one file (`plan/tasks.d/W1-T3101-…`), trailer `Remudero-Task: W1-T3101`, refused
+        `FAIL — unmet: a staged skill matching the task class appears in the rendered implement
+        prompt's CONTEXT block (+3 more)`. Those are W1-T3101's IMPLEMENTATION criteria; a one-field
+        plan amendment cannot satisfy any of them.
+      - #4585, #4586, #4587, #4588 — the four `chore(plan): reconcile shards to merged` batches, 30
+        files each, every path under `plan/`, all trailered `Remudero-Task: W1-T3043`, all four
+        refused on W1-T3043's criteria.
+    All five went green the moment the trailer was removed and the body carried its own `## Acceptance`
+    block. That is the repair done BY HAND five times, which is the definition of a missing gate.
+
+    THE CREDIT HALF IS THE DANGEROUS ONE, AND IT IS SILENT. Review failing is loud. But had any of
+    those five merged with the trailer intact, `findMergedByTrailer` would have credited W1-T3101 /
+    W1-T3043 as BUILT while no implementation exists — the plan would record shipped work that never
+    shipped, and the task would never be dispatched again. The review refusal is what accidentally
+    prevented that; nothing was actually checking it.
+
+    THE DISTINCTION ALREADY EXISTS IN THE CODE, UNUSED FOR THIS. `run-task.ts` computes
+    `planOnlyTask = declaredFiles.every(isInPlanScope)` for scope purposes, and `review.ts` exports
+    `planOnlyDiff` for the reviewer-skip decision. A trailer is legitimate on a plan-only PR when the
+    TASK ITSELF is plan-only (a filing whose `files:` are all under `plan/`); it is structurally
+    impossible when the task declares source files. Nothing joins those two facts.
+
+    WHY THE EXISTING PLAN-ONLY CARVE-OUT DOES NOT COVER IT. `planOnlySkip` only suppresses the
+    SEMANTIC reviewer spawn (`review.reviewer.skipped`, reason `plan-only`). The deterministic floor
+    still runs and still resolves the trailer's shard, so the criteria are judged in full against a
+    diff that contains no code. The carve-out makes the review cheaper, not correct.
+
+    WHY THE AUTHOR-TIME GATE DOES NOT COVER IT EITHER. `acceptanceAuthorTimeCheck` already accepts a
+    `trailerResolves` hook and `scripts/acceptance-author-gate.mjs` already supplies a plan-backed
+    resolver — but that gate receives only the PR BODY and author login. It cannot see the DIFF, so it
+    cannot know the change is plan-only. Any fix that lives there needs the changed-file list threaded
+    in, which is a second decision this task must make explicitly rather than by accident.
+  design: |
+    (i) REFUSE, DO NOT SILENTLY RE-RESOLVE. When the diff is plan-only and the trailer names a task
+    whose declared `files:` contain a non-plan path, the PR is refused with a message naming both
+    halves and the remedy: remove the trailer and author the PR's own `## Acceptance` block, or add
+    the implementation. Re-resolving criteria from the body instead would fix the review and LEAVE THE
+    CREDIT BUG — the trailer would still mark the task built on merge — so it is explicitly rejected.
+
+    (ii) THE PREDICATE JOINS TWO EXISTING FACTS AND MINTS NEITHER. `planOnlyDiff` decides the diff
+    half; the task half is `declaredFiles.every(isInPlanScope)`, the same expression `run-task.ts`
+    already uses for `planOnlyTask`. Export/observe them rather than writing a third copy.
+
+    (iii) A PLAN-ONLY TASK KEEPS ITS TRAILER. A task whose `files:` are entirely under `plan/` is
+    legitimately built by a plan-only diff; that combination must stay PASSING, and is the control the
+    regression needs. Getting this wrong would break every filing-style task at once.
+
+    (iv) THE MESSAGE MUST TEACH THE REMEDY, in the shape this repo's other refusals use
+    (`rule15-precheck`, the entanglement refusal): name the trailer, name the task's non-plan files,
+    and give the two ways out. A refusal a human cannot act on is the failure mode already recorded
+    for the dead-proof floor.
+
+    (v) DECIDE WHERE IT LIVES, AND SAY WHY. The review path has both facts today and is the cheapest
+    correct home. The author-time gate would catch it EARLIER but needs the changed-file list threaded
+    into `evaluateGate`. Pick one, state the reason in the source, and do not implement half of each.
+  acceptance:
+    - claim: "a plan-only diff whose trailer names a task declaring non-plan files is refused, and the message names the trailer, the task's source files and both remedies"
+      proof: "unit test: test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts"
+    - claim: "a plan-only diff whose trailer names a task whose files are entirely under plan/ still PASSES, so ordinary filings are unaffected"
+      proof: "unit test: test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts"
+    - claim: "a diff that does contain source keeps its existing behaviour for the same trailer, so the refusal turns on the diff and not on the trailer alone"
+      proof: "unit test: test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts"
+    - claim: "the refusal is reproduced against #4573's real shape — one plan/tasks.d file plus a trailer naming a task with src/ files — and not an invented fixture"
+      proof: "unit test: test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts"
+    - claim: "removing only the new predicate restores the old verdict, proving the regression does not pass on current main"
+      proof: "unit test: test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts"
+  falsifier: |
+    Close without implementation if a plan-only PR trailered to an implementation task is already
+    refused for THIS reason. MEASURED 2026-09-08: five such PRs were refused for the WRONG reason —
+    each reported its task's unmet implementation criteria (`FAIL — unmet: …`), never the structural
+    mismatch — and each passed once the trailer was deleted by hand. A refusal that names the wrong
+    cause is what made the same repair necessary five times in one session.
+
+    Close also if `planOnlySkip` already covers it. It does not: that flag suppresses only the
+    semantic reviewer spawn and logs `review.reviewer.skipped` with reason `plan-only`, while the
+    deterministic floor continues to resolve and judge the trailer's shard.
+
+    DO NOT falsify this from `acceptanceAuthorTimeCheck`'s `trailerResolves` hook. That predicate
+    answers "does this id exist in the plan", not "can this diff possibly build it", and the gate
+    around it never receives the changed-file list.
+  note: |
+    ONE CONCERN: a plan-only diff may not claim an implementation task. Not in scope: changing what
+    `planOnlyDiff` counts as plan scope, the semantic reviewer skip, `findMergedByTrailer` itself, or
+    the five PRs already repaired by hand.
+
+    The dangerous half is design (iii). A predicate that is even slightly too broad refuses every
+    ordinary filing — the most common PR shape in this repo — so the plan-only-TASK control must be
+    verified by watching it FAIL against a deliberately over-broad predicate, not merely by passing.

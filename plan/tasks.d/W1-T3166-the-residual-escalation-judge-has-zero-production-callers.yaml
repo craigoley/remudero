@@ -1,0 +1,108 @@
+- id: W1-T3166
+  title: "THE RESIDUAL ESCALATION JUDGE HAS ZERO PRODUCTION CALLERS — `escalateWithJudge` is built, spawn-ready and fully unit-tested, but every producer in run-task.ts calls plain `escalate()`, so no escalation has ever been judged and the fleet-notice queue has stood at 0 forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/run-task.ts, test/escalation-judge-is-wired.test.ts]
+  origin: "operator-session#console-visibility-2026-09-08"
+  plan_refs: ["W1-T349"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-08, three independent reads agreeing.
+
+    (1) CALLSITE CENSUS. `grep -rn 'escalateWithJudge' --include=*.ts .` (node_modules excluded)
+    returns hits in exactly three places: `test/escalate.test.ts` (5 tests),
+    `test/escalation-retirability.test.ts` (1 test), and two prose references inside
+    `src/lib/escalate.ts` and `src/lib/operator-message.ts`. THERE IS NO PRODUCTION CALLER.
+    Meanwhile `grep -rn '\bescalate(' src/` finds the real producers — run-task.ts:8832, 8848,
+    9241, 9344, 9409, 9977, 10173, 10229, 10301 and more — every one of them on the UNJUDGED path.
+
+    (2) THE QUEUE THE JUDGE WRITES TO IS EMPTY AND ALWAYS HAS BEEN.
+    `gh issue list --label fleet-notice --state open --json number -q 'length'` → **0**.
+
+    (3) THE LEDGER HAS NEVER RECORDED A VERDICT. Over the ledger union (579 gz archives + the live
+    file; positive control: `zgrep -h '"step"' ledger.2026-09*.ndjson.gz | head -1` opens and
+    returns a row), the census of judge-bearing step names is
+    `zgrep -ho '"step":"[^"]*judge[^"]*"' ledger.*.ndjson.gz | sort | uniq -c` →
+    `14813 risk_judge.escalated` and `349 risk_judge.decision`, AND NOTHING ELSE. The sibling
+    risk judge runs constantly. The escalation judge has never run once.
+
+    WHAT WAS BUILT AND IS SITTING UNUSED (src/lib/escalate.ts:434-…): `EscalationJudgeVerdict`,
+    `isEscalationJudgeExempt` (MANUAL/GRILL exempt structurally), `buildEscalationJudgePrompt`
+    (carrying the demote-only asymmetry in the prompt itself), `judgeEscalation` with a FAIL-OPEN
+    default, `buildEscalationJudgeSpawnArgs` and `spawnEscalationJudgeWorker` (a real, no-tools,
+    cheapest-mount spawn). The design, the polarity argument, the exemptions and the tests are all
+    DONE. The only thing missing is the call.
+
+    WHY THIS IS THE HIGH-VALUE ONE. On 2026-09-08 the operator read his NEEDS ME board and said of
+    the two items on it: "neither of them seem like they actually need me." Both were correct
+    escalations by their producer's own rule and neither wanted a human. That is EXACTLY the residue
+    W1-T349 designed this judge for, and the judge was there the whole time with nothing calling it.
+
+    THIS REPO'S OWN RECORD NAMES THIS FAILURE MODE. DECISIONS.md: "twelve have merged green with no
+    consumer and a thirteenth was found on 2026-08-18." This is another one, and a large one.
+  design: |
+    (i) WIRE AT THE PRODUCERS, NOT INSIDE `escalate()`. `escalateWithJudge` already composes dedup →
+    exemption → judge → label choice; moving the judge INTO `escalate()` would silently re-route the
+    operator's OWN `rmd escalate` CLI, which `escalateCommand` deliberately sends through plain
+    `escalate()` so an operator-authored escalation is exempt STRUCTURALLY rather than by a field
+    read. THAT STRUCTURAL EXEMPTION MUST SURVIVE THIS TASK UNCHANGED — it is the reason the two
+    functions are separate, and a wiring that erases it has broken the design it was meant to finish.
+    (ii) THE SWITCH IS PER-CALLSITE AND ENUMERATED, never a blanket rename. Each producer converted
+    is named in the PR body with the class it raises, so a reviewer can check the polarity call for
+    each one rather than trusting a sed.
+    (iii) FAIL-OPEN IS NOT NEGOTIABLE AND MUST BE PROVEN AT THE CALLSITE, not merely in the library.
+    A spawn error, timeout, unparseable verdict or governor refusal at a wired producer must still
+    open a needs-human issue. A wiring that can swallow an escalation is worse than no wiring.
+    (iv) LEDGER THE VERDICT. Every judged escalation writes a step naming the decision and the
+    reason, so the next reader can answer "has this ever run" with one grep — the exact question
+    this task's own rationale had to answer with three reads because no such row existed.
+  acceptance:
+    - claim: "at least one production escalation producer in run-task.ts reaches the judge — the callsite census that returns zero production callers today returns a non-zero count"
+      proof: "unit test: test/escalation-judge-is-wired.test.ts"
+    - claim: "a wired producer whose judge THROWS, times out, or returns an unparseable verdict still opens a needs-human issue — fail-open holds at the callsite, not only inside judgeEscalation"
+      proof: "unit test: test/escalation-judge-is-wired.test.ts"
+    - claim: "the operator's own `rmd escalate` CLI still reaches plain escalate() and is never judged — the structural exemption survives"
+      proof: "unit test: test/escalation-judge-is-wired.test.ts"
+    - claim: "a judged escalation writes a ledger step naming the decision and the reason, so 'has the judge ever run' is answerable by one step-name grep"
+      proof: "unit test: test/escalation-judge-is-wired.test.ts"
+  falsifier: |
+    CLOSE IF the judge already has a production caller. THE COMMAND, AND WHAT IT ACTUALLY RETURNS —
+    stated exactly, because the naive grep returns a hit and a future reader must not mistake it for
+    refutation:
+      `grep -rn 'escalateWithJudge' --include=*.ts src/ | grep -v '^src/lib/escalate.ts'`
+    MEASURED 2026-09-08 → EXACTLY ONE LINE, and it is PROSE, not a call:
+      `src/lib/operator-message.ts:8: * escalation producer already crosses (\`escalate.ts\`'s \`escalate()\`/\`escalateWithJudge()\`).`
+    Zero CALLS. The shard stands. REQUIRING A CALL SHAPE IS NOT ENOUGH EITHER — the comment above
+    contains the literal text `escalateWithJudge()`, so `escalateWithJudge\\(` still matches it. The
+    command that is actually true must drop comment lines:
+      `grep -rnE 'escalateWithJudge\\(' --include=*.ts src/ | grep -v '^src/lib/escalate.ts' | grep -vE ':[[:space:]]*(\\*|//)'`
+    MEASURED 2026-09-08 → NO OUTPUT (exit 1).
+    POSITIVE CONTROL, REQUIRED because a grep that finds nothing may simply be broken — the IDENTICAL
+    pipeline against the unjudged sibling must find the real producers:
+      `grep -rnE '\\bescalate\\(' --include=*.ts src/ | grep -v '^src/lib/escalate.ts' | grep -vE ':[[:space:]]*(\\*|//)' | wc -l`
+    MEASURED 2026-09-08 → **29**. The pipeline works; the judge has no callers.
+    PROVE IT LOAD-BEARING: with the wiring in place, a stub judge returning `demote` must move a
+    BLOCKED escalation to the fleet-notice label; the SAME escalation with the wiring reverted must
+    open needs-human. If both open needs-human, the callsite is not reaching the judge and the first
+    criterion is satisfied only on paper.
+    DO NOT satisfy this by adding a config flag that defaults to off. An unwired mechanism behind a
+    default-off flag is the same defect wearing a switch, and this repo already carries twelve of
+    them by its own count.
+    DO NOT widen `isEscalationJudgeExempt`. Broadening the exemption list makes the wiring pass its
+    tests while judging nothing — the shape this task exists to end.
+  note: |
+    Rule 25 CHECKED: `src/run-task.ts` is ordinary src; no instrument path is touched.
+    POLARITY, RESTATED BECAUSE IT IS EASY TO INVERT UNDER REVIEW PRESSURE (escalate.ts:440-445):
+    a FALSE NEGATIVE (demoting something the operator needed) hides work he cannot know to look for
+    and is the COSTLY direction; a FALSE POSITIVE costs one skim. WHEN IN DOUBT, DELIVER. A reviewer
+    asking for a more aggressive judge is asking for the costly direction.
+    CAVEAT WITH EQUAL WEIGHT TO THE FINDING: this task establishes that the judge never runs. It does
+    NOT establish that running it would have demoted the two items the operator called out — that is
+    a judgement call by a model on a prompt, and no measurement here can predict it. What is measured
+    is that nothing ever asked.
