@@ -168,21 +168,15 @@ export interface Task {
  */
 export const RELEASE_LEDGER_STEP = "ratify.approved";
 
-/** Task ids released by an operator, read from {@link RELEASE_LEDGER_STEP} rows. Pure over the
- *  lines it is handed — the caller owns the read, so no dispatch path gains file I/O. */
-export function releasedTaskIds(ledgerLines: readonly string[]): Set<string> {
+/** Task ids released by an operator, read from {@link RELEASE_LEDGER_STEP} rows. Takes the PARSED
+ *  rows the repo's own ledger readers return, so no second JSON parse happens and the caller owns
+ *  the read — no dispatch path gains file I/O. A row missing either field releases nothing. */
+export function releasedTaskIds(rows: readonly Record<string, unknown>[]): Set<string> {
   const out = new Set<string>();
-  for (const line of ledgerLines) {
-    if (!line.includes(RELEASE_LEDGER_STEP)) continue; // cheap reject before the parse
-    let row: { step?: unknown; task_id?: unknown };
-    try {
-      row = JSON.parse(line) as typeof row;
-    } catch {
-      continue; // an unparseable line releases nothing — the safe direction
-    }
-    if (row.step === RELEASE_LEDGER_STEP && typeof row.task_id === "string" && row.task_id) {
-      out.add(row.task_id);
-    }
+  for (const row of rows) {
+    if (row?.step !== RELEASE_LEDGER_STEP) continue;
+    const id = row.task_id;
+    if (typeof id === "string" && id) out.add(id);
   }
   return out;
 }
@@ -677,7 +671,8 @@ export function assertRunnable(
   if (task.status === "blocked") {
     throw new PlanError(`task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`);
   }
-  if (task.verify === "human" && releasedIds?.has(task.id) !== true) {
+  const released = releasedIds !== undefined && releasedIds.has(task.id);
+  if (task.verify === "human" && !released) {
     throw new PlanError(`task ${task.id} is verify:human — not auto-runnable by the proto-runner`);
   }
   const unmet = unmetDependencies(plan, task, isMerged);

@@ -735,6 +735,8 @@ import {
   taskRecordPath,
   readBlobsAtRef,
   mergePlanBlobs,
+  RELEASE_LEDGER_STEP,
+  releasedTaskIds,
 } from "./lib/plan.js";
 import { exitCodeFor } from "./lib/errors.js";
 import {
@@ -34030,12 +34032,66 @@ function loadProposalsForRatify(
  * {@link approveProposal}; this command is the thin real-world glue (mirrors
  * `inboxCommand`/`planCommand`'s split).
  */
+/** W1-T3206 — does this token name a TASK (`W1-T1041`) rather than an inbox proposal (`P7`)?
+ *  Shape only: whether the task exists, is parked, or is already released is decided below, so a
+ *  typo'd task id is refused BY NAME instead of falling through to "unknown proposal". */
+export function namesATask(token: string): boolean {
+  return /^W\d+-T[0-9A-Za-z]+$/.test(token);
+}
+
+/**
+ * W1-T3206 — RATIFY A PARKED `verify: human` TASK through the pipeline proposals already use.
+ *
+ * `verify: human` was a one-way park: `isDispatchEligible` refuses it and nothing converted an
+ * operator's decision back into dispatch. This writes the SAME `ratify.approved` row a proposal
+ * ratification writes, which `releasedTaskIds` (plan.ts) reads back — so the plan record is never
+ * edited and the decision is auditable on the one ledger step that already means "the operator
+ * spent his bit".
+ *
+ * REFUSES, NAMING THE STATE, with zero side effects: an unknown id, a task that is not
+ * `verify: human` (it needs no release), one that is blocked or retired, and one already released.
+ */
+export function approveParkedTask(
+  taskId: string,
+  deps: { plan: Plan; ledgerPath: string; runId: string; ledgerLines?: readonly Record<string, unknown>[]; append?: typeof appendLedger },
+): { code: number; message: string } {
+  const task = deps.plan.byId.get(taskId);
+  if (!task) return { code: 2, message: `rmd approve: unknown task '${taskId}' — not in the plan` };
+  if (task.verify !== "human") {
+    return { code: 2, message: `rmd approve: ${taskId} is verify:${task.verify} — it needs no release; only a verify:human task is parked` };
+  }
+  if (task.status !== "queued") {
+    return { code: 2, message: `rmd approve: ${taskId} is status:${task.status} — only a queued task can be released` };
+  }
+  const already = releasedTaskIds(deps.ledgerLines ?? readLedgerLines(deps.ledgerPath));
+  if (already.has(taskId)) {
+    return { code: 0, message: `rmd approve: ${taskId} is already released — no second row written` };
+  }
+  (deps.append ?? appendLedger)(deps.ledgerPath, {
+    run_id: deps.runId,
+    task_id: taskId,
+    step: RELEASE_LEDGER_STEP,
+    released: "verify-human",
+  });
+  return { code: 0, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
+}
 export async function approveCommand(
   rest: string[],
   deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway; overlap?: OverlapWarningDeps } = {},
 ): Promise<number> {
   const proposalId = rest[0];
   const badArg = unknownArgError("approve", rest.slice(1), [], []);
+  // W1-T3206: a TASK id takes the release path; the proposal path below is untouched.
+  if (proposalId && !badArg && namesATask(proposalId)) {
+    const cfg = deps.config ?? loadConfig();
+    const r = approveParkedTask(proposalId, {
+      plan: loadPlan(join(repoRoot, "plan", "tasks.yaml")),
+      ledgerPath: ledgerPathFor(cfg),
+      runId: `APPROVE-${proposalId}`,
+    });
+    (r.code === 0 ? console.log : console.error)(r.message);
+    return r.code;
+  }
   // W1-T2471: more than one bare id named (e.g. `rmd approve P1 P2 P3`) is what the SINGLE-id
   // parse above already flags as a bad arg — every token after the first is "unexpected".
   // Reinterpreted here, and ONLY here, as an EXPLICIT batch (Q4: never an implicit "approve
