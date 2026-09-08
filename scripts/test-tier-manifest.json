@@ -581,6 +581,7 @@
     "test/host-units-install.test.ts": 337,
     "test/host-update-reclaim.test.ts": 1297,
     "test/host-update-tmp-paths.test.ts": 645,
+    "test/host-worker-budget-is-sized-to-the-host.test.ts": 0,
     "test/human-verify-queue-surfaces.test.ts": 1224,
     "test/identity-provider-seam.test.ts": 332,
     "test/idle-reasons-panel.test.ts": 1055,

@@ -618,7 +618,10 @@ sweep:
   # memory sample (31.40%) deliberately above the 15% shed threshold. Provider headroom is read
   # from the existing age-bounded routing snapshot, never a new per-PR subscription call.
   reviewCapacity:
-    hostWorkerBudget: { value: 4, origin: "net-new", min: 1, max: 16 }
+    # W1-T3209, measured on the Azure fleet host 2026-09-08:
+    # min(8 cores, floor(23483 MiB / 1536 MiB) = 15, max 16) = 8. The core count
+    # binds before memory; the live pressure and recovery gates below still shed future admissions.
+    hostWorkerBudget: { value: 8, origin: "net-new", min: 1, max: 16 }
     workerMemoryReserveMib: { value: 1536, origin: "net-new", min: 256, max: 4096 }
     healthyWindowSamples: { value: 3, origin: "net-new", min: 2, max: 12 }
     sampleCadenceMs: { value: 60000, origin: "net-new", min: 10000, max: 600000 }
