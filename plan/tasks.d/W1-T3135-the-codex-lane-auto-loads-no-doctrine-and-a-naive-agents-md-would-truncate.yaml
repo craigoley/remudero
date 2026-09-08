@@ -1,0 +1,96 @@
+- id: W1-T3135
+  title: "THE CODEX LANE AUTO-LOADS NO REPOSITORY DOCTRINE — Codex's native project-doc reader looks for AGENTS.md and this repo has none, `codexExecArgs` passes `--ignore-user-config` with no `project_doc_*` override, so the ONLY route to any rule is one unenforced sentence in the spawn prompt; and the obvious remedy is a trap, because CLAUDE.md at 43685 bytes exceeds Codex's 32 KiB `project_doc_max_bytes` default and a copy would be SILENTLY TRUNCATED"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 16.00
+  files: [scripts/generate-agents-md.mjs, AGENTS.md, test/the-codex-lane-auto-loads-no-doctrine.test.ts, package.json]
+  origin: "operator-session#context-modularization-2026-09-08"
+  plan_refs: ["W1-T2759", "W1-T2508", "W1-T2761"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-08 at origin/main (1ee2b5ff).
+
+    (1) THE THREE FACTS THAT COMPOSE THE HOLE.
+      a. `git ls-files | grep -i '^agents\.md$'` returns NOTHING — this repo tracks no AGENTS.md.
+      b. Codex's native project-doc reader loads AGENTS.md (plus `project_doc_fallback_filenames`)
+         up to `project_doc_max_bytes`, whose documented default is 32 KiB.
+      c. `codexExecArgs` (src/lib/worker-provider.ts) passes `--ignore-user-config` and sets no
+         `-c project_doc_max_bytes` and no `-c project_doc_fallback_filenames`, so no user-level
+         config can supply either.
+    Together: the Codex lane's native doc injection loads NOTHING from this checkout.
+
+    (2) THE ONLY SURVIVING ROUTE IS PROSE. `spawnCodexWorker` prepends "Before acting, read and
+    follow the repository instruction files present in the checkout, including CLAUDE.md and
+    AGENTS.md." That is an instruction the model may follow, skip, or partially satisfy — exactly
+    the class CLAUDE.md's own header calls out: a rule stated only in prose "can be violated
+    silently and repeatedly". It names a file that does not exist, and its compliance is unobserved.
+
+    (3) THE OBVIOUS FIX IS THE WRONG ONE. Copying or symlinking CLAUDE.md to AGENTS.md puts 43685
+    bytes in front of a 32768-byte default cap. Codex stops accumulating at the cap, so the TAIL is
+    dropped — here that is "Ledger and evidence discipline", "Investigation discipline" and "Code
+    traps", the sections carrying the control/zero-measurement rules. A truncation at that boundary
+    is silent: no error, no warning, and the file looks present.
+
+    (4) WHY GENERATED, NOT HAND-WRITTEN. This repo already runs three generator+drift-check pairs
+    (`generate-cli-reference.mjs`, `generate-proof-dialect.mjs`, `generate-docs-index.mjs`), each
+    with a `--check` mode reached through `npm test` rather than a workflow step. A second
+    hand-maintained doctrine file would drift from CLAUDE.md within days and nothing would say so.
+  design: |
+    (i) THE GENERATOR. scripts/generate-agents-md.mjs renders AGENTS.md from CLAUDE.md's OWN
+    constants — `parseRuleHeadlines` + `renderHeadlineOnlyIndex` (src/lib/learnings.ts), the same
+    split W1-T2508 already proved — plus a pointer telling the reader to open CLAUDE.md in the
+    checkout for a headline's body. Headline-only is 7377 bytes today, well inside 32 KiB, and it
+    grows with headline COUNT rather than with rule prose.
+
+    (ii) THE DRIFT GATE. `--check` mode, spawned by the test the way test/cli-reference.test.ts
+    spawns its sibling. A CLAUDE.md edit that changes the headline set and leaves AGENTS.md stale
+    must FAIL BY NAME.
+
+    (iii) THE CAP IS PINNED, NOT ASSUMED. A test asserts the rendered AGENTS.md is under a named
+    `CODEX_PROJECT_DOC_MAX_BYTES = 32768` constant with headroom, and that constant carries its
+    source in a comment. If Codex's default ever moves, the assumption is one greppable place.
+
+    (iv) THE PROSE SENTENCE STAYS, AND STOPS LYING. `spawnCodexWorker`'s prelude currently names a
+    file that does not exist; once AGENTS.md is generated it names two that do.
+
+    (v) NOT IN SCOPE: renaming CLAUDE.md, changing what Claude Code loads, `settingSources`, the
+    CLAUDE.md budget cap, or any `-c project_doc_*` flag on the spawn (that would need the operator
+    to widen an already-narrow Codex argument surface).
+  acceptance:
+    - claim: "the generated AGENTS.md renders every CLAUDE.md rule headline and stays under Codex's 32 KiB project-doc default"
+      proof: "unit test: test/the-codex-lane-auto-loads-no-doctrine.test.ts"
+    - claim: "a CLAUDE.md headline change that leaves AGENTS.md stale fails the drift check by name"
+      proof: "unit test: test/the-codex-lane-auto-loads-no-doctrine.test.ts"
+    - claim: "the Codex spawn's own argument list is asserted to carry no project_doc override, so the 32 KiB default is the one that applies"
+      proof: "unit test: test/the-codex-lane-auto-loads-no-doctrine.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF AGENTS.md ALREADY EXISTS ON MAIN, or if `codexExecArgs` has
+    gained a `project_doc_` flag. Re-run both before building:
+    `git ls-files | grep -ix 'agents.md'` and `grep -n project_doc src/lib/worker-provider.ts`.
+
+    AND THE SIZE ASSERTION MUST BE ABLE TO FAIL. Assert the RENDERED byte length against the named
+    constant, not a hand-typed number, and prove the assertion bites by rendering a deliberately
+    oversized fixture in the same test. A size test that can only pass proves nothing — this repo
+    has shipped that shape before (the vacuous-pass family CLAUDE.md's coverage section names).
+
+    AND DO NOT ASSERT THAT CLAUDE CODE READS AGENTS.md. Measured 2026-09-08: the installed CLI's
+    discovery strings are `./CLAUDE.md` and `~/.claude/CLAUDE.md`; the one AGENTS.md mention sits
+    inside the Codex IMPORTER's unmappable-settings rationale, which is not evidence of runtime
+    discovery. This task is about the CODEX lane only.
+  note: |
+    FILED 2026-09-08. NO RESERVATION MINTED — see W1-T3134's note for the probe and the three-surface
+    sweep that chose this id.
+
+    risk:high with band_meaning:span because the declared files span a generator, a new root
+    doctrine file, a test and package.json. The SPAN is wide; the blast radius is not — nothing here
+    changes what any Claude lane loads, and a defect shows up as a failing drift check rather than
+    as a behaviour change in a worker.
+
+    verify:human because adding a second doctrine file at the repo root is a durable convention
+    change an operator should rule on, even though every acceptance criterion is mechanical.

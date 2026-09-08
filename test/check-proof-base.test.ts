@@ -378,14 +378,20 @@ test("R-11: a `unit test:` proof that passes at BOTH trees is executed_stale her
   }
 });
 
-test("R-11: a `unit test:` file ABSENT at --base <ref> discriminates — the forward-referencing TDD case", () => {
-  const passing = 'import { test } from "node:test";\ntest("exists only on the head", () => {});\n';
+test("W1-T3098 (amends R-11): a `unit test:` file the diff ADDED is copied into the --base <ref> worktree, and asserting nothing genuinely passes there too — executed_stale, not a false discriminates", () => {
+  // R-11 gave `unit test:` a real checkout at --base <ref>, but a checkout of that ref never
+  // contains a file only the head commit added — `node --test` there found nothing and exited
+  // nonzero, and this proof used to be reported "discriminates" for that reason alone. W1-T3098
+  // makes `buildBaseProofDir` copy the diff's ADDED test/** files into the base worktree
+  // first, so this exact proof can genuinely be re-run there; asserting nothing, it genuinely
+  // passes at the base exactly as it does at the head.
+  const passing = 'import { test } from "node:test";\ntest("exists on the head, and now copied into the base too", () => {});\n';
   const repo = twoCommitRepo({}, { "test/fresh.test.ts": passing });
   try {
     const { code, out } = runCheckProof(["--base", "HEAD~1", "unit test:", "test/fresh.test.ts"], repo);
-    assert.equal(code, CHECK_PROOF_EXIT.pass, out);
-    assert.match(out, /^base:\s+fail$/m, "`node --test` finds no such file at the base");
-    assert.match(out, /^discrimination:\s+discriminates/m);
+    assert.equal(code, CHECK_PROOF_EXIT.executedStale, out);
+    assert.match(out, /^base:\s+pass$/m, "the base run genuinely executed the copied file and passed");
+    assert.match(out, /^discrimination:\s+executed_stale/m);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

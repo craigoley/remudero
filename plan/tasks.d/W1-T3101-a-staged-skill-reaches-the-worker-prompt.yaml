@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   budget_usd: 20.00
-  files: [src/lib/skill-workshop.ts, src/run-task.ts, test/a-staged-skill-reaches-the-worker-prompt.test.ts]
+  files: [src/lib/skill-workshop.ts, src/lib/prompt-render.ts, src/run-task.ts, test/a-staged-skill-reaches-the-worker-prompt.test.ts]
   origin: "operator-session#next-wave-2026-09-08"
   plan_refs: ["W1-T2959", "W1-T2761", "W1-T2297"]
   status: queued
@@ -81,5 +81,10 @@
     DO NOT satisfy this by widening `settingSources`. Three sites in this tree state that isolation
     as load-bearing; overturning it from inside a delivery task is the shape this repo refuses.
   note: |
+    FILES AMENDED 2026-09-08: `implementPromptParts` — the CONTEXT-part derivation design (ii) must
+    edit — moved from `src/run-task.ts` to `src/lib/prompt-render.ts` in #4562, merged after this
+    shard was filed. `src/lib/prompt-render.ts` is added; `src/run-task.ts` is KEPT because
+    `retroCommand` (design (i)) still lives there. Verified with `git grep -ln "export function
+    implementPromptParts" origin/main`. No criterion field is touched by this amendment.
     Rule 25 CHECKED BEFORE FILING: every declared file is src or test, so the build PR is an
     ordinary src+test pair and must not carry a plan record.
