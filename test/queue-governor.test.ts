@@ -334,7 +334,7 @@ const OPEN_GITHUB: GitHub = {
 
 /** A complete open-board snapshot whose branches deliberately cannot be attributed to the one
  * plan task. The WIP ceiling governs the board, not only PRs that current main can map to a shard. */
-function githubWithUnplannedOpenPrs(count: number, onList?: () => void): GitHub {
+function boardWithUnplannedOpenPrs(count: number, onList?: () => void): GitHub {
   return {
     ...OPEN_GITHUB,
     listOpenHeadBranches: () => {
@@ -442,7 +442,7 @@ test("W1-T3144: drain WIP admission counts every open board PR even when current
   const config = queueGovernorFixtureConfig();
   try {
     const planPath = planWithOpenPrs(1);
-    const github = githubWithUnplannedOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
+    const github = boardWithUnplannedOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
     const deps = await captureDrainDepsWithLiveProjection(config, planPath, github);
 
     const result = deps.checkQueueGovernor!();
@@ -459,7 +459,7 @@ test("W1-T3144: daemon WIP admission counts every open board PR even when curren
   process.env.HOME = home;
   try {
     const planPath = planWithOpenPrs(1);
-    const github = githubWithUnplannedOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
+    const github = boardWithUnplannedOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
       githubFactory: () => github,
@@ -488,7 +488,7 @@ test("W1-T3144: the complete board count reuses projectPlan's one open-list read
   let listCalls = 0;
   try {
     const planPath = planWithOpenPrs(1);
-    const github = githubWithUnplannedOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit, () => { listCalls++; });
+    const github = boardWithUnplannedOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit, () => { listCalls++; });
     const deps = await captureDrainDepsWithLiveProjection(config, planPath, github);
 
     assert.equal(deps.checkQueueGovernor!()?.observedOpenCount, DEFAULT_SWEEP_POLICY.wipLimit);
