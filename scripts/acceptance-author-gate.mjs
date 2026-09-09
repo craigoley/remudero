@@ -44,7 +44,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
-import { acceptanceAuthorTimeCheck } from "../src/lib/review.ts";
+import { acceptanceAuthorTimeCheck, filingSelfCreditCheck } from "../src/lib/review.ts";
+import { execFileSync } from "node:child_process";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
 
 /**
@@ -90,7 +91,64 @@ export function readEventPayload(eventPath) {
     };
   }
   const authorLogin = typeof pr.user?.login === "string" ? pr.user.login : undefined;
-  return { readable: true, body: typeof pr.body === "string" ? pr.body : "", authorLogin };
+  // W1-T3231: the two shas the self-credit check needs. OPTIONAL by design — a payload without
+  // them (an older event shape, a hand-built fixture) leaves that check unable to see the diff,
+  // which it treats as "nothing to refuse". Their absence never makes the payload unreadable,
+  // because the checks this gate already runs do not need them.
+  const baseSha = typeof pr.base?.sha === "string" ? pr.base.sha : undefined;
+  const headSha = typeof pr.head?.sha === "string" ? pr.head.sha : undefined;
+  return { readable: true, body: typeof pr.body === "string" ? pr.body : "", authorLogin, baseSha, headSha };
+}
+
+/**
+ * W1-T3231 — the task ids whose PLAN RECORD this diff INTRODUCES.
+ *
+ * A shard file ADDED under `plan/tasks.d/` between the two shas, read for the `- id:` lines it
+ * declares. Same line-scan surface as {@link declaredPlanTaskIds}, and for the same reason: this
+ * must answer on a tree it may not be able to parse.
+ *
+ * NO API CALL, which is the property W1-T1060 built this gate for — `base.sha` and `head.sha` ride
+ * in the event payload the gate already reads, and the rest is local git. The job's checkout needs
+ * `fetch-depth: 0` for those shas to be present; without it the `git diff` fails and this returns
+ * `[]`.
+ *
+ * FAILS OPEN, ALWAYS. Missing shas, a shallow clone, a git that errors, a shard that reads back
+ * empty — every one returns `[]`, which the caller reads as "this diff introduces no task record".
+ * A gate that refuses when it cannot see is the vacuous-refusal mirror of the vacuous pass, and
+ * this one runs on every PR.
+ *
+ * KNOWN LIMITATION: a task filed by appending to the `plan/tasks.yaml` MONOLITH is a MODIFICATION,
+ * not an addition, and is not seen here. Every filing in the measured session used a shard, and
+ * `rule15-filing` pushes filings toward shards; widening to an id-set delta over the monolith is a
+ * separate, larger change.
+ *
+ * @param {{ baseSha?: string, headSha?: string, root?: string, git?: (args: string[]) => string }} opts
+ * @returns {string[]}
+ */
+export function introducedShardTaskIds({ baseSha, headSha, root = REPO_ROOT, git } = {}) {
+  if (!baseSha || !headSha) return [];
+  const run =
+    git ??
+    ((args) => execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }));
+  let nameStatus;
+  try {
+    nameStatus = run(["diff", "--name-status", "--diff-filter=A", `${baseSha}...${headSha}`, "--", "plan/tasks.d"]);
+  } catch {
+    return []; // shallow clone, unknown sha, no git — fail OPEN
+  }
+  const ids = [];
+  for (const line of String(nameStatus).split("\n")) {
+    const path = line.trim().split(/\s+/).slice(1).join(" ");
+    if (!path.endsWith(".yaml")) continue;
+    let text;
+    try {
+      text = run(["show", `${headSha}:${path}`]);
+    } catch {
+      continue; // one unreadable shard costs that shard, never the whole read
+    }
+    for (const m of String(text).matchAll(/^\s*- id:\s*([A-Za-z0-9-]+)\s*$/gm)) ids.push(m[1]);
+  }
+  return ids;
 }
 
 export { REPO_ROOT };
@@ -148,13 +206,18 @@ export function planTrailerResolver(root = REPO_ROOT) {
  * plan passes — leaves the verdict byte for byte what it was before this wiring.
  * @param {{ body: string, authorLogin?: string, trailerResolves?: (taskId: string) => boolean }} input
  */
-export function evaluateGate({ body, authorLogin, trailerResolves }) {
+export function evaluateGate({ body, authorLogin, trailerResolves, introducedTaskIds = [] }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
       message: `author "${authorLogin}" is exempt — the dep-review lane owns arming for these (W1-T1060 rationale (5))`,
     };
   }
+  // W1-T3231 runs BEFORE the acceptance check, not after: a filing PR carrying its own trailer
+  // PASSES `acceptanceAuthorTimeCheck` today (the trailer arm accepts any resolvable id at face
+  // value), so ordering it second would leave it unreachable on exactly the bodies it is for.
+  const selfCredit = filingSelfCreditCheck(body, introducedTaskIds);
+  if (!selfCredit.ok) return { ok: false, defect: "files-and-credits-the-same-task", message: selfCredit.message };
   return acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
 }
 
@@ -194,7 +257,12 @@ export function main(argv) {
     return;
   }
 
-  const result = evaluateGate({ body: payload.body, authorLogin: payload.authorLogin, trailerResolves: planTrailerResolver() });
+  const result = evaluateGate({
+    body: payload.body,
+    authorLogin: payload.authorLogin,
+    trailerResolves: planTrailerResolver(),
+    introducedTaskIds: introducedShardTaskIds({ baseSha: payload.baseSha, headSha: payload.headSha }),
+  });
   if (!result.ok) {
     console.error(`acceptance-author-gate: REFUSED (${result.defect}) — ${result.message}`);
     process.exitCode = 1;
