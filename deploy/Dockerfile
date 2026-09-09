@@ -181,8 +181,11 @@ RUN set -eu; \
 # symlink emptied node_modules under a running daemon twice in one week, so do not mount a volume
 # over /app/node_modules. The two assertions below run after the last root npm invocation, so a
 # layer above reintroducing a cache, or a `.cache` entry not owned by node, fails the build here.
+# W1-T3176: `build:console` in the SAME layer as the install that makes it possible. Non-fatal on
+# purpose — the image carries the daemon, and `rmd serve` reports an absent build at startup.
 RUN export npm_config_cache=/tmp/npm-build-cache \
  && { npm ci --omit=dev || npm ci; } \
+ && { npm run --silent build:console || echo "WARNING: build:console failed; rmd serve will report the console build as missing"; } \
  && rm -rf /tmp/npm-build-cache \
  && { [ ! -e /home/node/.npm ] || { \
         echo "BUILD ASSERTION FAILED (REQ 14): /home/node/.npm exists after the last root npm layer."; \

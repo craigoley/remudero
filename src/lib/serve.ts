@@ -33,7 +33,7 @@
  * everywhere else in this codebase).
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeSync } from "node:fs";
 import { promises as fsPromises } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -174,6 +174,12 @@ export function resolveEscalationOptionAffordance(option: EscalationOption): Esc
 export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
+  /** W1-T3176 — the built console's directory. OMITTED means this daemon serves the string shell
+   *  only: no mount is installed, no build is looked for, and nothing is reported. Set, it is
+   *  verified at startup and the result is both logged and printed in the banner. */
+  consoleBuildRoot?: string;
+  /** Injected filesystem for that check, so the decision is provable without a real build. */
+  consoleBuildIo?: ConsoleBuildIo;
   /** Injectable ONLY so a unit test can pin the captured sha; real callers omit it and get
    *  {@link resolveConsoleSha}, resolved once at server start. */
   consoleSha?: string;
@@ -3033,6 +3039,15 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // second hard-coded path list that could drift from it.
     route.tier === "high" ? staleExit.wrapWrite(route) : route,
   );
+  // W1-T3176 — VERIFY BEFORE MOUNTING. Installed ONLY when the entry document is really there, so
+  // an absent build cannot half-render: `/console/*` 404s, `/` and every `/v1` route are untouched.
+  // The daemon degrades on one surface, never on both.
+  const consoleBuild = consoleBuildStatus(deps.consoleBuildRoot, deps.consoleBuildIo ?? { realpath: consoleBuildRealpath });
+  if (consoleBuild && consoleBuild.kind !== "present") {
+    // REPORTED, NOT DISCOVERED. The motivating failure is an operator staring at a blank tab with
+    // no idea which directory was searched, so the path is in the line.
+    deps.log?.("serve.console_build_missing", { kind: consoleBuild.kind, root: consoleBuild.root, reason: consoleBuild.reason });
+  }
   const server = createService({
     tokens: deps.tokens,
     identity: deps.identity,
@@ -3045,6 +3060,17 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       log: deps.log,
     }),
     routes,
+    // Absent build -> no mount -> `/console/*` is a plain 404 rather than a shell with no assets.
+    staticMount:
+      consoleBuild?.kind === "present"
+        ? {
+            prefix: "/console/",
+            root: consoleBuild.root,
+            scope: "read",
+            clientRoutes: ["/console/", "/console/index.html"],
+            io: { realpath: consoleBuildRealpath, readFile: (p) => readFileSync(p) },
+          }
+        : undefined,
     sse: [staleExit.wrapSse(prewarm.route)],
     log: deps.log,
     confirmNonces,
@@ -3059,6 +3085,66 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   });
   server.on("close", prewarm.stop);
   return { server, githubAppReady: routeAssembly.githubAppReady };
+}
+
+/**
+ * W1-T3176 — IS THERE A CONSOLE BUILD, AND WAS IT LOOKED FOR?
+ *
+ * THE FAILURE MODE DOES NOT EXIST YET, WHICH IS WHY IT IS WORTH BUILDING NOW. Production runs
+ * TypeScript directly and nothing is precompiled, so today the console is a string inside the
+ * source that runs and CANNOT be older than the code around it. As a build output that stops
+ * being true, and a checkout that updates without rebuilding serves a stale or absent console.
+ *
+ * REFUSE, DO NOT DEGRADE: a shell without its assets is a blank page indistinguishable from a hung
+ * daemon. `/v1` keeps serving either way — `rmd status` with a dead console beats neither — but the
+ * console surface must fail legibly. ABSENCE ONLY: staleness needs a provenance stamp, and folding
+ * it in would put two mechanisms behind one falsifier.
+ */
+/** A realpath that tells ABSENCE from FAILURE — the reason {@link ConsoleBuildStatus} has three
+ *  states. ⚠ The first version swallowed EVERY error and returned null, so a real EACCES reported
+ *  as `absent` and the `unreadable` arm was UNREACHABLE in production; every test injected a
+ *  throwing fake, so none could see it. ENOENT alone means "not there". */
+export function consoleBuildRealpath(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+export type ConsoleBuildStatus =
+  | { kind: "present"; root: string }
+  | { kind: "absent"; root: string; reason: string }
+  | { kind: "unreadable"; root: string; reason: string };
+
+export interface ConsoleBuildIo {
+  /** The entry document's real path, or `null` when it is not there. */
+  realpath: (p: string) => string | null;
+}
+
+/** THE ENTRY DOCUMENT IS THE TEST, not the directory. An empty `dist/` is what a failed build
+ *  leaves behind, and a directory check would call that present and serve nothing. */
+export function consoleBuildStatus(root: string | undefined, io: ConsoleBuildIo): ConsoleBuildStatus | null {
+  if (!root) return null; // no console build configured — this daemon serves the string shell only
+  const entry = join(root, "index.html");
+  try {
+    return io.realpath(entry) === null
+      ? { kind: "absent", root, reason: `no index.html under ${root}` }
+      : { kind: "present", root };
+  } catch (err) {
+    // UNREADABLE IS NOT ABSENT. A permission error or a broken mount must not read as "no build",
+    // because the remedies differ and one of them is not "rebuild".
+    return { kind: "unreadable", root, reason: String((err as Error)?.message ?? err) };
+  }
+}
+
+/** The one line an operator reads at boot. It NAMES THE PATH SEARCHED, because "console build
+ *  missing" with no path sends them looking in the wrong tree. */
+export function consoleBuildBannerLine(status: ConsoleBuildStatus | null): string | null {
+  if (status === null) return null;
+  if (status.kind === "present") return `    console build: ${status.root}`;
+  return `    console build: ${status.kind.toUpperCase()} — ${status.reason} (the /v1 API is unaffected)`;
 }
 
 export function buildServeServer(deps: ServeDeps): Server {

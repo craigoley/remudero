@@ -63,6 +63,7 @@
     "test/a-mandatory-registration-is-not-entanglement.test.ts": 0,
     "test/a-mentioned-claim-is-not-a-made-one.test.ts": 925,
     "test/a-merged-tasks-shard-still-reads-queued-so-the-fleet-rebuilds-it.test.ts": 1255,
+    "test/a-missing-console-build-fails-loudly.test.ts": 0,
     "test/a-mixed-plan-and-source-diff-is-refused-before-push.test.ts": 837,
     "test/a-modified-test-line-reads-as-added-test-code.test.ts": 1155,
     "test/a-module-that-compiles-to-nothing-is-not-a-coverage-gap.test.ts": 306,
