@@ -168,3 +168,45 @@ incident, or design argument, so it is not archived separately.
     // read this text, recorded the ceiling AND corrected its own file count, which is the whole
     // reason this sentence exists.
 ```
+
+## The third outcome: "could not determine"
+
+### W1-T3141 — a missing REF and a missing PATH both exit 128, so an unfetched base read as a clean answer
+
+W1-T3037 gave the BLOCKED path an inherited/introduced split: each violating file is re-measured at
+`origin/main`, and the author is told which reds they inherited rather than grew. `contentAtRef`
+decides `absent` versus `unreadable` on the exit STATUS of `git show <ref>:<path>` — and git exits
+**128 for both** a path that is not at the ref and a ref that is not in the checkout. Measured in a
+throwaway repository, with a positive control first:
+
+```
+git show main:f.txt        -> (content)                                           exit 0    <- control
+git show main:nosuch.txt   -> fatal: path 'nosuch.txt' does not exist in 'main'   exit 128
+git show origin/main:f.txt -> fatal: invalid object name 'origin/main'.           exit 128
+```
+
+So a checkout that never fetched `origin/main` returned `absent` for every file, every violation was
+classified INTRODUCED, `inheritedNotice` returned `undefined`, and **nothing printed**. A run that
+could not answer the question arrived as a confident answer about every file — the one outcome
+`scripts/lib/inherited-violation.mjs`'s own header says it exists to prevent: *"'we could not ask'
+and 'the base is fine' must not arrive as the same answer."*
+
+`refResolvable(run, ref)` probes with `git rev-parse --verify --quiet <ref>^{commit}`, which
+separates the two cases (0 for a real ref, 1 for a missing one) where the `show` cannot.
+`splitInheritedViolations` takes an OPTIONAL `refPresent` predicate: supplied and false, every
+violation is `undetermined` and none is `introduced`. Optional on purpose — a caller passing none
+behaves exactly as it did, so W1-T3037's contract and all ten of its tests hold unchanged.
+
+**What you will see.** When the split cannot be made, the BLOCKED output carries a third sentence
+beside the ceiling list, naming the ref and making no claim either way:
+
+```
+  source-size-ratchet: could not determine whether N of these are INHERITED from origin/main
+  (<paths>) — that ref is not readable in this checkout, so no claim is made either way. This says
+  nothing about whether the violation is yours; it says the comparison could not be run.
+```
+
+It is not an accusation and not an absolution. The gate's verdict is unchanged: what it refuses,
+and the remedy it prints, are exactly as documented above.
+
+FALSIFIER: `test/an-unfetched-base-is-not-an-absent-file.test.ts`.
