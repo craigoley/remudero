@@ -5364,12 +5364,16 @@ if (args[0] === "pr" && args[1] === "view" && field && field.startsWith("headRef
   } as unknown as Plan;
 
   try {
-    const effects = buildSweepEffects(
-      owner, repo, config, join(root, "ledger.ndjson"), "SWEEP-1",
-      plan,
-      (step, extra) => { logs.push({ step, extra }); },
-      DEFAULT_SWEEP_POLICY,
-    );
+    const effects = buildSweepEffects({
+      owner: owner,
+      repo: repo,
+      config: config,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "SWEEP-1",
+      plan: plan,
+      log: (step, extra) => { logs.push({ step, extra }); },
+      policy: DEFAULT_SWEEP_POLICY,
+    });
     const mergeConflict: MergeConflictEvidence = {
       files: [{ path: "src/x.ts", oursDeleted: 0, theirsDeleted: 0 }],
       oursLog: "abc1234 add entry A",
@@ -5869,15 +5873,15 @@ test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh 
 
 test("buildSweepEffects.arm: the sweep's real arm wrapper reaches armAutoMerge (safe no-task-id path, no gh spawned)", async () => {
   const root = mkdtempSync(join(tmpdir(), "sweep-arm-"));
-  const effects = buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { root } as never,
-    join(root, "ledger.ndjson"),
-    "RUN-ARM-1",
-    { tasks: [] } as never,
-    () => {},
-  );
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { root } as never,
+    ledgerPath: join(root, "ledger.ndjson"),
+    runId: "RUN-ARM-1",
+    plan: { tasks: [] } as never,
+    log: () => {},
+  });
   // W1-T2347: `taskId: undefined` deliberately drives armAutoMergeDetailed's REAL default all
   // the way to its own no-task-id short-circuit ("safe ... no gh spawned", per this test's own
   // name) — a deliberate real-dependency exercise, not a forgotten seam, so it takes the
@@ -5909,22 +5913,22 @@ test("buildSweepEffects.arm: a SUCCESSFUL sweep arm writes automerge.armed with 
   // Driven THROUGH the returned adapter (effects.arm), never armAndLogOutcome directly —
   // the seam that matters is buildSweepEffects's own `arm` member, wired to armAutoMerge
   // bare before this task.
-  const effects = buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { root } as never,
-    join(root, "ledger.ndjson"),
-    "RUN-ARM-2",
-    { tasks: [] } as never,
-    (step, extra) => { logs.push({ step, extra }); },
-    DEFAULT_SWEEP_POLICY,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    armImplFake,
-  );
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { root } as never,
+    ledgerPath: join(root, "ledger.ndjson"),
+    runId: "RUN-ARM-2",
+    plan: { tasks: [] } as never,
+    log: (step, extra) => { logs.push({ step, extra }); },
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: undefined,
+    stallNotice: undefined,
+    armImpl: armImplFake,
+  });
   const outcome = await effects.arm({
     prNumber: 501,
     prUrl: "https://github.com/craigoley/remudero/pull/501",
@@ -7388,13 +7392,17 @@ test("main(): `rmd alert-fix` with an unknown flag dispatches to alertFixCommand
 test("buildSweepEffects.postReview: ledgers attempt then done with the review exit — over an injected review runner (no real review spawned)", async () => {
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const root = mkdtempSync(join(tmpdir(), "rmd-postreview-"));
-  const effects = buildSweepEffects(
-    "craigoley", "remudero", { root } as never, join(root, "ledger.ndjson"), "RUN-PR-1",
-    { tasks: [] } as never,
-    (step, extra) => { logs.push({ step, extra }); },
-    DEFAULT_SWEEP_POLICY,
-    async () => 0, // injected review runner: a clean review
-  );
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { root } as never,
+    ledgerPath: join(root, "ledger.ndjson"),
+    runId: "RUN-PR-1",
+    plan: { tasks: [] } as never,
+    log: (step, extra) => { logs.push({ step, extra }); },
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: async () => 0,
+  });
   await effects.postReview!({ prNumber: 720, headSha: "deadbeef" } as never);
   assert.ok(logs.some((l) => l.step === "sweep.post_review.attempt" && l.extra?.pr_number === 720));
   const done = logs.find((l) => l.step === "sweep.post_review.done");
@@ -7406,13 +7414,17 @@ test("buildSweepEffects.postReview: ledgers attempt then done with the review ex
 test("buildSweepEffects.postReview: a THROWING review runner ledgers post_review.failed and RETHROWS — runSweep's per-PR containment still marks acted:false", async () => {
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const root = mkdtempSync(join(tmpdir(), "rmd-postreview-fail-"));
-  const effects = buildSweepEffects(
-    "craigoley", "remudero", { root } as never, join(root, "ledger.ndjson"), "RUN-PR-2",
-    { tasks: [] } as never,
-    (step, extra) => { logs.push({ step, extra }); },
-    DEFAULT_SWEEP_POLICY,
-    async () => { throw new Error("review spawn failed"); },
-  );
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { root } as never,
+    ledgerPath: join(root, "ledger.ndjson"),
+    runId: "RUN-PR-2",
+    plan: { tasks: [] } as never,
+    log: (step, extra) => { logs.push({ step, extra }); },
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: async () => { throw new Error("review spawn failed"); },
+  });
   await assert.rejects(async () => { await effects.postReview!({ prNumber: 721, headSha: "cafe" } as never); }, /review spawn failed/);
   const failed = logs.find((l) => l.step === "sweep.post_review.failed");
   assert.ok(failed, "the failure is ledgered distinctly before the rethrow");
@@ -7451,12 +7463,16 @@ if (args[0] === "label" && args[1] === "create") {
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}:${oldPath}`;
   try {
-    const effects = buildSweepEffects(
-      "acme", "remudero", { root } as never, join(root, "ledger.ndjson"), "SWEEP-ESC-1",
-      { tasks: [] } as never,
-      () => {},
-      DEFAULT_SWEEP_POLICY,
-    );
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "remudero",
+      config: { root } as never,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "SWEEP-ESC-1",
+      plan: { tasks: [] } as never,
+      log: () => {},
+      policy: DEFAULT_SWEEP_POLICY,
+    });
     const pr = {
       prNumber: 999,
       prUrl: "https://github.com/acme/remudero/pull/999",
@@ -7517,11 +7533,15 @@ test("buildSweepEffects.captureRepairFeedback: the DEFAULT wiring (no override) 
   const entryPath = feedbackEntryPath(REPO_ROOT, id);
   assert.ok(!existsSync(entryPath), "sanity: this fresh, timestamped id must not already exist in this checkout");
   try {
-    const effects = buildSweepEffects(
-      "acme", "remudero", { root: REPO_ROOT } as never, join(REPO_ROOT, "ledger.ndjson"), "SWEEP-COV-1",
-      { tasks: [] } as never,
-      () => {},
-    );
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "remudero",
+      config: { root: REPO_ROOT } as never,
+      ledgerPath: join(REPO_ROOT, "ledger.ndjson"),
+      runId: "SWEEP-COV-1",
+      plan: { tasks: [] } as never,
+      log: () => {},
+    });
     assert.ok(effects.captureRepairFeedback, "the default wiring must expose captureRepairFeedback");
     const filing: RepairFilingCapture = { id, raw: "W1-T905 coverage fixture — repair#coverage-fixture", origin: "repair#coverage-fixture" };
 

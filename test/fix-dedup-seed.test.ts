@@ -144,7 +144,16 @@ test("W1-T1127: a fix dispatch whose own failure is swallowed no longer records 
     const log = (step: string, extra: Record<string, unknown> = {}) =>
       appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, lane: "sweep", ...extra });
     const plan = { tasks: [], byId: new Map() };
-    const effects = buildSweepEffects(owner, repo, { root } as never, ledgerPath, runId, plan as never, log, DEFAULT_SWEEP_POLICY);
+    const effects = buildSweepEffects({
+      owner: owner,
+      repo: repo,
+      config: { root } as never,
+      ledgerPath: ledgerPath,
+      runId: runId,
+      plan: plan as never,
+      log: log,
+      policy: DEFAULT_SWEEP_POLICY,
+    });
 
     const candidate = pr({
       prNumber: 501,
@@ -240,21 +249,21 @@ test("W1-T1127: a dispatch that reaches the worker still seeds the dedup exactly
       byId: new Map([[TASK, { id: TASK, title: "w1t1127 fixture" }]]),
     };
     let spawnCalls = 0;
-    const effects = buildSweepEffects(
-      owner,
-      repo,
-      { claudeBin: "/usr/bin/true", root } as never,
-      ledgerPath,
-      runId,
-      plan as never,
-      log,
-      DEFAULT_SWEEP_POLICY,
-      undefined,
-      async () => {
+    const effects = buildSweepEffects({
+      owner: owner,
+      repo: repo,
+      config: { claudeBin: "/usr/bin/true", root } as never,
+      ledgerPath: ledgerPath,
+      runId: runId,
+      plan: plan as never,
+      log: log,
+      policy: DEFAULT_SWEEP_POLICY,
+      reviewRunner: undefined,
+      spawnImpl: async () => {
         spawnCalls += 1;
         return fakeWorker("REPORT\nw1t1127 fix applied\n");
       },
-    );
+    });
 
     const candidate = pr({
       prNumber: 77,
@@ -361,7 +370,16 @@ test("W1-T1127: a preflight stand-down (PR already terminal) is distinguishable 
     const log = (step: string, extra: Record<string, unknown> = {}) =>
       appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, lane: "sweep", ...extra });
     const plan = { tasks: [], byId: new Map() };
-    const effects = buildSweepEffects(owner, repo, { root } as never, ledgerPath, runId, plan as never, log, DEFAULT_SWEEP_POLICY);
+    const effects = buildSweepEffects({
+      owner: owner,
+      repo: repo,
+      config: { root } as never,
+      ledgerPath: ledgerPath,
+      runId: runId,
+      plan: plan as never,
+      log: log,
+      policy: DEFAULT_SWEEP_POLICY,
+    });
 
     const candidate = pr({
       prNumber: 902,

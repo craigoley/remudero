@@ -780,21 +780,21 @@ test("runFixRung, wired via buildSweepEffects' REAL production `readCiRollup` cl
       byId: new Map([[TASK, { id: TASK, title: "w1t1278 fixture" }]]),
     };
     let spawnCalls = 0;
-    const effects = buildSweepEffects(
-      owner,
-      repo,
-      { claudeBin: "/usr/bin/true", root } as never,
-      ledgerPath,
-      runId,
-      plan as never,
-      log,
-      DEFAULT_SWEEP_POLICY,
-      undefined,
-      async () => {
+    const effects = buildSweepEffects({
+      owner: owner,
+      repo: repo,
+      config: { claudeBin: "/usr/bin/true", root } as never,
+      ledgerPath: ledgerPath,
+      runId: runId,
+      plan: plan as never,
+      log: log,
+      policy: DEFAULT_SWEEP_POLICY,
+      reviewRunner: undefined,
+      spawnImpl: async () => {
         spawnCalls += 1;
         return result({ sessionId: "should-never-spawn" }) as unknown as WorkerResult;
       },
-    );
+    });
 
     const candidate = ciRollupCandidate({ prUrl: `https://github.com/${owner}/${repo}/pull/501`, taskId: TASK, headSha: "cafe0501" });
 

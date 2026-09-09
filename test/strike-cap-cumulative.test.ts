@@ -290,16 +290,16 @@ async function driveDispatchFix(prOver: Partial<OpenPrView>, headRefName: string
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   try {
     mkdirSync(join(root, "repos"), { recursive: true });
-    const effects = buildSweepEffects(
-      "acme",
-      "scratch-scc-repo",
-      { root } as never,
-      join(root, "ledger.ndjson"),
-      "SWEEP-SCC",
-      PLAN,
-      (step, extra) => void logs.push({ step, extra }),
-      DEFAULT_SWEEP_POLICY,
-    );
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "scratch-scc-repo",
+      config: { root } as never,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "SWEEP-SCC",
+      plan: PLAN,
+      log: (step, extra) => void logs.push({ step, extra }),
+      policy: DEFAULT_SWEEP_POLICY,
+    });
     await effects.dispatchFix(
       { ...pr(prOver), headRefName } as never,
       { unmetCriteria: [], ciFailures: [] } as never,

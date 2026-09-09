@@ -326,37 +326,37 @@ function releasePr(over: Partial<OpenPrView> = {}): OpenPrView {
 }
 
 /** `buildSweepEffects` with every optional dep left at its default EXCEPT `pushEmptyCommit`
- *  (param 11) and `readJsonImpl` (param 22, the newest) — the exact positional gap
+ *  and `readJsonImpl` — the same wiring gap
  *  `test/stale-ci-gate-wiring.test.ts`'s own `buildEffects` helper already establishes for
  *  `ghRunImpl`/`readJsonImpl`. */
 function buildRealEffects(
   pushEmptyCommit: (repoDir: string, branch: string, head: string, message: string) => string,
   readJsonImpl: (args: string[]) => Promise<unknown>,
 ) {
-  return buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t2620-real-wiring-root-")) } as never,
-    join(mkdtempSync(join(tmpdir(), "w1t2620-real-wiring-")), "ledger.ndjson"),
-    "SWEEP-T2620-REAL-1",
-    { tasks: [], byId: new Map() } as never,
-    () => {},
-    DEFAULT_SWEEP_POLICY,
-    undefined,
-    undefined,
-    pushEmptyCommit,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    readJsonImpl,
-  );
+  return buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t2620-real-wiring-root-")) } as never,
+    ledgerPath: join(mkdtempSync(join(tmpdir(), "w1t2620-real-wiring-")), "ledger.ndjson"),
+    runId: "SWEEP-T2620-REAL-1",
+    plan: { tasks: [], byId: new Map() } as never,
+    log: () => {},
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: pushEmptyCommit,
+    issuesImpl: undefined,
+    stallNotice: undefined,
+    armImpl: undefined,
+    armSessionPrsOverride: undefined,
+    updateBranchImpl: undefined,
+    captureRepairFeedbackImpl: undefined,
+    ghRunImpl: undefined,
+    spawnWallClockBoundMsOverride: undefined,
+    reclaimWorkerImpl: undefined,
+    disarmImpl: undefined,
+    readJsonImpl: readJsonImpl,
+  });
 }
 
 test("W1-T2620/W1-T2789 GUARDED SITE: buildSweepEffects wires the base-release readers and action — all callable, not undefined", () => {
