@@ -321,6 +321,32 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
           "split can trust it:",
       );
       for (const f of missing) console.error(`  ${f}`);
+      // W1-T3203 — SAY WHAT THIS READING IS, and say it BEFORE offering a remedy for it.
+      //
+      // With no --base, `inheritedUntieredFiles` cannot separate a file this branch ADDED from one
+      // the merge base already had, so it fails closed and reports both. That reading is honest
+      // about what it measured and is NOT what CI decides — CI passes --base. MEASURED 2026-09-08:
+      // an operator read the bare form as "main is failing its own gate and blocking every open
+      // PR", opened a 21-row seeding PR on that diagnosis, and merged it. The rows were harmless;
+      // the diagnosis was false, and THIS BLOCK'S OWN REMEDY LINE is what led there.
+      //
+      // So the --seed remedy is withheld in exactly the case it cannot be known to apply. The
+      // refusal itself does NOT soften: a file this tree genuinely adds still exits 1, with or
+      // without a base, which is the case the gate exists for.
+      //
+      // The sibling `scripts/task-id-existence-check.mjs` announces the same degrade in as many
+      // words ("collision check SKIPPED -- no --base given ... Pass --base origin/main"); this is
+      // that sentence, one gate over.
+      if (!baseRef) {
+        console.error(
+          "test-tier-manifest: this reading is not CI's verdict — with no --base, a file inherited " +
+            "from the merge base cannot be told from one this branch added, so both are listed above.",
+        );
+        console.error(
+          "  Pass --base origin/main to get CI's reading. Seed only files this branch really adds.",
+        );
+        return 1;
+      }
       console.error("Record it with: node scripts/test-tier-manifest.mjs --seed");
       return 1;
     }
