@@ -1,0 +1,112 @@
+- id: W1-T3276
+  title: "THE CLOCK-SWEEP RATCHET COUNTS DRIFTING SUITES INSTEAD OF NAMING THEM, SO A BRAND-NEW TIME BOMB IS FORGIVEN WHENEVER AN OLD ONE WAS FIXED — the instrument built for exactly this defect class reported SUCCESS on 2026-09-07 over a tree that already carried the fixture which took `main` red on 2026-09-09"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files:
+    - scripts/clock-sweep.mjs
+    - test/clock-sweep.test.ts
+    - scripts/clock-sweep-baseline.json
+  origin: "operator-session#clock-sweep-false-clean-2026-09-09"
+  plan_refs: ["W1-T1128", "W1-T1104", "W1-T3270", "W1-T3272"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING. The change is one predicate in
+    one pure function, but it decides whether a weekly gate can ever report a NEW time bomb, and it
+    will almost certainly turn that job red on its next run — which is the correct outcome and is
+    argued for in the design below rather than left as a surprise.
+
+    SAFE TO TIGHTEN: `clock-sweep.yml` is deliberately NOT a required check and is absent from
+    ci-gate.yml (its own header says so, and gives the reason). A stricter verdict there cannot
+    block a single PR; it can only start telling the truth on Mondays.
+  rationale: |
+    MEASURED 2026-09-09, and this is the second-order finding behind W1-T3270.
+
+    `clock-sweep.yml` exists for EXACTLY the defect that took `main` red: its header cites the
+    2026-08-02 incident, same field (`lastActivityAt`), same rung (`staleDays` 14). It runs the
+    suite at +400 days, weekly, Monday 05:23 UTC.
+
+    THE BOMB WAS IN ITS SIGHTS AND IT SAID NOTHING.
+      * `test/stale-ci-gate-wiring.test.ts` matched `deriveCandidates` — verified against the
+        pre-fix blob: `AGE_SURFACE_RE` hits on "stale", `DATE_LITERAL_RE` on "2026-08-26".
+      * It appears in `node scripts/clock-sweep.mjs --list` (277 candidates, 0 excluded as
+        spawn-reaching) and is in NEITHER `SPAWN_REACHING` nor `CLOCK_ARTIFACTS`.
+      * Simulating that Monday exactly — the fixture was fresh then and stale at +400d:
+            FK_SHIFT_DAYS=-2   -> # pass 10  # fail 0     (green unshifted, as CI showed)
+            FK_SHIFT_DAYS=398  -> # pass 7   # fail 3     (the sweep's own view of that Monday)
+      * The scheduled run at 2026-09-07T10:24 reported **success**.
+
+    ⚠ THE MECHANISM IS THE RATCHET, AND THE EVIDENCE IS IN ITS OWN BASELINE FILE.
+    `classifySweep` ends `ok: drifted.length <= ceiling && staleExclusions.length === 0`, with
+    `driftCeiling: 11` recorded on 2026-08-22. The baseline ALSO records
+    `driftingSuitesAtCapture` — the eleven names — and nothing reads them. So the gate forgives by
+    COUNT, and a drifting suite's IDENTITY never enters the verdict. MEASURED against the real
+    `classifySweep`:
+
+        all 11 recorded + the new bomb   -> drifted 12, ok FALSE   (would have been caught)
+        10 recorded + the new bomb       -> drifted 11, ok TRUE    (forgiven; the new suite is
+                                                                    IN the drifted list, unread)
+        11 entirely NEW suites drifting  -> drifted 11, ok TRUE    (a wholly different population)
+
+    The third row is the shape of the defect: the ceiling can be satisfied by a set that shares NOT
+    ONE MEMBER with the population it was captured from.
+
+    W1-T1128 introduced the ceiling for a real reason — `drifted.length === 0` had never once been
+    satisfiable, so the job was permanently red and told nobody anything. That fix was right and
+    this task does not undo it. The error is that it swapped an unsatisfiable bound for a bound that
+    cannot see a regression, when the baseline already carried what was needed to see one.
+
+  design: |
+    (i) A DRIFTING SUITE THAT IS NOT IN THE RECORDED SET IS A REGRESSION, AT ANY COUNT. This is the
+    whole change. The ceiling keeps forgiving the recorded backlog — that is what makes the job
+    reportable rather than permanently red — but a name that was not on the list is never forgiven,
+    exactly as `staleExclusions` is never forgiven today. The precedent is in the same function.
+
+    (ii) THE REPORT MUST SEPARATE THE TWO. "12 suites drifted" is not actionable; "one NEW suite
+    drifted: stale-ci-gate-wiring, fuse 14d" is. The existing `bisectFuse`/`failingTitles` output
+    already gives the detail; this only has to route new drift into its own section, first.
+
+    (iii) IT WILL PROBABLY GO RED ON THE NEXT RUN, AND THAT IS THE DELIVERABLE. The recorded set is
+    from 2026-08-22 and W1-T1104 has repaired suites since, so today's true drifting set almost
+    certainly contains names the baseline does not. The first honest run is the point of the task;
+    the alternative is a gate that stays green by construction. Because the job is neither required
+    nor a PR trigger, that red blocks nothing and costs no lane a merge.
+
+    (iv) DO NOT RE-CAPTURE THE BASELINE AS PART OF THIS CHANGE. Re-capturing would make the new
+    check vacuous on arrival — the same "trivially true over an empty set" shape CLAUDE.md's
+    vacuous-pass family names. Let the first run report the real delta and let a REVIEWED bump
+    record it, which is what the baseline's own `_comment` already demands.
+
+    (v) A RECORDED SUITE THAT NOW PASSES IS ALREADY HANDLED and must stay that way: it is not drift,
+    and the ceiling may fall. This task must not turn a repair into a failure.
+
+  acceptance:
+    - claim: "a drifting suite absent from the recorded set fails the sweep even when the total is at or under the ceiling"
+      proof: "unit test: a NEW drifting suite fails the sweep even under the ceiling"
+    - claim: "the recorded backlog is still forgiven up to the ceiling, so W1-T1128's fix is preserved rather than undone"
+      proof: "unit test: the recorded backlog is still forgiven up to the ceiling"
+    - claim: "a drifting population that shares no member with the recorded set is refused, which is the measured false-clean shape"
+      proof: "unit test: a wholly different drifting population is refused"
+    - claim: "the report names new drift separately from the recorded backlog, so the verdict is actionable"
+      proof: "unit test: the report names NEW drift separately"
+    - claim: "a recorded suite that now passes is not treated as drift and does not fail the sweep"
+      proof: "unit test: a repaired suite is not drift"
+
+  falsifier: |
+    Close this without implementation if the drift backlog reaches zero and `driftCeiling` falls to
+    0 — the count bound and the identity bound then coincide and the extra machinery is dead weight.
+
+    Re-design rather than build if the recorded set cannot be kept honest without a re-capture on
+    every repair: a baseline that must be rewritten weekly will be rewritten carelessly, and a
+    carelessly rewritten allowlist is how this gate lost its teeth the first time.
+
+    Do NOT resolve this by raising `driftCeiling` — that is the direction the baseline's own comment
+    forbids in as many words, and it would forgive the very regression this task exists to surface.
+    Do NOT resolve it by re-capturing `driftingSuitesAtCapture` in this same change: the check would
+    then pass over a set defined to satisfy it.
