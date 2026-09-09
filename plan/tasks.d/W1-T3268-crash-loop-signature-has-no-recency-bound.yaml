@@ -1,0 +1,112 @@
+- id: W1-T3268
+  title: "THE CRASH-LOOP SIGNATURE COUNTS A TRAILING RUN WITH NO RECENCY BOUND, SO A RESOLVED INCIDENT STAYS ARMED FOREVER — `crash_loop_signature` read `88 1` on a fleet host whose daemon had been healthy for 25 minutes, and the first ordinary `exit 1` revival next month will make it 89 and raise DAEMON_CRASH_LOOP on a single transient"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: span
+  budget_usd: 8.00
+  files:
+    - deploy/install-host-units.sh
+    - test/crash-loop-signature-recency-bound.test.ts
+  origin: "operator-session#post-install-verification-2026-09-09"
+  plan_refs: ["W1-T3233", "W1-T2877", "W1-T2953"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: medium` with `band_meaning: span`. The edit is one awk function in a rendered
+    launcher, but that launcher is the fleet's crash-recovery path and the falsifiers below are
+    weighted toward what must NOT change: the reader must never refuse to revive.
+  rationale: |
+    MEASURED ON THE LIVE AZURE HOST, 2026-09-09T19:18Z, MINUTES AFTER `--install` COMMISSIONED THIS
+    READER. The reader shipped this morning in W1-T3233 and had never been run against real data:
+
+        $ /home/craigoleyagent/rmd-relaunch.sh --check-crash-loop /home/craigoleyagent/rmd-revivals.log
+        88 1
+
+    88 consecutive revivals from exit 1 — and the daemon had been `running` since 18:53:50Z with
+    `RestartCount=0`. The 88 records are THIS MORNING'S RESOLVED INCIDENT: the trailing record is
+    stamped `2026-09-09T10:15:01Z`, nine hours before the read, and the `core.bare` defect that
+    produced them was fixed and the fleet recovered.
+
+    `crash_loop_signature` counts the trailing run of identical non-zero `prev_exit` values and
+    applies NO time bound. A run is therefore contiguous in the FILE, which is not the same as
+    contiguous in TIME, and the file is append-only across the host's whole life.
+
+    WHY IT IS QUIET RIGHT NOW AND LOUD LATER. The launcher is idempotent: on a healthy daemon it
+    exits at the `docker ps` check BEFORE the revival record is appended and before the signature is
+    evaluated. So nothing reads the 88 today. The next time the daemon exits 1 for ANY reason — one
+    transient, one bad deploy, one OOM — that revival appends `prev_exit=1`, the run becomes 89,
+    89 >= CRASH_LOOP_RUN, and the FIRST revival of a one-off prints
+
+        rmd-relaunch: CRASH LOOP -- 89 consecutive revivals from exit 1. Reviving anyway; this needs a human.
+
+    and writes `state/DAEMON_CRASH_LOOP`. The signal that exists to name a real crash loop fires on
+    a single blip, and it will keep firing on every subsequent exit-1 revival for the life of the
+    log.
+
+    ⚠ AND THE FLAG HAS NO PATH BACK. The `else` arm that `rm -f`s DAEMON_CRASH_LOOP sits on the SAME
+    revival path, after the same idempotence check. A host whose daemon is healthy never reaches it.
+    So once raised, the flag persists through full recovery and is cleared only by a later revival
+    whose trailing run happens to be short — which, given the run only ever grows while the exit
+    code repeats, is precisely the case that cannot occur. Raised-and-stuck is the default outcome.
+
+    THIS IS THE HOUSE DEFECT NAMED IN CLAUDE.md: "a bound that fires on a HEALTHY condition is this
+    repo's recurring defect — before tuning the number, check the population it is meant to separate
+    has ever been observed." Three prior instances are cited there. This is the fourth, and it was
+    introduced by a task whose entire purpose was to make a crash loop visible.
+
+  design: |
+    (i) A RUN MUST BE CONTIGUOUS IN TIME AS WELL AS IN EXIT CODE. Two revivals belong to the same
+    incident only when they are close together; the watchdog tick is 5 minutes, so consecutive
+    revivals in a live loop are ~5 minutes apart. A gap materially larger than one tick ends the
+    run. Parse the leading ISO-8601 stamp each record already carries — no format change, no new
+    field, and the log the fix reads is the log this same script writes.
+
+    (ii) SIZE THE GAP FROM THE MEASURED CADENCE, NOT FROM TASTE. The 88 records span
+    02:2x-10:15Z at a 5-minute cadence; the gap to the read was 9 hours. A ceiling of 6 ticks
+    (30 minutes) separates those two populations by more than an order of magnitude in both
+    directions, and the number must be a named constant beside CRASH_LOOP_RUN with the measurement
+    in its comment, so the next person tuning it sees the population it was drawn from.
+
+    (iii) THE RUN MUST ALSO BE RECENT RELATIVE TO NOW, NOT MERELY INTERNALLY DENSE. A run that was
+    dense nine hours ago and then stopped is a RESOLVED incident. Apply the same ceiling between the
+    newest record and the current time; that single rule kills the measured case even if every
+    record inside the run is a tick apart.
+
+    (iv) IT STILL NEVER REFUSES TO REVIVE. W1-T3233's own doc: "COUNTS AND ANNOUNCES: it never
+    refuses to revive ... a bound that gives up is strictly worse than the problem." This task
+    narrows what counts as a loop; it must not add a refusal, and the falsifier below pins that.
+
+    (v) CLEAR THE FLAG WHERE HEALTH IS OBSERVED, NOT ONLY WHERE A REVIVAL HAPPENS. The idempotent
+    early-exit path is the one place the script learns the daemon is healthy. Clearing
+    DAEMON_CRASH_LOOP there is what gives a raised flag a path back, and it is the smaller half of
+    this fix but the half that makes the signal trustworthy rather than merely quieter.
+
+    (vi) `--check-crash-loop` STAYS THE SEAM. It already lets the suite drive this logic against a
+    fixture with no docker, no state root and no host. Every criterion below is exercised through it.
+
+  acceptance:
+    - claim: "a trailing run of identical non-zero exits whose newest record is older than the recency ceiling reports no crash loop, which is the 88-record case measured on the live host"
+      proof: "unit test: test/crash-loop-signature-recency-bound.test.ts"
+    - claim: "a dense recent run of identical non-zero exits still reports the crash loop, so the signal W1-T3233 shipped is narrowed and not removed"
+      proof: "unit test: test/crash-loop-signature-recency-bound.test.ts"
+    - claim: "a gap larger than the inter-record ceiling ends the run, so two separate incidents sharing an exit code are never summed into one"
+      proof: "unit test: test/crash-loop-signature-recency-bound.test.ts"
+    - claim: "the launcher clears DAEMON_CRASH_LOOP on the idempotent healthy-daemon path, so a raised flag has a path back that does not require another revival"
+      proof: "unit test: test/crash-loop-signature-recency-bound.test.ts"
+    - claim: "the reader still announces rather than refuses, so no input to the signature can stop a revival"
+      proof: "unit test: test/crash-loop-signature-recency-bound.test.ts"
+
+  falsifier: |
+    Close this without implementation if the revival log is given retention that bounds it to a
+    single incident, or if the reader is moved off the append-only log onto a per-incident record —
+    either resolves the staleness at the source and makes a time bound redundant.
+
+    Do NOT resolve this by raising CRASH_LOOP_RUN. The run length is not the defect; 88 is a
+    perfectly good count and the number would have to exceed the log's whole history to help.
+    Do NOT resolve it by truncating the log on the host: that discards the forensic record W1-T2877
+    created the log to keep, and it would re-arm the moment the next incident ends.
+    Do NOT add a refusal to revive under any signature value.
