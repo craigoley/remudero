@@ -82,6 +82,7 @@
     "test/a-proof-timeout-is-not-a-failed-proof.test.ts": 1263,
     "test/a-proposal-lands-as-its-own-reviewable-record.test.ts": 680,
     "test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts": 1399,
+    "test/a-pull-request-cannot-file-and-credit-the-same-task.test.ts": 0,
     "test/a-rate-limit-refusal-spends-the-crash-restart-budget.test.ts": 769,
     "test/a-recaptured-baseline-still-reads-as-tightening.test.ts": 0,
     "test/a-recon-cannot-propose-its-own-task.test.ts": 1230,
