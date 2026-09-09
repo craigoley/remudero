@@ -88,13 +88,13 @@
     DAEMON_CRASH_LOOP there is what gives a raised flag a path back, and it is the smaller half of
     this fix but the half that makes the signal trustworthy rather than merely quieter.
 
-(vi) THE EXISTING SUITE ENCODES THE OLD CONTRACT AND MUST BE UPDATED, NOT WORKED AROUND. W1-T3233's
-    fixtures stamp every record `2026-09-09T02:00:00Z`, so under a recency rule they describe a
-    resolved incident and correctly stop reporting a loop. Re-stamping them relative to the run is
-    the honest edit; adding a bypass so the old fixtures keep passing would exempt the suite from
-    the very rule this task adds.
+    (vi) THE EXISTING SUITE ENCODES THE OLD CONTRACT AND MUST BE UPDATED, NOT WORKED AROUND.
+    W1-T3233's fixtures stamp every record `2026-09-09T02:00:00Z`, so under a recency rule they
+    describe a resolved incident and correctly stop reporting a loop. Re-stamping them relative to
+    the run is the honest edit; adding a bypass so the old fixtures keep passing would exempt the
+    suite from the very rule this task adds.
 
-        (vi) `--check-crash-loop` STAYS THE SEAM. It already lets the suite drive this logic against a
+    (vii) `--check-crash-loop` STAYS THE SEAM. It already lets the suite drive this logic against a
     fixture with no docker, no state root and no host. Every criterion below is exercised through it.
 
   acceptance:

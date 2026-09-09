@@ -45,7 +45,7 @@
     signature is a red beginning at a clock boundary with no diff involved ... Stamp through the
     injected clock at the write seam; moving the constant only re-arms it." It is UNENFORCED PROSE,
     and by that file's own preamble a rule that turns out to matter is fixed by making something
-    refuse it. This shard is the record; the refusal is W1-T3271.
+    refuse it. This shard is the record; the refusal is W1-T3272.
 
   design: |
     (i) STAMP THE FIXTURE FROM `Date.now()`. Anything the sweep ages against the wall clock must be
@@ -59,7 +59,7 @@
 
     (iii) SCOPE IS ONE FILE ON PURPOSE. Four other suites drive `runSweep` with hardcoded activity
     stamps and all four pass today (328/328 across the whole set). Converting them under a red main
-    would widen an urgent repair into a refactor. The class is W1-T3271's problem, and a guard that
+    would widen an urgent repair into a refactor. The class is W1-T3272's problem, and a guard that
     names the population is worth more than five hand edits.
 
   acceptance:
