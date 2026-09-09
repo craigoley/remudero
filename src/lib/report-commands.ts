@@ -55,6 +55,7 @@ import {
   deriveDispatchCadence,
   deriveQueueHead,
   renderStatusBoardText,
+  type LivenessSensor,
   type ServiceName,
 } from "./status-board.js";
 import {
@@ -258,6 +259,65 @@ export function queryLaunchdListStatusSensed(
   const pid = m[1] === "-" ? null : Number(m[1]);
   const lastExitCode = Number(m[2]);
   return { pid, lastExitCode: Number.isFinite(lastExitCode) ? lastExitCode : undefined, sensed: true };
+}
+
+export interface ProcessServiceState {
+  running: boolean;
+  pid: number | null;
+  sensed: boolean;
+  sensor?: LivenessSensor;
+}
+
+const SERVICE_PROCESS_VERB: Record<ServiceName, string> = {
+  daemon: "daemon",
+  serve: "serve",
+  "deploy-supervisor": "deploy-run",
+};
+
+function processArgv(args: string): string[] {
+  return args.trim().split(/[ \t]+/).filter((part) => part.length > 0);
+}
+
+function tokenBasename(token: string): string {
+  const slash = token.lastIndexOf("/");
+  return slash === -1 ? token : token.slice(slash + 1);
+}
+
+function commandLineRunsService(args: string, service: ServiceName): boolean {
+  const tokens = processArgv(args);
+  const verb = SERVICE_PROCESS_VERB[service];
+  const runTaskIndex = tokens.findIndex((token) => token === "src/run-task.ts" || token.endsWith("/src/run-task.ts"));
+  if (runTaskIndex >= 0) return tokens[runTaskIndex + 1] === verb;
+  const rmdIndex = tokens.findIndex((token) => tokenBasename(token) === "rmd");
+  return rmdIndex >= 0 && tokens[rmdIndex + 1] === verb;
+}
+
+function parsePsProcess(line: string): { pid: number; args: string } | undefined {
+  const m = /^\s*(\d+)\s+(.+)$/.exec(line);
+  if (!m) return undefined;
+  const pid = Number(m[1]);
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  return { pid, args: m[2] };
+}
+
+export function queryProcessServiceSensed(
+  service: ServiceName,
+  exec: (cmd: string, args: string[]) => string = defaultLifecycleExec,
+): ProcessServiceState {
+  let out: string;
+  try {
+    out = exec("ps", ["-eo", "pid=,args="]);
+  } catch {
+    return { running: false, pid: null, sensed: false };
+  }
+  for (const line of out.split("\n")) {
+    const proc = parsePsProcess(line);
+    if (!proc) continue;
+    if (commandLineRunsService(proc.args, service)) {
+      return { running: true, pid: proc.pid, sensed: true, sensor: "process-table" };
+    }
+  }
+  return { running: false, pid: null, sensed: true, sensor: "process-table" };
 }
 
 // ── doctorCommand's own private readers ──────────────────────────────────────────────────────
@@ -580,7 +640,14 @@ export function renderGhBucketsSection(refusals: ReadonlyArray<GhBucketRefusalSt
  *  header for why it is injected rather than imported. */
 export interface StatusDeps extends ReportRepoContext {
   loadConfig?: () => Config;
-  queryService?: (service: ServiceName) => { running: boolean; pid: number | null; lastExitCode?: number; sensed?: boolean };
+  queryService?: (service: ServiceName) => {
+    running: boolean;
+    pid: number | null;
+    lastExitCode?: number;
+    sensed?: boolean;
+    sensor?: LivenessSensor;
+  };
+  lifecycleExec?: (cmd: string, args: string[]) => string;
   resolveSupervisorIntervalS?: () => number | undefined;
   ledgerPathFor?: (config: Config) => string;
   buildBatchedGithub?: typeof buildBatchedGithub;
@@ -605,26 +672,30 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   }
   const config = (deps.loadConfig ?? loadConfig)();
   const uid = realUid();
+  const lifecycleExec = deps.lifecycleExec ?? defaultLifecycleExec;
   const queryService =
     deps.queryService ??
-    ((service: ServiceName): { running: boolean; pid: number | null; lastExitCode?: number; sensed: boolean } => {
+    ((service: ServiceName): { running: boolean; pid: number | null; lastExitCode?: number; sensed: boolean; sensor?: LivenessSensor } => {
       const label = service === "daemon" ? DAEMON_LABEL : service === "serve" ? SERVE_LABEL : SUPERVISOR_LABEL;
       // W1-T2450: the SENSOR-AWARE query, not `queryLaunchdService` — this is the ONE caller
       // that must not fold "launchctl itself is unavailable" (every non-launchd host) into the
       // same `pid: null` a genuinely unloaded/stopped service returns (recon rationale Q1: the
       // panel "cannot tell 'I HAVE NO SENSOR HERE' from 'THE ANSWER IS NO'").
-      const state = queryLaunchdServiceSensed(label, uid);
+      const state = queryLaunchdServiceSensed(label, uid, lifecycleExec);
+      if (!state.sensed) return queryProcessServiceSensed(service, lifecycleExec);
       // "running" means a live pid, not merely "loaded" — a bootstrapped-but-not-spawned job
       // answers "is it running" with no, exactly like an unloaded one.
-      if (service !== "deploy-supervisor") return { running: state.pid !== null, pid: state.pid, sensed: state.sensed };
+      if (service !== "deploy-supervisor") return { running: state.pid !== null, pid: state.pid, sensed: state.sensed, sensor: "launchd" };
       // deploy-supervisor is an interval job: its own `pid`/`loaded` mean nothing between ticks
       // — `launchctl list`'s Status column is the fact that actually carries its health.
-      const listStatus = queryLaunchdListStatusSensed(label);
+      const listStatus = queryLaunchdListStatusSensed(label, lifecycleExec);
+      if (!listStatus.sensed) return queryProcessServiceSensed(service, lifecycleExec);
       return {
         running: listStatus.pid !== null,
         pid: listStatus.pid,
         lastExitCode: listStatus.lastExitCode,
         sensed: listStatus.sensed,
+        sensor: "launchd",
       };
     });
   const resolveSupervisorIntervalS =
