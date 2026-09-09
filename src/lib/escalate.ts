@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { createOrReadExclusive } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
+import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
 import {
   checkOperatorMessage,
   operatorMessageFooter,
@@ -378,7 +379,7 @@ export function classifyAsk(e: Escalation): AskType {
 }
 
 /** The label every escalation issue carries — the queue the control panel reads (§4). */
-export const NEEDS_HUMAN_LABEL = "needs-human";
+export { NEEDS_HUMAN_LABEL };
 
 /** The DEMOTED queue label (W1-T349): a fleet notice is a needs-human issue {@link judgeEscalation}
  *  decided did not need real-time attention. It keeps every other label and the full body, so it

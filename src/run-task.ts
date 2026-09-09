@@ -36717,6 +36717,23 @@ interface CommandSpec {
   readonly detail: string;
 }
 
+type HeavyVerbName = "review" | "dep-review" | "drain" | "daemon";
+
+async function loadHeavyVerb(name: HeavyVerbName): Promise<void> {
+  switch (name) {
+    case "review":
+    case "dep-review":
+      await import("./lib/review.js");
+      return;
+    case "drain":
+      await import("./lib/drain.js");
+      return;
+    case "daemon":
+      await import("./lib/daemon.js");
+      return;
+  }
+}
+
 const COMMANDS: readonly CommandSpec[] = [
   {
     name: "run-task",
@@ -37771,6 +37788,7 @@ export async function main(
     process.exit(result.merged ? 0 : 1);
   }
   if (cmd === "review" && arg) {
+    await loadHeavyVerb("review");
     process.exit(await reviewCommand(arg, rest.slice(1)));
   }
   // diff-cov: process-boundary — main() only translates mergeHoldCommand's tested return into
@@ -37779,6 +37797,7 @@ export async function main(
     process.exit(mergeHoldCommand(rest));
   }
   if (cmd === "dep-review" && arg) {
+    await loadHeavyVerb("dep-review");
     process.exit(await depReviewCommand(arg, rest.slice(1)));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await receiptCommand(arg, rest.slice(1))) cannot carry a DA hit without forking the process; receiptCommand's own logic — the unknown-arg refusal, the trailer resolution/refusal, and the buildReceipt print path — is unit-tested in test/receipt.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
@@ -37878,9 +37897,11 @@ export async function main(
     process.exit(await retroCommand(rest, automated ? { automated } : {}));
   }
   if (cmd === "drain") {
+    await loadHeavyVerb("drain");
     process.exit(await drainCommand(rest));
   }
   if (cmd === "daemon") {
+    await loadHeavyVerb("daemon");
     process.exit(await daemonCommand(rest));
   }
   if (cmd === "daemon-plist") {

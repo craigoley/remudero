@@ -13,3 +13,6 @@
  *  here because this module never touches the filesystem; `daemonCommand` threads the policy value
  *  on every real invocation, so this is provably dead for the operating path (W1-T253). */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
+
+/** Shared GitHub label for operator-facing escalation issues. */
+export const NEEDS_HUMAN_LABEL = "needs-human";
