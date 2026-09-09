@@ -11,6 +11,12 @@
   files:
     - scripts/expiring-fixture-census.mjs
     - test/expiring-fixture-census.test.ts
+    - .github/workflows/ci.yml
+    - test/review-admission-key-is-not-self-defeating.test.ts
+    - test/terminal-run-pins-a-job-non-terminal.test.ts
+    - test/plan-filing-admission-bound.test.ts
+    - test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts
+    - test/stale-base-release-before-exhaustion.test.ts
   origin: "operator-session#main-red-clock-boundary-2026-09-09"
   plan_refs: ["W1-T3270", "W1-T2250", "W1-T2732"]
   status: queued
@@ -74,6 +80,16 @@
     and one it MUST NOT, and must assert the population COUNT, so a query that silently stops
     matching fails rather than reporting all-clear. `grep` here is the harness's ugrep wrapper with
     `-I` injected; use `git grep` or `grep -ar`.
+
+    (vi) LANDING A GATE ON AN EXISTING CORPUS IS PART OF THE GATE. The tree must pass on the day
+    this merges or CI is red, so the flagged rows are resolved here: the one that is a real bomb is
+    clock-anchored, and each of the rest is aged past the rung, re-run, and marked with that
+    measurement. The declared files: list above is therefore wider than the two new artifacts.
+
+    (vii) IT RIDES AN EXISTING JOB AS A STEP, NOT AS A NEW JOB. A new `ci.yml` job must be
+    registered in `ci-gate.yml` AND in `src/lib/ci-parity.ts`, and a workflow changed beside a
+    `src/` product path is Standing rule 25 entanglement, refused outright. The ci-parity suite
+    states that growing a real job's step list is not drift.
 
     (v) IT REPORTS, IT DOES NOT REWRITE. Auto-rewriting a fixture's date is the same fix as moving
     the constant forward, which CLAUDE.md names explicitly as re-arming the bomb.
