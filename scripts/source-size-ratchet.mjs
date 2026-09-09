@@ -22,9 +22,8 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { splitInheritedViolations, inheritedNotice } from "./lib/inherited-violation.mjs";
+import { splitInheritedViolations, inheritedNotice, undeterminedNotice, refResolvable } from "./lib/inherited-violation.mjs";
 import { assertNoDuplicateKeys } from "./lib/json-duplicate-keys.mjs";
-import { git as spawnGit } from "./lib/git.mjs";
 
 export const DEFAULT_BASELINE_RELATIVE_PATH = "scripts/source-size-baseline.json";
 
@@ -203,19 +202,24 @@ function runLegacyRatchet(argv) {
     // W1-T3037 — whose red is this? A violation that already holds at the base is inherited: every
     // open PR sees it and no diff avoids it. It still blocks; the author is simply told that
     // recording it repairs the base rather than confessing to their own growth.
-    const notice = inheritedNotice(
-      splitInheritedViolations(verdict.violations, {
-        // maxBuffer raised deliberately: run-task.ts is over 1MB at the base and blows the 1MB default,
-        // which returns status null and used to read as "absent".
-        run: (cmd, args) => spawnSync(cmd, args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }),
-        ref: "origin/main",
-        measure: (text) => countLines(text),
-        baselineFor: (path) => baseline[path],
-      }).inherited,
-      "origin/main",
-      "source-size-ratchet",
-    );
+    // `gitResult` below already carries the 64 MiB buffer this call site used to ask for by hand:
+    // run-task.ts is over 1MB at the base and blows node's 1MB default, returning status null,
+    // which W1-T3037 had already had to stop reading as "absent".
+    const runGitHere = (_cmd, args) => gitResult(root, args);
+    // W1-T3141: establish the ref BEFORE trusting any `absent`. `git show <ref>:<path>` exits 128
+    // for a missing REF exactly as it does for a missing PATH, so in a checkout that never fetched
+    // origin/main every violation reads as INTRODUCED and nothing is printed at all.
+    const split = splitInheritedViolations(verdict.violations, {
+      run: runGitHere,
+      ref: "origin/main",
+      measure: (text) => countLines(text),
+      baselineFor: (path) => baseline[path],
+      refPresent: () => refResolvable(runGitHere, "origin/main"),
+    });
+    const notice = inheritedNotice(split.inherited, "origin/main", "source-size-ratchet");
     if (notice) console.error(`  ${notice}`);
+    const unknown = undeterminedNotice(split.undetermined, "origin/main", "source-size-ratchet");
+    if (unknown) console.error(`  ${unknown}`);
     // TRAP (W1-T2532): the remedy text must be followable by an agent, not only a human. Wording
     // that read "by hand" made a fix worker decline to touch the file, leaving PRs blocked on
     // nothing but this gate. What this gate refuses is unchanged; only that sentence is.
@@ -293,7 +297,9 @@ function runLegacyRatchet(argv) {
 export const SOURCE_SIZE_SIGNAL_SCHEMA_VERSION = 1;
 
 function gitResult(root, args) {
-  return spawnGit(args, { cwd: root });
+  // maxBuffer raised deliberately: run-task.ts is over 1MB at the base and blows the 1MB default,
+  // which returns status null and used to read as "absent" (W1-T3037).
+  return spawnSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 }
 
 function runGit(root, args, stage) {
