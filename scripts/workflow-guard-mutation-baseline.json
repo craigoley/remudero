@@ -12,9 +12,6 @@
     "coverage-ratchet#1: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
       "reason": "W1-T2428's fast lane: plan/docs diffs skip coverage work. Always-skip means a SOURCE PR is certified with no coverage measured at all. test/fast-lane-classifier.test.ts asserts the CLASSIFIER's verdicts, never that this step acts on them, so the two are not connected by any test."
     },
-    "coverage-ratchet#1: if ! find coverage/raw -maxdepth 1 -type f -name 'coverage-*.json' -print -quit | grep -q .; then": {
-      "reason": "The no-raw-coverage refusal. This one FAILS closed rather than skipping (its block exits non-zero after the echo), so an always-true mutant makes the job refuse rather than pass vacuously -- the safe direction. Enumerated because its block reaches `exit 0` further down; a narrower shape-check would drop it, at the cost of missing genuine skips."
-    },
     "coverage-ratchet-required#1: [ \"${GITHUB_EVENT_NAME}\" = \"pull_request\" ] || { echo \"coverage-ratchet: push event \u2014 no PR coverage merge required.\"; exit 0; }": {
       "reason": "The push-event bypass on the aggregator's merge step. Its four siblings in the same job ARE covered by test/push-ci-on-main.test.ts; this one is worded differently and that suite's assertion does not reach it. Closing it is a wording or assertion fix, not new machinery."
     },
