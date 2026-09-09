@@ -62,6 +62,16 @@ export interface TriggerInputs {
    *  the checkout at comparison time, which always matches (see {@link decideDeployTrigger}).
    *  `undefined` for a daemon that booted before this field shipped. */
   runningHead?: string;
+  /** W1-T3240: how many BAKED-PATH commits the running IMAGE predates — see
+   *  {@link bakedPathCommitsBehind}. THE FOURTH QUANTITY. `installHead`, `originMain` and
+   *  `runningHead` are all read off the bind-mounted checkout, so all three can agree while the
+   *  image is months old; on 2026-09-09 they did, and the `core.bare` repair that had merged,
+   *  built and published that morning was not running.
+   *
+   *  `undefined` is UNKNOWN, never zero — the image sha is unreadable exactly when the container
+   *  is down, which is the crash-loop case this whole class of fix exists for. Unknown leaves
+   *  every decision byte-identical to before this field existed. */
+  imageBakedCommitsBehind?: number;
 }
 
 export interface Decision {
@@ -87,6 +97,51 @@ export function sameCommit(a: string | undefined, b: string | undefined): boolea
   return short.length >= 7 && long.startsWith(short);
 }
 
+/** The BAKED paths — the only files whose change can make a running image stale. Everything else
+ *  under `src/`, `test/`, `plan/` and `scripts/` reaches the fleet through the bind mount the
+ *  instant it merges, so counting ANY commit here would fire on tens of mounted-source merges a
+ *  day and train an operator to ignore the signal. Mirrors `acr-build.yml`'s own `paths:` filter,
+ *  which is what decides whether a new image is even built. */
+export const IMAGE_BAKED_PATHS: readonly string[] = ["deploy/Dockerfile", "deploy/entrypoint.sh"];
+
+/** Where the image writes its own build sha. The SAME file `scripts/fleet-heartbeat.sh` reads to
+ *  publish `image_build_sha` (W1-T496) — one path, so the beat and the deploy trigger can never
+ *  disagree about which image is running. */
+export const IMAGE_BUILD_SHA_PATH = "/etc/rmd-build-sha";
+
+/** The daemon container the image sha is read out of, matching the heartbeat's own default. */
+export const IMAGE_SHA_CONTAINER = "remudero-daemon";
+
+/**
+ * W1-T3240 — how many BAKED-PATH commits `origin/main` has that the running image does not.
+ *
+ * `> 0` means a merged change to a file that only reaches the fleet through an image rebuild is
+ * published and not running. MEASURED 2026-09-09: exactly 1, and it was the `core.bare` repair
+ * for that morning's 7h32m outage.
+ *
+ * RETURNS `undefined` FOR UNKNOWN, AND THE CALLER MUST NOT COERCE THAT TO ZERO. The image sha is
+ * read via `docker exec <container> cat /etc/rmd-build-sha`, which fails precisely when the
+ * container is down — the case this exists for. Unknown must leave the decision unchanged rather
+ * than read as "current" (the silence being fixed) or "stale" (a restart storm against a host
+ * that may be fine). `scripts/fleet-heartbeat.sh` already models this, recording an
+ * `IMAGE_BUILD_SHA_SOURCE` naming why a read failed instead of blanking the field.
+ */
+export function bakedPathCommitsBehind(
+  imageBuildSha: string | undefined,
+  runGit: (args: readonly string[]) => string,
+): number | undefined {
+  const sha = imageBuildSha?.trim();
+  if (!sha) return undefined;
+  let out: string;
+  try {
+    out = runGit(["rev-list", "--count", `${sha}..origin/main`, "--", ...IMAGE_BAKED_PATHS]);
+  } catch {
+    return undefined; // an unknown sha, a shallow clone, no git — UNKNOWN, never zero
+  }
+  const n = Number.parseInt(String(out).trim(), 10);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
 /**
  * Deploy IFF a trigger is present AND the fleet is not already running the checkout's code.
  * Either of two independent reasons suffices: BEHIND (fast-forward + restart) or RUNNING STALE
@@ -99,8 +154,18 @@ export function sameCommit(a: string | undefined, b: string | undefined): boolea
 export function decideDeployTrigger(i: TriggerInputs): Decision {
   const behind = !sameCommit(i.installHead, i.originMain);
   const runningStale = !sameCommit(i.runningHead, i.installHead);
+  // W1-T3240: the fourth quantity. `behind` and `runningStale` are BOTH read off the bind-mounted
+  // checkout, so both can read healthy — correctly — while the running image is months old. UNKNOWN
+  // (`undefined`) is deliberately NOT stale: an unreadable image sha means the container is down,
+  // which is the crash-loop case, and restarting on it would be a storm.
+  const imageStale = (i.imageBakedCommitsBehind ?? 0) > 0;
   const alreadyFailed = i.lastFailedHead !== undefined && i.originMain === i.lastFailedHead;
-  const why = behind ? "install behind origin/main" : "daemon running stale code (install is current)";
+  const why = behind
+    ? "install behind origin/main"
+    : runningStale
+      ? "daemon running stale code (install is current)"
+      : `running image predates ${i.imageBakedCommitsBehind} baked-path commit(s) — a merged change to ` +
+        `${IMAGE_BAKED_PATHS.join(" or ")} is published and not running (install and daemon are current)`;
 
   // Liveness is checked BEFORE the sha short-circuit: a dead daemon's last boot sha still
   // equals the checkout, so that branch alone would report "running it" over a corpse. Restarts
@@ -111,7 +176,7 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   if (i.daemonAlive === false && !stopUnknownOrSet) {
     return { deploy: true, reason: "daemon is not running and no STOP is set — restarting it" };
   }
-  if (!behind && !runningStale) {
+  if (!behind && !runningStale && !imageStale) {
     // Claim the daemon is running it only when liveness was actually OBSERVED.
     return {
       deploy: false,
@@ -442,6 +507,13 @@ export interface DeployDeps {
   discardLocal?: (path: string) => void;
   /** The sha the running daemon recorded at ITS boot; undefined if none has. */
   runningHead: () => string | undefined;
+  /** W1-T3240: how many BAKED-PATH commits the running IMAGE predates, via
+   *  {@link bakedPathCommitsBehind} over `/etc/rmd-build-sha`. {@link runningHead} above cannot
+   *  substitute for it — that one is read off the bind-mounted checkout and is current whenever
+   *  the checkout is. OPTIONAL: omitted leaves the decision byte-identical to before image drift
+   *  was consulted, which is what every pre-existing test does. `undefined` from a supplied
+   *  reader is UNKNOWN (the container is down — the crash-loop case), never "current". */
+  imageBakedCommitsBehind?: () => number | undefined;
   dirtyFiles: () => string[];
   incomingFiles: (from: string, to: string) => string[];
   /** git pull --ff-only / merge --ff-only origin/main. Throws on a non-ff. */
@@ -576,6 +648,10 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     daemonAlive: deps.daemonAlive?.(),
     stopPresent: deps.stopPresent?.(),
     runningHead: deps.runningHead(),
+    // PRODUCER AND CONSUMER TOGETHER. A field the decision reads and nothing supplies is the
+    // #1066 shape this repo has paid for eleven times; `imageBuildSha` omitted yields `undefined`
+    // here, which reads UNKNOWN and changes nothing.
+    imageBakedCommitsBehind: deps.imageBakedCommitsBehind?.(),
   });
   if (!decision.deploy) {
     deps.clearDeferredSince?.(); // nothing being deferred — no active deploy attempt
@@ -994,6 +1070,20 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       else unlinkSync(join(o.installPath, path));
     },
     runningHead: () => readLatestBootSha(o.ledgerPath),
+    // W1-T3240 — THE PRODUCER, shipped with its consumer. `/etc/rmd-build-sha` is written into
+    // the image at build time and is the ONLY sha on this host not read off the bind mount,
+    // which is why `runningHead` above cannot stand in for it. Read through `docker exec`,
+    // exactly as scripts/fleet-heartbeat.sh already does to publish `image_build_sha` (W1-T496);
+    // a failure there means the container is down, and that becomes UNKNOWN, never a restart.
+    imageBakedCommitsBehind: () => {
+      let sha: string | undefined;
+      try {
+        sha = exec("docker", ["exec", IMAGE_SHA_CONTAINER, "cat", IMAGE_BUILD_SHA_PATH]).trim();
+      } catch {
+        return undefined; // container down / no docker — UNKNOWN, never "current"
+      }
+      return bakedPathCommitsBehind(sha, (args) => git([...args]));
+    },
     // Same ledger, same live-file-only read as `runningHead` directly above — the rollback anchor
     // (see runDeployCycle's rollback branch for why it is not `installHead()`).
     lastGoodBootSha: (excludeSha) => readLastGoodBootSha(o.ledgerPath, excludeSha),
