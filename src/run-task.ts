@@ -610,6 +610,11 @@ import {
   renderPlanStateTruth,
   resolveMarkerForGather,
   readRetroLedgerNdjson,
+  retroLedgerWindowSince,
+  retroLedgerScopeNote,
+  reportRetroLedgerTruncation,
+  RETRO_LEDGER_MAX_BYTES,
+  type RetroLedgerRead,
   escalateRetroPublicationFailure,
   retireSettledFollowups,
   routeFollowupsToRegistry,
@@ -21345,21 +21350,6 @@ async function retroCommand(
   const ledgerPath = ledgerPathFor(config);
   const markerPath = join(config.root, "state", "last-retro.json");
   const learningsPath = join(repoRoot, "LEARNINGS.md");
-  const ledgerNdjson = await readRetroLedgerNdjson(dirname(ledgerPath));
-  // W1-T1013: the follow-up harvest's OWN corpus — the archive∪live union, resolved
-  // separately from `ledgerNdjson` above so every OTHER miner buildGather runs keeps
-  // reading the single-file corpus it always has (see buildGather's `followupLedgerNdjson`
-  // doc for why this must stay a second, explicit input rather than replacing `ledgerNdjson`
-  // outright).
-  const followupLedgerNdjson = followupLedgerUnionNdjson(join(config.root, "state"));
-  const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
-  // W1-T89/P18: plan/mast-mapping.yaml is DATA (Rule 2) — loaded here, never
-  // touched by buildGather itself. A missing file degrades to an empty table
-  // (every failure verdict reports unmapped, LOUDLY, in the render) rather than
-  // aborting the retro; a PRESENT-but-malformed file fails closed (loadMastMapping
-  // throws MastMappingError), same discipline as a corrupt marker below.
-  const mastMappingPath = join(repoRoot, "plan", "mast-mapping.yaml");
-  const mastMapping: MastMapping = existsSync(mastMappingPath) ? loadMastMapping(mastMappingPath) : { rows: [] };
   // W1-T242: a corrupt-but-present marker (e.g. a torn write from a crash, or a manual
   // edit) MUST NOT be silently treated as "no marker" — that would replay the whole
   // already-consumed run window and double-count SHIPPED/learnings. resolveMarkerForGather
@@ -21379,6 +21369,37 @@ async function retroCommand(
     return 1;
   }
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
+  // W1-T3229: the ledger read is WINDOWED on the marker and BOUNDED by retained bytes. It used to
+  // be `readRetroLedgerNdjson(dirname(ledgerPath))` with neither, which held four copies of a
+  // 270MB corpus and SIGABRT'd the subprocess on every fire from 2026-09-03 onward. The marker
+  // resolution above was moved ABOVE this read to supply the window — it is a pure file read, and
+  // failing a corrupt marker before ~60s of decompression is strictly better ordering besides.
+  // ONE clock read for this whole block: the window and the row id below must agree, and two
+  // separate reads straddling a ~60s decompression would not.
+  const retroReadStartedMs = Date.now();
+  const retroLedgerRead = await readRetroLedgerNdjson(dirname(ledgerPath), {
+    sinceTs: retroLedgerWindowSince(marker?.ts, retroReadStartedMs),
+  });
+  const ledgerNdjson = retroLedgerRead.ndjson;
+  // NEVER SILENT, and UNCONDITIONAL on purpose: the no-op arm lives inside
+  // `reportRetroLedgerTruncation`, so this line runs on every retro and both arms stay reachable
+  // from a unit test. Written as an `if` here the reporting body was unreachable in every test
+  // that does not truncate, and `diff-coverage` blocked the PR naming exactly those lines.
+  reportRetroLedgerTruncation(retroLedgerRead, { ledgerPath, runId: `RETRO-${retroReadStartedMs}` });
+  // W1-T1013: the follow-up harvest's OWN corpus — the archive∪live union, resolved
+  // separately from `ledgerNdjson` above so every OTHER miner buildGather runs keeps
+  // reading the single-file corpus it always has (see buildGather's `followupLedgerNdjson`
+  // doc for why this must stay a second, explicit input rather than replacing `ledgerNdjson`
+  // outright).
+  const followupLedgerNdjson = followupLedgerUnionNdjson(join(config.root, "state"));
+  const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
+  // W1-T89/P18: plan/mast-mapping.yaml is DATA (Rule 2) — loaded here, never
+  // touched by buildGather itself. A missing file degrades to an empty table
+  // (every failure verdict reports unmapped, LOUDLY, in the render) rather than
+  // aborting the retro; a PRESENT-but-malformed file fails closed (loadMastMapping
+  // throws MastMappingError), same discipline as a corrupt marker below.
+  const mastMappingPath = join(repoRoot, "plan", "mast-mapping.yaml");
+  const mastMapping: MastMapping = existsSync(mastMappingPath) ? loadMastMapping(mastMappingPath) : { rows: [] };
   // owner/repo: still needed below (repo clone, orientation's own gateway, PR create) —
   // retroShippedGithubGateway() resolves its OWN copy internally for the SHIPPED union.
   const { owner, repo } = resolveOwnerRepo();
@@ -21526,7 +21547,15 @@ async function retroCommand(
   const promotionLedgerRunId = `RETRO-${Date.now()}`;
   const promotionCorpusDir = projectLearningsHome(repoRoot);
   const reportWithoutPromotion =
-    [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n") +
+    [
+      renderGather(gather),
+      "",
+      renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson))),
+      // W1-T3229: this rate is computed over the WINDOWED corpus above, not over all history as it
+      // was before the read was bounded. Stated here rather than left to be discovered: a
+      // window-scoped rate read as a lifetime one is a wrong number, not a smaller one.
+      retroLedgerScopeNote(retroLedgerRead),
+    ].join("\n") +
     planStateTruthSection +
     planHealthSection;
 

@@ -55,10 +55,176 @@ export function parseLedger(ndjson: string): LedgerRecord[] {
   return out;
 }
 
-export async function readRetroLedgerNdjson(stateDir: string): Promise<string> {
-  const lines: string[] = [];
-  for await (const row of openLedgerUnion(stateDir)) lines.push(JSON.stringify(row));
-  return lines.join("\n");
+// ── W1-T3229: the retro's ledger read is bounded by RETAINED BYTES ──────────────────────────
+//
+// This read used to be `openLedgerUnion(stateDir)` with no options and `lines.join("\n")`. That
+// opened every rotation the state dir had ever kept and held four full copies of the corpus at
+// once — the union's own `seen` dedupe Set, the accumulating array, the joined string, and then
+// ~900k objects from `parseLedger`. MEASURED on the fleet host 2026-09-09: 646 rotations,
+// 2.7GB uncompressed, 900,813 distinct rows = 270.4MB of ndjson, 641MB of heap to stream it
+// ONCE. Against `AUTOMATED_RETRO_HEAP_LIMIT_MB` (1792) that is a SIGABRT every fire, which is
+// what froze `state/last-retro.json` at 2026-09-03 for six days.
+//
+// WHY THE BOUND IS BYTES AND NOT DAYS. The obvious repair is W1-T2833's 30-day window, already
+// applied to the follow-up reader one function away. MEASURED, it drops 153 rows out of 900,813:
+// the oldest rotation is 2026-08-13 and 30 days reaches back past it, so the window is wider than
+// the data. Rotation VOLUME, not calendar span, is what crossed the heap. {@link
+// RETRO_LEDGER_MAX_BYTES} is therefore the load-bearing bound and the window below is a cost
+// optimisation on top of it — not the other way round.
+
+/** The ceiling on ndjson bytes {@link readRetroLedgerNdjson} RETAINS, whatever the corpus holds.
+ *
+ *  PRIMARY CONTROL. This is the bound that keeps the retro inside its heap — not the marker window
+ *  below, which is a cost optimisation layered on top. The distinction is measured, not stylistic:
+ *  a 30-day window over the corpus that OOM'd excluded 153 rows out of 900,813, because rotation
+ *  VOLUME rather than calendar span is what crossed the heap. If this cap is ever removed, the
+ *  window does not catch the fall.
+ *
+ *  Sized against the retro subprocess's own 1792MB heap with the measured multiplier: the retained
+ *  ndjson is held as an array of strings, joined into a second flat string, and parsed into objects
+ *  costing roughly 3x their text — so the retained side peaks near 5x this number, leaving the
+ *  union's `seen` Set (641MB at the full measured corpus, the one term this cap does NOT bound)
+ *  room to coexist with it. */
+export const RETRO_LEDGER_MAX_BYTES = 96 * 1024 * 1024;
+
+/** How far back {@link retroLedgerWindowSince} reaches when there is NO marker — a first-ever
+ *  retro, or one whose marker was deleted. Not a correctness bound (the byte budget is); this
+ *  exists so an absent marker cannot mean "decompress everything" by a second door. */
+export const RETRO_LEDGER_NO_MARKER_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1_000;
+
+/** Subtracted from the marker so a run that STARTED before it but whose lines continue after it is
+ *  read whole. `buildGather` discards runs with `startTs <= sinceTs` anyway, so this margin costs a
+ *  little I/O and removes a class of half-read run. */
+export const RETRO_LEDGER_WINDOW_LEAD_MS = 48 * 60 * 60 * 1_000;
+
+/** What {@link readRetroLedgerNdjson} read, and what it could not keep.
+ *
+ *  `droppedRows` is the honesty half and is never omitted: a retro that saw less than its whole
+ *  window MUST say so on its own report. A shortened story rendered as a complete one is the
+ *  failure this repo has recorded four times over, and it is strictly worse than the loud OOM
+ *  this bound replaces. */
+export interface RetroLedgerRead {
+  /** The retained rows as ndjson, oldest-first — the corpus every miner reads. */
+  ndjson: string;
+  /** The window actually applied, or `undefined` when the whole corpus was offered. */
+  sinceTs: string | undefined;
+  rowsKept: number;
+  /** Rows dropped to stay under the budget. ALWAYS the OLDEST ones — see the loop below. */
+  droppedRows: number;
+  droppedBytes: number;
+}
+
+/** The window to read from, given the marker's timestamp (absent on a first-ever retro).
+ *
+ *  DELIBERATELY NOT CLAMPED to {@link RETRO_LEDGER_NO_MARKER_LOOKBACK_MS} when a marker IS present.
+ *  A marker frozen for weeks is exactly the state this defect produces, and clamping it would make
+ *  the recovery run silently skip the history it exists to consume. The byte budget bounds that
+ *  case instead, and REPORTS what it dropped — a loss that is counted is not a loss that is
+ *  hidden. */
+export function retroLedgerWindowSince(markerTs: string | undefined, nowMs: number): string {
+  const parsed = markerTs === undefined ? Number.NaN : Date.parse(markerTs);
+  const fromMs = Number.isNaN(parsed) ? nowMs - RETRO_LEDGER_NO_MARKER_LOOKBACK_MS : parsed - RETRO_LEDGER_WINDOW_LEAD_MS;
+  return new Date(fromMs).toISOString();
+}
+
+export async function readRetroLedgerNdjson(
+  stateDir: string,
+  opts: { sinceTs?: string; maxBytes?: number } = {},
+): Promise<RetroLedgerRead> {
+  const maxBytes = opts.maxBytes ?? RETRO_LEDGER_MAX_BYTES;
+  const kept: string[] = [];
+  let head = 0;
+  let bytes = 0;
+  let droppedRows = 0;
+  let droppedBytes = 0;
+
+  for await (const row of openLedgerUnion(stateDir, opts.sinceTs === undefined ? {} : { sinceTs: opts.sinceTs })) {
+    const line = JSON.stringify(row);
+    // +1 for the separator `join` will add. An over-count by one separator across the whole read;
+    // deliberately conservative, since the budget exists to stay UNDER a hard ceiling.
+    const cost = line.length + 1;
+    kept.push(line);
+    bytes += cost;
+    // Drop from the FRONT — the union yields oldest-first (rotations in stamp order, then live), so
+    // the survivors are the NEWEST rows, which is what a retro reasons about. `kept.length - 1`
+    // keeps one row alive so a single row larger than the whole budget terminates instead of
+    // spinning.
+    while (bytes > maxBytes && head < kept.length - 1) {
+      const evicted = kept[head];
+      kept[head] = "";
+      head += 1;
+      bytes -= evicted.length + 1;
+      droppedRows += 1;
+      droppedBytes += evicted.length + 1;
+    }
+    // Compact rather than let the array grow without bound behind `head`. Amortised: only when the
+    // dead prefix is at least half the array, so this is O(n) over the whole read, not per row.
+    if (head > 4_096 && head * 2 > kept.length) {
+      kept.splice(0, head);
+      head = 0;
+    }
+  }
+
+  const rows = head === 0 ? kept : kept.slice(head);
+  return { ndjson: rows.join("\n"), sinceTs: opts.sinceTs, rowsKept: rows.length, droppedRows, droppedBytes };
+}
+
+/** Report a truncated read — a ledger row and a stderr line — or do NOTHING when nothing was
+ *  dropped.
+ *
+ *  THE NO-OP ARM LIVES HERE, NOT AT THE CALL SITE, AND THAT IS DELIBERATE. Written as an `if` in
+ *  `retroCommand` the reporting body is unreachable in every test that does not truncate, and
+ *  `diff-coverage` blocks the PR naming exactly those lines — which is what it did. Extracted, the
+ *  call site is one unconditional line that every retro run executes, and BOTH arms are reachable
+ *  from a unit test. Same extraction-and-injection remedy `resolveEventPath` used, rather than a
+ *  coverage exemption comment.
+ *
+ *  NEVER SILENT is the contract: a retro reasoning over less than its own window says so in the
+ *  ledger AND on its own report. Returns whether it reported, so a caller (and a test) can see. */
+export function reportRetroLedgerTruncation(
+  read: RetroLedgerRead,
+  ctx: {
+    ledgerPath: string;
+    runId: string;
+    append?: (path: string, row: Record<string, unknown>) => unknown;
+    warn?: (message: string) => void;
+  },
+): boolean {
+  if (read.droppedRows <= 0) return false;
+  (ctx.append ?? appendLedger)(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "RETRO",
+    step: "retro.ledger_read.truncated",
+    since_ts: read.sinceTs,
+    rows_kept: read.rowsKept,
+    dropped_rows: read.droppedRows,
+    dropped_bytes: read.droppedBytes,
+    max_bytes: RETRO_LEDGER_MAX_BYTES,
+  });
+  (ctx.warn ?? ((m: string) => console.error(m)))(
+    `\n### [retro] ledger read truncated: kept ${read.rowsKept} row(s), dropped ${read.droppedRows} ` +
+      `older row(s) (${read.droppedBytes} bytes) to stay under ${RETRO_LEDGER_MAX_BYTES} bytes ` +
+      `since ${String(read.sinceTs)}`,
+  );
+  return true;
+}
+
+/** The scope line the retro report carries under any section reduced from {@link
+ *  RetroLedgerRead.ndjson}.
+ *
+ *  WHY THIS EXISTS AT ALL: `ratifyTelemetry`'s approval rate used to be computed over the whole
+ *  ledger and read as a lifetime figure. Under a windowed read it is a window figure. That is the
+ *  better signal — a rubber-stamp rate over all history cannot show a trend — but it is a
+ *  DIFFERENT number, and a changed denominator presented under an unchanged label is how a report
+ *  lies without a single false statement in it. */
+export function retroLedgerScopeNote(read: RetroLedgerRead): string {
+  const window = read.sinceTs === undefined ? "the whole ledger corpus" : `the ledger since ${read.sinceTs}`;
+  const truncation =
+    read.droppedRows > 0
+      ? ` ${read.droppedRows} older row(s) (${read.droppedBytes} bytes) were DROPPED to stay under the ` +
+        `${RETRO_LEDGER_MAX_BYTES}-byte read budget, so this window is itself incomplete at its old end.`
+      : "";
+  return `\n_Scope: counted over ${window} — ${read.rowsKept} row(s), not over all history._${truncation}`;
 }
 
 /** The reduced summary of ONE run (all lines sharing a run_id). */
