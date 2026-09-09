@@ -1,0 +1,62 @@
+- id: W1-T3238
+  title: "`census-membership` MODELS 10 CENSUS SUITES AND PRINTS 126 IT 'CANNOT PLACE AND WILL NOT GUESS' — so the verb built to tell a change which censuses it joins is blind to 93% of them, and it missed one that reddened a PR the same day it was consulted"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: high
+  origin: "operator-session#census-membership-missed-clock-signature-2026-09-09"
+  plan_refs: ["W1-T2969", "W1-T2905"]
+  files: [src/lib/ci-parity.ts, test/an-unmodelled-census-is-named-with-what-it-walks.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 on origin/main: `rmd census-membership --base origin/main` reports
+    `10 modelled` and lists **126** suites under "UNMODELLED census suite(s), which this cannot
+    place and will not guess". The verb exists to answer "which census suites does my change join";
+    it can answer for 7% of them.
+
+    IT MISSED ONE THE SAME DAY IT WAS CONSULTED. On #4791 I ran `census-membership --base
+    origin/main`, got 9 named suites, ran all 9 green, pushed — and CI's coverage shard reddened on
+    `clock-signature-census`, which the verb had printed in the unmodelled list. The diff added two
+    `Date.now()` occurrences, one of them INSIDE A COMMENT, and that census counts textual
+    occurrences. Nothing about the diff referenced any symbol the census names, so the mandated
+    caller sweep was blind to it too. This is CLAUDE.md's own hazard (j), hit live, on the very
+    tooling built to prevent it.
+
+    THE MODELLED TEN ARE NOT AN ARBITRARY SAMPLE, AND THAT IS THE OPENING. W1-T2969 already split
+    them: a DERIVED half reachable from the symbols a diff changes, and a REGISTRY-SHAPED half
+    (`REGISTRY_CENSUS_SUITES`) that pins a population — command names, policy keys, source-text
+    reads — and references no symbol any diff touches. Its own comment says the mandated caller
+    sweep is blind to all three of those. So the model is not "the ten we got round to"; it is two
+    understood shapes, and the 126 are the ones nobody has classified into either.
+
+    THE HONEST BOUND ON WHAT CAN BE MODELLED. Not every one of the 126 is a census — the list is
+    "every test file this cannot place", which includes ordinary suites. So the deliverable is NOT
+    "model 126 suites". It is: make the verb able to SAY, for each unmodelled file, WHAT IT WALKS —
+    the population it asserts over — so a human or a later pass can classify it, and so the list
+    stops being an undifferentiated wall that a reader (this operator, twice today) skims past.
+
+    A SUITE THAT WALKS A POPULATION IS DETECTABLE WITHOUT UNDERSTANDING IT. Every census in this
+    repo reads a corpus by GLOB or by directory walk (`src/**`, `test/**`, `plan/tasks.d`,
+    `scripts/*.mjs`) and asserts over what it finds. That is a source-text property: a suite that
+    globs is a candidate; one that only imports named symbols is not. The verb can compute and
+    print that WITHOUT a hand-written model per suite, which is the difference between a backlog
+    that shrinks by itself and one that shrinks only when someone writes 126 table rows.
+
+    WHAT MUST NOT HAPPEN: THE VERB MUST NOT GUESS. Its current output is honest — "cannot place and
+    will not guess" — and that honesty is why the unmodelled list exists at all rather than being
+    silently dropped. A heuristic that PROMOTES a candidate into the named set would convert a
+    known blind spot into a false green, which is strictly worse. Candidates print as CANDIDATES,
+    in their own section, with the glob that made them one, and the named set stays exactly as
+    trustworthy as it is today.
+
+  acceptance:
+    - claim: "an unmodelled suite that walks a population is reported as a candidate, naming the glob that makes it one"
+      proof: "unit test: W1-T3238: an unmodelled suite that walks a corpus is named as a candidate with its glob"
+    - claim: "a suite that walks nothing stays unmodelled and is never promoted to a candidate"
+      proof: "unit test: W1-T3238: a suite that only imports symbols is not a candidate"
+    - claim: "the MODELLED set is unchanged — a candidate is never merged into the names the verb vouches for"
+      proof: "unit test: W1-T3238: candidates are a separate section and the named set is byte-identical"
