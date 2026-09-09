@@ -11982,7 +11982,15 @@ async function runTask(
     // anything, so it is deliberately NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts).
     log("prompt.manifest", {
       parts: buildPromptManifest(
-        implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart),
+        implementPromptParts(
+          task,
+          reconContext,
+          runId,
+          matchedLearnings,
+          operatorNotesBlock,
+          ruleHeadlinesPart,
+          skillsPart,
+        ),
       ),
     });
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -126,6 +126,18 @@ test("W1-T3101: the skills part is a named member of implementPromptParts, so th
   assert.equal(skills?.value, "SKILLTEXT");
   assert.ok(parts.findIndex((p) => p.name === "skills") > parts.findIndex((p) => p.name === "matched_learnings"),
     "beside the learnings it shares a budget with");
+});
+
+test("the live prompt manifest receives the same selected skills part as the worker prompt", () => {
+  // THE FALSIFIER: the pure helper test above stayed green while runTask omitted the optional
+  // final argument at its prompt.manifest call. Pin the production call, where that omission made
+  // an injected skill read as `present:false` even though the worker received its bytes.
+  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /implementPromptParts\(\s*task,\s*reconContext,\s*runId,\s*matchedLearnings,\s*operatorNotesBlock,\s*ruleHeadlinesPart,\s*skillsPart,?\s*\)/,
+    "runTask must hand skillsPart to the manifest derivation, not only to renderImplementPrompt",
+  );
 });
 
 // ── staging writes a proposal, never a skill ──────────────────────────────────────────────────
