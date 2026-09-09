@@ -1,0 +1,124 @@
+- id: W1-T3229
+  title: "THE RETRO READS THE WHOLE LEDGER UNION INTO ONE STRING AND OOMs — 900,813 deduped rows / 270MB against a 1792MB subprocess heap, SIGABRT every fire since 2026-09-03, and no ceiling can fix it because the read is unbounded"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  origin: "operator-session#the-self-improvement-loop-has-been-dead-since-09-03"
+  plan_refs: ["W1-T2833", "W1-T2870", "W1-T2988", "W1-T2993", "W1-T242", "W1-T91", "W1-T132"]
+  files: [src/lib/retro.ts, src/run-task.ts, test/the-retro-ledger-read-is-bounded-by-bytes-not-days.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SELF-IMPROVEMENT LOOP HAS PRODUCED NOTHING FOR SIX DAYS AND THIS IS WHY.
+    `state/last-retro.json` reads 2026-09-03T02:24:39.835Z. The trigger fires; the retro dies.
+    MEASURED on the fleet host, four consecutive `daemon.retro_subprocess.terminal` rows
+    (2026-09-08T23:39Z, 2026-09-09T00:40Z, 01:21Z, 02:05Z), every one identical in kind:
+
+      signal: SIGABRT   exit_code: null   heap_limit_mb: 1792   failure_class: signal
+      stderr_tail: "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory"
+      ...  v8::internal::Factory::NewStringFromUtf8  <- the top JS frame, every time
+
+    THE UNBOUNDED READ. `readRetroLedgerNdjson` (src/lib/retro.ts) is four lines:
+
+      for await (const row of openLedgerUnion(stateDir)) lines.push(JSON.stringify(row));
+      return lines.join("\n");
+
+    `openLedgerUnion` accepts a `sinceTs` and skips whole rotations before it
+    (`rotationBeforeWindow`). This call passes NO options, so it opens and decompresses every
+    rotation the state dir has ever kept, holds a `seen: Set<string>` of every distinct line for
+    the whole scan, accumulates a second copy in `lines`, and `.join("\n")` materialises a third —
+    after which `parseLedger` turns all of it into ~900k objects. Four full-corpus copies live at
+    once inside a 1792MB heap.
+
+    THE CORPUS, MEASURED IN THE CONTAINER THAT DIES:
+      646 `.gz` rotations + 2 plain rotations + the live file
+      2,709,938,810 bytes uncompressed (`zcat ledger.*.ndjson.gz | wc -c`)
+      900,813 DISTINCT rows after dedupe = 283,539,709 bytes (270.4 MB) of ndjson
+      641 MB heapUsed just to STREAM it once, before a single row is retained by the caller
+    (a `--max-old-space-size=12000` probe run in the live daemon container, 56s.)
+
+    WHY A DAY-COUNT WINDOW IS NOT THE BOUND, AND A BYTE BUDGET IS. The obvious repair — copy
+    W1-T2833's 30-day window from the follow-up reader one function away — WOULD NOT HAVE FIXED
+    THIS, and that is MEASURED, not argued. Three windowed reads over the live corpus:
+
+      sinceTs                    rows kept   ndjson MB   heapUsed to stream
+      (none — today's read)        900,813       270.4         641 MB
+      2026-08-10 (30 days back)    900,660       270.3         673 MB   <- excludes 153 rows
+      2026-09-01 (marker-ish)      477,639       142.1         363 MB
+
+    A 30-day window drops 0.02% of the corpus, because the oldest rotation is 2026-08-13: the
+    window is wider than the data. Rotation VOLUME, not calendar span, is what crossed the heap,
+    and volume is not something a day count can see. Even the marker's own window still retains
+    142 MB, which becomes four copies before `parseLedger` runs — survivable today and not
+    survivable in a fortnight. The bound has to be denominated in the thing that actually ran
+    out.
+
+    THE RATCHET, WHICH IS WHY IT ONLY EVER GETS WORSE. The marker advances only on a SUCCESSFUL
+    publish. Every OOM leaves it frozen, so the next attempt re-scopes from the same instant over
+    a corpus that has grown since — monotonic, with no equilibrium. Six days in, every fire spends
+    ~4 minutes of GC thrash and a full LLM budget to die in the same place.
+
+    TWO EARLIER FIXES EACH LEFT THIS EXACT SURFACE UNTOUCHED, AND BOTH READ AS COMPLETE.
+    W1-T2833 bounded `followupLedgerUnionNdjson` to a 30-day window and proved it with a
+    read-call recorder — the MAIN reader sat one function away in the same file and was never
+    given the same treatment. W1-T2870 moved the retro out of the daemon's heap into a
+    subprocess so an OOM could no longer kill queue supervision: it capped the CONTAINER and
+    never bounded the WORKLOAD, which converted "the retro kills the daemon" into "the retro
+    kills only itself, silently, forever". Neither is wrong; together they are the reason this
+    survived.
+
+    AND THE OPERATOR'S OWN MITIGATION COULD NOT HAVE WORKED. The fleet host was resized to
+    8 vCPU / 32GB and the daemon container's memory ceiling raised 4096 -> 8192. The retro still
+    dies at 1792MB, because `AUTOMATED_RETRO_HEAP_LIMIT_MB = 1792` (src/lib/retro-subprocess.ts)
+    is a constant in code passed as `--max-old-space-size`: the subprocess caps its own heap
+    regardless of what the box has. Raising the constant is NOT the fix either — at the measured
+    growth rate it buys days, and the read is unbounded at any ceiling.
+
+    THE FIX, IN THREE PARTS, BYTE BUDGET FIRST BECAUSE IT IS THE ONLY LOAD-BEARING ONE:
+      (i)  A BYTE BUDGET ON WHAT IS RETAINED, keeping the NEWEST rows and reporting exactly what
+           it dropped (rows and bytes) into the ledger row the retro already writes. Never an
+           OOM, and never a silent truncation — a retro that saw less than the whole window must
+           say so on its own report, because a shortened story read as a complete one is the
+           failure this repo has recorded four times over.
+      (ii) THE MARKER'S OWN WINDOW passed through as `sinceTs`, with a lead margin so a run that
+           STARTED before the marker is still whole. This is a cost optimisation, not the bound:
+           it stops old rotations being decompressed at all.
+      (iii) A LOOKBACK FLOOR for the no-marker case, so a first-ever retro (or a deleted marker)
+           cannot mean "read everything" and re-enter this by a second door.
+
+    SEMANTIC CHANGE, STATED RATHER THAN DISCOVERED LATER: `ratifyTelemetry` currently counts
+    `ratify.approved`/`ratify.reframed` over the WHOLE corpus and renders an approval rate. Under
+    a windowed read that rate becomes window-scoped. That is a better fatigue signal — a
+    rubber-stamp rate over all history cannot show a trend — but it IS a different number, and
+    the report must not present it as the lifetime one.
+
+    THE THREE DUPLICATE-SURFACE WARNINGS, RULED ON RATHER THAN NARROWED AWAY. `lint-plan` names
+    W1-T242, W1-T91 and W1-T132 as sharing src/lib/retro.ts + src/run-task.ts with this task. All
+    three still read `status: queued`, and all three have SHIPPED — their own symbols are on main
+    and cited by name in the code this task edits: `resolveMarkerForGather`'s corrupt-vs-absent
+    branch (W1-T242), `resolveGuardCheck` (W1-T91), `retroShippedGithubGateway` (W1-T132). Per the
+    standing rule that a shard's `status:` is what the FILING wrote and nothing updates it on
+    merge, none of the three is live work and none will be dispatched against this surface. What
+    this task does that no one of them does: it bounds the SIZE of what the retro reads. All
+    three concern the CONTENT — which marker, which guard cause, which merge credit — and every
+    one of them assumes a read that returns. `files:` is left as declared; narrowing it to dodge
+    the warning would hide the overlap rather than rule on it.
+
+    THE FALSIFIER MUST FAIL AGAINST THE UNFIXED READER. A test that merely asserts the new
+    bound exists would pass on any implementation that returns a short string. The suite builds a
+    rotation corpus larger than the budget and requires: the read completes, the retained bytes
+    are under the cap, the rows retained are the NEWEST ones, and the drop is REPORTED with a
+    count. Against today's `readRetroLedgerNdjson` the drop count does not exist, so the suite
+    fails — which is the condition for believing it.
+
+  acceptance:
+    - claim: "the retro's ledger read is bounded by RETAINED BYTES and cannot exceed its budget however large the corpus is"
+      proof: "unit test: test/the-retro-ledger-read-is-bounded-by-bytes-not-days.test.ts"
+    - claim: "a read that dropped rows reports the count rather than returning a shortened corpus silently"
+      proof: "grep: droppedRows in src/lib/retro.ts"
+    - claim: "the marker's own timestamp is passed through as the read's window, so rotations before it are never decompressed"
+      proof: "grep: sinceTs in src/lib/retro.ts"
