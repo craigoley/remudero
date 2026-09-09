@@ -15,10 +15,12 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { defaultProofSpawner } from "../src/lib/review.js";
+import type { execFileSync } from "node:child_process";
+
+import { defaultProofSpawner, ensureDeps } from "../src/lib/review.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
@@ -104,4 +106,54 @@ test("W1-T3266: the production spawner names the untrappable signal, so the choi
   const src = new URL("../src/lib/review.ts", import.meta.url);
   const text = readFileSync(src, "utf8");
   assert.match(text, /killSignal: "SIGKILL"/, "the bound must name a signal a spinning child cannot trap");
+});
+
+// ── THE SECOND SYNCHRONOUS SPAWN IN THIS MODULE, AND THE ONE NO DIRECTIVE CAN EXEMPT ─────────
+//
+// `installPinnedChromium` re-execs `process.execPath`, so `diff-cov: process-boundary` may exempt
+// it (MEASURED: diff-coverage prints `exempt (process-boundary) src/lib/review.ts:1242`).
+// `ensureDeps` shells `npm`, which that directive deliberately does not admit — so its bound is
+// asserted here instead. A bound nothing executes is what this whole task exists to remove; one
+// that is merely WRITTEN would repeat the defect in a new place.
+test("W1-T3266: the dependency priming spawn carries the same untrappable kill signal as the proof spawner", () => {
+  const calls: Array<{ file: string; args: readonly string[]; opts: Record<string, unknown> }> = [];
+  const recorder = ((file: string, args: readonly string[], opts: Record<string, unknown>) => {
+    calls.push({ file, args, opts });
+    return "";
+  }) as unknown as typeof execFileSync;
+
+  const cwd = makeTempDir("w1t3266-prime-");
+  writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "fixture", version: "1.0.0" }));
+
+  ensureDeps(cwd, recorder);
+
+  assert.equal(calls.length, 1, "a checkout with a package.json and no node_modules must be primed");
+  assert.equal(calls[0]!.file, "npm");
+  assert.deepEqual([...calls[0]!.args], ["ci"]);
+  assert.equal(
+    calls[0]!.opts.killSignal,
+    "SIGKILL",
+    "SIGTERM cannot stop a wedged install — the same reason the proof spawner was changed",
+  );
+  assert.equal(calls[0]!.opts.timeout, 120_000, "the bound itself must still be passed, not just the signal");
+});
+
+test("W1-T3266: priming is skipped where it cannot help, so the bound above is reached only on a real install", () => {
+  // The discriminating half. Without it the assertion above passes on an implementation that
+  // spawns `npm ci` unconditionally — which would be a worse defect than the one being fixed.
+  const calls: string[] = [];
+  const recorder = ((file: string) => {
+    calls.push(file);
+    return "";
+  }) as unknown as typeof execFileSync;
+
+  const noPackageJson = makeTempDir("w1t3266-nopkg-");
+  ensureDeps(noPackageJson, recorder);
+  assert.deepEqual(calls, [], "a directory with no package.json has nothing to install");
+
+  const alreadyInstalled = makeTempDir("w1t3266-primed-");
+  writeFileSync(join(alreadyInstalled, "package.json"), JSON.stringify({ name: "f", version: "1.0.0" }));
+  mkdirSync(join(alreadyInstalled, "node_modules"));
+  ensureDeps(alreadyInstalled, recorder);
+  assert.deepEqual(calls, [], "an existing node_modules must not be reinstalled on every proof");
 });

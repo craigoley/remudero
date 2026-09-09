@@ -1097,15 +1097,22 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
   });
 
 /** `npm ci` a fresh checkout ONCE before its first test proof, since fresh worktrees have no node_modules.
- *  Best-effort: a failed install surfaces as the test command's own exec_error, never a false pass. */
-function ensureDeps(cwd: string): void {
+ *  Best-effort: a failed install surfaces as the test command's own exec_error, never a false pass.
+ *
+ *  W1-T3266: `exec` is injectable and LAST, so no positional caller shifts. It exists because the
+ *  bound below is otherwise UNASSERTABLE — the sibling boundary (`installPinnedChromium`) re-execs
+ *  `process.execPath` and the `diff-cov: process-boundary` directive can exempt it, but this one
+ *  shells `npm`, which that directive deliberately does not admit. An unexecuted, unasserted bound
+ *  is the exact shape that let a SIGTERM default survive six hours, so this one is recorded by a
+ *  test rather than merely written down. */
+export function ensureDeps(cwd: string, exec: typeof execFileSync = execFileSync): void {
   if (npmCiPrimed.has(cwd)) return;
   npmCiPrimed.add(cwd); // mark attempted regardless of outcome — never retry-storm a cwd
   if (!existsSync(join(cwd, "package.json")) || existsSync(join(cwd, "node_modules"))) return;
   try {
     // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
     // outlive its timeout and hold the reviewer the way a wedged proof did.
-    execFileSync("npm", ["ci"], { cwd, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    exec("npm", ["ci"], { cwd, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
   } catch {
     /* best-effort priming; see doc comment above */
   }
