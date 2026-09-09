@@ -113,14 +113,21 @@ export function formatReport({ called, declared, missing, baseline }) {
 }
 
 /** Read every source file under a path (a file or a directory), via git so untracked scratch and
- *  ignored build output are never counted as a consumer. */
-function readTextTree(target) {
+ *  ignored build output are never counted as a consumer.
+ *  EXPORTED FOR ITS TEST, not for callers: this is the one part of the census that touches the real
+ *  corpus, so a fixture cannot stand in for it. If it stops listing files the uncovered count
+ *  collapses toward zero and the gate reads as a clean sheet -- the exact failure `main` refuses on. */
+export function readTextTree(target) {
   const listed = execFileSync("git", ["ls-files", "--", target], { encoding: "utf8" })
     .split("\n")
     .filter((p) => /\.(ts|tsx|js|mjs)$/.test(p));
   return listed.map((p) => readFileSync(p, "utf8"));
 }
 
+// diff-cov: process-boundary -- the CLI shell. Every DECISION it makes is a pure function tested
+// above (routesCalled, routesDeclared, uncovered, classify, formatReport, readTextTree); what is
+// left here is argument threading and the two `process.exit` calls that are the gate's verdict,
+// and a test cannot observe an exit code without spawning the script.
 function main() {
   const called = routesCalled(CLIENT_SOURCES, readTextTree);
   const declared = routesDeclared(readFileSync("openapi/daemon.yaml", "utf8"));

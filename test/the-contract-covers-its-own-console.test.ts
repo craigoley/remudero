@@ -24,6 +24,7 @@ const mod = (await import(pathToFileURL(join(ROOT, "scripts", "contract-coverage
   CLIENT_SOURCES: readonly string[];
   BASELINE_PATH: string;
   routesCalled: (sources: readonly string[], read: (s: string) => string[]) => string[];
+  readTextTree: (target: string) => string[];
   routesDeclared: (spec: string) => string[];
   normalisePath: (p: string) => string;
   uncovered: (called: string[], declared: string[]) => string[];
@@ -89,6 +90,34 @@ test("W1-T3174: the census reads the STRING console too, not only where the fetc
 
   const spec = mod.routesDeclared(readFileSync(join(ROOT, "openapi", "daemon.yaml"), "utf8"));
   assert.ok(spec.length > 0, "and the spec extraction must still see its paths");
+});
+
+test("W1-T3174: the FELL direction names the ceiling to lower — an improvement that is not locked in is not kept", () => {
+  // The sibling above covers ROSE. This arm was uncovered, and it is the half that matters for
+  // RATCHETING: a census that reports an improvement without saying to record it lets the next PR
+  // give the improvement back silently.
+  const fell = mod.formatReport({ called: ["/v1/a"], declared: ["/v1/a", "/v1/b"], missing: [], baseline: 3 });
+  assert.match(fell, /FELL/);
+  assert.ok(
+    fell.includes(mod.BASELINE_PATH),
+    "and it must name the file to lower — \"lower the ceiling\" is not actionable without it",
+  );
+  assert.doesNotMatch(fell, /UNDECLARED:/, "nothing is undeclared here — the section must not print empty");
+});
+
+test("W1-T3174: readTextTree lists through git, so untracked scratch is never counted as a consumer", () => {
+  // The one part of the census that touches the real corpus; a fixture cannot stand in for it.
+  const own = mod.readTextTree("scripts/contract-coverage-ratchet.mjs");
+  assert.equal(own.length, 1, "a tracked file resolves to exactly its own contents");
+  assert.match(own[0], /export function routesCalled/, "and the contents are the file's, not a path or a stat");
+
+  // A path git does not track yields NOTHING rather than throwing or reading from disk — that is
+  // what keeps ignored build output out of the population.
+  assert.deepEqual(mod.readTextTree("scripts/definitely-not-tracked-xyz.mjs"), []);
+
+  // A DIRECTORY resolves to many, and only source extensions survive the filter.
+  const dir = mod.readTextTree("scripts");
+  assert.ok(dir.length > 1, "a directory must list more than one file — measured " + dir.length);
 });
 
 test("W1-T3174: the census DISCRIMINATES — an undeclared caller is reported, a declared one is not", () => {
