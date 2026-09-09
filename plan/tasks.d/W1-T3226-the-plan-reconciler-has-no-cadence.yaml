@@ -1,0 +1,102 @@
+- id: W1-T3226
+  title: "THE PLAN RECONCILER HAS NO CADENCE, SO 85 CREDITED SHARDS SAT AT status:queued AND THE PRIORITISED QUEUE READ 21 OPEN WHEN 20 OF THEM WERE ALREADY SHIPPED — every sibling maintenance verb has a cadence; this one is invoked by hand or never"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/measurement-cadence.ts, test/the-plan-reconciler-runs-on-a-cadence.test.ts]
+  origin: "operator-session#ci-cost-items-2026-09-09"
+  plan_refs: ["W1-T3218", "W1-T2735", "W1-T3059"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09. `rmd plan-reconcile` exists, is registered in the command table, is
+    dispatched from `main()`, and is unit-tested. Nothing schedules it: a grep for
+    `plan-reconcile`/`planReconcile` across `src/lib/daemon.ts`, `.github/workflows/`, `scripts/`
+    and `package.json` returns only three BASELINE rows (comment-load, source-size, tier manifest)
+    — instrument entries, not invocations.
+    WHAT THAT COST, MEASURED THE SAME DAY. A dry run reported 85 shards credited-merged but still
+    at `status: queued`. The prioritised queue therefore read as 21 open shards when 20 of them
+    were already on main — including BOTH items an operator asked to start next. Two were checked
+    before building and both were already done and green: W1-T3207 (#4733, its suite 7/7) and
+    W1-T3208 (wired at review.ts:1455, its suite 9/9). The near-miss is the point: a queue that
+    overstates itself spends real budget rebuilding finished work.
+    IT IS THE ODD ONE OUT, NOT AN OVERSIGHT CLASS. The daemon runs a cadence for rule-efficacy,
+    verdict-calibration, autonomy-rate, digest, board-review, coverage-improvement, proof-debt,
+    verb-census, hand-run-census, revert-recall, github-posture, measurement, ci-learning and
+    wipe-test. `runMeasurementCadenceReport` (src/lib/measurement-cadence.ts) is the host for the
+    first three. Plan reconciliation is the one maintenance verb with no schedule at all.
+    NOT THE W1-T3218 DEFECT, and the distinction matters: this verb IS reachable. `rmd
+    plan-reconcile` works and was run by hand to produce the 85-shard reconcile. The gap is that
+    nothing invokes it without a human deciding to, which is a cadence gap rather than a wiring gap.
+  design: |
+    (i) REPORT EVERY CYCLE, LAND ONLY ABOVE A THRESHOLD. The drift count is cheap and belongs in
+    the cadence report unconditionally, so the number is visible before it is large. Landing a
+    plan diff is not free and should not fire for one stale shard.
+    (ii) NEVER EDIT THE PLAN IN PLACE ON THE DAEMON'S OWN CHECKOUT. `checkCliFreshness` refuses a
+    dirty tree, so an in-place write would break the daemon's self-sync — the same hazard the repo
+    already documents as "the daemon dirties its OWN tree". The change must go through the existing
+    landing bridge that `plan/decisions.d` and `plan/feedback` already use, as a plan-only PR.
+    (iii) A FALSE FLIP HIDES WORK, SO THE CREDIT SIGNAL IS THE SAFETY ARGUMENT. Reconciling a shard
+    that is NOT built removes it from the queue silently — strictly worse than leaving it stale.
+    The cadence must reconcile only what `reconcilePlan`'s existing credit predicate accepts, and
+    must not widen it.
+    (iv) THE REPORT NAMES THE COUNT AND THE VERB. A cadence that silently fixed the plan would make
+    the drift invisible again in the other direction; the operator should be able to read how much
+    drift there was and that a PR was opened for it.
+    (v) NOTHING ABOUT `reconcilePlan` ITSELF CHANGES. Its predicate, its skip categories and its
+    output are correct — this task schedules it and nothing more.
+  acceptance:
+    - claim: "the cadence reports the count of credited-but-queued shards on every cycle, including when that count is zero"
+      proof: "unit test: test/the-plan-reconciler-runs-on-a-cadence.test.ts"
+    - claim: "below the threshold the cadence lands nothing and opens no PR"
+      proof: "unit test: test/the-plan-reconciler-runs-on-a-cadence.test.ts"
+    - claim: "at or above the threshold it lands the reconcile as a plan-only change through the existing landing bridge, never an in-place write to the daemon's checkout"
+      proof: "unit test: test/the-plan-reconciler-runs-on-a-cadence.test.ts"
+    - claim: "a shard the credit predicate refuses is never reconciled by the cadence, so a false flip cannot hide work"
+      proof: "unit test: test/the-plan-reconciler-runs-on-a-cadence.test.ts"
+    - claim: "the cadence has a PRODUCTION call site — the measurement cadence host runs it, not only its own tests"
+      proof: "grep: planReconcileCadence( in src/lib/measurement-cadence.ts"
+  falsifier: |
+    CLOSE IF anything already schedules the reconciler: grep `plan-reconcile` and `planReconcile`
+    across src/lib/daemon.ts, .github/workflows/, scripts/ and package.json.
+    MEASURED 2026-09-09: three hits, all of them BASELINE rows in scripts/*.json (comment-load,
+    source-size, tier manifest). Zero invocations.
+    POSITIVE CONTROL, because "the cadence ran" is not the claim: the suite must show BOTH that a
+    zero-drift cycle reports zero and lands nothing, AND that an above-threshold cycle lands. A
+    suite proving only the landing arm cannot distinguish a cadence from an unconditional writer,
+    and one proving only the quiet arm cannot distinguish it from a no-op.
+    PROVE THE SAFETY DIRECTION: the fixture needs a shard the credit predicate REFUSES, and the
+    cadence must leave it queued. Without that case the suite cannot tell "reconciles what is
+    credited" from "reconciles everything", and the second silently empties the queue.
+    DO NOT widen `reconcilePlan`'s credit predicate to catch more shards. A wider predicate flips
+    uncredited work to merged, which removes real tasks from the queue — the exact harm this task
+    exists to prevent more of, in the opposite direction.
+    DO NOT write the plan in place on the daemon's checkout. Design (ii): that breaks self-sync,
+    and the landing bridge already exists for machine-authored plan changes.
+  note: |
+    Rule 25 CHECKED: `src/lib/measurement-cadence.ts` is ordinary src.
+    SCOPE IS ONE MODULE, DELIBERATELY: the cadence and its host (`runMeasurementCadenceReport`)
+    both live in measurement-cadence.ts, and run-task.ts only imports that host, so declaring it
+    would widen the task past what the change touches.
+    RISK IS HIGH BY RULE 19, and the reason is honest rather than procedural: lint-plan counts a
+    second concern because this shard's prose is about the DAEMON — the falsifier tells a reader
+    to grep src/lib/daemon.ts, and design (ii) turns on the daemon's own checkout staying clean.
+    A cadence that lands a plan PR on a schedule is daemon behaviour whatever file it lives in,
+    so the higher band is the accurate reading, not a formality to clear the gate.
+    THE 85-SHARD BACKLOG IS BEING RECONCILED SEPARATELY, by hand, in its own plan-only PR. This
+    task is about the recurrence, not the backlog: reconciling today does not stop the drift
+    resuming tomorrow.
+    CAVEAT WITH EQUAL WEIGHT: this task makes the plan's status field track the repo's credit
+    signal on a schedule. It does NOT make that signal more correct. `lint-plan` already reports
+    that a credit split reading 2 of 4 paths misses the other two, and the hand check behind the
+    85-shard reconcile hit exactly that — six shards with no git-history credit that were
+    nonetheless genuinely built, credited through the ledger. A cadence inherits whatever the
+    predicate knows.
+    SECOND CAVEAT: a threshold is a policy number and this shard does not know the right one. It
+    should be a declared policy value with a stated starting point, changed by measurement rather
+    than by argument, and the first cycles of the reported count are what would set it.
