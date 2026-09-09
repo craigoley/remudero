@@ -2401,15 +2401,24 @@ function fileUnderClaimedPath(file: string, path: string): boolean {
  * real contradiction hide behind a single backtick. ALSO REPORTS `fenceUnbalancedAtEof` (W1-T1264 (iv)), since an
  * unbalanced fence blanks the REMAINDER of the body. */
 function stripQuotedRegions(report: string): { scan: string; fenceUnbalancedAtEof: boolean } {
+  // W1-T3142: ...AND THE ACCEPTANCE BLOCK IS THE THIRD SUCH REGION — a RESTATEMENT of criteria living
+  // in `plan/tasks.d/`, which the gate resolves FROM THE SHARD whenever a `Remudero-Task:` trailer is
+  // present, so scanning it as the body's own assertion refuses a PR for words its task file wrote.
+  // MEASURED: W1-T3060's criterion 2, verbatim, produced the same single `plan-only` contradiction as
+  // the false control "This PR is plan-only."; #4577 had to OMIT its block to be reviewed. Blanked for
+  // CLAIM SCANNING ONLY — `parseAcceptanceBlock` and the author-time checks still read it unchanged.
+  const acceptance = acceptanceBlockRegion(report);
   let inFence = false;
   const scan = report
     .split("\n")
-    .map((line) => {
+    .map((line, index) => {
       if (/^\s*```/.test(line)) {
         inFence = !inFence;
         return " ".repeat(line.length);
       }
       if (inFence || /^\s*>/.test(line)) return " ".repeat(line.length);
+      // AFTER the fence arms, never before: a fence opened inside the block must still toggle.
+      if (acceptance && index > acceptance.headerLine && index < acceptance.endLine) return " ".repeat(line.length);
       return line;
     })
     .join("\n");
@@ -4189,6 +4198,35 @@ export const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?
  *  ACCEPTANCE_HEADER_RE}. Exported for the same reason {@link ACCEPTANCE_HEADER_RE} is (W1-T2762). */
 export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
 
+/** THE LINE SPAN of a body's Acceptance block: from the header to the first line that is neither a bullet, an
+ *  indented continuation, nor a tolerated leading blank — the boundary {@link acceptanceBlockDiagnostics} has always
+ *  walked, EXPORTED so {@link stripQuotedRegions} shares it rather than keeping a second copy (W1-T3142).
+ *  `endLine` is EXCLUSIVE. `undefined` when the body carries no acceptance header at all, which is what leaves such a
+ *  body byte-for-byte unchanged by the claim scan. */
+export function acceptanceBlockRegion(body: string): { headerLine: number; endLine: number; bulletsWritten: number } | undefined {
+  const lines = (body ?? "").split("\n");
+  let headerLine = -1;
+  let bulletsWritten = 0;
+  let index = 0;
+  for (; index < lines.length; index += 1) {
+    const line = lines[index].replace(/\r$/, "");
+    if (headerLine < 0) {
+      if (ACCEPTANCE_HEADER_RE.test(line)) headerLine = index;
+      continue;
+    }
+    if (ACCEPTANCE_BULLET_RE.test(line)) {
+      bulletsWritten += 1;
+      continue;
+    }
+    // An indented continuation (wrapped claim OR a `proof:` line) belongs to the current bullet.
+    if (bulletsWritten > 0 && /^\s+\S/.test(line)) continue;
+    if (line.trim() === "" && bulletsWritten === 0) continue;
+    break;
+  }
+  return headerLine < 0 ? undefined : { headerLine, endLine: index, bulletsWritten };
+}
+
+
 /** Where a single-line bullet's claim ends and its proof begins — index plus separator width, or null when the bullet
  * carries no `|`. THE SEPARATOR IS THE ONE THAT YIELDS AN EXECUTABLE PROOF. NOT SIMPLY THE LAST ` | `, which repairs a
  * pipe in the CLAIM and breaks one in the PROOF, since a `grep:` pattern is one argv element and may hold a ` | ` of
@@ -4307,26 +4345,13 @@ export interface AcceptanceBlockDiagnostics {
  * continuation, nor a tolerated leading blank, so a `## Validation` section is not miscounted. */
 export function acceptanceBlockDiagnostics(body: string): AcceptanceBlockDiagnostics {
   const parsed = parseAcceptanceBlock(body);
-  const lines = (body ?? "").split("\n");
-  let inBlock = false;
-  let bulletsWritten = 0;
-  for (const raw of lines) {
-    const line = raw.replace(/\r$/, "");
-    if (!inBlock) {
-      if (ACCEPTANCE_HEADER_RE.test(line)) inBlock = true;
-      continue;
-    }
-    if (ACCEPTANCE_BULLET_RE.test(line)) {
-      bulletsWritten++;
-      continue;
-    }
-    // An indented continuation (wrapped claim OR a `proof:` line) belongs to the current bullet.
-    if (bulletsWritten > 0 && /^\s+\S/.test(line)) continue;
-    if (line.trim() === "" && bulletsWritten === 0) continue;
-    break;
-  }
+  // ONE WALK, SHARED with {@link stripQuotedRegions} (W1-T3142). Two copies of this boundary would
+  // drift, and a body whose block ends in one reading and not the other is the silent half of the
+  // defect that sharing it fixes.
+  const region = acceptanceBlockRegion(body);
+  const bulletsWritten = region?.bulletsWritten ?? 0;
   const emptyProofs = parsed.filter((c) => !c.proof).length;
-  const headerFound = inBlock;
+  const headerFound = region !== undefined;
   return {
     headerFound,
     bulletsWritten,
