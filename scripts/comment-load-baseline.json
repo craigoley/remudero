@@ -52,6 +52,8 @@
   "scripts/clock-sweep.mjs": 153,
   "scripts/comment-load-baseline.json": 0,
   "scripts/comment-load-ratchet.mjs": 250,
+  "scripts/contract-coverage-baseline.json": 250,
+  "scripts/contract-coverage-ratchet.mjs": 250,
   "scripts/coverage-baseline.json": 0,
   "scripts/coverage-merge-ratchet.mjs": 13,
   "scripts/coverage-ratchet.mjs": 126,
