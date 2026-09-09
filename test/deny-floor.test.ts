@@ -15,10 +15,25 @@ import { join } from "node:path";
 
 const HOOK_PATH = fileURLToPath(new URL("../hooks/deny-floor.sh", import.meta.url));
 
+// W1-T3275 — EVERY CASE GETS ITS OWN CACHE ROOT. Rule 9 paces read-shaped `gh` calls using a stamp
+// under `$XDG_CACHE_HOME`. Without isolation these cases would read and WRITE the developer's real
+// `~/.cache/remudero` stamp: the suite would become order-dependent (the second bare-`gh` case
+// refused by the first), and running the tests would silently consume the session's own cadence
+// budget. A fresh root per call keeps each case a statement about the hook, not about what ran
+// before it.
 function runDenyFloor(command: string): { status: number | null; stderr: string } {
   const input = JSON.stringify({ tool_input: { command } });
-  const result = spawnSync("bash", [HOOK_PATH], { input, encoding: "utf8" });
-  return { status: result.status, stderr: result.stderr };
+  const cacheHome = mkdtempSync(join(tmpdir(), "rmd-denyfloor-cache-"));
+  try {
+    const result = spawnSync("bash", [HOOK_PATH], {
+      input,
+      encoding: "utf8",
+      env: { ...process.env, XDG_CACHE_HOME: cacheHome },
+    });
+    return { status: result.status, stderr: result.stderr };
+  } finally {
+    rmSync(cacheHome, { recursive: true, force: true });
+  }
 }
 
 // Rule 8 (W1-T2312) keys off the PROJECT directory, not the hook process's own
@@ -26,8 +41,17 @@ function runDenyFloor(command: string): { status: number | null; stderr: string 
 // alongside `tool_input.command` (BaseHookInput.cwd, sdk.d.ts).
 function runDenyFloorAt(command: string, cwd: string): { status: number | null; stderr: string } {
   const input = JSON.stringify({ cwd, tool_input: { command } });
-  const result = spawnSync("bash", [HOOK_PATH], { input, encoding: "utf8" });
-  return { status: result.status, stderr: result.stderr };
+  const cacheHome = mkdtempSync(join(tmpdir(), "rmd-denyfloor-cache-"));
+  try {
+    const result = spawnSync("bash", [HOOK_PATH], {
+      input,
+      encoding: "utf8",
+      env: { ...process.env, XDG_CACHE_HOME: cacheHome },
+    });
+    return { status: result.status, stderr: result.stderr };
+  } finally {
+    rmSync(cacheHome, { recursive: true, force: true });
+  }
 }
 
 test("deny-floor: refuses a worker POSTing the remudero-review commit status via `gh api`", () => {

@@ -29,6 +29,27 @@ deny() {
   exit 2
 }
 
+# DOES THIS COMMAND ACTUALLY INVOKE `gh`? (W1-T3275)
+#
+# A bare substring test matches every command that merely MENTIONS the tool: a grep about this very
+# rule was refused twice while it was being written, and a floor that refuses a grep about itself
+# gets disabled the same afternoon. Requiring `gh` after a SEPARATOR was worse — it silently stopped
+# rule 6 refusing `…; do gh pr view; sleep 20; done`, since `do` is not a separator, and that mutant
+# passed every existing test. So: strip quoted text, then match `gh` that is not part of a longer
+# word or a path. This is a TRIPWIRE, not a parser; an indirectly-named invocation escapes it, and
+# that limit is asserted in test/gh-read-cadence-floor.test.ts rather than papered over.
+invokes_gh() {
+  # A COMMAND SUBSTITUTION INSIDE QUOTES IS STILL AN INVOCATION. W1-T1066's own recorded poll,
+  # `until [ "$(gh run view …)" = completed ]; do sleep 20; done`, became ALLOWED under a
+  # quotes-only strip. Substitution forms are matched on the RAW text first.
+  if printf '%s' "$1" | grep -Eq '[$`]\([[:space:]]*gh[[:space:]]|`[[:space:]]*gh[[:space:]]'; then
+    return 0
+  fi
+  printf '%s' "$1" \
+    | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g' \
+    | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
+}
+
 # 1) force-push to the default branch (main/master).
 if printf '%s' "$cmd" | grep -Eq 'git[[:space:]]+push[[:space:]].*(--force|-f)([[:space:]]|=|$)'; then
   if printf '%s' "$cmd" | grep -Eq '(origin[[:space:]]+)?(main|master|HEAD:main|HEAD:master)'; then
@@ -88,7 +109,7 @@ fi
 #    inline command, not `gh` itself and not waiting in general.
 if printf '%s' "$cmd" | grep -Eq '\b(for|while|until)\b'; then
   if printf '%s' "$cmd" | grep -Eq '\bsleep\b'; then
-    if printf '%s' "$cmd" | grep -Eq '\bgh\b'; then
+    if invokes_gh "$cmd"; then
       deny "inline polling loop against gh (W1-T1066) — a wait is the operator's to schedule; report what you know and stop"
     fi
   fi
@@ -129,6 +150,73 @@ fi
 if printf '%s' "$cmd" | grep -Eq '\b(npm|pnpm)[[:space:]]+(ci|install|i|add)\b|\byarn[[:space:]]+(install|add)\b'; then
   if [ -L "${hook_cwd:-.}/node_modules" ]; then
     deny "an install here empties the shared node_modules through the symlink for every live run (W1-T2312) — the deps are already linked, so just run typecheck/test; a genuinely newer dependency comes from refreshing the canonical checkout, not installing in this worktree"
+  fi
+fi
+
+# 9) READ-SHAPED `gh` CALLS, TOO CLOSE TOGETHER (W1-T3275 — THE SECONDARY LIMIT COUNTS CADENCE).
+#    Rule 6 refuses the SHAPE of a poll — loop keyword + wait + `gh`. That is not how the budget
+#    gets burned. MEASURED 2026-09-09: a session tripped the secondary limit TWICE with no loop
+#    anywhere, just separate status reads seconds apart, each legal alone. At the 403,
+#    `gh api rate_limit` read core 5000/5000 — the ceiling was the SECONDARY limit, which counts
+#    RATE, NOT VOLUME. CLAUDE.md has carried "CADENCE IS THE BUDGET, NOT INTENT" since the
+#    ninety-minute lockout; prose did not bind it.
+#
+#    WRITES ARE NEVER REFUSED — creating a PR, posting a review, arming a merge is the productive
+#    path and is self-limiting; a floor blocking it would be routed around inside a week. Only READS
+#    are paced, because a read is what a session repeats while waiting. `gh api rate_limit` and
+#    `gh auth status` are exempt BY NAME: they cost no quota and are how a session learns to stop.
+if [ -n "$cmd" ] && invokes_gh "$cmd"; then
+  gh_is_write=0
+  printf '%s' "$cmd" | grep -Eq '(-X|--method)[[:space:]]+(POST|PATCH|PUT|DELETE)' && gh_is_write=1
+  printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+(pr|issue)[[:space:]]+(create|merge|edit|close|reopen|comment|review|ready|lock|unlock)' && gh_is_write=1
+  printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+(run[[:space:]]+(rerun|cancel|delete)|workflow[[:space:]]+(run|enable|disable)|release[[:space:]]+(create|edit|delete)|label[[:space:]]+(create|edit|delete)|secret[[:space:]]+set)' && gh_is_write=1
+
+  gh_is_exempt=0
+  printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api[[:space:]]+rate_limit|gh[[:space:]]+auth[[:space:]]+status' && gh_is_exempt=1
+
+  if [ "$gh_is_write" -eq 0 ] && [ "$gh_is_exempt" -eq 0 ]; then
+    # FAIL OPEN THROUGHOUT. A cadence floor that errors must never block work, so every failure
+    # path below falls through to allowing the call.
+    # THE OVERRIDE COMES FROM THE COMMAND, NOT THIS PROCESS'S ENV. A PreToolUse hook is spawned by
+    # the harness, so an inline `RMD_GH_COOLDOWN_S=0 gh …` never reaches this process's env — an
+    # env-only override would be a documented escape hatch that silently does nothing. Reading it
+    # from `$cmd` also keeps it visible to a reviewer. The env form still works session-wide.
+    gh_window="${RMD_GH_COOLDOWN_S-180}"
+    gh_inline="$(printf '%s' "$cmd" | sed -n 's/.*RMD_GH_COOLDOWN_S=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    [ -n "$gh_inline" ] && gh_window="$gh_inline"
+    case "$gh_window" in ''|*[!0-9]*) gh_window=180 ;; esac
+    if [ "$gh_window" -gt 0 ] 2>/dev/null; then
+      gh_state_dir="${XDG_CACHE_HOME:-$HOME/.cache}/remudero"
+      gh_stamp="$gh_state_dir/gh-last-read"
+      mkdir -p "$gh_state_dir" 2>/dev/null || true
+      gh_now="$(date +%s 2>/dev/null || echo 0)"
+      gh_prev=0
+      if [ -f "$gh_stamp" ]; then
+        # `stat` is not portable, and CHAINING ON EXIT STATUS DOES NOT WORK HERE — that is what made
+        # this floor inert on the host it runs on. GNU/Linux `stat -f` is VALID: it means
+        # --file-system, so it SUCCEEDS and prints "  File: ..." instead of failing through to -c.
+        # The non-numeric result was then sanitised to 0 below, gh_prev > 0 was false, and no read
+        # was ever refused on Linux. MEASURED via `bash -x`: gh_prev='  File: "…/gh-last-read"'.
+        # So SELECT ON THE SHAPE OF THE OUTPUT, not on exit status: take the first form that yields
+        # digits. Order no longer matters, and a future platform that succeeds with prose is caught.
+        gh_prev="$(stat -c %Y "$gh_stamp" 2>/dev/null || true)"
+        case "$gh_prev" in ''|*[!0-9]*) gh_prev="$(stat -f %m "$gh_stamp" 2>/dev/null || true)" ;; esac
+      fi
+      case "$gh_prev" in ''|*[!0-9]*) gh_prev=0 ;; esac
+      if [ "$gh_now" -gt 0 ] && [ "$gh_prev" -gt 0 ]; then
+        gh_age=$(( gh_now - gh_prev ))
+        if [ "$gh_age" -lt "$gh_window" ]; then
+          printf 'deny-floor: blocked - a read-shaped `gh` call %ss after the last one (floor %ss, W1-T3275).\n' "$gh_age" "$gh_window" >&2
+          printf '  The SECONDARY rate limit counts CADENCE, not volume: a run of cheap reads trips it while\n' >&2
+          printf '  `gh api rate_limit` still reads 5000/5000. Report what you already know and stop -- a wait\n' >&2
+          printf '  is the operator to schedule. Writes (create/merge/review/POST) are never refused, and\n' >&2
+          printf '  `gh api rate_limit` is exempt. Deliberate burst: RMD_GH_COOLDOWN_S=0, a choice on the record.\n' >&2
+          exit 2
+        fi
+      fi
+      # Stamped only on an ALLOWED read, so a refusal never extends its own window.
+      : > "$gh_stamp" 2>/dev/null || true
+    fi
   fi
 fi
 

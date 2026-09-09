@@ -271,18 +271,18 @@ carried had gone stale. Each rule cites the PR that earned it.
   cap is sized against this repo's real required-check wall-clock, so a green-in-progress sibling is
   waited out rather than timed out (W1-T312, `WAIT_CAP_SECONDS` in `.github/workflows/ci-gate.yml`).
   Both are FIXED; the citations are the detail. *(#873/#877, W1-T261/#885, W1-T312)*
-- **CADENCE IS THE BUDGET, NOT INTENT — never loop on `gh pr view`, `gh run view` or any API call
-  waiting for a state change; ONE sparse check-in is fine, a poll is not.** A lane polled 80 times
-  at a 45-second cadence against an 8-13 minute CI cycle, exhausted the shared budget and locked the
-  operator out for ~90 minutes while single calls 403'd at 204 of 5000 used — the ceiling hit was
-  the SECONDARY limit, counting RATE, NOT VOLUME. An hourly re-check keeps a watched PR watched;
-  minutes apart is a poll. *(2026-08-20 lockout; "never arm a check-in" corrected 2026-09-06)*
+- **CADENCE IS THE BUDGET, NOT INTENT — a sparse check-in is fine, a poll is not. NOW ENFORCED:**
+  `hooks/deny-floor.sh` rule 9 refuses a read-shaped `gh` call inside 180s of the last; writes and
+  `gh api rate_limit` are exempt, and a deliberate burst is `RMD_GH_COOLDOWN_S=0` INLINE IN THE
+  COMMAND (a hook is spawned by the harness, so an env-only override reaches nothing). The limit
+  that bites is the SECONDARY one, counting RATE NOT VOLUME — it 403s while rate_limit reads
+  5000/5000, so a quota check cannot predict it. *(80-call lockout 2026-08-20; a later session
+  tripped it twice with no loop at all; enforced by W1-T3275 2026-09-09)*
 - **`gh pr create` may die on API quota; git push is unaffected.** Open PRs via REST:
   `gh api --method POST repos/<owner>/<repo>/pulls -f title=… -f head=… -f base=main -F body=@<file>`.
-  The exhausted budget measured here was REST/core, and a budget read did not predict the next call:
-  one PR POST succeeded at remaining 0 and the next GET 403'd. attempt and handle one refusal; do
-  not poll or gate work on a budget reading. `rmd review` and `gh pr view --json` still need
-  GraphQL. *(#766; corrected 2026-09-07)*
+  Same unpredictability as the bullet above: one PR POST succeeded at remaining 0 and the next GET
+  403'd. Attempt it and handle one refusal; never gate work on a budget reading. `rmd review` and
+  `gh pr view --json` still need GraphQL. *(#766; corrected 2026-09-07)*
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.** *(#1399 — a full CI cycle
   spent waiting on checks that were never going to start)*
