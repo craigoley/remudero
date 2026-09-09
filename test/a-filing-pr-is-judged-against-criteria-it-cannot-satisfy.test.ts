@@ -18,7 +18,25 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { filingSelfCreditCheck } from "../src/lib/review.js";
-import { evaluateGate, introducedShardTaskIds } from "../scripts/acceptance-author-gate.mjs";
+// @ts-expect-error — `scripts/**` sits outside tsconfig's `include`, so this executable .mjs has
+// no declaration output (TS7016). The seam this suite consumes is declared immediately below
+// rather than left as `any`, the same idiom test/a-ci-skip-guard-can-fire-unconditionally.test.ts
+// uses for its own script.
+import * as authorGate from "../scripts/acceptance-author-gate.mjs";
+
+const evaluateGate = authorGate.evaluateGate as (input: {
+  body: string;
+  authorLogin?: string;
+  trailerResolves?: (taskId: string) => boolean;
+  introducedTaskIds?: readonly string[];
+}) => { ok: boolean; defect?: string; message: string };
+
+const introducedShardTaskIds = authorGate.introducedShardTaskIds as (opts: {
+  baseSha?: string;
+  headSha?: string;
+  root?: string;
+  git?: (args: readonly string[]) => string;
+}) => string[];
 
 const FILING_BODY = [
   "Plan-only. Files W1-T3231.",
