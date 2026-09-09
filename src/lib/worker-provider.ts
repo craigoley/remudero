@@ -1240,6 +1240,25 @@ export function codexGitWritableRoots(cwd: string, configRoot: string): string[]
   }
 }
 
+/**
+ * The `project_doc_max_bytes` the Codex spawn pins (W1-T3135). KIND: BACKSTOP (W1-T1266) — the
+ * PRIMARY CONTROL on this lane's doctrine size is the CLAUDE.md budget ratchet
+ * (`scripts/claude-md-budget-baseline.json`'s `capBytes`), and this ceiling binds only if that
+ * control is breached. Codex's own default, 32768, sits BELOW that cap and truncates silently, so
+ * this must stay above it; the test asserts it against the baseline file rather than a second
+ * hand-typed number, making a raised doc budget fail loudly instead of cutting doctrine.
+ */
+export const CODEX_PROJECT_DOC_MAX_BYTES = 65536;
+
+/**
+ * The nudge every Codex worker prompt opens with (W1-T3135). It names only instruction files this
+ * checkout actually contains — it used to name AGENTS.md, which has never existed here — and it
+ * stays even though `project_doc_fallback_filenames` now auto-loads CLAUDE.md, because a worker
+ * that is told what it was given reads it as doctrine rather than as background.
+ */
+export const CODEX_DOCTRINE_PRELUDE =
+  "Before acting, read and follow the repository instruction files present in the checkout, starting with CLAUDE.md — this repository's standing instructions, which are also loaded as your project doc.\n\n";
+
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
@@ -1280,6 +1299,18 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     //
     "-c", 'shell_environment_policy.inherit="core"',
     "-c", 'shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","ANTHROPIC_API_KEY"]',
+    // W1-T3135 — THE CODEX LANE'S ONLY ROUTE TO REPOSITORY DOCTRINE, AND BOTH FLAGS OR NEITHER.
+    // Codex's project-doc reader loads AGENTS.md, which this repo does not have and will not grow;
+    // the fallback points that same reader at CLAUDE.md, so there is one source of truth and
+    // nothing that can drift. MEASURED 2026-09-09 on codex-cli 0.152.0 under `--sandbox
+    // workspace-write`, prompted "Do not read or open any files" so the answer proves
+    // AUTO-INJECTION: without the fallback a CLAUDE.md canary reads back "UNKNOWN"; with it, the
+    // canary. The cap is not optional — alone the fallback would load CLAUDE.md (43685 bytes,
+    // ratchet cap 44000) against Codex's 32768 default and cut a quarter of the doctrine at a byte
+    // offset, mid-rule, with no signal. Falsifiers for both live in
+    // test/the-codex-lane-auto-loads-no-doctrine.test.ts.
+    "-c", 'project_doc_fallback_filenames=["CLAUDE.md"]',
+    "-c", `project_doc_max_bytes=${CODEX_PROJECT_DOC_MAX_BYTES}`,
   ];
   // W1-T2748 narrows W1-T2754's trust bypass to the two call-site properties that make it safe:
   // read-only tools and positive evidence that the cwd is not a Git worktree. The flag remains in
@@ -1357,9 +1388,7 @@ async function spawnCodexWorkerInPrivateTemp(
     armClockBound();
   });
   armClockBound();
-  const prompt =
-    "Before acting, read and follow the repository instruction files present in the checkout, including CLAUDE.md and AGENTS.md.\n\n" +
-    args.prompt;
+  const prompt = CODEX_DOCTRINE_PRELUDE + args.prompt;
   process.stdin.write(`${prompt}\n`);
   process.stdin.end();
   try {

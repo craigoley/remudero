@@ -85,8 +85,8 @@
     "changelog": "commit-and-tag-version"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.251",
-    "playwright": "^1.62.1",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.263",
+    "playwright": "^1.63.0",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
     "yaml": "^2.9.0"
@@ -96,12 +96,12 @@
     "@commitlint/cli": "^21.2.2",
     "@commitlint/config-conventional": "^21.2.0",
     "@stryker-mutator/core": "^9.6.1",
-    "@swc/core": "^1.16.1",
+    "@swc/core": "^1.16.2",
     "@types/node": "^22.20.1",
     "commit-and-tag-version": "^13.1.2",
     "dependency-cruiser": "^18.2.0",
     "fast-check": "^4.9.0",
-    "jscpd": "^5.1.0"
+    "jscpd": "^5.1.2"
   },
   "_dependencyRationale": {
     "@swc/core": "Required by .dependency-cruiser.cjs parser: \"swc\"; src never imports it, but depcruise loads it for TypeScript 7 extraction.",

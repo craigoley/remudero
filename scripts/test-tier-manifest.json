@@ -1150,6 +1150,7 @@
     "test/the-changed-files-block-has-no-production-caller.test.ts": 1053,
     "test/the-channel-is-built-and-the-digest-still-goes-nowhere.test.ts": 2141,
     "test/the-citation-miner-has-a-producer.test.ts": 798,
+    "test/the-codex-lane-auto-loads-no-doctrine.test.ts": 0,
     "test/the-comment-load-baseline-is-the-one-gate-remedy-the-scope-guard-still-refuses.test.ts": 1274,
     "test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts": 1125,
     "test/the-console-draws-the-graph-it-computes.test.ts": 1612,

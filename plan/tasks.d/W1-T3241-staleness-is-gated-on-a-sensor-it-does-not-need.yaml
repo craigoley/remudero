@@ -1,0 +1,87 @@
+- id: W1-T3241
+  title: "THE ONE ROW THAT WOULD HAVE SHOWN THE DAEMON'S CHECKOUT 34 COMMITS BEHIND READS `unknown` WHILE IT IS TRUE — `head vs origin/main` is gated on a LIVENESS SENSOR it does not need, and that sensor cannot answer on this host at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 18.00
+  files: [src/lib/status-board.ts, test/staleness-is-answerable-without-a-liveness-sensor.test.ts]
+  origin: "operator-session#deploy-visibility-2026-09-09"
+  plan_refs: ["W1-T2450", "W1-T301", "W1-T126"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 on origin/main 2a22ebcf0, from a lane so the read is of CURRENT code. One
+    `rmd status` LIVENESS block printed both of these, four lines apart:
+      daemon          : unknown - no launchd sensor on this host (`launchctl` unavailable) - boot 2h16m ago (7f7f36dfc1cf)
+      head vs origin/main : unknown
+    BOTH OPERANDS WERE IN HAND. The boot sha is printed on the same line that reports `unknown`;
+    `origin/main` resolved to 2a22ebcf0; the two are 34 commits apart. The comparison was declined
+    while its inputs sat in the same rendered block.
+    WHAT IT COST, THE SAME DAY. The daemon's checkout was 34 commits behind with a dirty index, and
+    every plan-reading verb was refused by `checkCliFreshness` for hours. `head vs origin/main` is
+    the row that names exactly that condition. It read `unknown` throughout.
+    THE CAUSE IS ONE CONJUNCT. `status-board.ts` gates the comparison on `daemonRow.running`, and
+    `running` is false whenever the launchd sensor did not answer - `livenessState` returns
+    `unknown` on `row.sensed === false`, which is EVERY read on this Linux host. So an absent
+    sensor suppresses a fact git can answer with no sensor at all.
+    THE EXISTING REASONING IS RIGHT ABOUT THE WRONG STATE. The gate's own comment says "a stopped
+    daemon has no running HEAD to compare, however recent its last boot". That is correct for
+    STOPPED and wrong for UNKNOWN: not sensing a process is not observing it absent, and W1-T2450
+    already established that distinction one layer up, where `sensed === false` is read BEFORE the
+    resident/interval split precisely so an absent sensor never masquerades as a verdict.
+  design: |
+    (i) SEPARATE "CANNOT SENSE THE PROCESS" FROM "CANNOT COMPARE TWO SHAS". The comparison needs a
+    boot sha and an origin/main sha. Neither is a liveness question, and neither becomes unavailable
+    because `launchctl` is missing.
+    (ii) STOPPED KEEPS TODAY'S ANSWER, and this is the load-bearing half. When the daemon is
+    POSITIVELY OBSERVED down, `unknown` stays right - a dead process's boot sha says nothing about
+    what code is running, which is the question this row exists to answer. Only the UNSENSED case
+    changes.
+    (iii) DO NOT WIDEN THE ROW. When either sha is genuinely unresolvable the answer is still
+    `unknown`; this task removes one wrong conjunct, it does not invent a verdict from missing data.
+    (iv) NOTHING ABOUT THE SENSOR CHANGES HERE. Making the sensor work on this host is a separate,
+    larger portability task; this shard is worth shipping alone because the row becomes readable
+    even while every service row stays `unknown`.
+  acceptance:
+    - claim: "with the liveness sensor unable to answer, a boot sha and an origin/main sha still render fresh or stale rather than unknown"
+      proof: "unit test: test/staleness-is-answerable-without-a-liveness-sensor.test.ts"
+    - claim: "a daemon positively observed STOPPED still reads unknown, so no verdict is claimed from a dead process's boot sha"
+      proof: "unit test: test/staleness-is-answerable-without-a-liveness-sensor.test.ts"
+    - claim: "either sha unresolvable still reads unknown, so the row is never fabricated from missing data"
+      proof: "unit test: test/staleness-is-answerable-without-a-liveness-sensor.test.ts"
+    - claim: "the production status board reaches the ungated comparison, not only its own tests"
+      proof: "grep: headVsOriginMain in src/lib/status-board.ts"
+  falsifier: |
+    CLOSE IF the row already renders on a host with no launchd sensor.
+    MEASURED 2026-09-09 on origin/main 2a22ebcf0: it printed `unknown` while the same block printed
+    the boot sha and `origin/main` stood 34 commits away.
+    POSITIVE CONTROL, because "renders a verdict" is not the claim: the suite must show BOTH that an
+    UNSENSED daemon now yields fresh/stale AND that a STOPPED one still yields `unknown`. A suite
+    proving only the first cannot distinguish this fix from deleting the gate, and deleting the gate
+    reports the boot sha of a process that is not running as if it were live code.
+    SECOND CONTROL: a row with an unresolvable sha must still read `unknown`, or the fix has traded
+    a false `unknown` for a fabricated verdict.
+    DO NOT fix this by making `running` true when the sensor is blind. That corrupts every other
+    liveness consumer to repair one row, and W1-T2450 exists because that conflation was already
+    made once.
+  note: |
+    RISK IS HIGH BY RULE 19 AND THE REASON IS HONEST RATHER THAN PROCEDURAL: lint-plan counts a
+    second concern because this shard's prose is about the DAEMON - the sha compared is the
+    daemon's boot sha, and the measurement that motivates the task is the daemon's checkout being
+    34 commits behind. A row that reports whether the running fleet is on stale code is daemon
+    surface whatever file it lives in, so the higher band is the accurate reading. It is ALSO the
+    direction of the residual danger: getting this wrong the other way - rendering `fresh` for a
+    process that is not running the compared sha - is worse than today's `unknown`.
+    Rule 25 CHECKED: `src/lib/status-board.ts` is ordinary src, not an instrument surface.
+    SCOPE IS ONE MODULE DELIBERATELY: the gate, `livenessState` and the renderer all live in
+    status-board.ts, so the change and its falsifiers sit in one file.
+    CAVEAT WITH EQUAL WEIGHT: this makes one row honest. It does NOT make the fleet's liveness
+    readable on this host - all three service rows stay `unknown` until the sensor itself is made
+    host-adaptive, which is filed separately. A reader who sees `STALE` here and `unknown` above it
+    is seeing the truth, not an inconsistency.
+    SECOND CAVEAT: the boot sha comes from ledger boot rows. If those are absent or rotated away the
+    row is legitimately `unknown` for a reason this task does not address.
