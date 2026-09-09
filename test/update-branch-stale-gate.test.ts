@@ -37,8 +37,13 @@ test("a red unarmed PR whose failing workflow moved on main is selected for an u
   const staleGateWorkflowsByPr = new Map([[2434, ["ci-gate"]]]);
 
   const found = redPrWithStaleGate([target], staleGateWorkflowsByPr);
+  // `updateReason` IS NEW AND THE DEEP-EQUAL IS KEPT ON PURPOSE. W1-T3277 adds a second reason a PR
+  // can be selected for an update — distance behind main — so the row now says WHICH rung claimed
+  // it. A loosened assertion (checking only prNumber) would stop noticing if the two reasons were
+  // ever conflated, and telling them apart is the whole point of naming them; so the field is
+  // asserted at its value rather than the shape being relaxed to accommodate it.
   assert.deepEqual(found, [
-    { prNumber: 2434, prUrl: "https://github.com/o/r/pull/1", taskId: "W1-TX", headSha: "533d8d84", staleWorkflow: "ci-gate" },
+    { prNumber: 2434, prUrl: "https://github.com/o/r/pull/1", taskId: "W1-TX", headSha: "533d8d84", staleWorkflow: "ci-gate", updateReason: "stale-gate" },
   ]);
 
   // Wired through the same public selector `armedButStalled`'s own action half uses.
