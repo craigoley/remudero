@@ -72,6 +72,9 @@ export interface TriggerInputs {
    *  is down, which is the crash-loop case this whole class of fix exists for. Unknown leaves
    *  every decision byte-identical to before this field existed. */
   imageBakedCommitsBehind?: number;
+  /** W1-T3245: read as the watchdog's RECYCLE question — image drift only, mount staleness ignored
+   *  because the daemon's own freshness restart already owns it. Absent ⇒ today's full reading. */
+  imageDriftOnly?: boolean;
 }
 
 export interface Decision {
@@ -159,8 +162,21 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   // (`undefined`) is deliberately NOT stale: an unreadable image sha means the container is down,
   // which is the crash-loop case, and restarting on it would be a storm.
   const imageStale = (i.imageBakedCommitsBehind ?? 0) > 0;
+  // W1-T3245 — TWO DECISIONS, NOT ONE SCORE. `imageDriftOnly` is the WATCHDOG TICK's reading: it
+  // asks whether a RECYCLE is due and is deliberately blind to mount-side staleness, because that
+  // is a different event with a different cost and it is ALREADY HANDLED — the daemon's own
+  // freshness check exits 75 and the entrypoint re-fetches, tens of times a day, in seconds.
+  // Having the tick also act on `behind`/`runningStale` would put a second actor on the daemon's
+  // own job and race it. The operator's `rmd deploy` keeps today's full reading.
+  const restartReasons = i.imageDriftOnly === true ? false : behind || runningStale;
   const alreadyFailed = i.lastFailedHead !== undefined && i.originMain === i.lastFailedHead;
-  const why = behind
+  // W1-T3245: in the tick's reading the REASON must name the image too. `behind` can be true while
+  // the tick is deliberately ignoring it, and reporting "install behind origin/main" for a recycle
+  // sends the reader to the checkout — which is exactly the misattribution W1-T3240 fixed.
+  const why = i.imageDriftOnly === true
+    ? `running image predates ${i.imageBakedCommitsBehind} baked-path commit(s) — a merged change to ` +
+      `${IMAGE_BAKED_PATHS.join(" or ")} is published and not running (mount staleness is the daemon's own restart)`
+    : behind
     ? "install behind origin/main"
     : runningStale
       ? "daemon running stale code (install is current)"
@@ -176,7 +192,7 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   if (i.daemonAlive === false && !stopUnknownOrSet) {
     return { deploy: true, reason: "daemon is not running and no STOP is set — restarting it" };
   }
-  if (!behind && !runningStale && !imageStale) {
+  if (!restartReasons && !imageStale) {
     // Claim the daemon is running it only when liveness was actually OBSERVED.
     return {
       deploy: false,
@@ -573,6 +589,8 @@ export interface DeployDeps {
 export interface DeployOpts {
   /** When true, run the WHOLE sequence but skip the real kickstart (validation). */
   dryRun?: boolean;
+  /** W1-T3245: the watchdog tick's RECYCLE-only reading — see {@link TriggerInputs.imageDriftOnly}. */
+  imageDriftOnly?: boolean;
   health?: HealthOpts;
   /** Override {@link DEPLOY_IDLE_DEFER_CEILING_MS} (tests only; production always uses the
    *  named default). */
@@ -652,6 +670,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     // #1066 shape this repo has paid for eleven times; `imageBuildSha` omitted yields `undefined`
     // here, which reads UNKNOWN and changes nothing.
     imageBakedCommitsBehind: deps.imageBakedCommitsBehind?.(),
+    imageDriftOnly: opts.imageDriftOnly,
   });
   if (!decision.deploy) {
     deps.clearDeferredSince?.(); // nothing being deferred — no active deploy attempt

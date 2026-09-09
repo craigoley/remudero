@@ -1115,6 +1115,24 @@ the host cannot be run to find out whether it needs running. It reports both **m
 | `rmd-fleet-watchdog.{service,timer}` | crash recovery — that budget is a **count, not a rate**; on 2026-09-05 six heap aborts exhausted it and the fleet sat dead for three hours |
 | `rmd-reap-stray.{service,timer}` + `rmd-reap-stray-containers` | a leaked ad-hoc container spawned 158 nested daemons and held ~90% of a core |
 
+**The watchdog tick also decides whether a RECYCLE is due (W1-T3245).** Nothing on this host ever
+pulled: `rmd-relaunch.sh` reaches `docker run` with no `docker pull`, so a revival recreates from
+the *cached* image — which is right during a crash loop, and means a published image can sit
+unfetched. MEASURED 2026-09-09: `acr-build` published at 11:14Z, the container (revived 10:15Z)
+still ran the 09-06 build, and the commit it was missing was the repair for that morning's 7h32m
+outage.
+
+**Two decisions, one tick, and only one of them is new.** A *restart* for mount-side staleness is
+already the daemon's own job — it exits 75 and the entrypoint re-fetches, tens of times a day, in
+seconds. A *recycle* for a new image has no other actor, because nothing inside a container can
+replace the image it is running on. So on a healthy fleet the tick runs
+`rmd deploy-run --image-drift-only`, which is blind to mount staleness and awake to image drift.
+
+It is **drift-driven, not clock-driven**: a tick with no image drift does nothing at all, and the
+five-minute cadence only sets how often the question is asked. The supervisor still owns the idle
+gate, the health check and the rollback, and reaches `recycle-container.sh` with its four refusals.
+A daemon that is **down** still falls through to the ordinary revive from cache.
+
 **Host-specific values are inputs, and an unresolvable one is refused rather than guessed** (exit 2).
 `RMD_STATE_DIR`, `RMD_IMAGE`, `RMD_SERVICE_USER`, `RMD_NODE_MAX_OLD_SPACE_MB`, the `RMD_GH_APP_*`
 trio. Note the defaults use `${VAR-default}`, *not* `${VAR:-default}`: the colon form would
