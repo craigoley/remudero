@@ -7,7 +7,7 @@ import test from "node:test";
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
-import { buildSweepEffects, type BuildSweepEffectsDeps } from "../src/run-task.js";
+import { buildSweepEffects, defaultSweepGhRun, type BuildSweepEffectsDeps } from "../src/run-task.js";
 
 const EFFECT_KEYS = [
   "arm",
@@ -79,3 +79,64 @@ const missingRequiredFieldFails: BuildSweepEffectsDeps = {
 };
 
 void missingRequiredFieldFails;
+
+// ── The two defaults the collapse left unreachable ─────────────────────────────────────────────
+//
+// Reshaping the parameter list made both read as ADDED, and diff-coverage named them. Measured on
+// origin/main at the same scoped suite set, both already read 0 there: this is inherited debt
+// surfacing at the gate, not a regression. Neither is exempt glue — the gate refuses a
+// process-boundary directive here, and it is right to: an execFileSync of an ARBITRARY file is not
+// re-exec/exit glue. So both are made reachable instead.
+
+test("W1-T2889: defaultSweepGhRun is the real spawn — the ghRunImpl seam's default does not quietly do nothing", () => {
+  // Its one caller closes a pull request, so this can only be driven directly. `true` is the
+  // harmless argv that still proves the statement runs, and a nonexistent binary proves the throw
+  // reaches the caller rather than being swallowed into a silent no-op.
+  assert.doesNotThrow(() => defaultSweepGhRun("true", []));
+  assert.throws(
+    () => defaultSweepGhRun("rmd-no-such-binary-xyzzy", []),
+    "a failing gh invocation must surface, or the sweep would read a failed close as a success",
+  );
+});
+
+test("W1-T2889: the DEFAULT reviewRunner opts in explicitly — driven through postReview, not read from the source", async () => {
+  // `reviewRunner` and `reviewCommandImpl` are separate seams on purpose: overriding reviewRunner
+  // replaces this arm outright and leaves its opt-in untested, which is exactly how it came to be
+  // asserted only as source text. Overriding the COMMAND keeps the default arm as the code under
+  // test, so the fields it names are observed rather than pattern-matched. `postReview` is the one
+  // effect that calls it.
+  const root = mkdtempSync(join(tmpdir(), "rmd-build-sweep-effects-default-runner-"));
+  try {
+    const calls: Array<{ pr: string; args: string[]; opts: Record<string, unknown> }> = [];
+    const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const effects = buildSweepEffects({
+      owner: "craigoley",
+      repo: "remudero",
+      config: { root, claudeBin: "/bin/true" } as Config,
+      ledgerPath: join(root, "state", "ledger.ndjson"),
+      runId: "SWEEP-W1-T2889-default-runner",
+      plan: { tasks: [], byId: new Map() } as unknown as Plan,
+      log: (step, extra) => logs.push({ step, extra }),
+      policy: DEFAULT_SWEEP_POLICY,
+      // reviewRunner deliberately NOT supplied — the default arm is the subject.
+      reviewCommandImpl: (async (pr: string, args: string[], opts: Record<string, unknown>) => {
+        calls.push({ pr, args, opts });
+        return 0;
+      }) as never,
+    } as BuildSweepEffectsDeps);
+
+    await effects.postReview!({ prNumber: 806, headSha: "abc", isPlanFiling: true } as never);
+
+    assert.equal(calls.length, 1, "exactly one review per PR — a second would bill twice");
+    assert.deepEqual(
+      calls[0].opts,
+      { executionMode: "semantic", planOnlyFiling: true },
+      "the default must NAME the semantic mode and the filing flag, never let reviewCommand infer them",
+    );
+    assert.deepEqual(calls[0].args, ["--repo", "remudero"]);
+    assert.equal(calls[0].pr, "806", "the PR number reaches the command as its own argument");
+    assert.ok(logs.some((l) => l.step === "sweep.post_review.done"), "and the lane records the outcome it got");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

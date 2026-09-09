@@ -88,9 +88,12 @@ test("the sweep runner explicitly enables a semantic reviewer with the head-reso
     // its `=`). What it actually protects is the OPT-IN — that the production default names
     // `executionMode: "semantic"` itself rather than letting reviewCommand infer it from the
     // caller — so the binding is matched loosely and the call shape strictly.
+    // The CALLEE may be the seam (`reviewCommandImpl`, whose default IS `reviewCommand`) — that
+    // indirection exists so the default arm itself is reachable by a test rather than replaced by
+    // one. What this pins either way is the OPT-IN, which is the same in both spellings.
     // The gap is BOUNDED, not open: an annotation is ~60 chars, so 120 admits one and still cannot
     // wander into an unrelated `reviewCommand(` elsewhere in a 38k-line file.
-    /reviewRunner\b[\s\S]{0,120}?=\s*\(prNumber, isPlanFiling\) =>[\s\S]{0,200}?reviewCommand\(String\(prNumber\), \["--repo", repo\], \{\s*executionMode: "semantic",\s*planOnlyFiling: isPlanFiling,\s*\}\)/,
+    /reviewRunner\b[\s\S]{0,120}?=\s*\(prNumber, isPlanFiling\) =>[\s\S]{0,200}?reviewCommand(?:Impl)?\(String\(prNumber\), \["--repo", repo\], \{\s*executionMode: "semantic",\s*planOnlyFiling: isPlanFiling,\s*\}\)/,
     "the production sweep default must opt in explicitly, not infer its caller",
   );
   const { args } = await captureReview("Remudero-Task: W1-T2593", "sweep");

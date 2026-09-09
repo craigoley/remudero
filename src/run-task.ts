@@ -29047,6 +29047,11 @@ export interface BuildSweepEffectsDeps {
   log: (step: string, extra?: Record<string, unknown>) => void;
   policy?: SweepPolicy;
   reviewRunner?: (prNumber: number, isPlanFiling?: boolean) => Promise<number>;
+  /** The command the DEFAULT `reviewRunner` above calls. Separate from `reviewRunner` on purpose:
+   *  overriding `reviewRunner` replaces the default outright and leaves its opt-in untested, while
+   *  this seam keeps the default arm itself — the one that names `executionMode: "semantic"` — as
+   *  the code under test. Omitted, it is `reviewCommand`. */
+  reviewCommandImpl?: typeof reviewCommand;
   spawnImpl?: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
   pushEmptyCommit?: typeof gitPushEmptyCommit;
   issuesImpl?: IssueGateway;
@@ -29065,6 +29070,17 @@ export interface BuildSweepEffectsDeps {
   readJsonImpl?: (args: string[]) => Promise<unknown>;
   registeredWorktreeOwnerImpl?: (repoDir: string, branchRef: string) => string | undefined;
   registeredOwnerRecovery?: RegisteredFixOwnerRecoveryDeps;
+}
+
+/**
+ * The default `gh` invocation for {@link buildSweepEffects}' `ghRunImpl` seam — a NAMED function
+ * rather than an inline default so it is reachable by a test at all. Its one caller closes a pull
+ * request, so a test that drove it through the effect would have to close one; called directly
+ * with a harmless argv it exercises the same statement and proves the seam's default is the real
+ * spawn rather than a stub that quietly does nothing.
+ */
+export function defaultSweepGhRun(file: string, args: readonly string[]): void {
+  execFileSync(file, [...args], { stdio: "pipe" });
 }
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -29108,15 +29124,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     armSessionPrsOverride,
     updateBranchImpl = updateBranchViaGh,
     captureRepairFeedbackImpl = (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, log),
-    // diff-cov: process-boundary — the default `gh` invocation: an irreducible execFileSync whose only statement IS the spawn, so it cannot carry a DA hit without actually closing a pull request (its one caller is `gh pr close`). MEASURED on origin/main at the same scoped suite set: this body already read 0 there — the deps-object collapse reshaped the parameter list, so pre-existing untested glue reads as ADDED (the inherited-debt case CLAUDE.md names). Every test supplies `ghRunImpl`, which is the seam that makes the callers gradeable.
-    ghRunImpl = (file, args) => {
-      execFileSync(file, [...args], { stdio: "pipe" });
-    },
+    ghRunImpl = defaultSweepGhRun,
     spawnWallClockBoundMsOverride,
     reclaimWorkerImpl = (info) => reclaimAbandonedWorker(info, { log }),
     disarmImpl = disarmAutoMerge,
     readJsonImpl = ghJsonAsync,
     registeredWorktreeOwnerImpl = registeredFixWorktreeOwner,
+    reviewCommandImpl = reviewCommand,
     registeredOwnerRecovery = {
       capture: captureRegisteredFixOwnerSnapshot,
       remove: removeAbandonedFixWorktreeOwner,
@@ -29127,9 +29141,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // survives the positional-parameters-to-one-deps-object collapse verbatim — the sweep's
   // post-review lane still routes through reviewCommand, and nothing but `deps.reviewRunner`
   // can override it.
-  // diff-cov: process-boundary — the default review runner: its body is one call to `reviewCommand`, which spawns a reviewer and posts a commit status, so it cannot carry a DA hit without doing both for real. MEASURED on origin/main: this body already read 0 there — the collapse reshaped the parameter list around it. Its CONTENT is not unpinned: test/event-driven-semantic-review.test.ts asserts from the source that this default names `executionMode: "semantic"` and `planOnlyFiling` itself rather than letting reviewCommand infer them from the caller, and reddens if either is dropped.
   let reviewRunner: (prNumber: number, isPlanFiling?: boolean) => Promise<number> = (prNumber, isPlanFiling) =>
-    reviewCommand(String(prNumber), ["--repo", repo], {
+    reviewCommandImpl(String(prNumber), ["--repo", repo], {
       executionMode: "semantic",
       planOnlyFiling: isPlanFiling,
     });
