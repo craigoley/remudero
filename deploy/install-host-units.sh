@@ -69,7 +69,19 @@ MODE="check"
 STATE_DIR="${RMD_STATE_DIR-/home/craigoleyagent/rmd-state2}"
 IMAGE="${RMD_IMAGE-synthwatcholey0620.azurecr.io/remudero:latest}"
 SERVICE_USER="${RMD_SERVICE_USER-craigoleyagent}"
-MAX_OLD_SPACE_MB="${RMD_NODE_MAX_OLD_SPACE_MB-4096}"
+# W1-T2953 — NO SILENT DEFAULT. This rendered 4096 when the variable was unset, while the live
+# Azure host runs 8192; a `--install` would have DOWNGRADED the daemon's heap without a word, and
+# the retro rung is the first thing an undersized heap kills. The value is now REQUIRED and
+# validated, so omission is a named refusal rather than a quiet halving. It is deliberately NOT
+# read back from the installed launcher: deriving the desired value from the current one makes
+# drift self-ratifying, which is the whole failure this task exists to end.
+MAX_OLD_SPACE_MB="${RMD_NODE_MAX_OLD_SPACE_MB-}"
+if [ -z "$MAX_OLD_SPACE_MB" ]; then
+  echo "install-host-units: FATAL — RMD_NODE_MAX_OLD_SPACE_MB is required and has no default." >&2
+  echo "  It sizes the daemon's V8 heap. This host (32 GiB / 8 vCPU) runs 8192; a smaller host needs less." >&2
+  echo "  Set it explicitly, e.g. RMD_NODE_MAX_OLD_SPACE_MB=8192 — never inferred from the installed unit." >&2
+  exit 2
+fi
 GH_APP_ID_V="${RMD_GH_APP_ID:-4648213}"
 GH_APP_INST_V="${RMD_GH_APP_INSTALLATION_ID:-155256285}"
 GH_APP_KEY_V="${RMD_GH_APP_PRIVATE_KEY_PATH:-/home/node/.claude/rmd-app.pem}"
@@ -125,7 +137,10 @@ crash_loop_signature() {
   ' "\$1" 2>/dev/null
 }
 
-# `--check-crash-loop <log>` prints the signature and exits, touching nothing else. It exists so the
+# W1-T2953: the backticks here were UNESCAPED inside an unquoted heredoc, so bash EXECUTED this
+# comment while rendering — printing a syntax error and substituting its empty output into the
+# shipped launcher. \`--check-crash-loop <log>\` prints the signature and exits, touching nothing
+# else. It exists so the
 # suite can exercise this logic against a fixture without docker, a state root or a real host.
 if [ "\${1:-}" = "--check-crash-loop" ]; then
   crash_loop_signature "\${2:-\$REVIVAL_LOG}"
@@ -211,12 +226,13 @@ render_fleet_service() {
   cat <<EOF
 [Unit]
 Description=Remudero fleet daemon launcher (canonical invocation)
+Documentation=https://github.com/craigoley/remudero
 Requires=docker.service
 After=docker.service network-online.target
 # The daemon runs --restart=on-failure:5 so a DELIBERATE stop (exit 0) is not undone by docker.
 # That also means docker will not bring it back after a clean reboot, so reboot survival is this
 # unit's job. serve and cloudflared are unless-stopped and revive on their own.
-RequiresMountsFor=/mnt/rmd ${STATE_DIR}
+RequiresMountsFor=/mnt/rmd /var/lib/containerd ${STATE_DIR}
 
 [Service]
 Type=oneshot
@@ -239,7 +255,7 @@ Description=Remudero fleet watchdog (revive a daemon docker has given up on)
 # --restart=on-failure:5 caps the COUNT, not the rate: once five failures are spent docker NEVER
 # tries again. On 2026-09-05 six heap aborts exhausted it and the fleet sat dead for three hours.
 # The script is idempotent and refuses on state/STOP, so this cannot resurrect a deliberate stop.
-RequiresMountsFor=/mnt/rmd ${STATE_DIR}
+RequiresMountsFor=/mnt/rmd /var/lib/containerd ${STATE_DIR}
 After=docker.service
 
 [Service]
@@ -302,7 +318,12 @@ EOF
 render_reaper_service() {
   cat <<EOF
 [Unit]
-Description=Reap stray ad-hoc rmd-* containers
+Description=Reap ad-hoc rmd-* containers that outlived any legitimate run
+# W1-T2953: both lines are live on Azure and neither was rendered. Without `After=docker.service`
+# the sweep can run before the socket exists and reap nothing while reporting success; without the
+# mount requirement it can run against an unmounted /mnt/rmd — the 2026-09-05 fleet-wipe surface.
+After=docker.service
+RequiresMountsFor=/mnt/rmd
 
 [Service]
 Type=oneshot
@@ -313,12 +334,18 @@ EOF
 render_reaper_timer() {
   cat <<'EOF'
 [Unit]
-Description=Hourly sweep for stray ad-hoc rmd-* containers
+Description=Hourly sweep for stray rmd-* containers
 
 [Timer]
 OnBootSec=10min
 OnUnitActiveSec=1h
-Unit=rmd-reap-stray.service
+# W1-T2953: live on Azure, absent from the renderer. Without it a sweep missed while the host was
+# down is simply skipped — and a host that was down is exactly the one most likely to have leaked
+# a container. A leaked ad-hoc container once spawned 158 nested daemons and held ~90% of a core.
+# No `Unit=`: a .timer defaults to the same-basename .service, which is what the live unit relies
+# on. Rendering it explicitly would be equivalent in effect and would read as DRIFT against the
+# installed host, which is the one thing check mode must not do.
+Persistent=true
 
 [Install]
 WantedBy=timers.target
@@ -375,6 +402,22 @@ WantedBy=timers.target
 EOF
 }
 
+# W1-T2953 — CHECK COMPARES DIRECTIVES, INSTALL WRITES EVERYTHING.
+#
+# The comparison was byte-for-byte over files that are mostly PROSE. MEASURED 2026-09-06: six of
+# seven artifacts read DRIFTED against Azure, and most of that was comment wording — the incident
+# forensics were expanded by hand on the host and never returned to the renderer. One red check
+# covering four real guard deletions and two paragraphs of prose is a check nobody can act on, and
+# `--install` looked like the remedy while it would have DELETED the four real guards.
+#
+# A systemd unit's semantics ARE its directives; comments are documentation. So check compares the
+# effective directive lines EXACTLY — every guard deletion is still caught, byte for byte in effect
+# — and stops reporting prose as drift. INSTALL is unchanged and still writes the full rendered
+# text, comments included, so the host keeps the documentation.
+effective_directives() {
+  printf '%s\n' "$1" | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d'
+}
+
 # path : renderer : mode
 UNITS="
 ${LAUNCHER}:render_launcher:0755
@@ -397,8 +440,8 @@ for row in $UNITS; do
     if [ ! -e "$path" ]; then
       echo "install-host-units: MISSING $path"
       drift=$(( drift + 1 ))
-    elif [ "$want" != "$(cat "$path" 2>/dev/null)" ]; then
-      echo "install-host-units: DRIFTED $path (installed content differs from what this repo renders)"
+    elif [ "$(effective_directives "$want")" != "$(effective_directives "$(cat "$path" 2>/dev/null)")" ]; then
+      echo "install-host-units: DRIFTED $path (installed DIRECTIVES differ from what this repo renders)"
       drift=$(( drift + 1 ))
     else
       echo "install-host-units: ok      $path"

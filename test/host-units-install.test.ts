@@ -17,6 +17,11 @@ function run(args: string[], env: Record<string, string>, root: string) {
       RMD_BIN_DIR: join(root, "bin"),
       RMD_LAUNCHER_PATH: join(root, "rmd-relaunch.sh"),
       RMD_REVIVAL_LOG: join(root, "revivals.log"),
+      // W1-T2953: the heap is a REQUIRED input now — it used to default to 4096 while the live
+      // host ran 8192, so an install silently halved it. The harness states the host class it is
+      // rendering for, exactly as an operator must; a case that wants the refusal overrides this
+      // with "" below.
+      RMD_NODE_MAX_OLD_SPACE_MB: "8192",
       ...env,
     },
   });
@@ -84,7 +89,10 @@ test("W1-T2877: the rendered launcher refuses on STOP and on an unmounted state 
     assert.match(launcher, /revive boot=/, "the revival record must survive rendering");
 
     // The heap ceiling is the difference between the retro rung completing and aborting at ~2046 MB.
-    assert.match(launcher, /max-old-space-size=4096/);
+    // W1-T2953: the heap comes from the INPUT, never a constant — it rendered 4096 by default while
+    // the live host ran 8192, so an install silently halved it. This asserts the harness's declared
+    // 8192 reaches the launcher; the required-input refusal is pinned separately below.
+    assert.match(launcher, /max-old-space-size=8192/);
     // on-failure:5 is deliberate: exit 0 is a STOP and must not be undone by docker.
     assert.match(launcher, /--restart=on-failure:5/);
 
@@ -267,6 +275,133 @@ test("W1-T3245: the renderer emits a deploy supervisor unit and timer", () => {
   }
 });
 
+// ── W1-T2953: the renderer must not DOWNGRADE the host it claims to describe ─────────────────
+//
+// OBSERVED READ-ONLY ON AZURE 2026-09-06: running the tracked installer in check mode reported six
+// of seven artifacts DRIFTED. The installed units carried guards the renderer did not — the
+// containerd mount on the fleet and watchdog units, Docker ordering and the /mnt/rmd mount on the
+// reaper, Persistent=true on its timer, and an 8192MiB heap against a rendered default of 4096. So
+// `--install`, which looks like the remedy, would have DELETED all five.
+//
+// The fixtures below are the REAL units captured off the live host, so "check accepts the host" is
+// a claim about the host and not about the renderer agreeing with itself.
+
+// Relative, like SCRIPT above: this suite runs from the repo root.
+const AZURE = join("test", "fixtures", "azure-host-units");
+const AZURE_LAUNCHER_PATH = "/home/craigoleyagent/rmd-relaunch.sh";
+
+/** The EFFECTIVE DIRECTIVES of a unit — what systemd acts on. Mirrors the installer's own
+ *  `effective_directives`, which is why check no longer reports prose as drift. */
+function directives(text: string): string[] {
+  return text
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l.trim() !== "" && !l.trim().startsWith("#"));
+}
+
+/** Render every unit against the live host's own inputs, into a throwaway tree. */
+function renderAsAzure(root: string, extra: Record<string, string> = {}) {
+  return run(["--install"], {
+    RMD_NODE_MAX_OLD_SPACE_MB: "8192",
+    RMD_SERVICE_USER: "craigoleyagent",
+    RMD_STATE_DIR: "/home/craigoleyagent/rmd-state2",
+    RMD_REVIVAL_LOG: "/home/craigoleyagent/rmd-revivals.log",
+    ...extra,
+  }, root);
+}
+
+test("W1-T2953: check mode accepts the captured Azure host — every live guard is now rendered", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-azure-"));
+  try {
+    assert.equal(renderAsAzure(root).status, 0, "render must succeed with the host's own inputs");
+
+    for (const unit of ["rmd-fleet.service", "rmd-fleet-watchdog.service", "rmd-fleet-watchdog.timer", "rmd-reap-stray.timer"]) {
+      // The launcher PATH is the one legitimate difference — the fixture names the host's location
+      // and the render names this throwaway tree — so it is normalised rather than ignored.
+      const rendered = directives(
+        readFileSync(join(root, "systemd", unit), "utf8").split(join(root, "rmd-relaunch.sh")).join(AZURE_LAUNCHER_PATH),
+      );
+      const live = directives(readFileSync(join(AZURE, unit), "utf8"));
+      assert.deepEqual(rendered, live, `${unit}: rendered directives must equal the live host's`);
+    }
+
+    // The four guards this task exists to stop deleting, asserted by name so a future edit that
+    // drops one names itself rather than showing up as an opaque diff.
+    const fleet = readFileSync(join(root, "systemd", "rmd-fleet.service"), "utf8");
+    const watchdog = readFileSync(join(root, "systemd", "rmd-fleet-watchdog.service"), "utf8");
+    const reaperSvc = readFileSync(join(root, "systemd", "rmd-reap-stray.service"), "utf8");
+    const reaperTimer = readFileSync(join(root, "systemd", "rmd-reap-stray.timer"), "utf8");
+    assert.match(fleet, /RequiresMountsFor=.*\/var\/lib\/containerd/, "containerd mount on the fleet unit");
+    assert.match(watchdog, /RequiresMountsFor=.*\/var\/lib\/containerd/, "containerd mount on the watchdog");
+    assert.match(reaperSvc, /After=docker\.service/, "Docker ordering on the reaper");
+    assert.match(reaperSvc, /RequiresMountsFor=\/mnt\/rmd/, "the reaper's own mount requirement");
+    assert.match(reaperTimer, /Persistent=true/, "missed-run recovery on the reaper timer");
+    assert.match(readFileSync(join(root, "rmd-relaunch.sh"), "utf8"), /max-old-space-size=8192/, "the host's heap");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2953: removing any one load-bearing guard makes check report that artifact drifted", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-guard-"));
+  try {
+    assert.equal(renderAsAzure(root).status, 0);
+    // A clean render must check CLEAN first, or every case below passes for the wrong reason.
+    assert.equal(renderAsAzure(root).status, 0);
+    const clean = run([], { RMD_NODE_MAX_OLD_SPACE_MB: "8192", RMD_SERVICE_USER: "craigoleyagent", RMD_STATE_DIR: "/home/craigoleyagent/rmd-state2", RMD_REVIVAL_LOG: "/home/craigoleyagent/rmd-revivals.log" }, root);
+    assert.equal(clean.status, 0, `a freshly rendered tree must check clean; got ${clean.stdout}${clean.stderr}`);
+
+    const guards: [string, RegExp][] = [
+      ["systemd/rmd-fleet.service", /^RequiresMountsFor=.*$/m],
+      ["systemd/rmd-fleet-watchdog.service", /^RequiresMountsFor=.*$/m],
+      ["systemd/rmd-reap-stray.service", /^After=docker\.service$/m],
+      ["systemd/rmd-reap-stray.timer", /^Persistent=true$/m],
+    ];
+    for (const [rel, guard] of guards) {
+      const p = join(root, rel);
+      const original = readFileSync(p, "utf8");
+      assert.match(original, guard, `${rel} must carry the guard before it is removed`);
+      writeFileSync(p, original.replace(guard, ""), "utf8");
+      const r = run([], { RMD_NODE_MAX_OLD_SPACE_MB: "8192", RMD_SERVICE_USER: "craigoleyagent", RMD_STATE_DIR: "/home/craigoleyagent/rmd-state2", RMD_REVIVAL_LOG: "/home/craigoleyagent/rmd-revivals.log" }, root);
+      assert.equal(r.status, 1, `${rel}: a deleted guard must fail check`);
+      assert.match(r.stdout, new RegExp(`DRIFTED.*${rel.split("/").pop()!.replace(/\./g, "\\.")}`), `${rel} must be NAMED as the drifted artifact`);
+      writeFileSync(p, original, "utf8");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2953: heap sizing is required and validated, never silently 4096", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-heap-"));
+  try {
+    // OMISSION IS A NAMED REFUSAL. It used to render 4096 while the live host ran 8192, so an
+    // install would have HALVED the daemon's heap without a word — and an undersized heap is what
+    // killed the retro rung for six days.
+    const missing = run(["--install"], { RMD_NODE_MAX_OLD_SPACE_MB: "" }, root);
+    assert.equal(missing.status, 2, "omission must refuse, not default");
+    assert.match(missing.stderr, /RMD_NODE_MAX_OLD_SPACE_MB is required and has no default/);
+    assert.doesNotMatch(missing.stderr + missing.stdout, /4096/, "the old silent default must not survive even as a suggestion");
+
+    // A non-integer is still refused by name, as before.
+    assert.equal(run(["--install"], { RMD_NODE_MAX_OLD_SPACE_MB: "8g" }, root).status, 2);
+
+    // And an explicit value is what reaches the launcher — never a value read back from an already
+    // installed one, which would make drift self-ratifying.
+    assert.equal(renderAsAzure(root).status, 0);
+    assert.match(readFileSync(join(root, "rmd-relaunch.sh"), "utf8"), /max-old-space-size=8192/);
+    const other = mkdtempSync(join(tmpdir(), "rmd-hostunits-heap-alt-"));
+    try {
+      assert.equal(renderAsAzure(other, { RMD_NODE_MAX_OLD_SPACE_MB: "2048" }).status, 0);
+      assert.match(readFileSync(join(other, "rmd-relaunch.sh"), "utf8"), /max-old-space-size=2048/);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T3245: the deploy unit runs the supervisor, never a bare restart", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-deploy-verb-"));
   try {
@@ -281,6 +416,21 @@ test("W1-T3245: the deploy unit runs the supervisor, never a bare restart", () =
     assert.doesNotMatch(service, /ExecStart=.*docker /, "never a bare docker call");
     assert.doesNotMatch(service, /ExecStart=.*rmd-relaunch\.sh/, "never the watchdog's launcher");
     assert.doesNotMatch(service, /ExecStart=.*recycle-container\.sh/, "the supervisor reaches it, not this unit");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2953: the renderer emits no shell error, so its output can be trusted", () => {
+  // W1-T3233 shipped a comment containing BACKTICKS inside an unquoted heredoc, so bash EXECUTED it
+  // while rendering: a syntax error on stderr and the comment's text replaced by the empty output
+  // of a failed command. A renderer that prints errors is not one an operator should --install.
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-clean-"));
+  try {
+    const r = renderAsAzure(root);
+    assert.equal(r.status, 0);
+    assert.doesNotMatch(r.stderr, /syntax error|command not found/, `renderer stderr: ${r.stderr}`);
+    assert.match(readFileSync(join(root, "rmd-relaunch.sh"), "utf8"), /--check-crash-loop <log>/, "the comment must survive rendering intact");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -303,6 +453,70 @@ test("W1-T3245: a STOP marker refuses the scheduled deploy", () => {
       service.indexOf("ExecCondition=") < service.indexOf("ExecStart="),
       "ExecCondition must precede ExecStart",
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2953: comment drift alone is NOT drift — the live reaper timer checks clean verbatim", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-prose-"));
+  try {
+    assert.equal(renderAsAzure(root).status, 0);
+    const env = {
+      RMD_NODE_MAX_OLD_SPACE_MB: "8192",
+      RMD_SERVICE_USER: "craigoleyagent",
+      RMD_STATE_DIR: "/home/craigoleyagent/rmd-state2",
+      RMD_REVIVAL_LOG: "/home/craigoleyagent/rmd-revivals.log",
+    };
+    assert.equal(run([], env, root).status, 0, "a freshly rendered tree must check clean first");
+
+    // THE REAL LIVE FILE, VERBATIM. rmd-reap-stray.timer embeds no host paths, so it can be
+    // dropped in unmodified: same directives, hand-expanded comments. Under the old byte
+    // comparison this read DRIFTED, and that is how four real guard deletions ended up sharing one
+    // red check with two paragraphs of prose — a check nobody could act on, while `--install`
+    // looked like the remedy and would have deleted the guards.
+    const timerPath = join(root, "systemd", "rmd-reap-stray.timer");
+    const rendered = readFileSync(timerPath, "utf8");
+    const live = readFileSync(join(AZURE, "rmd-reap-stray.timer"), "utf8");
+    assert.notEqual(rendered, live, "the fixture must differ from the render, or this proves nothing");
+    assert.deepEqual(directives(live), directives(rendered), "...and differ ONLY in comments");
+
+    writeFileSync(timerPath, live, "utf8");
+    const r = run([], env, root);
+    assert.equal(r.status, 0, `comment-only difference must check clean; got: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /ok      .*rmd-reap-stray\.timer/);
+
+    // ...and a DIRECTIVE change in the same file is still caught, so this is narrowing to comments
+    // rather than blinding the check.
+    writeFileSync(timerPath, live.replace(/^Persistent=true$/m, "Persistent=false"), "utf8");
+    const changed = run([], env, root);
+    assert.equal(changed.status, 1, "a changed directive must still fail");
+    assert.match(changed.stdout, /DRIFTED.*rmd-reap-stray\.timer/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2953: every guard the LIVE launcher carries is reproduced by the renderer", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-launcher-"));
+  try {
+    assert.equal(renderAsAzure(root).status, 0);
+    const rendered = readFileSync(join(root, "rmd-relaunch.sh"), "utf8");
+    const live = readFileSync(join(AZURE, "rmd-relaunch.sh"), "utf8");
+
+    // Captured off the host, so this asserts against what is ACTUALLY running rather than against
+    // the renderer's opinion of it. Each guard was learned from a real failure and a port that
+    // drops one is worse than no port — which is exactly what `--install` would have done.
+    for (const [name, guard] of [
+      ["STOP refusal", /state\/STOP present/],
+      ["unmounted-state refusal", /is not mounted/],
+      ["live-daemon idempotence", /already running -- nothing to do/],
+      ["revival record", /revive boot=/],
+      ["heap ceiling", /max-old-space-size=8192/],
+    ] as [string, RegExp][]) {
+      assert.match(live, guard, `the captured live launcher must carry the ${name} (else the fixture is wrong)`);
+      assert.match(rendered, guard, `the renderer must reproduce the ${name}`);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

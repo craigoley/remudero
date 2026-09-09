@@ -1,0 +1,19 @@
+[Unit]
+Description=Remudero fleet watchdog (revive a daemon docker has given up on)
+# WHY THIS EXISTS (2026-09-05). The daemon runs --restart=on-failure:5, which is deliberate: exit 0
+# is a STOP and must not be undone. But the counter is absolute, not a rate -- once five failures
+# are spent, docker NEVER tries again. On 2026-09-05 the daemon OOM'd six times, exhausted that
+# budget, and the fleet sat dead for three hours while PRs piled up green and unreviewed. Nothing
+# noticed: serve stayed up and kept accepting webhook wakes that nothing consumed.
+#
+# rmd-fleet.service covers boot. This covers the other case -- a crash-capped daemon on a host that
+# never reboots. The script it runs is idempotent (no-ops when the daemon is up) and refuses when
+# state/STOP is present, so the watchdog cannot resurrect a deliberately stopped fleet.
+RequiresMountsFor=/mnt/rmd /var/lib/containerd /home/craigoleyagent/rmd-state2
+After=docker.service
+
+[Service]
+Type=oneshot
+User=craigoleyagent
+Group=craigoleyagent
+ExecStart=/home/craigoleyagent/rmd-relaunch.sh

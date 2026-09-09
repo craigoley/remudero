@@ -1,0 +1,11 @@
+[Unit]
+Description=Revive the Remudero daemon if docker has given up on it
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=rmd-fleet-watchdog.service
+
+[Install]
+WantedBy=timers.target

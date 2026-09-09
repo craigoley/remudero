@@ -39,6 +39,19 @@
     a signature. All three changed a CONDITION or a BOUND at one of several sites that share a
     concern.
 
+    CORRECTION, 2026-09-09, BEFORE BUILDING: THIS SHARD OVERSTATED ITS OWN REACH AND THE FIGURE IS
+    ONE OF THREE, NOT TWO. Checking each incident against the proposed signal rather than asserting
+    it:
+      (1) W1-T2833/W1-T3229 — YES. `openLedgerUnion` had two callers and the diff changed one; a
+          list of that symbol's untouched call sites names `readRetroLedgerNdjson` exactly.
+      (2) W1-T2737/W1-T3232 — NO. Both carve-out arms live INSIDE ONE FUNCTION. No caller list can
+          see a sibling branch of the same body, and claiming otherwise was wrong.
+      (3) W1-T2870/W1-T3229 — NO, as already stated: a heap cap and the workload it fails to bound
+          are different modules and a caller list names symbols, not concerns.
+    So the honest claim is that the signal catches the SHARED-READER shape and nothing else. That is
+    still worth having — case (1) cost six days — but it is a third of what this shard said, and a
+    task that ships against an overstated premise is the very defect the shard is about.
+
     WHAT CAN ACTUALLY BE COMPUTED, AND WHAT CANNOT. "Are these two branches deciding the same
     question" is not mechanically decidable and this task does not pretend to it. What IS
     computable from the diff alone: for every symbol this diff CHANGED, the call sites of that
@@ -59,7 +72,7 @@
     print, exactly as the residue-id list already does.
 
   acceptance:
-    - claim: "a diff that changes one call site of a symbol names the sibling call sites it did not touch"
+    - claim: "a diff that changes one call site of a shared reader names the call sites it did not touch"
       proof: "unit test: W1-T3239: an untouched sibling call site is named"
     - claim: "a diff that changes EVERY call site of a symbol names nothing, so the section is a signal rather than noise"
       proof: "unit test: W1-T3239: a fully-audited symbol produces no sibling section"

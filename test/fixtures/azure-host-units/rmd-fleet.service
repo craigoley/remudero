@@ -1,0 +1,26 @@
+[Unit]
+Description=Remudero fleet daemon launcher (canonical invocation)
+Documentation=https://github.com/craigoley/remudero
+# Canonical invocation: deploy/host-update.sh --print-daemon-run; see ~/rmd-relaunch.sh header.
+Requires=docker.service
+After=docker.service network-online.target
+# The daemon runs --restart=on-failure:5 so that a DELIBERATE stop (exit 0) is not undone by docker.
+# That policy also means docker will not bring it back after a clean reboot, so reboot survival is
+# this unit's job. serve and cloudflared are unless-stopped and revive on their own.
+#
+# Same three mounts docker and containerd now wait for. All are nofail, so without this the unit
+# could start the daemon against an unmounted state root -- the 2026-09-05 fleet-wipe failure mode.
+RequiresMountsFor=/mnt/rmd /var/lib/containerd /home/craigoleyagent/rmd-state2
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=craigoleyagent
+Group=craigoleyagent
+ExecStart=/home/craigoleyagent/rmd-relaunch.sh --boot
+# The script is idempotent and refuses on state/STOP, so a retry is always safe.
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target

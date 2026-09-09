@@ -1082,9 +1082,27 @@ a heap ceiling and without a heartbeat — and a host with no beat branch is *si
 `fleet-heartbeat-watch.yml`, so an unmonitored instance looked exactly like a monitored healthy one.
 
 ```
-deploy/install-host-units.sh                 # CHECK (default): reports drift, changes nothing, exit 1 if any
-sudo deploy/install-host-units.sh --install  # renders the units, reloads systemd, enables the timers
+RMD_NODE_MAX_OLD_SPACE_MB=8192 deploy/install-host-units.sh                 # CHECK (default): reports drift, changes nothing, exit 1 if any
+RMD_NODE_MAX_OLD_SPACE_MB=8192 sudo -E deploy/install-host-units.sh --install  # renders, reloads systemd, enables the timers
 ```
+
+**`RMD_NODE_MAX_OLD_SPACE_MB` is required and has no default (W1-T2953).** It used to render 4096
+while this host runs 8192, so an `--install` would have silently *halved* the daemon's heap — and an
+undersized heap is what killed the retro rung for six days. Omitting it is now a named refusal. Set
+it from the host's memory class (this host: 32 GiB / 8 vCPU → 8192); **never read it back from the
+installed launcher**, which would make drift self-ratifying.
+
+**A GREEN CHECK AND EXPLICIT OPERATOR APPROVAL ARE BOTH REQUIRED BEFORE ANY LIVE `--install`.** On
+2026-09-06 check reported six of seven artifacts drifted, and `--install` looked like the remedy
+while it would have DELETED four live guards — the containerd mount on the fleet and watchdog units,
+Docker ordering and the `/mnt/rmd` requirement on the reaper, and `Persistent=true` on its timer.
+Run check first, read every DRIFTED line, and install only once it reports clean or you have decided
+each difference deliberately. This task changed no host: it repairs the renderer only, and a live
+install remains gated on a green check plus explicit operator approval.
+
+Check compares **effective directives**, not bytes: comments are documentation and differ freely
+between the host and the renderer, while every directive must match exactly. Install still writes
+the full text, comments included.
 
 Check mode is read-only, so it is safe to run at any time — an installer whose reporting mode mutates
 the host cannot be run to find out whether it needs running. It reports both **missing** units and

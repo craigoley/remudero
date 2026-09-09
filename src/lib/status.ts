@@ -455,9 +455,24 @@ export interface CreditStoreEntry {
   prState: string;
 }
 
+/** Durable proof that {@link runCreditBackfill} already appended its ledger correction. This is
+ * bookkeeping for that writer, NOT a third source of merge credit: {@link deriveStatus} consults
+ * only `trailer` and `head-branch` below. PR provenance stays on the receipt so the state remains
+ * auditable even after the corresponding ledger row rotates beyond the bounded reader. */
+export interface CreditBackfillReceipt {
+  source: "sweep.credit_backfill";
+  prUrl: string;
+  prNumber: number;
+}
+
+/** One task's durable merge-evidence paths plus independent backfill-writer bookkeeping. */
+export type CreditStoreTaskRecord = Partial<Record<CreditStoreEntry["source"], CreditStoreEntry>> & {
+  backfillReceipt?: CreditBackfillReceipt;
+};
+
 /** DELIVERABLE A — the durable, GitHub-independent record of merge credit, keyed by task id then by the path
  *  that credited it, so a caller can tell in O(1) whether credit rests on ONE path or BOTH. */
-export type CreditStore = Record<string, Partial<Record<CreditStoreEntry["source"], CreditStoreEntry>>>;
+export type CreditStore = Record<string, CreditStoreTaskRecord>;
 
 /** The minimal fs surface the durable credit store needs — the same "inject, or default to a property-accessed
  *  `fs` call" shape {@link LedgerFsDeps} establishes just above, so an external spy observes every real call. */
@@ -606,6 +621,25 @@ export function recordCredit(store: CreditStore, taskId: string, entry: CreditSt
   return { ...store, [taskId]: { ...existing, [entry.source]: entry } };
 }
 
+/** Whether the backfill writer has durably recorded a successful append for this task. Kept
+ * separate from the two credit paths so ordinary durable merge evidence cannot suppress the first
+ * legitimate ledger correction. */
+export function hasCreditBackfillReceipt(store: CreditStore, taskId: string): boolean {
+  return store[taskId]?.backfillReceipt !== undefined;
+}
+
+/** Immutably records one successful backfill append. Idempotent by task id, matching
+ * {@link readMergeCreditedTaskIds}; the first appended PR remains as audit provenance. */
+export function recordCreditBackfillReceipt(
+  store: CreditStore,
+  taskId: string,
+  receipt: CreditBackfillReceipt,
+): CreditStore {
+  const existing = store[taskId] ?? {};
+  if (existing.backfillReceipt) return store;
+  return { ...store, [taskId]: { ...existing, backfillReceipt: receipt } };
+}
+
 /** DELIVERABLE A's enumeration (design (ii)): every id with a head-branch entry and NO trailer entry — the
  *  population measured as fragile, credited by a ref GitHub deletes on merge. Sorted for a stable diff. */
 export function branchOnlyCreditedIds(store: CreditStore): string[] {
@@ -621,14 +655,14 @@ export function branchOnlyCreditedIds(store: CreditStore): string[] {
  *  exists but that it is indistinguishable from double-path credit until the single path disappears. */
 export function singlePathCreditedIds(store: CreditStore): string[] {
   return Object.keys(store)
-    .filter((id) => Object.keys(store[id]).length === 1)
+    .filter((id) => Number(!!store[id].trailer) + Number(!!store[id]["head-branch"]) === 1)
     .sort();
 }
 
 /** Per-task twin of {@link singlePathCreditedIds}, without scanning the whole store. */
 export function isSinglePathCredited(store: CreditStore, taskId: string): boolean {
   const paths = store[taskId];
-  return !!paths && Object.keys(paths).length === 1;
+  return !!paths && Number(!!paths.trailer) + Number(!!paths["head-branch"]) === 1;
 }
 
 /** {@link readLedgerLines}' return type: a plain array for every existing consumer, PLUS a `torn` count as a
