@@ -580,6 +580,7 @@
     "test/headroom-resetless.test.ts": 710,
     "test/headroom-sdk-source.test.ts": 966,
     "test/headroom.test.ts": 284,
+    "test/help-does-not-load-the-sdk.test.ts": 0,
     "test/help-registry.test.ts": 1627,
     "test/help-renders-a-summary-not-a-paragraph.test.ts": 1713,
     "test/helpers/fake-github.test.ts": 177,
