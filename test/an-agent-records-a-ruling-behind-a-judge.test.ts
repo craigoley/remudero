@@ -346,6 +346,7 @@ test("W1-T3212: rmd rule parses the authored ruling and renders both routed outc
   writeFileSync(join(root, ".remudero", "mounts.yaml"), readFileSync(join(process.cwd(), ".remudero", "mounts.yaml")));
   const record = await ruleCommand(args, {
     root,
+    config: { root } as never,
     route: async (ruling, deps) => {
       seen.push(ruling);
       deps.land("plan/decisions.d/ruling.md", "recorded ruling");
@@ -358,6 +359,7 @@ test("W1-T3212: rmd rule parses the authored ruling and renders both routed outc
 
   const escalate = await ruleCommand([...args, "--supersedes", "rule 15"], {
     root,
+    config: { root } as never,
     route: async (ruling, deps) => {
       seen.push(ruling);
       deps.stageProposal({ id: "ruling:W1-T4242", summary: "operator-owned", evidenceAnchors: [] });
