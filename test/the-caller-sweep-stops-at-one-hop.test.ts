@@ -34,7 +34,7 @@ const spawnThatMustNotRun: PreflightSpawn = ((...args: unknown[]) => {
  * the file text {@link callerReachableSuites}'s `readFile` reads back — so the fake tree is the
  * ONLY source of truth the walk can use, exactly like the real one.
  */
-function fakeRepo(
+function fakeTree(
   testFilesFor: Record<string, readonly string[]>,
   srcTree: Record<string, string>,
 ): { spawn: PreflightSpawn; readFile: (path: string) => string } {
@@ -84,7 +84,7 @@ test("W1-T3215 a suite naming only the CALLER of a changed symbol is still reach
       "}",
     ].join("\n"),
   };
-  const { spawn, readFile } = fakeRepo(
+  const { spawn, readFile } = fakeTree(
     {
       changedSymbol: ["test/direct.test.ts"],
       callerFn: ["test/via-caller.test.ts"],
@@ -144,8 +144,8 @@ test("W1-T3215 the closure is derived purely from the tree — a different calle
       "\n",
     ),
   };
-  const a = fakeRepo({ changedSymbol: [], callerA: ["test/a.test.ts"], callerB: ["test/b.test.ts"] }, treeA);
-  const b = fakeRepo({ changedSymbol: [], callerA: ["test/a.test.ts"], callerB: ["test/b.test.ts"] }, treeB);
+  const a = fakeTree({ changedSymbol: [], callerA: ["test/a.test.ts"], callerB: ["test/b.test.ts"] }, treeA);
+  const b = fakeTree({ changedSymbol: [], callerA: ["test/a.test.ts"], callerB: ["test/b.test.ts"] }, treeB);
 
   const reportA = callerReachableSuites(["changedSymbol"], "/fake-root", a.spawn, a.readFile);
   const reportB = callerReachableSuites(["changedSymbol"], "/fake-root", b.spawn, b.readFile);
@@ -189,7 +189,7 @@ test("W1-T3215 `rmd caller-sweep` reaches callerReachableSuites and renders its 
       "\n",
     ),
   };
-  const { spawn, readFile } = fakeRepo({ changedSymbol: ["test/direct.test.ts"], callerFn: ["test/via-caller.test.ts"] }, srcTree);
+  const { spawn, readFile } = fakeTree({ changedSymbol: ["test/direct.test.ts"], callerFn: ["test/via-caller.test.ts"] }, srcTree);
   const r = captured(() => callerSweepCommand(["changedSymbol"], { repoRoot: "/fake-root", spawn, readFile }));
   assert.equal(r.code, 0, "report-only: it exits 0 whatever it finds");
   assert.match(r.out, /test\/direct\.test\.ts/);
@@ -199,7 +199,7 @@ test("W1-T3215 `rmd caller-sweep` reaches callerReachableSuites and renders its 
 
 test("W1-T3215 `rmd caller-sweep --files` emits a bare, splice-ready suite list", () => {
   const srcTree = { "src/lib/fake.ts": ["export function changedSymbol() {}"].join("\n") };
-  const { spawn } = fakeRepo({ changedSymbol: ["test/direct.test.ts"] }, srcTree);
+  const { spawn } = fakeTree({ changedSymbol: ["test/direct.test.ts"] }, srcTree);
   const r = captured(() => callerSweepCommand(["changedSymbol", "--files"], { repoRoot: "/fake-root", spawn }));
   assert.equal(r.code, 0);
   assert.equal(r.out, "test/direct.test.ts");
