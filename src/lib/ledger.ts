@@ -17,6 +17,7 @@ import {
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -940,7 +941,7 @@ export function compactedArchiveName(newestTs: string): string {
   // toISOString() already ends in Z; the replace only rewrites : and . — appending another Z
   // produced `...-000ZZ`, which rotationStampIso does not match, so every windowed union would
   // have silently ignored the compacted file. Caught by the round-trip case below.
-  return `ledger.${new Date(newestTs).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`;
+  return `ledger.${fixedClock(Date.parse(newestTs)).iso().replace(/[:.]/g, "-")}.ndjson.gz`;
 }
 
 /**
@@ -960,6 +961,7 @@ export function compactRotations(
     readRows: (path: string) => string[];
     write: (name: string, body: string) => void;
     remove: (path: string) => void;
+    clock?: Clock;
   },
 ): LedgerCompactionResult {
   const seen = new Set<string>();
@@ -988,7 +990,8 @@ export function compactRotations(
   };
   rows.sort((a, b) => tsOf(a) - tsOf(b));
   const dated = rows.filter((r) => Number.isFinite(tsOf(r)));
-  const newestTs = new Date(dated.length > 0 ? tsOf(dated[dated.length - 1]!) : Date.now()).toISOString();
+  const clock = io.clock ?? systemClock;
+  const newestTs = dated.length > 0 ? fixedClock(tsOf(dated[dated.length - 1]!)).iso() : clock.iso();
   const archiveName = compactedArchiveName(newestTs);
   io.write(archiveName, rows.join("\n") + "\n");
   // THE SOURCES GO ONLY AFTER THE REPLACEMENT IS WRITTEN. A crash between the two costs a duplicate
