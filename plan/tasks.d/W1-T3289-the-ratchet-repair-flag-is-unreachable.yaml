@@ -21,8 +21,9 @@
     optional on `SweepPolicy` (sweep.ts) and read at two call sites, but `DEFAULT_SWEEP_POLICY` never
     assigns it and `plan/policy.yaml` carries no row for it. Every other governed knob —
     `wipLimit`, `reviewLanes`, `staleDays` — is COLLECTED from policy.yaml into the default; this one
-    is not. So it is permanently `undefined`, the `=== true` guards never pass, and there is no value
-    an operator can edit to change that. The ratification alone does nothing.
+    is not. So it is permanently `undefined`, the `=== true` guards never pass, and there is no value an operator can edit to change that.
+    THE FLAG IS UNREACHABLE, NOT MERELY OFF — off would still have a row to flip, and this has
+    none. The ratification alone does nothing.
     WHAT IT COSTS WHILE UNREACHABLE, MEASURED THE SAME DAY: the identical repair was performed BY
     HAND FIVE TIMES in one session (#4790, #4843, #4856, #4858, #4862). Every one was mechanical —
     the gate printed the exact value to record and a human typed it into the baseline.
