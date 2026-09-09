@@ -10,7 +10,8 @@
   files: [src/run-task.ts, test/escalation-judge-is-wired.test.ts]
   origin: "operator-session#console-visibility-2026-09-08"
   plan_refs: ["W1-T349"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
     OBSERVED 2026-09-08, three independent reads agreeing.
@@ -97,6 +98,12 @@
     DO NOT widen `isEscalationJudgeExempt`. Broadening the exemption list makes the wiring pass its
     tests while judging nothing — the shape this task exists to end.
   note: |
+    WITHDRAWN AS ALREADY SATISFIED, 2026-09-09. The headline claim is "ZERO PRODUCTION CALLERS" for
+    `escalateWithJudge`. MEASURED on origin/main: 11 references in `src/run-task.ts`, 13 in
+    `src/lib/escalate.ts`, 1 in `src/lib/operator-message.ts`. All four of this shard's own acceptance
+    proofs PASS (`test/escalation-judge-is-wired.test.ts`, which names this id). The producer wiring
+    the shard exists to add is present, so the premise no longer holds.
+    Carries no ledger merge-credit row, which is why it was still offered as runnable.
     Rule 25 CHECKED: `src/run-task.ts` is ordinary src; no instrument path is touched.
     POLARITY, RESTATED BECAUSE IT IS EASY TO INVERT UNDER REVIEW PRESSURE (escalate.ts:440-445):
     a FALSE NEGATIVE (demoting something the operator needed) hides work he cannot know to look for

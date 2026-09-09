@@ -11,7 +11,8 @@
   files: [src/lib/tmp.ts, src/run-task.ts, test/the-temp-sweep-cannot-see-the-debris-it-was-built-for.test.ts]
   origin: "operator-session#disk-full-2026-09-07"
   plan_refs: ["W1-T2786", "W1-T2775", "W1-T320"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
     MEASURED 2026-09-07 ON THE OPERATOR'S MAC, which reached 100% of a 228 GiB volume and blocked an
@@ -86,6 +87,19 @@
     passes its happy path while deleting a bystander is the failure this task would otherwise
     introduce, and it is strictly worse than the disk filling.
   note: |
+    WITHDRAWN AS ALREADY SATISFIED, 2026-09-09. Verified three ways rather than assumed:
+    (1) all four of this shard's own acceptance proofs PASS on origin/main through `rmd check-proof`
+    (`test/the-temp-sweep-cannot-see-the-debris-it-was-built-for.test.ts`), and that suite NAMES this
+    task id, so it is this shard's own falsifier and not a coincidentally-similar file;
+    (2) the mechanism is present at source — `sweepStaleTempDirs` is referenced 5x in `src/lib/tmp.ts`
+    and 13x in `src/run-task.ts`, and the scan root is parameterised ("Root to scan (tests). Defaults
+    to `os.tmpdir()`"), which is the "never runs where the operator works" half of the headline;
+    (3) it carries no ledger merge-credit row, which is WHY it was still being offered as runnable —
+    see the note below.
+    NOT CREDITED, THOUGH BUILT. `readMergeCreditedTaskIds` over the full ledger corpus (658 rotations,
+    budgetExhausted false, 1435 of 1597 ids credited) does not credit this id, so `runnableCandidates`
+    still offered it. Retiring the record is what stops a rebuild; it does not fix the credit gap,
+    which is a separate and unfiled observation recorded in the batch PR.
     FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3065`.
 
     THE 11 GiB ALREADY ON DISK IS NOT RECLAIMED BY THIS TASK AND CANNOT BE. Those dirs are owned by

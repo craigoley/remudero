@@ -11,7 +11,8 @@
   files: [src/lib/status.ts, test/a-plan-only-filing-cannot-earn-a-merge-credit.test.ts]
   origin: "operator-session#4461-closed-by-a-filing-credit-2026-09-07"
   plan_refs: ["W1-T413", "W1-T3063", "W1-T2794", "W1-T75"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
     ⚠ CORRECTED AFTER FILING. This shard was first written blaming the LEDGER arm alone. That arm is
@@ -110,6 +111,14 @@
     non-plan-path row and the subtract-only rows stay green. A test that reddens everywhere is
     pinning the arm's existence rather than what it decides.
   note: |
+    WITHDRAWN AS ALREADY SATISFIED, 2026-09-09. All four of this shard's own acceptance proofs PASS on
+    origin/main (`test/a-plan-only-filing-cannot-earn-a-merge-credit.test.ts`, which names this id),
+    and the mechanism is in the source it declares: `src/lib/status.ts` carries
+    `planOnlyFilingRefusal` / `isPlanOnlyFilingPr` with a comment naming `ownsOwnRunBranch` and the
+    diff-based refusal beside it — exactly the gap this shard describes.
+    IT ALSO CARRIES FIVE `Remudero-Task:` TRAILERS ON MERGED COMMITS, so git credits it and the
+    LEDGER does not. That disagreement is why it was still offered; it is recorded in the batch PR
+    rather than re-filed here, because nothing measured today shows which side is wrong.
     FILED 2026-09-07 under an id reserved through `refs/rmd-id/W1-T3067`.
 
     THIS IS THE SOURCE DEFECT BEHIND #4461. W1-T3063 (in flight) makes the DESTRUCTIVE consumer safe
