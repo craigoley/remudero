@@ -1,0 +1,97 @@
+- id: W1-T3271
+  title: "THE VERIFY-HUMAN BACKLOG IS JUDGED ONLY WHEN A HUMAN REMEMBERS TO ASK — 53 shards sit parked, the judge that sorts them has no schedule, and 30% of the first real sweep needed no operator at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/lib/verify-human-judge.ts, src/lib/measurement-cadence.ts, test/the-verify-human-backlog-is-judged-on-a-cadence.test.ts]
+  origin: "operator-session#verify-human-cadence-2026-09-09"
+  plan_refs: ["W1-T3188", "W1-T3206", "W1-T3226", "W1-T3183"]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09. `judgeVerifyHumanShard` (src/lib/verify-human-judge.ts) exists, is wired and
+    was run by hand twice. NOTHING SCHEDULES IT. The same defect W1-T3226 fixed for the plan
+    reconciler, in the lane next door: a correct verb with no cadence.
+    WHAT THE HAND RUN FOUND, and it is the reason this is worth a schedule. Second sweep: 39
+    `needs_operator`, 17 `backlog`, 0 failed. The 17 clustered into three kinds — dependencies not
+    yet merged, work already done, and FOUR shards waiting on a decision the operator had ALREADY
+    MADE. About 30% of what the board was presenting as "needs me" needed nobody.
+    THE COST IS AN ALARM THAT MEANS NOTHING. W1-T3183 already records that "needs me" is ~80%
+    backlog wearing an alarm badge. A queue that overstates what it needs from the operator trains
+    him to stop reading it, and then the genuine asks are lost inside the noise.
+    THE POPULATION IS NOT SMALL AND IT AGES. MEASURED the same day across plan/tasks.d: 45 parked
+    shards, bimodal — 17 at 0-6 days, 4 at 7-13, 17 at 14-29, 7 at 30-59, none past 60; oldest 49
+    days, median 16; arrival roughly 4-5 per day. As of 2026-09-09 the parked population reads 53.
+    RE-JUDGING IS CHEAP, WHICH IS WHAT MAKES A DAILY CADENCE AFFORDABLE. `observedStateKey` already
+    keys a verdict to a shard's id, its merged dependencies and whether it is cited in src — so an
+    unchanged shard is not re-judged, and a daily pass costs only the shards that actually moved.
+  design: |
+    (i) DAILY, NOT ON A COUNT. Arrival is continuous at 4-5/day, so any count threshold is crossed
+    continuously and fires at an arbitrary moment rather than a meaningful one. A count says nothing
+    about whether the ANSWER changed; a schedule at least asks on a rhythm the operator can predict.
+    (ii) A DEPENDENCY MERGE IS THE REAL EVENT, so trigger on it. The largest `backlog` cluster was
+    shards whose dependencies had since merged — that is a state change with a timestamp, and
+    waiting a day to notice it is the one place an event beats the schedule.
+    (iii) AGE IS A COARSE BAND, NEVER A CONTINUOUS CLOCK. Re-ask at 14, 30 and 60 days, not on a
+    sliding scale: a shard whose observed state has not changed has no new evidence, and re-judging
+    it every day would burn spend to print the same verdict. The bands exist so a settled-looking
+    ask cannot sit forever unexamined, not to re-litigate on a timer.
+    (iv) THE JUDGE STAYS FAIL-OPEN AND ITS FAILURES STAY UNCACHED. `FAIL_OPEN_VERIFY_HUMAN_VERDICT`
+    is marked `judgeFailed` and never cached; a cadence must not turn one outage into a day of
+    stale `needs_operator` rows, nor a `judge_failed` row into a verdict.
+    (v) IT REPORTS EVERY CYCLE, INCLUDING A QUIET ONE. Same rung shape as `planReconcileCadence`
+    (W1-T3226): the count is cheap and belongs in the report unconditionally, so the backlog's size
+    is visible before it is embarrassing.
+    (vi) NOTHING ABOUT THE JUDGE'S DECISION CHANGES. Its two outcomes, its observed-state key and
+    its fail-open default are correct. This schedules it and nothing more.
+  acceptance:
+    - claim: "the cadence reports the parked-shard count and the judged split on every cycle, including when nothing changed"
+      proof: "unit test: test/the-verify-human-backlog-is-judged-on-a-cadence.test.ts"
+    - claim: "a shard whose observed state is unchanged since its last verdict is NOT re-judged, so a daily pass costs only what moved"
+      proof: "unit test: test/the-verify-human-backlog-is-judged-on-a-cadence.test.ts"
+    - claim: "a shard whose dependency merged since the last pass IS re-judged, without waiting for the next scheduled cycle"
+      proof: "unit test: test/the-verify-human-backlog-is-judged-on-a-cadence.test.ts"
+    - claim: "an unchanged shard crossing an age band (14, 30, 60 days) is re-asked exactly once per band, not once per day"
+      proof: "unit test: test/the-verify-human-backlog-is-judged-on-a-cadence.test.ts"
+    - claim: "a judge failure is never cached as a verdict and never routes a shard to backlog"
+      proof: "unit test: test/the-verify-human-backlog-is-judged-on-a-cadence.test.ts"
+    - claim: "the cadence has a PRODUCTION call site — the measurement cadence host runs it, not only its own tests"
+      proof: "grep: verifyHumanCadence in src/lib/measurement-cadence.ts"
+  falsifier: |
+    CLOSE IF anything already schedules the verify-human judge: grep `verify_human` and
+    `judgeVerifyHumanShard` across src/lib/daemon.ts, src/lib/measurement-cadence.ts,
+    .github/workflows/ and package.json.
+    MEASURED 2026-09-09: the judge is reachable from `rmd` only, and the ledger's
+    `verify_human.judged` rows exist solely on the two by-hand sweeps.
+    POSITIVE CONTROL, because "the cadence ran" is not the claim: the suite must show BOTH that an
+    UNCHANGED shard is skipped AND that a dependency-merged shard is judged. A suite proving only the
+    first cannot distinguish a cadence from a no-op; only the second cannot distinguish it from an
+    unconditional re-judge of all 53, which is the spend this design exists to avoid.
+    PROVE THE BAND IS A BAND: an unchanged shard held across a boundary must be re-asked ONCE, not
+    on every subsequent cycle. Without that arm, "aging" degrades into the daily re-litigation
+    design (iii) refuses.
+    DO NOT route on age alone. An old shard is not thereby a backlog item, and flipping one to
+    `backlog` because it is stale hides an ask the operator never answered — the same
+    false-flip harm W1-T3226 names, pointed at the operator's attention instead of the queue.
+    DO NOT widen the judge's decision set or cache a `judgeFailed` verdict.
+  note: |
+    Rule 25 CHECKED: neither src file is an instrument surface.
+    THE OPERATOR APPROVED THIS SHAPE ON 2026-09-09 — daily cadence, an event trigger on dependency
+    merges, and aging as coarse re-ask bands rather than a continuous clock, with count thresholds
+    explicitly rejected. It was approved in-session and then not filed for several hours; this shard
+    is the record catching up with the decision.
+    RISK IS HIGH BY RULE 19: two modules change (the judge's scheduling seam and the cadence host),
+    and the thing being scheduled spends model budget per judged shard.
+    CAVEAT WITH EQUAL WEIGHT: this schedules a judge; it does not make the judge more correct. The
+    hand sweep's 39/17 split is the only evidence it sorts well, and 39 `needs_operator` verdicts
+    were never checked one by one against what the operator actually wanted. A daily cadence will
+    produce that evidence — and will also multiply a systematic misjudgement by the number of days
+    before anyone notices.
+    SECOND CAVEAT: the bands (14/30/60) are policy numbers this shard does not know are right. They
+    come from the measured age distribution on one day, not from any outcome. They should be
+    declared policy values changed by measurement rather than by argument.
