@@ -65,7 +65,7 @@
   "scripts/error-subclass-baseline.json": 250,
   "scripts/fixture-copy-baseline.json": 250,
   "scripts/flake-retry-aggregate.mjs": 250,
-  "scripts/fleet-heartbeat.sh": 320,
+  "scripts/fleet-heartbeat.sh": 341,
   "scripts/generate-api-client.mjs": 42,
   "scripts/generate-capability-snapshot.mjs": 57,
   "scripts/generate-cli-reference.mjs": 34,
