@@ -1,0 +1,101 @@
+- id: W1-T3266
+  title: "EVERY TIMED SPAWN IN THE FLEET IS DEFEATED BY A CPU-BOUND CHILD — `execFileSync`'s timeout kills with SIGTERM, a node process spinning synchronously can never run its handler, and the sync call then blocks FOREVER on a child it already gave up on; one such proof stalled the whole pipeline for six hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/review.ts, test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts]
+  origin: "operator-session#reviews-stopped-posting-2026-09-09"
+  plan_refs: ["W1-T2582", "W1-T2742", "W1-T253"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 ON THE LIVE FLEET, AS AN OUTAGE, NOT A HYPOTHETICAL. Nine PRs sat open with
+    no `remudero-review` status; the last `review.*` row of any kind was 11:59:06Z and the operator
+    noticed at 17:31Z. Across those two hours the ledger carried 467 rows and EVERY ONE was
+    board/console/SSE traffic - zero dispatch, zero sweep, zero review. The board kept refreshing
+    over a completely stalled fleet.
+    THE CHILD THAT DID IT. `ps` showed `node --test ... a-judge-names-its-settings-and-its-state-root.test.ts`
+    with elapsed 05:54:52 and CPU time 05:54:06 - a full core, pegged, for six hours. Its cwd was
+    `/tmp/rmd-proof-base-wYkEpq`: the REVIEWER's own base-tree proof execution, started 11:59:18,
+    twelve seconds after `review.pending_posted` for the PR it was judging. The daemon (pid 48) sat
+    in `ep_poll` with 00:01:41 of CPU across 5h51m, holding `drain.lock` and one inflight latch the
+    entire time.
+    WHY THE EXISTING TIMEOUT DID NOT SAVE IT, AND THIS IS THE WHOLE DEFECT. `defaultProofSpawner`
+    already passes `timeout: timeoutMs` to `execFileSync`, and `proofTimeoutMs` is a real policy
+    read. But `execFileSync` kills with `killSignal`, which DEFAULTS TO SIGTERM, and a node process
+    inside a synchronous CPU loop never turns its event loop, so its SIGTERM handler cannot run. The
+    bound fired, the signal bounced, and the synchronous call kept blocking on a child it had
+    already decided to abandon.
+    PROVEN BY HAND DURING THE RECOVERY, which is why this is a measurement and not a theory: SIGTERM
+    to that pid left it in state `R` still accumulating CPU; SIGKILL ended it immediately, and the
+    inflight latch dropped to zero and `sweep.pass` rows resumed within ninety seconds.
+    THE EXPOSURE IS THE WHOLE FLEET, NOT ONE CALL SITE. `killSignal` appears NOWHERE in the
+    repository. Every timed spawn - the proof spawner, the `npm ci` priming at 120s, the 600s spawn
+    beside them - carries a bound that any CPU-bound child can outlive.
+  design: |
+    (i) A BOUND THAT CANNOT BE IGNORED. The timeout must escalate to a signal the child cannot
+    handle. SIGTERM first is still right - a well-behaved child deserves the chance to exit cleanly
+    and say why - but it must be followed by SIGKILL, and the wait for the second one must itself be
+    bounded.
+    (ii) THE VERDICT FOR A KILLED PROOF IS UNCHANGED, and this is the load-bearing constraint. A
+    proof stopped by its bound already grades as a timeout/exec error (W1-T2742's ground); this task
+    changes WHETHER the bound takes effect, never WHAT a bounded proof scores. A change that turns
+    slow proofs into failures has replaced a hang with a false verdict.
+    (iii) THE KILL MUST REACH THE PROCESS GROUP, NOT ONLY THE DIRECT CHILD. The observed hang had a
+    `node --test` parent that spawns its own runners; signalling only the direct child leaves
+    grandchildren holding the pipe the sync call is still reading, which reproduces the same block
+    one level down.
+    (iv) EVERY TIMED SPAWN IN THIS MODULE, not just the proof one. A fix at one call site leaves the
+    class alive at the others, and the others run unattended on the same daemon.
+    (v) THE KILL IS LEDGERED OR LOGGED WITH ITS REASON. Six hours passed with no row saying a proof
+    had been abandoned; a bound that fires silently is only marginally better than one that does not
+    fire, because the next reader still cannot tell a hung fleet from an idle one.
+  acceptance:
+    - claim: "a child that ignores SIGTERM and spins is still terminated when its bound expires, and the spawner returns rather than blocking"
+      proof: "unit test: test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts"
+    - claim: "a well-behaved child still receives the polite signal first and is allowed to exit on its own"
+      proof: "unit test: test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts"
+    - claim: "a child that finishes well inside its bound is untouched and returns its output unchanged"
+      proof: "unit test: test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts"
+    - claim: "a grandchild of the spawned process does not survive the bound and keep the pipe open"
+      proof: "unit test: test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts"
+    - claim: "the production proof spawner carries the escalating kill, not only its own tests"
+      proof: "grep: killSignal in src/lib/review.ts"
+  falsifier: |
+    CLOSE IF a timed spawn already survives a SIGTERM-ignoring child: run one under
+    `defaultProofSpawner` with a short bound and watch whether the call returns.
+    MEASURED 2026-09-09: it did not return for 5h54m, and only SIGKILL ended the child.
+    POSITIVE CONTROL, because "the child is dead" is satisfied by killing everything immediately:
+    the suite must ALSO show a fast, well-behaved child completing untouched and returning its
+    stdout. A spawner that kills eagerly has traded a hang for a fleet that cannot run a slow proof.
+    SECOND CONTROL: the polite signal must be tried FIRST. A suite that only proves SIGKILL works
+    cannot distinguish this design from one that never lets a child clean up.
+    DO NOT raise `proofTimeoutMs` as the remedy. The bound was not too short - it fired correctly.
+    A longer bound multiplies the outage instead of ending it.
+    DO NOT make a killed proof grade as a FAILED criterion. Design (ii): the verdict semantics for a
+    bounded proof are settled elsewhere and a change here that alters them turns every slow test on
+    a loaded runner into a false refusal.
+  note: |
+    Rule 25 CHECKED: `src/lib/review.ts` is ordinary src, not an instrument surface.
+    RISK IS HIGH BECAUSE THIS CODE RUNS UNATTENDED AND KILLS PROCESSES. A kill that is too eager
+    breaks every slow proof on a loaded runner; one that reaches the wrong process group could
+    signal the orchestrator that spawned it. Both directions are worse than today's failure, which
+    is at least inert.
+    THE SIBLING BOUND IS ALREADY FILED AND UNBUILT: W1-T2582 ("the wall-clock bound stops awaiting
+    the work and never cancels it") describes this same class one layer up, in the sweep. It is
+    `status: queued` with no credit. This shard is the narrow, provable half - one option object,
+    one escalation - and does not close W1-T2582.
+    CAVEAT WITH EQUAL WEIGHT: this stops a hung child from holding the pipeline. It does NOT detect
+    a pipeline that has stopped. Today six hours passed with the drain lock held, no dispatch row
+    written, and nothing escalating - the operator found it by looking at the board. A watchdog on
+    "lock held, no progress row" is a separate gap this task does not close, and it is the one that
+    would have shortened today's outage from six hours to minutes.
+    SECOND CAVEAT: the test that spun is itself suspect - on the BASE tree it drives a
+    `verifyHumanSweepCommand` that predates the seams it injects, so the stub is ignored and the real
+    path runs. That is a proof-authoring hazard worth its own look, and it is NOT what this task
+    fixes: any test can hang, and the executor must survive one that does.
