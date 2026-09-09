@@ -10,7 +10,7 @@
   origin: "operator-session#i-deadlocked-4812-by-running-the-wrong-verb-2026-09-09"
   plan_refs: ["W1-T54"]
   files: [src/lib/dep-review.ts, test/the-dep-review-lane-does-not-wait-for-its-own-status.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED LIVE ON #4812, 2026-09-09, AND THE TRIGGER WAS AN OPERATOR MISTAKE THAT THE LANE

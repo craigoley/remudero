@@ -10,7 +10,7 @@
   origin: "operator-session#the-self-improvement-loop-has-been-dead-since-09-03"
   plan_refs: ["W1-T2833", "W1-T2870", "W1-T2988", "W1-T2993", "W1-T242", "W1-T91", "W1-T132"]
   files: [src/lib/retro.ts, src/run-task.ts, test/the-retro-ledger-read-is-bounded-by-bytes-not-days.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SELF-IMPROVEMENT LOOP HAS PRODUCED NOTHING FOR SIX DAYS AND THIS IS WHY.

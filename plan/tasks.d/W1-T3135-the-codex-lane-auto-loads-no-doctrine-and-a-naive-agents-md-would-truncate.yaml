@@ -11,7 +11,7 @@
   files: [scripts/generate-agents-md.mjs, AGENTS.md, test/the-codex-lane-auto-loads-no-doctrine.test.ts, package.json]
   origin: "operator-session#context-modularization-2026-09-08"
   plan_refs: ["W1-T2759", "W1-T2508", "W1-T2761"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-08 at origin/main (1ee2b5ff).

@@ -10,7 +10,7 @@
   origin: "operator-session#4770-shipped-without-the-file-its-own-proof-named-2026-09-09"
   plan_refs: ["W1-T456", "W1-T2737", "W1-T72"]
   files: [src/lib/review.ts, test/the-forward-reference-carve-out-is-asymmetric.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     TWO SIBLING BRANCHES IN `judgeCriterion` (src/lib/review.ts) DECIDE THE SAME QUESTION AND ONLY

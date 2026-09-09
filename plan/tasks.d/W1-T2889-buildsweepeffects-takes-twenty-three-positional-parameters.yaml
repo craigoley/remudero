@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§8A", "W1-T2883"]
   files: [src/run-task.ts, test/build-sweep-effects-takes-one-deps-object.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Step 6 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-29, R-33).

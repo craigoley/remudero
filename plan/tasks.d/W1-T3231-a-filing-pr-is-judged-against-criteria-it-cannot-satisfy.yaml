@@ -10,7 +10,7 @@
   origin: "operator-session#three-filing-prs-reddened-on-the-same-mistake-2026-09-09"
   plan_refs: ["W1-T1004", "W1-T1060", "W1-T952"]
   files: [src/lib/review.ts, scripts/acceptance-author-gate.mjs, .github/workflows/acceptance-author-gate.yml, test/a-filing-pr-is-judged-against-criteria-it-cannot-satisfy.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE MISTAKE IS ONE LINE AND IT WAS MADE THREE TIMES IN ONE SESSION (2026-09-09, on the filing

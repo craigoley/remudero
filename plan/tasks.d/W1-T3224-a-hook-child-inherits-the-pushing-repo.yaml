@@ -10,7 +10,7 @@
   files: [hooks/pre-push, test/a-hook-child-does-not-inherit-the-pushing-repo.test.ts]
   origin: "operator-session#prepush-arming-2026-09-09"
   plan_refs: ["W1-T3222", "W1-T3059", "W1-T3205"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

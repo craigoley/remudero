@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§9", "§8A", "W1-T47"]
   files: [src/run-task.ts, src/lib/status.ts, src/lib/escalate.ts, src/lib/poll-interval.ts, test/help-does-not-load-the-sdk.test.ts, test/helpers/module-load-recorder.cjs]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-28 (OBSERVED). At f7ceb86, `src/run-task.ts` carries 138 static

@@ -10,7 +10,7 @@
   origin: "operator-session#the-self-improvement-loop-has-been-dead-since-09-03"
   plan_refs: ["W1-T2875", "W1-T2988", "W1-T2981"]
   files: [test/entrypoint-boot.test.ts, src/lib/retro.ts, test/the-retro-preflight-names-the-suite-that-hung.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE SELF-IMPROVEMENT LOOP IS THE THING THAT IS BROKEN. `state/last-retro.json` reads

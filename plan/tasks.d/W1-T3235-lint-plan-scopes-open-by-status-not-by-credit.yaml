@@ -10,7 +10,7 @@
   origin: "operator-session#the-156-landmine-field-is-an-artifact-2026-09-09"
   plan_refs: ["W1-T2339", "W1-T324", "W1-T180"]
   files: [src/run-task.ts, test/lint-plan-scopes-open-by-credit-not-status.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON origin/main, 2026-09-09: `rmd lint-plan` reports
