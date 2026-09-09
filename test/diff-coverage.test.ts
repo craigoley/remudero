@@ -147,6 +147,21 @@ test("diff-coverage CI wiring: the stable coverage-ratchet aggregator checks the
   for (const jobId of ["coverage-ratchet", "coverage-ratchet-required"]) {
     for (const step of doc.jobs[jobId].steps ?? []) assert.equal(step.if, undefined, `${jobId} must use shell guards, never step if:`);
   }
+  // THE AGGREGATOR MUST INSTALL DEPENDENCIES, because the gate it runs needs one and fails CLOSED
+  // without it. `isTypeOnlyModule` transpiles with esbuild; with no node_modules it answers false
+  // for every file, and a module that compiles to nothing gets reported as a vacuous-coverage
+  // hazard whose only stated remedy is impossible for it. `cache: npm` caches ~/.npm, not
+  // node_modules, so setup-node does not cover this. Asserted on the AGGREGATOR's own body — the
+  // shard job installs separately and its install proves nothing about this one.
+  const aggStart = ciYml.indexOf("  coverage-ratchet-required:");
+  const aggEnd = ciYml.indexOf("\n  mutation-ratchet:", aggStart);
+  assert.ok(aggStart >= 0 && aggEnd > aggStart, "the coverage-ratchet-required job body must be findable");
+  assert.match(
+    ciYml.slice(aggStart, aggEnd),
+    /run:\s*npm ci\b/,
+    "the job that runs diff-coverage must install dependencies, or its type-only exemption is silently dead",
+  );
+
   // Needs the full base..head history to diff against, not the default shallow clone.
   assert.match(jobBody, /fetch-depth:\s*0/, "coverage-ratchet's checkout must fetch full history for the diff");
   // W1-T3060: the base side is now `HEAD^1` — the merge commit's first parent, which is the exact

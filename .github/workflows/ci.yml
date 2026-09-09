@@ -781,6 +781,25 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Install (clean, from lockfile)
+        # NOT OPTIONAL, AND ITS ABSENCE WAS SILENT. This job runs `scripts/diff-coverage.mjs`, whose
+        # `isTypeOnlyModule` (W1-T2570) transpiles with esbuild to tell a module that COMPILES TO
+        # NOTHING from one no shard imported. That guard FAILS CLOSED on a require error, so with no
+        # node_modules it answers `false` for every file and the type-only exemption is dead — a
+        # module of pure interfaces is reported as a vacuous-coverage hazard, under a remedy ("write
+        # a test that exercises this file") that is IMPOSSIBLE for a file with no executable code.
+        #
+        # `cache: npm` above caches ~/.npm, NOT node_modules, so setup-node does not supply it.
+        #
+        # MEASURED 2026-09-09 on #4872 (src/lib/merge-state.ts — 75 lines, four interfaces, zero
+        # runtime exports): the guard answers TRUE locally and the gate BLOCKED on that same file, on
+        # that same head, across two independent runs. Reproduced by copying scripts/ and src/ into a
+        # tree with no node_modules:
+        #   isTypeOnlyModule("src/lib/merge-state.ts") -> false
+        #   require('esbuild')                         -> THREW: Cannot find module 'esbuild'
+        # So the exemption has never applied in CI since it shipped; it went unnoticed because only
+        # four type-only modules exist on main and a PR must touch one to be blocked by it.
+        run: npm ci
       - name: Download coverage shards
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
