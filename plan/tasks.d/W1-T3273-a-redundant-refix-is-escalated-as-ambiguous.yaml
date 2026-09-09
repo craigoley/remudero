@@ -1,0 +1,97 @@
+- id: W1-T3273
+  title: "A BRANCH THAT INDEPENDENTLY FIXED WHAT MAIN ALREADY LANDED IS ESCALATED TO A HUMAN AS AN AMBIGUOUS CONFLICT — the resolution is mechanically decidable (take main, the branch side is redundant) and it happened TWICE in one hour"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/sweep.ts, test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts]
+  origin: "operator-session#conflicted-lane-2026-09-09"
+  plan_refs: ["W1-T106", "W1-T984", "W1-T2536", "W1-T2548"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09, twice inside one hour, on the same underlying bug. A stale-gate test fixture
+    aged past its 14-day threshold and turned `main` red. THREE branches fixed it independently:
+    #4845 (which merged), #4848 and #4832's own `8eaeb95c0`. The two that did not merge first then
+    CONFLICTED with the one that did, in exactly the same file and lines.
+    WHAT THE SWEEP DID WITH THAT. `DISPOSITION_RULES`' `conflicted` row admits a dirty PR only when
+    `isRegenerableArtifactConflict` or `isPureConcurrentAddition` clears EVERY conflicting file.
+    A hand-written test clears neither, so the PR falls through to `blocked-ambiguous`, whose own
+    reason says it plainly: "not classifiable as a pure concurrent addition — never auto-resolved".
+    MEASURED on the real fixture: `deriveDisposition` returns `blocked-ambiguous` for a semantic
+    conflict and `conflicted` for a baseline conflict, on otherwise identical PRs.
+    THE REFUSAL IS RIGHT AND THE CATEGORY IS INCOMPLETE. Guessing between two competing hand-written
+    resolutions is exactly what rule 2 forbids, and the fleet should keep refusing it. But
+    "REDUNDANT" is a third category between deterministic and ambiguous, and it is DECIDABLE without
+    judgement: resolve the conflicting path in main's favour and, if the result is byte-identical to
+    main AND the branch's remaining files still apply, the branch's side of that hunk added nothing.
+    VERIFIED BY HAND on #4832 before this shard was written: taking main's side produced a file
+    byte-identical to `origin/main`, the other five files rebased untouched, `tsc` was clean, and all
+    three affected suites passed (2/2, 4/4, 11/11).
+    THE COST TODAY WAS A HUMAN. #4832's only ledger row was `sweep.disposed blocked-fixable` at
+    18:57:10, written BEFORE main moved at ~19:54. After it went dirty nothing re-disposed it and
+    nothing escalated; it sat until the operator noticed and said, correctly, that the fleet should
+    have handled it.
+  design: |
+    (i) A THIRD ADMISSION ARM, NOT A WIDER GUESS. Add REDUNDANT-REFIX beside
+    `isRegenerableArtifactConflict` and `isPureConcurrentAddition`. It admits only when taking
+    THEIRS-IS-MAIN yields a tree byte-identical to main for every conflicting path. That is a
+    computed fact about bytes, never a reading of intent.
+    (ii) THE PROOF IS THE RESOLUTION ITSELF. The predicate must not infer redundancy from commit
+    subjects, task ids or diff similarity — all three would have matched here and all three are
+    guesses. It performs the resolution and compares bytes; if they differ by one character the arm
+    declines and the PR keeps its `blocked-ambiguous` sentence.
+    (iii) EVERY OTHER FILE MUST STILL APPLY CLEANLY. Redundancy in ONE hunk says nothing about the
+    rest of the branch. If any non-conflicting path fails to rebase, this is not a redundant re-fix
+    and the arm declines.
+    (iv) THE BRANCH'S OWN COMMIT IS DROPPED, NOT REWRITTEN. The resolution is "main already has
+    this"; the honest record is that the branch's redundant commit contributed nothing to the merged
+    tree, and the PR's own thread should say so.
+    (v) LEDGER THE ADMISSION AND THE DECLINE, with the byte comparison as the reason. A silent
+    admission is indistinguishable from a guess to anyone reading later, which is precisely the
+    charge this arm has to answer.
+  acceptance:
+    - claim: "a dirty PR whose conflicting hunk resolves byte-identically to main is admitted for automatic resolution rather than escalated"
+      proof: "unit test: test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts"
+    - claim: "a dirty PR whose conflicting hunk resolves to something DIFFERENT from main keeps its blocked-ambiguous sentence and is never auto-resolved"
+      proof: "unit test: test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts"
+    - claim: "a branch whose non-conflicting files fail to apply is declined, so redundancy in one hunk never admits the rest"
+      proof: "unit test: test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts"
+    - claim: "the predicate reads BYTES, not commit subjects or task ids — a branch describing the same fix in words but resolving differently is declined"
+      proof: "unit test: test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts"
+    - claim: "both the admission and the decline write a ledger row naming the byte comparison that decided it"
+      proof: "unit test: test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts"
+    - claim: "the new arm is reachable from the production disposition table, not only its own tests"
+      proof: "grep: isRegenerableArtifactConflict in src/lib/sweep.ts"
+  falsifier: |
+    CLOSE IF the sweep already resolves a redundant re-fix.
+    MEASURED 2026-09-09: `deriveDisposition` on a dirty PR whose only conflicting path is a
+    hand-written test returns `blocked-ambiguous` with "never auto-resolved", and #4832 sat with no
+    escalation until a human rebased it.
+    POSITIVE CONTROL, because "admits more conflicts" is the failure mode this must not become: the
+    suite must show a NON-redundant semantic conflict still refused. A suite proving only the
+    admission arm cannot distinguish this from widening `conflicted` to swallow every dirty PR, and
+    that mints wrong resolutions on contributor branches.
+    THE BYTE TEST IS THE WHOLE SAFETY ARGUMENT: a fixture whose two sides describe the same fix in
+    prose but resolve to DIFFERENT bytes must be declined. If that case passes, the predicate has
+    started reading intent.
+    DO NOT admit on task-id or commit-subject similarity. Both matched today and both are guesses.
+    DO NOT relax `isPureConcurrentAddition` or `isRegenerableArtifactConflict` to cover this — they
+    are correct as they stand and their blast radii differ.
+  note: |
+    Rule 25 CHECKED: `src/lib/sweep.ts` is ordinary src, not an instrument surface.
+    RISK IS HIGH BECAUSE THIS WRITES TO CONTRIBUTOR BRANCHES UNATTENDED. `mergeConflictAdmissionEnabled`'s
+    own doc already frames that as an operator ratification rather than a default, and this arm
+    inherits that framing: it should ship behind the same flag, not beside it.
+    CAVEAT WITH EQUAL WEIGHT: this narrows the human's share of conflicts; it does not eliminate it,
+    and it must not. Two genuinely different fixes to the same lines remain a judgement, and the
+    correct outcome there is still an escalation — which is the OTHER half of what went wrong today
+    and is NOT closed here: #4832 went dirty and nothing re-disposed or escalated it at all.
+    SECOND CAVEAT: "byte-identical to main" is a sufficient condition, not a necessary one. A branch
+    whose fix is BETTER than main's also resolves cleanly and would be declined by this arm, exactly
+    as it should be — a human should decide to prefer it. This arm buys back only the cases where
+    the branch contributed nothing.

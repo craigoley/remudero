@@ -1,0 +1,84 @@
+- id: W1-T3274
+  title: "EVERY PLAN-RECONCILE PR IS STRUCTURALLY RED — flipping `status: queued` to `merged` makes `lint-plan --base` treat the shard as CHANGED and lint it in full, so the reconcile inherits the pre-existing violations of every shard it touches"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files: [src/lib/task-linter.ts, test/a-status-flip-is-not-a-task-edit.test.ts]
+  origin: "operator-session#reconcile-lint-2026-09-09"
+  plan_refs: ["W1-T3226", "W1-T3235", "W1-T122"]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 on a real reconcile PR (#4846). `rmd plan-reconcile --write` flipped 26
+    shards from `queued` to `merged` — the ONLY change to each file was that one field. CI runs
+    `npm run --silent lint-plan -- --base HEAD^1`, which reported:
+      rmd lint-plan: 26 task(s) checked (26 new/changed vs HEAD^1) — 6 failing, 79 warning(s)
+    and EXITED 1. Five of those six already fail on base `origin/main`; the reconcile did not
+    introduce them, it merely made lint look at shards nobody had touched in months.
+    THE INTERACTION, not either half. `lint-plan` without `--base` checks OPEN TASKS ONLY, and a
+    shard flipped to `merged` is by definition no longer open. With `--base` it checks NEW/CHANGED
+    tasks instead, and a status flip counts as a change — so the one edit that REMOVES a task from
+    the open population is also the edit that drags it into the linted population.
+    THE CONSEQUENCE IS THAT THE FLEET CANNOT RECONCILE ITS OWN PLAN. Reconciliation is now on a
+    cadence (W1-T3226), so this fires on a schedule: every cycle proposes a PR that is red on
+    arrival for debt it did not create. TODAY'S WORKAROUND WAS TO WITHHOLD the six offending shards
+    and land twenty, which leaves their status permanently wrong — the drift the cadence exists to
+    remove, preserved by the gate meant to protect the plan.
+    NOT A LINT BUG AND NOT A RECONCILE BUG. `lint-plan`'s rules are right about open tasks;
+    `plan-reconcile`'s flip is right about credit. Only their composition is wrong.
+  design: |
+    (i) A STATUS FLIP TO A CLOSED STATE IS NOT A TASK EDIT. When a shard's diff against the base
+    changes ONLY `status:` and the new value is a merged/closed state, the open-task rules do not
+    apply to it — it has left the population those rules govern.
+    (ii) NARROW BY THE DIFF, NOT BY THE STATUS ALONE. A shard that flips to `merged` AND edits a
+    criterion, a `files:` list or a proof is still a task edit and must be linted in full. The carve
+    reads what the diff actually touched; a flip riding alongside any other field change gets no
+    carve at all.
+    (iii) THE CARVE MUST NOT REACH RULE 15. A criterion added or edited in the same diff is exactly
+    what `rule15-precheck` exists to catch, and it keeps its full power here — this changes which
+    tasks the OPEN-TASK rules examine, never whether a criterion edit is allowed.
+    (iv) STILL REPORT, NEVER SILENTLY SKIP. A carved shard should be NAMED in the summary as
+    status-flip-only, so a reader can see what was not linted and why. A quiet exclusion is how a
+    real edit would eventually ride in under a flip.
+    (v) NOTHING ABOUT THE UNSCOPED RUN CHANGES. `lint-plan` with no `--base` keeps linting the open
+    population exactly as it does today.
+  acceptance:
+    - claim: "a shard whose only diff is status queued to merged is not linted against the open-task rules and does not fail the run"
+      proof: "unit test: test/a-status-flip-is-not-a-task-edit.test.ts"
+    - claim: "a shard that flips status AND edits any other field is still linted in full, so a real edit cannot ride in under a flip"
+      proof: "unit test: test/a-status-flip-is-not-a-task-edit.test.ts"
+    - claim: "a shard that flips to a still-OPEN status is linted in full, so the carve is about leaving the population and not about the field being touched"
+      proof: "unit test: test/a-status-flip-is-not-a-task-edit.test.ts"
+    - claim: "a carved shard is NAMED in the run summary as status-flip-only, never silently omitted"
+      proof: "unit test: test/a-status-flip-is-not-a-task-edit.test.ts"
+    - claim: "the production linter reaches the carve, not only its own tests"
+      proof: "grep: status-flip in src/lib/task-linter.ts"
+  falsifier: |
+    CLOSE IF a reconcile PR already passes lint.
+    MEASURED 2026-09-09 on #4846: `lint-plan --base HEAD^1` exited 1 with 6 of 26 failing, five of
+    them pre-existing on base. Withholding those six brought it to "20 checked, 0 failing", exit 0.
+    POSITIVE CONTROL, because "the reconcile is green" is satisfied by a linter that checks nothing:
+    the suite must show a shard flipping status ALONGSIDE another edit still being linted in full and
+    still failing on its own violations. Without that arm this carve is indistinguishable from
+    disabling `--base` mode.
+    SECOND CONTROL: a flip to another OPEN status must still be linted. If that passes, the carve has
+    been written against the FIELD rather than against leaving the open population.
+    DO NOT fix this by relaxing the open-task rules. They are correct; the six shards really do carry
+    violations, and they should still be refused when someone reopens or edits them.
+    DO NOT fix it by making `plan-reconcile` skip shards that fail lint. That preserves the drift
+    permanently and is the workaround this task exists to retire.
+  note: |
+    Rule 25 CHECKED: `src/lib/task-linter.ts` is ordinary src. It is NOT on the instrument surface —
+    the surface names `scripts/*` gate executables, and this is the library they call.
+    THE WORKAROUND IS LIVE AND SHOULD BE REVERSED WHEN THIS LANDS: #4846 deliberately withheld
+    W1-T175, W1-T176, W1-T198, W1-T2547, W1-T289 and W1-T3139, whose statuses therefore remain wrong
+    on main. They are the first test of whether this actually works.
+    CAVEAT WITH EQUAL WEIGHT: this makes reconciles landable; it does NOT pay down the lint debt on
+    those six shards, and the debt stays invisible for as long as nobody edits them. That is the
+    existing behaviour for every un-touched failing shard in the plan, not a new hole — but it is
+    worth saying plainly, because a green reconcile will make the plan look healthier than it is.
