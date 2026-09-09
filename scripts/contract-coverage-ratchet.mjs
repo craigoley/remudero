@@ -21,7 +21,7 @@
 // LEGIBLE and stops it growing; W1-T3177 lowers it for the routes its screen actually consumes.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
 /** Where a first-party client's route calls live. The string console is listed EXPLICITLY because
  *  it is the one consumer that does not sit under `apps/`, and it is the largest. */
@@ -146,8 +146,5 @@ function main() {
   process.exit(classify(missing.length, baseline).ok ? 0 : 1);
 }
 
-export function writeBaseline(count, note) {
-  writeFileSync(BASELINE_PATH, JSON.stringify({ _comment: note, uncoveredCeiling: count }, null, 2) + "\n");
-}
 
 if (process.argv[1] && process.argv[1].endsWith("contract-coverage-ratchet.mjs")) main();
