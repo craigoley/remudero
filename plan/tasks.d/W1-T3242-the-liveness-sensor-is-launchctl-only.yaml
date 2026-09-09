@@ -1,0 +1,96 @@
+- id: W1-T3242
+  title: "EVERY SERVICE READS `unknown` ON THE ONLY HOST THE FLEET RUNS ON — the liveness sensor is `launchctl`-only, so `deploy-supervisor has never run` and `deploy-supervisor is healthy` render as the same word, and the tool names the remedy it declines to perform"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/report-commands.ts, src/lib/status-board.ts, test/liveness-is-sensed-on-the-host-it-runs-on.test.ts]
+  origin: "operator-session#deploy-visibility-2026-09-09"
+  plan_refs: ["W1-T3200", "W1-T2450", "W1-T301", "W1-T2349", "W1-T484"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 on origin/main 2a22ebcf0. Every row of the LIVENESS block:
+      daemon           : unknown - no launchd sensor on this host (`launchctl` unavailable)
+      serve            : unknown - no launchd sensor on this host (`launchctl` unavailable)
+      deploy-supervisor: unknown - no launchd sensor on this host (`launchctl` unavailable)
+      next action: ... daemon/deploy-supervisor liveness cannot be read here; confirm with `ps` instead
+    THE TOOL NAMES THE REMEDY IT DOES NOT PERFORM. `ps` is available, the daemon is plainly visible
+    in it, and the status board tells a human to go look by hand.
+    WHAT THE BLINDNESS HID, MEASURED THE SAME DAY. The deploy supervisor has NEVER completed a cycle
+    on this host: `deploy.*` rows number ZERO in the live ledger and none across the archives, `ps`
+    shows one long-lived process (`rmd daemon`) and no supervisor, the entrypoint execs the daemon
+    and starts nothing else, and `src/lib/daemon.ts` contains no deploy-cycle reference. That is a
+    total absence of the component the daemon DEPENDS on - `run-task.ts`'s plan-reload comment
+    states the sha is read without fetching because "the deploy supervisor keeps that ref current on
+    its own ~2-minute cadence". None of it was visible, because absence and health both print
+    `unknown`.
+    THE HOST HAS BEEN LINUX SINCE 2026-08-13 (W1-T3199's measurement: `command -v launchctl` ABSENT,
+    `uname -s` Linux). W1-T3200 already made the RESTART ACTUATOR host-adaptive and merged (#4720).
+    The SENSOR half was not in its scope and is still macOS-only.
+  design: |
+    (i) SENSE THE HOST YOU ARE ON. A process-table read answers "is this service's process alive"
+    on Linux; `launchctl` keeps answering it on macOS. Selection is by host capability, the same
+    shape W1-T3200 established for the actuator, not by a new configuration knob.
+    (i-b) A LEDGER TICK MAY BE THE BETTER SENSOR, AND THIS SHARD DOES NOT PRESCRIBE `ps`. W1-T484
+    (open, verify: human) proposes an unconditional per-tick ledger step in `runDaemon`. A row the
+    service ITSELF writes is host-independent and strictly stronger evidence than a process-table
+    match, because it proves the loop is TURNING rather than that a pid exists - the distinction
+    this host needed today, when the daemon was alive and every plan-reading verb was refused.
+    Whoever builds this should read W1-T484 first and prefer that signal where it is available,
+    falling back to the process table only for services that write no tick.
+    (ii) `sensed: false` MUST MEAN "NO SENSOR FOR THIS HOST", NOT "NO LAUNCHD". Today the field
+    conflates them, which is why a Linux host reports blindness rather than an answer. Once a host
+    HAS a sensor, an unanswered read is a real fault and must keep its full alarming power.
+    (iii) DO NOT SILENTLY UPGRADE CONFIDENCE, and this is the honest limit of the change. A launchd
+    query answers about a SERVICE IDENTITY; a process-table match answers about a PROCESS matching a
+    pattern. The second is weaker evidence and the rendered row must not pretend otherwise - a
+    reader must be able to tell which sensor answered.
+    (iv) AN INTERVAL SERVICE'S REST IS NOT DEATH. W1-T301 already separated a periodic one-shot's
+    healthy quiet from a dead service; the new sensor feeds that same three-way state and must not
+    collapse it back to a binary.
+  acceptance:
+    - claim: "on a host with no launchctl, a running daemon renders as running rather than unknown"
+      proof: "unit test: test/liveness-is-sensed-on-the-host-it-runs-on.test.ts"
+    - claim: "on a host with no launchctl, a service whose process is genuinely absent renders as not running, so the sensor can report a real fault"
+      proof: "unit test: test/liveness-is-sensed-on-the-host-it-runs-on.test.ts"
+    - claim: "the rendered row states which sensor answered, so a process-table match is not read as a service-identity guarantee"
+      proof: "unit test: test/liveness-is-sensed-on-the-host-it-runs-on.test.ts"
+    - claim: "a host that genuinely has no sensor at all still reads unknown, so blindness stays expressible"
+      proof: "unit test: test/liveness-is-sensed-on-the-host-it-runs-on.test.ts"
+    - claim: "the production sensor selection reaches the host-adaptive path, not only its own tests"
+      proof: "grep: queryLaunchdService in src/lib/report-commands.ts"
+  falsifier: |
+    CLOSE IF liveness already reads on this host: run `rmd status` on the Azure container.
+    MEASURED 2026-09-09: all three service rows printed `unknown - no launchd sensor on this host`.
+    POSITIVE CONTROL, because "renders running" is not the claim: the suite must show BOTH a live
+    process rendering `running` AND an absent one rendering `not running`. A suite proving only the
+    first cannot distinguish a working sensor from one hardcoded to report health, and a sensor that
+    never reports death is worse than the blindness it replaced - it converts an unreadable fleet
+    into a confidently wrong one.
+    THIRD ARM REQUIRED: a host with neither sensor must still read `unknown`. Deleting the blindness
+    state entirely would make this task's own diagnosis unexpressible on a future host.
+    DO NOT match a process by name alone if the pattern also matches a worker or a lane's own
+    process - the fleet runs many `node ... run-task.ts` processes and a careless match reports the
+    daemon alive whenever ANY of them is.
+  note: |
+    Rule 25 CHECKED: neither file is an instrument surface.
+    RISK IS HIGH AND THE REASON IS HONEST: two modules change (the sensor in report-commands.ts and
+    the state it feeds in status-board.ts), and a liveness sensor is a diagnosis surface the whole
+    fleet reads. Rule 19 asks for high or a decomposition; the sensor and the state it feeds cannot
+    be split without landing a producer nothing consumes.
+    THE STALENESS ROW IS FILED SEPARATELY as W1-T3241 and does not depend on this: that row can be
+    made honest without a sensor at all, and is worth shipping first.
+    CAVEAT WITH EQUAL WEIGHT: this makes liveness READABLE, not CORRECT. A process-table sensor can
+    report a process that is alive but wedged - exactly the state this fleet hit today, where the
+    daemon was running and every plan-reading verb was refused. Liveness is not health, and nothing
+    here claims otherwise.
+    THIRD SIGNAL EXISTS AND IS FILED: W1-T484 is parked at verify: human. If it is ruled and built
+    first, this task shrinks to selecting between a tick reader and a process reader rather than
+    building a sensor from nothing.
+    SECOND CAVEAT: the deploy supervisor has no runner on this host. Making its absence VISIBLE does
+    not give it one - that is W1-T3201's judge and W1-T3199's ruling, both open.
