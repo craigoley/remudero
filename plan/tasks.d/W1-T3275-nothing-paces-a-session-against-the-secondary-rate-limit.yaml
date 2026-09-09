@@ -1,0 +1,114 @@
+- id: W1-T3275
+  title: "NOTHING PACES A SESSION AGAINST THE SECONDARY RATE LIMIT — `deny-floor.sh` rule 6 refuses the SHAPE of a poll (loop + wait + `gh`) and sees nothing else, so a run of separate status reads seconds apart tripped the limit TWICE in one session with no loop anywhere, while `gh api rate_limit` read 5000/5000 throughout"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files:
+    - hooks/deny-floor.sh
+    - test/gh-read-cadence-floor.test.ts
+    - test/deny-floor.test.ts
+    - CLAUDE.md
+  origin: "operator-session#gh-cadence-2026-09-09"
+  plan_refs: ["W1-T1066", "W1-T203", "W1-T2312"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING. The diff is one shell function
+    and one rule, but it lands in the PreToolUse floor that EVERY interactive session and every
+    worker passes through, and it can refuse work. The falsifier set below is weighted almost
+    entirely toward what must still be allowed.
+
+    OPERATOR-REQUESTED. The ask was "set a rule somewhere that ensures our sessions do not poll
+    github more than once every few minutes". CLAUDE.md already carried that rule as prose; this is
+    the refusal that makes it bind, per that file's own preamble.
+  rationale: |
+    THE RULE ALREADY EXISTED AND DID NOT BIND. CLAUDE.md's "CI and merging" section has carried
+    "CADENCE IS THE BUDGET, NOT INTENT — never loop on `gh pr view` ... ONE sparse check-in is fine,
+    a poll is not" since the 2026-08-20 lockout, where a lane polled 80 times at a 45-second cadence
+    and locked the operator out of his own repo for ~90 minutes.
+
+    W1-T1066 turned half of it into a gate: `hooks/deny-floor.sh` rule 6 refuses a single command
+    carrying a loop keyword AND a wait AND `gh`. That catches `for i in $(seq 1 25); do gh pr view
+    …; sleep 20; done` and nothing else.
+
+    ⚠ THAT IS NOT HOW THE BUDGET GETS BURNED. MEASURED 2026-09-09, twice in one session: no loop
+    anywhere, just a run of separate `gh pr checks` / `gh run view --log-failed` calls seconds
+    apart, each of them legal on its own and each individually reasonable. The session was 403'd
+    both times. At the moment of the second 403:
+
+        gh api rate_limit --jq .resources.core  ->  core: 5000/5000 resets 21:27:50Z
+
+    FULL QUOTA, AND STILL REFUSED — because the ceiling hit is the SECONDARY limit, which counts
+    RATE, NOT VOLUME. A quota reading cannot predict it, which is why "check the budget first" is
+    not a workable discipline and why the cadence has to be paced rather than measured.
+
+    THE SHAPE OF THE FIX IS CONSTRAINED BY WHAT MUST NOT BREAK. A floor on ALL `gh` calls would make
+    ordinary work impossible: opening a PR, posting a review and arming a merge is four or five
+    calls in a row, and that burst is the productive path. This repo has already recorded what
+    happens to a gate that cries wolf — "a blocking check that false-positives on ~50 PRs/day gets
+    routed around within a week" (W1-T322's own doc). So only READS are paced.
+
+  design: |
+    (i) PACE READS, NEVER WRITES. A read is what a session repeats while waiting; a write is what it
+    does when it has something to say, and it is self-limiting. `gh pr create`, `gh pr merge`,
+    `gh pr comment`, `gh run rerun` and any `--method POST/PATCH/PUT/DELETE` are never refused.
+
+    (ii) THE BACK-OFF INSTRUMENTS ARE EXEMPT BY NAME. `gh api rate_limit` and `gh auth status` cost
+    no quota and are exactly how a session discovers it must stop. A floor that blocked them would
+    leave a rate-limited session unable to find out when it may resume.
+
+    (iii) THE OVERRIDE MUST BE READ FROM THE COMMAND, NOT THE ENVIRONMENT. A PreToolUse hook is
+    spawned by the harness, so an inline `RMD_GH_COOLDOWN_S=0 gh …` never reaches the hook process's
+    env. An env-only override would be a documented escape hatch that silently does nothing — worse
+    than having none. Reading it from the command text also keeps the override visible to a reviewer.
+
+    (iv) ⚠ THE MATCHER IS THE HARD PART, AND BOTH OBVIOUS FORMS ARE WRONG. A substring test refuses
+    every command that merely MENTIONS the tool: a `grep` for this rule's own test name was blocked
+    twice while it was being written, and a floor that refuses a grep about itself is disabled the
+    same afternoon. Requiring `gh` after a SEPARATOR is worse — it silently stops rule 6 refusing
+    `…; do gh pr view; sleep 20; done`, because `do` is not a separator, and that mutant passes every
+    existing test. The working form strips quoted text and then matches `gh` that is not part of a
+    longer word or a path, PLUS a raw-text pass for `$(gh` / backtick substitution, because
+    W1-T1066's own recorded poll wraps its whole call in double quotes.
+
+    (v) FAIL OPEN, ALWAYS. A cadence floor that errors must never block work: an unwritable state
+    root, an unreadable stamp or a missing `date` all fall through to allowing the call.
+
+    (vi) A REFUSAL MUST NOT RE-STAMP. If a blocked call advanced the clock, one burst would push the
+    window forward on every attempt and the floor would never open. The stamp moves only on an
+    ALLOWED read.
+
+    (vii) IT IS A TRIPWIRE, NOT A BOUNDARY. A command that assembles the tool name indirectly
+    escapes it. That limit is asserted in the suite rather than papered over, the same discipline
+    rule 7's indirect-refspec hole already carries.
+
+  acceptance:
+    - claim: "a read-shaped gh call inside the floor is refused, and the refusal names the cadence and the override"
+      proof: "unit test: a second read-shaped gh call inside the floor is refused"
+    - claim: "writes are never refused however close together, so the productive path is untouched"
+      proof: "unit test: WRITES are never refused, however close together"
+    - claim: "rate_limit and auth status stay reachable, so a paced session can still learn when to resume"
+      proof: "unit test: the back-off instruments stay reachable"
+    - claim: "the window expires and a refusal never extends its own window"
+      proof: "unit test: the window EXPIRES, and a refusal never extends its own window"
+    - claim: "a command that merely mentions gh is untouched, while a quoted command substitution still counts as an invocation"
+      proof: "unit test: a gh call inside a quoted command substitution IS an invocation"
+
+  falsifier: |
+    Close this without implementation if the harness gains its own request-pacing for tool calls
+    that reach GitHub — a second pacer in the hook would then be two actors throttling the same
+    stream, and the hook is the worse place to do it.
+
+    Re-design rather than build if the read/write split cannot be drawn reliably from the command
+    text: pacing writes is the version of this that gets disabled, and a matcher that cannot tell
+    `gh pr view` from `gh pr merge` must not ship.
+
+    Do NOT resolve this by lowering the floor until it never fires; a floor that never refuses is
+    the prose rule again, which is the thing that already failed twice. Do NOT extend it to block
+    writes, and do NOT remove the `rate_limit` exemption — a session that cannot read its own limit
+    cannot back off correctly.
