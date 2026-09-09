@@ -150,10 +150,29 @@ export const DRIFT_CEILING = DRIFT_BASELINE.driftCeiling;
  * ceiling, however generous, because it is a silently SHRINKING exclusion list, not a suite that
  * merely hasn't been fixed yet.
  *
+ * W1-T3276 -- AND NEITHER IS *NEW* DRIFT. The ceiling forgave by COUNT alone, so a brand-new time
+ * bomb was invisible whenever an old one had been repaired. MEASURED 2026-09-09 against this very
+ * function: 10 recorded suites plus one new bomb is 11, at the ceiling, `ok: true` -- with the new
+ * suite sitting IN the drifted list, unread. Eleven ENTIRELY NEW suites is also `ok: true`, a set
+ * sharing not one member with the population the ceiling was captured from. That is how
+ * `clock-sweep` reported SUCCESS on 2026-09-07 over the tree carrying the fixture which took `main`
+ * red two days later (W1-T3270).
+ *
+ * So a drifting suite whose NAME is not in `driftingSuitesAtCapture` is a regression at ANY count,
+ * exactly as a stale exclusion already is. The ceiling keeps forgiving the RECORDED backlog -- that
+ * is what W1-T1128 fixed and this does not undo -- but it can no longer forgive a stranger.
+ *
  * @param results Map<suite, {failed: boolean}>
  */
-export function classifySweep(results, artifacts = CLOCK_ARTIFACTS, ceiling = DRIFT_CEILING) {
+export function classifySweep(
+  results,
+  artifacts = CLOCK_ARTIFACTS,
+  ceiling = DRIFT_CEILING,
+  recorded = DRIFT_BASELINE.driftingSuitesAtCapture ?? [],
+) {
+  const known = new Set(recorded);
   const drifted = [];
+  const newDrift = [];
   const staleExclusions = [];
   for (const [suite, r] of results) {
     if (artifacts.has(suite)) {
@@ -161,13 +180,19 @@ export function classifySweep(results, artifacts = CLOCK_ARTIFACTS, ceiling = DR
       if (!r.failed) staleExclusions.push({ suite, reason: artifacts.get(suite) });
       continue;
     }
-    if (r.failed) drifted.push({ suite, ...r });
+    if (r.failed) {
+      const row = { suite, ...r };
+      drifted.push(row);
+      // A name the baseline never recorded is a suite that STARTED drifting since it was captured.
+      if (!known.has(suite)) newDrift.push(row);
+    }
   }
   return {
     drifted,
+    newDrift,
     staleExclusions,
     ceiling,
-    ok: drifted.length <= ceiling && staleExclusions.length === 0,
+    ok: newDrift.length === 0 && drifted.length <= ceiling && staleExclusions.length === 0,
   };
 }
 
@@ -228,6 +253,9 @@ export function main({
   run = runSuite,
   derive = deriveCandidates,
   ceiling = DRIFT_CEILING,
+  // W1-T3276 — injected beside `ceiling` and for the same reason: the suite must be able to state
+  // a recorded set without rewriting the shipped baseline.
+  recorded = DRIFT_BASELINE.driftingSuitesAtCapture ?? [],
   log = console.log,
   write = (s) => process.stdout.write(s),
 } = {}) {
@@ -261,7 +289,7 @@ export function main({
     const verdict = r.failed ? (CLOCK_ARTIFACTS.has(suite) ? "fail (known artifact)" : "FAIL") : "ok";
     write(`  [${String(done).padStart(3)}/${runnable.length}] ${verdict.padEnd(21)} ${suite}\n`);
   }
-  const { drifted, staleExclusions, ok } = classifySweep(results, CLOCK_ARTIFACTS, ceiling);
+  const { drifted, newDrift, staleExclusions, ok } = classifySweep(results, CLOCK_ARTIFACTS, ceiling, recorded);
 
   log("");
   // ── THE REPORT. An operator reads this months from now with no context, so it names the suite,
@@ -287,6 +315,15 @@ export function main({
     // A RATCHET, not absolute cleanliness (W1-T1128): the verdict compares against the recorded
     // ceiling, and each of the three relations gets its own line so an operator can tell "still
     // broken, unchanged", "just got worse" and "just got better -- lower the ceiling" apart.
+    // W1-T3276 -- NEW DRIFT LEADS, because "12 suites drifted" is not actionable and "one NEW
+    // suite drifted" is. A run that stays under the ceiling still fails when this list is non-empty.
+    if (newDrift.length) {
+      log(`\nNEW DRIFT — ${newDrift.length} suite(s) NOT in scripts/clock-sweep-baseline.json's recorded set:`);
+      for (const d of newDrift) log(`  test/${d.suite}.test.ts`);
+      log(`A suite that STARTED drifting is a regression at any count, and is never forgiven by the`);
+      log(`ceiling -- the ceiling exists to forgive the recorded backlog, not a stranger. Fix it, or`);
+      log(`record it deliberately in driftingSuitesAtCapture and say why in the same PR.`);
+    }
     if (drifted.length > ceiling) {
       log(`\nOVER CEILING — ${drifted.length} drifting suite(s) exceeds the recorded ceiling of ${ceiling}.`);
       log(`This is a REGRESSION against scripts/clock-sweep-baseline.json: fix the new drift, or if a`);

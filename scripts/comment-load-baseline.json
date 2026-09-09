@@ -49,7 +49,7 @@
   "scripts/clock-shift.mjs": 19,
   "scripts/clock-signature-baseline.json": 250,
   "scripts/clock-sweep-baseline.json": 0,
-  "scripts/clock-sweep.mjs": 136,
+  "scripts/clock-sweep.mjs": 153,
   "scripts/comment-load-baseline.json": 0,
   "scripts/comment-load-ratchet.mjs": 250,
   "scripts/coverage-baseline.json": 0,
