@@ -10,8 +10,8 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HELPER = "test/helpers/wall-clock-bound.js";
 const THIS_FILE = "test/a-wall-clock-bound-declares-itself.test.ts";
 const HELPER_IMPORT = "helpers/wall-clock-bound.js";
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 16;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 24;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 17;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 27;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 
