@@ -205,6 +205,14 @@ test("W1-T3215 `rmd caller-sweep --files` emits a bare, splice-ready suite list"
   assert.equal(r.out, "test/direct.test.ts");
 });
 
+test("W1-T3215 `rmd caller-sweep` says when the closure reaches no suite", () => {
+  const srcTree = { "src/lib/fake.ts": ["export function changedSymbol() {}"].join("\n") };
+  const { spawn, readFile } = fakeTree({ changedSymbol: [] }, srcTree);
+  const r = captured(() => callerSweepCommand(["changedSymbol"], { repoRoot: "/fake-root", spawn, readFile }));
+  assert.equal(r.code, 0);
+  assert.match(r.out, /no suite reachable, directly or through a src\/ caller/);
+});
+
 test("W1-T3215 `rmd caller-sweep` with no symbol is refused with exit 2, never a silent default", () => {
   const r = captured(() => callerSweepCommand([], { repoRoot: "/fake-root", spawn: spawnThatMustNotRun }));
   assert.equal(r.code, 2);
