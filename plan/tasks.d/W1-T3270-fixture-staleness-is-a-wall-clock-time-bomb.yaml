@@ -6,7 +6,6 @@
   verify: auto
   principles: {tdd: strict}
   risk: medium
-  band_meaning: depth
   budget_usd: 6.00
   files:
     - test/stale-ci-gate-wiring.test.ts
