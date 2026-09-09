@@ -1,0 +1,100 @@
+- id: W1-T3225
+  title: "THE PRE-PUSH HOOK SPAWNS TEST SUITES TO CATCH A DEFECT ITS OWN 2-SECOND CHECK ALREADY CATCHES — the census step found 0 of 9 measured incidents, clears 9 of 134 suites, and caused both times the hook damaged the repository it was protecting"
+  repo: remudero
+  depends_on: [W1-T3224]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [hooks/pre-push, test/the-hook-spawns-no-test-suite.test.ts]
+  origin: "operator-session#prepush-arming-2026-09-09"
+  plan_refs: ["W1-T3224", "W1-T3222", "W1-T3059", "W1-T3205", "W1-T2969"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    THE HOOK RUNS THREE THINGS: `rule15-precheck`, the W1-T3205 tier admission, and then
+    `node --test` over every census suite `rmd census-membership` can place for the diff. The third
+    is the subject of this task; the first two are not touched.
+    EVERY MEASURED PRE-PUSH INCIDENT IS THE SAME DEFECT, AND THE CHEAP CHECK CATCHES ALL OF THEM.
+    Nine PRs reddened by an untiered test file: #4749, #4750, #4751, #4760, #4761 (2026-09-09) and
+    #4698, #4692, #4681, #4684 (2026-09-08, measured in W1-T3205's own filing). The tier admission
+    names every one of them in about two seconds and spawns nothing. The census step caught NONE of
+    them — it is not what those diffs failed on.
+    WHAT THE CENSUS STEP DID INSTEAD, twice, on 2026-09-09:
+      A real armed push from lane t3222b left HEAD rewritten to a test fixture's commit, the index
+      cut from 3,550 tracked files to 1, and 231 paths dirty — seven fixture commits from one run.
+      A second run re-initialised the SHARED gitdir as bare (`core.bare = true`, in the config every
+      worktree reads), which took the main checkout and the daemon container down until repaired.
+    W1-T3224 fixes the mechanism (an exported GIT_DIR that hook children inherit) and is this task's
+    dependency. This task asks the separate question W1-T3224 deliberately does not: whether the
+    step should run in a hook at all.
+    THE STEP'S OWN COVERAGE IS SMALL AND IT SAYS SO. On the measured run it cleared 9 suites and
+    printed "125 census suite(s) are unmodelled and were NOT run". So it pays a spawn of the test
+    runner on every push to clear under 7% of the census population, for a defect class that has
+    never once been what a push failed on.
+    NOT AN ARGUMENT AGAINST THE CENSUS SUITES. They are correct, CI runs all of them, and nothing
+    here changes that. The claim is narrower: a git hook is the wrong place to spawn a test runner.
+  design: |
+    (i) REMOVE THE CENSUS STEP FROM THE HOOK. Keep `rule15-precheck` and the tier admission, in
+    order, unchanged. The hook's job becomes what it demonstrably does well: refuse in ~2 seconds
+    with a named remedy.
+    (ii) THE COVERAGE IT PROVIDED DOES NOT MOVE, BECAUSE CI ALREADY OWNS IT. Every census suite runs
+    in `ci-shard`. This changes WHEN a small subset runs, never WHETHER any of them do. A reviewer
+    must be able to confirm that without trusting this sentence, so the suite asserts CI's workflow
+    still invokes them.
+    (iii) NO TEST RUNNER IS SPAWNED BY THE HOOK, AND THAT IS THE ASSERTION. Not "it is faster" — a
+    time bound is a flaky assertion on a shared host. The property is structural: the hook's text
+    contains no `node --test`, and a real push spawns no test-runner process.
+    (iv) THE REMOVAL IS BOUNDED BY THE SAME ANCHORS W1-T3205 USED. That block already carries
+    `# W1-T3205: BEGIN/END` markers; the census block should be removed as a whole, so the diff
+    reads as one deletion rather than a re-flow of the file.
+    (v) `rmd census-membership` KEEPS ITS VERB AND ITS PURPOSE. It is a report an author can run;
+    W1-T2969 owns whether its model is complete. Nothing about the verb changes here.
+  acceptance:
+    - claim: "the hook still refuses an untiered test file and still passes a clean tree, proven through a real git push"
+      proof: "unit test: test/the-hook-spawns-no-test-suite.test.ts"
+    - claim: "a real push through the hook spawns no test runner, and the hook's text contains no node --test invocation"
+      proof: "unit test: test/the-hook-spawns-no-test-suite.test.ts"
+    - claim: "the census suites still run in CI, so this changes when a subset runs and never whether any of them do"
+      proof: "unit test: test/the-hook-spawns-no-test-suite.test.ts"
+    - claim: "rule15-precheck and the tier admission both still run, in that order"
+      proof: "unit test: test/the-hook-spawns-no-test-suite.test.ts"
+  falsifier: |
+    CLOSE IF the hook already spawns no suites: read `hooks/pre-push` for a `node --test` line.
+    MEASURED 2026-09-09: it runs `node --test --import tsx --import ./test/setup/tmp-hygiene.ts
+    $census_files` over whatever `rmd census-membership --files` returns.
+    POSITIVE CONTROL, because "no suite ran" passes trivially against a hook that does nothing: the
+    suite must ALSO show the hook still reaching a verdict — a clean tree passing and an untiered
+    file refused, both through a REAL `git push`. Testing the hook by invoking it directly is what
+    hid W1-T3224's defect for a full arming cycle, and a suite that did that here would prove
+    nothing about a hook.
+    PROVE THE REMOVAL IS LOAD-BEARING: assert against the hook's text that the census block is gone
+    AND that the two surviving checks are still present and ordered. A suite asserting only the
+    absence cannot tell a narrowed hook from a gutted one.
+    DO NOT justify this with a wall-time assertion. A time bound on a shared host is a flake, and
+    the argument here is not speed — it is that a git hook is the wrong place to spawn a test
+    runner. Design (iii) states the structural property instead.
+    DO NOT weaken CI. If the census suites stop running anywhere, this task has traded a real
+    guarantee for a cheaper hook, which is the opposite of its point.
+    DO NOT remove `rmd census-membership`. The verb is a useful report and W1-T2969 owns its model;
+    only the hook's invocation of the test runner goes.
+  note: |
+    Rule 25 CHECKED: `hooks/pre-push` is the product surface this task changes and its test is the
+    only other file.
+    RELATIONSHIP TO W1-T3224, which is a DEPENDENCY and not a duplicate: that task makes hook
+    children safe by scrubbing the environment they inherit. This one removes the child that has no
+    measured benefit. Both are wanted — the scrub protects `rule15-precheck` and the tier check and
+    any future child, and it must land first so this task is a narrowing rather than a rescue.
+    RELATIONSHIP TO W1-T3222: that shard arms the gates and is parked. The measured case for arming
+    rests entirely on the tier admission, which is what this task keeps. Narrowing first makes
+    arming a smaller bet, not a different one.
+    CAVEAT WITH EQUAL WEIGHT: "the census step caught 0 of 9" is a statement about NINE OBSERVED
+    incidents over two days, not a proof that it can never catch anything. It is a real check, and
+    on some future diff it would have fired first. The trade being made is explicit — a small,
+    self-reportedly incomplete early warning, against spawning a test runner inside every push on
+    every worker.
+    SECOND CAVEAT: after this, "pre-push passed" means LESS than it does today, and it already did
+    not mean "CI will pass". The honest description of the narrowed hook is that it catches the one
+    defect class that has actually cost this fleet CI matrices, quickly, and nothing else.
