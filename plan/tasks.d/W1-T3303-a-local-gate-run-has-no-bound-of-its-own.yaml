@@ -1,0 +1,115 @@
+- id: W1-T3303
+  title: "ONE WEDGED SUITE STALLS `--ci-parity` FOREVER AND KILLING IT LEAVES AN ORPHAN — CI bounds every job with `timeout-minutes: 35`, the local gate has NO bound at any layer, and a run measured 97 minutes with its whole process tree at 0.9% CPU and no diagnostic naming the suite"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files:
+    - src/lib/ci-parity.ts
+    - test/a-local-gate-run-has-no-bound-of-its-own.test.ts
+  origin: "operator-session#ci-parity-cost-2026-09-09"
+  plan_refs: ["W1-T294", "W1-T2597", "W1-T3266", "W1-T2433"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09, AS A 97-MINUTE STALL DURING AN ORDINARY PR FIX.
+
+    `rmd preflight --ci-parity` ran for 1h37m. Inspection of the live process tree found the whole
+    thing IDLE, not working: total CPU across all 44 descendants was 0.9%, and the deepest child had
+    been alive 14 minutes blocked in `futex_do_wait`, running one suite —
+    `test/serve-command-boot.test.ts`. Nothing printed for the last nine of those minutes. The run
+    would not have ended on its own.
+
+    THERE IS NO BOUND AT ANY LAYER, and this was verified rather than assumed:
+      - `scripts/test-with-retry.mjs` says so in its own header (W1-T2433): "This reads NO job bound
+        (no timeout-minutes, no WAIT_CAP_SECONDS) -- only the budget the caller supplies via
+        $TEST_RETRY_BUDGET_SECONDS". That variable decides whether a SECOND PASS STARTS; it does not
+        bound how long a pass runs.
+      - `src/lib/ci-parity.ts`'s `boundMs` is a SOFT bound on FAST_GATE census steps only, and its
+        own code path reports "over the ... soft bound (reported, not refused)". It does not apply
+        to the suite steps at all.
+      - Nothing else in the local path bounds a suite.
+
+    CI SURVIVES THIS FOR A REASON THAT HAS NO LOCAL COUNTERPART. `.github/workflows/ci.yml` gives
+    its jobs `timeout-minutes: 35` (and 10 on the lighter ones). A wedged suite there kills the job,
+    reddens one shard, and names it. The local gate has no runner to do that.
+
+    AND THE KILL LEAVES AN ORPHAN, which is the second half of the defect. Bounding that same suite
+    with `timeout 180` — whose default signal is SIGTERM — produced: the wrapper exited 143, and the
+    wedged child SURVIVED, reparented to PID 1, still consuming CPU in `futex_do_wait`. `SIGKILL`
+    killed it immediately. That is the W1-T3266 asymmetry reproduced on an unrelated process: a
+    bound that ASKS is not a bound when the target cannot service a signal.
+
+    THE COST IS NOT THE MINUTES. CLAUDE.md instructs every session to run this gate before its first
+    push and to treat a green run as "the real signal". A gate that can hang forever with no
+    diagnostic is one that gets killed, skipped, or — as happened here — waited on for two hours
+    while the PR it was gating had ALREADY MERGED.
+  design: |
+    (i) EVERY SUITE STEP CARRIES A WALL-CLOCK BOUND. The two full-suite entries get an explicit
+    ceiling; crossing it ends the step with a NAMED failure rather than an unbounded wait.
+    (ii) THE BOUND KILLS WITH AN UNTRAPPABLE SIGNAL. SIGTERM is what left an orphan spinning on
+    PID 1 in the measurement above; the kill must be SIGKILL, for the same reason W1-T3266 changed
+    the proof spawner. A bound whose signal can be ignored is not a bound.
+    (iii) THE WHOLE PROCESS GROUP DIES, NOT JUST THE DIRECT CHILD. The observed tree was five deep
+    (preflight -> test-with-retry -> runner -> suite child -> esbuild service). Killing the head
+    left descendants alive. Whatever this repo already uses for group teardown is the mechanism;
+    a second one must not be invented here.
+    (iv) THE FAILURE NAMES THE SUITE THAT HUNG. A timeout reported as "the ci step failed" sends the
+    reader to the whole suite. The runner's own per-file progress output already identifies the last
+    file entered; the report must carry it, because finding it in the measurement required reading
+    `/proc/<pid>/cmdline` on a live process.
+    (v) A BOUND CROSSING IS A LOUD FAILURE, NEVER A SILENT PASS. This is the one direction that
+    matters: a timed-out suite has an UNVERIFIED failure set, exactly as W1-T2597 records for a
+    shard with no `# tests` summary. It must never be folded into a total or reported as green.
+    (vi) THE CEILING IS SIZED AGAINST OBSERVED COMPLETION, not guessed. A completed run's own plain
+    suite pass measured `# duration_ms 1024664` (17.1 min); the bound must sit clear of that with
+    headroom for a slower host, or it becomes a bound that fires on a HEALTHY population — this
+    repo's own recurring defect.
+    (vii) NOT IN SCOPE: fixing whatever makes `test/serve-command-boot.test.ts` hang (W1-T3302),
+    sharding the suite entries, or changing CI's own timeouts.
+  acceptance:
+    - claim: "a suite step that exceeds its wall-clock ceiling ends the step, and the run does not wait past the bound"
+      proof: "unit test: test/a-local-gate-run-has-no-bound-of-its-own.test.ts"
+    - claim: "the bound kills with an untrappable signal, so a child that ignores SIGTERM does not outlive it"
+      proof: "unit test: test/a-local-gate-run-has-no-bound-of-its-own.test.ts"
+    - claim: "no descendant survives the bound: a grandchild of the timed-out step is gone, never reparented and left running"
+      proof: "unit test: test/a-local-gate-run-has-no-bound-of-its-own.test.ts"
+    - claim: "a bound crossing is reported as a FAILURE naming the suite that was running, never as a pass and never as a bare step name"
+      proof: "unit test: test/a-local-gate-run-has-no-bound-of-its-own.test.ts"
+    - claim: "a suite finishing inside its bound is untouched — no signal is sent and its own exit code and output survive"
+      proof: "unit test: test/a-local-gate-run-has-no-bound-of-its-own.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF a suite step is already bounded: read `src/lib/ci-parity.ts`'s
+    suite entries and `scripts/test-with-retry.mjs`. MEASURED 2026-09-09: the wrapper's own header
+    states it reads NO job bound, and `boundMs` is a soft, census-only, reported-not-refused ceiling.
+    PROVE THE KILL IS UNTRAPPABLE WITH A CHILD THAT IGNORES SIGTERM, and this is the one fixture
+    that must not be faked: a child installing a SIGTERM handler and spinning must still be gone
+    after the bound. A test whose child dies on SIGTERM passes on the implementation this task
+    exists to replace — the measurement above is exactly that: `timeout 180` (SIGTERM) left the
+    child alive on PID 1, `SIGKILL` ended it at once.
+    PROVE THE GRANDCHILD DIES TOO. The observed tree was five levels deep and killing the head left
+    descendants running. A fixture with one intermediate process is the minimum; without it the
+    implementation passes while still leaking the orphans that motivated the task.
+    THE HEALTHY PATH MUST BE BYTE-IDENTICAL. A suite finishing inside the bound must receive no
+    signal at all and keep its own exit code — a bound that perturbs a passing run has replaced a
+    hang with a flake.
+    DO NOT SIZE THE CEILING BELOW OBSERVED COMPLETION. A completed pass measured 17.1 minutes; a
+    bound near that fires on a healthy population, which is this repo's recurring defect and would
+    make the gate worse than unbounded.
+    DO NOT REPORT A TIMEOUT AS ANYTHING BUT A FAILURE WITH AN UNVERIFIED SET (W1-T2597).
+  note: |
+    Rule 25 CHECKED: `src/lib/ci-parity.ts` is not on INSTRUMENT_SURFACE; declared files are that
+    module and its own new test, so `detectInstrumentEntanglement` cannot fire.
+    risk:high on BLAST RADIUS, not span — two files is narrow. This module is the gate CLAUDE.md
+    tells every session to run before its first push. A bound sized wrong here does not fail loudly;
+    it either kills healthy runs or preserves the hang. The falsifier is written against both.
+    SEQUENCING: this touches the same module as W1-T3298 and W1-T3299 and is not independently
+    mergeable with them. It is the LEAST dependent of the three — a bound is orthogonal to which
+    argv the entries shell — but whichever lands first, the others rebase.
+    WHY THIS IS NOT A DUPLICATE OF W1-T3302. That task fixes ONE hanging suite. This one holds
+    whatever hangs NEXT. A gate whose safety depends on no suite ever wedging is not bounded, and
+    the suite found today was found by accident during an unrelated fix.
