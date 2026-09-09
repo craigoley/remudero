@@ -11,7 +11,7 @@
 // The outcome is: after a lesson about gate G landed, did G go on refusing pull requests?
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -167,6 +167,38 @@ test("an unreadable candidate shard makes lesson recurrence input explicitly unr
   mkdirSync(join(shards, "broken.yaml"), { recursive: true });
   try {
     assert.deepEqual(readFiledCiLessons(shards), { status: "unreadable" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a shard that PARSES AS A LESSON BUT NOT AS YAML is unreadable too — the lesson regexes are line-scoped and the document is not", () => {
+  // A SECOND, DISTINCT UNREADABLE PATH from the case above, which fails at the READ (a directory
+  // where a file should be). This one reads fine and its two lesson lines match: `parseFiledCiLesson`
+  // is two line-anchored regexes, so it happily reports a lesson out of a document the YAML parser
+  // cannot load at all. Without this arm the throwing branch is unexercised, and a shard corrupted
+  // below its origin line would be silently DROPPED from the population rather than making the
+  // whole measurement refuse — which is the failure this function's "unreadable" status exists for.
+  const root = mkdtempSync(join(tmpdir(), "rmd-ci-lessons-unparseable-"));
+  const shards = join(root, "tasks.d");
+  mkdirSync(shards, { recursive: true });
+  writeFileSync(
+    join(shards, "corrupt.yaml"),
+    [
+      "- id: W1-T0001",
+      '  origin: "ci-learning:42:comment-load-ratchet"',
+      "  ci_learning_prs: [42]",
+      "  files: [unterminated",
+    ].join("\n") + "\n",
+  );
+  try {
+    // The lesson lines themselves are intact — this is not a case of the shard failing to look
+    // like a lesson.
+    const asLesson = parseFiledCiLesson(readFileSync(join(shards, "corrupt.yaml"), "utf8"));
+    assert.deepEqual(asLesson, { findingId: "ci-learning:42:comment-load-ratchet", gate: "comment-load-ratchet", watermarkPr: 42 });
+
+    assert.deepEqual(readFiledCiLessons(shards), { status: "unreadable" },
+      "a shard whose YAML will not load must make the measurement REFUSE, never quietly shrink the population");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
