@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,7 +7,7 @@ import test from "node:test";
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
-import { buildSweepEffects, defaultSweepGhRun, type BuildSweepEffectsDeps } from "../src/run-task.js";
+import { buildSweepEffects, defaultSweepGhRun, fixCommand, type BuildSweepEffectsDeps } from "../src/run-task.js";
 
 const EFFECT_KEYS = [
   "arm",
@@ -65,6 +65,60 @@ test("buildSweepEffects takes one typed deps object and returns the sweep effect
     assert.deepEqual(Object.keys(effects).sort(), [...EFFECT_KEYS].sort());
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fixCommand builds the sweep effects from one deps object before routing the PR", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-fix-command-build-sweep-effects-"));
+  const ghBin = mkdtempSync(join(tmpdir(), "rmd-fix-command-gh-"));
+  const oldPath = process.env.PATH;
+  const oldError = console.error;
+  const errors: string[] = [];
+  try {
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(
+      join(ghBin, "gh"),
+      "#!/bin/sh\nprintf '{\"contexts\":[]}'\n",
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${ghBin}:${oldPath}`;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+
+    const fetched: string[][] = [];
+    const exitCode = await fixCommand(["2889"], {
+      config: { root, claudeBin: "/bin/true" } as Config,
+      fetch: (args) => {
+        fetched.push([...args]);
+        return /\/pulls\/2889$/.test(args[1])
+          ? {
+              number: 2889,
+              html_url: "https://github.com/craigoley/remudero/pull/2889",
+              state: "closed",
+              merged: true,
+              merged_at: "2026-09-09T00:00:00Z",
+              body: "Remudero-Task: W1-T2889\n",
+              updated_at: "2026-09-09T00:00:00Z",
+              head: { ref: "run-W1-T2889-1788914343433", sha: "abc123" },
+              auto_merge: null,
+            }
+          : /\/check-runs\?/.test(args[1])
+            ? { check_runs: [] }
+            : { statuses: [] };
+      },
+    });
+
+    assert.equal(exitCode, 1);
+    assert.ok(fetched.some((args) => /\/pulls\/2889$/.test(args[1] ?? "")));
+    assert.ok(fetched.some((args) => /\/check-runs\?/.test(args[1] ?? "")));
+    assert.ok(fetched.some((args) => /\/commits\/abc123\/status$/.test(args[1] ?? "")));
+    assert.ok(errors.some((line) => line.includes("PR #2889 is not fixable") && line.includes("MERGED")));
+  } finally {
+    console.error = oldError;
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(ghBin, { recursive: true, force: true });
   }
 });
 
