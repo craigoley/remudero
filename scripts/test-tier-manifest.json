@@ -97,6 +97,7 @@
     "test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts": 981,
     "test/a-red-pr-with-no-enumerable-check-hands-nothing-to-a-fixer.test.ts": 1318,
     "test/a-red-quality-gate-is-visible-to-the-sweep.test.ts": 915,
+    "test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts": 0,
     "test/a-refused-draft-waits-out-the-stated-window.test.ts": 1506,
     "test/a-relocation-across-files-is-still-a-relocation.test.ts": 0,
     "test/a-renamed-shard-silently-becomes-a-second-concern.test.ts": 713,
