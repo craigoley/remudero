@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { RmdError } from "./errors.js";
+import type { RepoLayout } from "./repo-location.js";
 
 /** The plan/tasks.yaml loader and validator (schema v1, MASTER-PLAN §2), read-only — the control
  *  plane flips `status`; every task's `prompt` is pre-authored (G-2). */
@@ -439,12 +440,20 @@ export function readWholeFile(path: string, io: FileIntegrityIO = defaultIntegri
 }
 
 /**
- * Load plan/tasks.yaml and merge in shards under the sibling `plan/tasks.d/*.yaml` (W1-T122): one
- * task per shard file so two concurrent filings add different files instead of racing to append to
- * one shared end-of-file. A duplicate id across the monolith and any shard fails loud.
+ * Load plan/tasks.yaml and merge in shards under a sibling `tasks.d/*.yaml` directory (W1-T122):
+ * one task per shard file so two concurrent filings add different files instead of racing to
+ * append to one shared end-of-file. A duplicate id across the monolith and any shard fails loud.
+ * `shardDir` defaults to `<path's own dir>/tasks.d` (today's behavior, unchanged for every
+ * existing caller); an explicit value lets a caller whose monolith and shard directory don't share
+ * a parent — a target resolved through a {@link RepoLayout} override (W1-T2922) — still find its
+ * shards. See {@link loadPlanForLayout} for that caller.
  * Why: docs/forensics/plan.md#loadplan.
  */
-export function loadPlan(path: string, io: FileIntegrityIO = defaultIntegrityIO): Plan {
+export function loadPlan(
+  path: string,
+  io: FileIntegrityIO = defaultIntegrityIO,
+  shardDir: string = join(dirname(path), "tasks.d"),
+): Plan {
   let text: string;
   try {
     text = readWholeFile(path, io);
@@ -454,7 +463,6 @@ export function loadPlan(path: string, io: FileIntegrityIO = defaultIntegrityIO)
   const tasks = parseTasksFromYaml(text, path);
   const byId = new Map(tasks.map((t) => [t.id, t]));
 
-  const shardDir = join(dirname(path), "tasks.d");
   for (const file of listShardFiles(shardDir)) {
     const shardPath = join(shardDir, file);
     let shardText: string;
@@ -483,6 +491,18 @@ export function loadPlan(path: string, io: FileIntegrityIO = defaultIntegrityIO)
     }
   }
   return { tasks, byId };
+}
+
+/**
+ * Load a plan through a resolved {@link RepoLayout} (W1-T2922, repo-location.ts): the monolith at
+ * `layout.planMonolith`, shards from `<layout.planDir>/tasks.d` — computed from the layout's OWN
+ * `planDir`, never re-derived from the monolith's dirname, so a foreign layout whose monolith and
+ * shard directory don't share a parent still finds the right shards. Running this against the
+ * house layout ({@link "./repo-location.js".resolveRepoLayout} with no override) is byte-identical
+ * to `loadPlan(join(root, "plan", "tasks.yaml"))`, today's call shape.
+ */
+export function loadPlanForLayout(layout: RepoLayout, io: FileIntegrityIO = defaultIntegrityIO): Plan {
+  return loadPlan(layout.planMonolith, io, join(layout.planDir, "tasks.d"));
 }
 
 /**
