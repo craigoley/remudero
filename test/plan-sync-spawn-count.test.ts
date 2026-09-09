@@ -175,14 +175,30 @@ test("the batch-read plan is deep-equal to loadPlan over the same tree on disk (
       "the fixture's multi-byte title must survive to the oracle, or the byte-framing claim is untested",
     );
 
+    // PROVENANCE IS EXPECTED TO DIFFER, and only provenance. W1-T2920 stamps `Task.sourcePath` at
+    // parse: the batch reader records `origin/main:plan/tasks.d/<shard>.yaml` because that is
+    // literally where it read the bytes, and loadPlan records an absolute path on disk because
+    // that is where IT read them. Both are correct and neither is the author's content, so the
+    // comparison is over the DECLARED record — the same rule changedTaskIds applies for the same
+    // reason (see comparableRecord in task-linter.ts). Comparing the raw objects would assert the
+    // two readers used the same file handle, which was never the claim.
+    const declared = (plan: Plan) =>
+      plan.tasks.map(({ sourcePath: _sourcePath, ...rest }) => rest);
+    const merged = syncPlanFromOrigin(repoDir, "plan/tasks.yaml", {}).plan;
     assert.deepEqual(
-      syncPlanFromOrigin(repoDir, "plan/tasks.yaml", {}).plan,
-      onDisk,
+      declared(merged),
+      declared(onDisk),
       "syncPlanFromOrigin's in-memory merge must equal loadPlan over the same content on disk",
     );
     assert.deepEqual(
-      loadPlanAtRef(repoDir, "plan/tasks.yaml", "HEAD"),
-      onDisk,
+      [...merged.byId.keys()].sort(),
+      [...onDisk.byId.keys()].sort(),
+      "and the index must cover exactly the same ids — dropping sourcePath must not narrow what is compared",
+    );
+    // Same rule, same reason: this reader stamps `HEAD:plan/...` because that is the ref it read.
+    assert.deepEqual(
+      declared(loadPlanAtRef(repoDir, "plan/tasks.yaml", "HEAD")),
+      declared(onDisk),
       "loadPlanAtRef's batch read must equal loadPlan over the same content on disk",
     );
   } finally {

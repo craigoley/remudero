@@ -2979,9 +2979,28 @@ export function changedTaskIds(oldTasks: Task[], newTasks: Task[]): Set<string> 
   const changed = new Set<string>();
   for (const t of newTasks) {
     const old = oldById.get(t.id);
-    if (!old || JSON.stringify(old) !== JSON.stringify(t)) changed.add(t.id);
+    if (!old || comparableRecord(old) !== comparableRecord(t)) changed.add(t.id);
   }
   return changed;
+}
+
+/**
+ * A task's DECLARED content, as JSON — provenance the parser stamps is excluded.
+ *
+ * W1-T2920 added {@link Task.sourcePath}, which records WHERE a record was read from rather than
+ * anything its author wrote. The two corpora this comparison spans are read differently by
+ * construction — one from the working tree, one reconstructed from git blobs — so a stamped path
+ * differs for every task even when not one character of the plan changed. MEASURED on that PR's
+ * first CI run: `rmd lint-plan --base` reported "1592 task(s) checked (1592 new/changed)", i.e.
+ * the ENTIRE plan, which turned the scoped changed-tasks gate into a full-plan lint and surfaced
+ * 174 pre-existing failures as if this diff had caused them.
+ *
+ * The rule generalises past this one field: anything the PARSER adds is not the author's edit, and
+ * a change detector that cannot tell those apart reports every task on any parser change.
+ */
+function comparableRecord(task: Task): string {
+  const { sourcePath: _sourcePath, ...declared } = task as Task & { sourcePath?: string };
+  return JSON.stringify(declared);
 }
 
 /** Thrown by {@link assertLintClean} — carries only the BLOCKING violations. */
