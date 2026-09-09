@@ -127,10 +127,16 @@ test("W1-T2737 unit test: grading is unchanged — W1-T456 is extended, never re
   // Absent and UNDECLARED ⇒ still a failure, exactly as before.
   const undeclared = grade("unit test: test/some-other-suite.test.ts", head, ["test/some-declared-suite.test.ts"], true);
   assert.equal(undeclared.proof_exec, "executed_fail");
-  // And the plan-only gate is grep-only: a declared-but-absent suite on a BUILD PR keeps the
-  // W1-T456 behaviour byte for byte, because `!existsSync` already scopes it.
+  // W1-T3232, operator ruling 2026-09-09 — THIS ASSERTION IS FLIPPED, NOT DELETED, and the flip is
+  // the record that the question was asked and answered. It read `not_yet_built` here, with the
+  // reason "`!existsSync` already scopes it". That holds whenever the build DID create the declared
+  // file, and fails in exactly the case #4770 produced: declared, never created, `!existsSync`
+  // true, carve-out fires, criterion falls to the keyword floor. The scoping argument held for the
+  // healthy case and failed for the defective one — which is the population the carve-out exists to
+  // separate. W1-T2737 never argued this arm SHOULD fire on a build head; its criterion 5 pinned
+  // byte-identical grading as a COMPATIBILITY guarantee while extending the carve-out to `grep:`.
   const onBuild = grade("unit test: test/some-declared-suite.test.ts", head, ["test/some-declared-suite.test.ts"], false);
-  assert.equal(onBuild.proof_exec, "not_yet_built", "the unit test: arm must not acquire a plan-only condition");
+  assert.equal(onBuild.proof_exec, "executed_fail", "on a BUILD head a declared-but-absent suite is missing work, not a forward reference");
 });
 
 test("W1-T2737 the carve-out reads the house dialect only, never author-selected argv", () => {

@@ -46,7 +46,10 @@ test("acceptance 1 — a filing whose proof names a test the implementation will
     },
     new Set(),
     undefined,
-    { cwd: dir, forwardReferenceFiles: new Set(["test/filing-forward-reference.test.ts"]) },
+    // W1-T3232: `planOnlyDiff` is now a condition of this carve-out, and a FILING head — which is
+    // what this case is about — is plan-only by construction. Supplying it makes the fixture state
+    // the head shape it was always assuming.
+    { cwd: dir, forwardReferenceFiles: new Set(["test/filing-forward-reference.test.ts"]), planOnlyDiff: true },
   );
   assert.equal(verdict.proof_exec, "not_yet_built", "a named, NEW state — never a silent pass, never exec_error");
   assert.equal(verdict.proof_skip, "forward-reference");
