@@ -166,6 +166,53 @@ function leasedForcePush(
     reportLeaselessRefusal(`the worktree at ${worktreePath} has no readable HEAD`);
     return;
   }
+  // THE DISCARD CHECK, AND IT IS THE ONE THE LEASE CANNOT MAKE. A lease answers "did the ref move
+  // since I last looked" — it compares the local tracking ref against the remote. That is a
+  // different question from "would this push destroy work", and the gap is not theoretical:
+  // MEASURED 2026-09-09 against a real local remote, once the lane FETCHES (a rebuild, a
+  // re-dispatch, any refresh at all) its tracking ref already contains the foreign commit, the
+  // lease is satisfied, and the force-push discards that commit anyway. The probe ended with the
+  // lane's amend as the remote head and the operator's commit unreachable.
+  //
+  // "REACHABLE FROM THE REMOTE BUT NOT FROM MY HEAD" IS THE WRONG SET, and getting that wrong is
+  // how a guard fires on the healthy path: an amend REPLACES the tip, so the pre-amend commit is a
+  // sibling of the new one and lands in that set every single time. MEASURED while writing this —
+  // the first version refused every ordinary trailer amend, which is the bound-fires-on-healthy
+  // defect this repo keeps re-earning.
+  //
+  // What separates the two is PARENTAGE. `appendTaskTrailerToCommit` amends, so the replacement
+  // carries exactly the parents the pushed commit carries; a commit someone else added sits ON TOP
+  // of the old tip and therefore has different parents. So walk the commits the remote holds and
+  // this head does not, and count only those whose parents differ from this head's. The tip being
+  // replaced is excused by construction, and nothing else is.
+  //
+  // UNREADABLE IS NOT ZERO. If the remote ref cannot be read, or the walk cannot be computed, that
+  // is not evidence there is nothing to lose — it is the absence of evidence, and it refuses.
+  const remoteHead = read(["ls-remote", "origin", ref])?.split(/\s+/)[0];
+  if (remoteHead !== undefined && remoteHead !== newSha) {
+    // `fetch` first, or the remote sha may not be an object this worktree holds and the walk
+    // cannot start. Best-effort: a failed fetch leaves the walk unreadable, which refuses.
+    read(["fetch", "--no-tags", "--quiet", "origin", ref]);
+    const mine = read(["rev-list", "--parents", "-1", newSha]);
+    const theirs = read(["rev-list", "--parents", remoteHead, `^${newSha}`]);
+    if (mine === undefined || theirs === undefined) {
+      reportLeaselessRefusal(
+        `could not determine whether pushing ${newSha} over ${remoteHead} on ${branch} would discard ` +
+          "commits — an unreadable walk is not a count of zero",
+      );
+      return;
+    }
+    const myParents = mine.trim().split(/\s+/).slice(1).join(" ");
+    const foreign = theirs
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .filter((l) => l.split(/\s+/).slice(1).join(" ") !== myParents);
+    if (foreign.length > 0) {
+      reportDiscard(branch, remoteHead, newSha, foreign.length);
+      return;
+    }
+  }
   // `setUpstream` still composes rather than being silently dropped — a flag that quietly stops
   // applying when another is set is a worse contract than one that costs a line here.
   const args = ["-C", worktreePath, "push"];
@@ -195,6 +242,22 @@ export function leaselessRefusalMessage(reason: string): string {
   );
 }
 
+/** The refusal for a push that WOULD have destroyed work, as distinct from one whose ref moved.
+ *  Exported so the suite can assert it names the count and both shas. */
+export function discardRefusalMessage(
+  branch: string,
+  remoteHead: string,
+  newSha: string,
+  count: number,
+): string {
+  return (
+    `git-push: refusing to force-push ${branch} — origin is at ${remoteHead}, and pushing ${newSha} ` +
+    `over it would discard ${count} commit(s) reachable from the remote and not from this head. ` +
+    "The lease held (this lane had already fetched them), so only this check could see it; nothing " +
+    "was pushed and nothing was discarded (W1-T3221)."
+  );
+}
+
 export function foreignHeadRefusalMessage(
   branch: string,
   lastPublished: string,
@@ -211,6 +274,10 @@ export function foreignHeadRefusalMessage(
 
 function reportLeaselessRefusal(reason: string): void {
   console.error(leaselessRefusalMessage(reason));
+}
+
+function reportDiscard(branch: string, remoteHead: string, newSha: string, count: number): void {
+  console.error(discardRefusalMessage(branch, remoteHead, newSha, count));
 }
 
 function reportForeignHead(
