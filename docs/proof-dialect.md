@@ -71,13 +71,14 @@ Refusals, each paired with the exact sentence the parser's own explainer returns
 
 ## `unit test:` proofs (`PROOF_DIALECT.unitTest`)
 
-Form: `unit test: "test/<name>.test.ts" (runs that file) or a bare test title (name-filtered)`
+Form: `unit test: "test/<name>.test.ts" or "apps/dashboard/src/<name>.test.tsx" (runs that file) or a bare test title (name-filtered)`
 
 Refusals:
 
 - REFUSED (empty body) -- empty `unit test:` body — nothing to run
 - REFUSED (an exact test-file path escaping the checkout (`..`)) -- no path traversal out of the checkout
 - REFUSED (a test-file path and a title joined by `::` — a THIRD form that does not exist) -- `test/cli-verbs-mint-the-app-token.test.ts::every help arm carries the token` is not a supported `unit test:` form — there are exactly two, and this is neither. Use the WHOLE FILE, `unit test: test/cli-verbs-mint-the-app-token.test.ts`, or the exact test TITLE on its own, `unit test: every help arm carries the token`. Written together they are escaped into ONE --test-name-pattern, which no test is named, so the proof matches zero tests and the criterion degrades to the keyword floor without saying so
+- REFUSED (a test-file path under a suite root the dialect does not declare) -- `src/lib/review.test.ts` is a test-file path under a suite root the `unit test:` dialect does not declare. The declared roots are `test/` (node) and `apps/dashboard/src/` (vitest). A path under any other root has no runner to execute it, and falling through to the TITLE arm would escape it into one --test-name-pattern that no test is named, matching zero tests and degrading the criterion to the keyword floor without saying so
 
 ## Scenario-narrative bounds (`SCENARIO_NARRATIVE_BOUNDS`)
 

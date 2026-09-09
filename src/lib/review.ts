@@ -583,7 +583,41 @@ export interface WhitelistedProof {
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
-const TEST_PATH_EXACT_RE = /^test\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
+/**
+ * W1-T3178 — THE DECLARED SUITE ROOTS, AND THE RUNNER EACH IS EXECUTED BY. Anchored `^test/` alone,
+ * every `apps/dashboard/**` path fell through to the bare-TITLE arm, resolved zero tests and graded
+ * `not_executable` — the console redesign was uncertifiable by construction. The roots are CLOSED
+ * and each carries its runner WITH it: accepting a path without teaching the runner resolves and
+ * then executes under the wrong tool, reporting a red suite as the author's defect.
+ */
+const SUITE_ROOTS = [
+  { root: "test/", runner: "node" },
+  { root: "apps/dashboard/src/", runner: "vitest" },
+] as const;
+
+const TEST_PATH_EXACT_RE = /^(?:test|apps\/dashboard\/src)\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
+
+/** A body SHAPED like a test-file path, whatever its root — used only to tell "undeclared root"
+ *  (REFUSE) from "bare title" (name-filtered). Structurally total for this classifier: matching
+ *  means path-shaped, nonmatching means the owning parser must handle it as some other form.
+ *  Without it `src/foo.test.ts` reaches the title arm and matches nothing: the silent zero W1-T3073
+ *  removed for `::`. */
+const TEST_PATH_SHAPED_RE = /^[\w./-]+\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
+
+/** The dashboard's Vitest config, named ONCE. W1-T3177 ships it; until then a dashboard proof
+ *  resolves and its file does not exist, which is the forward-reference the carve-out handles. */
+const DASHBOARD_VITEST_CONFIG = "apps/dashboard/vite.config.ts";
+
+/** The suite root a declared path sits under, or `undefined` when it sits under none. */
+function suiteRootFor(path: string): (typeof SUITE_ROOTS)[number] | undefined {
+  return SUITE_ROOTS.find((r) => path.startsWith(r.root));
+}
+
+/** The checkout's OWN Vitest CLI — same pinning argument as {@link pinnedPlaywrightCli}: `npx`
+ *  resolves a NAME and on a cache miss fetches a different Vitest than this checkout installed. */
+export function pinnedVitestCli(cwd: string): string {
+  return join(cwd, "node_modules", "vitest", "vitest.mjs");
+}
 
 /** W1-T3073 — a body shaped `<exact test path>::<suffix>`. THIS GRAMMAR DOES NOT EXIST. `unit test:`
  *  has exactly two forms, and this is neither: the `::` makes it fail {@link TEST_PATH_EXACT_RE},
@@ -732,6 +766,19 @@ export function explainUnitTestProofRefusal(proof: string): string | undefined {
       "degrades to the keyword floor without saying so"
     );
   }
+  // W1-T3178 — A ROOT THIS DIALECT DOES NOT DECLARE. Path-shaped, so never a TITLE; unrooted, so no
+  // runner. Falling through would match zero tests and read as the author's defect, not the
+  // dialect's limit.
+  if (TEST_PATH_SHAPED_RE.test(trimmed) && !suiteRootFor(trimmed)) {
+    const roots = SUITE_ROOTS.map((r) => `\`${r.root}\` (${r.runner})`).join(" and ");
+    return (
+      `\`${trimmed}\` is a test-file path under a suite root the \`unit test:\` dialect does not declare. ` +
+      `The declared roots are ${roots}. ` +
+      "A path under any other root has no runner to execute it, and falling through to the TITLE arm " +
+      "would escape it into one --test-name-pattern that no test is named, matching zero tests and " +
+      "degrading the criterion to the keyword floor without saying so"
+    );
+  }
   return undefined;
 }
 
@@ -830,7 +877,19 @@ function parseTestTarget(body: string): WhitelistedProof | null {
   // silent zero-match this refusal exists to stop (W1-T3073).
   if (TEST_PATH_TITLE_SEPARATOR_RE.test(trimmed)) return null;
   if (TEST_PATH_EXACT_RE.test(trimmed)) {
-    if (trimmed.includes("..")) return null; // no path traversal out of the checkout
+    if (trimmed.includes("..")) return null; // no path traversal out of the checkout — BOTH roots
+    const suite = suiteRootFor(trimmed);
+    if (!suite) return null; // unreachable while the regex and SUITE_ROOTS agree; fail closed if not
+    if (suite.runner === "vitest") {
+      // The FULL repo-relative path stays in argv: `purePathTestFiles` reads the args back for the
+      // not_yet_built carve-out and base discrimination, and a package-relative path hides it.
+      return {
+        kind: "test",
+        command: "node",
+        args: [pinnedVitestCli(process.cwd()), "run", "--config", DASHBOARD_VITEST_CONFIG, trimmed],
+        label: trimmed,
+      };
+    }
     return {
       kind: "test",
       command: "node",
@@ -838,6 +897,10 @@ function parseTestTarget(body: string): WhitelistedProof | null {
       label: trimmed,
     };
   }
+  // A path SHAPED like a suite file but under no declared root is an authoring error, and it is
+  // refused rather than allowed to reach the title arm, where it would resolve zero tests and grade
+  // not_executable in silence (the W1-T3073 lesson, applied to the root instead of the separator).
+  if (TEST_PATH_SHAPED_RE.test(trimmed)) return null;
   // No shell-metacharacter check on a bare TEST NAME (W1-T128): it is one `--test-name-pattern` argv value passed to
   // execFile and this branch names no file, so there is no traversal or glob surface. TRAP (W1-T112 round 3): that
   // flag compiles its argument as a REGEX, so a title echoing real syntax becomes an unescaped CHARACTER CLASS and
@@ -900,7 +963,7 @@ export const PROOF_DIALECT = {
   },
   unitTest: {
     prefixRe: DIALECT_TEST_RE,
-    form: 'unit test: "test/<name>.test.ts" (runs that file) or a bare test title (name-filtered)',
+    form: 'unit test: "test/<name>.test.ts" or "apps/dashboard/src/<name>.test.tsx" (runs that file) or a bare test title (name-filtered)',
     exactPathRe: TEST_PATH_EXACT_RE,
     refusals: [
       { when: "empty body", message: "empty `unit test:` body — nothing to run" },
@@ -913,6 +976,12 @@ export const PROOF_DIALECT = {
       unitTestRefusalExample(
         "a test-file path and a title joined by `::` — a THIRD form that does not exist",
         "unit test: test/cli-verbs-mint-the-app-token.test.ts::every help arm carries the token",
+      ),
+      // W1-T3178. An undeclared root cannot be executed, and the title arm would report that as
+      // "no test matched" — the author's defect rather than the dialect's limit.
+      unitTestRefusalExample(
+        "a test-file path under a suite root the dialect does not declare",
+        "unit test: src/lib/review.test.ts",
       ),
     ],
   },
