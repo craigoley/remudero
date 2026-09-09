@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { consoleBuildBannerLine, consoleBuildRealpath, consoleBuildStatus } from "../src/lib/serve.js";
-import { createService, type StaticMount } from "../src/lib/service.js";
+import {
+  buildServeServer,
+  consoleBuildBannerLine,
+  consoleBuildRealpath,
+  consoleBuildStatus,
+  type ServeDeps,
+} from "../src/lib/serve.js";
+import type { IssueCloser } from "../src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+import type { Plan, Task } from "../src/lib/plan.js";
+import type { GitHub, PrRef } from "../src/lib/status.js";
+import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 
 // W1-T3176 — A CONSOLE BUILD IS THE FIRST BUILD ARTIFACT THIS SYSTEM HAS EVER HAD.
 //
@@ -32,6 +43,132 @@ const io = {
     }
   },
 };
+
+function task(over: Partial<Task> = {}): Task {
+  return {
+    id: "W1-T3176-FIXTURE",
+    title: "fixture",
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    risk: "medium",
+    verify: "auto",
+    status: "queued",
+    attempts: 0,
+    ...over,
+  };
+}
+
+function planOf(tasks: Task[]): Plan {
+  return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+}
+
+function fakeGitHub(byRef: Record<string, PrRef> = {}): GitHub {
+  return {
+    prByRef: (ref) => byRef[String(ref)] ?? null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+}
+
+function fakeTraceGithub(byRef: Record<string, TracePrView> = {}): TraceGithub {
+  return { prView: (ref) => byRef[String(ref)] ?? null };
+}
+
+function fakeIssueCloser(): IssueCloser & { closed: string[] } {
+  const closed: string[] = [];
+  return {
+    closed,
+    close(issueUrl: string) {
+      closed.push(issueUrl);
+    },
+  };
+}
+
+function fakeRatifyGateway(): RatifyCliGateway & {
+  approved: string[];
+  reframed: Array<{ proposalId: string; feedback: string }>;
+} {
+  const approved: string[] = [];
+  const reframed: Array<{ proposalId: string; feedback: string }> = [];
+  return {
+    approved,
+    reframed,
+    approve(proposalId: string) {
+      approved.push(proposalId);
+    },
+    reframe(proposalId: string, feedback: string) {
+      reframed.push({ proposalId, feedback });
+    },
+  };
+}
+
+function tmpRoot(): string {
+  return mkdtempSync(join(tmpdir(), "rmd-console-build-serve-"));
+}
+
+function ledgerPathFor(root: string): string {
+  const p = join(root, "state", "ledger.ndjson");
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(p, "");
+  return p;
+}
+
+function writePlan(root: string, plan: Plan): string {
+  const planPath = join(root, "plan", "tasks.yaml");
+  mkdirSync(join(root, "plan"), { recursive: true });
+  const body =
+    plan.tasks.length === 0
+      ? "[]\n"
+      : plan.tasks.map((t) => `- id: ${t.id}\n  title: "${t.title}"\n  repo: ${t.repo}\n  type: ${t.type}\n`).join("");
+  writeFileSync(planPath, body, { flag: "wx" });
+  return planPath;
+}
+
+function serveDepsFor(root: string, over: Partial<ServeDeps> = {}): ServeDeps {
+  const ledgerPath = ledgerPathFor(root);
+  const plan = planOf([task()]);
+  const planPath = writePlan(root, plan);
+  return {
+    board: { plan, ledgerPath, github: fakeGitHub() },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: fakeGitHub(), ratify: fakeRatifyGateway() },
+    ledgerPath,
+    issues: fakeIssueCloser(),
+    fleetControlRoot: root,
+    questionsRoot: root,
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    identity: { trustedLocalAddress: "127.0.0.1", capability: "remudero:console" },
+    pollMs: 50,
+    ...over,
+  };
+}
+
+async function withConsoleRoot<T>(fn: (root: string) => Promise<T>, built: boolean): Promise<T> {
+  const base = mkdtempSync(join(tmpdir(), "rmd-console-build-"));
+  const root = join(base, "dist");
+  mkdirSync(root, { recursive: true });
+  if (built) {
+    writeFileSync(join(root, "index.html"), "<!doctype html><title>console</title>");
+    writeFileSync(join(root, "app.js"), "export const x = 1;");
+  }
+  try {
+    return await fn(realpathSync(root));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
+async function withServeServer<T>(deps: ServeDeps, fn: (baseUrl: string) => Promise<T>): Promise<T> {
+  const server = buildServeServer(deps);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    return await fn(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
 
 function withRoot(fn: (root: string, built: boolean) => void, built: boolean) {
   const base = mkdtempSync(join(tmpdir(), "rmd-console-build-"));
@@ -117,54 +254,62 @@ test("W1-T3176: UNREADABLE is not ABSENT — the remedies differ and one of them
 });
 
 test("W1-T3176: with the build absent the console route 404s while /v1 still serves — one surface, never both", async () => {
-  await new Promise<void>((done) => {
-    withRoot((root, built) => {
-      void built;
-      // The mount is installed ONLY when the entry document is really there. Absent, `/console/*`
-      // is a plain 404 rather than a shell with no assets, and every API route is untouched.
-      const mount: StaticMount | undefined = undefined; // what buildServeServer passes when absent
-      const server = createService({
-        tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
-        routes: [
+  await withConsoleRoot(async (consoleRoot) => {
+    const root = tmpRoot();
+    const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    try {
+      await withServeServer(
+        serveDepsFor(root, {
+          consoleBuildRoot: consoleRoot,
+          consoleBuildIo: io,
+          log: (step, extra) => logs.push({ step, extra }),
+        }),
+        async (base) => {
+          const h = { authorization: `Bearer ${READ_TOKEN}` };
+          const api = await fetch(`${base}/v1/version`, { headers: h });
+          assert.equal(api.status, 200, "the API must keep serving with no console build");
+
+          const console404 = await fetch(`${base}/console/app.js`, { headers: h });
+          assert.equal(console404.status, 404, "and the console surface refuses rather than half-rendering");
+          assert.match(await console404.text(), /not_found/);
+        },
+      );
+
+      assert.deepEqual(
+        logs.filter((line) => line.step === "serve.console_build_missing"),
+        [
           {
-            method: "GET",
-            path: "/v1/status",
-            scope: "read",
-            handler: (_q, s) => {
-              s.writeHead(200, { "content-type": "application/json" });
-              s.end('{"ok":true}');
-            },
+            step: "serve.console_build_missing",
+            extra: { kind: "absent", root: consoleRoot, reason: `no index.html under ${consoleRoot}` },
           },
         ],
-        staticMount: mount,
-      });
-      server.listen(0, "127.0.0.1", () => {
-        void (async () => {
-          const { port } = server.address() as { port: number };
-          const h = { authorization: `Bearer ${READ_TOKEN}` };
-          try {
-            const api = await fetch(`http://127.0.0.1:${port}/v1/status`, { headers: h });
-            assert.equal(api.status, 200, "the API must keep serving with no console build");
-            assert.equal(await api.text(), '{"ok":true}');
+        "buildServeServer must report the absent build through the daemon log",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, false);
+});
 
-            const console404 = await fetch(`http://127.0.0.1:${port}/console/app.js`, { headers: h });
-            assert.equal(console404.status, 404, "and the console surface refuses rather than half-rendering");
-            assert.match(await console404.text(), /not_found/);
-
-            // AND buildServeServer MUST ACTUALLY MAKE THAT DECISION. The case above proves what an
-            // absent mount does; it cannot prove serve.ts still declines to install one. Asserted
-            // on source text because reaching that branch for real needs the whole ServeDeps
-            // fixture — a mutant that mounted unconditionally would otherwise survive.
-            const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "serve.ts"), "utf8");
-            assert.match(src, /consoleBuild\?\.kind === "present"/, "the mount must be gated on a PRESENT build");
-            assert.match(src, /serve\.console_build_missing/, "and a non-present build must be reported on the ledger");
-          } finally {
-            server.close(() => done());
-          }
-        })();
-      });
-    }, false);
-  });
+test("W1-T3176: a PRESENT build is mounted by the real serve assembler", async () => {
+  await withConsoleRoot(async (consoleRoot) => {
+    const root = tmpRoot();
+    try {
+      await withServeServer(
+        serveDepsFor(root, {
+          consoleBuildRoot: consoleRoot,
+          consoleBuildIo: io,
+        }),
+        async (base) => {
+          const js = await fetch(`${base}/console/app.js`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+          assert.equal(js.status, 200, "a present build must install the /console/ static mount");
+          assert.equal(await js.text(), "export const x = 1;");
+        },
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, true);
 });
 
 test("W1-T3176: BOTH deploy paths that run `npm ci` also build the console", () => {
