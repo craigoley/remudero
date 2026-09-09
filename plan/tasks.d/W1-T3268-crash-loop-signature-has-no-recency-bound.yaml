@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
   band_meaning: span
   budget_usd: 8.00
   files:
@@ -17,7 +17,9 @@
   status: queued
   attempts: 0
   note: |
-    BAND. `risk: medium` with `band_meaning: span`. The edit is one awk function in a rendered
+    BAND. `risk: high` with `band_meaning: span`. `lint-plan` places the file set in two concerns
+    (daemon, install-host-units) and Rule 19 refuses that span at `risk: medium`, so this is the
+    linter's own grading rather than a self-assessment. The edit is one awk function in a rendered
     launcher, but that launcher is the fleet's crash-recovery path and the falsifiers below are
     weighted toward what must NOT change: the reader must never refuse to revive.
   rationale: |
