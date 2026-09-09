@@ -683,6 +683,7 @@
     "test/lint-plan-merge-evidence.test.ts": 1043,
     "test/lint-plan-open-only.test.ts": 51754,
     "test/lint-plan-proof-discrimination.test.ts": 1098,
+    "test/lint-plan-scopes-open-by-credit-not-status.test.ts": 0,
     "test/lint-proof-name-resolution-wiring.test.ts": 1515,
     "test/lint-proof-name-resolution.test.ts": 648,
     "test/lint-proof-scope.test.ts": 901,
