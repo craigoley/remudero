@@ -14713,6 +14713,41 @@ const NON_OPEN_LINT_STATUSES = new Set<TaskStatus>(["blocked", "merged", "done"]
 function isOpenLintTask(task: Pick<Task, "status">): boolean {
   return !NON_OPEN_LINT_STATUSES.has(task.status);
 }
+
+/**
+ * W1-T3235 — the ids the CREDIT PROJECTION reports merged, over the whole-plan candidate set.
+ *
+ * `undefined` means "could not resolve", NEVER "nothing is credited", and the caller must fall
+ * back to `status:` on it — the same fail-open discipline `statusResolvable` already documents for
+ * the changed-tasks pass, and for the same reason: a GitHub outage must not silently narrow a
+ * scope. A narrowed scope is worse than an over-wide one here, because the count stops meaning the
+ * same thing between runs and nothing announces the change.
+ *
+ * ONLY THE WHOLE-PLAN PASS CALLS THIS. CI runs `lint-plan --base HEAD^1`, which resolves its own
+ * projection over its own handful of changed tasks; this is the operator/daemon path, and it pays
+ * the same projection cost `rmd status` already pays.
+ */
+function creditedMergedIdsForWholePlan(
+  candidates: readonly Task[],
+  deps: {
+    loadConfig?: typeof loadConfig;
+    resolveOwnerRepo?: typeof resolveOwnerRepo;
+    ghGateway?: typeof ghGateway;
+    projectPlan?: typeof projectPlan;
+  },
+): ReadonlySet<string> | undefined {
+  if (candidates.length === 0) return undefined;
+  try {
+    const config = (deps.loadConfig ?? loadConfig)();
+    const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
+    const github = (deps.ghGateway ?? ghGateway)(owner, repo);
+    const scopedPlan: Plan = { tasks: [...candidates], byId: new Map() };
+    const projected = (deps.projectPlan ?? projectPlan)(scopedPlan, { ledgerPath: ledgerPathFor(config), github });
+    return creditedMergedIdsFrom(projected);
+  } catch {
+    return undefined; // unresolvable — the caller falls back to `status:` and SAYS which key it used
+  }
+}
 /**
  * W1-T278: the git-HISTORY half of the mint, layered on top of {@link mintNextTaskId}'s
  * current-tree union (lib/task-id.ts, untouched by this task). A task filed then FOLDED away
@@ -19164,10 +19199,25 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // pre-W1-T324 shape) when either `--base` is set or `--all` was passed.
   let wholePlanScope: Set<string> | undefined;
   let nonOpenRecordCount = 0;
+  let wholePlanScopeKey: "credit" | "status" = "status";
+  let creditRetiredCount = 0;
   if (!baseRef) {
-    const openIds = plan.tasks.filter(isOpenLintTask).map((t) => t.id);
-    nonOpenRecordCount = plan.tasks.length - openIds.length;
-    if (!allFlag) wholePlanScope = new Set(openIds);
+    const statusOpen = plan.tasks.filter(isOpenLintTask);
+    nonOpenRecordCount = plan.tasks.length - statusOpen.length;
+    if (!allFlag) {
+      // W1-T3235: SCOPE BY CREDIT, NOT BY `status:`. MEASURED on origin/main 2026-09-09: this run
+      // reported 172 open failing of which 169 had a merged implementation — and the three with
+      // none did not survive contact either (W1-T2 shipped as PR #18 before trailers existed,
+      // W1-T326 is an operator ruling open because nobody has ruled). `status:` is what the FILING
+      // wrote and nothing updates it on merge; the credit projection is this repo's only
+      // completion signal, and asking the wrong one manufactured a 156-record landmine field out
+      // of finished work.
+      const credited = creditedMergedIdsForWholePlan(statusOpen, deps);
+      const open = credited === undefined ? statusOpen : statusOpen.filter((t) => !credited.has(t.id));
+      wholePlanScopeKey = credited === undefined ? "status" : "credit";
+      creditRetiredCount = statusOpen.length - open.length;
+      wholePlanScope = new Set(open.map((t) => t.id));
+    }
   }
 
   // W1-T180 (§5C post-merge-amendment): derived merge status for every task in `scope`,
@@ -19424,7 +19474,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseRef}) — ${failing} failing, ${warned} warning(s)`;
   } else if (wholePlanScope) {
     summary =
-      `${checked} task(s) checked (open tasks only) — ${failing} open failing${failingSplit}, ${warned} warning(s); ` +
+      `${checked} task(s) checked (open tasks only) [scoped by ${wholePlanScopeKey}` +
+      (wholePlanScopeKey === "credit"
+        ? `: ${creditRetiredCount} status-open record(s) excluded as already credited merged]`
+        : ": the credit projection was UNRESOLVABLE, so this fell back to the `status:` field — nothing updates that on merge, so this count OVER-reports]") +
+      ` — ${failing} open failing${failingSplit}, ${warned} warning(s); ` +
       `${nonOpenRecordCount} merged-task record(s) behind --all`;
   } else {
     summary =
