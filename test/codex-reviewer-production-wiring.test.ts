@@ -43,7 +43,7 @@ case "$1 $2" in
       *pulls/*) echo '{"number":2829,"html_url":"https://github.com/acme/remudero/pull/2829","updated_at":"t","body":"","head":{"ref":"b","sha":"${headSha}"}}' ;;
       *) echo '{}' ;;
     esac ;;
-  "pr diff") printf '%s\n' 'diff --git a/src/example.ts b/src/example.ts' '+export const fixed = true;' ;;
+  "pr diff") printf '%s\n' 'diff --git a/src/example.ts b/src/example.ts' '+export const fixed = true;' 'diff --git a/src/extra.ts b/src/extra.ts' '+export const extra = true;' ;;
   *) exit 0 ;;
 esac
 `,
@@ -149,6 +149,10 @@ esac
     assert.equal(observedSpawn?.effort, "high");
     assert.equal(observedSpawn?.maxTurns, 10);
     assert.match(observedSpawn?.prompt ?? "", /TASK UNDER REVIEW: W1-T2829/);
+    assert.match(observedSpawn?.prompt ?? "", /DECLARED PATHS: \["src\/example\.ts"\]/);
+    assert.match(observedSpawn?.prompt ?? "", /CHANGED PATHS: \["src\/example\.ts","src\/extra\.ts"\]/);
+    assert.match(observedSpawn?.prompt ?? "", /WIDENED PATHS \(changed but not declared\): \["src\/extra\.ts"\]/);
+    assert.match(observedSpawn?.prompt ?? "", /Scope expansion alone must NEVER cause FAILURE/i);
     assert.match(observedSpawn?.prompt ?? "", /REVIEW_VERDICT <n>:/);
     assert.equal(existsSync(observedSpawn?.cwd ?? root), false, "the semantic review scratch cwd must be removed after the spawn");
     assert.equal(codexArgs.includes("--skip-git-repo-check"), false, "a materialized repository must not need the non-repository bypass");

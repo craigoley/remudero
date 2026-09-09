@@ -908,6 +908,7 @@ import {
   bodyContradictsDiff,
   recognizeChangesetClaims,
   buildReviewPrompt,
+  reviewScopeContext,
   cappedAnnotation,
   automergeHoldFromLedger,
   cappedOverrideFromLedger,
@@ -4609,6 +4610,7 @@ async function runReview(args: {
   // Source-text compatibility for W1-T913's pre-existing ordering proof:
   // execFileSync("gh", ["pr", "diff", prUrl])
   const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+  const scopeContext = reviewScopeContext(diff, task.files);
   const criteria = task.acceptance ?? [];
   const decisionDigest = reviewDecisionDigest({
     headSha, diff, report, body: inputBody, acceptance: criteria, declaredFiles: task.files,
@@ -4685,7 +4687,14 @@ async function runReview(args: {
           node_modules: snapshot.nodeModules,
         });
         const prompt =
-          buildReviewPrompt({ task: { id: task.id, acceptance: criteria }, prUrl, owner, repo, headSha }) +
+          buildReviewPrompt({
+            task: { id: task.id, acceptance: criteria },
+            prUrl,
+            owner,
+            repo,
+            headSha,
+            ...scopeContext,
+          }) +
           "\n" +
           reviewerVerdictContract(criteria.length);
         const reviewer = args.account(
