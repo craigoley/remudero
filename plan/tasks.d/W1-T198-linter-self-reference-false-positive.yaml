@@ -58,7 +58,7 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [src/lib/task-linter.ts, test/task-linter.test.ts]
-  status: merged
+  status: queued
   attempts: 0
   note: "THE BUG BIT THIS FILING THREE TIMES. Every acceptance criterion here had to be written in PARAPHRASE —
     the trigger words cannot appear in a criterion at all, even as the subject of the sentence describing them.

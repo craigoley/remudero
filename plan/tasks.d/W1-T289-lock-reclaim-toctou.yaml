@@ -105,7 +105,7 @@
   origin: feedback#fb-1784732585507-04eac2
   plan_refs: ["§4B", "§5"]
   files: [src/lib/fs-race-safe.ts, src/lib/inflight-lock.ts, src/lib/drain-lock.ts, src/lib/review.ts, test/lock-reclaim-race.test.ts]
-  status: merged
+  status: queued
   attempts: 0
   note: "FILED from feedback#fb-1784732585507-04eac2 (covered-by: NONE, confirmed against plan/tasks.yaml and
     every plan/tasks.d shard). The report's line refs were verified and TWO were wrong — the review.ts
