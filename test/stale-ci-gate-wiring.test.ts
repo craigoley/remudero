@@ -44,6 +44,15 @@ const OWNER = "craigoley";
 const REPO = "remudero";
 const SHA = "e97690b0e97690b0e97690b0e97690b0e97690b0";
 
+/** RECENT RELATIVE TO NOW, NEVER A LITERAL DATE, and this suite is why the distinction is not
+ *  pedantry. `deriveDisposition` compares `lastActivityAt` against the WALL CLOCK and routes
+ *  anything older than `policy.staleDays` (14) to `stale` / "abandoned" — a disposition that never
+ *  reaches the `blocked-fixable` lane these tests exercise. The fixture previously hardcoded
+ *  2026-08-26; on 2026-09-09, exactly fourteen days later, all three end-to-end tests began failing
+ *  and took `main` red with them. Nothing in the diff changed — the clock did. A fixture that must
+ *  read as ACTIVE has to be dated from the clock the code under test reads. */
+const RECENT = new Date().toISOString();
+
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-stale-gate-wiring-")), "ledger.ndjson");
 }
@@ -57,7 +66,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "red",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-08-26T18:15:00Z",
+    lastActivityAt: RECENT,
     headSha: SHA,
     headRefName: "run-W1-TX-1785378652634",
     autoMergeArmed: false,
