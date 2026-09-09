@@ -625,3 +625,43 @@ test("runDaemon: a THROWING runMeasurementCadence is caught and ledgered, never 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("W1-T2925: a TORN verdict row is excluded from the blocked_ci denominator, not counted and not fatal", () => {
+  // The blocked_ci share divides blocked_ci verdicts by ALL verdicts, and a rotation can end
+  // mid-write: the last line of a file being appended to is a real, ordinary shape. A torn row
+  // that still MATCHES the step filter reaches JSON.parse and throws, so the arm that skips it is
+  // load-bearing in both directions — counted, it would inflate the denominator and understate the
+  // share; fatal, one torn byte would refuse the whole metric.
+  const root = mkdtempSync(join(tmpdir(), "rmd-cadence-torn-"));
+  try {
+    const stateDir = join(root, "state");
+    mkdirSync(stateDir, { recursive: true });
+    const lines = [
+      JSON.stringify({ ts: "2026-09-01T00:00:00.000Z", step: "verdict", verdict: "blocked_ci", run_id: "r1" }),
+      JSON.stringify({ ts: "2026-09-01T00:01:00.000Z", step: "verdict", verdict: "merged", run_id: "r2" }),
+      // Truncated mid-write: matches the step filter, parses to nothing.
+      '{"ts":"2026-09-01T00:02:00.000Z","step":"verdict","verdict":"blocked_ci"',
+    ].join("\n");
+    writeFileSync(join(stateDir, "ledger.2026-09-02T00-00-00-000Z.ndjson"), lines + "\n");
+
+    const result = runMeasurementCadenceReport({
+      stateDir,
+      cwd: REPO_ROOT,
+      escalate: false,
+      gitLog: NO_GIT,
+      registryPath: join(stateDir, "inbox-proposals.json"),
+    });
+
+    // Two parseable verdicts, one of them blocked_ci: the torn third row must move neither number.
+    assert.equal(result.verdictCalibration.totalVerdicts, 2, "the torn row must not reach the denominator");
+    assert.equal(result.verdictCalibration.blockedCiCount, 1, "nor the numerator");
+    assert.equal(result.verdictCalibration.blocked_ci_share, 0.5);
+    assert.equal(
+      result.verdictCalibration.status,
+      "measured",
+      "and one torn byte must not refuse the whole metric — skipping the row is the point",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
