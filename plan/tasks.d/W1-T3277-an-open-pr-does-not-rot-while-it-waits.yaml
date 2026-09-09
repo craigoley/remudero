@@ -1,0 +1,91 @@
+- id: W1-T3277
+  title: "THE BRANCH-REFRESH RUNG ONLY TOUCHES AN ARMED, STALLED PR — SO EVERY PR AWAITING REVIEW ROTS UNTIL A HUMAN REBASES IT, AND ON 2026-09-09 THAT WAS THIRTEEN OF THEM, ONE 51 COMMITS BEHIND"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/sweep.ts, test/an-open-pr-does-not-rot-while-it-waits.test.ts]
+  origin: "operator-session#board-drive-2026-09-09"
+  plan_refs: ["W1-T528", "W1-T3273", "W1-T106", "W1-T3144"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 while driving the board by hand. THIRTEEN open PRs needed a rebase in one
+    session, and an operator had to ask for it explicitly: "rmd should do this automatically. if it
+    won't you should do it and then fix the underlying root cause."
+    THE DISTRIBUTION IS THE ARGUMENT, not the count. Every RED pull request was 10-11 commits behind
+    `origin/main`; every clean one was 1-8 behind. #4790 was FIFTY-ONE behind, and its
+    `comment-load-ratchet` passed against its own stale base while failing against the real one — a
+    red that says nothing about the diff. Rebasing cleared #4844, #4850, #4851 and #4790 without
+    touching their content.
+    THE RUNG EXISTS AND ITS SCOPE IS THE DEFECT. `deps.updateBranch` is wired, and
+    `selectUpdateBranchTarget` (W1-T528) picks AT MOST ONE PR per pass — from the ARMED-AND-STALLED
+    set only. A PR waiting for `remudero-review` is neither armed nor stalled, so nothing refreshes
+    it however far main moves. On a day when main advanced ~50 commits, that is every PR on the
+    board.
+    AND STALENESS MANUFACTURES FALSE RED. A stale base means stale baselines, stale shard
+    assignments and stale generated artifacts, so the checks report on a tree nobody will ever merge.
+    Three of the four reds triaged by hand that afternoon were this and nothing else.
+    NOT THE CONFLICT PROBLEM. W1-T3273 is about a dirty PR that cannot be rebased cleanly. This is
+    the opposite and much larger case: PRs that rebase CLEANLY and simply never get rebased.
+  design: |
+    (i) REFRESH ON DISTANCE, NOT ON DISPOSITION. The trigger is "this open PR is more than N commits
+    behind `origin/main` and rebases cleanly", not "this PR is armed and stalled". The existing
+    armed-stalled path keeps its own meaning and is not widened; this is a second, quieter reason to
+    press the same button.
+    (ii) CLEAN ONLY, ALWAYS. A refresh that hits a conflict must ABORT and leave the branch exactly
+    as it found it. Resolving a conflict is a judgement (rule 2) and belongs to W1-T3273's
+    byte-redundant arm or to a human — never to this rung.
+    (iii) BOUNDED PER PASS, and the bound is the point. `selectUpdateBranchTarget` already refuses a
+    loop; keep that discipline. A board-wide refresh storm costs CI minutes on every PR at once,
+    which is the failure mode the queue governor exists to prevent.
+    (iv) NEVER TOUCH A BRANCH SOMEONE ELSE IS PUSHING. Use the lease, so a concurrent push refuses
+    the refresh rather than clobbering it. MEASURED: the by-hand rebases used
+    `--force-with-lease` and one of them was correctly refused by a thread pushing at the same time.
+    (v) LEDGER THE REFRESH AND THE DECLINE, with the distance that triggered it. A silent rebase of
+    someone's branch is indistinguishable from a lost commit to the person reading it later.
+  acceptance:
+    - claim: "an open PR that is behind by more than the threshold and rebases cleanly is refreshed, even though it is neither armed nor stalled"
+      proof: "unit test: test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "a PR whose rebase CONFLICTS is left byte-for-byte as it was, and is never partially rewritten"
+      proof: "unit test: test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "a PR within the threshold is not touched, so the rung cannot become a board-wide refresh storm"
+      proof: "unit test: test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "the refresh is bounded per pass, the same discipline selectUpdateBranchTarget already keeps"
+      proof: "unit test: test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "a concurrent push refuses the refresh rather than being overwritten"
+      proof: "unit test: test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+    - claim: "both the refresh and the decline write a ledger row naming the commit distance that decided it"
+      proof: "unit test: test/an-open-pr-does-not-rot-while-it-waits.test.ts"
+  falsifier: |
+    CLOSE IF the sweep already refreshes a review-waiting PR: read `selectUpdateBranchTarget`'s
+    input set.
+    MEASURED 2026-09-09: it draws from ARMED-AND-STALLED PRs only, and thirteen review-waiting PRs
+    went stale in one session with nothing touching them.
+    POSITIVE CONTROL, because "more PRs get rebased" is the failure mode this must not become: the
+    suite must show a PR INSIDE the threshold left untouched, and the per-pass bound holding. A
+    suite proving only the refresh arm cannot distinguish this from rebasing the whole board every
+    tick, which spends CI on every open PR at once.
+    PROVE THE CONFLICT ARM LEAVES NO RESIDUE: a refresh that hits a conflict must abort to the exact
+    prior sha. A half-rebased contributor branch is far worse than a stale one.
+    DO NOT resolve conflicts here. That is W1-T3273's byte-redundant arm or a human; a rung that
+    guesses between two hand-written resolutions is what rule 2 forbids.
+    DO NOT refresh without a lease. Overwriting a branch someone is actively pushing loses work, and
+    the loss is silent.
+  note: |
+    Rule 25 CHECKED: `src/lib/sweep.ts` is ordinary src, not an instrument surface.
+    RISK IS HIGH BECAUSE THIS WRITES TO CONTRIBUTOR BRANCHES UNATTENDED, the same band and the same
+    reason as `mergeConflictAdmissionEnabled`'s own doc gives; it should ship behind a flag of that
+    shape rather than as a default.
+    THE THRESHOLD IS A POLICY NUMBER THIS SHARD DOES NOT KNOW. The measured split — red PRs 10-11
+    behind, clean ones 1-8 — suggests somewhere near ten, but that is one day's data and it should
+    become a declared value changed by measurement rather than by argument.
+    CAVEAT WITH EQUAL WEIGHT: this removes a class of FALSE red. It does not make any PR correct,
+    and a refreshed PR can still be genuinely broken — three of today's reds survived their rebase
+    and needed real fixes. A greener board is not by itself a better one.
+    SECOND CAVEAT: refreshing costs a full CI run per PR. On a busy board that is real spend, which
+    is why the per-pass bound in design (iii) is not optional.
