@@ -18,13 +18,15 @@ const mod = (await import(SWEEP_URL)) as {
   SPAWN_REACHING: ReadonlyMap<string, string>;
   SWEEP_SHIFT_DAYS: number;
   DRIFT_CEILING: number;
-  DRIFT_BASELINE: { _comment: string; driftCeiling: number };
+  DRIFT_BASELINE: { _comment: string; driftCeiling: number; driftingSuitesAtCapture?: string[] };
   classifySweep: (
     results: Map<string, { failed: boolean; output?: string }>,
     artifacts?: ReadonlyMap<string, string>,
     ceiling?: number,
+    recorded?: string[],
   ) => {
     drifted: Array<{ suite: string }>;
+    newDrift: Array<{ suite: string }>;
     staleExclusions: Array<{ suite: string; reason: string }>;
     ceiling: number;
     ok: boolean;
@@ -47,6 +49,7 @@ const mod = (await import(SWEEP_URL)) as {
     run?: (suite: string, days: number) => { failed: boolean; output?: string };
     derive?: () => string[];
     ceiling?: number;
+    recorded?: string[];
     log?: (m: string) => void;
     write?: (m: string) => void;
   }) => number;
@@ -88,6 +91,7 @@ test("a non-excluded suite that fails shifted IS reported — the list cannot sw
     ]),
     CLOCK_ARTIFACTS,
     0,
+    SYNTHETIC_RECORDED,
   );
   assert.equal(ok, false);
   assert.deepEqual(drifted.map((d) => d.suite), ["post-fix-reverification"]);
@@ -138,6 +142,12 @@ test("every exclusion reason names a MECHANISM — 'flaky' is not a reason", () 
 // not REGRESS past the recorded figure is green. Every test below pins its OWN ceiling rather than
 // reading the real DRIFT_CEILING, so these stay meaningful however the real baseline is ratcheted.
 
+// W1-T3276 — the ceiling cases below use synthetic suite names and exist to pin the COUNT relation
+// (over / at / under). They now declare those names as RECORDED, so each stays a statement about
+// the ceiling rather than accidentally becoming a statement about new drift, which has its own
+// cases at the end of this file.
+const SYNTHETIC_RECORDED = ["a", "b", "c", "d", "e", "f", "g", "h", "learnings", "alpha", "one", "two", "three"];
+
 test("a sweep whose drifting-suite count is at the recorded ceiling exits clean", () => {
   const { drifted, ok } = classifySweep(
     new Map([
@@ -147,6 +157,7 @@ test("a sweep whose drifting-suite count is at the recorded ceiling exits clean"
     ]),
     CLOCK_ARTIFACTS,
     2,
+    SYNTHETIC_RECORDED,
   );
   assert.equal(drifted.length, 2);
   assert.equal(ok, true, "drifted.length === ceiling is NOT a regression and must exit clean");
@@ -161,6 +172,7 @@ test("a sweep that drifts further than the ceiling still fails", () => {
     ]),
     CLOCK_ARTIFACTS,
     2,
+    SYNTHETIC_RECORDED,
   );
   assert.equal(drifted.length, 3);
   assert.equal(ok, false, "drifted.length > ceiling IS a regression and must fail");
@@ -173,6 +185,7 @@ test("a sweep with fewer drifting suites than the ceiling exits clean and says s
     derive: () => ["learnings"],
     run: () => ({ failed: true, output: "not ok 1 - a fixture date goes stale\n" }),
     ceiling: 5,
+    recorded: SYNTHETIC_RECORDED,
     log: (m) => lines.push(m),
     write: () => {},
   });
@@ -192,6 +205,7 @@ test("a sweep whose drifting-suite count exactly matches the ceiling exits clean
     derive: () => ["learnings"],
     run: () => ({ failed: true, output: "not ok 1 - a fixture date goes stale\n" }),
     ceiling: 1,
+    recorded: SYNTHETIC_RECORDED,
     log: (m) => lines.push(m),
     write: () => {},
   });
@@ -459,4 +473,77 @@ test("main routes --only through the spawn guard, so even an explicit spawn suit
   assert.equal(r.calls.length, 0, "a paid spawn must be unreachable even when named explicitly");
   assert.equal(d.state.called, 0, "--only must not consult the derivation at all");
   assert.equal(code, 0);
+});
+
+// ── W1-T3276 — THE RATCHET COUNTED DRIFT INSTEAD OF NAMING IT ────────────────────────────────────
+//
+// `clock-sweep` reported SUCCESS on 2026-09-07 over a tree already carrying the fixture that took
+// `main` red on 2026-09-09 (W1-T3270). The suite was a derived candidate, in `--list`, and in
+// neither exclusion set — it was simply forgiven by a COUNT. The baseline records the eleven
+// drifting suites BY NAME and nothing read them.
+
+const RECORDED = ["alpha", "beta", "gamma"];
+const CEILING = 3;
+const drifting = (...names: string[]) => new Map(names.map((n) => [n, { failed: true }]));
+
+test("W1-T3276: a NEW drifting suite fails the sweep even under the ceiling", () => {
+  // THE MEASURED SHAPE: one recorded suite repaired, one brand-new bomb arrives, total unchanged.
+  // Before this change that was `ok: true` with the new suite sitting IN the drifted list, unread.
+  const r = mod.classifySweep(drifting("alpha", "beta", "stale-ci-gate-wiring"), new Map(), CEILING, RECORDED);
+  assert.equal(r.drifted.length, 3, "the count is AT the ceiling, which used to be enough to pass");
+  assert.deepEqual(r.newDrift.map((d) => d.suite), ["stale-ci-gate-wiring"], "the stranger must be named");
+  assert.equal(r.ok, false, "a suite that STARTED drifting is a regression at any count");
+});
+
+test("W1-T3276: the recorded backlog is still forgiven up to the ceiling — W1-T1128 is preserved, not undone", () => {
+  // The ceiling exists because `drifted.length === 0` had never once been satisfiable, so the job
+  // was permanently red and told nobody anything. This task must not put it back there.
+  const r = mod.classifySweep(drifting(...RECORDED), new Map(), CEILING, RECORDED);
+  assert.equal(r.drifted.length, CEILING);
+  assert.equal(r.newDrift.length, 0, "every drifting suite is one the baseline already records");
+  assert.equal(r.ok, true, "the recorded backlog must still pass, or the gate is red forever again");
+});
+
+test("W1-T3276: a wholly different drifting population is refused — the ceiling can no longer be met by strangers", () => {
+  // The extreme the old bound permitted: every recorded suite repaired, an equal number of NEW ones
+  // drifting, and a green verdict over a set sharing not one member with the captured population.
+  const r = mod.classifySweep(drifting("new-one", "new-two", "new-three"), new Map(), CEILING, RECORDED);
+  assert.equal(r.drifted.length, CEILING, "still exactly at the ceiling");
+  assert.equal(r.newDrift.length, 3);
+  assert.equal(r.ok, false);
+});
+
+test("W1-T3276: a repaired suite is not drift — fixing one must never fail the sweep", () => {
+  // The inverse guard. A recorded suite that now PASSES shifted is an improvement, not a
+  // regression, and must not be reported as either drift or new drift.
+  const r = mod.classifySweep(drifting("alpha"), new Map(), CEILING, RECORDED);
+  assert.equal(r.drifted.length, 1);
+  assert.equal(r.newDrift.length, 0);
+  assert.equal(r.ok, true, "drift going DOWN is the outcome this gate wants");
+
+  const clean = mod.classifySweep(new Map(), new Map(), CEILING, RECORDED);
+  assert.equal(clean.ok, true, "and a fully repaired tree passes");
+});
+
+test("W1-T3276: the report names NEW drift separately, because a total is not actionable", () => {
+  // "12 suites drifted" sends an operator to a list; "one NEW suite drifted" sends them to a fix.
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "clock-sweep.mjs"), "utf8");
+  assert.match(src, /NEW DRIFT — \$\{newDrift\.length\}/, "the report must have its own NEW DRIFT section");
+  assert.ok(
+    src.indexOf("NEW DRIFT —") < src.indexOf("OVER CEILING —"),
+    "and it must lead, ahead of the ceiling comparison an operator can already read",
+  );
+});
+
+test("W1-T3276: the shipped baseline still records the names the ratchet now reads", () => {
+  // THE WIRE THAT MAKES THIS REAL. The identity check is only as good as the recorded set; if a
+  // future edit drops `driftingSuitesAtCapture`, `classifySweep` falls back to an EMPTY set and
+  // every drifting suite becomes "new" — loud, not silent, but this pins the intended shape.
+  const recorded = mod.DRIFT_BASELINE.driftingSuitesAtCapture;
+  assert.ok(Array.isArray(recorded), "the baseline must carry the drifting suites by name");
+  assert.equal(
+    recorded!.length,
+    mod.DRIFT_CEILING,
+    "and the recorded names must match the ceiling they justify — a ceiling above its own list forgives strangers by that margin",
+  );
 });
