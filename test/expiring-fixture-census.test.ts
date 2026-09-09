@@ -133,3 +133,18 @@ test("W1-T3272: a hardcoded date that NO threshold ages is not reported — the 
 function realTestFiles(): string[] {
   return execFileSync("git", ["ls-files", "test/*.test.ts"], { encoding: "utf8" }).split("\n").filter(Boolean);
 }
+
+test("W1-T3272: a report NAMES the already-expired population, which is state rather than a transition", () => {
+  // The distinction this line carries is the whole reason the census does not fail on them: a stamp
+  // ALREADY past its threshold is green as it stands, and only a stamp about to CROSS is a bomb.
+  // The live run reports 66 of these, so the branch is real; nothing formatted one until now.
+  const report = formatReport({
+    population: 3,
+    reported: [],
+    exempt: [],
+    alreadyExpired: [{ file: "test/a.test.ts", line: 1 }, { file: "test/b.test.ts", line: 2 }],
+  });
+  assert.match(report, /none crossing within/, "no crossing stamp still reads as OK");
+  assert.match(report, /2 stamp\(s\) are already past their threshold/, "and the settled ones are counted, never dropped");
+  assert.match(report, /state, not a transition/, "with the reason a reader needs to not treat them as failures");
+});

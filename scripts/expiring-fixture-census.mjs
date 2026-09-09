@@ -150,6 +150,10 @@ export function formatReport({ population, reported, exempt, alreadyExpired = []
   return out.join("\n");
 }
 
+// diff-cov: process-boundary — the irreducible glue. This shells `git ls-files`, spawns node to
+// read the policy the sweep itself loads, prints, and `process.exit`s on the census verdict. A unit
+// test cannot carry a hit through a fork; every DECISION it makes — which files, which threshold,
+// what the report says — lives in censusExpiringFixtures/formatReport above and is covered directly.
 function main() {
   assertFieldsStillAged();
   const files = execFileSync("git", ["ls-files", "test/*.test.ts"], { encoding: "utf8" }).split("\n").filter(Boolean);
