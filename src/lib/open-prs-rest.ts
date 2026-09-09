@@ -841,6 +841,7 @@ function redundantRefixEvidence(
       ? { compared: "bytes", verdict: "main-byte-identical", comparedPaths }
       : { compared: "bytes", verdict: "different-from-main", comparedPaths, differingPaths };
   } catch {
+    /* best-effort: content bytes were unreadable, so redundant evidence stays absent. */
     return undefined;
   }
 }
