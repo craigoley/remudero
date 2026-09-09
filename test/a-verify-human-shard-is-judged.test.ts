@@ -43,11 +43,11 @@ import {
 } from "../src/run-task.js";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan } from "../src/lib/plan.js";
 import type { Config } from "../src/lib/config.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 /** PLAINLY still needs a person: nothing has landed, nothing is cited, it asks for a judgement. */
 const NEEDS: ShardUnderJudgement = {
@@ -493,34 +493,27 @@ test("W1-T3188: a shard whose age cannot be read is reported as age 0 rather tha
 });
 
 test("W1-T3188: a shard whose file IS in git reports a real age in days, not the unknown-age zero", () => {
-  // The other half of the age fallback above: with a real repo and a real add-date, the number is
+  // The other half of the age fallback above: with a real repo and a real add-date the number is
   // computed rather than defaulted. Both halves matter — a shard's age is what the judge reads to
   // tell "parked deliberately" from "parked and forgotten", and a silent 0 erases that distinction.
-  const root = sweepRoot(PARKED_PLAN);
-  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
-  // The full record, not a stub: loadPlan merges tasks.d shards and validates every one, so a
-  // one-line file fails the load rather than the assertion. W1-T9001 lives ONLY here, so the id
-  // is not declared twice.
+  //
+  // Built through test/helpers/git-repo.ts rather than a local `git init`: the fixture-copy census
+  // counts raw init sites precisely to keep this from being the 143rd hand-rolled copy, and the
+  // shared fixture carries its own committer identity, which is what stopped this class of test
+  // passing on a dev machine and failing on every CI runner (#1964, #1971).
+  const repo = gitRepo({ kind: "vh-age", seedCommit: false });
+  mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
+  mkdirSync(join(repo.dir, ".remudero"), { recursive: true });
   writeFileSync(
-    join(root, "plan", "tasks.d", "W1-T9001-identity.yaml"),
+    join(repo.dir, "plan", "tasks.d", "W1-T9001-identity.yaml"),
     PARKED_PLAN.slice(0, PARKED_PLAN.indexOf("- id: W1-T9002")),
   );
-  writeFileSync(join(root, "plan", "tasks.yaml"), PARKED_PLAN.slice(PARKED_PLAN.indexOf("- id: W1-T9002")));
-  const env = {
-    ...process.env,
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_SYSTEM: "/dev/null",
-    GIT_AUTHOR_NAME: "t",
-    GIT_AUTHOR_EMAIL: "t@example.invalid",
-    GIT_COMMITTER_NAME: "t",
-    GIT_COMMITTER_EMAIL: "t@example.invalid",
-  };
-  execFileSync("git", ["init", "-q", "-b", "main", root], { env });
-  execFileSync("git", ["-C", root, "add", "-A"], { env });
-  execFileSync("git", ["-C", root, "commit", "-q", "-m", "chore: seed"], { env });
-  const addedAtMs = Number(execFileSync("git", ["-C", root, "log", "-1", "--format=%ct"], { encoding: "utf8", env }).trim()) * 1000;
+  writeFileSync(join(repo.dir, "plan", "tasks.yaml"), PARKED_PLAN.slice(PARKED_PLAN.indexOf("- id: W1-T9002")));
+  repo.git("add", "-A");
+  repo.git("commit", "--quiet", "-m", "chore: seed");
+  const addedAtMs = Number(repo.git("log", "-1", "--format=%ct")) * 1000;
 
-  const shards = parkedVerifyHumanShards(loadPlan(join(root, "plan", "tasks.yaml")), root, {
+  const shards = parkedVerifyHumanShards(loadPlan(join(repo.dir, "plan", "tasks.yaml")), repo.dir, {
     now: () => addedAtMs + 3 * 86_400_000,
     iso: () => "1970-01-01T00:00:00.000Z",
   } as unknown as Parameters<typeof parkedVerifyHumanShards>[2]);
