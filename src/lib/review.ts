@@ -1084,6 +1084,15 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
     env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined },
     stdio: ["ignore", "pipe", "ignore"],
     timeout: timeoutMs,
+    // W1-T3266: SIGKILL, NOT THE SIGTERM DEFAULT, AND THE DIFFERENCE IS A SIX-HOUR OUTAGE. The
+    // `timeout` above only ASKS a child to die; one inside a synchronous cpu loop never turns its
+    // event loop, so its handler cannot run and `execFileSync` blocks on a child it already gave
+    // up on. MEASURED 2026-09-09: a base-tree proof pegged a core for 5h54m, no review posted for
+    // six hours. Same-day probe, same child: SIGTERM returned only after the child finished on its
+    // OWN (120s), SIGKILL in 3s — and in 3s with a grandchild still holding the pipe. Escalation
+    // would need an async spawn (this seam returns a string) or a shell; an untrappable signal is
+    // the only bound a synchronous spawner enforces. COST: a killed proof flushes no diagnostic.
+    killSignal: "SIGKILL",
     encoding: "utf8",
   });
 
@@ -1094,7 +1103,9 @@ function ensureDeps(cwd: string): void {
   npmCiPrimed.add(cwd); // mark attempted regardless of outcome — never retry-storm a cwd
   if (!existsSync(join(cwd, "package.json")) || existsSync(join(cwd, "node_modules"))) return;
   try {
-    execFileSync("npm", ["ci"], { cwd, stdio: "pipe", timeout: 120_000 });
+    // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
+    // outlive its timeout and hold the reviewer the way a wedged proof did.
+    execFileSync("npm", ["ci"], { cwd, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
   } catch {
     /* best-effort priming; see doc comment above */
   }
@@ -1226,6 +1237,9 @@ function installPinnedChromium(cwd: string): void {
     cwd,
     stdio: "pipe",
     timeout: 600_000,
+    // W1-T3266: the longest bound in this module, and therefore the one whose failure to fire
+    // costs the most. Same reason as the proof spawner above.
+    killSignal: "SIGKILL",
   });
 }
 
