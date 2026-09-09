@@ -41,6 +41,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 import type { Config } from "../src/lib/config.js";
 import { isInPlanScope } from "../src/lib/plan-architect.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -1819,12 +1820,13 @@ test("fixCommand builds its sweep effects from its OWN resolved values, and rout
   // boundary — the effects are built and handed over, and no fix is ever dispatched.
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-cmd-effects-`));
   // A `gh` that refuses: ghRequiredStatusCheckContexts is fail-soft, so this makes its degradation
-  // deterministic and keeps the case off the network entirely.
-  const bin = join(root, "bin");
-  mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  // deterministic and keeps the case off the network entirely. Built through
+  // test/helpers/gh-shim.ts rather than a local script — the fixture-copy census counts
+  // hand-rolled shim files precisely to stop this becoming the 87th, and the shared fixture
+  // already carries the tmp prefix the mkdtemp-callsite gate requires.
+  const shim = ghShim([{ when: "", exit: 1 }], { kind: "fix-cmd-effects-gh" });
   const oldPath = process.env.PATH;
-  process.env.PATH = `${bin}:${oldPath}`;
+  process.env.PATH = `${shim.dir}:${oldPath}`;
 
   let seen: Parameters<typeof routeFix>[2] | undefined;
   let seenState: string | undefined;
