@@ -1125,6 +1125,7 @@
     "test/the-boot-fetch-survives-a-transient-ref-lock.test.ts": 7247,
     "test/the-browser-preflight-gates-on-dialect-not-on-need.test.ts": 1048,
     "test/the-cadence-row-names-every-member.test.ts": 1336,
+    "test/the-caller-sweep-stops-at-one-hop.test.ts": 0,
     "test/the-capacity-read-cannot-say-which-account-it-measured.test.ts": 725,
     "test/the-capacity-row-cannot-explain-its-own-telemetry-verdict.test.ts": 235,
     "test/the-census-admission-set-is-derived-not-enumerated.test.ts": 11465,
