@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§5", "§8A"]
   files: [test/helpers/git-repo.ts, test/helpers/fake-github.ts, test/helpers/gh-shim.ts, test/helpers/ledger-fixture.ts, test/fixture-copy-census.test.ts, scripts/fixture-copy-baseline.json, test/helpers/git-repo.test.ts, test/helpers/fake-github.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-41 (OBSERVED). At f7ceb86: `git grep -hoE 'function

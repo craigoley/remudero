@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§2", "§4", "W1-T340", "W1-T2799"]
   files: [src/lib/daemon.ts, src/run-task.ts, src/lib/status.ts, test/blocked-status-survives-plan-reload.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-5 (OBSERVED). At f7ceb86, `src/lib/daemon.ts:3103` sets

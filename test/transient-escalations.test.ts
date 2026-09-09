@@ -269,12 +269,20 @@ test("the real escalate closure stamps the PR referent on the issue it opens", (
     comment: () => {},
   } as never;
 
-  const effects = buildSweepEffects(
-    "craigoley", "remudero",
-    { claudeBin: "/bin/true", root } as Config,
-    ledgerPath, "TEST-RUN", fixturePlan(), () => {},
-    DEFAULT_SWEEP_POLICY, async () => 0, undefined, undefined as never, issuesImpl,
-  );
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { claudeBin: "/bin/true", root } as Config,
+    ledgerPath: ledgerPath,
+    runId: "TEST-RUN",
+    plan: fixturePlan(),
+    log: () => {},
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: async () => 0,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined as never,
+    issuesImpl: issuesImpl,
+  });
 
   effects.escalate!(
     pr({ prNumber: 1038, taskId: undefined }),

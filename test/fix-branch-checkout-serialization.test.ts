@@ -49,6 +49,7 @@ import {
   readRegisteredFixOwnerClaim,
   registeredFixWorktreeOwner,
   removeAbandonedFixWorktreeOwner,
+  type BuildSweepEffectsDeps,
   type RegisteredFixOwnerSnapshot,
 } from "../src/run-task.js";
 import { acquireInflightLock } from "../src/lib/inflight-lock.js";
@@ -351,8 +352,8 @@ async function driveDispatchFix(
   root: string,
   headRefName: string,
   registeredWorktreeOwnerPath?: string | (() => string | undefined),
-  registeredOwnerRecovery?: Parameters<typeof buildSweepEffects>[23],
-  spawnImpl?: Parameters<typeof buildSweepEffects>[9],
+  registeredOwnerRecovery?: BuildSweepEffectsDeps["registeredOwnerRecovery"],
+  spawnImpl?: BuildSweepEffectsDeps["spawnImpl"],
   evidence: { unmetCriteria: never[]; ciFailures: Array<{ name: string; logTail: string }> } = {
     unmetCriteria: [],
     ciFailures: [],
@@ -379,37 +380,37 @@ async function driveDispatchFix(
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   let threw: unknown;
   try {
-    const effects = buildSweepEffects(
-      "acme",
-      "scratch-fbcs-repo",
-      { root } as never,
-      join(root, "ledger.ndjson"),
-      "SWEEP-FBCS",
-      PLAN,
-      (step, extra) => void logs.push({ step, extra }),
-      DEFAULT_SWEEP_POLICY,
-      undefined, // reviewRunner
-      spawnImpl as never,
-      undefined, // pushEmptyCommit
-      undefined, // issuesImpl
-      undefined, // stallNotice
-      undefined, // armImpl
-      undefined, // armSessionPrsOverride
-      undefined, // updateBranchImpl
-      undefined, // captureRepairFeedbackImpl
-      undefined, // ghRunImpl
-      undefined, // spawnWallClockBoundMsOverride
-      undefined, // reclaimWorkerImpl
-      undefined, // disarmImpl
-      undefined, // readJsonImpl
-      (_repoDir: string, branchRef: string) => {
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "scratch-fbcs-repo",
+      config: { root } as never,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "SWEEP-FBCS",
+      plan: PLAN,
+      log: (step, extra) => void logs.push({ step, extra }),
+      policy: DEFAULT_SWEEP_POLICY,
+      reviewRunner: undefined,
+      spawnImpl: spawnImpl as never,
+      pushEmptyCommit: undefined,
+      issuesImpl: undefined,
+      stallNotice: undefined,
+      armImpl: undefined,
+      armSessionPrsOverride: undefined,
+      updateBranchImpl: undefined,
+      captureRepairFeedbackImpl: undefined,
+      ghRunImpl: undefined,
+      spawnWallClockBoundMsOverride: undefined,
+      reclaimWorkerImpl: undefined,
+      disarmImpl: undefined,
+      readJsonImpl: undefined,
+      registeredWorktreeOwnerImpl: (_repoDir: string, branchRef: string) => {
         assert.equal(branchRef, `refs/heads/${headRefName}`);
         return typeof registeredWorktreeOwnerPath === "function"
           ? registeredWorktreeOwnerPath()
           : registeredWorktreeOwnerPath;
       },
-      registeredOwnerRecovery,
-    );
+      registeredOwnerRecovery: registeredOwnerRecovery,
+    });
     await effects.dispatchFix(prFor(9001, headRefName) as never, evidence as never);
   } catch (e) {
     threw = e;

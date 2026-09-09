@@ -215,20 +215,20 @@ test("the production sweep escalation adapter carries the check, signature, and 
       return "https://github.com/craigoley/remudero/issues/9999";
     },
   };
-  const effects = buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { root, claudeBin: "/usr/bin/true" } as never,
-    ledgerPath,
-    "SWEEP-INFRA-ESCALATION",
-    { tasks: [] } as never,
-    () => {},
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    issues,
-  );
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { root, claudeBin: "/usr/bin/true" } as never,
+    ledgerPath: ledgerPath,
+    runId: "SWEEP-INFRA-ESCALATION",
+    plan: { tasks: [] } as never,
+    log: () => {},
+    policy: undefined,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: issues,
+  });
 
   await effects.escalateInfrastructureCheck?.(
     subject(),

@@ -316,22 +316,22 @@ test("REPLAY #921: the recorded shape re-pushes once where the live sweep escala
 
 test("buildSweepEffects wires repushAbsent to the push leaf with the PR's own branch, head, and a self-describing message", async () => {
   const calls: Array<{ repoDir: string; branch: string; head: string; message: string }> = [];
-  const effects = buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { claudeBin: "/bin/true", root: "/nonexistent-bh-root" } as never,
-    join(mkdtempSync(join(tmpdir(), "rmd-bh-eff-")), "ledger.ndjson"),
-    "SWEEP-EFF-1",
-    { tasks: [], byId: new Map() } as never,
-    () => {},
-    DEFAULT_SWEEP_POLICY,
-    async () => 0,
-    undefined,
-    (repoDir, branch, head, message) => {
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { claudeBin: "/bin/true", root: "/nonexistent-bh-root" } as never,
+    ledgerPath: join(mkdtempSync(join(tmpdir(), "rmd-bh-eff-")), "ledger.ndjson"),
+    runId: "SWEEP-EFF-1",
+    plan: { tasks: [], byId: new Map() } as never,
+    log: () => {},
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: async () => 0,
+    spawnImpl: undefined,
+    pushEmptyCommit: (repoDir, branch, head, message) => {
       calls.push({ repoDir, branch, head, message });
       return "mintedsha";
     },
-  );
+  });
 
   const minted = await effects.repushAbsent!(pr({ headRefName: "run-W1-T253-1785378652634", headSha: "35d636d454cc" }));
   assert.equal(minted, "mintedsha", "the freshly minted sha is returned to the sweep for its ledger line");
@@ -344,22 +344,22 @@ test("buildSweepEffects wires repushAbsent to the push leaf with the PR's own br
 
 test("buildSweepEffects' repushAbsent stands down when the head branch was never observed", async () => {
   let pushes = 0;
-  const effects = buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { claudeBin: "/bin/true", root: "/nonexistent-bh-root" } as never,
-    join(mkdtempSync(join(tmpdir(), "rmd-bh-eff2-")), "ledger.ndjson"),
-    "SWEEP-EFF-2",
-    { tasks: [], byId: new Map() } as never,
-    () => {},
-    DEFAULT_SWEEP_POLICY,
-    async () => 0,
-    undefined,
-    () => {
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { claudeBin: "/bin/true", root: "/nonexistent-bh-root" } as never,
+    ledgerPath: join(mkdtempSync(join(tmpdir(), "rmd-bh-eff2-")), "ledger.ndjson"),
+    runId: "SWEEP-EFF-2",
+    plan: { tasks: [], byId: new Map() } as never,
+    log: () => {},
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: async () => 0,
+    spawnImpl: undefined,
+    pushEmptyCommit: () => {
       pushes++;
       return "never";
     },
-  );
+  });
   assert.equal(await effects.repushAbsent!(pr({ headRefName: undefined })), undefined);
   assert.equal(pushes, 0, "no branch name means nothing to push to — never a guess");
 });

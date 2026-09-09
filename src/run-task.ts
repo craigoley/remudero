@@ -29048,129 +29048,53 @@ export interface RegisteredFixOwnerRecoveryDeps {
   preserveDiverged?: typeof preserveAbandonedFixOwnerDivergence;
 }
 
-export function buildSweepEffects(
-  owner: string,
-  repo: string,
-  config: Config,
-  ledgerPath: string,
-  runId: string,
-  plan: Plan,
-  log: (step: string, extra?: Record<string, unknown>) => void,
-  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
-  // W1-T254: injectable review runner so the post-review effect's attempt/
-  // done/failed logging path is unit-covered without spawning a real review.
-  /* c8 ignore next 5 -- the injected recorder below proves the handoff; these lines are the
-   * irreducible production binding to reviewCommand, whose own semantic path is tested directly. */
-  reviewRunner: (prNumber: number, isPlanFiling?: boolean) => Promise<number> = (prNumber, isPlanFiling) =>
-    reviewCommand(String(prNumber), ["--repo", repo], {
-      executionMode: "semantic",
-      planOnlyFiling: isPlanFiling,
-    }),
-  // Injectable worker spawn, same shape and rationale as `reviewRunner` directly above: the
-  // fix rung's own effects (including its best-effort push) were unreachable from any offline
-  // test because the adapter below hardcoded `spawnWorker`. Optional with no default body, so
-  // this adds no new executable line — the adapter itself resolves it.
-  spawnImpl?: (args: SpawnWorkerArgs) => Promise<WorkerResult>,
-  // Injectable empty-commit push — appended LAST so every existing positional caller is
-  // untouched. Same rationale as `reviewRunner`/`spawnImpl` above: the ABSENT remedy's wiring
-  // is unit-covered with a recorder instead of a real push to a real branch.
-  pushEmptyCommit: typeof gitPushEmptyCommit = gitPushEmptyCommit,
-  // Injectable issue gateway — appended LAST so no positional caller shifts, the same convention
-  // `reviewRunner`/`spawnImpl`/`pushEmptyCommit` above already follow. Without it the `escalate`
-  // closure's own body is unreachable from any offline test (it would open a REAL needs-human
-  // issue), which is exactly how the `taskId:` mint inside it went uncovered.
-  issuesImpl?: IssueGateway,
-  // Injectable stall notice — appended LAST so no positional caller shifts, the same convention
-  // `reviewRunner`/`spawnImpl`/`pushEmptyCommit`/`issuesImpl` above already follow. The postReview
-  // closure wraps this call in a try/catch so a throw from the NOTICE can never replace the real
-  // failure being reported; that catch arm is only reachable if something in here throws, so it is
-  // only provable with an injected thrower.
-  stallNotice: (verdict: PostReviewStallVerdict, ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway }) => void = escalatePostReviewStall,
-  // Injectable arm — same convention as `reviewRunner`/`spawnImpl` above: without it, a
-  // SUCCESSFUL sweep arm is unreachable from any offline test, because the adapter always
-  // called the real `armAutoMerge` (a live `gh pr merge`). Default is `armAutoMerge` itself,
-  // so production wiring is unchanged. W1-T449: the `arm` effect below now routes this
-  // through `armAndLogOutcome` (rather than calling it bare), so a successful sweep arm
-  // finally reaches the ledger with the PR identity + a `"sweep"` lane, not only the
-  // sweep.disposed row.
-  // W1-T1079: default is now {@link armAutoMergeDetailed}, not the bare-outcome
-  // {@link armAutoMerge} — the sweep lane arms far more PRs than any other, so it is where
-  // most of the 172 error-less `arm-error-ignored` rows this task fixes came from. Every
-  // existing test fixture returning a bare {@link ArmOutcome} (e.g. `(): ArmOutcome => "armed"`)
-  // still satisfies this widened type unchanged.
-  armImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = armAutoMergeDetailed,
-  // W1-T516 — appended LAST so no positional caller shifts, the same convention every dep
-  // above follows. OPTIONAL with no default expression (rather than a bare `= loadDefaultPolicy()
-  // ...` default), so the `??` fallback below is the injection SEAM test/config-reader-seams.test.ts
-  // recognizes — the SAME `deps.policy ?? loadDefaultPolicy()` shape `dailyCostCeilingReloader`/
-  // `buildAccountUsageRoute`/`ceilingPolicy` already use, not a new pattern.
-  armSessionPrsOverride?: boolean,
-  // W1-T528 — appended LAST, the same convention every dep above follows: without it, a
-  // successful update-branch request is unreachable from any offline test, because the
-  // adapter always called the real `updateBranchViaGh` (a live, mutating `gh` call). Default is
-  // `updateBranchViaGh` itself (REST since W1-T1208), so production wiring is unchanged.
-  updateBranchImpl: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome> = updateBranchViaGh,
-  // W1-T905 — appended LAST, the same convention every dep above follows. Wraps the real
-  // `captureFeedback` with the SAME caller-side `existsSync` dedup `src/lib/issues-intake.ts`'s
-  // `pollIssues` already uses for its own deterministic id (`fb-issue-<owner>-<repo>-<n>`) — see
-  // `SweepDeps.captureRepairFeedback`'s own doc for why the dedup check belongs HERE, in the one
-  // place effects are wired, rather than inside sweep.ts's pure fold. Injectable so a test can
-  // assert the dedup/capture behavior without writing a real plan/feedback/ entry; production
-  // wiring is unchanged.
-  // W1-T2416: now routes through {@link captureRepairFeedbackWithPriorVerdict}, which keeps this
-  // SAME `existsSync` per-window dedup first and adds the prior-verdict read beside it — see that
-  // function's own doc. Production wiring (`repoRoot`, this closure's own `log`) is unchanged.
-  captureRepairFeedbackImpl: (filing: RepairFilingCapture) => void = (filing) =>
-    captureRepairFeedbackWithPriorVerdict(repoRoot, filing, log),
-  // W1-T921 — appended LAST, the same convention every dep above follows. The `close` effect below
-  // is the ONE `gh` site in this object whose ARGUMENT VECTOR is the thing under test: whether it
-  // carries `--delete-branch`. Without a seam that vector is unobservable offline, because asserting
-  // it would mean closing a real pull request. Default is the real `execFileSync`, so production
-  // wiring is unchanged; a test passes a recorder and reads the argv back.
-  ghRunImpl: (file: string, args: readonly string[]) => void = (file, args) => {
-    execFileSync(file, [...args], { stdio: "pipe" });
-  },
-  // W1-T1044 — appended LAST, the same convention every dep above follows. OPTIONAL with no
-  // default expression (mirrors `armSessionPrsOverride`'s own shape immediately above): the
-  // `??` fallback below reads `plan/policy.yaml`'s `fixSpawnWallClockBoundMs` row (W1-T1219 —
-  // split off `sweepWallClockBoundMs`, the sweep tick's own row) so production wiring picks up
-  // an operator's edit with no code change, while a test overrides this directly to drive the
-  // bound without writing a fixture policy file.
-  spawnWallClockBoundMsOverride?: number,
-  // W1-T1044 — appended LAST, same convention. Defaults to {@link reclaimAbandonedWorker}
-  // (the real process-group kill, scoped by this run's own `REMUDERO_RUN_ID` marker); a test
-  // overrides it with a recorder so the abandon-then-reclaim sequence is provable without a
-  // real spawned process.
-  // W1-T2261: the default now binds THIS function's own `log` param (param 7, above) through —
-  // the bare `reclaimAbandonedWorker` reference this replaced left every match/no-match outcome
-  // silently swallowed by that function's own no-op default, on the ONE call site the measured
-  // incident actually hit (this doc's own W1-T1044 comment). A test overriding this parameter
-  // still receives its own recorder unchanged; only the PRODUCTION default gained a ledger sink.
-  reclaimWorkerImpl: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void> = (info) =>
-    reclaimAbandonedWorker(info, { log }),
-  // W1-T1000002 — appended LAST, the same convention every dep above follows. Default is the
-  // real `disarmAutoMerge` (a live `gh pr merge --disable-auto`), so production wiring is
-  // unchanged; a test overrides it with a recorder so the sweep's converging withdrawal (design
-  // (iv) of this task's record) is provable without a real mutating `gh` call.
-  disarmImpl: (prUrl: string) => DisarmOutcome | void = disarmAutoMerge,
-  // W1-T2300 (design ii) — appended LAST, the same convention every dep above follows.
-  // Injectable async JSON reader for the stale-ci-gate lane's FRESH rollup read: without it,
-  // `readCiGateRollup`/`reaggregateCiGate` below would be unreachable from any offline test
-  // without a real `gh` on PATH — the SAME reason `pollToGate`/`waitForCiGreen`'s own `readJson`
-  // deps param exists (this file, W1-T2268). Default is `ghJsonAsync`, the SAME non-blocking
-  // reader those two poll loops already drive `restRollupFor` through, so production wiring is
-  // unchanged.
-  readJsonImpl: (args: string[]) => Promise<unknown> = ghJsonAsync,
-  // W1-T2863 — appended LAST so every existing positional caller remains byte-for-byte intact.
-  // The registered worktree is Git's durable branch owner across an in-container daemon refresh;
-  // tests inject the read so they can prove admission stands down before the stale pid claim is
-  // reclaimed, without touching a real shared clone.
-  registeredWorktreeOwnerImpl: (repoDir: string, branchRef: string) => string | undefined = registeredFixWorktreeOwner,
-  registeredOwnerRecovery: RegisteredFixOwnerRecoveryDeps = {
-    capture: captureRegisteredFixOwnerSnapshot,
-    remove: removeAbandonedFixWorktreeOwner,
-  },
-): Pick<
+export interface BuildSweepEffectsDeps {
+  owner: string;
+  repo: string;
+  config: Config;
+  ledgerPath: string;
+  runId: string;
+  plan: Plan;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  policy?: SweepPolicy;
+  reviewRunner?: (prNumber: number, isPlanFiling?: boolean) => Promise<number>;
+  /** The command the DEFAULT `reviewRunner` above calls. Separate from `reviewRunner` on purpose:
+   *  overriding `reviewRunner` replaces the default outright and leaves its opt-in untested, while
+   *  this seam keeps the default arm itself — the one that names `executionMode: "semantic"` — as
+   *  the code under test. Omitted, it is `reviewCommand`. */
+  reviewCommandImpl?: typeof reviewCommand;
+  spawnImpl?: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+  pushEmptyCommit?: typeof gitPushEmptyCommit;
+  issuesImpl?: IssueGateway;
+  stallNotice?: (
+    verdict: PostReviewStallVerdict,
+    ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+  ) => void;
+  armImpl?: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult;
+  armSessionPrsOverride?: boolean;
+  updateBranchImpl?: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome>;
+  captureRepairFeedbackImpl?: (filing: RepairFilingCapture) => void;
+  ghRunImpl?: (file: string, args: readonly string[]) => void;
+  spawnWallClockBoundMsOverride?: number;
+  reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
+  disarmImpl?: (prUrl: string) => DisarmOutcome | void;
+  readJsonImpl?: (args: string[]) => Promise<unknown>;
+  registeredWorktreeOwnerImpl?: (repoDir: string, branchRef: string) => string | undefined;
+  registeredOwnerRecovery?: RegisteredFixOwnerRecoveryDeps;
+}
+
+/**
+ * The default `gh` invocation for {@link buildSweepEffects}' `ghRunImpl` seam — a NAMED function
+ * rather than an inline default so it is reachable by a test at all. Its one caller closes a pull
+ * request, so a test that drove it through the effect would have to close one; called directly
+ * with a harmless argv it exercises the same statement and proves the seam's default is the real
+ * spawn rather than a stub that quietly does nothing.
+ */
+export function defaultSweepGhRun(file: string, args: readonly string[]): void {
+  execFileSync(file, [...args], { stdio: "pipe" });
+}
+
+export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "arm"
   | "close"
@@ -29194,6 +29118,47 @@ export function buildSweepEffects(
   | "releaseBaseCausedStandDown"
   | "selectAdaptiveReviewWidth"
 > {
+  const {
+    owner,
+    repo,
+    config,
+    ledgerPath,
+    runId,
+    plan,
+    log,
+    policy = DEFAULT_SWEEP_POLICY,
+    spawnImpl,
+    pushEmptyCommit = gitPushEmptyCommit,
+    issuesImpl,
+    stallNotice = escalatePostReviewStall,
+    armImpl = armAutoMergeDetailed,
+    armSessionPrsOverride,
+    updateBranchImpl = updateBranchViaGh,
+    captureRepairFeedbackImpl = (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, log),
+    ghRunImpl = defaultSweepGhRun,
+    spawnWallClockBoundMsOverride,
+    reclaimWorkerImpl = (info) => reclaimAbandonedWorker(info, { log }),
+    disarmImpl = disarmAutoMerge,
+    readJsonImpl = ghJsonAsync,
+    registeredWorktreeOwnerImpl = registeredFixWorktreeOwner,
+    reviewCommandImpl = reviewCommand,
+    registeredOwnerRecovery = {
+      capture: captureRegisteredFixOwnerSnapshot,
+      remove: removeAbandonedFixWorktreeOwner,
+    },
+  } = deps;
+
+  // W1-T2889: kept as a typed local (not a destructured default) so this default arm's shape
+  // survives the positional-parameters-to-one-deps-object collapse verbatim — the sweep's
+  // post-review lane still routes through reviewCommand, and nothing but `deps.reviewRunner`
+  // can override it.
+  let reviewRunner: (prNumber: number, isPlanFiling?: boolean) => Promise<number> = (prNumber, isPlanFiling) =>
+    reviewCommandImpl(String(prNumber), ["--repo", repo], {
+      executionMode: "semantic",
+      planOnlyFiling: isPlanFiling,
+    });
+  if (deps.reviewRunner) reviewRunner = deps.reviewRunner;
+
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
   // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
@@ -30365,7 +30330,16 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   );
   const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
 
-  const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
+  const effects = buildSweepEffects({
+    owner: owner,
+    repo: repo,
+    config: config,
+    ledgerPath: ledgerPath,
+    runId: runId,
+    plan: plan,
+    log: log,
+    policy: DEFAULT_SWEEP_POLICY,
+  });
   // W1-T528: "in flight" for `selectUpdateBranchTarget` means exactly what it means everywhere
   // else in the fleet (see `liveInflightRuns`'s own doc) — the SAME per-task lock directory the
   // drain/daemon dispatch path already reads, never a second, looser definition.
@@ -31257,7 +31231,16 @@ export function buildSweepHook(
         reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
       );
       const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
-      const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
+      const effects = buildSweepEffects({
+        owner: owner,
+        repo: repo,
+        config: config,
+        ledgerPath: ledgerPath,
+        runId: runId,
+        plan: plan,
+        log: log,
+        policy: DEFAULT_SWEEP_POLICY,
+      });
       // W1-T528: same in-flight lock directory every other dispatch-path reader consults —
       // see `sweepCommand`'s own comment on this exact line for the full rationale.
       const inflightDir = join(config.root, "state", "inflight");
@@ -31543,7 +31526,16 @@ export function buildSweepLightHook(
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
       });
-      const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
+      const effects = buildSweepEffects({
+        owner: owner,
+        repo: repo,
+        config: config,
+        ledgerPath: ledgerPath,
+        runId: runId,
+        plan: plan,
+        log: log,
+        policy: DEFAULT_SWEEP_POLICY,
+      });
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
       const fixRungAllowed = fixRungAllowedBesideInFlight(
@@ -31739,7 +31731,12 @@ export async function fixCommand(
   rest: string[],
   // Injectable exactly as approveCommand/inboxCommand already are — the seam that lets the
   // REST lookup below be graded by a test instead of shipping unexercised.
-  deps: { config?: Config; fetch?: GhApiFetcher } = {},
+  //
+  // `route` joins them for the same reason `fetch` did: without it nothing can reach the effects
+  // this command builds, so the one `buildSweepEffects` call site of the four that no test drives
+  // stayed unexercised while the other three were graded. Omitted, it is `routeFix` and the
+  // behaviour is byte-identical.
+  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix } = {},
 ): Promise<number> {
   const prArg = rest[0];
   const badArg = unknownArgError("fix", rest.slice(1), ["--repo"], []);
@@ -31826,8 +31823,17 @@ export async function fixCommand(
     log("fix.plan.unavailable", { plan_path: planPath, error: String((e as Error)?.message ?? e) });
   }
 
-  const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
-  const { outcome, reason } = await routeFix(raw.state, pr, effects, DEFAULT_SWEEP_POLICY);
+  const effects = buildSweepEffects({
+    owner: owner,
+    repo: repo,
+    config: config,
+    ledgerPath: ledgerPath,
+    runId: runId,
+    plan: plan,
+    log: log,
+    policy: DEFAULT_SWEEP_POLICY,
+  });
+  const { outcome, reason } = await (deps.route ?? routeFix)(raw.state, pr, effects, DEFAULT_SWEEP_POLICY);
 
   log(`fix.${outcome === "refused" ? "refused" : "disposed"}`, { pr_number: prNumber, task_id: taskId, outcome, reason });
   if (outcome === "fixed") {

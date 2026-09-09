@@ -10,7 +10,7 @@
   files: [hooks/pre-push, test/a-worker-that-adds-a-test-file-is-born-red.test.ts]
   origin: "operator-session#fleet-throughput-2026-09-08"
   plan_refs: ["W1-T2904", "W1-T3072", "W1-T3057"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T2904's refusal is correct and this task does not touch it: a test file the manifest has

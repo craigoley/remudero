@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§9", "W1-T525", "W1-T2217", "W1-T2440", "W1-T1024"]
   files: [src/lib/github-transport.ts, src/lib/worker.ts, src/lib/open-prs-rest.ts, src/lib/escalate.ts, src/lib/self-sync.ts, src/lib/github-app.ts, src/lib/review.ts, src/lib/panel-actions.ts, src/lib/daemon-health.ts, src/lib/issues-intake.ts, src/lib/feedback-landing.ts, src/lib/retro.ts, src/lib/status.ts, src/lib/ops.ts, src/lib/onboard/recon.ts, src/lib/onboard/synthesize.ts, src/lib/onboard/inventory.ts, src/lib/feedback.ts, src/lib/specialist-panel.ts, src/lib/github-posture.ts, src/run-task.ts, test/gh-transport-census.test.ts, test/github-transport.test.ts, scripts/gh-transport-baseline.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-32 (OBSERVED) and R-6 (OBSERVED census, INFERRED hang). W1-T525

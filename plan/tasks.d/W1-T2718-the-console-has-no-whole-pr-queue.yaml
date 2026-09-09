@@ -15,7 +15,7 @@
     - scripts/source-size-baseline.json
   origin: oper#beautiful-operational-pr-queue-2026-09-02
   plan_refs: ["P22", "W1-T914", "W1-T1006", "W1-T2568", "W1-T2584"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED AT origin/main 4cc3efde. `BoardSnapshot.tasks` is one row per PLAN task, not one row
