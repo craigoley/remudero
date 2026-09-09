@@ -119,27 +119,37 @@ const STILL_RED_ROUTES = {
 };
 
 /** `buildSweepEffects` with every optional dep left at its default EXCEPT `log`, `ghRunImpl`
- *  (param 18) and `readJsonImpl` (param 22, the newest — W1-T2300) — the exact positional gap
+ *  and `readJsonImpl` (W1-T2300) — the same wiring gap
  *  `test/cancelled-required-check-requeue.test.ts`'s own GUARDED SITE tests already drive. */
 function buildEffects(
   ghRunImpl: (file: string, args: readonly string[]) => void,
   readJsonImpl: (args: string[]) => Promise<unknown>,
   log: (step: string, extra?: Record<string, unknown>) => void = () => {},
 ) {
-  return buildSweepEffects(
-    OWNER,
-    REPO,
-    { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t2300-stale-gate-root-")) } as never,
-    ledgerPath(),
-    "SWEEP-STALEGATE-1",
-    { tasks: [] } as never,
-    log,
-    undefined, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined,
-    ghRunImpl,
-    undefined, undefined, undefined,
-    readJsonImpl,
-  );
+  return buildSweepEffects({
+    owner: OWNER,
+    repo: REPO,
+    config: { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t2300-stale-gate-root-")) } as never,
+    ledgerPath: ledgerPath(),
+    runId: "SWEEP-STALEGATE-1",
+    plan: { tasks: [] } as never,
+    log: log,
+    policy: undefined,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: undefined,
+    stallNotice: undefined,
+    armImpl: undefined,
+    armSessionPrsOverride: undefined,
+    updateBranchImpl: undefined,
+    captureRepairFeedbackImpl: undefined,
+    ghRunImpl: ghRunImpl,
+    spawnWallClockBoundMsOverride: undefined,
+    reclaimWorkerImpl: undefined,
+    disarmImpl: undefined,
+    readJsonImpl: readJsonImpl,
+  });
 }
 
 // ── acceptance 1 — reachable from the CLI's own buildSweepEffects, and the detector fires ───────

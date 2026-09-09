@@ -298,10 +298,16 @@ test("dispatchFix REFUSES a synthetic PR whose head claims another task, before 
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   try {
     mkdirSync(join(root, "repos"), { recursive: true });
-    const effects = buildSweepEffects(
-      "acme", "scratch-fy-repo", { root } as never, join(root, "ledger.ndjson"), "SWEEP-FY",
-      PLAN, (step, extra) => void logs.push({ step, extra }), POLICY,
-    );
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "scratch-fy-repo",
+      config: { root } as never,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "SWEEP-FY",
+      plan: PLAN,
+      log: (step, extra) => void logs.push({ step, extra }),
+      policy: POLICY,
+    });
     await effects.dispatchFix(
       { ...AGENT_PR, prNumber: 4242, taskId: undefined, headRefName: "run-W1-T999-1785600000000" } as never,
       { unmetCriteria: [], ciFailures: [] } as never,
@@ -376,17 +382,17 @@ test("dispatchFix sends the production RETRO trailer/head shape to a worker unde
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   let spawnCalls = 0;
   try {
-    const effects = (await import("../src/run-task.js")).buildSweepEffects(
-      owner,
-      repo,
-      { claudeBin: "/usr/bin/true", root } as never,
-      join(root, "ledger.ndjson"),
-      "SWEEP-W1-T2703",
-      { tasks: [], byId: new Map() },
-      (step, extra) => void logs.push({ step, extra }),
-      DEFAULT_SWEEP_POLICY,
-      undefined,
-      async () => {
+    const effects = (await import("../src/run-task.js")).buildSweepEffects({
+      owner: owner,
+      repo: repo,
+      config: { claudeBin: "/usr/bin/true", root } as never,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "SWEEP-W1-T2703",
+      plan: { tasks: [], byId: new Map() },
+      log: (step, extra) => void logs.push({ step, extra }),
+      policy: DEFAULT_SWEEP_POLICY,
+      reviewRunner: undefined,
+      spawnImpl: async () => {
         spawnCalls += 1;
         return {
           sessionId: "W1-T2703-SESSION",
@@ -408,7 +414,7 @@ test("dispatchFix sends the production RETRO trailer/head shape to a worker unde
           qualitySuspect: false,
         } satisfies WorkerResult;
       },
-    );
+    });
 
     await withLiveWritesAllowed(() =>
       effects.dispatchFix(

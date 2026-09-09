@@ -306,20 +306,28 @@ test("acceptance 6 (end to end): a SECOND pass over the SAME head sha, still can
 
 test("acceptance 7: buildSweepEffects().requeueCheck targets coverage-ratchet's OWN job, never the whole workflow run that also carries ci-gate's job", async () => {
   const captured: string[][] = [];
-  const effects = buildSweepEffects(
-    OWNER,
-    REPO,
-    { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t2283-requeue-root-")) } as never,
-    ledgerPath(),
-    "SWEEP-CANCELLED-ARM-2",
-    { tasks: [] } as never,
-    () => {},
-    undefined, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined,
-    (file, args) => {
+  const effects = buildSweepEffects({
+    owner: OWNER,
+    repo: REPO,
+    config: { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t2283-requeue-root-")) } as never,
+    ledgerPath: ledgerPath(),
+    runId: "SWEEP-CANCELLED-ARM-2",
+    plan: { tasks: [] } as never,
+    log: () => {},
+    policy: undefined,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: undefined,
+    stallNotice: undefined,
+    armImpl: undefined,
+    armSessionPrsOverride: undefined,
+    updateBranchImpl: undefined,
+    captureRepairFeedbackImpl: undefined,
+    ghRunImpl: (file, args) => {
       captured.push([file, ...args]);
     },
-  );
+  });
 
   const cancelled = cancelledRequiredChecks(INCIDENT_2794.rollup, REAL_REQUIRED);
   assert.equal(cancelled.length, 1);

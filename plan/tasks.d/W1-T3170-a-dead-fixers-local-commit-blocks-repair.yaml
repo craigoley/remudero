@@ -13,7 +13,7 @@
     - test/fix-branch-checkout-serialization.test.ts
   origin: "fleet-incident#local-commit-not-contained-2026-09-08"
   plan_refs: ["W1-T2839", "W1-T2863", "W1-T2952", "§5", "§9"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED TWICE ON THE AZURE FLEET ON 2026-09-08. Repair admission for PR #4522

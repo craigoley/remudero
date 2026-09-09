@@ -268,28 +268,25 @@ test("the sweep's own postReview closure escalates a repeated failure — real w
   const { opened, gw } = recorder();
   const logged: string[] = [];
   try {
-    const effects = buildSweepEffects(
-      "craigoley",
-      "remudero",
-      { claudeBin: "/bin/true", root: "/nonexistent-stall-root" } as never,
-      led.path,
-      "SWEEP-STALL-1",
-      { tasks: [], byId: new Map() } as never,
-      // Mirrors production exactly: `runSweep`'s own log is
-      // `appendLedger(ledgerPath, {run_id, task_id:"SWEEP", step, ...extra})`. The detector reads
-      // the ledger FILE back, so a fake that only recorded in memory would not exercise the wiring.
-      (step, extra) => {
+    const effects = buildSweepEffects({
+      owner: "craigoley",
+      repo: "remudero",
+      config: { claudeBin: "/bin/true", root: "/nonexistent-stall-root" } as never,
+      ledgerPath: led.path,
+      runId: "SWEEP-STALL-1",
+      plan: { tasks: [], byId: new Map() } as never,
+      log: (step, extra) => {
         logged.push(step);
         appendLedger(led.path, { run_id: "SWEEP-STALL-1", task_id: "SWEEP", step, ...(extra ?? {}) });
       },
-      DEFAULT_SWEEP_POLICY,
-      async () => {
+      policy: DEFAULT_SWEEP_POLICY,
+      reviewRunner: async () => {
         throw new Error(rateLimitError(1339));
       },
-      undefined,
-      undefined,
-      gw,
-    );
+      spawnImpl: undefined,
+      pushEmptyCommit: undefined,
+      issuesImpl: gw,
+    });
 
     // Every tick the sweep re-attempts and the effect rethrows; the sweep contains that per PR.
     for (let i = 0; i < POST_REVIEW_STALL_THRESHOLD + 4; i++) {
@@ -336,25 +333,25 @@ test("a throw from the stall notice is contained and ledgered — it never repla
   // host, which has hit ENOSPC), so it is provable only with an injected thrower.
   const led = tmpLedger();
   const logged: string[] = [];
-  const effects = buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { claudeBin: "/bin/true", root: "/nonexistent-stall-root" } as never,
-    led.path,
-    "SWEEP-STALL-2",
-    { tasks: [], byId: new Map() } as never,
-    (step) => logged.push(step),
-    DEFAULT_SWEEP_POLICY,
-    async () => {
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { claudeBin: "/bin/true", root: "/nonexistent-stall-root" } as never,
+    ledgerPath: led.path,
+    runId: "SWEEP-STALL-2",
+    plan: { tasks: [], byId: new Map() } as never,
+    log: (step) => logged.push(step),
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: async () => {
       throw new Error(rateLimitError(1339));
     },
-    undefined,
-    undefined,
-    undefined,
-    () => {
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: undefined,
+    stallNotice: () => {
       throw new Error("notice exploded");
     },
-  );
+  });
   return assert
     .rejects(async () => {
       await effects.postReview!({ prNumber: 1339, headSha: "abc1234" } as never);

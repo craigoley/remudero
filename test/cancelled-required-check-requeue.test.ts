@@ -237,20 +237,28 @@ test("run-task.ts's cancelledRequiredChecks parses the JOB id off the rollup's o
 
 test("GUARDED SITE sweep check re-queue: buildSweepEffects().requeueCheck calls the single job's own rerun endpoint, never the whole-run rerun-failed-jobs endpoint", async () => {
   const captured: string[][] = [];
-  const effects = buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t1223-requeue-root-")) } as never,
-    ledgerPath(),
-    "SWEEP-REQUEUE-1",
-    { tasks: [] } as never,
-    () => {},
-    undefined, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined,
-    (file, args) => {
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t1223-requeue-root-")) } as never,
+    ledgerPath: ledgerPath(),
+    runId: "SWEEP-REQUEUE-1",
+    plan: { tasks: [] } as never,
+    log: () => {},
+    policy: undefined,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: undefined,
+    stallNotice: undefined,
+    armImpl: undefined,
+    armSessionPrsOverride: undefined,
+    updateBranchImpl: undefined,
+    captureRepairFeedbackImpl: undefined,
+    ghRunImpl: (file, args) => {
       captured.push([file, ...args]);
     },
-  );
+  });
 
   await effects.requeueCheck?.(
     { prNumber: 2434, prUrl: "https://github.com/craigoley/remudero/pull/2434", headSha: "202d302" } as never,
@@ -272,17 +280,25 @@ test("GUARDED SITE sweep check re-queue: buildSweepEffects().escalateCancelledCh
       return "https://github.com/craigoley/remudero/issues/999";
     },
   };
-  const effects = buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t1223-escalate-root-")) } as never,
-    ledgerPath(),
-    "SWEEP-REQUEUE-3",
-    { tasks: [] } as never,
-    () => {},
-    undefined, undefined, undefined, undefined, fakeIssues,
-    undefined, undefined, undefined, undefined, undefined,
-  );
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t1223-escalate-root-")) } as never,
+    ledgerPath: ledgerPath(),
+    runId: "SWEEP-REQUEUE-3",
+    plan: { tasks: [] } as never,
+    log: () => {},
+    policy: undefined,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: fakeIssues,
+    stallNotice: undefined,
+    armImpl: undefined,
+    armSessionPrsOverride: undefined,
+    updateBranchImpl: undefined,
+    captureRepairFeedbackImpl: undefined,
+  });
 
   await effects.escalateCancelledCheck?.(
     { prNumber: 2434, prUrl: "https://github.com/craigoley/remudero/pull/2434", headSha: "202d302" } as never,
@@ -299,22 +315,30 @@ test("GUARDED SITE sweep check re-queue: buildSweepEffects().escalateCancelledCh
 
 test("GUARDED SITE sweep check re-queue: buildSweepEffects().requeueCheck logs and swallows a throwing gh call, rather than crashing the sweep pass", async () => {
   const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const effects = buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t1223-requeue-throw-")) } as never,
-    ledgerPath(),
-    "SWEEP-REQUEUE-4",
-    { tasks: [] } as never,
-    (step, extra) => {
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t1223-requeue-throw-")) } as never,
+    ledgerPath: ledgerPath(),
+    runId: "SWEEP-REQUEUE-4",
+    plan: { tasks: [] } as never,
+    log: (step, extra) => {
       logged.push({ step, extra });
     },
-    undefined, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined,
-    () => {
+    policy: undefined,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: undefined,
+    stallNotice: undefined,
+    armImpl: undefined,
+    armSessionPrsOverride: undefined,
+    updateBranchImpl: undefined,
+    captureRepairFeedbackImpl: undefined,
+    ghRunImpl: () => {
       throw new Error("gh: rate limited");
     },
-  );
+  });
 
   await effects.requeueCheck?.(
     { prNumber: 2434, prUrl: "https://github.com/craigoley/remudero/pull/2434", headSha: "202d302" } as never,
@@ -381,20 +405,28 @@ test("GUARDED SITE gateway wiring: buildOpenPrViews populates OpenPrView.cancell
 
 test("buildSweepEffects().requeueCheck is a NAMED no-op when the rollup carried no job id — never a guessed target", async () => {
   const captured: string[][] = [];
-  const effects = buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t1223-requeue-nojob-")) } as never,
-    ledgerPath(),
-    "SWEEP-REQUEUE-2",
-    { tasks: [] } as never,
-    () => {},
-    undefined, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined,
-    (file, args) => {
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t1223-requeue-nojob-")) } as never,
+    ledgerPath: ledgerPath(),
+    runId: "SWEEP-REQUEUE-2",
+    plan: { tasks: [] } as never,
+    log: () => {},
+    policy: undefined,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: undefined,
+    stallNotice: undefined,
+    armImpl: undefined,
+    armSessionPrsOverride: undefined,
+    updateBranchImpl: undefined,
+    captureRepairFeedbackImpl: undefined,
+    ghRunImpl: (file, args) => {
       captured.push([file, ...args]);
     },
-  );
+  });
 
   await effects.requeueCheck?.(
     { prNumber: 2434, prUrl: "https://github.com/craigoley/remudero/pull/2434", headSha: "202d302" } as never,

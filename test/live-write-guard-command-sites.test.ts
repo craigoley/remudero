@@ -844,21 +844,21 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
 
     let fixSpawns = 0;
     const steps: string[] = [];
-    const effects = buildSweepEffects(
-      "acme",
-      "sandboxrepo",
-      { claudeBin: "/usr/bin/true", root } as never,
-      join(root, "ledger.ndjson"),
-      "SWEEP-FIX-1",
-      { tasks: [{ id: TASK, title: "sweep fixture", repo: "sandboxrepo", type: "implement", risk: "low", verify: "auto", status: "queued", attempts: 0, depends_on: [] }] } as never,
-      (step, extra) => { steps.push(`${step} ${JSON.stringify(extra ?? {})}`); },
-      undefined,
-      undefined,
-      async () => {
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "sandboxrepo",
+      config: { claudeBin: "/usr/bin/true", root } as never,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "SWEEP-FIX-1",
+      plan: { tasks: [{ id: TASK, title: "sweep fixture", repo: "sandboxrepo", type: "implement", risk: "low", verify: "auto", status: "queued", attempts: 0, depends_on: [] }] } as never,
+      log: (step, extra) => { steps.push(`${step} ${JSON.stringify(extra ?? {})}`); },
+      policy: undefined,
+      reviewRunner: undefined,
+      spawnImpl: async () => {
         fixSpawns += 1;
         return fakeWorker("REPORT\nfix applied\n");
       },
-    );
+    });
 
     try {
       await withLiveWritesAllowed(() =>
@@ -917,18 +917,26 @@ test("W1-T921: a sweep close does not delete the head branch", () => {
   const root = mkdtempSync(join(tmpdir(), "w1t921-close-"));
   const captured: string[][] = [];
   try {
-    const effects = buildSweepEffects(
-      "acme",
-      "sandboxrepo",
-      { claudeBin: "/usr/bin/true", root } as never,
-      join(root, "ledger.ndjson"),
-      "SWEEP-CLOSE-1",
-      { tasks: [] } as never,
-      () => {},
-      undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined,
-      (file, args) => { captured.push([file, ...args]); },
-    );
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "sandboxrepo",
+      config: { claudeBin: "/usr/bin/true", root } as never,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "SWEEP-CLOSE-1",
+      plan: { tasks: [] } as never,
+      log: () => {},
+      policy: undefined,
+      reviewRunner: undefined,
+      spawnImpl: undefined,
+      pushEmptyCommit: undefined,
+      issuesImpl: undefined,
+      stallNotice: undefined,
+      armImpl: undefined,
+      armSessionPrsOverride: undefined,
+      updateBranchImpl: undefined,
+      captureRepairFeedbackImpl: undefined,
+      ghRunImpl: (file, args) => { captured.push([file, ...args]); },
+    });
     effects.close(
       { prNumber: 42, prUrl: "https://github.com/acme/sandboxrepo/pull/42" } as never,
       "superseded-by #43",
@@ -1239,18 +1247,26 @@ test("W1-T921: the close argv is pinned against silent reinstatement", () => {
   const root = mkdtempSync(join(tmpdir(), "w1t921-pin-"));
   const captured: string[][] = [];
   try {
-    const effects = buildSweepEffects(
-      "acme",
-      "sandboxrepo",
-      { claudeBin: "/usr/bin/true", root } as never,
-      join(root, "ledger.ndjson"),
-      "SWEEP-CLOSE-2",
-      { tasks: [] } as never,
-      () => {},
-      undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined,
-      (file, args) => { captured.push([file, ...args]); },
-    );
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "sandboxrepo",
+      config: { claudeBin: "/usr/bin/true", root } as never,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "SWEEP-CLOSE-2",
+      plan: { tasks: [] } as never,
+      log: () => {},
+      policy: undefined,
+      reviewRunner: undefined,
+      spawnImpl: undefined,
+      pushEmptyCommit: undefined,
+      issuesImpl: undefined,
+      stallNotice: undefined,
+      armImpl: undefined,
+      armSessionPrsOverride: undefined,
+      updateBranchImpl: undefined,
+      captureRepairFeedbackImpl: undefined,
+      ghRunImpl: (file, args) => { captured.push([file, ...args]); },
+    });
     effects.close(
       { prNumber: 7, prUrl: "https://github.com/acme/sandboxrepo/pull/7" } as never,
       "superseded-by #8",
@@ -1280,15 +1296,15 @@ test("W1-T921: the default close runner really shells out and still omits the fl
   try {
     recordingGhShim(shimDir, logPath);
     process.env.PATH = `${shimDir}:${savedPath}`;
-    const effects = buildSweepEffects(
-      "acme",
-      "sandboxrepo",
-      { claudeBin: "/usr/bin/true", root } as never,
-      join(root, "ledger.ndjson"),
-      "SWEEP-CLOSE-3",
-      { tasks: [] } as never,
-      () => {},
-    );
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "sandboxrepo",
+      config: { claudeBin: "/usr/bin/true", root } as never,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "SWEEP-CLOSE-3",
+      plan: { tasks: [] } as never,
+      log: () => {},
+    });
     effects.close(
       { prNumber: 9, prUrl: "https://github.com/acme/sandboxrepo/pull/9" } as never,
       "superseded-by #10",

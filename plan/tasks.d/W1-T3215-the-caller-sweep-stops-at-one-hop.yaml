@@ -10,7 +10,7 @@
   files: [src/lib/ci-parity.ts, src/run-task.ts, test/the-caller-sweep-stops-at-one-hop.test.ts]
   origin: "operator-session#board-pass-2026-09-08"
   plan_refs: ["W1-T2680", "W1-T2969", "W1-T2523", "W1-T3192"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

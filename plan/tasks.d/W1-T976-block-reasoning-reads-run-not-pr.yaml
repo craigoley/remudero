@@ -120,7 +120,7 @@
   origin: "oper#verdict-describes-the-run-2026-08-18"
   plan_refs: ["W1-T968", "W1-T930", "W1-T51", "W1-T257"]
   files: [src/lib/daemon.ts, test/daemon.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     src/run-task.ts IS DELIBERATELY NOT DECLARED, AND THAT IS THE POINT OF PUTTING THE CHANGE HERE.

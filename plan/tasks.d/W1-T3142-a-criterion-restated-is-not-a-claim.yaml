@@ -12,7 +12,7 @@
   files: [src/lib/review.ts, test/a-criterion-restated-is-not-a-claim.test.ts]
   origin: "operator-session#4577-could-not-quote-its-own-criterion-2026-09-08"
   plan_refs: ["W1-T3061", "W1-T2533", "W1-T2534", "W1-T308"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED ON `origin/main` AT 41231c67, 2026-09-08, by driving the SHIPPED `bodyContradictsDiff`

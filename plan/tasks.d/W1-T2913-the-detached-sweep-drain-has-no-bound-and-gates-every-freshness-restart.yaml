@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§4", "§13", "W1-T2744", "W1-T2865", "W1-T2379"]
   files: [src/lib/sweep.ts, src/lib/daemon.ts, test/detached-sweep-drain-is-bounded.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-10 (INFERRED from the code; the audit names its verifier and this
