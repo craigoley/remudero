@@ -32,7 +32,7 @@
   "deploy/serve-container.sh": 254,
   "deploy/verify-image.sh": 322,
   "hooks/commit-msg": 37,
-  "hooks/deny-floor.sh": 92,
+  "hooks/deny-floor.sh": 250,
   "hooks/mkdtemp-allowlist.txt": 0,
   "hooks/pre-commit": 22,
   "hooks/pre-push": 250,
