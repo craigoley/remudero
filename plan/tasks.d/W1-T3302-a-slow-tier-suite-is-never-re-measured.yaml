@@ -1,0 +1,106 @@
+- id: W1-T3302
+  title: "A SUITE THAT CROSSES INTO THE SLOW TIER IS NEVER MEASURED AGAIN — every duration-recording path in CI runs the FAST lane, so a file's recorded cost freezes at the value that promoted it; `serve-command-boot.test.ts` is recorded at 9042ms and measured 172866ms on main, a 19x understatement the shard planner still balances against"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 16.00
+  files:
+    - scripts/test-tier-manifest.mjs
+    - test/a-slow-tier-suite-is-never-re-measured.test.ts
+  origin: "operator-session#ci-parity-cost-2026-09-09"
+  plan_refs: ["W1-T3191", "W1-T3207", "W1-T294"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 ON origin/main, IN ISOLATION ON AN OTHERWISE IDLE HOST:
+
+        test/serve-command-boot.test.ts  ->  # pass 5, # fail 0, # duration_ms 172866
+
+    The manifest records it at **9042**. That is a 19x understatement, and the file PASSES — so no
+    red check anywhere names it and nothing has cause to look.
+
+    THE FREEZE IS STRUCTURAL, NOT AN OVERSIGHT. `DEFAULT_SLOW_THRESHOLD_MS` is 5000, so 9042 puts
+    this file in the SLOW tier. Every path in CI that writes duration evidence runs the FAST lane:
+    `RMD_TEST_DURATION_OUTPUT` is exported at exactly two sites, both inside the `ci` job, and both
+    invoke `test-tier-manifest.mjs` with `--run fast` or `--run-candidates`. The `test-slow` job
+    records NOTHING (`grep -c RMD_TEST_DURATION_OUTPUT` over its whole block: 0), and on a SOURCE
+    diff it exits early without running at all (W1-T3207). `coverage-shard` uses a bare
+    `node --test --test-shard`, no manifest, no evidence.
+
+    SO A FILE'S DURATION IS FROZEN AT THE VALUE THAT PROMOTED IT, PERMANENTLY AND IN ONE DIRECTION.
+    Crossing 5000ms is the last time the number can change. After that the file is only ever run by
+    harnesses that do not measure it, and it may grow without bound with nothing to notice.
+
+    WHAT THAT COSTS. ci.yml's own words: "The manifest assigns the fast tier by cumulative recorded
+    duration." The shard planner balances four shards against numbers that are stale by construction
+    for exactly the files that dominate wall clock. A 164-second understatement on ONE file is
+    enough to unbalance a four-way split of a 17-minute suite.
+
+    HOW IT WAS FOUND, because it says something about detectability: not by reading the manifest,
+    but by a local `--ci-parity` run stalling. Under coverage instrumentation this same file went
+    past FOURTEEN MINUTES without completing, with its process tree at 0.9% CPU. In isolation on a
+    quiet box it finishes in 2m53s. The recorded 9s describes neither.
+  design: |
+    (i) THE SLOW TIER MUST BE MEASURED SOMEWHERE. A tier whose members are never re-timed is a
+    ledger of when files crossed a line, not of what they cost. The `test-slow` job already RUNS
+    them; it simply does not export `RMD_TEST_DURATION_OUTPUT` or upload the artifact the way the
+    `ci` job does. That is the smallest change that closes the loop.
+    (ii) STALENESS MUST BE VISIBLE WHERE THE NUMBER IS USED, not only where it is written. When
+    recorded and observed disagree beyond a stated factor, say so by name — the file, both numbers,
+    and the ratio. A silent 19x is what let this sit.
+    (iii) THE THRESHOLD IS NOT THE DEFECT AND MUST NOT BE TUNED HERE. 5000ms is a reasonable line;
+    the defect is that crossing it removes a file from every measuring harness. Raising or lowering
+    the threshold moves which files are frozen without unfreezing any of them.
+    (iv) A MISSING MEASUREMENT IS UNKNOWN, NEVER ZERO. `--seed` already writes a `0` placeholder
+    that is explicitly "distinct from no entry at all"; that distinction must survive. A file whose
+    evidence never arrived must not be planned as free.
+    (v) EVIDENCE STAYS A PROPOSAL. `--record-evidence` merges into a separate artifact rather than
+    writing the manifest, and applying it is its own step. This task does not change that: it makes
+    slow-tier evidence EXIST, not auto-apply.
+    (vi) NOT IN SCOPE: making `serve-command-boot.test.ts` faster, bounding a hung suite (W1-T3303),
+    the shard COUNT, or the fast/slow threshold value.
+  acceptance:
+    - claim: "a slow-tier file's duration evidence is produced by the harness that actually runs it, so the tier is no longer write-once"
+      proof: "unit test: test/a-slow-tier-suite-is-never-re-measured.test.ts"
+    - claim: "a recorded duration that disagrees with observed cost beyond a stated factor is reported by name, with both numbers"
+      proof: "unit test: test/a-slow-tier-suite-is-never-re-measured.test.ts"
+    - claim: "a file with no arriving evidence stays UNKNOWN and is never planned as zero-cost"
+      proof: "unit test: test/a-slow-tier-suite-is-never-re-measured.test.ts"
+    - claim: "evidence remains a proposal: this path writes no manifest entry of its own"
+      proof: "unit test: test/a-slow-tier-suite-is-never-re-measured.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF the slow tier is already measured. THE COMMANDS, and both must
+    be run rather than reasoned about:
+        grep -n RMD_TEST_DURATION_OUTPUT .github/workflows/ci.yml
+        grep -rn 'test:slow' .github/workflows/ci.yml
+    MEASURED 2026-09-09: two exports, both in the `ci` job, both on `--run fast`/`--run-candidates`;
+    the `test-slow` block contains zero. A third site that runs the slow tier AND exports the
+    variable closes this task.
+    POSITIVE CONTROL ON THE STALENESS CLAIM, because a single slow file proves nothing about the
+    mechanism: pick a second slow-tier entry, time it in isolation, and compare to its record. If
+    recorded and observed agree across the tier, the freeze is not costing anything and this task
+    should be reframed as reporting only.
+    RE-MEASURE BEFORE BELIEVING THE 19x. `172866ms` was one run on one host. The claim this task
+    rests on is the ABSENT FEEDBACK LOOP, not that one number — re-time it, and if it lands near
+    9042 the finding is a flaky measurement and must be withdrawn rather than defended.
+    DO NOT RAISE THE THRESHOLD to "fix" this. Moving 5000ms changes which files are frozen and
+    unfreezes none; it would hide the finding rather than close it.
+    DO NOT let evidence auto-apply to the manifest. The proposal boundary is deliberate and predates
+    this task.
+  note: |
+    Rule 25 CHECKED: `scripts/test-tier-manifest.mjs` is NOT on INSTRUMENT_SURFACE — the surface
+    names `scripts/*-ratchet.mjs`, `diff-coverage.mjs`, `diff-class.mjs`, `*-baseline.json` and the
+    named check scripts. `scripts/test-tier-manifest.json` IS matched by the baseline pattern, which
+    is why this task declares the SCRIPT and its own test and NOT the manifest data file: recording
+    a measurement into a baseline in the same diff that changes how measurements are taken is the
+    entanglement Rule 25 refuses.
+    WHAT THIS TASK IS NOT. The suite found here PASSES. This is not a bug report about
+    `serve-command-boot.test.ts`, and fixing that file would close nothing: the next file to cross
+    5000ms freezes the same way.
+    THE ORIGINAL FRAMING WAS WRONG AND IS RECORDED AS SUCH. This was first going to be filed as "the
+    suite hangs on main". It does not: bounded at 200s on a quiet host it completed, 5 passed, in
+    172866ms. The 14-minute non-completion was under COVERAGE INSTRUMENTATION during a `--ci-parity`
+    run. Filing the hang would have been a claim the isolation run refutes.
