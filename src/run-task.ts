@@ -34428,12 +34428,14 @@ export async function verifyHumanSweepCommand(
     return 0;
   }
 
-  const registryPath = join(root, "state", "inbox-proposals.json");
+  // The STATE root, never the checkout: `ledgerPathFor(config)` resolves under `config.root`, and
+  // a decision whose ledger row and whose proposal land in different directories is half-recorded.
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
   const result = await (deps.route ?? routeVerifyHumanBacklog)(shards, {
     judge: realVerifyHumanJudge({
       mounts: loadMounts(mountsPath(root)),
       cwd: root,
-      settingsFile: join(root, ".claude", "settings.json"),
+      settingsFile: join(root, "settings", "worker.json"),
     }),
     priorVerdicts,
     stageProposal: (proposal) =>
@@ -34603,7 +34605,7 @@ export function readStandingDecisions(root: string): string {
  */
 export async function ruleCommand(
   rest: string[],
-  deps: { root?: string; route?: typeof routeRuling; clock?: Clock } = {},
+  deps: { root?: string; route?: typeof routeRuling; clock?: Clock; config?: Config } = {},
 ): Promise<number> {
   const root = deps.root ?? repoRoot;
   const flag = (name: string): string | undefined => {
@@ -34628,13 +34630,21 @@ export async function ruleCommand(
   }
 
   const route = deps.route ?? routeRuling;
-  const ledgerPath = join(root, "state", "ledger.jsonl");
-  const registryPath = join(root, "state", "inbox-proposals.json");
+  // BOTH PATHS COME FROM THE CONFIG. The first draft got all three parts wrong: it wrote to
+  // `ledger.jsonl` (the real filename is `ledger.ndjson`, owned by `ledgerPathFor` — hardcoding it
+  // means a rename silently writes to a file nothing reads), under `root` (the CHECKOUT) rather
+  // than `config.root` (the daemon's STATE root), so a ruling's ledger row and its inbox proposal
+  // landed in different directories from each other and from every other consumer. MEASURED on the
+  // sibling verify-human sweep, 2026-09-09: 56 ledger rows in the state root, 56 proposals in a
+  // lane, nothing reaching the inbox an operator reads.
+  const config = deps.config ?? loadConfig();
+  const ledgerPath = ledgerPathFor(config);
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
   const result = await route(ruling, {
     judge: realRulingJudge({
       mounts: loadMounts(mountsPath(root)),
       cwd: root,
-      settingsFile: join(root, ".claude", "settings.json"),
+      settingsFile: join(root, "settings", "worker.json"),
     }),
     standingDecisions: readStandingDecisions(root),
     land: (relPath, content) => void recordRuling(root, relPath, content),
