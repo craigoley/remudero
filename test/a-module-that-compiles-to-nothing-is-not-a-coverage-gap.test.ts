@@ -28,9 +28,17 @@ import { test } from "node:test";
 // scripts through a runtime import rather than a typed one. A dynamic specifier is not statically
 // resolved, so this loads the REAL module with no shadow copy to drift from it.
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+/** What `isTypeOnlyModule` reports when it CANNOT decide — the verdict still fails closed. */
+type Undecidable = { file: string; stage: string; message: string };
+
 const mod = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "diff-coverage.mjs")).href)) as {
   isTypeOnlyModule: (file: string, readSource?: (f: string) => string) => boolean;
-  findMissingSourceCoverage: (diffText: string, lcov: Set<string>, isTypeOnly?: (f: string) => boolean) => string[];
+  findMissingSourceCoverage: (
+    diffText: string,
+    lcov: Set<string>,
+    isTypeOnly?: (f: string, readSource?: unknown, onUndecidable?: (d: Undecidable) => void) => boolean,
+    onUndecidable?: (d: Undecidable) => void,
+  ) => string[];
 };
 const { findMissingSourceCoverage, isTypeOnlyModule } = mod;
 
@@ -122,8 +130,8 @@ test("the type-only check is injectable, so the gate's own logic is provable wit
 
 test("a type-only check that could not be DECIDED is reported, not silently folded into the vacuity verdict", () => {
   const diff = diffTouching("src/lib/merge-state.ts");
-  const seen: Array<{ file: string; stage: string; message: string }> = [];
-  const throwingGuard = (file: string, _read?: unknown, onUndecidable?: (d: { file: string; stage: string; message: string }) => void) => {
+  const seen: Undecidable[] = [];
+  const throwingGuard = (file: string, _read?: unknown, onUndecidable?: (d: Undecidable) => void) => {
     onUndecidable?.({ file, stage: "transpile", message: "Cannot find module 'esbuild'" });
     return false; // the guard's own fail-closed verdict, unchanged
   };
@@ -137,7 +145,7 @@ test("a type-only check that could not be DECIDED is reported, not silently fold
 
 test("⚠ a check that DECIDES reports nothing — the diagnostic must not fire on the ordinary path", () => {
   const diff = diffTouching("src/lib/merge-state.ts", "src/lib/sweep.ts");
-  const seen: unknown[] = [];
+  const seen: Undecidable[] = [];
   const missing = findMissingSourceCoverage(diff, new Set<string>(), (f: string) => f === "src/lib/merge-state.ts", (d) => seen.push(d));
   assert.deepEqual(missing, ["src/lib/sweep.ts"], "exemption applied, real gap still named");
   assert.deepEqual(seen, [],
