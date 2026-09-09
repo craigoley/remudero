@@ -285,6 +285,22 @@ jobs:
           mkdir -p "$FLAKE_RETRY_DIR"
           grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log" || : > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log"
           exit "$CODE"
+      - name: Workflow guard mutation (W1-T3220 — a ci.yml skip guard that no test can distinguish turns a required check into a green no-op)
+        run: |
+          # NO EARLY `exit 0` IN THIS STEP, DELIBERATELY. The check below enumerates skip-shaped
+          # guards — a conditional whose block reaches `exit 0` — so writing this step's own gate
+          # that way would add a fourteenth guard demanding coverage for the privilege of running
+          # the coverage check. An if/else costs one line and enumerates as nothing.
+          #
+          # SHARD 1 ONLY, AND ONLY WHEN THE WORKFLOW ITSELF CHANGED. The guard population cannot
+          # move unless ci.yml does, and a full pass is ~4 minutes against ~1 minute with the
+          # baseline in place (MEASURED 2026-09-08, 14 guards over 35 ci.yml-reading suites), so
+          # running it four times on every PR would buy nothing at four times the cost.
+          if [ "${{ matrix.shard }}" = "1" ] && grep -qxF ".github/workflows/ci.yml" changed-files.txt; then
+            node scripts/workflow-guard-mutation-ratchet.mjs
+          else
+            echo "workflow-guard-mutation: not shard 1, or ci.yml is not in this diff — the guard population cannot have moved."
+          fi
       - name: Upload this shard's flake-retry evidence (best-effort input to ci-required's per-test aggregator, W1-T2904)
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -1,0 +1,107 @@
+- id: W1-T3222
+  title: "THE PRE-PUSH GATES SHIP OFF AND THE SWITCH IS SET NOWHERE, SO THE ONE CHECK THAT WOULD HAVE SAVED THREE PRs IN ONE DAY HAS NEVER RUN — arm them by default, keeping an exact-value escape hatch"
+  repo: remudero
+  depends_on: [W1-T3203]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [hooks/pre-push, test/the-prepush-gates-ship-armed.test.ts, test/prepush-gates-refuse.test.ts]
+  origin: "operator-session#prepush-dry-run-2026-09-09"
+  plan_refs: ["W1-T3059", "W1-T3205", "W1-T3203", "W1-T2904"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    W1-T3059 built the hook and shipped it OFF on purpose, recording why in the file itself: "being
+    picked up automatically by every worker means a mistake here does not redden one PR, it stops
+    the fleet pushing ... Turning it on is a separate, watched decision." This is that decision,
+    taken with measurements rather than on principle.
+    MEASURED 2026-09-09 on this checkout: `RMD_PREPUSH_GATES` appears in exactly two places —
+    `hooks/pre-push` itself and the suites that test it. It is set in NO worker spawn, NO workflow,
+    NO script and NO doc. So every check inside the hook (rule15-precheck, the W1-T3205 tier
+    admission, the census-membership subset) has never executed outside a test.
+    WHAT THAT COST, MEASURED THE SAME DAY: three PRs — #4749, #4750, #4751 — were reddened by ONE
+    untiered test file each. The refusal fires inside the test runner, so it reddens every ci-shard
+    plus test-slow at once: a full matrix per PR, three times, for a defect the hook names in two
+    seconds. W1-T3205's own filing measured four more (#4698, #4692, #4681, #4684) on 2026-09-08.
+    Seven PRs, two days, one cause, and the gate that catches it was installed and unarmed.
+    DRY RUN BEFORE ARMING, because "it should be fine" is not a measurement. `hooks/pre-push` was
+    run with the switch forced on against ALL SEVEN open PR heads on 2026-09-09:
+      #4754 4s PASS   #4751 14s PASS   #4750 7s PASS   #4749 7s PASS
+      #4748 4s PASS   #4746 6s PASS    #4745 4s PASS
+    ZERO false positives, 4-14 seconds. Nothing was pushed; the hook only reads the tree.
+    THAT RUN PROVED ONLY HALF, AND THE OTHER HALF WAS TESTED SEPARATELY. Seven passes cannot
+    distinguish a working gate from one that always says yes — by the time it ran, the fleet had
+    already fixed #4750 and #4751, so no branch carried the defect. Same tree, one variable:
+      clean origin/main                      -> exit 0, 2s
+      origin/main + one untiered test file   -> exit 1, 2s, naming the file and the --seed remedy
+    It discriminates.
+  design: |
+    (i) INVERT THE DEFAULT, KEEP THE EXACT-VALUE DISCIPLINE. Today only the exact string "1" arms,
+    so a stray `export RMD_PREPUSH_GATES=yes` cannot arm the fleet. The mirror hazard now matters
+    more: a stray value must not DISARM it. Only the exact string "0" may turn the gates off; unset,
+    empty and every other value ARM. Fail-armed is the safe direction once the checks are trusted.
+    (ii) THE ESCAPE HATCH STAYS AND STAYS DOCUMENTED. The refusal message already prints
+    `RMD_PREPUSH_GATES=0 git push ...`; a hook with no way out is its own hazard, and that sentence
+    is now the supported disarm rather than a formality.
+    (iii) THE `SHIPS OFF` TEST IS REPLACED, NEVER DELETED. Its subject was the default, and the
+    default is what this task changes. Its successor asserts the new default with the same force,
+    plus the mirror property (i) adds: a stray value cannot disarm.
+    (iv) NOTHING ELSE MOVES. No check inside the hook is added, removed, reordered or re-tuned.
+    This task changes exactly one predicate, so a regression can only be about the switch.
+    (v) DEPENDS ON W1-T3203 FOR A MEASURED REASON. The hook runs the bare `--check` with no
+    `--base`, which before W1-T3203 lists files INHERITED from a moving main as violations and
+    prints a `--seed` remedy for them. Arming that reading would refuse pushes for a defect the
+    branch did not introduce — the exact false diagnosis that produced a 21-row seeding PR on
+    2026-09-08. The dry run could not reproduce it because every branch tested was fully tiered,
+    which is precisely why the dependency is declared rather than argued away.
+  acceptance:
+    - claim: "with the switch UNSET the hook now runs its checks and refuses a violating tree, where before it exited 0 silently"
+      proof: "unit test: test/the-prepush-gates-ship-armed.test.ts"
+    - claim: "only the exact string 0 disarms — a stray value cannot turn the fleet's gates off"
+      proof: "unit test: test/the-prepush-gates-ship-armed.test.ts"
+    - claim: "a clean tree still passes with the switch unset, so arming is not a blanket refusal"
+      proof: "unit test: test/the-prepush-gates-ship-armed.test.ts"
+    - claim: "the refusal still names RMD_PREPUSH_GATES=0 as the way out"
+      proof: "unit test: test/the-prepush-gates-ship-armed.test.ts"
+  falsifier: |
+    CLOSE IF the gates are already armed anywhere: `grep -rn RMD_PREPUSH_GATES` across the repo.
+    MEASURED 2026-09-09: two locations, both the hook and its own tests. No spawn, workflow, script
+    or doc sets it.
+    POSITIVE CONTROL, because "zero false positives" is meaningless without the other arm: the
+    suite must prove BOTH that a clean tree passes unset AND that a violating tree refuses unset. A
+    suite proving only the refusal cannot distinguish an armed gate from a blanket block, and a
+    suite proving only the pass cannot distinguish an armed gate from the old silent exit.
+    DO NOT arm it before W1-T3203 is on main. See design (v): the bare `--check` misreads inherited
+    files, and arming that reading refuses pushes for defects the branch did not introduce.
+    DO NOT remove the escape hatch, and do not make it a truthy-value check. A hook that cannot be
+    bypassed in an emergency is a hazard; a hook that ANY value disarms is not a gate.
+    DO NOT expand scope into which checks the hook runs. The hook clears only the census suites it
+    can place — MEASURED on #4750: 9 run, 125 reported unmodelled — so "pre-push passed" is not
+    "CI will pass", and that gap is W1-T2969's, not this task's.
+  note: |
+    WHY THE PROOFS NAME A NEW SUITE RATHER THAN THE EXISTING ONE, and this is not cosmetic:
+    remudero-review executes a proof against the PR head AND the merge base. A `unit test:` proof
+    naming a file that ALREADY EXISTS passes at both, grades non-discriminating, and FAILS the
+    filing -- which is exactly what happened to this shard on #4765. The forward-reference
+    carve-out (review.ts) applies only when the proof names a file the diff DECLARES and the head
+    does NOT yet have. So the new assertions get their own suite, declared above; the two obsolete
+    tests in `test/prepush-gates-refuse.test.ts` are still replaced by the build, they are simply
+    not what any criterion is proved by. W1-T2835 filed this trap and it is merged; the lesson is
+    that a shard MODIFYING an existing suite cannot prove itself with that suite.
+    Rule 25 CHECKED: `hooks/pre-push` is not an instrument path under `scripts/`; it is the
+    product surface this task changes, and its test is its only other file.
+    RISK IS HIGH FOR ONE REASON AND IT IS NOT COMPLEXITY: the diff is one predicate. It is high
+    because the blast radius is every push by every worker, which is the same sentence W1-T3059
+    used to justify shipping it off. The dry run above is what converts that from a guess to a
+    measured bet, and it is a BET: seven branches on one day is not a proof about every future
+    branch.
+    CAVEAT WITH EQUAL WEIGHT: "pre-push passed" will not mean "CI will pass", and arming this must
+    not be read as making CI redundant. On the branch measured it ran 9 census suites and named 125
+    it could not place. It shortens ONE common feedback loop; it does not close it.
+    SECOND CAVEAT: the 4-14 second measurement is from the daemon host with a warm checkout. A cold
+    npm cache or a slower host will differ, and if the hook ever becomes slow enough to be resented
+    it will be disarmed by hand — which is how a check earns its way into being switched off. The
+    disarm is one env var, so that outcome is recoverable and visible, not silent.
