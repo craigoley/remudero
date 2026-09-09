@@ -16,6 +16,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createPublicKey, randomBytes, timingSafeEqual, verify as verifySignature } from "node:crypto";
+import { join as joinPath, resolve as resolvePath, sep } from "node:path";
 
 /** Bearer scope a route (or SSE stream) requires. `write` implies `read`. */
 export type Scope = "read" | "write";
@@ -169,6 +170,102 @@ export interface IdentityGrant {
   readSensitivity?: ReadSensitivity;
 }
 
+/**
+ * W1-T3175 — A STATIC MOUNT FOR THE BUILT CONSOLE, here and not in `serve.ts` because this module's
+ * routing is EXACT-MATCH ONLY and a built SPA is content-hashed filenames under a prefix. `serve.ts`
+ * hands its routes to {@link createService} and never wraps the handler, so an asset route that must
+ * enforce the SAME read scope as the shell has to sit INSIDE that dispatch. It SYNTHESISES A ROUTE
+ * AND NOTHING ELSE: a way to FIND a handler, never a second way to authorise one.
+ */
+export interface StaticMount {
+  /** URL prefix every asset sits under, e.g. `/console/`. Exact routes always win over this. */
+  prefix: string;
+  /** The RESOLVED build directory. Nothing outside it is ever served. */
+  root: string;
+  /** The scope an asset requires — the shell's own, so no asset is readable by a caller who could
+   *  not load the console. */
+  scope: Scope;
+  /** Client-routed paths that return the shell. EXPLICIT, NEVER A CATCH-ALL: a fallback that
+   *  answers everything turns a missing build artifact into a blank page with a syntax error. */
+  clientRoutes?: readonly string[];
+  /** Injected filesystem, so every decision below is provable without a real tree. */
+  io: StaticMountIo;
+}
+
+export interface StaticMountIo {
+  /** The path a symlink chain really lands on, or `null` when it does not exist. */
+  realpath: (p: string) => string | null;
+  readFile: (p: string) => Buffer;
+}
+
+/** CONTENT TYPE FROM A CLOSED ALLOW-LIST. An unknown extension is REFUSED, never served as
+ *  octet-stream: a console build emits a known, small set of kinds, and anything else is a surprise. */
+export const STATIC_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
+};
+
+/** Why a request under the mount was not served. Returned so the caller can LOG it while still
+ *  answering 404 — a refusal that says nothing is indistinguishable from a missing file. */
+export type StaticRefusal = "escapes_root" | "unknown_extension" | "absent";
+
+export type StaticResolution =
+  | { kind: "asset"; file: string; contentType: string }
+  | { kind: "shell"; file: string; contentType: string }
+  | { kind: "refused"; reason: StaticRefusal };
+
+/**
+ * What a path under the mount resolves to. PURE apart from the injected io.
+ *
+ * THE CONTAINMENT CHECK IS ON THE REALPATH, not the requested string: refusing `..` textually misses
+ * a URL-encoded separator (it decodes AFTER any string check) and a symlink inside the root whose
+ * target is outside it.
+ */
+export function resolveStaticRequest(mount: StaticMount, path: string): StaticResolution | null {
+  if (!path.startsWith(mount.prefix)) return null;
+
+  // A DECLARED client route returns the shell. Checked before the file lookup so a client path can
+  // never be shadowed by a same-named file, and so an UNDECLARED path falls through to `absent`.
+  if ((mount.clientRoutes ?? []).includes(path)) {
+    const shell = joinPath(mount.root, "index.html");
+    return mount.io.realpath(shell) === null
+      ? { kind: "refused", reason: "absent" }
+      : { kind: "shell", file: shell, contentType: STATIC_CONTENT_TYPES[".html"] };
+  }
+
+  let rest: string;
+  try {
+    rest = decodeURIComponent(path.slice(mount.prefix.length));
+  } catch {
+    return { kind: "refused", reason: "escapes_root" }; // a malformed escape is not a filename
+  }
+  if (rest === "" || rest.endsWith("/")) rest = `${rest}index.html`;
+
+  const candidate = resolvePath(mount.root, rest);
+  const real = mount.io.realpath(candidate);
+  if (real === null) return { kind: "refused", reason: "absent" };
+  if (real !== mount.root && !real.startsWith(mount.root + sep)) {
+    return { kind: "refused", reason: "escapes_root" };
+  }
+
+  const dot = real.lastIndexOf(".");
+  const ext = dot === -1 ? "" : real.slice(dot).toLowerCase();
+  const contentType = STATIC_CONTENT_TYPES[ext];
+  if (!contentType) return { kind: "refused", reason: "unknown_extension" };
+
+  return { kind: "asset", file: real, contentType };
+}
+
 export interface ServiceOptions {
   tokens: ServiceTokens;
   /** Additive tailnet-identity auth — see {@link IdentityAuth}. Omitted: identity is never consulted, byte-for-byte the pre-W1-T371 behavior. */
@@ -178,6 +275,8 @@ export interface ServiceOptions {
   providers?: IdentityProvider[];
   routes?: Route[];
   sse?: SseRoute[];
+  /** W1-T3175 — the built console. Omitted: this module behaves byte-for-byte as before. */
+  staticMount?: StaticMount;
   /** One ledger line per auth decision / SSE lifecycle event / handler error. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Turns ON tier + second-factor enforcement (W1-T404) — OFF by default here, so labeling a
@@ -743,6 +842,7 @@ export function createService(opts: ServiceOptions): Server {
   // OFF by default (W1-T495) — labeling sensitivity alone must not change what a route accepts.
   const enforceReadSensitivity = opts.enforceReadSensitivity ?? false;
   const confirmNonces = opts.confirmNonces ?? createConfirmNonceStore();
+  const staticMount = opts.staticMount;
 
   return createServer((req, res) => {
     void (async () => {
@@ -750,7 +850,28 @@ export function createService(opts: ServiceOptions): Server {
       const path = new URL(req.url ?? "/", "http://localhost").pathname;
 
       const sseRoute = method === "GET" ? sseRoutes.find((r) => r.path === path) : undefined;
-      const route = sseRoute ? undefined : routes.find((r) => r.method === method && r.path === path);
+      let route = sseRoute ? undefined : routes.find((r) => r.method === method && r.path === path);
+
+      // W1-T3175 — CONSULTED LAST, only when no declared route matched, so it can never shadow an
+      // API route. Auth, scope, logging and error handling below all run unchanged.
+      if (!sseRoute && !route && staticMount && method === "GET") {
+        const resolved = resolveStaticRequest(staticMount, path);
+        if (resolved && resolved.kind === "refused") {
+          // 404 TO THE CALLER, THE REASON TO THE LEDGER: a refusal that tells the operator nothing
+          // is indistinguishable from a missing file.
+          log("service.static_refused", { path, reason: resolved.reason });
+        } else if (resolved) {
+          route = {
+            method: "GET",
+            path,
+            scope: staticMount.scope,
+            handler: (_rq, rs) => {
+              rs.writeHead(200, { "content-type": resolved.contentType });
+              rs.end(staticMount.io.readFile(resolved.file));
+            },
+          };
+        }
+      }
 
       if (!sseRoute && !route) {
         sendJson(res, 404, { error: "not_found" });
