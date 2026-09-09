@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const runTaskSource = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 const commandsBlock = runTaskSource.match(/const COMMANDS: readonly CommandSpec\[] = \[([\s\S]*?)\n\] as const/);
 
+// diff-cov: process-boundary — this refusal ends in process.exit(2) and the script is DRIVEN AS A SUBPROCESS by test/help-does-not-load-the-sdk.test.ts (it resolves ../src/run-task.ts from its own URL, so a fixture tree is the only way to reach it); a child process's lines cannot carry DA hits into the parent's coverage, and both refusals — registry absent vs registry present but scanning to zero — are asserted there by exit code and message.
 if (!commandsBlock) {
   console.error("rmd help: cannot find COMMANDS registry in src/run-task.ts");
   process.exit(2);
@@ -22,6 +23,7 @@ function parseStringLiteral(literal) {
   return literal.slice(1, -1).replace(/\\([\\'])/g, "$1");
 }
 
+// diff-cov: process-boundary — this refusal ends in process.exit(2) and the script is DRIVEN AS A SUBPROCESS by test/help-does-not-load-the-sdk.test.ts (it resolves ../src/run-task.ts from its own URL, so a fixture tree is the only way to reach it); a child process's lines cannot carry DA hits into the parent's coverage, and both refusals — registry absent vs registry present but scanning to zero — are asserted there by exit code and message.
 if (commands.length === 0) {
   console.error("rmd help: COMMANDS registry scan found no commands");
   process.exit(2);
