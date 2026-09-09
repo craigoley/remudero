@@ -19,11 +19,11 @@
 // git-ls-files choice are archived in docs/forensics/source-size-ratchet.md#module-header.
 
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { splitInheritedViolations, inheritedNotice, undeterminedNotice, refResolvable } from "./lib/inherited-violation.mjs";
 import { assertNoDuplicateKeys } from "./lib/json-duplicate-keys.mjs";
-import { git as spawnGit } from "./lib/git.mjs";
 
 export const DEFAULT_BASELINE_RELATIVE_PATH = "scripts/source-size-baseline.json";
 
@@ -202,9 +202,9 @@ function runLegacyRatchet(argv) {
     // W1-T3037 — whose red is this? A violation that already holds at the base is inherited: every
     // open PR sees it and no diff avoids it. It still blocks; the author is simply told that
     // recording it repairs the base rather than confessing to their own growth.
-    // scripts/lib/git.mjs owns the 64 MiB buffer this call site used to ask for by hand: run-task.ts
-    // is over 1MB at the base and blows node's 1MB default, returning status null, which W1-T3037
-    // had already had to stop reading as "absent".
+    // `gitResult` below already carries the 64 MiB buffer this call site used to ask for by hand:
+    // run-task.ts is over 1MB at the base and blows node's 1MB default, returning status null,
+    // which W1-T3037 had already had to stop reading as "absent".
     const runGitHere = (_cmd, args) => gitResult(root, args);
     // W1-T3141: establish the ref BEFORE trusting any `absent`. `git show <ref>:<path>` exits 128
     // for a missing REF exactly as it does for a missing PATH, so in a checkout that never fetched
@@ -297,7 +297,9 @@ function runLegacyRatchet(argv) {
 export const SOURCE_SIZE_SIGNAL_SCHEMA_VERSION = 1;
 
 function gitResult(root, args) {
-  return spawnGit(args, { cwd: root });
+  // maxBuffer raised deliberately: run-task.ts is over 1MB at the base and blows the 1MB default,
+  // which returns status null and used to read as "absent" (W1-T3037).
+  return spawnSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 }
 
 function runGit(root, args, stage) {
