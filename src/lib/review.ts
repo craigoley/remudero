@@ -4405,6 +4405,58 @@ export interface AcceptanceAuthorTimeResult {
   message: string;
 }
 
+// THE SIGNAL IS IDENTITY, NOT PLAN-ONLY-NESS, AND THAT DISTINCTION IS LOAD-BEARING. W1-T1004 —
+// merged, and the fix for the OTHER half of this mistake (the false merge credit, in
+// `src/lib/status.ts`) — forbids inferring "this is a filing" from a diff touching only `plan/**`,
+// because a hand-authored plan PR would misclassify. Its rationale measured 15 plan-only credits
+// and found TWO CORRECT: those tasks' declared deliverable genuinely is plan text.
+//
+// So the refusal is narrower: the diff ADDS the shard that DECLARES the very task the trailer
+// names. A PR that introduces a task's record cannot be that task's implementation — at the merge
+// base the task did not exist, so nothing could have dispatched it. Neither of W1-T1004's two
+// correct cases adds its OWN shard; both were filed earlier by different PRs.
+//
+// FAILS OPEN ON AN UNKNOWN. `introducedTaskIds` empty means "this diff introduced no task record",
+// which is also what a caller that COULD NOT COMPUTE the diff passes. Both read as "nothing to
+// refuse", deliberately: a gate that refuses when it cannot see is the vacuous-refusal mirror of
+// the vacuous pass, and this one runs on every PR.
+
+/** {@link filingSelfCreditCheck}'s verdict. `ok: false` means this PR both FILES a task and claims
+ *  to implement it. */
+export interface FilingSelfCreditResult {
+  ok: boolean;
+  /** The trailered task, only when `!ok`. */
+  taskId?: string;
+  message: string;
+}
+
+/**
+ * W1-T3231 — DOES THIS PULL REQUEST BOTH FILE A TASK AND CLAIM TO IMPLEMENT IT?
+ *
+ * A plan-only filing PR carrying `Remudero-Task: X` makes `reviewCommand` resolve criteria from
+ * X's OWN shard — criteria describing the implementation, whose source files are not in this diff
+ * and whose test files do not exist yet. The filing is judged against them and fails closed.
+ */
+export function filingSelfCreditCheck(body: string, introducedTaskIds: readonly string[]): FilingSelfCreditResult {
+  const trailerId = extractTaskTrailerId(body ?? "");
+  if (trailerId === undefined) return { ok: true, message: "no Remudero-Task: trailer — nothing to self-credit" };
+  if (!introducedTaskIds.includes(trailerId)) {
+    return { ok: true, message: `Remudero-Task: ${trailerId} — this diff does not introduce that task's record` };
+  }
+  return {
+    ok: false,
+    taskId: trailerId,
+    message:
+      `this pull request ADDS the plan record declaring ${trailerId} AND carries "Remudero-Task: ${trailerId}". ` +
+      "A PR that introduces a task's record cannot be that task's implementation: at the merge base the task did " +
+      "not exist, so its acceptance criteria describe work no part of this diff contains. Review will resolve " +
+      `criteria from ${trailerId}'s shard and judge this filing against them — it fails closed, and on merge ` +
+      `${trailerId} is credited as built so the implementation is never dispatched. REMOVE THE TRAILER and give ` +
+      "this PR its own `## Acceptance` block proving the SHARD (grep: proofs against the shard text work well). " +
+      "If this really is the implementation, it belongs in a second PR on a `run-<taskId>-<epochMs>` branch.",
+  };
+}
+
 /** THE AUTHOR-TIME ENTRY POINT (W1-T952 design item ii) onto {@link acceptanceBlockDiagnostics} — the same diagnostic
  * `rmd check-acceptance` prints, callable BEFORE a PR pays for a CI cycle and review's generic "no acceptance criteria
  * to judge (fail closed)" to discover the same thing. See {@link PR_AUTHORING_PATHS} for which authoring paths it can

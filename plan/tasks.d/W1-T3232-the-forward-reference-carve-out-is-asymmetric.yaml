@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 60.00
   risk: high
@@ -50,12 +50,26 @@
     a new policy; it is the policy W1-T2737 already ratified, applied to the branch it was not
     applied to.
 
-    STOP — W1-T2737 CONSIDERED THIS EXACT CHANGE AND RATIFIED THE OPPOSITE. THIS TASK AWAITS AN
-    OPERATOR RULING AND MUST NOT BE BUILT UNTIL IT IS GIVEN. `verify: human` IS SET FOR THAT
-    REASON AND FOR NO OTHER — `assertRunnable` refuses a `verify: human` task, so the fleet cannot
-    dispatch this while the ruling is open. `status:` stays `queued` because the task is not
-    retired; `blocked` would demand a `retirement:` naming a disposition, and there is none to
-    name.
+    THE RULING WAS GIVEN ON 2026-09-09 AND IT IS TO PROCEED. `verify:` returns to `auto`; it was
+    `human` only to keep the fleet from dispatching this while the question was open.
+
+    WHAT THE RULING TURNED ON, RECORDED SO IT IS NOT RE-LITIGATED. W1-T2737's assertion —
+    "the unit test: arm must not acquire a plan-only condition" — is a COMPATIBILITY GUARANTEE, not
+    a policy. Its own criterion 5 reads "unit test: proof grading is byte-identical to before this
+    change, so W1-T456's existing carve-out is EXTENDED rather than rewritten", and its design (i)
+    is "extend the existing carve-out, do not invent a second one". "I did not change the other
+    arm" is a different claim from "the other arm is correct".
+
+    AND ITS DESIGN (iv) STATES THIS TASK'S INTENT IN ITS OWN WORDS: "A BUILT TASK IS UNAFFECTED …
+    This only reaches the case where the target path is declared-but-unwritten in the same diff."
+    W1-T2737 enforced exactly that for `grep:` by adding `planOnlyDiff`; the `unit test:` arm was
+    simply not touched. So the asymmetry is an artefact of a compatibility pin, and nobody has ever
+    argued that this arm should fire on a build head.
+
+    THE PIN ITSELF IS UPDATED, NOT DELETED. `test/two-gates-demand-opposite-proof-dialects-for-a-
+    new-module.test.ts`'s `onBuild` case must keep running and must now assert the OPPOSITE value,
+    carrying a comment naming this ruling — a deleted assertion leaves no trace that the question
+    was asked and answered.
     `test/two-gates-demand-opposite-proof-dialects-for-a-new-module.test.ts` pins it by name:
 
         // And the plan-only gate is grep-only: a declared-but-absent suite on a BUILD PR keeps the
