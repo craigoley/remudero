@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { buildSweepEffects, defaultSweepGhRun, fixCommand, type BuildSweepEffectsDeps } from "../src/run-task.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const EFFECT_KEYS = [
   "arm",
@@ -70,18 +71,13 @@ test("buildSweepEffects takes one typed deps object and returns the sweep effect
 
 test("fixCommand builds the sweep effects from one deps object before routing the PR", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-fix-command-build-sweep-effects-"));
-  const ghBin = mkdtempSync(join(tmpdir(), "rmd-fix-command-gh-"));
+  const shim = ghShim([{ when: "", stdout: '{"contexts":[]}' }], { kind: "fix-command-gh" });
   const oldPath = process.env.PATH;
   const oldError = console.error;
   const errors: string[] = [];
   try {
     mkdirSync(join(root, "state"), { recursive: true });
-    writeFileSync(
-      join(ghBin, "gh"),
-      "#!/bin/sh\nprintf '{\"contexts\":[]}'\n",
-      { mode: 0o755 },
-    );
-    process.env.PATH = `${ghBin}:${oldPath}`;
+    process.env.PATH = `${shim.dir}:${oldPath}`;
     console.error = (...args: unknown[]) => {
       errors.push(args.map(String).join(" "));
     };
@@ -118,7 +114,7 @@ test("fixCommand builds the sweep effects from one deps object before routing th
     console.error = oldError;
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
-    rmSync(ghBin, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
   }
 });
 
