@@ -1079,23 +1079,23 @@ function buildSessionArmEffects(
 ) {
   const config = { claudeBin: "/bin/true", root } as Config;
   const plan = { tasks: [], byId: new Map() } as unknown as Plan;
-  return buildSweepEffects(
-    "acme",
-    repo,
-    config,
-    join(root, "ledger.ndjson"),
-    "SWEEP-1",
-    plan,
-    log,
-    DEFAULT_SWEEP_POLICY,
-    undefined, // reviewRunner — its own default, unreached by the arm effect
-    undefined, // spawnImpl
-    undefined, // pushEmptyCommit
-    undefined, // issuesImpl
-    undefined, // stallNotice
-    armImpl, // armImpl — undefined keeps the REAL armAutoMerge, per default param semantics
-    armSessionPrs,
-  );
+  return buildSweepEffects({
+    owner: "acme",
+    repo: repo,
+    config: config,
+    ledgerPath: join(root, "ledger.ndjson"),
+    runId: "SWEEP-1",
+    plan: plan,
+    log: log,
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: undefined,
+    stallNotice: undefined,
+    armImpl: armImpl,
+    armSessionPrsOverride: armSessionPrs,
+  });
 }
 
 // Local alias so the helper above type-checks without importing ArmOutcome just for a signature.

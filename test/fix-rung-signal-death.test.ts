@@ -242,26 +242,23 @@ test("W1-T2402 integration: a spawn killed by signal is ledgered with a structur
       tasks: [{ id: TASK, title: "w1t2402 fixture", repo, type: "implement", risk: "low", verify: "auto", status: "queued", attempts: 0, depends_on: [] }],
       byId: new Map([[TASK, { id: TASK, title: "w1t2402 fixture" }]]),
     };
-    const effects = buildSweepEffects(
-      owner,
-      repo,
-      { claudeBin: "/usr/bin/true", root } as never,
-      ledgerPath,
-      runId,
-      plan as never,
-      log,
-      DEFAULT_SWEEP_POLICY,
-      undefined,
-      // Stands in for the SDK spawn: rejects the way a killed subprocess really does — an Error
-      // carrying `.signal` STRUCTURALLY (mirroring `@anthropic-ai/claude-agent-sdk`'s own
-      // `getProcessExitError`), never a bare message a caller would have to grep.
-      async () => {
+    const effects = buildSweepEffects({
+      owner: owner,
+      repo: repo,
+      config: { claudeBin: "/usr/bin/true", root } as never,
+      ledgerPath: ledgerPath,
+      runId: runId,
+      plan: plan as never,
+      log: log,
+      policy: DEFAULT_SWEEP_POLICY,
+      reviewRunner: undefined,
+      spawnImpl: async () => {
         throw Object.assign(new Error("Claude Code process terminated by signal SIGKILL"), {
           signal: "SIGKILL",
           errorClass: "process_killed_by_signal",
         });
       },
-    );
+    });
 
     const candidate = pr({
       prNumber: 88,

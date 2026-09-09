@@ -152,20 +152,20 @@ function makeHarness(): Harness {
       const log = (step: string, extra: Record<string, unknown> = {}): void => {
         appendLedger(ledgerPath, { run_id: `SWEEP-${headSha}`, task_id: "SWEEP", step, ...extra });
       };
-      const effects = buildSweepEffects(
-        "acme",
-        "scratch",
-        { root } as never,
-        ledgerPath,
-        `SWEEP-${headSha}`,
-        PLAN,
-        log,
-        DEFAULT_SWEEP_POLICY,
-        undefined,
-        undefined,
-        undefined,
-        issueGateway,
-      );
+      const effects = buildSweepEffects({
+        owner: "acme",
+        repo: "scratch",
+        config: { root } as never,
+        ledgerPath: ledgerPath,
+        runId: `SWEEP-${headSha}`,
+        plan: PLAN,
+        log: log,
+        policy: DEFAULT_SWEEP_POLICY,
+        reviewRunner: undefined,
+        spawnImpl: undefined,
+        pushEmptyCommit: undefined,
+        issuesImpl: issueGateway,
+      });
       const pr = {
         prNumber: 4242,
         prUrl: "https://github.com/acme/scratch/pull/4242",

@@ -334,16 +334,16 @@ test("runtime adapter reads only the local provider snapshot/host telemetry and 
 test("production buildSweepEffects wires the runtime controller at the real sweep boundary", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-review-effects-"));
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const effects = buildSweepEffects(
-    "acme",
-    "adaptive-review-runtime",
-    { root } as never,
-    join(root, "state", "ledger.ndjson"),
-    "ADAPTIVE-REVIEW-WIRING",
-    { tasks: [] } as never,
-    (step, extra) => logs.push({ step, extra }),
-    DEFAULT_SWEEP_POLICY,
-  );
+  const effects = buildSweepEffects({
+    owner: "acme",
+    repo: "adaptive-review-runtime",
+    config: { root } as never,
+    ledgerPath: join(root, "state", "ledger.ndjson"),
+    runId: "ADAPTIVE-REVIEW-WIRING",
+    plan: { tasks: [] } as never,
+    log: (step, extra) => logs.push({ step, extra }),
+    policy: DEFAULT_SWEEP_POLICY,
+  });
   assert.equal(typeof effects.selectAdaptiveReviewWidth, "function");
   const width = effects.selectAdaptiveReviewWidth!({
     queueDepth: 4,

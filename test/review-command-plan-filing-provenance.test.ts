@@ -42,28 +42,28 @@ function greenFiling(): OpenPrView {
 test("W1-T3115: the post-review effect carries the already-measured plan-filing fact into its review runner", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-review-filing-handoff-"));
   const calls: Array<{ prNumber: number; isPlanFiling: boolean | undefined }> = [];
-  const effects = buildSweepEffects(
-    "acme",
-    "remudero",
-    { root } as Config,
-    join(root, "state", "ledger.ndjson"),
-    "SWEEP-W1-T3115",
-    plan(),
-    () => {},
-    DEFAULT_SWEEP_POLICY,
-    async (prNumber: number, isPlanFiling?: boolean) => {
+  const effects = buildSweepEffects({
+    owner: "acme",
+    repo: "remudero",
+    config: { root } as Config,
+    ledgerPath: join(root, "state", "ledger.ndjson"),
+    runId: "SWEEP-W1-T3115",
+    plan: plan(),
+    log: () => {},
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: async (prNumber: number, isPlanFiling?: boolean) => {
       calls.push({ prNumber, isPlanFiling });
       return 0;
     },
-  );
+  });
 
   await effects.postReview?.(greenFiling());
   assert.deepEqual(calls, [{ prNumber: 42, isPlanFiling: true }]);
 });
 
 test("W1-T3115: buildSweepEffects's own PRODUCTION reviewRunner default is actually reached and threads isPlanFiling into a real reviewCommand call", async () => {
-  // Every real buildSweepEffects(...) call site in src/run-task.ts omits the ninth argument, so
-  // THIS default — not the fake reviewRunner the test above injects — is what production runs.
+  // Every real buildSweepEffects(...) call site in src/run-task.ts omits reviewRunner, so THIS
+  // default — not the fake reviewRunner the test above injects — is what production runs.
   // A fake `gh` on PATH (never a real GitHub or git-worktree touch) makes the real reviewCommand
   // fail fast at its very first side effect (`fetchView`), before materialize/runReview/post ever
   // run, so this drives the default's own three-line body without spawning a real review.
@@ -73,15 +73,15 @@ test("W1-T3115: buildSweepEffects's own PRODUCTION reviewRunner default is actua
   process.env.PATH = `${shim.dir}:${originalPath ?? ""}`;
   try {
     const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-    const effects = buildSweepEffects(
-      "acme",
-      "remudero",
-      { root } as Config,
-      join(root, "state", "ledger.ndjson"),
-      "SWEEP-W1-T3115-default",
-      plan(),
-      (step, extra) => logs.push({ step, extra }),
-    );
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "remudero",
+      config: { root } as Config,
+      ledgerPath: join(root, "state", "ledger.ndjson"),
+      runId: "SWEEP-W1-T3115-default",
+      plan: plan(),
+      log: (step, extra) => logs.push({ step, extra }),
+    });
     // postReview logs THEN rethrows the review failure (so runSweep's own containment records
     // it) — the assertion is on the log line, not on postReview resolving.
     await assert.rejects(() => Promise.resolve(effects.postReview!(greenFiling())));

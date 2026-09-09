@@ -411,16 +411,16 @@ test("buildSweepEffects.terminalFixStandDown reads the SAME durable cache dispat
     cause: "ci",
   });
 
-  const effects = buildSweepEffects(
-    "acme",
-    "scratch",
-    { root } as never,
-    path,
-    "SWEEP-t2752-effects",
-    PLAN,
-    () => {},
-    DEFAULT_SWEEP_POLICY,
-  );
+  const effects = buildSweepEffects({
+    owner: "acme",
+    repo: "scratch",
+    config: { root } as never,
+    ledgerPath: path,
+    runId: "SWEEP-t2752-effects",
+    plan: PLAN,
+    log: () => {},
+    policy: DEFAULT_SWEEP_POLICY,
+  });
   assert.equal(typeof effects.terminalFixStandDown, "function", "the seam is wired by production `buildSweepEffects`");
   const standDown = effects.terminalFixStandDown!;
 
