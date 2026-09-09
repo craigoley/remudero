@@ -29108,6 +29108,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     armSessionPrsOverride,
     updateBranchImpl = updateBranchViaGh,
     captureRepairFeedbackImpl = (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, log),
+    // diff-cov: process-boundary — the default `gh` invocation: an irreducible execFileSync whose only statement IS the spawn, so it cannot carry a DA hit without actually closing a pull request (its one caller is `gh pr close`). MEASURED on origin/main at the same scoped suite set: this body already read 0 there — the deps-object collapse reshaped the parameter list, so pre-existing untested glue reads as ADDED (the inherited-debt case CLAUDE.md names). Every test supplies `ghRunImpl`, which is the seam that makes the callers gradeable.
     ghRunImpl = (file, args) => {
       execFileSync(file, [...args], { stdio: "pipe" });
     },
@@ -29126,6 +29127,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // survives the positional-parameters-to-one-deps-object collapse verbatim — the sweep's
   // post-review lane still routes through reviewCommand, and nothing but `deps.reviewRunner`
   // can override it.
+  // diff-cov: process-boundary — the default review runner: its body is one call to `reviewCommand`, which spawns a reviewer and posts a commit status, so it cannot carry a DA hit without doing both for real. MEASURED on origin/main: this body already read 0 there — the collapse reshaped the parameter list around it. Its CONTENT is not unpinned: test/event-driven-semantic-review.test.ts asserts from the source that this default names `executionMode: "semantic"` and `planOnlyFiling` itself rather than letting reviewCommand infer them from the caller, and reddens if either is dropped.
   let reviewRunner: (prNumber: number, isPlanFiling?: boolean) => Promise<number> = (prNumber, isPlanFiling) =>
     reviewCommand(String(prNumber), ["--repo", repo], {
       executionMode: "semantic",
@@ -31705,7 +31707,12 @@ export async function fixCommand(
   rest: string[],
   // Injectable exactly as approveCommand/inboxCommand already are — the seam that lets the
   // REST lookup below be graded by a test instead of shipping unexercised.
-  deps: { config?: Config; fetch?: GhApiFetcher } = {},
+  //
+  // `route` joins them for the same reason `fetch` did: without it nothing can reach the effects
+  // this command builds, so the one `buildSweepEffects` call site of the four that no test drives
+  // stayed unexercised while the other three were graded. Omitted, it is `routeFix` and the
+  // behaviour is byte-identical.
+  deps: { config?: Config; fetch?: GhApiFetcher; route?: typeof routeFix } = {},
 ): Promise<number> {
   const prArg = rest[0];
   const badArg = unknownArgError("fix", rest.slice(1), ["--repo"], []);
@@ -31802,7 +31809,7 @@ export async function fixCommand(
     log: log,
     policy: DEFAULT_SWEEP_POLICY,
   });
-  const { outcome, reason } = await routeFix(raw.state, pr, effects, DEFAULT_SWEEP_POLICY);
+  const { outcome, reason } = await (deps.route ?? routeFix)(raw.state, pr, effects, DEFAULT_SWEEP_POLICY);
 
   log(`fix.${outcome === "refused" ? "refused" : "disposed"}`, { pr_number: prNumber, task_id: taskId, outcome, reason });
   if (outcome === "fixed") {

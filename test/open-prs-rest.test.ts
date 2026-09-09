@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -35,7 +35,7 @@ import {
   type GhApiFetcher,
 } from "../src/lib/open-prs-rest.js";
 import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
-import { fixCommand } from "../src/run-task.js";
+import { fixCommand, type routeFix } from "../src/run-task.js";
 import { ghJson, type GhRateLimitReading } from "../src/lib/worker.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { Config } from "../src/lib/config.js";
@@ -1810,4 +1810,55 @@ test("W1-T2384: the hydration reuses MERGE_STATE_HYDRATION_CAP rather than inven
   const f = filesFetcher(byPr);
   const out = hydrateSupersessionVerdicts(OWNER, REPO, flagged, f, isInPlanScope);
   assert.equal(out.size, MERGE_STATE_HYDRATION_CAP, "truncated at the SAME cap the sibling uses");
+});
+
+test("fixCommand builds its sweep effects from its OWN resolved values, and routes them — the fourth call site nothing drove", async () => {
+  // Three of the four buildSweepEffects call sites are graded by the sweep suites; this one is
+  // reached only through `rmd fix`, and no test got past the REST lookup, so the deps-object
+  // collapse reshaped it with nothing watching. `route` is injected so the assertion stops at the
+  // boundary — the effects are built and handed over, and no fix is ever dispatched.
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-cmd-effects-`));
+  // A `gh` that refuses: ghRequiredStatusCheckContexts is fail-soft, so this makes its degradation
+  // deterministic and keeps the case off the network entirely.
+  const bin = join(root, "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+
+  let seen: Parameters<typeof routeFix>[2] | undefined;
+  let seenState: string | undefined;
+  try {
+    const code = await fixCommand(["806"], {
+      config: { claudeBin: "/bin/true", root } as Config,
+      fetch: () => ({
+        number: 806,
+        url: "https://github.com/o/r/pull/806",
+        title: "t",
+        body: "Remudero-Task: W1-T2889",
+        headRefName: "run-W1-T2889-1",
+        headRefOid: SHA,
+        createdAt: "2026-09-09T00:00:00Z",
+        updatedAt: "2026-09-09T00:00:00Z",
+        state: "MERGED",
+        statusCheckRollup: [],
+      }) as never,
+      route: (async (prState, _pr, effects) => {
+        seenState = prState;
+        seen = effects;
+        return { outcome: "refused" as const, reason: "already merged" };
+      }) as typeof routeFix,
+    });
+    assert.equal(code, 1, "a refused PR reports non-fixable and exits 1 — the pre-existing contract");
+  } finally {
+    process.env.PATH = oldPath;
+  }
+
+  assert.equal(seenState, "MERGED", "the PR's own state must reach the router, or a terminal PR gets fixed");
+  assert.ok(seen, "the effects must be built and handed to the router");
+  // The effects carry the command's OWN resolutions, not defaults picked up elsewhere: this is
+  // what the collapse could have silently dropped, since every field moved in the same edit.
+  for (const key of ["dispatchFix", "escalate", "arm"] as const) {
+    assert.equal(typeof (seen as unknown as Record<string, unknown>)[key], "function", `effects must carry ${key}`);
+  }
 });
