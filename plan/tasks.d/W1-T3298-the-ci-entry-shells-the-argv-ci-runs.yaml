@@ -1,0 +1,114 @@
+- id: W1-T3298
+  title: "THE `ci` PARITY ENTRY DOES NOT SHELL CI'S OWN COMMAND — ci.yml runs `test-tier-manifest.mjs --run fast --shard n/4` and SKIPS that harness entirely on a source diff, while `--ci-parity` runs the whole `test/**/*.test.ts` glob unsharded and unconditionally, which is a ~17-minute pass CI never performs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 24.00
+  files:
+    - src/lib/ci-parity.ts
+    - test/the-ci-entry-shells-the-argv-ci-runs.test.ts
+  origin: "operator-session#ci-parity-cost-2026-09-09"
+  plan_refs: ["W1-T294", "W1-T3207", "W1-T3191", "W1-T2597"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE MODULE'S OWN STATED INVARIANT IS THE FINDING. `src/lib/ci-parity.ts`'s header:
+    "CI'S OWN COMMAND, NEVER A PROXY. Each mirrored step shells the argv ci.yml invokes."
+
+    IT DOES NOT, FOR THE `ci` JOB. MEASURED 2026-09-09 by reading both sides:
+
+      ci.yml, the ci-shard job:
+        node scripts/test-with-retry.mjs \
+          node scripts/test-tier-manifest.mjs --run fast --shard <n>/4 --base "$TIER_BASE"
+
+      ci-parity's `ci` entry (package.json `test:ci`):
+        node scripts/test-with-retry.mjs node --test --import tsx \
+          --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
+
+    Three differences, each one costing wall clock: CI runs the FAST TIER, this runs every tier;
+    CI runs ONE SHARD OF FOUR, this runs all four sequentially; CI derives its tier base from
+    `$TIER_BASE`, this has no tier concept at all.
+
+    AND ON A SOURCE DIFF CI DOES NOT RUN THAT HARNESS AT ALL. ci.yml, W1-T3207, verbatim:
+    "coverage-ratchet owns the single instrumented full-suite run; ci skips the quieter second
+    harness on PR source diffs" — the step exits 0 before running anything. So for the most common
+    PR shape in this repo, `--ci-parity` performs a full-suite pass that has no counterpart in CI
+    whatsoever.
+
+    THE COST, MEASURED ON A COMPLETED LOCAL RUN: the plain suite pass reported
+    `# duration_ms 1024664` — 17.1 minutes — inside a run whose total wall clock was ~45 minutes
+    across 41 entries. A second, instrumented full-suite pass runs beside it (that one IS faithful
+    to CI's argv apart from its shard flag, and is W1-T3299's concern, not this task's).
+
+    WHY THIS MATTERS BEYOND SPEED, AND IT IS THE REASON THIS IS risk:high. A parity harness that
+    runs MORE than CI is not merely slow — it reports failures CI would never have surfaced and
+    invites a session to "fix" a suite CI does not run for that diff class. The cost is paid twice:
+    once in wall clock, once in attention spent on a red that was never going to block the PR.
+  design: |
+    (i) MIRROR THE ARGV, INCLUDING THE TIER AND THE SHARD. The `ci` entry shells
+    `scripts/test-tier-manifest.mjs --run fast --shard <n>/4 --base <pinned base>`, the same
+    invocation ci.yml makes, for each of the four shards. The shard count is CI's own 4, read from
+    one place rather than typed twice.
+    (ii) MIRROR THE CLASS-CONDITIONAL SKIP. `scripts/diff-class.mjs` already decides the class CI
+    branches on. When it reports SOURCE, this entry reports SKIPPED WITH ITS REASON — naming
+    W1-T3207 and the coverage entry that owns the instrumented run — rather than running a pass CI
+    does not. A skip that does not say why is indistinguishable from a step that silently did
+    nothing, which is the failure mode this repo keeps recording.
+    (iii) THE PINNED BASE IS ALREADY SOLVED HERE — `pinnedBase` resolves `origin/main` to a SHA once
+    per run precisely so a moving ref cannot change what a step measures. `--base` takes that SHA,
+    never the ref.
+    (iv) A CLASSIFICATION FAILURE FALLS BACK TO THE FULL SUITE, LOUDLY, because that is what CI does:
+    ci.yml's own fallback reads "candidate enumeration FAILED or was empty — shard 1 owns the FULL
+    suite fallback". An unreadable class must never silently skip the suite; the expensive-and-correct
+    direction is the safe one here, and it must announce itself.
+    (v) NOT IN SCOPE: the coverage entry's missing `--test-shard` (W1-T3299), changing what CI itself
+    runs, changing the tier manifest's thresholds, or making `--fast` the documented default. The
+    last is deliberately deferred until this task and W1-T3299 have re-measured the real cost —
+    filing it now would be arguing from a number this task is about to change.
+  acceptance:
+    - claim: "the ci entry shells the tier-manifest invocation with a shard argument, not a bare node --test over the whole test glob"
+      proof: "unit test: test/the-ci-entry-shells-the-argv-ci-runs.test.ts"
+    - claim: "on a SOURCE-class diff the entry reports SKIPPED and names the reason, matching ci.yml's own W1-T3207 branch instead of running a pass CI does not"
+      proof: "unit test: test/the-ci-entry-shells-the-argv-ci-runs.test.ts"
+    - claim: "a diff class that cannot be determined falls back to the FULL suite and says so, so an unreadable class never silently skips testing"
+      proof: "unit test: test/the-ci-entry-shells-the-argv-ci-runs.test.ts"
+    - claim: "the shard argument covers every shard exactly once, so no test is dropped by the split"
+      proof: "unit test: test/the-ci-entry-shells-the-argv-ci-runs.test.ts"
+    - claim: "the base passed to the tier run is the RESOLVED sha the run pinned, never the origin/main ref"
+      proof: "unit test: test/the-ci-entry-shells-the-argv-ci-runs.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF the entry already shells CI's argv: read the `ci` entry in
+    `src/lib/ci-parity.ts` and compare it to ci.yml's ci-shard step, argument by argument. MEASURED
+    2026-09-09: `test:ci` runs `node --test ... "test/**/*.test.ts"` with no tier, no shard and no
+    base; ci.yml runs `test-tier-manifest.mjs --run fast --shard <n>/4 --base "$TIER_BASE"`.
+    PROVE THE SPLIT DROPS NOTHING, AND THIS IS THE CONTROL THAT MATTERS MOST: the union of the four
+    shards' selected files must equal the unsharded selection for the same base. A sharding change
+    that silently narrows the suite is far worse than the slowness it fixes, and a suite that runs
+    fewer tests reports FEWER failures, which reads as an improvement.
+    REQUIRE A `# tests` SUMMARY PER SHARD BEFORE BELIEVING ANY TOTAL (W1-T2597). A shard killed for
+    time prints the assertions it reached and no totals, so summing four shards without checking
+    each one's summary manufactures a green from a truncated run.
+    DO NOT let the SOURCE skip apply to the COVERAGE entry. ci.yml skips the quieter `ci` harness
+    precisely BECAUSE coverage-ratchet still owns the instrumented run; skipping both would remove
+    all test execution from the local gate.
+    DO NOT reimplement tier selection. `scripts/test-tier-manifest.mjs` already owns it; a second
+    selector would drift from the one CI uses, which is this task's entire complaint restated.
+  note: |
+    Rule 25 CHECKED: `src/lib/ci-parity.ts` is NOT on INSTRUMENT_SURFACE (which names
+    `src/lib/(config|settings|mounts).ts`, `(review|task-linter).ts`,
+    `(run-result|status|ledger|flight-judge).ts`, `src/run-task.ts`, `bin/` and the named scripts).
+    Declared files are that module and its own new test, so `detectInstrumentEntanglement` has no
+    instrument path to pair and cannot fire.
+    risk:high with band_meaning:blast-radius, and the band is NOT about file count — two files is a
+    narrow span. It is that this module is the gate CLAUDE.md instructs every session to run before
+    its first push and to treat as "the real signal". A defect here does not fail loudly; it changes
+    what a human believes was verified. Under-running is the dangerous direction and the falsifier
+    above is written against it.
+    THE DRIFT CHECK IS A SIBLING, NOT A BLOCKER: `ci-parity:drift` fails when a ci.yml job has no
+    entry. This task changes an existing entry's argv rather than the entry set, so the drift check's
+    population is unchanged — but its suites (test/preflight-ci-parity.test.ts,
+    test/ci-parity-contract.test.ts) assert this entry's shape and will need updating with it.
