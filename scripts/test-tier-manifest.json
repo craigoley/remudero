@@ -1172,6 +1172,7 @@
     "test/the-fix-rung-strike-cap-does-not-bind.test.ts": 1436,
     "test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts": 807,
     "test/the-followup-retirement-arm-has-a-call-site.test.ts": 1104,
+    "test/the-followup-rung-amplifies-the-ledger.test.ts": 0,
     "test/the-forward-reference-carve-out-is-asymmetric.test.ts": 0,
     "test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts": 1099,
     "test/the-golden-suite-has-every-piece-except-a-producer.test.ts": 1682,

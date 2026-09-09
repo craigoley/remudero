@@ -28,7 +28,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runTask } from "../src/run-task.js";
+import { resetWrittenFollowupDigests, runTask } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
@@ -224,6 +224,10 @@ async function runFixture(
 }
 
 test("a run that ends no_pr harvests the implement worker's follow-ups, with no blank pr_url on the line", async (t) => {
+  // W1-T3234: this fixture PINS the clock, so both cases run under the SAME run id — which two
+  // real runs never do. Reset the process-scoped follow-up memo to model the boundary between
+  // them; without it the second case inherits the first's writes and reads as a suppression.
+  resetWrittenFollowupDigests();
   const { verdict, ledger } = await runFixture(t, "nopr", undefined);
 
   // REACHING THE PATH IS THE FIRST ASSERTION — without it the rest is vacuous.
@@ -250,6 +254,10 @@ test("a run that ends no_pr harvests the implement worker's follow-ups, with no 
 });
 
 test("a run that opens a PR still harvests exactly once, carrying its pr_url — the change adds no duplicate", async (t) => {
+  // W1-T3234: this fixture PINS the clock, so both cases run under the SAME run id — which two
+  // real runs never do. Reset the process-scoped follow-up memo to model the boundary between
+  // them; without it the second case inherits the first's writes and reads as a suppression.
+  resetWrittenFollowupDigests();
   const prUrl = "https://github.com/acme/remudero/pull/1";
   const { verdict, ledger } = await runFixture(t, "withpr", prUrl);
 
