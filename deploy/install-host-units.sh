@@ -102,6 +102,10 @@ set -euo pipefail
 STATE_DIR=${STATE_DIR}
 IMAGE=${IMAGE}
 REVIVAL_LOG=${REVIVAL_LOG}
+# W1-T3269 — the checkout this host converges FROM, and the heap the installer requires. Rendered
+# in rather than re-derived, so the converge below uses the same inputs this file was rendered with.
+CHECKOUT=${STATE_DIR}/remudero
+UNITS_HEAP_MB=${MAX_OLD_SPACE_MB}
 BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
 
@@ -173,6 +177,54 @@ if [ "\${1:-}" = "--check-crash-loop" ]; then
   exit 0
 fi
 
+# W1-T3269 — CONVERGE THIS HOST'S OWN UNITS, THE THIRD QUESTION THIS TICK ALREADY ASKS.
+#
+# The installer had NO automatic caller -- referenced only by its own test, the operator guide and a
+# size baseline -- so it converged when a person remembered. MEASURED 2026-09-09: check mode read
+# DRIFTED against a checkout clean and exactly at origin/main. The code had shipped that morning;
+# the rendered artifact had not. The tick already asks "is the daemon down" and, since W1-T3245,
+# "is the image behind"; this is the same question about a third artifact class on the same cadence.
+# THREE DECISION FUNCTIONS IN ONE TICK, NEVER ONE WEIGHTED SCORE -- the signals differ in frequency,
+# cost and blast radius, so a weighted sum is dominated by the cheapest and most frequent.
+# THE REFUSALS ARE THE DELIVERABLE: a five-minute timer holding root write access to systemd units
+# is only safe because it declines in every case it cannot justify.
+converge_host_units() {
+  # A DIRTY OR OFF-MAIN CHECKOUT IS NEVER INSTALLED -- the whole safety argument. Without it a
+  # worktree experiment becomes root systemd configuration on the next tick.
+  [ -d "\$CHECKOUT/.git" ] || { echo "rmd-relaunch: units -- \$CHECKOUT is not a checkout; not converging."; return 0; }
+  if [ -n "\$(git -C "\$CHECKOUT" status --porcelain 2>/dev/null)" ]; then
+    echo "rmd-relaunch: units -- checkout is DIRTY; not converging (an unreviewed tree must never become root config)."
+    return 0
+  fi
+  head_sha=\$(git -C "\$CHECKOUT" rev-parse HEAD 2>/dev/null || echo unknown)
+  main_sha=\$(git -C "\$CHECKOUT" rev-parse origin/main 2>/dev/null || echo unknown)
+  if [ "\$head_sha" = unknown ] || [ "\$head_sha" != "\$main_sha" ]; then
+    echo "rmd-relaunch: units -- checkout is not at origin/main (\$head_sha vs \$main_sha); not converging."
+    return 0
+  fi
+
+  # CHECK BEFORE INSTALL, ALWAYS. The steady state is a silent no-op, which is what makes a converge
+  # event rare enough to be worth a record.
+  if RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB" "\$CHECKOUT/deploy/install-host-units.sh" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Elevation is REQUIRED and never prompted for: the tick runs as the service user while the unit
+  # dir is root-owned. No sudo, no converge -- reported, never fatal.
+  if ! sudo -n true 2>/dev/null; then
+    echo "rmd-relaunch: units -- DRIFTED but cannot elevate (sudo -n refused); leaving them alone." >&2
+    return 0
+  fi
+
+  echo "rmd-relaunch: units DRIFTED at \$head_sha -- converging."
+  if sudo -n env RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB" "\$CHECKOUT/deploy/install-host-units.sh" --install; then
+    printf '%s units-converged sha=%s\\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$head_sha" >> "\$REVIVAL_LOG" 2>/dev/null || true
+  else
+    echo "rmd-relaunch: units -- converge FAILED; the next tick re-asks." >&2
+  fi
+  return 0
+}
+
 # THE STOP LEVER OUTRANKS THIS SCRIPT, INCLUDING AT BOOT AND FROM THE WATCHDOG.
 if [ -e "\$STATE_DIR/state/STOP" ]; then
   echo "rmd-relaunch: state/STOP present -- refusing to start. rm it to resume."
@@ -185,6 +237,10 @@ if [ -n "\$(docker ps -q -f name='^remudero-daemon\$' 2>/dev/null)" ]; then
   # revival path below, after this very return, so a host that recovered stopped reviving and never
   # reached it. This is the one place the script observes the daemon HEALTHY.
   rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+  # CONVERGENCE IS LAST AND ONLY WHEN HEALTHY. A DOWN host needs reviving, not tidying, so nothing
+  # here runs before the revive decision; boot is excluded because a host coming up is the worst
+  # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
+  [ "\$BOOT" -eq 0 ] && converge_host_units
   echo "rmd-relaunch: remudero-daemon already running -- nothing to do."
   exit 0
 fi
