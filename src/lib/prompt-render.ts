@@ -844,7 +844,24 @@ export function implementPromptParts(
   ];
 }
 
-export function renderImplementPrompt(
+/**
+ * The rendered prompt AND the part array it was rendered from, together.
+ *
+ * WHY THIS EXISTS RATHER THAN TWO CALLS. `run-task.ts` used to render the prompt here and then
+ * call `implementPromptParts` A SECOND TIME to derive the ledgered manifest, re-typing the whole
+ * positional argument list at the second site. Its own comment claimed the manifest came from "the
+ * SAME array renderImplementPrompt itself assembled from, so this can never fingerprint a different
+ * composition than the one the worker actually got" — and that invariant WAS NOT ENFORCED BY
+ * ANYTHING. It broke: `skillsPart` was passed to the render and omitted from the manifest
+ * derivation, so an injected skill the worker genuinely received was ledgered `present: false`.
+ * Both argument lists end in optional parameters, so the omission is not a type error and the
+ * defect is silent.
+ *
+ * Returning the parts makes the second call unnecessary, which is the only way that class of
+ * divergence stops being possible. A caller that wants only the text still calls
+ * {@link renderImplementPrompt}, which is this function with `.prompt` taken.
+ */
+export function renderImplementPromptWithParts(
   task: Task,
   reconContext: string,
   runId: string,
@@ -852,11 +869,11 @@ export function renderImplementPrompt(
   operatorNotesBlock = "",
   ruleHeadlinesPart = "",
   skillsPart = "",
-): string {
+): { prompt: string; parts: Array<{ name: string; value: string }> } {
   const parts = implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart);
   const partValue = (name: string) => parts.find((p) => p.name === name)!.value;
 
-  return [
+  const prompt = [
     // THE ROLE, FIRST — mirroring `renderReconPrompt`, whose own first sentence is "You are a RECON
     // worker." Above `# CONTEXT` on purpose: `extractContext` starts at that heading, so this text
     // is outside the provenance linter's region and carries no citation, while the recon relay
@@ -885,4 +902,22 @@ export function renderImplementPrompt(
     // worker was told at turn 0, never a re-derived/paraphrased copy.
     ...outputContractLines(task.id),
   ].join("\n");
+  return { prompt, parts };
+}
+
+/** The rendered implement prompt alone. See {@link renderImplementPromptWithParts} for why the
+ *  parts are available at all — a caller that needs both MUST take them from one call, never
+ *  re-derive them beside this one. */
+export function renderImplementPrompt(
+  task: Task,
+  reconContext: string,
+  runId: string,
+  matchedLearnings = "",
+  operatorNotesBlock = "",
+  ruleHeadlinesPart = "",
+  skillsPart = "",
+): string {
+  return renderImplementPromptWithParts(
+    task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart,
+  ).prompt;
 }

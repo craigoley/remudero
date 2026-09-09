@@ -142,6 +142,7 @@ import {
   renderDiagnosePrompt,
   renderFixPrompt,
   renderImplementPrompt,
+  renderImplementPromptWithParts,
   renderPrerequisitePrPrompt,
   renderReconPrompt,
   scopeGuardOutOfScopeFiles,
@@ -156,6 +157,7 @@ export {
   renderDiagnosePrompt,
   renderFixPrompt,
   renderImplementPrompt,
+  renderImplementPromptWithParts,
   renderPrerequisitePrPrompt,
   renderReconPrompt,
   scopeGuardOutOfScopeFiles,
@@ -11961,7 +11963,12 @@ async function runTask(
     // Same shape as learnings.injected above, and same status: analytics, never a decision input.
     const skillsEvent = skillsInjectedEvent(injectableSkills, task.type, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
     if (skillsEvent) log("skills.injected", skillsEvent);
-    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart);
+    // ONE call yields both the text the worker gets and the parts it was assembled from. The
+    // manifest below is ledgered from THESE parts; deriving them a second time is what let the
+    // manifest disagree with the prompt (see renderImplementPromptWithParts).
+    const { prompt, parts: implementParts } = renderImplementPromptWithParts(
+      task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart,
+    );
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -11971,8 +11978,10 @@ async function runTask(
     say("prompt provenance-linted: clean");
     // W1-T2297: RECORDS the composition of the prompt this run just spawned with. `prompt.linted`
     // above already fingerprints the WHOLE rendered prompt; this ledgers the per-PART breakdown
-    // (`implementPromptParts` — the SAME array `renderImplementPrompt` itself assembled from, so
-    // this can never fingerprint a different composition than the one the worker actually got) —
+    // (the SAME array the render above returned — this sentence used to be a CLAIM about a second
+    // `implementPromptParts` call typed out beside it, and the claim was false: `skillsPart` was
+    // handed to the render and dropped from the manifest, so an injected skill the worker really
+    // received was ledgered `present: false`. It is now a fact about a single call) —
     // doctrine / task claims / recon / operator notes / matched learnings / task body — each as a
     // sha256 + byte length, NEVER the part's own text (rows stay greppable forever and rotate
     // through archives; republishing prompt content into them is out of scope by design). An
@@ -11980,19 +11989,7 @@ async function runTask(
     // `present: false` rather than a hash of the empty string standing in for "nothing here" — see
     // `buildPromptManifest`'s own doc. A RECORD, never a gate: nothing reads this to decide
     // anything, so it is deliberately NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts).
-    log("prompt.manifest", {
-      parts: buildPromptManifest(
-        implementPromptParts(
-          task,
-          reconContext,
-          runId,
-          matchedLearnings,
-          operatorNotesBlock,
-          ruleHeadlinesPart,
-          skillsPart,
-        ),
-      ),
-    });
+    log("prompt.manifest", { parts: buildPromptManifest(implementParts) });
 
     // ── COMPACTION ANCHOR (MASTER-PLAN §8B / W1-T36): the goal + acceptance
     // criteria + hard constraints, built ONCE and ledgered here so the anchor
