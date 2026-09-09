@@ -701,6 +701,7 @@
     "test/live-write-guard-leaves.test.ts": 2807,
     "test/live-write-guard.test.ts": 255,
     "test/liveness-distinguishes-absent-sensor-from-dead-service.test.ts": 1026,
+    "test/liveness-is-sensed-on-the-host-it-runs-on.test.ts": 0,
     "test/lock-holder-identity.test.ts": 1061,
     "test/lock-reclaim-race.test.ts": 1514,
     "test/log-rotation.test.ts": 172,
