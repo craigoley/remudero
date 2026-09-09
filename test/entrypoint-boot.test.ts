@@ -43,9 +43,24 @@ interface Boot {
   status: number;
   stdout: string;
   stderr: string;
+  /** The signal that killed the spawn, or `null` when it exited on its own. Non-null means the
+   *  {@link BOOT_SPAWN_TIMEOUT_MS} backstop fired — see {@link boot}. */
+  signal: NodeJS.Signals | null;
   /** argv of every stubbed `npm` invocation, in order. */
   npmCalls: string[][];
 }
+
+/**
+ * W1-T2993 — BACKSTOP, not the control. {@link ambientWithoutRmdControls} is the PRIMARY CONTROL
+ * for the one cause we know of (an inherited `RMD_RESTART_THROTTLE_S` sending the script down its
+ * supervised `while :; do` branch). This bound exists because that fix is cause-specific and this
+ * fixture spawns a REAL shell script that will keep growing branches: a fixture that can block
+ * indefinitely turns any future branch into a CANCELLED suite, and a cancelled suite reports as a
+ * subset of failures somewhere else entirely. MEASURED: three days of diagnosis went to four
+ * innocent files that way. Generous enough that no healthy boot approaches it — the slowest real
+ * case in this file is a two-clone boot well under a second.
+ */
+const BOOT_SPAWN_TIMEOUT_MS = 60_000;
 
 /** A git origin with one commit, plus the package files a real clone would carry. */
 function makeOrigin(): string {
@@ -136,13 +151,16 @@ function ambientWithoutRmdControls(): NodeJS.ProcessEnv {
 function boot(
   home: string,
   origin: string,
-  opts: { ref?: string; env?: Record<string, string>; cmd?: string[]; script?: string; cwd?: string } = {},
+  opts: { ref?: string; env?: Record<string, string>; cmd?: string[]; script?: string; cwd?: string; timeoutMs?: number } = {},
 ): Boot {
   const stubs = mkdtempSync(join(tmpdir(), "entrypoint-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "entrypoint-rec-"));
   writeNpmStub(stubs, rec);
   const r = spawnSync("bash", [opts.script ?? SCRIPT, ...(opts.cmd ?? ["true"])], {
     encoding: "utf8",
+    // W1-T2993: never unbounded. A blocked fixture is cancelled by the runner minutes later and
+    // reported as OTHER files' failures; a killed one fails here, by name, in seconds.
+    timeout: opts.timeoutMs ?? BOOT_SPAWN_TIMEOUT_MS,
     // NOT `home`: one test deliberately points HOME at a path that does not exist yet, and
     // spawnSync cannot chdir into it.
     cwd: opts.cwd ?? REPO_ROOT,
@@ -166,7 +184,7 @@ function boot(
   } catch {
     npmCalls = [];
   }
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", npmCalls };
+  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", signal: r.signal ?? null, npmCalls };
 }
 
 const treeOf = (home: string) => join(home, "Remudero", "remudero");
@@ -1251,5 +1269,59 @@ test("W1-T2994: an ambient restart throttle does not put the fixture into superv
   } finally {
     if (prior === undefined) delete process.env.RMD_RESTART_THROTTLE_S;
     else process.env.RMD_RESTART_THROTTLE_S = prior;
+  }
+});
+
+// ── W1-T2993: the fixture itself, under the environment that hung it ─────────────────────────
+//
+// The retro runs the full suite INSIDE the daemon container. That container sets
+// `RMD_RESTART_THROTTLE_S=120`, which sends `deploy/entrypoint.sh` past its `exec "$@"` into a
+// supervised loop that sleeps before returning. Every fixture here inherited it, so the file
+// blocked at scope and the runner cancelled it — after which the preflight reported the tests that
+// never RAN, in four other files, as the failures. The suite passes on a developer machine and in
+// CI because neither sets the variable: the one corpus that could observe it was the one nobody
+// ran the suite in.
+//
+// The two halves below are deliberately separate. The first pins the scrub against a control that
+// proves the variable really was in `process.env` when it ran — without that control the assertion
+// is vacuous on any machine that never set it, which is every machine except the one that failed.
+// The second is the structural half: a REAL boot under that ambient environment, spawned with a
+// short explicit timeout, must exit on its own. Against an unscrubbed fixture the spawn is killed
+// and `signal` is non-null, which fails here by name in seconds rather than hanging.
+
+test("W1-T2993: the entrypoint boot fixture cannot block indefinitely", () => {
+  const restore = process.env.RMD_RESTART_THROTTLE_S;
+  process.env.RMD_RESTART_THROTTLE_S = "120";
+  try {
+    // CONTROL: the poison is really present in this process's environment right now. Without it,
+    // every assertion below passes for the wrong reason.
+    assert.equal(process.env.RMD_RESTART_THROTTLE_S, "120", "positive control: the ambient variable IS set");
+
+    const scrubbed = ambientWithoutRmdControls();
+    assert.equal(
+      Object.keys(scrubbed).filter((k) => k.startsWith("RMD_")).join(","),
+      "",
+      "the fixture's ambient environment must carry no RMD_ control at all",
+    );
+
+    // The structural half: a real boot under that ambient environment returns on its own.
+    const home = freshHome();
+    const origin = makeOrigin();
+    const run = boot(home, origin, { timeoutMs: 15_000 });
+    assert.equal(
+      run.signal,
+      null,
+      `the boot must exit on its own, not be killed by the fixture's timeout backstop (stderr: ${run.stderr.slice(-400)})`,
+    );
+    assert.equal(run.status, 0, `boot exited ${run.status}: ${run.stderr.slice(-400)}`);
+    // And the script really did take its `exec` branch rather than the supervised loop — the log
+    // line the throttle branch prints must be absent.
+    assert.ok(
+      !/restart throttle: a NON-ZERO exit will sleep/.test(run.stderr + run.stdout),
+      "the scrubbed boot must take exec \"$@\", never the supervised while-loop",
+    );
+  } finally {
+    if (restore === undefined) delete process.env.RMD_RESTART_THROTTLE_S;
+    else process.env.RMD_RESTART_THROTTLE_S = restore;
   }
 });

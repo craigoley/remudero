@@ -1,0 +1,76 @@
+- id: W1-T3233
+  title: "THE WATCHDOG REVIVES A DAEMON INTO THE SAME EXIT FOREVER AND NOTHING COUNTS — it already writes prev_exit to a revival log on every revive, nothing has ever read it back, and on 2026-09-09 that cost ~90 identical revivals across 7h32m of total fleet downtime"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  origin: "operator-session#7h32m-of-identical-revivals-2026-09-09"
+  plan_refs: ["W1-T2877", "W1-T2953", "W1-T2856"]
+  files: [deploy/install-host-units.sh, test/host-units-install.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE EVIDENCE ALREADY EXISTS AND NOTHING READS IT. `render_launcher`
+    (deploy/install-host-units.sh) appends one line per revive to `rmd-revivals.log`, carrying
+    `prev_status`, `prev_exit` and `prev_restarts`. Its own comment states exactly why: "A REVIVAL
+    MUST LEAVE A TRACE. Recreating the container RESETS docker's RestartCount, so without this
+    record a crash loop is invisible: every beat is fresh and every daemon is young." That reasoning
+    is correct and the record is written. `prev_exit` is READ BY NOTHING — not by the launcher on
+    its next fire, not by the heartbeat, not by any gate. This is the mechanism-with-no-reader shape
+    W1-T1004's own note counts eleven prior instances of.
+
+    WHAT IT COST, MEASURED 2026-09-09. A `core.bare=true` flag written into the state checkout's
+    git config at 02:37:36 made every worktree operation fail, so `deploy/entrypoint.sh` exited 1
+    and `rmd daemon` never ran. `rmd-fleet-watchdog.timer` fires every five minutes and did its job
+    perfectly: it revived the container into the identical death roughly ninety times over 7h32m.
+    Docker's own `--restart=on-failure:5` could not bound it, because the watchdog RECREATES the
+    container and that resets RestartCount — the very fact the revival record was added to make
+    visible. The fleet was down for the whole window and the only thing that noticed was an
+    operator asking why the board was quiet.
+
+    THE BOUND MUST NOT STOP THE REVIVING, AND THAT IS THE WHOLE DESIGN CONSTRAINT. This repo's
+    recorded recurring defect is a bound that fires on a HEALTHY condition; the mirror is a
+    watchdog that gives up on a fleet that would have recovered. The ninety revivals were WASTED,
+    not WRONG — the same watchdog is what recovers a host from a transient. So the fix counts and
+    ANNOUNCES; it never refuses to revive, and it never touches the STOP lever's precedence.
+
+    WHY THE LAUNCHER, AND NOT A NEW MECHANISM. The launcher already opens this file to append to
+    it, already knows the exit code it is reviving from, and already runs on exactly the cadence
+    the count is denominated in. A reader anywhere else would need a second copy of the log's
+    format and a second schedule. Nothing new is scheduled, nothing new is installed, and the STOP
+    refusal, the mount checks and the idempotence check all keep their current precedence — the
+    count is computed after them, not before.
+
+    A ZERO EXIT IS A DELIBERATE STOP AND IS EXCLUDED. `--restart=on-failure:5` is documented in
+    this same file as deliberate precisely so exit 0 is never undone. A run of zeros is a healthy
+    fleet being stopped and started by an operator, and counting it would fire the notice on the
+    one condition that is definitely fine.
+
+    THE THRESHOLD IS DENOMINATED IN THE TIMER'S OWN CADENCE. Five consecutive identical non-zero
+    exits at the five-minute watchdog cadence is ~25 minutes of a fleet dying the same way — well
+    past any transient, and two orders of magnitude short of what actually happened. It is a
+    NOTICE, never a refusal, so a false positive costs a log line and a marker file; there is no
+    destructive arm for it to fire.
+
+    SCOPE, STATED. This task writes the signal: a distinct `crash-loop` line in the revival log and
+    a marker file under the state root naming the repeated exit and its count. It does NOT build a
+    surface that escalates the marker to a human — the daemon is down in exactly this scenario, so
+    the in-container heartbeat is not beating and `tryEscalate` is unreachable from the host script.
+    Routing the marker onward is a separate task and this one does not pretend to it.
+
+    W1-T2953 TOUCHES THE SAME FILE AND IS NOT THIS. It reconciles the tracked renderer with the
+    stronger units already installed on Azure (mount ordering, timer persistence, the heap ceiling)
+    and says applying `--install` today would DOWNGRADE the live host. This task adds a reader for a
+    record the renderer already writes. Both edit `render_launcher`; if W1-T2953 lands first this
+    rebases onto it, and neither depends on the other's content.
+
+  acceptance:
+    - claim: "a run of identical non-zero revival exits is detected and reported, with the exit code and the count"
+      proof: "unit test: W1-T3233: a repeated identical exit is reported with its code and count"
+    - claim: "a deliberate stop and a varied set of exits are NOT reported, so the notice separates a real population"
+      proof: "unit test: W1-T3233: a zero exit and a varied history report nothing"
+    - claim: "the watchdog still revives while the notice stands — the bound announces and never gives up"
+      proof: "grep: never refuses to revive in deploy/install-host-units.sh"
