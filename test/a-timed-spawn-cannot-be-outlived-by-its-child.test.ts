@@ -23,23 +23,31 @@ import { makeTempDir } from "../src/lib/tmp.js";
 
 /** The fixture's own ceiling. Long enough that an unkilled child is unmistakable against the 1s
  *  bound below, short enough that a total failure of this fix costs seconds, never a hung suite. */
-const SPIN_MS = 20_000;
+const SPIN_MS = 10_000;
 /** The bound under test — far below SPIN_MS, so "returned early" can only mean the kill worked. */
 const BOUND_MS = 1_000;
 
-/** A child that IGNORES SIGTERM and spins synchronously: the exact shape that stalled the fleet. */
+/** The body that blocks a child's main thread for `ms` without burning cpu. A handler registered
+ *  with `process.on("SIGTERM")` can never run while this is executing, which is the whole point. */
+const blockFor = (ms: number) =>
+  `const sab = new Int32Array(new SharedArrayBuffer(4));\nAtomics.wait(sab, 0, 0, ${ms});`;
+
+/** A child that IGNORES SIGTERM and BLOCKS ITS MAIN THREAD: the shape that stalled the fleet.
+ *  `Atomics.wait` rather than a busy loop — a blocked thread cannot run a signal handler either way,
+ *  and this one does it at ~zero CPU so a suite about runaway children never becomes a load problem
+ *  on the runner measuring it. */
 function spinnerDir(): string {
   const dir = makeTempDir("t3266");
   writeFileSync(
     join(dir, "spin.js"),
-    `process.on("SIGTERM", () => {});\nconst t = Date.now();\nwhile (Date.now() - t < ${SPIN_MS}) {}\n`,
+    `process.on("SIGTERM", () => {});\n${blockFor(SPIN_MS)}\n`,
   );
   // A parent that spawns a grandchild inheriting the same stdout pipe, then spins itself.
   writeFileSync(
     join(dir, "parent.js"),
     `const { spawn } = require("node:child_process");\n` +
       `spawn(process.execPath, [${JSON.stringify(join(dir, "spin.js"))}], { stdio: ["ignore", "inherit", "ignore"] });\n` +
-      `process.on("SIGTERM", () => {});\nconst t = Date.now();\nwhile (Date.now() - t < ${SPIN_MS}) {}\n`,
+      `process.on("SIGTERM", () => {});\n${blockFor(SPIN_MS)}\n`,
   );
   writeFileSync(join(dir, "quick.js"), `process.stdout.write("done-quickly");\n`);
   return dir;
