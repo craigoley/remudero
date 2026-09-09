@@ -1,0 +1,85 @@
+- id: W1-T3290
+  title: "REVIEW IS NOT THE BOTTLENECK AND MORE REVIEW LANES WOULD BUY NOTHING — the lane sits IDLE 84% of the wall clock at p50 8s, while a PR waits 10-17 MINUTES on CI whose slowest shard runs 2.5x its fastest"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 25.00
+  files: [scripts/test-tier-manifest.mjs, test/a-shard-split-balances-by-measured-duration.test.ts]
+  origin: "operator-session#review-parallelism-2026-09-09"
+  plan_refs: ["W1-T2904", "W1-T1049", "W1-T2853", "W1-T3207"]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 over a six-hour window, because "add more parallelism" is a request that has
+    to be pointed at the actual queue.
+    THE REVIEW LANE IS NOT SATURATED. 37 reviews started, 38 posted. Durations p50 8s, p90 194s,
+    max 1250s. The lane held ANY review in flight for 40 minutes of 247 observed — IDLE 84% of the
+    wall clock — while peak concurrency touched 3, its policy ceiling. So the lane is bursty, not
+    full: raising `sweep.reviewLanes` adds capacity to something that is already empty five sixths
+    of the time, and it is already at `max: 3` whose own comment records the reason ("two ceilings
+    added to 6 workers on a host that fits about 4").
+    CI IS THE WAIT, BY TWO ORDERS OF MAGNITUDE. Completed CI runs on pull requests: p50 10.0 min,
+    p90 17.1 min. Against a review p50 of 8 SECONDS, a PR spends roughly 75x longer waiting for CI
+    than for review at the median. Every "NO-REVIEW BLOCKED" row on the board that afternoon was a
+    PR whose `ci-gate` was still IN_PROGRESS — waiting on CI, not on a reviewer.
+    AND THE CI CRITICAL PATH IS AN IMBALANCE, NOT A VOLUME. On one representative run of 28 jobs
+    totalling 22 job-minutes, the four test shards were 4.8, 2.4, 2.3 and 1.9 minutes. The run
+    cannot finish faster than its slowest shard, so 4.8 min is the critical path while 1.9 min of a
+    peer shard sits done — a 2.5x spread across a split that W1-T2904 already shards BY RECORDED
+    DURATION. Perfect balance on the same four workers would put the critical path near 2.8 min.
+    THE LEVER IS THE SPLIT, NOT THE WORKER COUNT. Adding shards without fixing the balance moves the
+    same long tail onto a new worker; fixing the balance shortens every PR's wait with no new spend.
+  design: |
+    (i) MEASURE THE IMBALANCE BEFORE CHANGING IT, and keep measuring. The manifest already records
+    per-file durations; the gap between the slowest and fastest shard is the number this task moves,
+    and it must be reported every run so a regression is visible rather than inferred.
+    (ii) BALANCE BY LONGEST-FIRST, NOT ROUND-ROBIN. A greedy longest-processing-time assignment over
+    recorded durations is the standard remedy for exactly this spread and needs no new data — the
+    durations are already recorded.
+    (iii) AN UNMEASURED FILE MUST NOT LAND ALL IN ONE SHARD. A new test file has no recorded
+    duration; assigning every unmeasured file to the same bucket recreates the imbalance the moment
+    a burst of new tests lands. Spread them, and say so in the report.
+    (iv) THE SPLIT MUST STAY DETERMINISTIC FOR A GIVEN MANIFEST. Two runs of the same tree must
+    produce the same assignment, or a flaky test becomes unattributable to a shard.
+    (v) DO NOT RAISE `sweep.reviewLanes`. Recorded here because it is the obvious move and the
+    measurement refuses it: the lane is idle 84% of the time and the host fits about four workers.
+  acceptance:
+    - claim: "the split assigns by recorded duration longest-first, so the slowest shard's excess over the mean shrinks against the current round-robin on the same manifest"
+      proof: "unit test: test/a-shard-split-balances-by-measured-duration.test.ts"
+    - claim: "files with no recorded duration are spread across shards rather than collected into one"
+      proof: "unit test: test/a-shard-split-balances-by-measured-duration.test.ts"
+    - claim: "the same manifest produces the same assignment twice, so a shard is attributable"
+      proof: "unit test: test/a-shard-split-balances-by-measured-duration.test.ts"
+    - claim: "every file lands in exactly one shard — the split loses nothing and duplicates nothing"
+      proof: "unit test: test/a-shard-split-balances-by-measured-duration.test.ts"
+    - claim: "the run reports the slowest-vs-fastest spread, so an imbalance regression is visible rather than inferred"
+      proof: "unit test: test/a-shard-split-balances-by-measured-duration.test.ts"
+  falsifier: |
+    CLOSE IF the shards are already balanced: read four shard durations off one real CI run.
+    MEASURED 2026-09-09 on run 34409211121: 4.8, 2.4, 2.3, 1.9 minutes — a 2.5x spread with the
+    critical path set by the slowest.
+    POSITIVE CONTROL, because "the shards are more even" is satisfiable by a split that loses files:
+    the suite must prove every file lands in EXACTLY ONE shard. A balanced split that drops a test
+    file is a silent coverage hole, which is far worse than a slow run.
+    SECOND CONTROL: determinism. If the same manifest can produce two different assignments, a flake
+    cannot be attributed to a shard and the retry evidence W1-T2904 collects becomes unreadable.
+    DO NOT "fix" this by adding shards. The critical path is the slowest bucket; more buckets with
+    the same assignment leaves the long tail exactly where it is and costs more runners.
+    DO NOT raise sweep.reviewLanes as a throughput remedy — the lane is idle 84% of the wall clock,
+    and the ceiling's own comment records that this host fits about four workers.
+  note: |
+    Rule 25 CHECKED: `scripts/test-tier-manifest.mjs` IS on the instrument surface
+    (`^scripts/[^/]*-ratchet\\.mjs$` does not match it, but it decides what CI runs) — the
+    implementer must check `INSTRUMENT_SURFACE` before pairing it with a src change, and split the
+    PR if entanglement applies.
+    THE MEASUREMENT IS ONE WINDOW AND ONE RUN. Six hours of review data and a single representative
+    CI run. The 2.5x spread should be re-measured across several runs before the balance target is
+    treated as settled — a single run could be an unlucky assignment rather than a systematic one.
+    CAVEAT WITH EQUAL WEIGHT: balancing shortens the median wait; it does not remove the tail. One
+    test in the observed run took 177 SECONDS on its own (`serve boots on main…`), so no assignment
+    can put that shard below three minutes. Genuinely slow tests are a separate problem from an
+    uneven split, and this task does not touch them.

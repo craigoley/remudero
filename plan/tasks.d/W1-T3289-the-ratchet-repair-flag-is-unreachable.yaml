@@ -1,0 +1,88 @@
+- id: W1-T3289
+  title: "THE DETERMINISTIC RATCHET REPAIR IS RATIFIED BUT UNREACHABLE — `recordableRatchetRepairEnabled` is an optional SweepPolicy field that DEFAULT_SWEEP_POLICY never populates and policy.yaml has no row for, so there is no value anyone can set to turn it on"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/sweep.ts, plan/policy.yaml, test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts]
+  origin: "operator-session#ratchet-repair-ratified-2026-09-09"
+  plan_refs: ["W1-T2998", "W1-T3015", "W1-T2650"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    RATIFIED 2026-09-09 (DECISIONS.md, "the deterministic ratchet repair is RATIFIED"). The operator
+    has granted the ratification the flag's own doc asks for: "an unattended write to a contributor's
+    branch is an operator ratification, not a default."
+    THE FLAG CANNOT BE TURNED ON. MEASURED 2026-09-09: `recordableRatchetRepairEnabled` is declared
+    optional on `SweepPolicy` (sweep.ts) and read at two call sites, but `DEFAULT_SWEEP_POLICY` never
+    assigns it and `plan/policy.yaml` carries no row for it. Every other governed knob —
+    `wipLimit`, `reviewLanes`, `staleDays` — is COLLECTED from policy.yaml into the default; this one
+    is not. So it is permanently `undefined`, the `=== true` guards never pass, and there is no value
+    an operator can edit to change that. The ratification alone does nothing.
+    WHAT IT COSTS WHILE UNREACHABLE, MEASURED THE SAME DAY: the identical repair was performed BY
+    HAND FIVE TIMES in one session (#4790, #4843, #4856, #4858, #4862). Every one was mechanical —
+    the gate printed the exact value to record and a human typed it into the baseline.
+    THE BLAST RADIUS IS ALREADY BOUNDED, which is why this is safe to wire.
+    `REGENERABLE_ARTIFACT_GENERATORS` holds exactly two paths, `scripts/source-size-baseline.json`
+    and `scripts/comment-load-baseline.json`, and both are LEDGERS rather than score floors: raising
+    a row records debt and cannot make a failing falsifier pass. The mutation and coverage FLOORS,
+    where a lowered number WOULD let a weakened suite through, are absent from that registry.
+  design: |
+    (i) COLLECT IT FROM POLICY, the same shape every other governed knob uses — a `plan/policy.yaml`
+    row read into `DEFAULT_SWEEP_POLICY`, never a source literal. A knob an operator cannot see in
+    the plan is not governed.
+    (ii) DEFAULT FALSE, STILL. Wiring the row does not flip the behaviour; the row's shipped value is
+    the operator's to set, and the ratification says what value he intends. Fail-safe stays fail-safe.
+    (iii) RE-DERIVE, NEVER UNION. The repair must take the baseline from the merge base and re-run
+    the generator. MEASURED 2026-09-09: `comment-load-ratchet` refused a baseline that named
+    `src/lib/review.ts` twice and called it "the signature of a rebase conflict resolved by unioning
+    both sides" — an automatic repairer that unions manufactures exactly that.
+    (iv) VISIBLE, ALWAYS. Every automatic repair writes a ledger row and says so on the PR. A
+    silently raised ceiling is the one way this becomes a way to HIDE growth rather than record it.
+    (v) LEDGERS ONLY, AND THE REGISTRY IS THE FENCE. The repair may touch only
+    `REGENERABLE_ARTIFACT_GENERATORS` members. Adding a SCORE FLOOR to that registry would make a
+    lowered floor automatically writable, which is the one shape this must never acquire.
+  acceptance:
+    - claim: "the flag is collected from a plan/policy.yaml row into DEFAULT_SWEEP_POLICY, so an operator can set it where every other knob lives"
+      proof: "unit test: test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts"
+    - claim: "with the row absent or false the classifier still NAMES the remedy and the repair is withheld, byte-identical to today"
+      proof: "unit test: test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts"
+    - claim: "with the row true a recordable-ratchet red is repaired by re-deriving the baseline, never by unioning two sides"
+      proof: "unit test: test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts"
+    - claim: "a repair writes a ledger row and is legible on the PR, so a raised ceiling is reviewable rather than silent"
+      proof: "unit test: test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts"
+    - claim: "a path outside REGENERABLE_ARTIFACT_GENERATORS is never repaired, so a score floor cannot be written automatically"
+      proof: "unit test: test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts"
+  falsifier: |
+    CLOSE IF the flag is already reachable: grep `recordableRatchetRepairEnabled` across
+    `DEFAULT_SWEEP_POLICY` and `plan/policy.yaml`.
+    MEASURED 2026-09-09: it appears only as an optional interface field and two `=== true` reads. No
+    assignment, no policy row.
+    POSITIVE CONTROL, because "the repair now runs" is the failure mode this must not become: the
+    suite must show the row ABSENT or FALSE leaving today's behaviour byte-identical, classifier
+    sentence included. Without that arm this is indistinguishable from enabling unattended writes by
+    default.
+    THE FENCE IS THE SAFETY ARGUMENT: a path outside the registry must be refused. If a test can get
+    a score floor repaired, the fence is not real and the ratification's premise — that only ledgers
+    are writable — no longer holds.
+    DO NOT flip the shipped value as part of this task. Wiring and enabling are separate decisions,
+    and conflating them removes the operator's chance to see the row before it acts.
+    DO NOT add a score floor to REGENERABLE_ARTIFACT_GENERATORS to widen this. The registry's
+    membership is the blast radius.
+  note: |
+    Rule 25 CHECKED: `src/lib/sweep.ts` is ordinary src; `plan/policy.yaml` is plan data, not an
+    instrument surface.
+    RISK IS HIGH BECAUSE THE END STATE WRITES TO CONTRIBUTOR BRANCHES UNATTENDED, even though this
+    task only makes the switch reachable. The band reflects where the wiring leads, not the size of
+    the diff.
+    CAVEAT WITH EQUAL WEIGHT: this removes the cheapest red on the board and nothing more. A PR whose
+    only problem was an unrecorded ceiling still has to pass review on its criteria. The five hand
+    repairs measured on 2026-09-09 each unblocked a PR that then took its ordinary course.
+    SECOND CAVEAT: the ratification rests on the LEDGER/FLOOR distinction holding. It holds today
+    because the registry has exactly two members and both are ledgers. It is a property of the
+    registry's membership, not of the repair mechanism, so it can be broken later by an ordinary-
+    looking addition — which is why acceptance pins the fence rather than the current contents.
