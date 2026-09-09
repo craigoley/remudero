@@ -1,0 +1,96 @@
+- id: W1-T3230
+  title: "TWO GATES PULL AGAINST EACH OTHER ON EVERY EXTRACTION — `catch-erasure-ratchet` REQUIRES a comment in a catch body and a NEW file enters it at baseline 0, but that required comment is what breaks `relocationKey`'s byte match, so `diff-coverage` then demands a test for code that only MOVED; #4522 hit it three times and each was resolved by a human noticing a cross-gate interaction neither gate names"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: span
+  budget_usd: 10.00
+  files: [scripts/diff-coverage.mjs, test/a-required-comment-must-not-cost-a-relocation.test.ts]
+  origin: "operator-session#4522-merge-2026-09-09"
+  plan_refs: ["W1-T3189", "W1-T2325", "W1-T2902", "W1-T212"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 while merging #4522 (W1-T2902, the console-shell client extraction).
+
+    (1) THE INTERACTION, IN THE TWO GATES' OWN TERMS. `catch-erasure-ratchet`'s
+    `isBareErasingCatch` (test/catch-erasure-ratchet.test.ts) passes a catch body by ANY of four
+    routes — rethrow, record, a distinction key in the return shape, or A COMMENT. Its
+    `bareCatchViolations` gives a file with no baseline row an allowance of ZERO, "true for a
+    brand-new file". So a catch MOVED into a newly-extracted module must acquire one of those four,
+    and for an ordinary degrade-to-default arm the only available route is the comment.
+    `relocationKey` (scripts/diff-coverage.mjs) then compares the moved line to its original
+    BYTE-FOR-BYTE after trim and template-literal unescaping. The comment the first gate just
+    required is a byte the second gate does not expect, so the line reads as a REWRITE, and
+    `diff-coverage` demands a covering test for code that did not change.
+
+    (2) IT IS THE SAME SECOND-ORDER MECHANISM W1-T3189 ALREADY FIXED FOR A DIFFERENT CAUSE.
+    `relocationKey`'s own doc states it: "an unmatched line SPLITS the run around it, so a few
+    escaped lines disqualified the unescaped ones beside them once either piece fell under
+    MIN_RELOCATION_RUN -- on #4522, 293 escape-affected lines cost 486 (3229 -> 3715)." A required
+    comment splits a run identically. W1-T3189 normalised the escaping; nothing normalises this.
+
+    (3) THE SIZE, HONESTLY. Diffing the merged `src/lib/console-shell-client.ts` against the
+    pre-extraction `src/lib/serve.ts`, exactly THREE code lines match only once a trailing comment
+    is stripped, and one of those is a marker line. This is not a 486-line loss. The cost is not
+    volume: each such line BLOCKS the PR, and the diagnosis is a non-obvious interaction between
+    two gates that each report correctly and neither mentions the other. On #4522 three lines
+    (2539, 3609, 3740) each had to be found and hand-resolved.
+
+    (4) THE HAND RESOLUTION WORKS AND IS UNENFORCED PROSE. Moving the same comment onto its OWN
+    line satisfies both: the catch body still carries it, and the statement line matches again.
+    Verified through the gate's own `computeRelocatedLines` — all three flipped to EXEMPT. But
+    nothing records or enforces that, so the next extraction rediscovers it, and CLAUDE.md's own
+    standing point applies: a rule stated only in prose is violated silently and repeatedly.
+
+    (5) WHY IT MATTERS MORE FROM HERE THAN BEHIND. The decomposition programme is mid-flight:
+    W1-T2890 is rank 1 of a 51-task frontier and W1-T2891 follows it, `serve.ts` has just gone
+    7283 -> 3523 lines, and 53 open tasks declare `src/run-task.ts`. Every one of those is an
+    extraction that will meet both gates.
+  design: |
+    (i) THE FIX BELONGS IN `relocationKey`, NOT IN THE CATCH GATE. That function's entire declared
+    purpose is "the form a line is COMPARED in", and it already normalises one presentation
+    difference that does not change what executes (template-literal escaping). A trailing comment
+    is another. Coverage is an obligation on EXECUTABLE lines; a comment carries none, which is why
+    `isNonExecutableLine` already skips comment-only lines outright.
+    (ii) THE HAZARD THAT MUST BE FALSIFIED, NOT ASSUMED AWAY. A naive `/\s*\/\/.*$/` corrupts a line
+    whose `//` is inside a string, a template literal, or a regex — `const u = "http://x";` must NOT
+    normalise to `const u = "http:`. The same applies to `/*` inside a literal. A conservative rule
+    (refuse to strip when a quote, backtick or regex delimiter precedes the marker) is acceptable
+    and should be stated; what is not acceptable is a regex with no test for that case.
+    (iii) ADMIT NOTHING NEW IN PRINCIPLE. Whatever normalisation lands must be applied to BOTH sides,
+    exactly as the escaping fix was, and a relocation must still be a contiguous run of
+    >= MIN_RELOCATION_RUN consumed once. This widens what counts as the SAME line; it must not widen
+    what counts as a relocation.
+    (iv) COMMENT-ONLY LINES ARE OUT OF SCOPE. They are already non-executable and carry no coverage
+    obligation; normalising them would let an added comment line join a run it has no business in.
+    (v) A CHEAPER ALTERNATIVE IS DELIBERATELY NOT CHOSEN, AND WHY. Teaching `catch-erasure-ratchet`
+    to let a verbatim-moved catch inherit its source file's allowance would also resolve the tension,
+    but it requires that gate to reason about cross-file moves, which it has no notion of today —
+    a much larger change to a gate that is currently correct.
+  acceptance:
+    - claim: "a moved line differing from its original only by a trailing comment is matched as a relocation, and the run around it is not split"
+      proof: "unit test: test/a-required-comment-must-not-cost-a-relocation.test.ts"
+    - claim: "a line whose comment marker sits inside a string, template literal or regex is left alone rather than truncated"
+      proof: "unit test: test/a-required-comment-must-not-cost-a-relocation.test.ts"
+    - claim: "a comment-only line is still not eligible to join a relocation run"
+      proof: "unit test: test/a-required-comment-must-not-cost-a-relocation.test.ts"
+    - claim: "a genuinely rewritten line is still not exempt, so the change widens sameness and not relocation"
+      proof: "unit test: test/a-required-comment-must-not-cost-a-relocation.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if `relocationKey` already normalises comments: read it — MEASURED 2026-09-09 at
+    3b6a9d3c its whole body is three escape replacements and a `trim()`. CLOSE IT ALSO if the catch
+    gate does not force the comment: `isBareErasingCatch` passes on rethrow/record/distinction-key/
+    comment only, and `bareCatchViolations` gives a file with no baseline row an allowance of zero,
+    so a moved degrade-to-default catch in a NEW file has no other route.
+    PROVE IT LOAD-BEARING: revert the normalisation and the first criterion's fixture must fail; a
+    suite that passes both ways is asserting the harness, not the matcher.
+  note: |
+    risk:medium: one gate script plus its own falsifier, and the failure direction is a WIDER
+    relocation match, which is why criterion 4 pins that a genuine rewrite stays flagged. Sized at
+    three measured lines (rationale (3)) rather than the 486 the escaping variant cost — filed for
+    the diagnosis cost and the extractions still ahead, not for line volume. Id reserved at
+    `refs/rmd-id/W1-T3230` before filing.
