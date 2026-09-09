@@ -1,0 +1,105 @@
+- id: W1-T3224
+  title: "A GIT HOOK EXPORTS GIT_DIR TO EVERY CHILD, SO THE CENSUS SUITES hooks/pre-push RUNS COMMIT INTO THE PUSHING WORKTREE — one armed push rewrote a lane's HEAD to a test fixture and cut its index from 3,550 files to 1"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [hooks/pre-push, test/a-hook-child-does-not-inherit-the-pushing-repo.test.ts]
+  origin: "operator-session#prepush-arming-2026-09-09"
+  plan_refs: ["W1-T3222", "W1-T3059", "W1-T3205"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-09, on a real push from lane `t3222b` with the gates armed. The push was
+    REFUSED, and the refusal was not a violation — the hook had corrupted the repository it was
+    protecting:
+      HEAD      f11a41d94 (the real commit)  ->  7a14e294c "fixture"
+      ls-files  3,550 files                  ->  1
+      status    clean                        ->  231 changed
+      reflog    SEVEN "fixture"/"seed" commits, all from that single hook run
+    Nothing was lost — the real commit was still reachable at HEAD@{7} and `git reset --hard`
+    restored the lane — but a push that silently rewrites the pusher's HEAD is not a gate.
+    THE MECHANISM, and it is ordinary git. A hook runs with `GIT_DIR` exported by git. Every child
+    process inherits it, so a `git -C <somewhere-else>` inside a child resolves to the HOOK'S repo
+    rather than the directory it names. `hooks/pre-push` runs the census suites this diff joins, and
+    several of those build git fixtures in scratch dirs exactly that way.
+    MEASURED DIRECTLY, two throwaway repos A and B:
+      A HEAD before                                        31fd9ef "A's own commit"
+      `cd B && GIT_DIR=A/.git git commit -m "B fixture"`   A HEAD becomes 4bd3be6 "B fixture"
+      the same commit with GIT_DIR unset                    A unchanged; B gets its own commit
+    The suites are not at fault and are not changed by this task: `git -C <dir>` is the correct way
+    to drive a fixture, and it is correct in every context except one where GIT_DIR is exported.
+    WHY THIS WAS NOT CAUGHT BY THE DRY RUN THAT PRECEDED ARMING, which is the transferable lesson.
+    The dry run invoked `sh hooks/pre-push` BY HAND against seven PR heads: 7/7 pass, plus two
+    verified true-positive refusals. Every one of those readings was taken in an environment the
+    fleet never runs in, because a hand-invoked hook carries no GIT_DIR. The hook's LOGIC was
+    tested; the HOOK was not. A hook test that does not go through a real `git push` is measuring
+    something else.
+  design: |
+    (i) SCRUB ONCE, AT THE TOP, BEFORE ANY SUBPROCESS. The hook unsets git's per-invocation
+    variables as its first act, so every child — precheck, tier check, census suites, `bin/rmd` —
+    is covered by construction rather than by each call site remembering.
+    (ii) SCRUB THE WHOLE FAMILY, NOT JUST GIT_DIR. `GIT_INDEX_FILE` alone can redirect a child's
+    staging; `GIT_WORK_TREE`, `GIT_OBJECT_DIRECTORY`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`,
+    `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_PREFIX` and `GIT_QUARANTINE_PATH` each redirect a
+    different part of the same machinery. Unsetting one and leaving the rest is a fix that reads as
+    complete and is not.
+    (iii) THE HOOK MUST STILL RESOLVE ITS OWN REPO, and it does: with GIT_DIR unset, git discovers
+    the repository from the working directory, which for a pre-push hook is the worktree root.
+    VERIFIED on a linked worktree — branch and `origin/main` both resolve after the scrub, which is
+    the case that matters because every fleet lane is one.
+    (iv) THE TEST GOES THROUGH A REAL `git push`. This is the point of the task, not an
+    implementation detail. A scratch repo, a bare remote, this repo's hook installed via
+    `core.hooksPath`, and an actual push — then assert the pushing repo's HEAD and index are
+    unchanged. Testing the hook by invoking it directly is precisely the hole this task exists to
+    close, and a suite that did that would pass against the unfixed hook.
+    (v) NOTHING ABOUT WHICH CHECKS RUN, OR WHEN THEY REFUSE, CHANGES. This task makes the existing
+    checks safe to run; it does not add, remove, reorder or re-tune any of them.
+  acceptance:
+    - claim: "after a real git push through the hook, the pushing repository's HEAD and index are unchanged"
+      proof: "unit test: test/a-hook-child-does-not-inherit-the-pushing-repo.test.ts"
+    - claim: "a hook child running git against another directory writes to THAT directory, not to the pushing repo"
+      proof: "unit test: test/a-hook-child-does-not-inherit-the-pushing-repo.test.ts"
+    - claim: "the hook still refuses a violating tree and still passes a clean one, proven through a real push rather than a direct invocation"
+      proof: "unit test: test/a-hook-child-does-not-inherit-the-pushing-repo.test.ts"
+    - claim: "every per-invocation git variable is scrubbed, not only GIT_DIR, and the scrub happens before any subprocess"
+      proof: "unit test: test/a-hook-child-does-not-inherit-the-pushing-repo.test.ts"
+  falsifier: |
+    CLOSE IF a hook child already cannot reach the pushing repo: read the top of `hooks/pre-push`
+    for an unset of git's per-invocation variables.
+    MEASURED 2026-09-09: the hook sets only `set -u` and the gates switch; no scrub exists, and a
+    real armed push wrote seven fixture commits into the pushing lane.
+    POSITIVE CONTROL, because "HEAD is unchanged" passes trivially on a hook that does nothing: the
+    suite must ALSO show the hook actually RAN — a clean tree passing and a violating tree refused,
+    both through a real push. A test asserting only that nothing was corrupted cannot tell a fixed
+    hook from a disabled one.
+    PROVE THE FIX IS LOAD-BEARING: the suite must fail against the UNFIXED hook. Restore the
+    pre-scrub hook in a fixture and show the same push corrupts HEAD; if it does not, the test is
+    not reaching the mechanism and proves nothing about it.
+    DO NOT fix this by changing the census suites to avoid `git -C`. They are correct; the
+    environment they were handed is not, and there are 134 of them.
+    DO NOT scrub inside individual call sites. Design (i) is one line covering every child; a
+    per-call-site scrub is a rule each future check must remember, which is the class of defect
+    this repo keeps paying for.
+  note: |
+    Rule 25 CHECKED: `hooks/pre-push` is the product surface this task changes and its test is the
+    only other file.
+    BLOCKS W1-T3222. That shard is filed and merged and its implementation is built and verified,
+    but it must NOT land until this does: arming a hook that can rewrite the pushing worktree's
+    HEAD is strictly worse than leaving the gates off. W1-T3059's stated fear was "it stops the
+    fleet pushing"; this is that, plus a failure mode nobody had written down.
+    RISK IS HIGH FOR BLAST RADIUS, NOT COMPLEXITY — the diff is one `unset`. It is high because it
+    runs inside every worker's push once W1-T3222 lands, and because a wrong scrub could break the
+    hook's own ability to read its repo. Design (iii) is verified rather than assumed for exactly
+    that reason.
+    CAVEAT WITH EQUAL WEIGHT: this makes the census subset SAFE to run inside a hook. It does not
+    establish that running 9 of 134 census suites on every push is the right cost, and it does not
+    make "pre-push passed" mean "CI will pass" — the hook itself reports how many suites it could
+    not place, and on the measured run that was 125.
+    SECOND CAVEAT: the corruption was observed once, recovered fully, and its mechanism is ordinary
+    documented git behaviour. What is NOT established is how many other hook-adjacent surfaces in
+    this repo spawn git children — this task fixes the one hook it names and audits nothing else.
