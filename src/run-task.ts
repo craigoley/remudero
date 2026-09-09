@@ -8797,6 +8797,7 @@ export async function runFixRung(opts: {
     harvestFollowupsFromReport(workerTranscript(fixResult), {
       label: "fix",
       prUrl: opts.prUrl,
+      runId: opts.runId,
       log: deps.log,
       say: deps.say,
     });
@@ -9872,17 +9873,84 @@ export function implementAttemptOutcome(r: WorkerResult): AttemptOutcome {
  * this function's own scope. W1-T2456: the citation read "Rule 15 stays intact"; §12 rule 15
  * carries no such doctrine and rule 27 permits automatic filing.
  */
-function harvestFollowupsFromReport(
+/**
+ * W1-T3234 — THE IDENTITY OF ONE FOLLOW-UP DECLARATION. Same label, same PR, same entries ⇒ the
+ * same declaration, however many times a rung re-reads the transcript that carried it.
+ *
+ * A CONTENT digest, deliberately, not a counter or a timestamp: the amplification comes from the
+ * SAME text being harvested again, so only the content can tell a repeat from a new finding.
+ */
+export function followupSetDigest(
+  label: string,
+  prUrl: string | undefined,
+  entries: unknown,
+  runId?: string,
+): string {
+  // THE RUN IS PART OF THE IDENTITY. Without it, two DIFFERENT runs whose workers happen to declare
+  // the same generic follow-up collide in the process memo and the second is suppressed — losing a
+  // real finding, which is strictly worse than the duplication being fixed. Found by a pre-existing
+  // suite going red, not by reading.
+  return createHash("sha256").update(JSON.stringify([label, prUrl ?? null, runId ?? null, entries])).digest("hex").slice(0, 32);
+}
+
+/**
+ * Digests this PROCESS has already written a `report.followups` row for.
+ *
+ * PROCESS-SCOPED ON PURPOSE, and this is a BOUND rather than an exactly-once guarantee. The daemon
+ * is one long-lived process and that is where the re-reads happen — the fix rung re-reads the same
+ * worker transcript on every sweep tick for a PR it cannot dispatch, which is what produced the
+ * measured ratio. A fresh process writes its first row again, which is correct: it has no evidence
+ * the row exists, and inventing one would be worse than a duplicate.
+ */
+const writtenFollowupDigests = new Set<string>();
+
+/** Test seam — resets the process memo so a case cannot inherit another's writes. */
+export function resetWrittenFollowupDigests(): void {
+  writtenFollowupDigests.clear();
+}
+
+/** Exported for its falsifier: a suppression that only ever ran inside `runTask` is one no test
+ *  can drive without a full dispatch, and the amplification this bounds was measured in the
+ *  LEDGER rather than in any single run. */
+export function harvestFollowupsFromReport(
   text: string,
   ctx: {
     label: string;
     prUrl?: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
+    /** The run this declaration belongs to — part of the digest, so two runs never collide. */
+    runId?: string;
+    /** Injectable memo; defaults to this process's own. */
+    seen?: Set<string>;
   },
 ): void {
   const followups = parseFollowups(text);
   if (!followups) return;
+  const seen = ctx.seen ?? writtenFollowupDigests;
+  const digest = followupSetDigest(ctx.label, ctx.prUrl, followups, ctx.runId);
+  if (seen.has(digest)) {
+    // W1-T3234 — SUPPRESSED, AND SAID ONCE. MEASURED 2026-09-09 over the ledger union: 22,082
+    // `report.followups` rows on 2026-09-07 carrying 80 DISTINCT payloads (276:1), rising from
+    // 15:1 on 08-26 while the distinct content FELL from 90 to 26. A rate that rises as the signal
+    // falls is an amplifier, not a producer — and this corpus is what OOM-killed the retro that
+    // was supposed to consume it (W1-T3229).
+    //
+    // The suppression row is written ONCE per digest and never again. Logging every suppression
+    // would rebuild the amplifier out of the fix, which is the one outcome this must not ship.
+    if (!seen.has(`said:${digest}`)) {
+      seen.add(`said:${digest}`);
+      ctx.log("followup_write_suppressed", {
+        ...(ctx.prUrl ? { pr_url: ctx.prUrl } : {}),
+        label: ctx.label,
+        digest,
+        entry_count: followups.length,
+        note: "identical follow-up set already recorded by this process — further repeats are silent",
+      });
+    }
+    return;
+  }
+  seen.add(digest);
   ctx.log("report.followups", { ...(ctx.prUrl ? { pr_url: ctx.prUrl } : {}), entries: followups });
   ctx.say(`${ctx.label} follow-ups declared: ${followups.map((f) => f.type).join(", ")}`);
 }
@@ -11787,7 +11855,7 @@ async function runTask(
     // reused artifact (no fresh transcript this dispatch — the artifact's origin run already
     // harvested its own follow-ups when it ran).
     if (recon && !reconDegradedSubtype) {
-      harvestFollowupsFromReport(workerTranscript(recon), { label: "recon", log, say });
+      harvestFollowupsFromReport(workerTranscript(recon), { label: "recon", runId, log, say });
     }
 
     // ── Promptsmith READ side (W1-T19; SPLIT + INDEX + SUPERSESSION, W1-T33;
@@ -12218,7 +12286,7 @@ async function runTask(
       // `harvestFollowupsFromReport` spreads `pr_url` in only when defined, so the line carries
       // no blank field. That is the SAME shape the recon call site already emits on every
       // dispatch — the PR-less path is long-proven, not new code.
-      harvestFollowupsFromReport(fullText(impl), { label: "implement", log, say });
+      harvestFollowupsFromReport(fullText(impl), { label: "implement", runId, log, say });
       // W1-T272: the THIRD exit — before falling to the drain-halting `no_pr`, check whether
       // the worker instead claimed ALREADY_SATISFIED and, if so, whether that claim actually
       // verifies against the board gateway. A claim that fails to verify is deliberately NOT
@@ -12480,7 +12548,7 @@ async function runTask(
 
     // The implement worker's own optional '## Follow-ups' section (§2 OUTPUT CONTRACT,
     // outputContractLines in lib/compaction.ts).
-    harvestFollowupsFromReport(fullText(impl), { label: "implement", prUrl, log, say });
+    harvestFollowupsFromReport(fullText(impl), { label: "implement", prUrl, runId, log, say });
 
     // ── REVIEW GATE (W1-T1D). Wait for `ci` green, then JUDGE the task's
     // acceptance criteria and POST `remudero-review` to the PR head sha — only
