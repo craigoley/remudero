@@ -612,6 +612,7 @@ import {
   readRetroLedgerNdjson,
   retroLedgerWindowSince,
   retroLedgerScopeNote,
+  reportRetroLedgerTruncation,
   RETRO_LEDGER_MAX_BYTES,
   type RetroLedgerRead,
   escalateRetroPublicationFailure,
@@ -21375,25 +21376,11 @@ async function retroCommand(
     sinceTs: retroLedgerWindowSince(marker?.ts, retroReadStartedMs),
   });
   const ledgerNdjson = retroLedgerRead.ndjson;
-  if (retroLedgerRead.droppedRows > 0) {
-    // NEVER SILENT. The budget kept the newest rows and discarded older ones; the retro is
-    // reasoning over less than its own window and both the ledger and the report must say so.
-    appendLedger(ledgerPath, {
-      run_id: `RETRO-${retroReadStartedMs}`,
-      task_id: "RETRO",
-      step: "retro.ledger_read.truncated",
-      since_ts: retroLedgerRead.sinceTs,
-      rows_kept: retroLedgerRead.rowsKept,
-      dropped_rows: retroLedgerRead.droppedRows,
-      dropped_bytes: retroLedgerRead.droppedBytes,
-      max_bytes: RETRO_LEDGER_MAX_BYTES,
-    });
-    console.error(
-      `\n### [retro] ledger read truncated: kept ${retroLedgerRead.rowsKept} row(s), dropped ` +
-        `${retroLedgerRead.droppedRows} older row(s) (${retroLedgerRead.droppedBytes} bytes) to stay under ` +
-        `${RETRO_LEDGER_MAX_BYTES} bytes since ${String(retroLedgerRead.sinceTs)}`,
-    );
-  }
+  // NEVER SILENT, and UNCONDITIONAL on purpose: the no-op arm lives inside
+  // `reportRetroLedgerTruncation`, so this line runs on every retro and both arms stay reachable
+  // from a unit test. Written as an `if` here the reporting body was unreachable in every test
+  // that does not truncate, and `diff-coverage` blocked the PR naming exactly those lines.
+  reportRetroLedgerTruncation(retroLedgerRead, { ledgerPath, runId: `RETRO-${retroReadStartedMs}` });
   // W1-T1013: the follow-up harvest's OWN corpus — the archive∪live union, resolved
   // separately from `ledgerNdjson` above so every OTHER miner buildGather runs keeps
   // reading the single-file corpus it always has (see buildGather's `followupLedgerNdjson`

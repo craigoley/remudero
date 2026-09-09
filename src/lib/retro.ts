@@ -169,6 +169,46 @@ export async function readRetroLedgerNdjson(
   return { ndjson: rows.join("\n"), sinceTs: opts.sinceTs, rowsKept: rows.length, droppedRows, droppedBytes };
 }
 
+/** Report a truncated read — a ledger row and a stderr line — or do NOTHING when nothing was
+ *  dropped.
+ *
+ *  THE NO-OP ARM LIVES HERE, NOT AT THE CALL SITE, AND THAT IS DELIBERATE. Written as an `if` in
+ *  `retroCommand` the reporting body is unreachable in every test that does not truncate, and
+ *  `diff-coverage` blocks the PR naming exactly those lines — which is what it did. Extracted, the
+ *  call site is one unconditional line that every retro run executes, and BOTH arms are reachable
+ *  from a unit test. Same extraction-and-injection remedy `resolveEventPath` used, rather than a
+ *  coverage exemption comment.
+ *
+ *  NEVER SILENT is the contract: a retro reasoning over less than its own window says so in the
+ *  ledger AND on its own report. Returns whether it reported, so a caller (and a test) can see. */
+export function reportRetroLedgerTruncation(
+  read: RetroLedgerRead,
+  ctx: {
+    ledgerPath: string;
+    runId: string;
+    append?: (path: string, row: Record<string, unknown>) => unknown;
+    warn?: (message: string) => void;
+  },
+): boolean {
+  if (read.droppedRows <= 0) return false;
+  (ctx.append ?? appendLedger)(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "RETRO",
+    step: "retro.ledger_read.truncated",
+    since_ts: read.sinceTs,
+    rows_kept: read.rowsKept,
+    dropped_rows: read.droppedRows,
+    dropped_bytes: read.droppedBytes,
+    max_bytes: RETRO_LEDGER_MAX_BYTES,
+  });
+  (ctx.warn ?? ((m: string) => console.error(m)))(
+    `\n### [retro] ledger read truncated: kept ${read.rowsKept} row(s), dropped ${read.droppedRows} ` +
+      `older row(s) (${read.droppedBytes} bytes) to stay under ${RETRO_LEDGER_MAX_BYTES} bytes ` +
+      `since ${String(read.sinceTs)}`,
+  );
+  return true;
+}
+
 /** The scope line the retro report carries under any section reduced from {@link
  *  RetroLedgerRead.ndjson}.
  *

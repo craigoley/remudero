@@ -26,6 +26,7 @@ import {
   RETRO_LEDGER_NO_MARKER_LOOKBACK_MS,
   RETRO_LEDGER_WINDOW_LEAD_MS,
   readRetroLedgerNdjson,
+  reportRetroLedgerTruncation,
   retroLedgerScopeNote,
   retroLedgerWindowSince,
 } from "../src/lib/retro.js";
@@ -217,4 +218,49 @@ test("W1-T3229: the shipped budget is a real ceiling, not a placeholder that dis
     RETRO_LEDGER_MAX_BYTES < 283_539_709,
     `the budget must be below the corpus that was measured to OOM, got ${RETRO_LEDGER_MAX_BYTES}`,
   );
+});
+
+// ── The reporting call site: unconditional, with the no-op arm inside ───────────────────────
+//
+// Written as an `if` in `retroCommand` the reporting body was unreachable in every test that does
+// not truncate, and diff-coverage blocked the PR naming exactly those lines. Extracted, BOTH arms
+// are reachable — and both are asserted here, because "it reports when it should" and "it stays
+// quiet when it should" are different claims and a function that always reports satisfies one.
+
+test("W1-T3229: a truncated read is reported to the ledger AND to stderr, never one or the other", () => {
+  const rows: Array<{ path: string; row: Record<string, unknown> }> = [];
+  const warnings: string[] = [];
+  const reported = reportRetroLedgerTruncation(
+    { ndjson: "", sinceTs: "2026-09-01T00:00:00.000Z", rowsKept: 12, droppedRows: 7, droppedBytes: 4_096 },
+    { ledgerPath: "/synthetic/ledger.ndjson", runId: "RETRO-1", append: (path, row) => rows.push({ path, row }), warn: (m) => warnings.push(m) },
+  );
+
+  assert.equal(reported, true);
+  assert.equal(rows.length, 1, "exactly one ledger row");
+  assert.equal(rows[0]!.path, "/synthetic/ledger.ndjson");
+  assert.equal(rows[0]!.row.step, "retro.ledger_read.truncated");
+  assert.equal(rows[0]!.row.dropped_rows, 7);
+  assert.equal(rows[0]!.row.dropped_bytes, 4_096);
+  assert.equal(rows[0]!.row.rows_kept, 12);
+  assert.equal(rows[0]!.row.since_ts, "2026-09-01T00:00:00.000Z");
+  assert.equal(rows[0]!.row.max_bytes, RETRO_LEDGER_MAX_BYTES);
+
+  // The stderr half is not decoration: the ledger row is for the fleet, this line is for whoever
+  // is watching the run. A report that lands in only one place is the silent-truncation defect
+  // wearing a ledger row.
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /ledger read truncated/);
+  assert.match(warnings[0]!, /dropped 7 older row\(s\)/);
+});
+
+test("W1-T3229: a read that dropped nothing reports NOTHING — no row, no warning", () => {
+  const rows: unknown[] = [];
+  const warnings: string[] = [];
+  const reported = reportRetroLedgerTruncation(
+    { ndjson: "", sinceTs: "2026-09-01T00:00:00.000Z", rowsKept: 12, droppedRows: 0, droppedBytes: 0 },
+    { ledgerPath: "/synthetic/ledger.ndjson", runId: "RETRO-1", append: (_p, r) => rows.push(r), warn: (m) => warnings.push(m) },
+  );
+  assert.equal(reported, false);
+  assert.deepEqual(rows, [], "a complete read must not write a truncation row");
+  assert.deepEqual(warnings, []);
 });
