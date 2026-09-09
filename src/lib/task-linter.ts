@@ -93,6 +93,45 @@ export interface LintResult {
   violations: LintViolation[];
 }
 
+export interface AddedExport {
+  path: string;
+  symbol: string;
+}
+
+const ADDED_EXPORT_DECLARATION = /^\s*export\s+(?:function|const|class)\s+([A-Za-z_$][\w$]*)\b/;
+
+export function addedExportsFromPatch(
+  diffText: string,
+  pathExistsAtBase: (repoRelPath: string) => boolean = () => true,
+): AddedExport[] {
+  const out = new Map<string, AddedExport>();
+  let path = "";
+  let newFile = false;
+  for (const raw of diffText.split("\n")) {
+    if (raw.startsWith("diff --git")) {
+      const m = raw.match(/\sb\/(\S+)\s*$/);
+      path = m ? m[1] : "";
+      newFile = false;
+      continue;
+    }
+    if (raw.startsWith("new file mode") || raw.startsWith("--- /dev/null")) {
+      newFile = true;
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      const plusPath = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      path = plusPath === "/dev/null" ? "" : plusPath;
+      continue;
+    }
+    if (!raw.startsWith("+") || raw.startsWith("+++") || !path) continue;
+    if (!path.startsWith("src/") || !path.endsWith(".ts") || newFile || !pathExistsAtBase(path)) continue;
+    const m = ADDED_EXPORT_DECLARATION.exec(raw.slice(1));
+    if (!m) continue;
+    out.set(`${path}\0${m[1]}`, { path, symbol: m[1] });
+  }
+  return [...out.values()];
+}
+
 // ── SIZING (Rule 19) ─────────────────────────────────────────────────────────
 // Rule 19 counts DISTINCT SUBSYSTEMS/CONCERNS, never the raw criterion count: concerns are inferred
 // from the `files:` list plus criteria naming modules outside it. Many criteria over one module
@@ -2642,44 +2681,61 @@ export function learningDuplicateViolation(
  *  `lint-plan` never opens src/, `tsc` is satisfied because a TEST is an importer,
  *  `coverage-ratchet` because a unit test covers 100% of it, and the reviewer runs those same tests.
  *  Every gate asks whether the code WORKS; none asks whether anything CALLS it. THE RULE: a task
- *  that will CREATE a src/ module must carry a criterion proving a CALL SITE in a DIFFERENT file.
+ *  that will CREATE a src/ module or ADD an export to an existing one must carry a criterion
+ *  proving a CALL SITE in a DIFFERENT src/ file.
  *  CALL vs MENTION, AND THE EXACT LIMIT: a pattern without the open paren passes on a COMMENT,
  *  which is how one proof exited 0 against entirely unbuilt work. This enforces THE SHAPE OF THE
  *  PROOF, which is mechanically decidable, and cannot verify the eventual hit is code.
  *  Why: docs/forensics/task-linter.md#callsiteviolations (impl-DO, recon-DL, W1-T267, PR #1066). */
 export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
-  // NO PREDICATE ⇒ NO OPINION. Whether a module already exists is the caller's to answer, and a
-  // wrong guess here would flag every task that merely EDITS a module.
+  // NO PREDICATE ⇒ NO OPINION. Whether a module already exists, or whether an export line is new,
+  // is the caller's to answer; a wrong guess here would flag every task that merely EDITS a module.
   if (!opts.moduleExists) return [];
   const severity: LintSeverity = opts.callSite ?? "warn";
-  const created = (task.files ?? []).filter(
-    (f) => f.startsWith("src/") && f.endsWith(".ts") && !f.includes("*") && !opts.moduleExists!(f),
+  const declaredSrc = (task.files ?? []).filter((f) => f.startsWith("src/") && f.endsWith(".ts") && !f.includes("*"));
+  const declaredSrcSet = new Set(declaredSrc);
+  const created = declaredSrc.filter((f) => !opts.moduleExists!(f));
+  const addedExports = (opts.addedExports ?? []).filter(
+    (e) => declaredSrcSet.has(e.path) && !created.includes(e.path) && opts.moduleExists!(e.path),
   );
-  if (created.length === 0) return [];
+  if (created.length === 0 && addedExports.length === 0) return [];
 
-  const proves = (c: AcceptanceCriterion): boolean => {
+  const parsedGrepCallProof = (c: AcceptanceCriterion): { pattern: string; path: string } | undefined => {
     const parsed = parseWhitelistedProof(c.proof);
-    if (!parsed || parsed.kind !== "grep") return false;
+    if (!parsed || parsed.kind !== "grep") return undefined;
     const m = /^grep:\s*(.+?)\s+in\s+(\S+)\s*$/i.exec(String(c.proof).trim());
-    if (!m) return false;
+    if (!m) return undefined;
     const [, pattern, path] = m;
     // A CALL, not a mention: the pattern must demand an invocation…
-    if (!pattern.includes("(")) return false;
-    // …in a file OTHER than the module being created, since a module calling itself proves nothing
-    // about whether the rest of the program reaches it.
-    return !created.includes(path);
+    if (!pattern.includes("(")) return undefined;
+    // …in a src/ file, not a test. Tests prove behavior; they do not prove production reachability.
+    if (!path.startsWith("src/") || !path.endsWith(".ts") || path.includes("*")) return undefined;
+    return { pattern, path };
   };
+  const proofs = (task.acceptance ?? []).map(parsedGrepCallProof).filter((p): p is { pattern: string; path: string } => !!p);
+  const createdCovered = created.length === 0 || proofs.some((p) => !created.includes(p.path));
+  const missingExports = addedExports.filter(
+    (e) => !proofs.some((p) => p.path !== e.path && p.pattern.includes(`${e.symbol}(`)),
+  );
 
-  if ((task.acceptance ?? []).some(proves)) return [];
+  if (createdCovered && missingExports.length === 0) return [];
+  const subjects = [
+    ...created.map((path) => `new module ${path}`),
+    ...missingExports.map((e) => `new exported value ${e.symbol} in ${e.path}`),
+  ];
+  const rejectedTestProofs = (task.acceptance ?? [])
+    .map((c) => /^grep:\s*(.+?)\s+in\s+(\S+)\s*$/i.exec(String(c.proof).trim())?.[2])
+    .filter((path): path is string => !!path && path.startsWith("test/"));
+  const testNote = rejectedTestProofs.length > 0 ? ` Test proofs do not count as call sites: ${rejectedTestProofs.join(", ")}.` : "";
   return [
     {
       check: "call-site",
       severity,
       message:
-        `task ${task.id} creates ${created.join(", ")} but no acceptance criterion proves a CALL SITE ` +
+        `task ${task.id} adds ${subjects.join(", ")} but no acceptance criterion proves a CALL SITE ` +
         `for it. Add one of the form: grep: <symbol>( in <the file that calls it> — the open paren is ` +
-        `required (a bare symbol name passes on a comment), and the path must differ from the new ` +
-        `module. WHAT "UNREACHED" MEANS HERE, because the word names three different sets and a ` +
+        `required (a bare symbol name passes on a comment), and the path must be a different src/ ` +
+        `file.${testNote} WHAT "UNREACHED" MEANS HERE, because the word names three different sets and a ` +
         `count without its definition is unusable: MEASURED across src/ at 167c6844, ZERO modules ` +
         `have no importer at all, THREE have only TEST importers, and 77 of 2081 exported values ` +
         `are referenced nowhere outside their own file (43 of those are SCREAMING_CASE constants). ` +
@@ -2725,6 +2781,9 @@ export interface LintOpts {
   /** Does this repo-relative path already exist? Supplied by the caller because the linter is pure.
    *  Absent ⇒ {@link callSiteViolations} is silent. */
   moduleExists?: (repoRelPath: string) => boolean;
+  /** Exports added by this diff to existing src modules. Supplied only by callers holding diff
+   *  facts; absent means the call-site check falls back to the older new-module trigger. */
+  addedExports?: readonly AddedExport[];
   /** Severity for {@link callSiteViolations}. Default "warn" — see the report's retrofit count. */
   callSite?: LintSeverity;
   /** Severity for {@link proofResolvabilityViolations}. Default "block", but the pre-dispatch site
