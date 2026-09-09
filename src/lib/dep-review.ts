@@ -1,4 +1,5 @@
 import type { Escalation } from "./escalate.js";
+import { REVIEW_CONTEXT } from "./review.js";
 
 /**
  * The dependency-PR review lane (W1-T54, MASTER-PLAN §5D item 1).
@@ -310,10 +311,31 @@ const RED_CONCLUSIONS = new Set(["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_RE
  * `conclusion ?? state` (never `status`, which is a CheckRun's RUN state like
  * "COMPLETED", not its result) mirrors run-task.ts's own rollup reads exactly.
  */
+/**
+ * W1-T3244 — THE ONE STATUS THIS LANE PUBLISHES CANNOT ALSO BE ONE IT WAITS FOR.
+ *
+ * `remudero-review` is this module's own write path: `arm` means "post remudero-review=success and
+ * arm auto-merge" (see the header). Counting it as a red required check made the lane hold on the
+ * status it is the only publisher of — a closed loop with no exit inside the lane, escapable only
+ * by `@dependabot recreate` or an admin merge.
+ *
+ * NEVER HIT UNTIL 2026-09-09 because ABSENT AND RED ARE DIFFERENT. The ordinary case is that
+ * nothing ever posted — the state this module's header says every Dependabot PR used to sit in —
+ * and absent is not red, so the lane arms every time. Only a RED posting traps it. That day an
+ * operator ran the shared task-acceptance verb on a Dependabot PR; it fail-closed correctly on a
+ * bot body with no `## Acceptance` block, and #4812 deadlocked. The sweep's own `post-review` rung
+ * reaches that path too, as does a transient failure in this lane's write.
+ */
+export const LANE_OWNED_STATUS_CONTEXT = REVIEW_CONTEXT;
+
 export function redChecks(checks: DepReviewCheck[]): string[] {
   return checks
     .filter((c) => RED_CONCLUSIONS.has(String(c.conclusion ?? c.state ?? "").toUpperCase()))
-    .map((c) => c.name ?? c.context ?? "unknown");
+    .map((c) => c.name ?? c.context ?? "unknown")
+    // EXACTLY ONE NAME, never a relaxation. Every OTHER red check must keep holding — that is the
+    // entire value of the hold, and a fix that widened into "ignore red checks" would arm
+    // auto-merge over a genuinely broken bump, which is worse than the deadlock.
+    .filter((name) => name !== LANE_OWNED_STATUS_CONTEXT);
 }
 
 // ── The five-way verdict ─────────────────────────────────────────────────

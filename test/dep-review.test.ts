@@ -183,8 +183,12 @@ test("redChecks: SKIPPED/SUCCESS are clean; a real failure conclusion is red", (
 // reports its result on `state`, not `conclusion`. A re-run of this lane against
 // a PR that already carries one must still catch a red `state`. ──────────────
 test("redChecks: a legacy commit-status entry (context/state, no conclusion) is read via state", () => {
-  assert.deepEqual(redChecks([{ context: "remudero-review", state: "failure".toUpperCase() }]), ["remudero-review"]);
-  assert.deepEqual(redChecks([{ context: "remudero-review", state: "success" }]), []);
+  // W1-T3244: the example context changed from `remudero-review` to `ci-gate`. What this case
+  // proves — that a legacy commit STATUS is read through `state` rather than `conclusion` — is
+  // unchanged and needs no particular name; `remudero-review` is now excluded by name as the
+  // status this lane itself publishes, so it can no longer stand in for "some red status".
+  assert.deepEqual(redChecks([{ context: "ci-gate", state: "failure".toUpperCase() }]), ["ci-gate"]);
+  assert.deepEqual(redChecks([{ context: "ci-gate", state: "success" }]), []);
 });
 
 // ── The three branches (acceptance #1) ──────────────────────────────────────
@@ -663,4 +667,88 @@ test("W1-T2705: CONVENTIONAL_TITLE_PREFIX_RE matches a prefix and does NOT match
   assert.equal(CONVENTIONAL_TITLE_PREFIX_RE.test("feat!: something"), true);
   assert.equal(CONVENTIONAL_TITLE_PREFIX_RE.test("Bumps `x` from 1.0.0 to 2.0.0"), false, "no prefix, no match");
   assert.equal(CONVENTIONAL_TITLE_PREFIX_RE.test("Updates `x` from 1.0.0 to 2.0.0"), false);
+});
+
+// ── W1-T3244: the lane must not wait for the status it is the only publisher of ──────────────
+//
+// OBSERVED LIVE on #4812, 2026-09-09. An operator ran the shared TASK-ACCEPTANCE verb (`rmd
+// review`) on a Dependabot PR. It fail-closed CORRECTLY — a bot body has no `## Acceptance` block —
+// and posted `remudero-review=failure`. `rmd dep-review 4812` then answered
+// `hold: required check(s) not green: remudero-review`.
+//
+// This module's header states its own write paths: "(a) the `remudero-review` commit status and
+// (b) durable migration feedback for majors", and `arm` is "post remudero-review=success and arm
+// auto-merge". So the one status the lane exists to publish was also a status that, once red, made
+// the lane refuse to publish it. A closed loop with no exit inside the lane — escapable only by
+// `@dependabot recreate` or an admin merge, and editing the bot's branch is forbidden by the
+// lane's own migration policy.
+
+test("W1-T3244: a red remudero-review does not hold the lane", () => {
+  const withOwnStatusRed: DepReviewCheck[] = [...GREEN_CHECKS, { context: "remudero-review", state: "FAILURE" }];
+
+  assert.deepEqual(redChecks(withOwnStatusRed), [], "the lane's own status is not a check it waits for");
+
+  const r = decideDepReview({
+    author: DEPENDABOT_GRAPHQL_AUTHOR,
+    title: PR80_TITLE,
+    body: PR80_BODY,
+    diff: PR80_DIFF,
+    checks: withOwnStatusRed,
+  });
+  assert.equal(r.decision, "arm", "an otherwise-green minor/patch bump must still arm");
+  assert.deepEqual(r.redChecks, []);
+});
+
+test("W1-T3244: any other red check still holds the lane", () => {
+  // ONE NAME, NOT A RELAXATION. Widening this into "ignore red checks" would arm auto-merge over a
+  // genuinely broken bump — worse than the deadlock it fixes.
+  for (const red of ["ci", "ci-gate", "Review", "scan-pr"]) {
+    const checks: DepReviewCheck[] = [...GREEN_CHECKS.filter((c) => c.name !== red), { name: red, conclusion: "FAILURE" }];
+    assert.deepEqual(redChecks(checks), [red], `${red} must still count as red`);
+    const r = decideDepReview({
+      author: DEPENDABOT_GRAPHQL_AUTHOR,
+      title: PR80_TITLE,
+      body: PR80_BODY,
+      diff: PR80_DIFF,
+      checks,
+    });
+    assert.equal(r.decision, "hold", `${red} red must still hold`);
+    assert.match(r.reason, new RegExp(`required check\\(s\\) not green: ${red}`));
+  }
+
+  // ...and a red sibling ALONGSIDE the lane's own red status still holds, on the sibling alone —
+  // so the exclusion cannot be used to smuggle a real failure through.
+  const both: DepReviewCheck[] = [
+    ...GREEN_CHECKS.filter((c) => c.name !== "ci"),
+    { name: "ci", conclusion: "FAILURE" },
+    { context: "remudero-review", state: "FAILURE" },
+  ];
+  assert.deepEqual(redChecks(both), ["ci"]);
+  assert.equal(decideDepReview({ author: DEPENDABOT_GRAPHQL_AUTHOR, title: PR80_TITLE, body: PR80_BODY, diff: PR80_DIFF, checks: both }).decision, "hold");
+});
+
+test("W1-T3244: an absent status arms unchanged", () => {
+  // Absent and red are different, and absent is the ordinary case — the state this module's header
+  // says every Dependabot PR used to sit in. It armed then and must arm identically now, so this
+  // fix cannot be mistaken for a behaviour change on the healthy path.
+  const r = decideDepReview({
+    author: DEPENDABOT_GRAPHQL_AUTHOR,
+    title: PR80_TITLE,
+    body: PR80_BODY,
+    diff: PR80_DIFF,
+    checks: GREEN_CHECKS,
+  });
+  assert.equal(r.decision, "arm");
+  assert.deepEqual(r.redChecks, []);
+  // A SUCCESS posting is likewise not red and changes nothing.
+  assert.equal(
+    decideDepReview({
+      author: DEPENDABOT_GRAPHQL_AUTHOR,
+      title: PR80_TITLE,
+      body: PR80_BODY,
+      diff: PR80_DIFF,
+      checks: [...GREEN_CHECKS, { context: "remudero-review", state: "SUCCESS" }],
+    }).decision,
+    "arm",
+  );
 });
