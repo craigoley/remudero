@@ -27,7 +27,12 @@ import {
   proposalFromJudgedShard,
   shardsNeedingJudgement,
   verifyHumanVerdictRow,
+  spawnVerifyHumanJudgeWorker,
+  realVerifyHumanJudge,
 } from "../src/lib/verify-human-judge.js";
+import { resolveRiskJudgeMount } from "../src/lib/risk-judge.js";
+import type { Mount, Mounts } from "../src/lib/mounts.js";
+import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 import { priorVerifyHumanVerdicts, routeVerifyHumanBacklog, type VerifyHumanRouteDeps } from "../src/run-task.js";
 
@@ -218,4 +223,107 @@ test("W1-T3188: a staged proposal's id is derived, so asking twice asks once", (
   const b = proposalFromJudgedShard(NEEDS, { decision: "needs_operator", reason: "y" });
   assert.equal(a.id, b.id);
   assert.deepEqual(a.evidenceAnchors, [], "a routing ask depends on nothing landing on main — anchors would tier it not-ready forever");
+});
+
+// ── THE REAL-SPAWN WIRING, INJECTED ────────────────────────────────────────────────────────────
+//
+// `spawnVerifyHumanJudgeWorker` and `realVerifyHumanJudge` carried the note "untested by unit (it
+// shells out via the SDK)". They do not have to: both take an injectable `spawn`, so the wiring is
+// reachable with a recorder and no subprocess — which is what diff-coverage said when it named all
+// 20 lines of the two functions as added and uncovered. The seam existed; only the tests were
+// missing, and the sibling risk-judge suite already drives its own pair exactly this way.
+
+const JUDGE_MOUNTS: Mounts = {
+  tiers: { haiku: 1 },
+  efforts: { medium: 1 },
+  architect: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
+  judge: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
+  synthesis: {
+    retro: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
+    triage: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
+    inbox_draft: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
+  },
+  routes: { implement: { low: { default: { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 } } } },
+};
+
+const JUDGE_MOUNT: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+
+function fakeVerifyHumanWorkerResult(text: string): WorkerResult {
+  return {
+    sessionId: "s-verify-human-judge",
+    costUsd: 0.001,
+    numTurns: 1,
+    text,
+    blocks: [text],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "haiku",
+    effort: "medium",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  };
+}
+
+test("W1-T3188: spawnVerifyHumanJudgeWorker passes buildVerifyHumanJudgeSpawnArgs' own output through, and returns the result untouched", async () => {
+  const calls: unknown[] = [];
+  const raw = "VERIFY_HUMAN_VERDICT: needs_human\nVERIFY_HUMAN_CONFIDENCE: 0.9\nVERIFY_HUMAN_REASON: asks for a preference";
+  const spawn = (async (args: unknown) => {
+    calls.push(args);
+    return fakeVerifyHumanWorkerResult(raw);
+  }) as typeof spawnWorker;
+
+  const result = await spawnVerifyHumanJudgeWorker({
+    shard: NEEDS, mount: JUDGE_MOUNT, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn,
+  });
+
+  assert.equal(calls.length, 1, "exactly one spawn — a judge that fires twice bills twice for one shard");
+  assert.deepEqual(
+    calls[0],
+    buildVerifyHumanJudgeSpawnArgs({ shard: NEEDS, mount: JUDGE_MOUNT, cwd: "/tmp/x", settingsFile: "/tmp/settings.json" }),
+    "the args must be the builder's own output, not a second hand-rolled copy that can drift from it",
+  );
+  assert.equal(result.text, raw, "the raw WorkerResult is returned untouched — parsing happens one layer up");
+});
+
+test("W1-T3188: realVerifyHumanJudge resolves the cheapest mount and wires the spawn through parseVerifyHumanVerdict", async () => {
+  const calls: Array<{ model?: string; maxTurns?: number }> = [];
+  const spawn = (async (args: { model?: string; maxTurns?: number }) => {
+    calls.push(args);
+    return fakeVerifyHumanWorkerResult(
+      "VERIFY_HUMAN_VERDICT: settled\nVERIFY_HUMAN_CONFIDENCE: 0.75\nVERIFY_HUMAN_REASON: the deps all merged",
+    );
+  }) as unknown as typeof spawnWorker;
+
+  const judge = realVerifyHumanJudge({ mounts: JUDGE_MOUNTS, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const verdict = await judge(SETTLED);
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(
+    calls[0],
+    buildVerifyHumanJudgeSpawnArgs({
+      shard: SETTLED, mount: resolveRiskJudgeMount(JUDGE_MOUNTS), cwd: "/tmp/x", settingsFile: "/tmp/settings.json",
+    }),
+    "the mount must come from resolveRiskJudgeMount, not a second walk of the routing table",
+  );
+  assert.deepEqual(
+    verdict,
+    parseVerifyHumanVerdict(
+      "VERIFY_HUMAN_VERDICT: settled\nVERIFY_HUMAN_CONFIDENCE: 0.75\nVERIFY_HUMAN_REASON: the deps all merged",
+    ),
+    "the production judge fn must return the PARSED verdict, never the raw worker text",
+  );
+});
+
+test("W1-T3188: an unparseable worker reply still FAILS OPEN through the real judge — the polarity survives the wiring", async () => {
+  // The suite's own premise, driven through the production path rather than the parser alone: an
+  // outage or a garbled reply must never quietly decide the operator need not see something.
+  const spawn = (async () => fakeVerifyHumanWorkerResult("the model said something else entirely")) as typeof spawnWorker;
+  const judge = realVerifyHumanJudge({ mounts: JUDGE_MOUNTS, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  assert.deepEqual(await judge(SETTLED), FAIL_OPEN_VERIFY_HUMAN_VERDICT);
 });

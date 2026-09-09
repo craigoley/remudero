@@ -263,8 +263,10 @@ export function buildVerifyHumanJudgeSpawnArgs(opts: {
   };
 }
 
-/** Spawn and parse. Untested by unit (it shells out via the SDK); the two pure functions above
- *  carry the contract. */
+/** Spawn and parse. The `spawn` seam is injectable precisely so this IS unit-reachable: the note
+ *  here used to read "untested by unit (it shells out via the SDK)", and diff-coverage answered by
+ *  naming all 20 lines of this function and {@link realVerifyHumanJudge} as added and uncovered.
+ *  A recorder drives both with no subprocess, exactly as risk-judge.ts's own pair is driven. */
 export async function spawnVerifyHumanJudgeWorker(opts: {
   shard: ShardUnderJudgement;
   mount: Mount;
