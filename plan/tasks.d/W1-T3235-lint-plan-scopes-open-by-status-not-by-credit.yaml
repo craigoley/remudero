@@ -1,0 +1,74 @@
+- id: W1-T3235
+  title: "LINT-PLAN SCOPES ITS OPEN-TASK RUN BY `status:` — THE ONE FIELD THIS REPO DOCUMENTS AS NOT A COMPLETION SIGNAL — SO 169 OF ITS 172 `open failing` TASKS HAVE ALREADY SHIPPED, AND THE CREDIT PROJECTION THAT WOULD SAY SO IS ALREADY COMPUTED TWENTY LINES AWAY"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: high
+  origin: "operator-session#the-156-landmine-field-is-an-artifact-2026-09-09"
+  plan_refs: ["W1-T2339", "W1-T324", "W1-T180"]
+  files: [src/run-task.ts, test/lint-plan-scopes-open-by-credit-not-status.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON origin/main, 2026-09-09: `rmd lint-plan` reports
+
+      503 task(s) checked (open tasks only) — 172 open failing
+      (169 with a merged implementation, 3 with none: W1-T2, W1-T49, W1-T326), 497 warning(s)
+
+    169 OF 172 HAVE SHIPPED. And the residue of 3 does not survive contact either. W1-T2 is
+    "Validate-before-spawn guard + settings schema pin" — it shipped as PR #18, in the pre-trailer
+    era, which is why no credit path can see it. W1-T326 is "nobody has ruled on whether the DAEMON
+    should dispatch in parallel" — an OPERATOR RULING, open because nobody has ruled, not because
+    anything is broken. W1-T49 is docs coherence. THE GENUINELY-OPEN FAILING POPULATION IS
+    APPROXIMATELY ZERO.
+
+    AND THE 169 IS ITSELF AN UNDER-COUNT. The linter's own caveat line says the split "reads 2 of 4
+    credit paths (commit-subject citation, commit-body trailer) and misses the PR-body trailer and
+    the run-<id>-<epoch> head ref". So more than 169 have shipped, not fewer.
+
+    THE MIS-KEYED FILTER, NAMED. `isOpenLintTask` is two lines: `!NON_OPEN_LINT_STATUSES.has(
+    task.status)` over `{blocked, merged, done}`. `lintPlanCommand` builds `wholePlanScope` from it.
+    So "open" means "the `status:` field does not say otherwise" — and this repo's own standing
+    guidance is that `status:` "is what the FILING wrote and nothing updates it on merge", with the
+    credit projection named as THE ONLY completion signal. The linter asks the field it is
+    documented not to trust.
+
+    THE ANSWER IS ALREADY IN THE FUNCTION. `creditedMergedIdsFrom(statusByTaskId)` is computed in
+    `lintPlanCommand` itself, about fifty lines below where `wholePlanScope` is built, and the
+    projection behind it is the same one `postMergeAmendmentViolations` already consumes. Nothing
+    new needs deriving; the scope is built before the answer is fetched.
+
+    WHAT THIS COSTS W1-T2339, AND WHY THAT TASK STAYS RIGHT. W1-T2339 measured a "landmine field"
+    of 156 failing records — 144 in the legacy monolith, 62% of the monolith against 1.9% of the
+    shards — and correctly refused to make the GATE softer, because `LintViolation` carries no
+    stable identity (`message` embeds truncated proof text, so a reworded proof reads as NEW; and
+    `criterion N` renumbers on insertion). THAT ANALYSIS IS NOT DISTURBED BY THIS TASK. Nothing here
+    changes a severity, an exit code, or which violations a checked task reports. It changes WHICH
+    TASKS ARE CHECKED, and on the evidence above most of the landmine field is finished work that a
+    correct scope would never have visited. The remaining diff-scoped question — failing only on
+    violations a diff introduced — still needs the stable violation identity W1-T2339 named, and is
+    still not proposed.
+
+    IT MUST FAIL OPEN AND SAY SO. The credit projection needs GitHub, and a whole-plan run today
+    resolves it only under `--base` — `statusResolvable` is already documented as false on any
+    resolution failure so a plan-only PR is not reddened during an outage. This task inherits that
+    discipline exactly: when the projection cannot be resolved, the scope falls back to `status:`,
+    which is today's behaviour byte for byte, and THE SUMMARY LINE SAYS WHICH KEY IT USED. A run
+    that silently narrows its own scope is worse than one that over-reports, because the number
+    stops meaning the same thing between runs and nothing announces the change.
+
+    NO RECORD IS EDITED. This repairs the QUESTION, not the corpus. Not one task's `status:` is
+    written, no proof is rewritten, and rule 21's post-merge amendment guard is never engaged —
+    which is precisely why this is cheaper and safer than the repair campaign the 156 appear to
+    demand.
+
+  acceptance:
+    - claim: "a task the credit projection reports merged is not checked by the open-tasks run, even when its status still reads queued"
+      proof: "unit test: W1-T3235: a credited-merged task is out of scope even with status queued"
+    - claim: "a task with no merge credit is still checked, so the narrower scope never hides real work"
+      proof: "unit test: W1-T3235: an uncredited task is still checked"
+    - claim: "an unresolvable credit projection falls back to status and the summary names which key it used"
+      proof: "unit test: W1-T3235: an unresolvable projection falls back to status and says so"
