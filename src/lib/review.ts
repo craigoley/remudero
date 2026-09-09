@@ -1874,7 +1874,24 @@ export function judgeCriterion(
       // on the head but DECLARED by this diff's own plan shard is a forward reference, not a failure — spawning
       // `node --test` on it exits nonzero, which the branch below would read as a genuine `executed_fail`, the hard
       // block that made a filing PR unrepairable. Gated on `!nameFiltered`: a bare test-NAME proof has no target path.
+      //
+      // W1-T3232 — THE FIFTH CONDITION, BOUND ONCE AND READ BY BOTH ARMS. This carve-out shipped
+      // with four conditions; W1-T2737 gave its `grep:` sibling below a fifth, `planOnlyDiff`, and
+      // its own comment calls that "the filing-scope half". This arm never got it, so the carve-out
+      // fired on IMPLEMENTATION heads too — where a proof naming a declared-but-absent test file is
+      // not a forward reference but work the PR claimed and did not build. The criterion was
+      // excused and fell to the KEYWORD FLOOR, which the body satisfies because the body describes
+      // the work. MEASURED on #4770: a declared test file was never created, the mechanical gate
+      // passed, and only the LLM reviewer's semantic downgrade caught it.
+      //
+      // Operator ruling 2026-09-09. W1-T2737 never argued this arm SHOULD fire on a build head —
+      // its criterion 5 pinned "byte-identical" grading as a COMPATIBILITY guarantee while it
+      // extended the carve-out to `grep:`, and its own design (iv) states this intent: "A BUILT
+      // TASK IS UNAFFECTED ... this only reaches the case where the target path is
+      // declared-but-unwritten in the same diff."
+      const filingScopeHead = execCtx.planOnlyDiff === true;
       const forwardReference =
+        filingScopeHead &&
         whitelisted.kind === "test" &&
         !whitelisted.nameFiltered &&
         execCtx.forwardReferenceFiles?.has(whitelisted.label) === true &&
@@ -1884,7 +1901,7 @@ export function judgeCriterion(
       // branch below. `planOnlyDiff` is the filing-scope half; an UNDECLARED path yields `undefined` and keeps blocking.
       const grepTarget = dialectGrepTargetPath(whitelisted);
       const grepForwardReferenceTarget =
-        execCtx.planOnlyDiff === true && grepTarget !== undefined && execCtx.forwardReferenceFiles?.has(grepTarget) === true
+        filingScopeHead && grepTarget !== undefined && execCtx.forwardReferenceFiles?.has(grepTarget) === true
           ? grepTarget
           : undefined;
       if (forwardReference) {

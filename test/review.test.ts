@@ -2766,7 +2766,11 @@ test("W1-T456: an exact-path unit-test proof absent on the head, declared by the
     { claim: "the forward-referenced test exists", proof: "unit test: test/filing-forward-reference.test.ts" },
     new Set(),
     undefined,
-    { cwd: dir, forwardReferenceFiles: new Set(["test/filing-forward-reference.test.ts"]) },
+    // W1-T3232: `planOnlyDiff` is now a condition of this carve-out, and this case is a FILING-PR
+    // review ("declared by the diff's own shard") — plan-only by construction. Supplying it makes
+    // the fixture state the head shape it was always assuming; on a BUILD head the same inputs now
+    // grade executed_fail, which test/the-forward-reference-carve-out-is-asymmetric.test.ts pins.
+    { cwd: dir, forwardReferenceFiles: new Set(["test/filing-forward-reference.test.ts"]), planOnlyDiff: true },
   );
   assert.equal(verdict.proof_exec, "not_yet_built");
   assert.equal(verdict.proof_skip, "forward-reference");
