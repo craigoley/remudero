@@ -31,6 +31,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// W1-T2922: keep the layout API surfaced from repo-location for the review proof, while
+// pure library callers import repo-layout.js directly so they do not evaluate repoRoot at import.
+export { RepoLayoutError, resolveRepoLayout } from "./repo-layout.js";
+export type { RepoLayout } from "./repo-layout.js";
+
 /**
  * Resolve the repo root a `rmd` invocation GATES, in priority order — replacing the
  * old INSTALL-PATH derivation (`dirname(dirname(fileURLToPath(import.meta.url)))`,
