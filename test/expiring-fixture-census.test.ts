@@ -2,14 +2,34 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import {
-  AGED_FIELDS,
-  EXEMPT_MARKER,
-  MARGIN_DAYS,
-  assertFieldsStillAged,
-  censusExpiringFixtures,
-  formatReport,
-} from "../scripts/expiring-fixture-census.mjs";
+import { dirname, join as joinPath } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// `scripts/**` sits OUTSIDE tsconfig's `include`, so a STATIC import of the .mjs is a TS7016 and
+// fails typecheck — the same reason test/a-source-file-cannot-outgrow-its-baseline.test.ts reaches
+// its script this way. A dynamic specifier is not statically resolved, so this loads the REAL
+// module with no shadow copy that could drift from it.
+const SCRIPT = joinPath(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "expiring-fixture-census.mjs");
+const { AGED_FIELDS, EXEMPT_MARKER, MARGIN_DAYS, assertFieldsStillAged, censusExpiringFixtures, formatReport } =
+  (await import(pathToFileURL(SCRIPT).href)) as {
+    AGED_FIELDS: ReadonlyArray<{ field: string; threshold: string; source: string; evidence: string[] }>;
+    EXEMPT_MARKER: string;
+    MARGIN_DAYS: number;
+    assertFieldsStillAged: (readFile?: (p: string) => string) => void;
+    censusExpiringFixtures: (o: {
+      files: string[];
+      readFile: (p: string) => string;
+      now: number;
+      thresholdDays: number;
+      marginDays?: number;
+    }) => {
+      population: number;
+      reported: Array<{ file: string; line: number; daysLeft: number; expiresAt: number }>;
+      exempt: unknown[];
+      alreadyExpired: unknown[];
+    };
+    formatReport: (r: unknown, marginDays?: number) => string;
+  };
 
 // W1-T3272 — THE REFUSAL FOR A RULE THAT BOUND NOTHING TWICE.
 //
