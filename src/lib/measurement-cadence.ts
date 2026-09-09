@@ -1,3 +1,4 @@
+import { reconcilePlan } from "./plan-reconcile.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -1096,6 +1097,65 @@ export function mintProofDebtProposals(
 
 /** Every field below the first three is optional on the TYPE only, for a pre-existing test
  *  double — {@link runMeasurementCadenceReport} itself never omits one. */
+/**
+ * W1-T3226 — WHAT ONE PLAN-RECONCILE PASS FOUND, and whether it landed.
+ *
+ * `drift` is reported on EVERY cycle including zero, because a number nobody sees until it is
+ * large is how 85 shards accumulated: the prioritised queue read 21 open when 20 of them were
+ * already on main, and two of those were items an operator asked to start next.
+ */
+export interface PlanReconcileCadenceResult {
+  /** Shards credited-merged by `reconcilePlan`'s own predicate but still `status: queued`. */
+  drift: number;
+  /** WHICH ones — a count with no names cannot be checked, and this report exists to be checked. */
+  taskIds: string[];
+  /** `clear` = no drift; `reported` = drift below the threshold, nothing landed; `landed` = the
+   *  writes were handed to the caller's landing seam. */
+  status: "clear" | "reported" | "landed";
+  threshold: number;
+}
+
+/** {@link planReconcileCadence}'s input. `land` is the ONLY way this function can affect the
+ *  repository, and it is called ONLY at or above the threshold. */
+export interface PlanReconcileCadenceOpts {
+  /** Every shard's id and current text, exactly as `reconcilePlan` takes them. */
+  shards: ReadonlyArray<{ readonly taskId: string; readonly text: string }>;
+  /** `reconcilePlan`'s OWN credit predicate, passed through untouched. Widening it here would
+   *  flip uncredited work to merged, which removes a real task from the queue — strictly worse
+   *  than leaving it stale, and the one direction this task must not move. */
+  isCreditedMerged: (taskId: string) => boolean | undefined;
+  /** How much drift is worth a plan diff. Below it the cadence reports and lands nothing. */
+  threshold: number;
+  /** Hands the rewritten shards to the caller's LANDING BRIDGE — never an in-place write. The
+   *  daemon's own checkout must stay clean: `checkCliFreshness` refuses a dirty tree, so writing
+   *  the plan where the daemon lives would break its self-sync. Absent = report only. */
+  land?: (writes: ReadonlyArray<{ taskId: string; text: string }>) => void;
+}
+
+/**
+ * ONE plan-reconcile pass, as a cadence rung.
+ *
+ * REPORTS EVERY CYCLE, LANDS ONLY ABOVE THE THRESHOLD. The count is cheap and belongs in the
+ * report unconditionally; a plan diff is not free and should not fire for one stale shard.
+ *
+ * `reconcilePlan` ITSELF IS UNTOUCHED — its predicate, its skip categories and its output are
+ * correct. This schedules it and nothing more.
+ */
+export function planReconcileCadence(opts: PlanReconcileCadenceOpts): PlanReconcileCadenceResult {
+  const { writes } = reconcilePlan(opts.shards, opts.isCreditedMerged);
+  const taskIds = writes.map((w) => w.taskId);
+  if (taskIds.length === 0) {
+    return { drift: 0, taskIds, status: "clear", threshold: opts.threshold };
+  }
+  // Below the threshold, or with no landing seam wired, this reports and touches nothing. An
+  // absent `land` is report-only BY CONSTRUCTION rather than by a caller remembering.
+  if (taskIds.length < opts.threshold || opts.land === undefined) {
+    return { drift: taskIds.length, taskIds, status: "reported", threshold: opts.threshold };
+  }
+  opts.land(writes);
+  return { drift: taskIds.length, taskIds, status: "landed", threshold: opts.threshold };
+}
+
 export interface MeasurementCadenceRunResult {
   ruleEfficacy: RuleEfficacyCadenceResult;
   verdictCalibration: VerdictCalibrationCadenceResult;
@@ -1108,6 +1168,8 @@ export interface MeasurementCadenceRunResult {
   adoptionMint?: AdoptionMintCadenceResult;
   /** The board-review rung, set only when `opts.boardReview` is supplied. */
   boardReview?: BoardReviewReport;
+  /** W1-T3226's drift report, set only when `opts.planReconcile` is supplied. */
+  planReconcile?: PlanReconcileCadenceResult;
   /** proof-queue-audit's offender population, set only when `opts.proofDebt` is supplied — see
    *  {@link mintProofDebtProposals}. */
   proofDebtReport?: ProofQueueAuditReport;
@@ -1169,6 +1231,9 @@ export interface MeasurementCadenceReportOpts {
     registryPath: string;
     rerunDeadCheck?: (item: BoardItem) => void;
   };
+  /** W1-T3226's plan-reconcile rung. Optional: omitted skips it entirely, the same opt-in shape
+   *  every producer above uses. */
+  planReconcile?: PlanReconcileCadenceOpts;
   /** proof-queue-audit's population and resolvers, bound to a real checkout by the caller.
    *  Optional: omitted skips this producer entirely. */
   proofDebt?: {
@@ -1576,6 +1641,11 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
         };
   }
 
+  // ── W1-T3226: the plan-status drift report. Skipped when `opts.planReconcile` is absent.
+  // `planReconcileCadence` performs no I/O of its own — its only outward effect is the caller's
+  // `land` seam — so this cannot turn a cadence tick into a failure however large the drift is.
+  const planReconcile = opts.planReconcile ? planReconcileCadence(opts.planReconcile) : undefined;
+
   const currentMetrics = {
     repeatIncidentRate: ruleEfficacy.repeatIncidentRate,
     blockedCiShare: verdictCalibration.blocked_ci_share ?? null,
@@ -1608,6 +1678,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     ...(coverageImprovement ? { coverageImprovement } : {}),
     verbCensus,
     ...(handRunCensusResult ? { handRunCensus: handRunCensusResult } : {}),
+    ...(planReconcile ? { planReconcile } : {}),
   };
 }
 
