@@ -15,7 +15,7 @@ import { parse as parseYaml } from "yaml";
 import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps } from "./ledger-union.js";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { NEEDS_HUMAN_LABEL } from "./escalate.js";
+import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { isTestRunner } from "./live-write-guard.js";
 import type { BoardSnapshotCache } from "./board-snapshot-cache.js";

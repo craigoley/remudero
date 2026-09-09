@@ -36723,6 +36723,26 @@ interface CommandSpec {
   readonly detail: string;
 }
 
+export type HeavyVerbName = "review" | "dep-review" | "drain" | "daemon";
+
+/** Exported for test only: the whole point of this switch is that a verb's heavy module is loaded
+ *  ON DEMAND rather than at import, and "on demand" is a claim about which module each name pulls
+ *  in. Unexported it was unreachable, and diff-coverage named every arm. */
+export async function loadHeavyVerb(name: HeavyVerbName): Promise<void> {
+  switch (name) {
+    case "review":
+    case "dep-review":
+      await import("./lib/review.js");
+      return;
+    case "drain":
+      await import("./lib/drain.js");
+      return;
+    case "daemon":
+      await import("./lib/daemon.js");
+      return;
+  }
+}
+
 const COMMANDS: readonly CommandSpec[] = [
   {
     name: "run-task",
@@ -37776,7 +37796,9 @@ export async function main(
     console.log("\n" + JSON.stringify(result, null, 2));
     process.exit(result.merged ? 0 : 1);
   }
+  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
   if (cmd === "review" && arg) {
+    await loadHeavyVerb("review");
     process.exit(await reviewCommand(arg, rest.slice(1)));
   }
   // diff-cov: process-boundary — main() only translates mergeHoldCommand's tested return into
@@ -37784,7 +37806,9 @@ export async function main(
   if (cmd === "merge-hold") {
     process.exit(mergeHoldCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
   if (cmd === "dep-review" && arg) {
+    await loadHeavyVerb("dep-review");
     process.exit(await depReviewCommand(arg, rest.slice(1)));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await receiptCommand(arg, rest.slice(1))) cannot carry a DA hit without forking the process; receiptCommand's own logic — the unknown-arg refusal, the trailer resolution/refusal, and the buildReceipt print path — is unit-tested in test/receipt.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
@@ -37883,10 +37907,14 @@ export async function main(
       : decodeAutomatedRetroDecision(encodedAutomatedDecision);
     process.exit(await retroCommand(rest, automated ? { automated } : {}));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
   if (cmd === "drain") {
+    await loadHeavyVerb("drain");
     process.exit(await drainCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
   if (cmd === "daemon") {
+    await loadHeavyVerb("daemon");
     process.exit(await daemonCommand(rest));
   }
   if (cmd === "daemon-plist") {
