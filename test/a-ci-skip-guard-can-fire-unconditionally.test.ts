@@ -12,21 +12,94 @@ import assert from "node:assert/strict";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import {
+type SkipGuard = {
+  key: string;
+  job: string;
+  line: number;
+  text: string;
+  form: "if" | "or";
+};
+
+const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const SCRIPT = join(REPO_ROOT, "scripts", "workflow-guard-mutation-check.mjs");
+const CI_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+const BASELINE = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "workflow-guard-mutation-baseline.json"), "utf8")) as {
+  guards: Record<string, { reason: string }>;
+};
+const {
   enumerateSkipGuards,
   mutateGuardLine,
   ciReadingSuites,
   classifyGuard,
-} from "../scripts/workflow-guard-mutation-check.mjs";
-
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
-const CI_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-const BASELINE = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "workflow-guard-mutation-baseline.json"), "utf8"));
+  suiteFails,
+  readBaseline,
+  withMutant,
+  main,
+  runCli,
+} = (await import(pathToFileURL(SCRIPT).href)) as {
+  enumerateSkipGuards: (text: string) => SkipGuard[];
+  mutateGuardLine: (text: string, guard: SkipGuard) => string;
+  ciReadingSuites: (root?: string) => string[];
+  suiteFails: (
+    suite: string,
+    spawn?: (
+      command: string,
+      args: string[],
+      options: { cwd: string; encoding: "utf8"; stdio: ["ignore", "pipe", "pipe"] },
+    ) => { stdout?: string; stderr?: string },
+  ) => { failed: boolean | undefined; out: string };
+  readBaseline: (
+    path?: string,
+    read?: (path: string, encoding: "utf8") => string,
+  ) => { guards: Record<string, { reason: string }> };
+  withMutant: (
+    guard: SkipGuard,
+    original: string,
+    fn: () => { ok: boolean },
+    io?: {
+      path: string;
+      write: (path: string, text: string) => void;
+      mutate: (original: string, guard: SkipGuard) => string;
+      once: (event: "exit", listener: () => void) => void;
+      removeListener: (event: "exit", listener: () => void) => void;
+    },
+  ) => { ok: boolean };
+  classifyGuard: (
+    guard: SkipGuard,
+    original: string,
+    suites: string[],
+    runSuite?: (suite: string) => { failed: boolean | undefined; out?: string },
+    apply?: (guard: SkipGuard, original: string, fn: () => { covered: boolean; by: string | undefined }) => {
+      covered: boolean;
+      by: string | undefined;
+    },
+  ) => { covered: boolean; by: string | undefined };
+  main: (
+    argv: string[],
+    deps?: {
+      readWorkflow?: () => string;
+      enumerate?: (text: string) => SkipGuard[];
+      baseline?: () => { guards: Record<string, { reason: string }> };
+      suitesForWorkflow?: () => string[];
+      classify?: (guard: SkipGuard, original: string, suites: string[]) => { covered: boolean; by: string | undefined };
+      writeBaseline?: (path: string, text: string) => void;
+      log?: (text: string) => void;
+      error?: (text: string) => void;
+      baselinePath?: string;
+    },
+  ) => number;
+  runCli: (
+    entry?: string,
+    argv?: string[],
+    exit?: (code: number) => void,
+    run?: (argv: string[]) => number,
+  ) => void;
+};
 
 /** A mutant-free `withMutant` stand-in: never touches disk, still proves the mutation was formed. */
-const inMemory = (guard, original, fn) => {
+const inMemory = (guard: SkipGuard, original: string, fn: () => { covered: boolean; by: string | undefined }) => {
   mutateGuardLine(original, guard); // must not throw - the same precondition the real path enforces
   return fn();
 };
@@ -93,6 +166,16 @@ test("W1-T3220: a guard whose recorded line no longer holds it is refused, never
   );
 });
 
+test("W1-T3220: an already-constant mutant is refused because no line changed", () => {
+  const text = 'jobs:\n  j:\n    steps:\n      - run: |\n          if [ "1" = "1" ]; then\n            exit 0\n          fi\n';
+  const [guard] = enumerateSkipGuards(text);
+  assert.throws(
+    () => mutateGuardLine(text, guard),
+    /refusing a mutant that touched line\(s\)  rather than only/,
+    "the mutation must prove it actually rewrote the target line",
+  );
+});
+
 test("W1-T3220: both guard forms are mutated to ALWAYS SKIP, which means opposite constants", () => {
   // An `if` guard skips when its condition is true; an `[ .. ] || { .. }` guard skips when its
   // test is FALSE. Forcing both to "true" would leave the second one never skipping at all - the
@@ -105,8 +188,8 @@ test("W1-T3220: both guard forms are mutated to ALWAYS SKIP, which means opposit
 
 test("W1-T3220: a guard some suite notices is COVERED, and the first noticing suite is named", () => {
   const [guard] = enumerateSkipGuards(CI_YML);
-  const seen = [];
-  const run = (suite) => {
+  const seen: string[] = [];
+  const run = (suite: string) => {
     seen.push(suite);
     return { failed: suite === "test/b.test.ts" };
   };
@@ -128,6 +211,49 @@ test("W1-T3220: a suite that produced NO summary is not read as a pass", () => {
   const [guard] = enumerateSkipGuards(CI_YML);
   const out = classifyGuard(guard, CI_YML, ["test/truncated.test.ts"], () => ({ failed: undefined }), inMemory);
   assert.equal(out.covered, false, "absent totals must never be counted as a suite noticing the mutant");
+});
+
+test("W1-T3220: suiteFails reads node-test summaries as failure, pass, or unknown", () => {
+  const spawn = (_command: string, _args: string[], _options: { cwd: string; encoding: "utf8"; stdio: ["ignore", "pipe", "pipe"] }) => ({
+    stdout: "# fail 1\n",
+    stderr: "",
+  });
+  assert.deepEqual(suiteFails("test/failing.test.ts", spawn), { failed: true, out: "# fail 1\n" });
+  const pass = () => ({ stdout: "# fail 0\n", stderr: "" });
+  assert.deepEqual(suiteFails("test/passing.test.ts", pass), { failed: false, out: "# fail 0\n" });
+  const truncated = () => ({ stdout: "TAP version 13\n", stderr: "killed\n" });
+  assert.deepEqual(suiteFails("test/truncated.test.ts", truncated), {
+    failed: undefined,
+    out: "TAP version 13\nkilled\n",
+  });
+});
+
+test("W1-T3220: a missing or corrupt baseline reads as an empty decision file", () => {
+  assert.deepEqual(
+    readBaseline("/tmp/missing-baseline.json", () => {
+      throw new Error("nope");
+    }),
+    { guards: {} },
+  );
+});
+
+test("W1-T3220: withMutant restores the workflow after the callback and unregisters its listener", () => {
+  const [guard] = enumerateSkipGuards(CI_YML);
+  const writes: string[] = [];
+  const listeners: Array<() => void> = [];
+  const out = withMutant(guard, CI_YML, () => ({ ok: true }), {
+    path: "ci.yml",
+    write: (_path, text) => writes.push(text),
+    mutate: (original, target) => mutateGuardLine(original, target),
+    once: (_event, listener) => listeners.push(listener),
+    removeListener: (_event, listener) => {
+      assert.equal(listener, listeners[0]);
+    },
+  });
+  assert.deepEqual(out, { ok: true });
+  assert.equal(writes.length, 2, "the mutant is written once, then the original is restored once");
+  assert.notEqual(writes[0], CI_YML);
+  assert.equal(writes[1], CI_YML);
 });
 
 test("W1-T3220: every baselined guard carries a real recorded reason and still exists in ci.yml", () => {
@@ -153,7 +279,7 @@ test("W1-T3220: the corpus includes an UNSTAGED suite, because that is the one a
   // it until staged — and this check exists to ask whether that new guard is covered, usually by
   // exactly that new suite. An under-counted corpus reports UNCOVERED for want of a reader rather
   // than for want of coverage. MEASURED while building this: 35 without the flag, 36 with it.
-  const probe = join(REPO_ROOT, "test", "zz-w1t3220-untracked-probe.test.ts");
+  const probe = join(REPO_ROOT, "test", `zz-w1t3220-untracked-probe-${process.pid}.test.ts`);
   const before = ciReadingSuites(REPO_ROOT).length;
   writeFileSync(probe, 'import { test } from "node:test";\n// reads .github/workflows/ci.yml\ntest("probe", () => {});\n');
   try {
@@ -176,4 +302,127 @@ test("W1-T3220: the ci.yml-reading suites are found from the tree, and this suit
     "the suite that distinguishes four of the four covered guards must be in the corpus",
   );
   for (const s of suites) assert.match(s, /^test\/.*\.test\.ts$/);
+});
+
+test("W1-T3220: main refuses an empty guard enumeration and an empty suite corpus", () => {
+  const errors: string[] = [];
+  assert.equal(main([], { readWorkflow: () => "jobs:\n", enumerate: () => [], error: (text) => errors.push(text) }), 1);
+  assert.match(errors[0], /NO skip-shaped guards/);
+
+  const [guard] = enumerateSkipGuards(CI_YML);
+  assert.equal(
+    main([], {
+      readWorkflow: () => CI_YML,
+      enumerate: () => [guard],
+      baseline: () => ({ guards: {} }),
+      suitesForWorkflow: () => [],
+      error: (text) => errors.push(text),
+    }),
+    1,
+  );
+  assert.match(errors.at(-1) ?? "", /no ci\.yml-reading suites/);
+});
+
+test("W1-T3220: main lists guards without consulting baseline or suites", () => {
+  const [guard] = enumerateSkipGuards(CI_YML);
+  const logs: string[] = [];
+  assert.equal(
+    main(["--list"], {
+      readWorkflow: () => CI_YML,
+      enumerate: () => [guard],
+      baseline: () => {
+        throw new Error("baseline must not be read in list mode");
+      },
+      log: (text) => logs.push(text),
+    }),
+    0,
+  );
+  assert.match(logs.join("\n"), new RegExp(guard.key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(logs.at(-1) ?? "", /1 skip-shaped guard/);
+});
+
+test("W1-T3220: main reports baselined, covered, and blocking uncovered guards", () => {
+  const guards = enumerateSkipGuards(CI_YML).slice(0, 3);
+  const logs: string[] = [];
+  const errors: string[] = [];
+  const result = main([], {
+    readWorkflow: () => CI_YML,
+    enumerate: () => guards,
+    baseline: () => ({ guards: { [guards[0].key]: { reason: "already reviewed" } } }),
+    suitesForWorkflow: () => ["test/a.test.ts"],
+    classify: (guard) =>
+      guard.key === guards[1].key ? { covered: true, by: "test/a.test.ts" } : { covered: false, by: undefined },
+    log: (text) => logs.push(text),
+    error: (text) => errors.push(text),
+    baselinePath: "baseline.json",
+  });
+  assert.equal(result, 1);
+  assert.match(logs.join("\n"), /BASELINED/);
+  assert.match(logs.join("\n"), /COVERED/);
+  assert.match(logs.join("\n"), /UNCOVERED/);
+  assert.match(errors.join("\n"), /BLOCKED -- 1 skip guard/);
+  assert.match(errors.join("\n"), /baseline\.json/);
+});
+
+test("W1-T3220: main --all measures baselined guards and exits green in report mode", () => {
+  const [guard] = enumerateSkipGuards(CI_YML);
+  const logs: string[] = [];
+  assert.equal(
+    main(["--all"], {
+      readWorkflow: () => CI_YML,
+      enumerate: () => [guard],
+      baseline: () => ({ guards: { [guard.key]: { reason: "recorded but still measured" } } }),
+      suitesForWorkflow: () => ["test/a.test.ts"],
+      classify: () => ({ covered: false, by: undefined }),
+      log: (text) => logs.push(text),
+    }),
+    0,
+  );
+  assert.match(logs.join("\n"), /UNCOVERED/);
+  assert.match(logs.at(-1) ?? "", /1 uncovered/);
+});
+
+test("W1-T3220: main --seed writes placeholders only for newly uncovered guards", () => {
+  const guards = enumerateSkipGuards(CI_YML).slice(0, 2);
+  let written = "";
+  const logs: string[] = [];
+  assert.equal(
+    main(["--seed"], {
+      readWorkflow: () => CI_YML,
+      enumerate: () => guards,
+      baseline: () => ({ guards: { [guards[0].key]: { reason: "existing decision" } } }),
+      suitesForWorkflow: () => ["test/a.test.ts"],
+      classify: () => ({ covered: false, by: undefined }),
+      writeBaseline: (_path, text) => {
+        written = text;
+      },
+      log: (text) => logs.push(text),
+      baselinePath: "seed.json",
+    }),
+    0,
+  );
+  const parsed = JSON.parse(written) as { guards: Record<string, { reason: string }> };
+  assert.equal(parsed.guards[guards[0].key].reason, "existing decision");
+  assert.match(parsed.guards[guards[1].key].reason, /RECORDED UNMEASURED/);
+  assert.match(logs.at(-1) ?? "", /recorded 2 uncovered guard\(s\) in seed\.json/);
+});
+
+test("W1-T3220: the CLI entrypoint exits only when this script is the process entry", () => {
+  const exits: number[] = [];
+  const runs: string[][] = [];
+  const exit = (code: number) => {
+    exits.push(code);
+  };
+  const run = (argv: string[]) => {
+    runs.push(argv);
+    return 7;
+  };
+
+  runCli("node", ["--list"], exit, run);
+  assert.deepEqual(exits, []);
+  assert.deepEqual(runs, []);
+
+  runCli("/tmp/workflow-guard-mutation-check.mjs", ["--list"], exit, run);
+  assert.deepEqual(runs, [["--list"]]);
+  assert.deepEqual(exits, [7]);
 });

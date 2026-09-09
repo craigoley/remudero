@@ -112,8 +112,8 @@ export function ciReadingSuites(root = REPO_ROOT) {
   return out.split("\n").map((l) => l.trim()).filter((l) => l.endsWith(".test.ts"));
 }
 
-function suiteFails(suite) {
-  const res = spawnSync(
+export function suiteFails(suite, spawn = spawnSync) {
+  const res = spawn(
     process.execPath,
     ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", suite],
     { cwd: REPO_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
@@ -127,24 +127,35 @@ function suiteFails(suite) {
   return { failed: Number(summary[1]) > 0, out };
 }
 
-function readBaseline() {
+export function readBaseline(path = BASELINE, read = readFileSync) {
   try {
-    return JSON.parse(readFileSync(BASELINE, "utf8"));
+    return JSON.parse(read(path, "utf8"));
   } catch {
     return { guards: {} };
   }
 }
 
 /** Restore the workflow whatever happens - a crashed run must never leave a mutant on disk. */
-function withMutant(guard, original, fn) {
-  writeFileSync(CI_YML, mutateGuardLine(original, guard));
-  const restore = () => writeFileSync(CI_YML, original);
-  process.once("exit", restore);
+export function withMutant(
+  guard,
+  original,
+  fn,
+  io = {
+    path: CI_YML,
+    write: writeFileSync,
+    mutate: mutateGuardLine,
+    once: process.once.bind(process),
+    removeListener: process.removeListener.bind(process),
+  },
+) {
+  io.write(io.path, io.mutate(original, guard));
+  const restore = () => io.write(io.path, original);
+  io.once("exit", restore);
   try {
     return fn();
   } finally {
     restore();
-    process.removeListener("exit", restore);
+    io.removeListener("exit", restore);
   }
 }
 
@@ -166,70 +177,84 @@ export function classifyGuard(guard, original, suites, runSuite = suiteFails, ap
   });
 }
 
-export function main(argv) {
+export function main(argv, deps = {}) {
+  const {
+    readWorkflow = () => readFileSync(CI_YML, "utf8"),
+    enumerate = enumerateSkipGuards,
+    baseline = readBaseline,
+    suitesForWorkflow = ciReadingSuites,
+    classify = classifyGuard,
+    writeBaseline = writeFileSync,
+    log = console.log,
+    error = console.error,
+    baselinePath = BASELINE,
+  } = deps;
   const list = argv.includes("--list");
   const all = argv.includes("--all");
   const seed = argv.includes("--seed");
-  const original = readFileSync(CI_YML, "utf8");
-  const guards = enumerateSkipGuards(original);
+  const original = readWorkflow();
+  const guards = enumerate(original);
   if (guards.length === 0) {
-    console.error("workflow-guard-mutation: NO skip-shaped guards found in ci.yml - the enumerator sees nothing, which is a defect in this script, not a clean tree. FAILING.");
+    error("workflow-guard-mutation: NO skip-shaped guards found in ci.yml - the enumerator sees nothing, which is a defect in this script, not a clean tree. FAILING.");
     return 1;
   }
   if (list) {
-    for (const g of guards) console.log(`${String(g.line).padStart(5)}  ${g.key}`);
-    console.log(`\nworkflow-guard-mutation: ${guards.length} skip-shaped guard(s).`);
+    for (const g of guards) log(`${String(g.line).padStart(5)}  ${g.key}`);
+    log(`\nworkflow-guard-mutation: ${guards.length} skip-shaped guard(s).`);
     return 0;
   }
-  const baseline = readBaseline();
-  const suites = ciReadingSuites();
+  const baselineDoc = baseline();
+  const suites = suitesForWorkflow();
   if (suites.length === 0) {
-    console.error("workflow-guard-mutation: no ci.yml-reading suites found - every guard would read UNCOVERED for want of a corpus, not for want of coverage. FAILING.");
+    error("workflow-guard-mutation: no ci.yml-reading suites found - every guard would read UNCOVERED for want of a corpus, not for want of coverage. FAILING.");
     return 1;
   }
   const uncovered = [];
   const measured = [];
   for (const g of guards) {
-    const recorded = baseline.guards?.[g.key];
+    const recorded = baselineDoc.guards?.[g.key];
     if (recorded && !all && !seed) {
-      console.log(`BASELINED  ${g.key}\n           reason: ${recorded.reason}`);
+      log(`BASELINED  ${g.key}\n           reason: ${recorded.reason}`);
       continue;
     }
-    const { covered, by } = classifyGuard(g, original, suites);
+    const { covered, by } = classify(g, original, suites);
     measured.push({ guard: g, covered, by });
-    if (covered) console.log(`COVERED    ${g.key}\n           distinguished by ${by}`);
+    if (covered) log(`COVERED    ${g.key}\n           distinguished by ${by}`);
     else {
-      console.log(`UNCOVERED  ${g.key}`);
+      log(`UNCOVERED  ${g.key}`);
       uncovered.push(g);
     }
   }
   if (seed) {
-    const guardsOut = { ...(baseline.guards ?? {}) };
+    const guardsOut = { ...(baselineDoc.guards ?? {}) };
     for (const g of uncovered) {
       guardsOut[g.key] = guardsOut[g.key] ?? {
         reason: "RECORDED UNMEASURED by --seed: no test distinguishes this skip firing unconditionally. Replace this line with why that is acceptable, or cover it.",
       };
     }
-    writeFileSync(BASELINE, `${JSON.stringify({ guards: guardsOut }, null, 2)}\n`);
-    console.log(`\nworkflow-guard-mutation: recorded ${uncovered.length} uncovered guard(s) in ${BASELINE}.`);
+    writeBaseline(baselinePath, `${JSON.stringify({ guards: guardsOut }, null, 2)}\n`);
+    log(`\nworkflow-guard-mutation: recorded ${uncovered.length} uncovered guard(s) in ${baselinePath}.`);
     return 0;
   }
-  console.log(
+  log(
     `\nworkflow-guard-mutation: ${measured.filter((m) => m.covered).length} covered, ${uncovered.length} uncovered, ` +
       `${guards.length - measured.length} baselined, across ${guards.length} guard(s) and ${suites.length} ci.yml-reading suite(s).`,
   );
   if (uncovered.length > 0 && !all) {
-    console.error(
+    error(
       `workflow-guard-mutation: BLOCKED -- ${uncovered.length} skip guard(s) can fire UNCONDITIONALLY with every test still green:\n` +
         uncovered.map((g) => `  - ci.yml:${g.line}  ${g.key}`).join("\n") +
         "\nA guard no test can distinguish turns a required check into a green no-op. Add a case that\n" +
-        `asserts the skip does NOT fire on the other side, or record it in ${BASELINE} with the reason.`,
+        `asserts the skip does NOT fire on the other side, or record it in ${baselinePath} with the reason.`,
     );
     return 1;
   }
   return 0;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("workflow-guard-mutation-check.mjs")) {
-  process.exit(main(process.argv.slice(2)));
+export function runCli(entry = process.argv[1], argv = process.argv.slice(2), exit = process.exit, run = main) {
+  if (!entry || !entry.endsWith("workflow-guard-mutation-check.mjs")) return;
+  exit(run(argv));
 }
+
+runCli();
