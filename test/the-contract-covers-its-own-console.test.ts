@@ -63,6 +63,14 @@ test("W1-T3174: the uncovered count is a ratchet — it may FALL and never RISE"
   assert.match(rose, /UNDECLARED:/, "naming the routes, because a bare count is not actionable");
 });
 
+// @source-text-subject — this test's SUBJECT genuinely IS a source file's text, in the sense
+// W1-T2905's census carves out. The tool under test is a source-text census: `routesCalled` finds
+// `fetch("/v1/…")` literals by scanning code. The read below is not a prose assertion standing in
+// for behaviour — it is a POSITIVE CONTROL ON THE REAL CORPUS, feeding the live client's actual
+// bytes through the extractor so that an extractor which stops matching fails HERE instead of
+// reporting an empty uncovered set as a clean sheet. Asserting on behaviour instead is not
+// available: the behaviour IS reading source text, and a synthetic fixture cannot catch the
+// regression this control exists for.
 test("W1-T3174: the census reads the STRING console too, not only where the fetch gate looks", () => {
   // COUNTING ONLY `apps/` REPORTS A CLEAN SHEET while 28 routes are in daily use: the live
   // console's client is src/lib/console-shell-client.ts, which is not under apps/ and is the
