@@ -259,7 +259,7 @@
   "src/lib/replay-harness.ts": 76,
   "src/lib/replay.ts": 82,
   "src/lib/reply-interpreter.ts": 104,
-  "src/lib/repo-layout.ts": 60,
+  "src/lib/repo-layout.ts": 250,
   "src/lib/repo-location.ts": 57,
   "src/lib/report-commands.ts": 500,
   "src/lib/retro-closure.ts": 250,

@@ -14,6 +14,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { RmdError } from "./errors.js";
 
 /**
  * ONE resolved layout per target (W1-T2922). The harness's own directory shape — where the plan
@@ -49,9 +50,12 @@ export interface RepoLayout {
   stateDir: string;
 }
 
-export class RepoLayoutError extends Error {
-  constructor(message: string) {
-    super(message);
+/** A malformed or invalid layout override (see {@link resolveRepoLayout}). Adopts the shared
+ *  envelope (`./errors.ts`'s `RmdError`, kind `"usage"` — a target repo's own bad input, not a
+ *  harness defect) instead of extending `Error` directly, per test/error-subclass-census.test.ts. */
+export class RepoLayoutError extends RmdError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super("usage", 1, message, details);
     this.name = "RepoLayoutError";
   }
 }
