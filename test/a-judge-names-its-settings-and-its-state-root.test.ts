@@ -9,6 +9,12 @@
  *
  * These tests exercise what an injected seam skips: the settings file the command actually names,
  * and the directory a staged proposal actually lands in.
+ *
+ * DECLARES @source-text-subject, and the declaration is honest rather than a way past the census.
+ * Two of the four tests below have a source file's TEXT as their literal subject: that no spawn
+ * names the deny floor, and that no call site hardcodes the ledger filename. Both assert an
+ * ABSENCE across a 37k-line file, which no behavioural test can express — you cannot drive a code
+ * path that is supposed not to exist. The other two are behavioural and stay that way.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
