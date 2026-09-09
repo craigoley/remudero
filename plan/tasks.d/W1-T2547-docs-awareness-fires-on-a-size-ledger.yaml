@@ -47,7 +47,7 @@
   origin: retro-followup
   plan_refs: ["W1-T2543", "W1-T2526", "W1-T2488"]
   files: [src/lib/review.ts, test/docs-awareness-does-not-read-a-ledger-as-a-surface.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     The arm lives in `src/lib/review.ts` (the rubric), while the companion table W1-T2543 added

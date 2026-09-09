@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§12A", "§8A", "W1-T2630"]
   files: [docs/base-ref-contract.md, .github/workflows/probe-path-filter.yml, src/lib/ci-parity.ts, src/lib/learnings.ts, test/docs-cite-real-symbols.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-57 (OBSERVED). At f7ceb86: `docs/base-ref-contract.md:63-65`

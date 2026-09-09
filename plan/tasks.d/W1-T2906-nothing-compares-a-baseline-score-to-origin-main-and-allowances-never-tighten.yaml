@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§5C", "§12", "W1-T479"]
   files: [scripts/baseline-monotonic-check.mjs, .github/workflows/ci.yml, src/lib/ci-parity.ts, test/baseline-monotonic-against-origin-main.test.ts, test/catch-erasure-ratchet.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-43 (OBSERVED; the line-floor half is ALREADY W1-T479 and is not

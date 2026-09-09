@@ -128,7 +128,7 @@
     - claim: "supersessionVerdict no longer sits on the producer-completeness allowlist once a producer assigns it"
       proof: "unit test: test/producer-completeness.test.ts"
   files: [src/lib/open-prs-rest.ts, src/lib/sweep.ts, src/lib/producer-completeness.ts, src/run-task.ts, test/open-prs-rest.test.ts, test/producer-completeness.test.ts, test/sweep-superseded-evidence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   origin: "feedback#fb-repair-stale-2954"
   plan_refs: ["W1-T920", "W1-T932", "W1-T984", "W1-T905", "W1-T80", "W1-T377", "W1-T921"]

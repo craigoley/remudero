@@ -14,7 +14,7 @@
     - test/entanglement-split-sweep-reachability.test.ts
   origin: "fleet-incident#pr-4559-unreachable-rule25-split-2026-09-08"
   plan_refs: ["W1-T297", "W1-T527", "W1-T923", "W1-T2436", "W1-T3029"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON PR #4559 AT 2026-09-08T13:23:28Z. Its authoritative `review.posted`

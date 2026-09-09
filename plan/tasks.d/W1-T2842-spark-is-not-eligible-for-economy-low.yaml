@@ -13,7 +13,7 @@
     - test/codex-spark-economy-routing.test.ts
   origin: "operator-session#spark-smart-selector-2026-09-04"
   plan_refs: ["W1-T2572", "W1-T2573", "W1-T2711", "W1-T2840"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on origin/main on 2026-09-04: the reviewed capability table maps

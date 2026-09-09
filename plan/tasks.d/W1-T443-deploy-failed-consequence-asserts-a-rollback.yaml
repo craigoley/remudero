@@ -71,7 +71,7 @@
   origin: recon#deploy-failed-dirty-tree-2026-08-12
   plan_refs: ["W1-T431", "P48"]
   files: [src/lib/status-board.ts, test/deploy-failed-consequence-kind.test.ts, test/status-board.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "CORRECTION MADE WHILE BUILDING THIS (2026-08-12): `test/status-board.test.ts` WAS ADDED to
     files:, for the same measured reason W1-T442 declared `test/worker-containment.test.ts` — it

@@ -34,7 +34,7 @@
   origin: architect
   plan_refs: ["§4", "§9"]
   files: [src/lib/block-reason.ts, src/lib/daemon.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: "SIBLING of W1-T168 (not a fixture of it): no-attempt/drain-side vs futile-attempt/rung-side are distinct
     calibration failures. Drain/sweep PARITY — the W1-T77 sweep routes blocked-fixable->fix rung; the drain's W1-T46

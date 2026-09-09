@@ -13,7 +13,7 @@
     - test/plan-reconcile-credit-parity.test.ts
   origin: "operator-session#reconcile-1036-vs-953-2026-09-07"
   plan_refs: ["W1-T3043", "W1-T3063", "W1-T3067"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     TWO RUNGS READ ONE PROJECTION AND APPLY DIFFERENT FILTERS TO IT. Only one of them writes.

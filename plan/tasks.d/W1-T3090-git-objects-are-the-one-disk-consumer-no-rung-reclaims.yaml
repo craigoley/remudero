@@ -13,7 +13,7 @@
     - test/object-reaper.test.ts
   origin: "operator-session#can-the-reaper-do-this-instead-of-me-2026-09-07"
   plan_refs: ["W1-T3065", "W1-T2493"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE RUNG ALREADY EXISTS AND ALREADY HAS THREE SWEEPS. This task adds a fourth to
