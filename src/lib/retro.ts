@@ -4515,6 +4515,16 @@ export interface RetroPublicationEscalationCtx {
  * (and a test) can see why nothing was raised. NEVER touches the marker — the marker stays frozen
  * on failure by design, and advancing it here would discard the runs the retro exists to read.
  */
+/** One `failing_tests`/`cancelled_tests` ledger field, read back as a bounded list of names.
+ *  Tolerates the array form, the comma-joined string form and absence, because a row written by an
+ *  older harness carries whichever of those it carried. */
+function namedTestList(raw: unknown): string[] {
+  return (Array.isArray(raw) ? raw.map(String) : typeof raw === "string" ? raw.split(",") : [])
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
 export function escalateRetroPublicationFailure(
   info: { attempts: number },
   ctx: RetroPublicationEscalationCtx,
@@ -4530,14 +4540,22 @@ export function escalateRetroPublicationFailure(
   // from the caller: RetroPrepublishResult carries neither (retro-preflight.ts), and the row is the
   // same source of truth the notice sends the reader to. No new plumbing, and they cannot disagree.
   const newestFailure = lines.filter((l) => l.step === "retro.preflight_failed").pop() as
-    | (RetroLedgerRowView & { exit_class?: unknown; failing_tests?: unknown })
+    | (RetroLedgerRowView & {
+        exit_class?: unknown;
+        failing_tests?: unknown;
+        cancelled_tests?: unknown;
+        has_summary?: unknown;
+      })
     | undefined;
   const exitClass = typeof newestFailure?.exit_class === "string" ? newestFailure.exit_class : undefined;
-  const rawFailing = newestFailure?.failing_tests;
-  const failing = (Array.isArray(rawFailing) ? rawFailing.map(String) : typeof rawFailing === "string" ? rawFailing.split(",") : [])
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .slice(0, 8);
+  const failing = namedTestList(newestFailure?.failing_tests);
+  // W1-T2993: a CANCELLED suite is not a failing one, and the notice must not present it as such.
+  // The incident this exists for: a file that blocked at scope was cancelled along with every
+  // other in-flight subtest, this notice listed those subtests as "Failing tests", and three days
+  // of diagnosis went to four files that pass on origin/main while the file that actually hung was
+  // never named. Rendered as its own section, first, because it is where the reader should start.
+  const cancelled = namedTestList(newestFailure?.cancelled_tests);
+  const hasSummary = newestFailure?.has_summary !== false;
   const issueUrl = tryEscalate(
     {
       class: "BLOCKED",
@@ -4550,6 +4568,16 @@ export function escalateRetroPublicationFailure(
         "The marker is deliberately NOT advanced on failure, so every fire re-reads the same runs and " +
         "re-runs the same suite — a full LLM run and a multi-minute suite each time — and until now said " +
         "nothing. This notice does not stop the retro; it makes the repetition visible.\n\n" +
+        (cancelled.length > 0
+          ? `START HERE — suites the newest attempt CANCELLED (they did not run, and did not fail):\n- ${cancelled.join("\n- ")}\n\n` +
+            "A cancelled suite blocks the runner and takes every in-flight subtest down with it, so the " +
+            "failing list below is a SUBSET BY CONSTRUCTION and the tests in it may be innocent. Diagnose " +
+            "the cancelled suite first.\n\n"
+          : "") +
+        (hasSummary
+          ? ""
+          : "The runner printed no `# tests` summary, so nothing below is a total — the attempt was " +
+            "truncated and its failure list is a subset of what would have failed.\n\n") +
         (failing.length > 0
           ? `Failing tests reported by the newest attempt:\n- ${failing.join("\n- ")}`
           : "The newest attempt parsed no failing test names; see the retro.preflight_failed row for the bounded stdout/stderr excerpts.") +

@@ -1,0 +1,70 @@
+- id: W1-T3231
+  title: "A FILING PR CARRYING ITS OWN TASK'S TRAILER IS JUDGED AGAINST THAT TASK'S IMPLEMENTATION CRITERIA AND FAILS CLOSED — W1-T1004 stopped the false MERGE CREDIT and nothing stops the false REVIEW RESOLUTION, so the mistake still costs a full CI cycle every time it is made"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: "operator-session#three-filing-prs-reddened-on-the-same-mistake-2026-09-09"
+  plan_refs: ["W1-T1004", "W1-T1060", "W1-T952"]
+  files: [src/lib/review.ts, scripts/acceptance-author-gate.mjs, .github/workflows/acceptance-author-gate.yml, test/a-filing-pr-is-judged-against-criteria-it-cannot-satisfy.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE MISTAKE IS ONE LINE AND IT WAS MADE THREE TIMES IN ONE SESSION (2026-09-09, on the filing
+    PRs for W1-T3224, W1-T3222 and a sibling). A plan-only filing PR carries `Remudero-Task: X`.
+    `reviewCommand` then resolves criteria from X'S OWN SHARD — criteria that describe the
+    IMPLEMENTATION: source files not in this diff, and test files that do not exist yet, because the
+    task has not been built. The filing is judged against them and fails. Every occurrence costs a
+    full CI cycle plus a body rewrite plus a re-review.
+
+    W1-T1004 IS MERGED AND FIXED THE OTHER HALF. Its predicate lives in `src/lib/status.ts` beside
+    `findMergedByTrailer`/`findMergedByHeadBranch` and stops a filing PR from CREDITING the task it
+    filed. That is the durable half — a wrongly credited task never gets dispatched. It says nothing
+    about REVIEW RESOLUTION, which happens earlier, in a different module, and reddens the PR
+    rather than silently over-crediting it. Both halves come from the same authoring mistake; only
+    one has a gate.
+
+    W1-T1004's DESIGN (ii) RULES OUT THE OBVIOUS PREDICATE AND THIS TASK OBEYS IT. It forbids
+    inferring "this is a filing" from the diff touching only `plan/**`, because a hand-authored plan
+    PR would misclassify — and its own rationale (2) proves it: of 15 plan-only credits measured,
+    TWO were CORRECT, because those tasks' declared deliverable genuinely is plan text. A blanket
+    "plan-only PR must not carry a trailer" rule would refuse both.
+
+    SO THE SIGNAL IS NARROWER AND IT IS NOT PLAN-ONLY-NESS. REFUSE ONLY WHEN THE DIFF ADDS THE
+    SHARD THAT DECLARES THE VERY TASK THE TRAILER NAMES. A pull request that INTRODUCES a task's
+    record cannot be that task's implementation: at the merge base the task did not exist, so
+    nothing could have dispatched it and no criteria could have been written against work in this
+    diff. That is a statement about identity, not about file extensions, and it leaves W1-T1004's
+    two correct cases untouched — W1-T426 and W1-T314 each ship plan text as their deliverable, and
+    neither PR adds its OWN shard, because their shards were filed earlier by different PRs.
+
+    IT BELONGS AT AUTHOR TIME, WHICH IS THE POINT. W1-T1060 built
+    `scripts/acceptance-author-gate.mjs` for exactly this class: a defect a body carries is
+    discoverable BEFORE a CI cycle, and a posted review verdict binds to its head sha, so repairing
+    the body afterwards buys nothing without a new head. This check is a second refusal in that
+    same gate, reusing its event-payload read rather than adding a second mechanism.
+
+    THE GATE NEEDS THE DIFF, WHICH IT DOES NOT CURRENTLY HAVE. `on: pull_request`'s payload carries
+    the body and the author login but not the file list, and the job's `actions/checkout` is
+    shallow. The payload DOES carry `base.sha` and `head.sha`, so `fetch-depth: 0` plus a local
+    `git diff --name-status` answers it with NO API call — preserving the property W1-T1060 built
+    this gate for, that it keeps working in exactly the window a busy fleet exhausts the GitHub API.
+
+    KNOWN LIMITATION, STATED RATHER THAN DISCOVERED. This reads shard files ADDED under
+    `plan/tasks.d/`. A task filed by appending to the `plan/tasks.yaml` MONOLITH is a modification,
+    not an addition, and is not caught. Every filing in the measured session used a shard, and
+    `rule15-filing` already pushes filings toward shards, so this is the 95% case and not the whole
+    of it. Widening to an id-set delta over the monolith is a separate, larger change.
+
+  acceptance:
+    - claim: "a pull request whose diff adds the shard declaring the task its trailer names is refused, naming both"
+      proof: "unit test: W1-T3231: a pull request that adds the shard it credits is refused"
+    - claim: "an implementation pull request carrying a trailer for a task it does not file is untouched"
+      proof: "unit test: W1-T3231: an implementation pull request carrying a trailer is not refused"
+    - claim: "a filing whose own deliverable is plan text is still allowed, so the refusal is not plan-only-ness"
+      proof: "unit test: W1-T3231: a plan-only pull request that does not add its own shard is allowed"
+    - claim: "the author-time gate can see the diff at all, deriving it from the event payload's own shas with no API call"
+      proof: "grep: fetch-depth in .github/workflows/acceptance-author-gate.yml"

@@ -212,6 +212,36 @@ boot_fetch() {
 sync_tree() {
   log "work tree present at $TREE"
 
+  # ── REPAIR THE ONE CONTRADICTION THIS SCRIPT CAN PROVE (W1-T3228) ─────────────────────────────
+  # The line above is a FILESYSTEM reading; every git command below asks a different question, and
+  # when the two disagree this script used to fail with git's answer and report the filesystem's.
+  #
+  # MEASURED 2026-09-09 on the Azure host: `core.bare=true` was set on the daemon's checkout at
+  # 02:37:36 while the tree was fully intact — 3,551 index entries, HEAD at a real commit, status
+  # clean. git then refused every worktree operation ("fatal: this operation must be run in a work
+  # tree"), so the checkout failed, this script exited 1 as it should, and `rmd daemon` NEVER RAN.
+  # The fleet watchdog revived the container every five minutes for 7h32m, each attempt dying at
+  # exactly this line, because a revive cannot fix the reason a thing dies. No daemon-side
+  # self-repair could ever have reached it: the daemon is what failed to start.
+  #
+  # WHY THIS ONE IS SAFE TO REPAIR AND ALMOST NOTHING ELSE IS. A directory that HOLDS a populated
+  # work tree while its own config declares the repo bare is not an ambiguous state to be
+  # interpreted — it is a config that contradicts its own contents, and there is exactly one value
+  # that reconciles them. The repair is a single boolean, reversible, and touches no object, ref or
+  # file. It is NOT a licence to repair anything else here: every other failure below still refuses,
+  # because "the tree is not what I expected" and "the config disagrees with the tree" are different
+  # questions and only the second has one answer.
+  #
+  # THE REPAIR IS LOUD. A silent fix would hide a hook that is still rewriting this config on every
+  # push (W1-T3224 is the mechanism, unmerged at the time of writing), so the line below is the
+  # thing an operator greps for when asking why the flag came back.
+  if [ "$(git -C "$TREE" rev-parse --is-bare-repository 2>/dev/null)" = "true" ] && [ -d "$TREE/.git" ]; then
+    log "REPAIRING: core.bare=true on a directory that holds a work tree — git would refuse every"
+    log "  checkout below while this script reported the tree present. Unsetting it; nothing else is touched."
+    log "  If this recurs, something is WRITING that flag: a hook child inheriting GIT_DIR is the known cause."
+    git -C "$TREE" config --local core.bare false || log "  WARNING: could not unset core.bare — the checkout below will fail and say so"
+  fi
+
   # ── Drop dead worktree registrations, before the fetch ────────────────────────────
   # Invariant: NOT the fetch's own `--prune` (that drops remote-tracking refs) — this drops
   # `.git/worktrees/` admin records whose checkout directory no longer exists. The bind-

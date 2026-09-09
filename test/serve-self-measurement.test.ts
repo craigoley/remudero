@@ -196,7 +196,15 @@ test("self-measurement panel: renders the latest per-verb figure with its as-of 
       task_id: "DAEMON",
       step: "measurement_cadence.ran",
       lane: "daemon",
-      rule_efficacy: { status: "measured", measurableCount: 14, repeatingCount: 2, repeatIncidentRate: 0.143, escalated: false, escalatedProposalIds: [] },
+      rule_efficacy: {
+        status: "measured",
+        measurableCount: 14,
+        repeatingCount: 2,
+        repeatIncidentRate: 0.143,
+        delta_vs_previous: 0.043,
+        escalated: false,
+        escalatedProposalIds: [],
+      },
       autonomy_rate: { status: "refused", refusedReason: "shallow clone — truncated history" },
     },
   ]);
@@ -212,6 +220,7 @@ test("self-measurement panel: renders the latest per-verb figure with its as-of 
       // (measurableCount 10) from fire 1 -- all three off the SAME union read.
       const ruleEfficacy = await rowText(page, "ruleEfficacy");
       assert.match(ruleEfficacy ?? "", /measurableCount: 14/, "the LATEST fire's own figure");
+      assert.match(ruleEfficacy ?? "", /delta_vs_previous: 0\.043/, "the LATEST fire's delta renders beside its value");
       assert.match(ruleEfficacy ?? "", /as of/, "every figure carries its as-of time");
       assert.match(ruleEfficacy ?? "", /previously:.*measurableCount: 10/, "the PREVIOUS fire's own figure, named as such");
       assert.equal(await rowState(page, "ruleEfficacy"), "measured");

@@ -113,6 +113,35 @@ test("no other src/lib module imports src/lib/repo-location.ts — only run-task
   assert.deepEqual(importers, [], `an unrelated src/lib module imports repo-location.ts and would pay the argv-at-import cost on import: ${importers.join(", ")}`);
 });
 
+test("repo-layout.ts does NOT import repo-location.ts — the split is what makes the guard above satisfiable", () => {
+  // W1-T2922 needed a resolved layout inside `learnings.ts`, `alert-lane.ts` and `plan.ts`. Every
+  // one of those is a `src/lib` module, so importing it from repo-location.ts would have made all
+  // three pay the argv-at-import cost the test above exists to keep on the CLI entrypoint — an
+  // import runs the whole file, so taking only the pure function does not take only its cost.
+  //
+  // The answer was a split, not a widened exemption: the layout half reads no argv, no cwd and no
+  // `repoRoot`, so it lives in its own module and the guard above keeps its FULL strength over the
+  // half that actually costs something. That only holds while the pure half stays pure — one
+  // import here would reintroduce the cost through the back door and leave the guard above green.
+  const text = readFileSync(join(libDir, "repo-layout.ts"), "utf8");
+  // EXECUTABLE lines only. A comment naming `process.argv` costs nothing at run time, and this
+  // module's own header has to name it to explain why the split exists — a purely textual scan
+  // would refuse the file for documenting its own reason, which is the third time today a comment
+  // has been counted as the code around it.
+  const executable = text
+    .split("\n")
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+    .join("\n");
+  assert.equal(
+    importsModule(text, /(^|\/)repo-location\.js$/),
+    false,
+    "repo-layout.ts must not import repo-location.ts — that would restore the argv-at-import cost for every library that takes the layout",
+  );
+  for (const forbidden of ["process.argv", "process.cwd()"]) {
+    assert.ok(!executable.includes(forbidden), `repo-layout.ts must not read ${forbidden} either — the split is about the COST, not the import path`);
+  }
+});
+
 // ── Criterion 3: the separable arg-parsing symbol moves without dragging the registry ───────
 
 test("unknownArgError lives in src/lib/cli-args.ts and is self-contained (no imports at all)", () => {

@@ -10,7 +10,8 @@
   origin: architect
   plan_refs: ["§5C", "W1-T1657", "W1-T2960"]
   files: [src/lib/status.ts, test/the-frontier-does-not-offer-finished-work.test.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
     MEASURED 2026-09-06 against a trailer-built merged set of 796 ids over the whole commit history
@@ -60,3 +61,41 @@
       proof: "unit test: W1-T2963: an uncredited task with no baseline entry stays runnable"
     - claim: "a baseline entry without a written reason is refused rather than trusted"
       proof: "unit test: W1-T2963: a baseline entry with no reason is refused"
+  note: |
+    RETIREMENT RECORD, 2026-09-09 — RETIRED AS REFUTED. The defect this shard describes DOES NOT
+    EXIST, measured through the daemon's OWN projection rather than a hand-built set. Everything
+    below is preserved verbatim so a future reader needs no archaeology.
+
+    THE MEASUREMENT. `readMergeCreditedTaskIds` (src/lib/status.ts) — the function the daemon
+    actually dispatches on — was run over the live ledger at /mnt/rmd/state2/state/ledger.ndjson
+    against all 1530 plan ids: it credits 1429 of them (filesRead 501, budgetExhausted true, so
+    1429 is a LOWER bound). Every id this shard's own headline names as an uncredited phantom is
+    credited by it:
+
+        W1-T80  W1-T121  W1-T122  W1-T123  W1-T126  W1-T127  W1-T203  -> all CREDITED
+
+    THE FRONTIER THAT FOLLOWS FROM IT. `runnableCandidates` over that credit set offers 51
+    dispatch-eligible tasks, and its head is entirely RECENT work (W1-T2890, W1-T2922, W1-T2925,
+    W1-T2926, W1-T2928 …) — not one of the four this shard names. That is the same observation the
+    2026-09-07 amendment above recorded, now re-derived through the projection it asked for.
+
+    WHY THE ORIGINAL MEASUREMENT WAS WRONG, AND IT IS THE FAILURE THIS REPO ALREADY NAMES. The
+    shard built its merged set from squash-commit `Remudero-Task:` TRAILERS ALONE. That path
+    under-credits by construction: pre-trailer work carries no trailer and its `run-` head is
+    deleted on merge. A trailer-only set credits 937 of 1530; unioning shard `status:` reaches
+    1175; the daemon's ledger-union projection reaches 1429. The 586-uncredited figure was an
+    artifact of the reconstruction, never a property of the fleet. CLAUDE.md's own rule — "NAME THE
+    QUERY, NEVER ITS ANSWER", and "derive merged from the trailer AND the branch-name path" —
+    covers exactly this, and the shard broke it.
+
+    THIS RETIREMENT REPEATED THE SAME ERROR ONCE MORE BEFORE CATCHING IT. The operator session that
+    retired this shard first RECOMMENDED building it, on a frontier built the same trailer-only way,
+    and called it "not close to being built". It is rank 7 of 51. The recommendation was withdrawn
+    only after reading this shard's own 2026-09-07 amendment. A hand-built merged set is not a
+    second opinion about the daemon's; it is a worse copy of it.
+
+    WHAT IS NOT REFUTED, AND IS DELIBERATELY NOT RE-FILED HERE. The written-reason baseline this
+    shard designed (`scripts/task-id-existence-baseline.json`'s shape) remains a reasonable
+    mechanism IF a real under-credit is ever measured through `readMergeCreditedTaskIds`. Nothing
+    measured today shows one, so filing it would spend fleet capacity on a defect nobody has
+    observed — the specific harm the amendment above already warned about.

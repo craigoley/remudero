@@ -108,6 +108,7 @@
   plan_refs: ["§8A", "§12A", "§5E", "P29", "P38", "P43", "P48"]
   files: [plan/claims.yaml, scripts/plan-state-claims.mjs, src/lib/retro.ts, test/plan-state-claims.test.ts]
   status: blocked
+  retirement: retired
   attempts: 0
   note: "RETIREMENT RECORD, 2026-08-09 — THIS SHARD IS SUPERSEDED, and it is retired because it was
     UNDISPATCHABLE AS FILED rather than because it was wrong or because the work is done. The work is

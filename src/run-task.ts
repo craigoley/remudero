@@ -11593,7 +11593,10 @@ async function runTask(
     // down, never re-derived: `taskRecordPath` is fail-soft (`undefined` on an unresolvable
     // record) and `workerVisibleRecordPath` (W1-T501) re-anchors it to the WORKER's own tree,
     // never the orchestrator's `planPath`.
-    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId));
+    // W1-T2920: `plan` (loaded a few lines above) already carries every task's `sourcePath`, so
+    // this is a `Map.get` rather than the walk-and-reparse-every-shard fallback — the cost this
+    // task exists to stop paying once per dispatch prompt.
+    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId, plan));
     // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
     // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as
     // "never a hardcoded literal". These were simply absent, so every recon ran on the SDK
@@ -20181,7 +20184,9 @@ export function defaultProofDebtCadenceInput(
         deps.resolveNameFilteredCandidates ?? ((rawName) => resolveNameFilteredCandidates(repoRoot, rawName)),
       pathExists: deps.pathExists ?? ((rel) => existsSync(join(repoRoot, rel))),
       shardPathFor: (taskId) => {
-        const resolved = taskRecordPath(planPath, taskId);
+        // W1-T2920: `plan` above is this SAME `planPath`, already loaded — pass it so this is a
+        // map lookup, not a re-parse of every shard per id this closure is called with.
+        const resolved = taskRecordPath(planPath, taskId, plan);
         return resolved === undefined ? undefined : relative(repoRoot, resolved);
       },
     };
@@ -36752,6 +36757,26 @@ interface CommandSpec {
   readonly detail: string;
 }
 
+export type HeavyVerbName = "review" | "dep-review" | "drain" | "daemon";
+
+/** Exported for test only: the whole point of this switch is that a verb's heavy module is loaded
+ *  ON DEMAND rather than at import, and "on demand" is a claim about which module each name pulls
+ *  in. Unexported it was unreachable, and diff-coverage named every arm. */
+export async function loadHeavyVerb(name: HeavyVerbName): Promise<void> {
+  switch (name) {
+    case "review":
+    case "dep-review":
+      await import("./lib/review.js");
+      return;
+    case "drain":
+      await import("./lib/drain.js");
+      return;
+    case "daemon":
+      await import("./lib/daemon.js");
+      return;
+  }
+}
+
 const COMMANDS: readonly CommandSpec[] = [
   {
     name: "run-task",
@@ -37805,7 +37830,9 @@ export async function main(
     console.log("\n" + JSON.stringify(result, null, 2));
     process.exit(result.merged ? 0 : 1);
   }
+  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
   if (cmd === "review" && arg) {
+    await loadHeavyVerb("review");
     process.exit(await reviewCommand(arg, rest.slice(1)));
   }
   // diff-cov: process-boundary — main() only translates mergeHoldCommand's tested return into
@@ -37813,7 +37840,9 @@ export async function main(
   if (cmd === "merge-hold") {
     process.exit(mergeHoldCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
   if (cmd === "dep-review" && arg) {
+    await loadHeavyVerb("dep-review");
     process.exit(await depReviewCommand(arg, rest.slice(1)));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await receiptCommand(arg, rest.slice(1))) cannot carry a DA hit without forking the process; receiptCommand's own logic — the unknown-arg refusal, the trailer resolution/refusal, and the buildReceipt print path — is unit-tested in test/receipt.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
@@ -37912,10 +37941,14 @@ export async function main(
       : decodeAutomatedRetroDecision(encodedAutomatedDecision);
     process.exit(await retroCommand(rest, automated ? { automated } : {}));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
   if (cmd === "drain") {
+    await loadHeavyVerb("drain");
     process.exit(await drainCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
   if (cmd === "daemon") {
+    await loadHeavyVerb("daemon");
     process.exit(await daemonCommand(rest));
   }
   if (cmd === "daemon-plist") {

@@ -36,4 +36,8 @@ if [ -f "$DIR/.nvmrc" ]; then
   unset RMD_EXPECTED_NODE RMD_ACTUAL_NODE
 fi
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "help" ]; then
+  exec node "$DIR/scripts/rmd-help.mjs"
+fi
+
 exec "$DIR/node_modules/.bin/tsx" "$DIR/src/run-task.ts" "$@"

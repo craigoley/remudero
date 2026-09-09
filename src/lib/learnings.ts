@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { citation } from "./provenance.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 import { EXTERNAL_SOURCE_CLASSES, type ExternalSourceClass } from "./untrusted-envelope.js";
 
 /**
@@ -281,10 +282,13 @@ export function entryLayer(entry: LearningEntry): Layer {
   return entry.layer ?? "project";
 }
 
-/** The project layer's home (P32/W1-T145): the repo-relative `learnings` directory. Named so it,
+/** The project layer's home (P32/W1-T145): resolved through {@link resolveRepoLayout} (W1-T2922)
+ *  rather than a bare `join(repoRoot, "learnings")` house literal, so a target carrying its own
+ *  layout override reads ITS learnings directory, not this repo's. House defaults reproduce
+ *  today's path exactly, so every existing caller is unaffected. Named so it,
  *  `userOverallLearningsHome` and `globalLearningsHome` (config.ts) read as one symmetric set. */
 export function projectLearningsHome(repoRoot: string): string {
-  return join(repoRoot, "learnings");
+  return resolveRepoLayout(repoRoot).learningsDir;
 }
 
 /** The five subsystem shards this repo's corpus is split into (W1-T33). `rmd onboard --phase
