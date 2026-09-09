@@ -2070,6 +2070,178 @@ export function censusSuiteMembershipFor(
   return censusSuiteMembership(changedPaths, srcFilteredCallers);
 }
 
+// ── W1-T3215: THE CALLER SWEEP MUST WALK PAST ONE HOP ──────────────────────────────────────────
+//
+// TRAP: CLAUDE.md's mandated sweep is `git grep -l <symbol>` over test/ — ONE hop from the changed
+// symbol to the suites naming it BY NAME. MEASURED 2026-09-08 on #4722: that sweep, run on a diff
+// changing only `prewarmBoardGithub`'s body, names four suites, all green. CI reddened a FIFTH,
+// test/serve-prewarm-clientgate.test.ts, which names ZERO occurrences of `prewarmBoardGithub` — it
+// drives `gatePrewarmOnClients`, the only src/ function that calls `prewarmBoardGithub`, and that
+// suite has 22 matches on THAT name. One more hop — symbol -> its in-file caller -> the suites
+// naming the caller — would have named it.
+//
+// INVARIANT — NEVER A GATE, same as {@link censusSuiteMembership} above: report-only, no `ok`,
+// nothing wireable into a refusal. And bounded to exactly the hop the measured failure needed:
+// MEASURED on this same #4722 diff, the one-hop sweep above finds 4 suites, this closure finds 6
+// (adding exactly `test/serve-prewarm-clientgate.test.ts` and `test/task-card.test.ts`, both
+// genuine `gatePrewarmOnClients` callers), and the whole-file fallback the task rationale rejects
+// finds 76 — so this stays two orders of magnitude under the fallback while still repairing the
+// miss. An UNBOUNDED walk (callers of callers of callers...) is that "reach most of the tree"
+// failure; this stops at exactly one hop past the changed symbol, which is the whole gap the
+// mandated sweep had.
+// Why: same class as CLAUDE.md hazard (j) — a suite the sweep is structurally blind to — one hop
+// further out than a census suite's zero-symbol blindness.
+
+/** One changed symbol and what this walk found for it: `callers` are the `src/` functions whose
+ *  body references the symbol — the hop the mandated `git grep -l <symbol>` sweep cannot take —
+ *  and `suites` unions the suites naming the symbol directly with the suites naming any of those
+ *  callers. `suites` is `[]` when the walk reaches nothing, never omitted. */
+export interface CallerReachableEntry {
+  readonly symbol: string;
+  readonly callers: readonly string[];
+  readonly suites: readonly string[];
+}
+
+/** Pure, non-blocking output: no `ok`, no verdict — a report a caller prints or runs, never a gate. */
+export interface CallerReachableSuitesReport {
+  readonly entries: readonly CallerReachableEntry[];
+  /** Every suite reached, across every changed symbol, deduplicated and sorted — the list a caller
+   *  actually runs. `[]` for an empty `changedSymbols` input: the empty set is never widened into
+   *  "every suite". */
+  readonly suites: readonly string[];
+}
+
+/** A `git grep` hit whose line is prose ABOUT the symbol — `{@link foo}` and its kin — never
+ *  counts as a call site: counting it re-admits a false caller. MEASURED: an interface field's own
+ *  doc comment, scanned back past the interface (which neither def regex below matches), misattributed
+ *  to an unrelated preceding top-level `const`. Filtering the comment line out removes the false
+ *  caller entirely rather than papering over it with a third def regex. */
+function isCommentLine(line: string): boolean {
+  const t = line.trimStart();
+  return t.startsWith("*") || t.startsWith("//") || t.startsWith("/*");
+}
+
+/** `\`, `.`, `*`, `+`, `?`, `(`, `)`, `[`, `]`, `{`, `}`, `|`, `^`, `$` all need escaping to embed
+ *  an arbitrary identifier inside a `RegExp` literally — a bare `$` (legal in a JS identifier) is
+ *  the one this repo actually hits, and unescaped it silently turns into an end-of-input anchor. */
+function escapeForRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** A hit line counts as a CALL only when the symbol is immediately followed by `(` (optional
+ *  whitespace between): `prewarmBoardGithub(github, refreshMs)` is a call, `prewarmBoardGithub's
+ *  body` and `{@link prewarmBoardGithub}` are prose ABOUT it. MEASURED: without this, a COMMANDS
+ *  registry `detail` string that merely NAMES a symbol in its own doc text — the same prose shape
+ *  `git grep -l <symbol>` itself would be blind to reading as a call — resolved to `COMMANDS` as a
+ *  false "caller" and pulled in every suite that ever mentions the command table, wiping out the
+ *  bound this closure exists to hold. `isCommentLine` above catches the doc-comment shape; this
+ *  catches the same prose landing inside an ordinary string literal instead. */
+function isCallSite(content: string, symbol: string): boolean {
+  return new RegExp(`\\b${escapeForRegExp(symbol)}\\s*\\(`).test(content);
+}
+
+/** The nearest UNINDENTED (module-top-level) function/const definition AT OR ABOVE `hitLine`
+ *  (1-based, `git grep -n`'s own numbering) — the enclosing declaration whose body the hit sits
+ *  inside, by this repo's own convention that only a top-level declaration starts in column 0. A
+ *  nested closure (indented, e.g. the `const warm = ...` inside `prewarmBoardGithub`) is never
+ *  mistaken for the owner, and the definition line itself resolves to its OWN name (the self-
+ *  reference {@link srcCallersOf} then excludes). */
+const TOP_LEVEL_FUNCTION_DEF = /^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/;
+const TOP_LEVEL_CONST_DEF = /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*[:=]/;
+
+function enclosingTopLevelSymbol(lines: readonly string[], hitLine: number): string | undefined {
+  for (let i = hitLine - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line === undefined) continue;
+    const m = TOP_LEVEL_FUNCTION_DEF.exec(line) ?? TOP_LEVEL_CONST_DEF.exec(line);
+    if (m) return m[1];
+  }
+  return undefined;
+}
+
+/** `git grep -l -w -F <symbol> -- test/` — the mandated one-hop sweep itself, factored out so
+ *  {@link callerReachableSuites} both replays it (hop 0) and re-runs it per discovered caller
+ *  (hop 1). A `git grep` matching nothing exits 1 — git's documented "no match" — and reads as no
+ *  suites, never thrown. */
+function suitesNamingSymbol(symbol: string, repoRoot: string, spawn: PreflightSpawn): string[] {
+  const res = spawn("git", ["grep", "-l", "-w", "-F", "--", symbol, "--", "test/"], { cwd: repoRoot });
+  return (res.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
+}
+
+/** THE ONE HOP THE MANDATED SWEEP DOES NOT TAKE: every `src/` function whose body CALLS `symbol`,
+ *  found by walking every `git grep -n -w -F` hit that is an actual call site
+ *  ({@link isCallSite}, never a comment mention — {@link isCommentLine}) back to its nearest
+ *  top-level owner, excluding the symbol's own definition (self-reference). ENUMERATED FROM THE
+ *  TREE, never a hand list: a caller added in the same commit is walked by the run that adds it,
+ *  with no registry to edit. */
+function srcCallersOf(
+  symbol: string,
+  repoRoot: string,
+  spawn: PreflightSpawn,
+  readFile: (path: string) => string,
+): string[] {
+  const res = spawn("git", ["grep", "-n", "-w", "-F", "--", symbol, "--", "src/"], { cwd: repoRoot });
+  const hits = (res.stdout ?? "").split("\n").filter(Boolean);
+  const byFile = new Map<string, number[]>();
+  for (const hit of hits) {
+    const m = /^(.+?):(\d+):(.*)$/.exec(hit);
+    if (!m) continue;
+    const [, file, lineStr, content] = m;
+    if (isCommentLine(content) || !isCallSite(content, symbol)) continue;
+    const lines = byFile.get(file) ?? [];
+    lines.push(Number(lineStr));
+    byFile.set(file, lines);
+  }
+  const callers = new Set<string>();
+  for (const [file, lineNums] of byFile) {
+    let text: string;
+    try {
+      text = readFile(file);
+    } catch {
+      continue; // unreadable: no owner can be attributed, same convention as discoverCensusCandidates
+    }
+    const lines = text.split("\n");
+    for (const lineNum of lineNums) {
+      const owner = enclosingTopLevelSymbol(lines, lineNum);
+      if (owner && owner !== symbol) callers.add(owner);
+    }
+  }
+  return [...callers].sort();
+}
+
+/**
+ * W1-T3215 — THE SECOND HOP, BESIDE ITS FIRST. {@link censusSuiteMembership} above answers "which
+ * population-walking suite does this diff join" for a suite the mandated `git grep -l <symbol>`
+ * sweep cannot see because it names NO symbol at all; this answers the other half of the same gap
+ * — a suite that names a symbol perfectly well, just not the CHANGED one, because it drives the
+ * changed symbol's caller instead. An empty `changedSymbols` walks nothing (no `spawn` call at
+ * all) and returns nothing, so the empty set is never widened into "every suite".
+ *
+ * PURE CONTRACT identical to {@link censusSuiteMembershipFor}: `spawn`/`readFile` injected, no
+ * other I/O, `ok`-free, never wireable into a refusal.
+ */
+export function callerReachableSuites(
+  changedSymbols: readonly string[],
+  repoRoot: string,
+  spawn: PreflightSpawn,
+  readFile: (path: string) => string = (path) => readFileSync(join(repoRoot, path), "utf8"),
+): CallerReachableSuitesReport {
+  const entries: CallerReachableEntry[] = [];
+  const allSuites = new Set<string>();
+  for (const symbol of changedSymbols) {
+    const directSuites = suitesNamingSymbol(symbol, repoRoot, spawn);
+    const callers = srcCallersOf(symbol, repoRoot, spawn, readFile);
+    const suites = new Set(directSuites);
+    for (const caller of callers) {
+      for (const s of suitesNamingSymbol(caller, repoRoot, spawn)) suites.add(s);
+    }
+    const sorted = [...suites].sort();
+    entries.push({ symbol, callers, suites: sorted });
+    for (const s of sorted) allSuites.add(s);
+  }
+  return { entries, suites: [...allSuites].sort() };
+}
+
 /** The `package.json` "scripts" key set, so a renamed script is told apart from a failing one (design vi). */
 function fastGateScriptNames(repoRoot: string, packageJsonText?: string): Set<string> {
   const text = packageJsonText ?? readFileSync(join(repoRoot, "package.json"), "utf8");

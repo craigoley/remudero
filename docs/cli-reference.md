@@ -34,6 +34,7 @@ usage:
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
   rmd census-membership [--base <ref>] [--files]   # Name the population-walking census suites this diff enters.
+  rmd caller-sweep <symbol> [<symbol>...] [--files]   # Name the suites reachable from a changed symbol, including through its src/ callers.
   rmd ci-learning [--days N] [--force]   # Draft a marked, parked shard for each repaired CI failure in the window.
   rmd rule-efficacy [--no-escalate]   # Report each rule's post-citation repeat-incident rate over the ledger union.
   rmd coverage-improve [--lcov <path> | --from-ci]   # File one feedback entry ranking src/ files by uncovered branches (85-90% band).
@@ -291,6 +292,16 @@ rmd census-membership [--base <ref>] [--files]
 ```
 
 W1-T2969: the answer censusSuiteMembership (W1-T2523) has always been able to give and nothing could ask for. A census suite WALKS a population and asserts a property of the whole set, so it names none of a caller's symbols and `git grep -l <symbol>` — the caller sweep this repo mandates before a PR — is structurally blind to it. MEASURED 2026-09-06: four CI failures across #4283 and #4290 were census baselines, and a correctly-run symbol sweep found none of them. Models both halves: the fast-gate census members, DERIVED from CENSUS_ADMITTED_MEMBERS, and the registry-shaped suites (the COMMANDS name list, the policy key set, the source-text-read ratchet) that are not fast-gate members and must not become them. A suite the model cannot place is NAMED as unmodelled rather than dropped, so 'joins nothing' is never confused with 'the model does not know'. REPORT-ONLY: runs no suite, gates nothing, exits 0 whatever it finds. `--files` emits the same membership as the bare TEST FILE PATHS on stdout, one per line, so a caller can run them without carrying a second copy of the table; incompleteness (an unmodelled or unmappable suite) is named on stderr, never folded into the list, because a caller that cannot tell a partial enumeration from a complete one reads its own subset pass as covering the whole set.
+
+### `rmd caller-sweep`
+
+Name the suites reachable from a changed symbol, including through its src/ callers.
+
+```
+rmd caller-sweep <symbol> [<symbol>...] [--files]
+```
+
+W1-T3215: the SECOND hop `census-membership` above does not take. `git grep -l <symbol>` — the mandated sweep — finds every suite naming a changed symbol directly and is structurally blind to a suite that instead drives the symbol's IN-FILE CALLER. MEASURED on #4722: a diff changing only prewarmBoardGithub's body named four suites by the mandated sweep, all green, while CI reddened a fifth, test/serve-prewarm-clientgate.test.ts — zero prewarmBoardGithub hits, 22 hits on gatePrewarmOnClients, the only src/ function calling it. `callerReachableSuites` walks src/ at run time for every caller of each named symbol (never a hand list — a caller added in the same commit is walked by the run that adds it) and unions in the suites naming those callers too. An empty symbol list is refused as a usage error, never run as 'every suite'. REPORT-ONLY: names suites, runs none, gates nothing, exits 0 whatever it finds. `--files` emits the same union as bare TEST FILE PATHS on stdout, one per line.
 
 ### `rmd ci-learning`
 
