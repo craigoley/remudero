@@ -50,6 +50,24 @@ export interface ConflictFileDiff {
 }
 
 /**
+ * A deterministic redundant-refix resolution result. This is deliberately evidence, not intent:
+ * producers may set it only after resolving the conflict paths toward the target branch and
+ * comparing the resulting bytes. Commit subjects, task ids and similarity never satisfy it.
+ */
+export interface RedundantRefixEvidence {
+  /** The discriminator that makes a later reader refuse prose/semantic lookalikes. */
+  compared: "bytes";
+  /** The byte-resolution result. Only `"main-byte-identical"` admits the conflict. */
+  verdict: "main-byte-identical" | "different-from-main" | "non-conflicting-files-failed";
+  /** Conflicting paths whose resolved bytes were compared against the target branch. */
+  comparedPaths: string[];
+  /** Paths whose resolved bytes differed from the target branch, when that was the reason. */
+  differingPaths?: string[];
+  /** Non-conflicting branch paths that failed to apply after the conflict paths took main. */
+  failedApplyPaths?: string[];
+}
+
+/**
  * The merge-conflict fix mode's ONLY input (W1-T94's mode table gains
  * merge-conflict, design note iii): the conflicting file list plus BOTH
  * sides' log since the merge-base, so the dispatched fix worker can perform
@@ -63,4 +81,6 @@ export interface MergeConflictEvidence {
   oursLog: string;
   /** `git log <merge-base>..origin/main`, the same shape for the target side. */
   theirsLog: string;
+  /** Optional byte-resolution evidence for a redundant re-fix conflict. */
+  redundantRefix?: RedundantRefixEvidence;
 }

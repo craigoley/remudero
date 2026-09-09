@@ -11,7 +11,7 @@
  * — 7-21 core a pass, from the budget that was never exhausted (docs/forensics/open-prs-rest.md).
  */
 
-import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
+import type { ConflictFileDiff, MergeConflictEvidence, MergeState, RedundantRefixEvidence } from "./merge-state.js";
 import type { WorkflowRunObservation } from "./workflow-run.js";
 // W1-T2384: from the LEAF, never from sweep.js. dependency-cruiser reads a type-only import as
 // a dependency (MEASURED: importing this off sweep.js took it 13 -> 24 warnings), and sweep.ts
@@ -788,6 +788,18 @@ interface RestCompareResponse {
   commits?: RestCompareCommit[];
 }
 
+/** One repository content response. Directories/arrays are refused by shape. */
+interface RestContentResponse {
+  content?: string;
+  encoding?: string;
+}
+
+/** The contents endpoint argv for one path at one ref, preserving path separators. */
+export function contentRestArgs(owner: string, repo: string, path: string, ref: string): string[] {
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  return ["api", `repos/${owner}/${repo}/contents/${encodedPath}?ref=${encodeURIComponent(ref)}`];
+}
+
 /**
  * `git log <since>..<until>`'s one-line-per-commit shape ({@link MergeConflictEvidence.oursLog}'s
  * own doc), built from a compare response's `commits[]` rather than shelling to git — REST already
@@ -795,6 +807,42 @@ interface RestCompareResponse {
  */
 function logFromCompareCommits(commits: RestCompareCommit[] | undefined): string {
   return (commits ?? []).map((c) => `${(c.sha ?? "").slice(0, 7)} ${(c.commit?.message ?? "").split("\n")[0]}`).join("\n");
+}
+
+function contentBytes(owner: string, repo: string, path: string, ref: string, fetch: GhApiFetcher): Buffer {
+  const raw = fetch(contentRestArgs(owner, repo, path, ref)) as RestContentResponse;
+  if (raw.encoding !== "base64" || typeof raw.content !== "string") {
+    throw new Error(`content response for ${path}@${ref} was not a base64 file`);
+  }
+  return Buffer.from(raw.content.replace(/\s/g, ""), "base64");
+}
+
+const REDUNDANT_REFIX_COMPARE_PATH_CAP = 25;
+
+function redundantRefixEvidence(
+  owner: string,
+  repo: string,
+  targetBranch: string,
+  headRefOid: string,
+  files: readonly ConflictFileDiff[],
+  fetch: GhApiFetcher,
+): RedundantRefixEvidence | undefined {
+  if (files.length === 0 || files.length > REDUNDANT_REFIX_COMPARE_PATH_CAP) return undefined;
+  try {
+    const comparedPaths: string[] = [];
+    const differingPaths: string[] = [];
+    for (const file of files) {
+      const target = contentBytes(owner, repo, file.path, targetBranch, fetch);
+      const head = contentBytes(owner, repo, file.path, headRefOid, fetch);
+      comparedPaths.push(file.path);
+      if (!target.equals(head)) differingPaths.push(file.path);
+    }
+    return differingPaths.length === 0
+      ? { compared: "bytes", verdict: "main-byte-identical", comparedPaths }
+      : { compared: "bytes", verdict: "different-from-main", comparedPaths, differingPaths };
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -829,6 +877,7 @@ export function fetchMergeConflictEvidence(
     files,
     oursLog: logFromCompareCommits(ours.commits),
     theirsLog: logFromCompareCommits(theirs.commits),
+    redundantRefix: redundantRefixEvidence(owner, repo, targetBranch, headRefOid, files, fetch),
   };
 }
 

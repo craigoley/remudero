@@ -509,12 +509,24 @@ export function renderFixPrompt(opts: {
     // differently-worded control.
     const mc = opts.evidence.mergeConflict;
     const files = mc?.files ?? [];
+    const redundant = mc?.redundantRefix?.verdict === "main-byte-identical" ? mc.redundantRefix : undefined;
     const fileList =
       files.length > 0
         ? files
             .map((f) => `- ${neutralizeFenceMarkers(f.path)} (ours -${f.oursDeleted} line(s), theirs -${f.theirsDeleted} line(s) since merge-base)`)
             .join("\n")
         : "(no conflicting file detail was captured — re-check the PR's mergeability for the current state.)";
+    const redundantBlock =
+      redundant === undefined
+        ? []
+        : [
+            "",
+            `REDUNDANT RE-FIX EVIDENCE: the sweep already resolved the conflicting path(s) toward`,
+            `origin/main and compared BYTES. For ${redundant.comparedPaths.map(neutralizeFenceMarkers).join(", ")},`,
+            `that result is byte-identical to main and the branch's non-conflicting files apply cleanly.`,
+            `Resolve those conflicting path(s) by taking origin/main's version. Do not union those hunk(s),`,
+            `and do not preserve the branch side there: main already landed that fix.`,
+          ];
     return [
       header,
       ...constraintBlock,
@@ -530,6 +542,7 @@ export function renderFixPrompt(opts: {
       `DELETED something in a conflicting file, or the conflict is SEMANTIC rather than a safe`,
       `textual union, REFUSE to resolve it yourself and escalate instead — a wrong auto-resolution`,
       `is worse than a strand.`,
+      ...redundantBlock,
       "",
       `REGENERABLE ARTIFACTS ARE THE EXCEPTION, AND THE UNION IS ALWAYS WRONG FOR THEM. If a`,
       `conflicting file is one a TOOL rewrites from the tree — a size or coverage ledger, a lockfile,`,
