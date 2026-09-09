@@ -598,13 +598,15 @@ const SUITE_ROOTS = [
 const TEST_PATH_EXACT_RE = /^(?:test|apps\/dashboard\/src)\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
 
 /** A body SHAPED like a test-file path, whatever its root — used only to tell "undeclared root"
- *  (REFUSE) from "bare title" (name-filtered). Without it `src/foo.test.ts` reaches the title arm
- *  and matches nothing: the silent zero W1-T3073 removed for `::`. */
+ *  (REFUSE) from "bare title" (name-filtered). Structurally total for this classifier: matching
+ *  means path-shaped, nonmatching means the owning parser must handle it as some other form.
+ *  Without it `src/foo.test.ts` reaches the title arm and matches nothing: the silent zero W1-T3073
+ *  removed for `::`. */
+const TEST_PATH_SHAPED_RE = /^[\w./-]+\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
+
 /** The dashboard's Vitest config, named ONCE. W1-T3177 ships it; until then a dashboard proof
  *  resolves and its file does not exist, which is the forward-reference the carve-out handles. */
 const DASHBOARD_VITEST_CONFIG = "apps/dashboard/vite.config.ts";
-
-const TEST_PATH_SHAPED_RE = /^[\w./-]+\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
 
 /** The suite root a declared path sits under, or `undefined` when it sits under none. */
 function suiteRootFor(path: string): (typeof SUITE_ROOTS)[number] | undefined {
