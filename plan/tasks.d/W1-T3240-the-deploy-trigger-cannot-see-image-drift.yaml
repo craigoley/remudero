@@ -1,0 +1,69 @@
+- id: W1-T3240
+  title: "THE DEPLOY TRIGGER COMPARES THREE SHAS AND NONE OF THEM IS THE IMAGE'S — so a merged fix to a BAKED path builds successfully, publishes, and never reaches the host, while every signal the supervisor reads says `up-to-date`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: high
+  origin: "operator-session#the-core-bare-repair-merged-built-and-never-shipped-2026-09-09"
+  plan_refs: ["W1-T496", "W1-T3200", "W1-T2856"]
+  files: [src/lib/deployer.ts, test/the-deploy-trigger-sees-image-drift.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09, ON THE LIVE FLEET HOST. `#4785` repaired `deploy/entrypoint.sh` so a
+    `core.bare=true` flag written into the state checkout can no longer stop the fleet — the exact
+    condition that took the fleet down for 7h32m that morning, with 97 revival records, 88 of them
+    `prev_exit=1`. It merged at c4bf56026. `acr-build.yml` fired ON THAT PUSH and SUCCEEDED at
+    11:14. `/etc/rmd-build-sha` in the running container reads **c6baa842**, the 2026-09-06 build.
+    The repair is merged, built, published — AND NOT RUNNING. The image is exactly ONE baked-path
+    commit behind, and that commit is the fix for the outage.
+
+    NOTHING IS BROKEN UPSTREAM, WHICH IS WHY THIS SURVIVED. The build trigger works: `acr-build.yml`
+    fires on a main push touching `deploy/Dockerfile` or `deploy/entrypoint.sh`, and its own header
+    says why that trigger exists — "the rare Dockerfile/entrypoint merge cannot silently wait for a
+    human to notice image drift". It also says, in capitals, "THIS BUILDS. IT DEPLOYS NOTHING."
+    Publishing was always the deliberate end of that workflow's job.
+
+    THE SUPERVISOR CANNOT SEE THE GAP, AND THAT IS THE DEFECT. `decideDeployTrigger`
+    (src/lib/deployer.ts) reasons over exactly three quantities: `installHead` (the bind-mounted
+    checkout), `originMain`, and `runningHead` (the daemon's boot sha). `behind` compares the first
+    two; `runningStale` compares the third against the first. THE IMAGE IS A FOURTH QUANTITY AND
+    APPEARS IN NEITHER. The checkout is kept current by `ensureInstallFresh`, so `installHead ==
+    originMain`; the daemon boots off that same mount, so `runningHead == installHead`. Both
+    comparisons read healthy AND ARE CORRECT — they are simply not about the image.
+
+    THE VALUE IT NEEDS ALREADY EXISTS AND IS ALREADY PUBLISHED. W1-T496 added `image_build_sha` to
+    `scripts/fleet-heartbeat.sh`, read via `docker exec <container> cat /etc/rmd-build-sha`,
+    EXPLICITLY so the baked-vs-mounted boundary is checkable from the beat without shelling into
+    the host. The heartbeat publishes it. `decideDeployTrigger` does not read it. This is the third
+    mechanism-with-no-reader found in one session, after the revival log's `prev_exit` (W1-T3233)
+    and lint-plan's credit projection (W1-T3235).
+
+    THE COMPARISON IS ONE LINE OF GIT AND NEEDS NO NEW DATA. Image drift is
+    `git rev-list --count <image_build_sha>..origin/main -- deploy/Dockerfile deploy/entrypoint.sh`
+    — the number of BAKED-PATH commits the running image predates. MEASURED today: exactly 1. It is
+    NOT `installHead != image_build_sha`, which would fire on every mounted-source merge — tens a
+    day — and train an operator to ignore it. Only a baked-path commit can make an image stale.
+
+    IT MUST DEGRADE, NOT GUESS. `image_build_sha` is unavailable whenever the container is down or
+    `docker exec` fails — which includes the crash-loop case this whole class of fix exists for. An
+    unreadable image sha must read as UNKNOWN and leave today's three-way decision exactly as it is
+    now, never as "stale" (a restart storm against a host that may be fine) and never as "current"
+    (the silence being fixed). The heartbeat already models this: it records a
+    `IMAGE_BUILD_SHA_SOURCE` naming why the read failed rather than blanking the field.
+
+    SCOPE, STATED. This makes the supervisor SEE the drift and say so. Whether it then deploys is
+    the existing `markerPresent`/`autoMode` gate's decision, unchanged — an operator who has not
+    opted into auto mode still gets "run rmd deploy", now with a reason that names the image
+    instead of claiming up-to-date.
+
+  acceptance:
+    - claim: "an image predating a baked-path commit is reported stale even when the checkout and the daemon's boot sha are both current"
+      proof: "unit test: W1-T3240: a stale image is seen when install and running heads are both current"
+    - claim: "a mounted-source merge does NOT make the image stale, so the signal cannot fire tens of times a day"
+      proof: "unit test: W1-T3240: a mounted-source commit leaves the image current"
+    - claim: "an unreadable image sha reads UNKNOWN and leaves the existing decision byte-identical, never stale and never current"
+      proof: "unit test: W1-T3240: an unreadable image sha changes no decision"
