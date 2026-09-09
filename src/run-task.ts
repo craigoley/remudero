@@ -13793,6 +13793,10 @@ interface ReviewCommandDeps {
   fetchHead?: (repoDir: string, prNumber: number) => void;
   /** Operator CLI remains deterministic; only internal unattended callers opt in. */
   executionMode?: "deterministic" | "semantic";
+  /** W1-T3115: the sweep already proved this from GitHub's complete material file list. Carry
+   *  that fact across the process boundary instead of making reviewCommand reclassify with the
+   *  narrower emitter-ledger evidence available here. Undefined preserves the operator CLI. */
+  planOnlyFiling?: boolean;
 }
 
 // reviewPrNumber / reviewViewArgs moved to src/lib/report-commands.ts (W1-T2888) — imported/
@@ -13952,6 +13956,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     postReviewPending: postReviewPendingDep,
     fetchHead,
     executionMode,
+    planOnlyFiling,
   } = {
     fetchView: ghJson,
     loadConfig,
@@ -13993,7 +13998,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
-  const taskId = resolveReviewTaskId(body, view.headRefName, isPlanOnlyFilingPr(reviewLedger, view.url));
+  const taskId = resolveReviewTaskId(
+    body,
+    view.headRefName,
+    planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
+  );
   // W1-T322: the same plan lookup this block already does for `criteria` also carries the
   // task's declared scope — an advisory-only input judgeReview needs. Stays `undefined` on ANY
   // read/parse failure (see the catch below), exactly like `criteria` degrading to the body's
@@ -28960,7 +28969,13 @@ export function buildSweepEffects(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   // W1-T254: injectable review runner so the post-review effect's attempt/
   // done/failed logging path is unit-covered without spawning a real review.
-  reviewRunner: (prNumber: number) => Promise<number> = (prNumber) => reviewCommand(String(prNumber), ["--repo", repo], { executionMode: "semantic" }),
+  /* c8 ignore next 5 -- the injected recorder below proves the handoff; these lines are the
+   * irreducible production binding to reviewCommand, whose own semantic path is tested directly. */
+  reviewRunner: (prNumber: number, isPlanFiling?: boolean) => Promise<number> = (prNumber, isPlanFiling) =>
+    reviewCommand(String(prNumber), ["--repo", repo], {
+      executionMode: "semantic",
+      planOnlyFiling: isPlanFiling,
+    }),
   // Injectable worker spawn, same shape and rationale as `reviewRunner` directly above: the
   // fix rung's own effects (including its best-effort push) were unreachable from any offline
   // test because the adapter below hardcoded `spawnWorker`. Optional with no default body, so
@@ -29313,7 +29328,7 @@ export function buildSweepEffects(
     postReview: async (pr) => {
       log("sweep.post_review.attempt", { pr_number: pr.prNumber, head_sha: pr.headSha });
       try {
-        const exit = await reviewRunner(pr.prNumber);
+        const exit = await reviewRunner(pr.prNumber, pr.isPlanFiling);
         log("sweep.post_review.done", { pr_number: pr.prNumber, head_sha: pr.headSha, exit });
       } catch (e) {
         log("sweep.post_review.failed", {
