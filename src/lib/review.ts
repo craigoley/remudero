@@ -1098,10 +1098,6 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
 
 /** `npm ci` a fresh checkout ONCE before its first test proof, since fresh worktrees have no node_modules.
  *  Best-effort: a failed install surfaces as the test command's own exec_error, never a false pass. */
-// diff-cov: process-boundary — the irreducible `npm ci`. A unit test cannot install a dependency
-// tree; every decision about WHETHER to reach it (the primed set, the package.json/node_modules
-// probes) sits above this line and is covered, and the bound itself is asserted against a real
-// child in test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts.
 function ensureDeps(cwd: string): void {
   if (npmCiPrimed.has(cwd)) return;
   npmCiPrimed.add(cwd); // mark attempted regardless of outcome — never retry-storm a cwd
