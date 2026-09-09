@@ -174,8 +174,10 @@ test("the update-branch REST call carries an expected head sha lease", () => {
 test("distance refresh ledger rows name the commit distance for updated and declined outcomes", async () => {
   const updated = pr({ prNumber: 4807, headSha: "updated-head" });
   const conflicted = pr({ prNumber: 4808, headSha: "conflicted-head" });
+  const errored = pr({ prNumber: 4811, headSha: "errored-head" });
   const updatedRows: Array<Record<string, unknown>> = [];
   const conflictedRows: Array<Record<string, unknown>> = [];
+  const erroredRows: Array<Record<string, unknown>> = [];
 
   await runSweep(
     [updated],
@@ -195,13 +197,28 @@ test("distance refresh ledger rows name the commit distance for updated and decl
     }),
     POLICY,
   );
+  await runSweep(
+    [errored],
+    deps({
+      behindMainByPr: new Map([[4811, 52]]),
+      appendLine: (_path, row) => erroredRows.push(row),
+      updateBranch: () => {
+        throw new Error("branch update unavailable");
+      },
+    }),
+    POLICY,
+  );
 
   const updatedOutcome = updatedRows.find((row) => row.step === "sweep.update_branch.updated");
   const declinedOutcome = conflictedRows.find((row) => row.step === "sweep.update_branch.conflict");
+  const errorOutcome = erroredRows.find((row) => row.step === "sweep.update_branch.error");
   assert.equal(updatedOutcome?.behind_by, 12);
   assert.equal(updatedOutcome?.update_reason, "distance");
   assert.equal(declinedOutcome?.behind_by, 51);
   assert.equal(declinedOutcome?.update_reason, "distance");
+  assert.equal(errorOutcome?.behind_by, 52);
+  assert.equal(errorOutcome?.update_reason, "distance");
+  assert.equal(errorOutcome?.error, "branch update unavailable");
 });
 
 test("the production distance reader reports main's ahead_by count for behind PRs only", () => {
