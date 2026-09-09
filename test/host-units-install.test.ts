@@ -127,3 +127,93 @@ test("W1-T2877: an unresolvable host value is refused rather than guessed", () =
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ── W1-T3233: the revival log's reader ───────────────────────────────────────────────────────
+//
+// `render_launcher` has appended prev_status/prev_exit/prev_restarts since W1-T2877, and nothing
+// read it back. MEASURED 2026-09-09: a core.bare flag in the state checkout made entrypoint.sh
+// exit 1, and the five-minute watchdog revived the container into the identical death ~90 times
+// across 7h32m of total fleet downtime. docker's --restart=on-failure:5 could not bound it,
+// because recreating the container RESETS RestartCount — the very fact the record exists to make
+// visible.
+//
+// These cases drive the RENDERED launcher's `--check-crash-loop` mode against fixture logs, so the
+// awk that reads the format runs for real — a source-text assertion would pass on an awk that
+// matches nothing. The threshold and the revive-anyway guarantee are asserted on the rendered text
+// beside them, because those two are what make this a notice rather than a bound that gives up.
+
+/** Install into `root` and return the rendered launcher's path. */
+function installedLauncher(root: string): string {
+  assert.equal(run(["--install"], {}, root).status, 0);
+  return join(root, "rmd-relaunch.sh");
+}
+
+/** Run the rendered launcher's read-only crash-loop probe over a fixture log. */
+function checkCrashLoop(launcher: string, logLines: readonly string[], root: string): string {
+  const logPath = join(root, "fixture-revivals.log");
+  writeFileSync(logPath, logLines.join("\n") + (logLines.length > 0 ? "\n" : ""));
+  const r = spawnSync("bash", [launcher, "--check-crash-loop", logPath], { encoding: "utf8" });
+  assert.equal(r.status, 0, `probe failed: ${r.stderr}`);
+  return r.stdout.trim();
+}
+
+const revive = (exit: string) => `2026-09-09T02:00:00Z revive boot=0 prev_status=exited prev_exit=${exit} prev_restarts=0`;
+
+test("W1-T3233: a repeated identical exit is reported with its code and count", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-loop-"));
+  try {
+    const launcher = installedLauncher(root);
+
+    // Five in a row is the shipped threshold — ~25 minutes at the five-minute timer cadence.
+    assert.equal(checkCrashLoop(launcher, Array(5).fill(revive("1")), root), "5 1");
+    // The count is the TRAILING run, not the total: an earlier, different death does not dilute it.
+    assert.equal(checkCrashLoop(launcher, [revive("75"), ...Array(6).fill(revive("1"))], root), "6 1");
+    // And the exit code is carried through verbatim, not normalised to a boolean.
+    assert.equal(checkCrashLoop(launcher, Array(7).fill(revive("75")), root), "7 75");
+
+    // The threshold and the announce-don't-refuse guarantee survive rendering. The second is the
+    // one that matters: a watchdog that gives up on a fleet that would have recovered is strictly
+    // worse than ~90 wasted revivals.
+    const text = readFileSync(launcher, "utf8");
+    assert.match(text, /CRASH_LOOP_RUN=5/, "the threshold must survive rendering");
+    assert.match(text, /Reviving anyway; this needs a human/, "the notice must say it did not stop");
+    assert.match(text, /never refuses to revive/, "the design constraint must survive rendering");
+    // The count is taken AFTER the guards that outrank it, so none of their precedence changes.
+    assert.ok(
+      text.indexOf("state/STOP present") < text.indexOf("CRASH_LOOP_SIG="),
+      "the STOP refusal must still outrank this",
+    );
+    assert.ok(
+      text.indexOf("already running -- nothing to do") < text.indexOf("CRASH_LOOP_SIG="),
+      "idempotence must still outrank this",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3233: a zero exit and a varied history report nothing", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-quiet-"));
+  try {
+    const launcher = installedLauncher(root);
+
+    // A run of ZEROS is an operator stopping and starting a healthy fleet. --restart=on-failure:5
+    // is documented as deliberate precisely so exit 0 is never undone; counting it would fire the
+    // notice on the one condition that is definitely fine.
+    assert.equal(checkCrashLoop(launcher, Array(20).fill(revive("0")), root), "");
+
+    // A VARIED history is a host having different problems, not one problem repeating.
+    assert.equal(checkCrashLoop(launcher, [revive("1"), revive("75"), revive("1"), revive("76")], root), "1 76");
+
+    // An empty log, and a log whose newest entries are zeros after a real loop, both report a
+    // trailing run only — the signal is "dying the same way RIGHT NOW", not "ever did".
+    assert.equal(checkCrashLoop(launcher, [], root), "");
+    assert.equal(checkCrashLoop(launcher, [...Array(9).fill(revive("1")), revive("0")], root), "");
+
+    // `none` is what docker inspect prints for a container that does not exist — a first boot, not
+    // a crash. It must not be counted as a repeating exit code.
+    assert.equal(checkCrashLoop(launcher, Array(8).fill(revive("none")), root), "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

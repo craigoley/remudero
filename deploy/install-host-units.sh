@@ -93,6 +93,38 @@ REVIVAL_LOG=${REVIVAL_LOG}
 BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
 
+# W1-T3233 — THE REVIVAL LOG'S READER. The record below has been written since W1-T2877 and read by
+# nothing. On 2026-09-09 a core.bare flag in the state checkout made entrypoint.sh exit 1, and this
+# five-minute timer revived the container into the identical death ~90 times across 7h32m of total
+# fleet downtime. docker's own --restart=on-failure:5 could not bound it, because recreating the
+# container RESETS RestartCount -- the very fact the record exists to make visible.
+#
+# COUNTS AND ANNOUNCES: it never refuses to revive. The ninety revivals were wasted, not wrong: the
+# same watchdog is what recovers a host from a transient, and a bound that gives up is strictly
+# worse than the problem. Exit 0 is excluded because --restart=on-failure:5 is deliberate so a
+# clean STOP is never undone -- a run of zeros is an operator stopping a healthy fleet.
+CRASH_LOOP_RUN=5
+
+# Prints "<count> <exit>" for the trailing run of identical NON-ZERO prev_exit values in \$1, or
+# nothing when there is no such run. Reads the log this same script appends to, so the format has
+# exactly one definition.
+crash_loop_signature() {
+  awk '
+    match(\$0, /prev_exit=[^ ]+/) {
+      e = substr(\$0, RSTART + 10, RLENGTH - 10)
+      if (e == last) { n += 1 } else { last = e; n = 1 }
+    }
+    END { if (last != "" && last != "0" && last != "none") print n, last }
+  ' "\$1" 2>/dev/null
+}
+
+# `--check-crash-loop <log>` prints the signature and exits, touching nothing else. It exists so the
+# suite can exercise this logic against a fixture without docker, a state root or a real host.
+if [ "\${1:-}" = "--check-crash-loop" ]; then
+  crash_loop_signature "\${2:-\$REVIVAL_LOG}"
+  exit 0
+fi
+
 # THE STOP LEVER OUTRANKS THIS SCRIPT, INCLUDING AT BOOT AND FROM THE WATCHDOG.
 if [ -e "\$STATE_DIR/state/STOP" ]; then
   echo "rmd-relaunch: state/STOP present -- refusing to start. rm it to resume."
@@ -123,6 +155,21 @@ printf '%s revive boot=%s prev_status=%s prev_exit=%s prev_restarts=%s\n' \\
   "\$(docker inspect remudero-daemon --format '{{.State.ExitCode}}' 2>/dev/null || echo none)" \\
   "\$(docker inspect remudero-daemon --format '{{.RestartCount}}' 2>/dev/null || echo none)" \\
   >> "\$REVIVAL_LOG" 2>/dev/null || true
+
+# THE COUNT IS TAKEN AFTER the STOP refusal, the idempotence check and the mount checks, so none of
+# their precedence changes. It writes a marker and a log line; the revive below happens regardless.
+CRASH_LOOP_SIG="\$(crash_loop_signature "\$REVIVAL_LOG")"
+CRASH_LOOP_N="\${CRASH_LOOP_SIG%% *}"
+if [ -n "\$CRASH_LOOP_SIG" ] && [ "\$CRASH_LOOP_N" -ge "\$CRASH_LOOP_RUN" ] 2>/dev/null; then
+  CRASH_LOOP_EXIT="\${CRASH_LOOP_SIG##* }"
+  echo "rmd-relaunch: CRASH LOOP -- \$CRASH_LOOP_N consecutive revivals from exit \$CRASH_LOOP_EXIT. Reviving anyway; this needs a human." >&2
+  printf '%s crash-loop count=%s exit=%s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$CRASH_LOOP_N" "\$CRASH_LOOP_EXIT" \\
+    >> "\$REVIVAL_LOG" 2>/dev/null || true
+  printf '%s %s consecutive revivals from exit %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$CRASH_LOOP_N" "\$CRASH_LOOP_EXIT" \\
+    > "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+else
+  rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+fi
 
 docker rm -f remudero-daemon >/dev/null 2>&1 || true
 
