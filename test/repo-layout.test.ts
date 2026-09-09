@@ -190,8 +190,15 @@ const HOUSE_LITERALS = ["plan/tasks.d", "MASTER-PLAN.md", ".remudero/", "learnin
  * it through {@link resolveRepoLayout}, pushes a count past its own literal here and this test
  * reddens — the ratchet the task record calls for.
  */
+//
+// RE-FROZEN ONCE, AND ONLY WHERE MAIN MOVED. `plan/tasks.d` went 23 -> 24 while this branch was
+// open, and the growth is not this diff's: MEASURED on origin/main ALONE the count is already 24,
+// and on the merged branch it is also 24 — this PR adds no site. The ceiling is re-frozen at the
+// inherited number rather than the branch being blamed for it, which is the same distinction
+// comment-load-ratchet draws in as many words ("already carried N at the merge base — inherited,
+// not this diff's growth"). The ratchet keeps its direction: a 25th site still reddens.
 const HOUSE_LITERAL_CEILING: Record<(typeof HOUSE_LITERALS)[number], number> = {
-  "plan/tasks.d": 23,
+  "plan/tasks.d": 24,
   "MASTER-PLAN.md": 19,
   ".remudero/": 18,
   "learnings/": 16,
