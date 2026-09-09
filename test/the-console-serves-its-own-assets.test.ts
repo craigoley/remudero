@@ -139,6 +139,29 @@ test("W1-T3175: a DECLARED client route returns the shell, and a MISSING asset 4
   });
 });
 
+test("W1-T3175: a declared client route with no built shell is refused as absent, not silently served", async () => {
+  await withTree(({ root }) => {
+    // A broken or half-finished build: the route IS declared, but index.html itself is gone. The
+    // fallback must still answer `absent`, never invent a shell body it cannot read.
+    rmSync(join(root, "index.html"));
+    const r = resolveStaticRequest(mountFor(root), "/console/tasks");
+    assert.equal(r?.kind, "refused", "a declared route with no shell on disk is refused");
+    assert.equal(r!.kind === "refused" ? r.reason : "", "absent");
+  });
+});
+
+test("W1-T3175: a malformed percent-escape is refused, never decoded as a literal filename", async () => {
+  await withTree(({ root }) => {
+    // decodeURIComponent THROWS on a truncated or invalid escape (`%zz`, a lone `%`) — the catch
+    // must turn that into a refusal, not let the raw, still-encoded string reach the filesystem.
+    for (const path of ["/console/%zz", "/console/%", "/console/assets/%E0%80"]) {
+      const r = resolveStaticRequest(mountFor(root), path);
+      assert.equal(r?.kind, "refused", `${path} must be refused`);
+      assert.equal(r!.kind === "refused" ? r.reason : "", "escapes_root", `${path} must not reach the filesystem`);
+    }
+  });
+});
+
 test("W1-T3175: the asset route requires the SAME read scope as the shell — through the real dispatch", async () => {
   await withTree(async ({ root }) => {
     // Driven through createService itself, not a re-implementation: the synthesised route must reach
