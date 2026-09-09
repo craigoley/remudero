@@ -761,12 +761,15 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // of both (an `assertWallClockBound` import, so this file's one wall-clock-bounded assertion
   // declares itself) and they moved by exactly one again, to :5961/:6022 — the FIFTH. That is this
   // note's own point: a line number is a QUERY over the current tree, and any diff inserting above
-  // these witnesses moves them. The THIRD witness (arm-ordering.test.ts) is untouched by every one
-  // of these edits and unmoved.
+  // these witnesses moves them. W1-T2889's deps-object collapse then rewrote run-task.test.ts's
+  // fixtures and moved both by FOUR, to :5965/:6026 — the SIXTH re-derivation, and the first where
+  // the mover was a refactor of the tests themselves rather than a line added above them. The
+  // THIRD witness (arm-ordering.test.ts) is untouched by every one of these edits and unmoved,
+  // which is what keeps this case a census over the real tree rather than three moving literals.
   const expectedKeys = [
     "armIfVerdictPermits:test/arm-ordering.test.ts:63:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:5961:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6022:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:5965:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6026:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(

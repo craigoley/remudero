@@ -82,7 +82,15 @@ test("the sweep runner explicitly enables a semantic reviewer with the head-reso
   const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   assert.match(
     source,
-    /reviewRunner\s*=\s*\(prNumber, isPlanFiling\) =>[\s\S]*?reviewCommand\(String\(prNumber\), \["--repo", repo\], \{\s*executionMode: "semantic",\s*planOnlyFiling: isPlanFiling,\s*\}\)/,
+    // The DECLARATION's syntax is not the subject and must not be pinned to it: this assertion has
+    // now been re-derived twice for shape changes that preserved the behaviour exactly (a deps
+    // object collapsing to a local, then that local gaining a type annotation between its name and
+    // its `=`). What it actually protects is the OPT-IN — that the production default names
+    // `executionMode: "semantic"` itself rather than letting reviewCommand infer it from the
+    // caller — so the binding is matched loosely and the call shape strictly.
+    // The gap is BOUNDED, not open: an annotation is ~60 chars, so 120 admits one and still cannot
+    // wander into an unrelated `reviewCommand(` elsewhere in a 38k-line file.
+    /reviewRunner\b[\s\S]{0,120}?=\s*\(prNumber, isPlanFiling\) =>[\s\S]{0,200}?reviewCommand\(String\(prNumber\), \["--repo", repo\], \{\s*executionMode: "semantic",\s*planOnlyFiling: isPlanFiling,\s*\}\)/,
     "the production sweep default must opt in explicitly, not infer its caller",
   );
   const { args } = await captureReview("Remudero-Task: W1-T2593", "sweep");

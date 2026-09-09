@@ -241,6 +241,7 @@
     "test/breaker-merge-credit-reset.test.ts": 746,
     "test/breaker-reset-corroborated.test.ts": 1626,
     "test/breaker-survives-rotation.test.ts": 652,
+    "test/build-sweep-effects-takes-one-deps-object.test.ts": 0,
     "test/bundle-export.test.ts": 1600,
     "test/bundle-policy-proposals.test.ts": 1035,
     "test/cache-hit-sensor.test.ts": 1445,
