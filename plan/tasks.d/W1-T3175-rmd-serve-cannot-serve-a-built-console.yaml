@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 25.00
-  files: [src/lib/serve.ts, test/the-console-serves-its-own-assets.test.ts]
+  files: [src/lib/serve.ts, src/lib/service.ts, test/the-console-serves-its-own-assets.test.ts]
   origin: "operator-session#console-architecture-2026-09-08"
   plan_refs: ["W1-T3173", "W1-T3176", "W1-T139"]
   status: queued
@@ -38,6 +38,24 @@
     A STATIC FILE ROUTE IS A CLASSIC SOURCE OF PATH TRAVERSAL and this repo serves over a tailnet
     with a bearer-token model, so the traversal question is not academic.
   design: |
+    (0) ⚠ IT CANNOT BE BUILT IN `serve.ts` ALONE, AND THE ORIGINAL `files:` LIST SAID IT COULD.
+    MEASURED 2026-09-09 in `src/lib/service.ts`: "v0 routing is exact-match only (no params/
+    wildcards)" — `createServer` does `routes.find((r) => r.method === method && r.path === path)`
+    and sends `404 not_found` when that misses. A built SPA is a set of HASHED filenames under a
+    prefix, which no exact-match table can express. And `serve.ts` does not wrap the handler: it
+    assembles `routes` and hands them to `createService`, which owns auth dispatch. Since criterion
+    5 requires the asset route to enforce THE SAME read scope as the shell, the mount has to sit
+    INSIDE that dispatch, not beside it — wrapping the returned server would serve assets with no
+    scope check at all, which is the one thing this task must not do. `src/lib/service.ts` is
+    therefore added to `files:`.
+
+    ENUMERATION WAS CONSIDERED AND REJECTED, and the reason is operational rather than aesthetic.
+    Registering one exact route per file in the build directory at startup needs no router change
+    and removes the traversal surface entirely — there is no path resolution to escape. But Vite
+    emits CONTENT-HASHED filenames, so every rebuild changes them, and a long-lived `rmd serve`
+    would 404 every asset of a freshly deployed console until someone restarted it. On a fleet that
+    redeploys continuously that trades a bounded, testable refusal for an unbounded outage.
+
     (i) SERVE FROM ONE RESOLVED ROOT, AND REFUSE ANYTHING THAT ESCAPES IT. Every request path
     resolves against the build directory and the RESOLVED result must remain inside it; `..`,
     absolute paths, URL-encoded separators and symlinks that leave the root are all refused. THE
@@ -79,7 +97,11 @@
     DO NOT serve assets from the repository root or from `src/`. The root is the BUILD directory
     only; a route that can read source files has turned a console into a source browser.
   note: |
-    Rule 25 CHECKED: `src/lib/serve.ts` is ordinary src; no instrument path is entangled.
+    Rule 25 CHECKED: `src/lib/serve.ts` and `src/lib/service.ts` are ordinary src; no instrument
+    path is entangled.
+    SCOPE WIDENED 2026-09-09 to include `src/lib/service.ts` — see design (0). The band stays as
+    filed, but a reviewer should know this now touches the dispatcher every route's auth flows
+    through, not one handler.
     DEPENDS ON W1-T3173 because serving a build presumes there is a build to serve; it does NOT
     depend on W1-T3174 — assets are files, not API routes, and the fetch gate has no bearing on them.
     CAVEAT WITH EQUAL WEIGHT: this shard makes the daemon ABLE to serve a console build. It does not
