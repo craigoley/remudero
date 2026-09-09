@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { baseCausedCheckName, classifyRedCause, type CiFailure, type OpenPrView } from "../src/lib/sweep.js";
+import { PUSH_UNSAFE_TOKENS } from "./helpers/push-safety.js";
 
 // ── W1-T1033: nothing ran the suite against `main` ──────────────────────────────────────────
 //
@@ -76,7 +77,7 @@ test("W1-T1033: the ci workflow runs the suite on a push to main", async () => {
   // empty on a push (this is the rationale's own CONTROL: `coverage-ratchet`'s diff-coverage step
   // carries exactly one such reference, which is why that job — unlike `ci` — must stay gated).
   for (const run of runs) {
-    for (const token of ["github.event", "pull_request", "BASE_SHA"]) {
+    for (const token of PUSH_UNSAFE_TOKENS) {
       assert.ok(!run.includes(token), `the ci job's steps must not reference '${token}' — that would break on a push`);
     }
   }
@@ -236,4 +237,37 @@ test("W1-T1033: coverage shards and their stable aggregator skip PR-only work on
     assert.ok(step.run.includes(guard), `aggregator PR-only step must shell-guard push events, got: ${step.run}`);
     assert.doesNotMatch(step.run, /\bif:/, "the guard must be shell, not a YAML if: key");
   }
+});
+
+// ── THE RULE ITSELF, AND WHY IT NARROWED ───────────────────────────────────────────────────────
+
+test("W1-T1033: the push-safety rule names only tokens that are EMPTY on a push, so the correct expression stays writable", () => {
+  // `pull_request` was on this list and should not have been: it is a VALUE, not a context, and
+  // comparing $GITHUB_EVENT_NAME against it is push-safe by construction. Forbidding the bare
+  // token made the correct expression unwritable, and three separate attempts contorted around it
+  // in one day — the last being two adjacent string literals that concatenate to the same value
+  // while the source text no longer contains it, which passed both suites 48/48.
+  assert.ok(
+    !PUSH_UNSAFE_TOKENS.includes("pull_request" as never),
+    "a bare pull_request is a value, not request-scoped context — forbidding it is what invited the dodge",
+  );
+  assert.ok(
+    PUSH_UNSAFE_TOKENS.includes("github.event" as never),
+    "github.event must stay refused: it covers every ${{ github.event.pull_request.* }} expression",
+  );
+});
+
+test("W1-T1033: a genuinely request-scoped reference in a ci step is still refused", () => {
+  // The narrowing must not have retired the rule. This drives the same predicate the suite above
+  // applies, over a step body that carries the unsafe form rather than the safe one.
+  const unsafe = 'if [ -n "${{ github.event' + '.pull_request.number }}" ]; then :; fi';
+  const safe = 'if [ "${GITHUB_EVENT_NAME}" = "pull_' + 'request" ]; then :; fi';
+  assert.ok(
+    PUSH_UNSAFE_TOKENS.some((t) => unsafe.includes(t)),
+    "an expression that is empty on a push must still trip the rule",
+  );
+  assert.ok(
+    !PUSH_UNSAFE_TOKENS.some((t) => safe.includes(t)),
+    "and the always-set comparison must be writable without contortion",
+  );
 });

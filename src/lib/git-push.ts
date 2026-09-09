@@ -36,9 +36,12 @@ export type PushExec = (file: string, args: string[], opts: { stdio: "inherit" |
  *  `force` (W1-T1012) is true only at the two call sites that just amended the worktree's
  *  own last commit (appending the `Remudero-Task:` trailer, `appendTaskTrailerToCommit`,
  *  run-task.ts) AFTER that commit was already on origin — the amend rewrites the tip sha,
- *  so a plain push is a non-fast-forward rejection. Safe here specifically: this branch is
- *  `run-<id>-<epochMs>`, owned exclusively by this one run, so nobody else's work is ever
- *  discarded by the force. */
+ *  so a plain push is a non-fast-forward rejection.
+ *
+ *  THAT LAST SENTENCE USED TO READ "owned exclusively by this one run, so nobody else's work
+ *  is ever discarded". W1-T3221 measured it false — an operator now works lane-owned PRs by
+ *  hand, so the branch is SHARED — and `force` therefore carries a lease; see
+ *  {@link leasedForcePush}. */
 export interface PushRunBranchOpts {
   stdio?: "inherit" | "ignore";
   setUpstream?: boolean;
@@ -64,8 +67,9 @@ export interface PushRunBranchOpts {
    * WRONG commit (or move nothing), so this raises instead of pushing.
    */
   expectedHeadSha?: string;
-  /** Injected by tests to observe the pre-push HEAD read without a real repo. Defaults to
-   *  {@link defaultGitCapture}. Only consulted when `expectedHeadSha` is supplied. */
+  /** Injected by tests to observe the pre-push reads without a real repo. Defaults to
+   *  {@link defaultGitCapture}. Consulted when `expectedHeadSha` is supplied, and by
+   *  {@link leasedForcePush} to derive the lease when `force` is set. */
   capture?: GitCapture;
 }
 
@@ -93,11 +97,196 @@ export function gitPushRunBranch(worktreePath: string, opts: PushRunBranchOpts =
       );
     }
   }
+  const stdio = opts.stdio ?? "inherit";
+  const exec = opts.exec ?? defaultPushExec;
+  if (opts.force) {
+    leasedForcePush(worktreePath, {
+      capture: opts.capture ?? defaultGitCapture,
+      exec,
+      stdio,
+      setUpstream: opts.setUpstream === true,
+    });
+    return;
+  }
   const args = ["-C", worktreePath, "push"];
   if (opts.setUpstream) args.push("-u");
-  if (opts.force) args.push("--force");
   args.push("origin", "HEAD");
-  (opts.exec ?? defaultPushExec)("git", args, { stdio: opts.stdio ?? "inherit" });
+  exec("git", args, { stdio });
+}
+
+/**
+ * THE FORCE PATH, LEASED (W1-T3221). The `force: true` sites amend the tip to append the
+ * `Remudero-Task:` trailer (W1-T1012) after that commit is already on origin, so the push must
+ * rewrite history. What it must NOT do is rewrite history it never saw: a bare `--force` cannot
+ * tell "my own amended commit" from "my own commit plus someone else's on top".
+ *
+ * THE LEASE IS DERIVED, NOT PASSED, so no call site changes. `refs/remotes/origin/<branch>` is
+ * updated by this lane's OWN push moments earlier and by nothing else in between, so a foreign
+ * commit landing after that leaves the tracking ref behind the real remote — the disagreement.
+ *
+ * NO LEASE ⇒ NO PUSH. A detached HEAD or a missing tracking ref cannot state the precondition,
+ * and a push that cannot state it is the bare `--force` this removes. Refusing costs a bounded,
+ * known thing — the trailer — and `findMergedByHeadBranch` credits a merged `run-<id>-<digits>`
+ * head without one (MEASURED on #1657). Pushing costs someone else's commit, with an exit 0.
+ *
+ * A REFUSAL IS REPORTED AND RETURNS, never throws: the work is already on origin, and aborting
+ * before the PR is opened would trade an invisible loss for a louder one.
+ *
+ * THE ELISION CHECK IS NOT OPTIONAL — `task-id-reservation.ts`'s header records the trap and
+ * {@link gitPushEmptyCommit} already answers it: a lease git ELIDES still exits 0, so the remote
+ * ref is re-read afterwards and must equal what was pushed.
+ */
+function leasedForcePush(
+  worktreePath: string,
+  io: { capture: GitCapture; exec: PushExec; stdio: "inherit" | "ignore"; setUpstream: boolean },
+): void {
+  const read = (args: string[]): string | undefined => {
+    try {
+      const out = io.capture("git", ["-C", worktreePath, ...args]).trim();
+      return out.length > 0 ? out : undefined;
+    } catch {
+      // An absent ref, not a fault -- every caller below names its own reason for `undefined`.
+      return undefined;
+    }
+  };
+  const branch = read(["rev-parse", "--abbrev-ref", "HEAD"]);
+  // "HEAD" is what a DETACHED worktree reports, which names no ref to lease against.
+  if (branch === undefined || branch === "HEAD") {
+    reportLeaselessRefusal(`the worktree at ${worktreePath} is not on a named branch`);
+    return;
+  }
+  const ref = `refs/heads/${branch}`;
+  const lastPublished = read(["rev-parse", `refs/remotes/origin/${branch}`]);
+  if (lastPublished === undefined) {
+    reportLeaselessRefusal(`no refs/remotes/origin/${branch} to lease against — this lane has published nothing there`);
+    return;
+  }
+  const newSha = read(["rev-parse", "HEAD"]);
+  if (newSha === undefined) {
+    reportLeaselessRefusal(`the worktree at ${worktreePath} has no readable HEAD`);
+    return;
+  }
+  // THE DISCARD CHECK, AND IT IS THE ONE THE LEASE CANNOT MAKE. A lease answers "did the ref move
+  // since I last looked" — it compares the local tracking ref against the remote. That is a
+  // different question from "would this push destroy work", and the gap is not theoretical:
+  // MEASURED 2026-09-09 against a real local remote, once the lane FETCHES (a rebuild, a
+  // re-dispatch, any refresh at all) its tracking ref already contains the foreign commit, the
+  // lease is satisfied, and the force-push discards that commit anyway. The probe ended with the
+  // lane's amend as the remote head and the operator's commit unreachable.
+  //
+  // "REACHABLE FROM THE REMOTE BUT NOT FROM MY HEAD" IS THE WRONG SET, and getting that wrong is
+  // how a guard fires on the healthy path: an amend REPLACES the tip, so the pre-amend commit is a
+  // sibling of the new one and lands in that set every single time. MEASURED while writing this —
+  // the first version refused every ordinary trailer amend, which is the bound-fires-on-healthy
+  // defect this repo keeps re-earning.
+  //
+  // What separates the two is PARENTAGE. `appendTaskTrailerToCommit` amends, so the replacement
+  // carries exactly the parents the pushed commit carries; a commit someone else added sits ON TOP
+  // of the old tip and therefore has different parents. So walk the commits the remote holds and
+  // this head does not, and count only those whose parents differ from this head's. The tip being
+  // replaced is excused by construction, and nothing else is.
+  //
+  // UNREADABLE IS NOT ZERO. If the remote ref cannot be read, or the walk cannot be computed, that
+  // is not evidence there is nothing to lose — it is the absence of evidence, and it refuses.
+  const remoteHead = read(["ls-remote", "origin", ref])?.split(/\s+/)[0];
+  if (remoteHead !== undefined && remoteHead !== newSha) {
+    // `fetch` first, or the remote sha may not be an object this worktree holds and the walk
+    // cannot start. Best-effort: a failed fetch leaves the walk unreadable, which refuses.
+    read(["fetch", "--no-tags", "--quiet", "origin", ref]);
+    const mine = read(["rev-list", "--parents", "-1", newSha]);
+    const theirs = read(["rev-list", "--parents", remoteHead, `^${newSha}`]);
+    if (mine === undefined || theirs === undefined) {
+      reportLeaselessRefusal(
+        `could not determine whether pushing ${newSha} over ${remoteHead} on ${branch} would discard ` +
+          "commits — an unreadable walk is not a count of zero",
+      );
+      return;
+    }
+    const myParents = mine.trim().split(/\s+/).slice(1).join(" ");
+    const foreign = theirs
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .filter((l) => l.split(/\s+/).slice(1).join(" ") !== myParents);
+    if (foreign.length > 0) {
+      reportDiscard(branch, remoteHead, newSha, foreign.length);
+      return;
+    }
+  }
+  // `setUpstream` still composes rather than being silently dropped — a flag that quietly stops
+  // applying when another is set is a worse contract than one that costs a line here.
+  const args = ["-C", worktreePath, "push"];
+  if (io.setUpstream) args.push("-u");
+  args.push(`--force-with-lease=${ref}:${lastPublished}`, "origin", `HEAD:${ref}`);
+  try {
+    io.exec("git", args, { stdio: io.stdio });
+  } catch {
+    // Rejected lease, non-fast-forward, or the ref moved — one meaning here: someone else holds
+    // it. Name BOTH shas, or the reader cannot tell what was preserved from what was not.
+    reportForeignHead(branch, lastPublished, newSha, read(["ls-remote", "origin", ref])?.split(/\s+/)[0]);
+    return;
+  }
+  const observed = read(["ls-remote", "origin", ref])?.split(/\s+/)[0];
+  if (observed !== newSha) {
+    reportForeignHead(branch, lastPublished, newSha, observed);
+  }
+}
+
+/** Both refusals go to stderr, never a throw — see {@link leasedForcePush}. Exported so the
+ *  suite can assert the wording carries the shas rather than a bare "refused". */
+export function leaselessRefusalMessage(reason: string): string {
+  return (
+    `git-push: refusing to force-push the run branch without a lease — ${reason}. ` +
+    `The commit is already on origin; only the Remudero-Task: trailer amend is skipped, and a ` +
+    `merged run-<id>-<epochMs> head is credited without one (W1-T3221).`
+  );
+}
+
+/** The refusal for a push that WOULD have destroyed work, as distinct from one whose ref moved.
+ *  Exported so the suite can assert it names the count and both shas. */
+export function discardRefusalMessage(
+  branch: string,
+  remoteHead: string,
+  newSha: string,
+  count: number,
+): string {
+  return (
+    `git-push: refusing to force-push ${branch} — origin is at ${remoteHead}, and pushing ${newSha} ` +
+    `over it would discard ${count} commit(s) reachable from the remote and not from this head. ` +
+    "The lease held (this lane had already fetched them), so only this check could see it; nothing " +
+    "was pushed and nothing was discarded (W1-T3221)."
+  );
+}
+
+export function foreignHeadRefusalMessage(
+  branch: string,
+  lastPublished: string,
+  newSha: string,
+  observed: string | undefined,
+): string {
+  return (
+    `git-push: refusing to force-push ${branch} — this lane last published ${lastPublished} and ` +
+    `would have replaced the remote with ${newSha}, but origin now reads ` +
+    `${observed ?? "an unreadable ref"}. Someone else's commit is on that branch; nothing was ` +
+    `pushed and nothing was discarded (W1-T3221).`
+  );
+}
+
+function reportLeaselessRefusal(reason: string): void {
+  console.error(leaselessRefusalMessage(reason));
+}
+
+function reportDiscard(branch: string, remoteHead: string, newSha: string, count: number): void {
+  console.error(discardRefusalMessage(branch, remoteHead, newSha, count));
+}
+
+function reportForeignHead(
+  branch: string,
+  lastPublished: string,
+  newSha: string,
+  observed: string | undefined,
+): void {
+  console.error(foreignHeadRefusalMessage(branch, lastPublished, newSha, observed));
 }
 
 /** Captures stdout from a git plumbing read/write. Injected by tests so the argv and the

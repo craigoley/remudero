@@ -51,7 +51,15 @@ fi
 # Refuse before push, but never mutate the duration ledger from a gate. The check already names
 # `--seed`, whose zero-duration placeholder is the repository's established unmeasured state.
 if [ -f scripts/test-tier-manifest.mjs ]; then
-  node scripts/test-tier-manifest.mjs --check || fail=1
+  # W1-T3203 — PASS A BASE. Without one the check cannot tell a file this branch ADDED from one the
+  # merge base already had, so it lists both and (since W1-T3203) withholds the --seed remedy it
+  # cannot know applies. That is right for a bare invocation and WRONG here: W1-T3205's whole value
+  # is refusing early AND naming the command, and a refusal with no remedy is a worse hook than none.
+  # With a base, attribution works, inherited files stop being charged to this branch, and the
+  # remedy is printed for the files that actually need it — CI's own reading, one cycle earlier.
+  # An absent or unreadable origin/main degrades to exactly today's behaviour: inheritedUntieredFiles
+  # returns every missing file as blocking, and the remedy prints, because the base was SUPPLIED.
+  node scripts/test-tier-manifest.mjs --check --base origin/main || fail=1
 else
   echo "pre-push: scripts/test-tier-manifest.mjs absent — skipped, NOT passed" >&2
 fi

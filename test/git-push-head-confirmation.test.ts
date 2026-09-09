@@ -135,8 +135,25 @@ test("W1-T2610: omitting expectedHeadSha never reads the worktree's HEAD at all 
 test("W1-T2610: setUpstream/force still compose with an omitted expectedHeadSha exactly as before (spike.ts's push-fallback, the two amend sites)", () => {
   const { pushed } = spies();
   const exec: PushExec = (_file, args) => pushed.push(args);
-  withLiveWritesAllowed(() => gitPushRunBranch("/wt", { setUpstream: true, force: true, exec }));
-  assert.deepEqual(pushed[0], ["-C", "/wt", "push", "-u", "--force", "origin", "HEAD"]);
+  // W1-T3221 replaced the bare `--force` with a derived lease. The claim this case makes is about
+  // COMPOSITION — that `setUpstream` still applies when `force` is set — so it is asserted against
+  // the leased argv rather than dropped; a flag that quietly stops applying is the regression.
+  const capture = (_f: string, args: string[]): string => {
+    if (args.includes("--abbrev-ref")) return "run-W1-T2610-1\n";
+    if (args.includes("refs/remotes/origin/run-W1-T2610-1")) return "pub00000\n";
+    if (args[args.length - 1] === "HEAD") return "amended0\n";
+    return "amended0\trefs/heads/run-W1-T2610-1\n";
+  };
+  withLiveWritesAllowed(() => gitPushRunBranch("/wt", { setUpstream: true, force: true, exec, capture }));
+  assert.deepEqual(pushed[0], [
+    "-C",
+    "/wt",
+    "push",
+    "-u",
+    "--force-with-lease=refs/heads/run-W1-T2610-1:pub00000",
+    "origin",
+    "HEAD:refs/heads/run-W1-T2610-1",
+  ]);
 });
 
 // ── claim 3 — REUSES LanePushForeignHeadError, NEVER A SECOND CLASS FOR THE SAME FACT ───────
