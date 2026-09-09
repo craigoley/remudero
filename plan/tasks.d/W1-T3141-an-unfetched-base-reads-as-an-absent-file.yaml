@@ -10,7 +10,7 @@
               # same fault and a fix to any one of them alone leaves the notice unreachable.
   band_meaning: span
   budget_usd: 25.00
-  files: [.github/workflows/ci.yml, scripts/lib/inherited-violation.mjs, scripts/source-size-ratchet.mjs, test/an-unfetched-base-is-not-an-absent-file.test.ts]
+  files: [scripts/lib/inherited-violation.mjs, scripts/source-size-ratchet.mjs, test/an-unfetched-base-is-not-an-absent-file.test.ts]
   origin: "operator-session#the-notice-that-cannot-print-2026-09-08"
   plan_refs: ["W1-T3037", "W1-T2883", "W1-T2324", "W1-T3068"]
   status: queued
@@ -57,11 +57,34 @@
     WHY IT SURVIVED. The split runs only when the ratchet BLOCKS, which is rare and is exactly the
     moment nobody is reading closely; the helper's ten tests all inject a `run`, so no test ever
     exercises a real checkout; and the failure is SILENT — a missing sentence, not a red.
+
+    AMENDMENT 2026-09-09, BEFORE ANY IMPLEMENTATION LANDED. `origin/main` moved 125 commits between
+    this shard being filed (#4609, 85ec59e9) and its build, and W1-T2862 rewrote the surface the
+    rationale above measures. MEASURED at 91773c23:
+
+      - the `source-size` job runs `source-size-signal`, NOT the enforcing ratchet;
+      - `.github/workflows/ci.yml` names `source-size-ratchet` ZERO times;
+      - the `run_main_ceiling_gate` list no longer includes it either;
+      - the enforcing mode is now `source-size-baseline:legacy`, invoked ONLY by `src/lib/sweep.ts`;
+      - `source-size`'s checkout ALREADY carries `fetch-depth: 0`, added for the signal's own base
+        ref, not for this defect.
+
+    WHAT THAT CHANGES: the framing. The notice is not merely unreachable because of a shallow
+    checkout — W1-T3037's whole inherited/introduced subsystem is unwired from CI, and its one
+    remaining caller is the sweep's baseline-regeneration lane. That is a larger finding than this
+    task, and it is NOT claimed here.
+
+    WHAT IT DOES NOT CHANGE: the defect. `contentAtRef` still cannot tell a MISSING REF from a
+    MISSING PATH, because git still exits 128 for both, and the sweep lane it now runs in has no
+    stronger guarantee that `origin/main` is fetched than the CI job did. A helper that answers
+    confidently about a base it could not read is wrong wherever it runs.
+
   design: |
-    (i) PROVISION THE REF THE JOB ALREADY DEPENDS ON. `source-size`'s checkout takes
-    `fetch-depth: 0`, the same one-line shape and the same stated reason as the nine sibling jobs
-    around it. This is the half that makes the feature work; without it the code below can only
-    report that it could not tell.
+    (i) THE WORKFLOW HALF LANDED WITHOUT THIS TASK, UNDER W1-T2862, FOR A DIFFERENT REASON — see
+    the AMENDMENT in the rationale. `source-size`'s checkout now takes `fetch-depth: 0` because the
+    SIGNAL mode refreshes `origin/main` to measure changed files from the merge base. This task
+    therefore ADDS NO LINE TO ci.yml and claims no credit for that one; it PINS it with a falsifier,
+    so the depth cannot be dropped back without a named refusal.
 
     (ii) A CALLER THAT CAN ESTABLISH THE REF MUST BE ABLE TO SAY SO, AND THE HELPER MUST BELIEVE
     IT OVER `git show`'s ambiguous 128. Export `refResolvable(run, ref)` — one
@@ -102,7 +125,7 @@
       proof: "unit test: test/an-unfetched-base-is-not-an-absent-file.test.ts"
     - claim: the shipped ratchet run against a checkout with no origin/main says it could not determine whose red this is, instead of printing nothing
       proof: "unit test: test/an-unfetched-base-is-not-an-absent-file.test.ts"
-    - claim: the source-size job checks out at a depth that makes origin/main resolvable, and carries exactly one checkout step so the assertion cannot go ambiguous later
+    - claim: the source-size job's checkout depth is PINNED by a falsifier rather than left to convention, with exactly one checkout step so the assertion cannot go ambiguous later
       proof: "unit test: test/an-unfetched-base-is-not-an-absent-file.test.ts"
     - claim: a caller that supplies no predicate gets W1-T3037's behaviour unchanged, so the merged task keeps its own falsifiers rather than being redefined by this one
       proof: "unit test: test/an-unfetched-base-is-not-an-absent-file.test.ts"
