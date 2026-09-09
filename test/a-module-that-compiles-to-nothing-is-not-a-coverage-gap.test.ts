@@ -105,3 +105,41 @@ test("the type-only check is injectable, so the gate's own logic is provable wit
   assert.deepEqual(findMissingSourceCoverage(diff, new Set<string>(), () => true), [], "all exempt ⇒ nothing reported");
   assert.deepEqual(findMissingSourceCoverage(diff, new Set<string>(), () => false), ["src/a.ts", "src/b.ts"], "none exempt ⇒ both");
 });
+
+// ── CASE 3, ADDED 2026-09-09: the discriminator did not get to run at all ─────────────────────────
+//
+// A third cause of "no SF record" hid inside case 1's verdict for as long as the guard's only output
+// was a boolean. `isTypeOnlyModule` fails CLOSED on a read or transpile error — correct, and the
+// safe direction — but a type-only module then gets case 1's message anyway, and case 1's message
+// implies a remedy ("write a test that exercises this file") that is IMPOSSIBLE for a module that
+// compiles to nothing. There is nothing to instrument, so no test can ever produce its `SF:` record.
+//
+// MEASURED on #4872: `isTypeOnlyModule("src/lib/merge-state.ts")` returned TRUE locally while CI
+// blocked on that exact file, on that exact head (`a16c794eb`), across two independent runs. Feeding
+// the same diff a guard that always throws reproduces CI's output exactly — `["src/lib/merge-state.ts"]`
+// — so the guard is failing in the runner. A bare `false` cannot say which of read/require/transpile
+// failed, and a re-run reproduces it identically while teaching nothing.
+
+test("a type-only check that could not be DECIDED is reported, not silently folded into the vacuity verdict", () => {
+  const diff = diffTouching("src/lib/merge-state.ts");
+  const seen: Array<{ file: string; stage: string; message: string }> = [];
+  const throwingGuard = (file: string, _read?: unknown, onUndecidable?: (d: { file: string; stage: string; message: string }) => void) => {
+    onUndecidable?.({ file, stage: "transpile", message: "Cannot find module 'esbuild'" });
+    return false; // the guard's own fail-closed verdict, unchanged
+  };
+  const missing = findMissingSourceCoverage(diff, new Set<string>(), throwingGuard, (d) => seen.push(d));
+
+  assert.deepEqual(missing, ["src/lib/merge-state.ts"],
+    "THE VERDICT MUST NOT MOVE — failing closed is still right, and an undecidable check must never become an exemption");
+  assert.deepEqual(seen, [{ file: "src/lib/merge-state.ts", stage: "transpile", message: "Cannot find module 'esbuild'" }],
+    "and the run must be able to SAY the exemption never got a chance to apply");
+});
+
+test("⚠ a check that DECIDES reports nothing — the diagnostic must not fire on the ordinary path", () => {
+  const diff = diffTouching("src/lib/merge-state.ts", "src/lib/sweep.ts");
+  const seen: unknown[] = [];
+  const missing = findMissingSourceCoverage(diff, new Set<string>(), (f: string) => f === "src/lib/merge-state.ts", (d) => seen.push(d));
+  assert.deepEqual(missing, ["src/lib/sweep.ts"], "exemption applied, real gap still named");
+  assert.deepEqual(seen, [],
+    "POSITIVE CONTROL: a guard that answers cleanly emits no diagnostic. Without this arm, a collector that fires on every file would pass the test above and flood every blocked report");
+});

@@ -217,30 +217,44 @@ export function changedSourceFiles(diffText) {
  * and a pure type module was wrongly getting the first verdict. TRANSPILED, NEVER TEXT-SCANNED, a
  * distinction load-bearing enough that a text-scan first draft misjudged a real module type-only.
  * FAILS CLOSED on any read or transpile error, so a broken check can only under-exempt.
+ * AND IT SAYS SO, via the optional `onUndecidable` collector — because "can only under-exempt" is
+ * the safe direction, not a harmless one. MEASURED 2026-09-09 on #4872: this guard answered TRUE for
+ * `src/lib/merge-state.ts` locally and the gate BLOCKED on that same file, on that same head, in
+ * CI — twice, deterministically. Feeding a always-throwing guard the same diff reproduces CI's
+ * output exactly, so the guard is failing in the runner; WHICH of read/require/transpile fails is
+ * not knowable from a verdict that is a bare `false`. A type-only module is then reported as a
+ * vacuous-coverage hazard, which is a confident and wrong diagnosis, and the remedy it implies —
+ * "write a test that exercises this file" — is IMPOSSIBLE for a module that compiles to nothing.
  * Falsifier: test/a-module-that-compiles-to-nothing-is-not-a-coverage-gap.test.ts.
  * Why: docs/forensics/diff-coverage.md#istypeonlymodule.
  */
-export function isTypeOnlyModule(file, readSource = (f) => readFileSync(f, 'utf8')) {
+export function isTypeOnlyModule(file, readSource = (f) => readFileSync(f, 'utf8'), onUndecidable) {
   let source;
   try {
     source = readSource(file);
-  } catch {
+  } catch (err) {
+    // FAILING CLOSED IS CORRECT AND STILL SILENT WITHOUT THIS. Reported, never rethrown: the verdict
+    // is unchanged, only now the run can say the exemption did not get a chance to apply.
+    onUndecidable?.({ file, stage: 'read', message: err?.message ?? String(err) });
     return false; // unreadable ⇒ not exempt
   }
   try {
     // Lazily required: a caller that never reaches this path pays nothing, and a missing esbuild degrades safely.
     const { transformSync } = require('esbuild');
     return transformSync(source, { loader: 'ts' }).code.trim().length === 0;
-  } catch {
+  } catch (err) {
+    onUndecidable?.({ file, stage: 'transpile', message: err?.message ?? String(err) });
     return false; // cannot transpile ⇒ not exempt
   }
 }
 
 /** Changed source files absent from the merged LCOV surface, excluding type-only ones ({@link isTypeOnlyModule}). */
 // Why: docs/forensics/diff-coverage.md#findmissingsourcecoverage.
-export function findMissingSourceCoverage(diffText, lcov, isTypeOnly = isTypeOnlyModule) {
+export function findMissingSourceCoverage(diffText, lcov, isTypeOnly = isTypeOnlyModule, onUndecidable) {
   const hits = lcov.hits ?? lcov;
-  return changedSourceFiles(diffText).filter((file) => !hits.has(file) && !isTypeOnly(file));
+  return changedSourceFiles(diffText).filter(
+    (file) => !hits.has(file) && !isTypeOnly(file, undefined, onUndecidable),
+  );
 }
 
 /**
@@ -587,16 +601,27 @@ function main(argv) {
   const lcovText = readFileSync(values.lcov, 'utf8');
   const diffText = values.diff ? readFileSync(values.diff, 'utf8') : readFileSync(0, 'utf8');
   const lcovHits = parseLcovHitsByFile(lcovText);
-  const missingSourceFiles = findMissingSourceCoverage(diffText, lcovHits);
+  const undecidable = [];
+  const missingSourceFiles = findMissingSourceCoverage(diffText, lcovHits, isTypeOnlyModule, (d) =>
+    undecidable.push(d));
   if (missingSourceFiles.length > 0) {
     const headline =
       'BLOCKED -- changed source file(s) have no SF record in the coverage report; ' +
       'coverage would otherwise pass vacuously:';
+    // THE TYPE-ONLY EXEMPTION MAY SIMPLY NOT HAVE RUN, and without this the two causes of a blocked
+    // file are indistinguishable in the log. Named here rather than left to a re-run: a re-run
+    // reproduces it identically and teaches nothing.
+    const detail = undecidable.map(
+      (d) => `  ! ${d.file}: the type-only exemption could not be decided (${d.stage}: ${d.message})`,
+    );
     console.error(`diff-coverage: ${headline}`);
     for (const file of missingSourceFiles) console.error(`  - ${file}`);
-    emitCiReport('diff-coverage', formatCiReport('diff-coverage', headline, missingSourceFiles), {
-      blocked: true,
-    });
+    for (const line of detail) console.error(line);
+    emitCiReport(
+      'diff-coverage',
+      formatCiReport('diff-coverage', headline, [...missingSourceFiles, ...detail]),
+      { blocked: true },
+    );
     process.exitCode = 1;
     return;
   }
