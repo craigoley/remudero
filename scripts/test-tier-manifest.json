@@ -22,6 +22,7 @@
     "test/a-count-assertion-names-its-members.test.ts": 520,
     "test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts": 4548,
     "test/a-criterion-names-the-test-that-proves-it.test.ts": 1300,
+    "test/a-criterion-restated-is-not-a-claim.test.ts": 0,
     "test/a-deadlock-the-harness-cannot-count.test.ts": 1938,
     "test/a-declared-file-absent-from-a-diff-is-not-proof-of-drift.test.ts": 1338,
     "test/a-deferred-follow-up-names-no-filed-id.test.ts": 2505,
