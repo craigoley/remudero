@@ -250,17 +250,16 @@ function boundedOutputs(stdout: string, stderr: string): {
 /**
  * W1-T2993 — A CANCELLED SUITE AND A FAILED ASSERTION ARE DIFFERENT FACTS.
  *
- * This used to be `failingTestNames`, which folded both into one list. When a suite file BLOCKS,
- * the runner cancels it and every other in-flight subtest, and each of those emits `not ok` —
- * so the list filled with tests that never RAN, in files the hung one had nothing to do with,
- * while the file that actually blocked was not named at all. MEASURED: `exit_class: tests_failed`,
- * `suite_count: 238`, a `failing_tests` list clustered entirely in self-sync/freshness/deploy,
- * every one of which passes on origin/main — three days of diagnosis spent on innocent files.
+ * `failingTestNames` folded both into one list. When a suite file BLOCKS the runner cancels it and
+ * every in-flight subtest, and each emits `not ok` — so the list filled with tests that never RAN,
+ * in files the hung one had nothing to do with, while the file that blocked was never named.
+ * MEASURED: `exit_class: tests_failed`, `suite_count: 238`, a `failing_tests` list clustered in
+ * self-sync/freshness/deploy, every one of which passes on origin/main.
  *
- * A cancelled run's failure set is also a SUBSET BY CONSTRUCTION: whatever had not reported yet
- * is simply absent, so the shorter list reads as "fewer problems" when it means "less was seen".
- * That is why {@link PreflightOutcomeClassification.hasSummary} is carried too — a run with no
- * `# tests` line produced no totals at all and its list must never be read as complete.
+ * A cancelled run's failure set is also a SUBSET BY CONSTRUCTION, so the shorter list reads as
+ * "fewer problems" when it means "less was seen" — hence {@link
+ * PreflightOutcomeClassification.hasSummary}: a run with no `# tests` line printed no totals and
+ * its list must never be read as complete.
  */
 export interface PreflightOutcomeClassification {
   /** Tests that ran and FAILED. Never a cancelled one. */
@@ -277,11 +276,10 @@ export interface PreflightOutcomeClassification {
 /** node:test failure types that mean "this never finished", not "this asserted and failed". */
 const CANCELLED_FAILURE_TYPES: readonly string[] = ["testTimeoutFailure", "cancelledByParent", "testAborted"];
 
-/** Classify one runner's combined stdout+stderr into what FAILED and what was CANCELLED.
- *
- *  TAP shape: a `not ok N - <name>` line is followed by an indented YAML block, and the block's
- *  `failureType:` (or an `error: 'test timed out ...'`) is the only place the distinction appears.
- *  So the name is held until its block is read, rather than classified on the `not ok` line alone. */
+/** Classify one runner's combined stdout+stderr into what FAILED and what was CANCELLED. A
+ *  `not ok N - <name>` line is followed by an indented YAML block whose `failureType:` (or
+ *  `error: 'test timed out ...'`) is the ONLY place the distinction appears, so each name is held
+ *  until its block is read rather than classified on the `not ok` line alone. */
 export function classifyPreflightOutput(output: string): PreflightOutcomeClassification {
   const failing = new Set<string>();
   const cancelled = new Set<string>();
