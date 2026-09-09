@@ -249,3 +249,198 @@ test("W1-T3220: the ci.yml-reading suites are found from the tree, and this suit
   );
   for (const s of suites) assert.match(s, /^test\/.*\.test\.ts$/);
 });
+
+// ── THE RATCHET'S OWN VERDICTS, DRIVEN ─────────────────────────────────────────────────────────
+//
+// Every refusal below is a verdict about the tree, and a verdict nothing can drive is a verdict
+// nobody has shown works. `main`'s `io` seam exists for that; omitted, every field is the real one.
+
+const CI_FIXTURE = [
+  "jobs:",
+  "  j:",
+  "    steps:",
+  "      - run: |",
+  '          if [ "$X" = "1" ]; then',
+  "            exit 0",
+  "          fi",
+  "",
+].join("\n");
+
+function mainIo(over: Record<string, unknown> = {}) {
+  const out: string[] = [];
+  const errs: string[] = [];
+  const io = {
+    readCi: () => CI_FIXTURE,
+    readBaseline: () => ({ guards: {} }),
+    suites: () => ["test/a.test.ts"],
+    redCorpus: () => [],
+    classify: () => ({ covered: true, by: "test/a.test.ts" }),
+    writeBaseline: () => {},
+    log: (m: string) => void out.push(m),
+    err: (m: string) => void errs.push(m),
+    ...over,
+  };
+  return { io, out, errs };
+}
+
+const runMain = (argv: string[], over: Record<string, unknown> = {}) => {
+  const { io, out, errs } = mainIo(over);
+  return { code: (workflowGuard as { main(a: string[], io: unknown): number }).main(argv, io), out, errs };
+};
+
+test("W1-T3220: --list prints every guard with its line and exits 0 without running a suite", () => {
+  const { code, out } = runMain(["--list"], {
+    classify: () => assert.fail("--list must not measure anything"),
+    suites: () => assert.fail("--list must not enumerate the corpus"),
+  });
+  assert.equal(code, 0);
+  assert.ok(out.some((l) => l.includes('if [ "$X" = "1" ]; then')), "each guard is named");
+  assert.ok(out.some((l) => l.includes("1 skip-shaped guard(s)")), "and counted");
+});
+
+test("W1-T3220: a ci.yml the enumerator finds NO guard in FAILS — an empty read is a defect here, not a clean tree", () => {
+  const { code, errs } = runMain([], { readCi: () => "jobs:\n  j:\n    steps: []\n" });
+  assert.equal(code, 1, "zero guards means the enumerator is broken, and a broken detector must not pass");
+  assert.ok(errs.some((e) => e.includes("a defect in this script, not a clean tree")));
+});
+
+test("W1-T3220: an EMPTY corpus FAILS rather than reporting every guard uncovered for want of a reader", () => {
+  const { code, errs } = runMain([], { suites: () => [] });
+  assert.equal(code, 1);
+  assert.ok(errs.some((e) => e.includes("for want of a corpus, not for want of coverage")));
+});
+
+test("W1-T3220: a RED corpus refuses before a single mutant is written", () => {
+  let mutated = 0;
+  const { code, errs } = runMain([], {
+    redCorpus: () => [{ suite: "test/b.test.ts", why: "is already failing" }],
+    classify: () => {
+      mutated += 1;
+      return { covered: true, by: "x" };
+    },
+  });
+  assert.equal(code, 1);
+  assert.equal(mutated, 0, "the control must run BEFORE any mutation, or the refusal comes too late");
+  assert.ok(errs.some((e) => e.includes("test/b.test.ts") && e.includes("REFUSING to measure")));
+});
+
+test("W1-T3220: an UNCOVERED guard blocks and is named with its ci.yml line", () => {
+  const { code, errs, out } = runMain([], { classify: () => ({ covered: false, by: undefined }) });
+  assert.equal(code, 1);
+  assert.ok(errs.some((e) => e.includes("ci.yml:5") && e.includes("BLOCKED")), `expected a located refusal; got ${JSON.stringify(errs)}`);
+  assert.ok(out.some((l) => l.startsWith("UNCOVERED")));
+});
+
+test("W1-T3220: a BASELINED guard is skipped with its reason and never measured", () => {
+  let measured = 0;
+  const { code, out } = runMain([], {
+    readBaseline: () => ({ guards: { 'j#1: if [ "$X" = "1" ]; then': { reason: "recorded, with a stated reason" } } }),
+    classify: () => {
+      measured += 1;
+      return { covered: false, by: undefined };
+    },
+  });
+  assert.equal(code, 0, "a recorded guard must not block");
+  assert.equal(measured, 0, "nor cost a measurement");
+  assert.ok(out.some((l) => l.includes("recorded, with a stated reason")), "the reason is printed, so a reader sees the decision");
+});
+
+test("W1-T3220: --all measures a baselined guard anyway and still exits 0 — a report, not a gate", () => {
+  let measured = 0;
+  const { code } = runMain(["--all"], {
+    readBaseline: () => ({ guards: { 'j#1: if [ "$X" = "1" ]; then': { reason: "recorded" } } }),
+    classify: () => {
+      measured += 1;
+      return { covered: false, by: undefined };
+    },
+  });
+  assert.equal(measured, 1, "--all re-measures what the baseline exempts");
+  assert.equal(code, 0, "and reports rather than blocking");
+});
+
+test("W1-T3220: --seed records the uncovered guards it found, with a placeholder reason a reviewer must replace", () => {
+  let written = "";
+  const { code } = runMain(["--seed"], {
+    classify: () => ({ covered: false, by: undefined }),
+    writeBaseline: (text: string) => {
+      written = text;
+    },
+  });
+  assert.equal(code, 0);
+  const guards = (JSON.parse(written) as { guards: Record<string, { reason: string }> }).guards;
+  assert.deepEqual(Object.keys(guards), ['j#1: if [ "$X" = "1" ]; then']);
+  assert.match(guards[Object.keys(guards)[0]].reason, /RECORDED UNMEASURED/, "the placeholder must be obvious enough that shipping it is a choice");
+});
+
+test("W1-T3220: --seed never overwrites a reason someone already wrote", () => {
+  let written = "";
+  runMain(["--seed"], {
+    readBaseline: () => ({ guards: { 'j#1: if [ "$X" = "1" ]; then': { reason: "a real, considered reason" } } }),
+    classify: () => ({ covered: false, by: undefined }),
+    writeBaseline: (text: string) => {
+      written = text;
+    },
+  });
+  assert.match(written, /a real, considered reason/, "re-seeding must not erase written reasons");
+  assert.doesNotMatch(written, /RECORDED UNMEASURED/);
+});
+
+test("W1-T3220: a suite's verdict comes from its `# fail` line, and a run with no totals is UNKNOWN", () => {
+  const { suiteVerdictFrom } = workflowGuard as { suiteVerdictFrom(out: string): boolean | undefined };
+  assert.equal(suiteVerdictFrom("# tests 3\n# pass 3\n# fail 0\n"), false, "a green run did not notice the mutant");
+  assert.equal(suiteVerdictFrom("# tests 3\n# pass 2\n# fail 1\n"), true, "a failing run did");
+  assert.equal(
+    suiteVerdictFrom("ok 1 - something\nok 2 - something else\n"),
+    undefined,
+    "a truncated run has no totals, and its failure set is a subset by construction — never read as green",
+  );
+});
+
+test("W1-T3220: an unreadable baseline is an EMPTY one, not a crash", () => {
+  const { readBaseline } = workflowGuard as { readBaseline(p: string, r: () => string): { guards: Record<string, unknown> } };
+  assert.deepEqual(
+    readBaseline("/nonexistent", () => {
+      throw new Error("ENOENT");
+    }),
+    { guards: {} },
+    "a ratchet that dies on its own record file cannot report the thing it exists to report",
+  );
+  assert.deepEqual(readBaseline("/x", () => "{ not json"), { guards: {} });
+});
+
+test("W1-T3220: withMutant restores the workflow even when the body throws", () => {
+  const { withMutant } = workflowGuard as {
+    withMutant(g: SkipGuard, o: string, fn: () => unknown, io: { path: string; write: (p: string, t: string) => void }): unknown;
+  };
+  const writes: string[] = [];
+  const guard = enumerateSkipGuards(CI_FIXTURE)[0];
+  assert.throws(() =>
+    withMutant(guard, CI_FIXTURE, () => {
+      throw new Error("a suite blew up mid-measurement");
+    }, { path: "/tmp/x", write: (_p, t) => void writes.push(t) }),
+  );
+  assert.equal(writes.length, 2, "the mutant is written, then the original is written back");
+  assert.equal(writes[1], CI_FIXTURE, "a crashed run must never leave a mutant on disk");
+});
+
+test("W1-T3220: a mutation that changes NOTHING is refused — a no-op mutant would read COVERED for free", () => {
+  // The guard on the guard. If the rewrite leaves the line identical, no mutant was ever applied,
+  // and every suite would pass exactly as it does on the real tree — so the guard would be scored
+  // against a file nobody changed. An already-constant condition is the reachable case.
+  const alreadyConstant = [
+    "jobs:",
+    "  j:",
+    "    steps:",
+    "      - run: |",
+    '          if [ "1" = "1" ]; then',
+    "            exit 0",
+    "          fi",
+    "",
+  ].join("\n");
+  const [guard] = enumerateSkipGuards(alreadyConstant);
+  assert.throws(
+    () => mutateGuardLine(alreadyConstant, guard),
+    /refusing a mutant that touched line\(s\)  rather than only 5/,
+    "a rewrite that changes no line must refuse rather than measure an unmutated tree",
+  );
+});

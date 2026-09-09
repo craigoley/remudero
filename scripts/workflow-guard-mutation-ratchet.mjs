@@ -125,6 +125,22 @@ export function ciReadingSuites(root = REPO_ROOT) {
     .filter((l) => l.endsWith(".test.ts") && l !== OWN_SUITE);
 }
 
+/**
+ * THE VERDICT A RUN'S OUTPUT CARRIES — split from the spawn so the rule is testable without one.
+ *
+ * A run with no `# fail` summary is NOT a result: a killed or timed-out run prints the assertions
+ * it reached and no totals, and reading that as "no failures" is how a truncated run gets mistaken
+ * for a green one. Absent totals answer `undefined`, never `false`.
+ */
+export function suiteVerdictFrom(out) {
+  const summary = /^# fail (\d+)$/m.exec(out);
+  if (!summary) return undefined;
+  return Number(summary[1]) > 0;
+}
+
+// diff-cov: process-boundary — running a suite in a child node cannot carry a DA hit without
+// forking; everything this decides lives in suiteVerdictFrom above, unit-tested against the
+// truncated, green and failing shapes, and every caller takes it as an injectable `runSuite`.
 function suiteFails(suite) {
   const res = spawnSync(
     process.execPath,
@@ -132,26 +148,23 @@ function suiteFails(suite) {
     { cwd: REPO_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   );
   const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
-  // A run with no `# fail` summary is NOT a result - a killed or timed-out run prints the
-  // assertions it reached and no totals, and reading that as "no failures" is how a truncated run
-  // gets mistaken for a green one. Absent totals are reported as unknown, never as a pass.
-  const summary = /^# fail (\d+)$/m.exec(out);
-  if (!summary) return { failed: undefined, out };
-  return { failed: Number(summary[1]) > 0, out };
+  return { failed: suiteVerdictFrom(out), out };
 }
 
-function readBaseline() {
+/** An unreadable or unparseable baseline is an EMPTY one, never a crash: a ratchet that dies on
+ *  its own record file cannot report the thing it exists to report. */
+export function readBaseline(path = BASELINE, read = readFileSync) {
   try {
-    return JSON.parse(readFileSync(BASELINE, "utf8"));
+    return JSON.parse(read(path, "utf8"));
   } catch {
     return { guards: {} };
   }
 }
 
 /** Restore the workflow whatever happens - a crashed run must never leave a mutant on disk. */
-function withMutant(guard, original, fn) {
-  writeFileSync(CI_YML, mutateGuardLine(original, guard));
-  const restore = () => writeFileSync(CI_YML, original);
+export function withMutant(guard, original, fn, io = { path: CI_YML, write: writeFileSync }) {
+  io.write(io.path, mutateGuardLine(original, guard));
+  const restore = () => io.write(io.path, original);
   process.once("exit", restore);
   try {
     return fn();
@@ -200,31 +213,45 @@ export function classifyGuard(guard, original, suites, runSuite = suiteFails, ap
   });
 }
 
-export function main(argv) {
+/**
+ * `io` EXISTS SO THIS FUNCTION IS TESTABLE, and that is not a courtesy: every refusal below is a
+ * verdict about the tree, and a verdict nothing can drive is a verdict nobody has shown works —
+ * the same argument git-push.ts's own leaf makes for its `exec` seam. Omitted, every field is the
+ * real one and the behaviour is byte-identical.
+ */
+export function main(argv, io = {}) {
+  const readCi = io.readCi ?? (() => readFileSync(CI_YML, "utf8"));
+  const baselineOf = io.readBaseline ?? (() => readBaseline());
+  const suitesOf = io.suites ?? (() => ciReadingSuites());
+  const classify = io.classify ?? classifyGuard;
+  const corpusCheck = io.redCorpus ?? redCorpus;
+  const writeBaseline = io.writeBaseline ?? ((text) => writeFileSync(BASELINE, text));
+  const log = io.log ?? console.log;
+  const err = io.err ?? console.error;
   const list = argv.includes("--list");
   const all = argv.includes("--all");
   const seed = argv.includes("--seed");
-  const original = readFileSync(CI_YML, "utf8");
+  const original = readCi();
   const guards = enumerateSkipGuards(original);
   if (guards.length === 0) {
-    console.error("workflow-guard-mutation: NO skip-shaped guards found in ci.yml - the enumerator sees nothing, which is a defect in this script, not a clean tree. FAILING.");
+    err("workflow-guard-mutation: NO skip-shaped guards found in ci.yml - the enumerator sees nothing, which is a defect in this script, not a clean tree. FAILING.");
     return 1;
   }
   if (list) {
-    for (const g of guards) console.log(`${String(g.line).padStart(5)}  ${g.key}`);
-    console.log(`\nworkflow-guard-mutation: ${guards.length} skip-shaped guard(s).`);
+    for (const g of guards) log(`${String(g.line).padStart(5)}  ${g.key}`);
+    log(`\nworkflow-guard-mutation: ${guards.length} skip-shaped guard(s).`);
     return 0;
   }
-  const baseline = readBaseline();
-  const suites = ciReadingSuites();
+  const baseline = baselineOf();
+  const suites = suitesOf();
   if (suites.length === 0) {
-    console.error("workflow-guard-mutation: no ci.yml-reading suites found - every guard would read UNCOVERED for want of a corpus, not for want of coverage. FAILING.");
+    err("workflow-guard-mutation: no ci.yml-reading suites found - every guard would read UNCOVERED for want of a corpus, not for want of coverage. FAILING.");
     return 1;
   }
   // THE CONTROL RUNS FIRST, BEFORE A SINGLE MUTANT IS WRITTEN - see redCorpus.
-  const red = redCorpus(suites);
+  const red = corpusCheck(suites);
   if (red.length > 0) {
-    console.error(
+    err(
       "workflow-guard-mutation: REFUSING to measure - the corpus is not green on the UNMUTATED tree:\n" +
         red.map((r) => `  - ${r.suite} ${r.why}`).join("\n") +
         "\nA guard is called covered when a suite fails under its mutant, and that cannot be told apart\n" +
@@ -238,14 +265,14 @@ export function main(argv) {
   for (const g of guards) {
     const recorded = baseline.guards?.[g.key];
     if (recorded && !all && !seed) {
-      console.log(`BASELINED  ${g.key}\n           reason: ${recorded.reason}`);
+      log(`BASELINED  ${g.key}\n           reason: ${recorded.reason}`);
       continue;
     }
-    const { covered, by } = classifyGuard(g, original, suites);
+    const { covered, by } = classify(g, original, suites);
     measured.push({ guard: g, covered, by });
-    if (covered) console.log(`COVERED    ${g.key}\n           distinguished by ${by}`);
+    if (covered) log(`COVERED    ${g.key}\n           distinguished by ${by}`);
     else {
-      console.log(`UNCOVERED  ${g.key}`);
+      log(`UNCOVERED  ${g.key}`);
       uncovered.push(g);
     }
   }
@@ -256,16 +283,16 @@ export function main(argv) {
         reason: "RECORDED UNMEASURED by --seed: no test distinguishes this skip firing unconditionally. Replace this line with why that is acceptable, or cover it.",
       };
     }
-    writeFileSync(BASELINE, `${JSON.stringify({ guards: guardsOut }, null, 2)}\n`);
-    console.log(`\nworkflow-guard-mutation: recorded ${uncovered.length} uncovered guard(s) in ${BASELINE}.`);
+    writeBaseline(`${JSON.stringify({ guards: guardsOut }, null, 2)}\n`);
+    log(`\nworkflow-guard-mutation: recorded ${uncovered.length} uncovered guard(s) in ${BASELINE}.`);
     return 0;
   }
-  console.log(
+  log(
     `\nworkflow-guard-mutation: ${measured.filter((m) => m.covered).length} covered, ${uncovered.length} uncovered, ` +
       `${guards.length - measured.length} baselined, across ${guards.length} guard(s) and ${suites.length} ci.yml-reading suite(s).`,
   );
   if (uncovered.length > 0 && !all) {
-    console.error(
+    err(
       `workflow-guard-mutation: BLOCKED -- ${uncovered.length} skip guard(s) can fire UNCONDITIONALLY with every test still green:\n` +
         uncovered.map((g) => `  - ci.yml:${g.line}  ${g.key}`).join("\n") +
         "\nA guard no test can distinguish turns a required check into a green no-op. Add a case that\n" +
@@ -276,6 +303,10 @@ export function main(argv) {
   return 0;
 }
 
+// diff-cov: process-boundary — CLI dispatch: process.exit(main(...)) cannot carry a DA hit without
+// forking the process; main's own verdicts — the no-guards and empty-corpus refusals, the red-corpus
+// refusal, the uncovered block, the baselined skip, --list, --all and --seed — are unit-tested
+// through its `io` seam in test/a-ci-skip-guard-can-fire-unconditionally.test.ts.
 if (process.argv[1] && process.argv[1].endsWith("workflow-guard-mutation-ratchet.mjs")) {
   process.exit(main(process.argv.slice(2)));
 }
