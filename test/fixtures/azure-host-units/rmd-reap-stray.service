@@ -1,0 +1,8 @@
+[Unit]
+Description=Reap ad-hoc rmd-* containers that outlived any legitimate run
+After=docker.service
+RequiresMountsFor=/mnt/rmd
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rmd-reap-stray-containers
