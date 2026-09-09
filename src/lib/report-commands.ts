@@ -266,6 +266,7 @@ export interface ProcessServiceState {
   pid: number | null;
   sensed: boolean;
   sensor?: LivenessSensor;
+  reason?: string;
 }
 
 const SERVICE_PROCESS_VERB: Record<ServiceName, string> = {
@@ -307,8 +308,8 @@ export function queryProcessServiceSensed(
   let out: string;
   try {
     out = exec("ps", ["-eo", "pid=,args="]);
-  } catch {
-    return { running: false, pid: null, sensed: false };
+  } catch (error) {
+    return { running: false, pid: null, sensed: false, reason: String((error as Error)?.message ?? error) };
   }
   for (const line of out.split("\n")) {
     const proc = parsePsProcess(line);
