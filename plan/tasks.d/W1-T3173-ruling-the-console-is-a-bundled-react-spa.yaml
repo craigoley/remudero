@@ -78,6 +78,27 @@
     CLAUDE.md warns, drafted the whole entry a second time before a base-discrimination check on its
     own proofs read `base hits=1` and caught it.
 
+    ⚠ THE RULING'S HEADLINE MEASUREMENT IS STALE IN ITS SPECIFICS, AND THE CONCLUSION IS
+    STRONGER THAN WHEN IT WAS WRITTEN. The record says 2515 code lines — 58.4% — sit "inside one
+    template literal" invisible to `tsc`. RE-MEASURED 2026-09-09: that is no longer where the code
+    is. W1-T2902 moved the shell's DOM-driving client out of the raw string into
+    `src/lib/console-shell-client.ts`, and W1-T2731 moved the pure helpers into
+    `src/lib/console-shell-script.ts`. `renderShellHtml`'s `<script type="module">` block is now
+    SEVENTEEN LINES, two of which are seam calls.
+
+    THE CODE IS STILL INVISIBLE TO `tsc`, FOR A MORE ENTRENCHED REASON. `console-shell-client.ts`
+    opens with `// @ts-nocheck -- ... the BODY START/END-bracketed body must stay plain,
+    unannotated browser JS, or it ships to the browser as a syntax error`. MEASURED with the
+    ruling's own control: `const __probe: number = "not a number";` inserted at line 1990 of that
+    file leaves `tsc --noEmit` at EXIT 0 WITH NO OUTPUT.
+
+    AND IT IS NOW THE ONLY ONE. `git grep -l "@ts-nocheck" -- 'src/**/*.ts'` returns exactly one
+    path — this file, 3977 lines. The console's client is the single largest untypechecked region
+    in the tree and the only opt-out in it, and the stated reason is structural: it must remain
+    unannotated browser JS because it is spliced into the shell as SOURCE TEXT. That is precisely
+    the constraint a bundler removes, so the correction supports the ruling rather than undermining
+    it — the argument moves from "it is a string" to "it is opted out, by necessity, forever".
+
     ⚠ THE ACTUAL BLOCKER IS THAT #4711 EARNED NO CREDIT ON EITHER SURFACE. Its head ref was
     `plan/operator-rulings-2026-09-08`, not `run-W1-T3173-<digits>`, and its body carries ZERO
     `Remudero-Task:` lines (MEASURED both ways). So the merged-set projection cannot see this task
