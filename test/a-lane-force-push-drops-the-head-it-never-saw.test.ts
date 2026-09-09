@@ -25,6 +25,7 @@ import {
   gitPushRunBranch,
   leaselessRefusalMessage,
   foreignHeadRefusalMessage,
+  discardRefusalMessage,
 } from "../src/lib/git-push.js";
 // The fixture's origin is a bare repo under TMPDIR, which is exactly the case the live-write
 // guard names as legitimate — it checks the CALL, not the destination, so a real-but-local remote
@@ -211,8 +212,11 @@ test("W1-T3221: an ELIDED lease is caught by the post-push read, not trusted fro
   // answers it: git can skip a lease entirely and still exit 0, so a caller reading the exit code
   // alone takes a lease-skipped push for a lease-honoured one. An exec that returns cleanly while
   // moving nothing is exactly that shape.
+  //
+  // The fixture is the ORDINARY amend, deliberately: with a foreign commit present the discard
+  // check refuses before a push is ever attempted, so this case would pass without exercising the
+  // post-push read at all — a test that proves the wrong guard.
   const { lane, remote, branch, published } = laneOnAPublishedBranch();
-  const operatorSha = anOperatorCommitLandsOn(remote, branch, published);
   const amended = amendWithTrailer(lane);
   const errors: string[] = [];
   const realError = console.error;
@@ -222,9 +226,59 @@ test("W1-T3221: an ELIDED lease is caught by the post-push read, not trusted fro
   } finally {
     console.error = realError;
   }
-  assert.equal(remoteHead(remote, branch), operatorSha, "nothing moved, which is the point");
+  assert.equal(remoteHead(remote, branch), published, "nothing moved, which is the point");
   assert.ok(
-    errors.some((e) => e.includes(amended) && e.includes(published) && e.includes(operatorSha)),
-    `a clean exit that moved nothing must still be reported with all three shas; got ${JSON.stringify(errors)}`,
+    errors.some((e) => e.includes(amended) && e.includes(published)),
+    `a clean exit that moved nothing must still be reported with both shas; got ${JSON.stringify(errors)}`,
   );
+});
+
+
+// ── THE LEASE ANSWERS THE WRONG QUESTION ONCE THE LANE HAS FETCHED ─────────────────────────────
+//
+// `--force-with-lease` compares the LOCAL tracking ref against the remote, so it answers "did the
+// ref move since I last looked". That is not "would this push destroy work", and the gap is not
+// theoretical: a rebuild, a re-dispatch or any plain `git fetch` updates the tracking ref, after
+// which the lease is satisfied by the very commit it exists to protect. MEASURED 2026-09-09
+// against a real local remote: the lane's amend became the remote head and the operator's commit
+// went unreachable, with the lease held.
+
+test("W1-T3221: a lane that FETCHED the foreign commit is still refused — the lease alone lets it through", () => {
+  const { lane, remote, branch, published } = laneOnAPublishedBranch();
+  const operatorSha = anOperatorCommitLandsOn(remote, branch, published);
+  // THE DIFFERENCE FROM THE CASE ABOVE, and the whole point: the lane fetches first, so its
+  // refs/remotes/origin/<branch> now equals the real remote and the lease has nothing to object to.
+  lane.git("fetch", "origin", "--quiet");
+  assert.equal(
+    lane.git("rev-parse", `refs/remotes/origin/${branch}`),
+    operatorSha,
+    "sanity: the lease's own input now AGREES with the remote, which is why it cannot help here",
+  );
+  const amended = amendWithTrailer(lane);
+
+  withLiveWritesAllowed(() => gitPushRunBranch(lane.dir, { force: true, stdio: "ignore" }));
+
+  assert.equal(remoteHead(remote, branch), operatorSha, "the operator's commit must still be the remote tip");
+  assert.notEqual(remoteHead(remote, branch), amended, "the lane's amended tip must not have replaced it");
+});
+
+test("W1-T3221: an ordinary amend discards nothing, so the check does not block the path it guards", () => {
+  // The amended tip carries the SAME PARENTS as the commit it replaces, which is exactly what the
+  // check excuses. Its first version compared reachability alone and refused every ordinary trailer
+  // amend — the bound-fires-on-a-healthy-condition defect this repo keeps re-earning, caught here.
+  const { lane, remote, branch } = laneOnAPublishedBranch();
+  const amended = amendWithTrailer(lane);
+
+  withLiveWritesAllowed(() => gitPushRunBranch(lane.dir, { force: true, stdio: "ignore" }));
+
+  assert.equal(remoteHead(remote, branch), amended, "an amend over the lane's own commit must still land");
+  assert.match(remote.git("log", "-1", "--format=%B", `refs/heads/${branch}`), /Remudero-Task: W1-T3221/);
+});
+
+test("W1-T3221: the discard refusal names the count and both shas, and says why the lease missed it", () => {
+  const msg = discardRefusalMessage("run-W1-T3221-1", "aaaaaaa", "bbbbbbb", 2);
+  for (const part of ["aaaaaaa", "bbbbbbb", "2 commit(s)"]) {
+    assert.ok(msg.includes(part), `the discard refusal must name ${part}`);
+  }
+  assert.match(msg, /lease held/, "and must say why the lease did not catch it, or the reader re-derives it");
 });
