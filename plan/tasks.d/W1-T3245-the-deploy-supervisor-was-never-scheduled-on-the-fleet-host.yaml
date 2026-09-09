@@ -29,6 +29,29 @@
     `--reclaim-only` is documented in that script as reclaiming disk and prints "(no pull, no
     restart under --reclaim-only)". Every image this fleet has ever run was deployed by hand.
 
+    THE WATCHDOG IS WHAT RECREATES THE CONTAINER, AND IT PULLS NOTHING — BY DESIGN. MEASURED
+    2026-09-09: the running container was created at 10:15:01.930Z and the revival log carries
+    `2026-09-09T10:15:01Z revive boot=0 prev_status=exited prev_exit=1 prev_restarts=5` at the same
+    instant. `rmd-relaunch.sh` reaches `docker run` with NO `docker pull` anywhere in it, so every
+    revival recreates the container from the LOCALLY CACHED image. The 11:14Z build published a new
+    `:latest` an hour later and nothing has fetched it; the container's own
+    `/etc/rmd-build-sha` still reads c6baa842, the 2026-09-06 build.
+
+    AND THAT OMISSION SHOULD NOT BE "FIXED" BY ADDING A PULL TO THE LAUNCHER. A watchdog's job is
+    reviving a crash-looping fleet, and adopting a freshly built, untested image MID-CRISIS is the
+    wrong instinct: during a crash loop the known-good cached image is exactly what you want. The
+    launcher is right to pull nothing. What is missing is a SEPARATE, SCHEDULED path that deploys
+    deliberately when the fleet is healthy — which is what the supervisor is and what this task
+    installs.
+
+    THE TOOL IS ALREADY CORRECT AND ALREADY THERE. `deploy/recycle-container.sh` pulls, and REFUSES
+    on a failed pull rather than falling through to a `docker run` on whatever is cached — the
+    2026-08-18 incident is written into its header. Its only executing caller in the repo is
+    `src/lib/deployer.ts`'s recycle backend, reached through `runDeployCycle` and `rmd deploy-run`.
+    MEASURED: nothing under /etc/systemd/system, /etc/cron*, /var/spool/cron or root's crontab
+    references it, and no workflow deploys — `acr-build.yml` says "THIS BUILDS. IT DEPLOYS NOTHING."
+    SO THE GAP IS THE TRIGGER, NOT THE TOOL.
+
     AND THE CAPABILITY WAS FIXED FOR THIS HOST FIVE HOURS AGO. W1-T3200 (#4720, merged
     2026-09-09) exists because "the deploy supervisor kickstarted the daemon only via `launchctl`,
     which is ABSENT on the fleet's actual Linux host — the automatic restart path never ran there,
