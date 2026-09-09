@@ -494,11 +494,11 @@ export function loadPlan(
 }
 
 /**
- * Load a plan through a resolved {@link RepoLayout} (W1-T2922, repo-location.ts): the monolith at
+ * Load a plan through a resolved {@link RepoLayout} (W1-T2922, repo-layout.ts): the monolith at
  * `layout.planMonolith`, shards from `<layout.planDir>/tasks.d` — computed from the layout's OWN
  * `planDir`, never re-derived from the monolith's dirname, so a foreign layout whose monolith and
  * shard directory don't share a parent still finds the right shards. Running this against the
- * house layout ({@link "./repo-location.js".resolveRepoLayout} with no override) is byte-identical
+ * house layout ({@link "./repo-layout.js".resolveRepoLayout} with no override) is byte-identical
  * to `loadPlan(join(root, "plan", "tasks.yaml"))`, today's call shape.
  */
 export function loadPlanForLayout(layout: RepoLayout, io: FileIntegrityIO = defaultIntegrityIO): Plan {

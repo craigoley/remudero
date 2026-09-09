@@ -15,7 +15,7 @@ import { loadAlertPolicyForRepo } from "../src/lib/alert-lane.js";
  *
  * The audit: the harness's OWN directory shape (`plan/tasks.d`, `MASTER-PLAN.md`, `.remudero/`,
  * `learnings/`) was assumed by 20+ non-test src files, so a target repo missing any of those
- * throws in the first loader that assumes one. `resolveRepoLayout` (repo-location.ts) is the ONE
+ * throws in the first loader that assumes one. `resolveRepoLayout` (repo-layout.ts) is the ONE
  * place that shape now lives, house-defaulted for THIS repo and overridable per-target via a
  * `.remudero/layout.json` file; `projectLearningsHome` (learnings.ts), `loadPlanForLayout`
  * (plan.ts) and `loadAlertPolicyForRepo` (alert-lane.ts) all read through it instead of an inline
@@ -219,7 +219,7 @@ test("W1-T2922 ratchet: non-test src's house-layout literal count cannot grow pa
       counts[literal] <= HOUSE_LITERAL_CEILING[literal],
       `'${literal}' now appears in ${counts[literal]} non-test src files, exceeding the frozen ` +
         `ceiling of ${HOUSE_LITERAL_CEILING[literal]} — a new file assumed the house layout ` +
-        `inline instead of resolving it through resolveRepoLayout (src/lib/repo-location.ts)`,
+        `inline instead of resolving it through resolveRepoLayout (src/lib/repo-layout.ts)`,
     );
   }
 });

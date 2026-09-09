@@ -33,8 +33,11 @@ import { fileURLToPath } from "node:url";
 
 // W1-T2922: keep the layout API surfaced from repo-location for the review proof, while
 // pure library callers import repo-layout.js directly so they do not evaluate repoRoot at import.
-export { RepoLayoutError, resolveRepoLayout } from "./repo-layout.js";
-export type { RepoLayout } from "./repo-layout.js";
+// NO RE-EXPORT OF THE LAYOUT HALF, and that is the whole point of the split. A re-export here
+// reads as convenience and costs exactly what the split removed: an import runs the file, so a
+// library reaching `resolveRepoLayout` THROUGH this module pays the `process.argv` evaluation on
+// line ~80 just the same. test/cli-plumbing-extraction.test.ts refuses it by name — this module
+// exports the argv cluster and nothing else. Consumers import from ./repo-layout.js directly.
 
 /**
  * Resolve the repo root a `rmd` invocation GATES, in priority order — replacing the
