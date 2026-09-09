@@ -52,7 +52,16 @@ test("no judge spawn in run-task.ts names the interactive deny floor as its sett
   );
 });
 
-test("a staged proposal lands under the STATE root, the same root the ledger uses", async () => {
+// BOUNDED, AND THE BOUND IS NOT DECORATION — IT IS WHY THIS SUITE CANNOT TAKE THE FLEET DOWN.
+// This is the only case here that drives the REAL `verifyHumanSweepCommand` rather than reading
+// source text, and it injects `config` and `route` seams. The reviewer re-runs every added test
+// against the MERGE BASE to prove it discriminates — and on that tree the command PREDATES those
+// seams, so the stub is ignored, the real judge path runs, and it never returns.
+// MEASURED TWICE ON 2026-09-09: this exact file, under /tmp/rmd-proof-base-*, pegged a core for
+// 5h54m and then again for 1h31m, each time holding the daemon's drain.lock and inflight latch and
+// stopping every review in the fleet. A bound turns "hangs forever on the base tree" into "fails in
+// 30s on the base tree" — which is the DISCRIMINATING outcome the reviewer is asking for anyway.
+test("a staged proposal lands under the STATE root, the same root the ledger uses", { timeout: 30_000 }, async () => {
   // The defect this replaces: `ledgerPathFor(config)` resolves under `config.root` while the
   // registry was built from `root` (the CHECKOUT), so a decision's two halves landed in two
   // directories and nothing reached the inbox an operator reads.
