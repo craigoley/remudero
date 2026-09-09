@@ -8,6 +8,40 @@ decision reversible.
 
 <!-- Entries below are appended verbatim by the runner. -->
 
+## 2026-09-09 — OPERATOR DECISION: a deploy is CHANGE-AND-RISK GATED, not human gated
+
+*Operator-authored, not a machine auto-choose resolution. Recorded by hand at the operator's
+instruction on 2026-09-09 ("Ratify"), ratifying W1-T3199, which was parked at `verify: human`
+precisely because it reverses a recorded operator-control decision. The direction it ratifies is the
+operator's own, given 2026-09-08 and restated 2026-09-09.*
+
+- **THE GATE IS CHANGE-AND-RISK, NOT A MARKER.** `rmd deploy`'s registry entry previously read
+  "OPERATOR trigger for the deploy supervisor (human-gated) … keeps Craig's control over WHEN a
+  merged fix goes live." **That clause is reversed.** What decides a restart is the pending diff's
+  worth against the cost of interrupting what is in flight. The operator's marker stops being
+  required. An explicit `rmd deploy` still FORCES a deploy: a human who has decided must never have
+  to persuade a model.
+- **WHY, MEASURED.** Across the entire ledger archive union the deployer emitted 15 rows, all
+  `deploy.skip`, 14 of them naming **no operator marker** (human-gated; run rmd deploy) — six of
+  those on the correct diagnosis "daemon running stale code". It identified the exact condition
+  fourteen times and acted on none. Meanwhile its restart path was `launchctl`, absent on the Azure
+  Linux host the fleet has run on since 2026-08-13.
+- **THE SAFETY GATES STAY DETERMINISTIC, AND THIS IS THE LOAD-BEARING LIMIT.** Idle detection, the
+  health check and the rollback are facts with correct answers, and `deployer.ts` already gets them
+  right. **No judge may override them.** The judge chooses WHETHER and WHEN to want a restart; the
+  gates decide whether it is safe to have one. A verdict of "deploy now" that lands while a worker is
+  mid-task, or that skips a health check, has replaced a human gate with a worse one.
+- **A RESTART-RATE CEILING IS A REQUIREMENT, NOT A PREFERENCE.** "We don't want to restart and
+  recycle too much" is binding: a bounded rate is recorded so a miscalibrated judge cannot thrash the
+  fleet, and hitting that bound is itself visible.
+- **EVERY VERDICT IS LEDGERED WITH ITS REASON, ON BOTH ARMS.** The existing `deploy.skip` rows are
+  the only reason this decision could establish what the gate had been doing since August; that
+  legibility must survive the change rather than being replaced by silence.
+- **NOT RATIFIED HERE:** that an LLM judges this WELL. That is the operator's bet, recorded as his,
+  and W1-T3201's ledgered verdicts are what will make it checkable. **ROLLBACK:** restore the
+  human-gated clause in `rmd deploy`'s registry entry and the marker check in `deployer.ts`; the
+  judge is additive and removing its call site returns the previous behaviour.
+
 ## 2026-07-20 — OPERATOR DECISION: WS-2 deferral, overnight posture, P34 family
 
 *Operator-authored, not a machine auto-choose resolution. This file's other entries are
