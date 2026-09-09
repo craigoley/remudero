@@ -20,7 +20,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { classifyPreflightOutput, ordinaryTestFailureClass } from "../src/lib/retro-preflight.js";
+import {
+  classifyPreflightOutput,
+  ordinaryTestFailureClass,
+  runRetroPrepublishPreflight,
+  type RetroPrepublishRunner,
+} from "../src/lib/retro-preflight.js";
 import { escalateRetroPublicationFailure } from "../src/lib/retro.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -192,4 +197,75 @@ test("W1-T2993: the escalation notice names the cancelled suite FIRST and says t
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── The repair prompt, which is what the Architect actually reads ────────────────────────────
+//
+// The ledger row and the escalation notice are for humans and for the fleet. The repair prompt is
+// the ONE artifact an automated repair attempt sees, so a cancelled suite missing from it sends
+// the repair itself at the innocent files — the same wrong turn, made by a worker instead of a
+// person, with a budget attached.
+
+test("W1-T2993: the repair prompt names the cancelled suites and tells the repairer to start there", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const prompts: string[] = [];
+  const run: RetroPrepublishRunner = (_command, args) =>
+    args.includes("--list-plan-reading-suites")
+      ? { status: 0, signal: null, stdout: "test/plan.test.ts\n", stderr: "" }
+      : { status: 1, signal: null, stdout: HUNG_RUN, stderr: "" };
+
+  const result = await runRetroPrepublishPreflight({
+    worktreePath: "/tmp/retro-worktree",
+    provenance: { provider: "codex", model: "gpt-5", servedModel: null, effort: "high", sessionId: "t" },
+    remotePrExisted: false,
+    repair: async (prompt: string) => {
+      prompts.push(prompt);
+      throw new Error("repair worker unavailable");
+    },
+    regenerateHarnessArtifacts: async () => {},
+    log: (step, extra) => rows.push({ step, extra }),
+    deps: { run },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(prompts.length, 1, "the repair must have been attempted, or this case proves nothing");
+
+  const prompt = prompts[0]!;
+  assert.match(prompt, /cancelled_tests \(these did NOT run — start here, not with failing_tests\)/);
+  assert.match(prompt, /test\/entrypoint-boot\.test\.ts/);
+  // The failing list is still there — the point is that both are, and that they are labelled.
+  assert.match(prompt, /failing_tests:/);
+  assert.match(prompt, /the freshness gate names the behind-count/);
+
+  // And the ledger row carries the same two facts, so the prompt and the row cannot disagree.
+  const failed = rows.find((r) => r.step === "retro.preflight_failed")!;
+  assert.equal(failed.extra.exit_class, "tests_cancelled");
+  assert.deepEqual(failed.extra.cancelled_tests, ["test/entrypoint-boot.test.ts", "the self-sync refuses a stale checkout"]);
+  assert.deepEqual(failed.extra.failing_tests, ["the freshness gate names the behind-count"]);
+  assert.equal(failed.extra.cancelled_count, 2);
+  assert.equal(failed.extra.has_summary, true);
+});
+
+test("W1-T2993: a run with no summary says so IN the repair prompt — a subset must not read as a total", async () => {
+  const prompts: string[] = [];
+  const run: RetroPrepublishRunner = (_command, args) =>
+    args.includes("--list-plan-reading-suites")
+      ? { status: 0, signal: null, stdout: "test/plan.test.ts\n", stderr: "" }
+      : { status: 1, signal: null, stdout: "not ok 1 - something failed\n  ---\n  code: 'ERR_ASSERTION'\n  ...\n", stderr: "" };
+
+  await runRetroPrepublishPreflight({
+    worktreePath: "/tmp/retro-worktree",
+    provenance: { provider: "codex", model: "gpt-5", servedModel: null, effort: "high", sessionId: "t" },
+    remotePrExisted: false,
+    repair: async (prompt: string) => {
+      prompts.push(prompt);
+      throw new Error("stop here");
+    },
+    regenerateHarnessArtifacts: async () => {},
+    log: () => {},
+    deps: { run },
+  });
+
+  assert.match(prompts[0]!, /printed no `# tests` summary/);
+  assert.match(prompts[0]!, /SUBSET of what would have failed/);
 });
