@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 60.00
   risk: high
@@ -49,6 +49,38 @@
     nothing, and grades `executed_fail` exactly as the `grep:` half already does today. This is not
     a new policy; it is the policy W1-T2737 already ratified, applied to the branch it was not
     applied to.
+
+    STOP — W1-T2737 CONSIDERED THIS EXACT CHANGE AND RATIFIED THE OPPOSITE. THIS TASK AWAITS AN
+    OPERATOR RULING AND MUST NOT BE BUILT UNTIL IT IS GIVEN. `verify: human` IS SET FOR THAT
+    REASON AND FOR NO OTHER — `assertRunnable` refuses a `verify: human` task, so the fleet cannot
+    dispatch this while the ruling is open. `status:` stays `queued` because the task is not
+    retired; `blocked` would demand a `retirement:` naming a disposition, and there is none to
+    name.
+    `test/two-gates-demand-opposite-proof-dialects-for-a-new-module.test.ts` pins it by name:
+
+        // And the plan-only gate is grep-only: a declared-but-absent suite on a BUILD PR keeps the
+        // W1-T456 behaviour byte for byte, because `!existsSync` already scopes it.
+        const onBuild = grade("unit test: ...", head, [...], false);
+        assert.equal(onBuild.proof_exec, "not_yet_built", "the unit test: arm must not acquire a plan-only condition");
+
+    So the asymmetry is DELIBERATE, not an oversight, and the fix above reverses a ratified
+    decision. MEASURED: applying it turns that assertion red, plus one direct `judgeCriterion`
+    fixture that omits the new input.
+
+    THE COUNTER-EVIDENCE, WHICH IS WHY THIS IS FILED RATHER THAN DROPPED. W1-T2737's stated reason
+    is that "`!existsSync` already scopes it" — on a build PR the declared file exists, so the
+    carve-out does not fire. That is true whenever the build DID create the file, and false in
+    exactly the case #4770 produced: the file was declared, was NOT created, `!existsSync` is true,
+    the carve-out fires, and the criterion falls to the keyword floor. The scoping argument holds
+    for the healthy case and fails for the defective one, which is the population the carve-out is
+    supposed to separate.
+
+    A MIDDLE PATH THE RULING MAY PREFER, RECORDED SO IT IS NOT REDISCOVERED. The pin asserts
+    `proof_exec === "not_yet_built"` and nothing more. A change that leaves that value alone but
+    CAPS the verdict on a build head — so the criterion neither blocks nor silently earns the
+    keyword floor, and auto-merge is not armed — would honour the pin's letter and close the hole.
+    It is a different design from the one this shard's criteria describe and would need them
+    rewritten.
 
     THE COST IS REAL AND IS STATED UP FRONT. A task deliberately SPLIT across two PRs, whose first
     PR changes source but leaves a declared test file for the second, will now BLOCK on that first
