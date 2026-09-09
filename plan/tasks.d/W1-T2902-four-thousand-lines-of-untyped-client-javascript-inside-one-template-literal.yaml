@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§7", "§7A", "W1-T2731", "W1-T314", "W1-T334", "W1-T336"]
   files: [src/lib/serve.ts, src/lib/console-shell-script.ts, src/lib/console-shell-client.ts, apps/dashboard/index.html, apps/dashboard/src/main.ts, apps/dashboard/package.json, docs/control-surface.md, test/console-shell-client.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-35 (OBSERVED for size; INFERRED that apps/dashboard is

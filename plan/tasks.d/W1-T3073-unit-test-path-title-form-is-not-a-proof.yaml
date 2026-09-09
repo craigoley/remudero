@@ -68,7 +68,7 @@
       proof: "unit test: test/proof-path-title-separator.test.ts"
     - claim: "deleting only the new parser refusal makes the regression fail, proving the test does not pass on current main"
       proof: "unit test: test/proof-path-title-separator.test.ts"
-  status: queued
+  status: merged
   attempts: 0
   plan_refs: ["W1-T488", "W1-T497", "W1-T1053", "W1-T3071"]
   note: |

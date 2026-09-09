@@ -11,7 +11,7 @@
   files: [src/lib/review.ts, test/a-described-rule-is-not-a-claim.test.ts]
   origin: "operator-session#two-false-review-refusals-2026-09-07"
   plan_refs: ["W1-T2549", "W1-T2534", "W1-T2533", "W1-T2679", "W1-T308"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     TWO PRs REFUSED IN ONE AFTERNOON, EACH AFTER A FULL CI CYCLE, NEITHER MAKING THE CLAIM.

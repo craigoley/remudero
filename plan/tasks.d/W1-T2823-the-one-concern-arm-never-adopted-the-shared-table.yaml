@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/the-one-concern-arm-never-adopted-the-shared-table.test.ts]
   origin: "operator-decision#w1-t2823-one-concern-arm-2026-09-04"
   plan_refs: ["W1-T2543", "W1-T2547", "W1-T2525", "W1-T2790"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED WITH THE SHIPPED PREDICATE, AT HEAD caa9287c, NOT REASONED ABOUT.

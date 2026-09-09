@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§8A"]
   files: [src/lib/errors.ts, src/lib/plan.ts, src/run-task.ts, test/error-envelope.test.ts, test/error-subclass-census.test.ts, scripts/error-subclass-baseline.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-37 (OBSERVED). At f7ceb86, `git grep -nE 'class \w+ extends

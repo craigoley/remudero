@@ -12,7 +12,7 @@
     - test/instrument-surface-completeness.test.ts
   origin: "oper#pr-3967-entrypoint-path-trigger-2026-09-04"
   plan_refs: ["W1-T402", "W1-T2841"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     PR #3967 adds `deploy/entrypoint.sh` to the ACR workflow's `push.paths` filter because that

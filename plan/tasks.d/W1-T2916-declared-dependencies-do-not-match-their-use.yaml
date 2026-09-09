@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§6", "§8", "W1-T934"]
   files: [.dependency-cruiser.cjs, package.json, package-lock.json, scripts/source-size-baseline.json, scripts/test-tier-manifest.json, src/lib/ci-parity.ts, src/lib/settings.ts, src/lib/review.ts, test/dependency-declarations-match-use.test.ts, test/settings.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     SCOPE AMENDMENT 2026-09-08. The implementation necessarily updates the existing settings

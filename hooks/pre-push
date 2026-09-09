@@ -27,6 +27,29 @@
 # arm it either). The documented escape hatch stays: `RMD_PREPUSH_GATES=0 git push ...`.
 set -u
 
+# W1-T3224 — SCRUB GIT'S PER-INVOCATION ENVIRONMENT BEFORE ANY SUBPROCESS RUNS.
+#
+# git exports GIT_DIR (and friends) to every hook, and every child inherits them. A child that
+# runs `git -C <somewhere-else>` then resolves to THIS repo instead of the directory it named.
+# OBSERVED 2026-09-09 on a real armed push: the census suites this hook runs build git fixtures
+# that way, and one push rewrote the pushing lane's HEAD to a fixture commit and cut its index
+# from 3,550 tracked files to 1 — seven fixture commits from a single run.
+#
+# THE WHOLE FAMILY, not just GIT_DIR: GIT_INDEX_FILE alone redirects a child's staging, and each
+# of the others redirects a different part of the same machinery. Unsetting one reads as complete
+# and is not.
+#
+# THE HOOK STILL FINDS ITS OWN REPO: with these unset, git discovers the repository from the
+# working directory, which for a pre-push hook is the worktree root. VERIFIED on a linked
+# worktree (branch and origin/main both resolve), which is the case that matters because every
+# fleet lane is one.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_OBJECT_DIRECTORY \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_QUARANTINE_PATH
+
+# W1-T3222: ARMED BY DEFAULT. The scrub above runs FIRST and unconditionally — it protects every
+# child this hook spawns, and a hook that exits before spawning any still costs nothing to have
+# scrubbed. Only the literal "0" disarms: `core.hooksPath=hooks` puts this file in every worker
+# worktree, so a loose truthiness test would let a stray value turn the fleet's gates off.
 [ "${RMD_PREPUSH_GATES:-}" = "0" ] && exit 0
 
 fail=0

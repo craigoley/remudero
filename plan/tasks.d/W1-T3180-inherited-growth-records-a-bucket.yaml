@@ -10,7 +10,7 @@
   files: [scripts/comment-load-ratchet.mjs, test/inherited-growth-records-a-bucket.test.ts]
   origin: "operator-session#board-pass-2026-09-08"
   plan_refs: ["W1-T3022", "W1-T2539", "W1-T3015"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3022 ended a four-for-four conflict incident by bucketing the comment-load ceiling, and
