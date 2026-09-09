@@ -25411,7 +25411,7 @@ async function deployCommand(rest: string[]): Promise<number> {
  * Provisioning the install root is exclusively `rmd install-checkout`'s job, not this one's.
  */
 async function deployRunCommand(rest: string[]): Promise<number> {
-  const badArg = unknownArgError("deploy-run", rest, [], ["--dry-run"]);
+  const badArg = unknownArgError("deploy-run", rest, [], ["--dry-run", "--image-drift-only"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -25437,7 +25437,12 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     uid,
     ledgerPath: ledgerPathFor(config),
   });
-  const result = runDeployCycle(deps, { dryRun: rest.includes("--dry-run") });
+  // W1-T3245: `--image-drift-only` is the WATCHDOG TICK's reading — recycle for a new image,
+  // never restart for mount staleness, which the daemon's own freshness exit already owns.
+  const result = runDeployCycle(deps, {
+    dryRun: rest.includes("--dry-run"),
+    imageDriftOnly: rest.includes("--image-drift-only"),
+  });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
   return result.reason.startsWith("dirty-tree-conflict") || result.rolledBackTo ? 1 : 0;
 }

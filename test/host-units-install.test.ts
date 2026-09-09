@@ -5,6 +5,8 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync, mkdirSync, rmSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { decideDeployTrigger } from "../src/lib/deployer.js";
+
 const SCRIPT = "deploy/install-host-units.sh";
 
 /** Run the installer against a throwaway tree so no test can touch real systemd. */
@@ -437,6 +439,101 @@ test("W1-T2953: every guard the LIVE launcher carries is reproduced by the rende
       assert.match(live, guard, `the captured live launcher must carry the ${name} (else the fixture is wrong)`);
       assert.match(rendered, guard, `the renderer must reproduce the ${name}`);
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T3245: the recycle folds into the watchdog's tick, and is NOT a second timer ──────────
+//
+// MEASURED 2026-09-09: acr-build published a new image at 11:14Z; the running container, created
+// by a watchdog revival at 10:15Z, still ran the 09-06 build. The commit it was missing was the
+// repair for that morning's 7h32m outage.
+//
+// NOTHING ON THIS HOST EVER PULLED. `rmd-relaunch.sh` reaches `docker run` with no `docker pull`,
+// so a revival recreates from the CACHED image — and that is right: adopting a freshly built,
+// untested image mid-crash-loop is the wrong instinct. `recycle-container.sh` does pull and refuses
+// on a failed pull, but its only caller is `rmd deploy-run`, which nothing invoked.
+//
+// FOLDED RATHER THAN SCHEDULED SEPARATELY. Reconciliation is level-triggered: this loop already
+// reads observed state and converges, so "is the image current" is the same loop asking a second
+// question about the same desired state. A second timer would be a second reconciler over one
+// subject.
+
+test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-fold-"));
+  try {
+    assert.equal(renderAsAzure(root).status, 0);
+    const launcher = readFileSync(join(root, "rmd-relaunch.sh"), "utf8");
+
+    // The tick asks the SUPERVISOR, which owns the idle gate, health check and rollback and reaches
+    // recycle-container.sh. It must never shortcut to docker or to a bare restart.
+    assert.match(launcher, /bin\/rmd" deploy-run --image-drift-only/);
+    assert.doesNotMatch(launcher, /docker pull/, "the launcher itself must never pull — that is the recycle's job");
+
+    // NO SECOND RECONCILER. The whole point of folding is one loop over one subject.
+    const units = readdirSync(join(root, "systemd"));
+    assert.deepEqual(
+      units.filter((u) => u.startsWith("rmd-deploy")),
+      [],
+      "no separate deploy service or timer may be rendered",
+    );
+    assert.equal(units.length, 5, "the five existing units, and no more");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3245: the tick recycles for image drift and never for mount drift", () => {
+  // TWO DECISIONS, NOT ONE SCORE. Mount staleness is the daemon's own freshness exit (75), tens of
+  // times a day, in seconds; a second actor on that job would race it. `--image-drift-only` is what
+  // makes the tick blind to it — asserted on the DECISION, not just on the rendered flag.
+  const base = {
+    markerPresent: false,
+    autoMode: true,
+    installHead: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    originMain: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", // the checkout IS behind
+    runningHead: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    daemonAlive: true,
+    stopPresent: false,
+  };
+
+  // Mount drift alone: the operator's full reading deploys; the tick's reading does NOT.
+  assert.equal(decideDeployTrigger({ ...base, imageBakedCommitsBehind: 0 }).deploy, true, "control: the full reading acts");
+  const tick = decideDeployTrigger({ ...base, imageBakedCommitsBehind: 0, imageDriftOnly: true });
+  assert.equal(tick.deploy, false, "the tick must leave mount staleness to the daemon");
+  assert.match(tick.reason, /up-to-date/);
+
+  // Image drift: the tick DOES act, even though the checkout is also behind.
+  const drifted = decideDeployTrigger({ ...base, imageBakedCommitsBehind: 1, imageDriftOnly: true });
+  assert.equal(drifted.deploy, true, "a new image is the tick's own business");
+  assert.match(drifted.reason, /running image predates 1 baked-path commit/);
+
+  // And STOP still outranks it in the tick's reading too.
+  assert.equal(
+    decideDeployTrigger({ ...base, imageBakedCommitsBehind: 1, imageDriftOnly: true, autoMode: false, markerPresent: false }).deploy,
+    false,
+    "no marker and no auto mode is still human-gated",
+  );
+});
+
+test("W1-T3245: a down daemon is revived from cache, not recycled", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-down-"));
+  try {
+    assert.equal(renderAsAzure(root).status, 0);
+    const launcher = readFileSync(join(root, "rmd-relaunch.sh"), "utf8");
+
+    // The recycle sits INSIDE the already-running branch. A daemon that is DOWN falls through to
+    // the ordinary `docker run` from cache — deliberately, because adopting an untested image
+    // mid-crash-loop is exactly when you want the known-good one.
+    const running = launcher.indexOf("remudero-daemon healthy");
+    const dockerRun = launcher.indexOf("docker run -d --name remudero-daemon");
+    assert.ok(running > 0 && dockerRun > running, "the revive path must come AFTER the healthy branch");
+    assert.match(launcher, /--boot/, "the boot path is unchanged");
+
+    // On --boot the daemon is not running, so the recycle branch is unreachable there by
+    // construction; the guard states it rather than relying on that.
+    assert.match(launcher, /\[ "\$BOOT" -eq 0 \]/, "the recycle is never considered on a boot run");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
