@@ -74,6 +74,12 @@ export function parseLedger(ndjson: string): LedgerRecord[] {
 
 /** The ceiling on ndjson bytes {@link readRetroLedgerNdjson} RETAINS, whatever the corpus holds.
  *
+ *  PRIMARY CONTROL. This is the bound that keeps the retro inside its heap — not the marker window
+ *  below, which is a cost optimisation layered on top. The distinction is measured, not stylistic:
+ *  a 30-day window over the corpus that OOM'd excluded 153 rows out of 900,813, because rotation
+ *  VOLUME rather than calendar span is what crossed the heap. If this cap is ever removed, the
+ *  window does not catch the fall.
+ *
  *  Sized against the retro subprocess's own 1792MB heap with the measured multiplier: the retained
  *  ndjson is held as an array of strings, joined into a second flat string, and parsed into objects
  *  costing roughly 3x their text — so the retained side peaks near 5x this number, leaving the
