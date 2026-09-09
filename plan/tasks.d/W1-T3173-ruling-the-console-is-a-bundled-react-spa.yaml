@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   risk: high
   budget_usd: 2.00
@@ -62,8 +62,30 @@
     (iii) NAME THE COSTS ADMITTED, not just the benefits: this introduces the FIRST build artifact
     the system has ever had (W1-T3176), and a second test runner (Vitest) alongside `node --test`.
     A ruling that records only the upside is a sales document.
-    (iv) NAME THE OPERATOR AS THE DECIDER, with the date and the quoted direction. This is a
-    `verify: human` ruling precisely because no test can establish that a taste bar was met.
+    (iv) NAME THE OPERATOR AS THE DECIDER, with the date and the quoted direction.
+
+    (v) RATIFIED 2026-09-09, AND THE BAND MOVED TO `verify: auto` ON THE OPERATOR'S OWN OBJECTION:
+    "i don't know why that would be verify:human - i'm literally the one that proposed the idea."
+    The original band was defensible when filed — a taste bar is not testable — but it was gating
+    the RULING on a sign-off that the rationale above already quotes verbatim from 2026-09-08. The
+    decision was never open; only its record was. What remains to verify is whether DECISIONS.md
+    carries the required text, and all three criteria below are mechanical greps, which is precisely
+    what `auto` is for.
+
+    ⚠ AND THE RULING WAS ALREADY RECORDED, WHICH THE BAND HID. DECISIONS.md has carried this entry
+    since #4711 merged 2026-09-08T19:55Z — the reversed clause, the WS-12 separation and the 2515
+    measurement are all present on `main`. A session reading `status: queued` on this shard, as
+    CLAUDE.md warns, drafted the whole entry a second time before a base-discrimination check on its
+    own proofs read `base hits=1` and caught it.
+
+    ⚠ THE ACTUAL BLOCKER IS THAT #4711 EARNED NO CREDIT ON EITHER SURFACE. Its head ref was
+    `plan/operator-rulings-2026-09-08`, not `run-W1-T3173-<digits>`, and its body carries ZERO
+    `Remudero-Task:` lines (MEASURED both ways). So the merged-set projection cannot see this task
+    as done, and W1-T3174, W1-T3175, W1-T3176 and W1-T3177 stay blocked behind a dependency that has
+    in fact shipped. W1-T1214 built the author-time refusal for exactly this shape and correctly
+    EXEMPTS a plan/docs PR — but this task's deliverable IS a docs artifact, so the carve-out
+    swallows the case it was meant to catch. That gap is filed separately; this shard records only
+    that the ruling is done and the band is wrong.
   acceptance:
     - claim: "DECISIONS.md records the ruling, quoting the reversed 'No bundler by design (the W3-T2 decision)' clause verbatim"
       proof: "grep: No bundler by design in DECISIONS.md"
