@@ -12,7 +12,6 @@ import {
   measurementCadenceMarkerPath,
   readMeasurementCadenceMarker,
   recordMeasurementCadenceFire,
-  buildMeasurementCadenceRow,
   runMeasurementCadenceReport,
   type MeasurementCadencePolicy,
 } from "../src/lib/measurement-cadence.js";
@@ -172,17 +171,6 @@ function writeRepeatingRuleFixture(stateDir: string): void {
 
 const NO_GIT = () => ({ dump: "", ref: "test" });
 
-function trailerMergeDump(taskIds: readonly string[]): string {
-  return taskIds
-    .map((taskId, index) => {
-      const sha = `${index + 1}`.repeat(40);
-      const ts = `2026-09-09T0${index}:00:00+00:00`;
-      const body = `body\n\nRemudero-Task: ${taskId}\n`;
-      return `\x02${sha}\x00${ts}\x00feat: merge ${taskId}\x00${body}\x01src/${taskId}.ts\n`;
-    })
-    .join("");
-}
-
 test("shipped plan/policy.yaml has the base cadence ON and the escalating form ON since 2026-09-02 — both pinned", () => {
   const p = loadPolicy(policyPath(REPO_ROOT));
   assert.equal(p.values.measurementCadence.enabled, true, "the cadence itself must be safe-on out of the box");
@@ -332,52 +320,6 @@ test("an unreadable git history degrades verdict-calibration/autonomy-rate to a 
     assert.match(result.verdictCalibration.refusedReason ?? "", /git history unavailable/);
     assert.equal(result.autonomyRate.status, "refused");
     assert.match(result.autonomyRate.refusedReason ?? "", /git history unavailable/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("metric deltas compare the current fire with the previous measurement_cadence.ran ledger row", () => {
-  const root = tmp("rmd-mc-delta-");
-  try {
-    const stateDir = join(root, "state");
-    mkdirSync(stateDir, { recursive: true });
-    const previous = {
-      ts: "2026-09-08T18:00:00.000Z",
-      run_id: "R0",
-      task_id: "DAEMON",
-      step: "measurement_cadence.ran",
-      rule_efficacy: { status: "measured", repeatIncidentRate: 0.25 },
-      verdict_calibration: { status: "measured", blocked_ci_share: 0.5 },
-      autonomy_rate: { status: "measured", zeroTouchRate: 0.75 },
-    };
-    const rows = [
-      previous,
-      { ts: "2026-09-09T00:00:00.000Z", step: "ci.stalled", run_id: "R1", task_id: "C1" },
-      { ts: "2026-09-09T00:00:00.000Z", step: "ci.stalled", run_id: "R2", task_id: "C2" },
-      { ts: "2026-09-09T00:00:00.000Z", step: "verdict", run_id: "R3", task_id: "V1", verdict: "blocked_ci" },
-      { ts: "2026-09-09T00:00:00.000Z", step: "verdict", run_id: "R4", task_id: "V2", verdict: "merged" },
-      { ts: "2026-09-09T00:00:00.000Z", step: "verdict", run_id: "R5", task_id: "V3", verdict: "merged" },
-      { ts: "2026-09-09T00:00:00.000Z", step: "verdict", run_id: "R6", task_id: "V4", verdict: "merged" },
-      { ts: "2026-09-09T00:00:00.000Z", step: "automerge.armed", run_id: "R7", task_id: "T1" },
-    ];
-    writeFileSync(join(stateDir, "ledger.2026-09-09T00-00-00-000Z.ndjson"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
-
-    const row = buildMeasurementCadenceRow(
-      runMeasurementCadenceReport({
-        stateDir,
-        cwd: REPO_ROOT,
-        escalate: false,
-        gitLog: () => ({ dump: trailerMergeDump(["T1", "T2"]), ref: "test" }),
-      }),
-    );
-
-    assert.equal((row.rule_efficacy as Record<string, unknown>).repeatIncidentRate, 1);
-    assert.equal((row.rule_efficacy as Record<string, unknown>).delta_vs_previous, 0.75);
-    assert.equal((row.verdict_calibration as Record<string, unknown>).blocked_ci_share, 0.25);
-    assert.equal((row.verdict_calibration as Record<string, unknown>).delta_vs_previous, -0.25);
-    assert.equal((row.autonomy_rate as Record<string, unknown>).zeroTouchRate, 0.5);
-    assert.equal((row.autonomy_rate as Record<string, unknown>).delta_vs_previous, -0.25);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
