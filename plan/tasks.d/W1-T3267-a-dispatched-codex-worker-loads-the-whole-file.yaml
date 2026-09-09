@@ -1,0 +1,113 @@
+- id: W1-T3267
+  title: "EVERY DISPATCHED CODEX WORKER NOW LOADS ALL 43,685 BYTES OF CLAUDE.md — W1-T3135's merged fallback closed the auto-load hole by injecting the WHOLE file under a 64 KiB cap, so the per-spawn context tax is now paid unconditionally and in full, while the headline-only rendering that shard designed (7,377 bytes by its own measurement) was superseded by its own falsifier and never built"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high  # Rule 19: one concern — what the Codex lane loads — but it spans the generator, the
+              # rendered doc, the spawn's fallback list and the falsifier, and a fix to any one
+              # alone either renders a doc nothing reads or points the reader at a missing file.
+  band_meaning: span
+  budget_usd: 20.00
+  files: [scripts/generate-agents-md.mjs, AGENTS.md, src/lib/worker-provider.ts, test/a-dispatched-codex-worker-loads-the-whole-file.test.ts, package.json]
+  origin: "operator-session#ratifying-W1-T3135-2026-09-09"
+  plan_refs: ["W1-T3135", "W1-T2508"]
+  status: queued
+  attempts: 0
+  rationale: |
+    CARRIED FROM W1-T3135, which merged a DIFFERENT remedy than it designed. See that shard's
+    RATIFIED section: #4826 (632cd86e) gave `codexExecArgs` a `project_doc_fallback_filenames`
+    pointing at CLAUDE.md plus `project_doc_max_bytes = 65536`, which is precisely the route
+    W1-T3135's design clause (v) ruled out and precisely the condition its own falsifier named as a
+    close-without-implementation. Its clauses (i)-(iii) — the rendered doc and its drift check —
+    were never built. This task carries that half rather than letting it be deleted with the
+    supersession.
+
+    THE MOTIVATION MOVED, IT DID NOT VANISH. W1-T3135 was written against SILENT TRUNCATION: 43685
+    bytes of CLAUDE.md behind Codex's 32 KiB `project_doc_max_bytes` default would drop the tail.
+    Raising the cap to 65536 answers that completely, and the merged test ties the cap above the
+    CLAUDE.md budget ratchet's ceiling so it cannot silently invert. Truncation is CLOSED and this
+    task must not re-litigate it.
+
+    WHAT THE RAISED CAP DOES NOT ANSWER IS SIZE. MEASURED on origin/main 2026-09-09: CLAUDE.md is
+    43,685 bytes and `CODEX_PROJECT_DOC_MAX_BYTES` is 65,536, so every Codex spawn now loads the
+    ENTIRE file. Before #4826 the Codex lane's only route to doctrine was a prose sentence in the
+    prelude — a tax the model could decline to pay by not opening the file. It is now paid
+    unconditionally, in full, on every dispatch.
+
+    THAT IS THE TAX CLAUDE.md's OWN MAINTENANCE RULE IS WRITTEN AROUND. Its header reads:
+    "INTERACTIVE sessions here load it in full and pay that tax per session; a DISPATCHED WORKER
+    never sees it ... (only Codex reads it). Keep it compressed for the lane that pays." #4154
+    ("name the lane that actually pays the context tax") put that parenthetical there, so Codex was
+    already named as the payer — what changed is that the payment became mandatory and whole.
+    W1-T3135 measured the headline-only rendering at 7,377 bytes on 2026-09-08: an 83% reduction in
+    what every dispatched Codex worker carries, for a lane whose own file says to keep it compressed.
+
+    AND THE GENERATOR HALF IS STILL THE RIGHT SHAPE FOR IT. W1-T3135 clause (iv)'s reasoning is
+    untouched by the supersession: this repo runs three generator+drift-check pairs already
+    (`generate-cli-reference.mjs`, `generate-proof-dialect.mjs`, `generate-docs-index.mjs`), and a
+    second HAND-MAINTAINED doctrine file would drift from CLAUDE.md within days with nothing saying
+    so. A rendered index is not a second source of truth; a hand-written one would be.
+  design: |
+    (i) RENDER, DO NOT COPY. `scripts/generate-agents-md.mjs` renders AGENTS.md from CLAUDE.md's own
+    headline constants — `parseRuleHeadlines` + `renderHeadlineOnlyIndex` (src/lib/learnings.ts),
+    the split W1-T2508 already proved — plus a pointer telling the reader to open CLAUDE.md in the
+    checkout for a headline's body. It grows with headline COUNT, not with rule prose.
+
+    (ii) THE DRIFT GATE, REACHED THROUGH `npm test`. `--check` mode, spawned by the falsifier the
+    way test/cli-reference.test.ts spawns its sibling. A CLAUDE.md headline change that leaves
+    AGENTS.md stale must FAIL BY NAME, not merely differ.
+
+    (iii) THE SPAWN PREFERS THE INDEX AND KEEPS CLAUDE.md AS THE FALLBACK. Codex's native reader
+    looks for AGENTS.md FIRST, so a tracked AGENTS.md is preferred without removing anything:
+    `project_doc_fallback_filenames` keeps CLAUDE.md so a checkout without the rendered file still
+    auto-loads doctrine. NOTHING about `project_doc_max_bytes` changes — the cap #4826 pinned, and
+    the test tying it above the ratchet ceiling, are load-bearing and stay exactly as merged.
+
+    (iv) THE REDUCTION IS THE CLAIM, SO MEASURE IT AGAINST BOTH FILES. Assert the rendered byte
+    length against CLAUDE.md's own committed size, not a hand-typed number, so the assertion tracks
+    the file rather than a snapshot — and prove it can FAIL by rendering a deliberately oversized
+    fixture in the same test. A size assertion that can only pass proves nothing; this repo has
+    shipped that shape before.
+
+    (v) THE PRELUDE MUST STAY TRUE. #4826 rewrote it to name only files this repo contains. Adding
+    AGENTS.md means the prelude may name it — and must not name it before it is tracked.
+
+    (vi) NOT IN SCOPE: the cap constant, the CLAUDE.md budget ratchet, `settingSources`, what Claude
+    Code loads, or any change to what W1-T3135 merged. This task ADDS a smaller preferred document;
+    it removes no fallback and relaxes no ceiling.
+  acceptance:
+    - claim: the rendered index carries every CLAUDE.md rule headline, so nothing a worker needs to know about is dropped by preferring it
+      proof: "unit test: test/a-dispatched-codex-worker-loads-the-whole-file.test.ts"
+    - claim: the rendered index is materially smaller than the CLAUDE.md a Codex spawn loads today, measured against the committed file rather than a typed constant
+      proof: "unit test: test/a-dispatched-codex-worker-loads-the-whole-file.test.ts"
+    - claim: a CLAUDE.md headline change that leaves the rendered index stale fails the drift check by name
+      proof: "unit test: test/a-dispatched-codex-worker-loads-the-whole-file.test.ts"
+    - claim: the size assertion can fail — an oversized fixture is refused by the same check that accepts the real one
+      proof: "unit test: test/a-dispatched-codex-worker-loads-the-whole-file.test.ts"
+    - claim: the spawn still names CLAUDE.md as a project-doc fallback and still pins the byte cap W1-T3135 merged, so a checkout without the rendered file loses nothing
+      proof: "unit test: test/a-dispatched-codex-worker-loads-the-whole-file.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF THE TAX IS NOT REAL. Re-measure both numbers first:
+    `git show origin/main:CLAUDE.md | wc -c` and the headline-only rendering's byte length. If
+    CLAUDE.md has since been compressed to where a rendered index saves little, the premise is gone
+    and a second file is not worth its drift risk — say so and close.
+
+    CLOSE ALSO IF `project_doc_fallback_filenames` NO LONGER NAMES CLAUDE.md, or if
+    `CODEX_PROJECT_DOC_MAX_BYTES` has been removed: this task is an ADDITION on top of what #4826
+    merged, and without that base it is a different task that needs its own filing.
+
+    A CHANGE THAT LOWERS THE CAP, EDITS THE CLAUDE.md BUDGET RATCHET, OR DROPS CLAUDE.md FROM THE
+    FALLBACK LIST DOES NOT SATISFY THIS TASK. The merged repair is not this task's to undo, and a
+    smaller preferred document that removes the safety net is a regression wearing a saving.
+
+    A HAND-WRITTEN AGENTS.md DOES NOT SATISFY IT EITHER. Without the generator and its drift check
+    the file is a second source of truth that goes stale silently, which is the outcome W1-T3135
+    clause (iv) filed this shape to avoid.
+  note: |
+    FILED 2026-09-09 under a RESERVED id (`refs/rmd-id/W1-T3267`), in the same PR that ratifies
+    W1-T3135's shard to what actually merged. That pairing is deliberate: Standing rule 21's
+    concern is a criterion orphaning when a merged task's record changes, and W1-T3135's criteria
+    are being left UNAMENDED precisely so nothing is rewritten to match a diff — this task is where
+    the unbuilt half lives instead.

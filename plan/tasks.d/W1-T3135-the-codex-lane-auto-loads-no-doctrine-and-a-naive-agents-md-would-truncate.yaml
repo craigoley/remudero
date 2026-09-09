@@ -41,6 +41,45 @@
     (`generate-cli-reference.mjs`, `generate-proof-dialect.mjs`, `generate-docs-index.mjs`), each
     with a `--check` mode reached through `npm test` rather than a workflow step. A second
     hand-maintained doctrine file would drift from CLAUDE.md within days and nothing would say so.
+
+    RATIFIED 2026-09-09 — WHAT MERGED IS NOT WHAT THIS SHARD DESIGNED, AND THE CRITERIA BELOW ARE
+    LEFT DELIBERATELY UNAMENDED.
+
+    #4826 (632cd86e) merged under this id and shipped a DIFFERENT remedy: `codexExecArgs` now passes
+    `-c project_doc_fallback_filenames=["CLAUDE.md"]` and `-c project_doc_max_bytes=65536`
+    (`CODEX_PROJECT_DOC_MAX_BYTES`, src/lib/worker-provider.ts), with
+    test/the-codex-lane-auto-loads-no-doctrine.test.ts tying that cap above the CLAUDE.md budget
+    ratchet's ceiling. The prelude was rewritten to name only files this repo contains. That is a
+    real repair of fact (1) and it is on main.
+
+    IT IS THE ROUTE THIS SHARD RULED OUT, ON ITS OWN TERMS. Design clause (v) put "any `-c
+    project_doc_*` flag on the spawn" explicitly OUT OF SCOPE, needing an operator to widen the
+    Codex argument surface — which is what happened, and is the legitimate review-ratified-widening
+    case, not a violation. And this shard's own falsifier names the outcome exactly: "CLOSE WITHOUT
+    IMPLEMENTATION IF AGENTS.md ALREADY EXISTS ON MAIN, or if `codexExecArgs` has gained a
+    `project_doc_` flag." That second condition is now TRUE. The generator design was superseded by
+    its own close-condition before it was ever built.
+
+    SO THE CRITERIA STAND AS FILED, UNMET. Measured on main 2026-09-09: `AGENTS.md` is ABSENT and
+    `scripts/generate-agents-md.mjs` is ABSENT, so criteria 1 and 2 name work that does not exist,
+    and criterion 3 ("the spawn's argument list carries no project_doc override") is now FALSE by
+    design. Rewriting them to match the merged diff is the one move Standing rule 21 and the
+    reviewer's own message both refuse — "Add the missing work (or escalate). Do NOT edit the
+    acceptance criteria to match the diff." This is the escalation: the record says what shipped and
+    what did not, and the unbuilt half is carried by a follow-up rather than deleted.
+
+    `files:` IS ALSO LEFT AS FILED, naming `scripts/generate-agents-md.mjs`, `AGENTS.md` and
+    `package.json` — paths the merged work never touched. That is not tidied here either: the list
+    is the record of what this task SET OUT to build, and the gate's "untouched declared scope"
+    advisory reading true against it is the correct signal, not noise to be silenced.
+
+    PARENT SURVIVES: the merged repair stands and is not re-queued — the Codex lane now auto-loads
+    CLAUDE.md under a pinned cap, which is fact (1) closed. What does NOT survive is this shard's
+    OWN design: the headline-only rendered doctrine doc and its drift check, clauses (i)-(iii),
+    never built. W1-T3267 carries that half, re-motivated: the raised cap answers the TRUNCATION
+    hazard of fact (3), and leaves the SIZE one open, because every dispatched Codex worker now
+    receives all 43685 bytes of CLAUDE.md where the rendered index was 7377.
+
   design: |
     (i) THE GENERATOR. scripts/generate-agents-md.mjs renders AGENTS.md from CLAUDE.md's OWN
     constants — `parseRuleHeadlines` + `renderHeadlineOnlyIndex` (src/lib/learnings.ts), the same
