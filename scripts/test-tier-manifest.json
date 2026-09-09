@@ -12,6 +12,7 @@
     "test/a-check-that-could-not-run-is-reported-as-a-failed-check.test.ts": 252,
     "test/a-check-that-names-its-own-escape-hatch-gets-escaped.test.ts": 260,
     "test/a-check-without-a-base-reports-inherited-files-as-violations.test.ts": 0,
+    "test/a-ci-skip-guard-can-fire-unconditionally.test.ts": 0,
     "test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts": 294,
     "test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts": 804,
     "test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts": 320,
