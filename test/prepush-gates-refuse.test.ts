@@ -17,8 +17,13 @@ const HOOK = join(REPO_ROOT, "hooks", "pre-push");
  * The pre-push route can REFUSE: what it checks, how each check reports a result it did not
  * reach, and how it reports what it could not enumerate. `core.hooksPath=hooks` means this file
  * reaches every worker worktree the moment it merges — a mistake here does not redden a PR, it
- * stops the fleet pushing. Whether the switch defaults on or off is no longer this file's claim;
- * W1-T3222 moved that to test/the-prepush-gates-ship-armed.test.ts.
+ * stops the fleet pushing.
+ *
+ * W1-T3222 folds in the ARMED-BY-DEFAULT proof here rather than a second file: a new test file
+ * enters `test:tier:check`'s (scripts/test-tier-manifest.mjs) untiered-file refusal the moment it
+ * exists, and W1-T3222's own declared scope does not include scripts/test-tier-manifest.json, so
+ * a second file would fail CI's `test-slow` job for a reason this task cannot fix in scope. This
+ * file was already tiered before this change, so extending it costs nothing there.
  */
 
 /** A spawn whose stdout is fixed, so census candidate discovery is decided by the test, not the tree. */
@@ -120,11 +125,57 @@ function runHook(cwd: string, env: Record<string, string>): { status: number; st
   return { status: res.status ?? -1, stderr: res.stderr ?? "" };
 }
 
-// The SHIPS-OFF-by-default tests that lived here (W1-T3059) are replaced, not deleted, by
-// W1-T3222: the default they pinned is exactly what that task changes. Their successor,
-// asserting the new fail-armed default plus the mirror property it adds, lives in
-// test/the-prepush-gates-ship-armed.test.ts — see that file's own header for why a new suite
-// rather than an edit to this one.
+// The SHIPS-OFF-by-default tests that lived here (W1-T3059) are gone: the default they pinned
+// is exactly what W1-T3222 changes. Their successor below proves both halves — a violating tree
+// is now refused with the switch UNSET, and a clean tree still passes unset, so arming is not a
+// blanket block — plus the mirror property the new predicate adds: only the exact string "0"
+// disarms, so a stray value (the old hazard ran the other way — only exact "1" armed) cannot turn
+// the fleet's gates off.
+
+function violatingPrecheck(dir: string): void {
+  mkdirSync(join(dir, "scripts"), { recursive: true });
+  writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(1)\n");
+}
+
+test("ARMED BY DEFAULT: with the switch unset, a violating tree is refused, not waved through", () => {
+  const dir = scratch();
+  violatingPrecheck(dir);
+  const { status, stderr } = runHook(dir, {});
+  assert.equal(status, 1, "unset must now run the checks, where before it exited 0 before touching one");
+  assert.match(stderr, /pre-push REFUSED/, "the refusal must actually fire, not just the checks running");
+});
+
+test("ARMED BY DEFAULT: with the switch unset, a clean tree still passes", () => {
+  const dir = scratch();
+  // No scripts/rule15-precheck.mjs, no scripts/test-tier-manifest.mjs, no ./bin/rmd: every check
+  // reports itself skipped-with-a-name, none of which is a violation.
+  const { status } = runHook(dir, {});
+  assert.equal(status, 0, "arming is not a blanket refusal — a tree with nothing wrong must still pass");
+});
+
+test("only the exact string 0 disarms — a stray value cannot turn the fleet's gates off", () => {
+  const dir = scratch();
+  violatingPrecheck(dir);
+  for (const value of ["", "1", "true", "yes", "no", "false", "disabled"]) {
+    const { status } = runHook(dir, { RMD_PREPUSH_GATES: value });
+    assert.equal(status, 1, `RMD_PREPUSH_GATES=${JSON.stringify(value)} must still be armed, not disarmed`);
+  }
+});
+
+test("RMD_PREPUSH_GATES=0 is the one value that disarms, and it stays silent like the old default", () => {
+  const dir = scratch();
+  violatingPrecheck(dir);
+  const { status, stderr } = runHook(dir, { RMD_PREPUSH_GATES: "0" });
+  assert.equal(status, 0, "the exact string 0 is the documented escape hatch");
+  assert.equal(stderr.trim(), "", "a disarmed hook must not even announce itself, same as the old default");
+});
+
+test("the refusal still names RMD_PREPUSH_GATES=0 as the way out, with the switch left unset", () => {
+  const dir = scratch();
+  violatingPrecheck(dir);
+  const { stderr } = runHook(dir, {});
+  assert.match(stderr, /RMD_PREPUSH_GATES=0 git push/, "a hook with no escape hatch is its own hazard");
+});
 
 test("ARMED: a refusing precheck blocks the push and the message names the way out", () => {
   const dir = scratch();
