@@ -1,0 +1,92 @@
+- id: W1-T3243
+  title: "A REFUSED COMMIT LEAVES THE PLAN STAGED FOREVER — the plan-write paths `git add` then `git commit` with no rollback, so one pre-commit refusal wedges the checkout's freshness gate permanently and every plan-reading verb is refused until a human intervenes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/plan-architect.ts, src/run-task.ts, test/a-refused-commit-leaves-no-staged-residue.test.ts]
+  origin: "operator-session#deploy-visibility-2026-09-09"
+  plan_refs: ["W1-T1089", "W1-T2551", "W1-T446"]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 on the running Azure host. The daemon's own checkout carried 88 staged
+    entries, every one under `plan/tasks.d/` (82 modified, 6 added). Against `origin/main` at
+    2a22ebcf0: 87 byte-identical, 1 strictly OLDER, 0 absent - the whole set was superseded content
+    that had been sitting in the index long enough for main to overtake it.
+    THE CONSEQUENCE WAS A WEDGED FLEET SURFACE, NOT UNTIDINESS. `checkCliFreshness` refuses when the
+    checkout is behind AND dirty on a path the incoming fast-forward would also write. Those 88
+    paths are exactly such paths, so the refusal fired on every plan-reading verb:
+      rmd is behind origin/main (7f7f36d..2a22ebc) and the working tree has uncommitted changes
+      the incoming fast-forward would also write -- refusing to auto-sync
+    `rmd plan-reconcile` was refused. The refusal is CORRECT - a stale plan gives a wrong answer,
+    which is the gate's whole purpose - so the defect is not the gate. It is that nothing ever
+    removed the residue, and nothing reported that it existed.
+    THE SHAPE THAT PRODUCES IT. `applyPlanProposalCommit` (src/lib/plan-architect.ts) runs
+    `git add -A -- plan/ MASTER-PLAN.md` and then `git commit`, both through `execFileSync`, with
+    the surrounding `try` covering only the plan-index regeneration ABOVE them. A non-zero commit
+    throws AFTER the add has succeeded, and nothing unstages. `commitGeneratorOutputViaGit`
+    (src/run-task.ts) has the same add-then-commit pair with the same absence.
+    A COMMIT REFUSAL IS ROUTINE HERE, WHICH IS WHY THIS IS NOT THEORETICAL. `core.hooksPath` is
+    `hooks` and `hooks/pre-commit` is present and does refuse: on this same day it refused a commit
+    in this repo over `mkdtemp-callsite-check`, printing "pre-commit refused". Every such refusal
+    converts a transient gate verdict into a permanent dirty index.
+  design: |
+    (i) LEAVE THE TREE AS YOU FOUND IT. A function that could not complete its commit must not leave
+    the repository in a state its caller did not ask for. The failure is still raised - this is a
+    cleanup, never a swallow.
+    (ii) RESTORE PRECISELY, NEVER BLUNTLY. `git reset` would also unstage whatever the CALLER had
+    staged before the call, and `git reset --hard` would destroy working-tree content that was never
+    this function's to touch. The rollback must return the index to what it was ON ENTRY and touch
+    the working tree not at all.
+    (iii) THE ERROR MUST STILL SURFACE, with the commit's own refusal text intact. The pre-commit
+    hook's message is the actionable half; a rollback that hides why the commit failed trades a
+    wedged checkout for an unexplained one.
+    (iv) BOTH CALL SITES, because a fix at one leaves the class alive at the other. The pair is the
+    unit of repair.
+    (v) A ROLLBACK THAT ITSELF FAILS MUST SAY SO. If the index cannot be restored, that is the
+    condition a human has to know about - it is the state this task exists to prevent, and silence
+    about it would reproduce the original invisibility.
+  acceptance:
+    - claim: "when the commit is refused, the index is left exactly as it was on entry and no plan file remains staged"
+      proof: "unit test: test/a-refused-commit-leaves-no-staged-residue.test.ts"
+    - claim: "the commit's own refusal text still reaches the caller, so the rollback never hides why it failed"
+      proof: "unit test: test/a-refused-commit-leaves-no-staged-residue.test.ts"
+    - claim: "content the caller had already staged before the call survives the rollback, so the cleanup is scoped to what this function staged"
+      proof: "unit test: test/a-refused-commit-leaves-no-staged-residue.test.ts"
+    - claim: "a SUCCESSFUL commit still commits every plan path it staged, so the rollback did not become a refusal to stage"
+      proof: "unit test: test/a-refused-commit-leaves-no-staged-residue.test.ts"
+    - claim: "both plan-write call sites carry the rollback, not only the first"
+      proof: "grep: applyPlanProposalCommit in src/lib/plan-architect.ts"
+  falsifier: |
+    CLOSE IF a refused commit already leaves no residue: drive `applyPlanProposalCommit` against a
+    repo whose `pre-commit` hook exits non-zero and read `git status --porcelain` afterwards.
+    MEASURED 2026-09-09: the real checkout held 88 staged plan paths and every plan-reading verb was
+    refused for hours.
+    POSITIVE CONTROL, because "nothing is staged afterwards" is satisfied by never staging at all:
+    the suite must ALSO show a successful commit committing the full plan set. Without that arm the
+    fix is indistinguishable from breaking the writer.
+    THIRD ARM, and it is the one a careless `git reset` fails: content staged by the CALLER before
+    the call must still be staged after a refused commit.
+    DO NOT use `git reset --hard` or `git checkout -- .` in the rollback. Both destroy working-tree
+    content this function never staged, which turns a recoverable refusal into data loss - strictly
+    worse than the residue being repaired.
+    DO NOT swallow the commit error to make the path look clean. The refusal is the signal.
+  note: |
+    Rule 25 CHECKED: neither file is an instrument surface.
+    RISK IS HIGH BECAUSE THE ROLLBACK TOUCHES GIT STATE IN A PATH THE DAEMON RUNS UNATTENDED, and a
+    wrong rollback destroys work rather than merely leaving residue. Two modules change, which Rule
+    19 also puts in this band.
+    HONEST LIMIT ON ATTRIBUTION, STATED BECAUSE IT MATTERS: this shard proves the SHAPE exists and
+    that the residue existed. It does NOT prove that these two call sites produced THAT residue -
+    no ledger row or reflog entry names the writer, and the staged content's age only places it
+    around a hand-run reconcile. The defect stands on the code path being able to do this, not on a
+    reconstruction of the one time it did.
+    CAVEAT WITH EQUAL WEIGHT: this stops the residue FORMING. It does not detect residue that
+    already exists, and it does not make the wedged state visible when it happens by some other
+    route - the checkout stayed silently wedged for hours today and nothing reported it. Detection
+    is a separate gap this task does not close.
