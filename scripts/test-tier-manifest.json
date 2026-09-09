@@ -377,6 +377,7 @@
     "test/coverage-ratchet.test.ts": 1210,
     "test/coverage-report-annotation.test.ts": 380,
     "test/coverage-session-blanking.test.ts": 8285,
+    "test/crash-loop-signature-recency-bound.test.ts": 0,
     "test/credential-arms-match-the-observed-text.test.ts": 821,
     "test/credential-reach-probe.test.ts": 996,
     "test/credit-backfill-rotation-union.test.ts": 1377,

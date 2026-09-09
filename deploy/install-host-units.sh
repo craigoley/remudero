@@ -117,19 +117,52 @@ BOOT=0
 # clean STOP is never undone -- a run of zeros is an operator stopping a healthy fleet.
 CRASH_LOOP_RUN=5
 
+# W1-T3268 — A RUN MUST BE CONTIGUOUS IN TIME, NOT ONLY IN THE FILE. MEASURED on this host at
+# 2026-09-09T19:18Z the unbounded reader answered "88 1" while the daemon had been running 25
+# minutes with RestartCount=0: those 88 were that morning's RESOLVED incident, newest record
+# 10:15:01Z. The log is append-only for the host's life, so a resolved run stayed armed forever and
+# the next ordinary exit-1 revival would have raised CRASH LOOP on a single transient.
+# THE CEILING IS SIZED FROM THE CADENCE: the tick is 5 minutes, so live revivals are ~300s apart
+# and the gap to the read was ~9 hours. 1800s sits an order of magnitude clear of both.
+CRASH_LOOP_GAP_S=1800
+
+# Seconds since the epoch for an ISO-8601 UTC stamp, computed ARITHMETICALLY: \`mktime\` is a gawk
+# extension absent on other awks, where a missing function is a silent empty result, not an error.
+CRASH_LOOP_EPOCH_AWK='
+function epoch(ts,   y, mo, d, h, mi, s, yy, era, yoe, doy, doe, days) {
+  y = substr(ts, 1, 4) + 0; mo = substr(ts, 6, 2) + 0; d = substr(ts, 9, 2) + 0
+  h = substr(ts, 12, 2) + 0; mi = substr(ts, 15, 2) + 0; s = substr(ts, 18, 2) + 0
+  if (y == 0) return -1
+  yy = (mo <= 2) ? y - 1 : y
+  era = int((yy >= 0 ? yy : yy - 399) / 400)
+  yoe = yy - era * 400
+  doy = int((153 * (mo + ((mo > 2) ? -3 : 9)) + 2) / 5) + d - 1
+  doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+  days = era * 146097 + doe - 719468
+  return days * 86400 + h * 3600 + mi * 60 + s
+}
+'
+
 # Prints "<count> <exit>" for the trailing run of identical NON-ZERO prev_exit values in \$1, or
 # nothing when there is no such run. Reads the log this same script appends to, so the format has
-# exactly one definition.
+# exactly one definition. \$2 overrides "now" (epoch seconds) so the suite can pin the clock.
 crash_loop_signature() {
-  awk '
+  awk -v gap="\$CRASH_LOOP_GAP_S" -v now="\${2:-\$(date -u +%s)}" "\$CRASH_LOOP_EPOCH_AWK"'
     match(\$0, /prev_exit=[^ ]+/) {
       e = substr(\$0, RSTART + 10, RLENGTH - 10)
-      if (e == last) { n += 1 } else { last = e; n = 1 }
+      t = epoch(\$1)
+      # A gap wider than the ceiling ENDS the run even when the exit code repeats, so two separate
+      # incidents sharing an exit code are never summed into one.
+      if (e == last && t >= 0 && lastT >= 0 && t - lastT <= gap) { n += 1 } else { n = 1 }
+      last = e; lastT = t
     }
-    END { if (last != "" && last != "0" && last != "none") print n, last }
+    END {
+      # And the run must be recent relative to NOW. A run that was dense nine hours ago and then
+      # stopped is a resolved incident, which is the case measured on the live host.
+      if (last != "" && last != "0" && last != "none" && lastT >= 0 && now - lastT <= gap) print n, last
+    }
   ' "\$1" 2>/dev/null
 }
-
 # W1-T2953: the backticks here were UNESCAPED inside an unquoted heredoc, so bash EXECUTED this
 # comment while rendering — printing a syntax error and substituting its empty output into the
 # shipped launcher. \`--check-crash-loop <log>\` prints the signature and exits, touching nothing
@@ -148,6 +181,10 @@ fi
 
 # IDEMPOTENT. A five-minute timer must never disturb a healthy daemon or its in-flight workers.
 if [ -n "\$(docker ps -q -f name='^remudero-daemon\$' 2>/dev/null)" ]; then
+  # W1-T3268 -- THE FLAG'S ONLY PATH BACK. The arm that cleared DAEMON_CRASH_LOOP sat on the
+  # revival path below, after this very return, so a host that recovered stopped reviving and never
+  # reached it. This is the one place the script observes the daemon HEALTHY.
+  rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
   echo "rmd-relaunch: remudero-daemon already running -- nothing to do."
   exit 0
 fi
