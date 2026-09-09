@@ -330,7 +330,7 @@ test("a failed repair is terminal and records a compact synthetic second attempt
   const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const run: RetroPrepublishRunner = (_command, args) => args.includes("--list-plan-reading-suites")
     ? commandResult(0, "test/plan.test.ts\n")
-    : commandResult(1, "not ok 1 - repair me\n");
+    : commandResult(1, "not ok 1 - repair me\n# tests 1\n# fail 1\n# cancelled 0\n");
 
   const result = await runRetroPrepublishPreflight({
     worktreePath: "/tmp/retro-worktree",
@@ -351,7 +351,7 @@ test("a failed harness regeneration is terminal after a successful repair", asyn
   const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const run: RetroPrepublishRunner = (_command, args) => args.includes("--list-plan-reading-suites")
     ? commandResult(0, "test/plan.test.ts\n")
-    : commandResult(1, "not ok 1 - regenerate me\n");
+    : commandResult(1, "not ok 1 - regenerate me\n# tests 1\n# fail 1\n# cancelled 0\n");
 
   const result = await runRetroPrepublishPreflight({
     worktreePath: "/tmp/retro-worktree",

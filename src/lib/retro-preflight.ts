@@ -110,6 +110,11 @@ interface AttemptFailure {
   stdout: string;
   stderr: string;
   failingTests: string[];
+  /** W1-T2993: suites/tests the runner CANCELLED. Never merged into `failingTests` — see
+   *  {@link classifyPreflightOutput} for what conflating them cost. */
+  cancelledTests: string[];
+  cancelledCount: number | undefined;
+  hasSummary: boolean;
 }
 
 interface AttemptResult {
@@ -242,17 +247,88 @@ function boundedOutputs(stdout: string, stderr: string): {
   };
 }
 
-function failingTestNames(output: string): string[] {
-  const names = new Set<string>();
+/**
+ * W1-T2993 — A CANCELLED SUITE AND A FAILED ASSERTION ARE DIFFERENT FACTS.
+ *
+ * This used to be `failingTestNames`, which folded both into one list. When a suite file BLOCKS,
+ * the runner cancels it and every other in-flight subtest, and each of those emits `not ok` —
+ * so the list filled with tests that never RAN, in files the hung one had nothing to do with,
+ * while the file that actually blocked was not named at all. MEASURED: `exit_class: tests_failed`,
+ * `suite_count: 238`, a `failing_tests` list clustered entirely in self-sync/freshness/deploy,
+ * every one of which passes on origin/main — three days of diagnosis spent on innocent files.
+ *
+ * A cancelled run's failure set is also a SUBSET BY CONSTRUCTION: whatever had not reported yet
+ * is simply absent, so the shorter list reads as "fewer problems" when it means "less was seen".
+ * That is why {@link PreflightOutcomeClassification.hasSummary} is carried too — a run with no
+ * `# tests` line produced no totals at all and its list must never be read as complete.
+ */
+export interface PreflightOutcomeClassification {
+  /** Tests that ran and FAILED. Never a cancelled one. */
+  failingTests: string[];
+  /** Tests (and suite files) the runner CANCELLED — timed out, or aborted with their parent. */
+  cancelledTests: string[];
+  /** The runner's own `# cancelled N` total, or `undefined` when no summary was printed. */
+  cancelledCount: number | undefined;
+  /** Whether the runner printed a `# tests N` summary at all. False means the run was truncated
+   *  and NO count it printed is a total. */
+  hasSummary: boolean;
+}
+
+/** node:test failure types that mean "this never finished", not "this asserted and failed". */
+const CANCELLED_FAILURE_TYPES: readonly string[] = ["testTimeoutFailure", "cancelledByParent", "testAborted"];
+
+/** Classify one runner's combined stdout+stderr into what FAILED and what was CANCELLED.
+ *
+ *  TAP shape: a `not ok N - <name>` line is followed by an indented YAML block, and the block's
+ *  `failureType:` (or an `error: 'test timed out ...'`) is the only place the distinction appears.
+ *  So the name is held until its block is read, rather than classified on the `not ok` line alone. */
+export function classifyPreflightOutput(output: string): PreflightOutcomeClassification {
+  const failing = new Set<string>();
+  const cancelled = new Set<string>();
+  let cancelledCount: number | undefined;
+  let hasSummary = false;
+  let pending: string | undefined;
+  let pendingCancelled = false;
+
+  const settle = (): void => {
+    if (pending === undefined) return;
+    (pendingCancelled ? cancelled : failing).add(pending);
+    pending = undefined;
+    pendingCancelled = false;
+  };
+
   for (const rawLine of output.split(/\r?\n/)) {
     const line = rawLine.trimEnd();
+
+    const summary = line.match(/^# tests (\d+)$/);
+    if (summary) hasSummary = true;
+    const cancelledSummary = line.match(/^# cancelled (\d+)$/);
+    if (cancelledSummary) cancelledCount = Number(cancelledSummary[1]);
+
     const tap = line.match(/^not ok \d+ - (.+)$/);
     const spec = line.match(/^\s*✖\s+(.+?)\s+\(\d+(?:\.\d+)?ms\)$/);
     const name = tap?.[1] ?? spec?.[1];
-    if (name) names.add(Buffer.from(name.trim(), "utf8").subarray(0, MAX_FAILING_TEST_NAME_BYTES).toString("utf8"));
-    if (names.size >= MAX_FAILING_TESTS) break;
+    if (name !== undefined) {
+      settle();
+      pending = Buffer.from(name.trim(), "utf8").subarray(0, MAX_FAILING_TEST_NAME_BYTES).toString("utf8");
+      // The spec reporter prints no YAML block, so its verdict is settled on the next line.
+      pendingCancelled = false;
+      continue;
+    }
+
+    if (pending !== undefined) {
+      const failureType = line.match(/^\s*failureType:\s*'?([A-Za-z]+)'?\s*$/);
+      if (failureType && CANCELLED_FAILURE_TYPES.includes(failureType[1])) pendingCancelled = true;
+      if (/^\s*error:\s*'?test timed out/.test(line)) pendingCancelled = true;
+      // `  ...` closes a YAML block; anything else at column 0 means the block is over too.
+      if (/^\s*\.\.\.\s*$/.test(line) || (line.length > 0 && !/^\s/.test(line))) settle();
+    }
+
+    if (failing.size + cancelled.size >= MAX_FAILING_TESTS) break;
   }
-  return [...names];
+  settle();
+
+  return { failingTests: [...failing], cancelledTests: [...cancelled], cancelledCount, hasSummary };
 }
 
 function exitClass(result: RetroPrepublishCommandResult, ordinaryFailure: string): string {
@@ -306,6 +382,9 @@ async function runAttempt(worktreePath: string, run: RetroPrepublishRunner, now:
         stdout: enumeration.result.stdout,
         stderr: enumeration.result.stderr,
         failingTests: [],
+        cancelledTests: [],
+        cancelledCount: undefined,
+        hasSummary: false,
       },
     };
   }
@@ -327,19 +406,34 @@ async function runAttempt(worktreePath: string, run: RetroPrepublishRunner, now:
   if (result.status === 0) {
     return { ok: true, suiteCount: enumeration.suites.length, elapsedMs: Math.max(0, now() - startedAt) };
   }
+  const classified = classifyPreflightOutput(`${stdout}\n${stderr}`);
   return {
     ok: false,
     suiteCount: enumeration.suites.length,
     elapsedMs: Math.max(0, now() - startedAt),
     failure: {
-      exitClass: exitClass(result, "tests_failed"),
+      exitClass: exitClass(result, ordinaryTestFailureClass(classified)),
       status: result.status,
       signal: result.signal,
       stdout,
       stderr,
-      failingTests: failingTestNames(`${stdout}\n${stderr}`),
+      failingTests: classified.failingTests,
+      cancelledTests: classified.cancelledTests,
+      cancelledCount: classified.cancelledCount,
+      hasSummary: classified.hasSummary,
     },
   };
+}
+
+/** The exit class for an ordinary non-zero test run, once the output has been read.
+ *
+ *  `tests_failed` is a claim that assertions failed. It is only true when nothing was cancelled and
+ *  the runner printed totals; otherwise the run saw less than it was asked to, and saying so is the
+ *  difference between diagnosing the suite that hung and diagnosing four that did not. */
+export function ordinaryTestFailureClass(c: PreflightOutcomeClassification): string {
+  if (c.cancelledTests.length > 0 || (c.cancelledCount ?? 0) > 0) return "tests_cancelled";
+  if (!c.hasSummary) return "tests_no_summary";
+  return "tests_failed";
 }
 
 function provenanceFields(provenance: RetroPrepublishProvenance): Record<string, unknown> {
@@ -377,6 +471,9 @@ function logAttempt(
     exit_code: failure.status,
     signal: failure.signal,
     failing_tests: failure.failingTests,
+    cancelled_tests: failure.cancelledTests,
+    cancelled_count: failure.cancelledCount ?? null,
+    has_summary: failure.hasSummary,
     stdout_excerpt: bounded.stdoutExcerpt,
     stderr_excerpt: bounded.stderrExcerpt,
     output_truncated: bounded.truncated,
@@ -396,6 +493,14 @@ function repairPrompt(failure: AttemptFailure): string {
     `exit_class: ${failure.exitClass}`,
     `exit_code: ${failure.status ?? "null"}`,
     `failing_tests:\n- ${failing}`,
+    ...(failure.cancelledTests.length > 0
+      ? [
+          `cancelled_tests (these did NOT run — start here, not with failing_tests):\n- ${failure.cancelledTests.join("\n- ")}`,
+        ]
+      : []),
+    ...(failure.hasSummary
+      ? []
+      : ["NOTE: the runner printed no `# tests` summary, so the lists above are a SUBSET of what would have failed."]),
     "stdout:",
     bounded.stdoutExcerpt,
     "stderr:",
@@ -413,6 +518,12 @@ function syntheticFailure(exitClassName: string, error: unknown): AttemptFailure
     stdout: "",
     stderr: String((error as Error)?.message ?? error),
     failingTests: [],
+    // A synthetic failure never ran a runner, so there is nothing to have been cancelled and no
+    // summary to have been printed. `hasSummary: false` is the honest value: this list is not a
+    // total either.
+    cancelledTests: [],
+    cancelledCount: undefined,
+    hasSummary: false,
   };
 }
 
