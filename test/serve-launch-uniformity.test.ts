@@ -20,7 +20,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /** Assembled, never written contiguously — see the note above. Matched on the ASSIGNMENT
  * form rather than the bare call: the bare call also appears in the explanatory comments of
@@ -36,20 +40,21 @@ const CANONICAL_ARGS = '{ args: ["--no-sandbox"] }';
 /** Every test file that launches a browser, read from the tree rather than hard-coded, so a
  * newly added suite is covered the day it lands. */
 function browserLaunchingSuites(): string[] {
-  const out = execFileSync("grep", ["-rl", "-F", "--include=*.test.ts", "--", LAUNCH_CALL, "test"], {
+  const tracked = execFileSync("git", ["-C", REPO_ROOT, "ls-files", "--", "test/*.test.ts"], {
     encoding: "utf8",
   });
-  return out
+  return tracked
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => l && !l.endsWith("serve-launch-uniformity.test.ts"));
+    .filter((l) => l && !l.endsWith("serve-launch-uniformity.test.ts"))
+    .filter((l) => readFileSync(join(REPO_ROOT, l), "utf8").includes(LAUNCH_CALL));
 }
 
 test("every browser-launching serve suite launches exactly ONCE — no retry-around-the-launch may creep back in", () => {
   const suites = browserLaunchingSuites();
   assert.ok(suites.length >= 5, `expected the serve browser suites to be discoverable, found ${suites.length}`);
   for (const f of suites) {
-    const src = readFileSync(f, "utf8");
+    const src = readFileSync(join(REPO_ROOT, f), "utf8");
     const launches = src.split(LAUNCH_CALL).length - 1;
     // A relaunch-on-rejection is a SECOND call site. Requiring exactly one forbids that
     // shape structurally, without this guard needing to recognise any particular retry
@@ -61,7 +66,7 @@ test("every browser-launching serve suite launches exactly ONCE — no retry-aro
 
 test("every browser-launching serve suite uses the identical canonical launch arguments — no per-file flag drift", () => {
   for (const f of browserLaunchingSuites()) {
-    const src = readFileSync(f, "utf8");
+    const src = readFileSync(join(REPO_ROOT, f), "utf8");
     const call = src.slice(src.indexOf(LAUNCH_CALL) + LAUNCH_CALL.length);
     const args = call.slice(0, call.indexOf(")") + 1);
     assert.ok(
@@ -77,7 +82,7 @@ test("no serve suite carries the --disable-dev-shm-usage flag, which is a no-op 
   // actual failure was a missing browser binary.
   for (const f of browserLaunchingSuites()) {
     assert.equal(
-      readFileSync(f, "utf8").includes("disable-dev-shm-usage"),
+      readFileSync(join(REPO_ROOT, f), "utf8").includes("disable-dev-shm-usage"),
       false,
       `${f}: --disable-dev-shm-usage is inert on macOS and must not be reintroduced without evidence`,
     );
