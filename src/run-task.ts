@@ -34139,7 +34139,16 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
  */
 export async function verifyHumanSweepCommand(
   rest: string[],
-  deps: { root?: string; route?: typeof routeVerifyHumanBacklog; clock?: Clock } = {},
+  deps: {
+    root?: string;
+    route?: typeof routeVerifyHumanBacklog;
+    clock?: Clock;
+    /** The FOURTH seam, and the one that makes the rest of this function reachable at all:
+     *  `loadConfig()` shells `which claude`, which no CI runner has (W1-T2 / PR #18), so a test
+     *  that does not supply this cannot get past the next line — which is why diff-coverage named
+     *  every line below it. Omitted, the behaviour is byte-identical to loading it here. */
+    config?: Config;
+  } = {},
 ): Promise<number> {
   const root = deps.root ?? repoRoot;
   const dryRun = rest.includes("--dry-run");
@@ -34149,7 +34158,7 @@ export async function verifyHumanSweepCommand(
     return 2;
   }
 
-  const config = loadConfig();
+  const config = deps.config ?? loadConfig();
   const plan = loadPlan(join(root, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
   // status.ts's reader, which already parses and already skips an unreadable line — no second
@@ -37829,6 +37838,7 @@ export async function main(
   if (cmd === "approve" && arg) {
     process.exit(await approveCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await verifyHumanSweepCommand(rest)) cannot carry a DA hit without forking the process; the command's own logic — the unknown-arg refusal at exit 2, the --dry-run report that spends nothing, the real pass's routing, staging and summary — is unit-tested in test/a-verify-human-shard-is-judged.test.ts through its root/config/route/clock seams (the same irreducible-glue shape as the sibling inbox/approve/receipt dispatch cases).
   if (cmd === "verify-human-sweep") {
     process.exit(await verifyHumanSweepCommand(rest));
   }

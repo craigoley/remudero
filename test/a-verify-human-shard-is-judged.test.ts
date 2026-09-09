@@ -34,7 +34,20 @@ import { resolveRiskJudgeMount } from "../src/lib/risk-judge.js";
 import type { Mount, Mounts } from "../src/lib/mounts.js";
 import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import { priorVerifyHumanVerdicts, routeVerifyHumanBacklog, type VerifyHumanRouteDeps } from "../src/run-task.js";
+import {
+  priorVerifyHumanVerdicts,
+  routeVerifyHumanBacklog,
+  verifyHumanSweepCommand,
+  parkedVerifyHumanShards,
+  type VerifyHumanRouteDeps,
+} from "../src/run-task.js";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadPlan } from "../src/lib/plan.js";
+import type { Config } from "../src/lib/config.js";
 
 /** PLAINLY still needs a person: nothing has landed, nothing is cited, it asks for a judgement. */
 const NEEDS: ShardUnderJudgement = {
@@ -326,4 +339,191 @@ test("W1-T3188: an unparseable worker reply still FAILS OPEN through the real ju
   const spawn = (async () => fakeVerifyHumanWorkerResult("the model said something else entirely")) as typeof spawnWorker;
   const judge = realVerifyHumanJudge({ mounts: JUDGE_MOUNTS, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
   assert.deepEqual(await judge(SETTLED), FAIL_OPEN_VERIFY_HUMAN_VERDICT);
+});
+
+// ── `rmd verify-human-sweep`: THE COMMAND, DRIVEN ──────────────────────────────────────────────
+//
+// diff-coverage named 62 lines of this command as added and uncovered, and the reason was one
+// missing seam: `loadConfig()` shells `which claude`, which no CI runner has (W1-T2 / PR #18), so
+// nothing could get past its first line. With `config` injected beside the `root`/`route`/`clock`
+// seams that were already there, the whole command is reachable without a subprocess.
+
+function sweepRoot(tasks: string): string {
+  const root = mkdtempSync(join(tmpdir(), "rmd-vh-sweep-"));
+  mkdirSync(join(root, "plan"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), tasks);
+  // The command builds its real judge eagerly, so the routing table has to exist even on a pass
+  // that never spawns. The repo's own table is copied rather than hand-written: a fixture that
+  // drifts from the shipped one would test a mounts.yaml nobody has.
+  writeFileSync(
+    join(root, ".remudero", "mounts.yaml"),
+    readFileSync(join(REPO_ROOT_FOR_FIXTURES, ".remudero", "mounts.yaml"), "utf8"),
+  );
+  return root;
+}
+
+const REPO_ROOT_FOR_FIXTURES = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+
+const PARKED_PLAN = `- id: W1-T9001
+  title: "should the fleet commit under its own identity?"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  status: queued
+  rationale: "A preference about how the operator's repo presents itself."
+  acceptance:
+    - claim: "the operator states which identity he wants"
+      proof: "unit test: test/x.test.ts"
+- id: W1-T9002
+  title: "an ordinary auto-verified task"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  status: queued
+  acceptance:
+    - claim: "something"
+      proof: "unit test: test/x.test.ts"
+`;
+
+test("W1-T3188: parkedVerifyHumanShards selects the verify:human queued population and nothing else", () => {
+  const root = sweepRoot(PARKED_PLAN);
+  const shards = parkedVerifyHumanShards(loadPlan(join(root, "plan", "tasks.yaml")), root, {
+    now: () => 0,
+    iso: () => "1970-01-01T00:00:00.000Z",
+  } as unknown as Parameters<typeof parkedVerifyHumanShards>[2]);
+  assert.deepEqual(
+    shards.map((s) => s.id),
+    ["W1-T9001"],
+    "a verify:auto task must never enter the judged population — it was never parked behind a person",
+  );
+  assert.equal(shards[0].title, "should the fleet commit under its own identity?");
+  assert.deepEqual(shards[0].acceptance, ["the operator states which identity he wants"]);
+});
+
+test("W1-T3188: --dry-run judges nothing, spends nothing, and reports what a real pass WOULD ask about", async () => {
+  const root = sweepRoot(PARKED_PLAN);
+  const said: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+  let routed = 0;
+  try {
+    const code = await verifyHumanSweepCommand(["--dry-run"], {
+      root,
+      config: { claudeBin: "/bin/true", root } as Config,
+      route: (async () => {
+        routed += 1;
+        return { judged: 0, needsOperator: [], backlog: [], skipped: [] };
+      }) as unknown as typeof routeVerifyHumanBacklog,
+    });
+    assert.equal(code, 0);
+  } finally {
+    console.log = realLog;
+  }
+  assert.equal(routed, 0, "--dry-run must not reach the router at all — spending nothing is the contract");
+  assert.ok(
+    said.some((l) => l.includes("would be judged") && l.includes("Nothing spent")),
+    `the dry run must report what a real pass would ask about; got ${JSON.stringify(said)}`,
+  );
+  assert.ok(said.some((l) => l.includes("would judge W1-T9001")), "and name the shard by id");
+});
+
+test("W1-T3188: an unknown flag is refused with exit 2 before any config, plan or ledger is read", async () => {
+  const errs: string[] = [];
+  const realError = console.error;
+  console.error = (...a: unknown[]) => void errs.push(a.map(String).join(" "));
+  try {
+    // No `root` and no `config`: reaching either would mean the refusal came too late.
+    assert.equal(await verifyHumanSweepCommand(["--no-such-flag"]), 2);
+  } finally {
+    console.error = realError;
+  }
+  assert.ok(errs.some((e) => e.includes("--no-such-flag")), "the refusal must name the argument it refused");
+});
+
+test("W1-T3188: a real (non-dry-run) pass routes through the injected router, stages a proposal and reports what needs you", async () => {
+  const root = sweepRoot(PARKED_PLAN);
+  const said: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+  let seen: VerifyHumanRouteDeps | undefined;
+  try {
+    const code = await verifyHumanSweepCommand([], {
+      root,
+      config: { claudeBin: "/bin/true", root } as Config,
+      route: (async (_shards: readonly ShardUnderJudgement[], routeDeps: VerifyHumanRouteDeps) => {
+        seen = routeDeps;
+        // Drive the two closures the command supplies, which is the only way they execute: they
+        // are what turns a verdict into an inbox proposal and a ledger row.
+        const v: VerifyHumanVerdict = { decision: "needs_operator", reason: "asks for a preference" };
+        routeDeps.stageProposal(proposalFromJudgedShard(NEEDS, v));
+        routeDeps.appendRow(verifyHumanVerdictRow(NEEDS, v, routeDeps.runId) as never);
+        return { judged: 1, needsOperator: [NEEDS.id], backlog: [], skipped: [] };
+      }) as unknown as typeof routeVerifyHumanBacklog,
+    });
+    assert.equal(code, 0);
+  } finally {
+    console.log = realLog;
+  }
+  assert.ok(seen, "the router must actually be called on a real pass");
+  assert.match(seen!.runId, /^VHSWEEP-/, "the run id must name the sweep that produced the rows");
+  assert.ok(
+    said.some((l) => l.includes("judged 1") && l.includes("1 need you")),
+    `the summary must report the counts; got ${JSON.stringify(said)}`,
+  );
+  assert.ok(
+    said.some((l) => l.includes(`NEEDS YOU: ${NEEDS.id}`)),
+    "and name every shard that needs the operator, or the sweep is a number with no next action",
+  );
+});
+
+test("W1-T3188: a shard whose age cannot be read is reported as age 0 rather than throwing", () => {
+  // `shardAgeDays` shells git for the shard file's add-date. The fixture root is not a git repo at
+  // all, which is the same shape as a shard with no file: age is CONTEXT, so an unknown one is
+  // reported as 0 and the shard still gets judged, rather than the whole sweep dying on it.
+  const root = sweepRoot(PARKED_PLAN);
+  const shards = parkedVerifyHumanShards(loadPlan(join(root, "plan", "tasks.yaml")), root, {
+    now: () => 0,
+    iso: () => "1970-01-01T00:00:00.000Z",
+  } as unknown as Parameters<typeof parkedVerifyHumanShards>[2]);
+  assert.equal(shards[0].ageDays, 0, "an unreadable age must not throw, and must not invent a number");
+});
+
+test("W1-T3188: a shard whose file IS in git reports a real age in days, not the unknown-age zero", () => {
+  // The other half of the age fallback above: with a real repo and a real add-date, the number is
+  // computed rather than defaulted. Both halves matter — a shard's age is what the judge reads to
+  // tell "parked deliberately" from "parked and forgotten", and a silent 0 erases that distinction.
+  const root = sweepRoot(PARKED_PLAN);
+  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  // The full record, not a stub: loadPlan merges tasks.d shards and validates every one, so a
+  // one-line file fails the load rather than the assertion. W1-T9001 lives ONLY here, so the id
+  // is not declared twice.
+  writeFileSync(
+    join(root, "plan", "tasks.d", "W1-T9001-identity.yaml"),
+    PARKED_PLAN.slice(0, PARKED_PLAN.indexOf("- id: W1-T9002")),
+  );
+  writeFileSync(join(root, "plan", "tasks.yaml"), PARKED_PLAN.slice(PARKED_PLAN.indexOf("- id: W1-T9002")));
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@example.invalid",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@example.invalid",
+  };
+  execFileSync("git", ["init", "-q", "-b", "main", root], { env });
+  execFileSync("git", ["-C", root, "add", "-A"], { env });
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "chore: seed"], { env });
+  const addedAtMs = Number(execFileSync("git", ["-C", root, "log", "-1", "--format=%ct"], { encoding: "utf8", env }).trim()) * 1000;
+
+  const shards = parkedVerifyHumanShards(loadPlan(join(root, "plan", "tasks.yaml")), root, {
+    now: () => addedAtMs + 3 * 86_400_000,
+    iso: () => "1970-01-01T00:00:00.000Z",
+  } as unknown as Parameters<typeof parkedVerifyHumanShards>[2]);
+
+  assert.equal(shards[0].ageDays, 3, "three days after the shard was added, the age must read 3");
 });
