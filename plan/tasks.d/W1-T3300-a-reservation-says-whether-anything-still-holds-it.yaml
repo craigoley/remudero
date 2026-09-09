@@ -1,0 +1,112 @@
+- id: W1-T3300
+  title: "NOTHING EVER RELEASES A TASK-ID RESERVATION AND NOTHING REPORTS ONE — 341 of 1331 refs on origin (26%) are held by no shard, no branch and no PR, they accumulate at ~13.6 a day, and an operator cannot tell a claim minted four minutes ago from one abandoned three weeks back"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 14.00
+  files:
+    - src/run-task.ts
+    - test/a-reservation-says-whether-anything-still-holds-it.test.ts
+  origin: "operator-session#pr-fix-sweep-2026-09-09"
+  plan_refs: ["W1-T1055", "W1-T2316", "W1-T278"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 over every `refs/rmd-id/*` ref on origin, fetched and read directly:
+
+        reservations on origin ................................ 1331
+        ids declared in the plan on main ...................... 1598
+        reserved and NEVER declared, at any point in plan history  341  (26%)
+
+    THE MECHANISM IS 25 DAYS OLD AND HAS NO RELEASE PATH. The oldest reservation anywhere is
+    W1-T515, 2026-08-15 — `--reserve` (W1-T1055) is that recent. So 1331 refs in 25 days is
+    ~53 minted a day, of which ~13.6 a day are still held by nothing. This is an ACCUMULATION RATE,
+    not a historical backlog, and it has no ceiling: nothing in this repo deletes, expires or even
+    counts a reservation after it is written.
+
+    AGE SPREAD OF THE 341, and it is the reason this task is a REPORT and not a reaper:
+
+        < 7 days .... 161      7-29 days .... 180      30+ days .... 0
+
+    Nearly half were minted inside the last week and are overwhelmingly live in-flight work. A naive
+    age sweep would reclaim ids a worker is about to file against, which is the exact race the
+    reservation exists to settle.
+
+    THE REF ALREADY CARRIES THE EVIDENCE AND NOTHING READS IT. Each reservation is an empty-tree
+    commit whose subject is `rmd-id reservation <pid>@<container> <ISO timestamp>` (measured on
+    W1-T524: `5929@5efb86ede91b 2026-08-15T21:45:48.141Z`), authored by `remudero-worker`. So age
+    and anchor are recoverable per id today — by a human willing to fetch 1331 refs and cross-join
+    them against the plan, which is what producing the numbers above required.
+
+    THE STANDING RULING IS NOT IN DOUBT AND THIS TASK DOES NOT REOPEN IT. CLAUDE.md: "A reserved id
+    with no shard anywhere is HELD, not abandoned; deleting the ref re-opens the race it settled, and
+    reclaiming one is an operator decision." That ruling is CORRECT and the W1-T2316 reissue
+    (#2965/#2970) is what it cost to learn. The defect is not that reservations are kept — it is
+    that nothing tells the operator WHICH ones are still doing work, so the decision the ruling
+    assigns to a human is one no human has the evidence to make.
+  design: |
+    (i) A READ-ONLY REPORT, NEVER A REAPER. `rmd next-task-id --audit` (or an equivalent flag on the
+    verb that already owns this namespace) prints the reservation population classified by EVIDENCE.
+    Nothing in this task deletes a ref, and no flag it adds can.
+    (ii) CLASSIFY BY WHAT STILL POINTS AT THE ID, not by age alone. For each reservation: is a shard
+    declared in the plan, was one ever declared in plan history, is there an open `run-<id>-*` head,
+    does any open PR body carry its trailer. An id with none of those and an age past the working
+    window is a CANDIDATE; an id with any of them is HELD and is reported as such with the reason.
+    (iii) AGE IS A TIE-BREAK, NEVER THE PREDICATE. The measured distribution above is why: 161 of the
+    341 are under a week old. Any threshold must sit well outside the observed fill-to-file window,
+    and the report must state the threshold it used rather than bury it.
+    (iv) THE OUTPUT NAMES THE ANCHOR, so an operator can tell a fleet mint from a hand mint — the
+    subject already distinguishes `rmd-id reservation <pid>@<container>` from an operator's
+    `reserve W1-T#### <host>-<pid>-<nanotime>`, and the refusal path already reads that distinction
+    when it reports a contested candidate.
+    (v) A DEGRADED SURFACE REPORTS UNKNOWN, NEVER FREE. If the open-PR read fails (the shared REST
+    budget was exhausted for hours on 2026-09-09), every id whose status depends on it is UNKNOWN,
+    not CANDIDATE. Reporting a live id as reclaimable because a read failed is the reissue this
+    whole namespace exists to prevent, arriving by a new route.
+    (vi) NOT IN SCOPE: deleting or expiring any ref, changing what `--reserve` writes, changing the
+    walk, or reclaiming an id automatically. This task ends at the report. Whether to reclaim stays
+    an operator decision, exactly as ruled — it simply becomes an INFORMED one.
+  acceptance:
+    - claim: "the audit reports every reservation classified as HELD or CANDIDATE, and each HELD row names WHICH evidence holds it"
+      proof: "unit test: test/a-reservation-says-whether-anything-still-holds-it.test.ts"
+    - claim: "an id with a declared shard, a historical shard, an open run branch or an open PR trailer is HELD, never a candidate"
+      proof: "unit test: test/a-reservation-says-whether-anything-still-holds-it.test.ts"
+    - claim: "a degraded open-PR read makes the affected ids UNKNOWN rather than CANDIDATE, so a failed read can never present a live id as reclaimable"
+      proof: "unit test: test/a-reservation-says-whether-anything-still-holds-it.test.ts"
+    - claim: "the report states the age threshold it applied, and changing that threshold demonstrably moves the candidate set"
+      proof: "unit test: test/a-reservation-says-whether-anything-still-holds-it.test.ts"
+    - claim: "the audit deletes nothing: it writes no ref and issues no destructive git command, proven at the seam rather than by inspection"
+      proof: "unit test: test/a-reservation-says-whether-anything-still-holds-it.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF something already reports reservation liveness: read the
+    `next-task-id` verb's own flags and any `reap-*` verb. MEASURED 2026-09-09: `reap-branches`
+    reaps BRANCHES, and `next-task-id` prints a mint and its provenance; neither enumerates
+    `refs/rmd-id/*` or joins it against anything.
+    THE POSITIVE CONTROL IS A KNOWN-HELD ID, because "no reservations are stale" and "my join found
+    nothing" print the same word. A fixture must contain at least one id that IS declared in the plan
+    and must classify it HELD; a run reporting every id as a candidate has failed to read the plan.
+    PROVE THE UNKNOWN ARM SEPARATELY AND IT IS THE ONE MOST LIKELY TO BE FAKED: a fixture whose
+    open-PR read THROWS must report UNKNOWN. A suite that only drives the healthy path passes on an
+    implementation that folds a failed read into "nothing holds it", which manufactures reclaimable
+    ids out of an outage.
+    DO NOT DELETE A REF, under any flag, in this task. The ruling stands and the reissue that earned
+    it is recorded. A reaper is a separate decision with a separate blast radius, and it must not
+    arrive as a convenience flag on a report.
+    DO NOT USE AGE AS THE PREDICATE. 161 of 341 dangling ids are under a week old; an age-only sweep
+    reclaims work in flight, which is the race the reservation settles.
+  note: |
+    Rule 25 CHECKED, AND IT DECIDED THE FILE LIST. `src/run-task.ts` IS on INSTRUMENT_SURFACE
+    (`^src/run-task.ts$`), and `detectInstrumentEntanglement` fires on an instrument path PLUS a
+    product `src/` path. So the implementation belongs in `src/run-task.ts` beside the verb that
+    already owns this namespace rather than in a new `src/lib` module: instrument plus its own
+    `test/` falsifier is the sanctioned shape, while instrument-plus-lib would be refused.
+    WHY A REPORT IS THE WHOLE TASK, stated because the obvious next step is a reaper and it is the
+    wrong one. The standing ruling assigns reclaiming to a human. A human currently cannot do it: the
+    numbers in the rationale took a fetch of 1331 refs and a cross-join against the plan to produce.
+    Closing that gap discharges the ruling; automating past it contradicts the ruling.
+    THE NUMBERS ARE A SNAPSHOT AND WILL MOVE. 1331/341 were read at 2026-09-09T22:40Z, and the mint
+    rate over the preceding eight days ranged 35-138 a day. The RATE and the ABSENCE OF A RELEASE
+    PATH are the durable findings; the counts are evidence for them, not a target.
