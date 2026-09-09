@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // its script this way. A dynamic specifier is not statically resolved, so this loads the REAL
 // module with no shadow copy that could drift from it.
 const SCRIPT = joinPath(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "expiring-fixture-census.mjs");
-const { AGED_FIELDS, EXEMPT_MARKER, MARGIN_DAYS, assertFieldsStillAged, censusExpiringFixtures, formatReport } =
+const { AGED_FIELDS, EXEMPT_MARKER, MARGIN_DAYS, assertFieldsStillAged, censusExpiringFixtures, formatReport, main } =
   (await import(pathToFileURL(SCRIPT).href)) as {
     AGED_FIELDS: ReadonlyArray<{ field: string; threshold: string; source: string; evidence: string[] }>;
     EXEMPT_MARKER: string;
@@ -29,6 +29,13 @@ const { AGED_FIELDS, EXEMPT_MARKER, MARGIN_DAYS, assertFieldsStillAged, censusEx
       alreadyExpired: unknown[];
     };
     formatReport: (r: unknown, marginDays?: number) => string;
+    main: (o?: {
+      execFile?: (cmd: string, args: string[], opts: { encoding: "utf8" }) => string;
+      readFile?: (p: string) => string;
+      now?: () => number;
+      log?: (message: string) => void;
+      assertAged?: () => void;
+    }) => number;
   };
 
 // W1-T3272 — THE REFUSAL FOR A RULE THAT BOUND NOTHING TWICE.
@@ -127,6 +134,45 @@ test("W1-T3272: a hardcoded date that NO threshold ages is not reported — the 
   const r = censusExpiringFixtures(tree({ "test/a.test.ts": `createdAt: "${at(-13 * DAY)}",\nsomeOtherDate: "2020-01-01T00:00:00Z",` }));
   assert.equal(r.reported.length, 0, "only fields a live threshold ages are in scope");
   assert.equal(r.population, 0, "and they are not even counted, so the population figure stays meaningful");
+});
+
+test("W1-T3272: main reads the real test-file population and sweep staleDays policy through the CLI seams", () => {
+  const calls: string[] = [];
+  const output: string[] = [];
+  const code = main({
+    execFile: (cmd, args) => {
+      calls.push(`${cmd} ${args.join(" ")}`);
+      if (cmd === "git") return "test/a.test.ts\n";
+      if (cmd === "node") return JSON.stringify({ staleDays: THRESHOLD });
+      throw new Error(`unexpected command: ${cmd}`);
+    },
+    readFile: () => `lastActivityAt: "${at(-1 * DAY)}",`,
+    now: () => NOW,
+    log: (message) => output.push(message),
+    assertAged: () => undefined,
+  });
+
+  assert.equal(code, 0, "fresh fixtures should let the CLI pass");
+  assert.deepEqual(calls, [
+    "git ls-files test/*.test.ts",
+    "node --import tsx -e import {loadDefaultPolicy} from './src/lib/policy.ts'; console.log(JSON.stringify(loadDefaultPolicy().values.sweep));",
+  ]);
+  assert.match(output.join("\n"), /OK -- 1 fixture stamp/);
+});
+
+test("W1-T3272: main returns a blocking exit code when its census reports an expiring fixture", () => {
+  const output: string[] = [];
+  const code = main({
+    execFile: (cmd) => (cmd === "git" ? "test/a.test.ts\n" : JSON.stringify({ staleDays: THRESHOLD })),
+    readFile: () => `lastActivityAt: "${at(-13 * DAY)}",`,
+    now: () => NOW,
+    log: (message) => output.push(message),
+    assertAged: () => undefined,
+  });
+
+  assert.equal(code, 1, "an expiring fixture must fail the CLI gate");
+  assert.match(output.join("\n"), /BLOCKED -- 1 fixture/);
+  assert.match(output.join("\n"), /goes red 2026-09-10/);
 });
 
 /** The real test corpus, read the way the CLI reads it. */

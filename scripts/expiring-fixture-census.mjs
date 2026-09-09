@@ -150,23 +150,25 @@ export function formatReport({ population, reported, exempt, alreadyExpired = []
   return out.join("\n");
 }
 
-// diff-cov: process-boundary — the irreducible glue. This shells `git ls-files`, spawns node to
-// read the policy the sweep itself loads, prints, and `process.exit`s on the census verdict. A unit
-// test cannot carry a hit through a fork; every DECISION it makes — which files, which threshold,
-// what the report says — lives in censusExpiringFixtures/formatReport above and is covered directly.
-function main() {
-  assertFieldsStillAged();
-  const files = execFileSync("git", ["ls-files", "test/*.test.ts"], { encoding: "utf8" }).split("\n").filter(Boolean);
+export function main({
+  execFile = execFileSync,
+  readFile = (p) => readFileSync(p, "utf8"),
+  now = () => Date.now(),
+  log = (message) => console.log(message),
+  assertAged = assertFieldsStillAged,
+} = {}) {
+  assertAged();
+  const files = execFile("git", ["ls-files", "test/*.test.ts"], { encoding: "utf8" }).split("\n").filter(Boolean);
   // The threshold comes from the policy the sweep actually loads, never a copy of the number here.
-  const policy = JSON.parse(execFileSync("node", ["--import", "tsx", "-e", "import {loadDefaultPolicy} from './src/lib/policy.ts'; console.log(JSON.stringify(loadDefaultPolicy().values.sweep));"], { encoding: "utf8" }));
+  const policy = JSON.parse(execFile("node", ["--import", "tsx", "-e", "import {loadDefaultPolicy} from './src/lib/policy.ts'; console.log(JSON.stringify(loadDefaultPolicy().values.sweep));"], { encoding: "utf8" }));
   const result = censusExpiringFixtures({
     files,
-    readFile: (p) => readFileSync(p, "utf8"),
-    now: Date.now(),
+    readFile,
+    now: now(),
     thresholdDays: policy.staleDays,
   });
-  console.log(formatReport(result));
-  process.exit(result.reported.length > 0 ? 1 : 0);
+  log(formatReport(result));
+  return result.reported.length > 0 ? 1 : 0;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("expiring-fixture-census.mjs")) main();
+if (process.argv[1] && process.argv[1].endsWith("expiring-fixture-census.mjs")) process.exit(main());
