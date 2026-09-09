@@ -148,6 +148,7 @@
     "test/acr-build-image-tag.test.ts": 294,
     "test/acr-build-trigger.test.ts": 357,
     "test/adaptive-review-capacity.test.ts": 1874,
+    "test/adaptive-review-widener-can-widen.test.ts": 0,
     "test/adhoc-lane-reap.test.ts": 1174,
     "test/adhoc-lane-root.test.ts": 920,
     "test/adoption-debt-becomes-a-proposal.test.ts": 1211,

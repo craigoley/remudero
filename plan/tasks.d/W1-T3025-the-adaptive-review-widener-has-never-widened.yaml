@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   budget_usd: 20.00
-  files: [src/lib/review-capacity.ts, test/adaptive-review-widener-can-widen.test.ts]
+  files: [src/lib/review-capacity.ts, test/adaptive-review-widener-can-widen.test.ts, scripts/test-tier-manifest.json]
   origin: "operator-session#why-are-reviews-slow-2026-09-07"
   plan_refs: ["W1-T2853", "W1-T3024", "W1-T2931"]
   status: blocked
