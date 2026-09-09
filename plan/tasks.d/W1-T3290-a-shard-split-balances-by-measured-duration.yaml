@@ -1,0 +1,107 @@
+- id: W1-T3290
+  title: "CI'S WALL CLOCK IS ONE SHARD'S LONG TAIL, NOT A SHORTAGE OF WORKERS — queue time is ~0, 106 files over the slow threshold are 51% of all test time, and one file alone is 172s, a floor no split can beat; review meanwhile sits IDLE 84% of the wall clock"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 30.00
+  files: [scripts/test-tier-manifest.mjs, test/a-shard-split-balances-by-measured-duration.test.ts]
+  origin: "operator-session#review-parallelism-2026-09-09"
+  plan_refs: ["W1-T2904", "W1-T1049", "W1-T2853", "W1-T3207", "W1-T2428"]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09, because "add more parallelism" has to be pointed at the actual queue. This
+    shard was AMENDED after its first draft: the first version claimed balancing would cut the
+    critical path to ~2.8 min, and the manifest arithmetic below does not support that. The
+    correction is kept in view rather than quietly replaced.
+    REVIEW IS NOT THE BOTTLENECK. Over six hours: 37 reviews started, 38 posted, p50 8s, p90 194s,
+    max 1250s. The lane held ANY review in flight for 40 minutes of 247 observed — IDLE 84% of the
+    wall clock — while peak concurrency touched 3, its ceiling. Raising `sweep.reviewLanes` adds
+    capacity to something empty five sixths of the time, and it is already at `max: 3`, whose own
+    comment records why: "two ceilings added to 6 workers on a host that fits about 4".
+    QUEUE TIME IS ~ZERO, SO WORKERS ARE NOT SCARCE. Two representative CI runs: wall 5.3 min, 28
+    jobs, summed RUN 22 min, summed QUEUE 1 min. The wall clock is `ci-shard (1/4)` at 4.8 min plus
+    the aggregator that waits on it (`flake-retry-aggregate`, last to finish at +5.3 min). Nothing
+    was waiting for a runner.
+    THE ARITHMETIC THAT CORRECTS THE FIRST DRAFT. The manifest records 1,262 measured files totalling
+    50.9 minutes. A PERFECT four-way split of all of it is 763s per shard — 12.7 minutes, far WORSE
+    than the 4.8 min a shard actually takes. So CI is not running the whole suite per PR: the
+    fast-lane selection (W1-T2428) already admits a subset, and 4.8 min is that subset's slowest
+    quarter. Any claim about what balancing buys must therefore be derived from the SELECTED set,
+    which is per-diff, and not from the manifest total.
+    THE TAIL IS THE TARGET AND IT IS CONCENTRATED. 106 files exceed the 5s slow-tier threshold and
+    account for 51% of all measured test time; the top ten alone are 22%. The longest single file is
+    `test/retro-marker-atomic.test.ts` at 172s, then 110s, 83s, 59s. A shard holding the 172s file
+    cannot finish under 172s however the rest is arranged — the tail sets the floor that balancing
+    then works within, not the other way round.
+  design: |
+    (i) MEASURE THE SELECTED SET, NOT THE MANIFEST TOTAL. The ideal-split figure must be computed
+    over the files a given diff actually admits. Reporting a balance target derived from all 50.9
+    minutes would repeat this shard's own first-draft error in the tool.
+    (ii) THE FLOOR IS THE LONGEST SELECTED FILE, AND THE REPORT MUST SAY SO. Emitting "slowest vs
+    fastest shard" alone invites the reading that balance can always close the gap; when one file
+    exceeds the balanced mean, it is the binding constraint and no assignment beats it.
+    (iii) BALANCE BY LONGEST-FIRST over recorded durations. A greedy longest-processing-time
+    assignment is the standard remedy for this spread and needs no new data. Its BENEFIT is bounded
+    by (ii) and must be reported as measured, never as projected.
+    (iv) AN UNMEASURED FILE MUST NOT LAND ALL IN ONE SHARD. 75 of 1,337 files carry a recorded 0;
+    assigning them together recreates the imbalance the moment a burst of new tests lands.
+    (v) DO NOT ADD SHARDS, and this is the one the measurement most clearly refuses: queue time is
+    ~0 and a 172s file floors the critical path, so extra runners buy setup cost and nothing else
+    until the tail is shorter.
+    (vi) DO NOT RAISE `sweep.reviewLanes`. Recorded because it is the obvious move and the
+    measurement refuses it.
+  acceptance:
+    - claim: "the split assigns by recorded duration longest-first, so the slowest shard's excess over the mean shrinks against the current assignment on the same selected set"
+      proof: "unit test: test/a-shard-split-balances-by-measured-duration.test.ts"
+    - claim: "the balance target is computed over the SELECTED files for the diff, never over the whole manifest"
+      proof: "unit test: test/a-shard-split-balances-by-measured-duration.test.ts"
+    - claim: "when one file exceeds the balanced mean the report NAMES it as the binding floor, so no reader expects balance to close that gap"
+      proof: "unit test: test/a-shard-split-balances-by-measured-duration.test.ts"
+    - claim: "files with no recorded duration are spread across shards rather than collected into one"
+      proof: "unit test: test/a-shard-split-balances-by-measured-duration.test.ts"
+    - claim: "the same selected set produces the same assignment twice, so a shard is attributable"
+      proof: "unit test: test/a-shard-split-balances-by-measured-duration.test.ts"
+    - claim: "every selected file lands in exactly one shard — the split loses nothing and duplicates nothing"
+      proof: "unit test: test/a-shard-split-balances-by-measured-duration.test.ts"
+  falsifier: |
+    CLOSE IF the shards are already balanced against their selected set: read four shard durations
+    off one real CI run and the selection that fed them.
+    MEASURED 2026-09-09 on runs 34409211121 and 34409058857: 4.8, 2.6, 2.5, 1.9 minutes, wall 5.3,
+    summed queue 1 minute.
+    POSITIVE CONTROL, because "the shards are more even" is satisfiable by a split that loses files:
+    the suite must prove every selected file lands in EXACTLY ONE shard. A balanced split that drops
+    a test file is a silent coverage hole, far worse than a slow run.
+    SECOND CONTROL: the floor must be reported. A fixture whose longest file exceeds the balanced
+    mean must produce a report naming that file, or the tool will invite exactly the wrong
+    conclusion this shard had to correct in its own first draft.
+    THIRD CONTROL: determinism. Two runs over one selected set must assign identically, or a flake
+    cannot be attributed and W1-T2904's retry evidence becomes unreadable.
+    DO NOT add shards as the remedy. Queue time is ~0 and a 172s file floors the path; more buckets
+    move the tail rather than shorten it.
+    DO NOT raise sweep.reviewLanes. The lane is idle 84% of the wall clock.
+    DO NOT quote a balance benefit derived from the manifest total — 763s per shard against a 4.8
+    min observed shard is the arithmetic that proves the selection, not the total, is what matters.
+  note: |
+    Rule 25 CHECKED: `scripts/test-tier-manifest.mjs` decides what CI runs, so the implementer must
+    check `INSTRUMENT_SURFACE` before pairing it with a src change and split the PR if entanglement
+    applies.
+    THIS SHARD WAS AMENDED ON 2026-09-09 BEFORE IT WAS BUILT. The first draft asserted balancing
+    would take the critical path from 4.8 to ~2.8 minutes, extrapolated from one run's shard times
+    without checking the manifest. The manifest's own numbers refute it — a perfect four-way split
+    of the whole suite is 763s — which is how the fast-lane selection came into view. The wrong
+    figure is recorded here rather than deleted, because the mistake it encodes (projecting a
+    benefit from an unmeasured population) is the same one design (i) now forbids the tool from
+    making.
+    THE SLOW-FILE ATTACK IS THE LARGER PRIZE AND IS NOT IN THIS TASK'S `files:`. 106 files over the
+    threshold are 51% of measured time and the top ten are 22%; `retro-marker-atomic.test.ts` alone
+    is 172s. Shortening those raises the ceiling on every split. It wants its own task, and did not
+    get one only because no id was available at the time of writing — recorded here so the work is
+    not lost.
+    CAVEAT WITH EQUAL WEIGHT: balancing shortens the median wait and cannot touch the tail. If the
+    selected set for a diff contains the 172s file, that PR's CI cannot go below ~3 minutes whatever
+    this task does.
