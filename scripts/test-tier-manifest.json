@@ -37,6 +37,7 @@
     "test/a-failing-retro-can-never-shrink-its-own-scope.test.ts": 1038,
     "test/a-filing-credit-must-never-close-a-build.test.ts": 1441,
     "test/a-filing-is-not-a-build.test.ts": 226,
+    "test/a-filing-pr-is-judged-against-criteria-it-cannot-satisfy.test.ts": 0,
     "test/a-fired-retro-must-not-hold-the-dispatch-rung.test.ts": 1403,
     "test/a-fired-triage-must-not-hold-the-dispatch-rung.test.ts": 1126,
     "test/a-gate-run-leaves-the-tracked-tree-clean.test.ts": 15674,
