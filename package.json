@@ -108,10 +108,12 @@
     "playwright": "Runtime dependency for rmd review's browser proof path; src/lib/review.ts resolves node_modules/playwright/cli.js to install Chromium."
   },
   "overrides": {
-    "qs": "^6.16.0"
+    "qs": "^6.16.0",
+    "js-yaml": "^4.3.2"
   },
   "_overridesRationale": {
-    "qs": "Forces typed-rest-client's qs 6.15.1 pin and Express/body-parser qs ranges to 6.16.0, patched for GHSA-4mjr-xmp4-gh2g and GHSA-x5fp-wj9c-mxmx."
+    "qs": "Forces typed-rest-client's qs 6.15.1 pin and Express/body-parser qs ranges to 6.16.0, patched for GHSA-4mjr-xmp4-gh2g and GHSA-x5fp-wj9c-mxmx.",
+    "js-yaml": "Forces cosmiconfig's js-yaml 4.3.1, reached only through @commitlint/cli, to 4.3.2 — patched for GHSA-2883-xcg3-v3hh (maxTotalMergeKeys does not bound CPU on empty merge keys). Dev-scope, and no direct dependency declares js-yaml, so an override is the only lever short of waiting on cosmiconfig."
   },
   "commit-and-tag-version": {
     "skip": {
