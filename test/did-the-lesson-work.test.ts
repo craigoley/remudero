@@ -12,46 +12,85 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { collectCiFailureCorpus, type CorpusPr } from "../src/lib/ci-failure-corpus.js";
 import { judgeCiLessonEfficacy, parseFiledCiLesson } from "../src/lib/measurement-cadence.js";
 
 const pair = (pr: number, gate: string) => ({ pr, gate, state: "repaired" as const, redSha: "a", repairFiles: [] });
 const lesson = (gate: string, watermarkPr: number) => ({ findingId: `ci-learning:1:${gate}`, gate, watermarkPr });
+const seen = (pr: number, gate: string) => ({ pr, gate });
+const corpus = (pairs = [pair(1, "g"), pair(2, "g")], fullyObservedGatePrs = pairs.map((p) => seen(p.pr, p.gate))) => ({
+  pairs,
+  fullyObservedGatePrs,
+});
+const pr = (number: number, commits: CorpusPr["commits"]): CorpusPr => ({ number, commits });
+const run = (name: string, conclusion: string) => ({
+  name,
+  status: "COMPLETED",
+  conclusion,
+  startedAt: "2026-09-09T12:00:00Z",
+});
 
 test("W1-T3055: a gate that kept refusing after the lesson landed reads RECURRED, naming the PRs", () => {
-  const corpus = { pairs: [pair(1, "g"), pair(2, "g"), pair(9, "g"), pair(11, "g")] };
-  const [r] = judgeCiLessonEfficacy(corpus, [lesson("g", 2)]);
+  const input = corpus([pair(1, "g"), pair(2, "g"), pair(9, "g"), pair(11, "g")]);
+  const [r] = judgeCiLessonEfficacy(input, [lesson("g", 2)]);
   assert.equal(r.verdict, "recurred");
   assert.deepEqual(r.recurredPrs, [9, 11], "the lesson did not take, and these are the receipts");
 });
 
-test("W1-T3055: a gate silent afterwards reads HELD — but only because later PRs existed to be silent about", () => {
-  const corpus = { pairs: [pair(1, "g"), pair(2, "g"), pair(9, "other"), pair(11, "other")] };
-  const [r] = judgeCiLessonEfficacy(corpus, [lesson("g", 2)]);
+test("W1-T3055: all-green later exposures of the lesson's gate read HELD", () => {
+  // Falsifier for the old denominator: neither later PR produces a failure pair, so counting only
+  // corpus.pairs reports UNMEASURABLE even though the target gate ran and passed twice.
+  const input = collectCiFailureCorpus({
+    prs: [
+      pr(9, [{ sha: "green9", rollup: [run("g", "SUCCESS")] }]),
+      pr(11, [{ sha: "green11", rollup: [run("g", "SUCCESS")] }]),
+    ],
+  });
+  const [r] = judgeCiLessonEfficacy(input, [lesson("g", 2)]);
   assert.equal(r.verdict, "held");
   assert.deepEqual(r.recurredPrs, []);
   assert.equal(r.laterPrsSeen, 2, "the denominator is carried, so `held` can be checked rather than believed");
+});
+
+test("W1-T3055: unrelated or unreadable later gates cannot manufacture a HELD verdict", () => {
+  const input = collectCiFailureCorpus({
+    prs: [
+      pr(9, [{ sha: "other", rollup: [run("other", "FAILURE")] }]),
+      pr(10, [{ sha: "pending", rollup: [run("g", "IN_PROGRESS")] }]),
+      pr(11, [
+        { sha: "green", rollup: [run("g", "SUCCESS")] },
+        { sha: "blind" },
+      ]),
+      pr(12, []),
+    ],
+  });
+  const [r] = judgeCiLessonEfficacy(input, [lesson("g", 2)]);
+  assert.equal(r.verdict, "unmeasurable");
+  assert.equal(r.laterPrsSeen, 0);
 });
 
 test("W1-T3055: NO later PRs is UNMEASURABLE, never held — a claim over an empty set is not a pass", () => {
   // The verdict that matters most. A lesson filed from the newest pull requests in a window has no
   // "after" yet; calling that success would be the vacuous pass this repo's coverage and ledger
   // sections already refuse, and it would accumulate silently as the loop's headline number.
-  const corpus = { pairs: [pair(1, "g"), pair(2, "g")] };
-  const [r] = judgeCiLessonEfficacy(corpus, [lesson("g", 2)]);
+  const [r] = judgeCiLessonEfficacy(corpus(), [lesson("g", 2)]);
   assert.equal(r.verdict, "unmeasurable");
   assert.equal(r.laterPrsSeen, 0);
   assert.deepEqual(r.recurredPrs, []);
 });
 
 test("W1-T3055: a gate is judged only against ITS OWN later failures, never another gate's", () => {
-  const corpus = { pairs: [pair(1, "g"), pair(9, "unrelated"), pair(10, "unrelated")] };
-  const [r] = judgeCiLessonEfficacy(corpus, [lesson("g", 1)]);
-  assert.equal(r.verdict, "held", "another gate's noise must not convict this lesson");
+  const input = corpus(
+    [pair(1, "g"), pair(9, "unrelated"), pair(10, "unrelated")],
+    [seen(1, "g"), seen(9, "unrelated"), seen(10, "unrelated")],
+  );
+  const [r] = judgeCiLessonEfficacy(input, [lesson("g", 1)]);
+  assert.equal(r.verdict, "unmeasurable", "another gate's noise is neither a recurrence nor exposure");
 });
 
 test("W1-T3055: one PR refusing twice on the same gate counts once", () => {
-  const corpus = { pairs: [pair(1, "g"), pair(9, "g"), pair(9, "g")] };
-  const [r] = judgeCiLessonEfficacy(corpus, [lesson("g", 1)]);
+  const input = corpus([pair(1, "g"), pair(9, "g"), pair(9, "g")]);
+  const [r] = judgeCiLessonEfficacy(input, [lesson("g", 1)]);
   assert.deepEqual(r.recurredPrs, [9], "a PR is one recurrence however many times it tripped");
 });
 

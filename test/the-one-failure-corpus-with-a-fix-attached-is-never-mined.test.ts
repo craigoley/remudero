@@ -35,6 +35,10 @@ test("W1-T2957 one record per red gate, and the review COMMIT STATUS is not drop
   });
   assert.equal(corpus.status, "populated");
   assert.equal(corpus.prsScanned, 1);
+  assert.deepEqual(corpus.fullyObservedGatePrs, [
+    { pr: 1, gate: "ci-shard (1/4)" },
+    { pr: 1, gate: "remudero-review" },
+  ]);
   assert.deepEqual(
     corpus.pairs.map((p) => p.gate).sort(),
     ["ci-shard (1/4)", "remudero-review"],
@@ -98,6 +102,7 @@ test("W1-T2957 an empty window and an unreadable one are distinguishable", () =>
   assert.equal(blind.status, "unreadable", "a rollup that could not be read is never a clean window");
   assert.deepEqual(blind.unreadableShas, ["a"]);
   assert.equal(blind.pairs.length, 0);
+  assert.deepEqual(blind.fullyObservedGatePrs, [], "an unreadable pull request cannot certify a gate exposure");
 });
 
 test("W1-T2957 a superseded red attempt does not outvote its own successor on one sha", () => {

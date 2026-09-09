@@ -64,6 +64,7 @@ const corpus = (over: Partial<CiFailureCorpus> = {}): CiFailureCorpus => ({
   prsScanned: 4,
   unreadableShas: [],
   pairs: [],
+  fullyObservedGatePrs: [],
   ...over,
 });
 
