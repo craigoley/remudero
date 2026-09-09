@@ -134,6 +134,10 @@ test("W1-T2972 THE WIRED HOOK, CALLED FOR REAL: check fires on a fresh root and 
       policy: ON,
       now: () => NOW,
       loadWindow: () => repairedWindow() as never,
+      loadLessons: () => ({
+        status: "measured",
+        lessons: [{ findingId: "ci-learning:1:coverage-ratchet", gate: "coverage-ratchet", watermarkPr: 1 }],
+      }),
     });
     assert.equal(hooks.checkCiLearningCadence().fire, true, "no marker under this fresh root — must fire");
 
@@ -143,6 +147,11 @@ test("W1-T2972 THE WIRED HOOK, CALLED FOR REAL: check fires on a fresh root and 
     const result = await hooks.runCiLearningCadence();
     assert.equal(result.status, "backlog", "the repaired pair is mintable, so the run has a backlog");
     assert.equal(result.draftCount, 1);
+    assert.equal(result.lessonRecurrences.status, "observed");
+    if (result.lessonRecurrences.status === "observed") {
+      assert.equal(result.lessonRecurrences.recurrenceCount, 1, "the already-filed lesson is checked in the same window");
+      assert.deepEqual(result.lessonRecurrences.recurrences[0].prs, [42], "the recurrence receipt remains named");
+    }
 
     const after = readMeasurementCadenceMarker(ciLearningCadenceMarkerPath(root));
     assert.equal(after.kind, "ok", "the fire is recorded on the rung's OWN marker");
@@ -243,7 +252,19 @@ test("W1-T2972 the poll loop runs the rung ONLY on a tick that decided to fire",
     checkCiLearningCadence: () => ({ fire: false, reason: "held by the interval bound" }),
     runCiLearningCadence: async () => {
       ran++;
-      return { status: "clear", draftCount: 0, excludedCount: 0, unreadableCount: 0 };
+      return {
+        status: "clear",
+        draftCount: 0,
+        excludedCount: 0,
+        unreadableCount: 0,
+        lessonRecurrences: {
+          status: "observed",
+          lessonCount: 0,
+          recurrenceCount: 0,
+          recurrences: [],
+          omittedRecurrenceCount: 0,
+        },
+      };
     },
   } as never);
   assert.equal(ran, 0, "a tick that did not fire must not run the rung");
@@ -253,10 +274,31 @@ test("W1-T2972 the poll loop runs the rung ONLY on a tick that decided to fire",
     checkCiLearningCadence: () => ({ fire: true, reason: "interval elapsed" }),
     runCiLearningCadence: async () => {
       ranOnFire++;
-      return { status: "clear", draftCount: 0, excludedCount: 0, unreadableCount: 0 };
+      return {
+        status: "clear",
+        draftCount: 0,
+        excludedCount: 0,
+        unreadableCount: 0,
+        lessonRecurrences: { status: "unreadable" },
+      };
     },
   } as never);
   assert.equal(ranOnFire, 1, "a tick that fired must run it exactly once");
+  const { rows } = await tickWith({
+    checkCiLearningCadence: () => ({ fire: true, reason: "interval elapsed" }),
+    runCiLearningCadence: async () => ({
+      status: "clear",
+      draftCount: 0,
+      excludedCount: 0,
+      unreadableCount: 0,
+      lessonRecurrences: { status: "unreadable" },
+    }),
+  } as never);
+  assert.deepEqual(
+    rows.find((row) => row.step === "ci_learning_cadence.ran")?.fields?.lesson_recurrences,
+    { status: "unreadable" },
+    "the bounded efficacy object reaches the durable cadence row",
+  );
 });
 
 test("W1-T2972 a run that THROWS is best-effort and never stops the tick that contains it", async () => {
