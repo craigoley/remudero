@@ -20,6 +20,7 @@ import { join } from "node:path";
 
 import { defaultProofSpawner } from "../src/lib/review.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 /** The fixture's own ceiling. Long enough that an unkilled child is unmistakable against the 1s
  *  bound below, short enough that a total failure of this fix costs seconds, never a hung suite. */
@@ -71,8 +72,9 @@ test("W1-T3266: a child that ignores SIGTERM and spins does not outlive its boun
   const { ms } = elapsedThrough(dir, "spin.js");
   // Generous headroom over the 1s bound for a loaded runner, and still an order of magnitude below
   // SPIN_MS — so this can only pass if the child was actually killed, never if it merely finished.
-  assert.ok(
-    ms < SPIN_MS / 2,
+  assertWallClockBound(
+    ms,
+    SPIN_MS / 2,
     `the spawner must return once its bound expires; it took ${ms}ms against a ${SPIN_MS}ms child ` +
       "(SIGTERM alone measured 120s on a 3s bound — the child ran to completion)",
   );
@@ -83,7 +85,7 @@ test("W1-T3266: a grandchild holding the pipe does not keep the orchestrator blo
   // stdout pipe the synchronous read is draining.
   const dir = spinnerDir();
   const { ms } = elapsedThrough(dir, "parent.js");
-  assert.ok(ms < SPIN_MS / 2, `a grandchild must not hold the spawner open; it took ${ms}ms`);
+  assertWallClockBound(ms, SPIN_MS / 2, `a grandchild must not hold the spawner open; it took ${ms}ms`);
 });
 
 test("W1-T3266: a child that finishes INSIDE its bound is never signalled, and its stdout is intact", () => {
@@ -93,7 +95,7 @@ test("W1-T3266: a child that finishes INSIDE its bound is never signalled, and i
   const started = Date.now();
   const out = defaultProofSpawner(process.execPath, [join(dir, "quick.js")], dir, 30_000);
   assert.equal(out.trim(), "done-quickly", "stdout must come back byte-identical, unkilled");
-  assert.ok(Date.now() - started < 30_000, "and it must not have waited out its bound");
+  assertWallClockBound(Date.now() - started, 30_000, "and it must not have waited out its bound");
 });
 
 test("W1-T3266: the production spawner names the untrappable signal, so the choice is readable", () => {
