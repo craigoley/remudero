@@ -1,0 +1,67 @@
+- id: W1-T3239
+  title: "THE `callers-audited` RUBRIC ITEM CHECKS ARITY, NOT SEMANTICS — it catches a caller passing too few arguments, which `tsc` also catches, and is blind to the partial-fix shape that caused THREE incidents in one session: a sibling branch deciding the same question that never got the same fix"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: high
+  origin: "operator-session#three-partial-fixes-in-one-session-2026-09-09"
+  plan_refs: ["W1-T3229", "W1-T3232", "W1-T2833", "W1-T2737", "W1-T2870"]
+  files: [src/lib/review.ts, test/an-unaudited-sibling-call-site-is-named.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THREE INCIDENTS IN ONE SESSION, ALL THE SAME SHAPE, ALL FOUND BY HAND.
+
+    (1) W1-T2833 bounded the retro's FOLLOW-UP ledger reader to a 30-day window and proved it with
+    a read-call recorder. The MAIN reader sat ONE FUNCTION AWAY IN THE SAME FILE, unbounded. It
+    OOM-killed the retro subprocess on every fire for six days (W1-T3229).
+
+    (2) W1-T2737 gave the `grep:` forward-reference carve-out a fifth condition, `planOnlyDiff`,
+    and its own criterion 5 pinned the `unit test:` arm "byte-identical". The two arms decide the
+    SAME QUESTION and only one asks it of the head. A declared-but-unbuilt test file was excused on
+    an implementation PR and passed the mechanical gate (#4770, W1-T3232).
+
+    (3) W1-T2870 moved the retro into its own subprocess so an OOM could not kill queue
+    supervision. It capped the CONTAINER and never bounded the WORKLOAD, converting "the retro
+    kills the daemon" into "the retro kills only itself, silently, forever".
+
+    EVERY ONE WAS CORRECT, WELL-TESTED AND SHIPPED GREEN. That is the defining property: a partial
+    fix does not look like a defect, it looks like a merged task. Nothing at the gate said "you
+    changed one of these and not the other".
+
+    THE ITEM NAMED FOR THIS CHECKS SOMETHING ELSE. `checkCallersAudited` (src/lib/review.ts) scans
+    for a function that GAINED A PARAMETER and a call site still passing fewer arguments — arity
+    drift, which `tsc` refuses independently. Its own message says "partial-fix drift", so the
+    intent is right and the reach is one shape: a signature change. None of the three above changed
+    a signature. All three changed a CONDITION or a BOUND at one of several sites that share a
+    concern.
+
+    WHAT CAN ACTUALLY BE COMPUTED, AND WHAT CANNOT. "Are these two branches deciding the same
+    question" is not mechanically decidable and this task does not pretend to it. What IS
+    computable from the diff alone: for every symbol this diff CHANGED, the call sites of that
+    symbol the diff did NOT touch. In all three incidents that list would have named the sibling —
+    `openLedgerUnion`'s other caller, the second `forwardReferenceFiles` consumer, the workload the
+    heap cap did not bound.
+
+    IT IS AN ADVISORY SECTION, NOT A BLOCK, AND THE PRECEDENT IS MEASURED. The reviewer already
+    prints "Untouched declared scope" as advisory, and that section is what surfaced #4770's
+    unbuilt file — a human read it and acted. A blocking version would refuse every legitimate
+    single-site change to a widely-called symbol, which is most changes in this repo. VISIBILITY IS
+    THE DELIVERABLE: the sibling appears at the gate instead of depending on the author having
+    thought of it.
+
+    THE SECTION MUST BOUND ITSELF OR IT WILL BE SKIPPED. A symbol with two hundred callers produces
+    a wall nobody reads, which is the same failure as printing nothing. It names a bounded number,
+    ordered by proximity — same file first, then same directory — and says how many it did not
+    print, exactly as the residue-id list already does.
+
+  acceptance:
+    - claim: "a diff that changes one call site of a symbol names the sibling call sites it did not touch"
+      proof: "unit test: W1-T3239: an untouched sibling call site is named"
+    - claim: "a diff that changes EVERY call site of a symbol names nothing, so the section is a signal rather than noise"
+      proof: "unit test: W1-T3239: a fully-audited symbol produces no sibling section"
+    - claim: "the list is bounded and says how many it did not print, so a widely-called symbol cannot produce an unreadable wall"
+      proof: "unit test: W1-T3239: a symbol with many callers prints a bounded list and names the remainder"
