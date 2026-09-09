@@ -244,12 +244,21 @@ test("THE ESCALATING FORM, WHEN OPTED IN, ONLY EVER DRAFTS A PROPOSAL — never 
     const registry = JSON.parse(readFileSync(registryPath, "utf8"));
     assert.ok(Array.isArray(registry) || Array.isArray(registry.proposals ?? registry), "sanity: it parses as the registry shape");
 
-    // LAW 5, DIRECTLY: nothing under stateDir besides the ledger fixture and the registry itself —
-    // no minted task shard, no feedback entry, no second write path. W1-T2490: `inbox-proposals.d/`
-    // is the newly minted proposal's OWN shard mirror — part of the registry's own footprint, not
-    // a second write path — updateProposalRegistry writes it alongside, never instead of, the blob.
+    // LAW 5, DIRECTLY: nothing under stateDir besides the ledger fixture, the registry itself,
+    // and measurementCadence's own latest-value snapshot — no minted task shard, no feedback
+    // entry, no second proposal write path. W1-T2490: `inbox-proposals.d/` is the newly minted
+    // proposal's OWN shard mirror — part of the registry's own footprint, not a second write
+    // path — updateProposalRegistry writes it alongside, never instead of, the blob.
     const entries = readdirSync(stateDir).sort();
-    assert.deepEqual(entries, ["inbox-proposals.d", "inbox-proposals.json", "ledger.2026-08-12T00-00-00-000Z.ndjson"].sort());
+    assert.deepEqual(
+      entries,
+      [
+        "inbox-proposals.d",
+        "inbox-proposals.json",
+        "last-measurement-cadence-values.json",
+        "ledger.2026-08-12T00-00-00-000Z.ndjson",
+      ].sort(),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

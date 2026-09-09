@@ -194,6 +194,7 @@ export interface RuleEfficacyCadenceResult extends MeasurementCadenceVerbStatus 
   measurableCount: number;
   repeatingCount: number;
   repeatIncidentRate: number | null;
+  delta_vs_previous?: number | null;
   /** True only when `policy.escalate` was on and a proposal was actually drafted. */
   escalated: boolean;
   escalatedProposalIds: string[];
@@ -201,11 +202,16 @@ export interface RuleEfficacyCadenceResult extends MeasurementCadenceVerbStatus 
 
 export interface VerdictCalibrationCadenceResult extends MeasurementCadenceVerbStatus {
   classes: { verdictClass: string; total: number; revertRate: number | null }[];
+  totalVerdicts?: number;
+  blockedCiCount?: number;
+  blocked_ci_share?: number | null;
+  delta_vs_previous?: number | null;
 }
 
 export interface AutonomyRateCadenceResult extends MeasurementCadenceVerbStatus {
   totalMerges: number;
   zeroTouchRate: number | null;
+  delta_vs_previous?: number | null;
 }
 
 /** W1-T2659's wipe-test cadence row — same cadence bound shape as CI-learning, without
@@ -1183,6 +1189,106 @@ export interface MeasurementCadenceReportOpts {
    *  `coverageImprovement` above uses (both need a caller-supplied `run_id` for their own ledger
    *  marker, so neither can run unconditionally off `stateDir` alone). */
   handRunCensus?: Omit<HandRunCensusCadenceOpts, "stateDir">;
+  /** The cadence fire time for delta snapshots. Production may omit it; tests pin it. */
+  now?: Date;
+}
+
+export const MEASUREMENT_CADENCE_DELTA_HORIZON_MS = DAY_MS;
+
+interface MeasurementCadenceMetricSnapshot {
+  firedAt: string;
+  metrics: {
+    repeatIncidentRate: number | null;
+    blockedCiShare: number | null;
+    zeroTouchRate: number | null;
+  };
+}
+
+export function measurementCadenceMetricSnapshotPath(stateDir: string): string {
+  return join(stateDir, "last-measurement-cadence-values.json");
+}
+
+function finiteMetric(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readMeasurementCadenceMetricSnapshot(path: string): MeasurementCadenceMetricSnapshot | null {
+  if (!existsSync(path)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.firedAt !== "string" || Number.isNaN(Date.parse(obj.firedAt))) return null;
+    if (!obj.metrics || typeof obj.metrics !== "object" || Array.isArray(obj.metrics)) return null;
+    const metrics = obj.metrics as Record<string, unknown>;
+    return {
+      firedAt: obj.firedAt,
+      metrics: {
+        repeatIncidentRate: finiteMetric(metrics.repeatIncidentRate),
+        blockedCiShare: finiteMetric(metrics.blockedCiShare),
+        zeroTouchRate: finiteMetric(metrics.zeroTouchRate),
+      },
+    };
+  } catch (_e) {
+    return null;
+  }
+}
+
+function writeMeasurementCadenceMetricSnapshot(path: string, snapshot: MeasurementCadenceMetricSnapshot): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(snapshot, null, 2));
+}
+
+function deltaVsPrevious(current: number | null, previous: number | null | undefined, previousAt: string | undefined, now: Date): number | null {
+  if (current === null || previous === null || previous === undefined || previousAt === undefined) return null;
+  const previousMs = Date.parse(previousAt);
+  if (Number.isNaN(previousMs)) return null;
+  const ageMs = now.getTime() - previousMs;
+  if (ageMs < 0 || ageMs > MEASUREMENT_CADENCE_DELTA_HORIZON_MS) return null;
+  return current - previous;
+}
+
+function measurementSnapshotFromResults(
+  firedAt: Date,
+  metrics: { repeatIncidentRate: number | null; blockedCiShare: number | null; zeroTouchRate: number | null },
+): MeasurementCadenceMetricSnapshot {
+  return { firedAt: firedAt.toISOString(), metrics };
+}
+
+const BLOCKED_CI_VERDICT_PATTERN = /"step":"verdict"/;
+
+function blockedCiShareFromLedger(
+  stateDir: string,
+  ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult = resolveLedgerUnion,
+): { totalVerdicts: number; blockedCiCount: number; blockedCiShare: number | null; refusedReason?: string } {
+  const union = ledgerUnion(stateDir, BLOCKED_CI_VERDICT_PATTERN);
+  if (!union.ok) {
+    const refusedReason =
+      union.archiveCount === 0
+        ? `blocked_ci share ledger union unreadable under ${union.stateDir}: no rotation corpus`
+        : `blocked_ci share ledger union unreadable under ${union.stateDir}: ${union.unread.length} unreadable file(s)`;
+    return { totalVerdicts: 0, blockedCiCount: 0, blockedCiShare: null, refusedReason };
+  }
+  let totalVerdicts = 0;
+  let blockedCiCount = 0;
+  for (const raw of union.matches) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const row = parsed as Record<string, unknown>;
+    if (row.step !== "verdict" || typeof row.verdict !== "string") continue;
+    totalVerdicts++;
+    if (row.verdict === "blocked_ci") blockedCiCount++;
+  }
+  return {
+    totalVerdicts,
+    blockedCiCount,
+    blockedCiShare: totalVerdicts === 0 ? null : blockedCiCount / totalVerdicts,
+  };
 }
 
 const WIPE_TEST_PAIR_PATTERN = /"step":"wipetest\.pair"/;
@@ -1293,6 +1399,9 @@ export function runWipeTestCadenceReport(opts: {
  */
 export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts): MeasurementCadenceRunResult {
   const registryPath = opts.registryPath ?? join(opts.stateDir, "inbox-proposals.json");
+  const firedAt = opts.now ?? new Date();
+  const snapshotPath = measurementCadenceMetricSnapshotPath(opts.stateDir);
+  const previousSnapshot = readMeasurementCadenceMetricSnapshot(snapshotPath);
 
   // ── rule-efficacy: no git needed, escalation is the ONE write in this whole module ──────────
   const efficacyReport: RuleEfficacyReport = ruleEfficacyReport(opts.stateDir);
@@ -1339,14 +1448,20 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
 
   const vReport = verdictCalibrationReport(rows, gitDump, { gitReadError });
   const anyVerdictMeasurable = vReport.classes.some((c) => c.revertRate !== null);
+  const blockedCiShare = blockedCiShareFromLedger(opts.stateDir, opts.ledgerUnion ?? resolveLedgerUnion);
   const verdictCalibration: VerdictCalibrationCadenceResult = {
-    status: anyVerdictMeasurable ? "measured" : "refused",
-    refusedReason: anyVerdictMeasurable
+    status: anyVerdictMeasurable || blockedCiShare.blockedCiShare !== null ? "measured" : "refused",
+    refusedReason: anyVerdictMeasurable || blockedCiShare.blockedCiShare !== null
       ? undefined
-      : gitReadError
+      : blockedCiShare.refusedReason
+        ? blockedCiShare.refusedReason
+        : gitReadError
         ? `git history unavailable: ${gitReadError}`
         : "every verdict class sits below the minimum population floor — nothing measurable this run",
     classes: vReport.classes.map((c) => ({ verdictClass: c.verdictClass, total: c.total, revertRate: c.revertRate })),
+    totalVerdicts: blockedCiShare.totalVerdicts,
+    blockedCiCount: blockedCiShare.blockedCiCount,
+    blocked_ci_share: blockedCiShare.blockedCiShare,
   };
 
   const merges = gitReadError ? [] : parseTrailerMerges(gitDump);
@@ -1481,10 +1596,31 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
         };
   }
 
+  const previousMetrics = previousSnapshot?.metrics;
+  const previousAt = previousSnapshot?.firedAt;
+  const currentMetrics = {
+    repeatIncidentRate: ruleEfficacy.repeatIncidentRate,
+    blockedCiShare: verdictCalibration.blocked_ci_share ?? null,
+    zeroTouchRate: autonomyRate.zeroTouchRate,
+  };
+  const trendedRuleEfficacy: RuleEfficacyCadenceResult = {
+    ...ruleEfficacy,
+    delta_vs_previous: deltaVsPrevious(currentMetrics.repeatIncidentRate, previousMetrics?.repeatIncidentRate, previousAt, firedAt),
+  };
+  const trendedVerdictCalibration: VerdictCalibrationCadenceResult = {
+    ...verdictCalibration,
+    delta_vs_previous: deltaVsPrevious(currentMetrics.blockedCiShare, previousMetrics?.blockedCiShare, previousAt, firedAt),
+  };
+  const trendedAutonomyRate: AutonomyRateCadenceResult = {
+    ...autonomyRate,
+    delta_vs_previous: deltaVsPrevious(currentMetrics.zeroTouchRate, previousMetrics?.zeroTouchRate, previousAt, firedAt),
+  };
+  writeMeasurementCadenceMetricSnapshot(snapshotPath, measurementSnapshotFromResults(firedAt, currentMetrics));
+
   return {
-    ruleEfficacy,
-    verdictCalibration,
-    autonomyRate,
+    ruleEfficacy: trendedRuleEfficacy,
+    verdictCalibration: trendedVerdictCalibration,
+    autonomyRate: trendedAutonomyRate,
     revertRecall,
     adoptionReport,
     adoptionMint,

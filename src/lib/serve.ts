@@ -2693,8 +2693,9 @@ export interface SelfMeasurementRouteDeps {
  * that module's own writer (design (i)) rather than re-describing the row shape here. Returns
  * `latestMeasurementRows`'s own result verbatim as JSON: `{status: "ok", rows: [...]}` or
  * `{status: "unreadable", reason}` — the client-side `renderSelfMeasurement` (renderShellHtml's
- * script) renders the `unreadable` case AS unreadable, never as a quietly-empty panel (the
- * W1-T119 distinction this reader's own doc states).
+ * script) renders the `unreadable` case AS unreadable, and renders each metric's
+ * `delta_vs_previous` beside the latest value through the generic figure row, never as a
+ * quietly-empty panel (the W1-T119 distinction this reader's own doc states).
  */
 export function buildSelfMeasurementRoute(deps: SelfMeasurementRouteDeps): Route {
   return {
