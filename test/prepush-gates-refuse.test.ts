@@ -1,3 +1,10 @@
+// W1-T3225 REMOVED THE HOOK'S CENSUS STEP, and with it three tests whose entire subject was that
+// step: how it invoked the test runner, how it counted an unmodelled flood, and how it surfaced an
+// unmappable suite. They are deleted rather than skipped — a test whose subject no longer exists is
+// a fixture for a thing that is gone, not coverage. What the step guarded now lives in CI's
+// ci-shard, unchanged; test/the-hook-spawns-no-test-suite.test.ts asserts the absence and that the
+// two surviving checks still run, in order.
+
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
@@ -153,7 +160,9 @@ test("a MISSING check is named as skipped, never reported as cleared", () => {
   const { status, stderr } = runHook(dir, { RMD_PREPUSH_GATES: "1" });
   assert.equal(status, 0, "a missing entry point is not a violation");
   assert.match(stderr, /rule15-precheck\.mjs absent — skipped, NOT passed/);
-  assert.match(stderr, /bin\/rmd absent — census suites not enumerated, NOT cleared/);
+  // W1-T3225 removed the census step, and with it the `./bin/rmd absent` arm this used to assert.
+  // The PROPERTY is unchanged and still worth holding: a check that could not RUN is named as
+  // skipped, never reported as cleared.
 });
 
 test("the hook is executable, or git silently ignores it and every claim here is vacuous", () => {
@@ -168,48 +177,6 @@ test("the hook is executable, or git silently ignores it and every claim here is
   const mode = execFileSync("git", ["-C", REPO_ROOT, "ls-tree", "HEAD", "--", "hooks/pre-push"], { encoding: "utf8" });
   assert.match(mode, /^100755 /, `git must record the exec bit; got ${mode.trim()}`);
   chmodSync(HOOK, 0o755);
-});
-
-test("the hook runs census suites with the loaders package.json uses, not a bare `node --test`", () => {
-  // MEASURED while building this: under a bare `node --test`, test/authority-ratchet.test.ts
-  // reported a failure it does not have (6/6 under the real invocation). A runner that
-  // manufactures failures is worse than one that runs nothing — it teaches the author to distrust
-  // the gate, which is how the gate ends up switched off.
-  const hook = readFileSync(HOOK, "utf8");
-  const invocation = /node --test [^\n]*\$census_files/.exec(hook);
-  assert.ok(invocation, "the hook must run the enumerated suites");
-  assert.match(invocation[0], /--import tsx/, `bare node --test cannot load these .ts suites: ${invocation[0]}`);
-  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
-    scripts: Record<string, string>;
-  };
-  for (const loader of pkg.scripts.test.match(/--import \S+/g) ?? []) {
-    assert.ok(invocation[0].includes(loader), `package.json's test script uses ${loader}; the hook must too`);
-  }
-});
-
-test("an unmodelled FLOOD is counted, not echoed — 119 lines a push is how a gate gets turned off", () => {
-  const dir = scratch();
-  mkdirSync(join(dir, "bin"), { recursive: true });
-  const fake = join(dir, "bin", "rmd");
-  // Names many suites it cannot place and emits no runnable file: the real tree's shape today.
-  writeFileSync(fake, "#!/bin/sh\ni=0\nwhile [ $i -lt 119 ]; do echo \"unmodelled: t$i\" >&2; i=$((i+1)); done\n");
-  chmodSync(fake, 0o755);
-  const { status, stderr } = runHook(dir, { RMD_PREPUSH_GATES: "1" });
-  assert.equal(status, 0, "incompleteness is not a violation");
-  assert.match(stderr, /119 census suite\(s\) are unmodelled and were NOT run/);
-  assert.ok(!/unmodelled: t7\b/.test(stderr), "the individual lines must not be echoed");
-  assert.match(stderr, /joins no MODELLED census suite/, "and silence must not read as coverage");
-});
-
-test("an UNMAPPABLE suite is shown in full — it is a table defect, not routine incompleteness", () => {
-  const dir = scratch();
-  mkdirSync(join(dir, "bin"), { recursive: true });
-  const fake = join(dir, "bin", "rmd");
-  writeFileSync(fake, "#!/bin/sh\necho 'unmapped: some-census' >&2\n");
-  chmodSync(fake, 0o755);
-  const { status, stderr } = runHook(dir, { RMD_PREPUSH_GATES: "1" });
-  assert.equal(status, 0);
-  assert.match(stderr, /unmapped: some-census/, "a suite the table cannot map must stay visible");
 });
 
 test("rule15-precheck is invoked through the tsx loader, or its exit code means something else", () => {
