@@ -1,0 +1,65 @@
+- id: W1-T3237
+  title: "NOTHING EVER PRUNES THE LEDGER ARCHIVE — 646 rotations and 2.7GB accumulated with no retention policy at all, and it is the corpus that OOM-killed the retro; W1-T3229 bounded the READER and W1-T3234 bounds the WRITER, but the pile itself still only grows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  origin: "operator-session#the-corpus-that-oom-killed-the-retro-2026-09-09"
+  plan_refs: ["W1-T3229", "W1-T3234", "W1-T2833"]
+  files: [src/lib/ledger.ts, test/the-ledger-archive-is-compacted-never-truncated.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON THE FLEET HOST, 2026-09-09: 646 `ledger.*.ndjson.gz` rotations plus 2 plain
+    rotations plus the live file, 2,709,938,810 bytes uncompressed, 900,813 DISTINCT rows totalling
+    283,539,709 bytes of ndjson. `rotateLedger` keeps `MAX_RETAINED_LINES_PER_STEP = 200` newest
+    lines per step in the live file and ARCHIVES the rest. Nothing has ever deleted, merged or aged
+    out an archive. The retention policy is "keep everything, forever", and it was never chosen —
+    it is what happens when rotation is written and retention is not.
+
+    THIS IS THE PILE THAT OOM-KILLED THE SELF-IMPROVEMENT LOOP. W1-T3229 bounded the retro's READER
+    so it survives the corpus; W1-T3234 bounds the follow-up WRITER that inflates it at 276:1.
+    Neither removes a byte. The corpus is the shared input of every union reader in this repo, and
+    the next one to grow past its own heap will fail the same way with a different symptom.
+
+    COMPACT, NEVER DELETE — AND THIS REPO ALREADY KNOWS WHY. Its own standing guidance is that the
+    archives are NOT cumulative snapshots: `rotateLedger` keeps only the newest 200 per step and
+    archives the rest, so MOST HISTORY EXISTS ONLY IN OLDER ARCHIVES, deleting any destroys unique
+    data, and the newest subsumes nothing. Claims of the form "N occurrences" — and especially
+    "zero in the entire history" — become unsupportable the moment a file is dropped. A retention
+    policy that deletes is therefore not a smaller version of this task; it is a different and
+    worse one.
+
+    THE HEADROOM IS IN DUPLICATION, WHICH IS MEASURED, NOT ASSUMED. 2,709,938,810 uncompressed
+    bytes reduce to 900,813 distinct rows / 283,539,709 bytes — a **9.6x** collapse across the
+    corpus, and W1-T3234 measured the same effect within a single day at up to 447:1 on one step.
+    So compaction can reclaim most of the pile WITHOUT LOSING A SINGLE DISTINCT ROW, which is
+    exactly the property a delete-based policy cannot offer.
+
+    THE FALSIFIER IS ROW-SET EQUALITY, NOT A SIZE DROP. A compaction that shrinks the corpus is
+    trivial to write and worthless to trust: the test must assert that the set of DISTINCT rows
+    before and after is IDENTICAL, and that every rotation's newest and oldest `ts` still bound the
+    same window. A byte-count assertion alone would pass on a truncation, which is the one outcome
+    this task must never ship.
+
+    ORDERING AND NAMES ARE PART OF THE CONTRACT. Every union reader in this repo globs the three
+    forms (`ledger.ndjson`, `ledger.*.ndjson`, `ledger.*.ndjson.gz`) and several derive a window
+    from the rotation STAMP in the filename (`rotationBeforeWindow`, lib/ledger-union.ts). A
+    compacted archive must keep a name those readers place correctly, or the window optimisation
+    silently starts opening files it should skip — or worse, skipping ones it should open.
+
+    IT MUST BE A SEPARATE, EXPLICIT VERB — NEVER A SIDE EFFECT OF ROTATION. Rotation runs inside
+    the daemon's write path, and a compaction that fires there would put a multi-hundred-megabyte
+    rewrite on the latency path of every ledger append. The operator runs this, the same way
+    `deploy/host-update.sh` and the image rebuild are operator acts.
+
+  acceptance:
+    - claim: "compaction preserves the exact set of distinct rows — a truncation that merely shrinks the corpus fails"
+      proof: "unit test: W1-T3237: the distinct row set is identical before and after compaction"
+    - claim: "a compacted archive keeps a name and stamp the union's window filter still places correctly"
+      proof: "unit test: W1-T3237: a compacted archive is still found and windowed by the union reader"
+    - claim: "compaction is an operator verb and never runs from the rotation write path"
+      proof: "grep: never a side effect of rotation in src/lib/ledger.ts"
