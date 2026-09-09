@@ -1,0 +1,115 @@
+- id: W1-T3297
+  title: "THE GITHUB TRANSPORT WATCHES THE LIMIT THAT DOES NOT FIRE AND IS BLIND TO THE ONE THAT DOES — `ghRateLimitRefusalFromReading` refuses only at `remaining === 0`, while every 403 this session arrived with the primary budget reading 5000/5000; and W1-T3275's cadence floor cannot see `rmd` verbs at all, because a hook matches `gh` in a command's text and `./bin/rmd review` contains none"
+  repo: remudero
+  depends_on: ["W1-T3275"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files:
+    - src/lib/github-transport.ts
+    - test/the-transport-paces-its-own-reads.test.ts
+  origin: "operator-session#gh-cadence-2026-09-09"
+  plan_refs: ["W1-T3275", "W1-T1066", "W1-T2897"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING. The diff is one module, but 24
+    `src/` files import this transport and every GitHub call the fleet makes passes through it. A
+    floor that refuses too eagerly here does not slow a session down, it stops the daemon.
+
+    THIS IS THE OTHER HALF OF W1-T3275, NOT A REPLACEMENT FOR IT. That task paces `gh` typed into a
+    Bash tool call; this one paces `gh` reached through an `rmd` verb. Neither surface can see the
+    other, which is why the session that built the first one went on tripping the limit through the
+    second.
+  rationale: |
+    MEASURED 2026-09-09, four separate 403s in one session, all of them AFTER the cadence floor
+    W1-T3275 shipped.
+
+    ⚠ THE EXISTING REFUSAL WATCHES THE WRONG NUMBER. `ghRateLimitRefusalFromReading`
+    (src/lib/github-transport.ts) opens with
+
+        if (reading.remaining !== 0) return undefined;
+
+    so it refuses only when the PRIMARY budget is exhausted. At the moment of each 403 today:
+
+        gh api rate_limit --jq .resources.core     ->  core:    5000/5000 resets 23:21:35Z
+        gh api rate_limit --jq .resources.graphql  ->  graphql: 5000/5000 resets 23:21:35Z
+
+    FULL QUOTA, AND STILL REFUSED. The limit that fires is the SECONDARY one, which counts request
+    RATE rather than volume; it does not send `X-Ratelimit-Remaining: 0`, so nothing in this module
+    can currently see it. The transport's whole rate-limit awareness is pointed at the limit that
+    did not fire and blind to the one that did.
+
+    THE PRIMARY CHECK IS NOT WRONG AND MUST STAY. `remaining === 0` is the correct refusal for the
+    hourly budget, and CLAUDE.md's own bullet records a PR POST succeeding at remaining 0 with the
+    next GET 403ing. This task ADDS the secondary case; it does not replace the primary one.
+
+    AND THE HOOK CANNOT COVER THIS. `hooks/deny-floor.sh` rule 9 (W1-T3275) refuses a read-shaped
+    `gh` call inside 180s of the last one, and it matches `gh` in the COMMAND TEXT. `./bin/rmd
+    review 4862` contains no `gh`; the call is made in-process by `ghExec`. MEASURED: the session
+    that shipped rule 9 tripped the secondary limit twice more within the hour, both times through
+    `rmd review`, and the hook logged nothing because it never saw a `gh` invocation.
+
+    THE CHOKE POINT ALREADY EXISTS. Every GitHub call in this codebase reaches
+    `ghExec`/`ghJson` here — 24 `src/` files import this module — so there is exactly one place to
+    put a floor, and it is the same place the primary-limit refusal already lives.
+
+  design: |
+    (i) PACE READS, NOT WRITES — the same split W1-T3275 argued and for the same reason. A write is
+    what the fleet does when it has something to say and is self-limiting; a read is what it repeats
+    while waiting. A floor that delays `gh pr create` or a status POST does not slow a session, it
+    stalls the daemon mid-dispatch.
+
+    (ii) A SECONDARY-LIMIT 403 IS A DISTINCT OUTCOME, NOT "BUDGET EXHAUSTED". It carries no
+    `remaining: 0`, and its remedy is BACKOFF rather than waiting for a reset time — reporting it as
+    the primary limit sends the reader to a reset timestamp an hour away for a condition that clears
+    in a minute. Classify it by the response, and name it distinctly in the refusal and on the
+    ledger.
+
+    (iii) THE FLOOR IS ADVISORY-BY-DEFAULT IN THE DAEMON AND ENFORCED IN A SESSION, or it is not
+    shippable. A hard refusal inside `runSweep` turns a paced read into a failed rung. The default
+    must be the direction that cannot take the fleet down, and the enforcing mode must be opt-in —
+    the polarity W1-T322's advisory floor already establishes for exactly this reason.
+
+    (iv) IT MUST NOT DOUBLE WITH THE HOOK. A `gh` call typed into a Bash tool call is paced by
+    hooks/deny-floor.sh; one made through `ghExec` is paced here. The two surfaces are disjoint by
+    construction (a hook sees a command string, this sees a function call), so no call is paced
+    twice — but the shared stamp must be the same file, or two independent 180s windows become an
+    effective 90s one.
+
+    (v) FAIL OPEN ON EVERY INTERNAL ERROR. An unreadable stamp, an unwritable cache root, a missing
+    clock: all allow the call. A transport that refuses because it could not read its own timestamp
+    is worse than no floor at all.
+
+  acceptance:
+    - claim: "a 403 carrying no remaining:0 is classified as a SECONDARY limit and named distinctly, not reported as the primary budget"
+      proof: "unit test: test/the-transport-paces-its-own-reads.test.ts"
+    - claim: "the existing primary refusal at remaining === 0 is unchanged, so the hourly budget still refuses exactly as it does today"
+      proof: "unit test: test/the-transport-paces-its-own-reads.test.ts"
+    - claim: "a read-shaped call inside the window is paced while a write is never delayed, however close together"
+      proof: "unit test: test/the-transport-paces-its-own-reads.test.ts"
+    - claim: "the floor is advisory by default and refuses only when explicitly enforced, so no daemon rung fails on a paced read"
+      proof: "unit test: test/the-transport-paces-its-own-reads.test.ts"
+    - claim: "an unreadable or unwritable stamp allows the call, so the floor can never block work by failing"
+      proof: "unit test: test/the-transport-paces-its-own-reads.test.ts"
+
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if the harness gains request pacing for tool calls that reach
+    GitHub, or if `gh` itself grows a client-side secondary-limit backoff — a second pacer would then
+    be two actors throttling one stream, and the transport is the worse place to lose that race.
+
+    RE-DESIGN rather than build if the read/write split cannot be drawn from `ghExec`'s argv with
+    the same confidence the hook draws it from a command string. Pacing writes is the version of
+    this that stalls the daemon, and a classifier that cannot tell `gh pr view` from `gh pr merge`
+    must not ship.
+
+    DO NOT resolve this by removing the `remaining === 0` refusal. It is correct for the primary
+    limit and this task is additive.
+    DO NOT make the floor enforcing by default. The measured cost of a false refusal here is a
+    stalled dispatch rung, and this repo has already recorded what happens to a gate that stops real
+    work: it gets routed around inside a week.
+    DO NOT give it its own stamp file. Two independent windows against one shared limiter halve the
+    effective cadence, which is the defect wearing the fix's clothes.
