@@ -10,7 +10,7 @@
   files: [src/lib/review.ts, test/a-grep-proof-naming-an-added-test-file-greps-the-copy-put-there-for-it.test.ts]
   origin: "operator-session#board-pass-2026-09-08"
   plan_refs: ["W1-T3098", "W1-T273", "W1-T362", "W1-T1071"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3098 fixed a real thing. A `unit test:` proof naming a test file this diff ADDS could not

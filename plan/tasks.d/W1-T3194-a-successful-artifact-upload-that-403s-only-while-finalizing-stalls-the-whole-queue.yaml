@@ -18,7 +18,7 @@
     - test/main-health-wiring.test.ts
   origin: "fleet-incident#github-artifact-finalization-403-2026-09-08"
   plan_refs: ["W1-T7", "W1-T1223", "W1-T2403", "W1-T2787"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED TWICE ON 2026-09-08, ON DIFFERENT WORKFLOWS AND REPOSITORY SURFACES. PR #4671's CI

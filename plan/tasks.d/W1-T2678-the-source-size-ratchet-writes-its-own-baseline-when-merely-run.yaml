@@ -10,7 +10,7 @@
   files: [scripts/source-size-ratchet.mjs, test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts]
   origin: "operator-session#3512-misattribution-2026-09-02"
   plan_refs: ["W1-T2488", "W1-T2526", "W1-T2653"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-01 WHILE REPAIRING #3569. `node scripts/source-size-ratchet.mjs` was run as a

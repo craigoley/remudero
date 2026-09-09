@@ -10,7 +10,7 @@
   origin: architect
   plan_refs: ["§5C", "W1-T2853", "W1-T341", "W1-T326"]
   files: [src/lib/sweep.ts, test/the-sweep-fan-out-respects-the-host-budget.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     `plan/policy.yaml` sets `hostWorkerBudget: { value: 4, min: 1, max: 16 }`. `git grep hostWorkerBudget

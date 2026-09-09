@@ -10,7 +10,7 @@
   files: [src/lib/deployer.ts, test/the-restart-seam-adapts-to-its-host.test.ts]
   origin: "operator-session#deploy-gate-2026-09-08"
   plan_refs: ["W1-T3199", "W1-T3201"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

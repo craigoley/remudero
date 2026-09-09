@@ -14,7 +14,7 @@
     - src/run-task.ts
     - test/full-sweep-fix-head-of-line.test.ts
     - scripts/test-tier-manifest.json
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED AT origin/main 77f1fe8e6. `runSweep` walks `openPrs` with a sequential `for` loop.

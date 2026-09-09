@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§4", "§13", "W1-T2769"]
   files: [src/lib/self-sync.ts, test/reexec-forwards-signals.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-8 (OBSERVED). At f7ceb86, `defaultReexec`

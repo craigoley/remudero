@@ -12,7 +12,7 @@
     - test/post-review-throw-backoff.test.ts
   origin: "oper#pr-3766-stale-pending-refusal-deadlock-2026-09-03"
   plan_refs: ["W1-T529", "W1-T913", "W1-T1018", "W1-T1213", "W1-T2427"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THIS STRANDED A GREEN PR AFTER THE RECOVERY CLOCK EXPIRED. PR #3766 had every CI check green

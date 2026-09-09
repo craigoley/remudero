@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§4", "§9", "W1-T372", "W1-T414"]
   files: [src/lib/escalate.ts, test/escalation-dedup-fails-closed-on-list-error.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-9 (OBSERVED). At f7ceb86, `src/lib/escalate.ts:1125` documents
