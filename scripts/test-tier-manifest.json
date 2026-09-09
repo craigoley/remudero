@@ -699,6 +699,7 @@
     "test/managed-repos.test.ts": 226,
     "test/manual-completion-assertion.test.ts": 1414,
     "test/mast-mapping.test.ts": 762,
+    "test/measurement-cadence-delta.test.ts": 0,
     "test/measurement-cadence.test.ts": 82592,
     "test/merge-lcov-node-drift-cluster-and-image-pin.test.ts": 868,
     "test/merge-lcov.test.ts": 8836,

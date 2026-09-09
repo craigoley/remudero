@@ -194,6 +194,7 @@ export interface RuleEfficacyCadenceResult extends MeasurementCadenceVerbStatus 
   measurableCount: number;
   repeatingCount: number;
   repeatIncidentRate: number | null;
+  delta_vs_previous?: number | null;
   /** True only when `policy.escalate` was on and a proposal was actually drafted. */
   escalated: boolean;
   escalatedProposalIds: string[];
@@ -201,11 +202,16 @@ export interface RuleEfficacyCadenceResult extends MeasurementCadenceVerbStatus 
 
 export interface VerdictCalibrationCadenceResult extends MeasurementCadenceVerbStatus {
   classes: { verdictClass: string; total: number; revertRate: number | null }[];
+  totalVerdicts?: number;
+  blockedCiCount?: number;
+  blocked_ci_share?: number | null;
+  delta_vs_previous?: number | null;
 }
 
 export interface AutonomyRateCadenceResult extends MeasurementCadenceVerbStatus {
   totalMerges: number;
   zeroTouchRate: number | null;
+  delta_vs_previous?: number | null;
 }
 
 /** W1-T2659's wipe-test cadence row — same cadence bound shape as CI-learning, without
@@ -1185,6 +1191,87 @@ export interface MeasurementCadenceReportOpts {
   handRunCensus?: Omit<HandRunCensusCadenceOpts, "stateDir">;
 }
 
+function finiteMetric(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function objectField(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function metricsFromMeasurementRow(row: MeasurementCadenceRowEntry | undefined):
+  | {
+      repeatIncidentRate: number | null;
+      blockedCiShare: number | null;
+      zeroTouchRate: number | null;
+    }
+  | undefined {
+  if (!row) return undefined;
+  const ruleEfficacy = objectField(row.result.ruleEfficacy);
+  const verdictCalibration = objectField(row.result.verdictCalibration);
+  const autonomyRate = objectField(row.result.autonomyRate);
+  return {
+    repeatIncidentRate: finiteMetric(ruleEfficacy?.repeatIncidentRate),
+    blockedCiShare: finiteMetric(verdictCalibration?.blocked_ci_share),
+    zeroTouchRate: finiteMetric(autonomyRate?.zeroTouchRate),
+  };
+}
+
+function previousMeasurementCadenceMetrics(
+  stateDir: string,
+  ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult,
+):
+  | {
+      repeatIncidentRate: number | null;
+      blockedCiShare: number | null;
+      zeroTouchRate: number | null;
+    }
+  | undefined {
+  const previousRows = latestMeasurementRows(stateDir, 1, ledgerUnion);
+  return previousRows.status === "ok" ? metricsFromMeasurementRow(previousRows.rows[0]) : undefined;
+}
+
+function deltaVsPrevious(current: number | null, previous: number | null | undefined): number | null {
+  if (current === null || previous === null || previous === undefined) return null;
+  return current - previous;
+}
+
+const BLOCKED_CI_VERDICT_PATTERN = /"step":"verdict"/;
+
+function blockedCiShareFromLedger(
+  stateDir: string,
+  ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult = resolveLedgerUnion,
+): { totalVerdicts: number; blockedCiCount: number; blockedCiShare: number | null; refusedReason?: string } {
+  const union = ledgerUnion(stateDir, BLOCKED_CI_VERDICT_PATTERN);
+  if (!union.ok) {
+    const refusedReason =
+      union.archiveCount === 0
+        ? `blocked_ci share ledger union unreadable under ${union.stateDir}: no rotation corpus`
+        : `blocked_ci share ledger union unreadable under ${union.stateDir}: ${union.unread.length} unreadable file(s)`;
+    return { totalVerdicts: 0, blockedCiCount: 0, blockedCiShare: null, refusedReason };
+  }
+  let totalVerdicts = 0;
+  let blockedCiCount = 0;
+  for (const raw of union.matches) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue; // Torn verdict rows cannot contribute to the blocked_ci denominator.
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const row = parsed as Record<string, unknown>;
+    if (row.step !== "verdict" || typeof row.verdict !== "string") continue;
+    totalVerdicts++;
+    if (row.verdict === "blocked_ci") blockedCiCount++;
+  }
+  return {
+    totalVerdicts,
+    blockedCiCount,
+    blockedCiShare: totalVerdicts === 0 ? null : blockedCiCount / totalVerdicts,
+  };
+}
+
 const WIPE_TEST_PAIR_PATTERN = /"step":"wipetest\.pair"/;
 
 function numberFieldOrZero(value: unknown): number {
@@ -1293,6 +1380,8 @@ export function runWipeTestCadenceReport(opts: {
  */
 export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts): MeasurementCadenceRunResult {
   const registryPath = opts.registryPath ?? join(opts.stateDir, "inbox-proposals.json");
+  const ledgerUnion = opts.ledgerUnion ?? resolveLedgerUnion;
+  const previousMetrics = previousMeasurementCadenceMetrics(opts.stateDir, ledgerUnion);
 
   // ── rule-efficacy: no git needed, escalation is the ONE write in this whole module ──────────
   const efficacyReport: RuleEfficacyReport = ruleEfficacyReport(opts.stateDir);
@@ -1339,14 +1428,20 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
 
   const vReport = verdictCalibrationReport(rows, gitDump, { gitReadError });
   const anyVerdictMeasurable = vReport.classes.some((c) => c.revertRate !== null);
+  const blockedCiShare = blockedCiShareFromLedger(opts.stateDir, ledgerUnion);
   const verdictCalibration: VerdictCalibrationCadenceResult = {
-    status: anyVerdictMeasurable ? "measured" : "refused",
-    refusedReason: anyVerdictMeasurable
+    status: anyVerdictMeasurable || blockedCiShare.blockedCiShare !== null ? "measured" : "refused",
+    refusedReason: anyVerdictMeasurable || blockedCiShare.blockedCiShare !== null
       ? undefined
-      : gitReadError
+      : blockedCiShare.refusedReason
+        ? blockedCiShare.refusedReason
+        : gitReadError
         ? `git history unavailable: ${gitReadError}`
         : "every verdict class sits below the minimum population floor — nothing measurable this run",
     classes: vReport.classes.map((c) => ({ verdictClass: c.verdictClass, total: c.total, revertRate: c.revertRate })),
+    totalVerdicts: blockedCiShare.totalVerdicts,
+    blockedCiCount: blockedCiShare.blockedCiCount,
+    blocked_ci_share: blockedCiShare.blockedCiShare,
   };
 
   const merges = gitReadError ? [] : parseTrailerMerges(gitDump);
@@ -1412,20 +1507,20 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     checkoutDir: opts.checkoutDir,
     stateDir: opts.stateDir,
     shipDateFor: opts.shipDateFor ?? defaultAdoptionShipDate,
-    ledgerUnion: opts.ledgerUnion ?? resolveLedgerUnion,
+    ledgerUnion,
   });
 
   // ── the sixth verb: the verb census (W1-T2485) — see that section's own header doc above ───
   const verbCensus = runVerbCensus({
     checkoutDir: opts.checkoutDir,
     stateDir: opts.stateDir,
-    ledgerUnion: opts.ledgerUnion ?? resolveLedgerUnion,
+    ledgerUnion,
   });
 
   // ── wipe-test's report seat (W1-T2659): per-factor aggregates only above the pairing floor ──
   const wipeTest = runWipeTestCadenceReport({
     stateDir: opts.stateDir,
-    ledgerUnion: opts.ledgerUnion ?? resolveLedgerUnion,
+    ledgerUnion,
   });
   // ── coverage-improvement: daemon-side reader for CI's merged coverage artifact ─────────────
   const coverageImprovement = opts.coverageImprovement
@@ -1481,10 +1576,28 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
         };
   }
 
+  const currentMetrics = {
+    repeatIncidentRate: ruleEfficacy.repeatIncidentRate,
+    blockedCiShare: verdictCalibration.blocked_ci_share ?? null,
+    zeroTouchRate: autonomyRate.zeroTouchRate,
+  };
+  const trendedRuleEfficacy: RuleEfficacyCadenceResult = {
+    ...ruleEfficacy,
+    delta_vs_previous: deltaVsPrevious(currentMetrics.repeatIncidentRate, previousMetrics?.repeatIncidentRate),
+  };
+  const trendedVerdictCalibration: VerdictCalibrationCadenceResult = {
+    ...verdictCalibration,
+    delta_vs_previous: deltaVsPrevious(currentMetrics.blockedCiShare, previousMetrics?.blockedCiShare),
+  };
+  const trendedAutonomyRate: AutonomyRateCadenceResult = {
+    ...autonomyRate,
+    delta_vs_previous: deltaVsPrevious(currentMetrics.zeroTouchRate, previousMetrics?.zeroTouchRate),
+  };
+
   return {
-    ruleEfficacy,
-    verdictCalibration,
-    autonomyRate,
+    ruleEfficacy: trendedRuleEfficacy,
+    verdictCalibration: trendedVerdictCalibration,
+    autonomyRate: trendedAutonomyRate,
     revertRecall,
     adoptionReport,
     adoptionMint,
