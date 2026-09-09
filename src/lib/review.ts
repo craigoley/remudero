@@ -45,7 +45,7 @@ export type PostableReviewState = ReviewState | "pending";
  *  so a new commit OR a body edit earns a fresh retry budget while comments, labels and other `updated_at` churn do
  *  not. The revision rearms the same evidence only after a material reviewer-contract change, independent of boot
  *  commits, provider choice and model sampling. */
-export const REVIEW_ENGINE_REVISION = "w1-t2946-codex-disposable-review-v1";
+export const REVIEW_ENGINE_REVISION = "reviewer-scope-context-v1";
 
 export function reviewInputDigest(
   headSha: string,
@@ -2653,6 +2653,27 @@ function scopeViolationFiles(diffFiles: readonly string[], declaredFiles: readon
   return diffFiles.filter((f) => !declared.has(f) && !SCOPE_EXEMPT_GENERATED_ARTIFACTS.has(f));
 }
 
+export interface ReviewScopeContext {
+  declaredFiles: string[];
+  changedFiles: string[];
+  widenedFiles: string[];
+}
+
+/** The compact path context supplied to the semantic reviewer. This deliberately reuses the exact changed-file
+ * walker and advisory-only scope comparison that {@link judgeReview} uses: a second diff parser or a second notion
+ * of widening would let the prompt and the rendered advisory disagree about which extra code needs inspection. */
+export function reviewScopeContext(
+  diff: string,
+  declaredFiles: readonly string[] | undefined,
+): ReviewScopeContext {
+  const diffFiles = changedFiles(walkDiff(diff));
+  return {
+    declaredFiles: [...(declaredFiles ?? [])],
+    changedFiles: diffFiles,
+    widenedFiles: scopeViolationFiles(diffFiles, declaredFiles),
+  };
+}
+
 /** IMPLEMENTATION-SHAPED (W1-T458 design (ii)): `src/` or `test/` only. Narrowing to these two prefixes is what turns
  *  the raw "touches ANY declared path" false-positive rate — 52%, inflated by plan filings and docs PRs — into the
  *  honest ~11% the advisory-not-refusal call rests on. */
@@ -4059,6 +4080,9 @@ export interface ReviewPromptInput {
   owner: string;
   repo: string;
   headSha: string;
+  declaredFiles?: readonly string[];
+  changedFiles?: readonly string[];
+  widenedFiles?: readonly string[];
 }
 
 /** Render the prompt for a FRESH-context REVIEW worker (acceptance #1/#3). The worker is read-only plus gh: it reads
@@ -4071,6 +4095,9 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
   const criteria = (input.task.acceptance ?? [])
     .map((c, i) => `  ${i + 1}. CLAIM: ${c.claim}\n     PROOF: ${c.proof}`)
     .join("\n");
+  const declaredFiles = JSON.stringify(input.declaredFiles ?? []);
+  const changedFiles = JSON.stringify(input.changedFiles ?? []);
+  const widenedFiles = JSON.stringify(input.widenedFiles ?? []);
 
   return [
     `You are a REVIEW worker with FRESH context — you are NOT the implementer and`,
@@ -4082,6 +4109,9 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     ``,
     `TASK UNDER REVIEW: ${input.task.id}`,
     `PR: ${input.prUrl}`,
+    `DECLARED PATHS: ${declaredFiles}`,
+    `CHANGED PATHS: ${changedFiles}`,
+    `WIDENED PATHS (changed but not declared): ${widenedFiles}`,
     ``,
     `Do this:`,
     `1. Read the PR diff:            gh pr diff ${input.prUrl}`,
@@ -4105,6 +4135,12 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     `   always takes a fallback instead of the claimed behavior = FAILURE. A grep proving`,
     `   that a call site names the new function is not proof that its runtime value can`,
     `   reach that function; verify the data path, not only symbol reachability.`,
+    `6. Inspect the WIDENED PATHS closely for harmful behavior that makes a claim false:`,
+    `   unsafe or dead code, hidden coupling, unrelated regressions, or code that is not`,
+    `   actually wired into production. Scope expansion alone must NEVER cause FAILURE.`,
+    `   Good, coherent extra code is not a defect. If extra code does invalidate a claim,`,
+    `   fail the affected criterion and name the concrete behavior and path; do not fail`,
+    `   merely because a changed path was not declared, and do not invent new criteria.`,
     ``,
     `ACCEPTANCE CRITERIA:`,
     criteria || "  (none stated — treat as FAILURE: nothing to verify)",

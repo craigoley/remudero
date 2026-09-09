@@ -140,9 +140,9 @@ test("every consumer of the shared changed-file list is enumerated, so a new one
     .filter((l) => l.includes("changedFiles(walkDiff(") && !/^\s*(\/\/|\*|\/\*)/.test(l)).length;
   assert.equal(
     callSites,
-    4,
+    5,
     "known: judgeReview (planOnly + bodyContradictsDiff + detectInstrumentEntanglement), " +
-      "checkOneConcern, checkDocsAwareness, planOnlyDiff. A 5th call site must state its verdict change.",
+      "checkOneConcern, checkDocsAwareness, planOnlyDiff, reviewScopeContext. A 6th call site must state its verdict change.",
   );
   // THE 4th CALL SITE, AND ITS VERDICT CHANGE: NONE. W1-T2472's `planOnlyDiff` is the same
   // plan-only question `judgeReview` already answers, exposed for a caller that must ask it
@@ -154,6 +154,15 @@ test("every consumer of the shared changed-file list is enumerated, so a new one
   assert.ok(
     src.includes("return planOnlyFromFiles(diffFiles, enforcementDataInDiff(diffFiles));"),
     "planOnlyDiff must keep deriving its answer from planOnlyFromFiles, never from a second copy of the expression",
+  );
+  // THE 5th CALL SITE, AND ITS VERDICT CHANGE: `reviewScopeContext` gives the fresh semantic
+  // reviewer the deletion-complete changed-file set and the SAME advisory-only widening set. That
+  // reviewer may downgrade a criterion only when harmful extra behavior makes its claim false;
+  // the prompt explicitly forbids a downgrade merely because a path was undeclared. Requiring the
+  // shared scope comparison here keeps the prompt from inventing a stricter widening definition.
+  assert.match(
+    src,
+    /export function reviewScopeContext[\s\S]*?const diffFiles = changedFiles\(walkDiff\(diff\)\);[\s\S]*?widenedFiles: scopeViolationFiles\(diffFiles, declaredFiles\)/,
   );
   // detectInstrumentEntanglement takes the SAME list by argument rather than re-walking, so
   // it is a consumer that this regex cannot see — pinned separately.

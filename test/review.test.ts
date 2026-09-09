@@ -44,6 +44,7 @@ import {
   resolveAutoMergeArm,
   resolveNameFilteredCandidates,
   reviewerOutcome,
+  reviewScopeContext,
   reviewerVerdictContract,
   reviewLedgerLegibilityFields,
   rubricAdvisorySection,
@@ -927,6 +928,56 @@ test("buildReviewPrompt: fresh, read-only, gh-only, does NOT post the status (or
   assert.match(prompt, /git rev-parse HEAD/);
   assert.match(prompt, /abc123/);
   assert.doesNotMatch(prompt, /gh pr checkout|git fetch origin/);
+  assert.match(prompt, /DECLARED PATHS: \[\]/);
+  assert.match(prompt, /CHANGED PATHS: \[\]/);
+  assert.match(prompt, /WIDENED PATHS \(changed but not declared\): \[\]/);
+  assert.match(prompt, /Scope expansion alone must NEVER cause FAILURE/i);
+  assert.match(prompt, /Good, coherent extra code is not a defect/i);
+});
+
+test("reviewScopeContext: the semantic reviewer sees exact changed and advisory-widened paths", () => {
+  const diff = [
+    "diff --git a/src/lib/declared.ts b/src/lib/declared.ts",
+    "--- a/src/lib/declared.ts",
+    "+++ b/src/lib/declared.ts",
+    "@@",
+    "+export const declared = true;",
+    "diff --git a/src/lib/removed-extra.ts b/src/lib/removed-extra.ts",
+    "--- a/src/lib/removed-extra.ts",
+    "+++ /dev/null",
+    "@@",
+    "-export const removed = true;",
+    "diff --git a/scripts/source-size-baseline.json b/scripts/source-size-baseline.json",
+    "--- a/scripts/source-size-baseline.json",
+    "+++ b/scripts/source-size-baseline.json",
+    "@@",
+    "+{}",
+  ].join("\n");
+
+  const context = reviewScopeContext(diff, ["src/lib/declared.ts"]);
+  assert.deepEqual(context, {
+    declaredFiles: ["src/lib/declared.ts"],
+    changedFiles: [
+      "src/lib/declared.ts",
+      "src/lib/removed-extra.ts",
+      "scripts/source-size-baseline.json",
+    ],
+    widenedFiles: ["src/lib/removed-extra.ts"],
+  });
+
+  const prompt = buildReviewPrompt({
+    task: { id: "W1-T-SCOPE", acceptance: CRITERIA },
+    prUrl: "https://github.com/o/r/pull/8",
+    owner: "o",
+    repo: "r",
+    headSha: "def456",
+    ...context,
+  });
+  assert.match(prompt, /DECLARED PATHS: \["src\/lib\/declared\.ts"\]/);
+  assert.match(prompt, /CHANGED PATHS: \["src\/lib\/declared\.ts","src\/lib\/removed-extra\.ts","scripts\/source-size-baseline\.json"\]/);
+  assert.match(prompt, /WIDENED PATHS \(changed but not declared\): \["src\/lib\/removed-extra\.ts"\]/);
+  assert.match(prompt, /unsafe or dead code, hidden coupling, unrelated regressions/i);
+  assert.match(prompt, /fail the affected criterion and name the concrete behavior and path/i);
 });
 
 // ── The reviewer RUBRIC (§5 layer 2): four judgment items + the satisfied_by guard ──
