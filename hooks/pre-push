@@ -16,14 +16,18 @@
 # sets `core.hooksPath=hooks` on every worker worktree it creates. The install path this route owed is
 # already built and paid for; this file is picked up with no new machinery at all.
 #
-# WHICH IS ALSO THE BLAST RADIUS, so it SHIPS OFF. Being picked up automatically by every worker means
-# a mistake here does not redden one PR, it stops the fleet pushing. The switch below is the whole
-# safety story and is deliberately the first thing that runs: with RMD_PREPUSH_GATES unset this exits 0
-# before touching a file, a repo, or a subprocess. Turning it on is a separate, watched decision — the
-# same shape as the ci-learning cadence switch, and for the same reason.
+# WHICH IS ALSO THE BLAST RADIUS, so it SHIPPED OFF FIRST. Being picked up automatically by every
+# worker means a mistake here does not redden one PR, it stops the fleet pushing. W1-T3059 shipped
+# it with the switch defaulting OFF, on purpose, and W1-T3222 is the separate, watched decision that
+# flips that default: seven PRs reddened by ONE untiered file each in two days is what the switch was
+# withholding, MEASURED. The switch is still the whole safety story and is deliberately the first
+# thing that runs, but the direction is now FAIL-ARMED: only the exact string "0" disarms. Unset,
+# empty, or any other value runs every check below — a stray `export RMD_PREPUSH_GATES=yes` must not
+# silently turn the fleet's gates off, which is the mirror of the old hazard (a stray value could not
+# arm it either). The documented escape hatch stays: `RMD_PREPUSH_GATES=0 git push ...`.
 set -u
 
-[ "${RMD_PREPUSH_GATES:-0}" = "1" ] || exit 0
+[ "${RMD_PREPUSH_GATES:-}" = "0" ] && exit 0
 
 fail=0
 
