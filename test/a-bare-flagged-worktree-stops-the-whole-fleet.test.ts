@@ -23,36 +23,16 @@
  * contradicting its contents, and exactly one value reconciles them.
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ENTRYPOINT = readFileSync(join(REPO_ROOT, "deploy", "entrypoint.sh"), "utf8");
-
-const GIT_ENV = {
-  ...process.env,
-  GIT_CONFIG_GLOBAL: "/dev/null",
-  GIT_CONFIG_SYSTEM: "/dev/null",
-  GIT_AUTHOR_NAME: "t",
-  GIT_AUTHOR_EMAIL: "t@example.invalid",
-  GIT_COMMITTER_NAME: "t",
-  GIT_COMMITTER_EMAIL: "t@example.invalid",
-};
-
-/** A real repo with a real work tree, then flagged bare — the exact shape measured on the host. */
-function bareFlaggedCheckout(): string {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-bare-flag-"));
-  execFileSync("git", ["init", "--quiet", "-b", "main", dir], { env: GIT_ENV });
-  writeFileSync(join(dir, "seed.txt"), "seed\n");
-  execFileSync("git", ["-C", dir, "add", "-A"], { env: GIT_ENV });
-  execFileSync("git", ["-C", dir, "commit", "--quiet", "-m", "chore: seed"], { env: GIT_ENV });
-  execFileSync("git", ["-C", dir, "config", "--local", "core.bare", "true"], { env: GIT_ENV });
-  return dir;
-}
 
 /** The repair, extracted verbatim from the entrypoint so the TEST drives the shipped text. */
 function repairSnippet(): string {
@@ -67,26 +47,25 @@ function runRepair(tree: string): { status: number | null; out: string } {
   const script = ['#!/usr/bin/env bash', 'set -u', `TREE="${tree}"`, 'log() { echo "$*"; }', repairSnippet(), ""].join("\n");
   const path = join(mkdtempSync(join(tmpdir(), "rmd-bare-flag-run-")), "run.sh");
   writeFileSync(path, script, { mode: 0o755 });
-  const res = spawnSync("bash", [path], { encoding: "utf8", env: GIT_ENV });
+  const res = spawnSync("bash", [path], { encoding: "utf8" });
   return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
 }
 
-const isBare = (dir: string) =>
-  execFileSync("git", ["-C", dir, "rev-parse", "--is-bare-repository"], { encoding: "utf8", env: GIT_ENV }).trim();
-
 test("W1-T3228: a work tree flagged bare is REPAIRED, so the checkout below can run at all", () => {
-  const tree = bareFlaggedCheckout();
-  assert.equal(isBare(tree), "true", "sanity: the fixture must reproduce the measured state");
+  // A real repo with a real work tree, then flagged bare — the exact shape measured on the host.
+  const tree = gitRepo({ kind: "bare-flag" });
+  tree.git("config", "--local", "core.bare", "true");
+  assert.equal(tree.git("rev-parse", "--is-bare-repository"), "true", "sanity: the fixture must reproduce the measured state");
   assert.throws(
-    () => execFileSync("git", ["-C", tree, "rev-parse", "--show-toplevel"], { stdio: "pipe", env: GIT_ENV }),
+    () => tree.git("rev-parse", "--show-toplevel"),
     "sanity: git must refuse worktree operations here, which is what killed the daemon",
   );
 
-  const { out } = runRepair(tree);
+  const { out } = runRepair(tree.dir);
 
-  assert.equal(isBare(tree), "false", "the flag must be cleared — otherwise every checkout below still refuses");
+  assert.equal(tree.git("rev-parse", "--is-bare-repository"), "false", "the flag must be cleared — otherwise every checkout below still refuses");
   assert.doesNotThrow(
-    () => execFileSync("git", ["-C", tree, "rev-parse", "--show-toplevel"], { stdio: "pipe", env: GIT_ENV }),
+    () => tree.git("rev-parse", "--show-toplevel"),
     "and git must accept worktree operations again",
   );
   assert.match(out, /REPAIRING: core\.bare=true/, "the repair must be LOUD — a silent one hides a hook still writing the flag");
@@ -94,16 +73,12 @@ test("W1-T3228: a work tree flagged bare is REPAIRED, so the checkout below can 
 });
 
 test("W1-T3228: an ORDINARY checkout is left completely alone — the repair is not a blanket rewrite", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-bare-flag-ok-"));
-  execFileSync("git", ["init", "--quiet", "-b", "main", dir], { env: GIT_ENV });
-  writeFileSync(join(dir, "seed.txt"), "seed\n");
-  execFileSync("git", ["-C", dir, "add", "-A"], { env: GIT_ENV });
-  execFileSync("git", ["-C", dir, "commit", "--quiet", "-m", "chore: seed"], { env: GIT_ENV });
-  const before = readFileSync(join(dir, ".git", "config"), "utf8");
+  const tree = gitRepo({ kind: "bare-flag-ok" });
+  const before = readFileSync(join(tree.dir, ".git", "config"), "utf8");
 
-  const { out } = runRepair(dir);
+  const { out } = runRepair(tree.dir);
 
-  assert.equal(readFileSync(join(dir, ".git", "config"), "utf8"), before, "a healthy repo's config must be byte-identical");
+  assert.equal(readFileSync(join(tree.dir, ".git", "config"), "utf8"), before, "a healthy repo's config must be byte-identical");
   assert.doesNotMatch(out, /REPAIRING/, "and nothing may be reported as repaired when nothing was wrong");
 });
 
@@ -111,11 +86,10 @@ test("W1-T3228: a genuinely BARE repo — no work tree on disk — is NOT rewrit
   // The direction that makes this narrow rather than reckless. `--is-bare-repository` alone would
   // also be true here, and flipping the flag would corrupt a real bare repo. The second condition
   // is what separates "config contradicts its contents" from "this repo is legitimately bare".
-  const dir = mkdtempSync(join(tmpdir(), "rmd-really-bare-"));
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", dir], { env: GIT_ENV });
+  const tree = gitRepo({ bare: true, kind: "really-bare" });
 
-  const { out } = runRepair(dir);
+  const { out } = runRepair(tree.dir);
 
-  assert.equal(isBare(dir), "true", "a real bare repo must stay bare");
+  assert.equal(tree.git("rev-parse", "--is-bare-repository"), "true", "a real bare repo must stay bare");
   assert.doesNotMatch(out, /REPAIRING/, "and must not be reported as repaired");
 });
