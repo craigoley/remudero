@@ -12,7 +12,7 @@ import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, governorDeferPayload } from "./dispatch-governor.js";
-import { unmetDependencies, type Plan, type Task } from "./plan.js";
+import { releasedTaskIds, unmetDependencies, type Plan, type Task } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
   partitionByFileOverlap,
@@ -881,6 +881,11 @@ export function renderRundown(lines: RundownLine[]): string {
 export interface DrainDeps {
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: () => MergedSet;
+  /** W1-T3216 — the ledger's RAW lines, for {@link resolveReleasedIds}. A seam, not a file read:
+   *  this module has no `fs` import and keeps none, so every I/O stays the caller's (`drainCommand`
+   *  wires the real reader). ABSENT = today's behaviour exactly, an empty released set — a door
+   *  that is never opened, never a wall that comes down. */
+  readLedgerLines?: () => readonly string[];
   /** The in-flight guard (W1-T80): the OPEN PR number for a task, re-derived from the SAME
    *  projection `refreshMerged` just built, never a second GitHub read path. Optional. */
   isOpenPr?: OpenPrCheck;
@@ -973,11 +978,31 @@ export interface DrainDeps {
  *  headroom, pick the next runnable, run it, and stop on any halting verdict. `opts.laneCount >= 2`
  *  hands off to {@link runDrainLanes}, entirely separate code so this loop cannot drift under lane
  *  changes; omitted or <= 1 runs the single-task loop below. */
+/**
+ * W1-T3216 — the ids an operator RELEASED, resolved ONCE PER DISPATCH PASS.
+ *
+ * WHY IT IS A FUNCTION AND NOT A FIELD. #4715 shipped `releasedTaskIds` (plan.ts) and the
+ * `releasedIds` parameter with ZERO callers and ZERO producers: a complete, tested feature no
+ * production path could reach. This is the producer. It is called at each pass boundary, never
+ * inside the per-task filter, because `deps.readLedgerLines` is real file I/O at the caller and a
+ * per-task read would put a disk hit in the selection loop once per candidate.
+ *
+ * NO READER WIRED MEANS AN EMPTY SET, never a throw and never an open door: a caller that has not
+ * opted in behaves exactly as it did before this task.
+ */
+export function resolveReleasedIds(deps: Pick<DrainDeps, "readLedgerLines">): ReadonlySet<string> {
+  const read = deps.readLedgerLines;
+  if (!read) return new Set<string>();
+  return releasedTaskIds(read());
+}
+
 export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}): Promise<DrainSummary> {
   if ((opts.laneCount ?? 1) >= 2) return runDrainLanes(plan, deps, opts);
 
   const max = opts.max ?? DEFAULT_MAX;
   const log = deps.log ?? (() => {});
+  // W1-T3216: ONCE, here at the pass boundary — see resolveReleasedIds' doc for why not per task.
+  const releasedIds = resolveReleasedIds(deps);
   const attempted: string[] = [];
   const merged: string[] = [];
   /** Non-merged, non-halting outcomes (NON_HALTING_VERDICTS) — recorded, never credited. */
@@ -1109,6 +1134,9 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     }
 
     const skipOpts: NextRunnableOpts = {
+      // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
+      // sites so the single-lane and multi-lane passes cannot answer the same task differently.
+      releasedIds,
       isOpenPr: deps.isOpenPr,
       isCreditIndeterminate: deps.isCreditIndeterminate,
       // W1-T2397: forwarded at BOTH `skipOpts` sites, so the single-lane and multi-lane passes
@@ -1273,6 +1301,10 @@ export function laneDispatchBudget(input: LaneBudgetInput): number {
  *  cancels or races ahead of its siblings, and every result is recorded before the pass decides. On
  *  any block or lane failure the WHOLE drain stops afterward, at pass granularity. */
 async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Promise<DrainSummary> {
+  // W1-T3216: the lane pass has its OWN boundary — resolved here, exactly once, for the same
+  // reason runDrain does it: deps.readLedgerLines is real I/O and must not enter the per-task
+  // filter. Both passes must answer the same task the same way, so neither may skip this.
+  const releasedIds = resolveReleasedIds(deps);
   const laneCount = Math.max(1, opts.laneCount ?? 1);
   const max = opts.max ?? DEFAULT_MAX;
   const log = deps.log ?? (() => {});
@@ -1409,6 +1441,9 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     }
 
     const skipOpts: NextRunnableOpts = {
+      // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
+      // sites so the single-lane and multi-lane passes cannot answer the same task differently.
+      releasedIds,
       isOpenPr: deps.isOpenPr,
       isCreditIndeterminate: deps.isCreditIndeterminate,
       // W1-T2397: forwarded at BOTH `skipOpts` sites, so the single-lane and multi-lane passes

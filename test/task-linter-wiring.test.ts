@@ -20,7 +20,10 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 test("the run path INVOKES assertLintClean right after assertRunnable (the pre-dispatch guard is wired, not just implemented)", () => {
   assert.match(runTaskSrc, /assertLintClean\(/, "run-task.ts must call assertLintClean");
   assert.match(runTaskSrc, /TaskLintError/, "run-task.ts must convert a failing lint into a terminal verdict");
-  const assertRunnableIdx = runTaskSrc.indexOf("assertRunnable(plan, task, isMerged)");
+  // W1-T3216 added a fourth argument (the operator-released set), so the needle drops the closing
+  // paren rather than pinning an argument list this test has no opinion about. What it guards is
+  // the ORDER of the two guards, and that is unchanged.
+  const assertRunnableIdx = runTaskSrc.indexOf("assertRunnable(plan, task, isMerged");
   const lintIdx = runTaskSrc.indexOf("assertLintClean(");
   assert.ok(assertRunnableIdx >= 0, "assertRunnable must be called");
   assert.ok(lintIdx > assertRunnableIdx, "the lint guard must run AFTER assertRunnable (unmet-deps/blocked/verify:human are checked first)");
