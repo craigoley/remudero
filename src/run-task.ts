@@ -29021,11 +29021,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     plan,
     log,
     policy = DEFAULT_SWEEP_POLICY,
-    reviewRunner = (prNumber, isPlanFiling) =>
-      reviewCommand(String(prNumber), ["--repo", repo], {
-        executionMode: "semantic",
-        planOnlyFiling: isPlanFiling,
-      }),
     spawnImpl,
     pushEmptyCommit = gitPushEmptyCommit,
     issuesImpl,
@@ -29047,6 +29042,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       remove: removeAbandonedFixWorktreeOwner,
     },
   } = deps;
+
+  // W1-T2889: kept as a typed local (not a destructured default) so this default arm's shape
+  // survives the positional-parameters-to-one-deps-object collapse verbatim — the sweep's
+  // post-review lane still routes through reviewCommand, and nothing but `deps.reviewRunner`
+  // can override it.
+  let reviewRunner: (prNumber: number, isPlanFiling?: boolean) => Promise<number> = (prNumber, isPlanFiling) =>
+    reviewCommand(String(prNumber), ["--repo", repo], {
+      executionMode: "semantic",
+      planOnlyFiling: isPlanFiling,
+    });
+  if (deps.reviewRunner) reviewRunner = deps.reviewRunner;
 
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
