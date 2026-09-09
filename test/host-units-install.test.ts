@@ -165,7 +165,17 @@ function checkCrashLoop(launcher: string, logLines: readonly string[], root: str
   return r.stdout.trim();
 }
 
-const revive = (exit: string) => `2026-09-09T02:00:00Z revive boot=0 prev_status=exited prev_exit=${exit} prev_restarts=0`;
+/** An ISO stamp `secondsAgo` in the past, in the launcher's own second-resolution format. */
+function reviveStamp(secondsAgo: number): string {
+  return new Date(Date.now() - secondsAgo * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+// W1-T3268 — STAMPED FROM THE CLOCK, NOT FROM A CALENDAR DATE. This read a fixed
+// `"2026-09-09T02:00:00Z"`, which the recency bound added by W1-T3268 correctly reads as a
+// RESOLVED incident: every case below would have reported no crash loop and passed for the wrong
+// reason, or failed outright, purely because the calendar moved. A fixture the reader ages against
+// the wall clock has to be written from the wall clock.
+const revive = (exit: string) => `${reviveStamp(60)} revive boot=0 prev_status=exited prev_exit=${exit} prev_restarts=0`;
 
 test("W1-T3233: a repeated identical exit is reported with its code and count", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-loop-"));
