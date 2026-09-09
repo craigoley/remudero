@@ -27,7 +27,7 @@ function basePr(over: Partial<OpenPrView> = {}): OpenPrView {
     prNumber: 1,
     prUrl: "https://github.com/craigoley/remudero/pull/1",
     headSha: "abcdef0123456789abcdef0123456789abcdef01",
-    lastActivityAt: "2026-08-27T00:00:00Z",
+    lastActivityAt: "2026-08-27T00:00:00Z", // expiring-fixture: exempt -- aged 10d past the rung, nothing failed; this case ignores the disposition
     reviewState: "none",
     checksState: "pending",
     ...over,
