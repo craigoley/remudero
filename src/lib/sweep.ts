@@ -437,6 +437,16 @@ export interface SweepPolicy {
    *  an operator ratification, not a default. With it false the classifier still runs and still
    *  NAMES the remedy on the disposition reason — only the automatic repair is withheld. */
   recordableRatchetRepairEnabled?: boolean;
+  /** W1-T3277 — may the update-branch rung refresh an ordinary open PR that has drifted far enough
+   *  behind main even when it is not armed/stalled and not red with a stale gate. Same risk band as
+   *  {@link mergeConflictAdmissionEnabled}: the write is unattended and targets contributor
+   *  branches, so the predicate is policy-gated and distance-bounded rather than a default widening
+   *  of the existing armed/stalled population. */
+  reviewWaitingBranchRefreshEnabled?: boolean;
+  /** W1-T3277 — how many commits behind main an open PR must be before the distance-refresh rung may
+   *  press the existing update-branch button. Strictly greater-than: a value of 10 fires at 11, not
+   *  at 10, matching the incident split that found red PRs at 10-11 behind and clean PRs at 1-8. */
+  reviewWaitingBranchRefreshThreshold: number;
   /** W1-T2345 — THE UNBOUNDED-IDENTICAL-DISPOSITION BOUND: a repeated (disposition, head_sha) pair
    *  escalates once at this many consecutive rows; {@link repeatDispositionStreaksFromLedger} says
    *  why the key excludes the rendered `reason`. ONCE PER HEAD PER ROTATION WINDOW (W1-T2382):
@@ -599,6 +609,10 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // Still NOT sourced from plan/policy.yaml: a hardcoded literal, the same choice
   // `conceptCoexistenceEnabled` just above already made.
   mergeConflictAdmissionEnabled: true,
+  // W1-T3277: flagged because this writes to contributor branches unattended. The threshold is the
+  // measured split from 2026-09-09: ordinary clean PRs were 1-8 behind, red stale-base PRs 10-11.
+  reviewWaitingBranchRefreshEnabled: true,
+  reviewWaitingBranchRefreshThreshold: 10,
   // W1-T2345: NOT sourced from plan/policy.yaml (see the field's own doc, above) — a hardcoded
   // literal, 50, derived against the merge-time population measured 2026-08-26 (see the field's
   // own doc for the full derivation), never a round number picked because it looked safe.
@@ -2515,6 +2529,10 @@ export interface ArmedStalledPr {
   taskId?: string;
   /** The head the arm is pinned to — the sha a later verdict would be bound to. */
   headSha: string;
+  /** W1-T3277: the main-distance fact that selected this ordinary stale PR, when present. */
+  behindBy?: number;
+  /** W1-T3277/W1-T1212: why this PR reached the shared update-branch effect. */
+  updateReason?: "armed-stalled" | "stale-gate" | "distance";
 }
 
 /** W1-T528 — the terminal outcome of ONE `gh pr update-branch` request; only these three are
@@ -2537,6 +2555,34 @@ export function armedButStalled(prs: readonly OpenPrView[]): ArmedStalledPr[] {
       prUrl: pr.prUrl,
       ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }),
       headSha: pr.headSha,
+      updateReason: "armed-stalled",
+    });
+  }
+  return out;
+}
+
+/** W1-T3277 — ordinary open PRs whose base has rotted far enough to deserve the same single
+ *  update-branch press the armed/stalled rung already owns. The commit distance is injected data:
+ *  `sweep.ts` stays pure and never performs a GitHub/git comparison itself. */
+export function openPrsBehindMain(
+  prs: readonly OpenPrView[],
+  behindMainByPr: ReadonlyMap<number, number>,
+  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold">,
+): ArmedStalledPr[] {
+  if (policy.reviewWaitingBranchRefreshEnabled !== true) return [];
+  const out: ArmedStalledPr[] = [];
+  for (const pr of prs) {
+    const behindBy = behindMainByPr.get(pr.prNumber);
+    if (behindBy === undefined) continue;
+    if (behindBy <= policy.reviewWaitingBranchRefreshThreshold) continue;
+    if (pr.mergeState === "dirty" || pr.mergeable === false) continue;
+    out.push({
+      prNumber: pr.prNumber,
+      prUrl: pr.prUrl,
+      ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }),
+      headSha: pr.headSha,
+      behindBy,
+      updateReason: "distance",
     });
   }
   return out;
@@ -2552,12 +2598,18 @@ export function selectUpdateBranchTarget(
   inFlightTaskIds: ReadonlySet<string> = new Set(),
   staleGateWorkflowsByPr: ReadonlyMap<number, readonly string[]> = new Map(),
   updatedForWorkflow: ReadonlySet<string> = new Set(),
+  behindMainByPr: ReadonlyMap<number, number> = new Map(),
+  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold"> = DEFAULT_SWEEP_POLICY,
 ): ArmedStalledPr | undefined {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
   // carries no meaning the comparator below reads.
   const combined = new Map<number, ArmedStalledPr>();
-  for (const c of [...armedButStalled(prs), ...redPrWithStaleGate(prs, staleGateWorkflowsByPr, updatedForWorkflow)]) {
+  for (const c of [
+    ...armedButStalled(prs),
+    ...redPrWithStaleGate(prs, staleGateWorkflowsByPr, updatedForWorkflow),
+    ...openPrsBehindMain(prs, behindMainByPr, policy),
+  ]) {
     if (!combined.has(c.prNumber)) combined.set(c.prNumber, c);
   }
   const candidates = [...combined.values()];
@@ -2608,6 +2660,7 @@ export function redPrWithStaleGate(
       ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }),
       headSha: pr.headSha,
       staleWorkflow: fresh,
+      updateReason: "stale-gate",
     });
   }
   return out;
@@ -3163,6 +3216,10 @@ export interface SweepDeps {
    *  for. An update mints a new head and a second request for the same pair is a no-op that still
    *  spends one, so a fired pair must be remembered and skipped. Read from prior ledger rows. */
   updatedForWorkflow?: ReadonlySet<string>;
+  /** W1-T3277 — per open PR, how many commits `main` is ahead of the PR head. This is injected
+   *  data for the ordinary stale-PR refresh rung; omission keeps the rung quiet, so callers that
+   *  cannot read the comparison never invent a refresh. */
+  behindMainByPr?: ReadonlyMap<number, number>;
   /** W1-T2620 — an OPTIONAL, per-PASS read of `origin/main`'s CURRENT tip, consulted ONCE before the
    *  per-PR walk; this module never calls gh or git, so the read is the caller's. Feeds
    *  {@link selectBaseCausedRelease}'s "main has moved" condition — never the `behind` GitHub
@@ -5479,12 +5536,16 @@ export async function runSweep(
       deps.inFlightTaskIds ?? new Set(),
       deps.staleGateWorkflowsByPr ?? new Map(),
       deps.updatedForWorkflow ?? new Set(),
+      deps.behindMainByPr ?? new Map(),
+      policy,
     );
     if (target) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
       // fact `deps.updatedForWorkflow`'s next read needs to remember this exact pair.
       const staleWorkflow = "staleWorkflow" in target ? (target as StaleGatePr).staleWorkflow : undefined;
       const staleWorkflowFields = staleWorkflow === undefined ? {} : { stale_workflow: staleWorkflow };
+      const behindFields = target.behindBy === undefined ? {} : { behind_by: target.behindBy };
+      const updateReasonFields = target.updateReason === undefined ? {} : { update_reason: target.updateReason };
       appendLine(deps.ledgerPath, {
         run_id: deps.runId,
         task_id: target.taskId ?? "SWEEP",
@@ -5493,6 +5554,8 @@ export async function runSweep(
         pr_url: target.prUrl,
         head_sha: target.headSha,
         ...staleWorkflowFields,
+        ...behindFields,
+        ...updateReasonFields,
       });
       try {
         const outcome = await deps.updateBranch(target);
@@ -5504,6 +5567,8 @@ export async function runSweep(
           pr_url: target.prUrl,
           head_sha: target.headSha,
           ...staleWorkflowFields,
+          ...behindFields,
+          ...updateReasonFields,
         });
       } catch (e) {
         appendLine(deps.ledgerPath, {
@@ -5515,6 +5580,8 @@ export async function runSweep(
           head_sha: target.headSha,
           error: String((e as Error)?.message ?? e),
           ...staleWorkflowFields,
+          ...behindFields,
+          ...updateReasonFields,
         });
       }
     }
