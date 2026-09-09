@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { RmdError } from "./errors.js";
-import type { RepoLayout } from "./repo-location.js";
+import type { RepoLayout } from "./repo-layout.js";
 
 /** The plan/tasks.yaml loader and validator (schema v1, MASTER-PLAN §2), read-only — the control
  *  plane flips `status`; every task's `prompt` is pre-authored (G-2). */

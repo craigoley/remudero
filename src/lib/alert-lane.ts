@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { appendLedger } from "./ledger.js";
-import { resolveRepoLayout } from "./repo-location.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 import { readLedgerLines } from "./status.js";
 import { alertOriginId, alertTaskId, priorEscalatedAlertIds, type AlertSeverity, type RawAlert } from "./ops.js";
 

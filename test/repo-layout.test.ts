@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { RepoLayoutError, resolveRepoLayout } from "../src/lib/repo-location.js";
+import { RepoLayoutError, resolveRepoLayout } from "../src/lib/repo-layout.js";
 import { loadPlanForLayout } from "../src/lib/plan.js";
 import { loadLearningsCorpus, projectLearningsHome } from "../src/lib/learnings.js";
 import { loadAlertPolicyForRepo } from "../src/lib/alert-lane.js";
@@ -130,6 +130,24 @@ test("resolveRepoLayout: a malformed .remudero/layout.json fails loud, never sil
   mkdirSync(join(root, ".remudero"), { recursive: true });
   writeFileSync(join(root, ".remudero", "layout.json"), "{ not json");
   assert.throws(() => resolveRepoLayout(root), RepoLayoutError);
+});
+
+test("resolveRepoLayout: a layout.json that is valid JSON but NOT an object fails loud", () => {
+  // The third refusal in parseLayoutOverrides, and the one the other two cannot reach: `[]` and
+  // `"x"` both parse cleanly, so the JSON guard above passes them straight through to a key walk
+  // that would find no keys and silently return the house defaults — a relocated repo would then
+  // be read at the wrong paths with nothing said. Each shape is asserted, not just one: an array
+  // is the case a `typeof === "object"` check alone lets through.
+  for (const body of ["[]", '"a string"', "42", "null"]) {
+    const root = fixtureRoot();
+    mkdirSync(join(root, ".remudero"), { recursive: true });
+    writeFileSync(join(root, ".remudero", "layout.json"), body);
+    assert.throws(
+      () => resolveRepoLayout(root),
+      RepoLayoutError,
+      `a layout.json of ${body} must be refused, not read as "no overrides"`,
+    );
+  }
 });
 
 test("resolveRepoLayout: an unknown layout.json key fails loud", () => {
