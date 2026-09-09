@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   budget_usd: 16.00
-  files: [src/lib/worker-provider.ts, test/the-codex-lane-auto-loads-no-doctrine.test.ts, scripts/test-tier-manifest.json]
+  files: [src/lib/worker-provider.ts, test/the-codex-lane-auto-loads-no-doctrine.test.ts, scripts/test-tier-manifest.json, scripts/comment-load-baseline.json]
   origin: "operator-session#context-modularization-2026-09-08"
   plan_refs: ["W1-T2759", "W1-T2508", "W1-T2761"]
   status: queued
@@ -78,6 +78,11 @@
     file, so a worker would act confidently on three quarters of the doctrine with no signal that
     the rest was cut — and the cut lands mid-rule, at a byte offset. Rationale (3) measures both.
 
+    (ii-b) THE PRELUDE IS AN EXPORTED CONSTANT, ASSERTED BY VALUE. W1-T2905's ratchet forbids a
+    test that reads a `src/` file as prose — it passes when the wording is right and the wiring is
+    wrong — so the sentence is exported and the test asserts what the spawn actually prepends, and
+    that every `.md` the prelude names exists in the checkout.
+
     (iii) THE CAP IS PINNED TO THE RATCHET, NOT HAND-TYPED. `scripts/claude-md-budget-baseline.json`
     declares `capBytes: 44000`; the constant here must exceed it, and a test must fail if CLAUDE.md
     (or that cap) ever grows past the Codex cap. Otherwise this silently re-breaks the day the doc
@@ -125,7 +130,10 @@
     risk:high with band_meaning:span, CARRIED THROUGH THE 2026-09-09 REFRAME. The original span
     claim named a generator, a new root doctrine file, a test and package.json; the reframe deletes
     all four and leaves one spawn-arg site, its test, and the tier-manifest row that test needs. The
-    SPAN is now narrow, but risk:high stands on BLAST RADIUS instead: `codexExecArgs` is the single
+    SPAN is now narrow — one spawn-arg site, its test, and two gate baselines the change forces
+    (`test-tier-manifest.json`, which every new test file must join before the fast/slow split
+    trusts it, and `comment-load-baseline.json`, recorded at the ratchet's own bucket after the
+    added prose was trimmed from +31 to +18 lines). risk:high stands on BLAST RADIUS instead: `codexExecArgs` is the single
     seam every Codex worker in the fleet spawns through, so a malformed `-c` there fails every Codex
     run at once rather than degrading one. Nothing here changes what any Claude lane loads.
 
