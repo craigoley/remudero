@@ -1163,6 +1163,7 @@
     "test/the-golden-suite-has-every-piece-except-a-producer.test.ts": 1682,
     "test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts": 844,
     "test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts": 1172,
+    "test/the-hook-spawns-no-test-suite.test.ts": 0,
     "test/the-implement-lane-s-model-lives-on-the-run-not-the-verdict-row.test.ts": 1058,
     "test/the-local-coverage-gate-passes-vacuously-on-a-diff-it-failed-to-compute.test.ts": 1375,
     "test/the-local-gate-writes-coverage-where-ci-does.test.ts": 5903,

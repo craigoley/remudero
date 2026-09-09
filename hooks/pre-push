@@ -84,52 +84,26 @@ else
 fi
 # W1-T3205: END test-tier admission
 
-# The verb owns membership; this reads its answer. stdout is the bare file list, and anything the
-# verb could not place goes to stderr, where it stays visible to the author instead of quietly
-# shortening the list this runs.
-if [ -x ./bin/rmd ]; then
-  # COUNTED, NOT ECHOED. The verb names every suite it cannot place, and on this tree that is 119
-  # lines — a wall of text on every push, which is how a check earns its way into being switched
-  # off. The count still has to be SAID: it is the difference between "this diff joins no census"
-  # and "this ran the part of the model that exists", and a hook that printed neither would be
-  # claiming a coverage it does not have.
-  # Scratch goes to TMPDIR, never into the worktree: a stray file left by an interrupted hook is an
-  # untracked path, and this repo has a daemon that reacts to a dirty tree. A hook must not be able
-  # to create work for the thing it is protecting.
-  unmodelled=0
-  census_err=$(mktemp "${TMPDIR:-/tmp}/rmd-prepush-census-XXXXXX" 2>/dev/null || true)
-  if [ -n "$census_err" ]; then
-    census_files=$(RMD_SELF_SYNC_DONE=1 ./bin/rmd census-membership --files 2>"$census_err")
-    unmodelled=$(grep -ac '^unmodelled: ' "$census_err" 2>/dev/null)
-    : "${unmodelled:=0}"
-    # An UNMAPPABLE suite is a different animal from an unmodelled one — the model placed the path
-    # but the table has no test file for it — so it is shown in full rather than counted away.
-    grep -a '^unmapped: ' "$census_err" >&2 2>/dev/null || true
-    rm -f "$census_err"
-  else
-    # No scratch file: let the verb's own stderr through rather than swallow what it had to say.
-    census_files=$(RMD_SELF_SYNC_DONE=1 ./bin/rmd census-membership --files)
-  fi
-  if [ -n "$census_files" ]; then
-    echo "pre-push: running the census suites this diff joins —" >&2
-    echo "$census_files" | sed 's/^/  /' >&2
-    # THE SAME LOADERS package.json's "test" script uses. A bare `node --test` on these .ts files
-    # half-works — some suites pass under type stripping and others fail on an import that never
-    # resolved — which is worse than not running them: it manufactures failures that are artifacts
-    # of the runner. MEASURED while building this: test/authority-ratchet.test.ts "failed" that way
-    # and passes 6/6 under the real invocation.
-    # shellcheck disable=SC2086
-    node --test --import tsx --import ./test/setup/tmp-hygiene.ts $census_files || fail=1
-  else
-    echo "pre-push: this diff joins no MODELLED census suite" >&2
-  fi
-  if [ "$unmodelled" -gt 0 ] 2>/dev/null; then
-    echo "pre-push: $unmodelled census suite(s) are unmodelled and were NOT run —" >&2
-    echo "         'rmd census-membership' names them; this cleared only what it could place." >&2
-  fi
-else
-  echo "pre-push: ./bin/rmd absent — census suites not enumerated, NOT cleared" >&2
-fi
+# W1-T3225 — THE CENSUS STEP IS GONE, AND ITS ABSENCE IS THE POINT.
+#
+# This hook used to spawn the test runner over every census suite `rmd census-membership` could
+# place for the diff. The invocation is spelled out in W1-T3225 rather than quoted here: a suite
+# asserting this hook spawns no runner would otherwise match its own explanatory comment, which
+# is the same trap clock-signature-census sets for a comment naming the clock call it avoids. MEASURED over nine pre-push incidents across two days (#4749 #4750 #4751 #4760
+# #4761, and #4698 #4692 #4681 #4684 from W1-T3205's filing), every one was a single UNTIERED TEST
+# FILE — which the tier admission above names in about two seconds, spawning nothing. The census
+# step caught NONE of them. It also reported clearing 9 suites while naming 125 it could not place.
+#
+# What it did do, twice on 2026-09-09, was damage the repository it was protecting: one armed push
+# rewrote the pushing lane's HEAD to a test fixture's commit and cut its index from 3,550 tracked
+# files to 1, and another re-initialised the SHARED gitdir as bare, taking the main checkout and
+# the daemon down. W1-T3224's env scrub fixes that MECHANISM and stays; this task answers the
+# separate question of whether a git hook should spawn a test runner at all.
+#
+# THE COVERAGE DOES NOT MOVE: every census suite runs in CI's ci-shard, unchanged. This changes
+# WHEN a small subset runs, never WHETHER any of them do. `rmd census-membership` keeps its verb
+# and its purpose as a report an author can run by hand.
+
 
 if [ "$fail" -ne 0 ]; then
   echo "" >&2
