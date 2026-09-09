@@ -1123,6 +1123,7 @@
     "test/task-id.test.ts": 225,
     "test/task-linter-wiring.test.ts": 1858,
     "test/task-linter.test.ts": 3113,
+    "test/task-record-path-is-constant-time.test.ts": 0,
     "test/task-retirement-reason.test.ts": 1113,
     "test/temp-hygiene-suite.test.ts": 3137,
     "test/temp-sweep-backstop.test.ts": 2532,

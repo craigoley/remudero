@@ -153,6 +153,12 @@ export interface Task {
   /** Operator-only retirement category (W1-T1287): why a `blocked` task will never be built. Never
    *  auto-written; see CLAUDE.md's plan-hygiene section, {@link RETIREMENT_REASONS} and Why: docs/forensics/plan.md#taskretirement. */
   retirement?: RetirementReason;
+  /** W1-T2920 — the file this task's record was parsed FROM: the monolith path or a shard path,
+   *  set by {@link parseTasksFromYaml} at parse time from its own `sourceLabel`. This is what lets
+   *  {@link taskRecordPath} answer "which file holds this task" as a map lookup on an already-loaded
+   *  {@link Plan} instead of re-reading and re-parsing every shard to find it. Optional because a
+   *  `Task` built by hand (fixtures, tests) never went through a parse and has no file to name. */
+  sourcePath?: string;
 }
 
 /**
@@ -353,6 +359,12 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
       context: e.context as ContextClaim[] | undefined,
       files: Array.isArray(e.files) ? (e.files as string[]) : undefined,
       retirement,
+      // W1-T2920 — record it once, HERE, at the one place that already knows it: `sourceLabel`
+      // is the monolith path or the shard path for every disk-backed caller (`loadPlan`,
+      // `taskRecordPath`'s own fallback) and a git-ref label for `loadPlanAtRef`/`mergePlanBlobs`
+      // — either way it is exactly what {@link taskRecordPath} needs to answer "which file holds
+      // this id" without ever re-reading a file to find out.
+      sourcePath: sourceLabel,
     };
     byId.set(id, task);
     return task;
@@ -387,14 +399,42 @@ function listShardFiles(shardDir: string): string[] {
   return entries.filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort();
 }
 
-/** Which file holds `taskId`'s record — the monolith or a shard — or `undefined`. Reuses {@link
- *  parseTasksFromYaml} rather than a text scan, so the answer matches {@link loadPlan}'s own. Every
- *  read is guarded: an unreadable file is simply not the answer, never a failed run.
- *  Why: docs/forensics/plan.md#taskrecordpath. */
-export function taskRecordPath(planPath: string, taskId: string): string | undefined {
+/** The file-read primitives {@link taskRecordPath} falls back to when it has no already-loaded
+ *  {@link Plan} to consult. Injectable so a test can prove the FAST PATH (a `plan` argument given)
+ *  never reaches these at all — see test/task-record-path-is-constant-time.test.ts. */
+export interface TaskRecordPathIO {
+  readFile: (path: string) => string;
+  listShardFiles: (shardDir: string) => string[];
+}
+
+const defaultTaskRecordPathIO: TaskRecordPathIO = {
+  readFile: (path) => readFileSync(path, "utf8"),
+  listShardFiles,
+};
+
+/**
+ * Which file holds `taskId`'s record — the monolith or a shard — or `undefined`.
+ *
+ * W1-T2920 — CONSTANT TIME WHEN `plan` IS GIVEN. Pass the {@link Plan} {@link loadPlan} already
+ * produced and this is one `Map.get` against {@link Task.sourcePath}: zero file reads, however
+ * many shards the plan has. `plan` is optional (not every caller has one loaded — e.g. a caller
+ * naming a DIFFERENT `planPath` than any plan it already holds, such as a fresh worktree
+ * checkout) — omit it and this falls back to the original behaviour: reusing {@link
+ * parseTasksFromYaml} rather than a text scan (so the answer matches {@link loadPlan}'s own),
+ * re-reading and re-parsing the monolith then each shard in order until one contains the id.
+ * Every read in the fallback is guarded: an unreadable file is simply not the answer, never a
+ * failed run. Why: docs/forensics/plan.md#taskrecordpath.
+ */
+export function taskRecordPath(
+  planPath: string,
+  taskId: string,
+  plan?: Plan,
+  io: TaskRecordPathIO = defaultTaskRecordPathIO,
+): string | undefined {
+  if (plan) return plan.byId.get(taskId)?.sourcePath;
   const holdsTask = (p: string): boolean => {
     try {
-      return parseTasksFromYaml(readFileSync(p, "utf8"), p).some((t) => t.id === taskId);
+      return parseTasksFromYaml(io.readFile(p), p).some((t) => t.id === taskId);
     } catch {
       return false;
     }
@@ -402,7 +442,7 @@ export function taskRecordPath(planPath: string, taskId: string): string | undef
   // Monolith first, then shards, same order `loadPlan` merges in — ids are unique so order cannot change the answer.
   if (holdsTask(planPath)) return planPath;
   const shardDir = join(dirname(planPath), "tasks.d");
-  for (const file of listShardFiles(shardDir)) {
+  for (const file of io.listShardFiles(shardDir)) {
     const shardPath = join(shardDir, file);
     if (holdsTask(shardPath)) return shardPath;
   }

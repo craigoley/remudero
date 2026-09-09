@@ -11588,7 +11588,10 @@ async function runTask(
     // down, never re-derived: `taskRecordPath` is fail-soft (`undefined` on an unresolvable
     // record) and `workerVisibleRecordPath` (W1-T501) re-anchors it to the WORKER's own tree,
     // never the orchestrator's `planPath`.
-    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId));
+    // W1-T2920: `plan` (loaded a few lines above) already carries every task's `sourcePath`, so
+    // this is a `Map.get` rather than the walk-and-reparse-every-shard fallback — the cost this
+    // task exists to stop paying once per dispatch prompt.
+    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId, plan));
     // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
     // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as
     // "never a hardcoded literal". These were simply absent, so every recon ran on the SDK
@@ -20176,7 +20179,9 @@ export function defaultProofDebtCadenceInput(
         deps.resolveNameFilteredCandidates ?? ((rawName) => resolveNameFilteredCandidates(repoRoot, rawName)),
       pathExists: deps.pathExists ?? ((rel) => existsSync(join(repoRoot, rel))),
       shardPathFor: (taskId) => {
-        const resolved = taskRecordPath(planPath, taskId);
+        // W1-T2920: `plan` above is this SAME `planPath`, already loaded — pass it so this is a
+        // map lookup, not a re-parse of every shard per id this closure is called with.
+        const resolved = taskRecordPath(planPath, taskId, plan);
         return resolved === undefined ? undefined : relative(repoRoot, resolved);
       },
     };
