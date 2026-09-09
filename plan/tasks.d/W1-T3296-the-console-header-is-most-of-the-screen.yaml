@@ -1,0 +1,116 @@
+- id: W1-T3296
+  title: "THE CONSOLE HEADER IS MOST OF THE SCREEN AND ON A PHONE IT IS MORE THAN ALL OF IT — MEASURED against the fixture shell: 576px of a 900px laptop viewport (64%), 650px of 1112px on tablet, and 1188px of an 844px phone (141%), from ONE `<header>` carrying sixteen children including the whole seven-counter glance strip"
+  repo: remudero
+  depends_on: ["W1-T3177"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - apps/dashboard/src/App.tsx
+    - apps/dashboard/src/Overview.tsx
+    - apps/dashboard/src/App.test.tsx
+  origin: "operator-session#console-header-2026-09-09"
+  plan_refs: ["W1-T3177", "W1-T3173", "W1-T159", "W1-T262", "W1-T153"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING. The change is one screen's
+    information architecture, but it moves the element every operator session begins by reading, and
+    the falsifiers below are weighted toward what must REMAIN unmissable.
+
+    OPERATOR-REPORTED, 2026-09-09, verbatim: "The header of the console is gigantic. It almost needs
+    its own page." The measurement below was taken to answer that rather than to agree with it.
+
+    DEPENDS ON W1-T3177 DELIBERATELY, AND THIS IS THE WHOLE SEQUENCING ARGUMENT. The header lives in
+    `renderShellHtml`, inside the 58.4% of `src/lib/serve.ts` that sits in one template literal and
+    is invisible to `tsc` (W1-T3173's measurement). W1-T3177's design (iv) forbids modifying that
+    shell — "the strangler only works if the thing being strangled still runs". Restructuring the
+    header THERE means doing information-architecture work in untypechecked code that the same
+    workstream deletes. This is a screen on the new stack, not a repair of the old one.
+  rationale: |
+    MEASURED 2026-09-09 with Playwright against `buildServeServer`'s own fixture shell, at three
+    viewports, waiting on `shellBootReady` so the strip is populated:
+
+        laptop 1440x900   header = 576px    64% of the viewport   doc 900px    first row at y=93
+        tablet  834x1112  header = 650px    58% of the viewport   doc 1112px   first row at y=93
+        phone   390x844   header = 1188px  141% of the viewport   doc 1339px   first row at y=131
+
+    ON A PHONE THE HEADER IS TALLER THAN THE SCREEN. An operator scrolls a full viewport of header
+    before the first piece of work appears, and 1188 of 1339 document pixels — 89% of the entire
+    page — are header.
+
+    AND THE FIXTURE IS THE GENEROUS CASE. That shell renders THREE tasks. The header is a FIXED
+    cost: `<header>` carries sixteen children — the `<h1>`, the write-state badge, the whole W1-T159
+    glance strip with its seven counters, the anomaly banner and the freshness panes — none of which
+    grow or shrink with the board. The live console renders 66 NEEDS ME rows behind that same 576px.
+
+    ⚠ IT IS NOT A HEADER. It is a SUMMARY DASHBOARD inside a `<header>` element, which is why it
+    reads as needing its own page: it already is one. `<header>` is a banner landmark, and putting
+    the primary content region inside it is also why the live shell reports `aria-prohibited-attr`
+    and unlabelled-control violations that the fixture suite passes (W1-T3184).
+
+    THE ESTABLISHED PATTERN SAYS THE SAME THING, and it is not "move it all to another page".
+    Shneiderman's mantra — overview first, zoom and filter, details on demand — makes the glance
+    strip an OVERVIEW, which is a first-class region rather than chrome. The operations-dashboard
+    literature pairs that with a status row that stays unmissable: ONE line that answers "are we
+    okay?" and nothing else. So the split is not header-versus-page, it is STATUS versus OVERVIEW.
+
+  design: |
+    (i) THE SPLIT IS STATUS vs OVERVIEW, NOT HEADER vs PAGE. A thin, always-visible status bar keeps
+    the single question an operator opens the console to ask — is everything okay — and everything
+    that answers "how many, of what, since when" moves into an Overview region that scrolls with the
+    page like any other content.
+
+    (ii) A BUDGET, EXPRESSED AS A TEST, NOT AS TASTE. The status bar is capped as a fraction of the
+    viewport at each of the three measured widths, asserted by the same Playwright measurement that
+    produced the numbers above. A budget nobody can fail is a preference; this one fails.
+
+    (iii) THE ANOMALY BANNER IS THE EXCEPTION AND STAYS PINNED. W1-T159 put it there because a NOW
+    row past its phase threshold, or a NEEDS ME item open over 24h, must not be scrolled past. It is
+    ABSENT when there is no anomaly, so it costs nothing in the healthy case — which is what lets
+    the rest of the strip move without losing the alarm.
+
+    (iv) THE WRITE-STATE BADGE STAYS WHERE THE CLICK HAPPENS. impl-DY put it in the header because
+    an operator clicking "Mark handled" read a disabled button as a broken one, TWICE, while the
+    only statement of write-state lived eleven sections below. Moving it back down re-creates a
+    measured defect; it belongs with the status bar.
+
+    (v) EVERY NUMBER KEEPS ITS SOURCE. W1-T262's contract is that each pane declares where its
+    figure comes from and that the freshness story is ONE story. Relocating a counter must not
+    strip the attribution that makes it trustworthy.
+
+    (vi) `<header>` BECOMES A BANNER AGAIN. The Overview is a `<main>`-side region with its own
+    heading, so the landmark structure states what the page actually is — which is also what makes
+    the axe violations addressable rather than suppressed.
+
+  acceptance:
+    - claim: "the status bar fits inside a measured budget at laptop, tablet and phone widths, and the phone case is asserted because that is where the old header exceeded the whole viewport"
+      proof: "unit test: apps/dashboard/src/App.test.tsx"
+    - claim: "the seven glance counters render in an Overview region outside the banner landmark, each still declaring its source"
+      proof: "unit test: apps/dashboard/src/App.test.tsx"
+    - claim: "the anomaly banner stays pinned and visible without scrolling when an anomaly is present, and is absent when there is none"
+      proof: "unit test: apps/dashboard/src/App.test.tsx"
+    - claim: "the write-state badge remains adjacent to the controls it explains, so a disabled button never reads as broken"
+      proof: "unit test: apps/dashboard/src/App.test.tsx"
+    - claim: "the first actionable row is reachable without scrolling at laptop and tablet widths"
+      proof: "unit test: apps/dashboard/src/App.test.tsx"
+
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if W1-T3177's first screen already lands the status/overview
+    split — this is a follow-on screen, not a competing one, and two tasks restructuring the same
+    region would collide.
+
+    RE-DESIGN rather than build if the measured budget cannot be met while keeping the anomaly
+    banner and the write-state badge above the fold. Those two are the reason the strip is up there
+    at all; a budget met by dropping them has optimised the number and lost the alarm.
+
+    DO NOT satisfy this by collapsing the header behind a toggle. A disclosure that starts closed
+    hides the anomaly banner in exactly the case it exists for, and one that starts open changes
+    nothing measured above.
+    DO NOT satisfy it by shrinking type. The live shell already renders 67 elements at 11px
+    (W1-T3184); reclaiming pixels from legibility is the trade this repo has already been paying.
+    DO NOT restructure `renderShellHtml` to land this sooner — see the note: that is information
+    architecture in code the same workstream deletes, and W1-T3177 (iv) forbids touching it.
