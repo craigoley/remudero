@@ -1,0 +1,57 @@
+- id: W1-T3244
+  title: "THE DEP-REVIEW LANE HOLDS ON A RED `remudero-review` — THE STATUS IT IS ITSELF THE ONLY PUBLISHER OF — so one red posting on a Dependabot PR deadlocks it permanently, and only a recreate or an admin override clears it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  origin: "operator-session#i-deadlocked-4812-by-running-the-wrong-verb-2026-09-09"
+  plan_refs: ["W1-T54"]
+  files: [src/lib/dep-review.ts, test/the-dep-review-lane-does-not-wait-for-its-own-status.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED LIVE ON #4812, 2026-09-09, AND THE TRIGGER WAS AN OPERATOR MISTAKE THAT THE LANE
+    SHOULD HAVE ABSORBED. I ran `rmd review` — the shared TASK-ACCEPTANCE verb — on a Dependabot
+    PR. It fail-closed correctly ("no acceptance criteria to judge") on a bot body that has no
+    `## Acceptance` block, and posted `remudero-review=failure`. `rmd dep-review 4812` then
+    answered `hold: required check(s) not green: remudero-review`.
+
+    THE LANE IS WAITING FOR A STATUS ONLY IT PUBLISHES. `dep-review.ts`'s own header states the
+    contract: its write paths are "(a) the `remudero-review` commit status and (b) durable
+    migration feedback for majors", and the `arm` verdict is "post remudero-review=success and arm
+    auto-merge". `redChecks` (same file) is three lines and filters EVERY check whose conclusion is
+    red, by name, with NO exclusion of `remudero-review` itself. So the one status the lane exists
+    to publish is also a status that, once red, makes the lane refuse to publish it. That is a
+    closed loop with no exit inside the lane.
+
+    ABSENT AND RED ARE DIFFERENT, AND THAT IS WHY THIS HAS NEVER BEEN HIT. `redChecks` matches on a
+    RED conclusion, so the ordinary case — `remudero-review` simply never posted on a bot PR, which
+    is the state `dep-review.ts`'s header says every Dependabot PR used to sit in — is not red and
+    does not hold. The lane arms from absent every time. It is only a red posting that traps it,
+    and until today nothing posted one.
+
+    IT IS REACHABLE WITHOUT AN OPERATOR MISTAKE. The sweep's `post-review` rung re-posts
+    `remudero-review` when the status is missing on a new head, and any path that reaches a
+    Dependabot PR reproduces this exactly. A transient failure in the lane's own post does too:
+    the lane would then be unable to retry its own write.
+
+    THE EXIT COSTS A FULL CI CYCLE AND IS NOT OBVIOUS. Nothing in the hold message says the check it
+    names is the lane's own, so the reading is "wait for CI", which never clears. Recovery is
+    `@dependabot recreate` (a new head, clean statuses) or an admin merge — and editing the bot's
+    branch is forbidden by the lane's own migration policy.
+
+    THE FIX IS THE EXCLUSION, NOT A NEW OVERRIDE. `redChecks` must not count the status this lane
+    publishes when deciding whether this lane may publish. Every OTHER red check must keep holding
+    exactly as today — that is the whole value of the hold, and a fix that widened it into "ignore
+    red checks" would arm auto-merge over a genuinely broken bump.
+
+  acceptance:
+    - claim: "a red remudero-review does not hold the lane, because that is the status the lane itself publishes"
+      proof: "unit test: W1-T3244: a red remudero-review does not hold the lane"
+    - claim: "every other red required check still holds, so the exclusion is one name and not a relaxation"
+      proof: "unit test: W1-T3244: any other red check still holds the lane"
+    - claim: "an absent remudero-review still arms exactly as today, so the ordinary path is byte-identical"
+      proof: "unit test: W1-T3244: an absent status arms unchanged"
