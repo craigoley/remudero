@@ -1,0 +1,126 @@
+- id: W1-T3223
+  title: "THE CREDIT BACKFILL FORGETS THE CORRECTION IT JUST WROTE AFTER ROTATION PUSHES IT PAST THE BOUNDED READER — all 3,709 live-window corrections were written on a budget-exhausted scan, 1,339 of 1,368 task/PR pairs repeated, and the loop generated 10.42% of every ledger row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 28.00
+  files: [src/lib/sweep.ts, src/lib/status.ts, test/a-credit-backfill-does-not-forget-the-correction-it-just-wrote.test.ts]
+  origin: "lifeguard#daemon-efficiency-2026-09-09"
+  plan_refs: ["W1-T103", "W1-T150", "W1-T951", "W1-T3019"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED FROM LIVE TELEMETRY, NOT INFERRED FROM THE PLAN. This filing follows W1-T3019's
+    explicit instruction to size the behaviour change from the telemetry it added. The fixed
+    window is 2026-09-08T07:45:58Z through 2026-09-09T00:55:20Z over the exact-line-deduplicated
+    union of all three ledger forms on the live Azure host. Coverage controls before the query:
+    628 `ledger.*.ndjson.gz` files carried 125,700 raw `run.start` matches; two
+    `ledger.*.ndjson` rotations carried 426; `ledger.ndjson` carried 200. The resulting window
+    held 71,609 rows / 22,964,564 bytes.
+
+      sweep.credit_backfill corrections                 : 3,709
+      corrections with budget exhausted / scan incomplete: 3,709
+      distinct (task_id, pr_number) pairs                : 1,368
+      pairs repeated two or more times                   : 1,339
+      pairs repeated four times                          :    72
+      correction + action + summary rows                 : 7,464 (10.42% of the window)
+      correction + action + summary bytes                : 2,505,302 (10.91% of the window)
+
+    Every action row carried `credit_scan_complete:false`,
+    `credit_scan_exhausted_budget:true`, `already_credited:false`, and `corrected:true`. The 46
+    summary rows agree: 35 passes exhausted the budget, and their `credit_scan_unknown` sum is
+    exactly their 3,709 corrections. The byte count is the measured retention/write tax. This
+    filing does NOT claim a CPU or wall-clock cost that the telemetry did not measure.
+
+    OBSERVED SOURCE CHAIN at origin/main b898a6c11518b3c91fb433b0d80a3a298c0a827c.
+    `buildCreditCandidates` derives every candidate through `deriveStatus`
+    (`src/run-task.ts:27676-27718`). The daemon builds that array once at :31267-31273 and passes
+    it to `runCreditBackfill` every poll at :31297-31299. `deriveStatus` already resolves known
+    merges from the durable store at `src/lib/status.ts:1940-1980`; live head-branch and trailer
+    hits populate it at :2051-2055 and :2128-2136. That store proves THE MERGE, not that the
+    separate ledger-backfill write has happened.
+
+    `readMergeCreditedTaskIds` then asks the second question from the ledger alone, stops at
+    `CREDIT_SCAN_MAX_ROTATIONS = 24`, and reports an unresolved walk as `budgetExhausted`
+    (`src/lib/status.ts:662-731`). `runCreditBackfill` preserves the discriminator for telemetry
+    but does not branch on it (`src/lib/sweep.ts:6186-6212`): `shouldCorrect` remains only
+    `c.merged && !alreadyCredited` at :6217-6220, followed by a new `verdict.merged` at
+    :6222-6235. A large pass writes more credit rows than the live per-step retention, rotation
+    moves earlier corrections beyond the 24-file reader, and the next pass derives the same
+    absence again. This is the self-sustaining loop W1-T3019 made attributable but deliberately
+    did not change.
+
+    OBSERVED FALSIFIER. This filing would be wrong if repeated pairs came from a complete scan,
+    or if current source refused to act when `creditScanExhaustedBudget` was true. The live query
+    found zero repeated corrections outside the exhausted-budget class, and the current writer
+    contains no such refusal. It would also be duplicate ownership if a current shard or open PR
+    named the same bounded-reader/backfill-receipt fix; the plan and all open PR titles, heads and
+    bodies returned no match before W1-T3223 was reserved.
+
+    OBSERVED SHARED SURFACE, DISTINCT CONCERN. W1-T103 is live and declares `status.ts` and
+    `sweep.ts`; it changes how required, skipped and non-required GitHub checks derive mergeability.
+    W1-T3223 changes only whether an already-written ledger backfill survives rotation as durable
+    deduplication. Neither supersedes the other, and the fleet must sequence their conflicting files.
+  design: |
+    PERSIST THE FACT THE WRITER NEEDS, NOT A WIDER HISTORY SCAN. A successful ledger-backfill
+    append needs a durable receipt that survives rotation, and a later pass must consult it before
+    appending again. Reuse the existing atomic durable-store machinery in `status.ts` unless the
+    implementation proves its representation cannot carry bookkeeping separately. Do not add a
+    second best-effort cache merely because the current store's schema needs a compatible
+    extension.
+
+    THE RECEIPT IS NOT A THIRD MERGE-CREDIT SOURCE. Ordinary durable trailer/head-branch credit is
+    present before a candidate's first legitimate backfill and therefore cannot suppress that
+    first write. Keep `deriveStatus`'s source and `singlePathCredit` semantics unchanged. Key the
+    dedup with the same task-id semantics `readMergeCreditedTaskIds` uses, while retaining the PR
+    provenance that was appended so the state is auditable.
+
+    ORDER THE TWO EFFECTS TOWARD DUPLICATION, NEVER MISSING CREDIT: append `verdict.merged` first,
+    then persist its receipt. If append throws, no receipt may survive. If receipt persistence
+    fails, a later pass may duplicate the row; it must never believe an unwritten correction
+    exists. A process death between the append and receipt is therefore an explicit at-least-once
+    crash window, not a falsely promised cross-file transaction. Batch durable writes once per
+    completed pass rather than fsyncing per candidate.
+
+    DO NOT TURN `budgetExhausted` INTO A BLANKET STAND-DOWN. A genuinely new merge is unresolved
+    too and still needs exactly one correction. Do not raise the rotation cap or full-scan hundreds
+    of archives per tick: W1-T3019 already measured that direction and rejected it. Missing or
+    corrupt durable state may cost one reconstruction pass, but it must not permanently suppress
+    a real correction. `--dry-run` writes neither ledger nor durable state. Add a summary count for
+    candidates suppressed by the durable receipt so the fixed path stays measurable without a
+    per-candidate log loop.
+  acceptance:
+    - claim: "after one successful backfill is rotated beyond the bounded credit scan, a later pass appends no second correction for that task"
+      proof: "unit test: test/a-credit-backfill-does-not-forget-the-correction-it-just-wrote.test.ts"
+    - claim: "a genuinely new merged candidate still receives exactly one correction when the bounded scan exhausts its budget"
+      proof: "unit test: test/a-credit-backfill-does-not-forget-the-correction-it-just-wrote.test.ts"
+    - claim: "ordinary durable merge evidence without a backfill receipt does not suppress the first legitimate ledger correction"
+      proof: "unit test: test/a-credit-backfill-does-not-forget-the-correction-it-just-wrote.test.ts"
+    - claim: "an append failure cannot persist a false receipt, while a completed pass batches its receipt persistence"
+      proof: "unit test: test/a-credit-backfill-does-not-forget-the-correction-it-just-wrote.test.ts"
+    - claim: "dry-run writes neither a ledger correction nor durable state, and the summary reports durable suppressions"
+      proof: "unit test: test/a-credit-backfill-does-not-forget-the-correction-it-just-wrote.test.ts"
+    - claim: "removing the durable receipt lookup makes the repeat-pass falsifier fail"
+      proof: "unit test: test/a-credit-backfill-does-not-forget-the-correction-it-just-wrote.test.ts"
+  note: |
+    ONE CONCERN. Retro subprocess OOMs and W1-T3202's 559-second full-sweep abandonment are
+    separate findings and are not part of this task.
+
+    W1-T3019 is merged, telemetry-only prior art: commit 55b462276 carried the discriminator and
+    explicitly changed no correction. W1-T951 is merged storage prior art: commit 2a36b04ef made
+    merge evidence durable, but its store does not record whether this ledger writer completed.
+    Neither task owns the behavioural fix here.
+
+    RISK IS HIGH because this changes the durable deduplication of merge credit: over-suppression
+    can hide a legitimate correction and under-suppression recreates the measured loop. The three
+    declared files are one production writer, the existing durable-store owner, and one new direct
+    falsifier suite. `src/run-task.ts` is cited as composition evidence but is deliberately not in
+    scope unless implementation proves a wiring change is unavoidable; if so, widen explicitly
+    rather than smuggling the monolith into the diff.
+
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically reserved refs/rmd-id/W1-T3223 against
+    tasks.yaml, every shard, open PRs, remote plan and history before this shard was written. It
+    reported max 3222 and reserved W1-T3223 on the first attempt.
