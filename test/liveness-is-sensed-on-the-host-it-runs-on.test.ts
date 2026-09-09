@@ -88,3 +88,51 @@ test("the process-table sensor keys on the rmd verb, not stray service words in 
 
   assert.deepEqual(state, { running: true, pid: 222, sensed: true, sensor: "process-table" });
 });
+
+// ── the SENSED launchd path, which every test above returns before reaching ───────────────────
+//
+// ON A REAL LAUNCHD HOST the default `queryService` closure does not stop at `launchctl print`.
+// Every test above makes launchctl throw ENOENT, so the closure returns at its process-table
+// fallback and the launchd half of it never runs — diff-coverage named exactly those lines.
+//
+// deploy-supervisor is the branch that matters: it is an INTERVAL job, so its `pid`/`loaded` mean
+// nothing between ticks and `launchctl list`'s Status column is the fact that carries its health.
+// That second exec is a separate call the first one's success does not imply.
+
+test("a sensed launchd host reads deploy-supervisor from launchctl list, not from print's pid", async () => {
+  const calls: string[] = [];
+  const text = await statusTextWithExec((cmd, args) => {
+    calls.push([cmd, ...args].join(" "));
+    if (cmd !== "launchctl") throw new Error(`unexpected command ${cmd}`);
+    // print SUCCEEDS here — that is the whole difference from the tests above.
+    if (args[0] === "print") return 'state = running\n\t"pid" = 4242\n';
+    if (args[0] === "list") return "9182\t0\tcom.remudero.deploy-supervisor\n";
+    throw new Error(`unexpected launchctl subcommand ${args[0]}`);
+  });
+
+  assert.ok(calls.some((c) => c.startsWith("launchctl print ")), "the closure must still try print first");
+  assert.ok(calls.some((c) => c.startsWith("launchctl list ")),
+    "and deploy-supervisor must be read from launchctl list — print's pid is not its health between ticks");
+
+  // The PID PROVES WHICH EXEC ANSWERED. print returns 4242 and list returns 9182; if the row showed
+  // 4242 the closure would have taken the resident-service path and this test would pass for the
+  // wrong reason.
+  assert.match(text, /deploy-supervisor\s*:[^\n]*9182/);
+  assert.doesNotMatch(text, /deploy-supervisor\s*:[^\n]*4242/);
+  assert.match(text, /deploy-supervisor\s*:[^\n]*sensor: launchd/,
+    "and it must report the launchd sensor, not the process table");
+});
+
+test("a sensed print with an UNSENSED list still falls back to the process table for deploy-supervisor", async () => {
+  // The second exec has its own sensed/unsensed answer. launchctl exists (print worked), then the
+  // list call hits an absent launchctl — contrived on purpose: it is the one arm that proves the
+  // fallback is keyed on THIS call's sensing rather than on the earlier one's success.
+  const text = await statusTextWithExec((cmd, args) => {
+    if (cmd === "launchctl" && args[0] === "print") return 'state = running\n\t"pid" = 4242\n';
+    if (cmd === "launchctl" && args[0] === "list") throw enoent(cmd);
+    if (cmd === "ps") return " 7777 node /repo/src/run-task.ts deploy-supervisor\n";
+    throw new Error(`unexpected command ${cmd}`);
+  });
+  assert.doesNotMatch(text, /deploy-supervisor\s*:[^\n]*sensor: launchd/,
+    "an unsensed list must not be reported as a launchd answer");
+});
