@@ -1230,6 +1230,7 @@ function readMeasurementCadenceMetricSnapshot(path: string): MeasurementCadenceM
       },
     };
   } catch (_e) {
+    // A corrupt snapshot cannot prove a previous metric value; this fire overwrites it below.
     return null;
   }
 }
@@ -1276,7 +1277,7 @@ function blockedCiShareFromLedger(
     try {
       parsed = JSON.parse(raw);
     } catch {
-      continue;
+      continue; // Torn verdict rows cannot contribute to the blocked_ci denominator.
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
     const row = parsed as Record<string, unknown>;
