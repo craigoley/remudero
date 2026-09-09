@@ -11,9 +11,41 @@
   files: [src/lib/review-capacity.ts, test/adaptive-review-widener-can-widen.test.ts]
   origin: "operator-session#why-are-reviews-slow-2026-09-07"
   plan_refs: ["W1-T2853", "W1-T3024", "W1-T2931"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
+    WITHDRAWN AS FILED 2026-09-09 — THE PREMISE IS FALSIFIED AND THE ACCEPTANCE CONTRACT IS
+    ARITHMETICALLY UNSATISFIABLE. Re-verified at 378ee37e72196983e0e92da82f94d66372f3120b,
+    then checked unchanged at e4ce28bebaef0d1299f39b6ecdbd68ff5a6c082f: `plan/policy.yaml`
+    sets `reviewLanes` value 3 and max 3, while `clampedWidth` in
+    `src/lib/review-capacity.ts` caps `effectiveWidth` at `maxWidth`. Production supplies both
+    `baseWidth` and `maxWidth` as 3. The criterion requiring `effective_width > base_width` can
+    therefore never pass without changing the operator-set policy bound, which this task explicitly
+    excludes.
+
+    THE MEANINGFUL RECOVERY ALREADY SHIPPED. Across 516 exact-line-deduplicated, post-policy-change
+    `review.capacity` rows, `provider-telemetry-unavailable` produced 174 recoveries, 81 holds and
+    ZERO reductions; `telemetry-unavailable` produced ZERO rows. W1-T2987's additive recovery toward
+    base width is working. `host-worker-budget` was the material reducing reason and its rows carried
+    real occupancy. `queue_depth` was zero in 429 of 516 rows and exceeded `effective_width` in only
+    five, removing this task from queue-latency ownership.
+
+    THIS SUPERSEDES THE EARLIER CLAIM that 665 missing-telemetry decisions were narrowings. That
+    reading conflated a reason label with transition direction and pooled the pre-change and
+    post-change eras. The post-change transition census above separates reductions, holds and
+    recoveries.
+
+    `status: blocked` IS THE RETIREMENT RECORD, not a live blocker: `withdrawn` is not a valid task
+    status, and W1-T270/W1-T467 establish the in-place tombstone convention. The original rationale,
+    acceptance, falsifier and provenance remain below as the historical record. No replacement task
+    is filed here. If a future operator raises `reviewLanes.max` above `reviewLanes.value`, above-base
+    widening becomes reachable again and must earn a fresh task plus a discriminating test at that
+    time. This retirement grants no authority to change review lanes, host-worker budget, telemetry
+    policy, review-capacity source, or daemon behavior.
+
+    --- ORIGINAL RATIONALE, PRESERVED VERBATIM ---
+
     W1-T2853 shipped `selectRuntimeReviewWidth` (src/lib/review-capacity.ts, wired at
     run-task.ts:31230) to EARN a third review lane on a sustained healthy window. Its own policy
     prose calls lane three "temporary capacity earned by a sustained healthy window, not a new
