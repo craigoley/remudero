@@ -14,19 +14,44 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import {
-  enumerateSkipGuards,
-  mutateGuardLine,
-  ciReadingSuites,
-  classifyGuard,
-} from "../scripts/workflow-guard-mutation-check.mjs";
+// @ts-expect-error — this executable .mjs intentionally has no declaration output; the complete
+// seam consumed by this TypeScript suite is declared immediately below rather than left as any.
+import * as workflowGuard from "../scripts/workflow-guard-mutation-check-ratchet.mjs";
+
+interface SkipGuard {
+  key: string;
+  job: string;
+  line: number;
+  text: string;
+  form: "if" | "or";
+}
+
+interface GuardResult {
+  covered: boolean;
+  by: string | undefined;
+}
+
+const { enumerateSkipGuards, mutateGuardLine, ciReadingSuites, classifyGuard } = workflowGuard as {
+  enumerateSkipGuards(text: string): SkipGuard[];
+  mutateGuardLine(text: string, guard: SkipGuard): string;
+  ciReadingSuites(root?: string): string[];
+  classifyGuard(
+    guard: SkipGuard,
+    original: string,
+    suites: string[],
+    runSuite?: (suite: string) => { failed: boolean | undefined; out?: string },
+    apply?: (guard: SkipGuard, original: string, fn: () => GuardResult) => GuardResult,
+  ): GuardResult;
+};
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const CI_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-const BASELINE = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "workflow-guard-mutation-baseline.json"), "utf8"));
+const BASELINE = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "workflow-guard-mutation-baseline.json"), "utf8")) as {
+  guards: Record<string, { reason: string }>;
+};
 
 /** A mutant-free `withMutant` stand-in: never touches disk, still proves the mutation was formed. */
-const inMemory = (guard, original, fn) => {
+const inMemory = (guard: SkipGuard, original: string, fn: () => GuardResult): GuardResult => {
   mutateGuardLine(original, guard); // must not throw - the same precondition the real path enforces
   return fn();
 };
@@ -105,8 +130,8 @@ test("W1-T3220: both guard forms are mutated to ALWAYS SKIP, which means opposit
 
 test("W1-T3220: a guard some suite notices is COVERED, and the first noticing suite is named", () => {
   const [guard] = enumerateSkipGuards(CI_YML);
-  const seen = [];
-  const run = (suite) => {
+  const seen: string[] = [];
+  const run = (suite: string) => {
     seen.push(suite);
     return { failed: suite === "test/b.test.ts" };
   };
