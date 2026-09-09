@@ -10,7 +10,7 @@
               # same fault and a fix to any one of them alone leaves the notice unreachable.
   band_meaning: span
   budget_usd: 25.00
-  files: [scripts/lib/inherited-violation.mjs, scripts/source-size-ratchet.mjs, test/an-unfetched-base-is-not-an-absent-file.test.ts]
+  files: [scripts/lib/inherited-violation.mjs, scripts/source-size-ratchet.mjs, test/an-unfetched-base-is-not-an-absent-file.test.ts, docs/forensics/source-size-ratchet.md, scripts/test-tier-manifest.json]
   origin: "operator-session#the-notice-that-cannot-print-2026-09-08"
   plan_refs: ["W1-T3037", "W1-T2883", "W1-T2324", "W1-T3068"]
   status: queued
@@ -113,6 +113,13 @@
     take `jobs["source-size"]`, require EXACTLY ONE `actions/checkout` step, then read its
     `fetch-depth`. Two guards this session failed because a selector was unambiguous only while one
     thing matched it (#4493, #4505); asserting the count is what keeps this one honest.
+
+    (viii) THE DECLARED SCOPE NAMES WHAT THE BUILD TOUCHES, INCLUDING THE TWO PATHS A GATE FORCES.
+    `scripts/test-tier-manifest.json` is the per-test-file duration ledger `test-tier-manifest
+    --check` refuses a new test file without (seeded at duration 0, never a recorded duration
+    edited), and `docs/forensics/source-size-ratchet.md` is where this gate's output is documented —
+    the rubric's docs-awareness row asks for it by name. Both were flagged as undeclared overrun on
+    the build PR, which is exactly what that advisory is for; declaring them is its own remedy.
 
     (vii) OUT OF SCOPE, DELIBERATELY. Whether the other `*-baseline.json` gates should share the
     inherited/introduced split is a separate question with its own answer; this task changes no
