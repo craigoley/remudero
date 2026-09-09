@@ -43,6 +43,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 const OWNER = "craigoley";
 const REPO = "remudero";
 const SHA = "e97690b0e97690b0e97690b0e97690b0e97690b0";
+const INCIDENT_NOW_MS = Date.parse("2026-08-26T18:16:00.000Z");
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-stale-gate-wiring-")), "ledger.ndjson");
@@ -336,6 +337,7 @@ test("runSweep END TO END with the REAL buildSweepEffects wiring: a PR red only 
       readLiveState: undefined,
       ledgerPath: ledger,
       runId: "SWEEP-STALEGATE-E2E-1",
+      now: () => INCIDENT_NOW_MS,
       log: () => {},
     },
     DEFAULT_SWEEP_POLICY,
@@ -370,6 +372,7 @@ test("runSweep END TO END with the REAL buildSweepEffects wiring: a SECOND pass 
     log: () => {},
     // Same override as the previous test — no real `gh pr view` network call.
     readLiveState: undefined,
+    now: () => INCIDENT_NOW_MS,
   };
 
   await runSweep([subject], { ...effects, ...commonDeps, ledgerPath: ledger, runId: "SWEEP-STALEGATE-E2E-2A" }, DEFAULT_SWEEP_POLICY);
@@ -412,6 +415,7 @@ test("runSweep END TO END with the REAL buildSweepEffects wiring: a genuinely st
       readLiveState: undefined,
       ledgerPath: ledger,
       runId: "SWEEP-STALEGATE-E2E-3",
+      now: () => INCIDENT_NOW_MS,
       log: () => {},
     },
     DEFAULT_SWEEP_POLICY,

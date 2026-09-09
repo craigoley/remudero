@@ -17,6 +17,7 @@ import {
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -892,6 +893,121 @@ export interface LedgerRotationResult {
  * Why: without the lock the second rotator's catch-up saw the first's smaller live file, took an
  * empty tail and renamed over it (R-1; docs/forensics/ledger.md#rotateledger).
  */
+// ── W1-T3237: COMPACTION — reclaim the archive without losing a row ──────────────────────────
+//
+// MEASURED on the fleet host 2026-09-09: 646 `.gz` rotations + 2 plain + the live file,
+// 2,709,938,810 bytes uncompressed, reducing to 900,813 DISTINCT rows = 283,539,709 bytes. A 9.6x
+// collapse. `rotateLedger` keeps MAX_RETAINED_LINES_PER_STEP newest lines per step and archives the
+// rest; NOTHING has ever deleted, merged or aged out an archive. "Keep everything, forever" was
+// never chosen — it is what happens when rotation is written and retention is not. That pile is the
+// corpus that OOM-killed the retro (W1-T3229).
+//
+// COMPACT, NEVER DELETE, and this repo already knows why: the archives are NOT cumulative
+// snapshots, so most history exists ONLY in older ones and dropping any destroys unique data.
+// Claims of the form "N occurrences" — and especially "zero in the entire history" — become
+// unsupportable the moment a file goes. A retention policy that deletes is not a smaller version of
+// this; it is a different and worse one.
+//
+// AND THIS IS never a side effect of rotation. `rotateLedger` runs inside the daemon's write path,
+// and a multi-hundred-megabyte rewrite there would sit on the latency of every ledger append.
+// Compaction is an operator act, like `deploy/host-update.sh` and the image rebuild.
+
+/** What one compaction did, in terms a caller can assert on rather than infer from bytes. */
+export interface LedgerCompactionResult {
+  /** Rotations read and replaced. */
+  sourceCount: number;
+  /** DISTINCT rows written — the set that must be identical to the union of the sources. */
+  rowsWritten: number;
+  /** Duplicate lines collapsed. The reclaim is exactly this many rows' worth. */
+  duplicatesCollapsed: number;
+  /** The compacted archive's filename, whose stamp is the NEWEST row it carries — see below. */
+  archiveName: string;
+}
+
+/**
+ * The name a compacted archive must take.
+ *
+ * ITS STAMP IS THE NEWEST ROW IT CARRIES, AND THAT IS NOT A STYLE CHOICE. `rotationBeforeWindow`
+ * (lib/ledger-union.ts) SKIPS a rotation whose filename stamp is older than the window's start, so
+ * a compacted file stamped with its OLDEST row would be skipped whole by any window beginning
+ * mid-range — silently losing every newer row inside it. Stamped with the NEWEST row, the file is
+ * never wrongly skipped, and rows outside the window are still filtered per-row by
+ * `recordMatchesFilters`, exactly as they are today.
+ *
+ * The format mirrors `rotationStampIso`'s parser byte for byte, because a name that parser cannot
+ * read is a file every windowed union silently ignores.
+ */
+export function compactedArchiveName(newestTs: string): string {
+  // toISOString() already ends in Z; the replace only rewrites : and . — appending another Z
+  // produced `...-000ZZ`, which rotationStampIso does not match, so every windowed union would
+  // have silently ignored the compacted file. Caught by the round-trip case below.
+  return `ledger.${fixedClock(Date.parse(newestTs)).iso().replace(/[:.]/g, "-")}.ndjson.gz`;
+}
+
+/**
+ * Compact a set of rotations into ONE deduped archive, preserving every distinct row.
+ *
+ * PURE OVER INJECTED I/O so its falsifier can assert ROW-SET EQUALITY rather than a size drop. A
+ * compaction that shrinks the corpus is trivial to write and worthless to trust: a byte-count
+ * assertion passes on a TRUNCATION, which is the one outcome this must never ship.
+ *
+ * MEMORY IS BOUNDED BY THE CALLER'S CHOICE OF SOURCES, not by this function. It holds the distinct
+ * rows of what it is given, so an operator compacts a window at a time; handing it all 646
+ * rotations at once would hold ~283MB of strings and is the caller's decision to make.
+ */
+export function compactRotations(
+  sources: readonly string[],
+  io: {
+    readRows: (path: string) => string[];
+    write: (name: string, body: string) => void;
+    remove: (path: string) => void;
+    clock?: Clock;
+  },
+): LedgerCompactionResult {
+  const seen = new Set<string>();
+  const rows: string[] = [];
+  let read = 0;
+  for (const path of sources) {
+    for (const raw of io.readRows(path)) {
+      const line = raw.trim();
+      if (!line) continue;
+      read += 1;
+      if (seen.has(line)) continue;
+      seen.add(line);
+      rows.push(line);
+    }
+  }
+  if (rows.length === 0) {
+    return { sourceCount: sources.length, rowsWritten: 0, duplicatesCollapsed: 0, archiveName: "" };
+  }
+  // Ordered by each row's OWN ts, so the compacted archive reads chronologically like the rotations
+  // it replaces. A row with no parseable ts sorts last rather than being dropped — losing a torn
+  // row to tidy the ordering would be exactly the truncation this refuses.
+  const tsOf = (line: string): number => {
+    const m = /"ts":"([^"]+)"/.exec(line);
+    const parsed = m ? Date.parse(m[1]) : Number.NaN;
+    return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+  };
+  rows.sort((a, b) => tsOf(a) - tsOf(b));
+  const dated = rows.filter((r) => Number.isFinite(tsOf(r)));
+  const clock = io.clock ?? systemClock;
+  const newestTs = dated.length > 0 ? fixedClock(tsOf(dated[dated.length - 1]!)).iso() : clock.iso();
+  const archiveName = compactedArchiveName(newestTs);
+  io.write(archiveName, rows.join("\n") + "\n");
+  // THE SOURCES GO ONLY AFTER THE REPLACEMENT IS WRITTEN. A crash between the two costs a duplicate
+  // archive, which the union dedupes anyway; the other order costs history.
+  //
+  // AND NEVER THE FILE JUST WRITTEN. The compacted stamp is its newest row's ts, which is very
+  // often the stamp of the newest SOURCE — so the archive lands on that source's own name and the
+  // cleanup would then delete the replacement, taking every row with it. Found by the window case
+  // below, which read back an empty union.
+  for (const path of sources) {
+    if (basename(path) === archiveName) continue;
+    io.remove(path);
+  }
+  return { sourceCount: sources.length, rowsWritten: rows.length, duplicatesCollapsed: read - rows.length, archiveName };
+}
+
 export function rotateLedger(
   path: string,
   opts: {

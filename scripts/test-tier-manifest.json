@@ -1178,6 +1178,7 @@
     "test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts": 1172,
     "test/the-hook-spawns-no-test-suite.test.ts": 0,
     "test/the-implement-lane-s-model-lives-on-the-run-not-the-verdict-row.test.ts": 1058,
+    "test/the-ledger-archive-is-compacted-never-truncated.test.ts": 0,
     "test/the-local-coverage-gate-passes-vacuously-on-a-diff-it-failed-to-compute.test.ts": 1375,
     "test/the-local-gate-writes-coverage-where-ci-does.test.ts": 5903,
     "test/the-manual-reap-was-costed-against-a-population-that-tripled.test.ts": 252,
