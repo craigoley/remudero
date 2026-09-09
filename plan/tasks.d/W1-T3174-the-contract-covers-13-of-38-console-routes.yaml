@@ -10,6 +10,7 @@
   files:
     - scripts/contract-coverage-ratchet.mjs
     - scripts/contract-coverage-baseline.json
+    - .github/workflows/ci.yml
     - test/the-contract-covers-its-own-console.test.ts
   origin: "operator-session#console-architecture-2026-09-08"
   plan_refs: ["W1-T3173", "W3-T1a", "W1-T3175"]
