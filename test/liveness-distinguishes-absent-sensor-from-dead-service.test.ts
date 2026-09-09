@@ -106,12 +106,20 @@ test("buildStatusBoard/renderStatusBoardText: a non-launchd host's daemon row re
   assert.equal(livenessState(daemonRow), "unknown");
 
   const text = renderStatusBoardText(model);
-  assert.match(text, /daemon\s*:\s*unknown.*no launchd sensor/);
+  // THE PHRASE CHANGED BECAUSE THE CLAIM DID. This file pinned "no launchd sensor" from when
+  // launchd was the only sensor there was. W1-T3242 adds `LivenessSensor = "launchd" |
+  // "process-table"`, so naming launchd in the message became wrong on every host that never had
+  // it — which includes the host the daemon actually runs on. The assertion below still pins what
+  // this test is for: the row reads UNKNOWN and says liveness cannot be read here, rather than
+  // fabricating a stopped service out of a question nobody asked.
+  assert.match(text, /daemon\s*:\s*unknown.*no liveness sensor on this host/);
   assert.doesNotMatch(text, /daemon\s*:\s*not running/);
   // the next action must not send the operator chasing a process that was never actually asked
   // about — "rmd up" is advice for a REAL stopped service, not an unasked question.
   assert.doesNotMatch(text, /rmd up.*resume the fleet/);
-  assert.match(model.liveness.nextAction ?? "", /no launchd sensor/);
+  assert.match(model.liveness.nextAction ?? "", /no liveness sensor on this host/);
+  assert.match(model.liveness.nextAction ?? "", /cannot be read here/,
+    "and it must say the question went unanswered — naming the absent sensor is not the same as saying so");
 });
 
 // ── ACCEPTANCE 2: a genuinely stopped service on a launchd host still reads stopped ──────────
@@ -154,14 +162,18 @@ test("buildStatusBoard: a recent daemon.boot heartbeat next to an unsensed query
 
 // ── ACCEPTANCE 4: the deploy-supervisor row separates no sensor from no tick observed ────────
 
-test("buildStatusBoard: deploy-supervisor with an unsensed query reads 'unknown — no launchd sensor', not 'overdue'", () => {
+test("buildStatusBoard: deploy-supervisor with an unsensed query reads 'unknown — no liveness sensor', not 'overdue'", () => {
   const queryService = (service: ServiceName): { running: boolean; pid: number | null; sensed: boolean } =>
     service === "deploy-supervisor" ? { running: false, pid: null, sensed: false } : { running: false, pid: null, sensed: true };
   const model = buildStatusBoard(tmpRoot(), join(tmpdir(), "does-not-exist.ndjson"), baseDeps(queryService));
 
   const row = model.liveness.services.find((s) => s.service === "deploy-supervisor")!;
   assert.equal(livenessState(row), "unknown");
-  assert.match(renderStatusBoardText(model), /deploy-supervisor\s*:\s*unknown.*no launchd sensor/);
+  // Same generalisation as the daemon row above — see its comment for why launchd stopped being
+  // the name to pin. `overdue` remains the thing this must never say, and the test below proves a
+  // SENSED deploy-supervisor with no tick still reads exactly that, so the amnesty is not blanket.
+  assert.match(renderStatusBoardText(model), /deploy-supervisor\s*:\s*unknown.*no liveness sensor on this host/);
+  assert.doesNotMatch(renderStatusBoardText(model), /deploy-supervisor\s*:\s*overdue/);
 });
 
 test("buildStatusBoard: deploy-supervisor SENSED but with no tick ever observed still reads 'overdue — no tick observed yet' — a real answer, not amnestied", () => {
