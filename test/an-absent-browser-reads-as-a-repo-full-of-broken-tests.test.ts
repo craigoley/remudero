@@ -135,15 +135,15 @@ test("a manifest naming NO chromium build is UNKNOWN, not present — an empty r
 
 /** Every test file that launches a browser, by the guards' own fixed-string definition. */
 function browserLaunchingSuites(): string[] {
-  const out = execFileSync(
-    "grep",
-    ["-rl", "-F", "--include=*.test.ts", "--", "browserPromise = chromium.launch" + "(", "test"],
-    { cwd: REPO_ROOT, encoding: "utf8" },
-  );
-  return out
+  const tracked = execFileSync("git", ["-C", REPO_ROOT, "ls-files", "--", "test/*.test.ts"], {
+    encoding: "utf8",
+  });
+  const launchCall = "browserPromise = chromium.launch" + "(";
+  return tracked
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l && !l.endsWith("serve-launch-uniformity.test.ts"))
+    .filter((l) => readFileSync(join(REPO_ROOT, l), "utf8").includes(launchCall))
     .sort();
 }
 
