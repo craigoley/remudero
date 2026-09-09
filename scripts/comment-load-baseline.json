@@ -303,6 +303,7 @@
   "src/lib/tty.ts": 70,
   "src/lib/untrusted-envelope.ts": 69,
   "src/lib/verdict-calibration.ts": 219,
+  "src/lib/verify-human-judge.ts": 120,
   "src/lib/wipe-test.ts": 156,
   "src/lib/worker-containment.ts": 214,
   "src/lib/worker-home.ts": 500,
@@ -311,6 +312,6 @@
   "src/lib/worker.ts": 1250,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 15500,
+  "src/run-task.ts": 15507,
   "src/spike.ts": 18
 }

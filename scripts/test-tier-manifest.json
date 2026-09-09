@@ -120,6 +120,7 @@
     "test/a-test-that-writes-the-tracked-tree-is-observed-by-every-other-worker.test.ts": 638,
     "test/a-verdict-class-is-not-a-failure-class-until-its-members-are-joined-to-merge-state.test.ts": 1115,
     "test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts": 1313,
+    "test/a-verify-human-shard-is-judged.test.ts": 0,
     "test/a-wake-is-not-consumed-by-a-sweep-that-never-ran.test.ts": 1844,
     "test/a-wall-clock-bound-declares-itself.test.ts": 1057,
     "test/a-windowed-union-never-opens-an-archive-outside-it.test.ts": 250,
