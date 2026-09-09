@@ -66,6 +66,7 @@
   "scripts/diff-class.mjs": 100,
   "scripts/diff-coverage.mjs": 250,
   "scripts/error-subclass-baseline.json": 250,
+  "scripts/expiring-fixture-census.mjs": 250,
   "scripts/fixture-copy-baseline.json": 250,
   "scripts/flake-retry-aggregate.mjs": 250,
   "scripts/fleet-heartbeat.sh": 341,
