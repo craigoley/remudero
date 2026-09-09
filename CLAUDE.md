@@ -296,18 +296,17 @@ carried had gone stale. Each rule cites the PR that earned it.
   the defaults `[opened, synchronize, reopened]` exclude `edited` and a retitle alone triggers no run.
   Cheapest path is retitle THEN push; backwards, re-run the job. Close/reopen fires `reopened` without
   touching another lane's branch. *(W1-T351; re-derived 2026-08-06)*
-- **A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which
-  half of your diff you are in before you call a merge "shipped."** On a container host the daemon
-  runs from a **bind-mounted checkout** (`<state-root> -> .../Remudero`, the entrypoint `cd`s into
-  it), while its own **entrypoint script and every apt-level binary come from the image**. A path
-  read from the mount ships the instant it merges; a path baked into the image sits inert in a
-  MERGED, GREEN-EVERYWHERE commit until `.github/workflows/acr-build.yml` (`workflow_dispatch`
-  only, run by the operator from the Actions tab) is triggered and the new image is
-  deployed. The failure mode is
-  not a red check: docker still restarts the container, the daemon still logs `exited N`, and every
-  diagnostic that reads the MOUNT still says the code is current — because it is; only the image is
-  not. MEASURED 2026-08-14: the running image was 124 commits behind `origin/main`, including a
-  Dockerfile fix and an entrypoint fix, neither showing as a failure off-host.
+- **A BAKED path is BUILT automatically; the DEPLOY is the separate half — know which half of your
+  diff you are in before calling a merge "shipped."** The daemon runs from a **bind-mounted
+  checkout**; its **entrypoint and every apt binary come from the image**. Mount paths ship on
+  merge. **CORRECTED 2026-09-09:** this said the image waits on `workflow_dispatch` "run by the
+  operator", FALSE since #3967 — `acr-build.yml` is `on: push` to main for `deploy/Dockerfile` and
+  `deploy/entrypoint.sh` (three push runs succeeded 09-05/09-06/09-09). A stale rule beats no rule
+  only when it is true; this one had a session tell the operator an image change needed his hand.
+  STILL SEPARATE IS THE DEPLOY: a built image sits in the registry until something pulls it and
+  recycles (W1-T3245 folds that into the watchdog tick). The failure mode is not a red check —
+  docker restarts, the daemon logs `exited N`, and every MOUNT-reading diagnostic says the code is
+  current, because it is; only the running image is not. MEASURED 2026-08-14: 124 commits behind.
 
   | ships on merge (the mount) | needs an image rebuild (the image) |
   |---|---|
