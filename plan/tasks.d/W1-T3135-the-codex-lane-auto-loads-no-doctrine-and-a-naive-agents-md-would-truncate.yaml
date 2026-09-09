@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   budget_usd: 16.00
-  files: [scripts/generate-agents-md.mjs, AGENTS.md, test/the-codex-lane-auto-loads-no-doctrine.test.ts, package.json]
+  files: [src/lib/worker-provider.ts, test/the-codex-lane-auto-loads-no-doctrine.test.ts, scripts/test-tier-manifest.json]
   origin: "operator-session#context-modularization-2026-09-08"
   plan_refs: ["W1-T2759", "W1-T2508", "W1-T2761"]
   status: queued
@@ -41,56 +41,93 @@
     (`generate-cli-reference.mjs`, `generate-proof-dialect.mjs`, `generate-docs-index.mjs`), each
     with a `--check` mode reached through `npm test` rather than a workflow step. A second
     hand-maintained doctrine file would drift from CLAUDE.md within days and nothing would say so.
+    (4) MEASURED 2026-09-09 IN THE RUNNING IMAGE (codex-cli 0.152.0), four probes, each prompted
+    with "Do not read or open any files" so a correct answer proves AUTO-INJECTION rather than
+    tool use:
+      CONTROL   CLAUDE.md present, no AGENTS.md, no flags ................. reply "UNKNOWN"
+      TREATMENT + -c project_doc_fallback_filenames=["CLAUDE.md"] ......... reply "ZEBRA-4417"
+      REAL SANDBOX  same flags under --sandbox workspace-write ............ reply "DELTA-77"
+      TRUNCATION    71938-byte doc, default cap .... HEAD=ALPHA-1, TAIL=MISSING
+                    same doc, -c project_doc_max_bytes=262144 .... HEAD=ALPHA-1, TAIL=OMEGA-9
+    The default cap was BRACKETED, not assumed: a 32313-byte doc keeps its tail, a 33019-byte doc
+    loses it — the documented 32768 (32 KiB), confirmed by measurement.
+
+    (5) THE SIZES THAT MAKE BOTH FLAGS MANDATORY. CLAUDE.md is 43685 bytes at 2a22ebcf and
+    `scripts/claude-md-budget-baseline.json` permits growth to `capBytes: 44000`. Both exceed the
+    32768 default, so the fallback flag ALONE ships a silently truncated doctrine.
+
+    (6) THE BINARY, NOT THE DOCS, IS THE AUTHORITY. The vendored codex binary contains
+    `project_doc_fallback_filenames` (18 hits) and `project_doc_max_bytes` (18), and does NOT
+    contain `experimental_instructions_file` (0) — so that third route does not exist here.
+
   design: |
-    (i) THE GENERATOR. scripts/generate-agents-md.mjs renders AGENTS.md from CLAUDE.md's OWN
-    constants — `parseRuleHeadlines` + `renderHeadlineOnlyIndex` (src/lib/learnings.ts), the same
-    split W1-T2508 already proved — plus a pointer telling the reader to open CLAUDE.md in the
-    checkout for a headline's body. Headline-only is 7377 bytes today, well inside 32 KiB, and it
-    grows with headline COUNT rather than with rule prose.
+    REFRAMED 2026-09-09 ON OPERATOR DIRECTION, and the direction is what unblocks it: design (v)
+    below previously scoped OUT any `-c project_doc_*` flag because widening the Codex argument
+    surface was the operator's call to make. It has now been made, and the measurements in
+    rationale (3) show the flag route is both smaller and strictly safer than the generator.
 
-    (ii) THE DRIFT GATE. `--check` mode, spawned by the test the way test/cli-reference.test.ts
-    spawns its sibling. A CLAUDE.md edit that changes the headline set and leaves AGENTS.md stale
-    must FAIL BY NAME.
+    (i) TWO FLAGS ON THE EXISTING SURFACE, NO SECOND FILE. `codexExecArgs` (worker-provider.ts)
+    already passes EIGHT `-c` flags; this adds two more to the same `shared` segment:
+        -c project_doc_fallback_filenames=["CLAUDE.md"]
+        -c project_doc_max_bytes=<a named constant above the CLAUDE.md ratchet cap>
+    No AGENTS.md, no generator, no package.json entry, no drift gate — because there is no second
+    copy that can drift. CLAUDE.md stays the single source of truth.
 
-    (iii) THE CAP IS PINNED, NOT ASSUMED. A test asserts the rendered AGENTS.md is under a named
-    `CODEX_PROJECT_DOC_MAX_BYTES = 32768` constant with headroom, and that constant carries its
-    source in a comment. If Codex's default ever moves, the assumption is one greppable place.
+    (ii) BOTH FLAGS OR NEITHER, AND THE TEST MUST PIN THAT. The fallback alone is WORSE than the
+    status quo: it loads CLAUDE.md and silently truncates it at 32768 bytes against a 43685-byte
+    file, so a worker would act confidently on three quarters of the doctrine with no signal that
+    the rest was cut — and the cut lands mid-rule, at a byte offset. Rationale (3) measures both.
 
-    (iv) THE PROSE SENTENCE STAYS, AND STOPS LYING. `spawnCodexWorker`'s prelude currently names a
-    file that does not exist; once AGENTS.md is generated it names two that do.
+    (iii) THE CAP IS PINNED TO THE RATCHET, NOT HAND-TYPED. `scripts/claude-md-budget-baseline.json`
+    declares `capBytes: 44000`; the constant here must exceed it, and a test must fail if CLAUDE.md
+    (or that cap) ever grows past the Codex cap. Otherwise this silently re-breaks the day the doc
+    budget is raised — the exact shape of defect this repo keeps recording.
+
+    (iv) THE PROSE SENTENCE STAYS, AND STOPS LYING. `spawnCodexWorker`'s prelude
+    (worker-provider.ts) names AGENTS.md, a file this repo does not have and — under this design —
+    never will. Keep the nudge, drop the false filename.
 
     (v) NOT IN SCOPE: renaming CLAUDE.md, changing what Claude Code loads, `settingSources`, the
-    CLAUDE.md budget cap, or any `-c project_doc_*` flag on the spawn (that would need the operator
-    to widen an already-narrow Codex argument surface).
+    CLAUDE.md budget cap itself, or generating AGENTS.md. The Claude-worker lane still does not
+    load CLAUDE.md (`settingSources: []`) and this task does not change that — it closes the CODEX
+    lane only, and the resulting asymmetry is stated rather than hidden.
   acceptance:
-    - claim: "the generated AGENTS.md renders every CLAUDE.md rule headline and stays under Codex's 32 KiB project-doc default"
+    - claim: "the Codex spawn passes a project-doc fallback naming CLAUDE.md, so the lane auto-loads repository doctrine"
       proof: "unit test: test/the-codex-lane-auto-loads-no-doctrine.test.ts"
-    - claim: "a CLAUDE.md headline change that leaves AGENTS.md stale fails the drift check by name"
+    - claim: "the spawn also pins an explicit project-doc byte cap, and the cap exceeds the committed CLAUDE.md ratchet ceiling"
       proof: "unit test: test/the-codex-lane-auto-loads-no-doctrine.test.ts"
-    - claim: "the Codex spawn's own argument list is asserted to carry no project_doc override, so the 32 KiB default is the one that applies"
+    - claim: "removing either flag fails the suite, so the fallback can never ship without its cap"
+      proof: "unit test: test/the-codex-lane-auto-loads-no-doctrine.test.ts"
+    - claim: "the Codex prelude names only instruction files this repository actually contains, so the nudge cannot point at a missing one"
       proof: "unit test: test/the-codex-lane-auto-loads-no-doctrine.test.ts"
   falsifier: |
-    CLOSE WITHOUT IMPLEMENTATION IF AGENTS.md ALREADY EXISTS ON MAIN, or if `codexExecArgs` has
-    gained a `project_doc_` flag. Re-run both before building:
-    `git ls-files | grep -ix 'agents.md'` and `grep -n project_doc src/lib/worker-provider.ts`.
+    CLOSE WITHOUT IMPLEMENTATION IF `codexExecArgs` already carries a `project_doc_` flag:
+    `grep -n project_doc src/lib/worker-provider.ts`. MEASURED 2026-09-09 at 2a22ebcf: zero hits.
+    CLOSE ALSO if Codex stops honouring the option — the binary is the authority, not the docs:
+    `grep -ac project_doc_fallback_filenames <the vendored codex binary>` returned 18 on
+    codex-cli 0.152.0 in the running image.
 
-    AND THE SIZE ASSERTION MUST BE ABLE TO FAIL. Assert the RENDERED byte length against the named
-    constant, not a hand-typed number, and prove the assertion bites by rendering a deliberately
-    oversized fixture in the same test. A size test that can only pass proves nothing — this repo
-    has shipped that shape before (the vacuous-pass family CLAUDE.md's coverage section names).
+    THE CAP ASSERTION MUST BE ABLE TO FAIL, and the earlier version of this shard was right about
+    why: assert the constant against the value read from `scripts/claude-md-budget-baseline.json`,
+    never a hand-typed number, and prove it bites by feeding a baseline whose capBytes exceeds the
+    Codex constant and watching the test go red. A size test that can only pass proves nothing.
 
-    AND DO NOT ASSERT THAT CLAUDE CODE READS AGENTS.md. Measured 2026-09-08: the installed CLI's
-    discovery strings are `./CLAUDE.md` and `~/.claude/CLAUDE.md`; the one AGENTS.md mention sits
-    inside the Codex IMPORTER's unmappable-settings rationale, which is not evidence of runtime
-    discovery. This task is about the CODEX lane only.
+    PROVE THE FLAGS ARE LOAD-BEARING, NOT MERELY PRESENT: drop `project_doc_max_bytes` and the
+    third criterion must fail. Presence-only assertions would pass against a build that ignores
+    the option entirely.
+
+    DO NOT ASSERT THAT CLAUDE CODE READS CLAUDE.md IN A WORKER. It does not: `spawnWorker` passes
+    `settingSources: []`. This task is about the CODEX lane only, and that asymmetry survives it.
   note: |
     FILED 2026-09-08. NO RESERVATION MINTED — see W1-T3134's note for the probe and the three-surface
     sweep that chose this id.
 
-    risk:high with band_meaning:span because the declared files span a generator, a new root
-    doctrine file, a test and package.json. The SPAN is wide; the blast radius is not — nothing here
-    changes what any Claude lane loads, and a defect shows up as a failing drift check rather than
-    as a behaviour change in a worker.
+    risk:high with band_meaning:span, CARRIED THROUGH THE 2026-09-09 REFRAME. The original span
+    claim named a generator, a new root doctrine file, a test and package.json; the reframe deletes
+    all four and leaves one spawn-arg site, its test, and the tier-manifest row that test needs. The
+    SPAN is now narrow, but risk:high stands on BLAST RADIUS instead: `codexExecArgs` is the single
+    seam every Codex worker in the fleet spawns through, so a malformed `-c` there fails every Codex
+    run at once rather than degrading one. Nothing here changes what any Claude lane loads.
 
     verify:auto BY OPERATOR RULING 2026-09-08. This shard was filed verify:human on the author's
     own caution — that adding a root doctrine file is a durable convention change. The operator
