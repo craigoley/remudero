@@ -598,6 +598,7 @@
     "test/host-caused-suite-reds.test.ts": 784,
     "test/host-parity-azure-pole.test.ts": 1145,
     "test/host-parity.test.ts": 1334,
+    "test/host-unit-drift-converges-on-the-watchdog-tick.test.ts": 0,
     "test/host-units-install.test.ts": 337,
     "test/host-update-reclaim.test.ts": 1297,
     "test/host-update-tmp-paths.test.ts": 645,
