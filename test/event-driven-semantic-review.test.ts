@@ -82,7 +82,7 @@ test("the sweep runner explicitly enables a semantic reviewer with the head-reso
   const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   assert.match(
     source,
-    /reviewRunner:[^\n]+reviewCommand\(String\(prNumber\), \["--repo", repo\], \{ executionMode: "semantic" \}\)/,
+    /reviewRunner:\s*\(prNumber: number, isPlanFiling\?: boolean\) => Promise<number>[\s\S]*?reviewCommand\(String\(prNumber\), \["--repo", repo\], \{\s*executionMode: "semantic",\s*planOnlyFiling: isPlanFiling,\s*\}\)/,
     "the production sweep default must opt in explicitly, not infer its caller",
   );
   const { args } = await captureReview("Remudero-Task: W1-T2593", "sweep");

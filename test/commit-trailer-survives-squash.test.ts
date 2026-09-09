@@ -121,8 +121,25 @@ test("W1-T1012: appendTaskTrailerToCommit force-pushes through the SAME guarded 
   const rec = (_f: string, args: string[]) => {
     seen.push(args);
   };
-  withLiveWritesAllowed(() => gitPushRunBranch("/tmp/wt", { force: true, exec: rec }));
-  assert.deepEqual(seen[0], ["-C", "/tmp/wt", "push", "--force", "origin", "HEAD"]);
+  // W1-T3221 made this force a LEASED one, so the leaf now derives the branch and the sha it last
+  // published before pushing. The subject of this test is unchanged — the amend still re-lands
+  // through the one guarded choke point rather than a second, unguarded execFileSync — so the
+  // reads are answered here and the argv assertion follows the leaf's current shape.
+  const capture = (_f: string, args: string[]): string => {
+    if (args.includes("--abbrev-ref")) return "run-W1-T1012-1\n";
+    if (args.includes("refs/remotes/origin/run-W1-T1012-1")) return "pub00000\n";
+    if (args[args.length - 1] === "HEAD") return "amended0\n";
+    return "amended0\trefs/heads/run-W1-T1012-1\n"; // the post-push ls-remote read
+  };
+  withLiveWritesAllowed(() => gitPushRunBranch("/tmp/wt", { force: true, exec: rec, capture }));
+  assert.deepEqual(seen[0], [
+    "-C",
+    "/tmp/wt",
+    "push",
+    "--force-with-lease=refs/heads/run-W1-T1012-1:pub00000",
+    "origin",
+    "HEAD:refs/heads/run-W1-T1012-1",
+  ]);
 });
 
 // ── acceptance 2: a plan filing run's commit is left with no task trailer ──

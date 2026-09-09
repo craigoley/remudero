@@ -68,6 +68,7 @@ import {
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, type DispatchGovernorVerdict, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { RetroTriggerDecision } from "./retro.js";
@@ -526,6 +527,11 @@ export function decideAlertPoll(i: AlertPollInputs): AlertPollDecision {
 }
 
 export interface DaemonDeps {
+  /** W1-T3216 — the ledger's RAW lines, for {@link resolveReleasedIds}: a console KICK for an
+   *  operator-released `verify: human` task must be admitted here too, or the release works from
+   *  the drain and is refused from the console. Same seam and same contract as `DrainDeps`'s.
+   *  ABSENT = today's behaviour exactly, an empty released set. */
+  readLedgerLines?: () => readonly string[];
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
    *  nothing changed; omitted means the plan stays frozen at boot. The dep owns change detection
    *  because the cheap signal is caller-specific: a plan tree sha costs ~8ms, the parse ~60ms (impl-FZ). */
@@ -2489,7 +2495,9 @@ export async function runDaemon(
         if (!task) { refuse("unknown task id"); continue; }
         if (isMerged(kick.taskId)) { refuse("already merged — stale kick"); continue; }
         try {
-          assertRunnable(planForBatch, task, mergedTask);
+          // W1-T3216: a console kick for an operator-RELEASED verify:human task must be admitted
+          // here too, or the release works from the drain and is refused from the console.
+          assertRunnable(planForBatch, task, mergedTask, resolveReleasedIds(deps));
         } catch (e) {
           refuse(e instanceof PlanError ? e.message : String((e as Error)?.message ?? e));
           continue;

@@ -26,6 +26,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { PUSH_UNSAFE_TOKENS } from "./helpers/push-safety.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -480,7 +481,7 @@ test("W1-T2428 ci half: every skip NAMES itself — class, count and total — i
 test("W1-T2428 ci half: the ci job body stays push-safe — no request-scoped token in any run", () => {
   // The invariant #3187 tripped: this job also runs on a push to main, where these are empty.
   for (const step of ciSteps()) {
-    for (const tok of ["github.event", "pull_request", "BASE_SHA"]) {
+    for (const tok of PUSH_UNSAFE_TOKENS) {
       assert.ok(!(step.run ?? "").includes(tok), `ci step ${step.name ?? step.id} must not reference ${tok}`);
     }
   }

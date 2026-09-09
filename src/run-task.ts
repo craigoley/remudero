@@ -266,6 +266,7 @@ import {
   type DrainSummary,
   type MergedSet,
   type OpenPrCheck,
+  resolveReleasedIds,
 } from "./lib/drain.js";
 import {
   daemonBoot,
@@ -422,6 +423,7 @@ import { ghTraceGateway } from "./lib/trace.js";
 import { defaultPreflightSpawn, runPreflight, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
 import {
   buildPreflightSummary,
+  callerReachableSuites,
   censusSuiteMembershipFor,
   detectRunContext,
   peekPinnedBase,
@@ -732,6 +734,8 @@ import {
   type BoardReviewReport,
 } from "./lib/board-review.js";
 import {
+  RELEASE_LEDGER_STEP,
+  releasedTaskIds,
   assertRunnable,
   loadPlan,
   selectTask,
@@ -758,6 +762,7 @@ import {
 } from "./lib/dispatch-overlap.js";
 import type { DuplicateCorpusEntry } from "./lib/knowledge-dedup.js";
 import {
+  addedExportsFromPatch,
   assertLintClean,
   breMetacharsIn,
   changedTaskIds,
@@ -775,6 +780,7 @@ import {
   TaskLintError,
   // Source-text compatibility: GENERATED_LEDGER_CLASSES and isCompanionPath moved with
   // scopeGuardOutOfScopeFiles into lib/prompt-render.ts.
+  type AddedExport,
   type LintOpts,
   type DuplicateSurfaceCorpusEntry,
 } from "./lib/task-linter.js";
@@ -11069,7 +11075,9 @@ async function runTask(
     }
   }
 
-  assertRunnable(plan, task, isMerged); // refuse unmerged deps / blocked / verify:human
+  // W1-T3216: the released set is passed so an operator-ratified verify:human task runs here too.
+  // Read once, at this single-task entry point — there is no pass to amortise it over.
+  assertRunnable(plan, task, isMerged, releasedTaskIds(readLedgerRawLines(ledgerPath)));
 
   // ── §5C LAYER A: deterministic task linter, FAIL-CLOSED pre-dispatch guard
   // (MASTER-PLAN §5C). Four malformed tasks (W1-T6, W1-T9, W1-T12) reached a
@@ -13804,6 +13812,10 @@ interface ReviewCommandDeps {
   fetchHead?: (repoDir: string, prNumber: number) => void;
   /** Operator CLI remains deterministic; only internal unattended callers opt in. */
   executionMode?: "deterministic" | "semantic";
+  /** W1-T3115: the sweep already proved this from GitHub's complete material file list. Carry
+   *  that fact across the process boundary instead of making reviewCommand reclassify with the
+   *  narrower emitter-ledger evidence available here. Undefined preserves the operator CLI. */
+  planOnlyFiling?: boolean;
 }
 
 // reviewPrNumber / reviewViewArgs moved to src/lib/report-commands.ts (W1-T2888) — imported/
@@ -13963,6 +13975,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     postReviewPending: postReviewPendingDep,
     fetchHead,
     executionMode,
+    planOnlyFiling,
   } = {
     fetchView: ghJson,
     loadConfig,
@@ -14004,7 +14017,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
-  const taskId = resolveReviewTaskId(body, view.headRefName, isPlanOnlyFilingPr(reviewLedger, view.url));
+  const taskId = resolveReviewTaskId(
+    body,
+    view.headRefName,
+    planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
+  );
   // W1-T322: the same plan lookup this block already does for `criteria` also carries the
   // task's declared scope — an advisory-only input judgeReview needs. Stays `undefined` on ANY
   // read/parse failure (see the catch below), exactly like `criteria` degrading to the body's
@@ -16461,6 +16478,54 @@ export function censusMembershipCommand(
     // nothing" and "the model does not know".
     console.log("  UNMODELLED census suite(s), which this cannot place and will not guess:");
     for (const u of report.unknownCoverage) console.log(`    ? ${u}`);
+  }
+  return 0;
+}
+
+/**
+ * `rmd caller-sweep <symbol> [<symbol>...] [--files]` — W1-T3215: the SECOND hop `census-membership`
+ * (above) does not take. `git grep -l <symbol>` — CLAUDE.md's own mandated sweep — finds every
+ * suite naming a changed symbol directly; it is structurally blind to a suite that instead drives
+ * the symbol's IN-FILE CALLER. MEASURED on #4722: the diff changed only `prewarmBoardGithub`'s
+ * body; the mandated sweep named four suites, all green, while CI reddened a fifth,
+ * test/serve-prewarm-clientgate.test.ts — zero `prewarmBoardGithub` hits, 22 hits on
+ * `gatePrewarmOnClients`, the only src/ function that calls it. `callerReachableSuites` walks
+ * src/ at run time for every caller of each named symbol and unions in the suites naming THOSE, so
+ * a caller added anywhere in the same commit is found with no registry to edit.
+ * REPORT-ONLY: names suites, runs none, gates nothing, exits 0 whatever it finds — same contract
+ * as `census-membership` (W1-T2969), which answers the sibling half of this same sweep gap.
+ */
+export function callerSweepCommand(
+  rest: string[],
+  deps: { repoRoot?: string; spawn?: PreflightSpawn; readFile?: (path: string) => string } = {},
+): number {
+  const files = rest.includes("--files");
+  const symbols = rest.filter((a) => a !== "--files");
+  const badFlag = symbols.find((a) => a.startsWith("--"));
+  if (badFlag) {
+    console.error(`rmd caller-sweep: unexpected argument '${badFlag}' — see \`rmd --help\`\n${USAGE}`);
+    return 2;
+  }
+  if (symbols.length === 0) {
+    console.error("rmd caller-sweep: needs at least one changed symbol name (the sweep this replaces takes one too)");
+    return 2;
+  }
+
+  const root = deps.repoRoot ?? repoRoot;
+  const report = callerReachableSuites(symbols, root, deps.spawn ?? defaultPreflightSpawn, deps.readFile);
+  if (files) {
+    // STDOUT stays a clean file list a caller can splice — same shape as `census-membership --files`.
+    for (const s of report.suites) console.log(s);
+    return 0;
+  }
+  console.log(`rmd caller-sweep — ${symbols.length} changed symbol(s): ${symbols.join(", ")}`);
+  if (report.suites.length === 0) {
+    console.log("  no suite reachable, directly or through a src/ caller");
+  }
+  for (const entry of report.entries) {
+    console.log(`  ${entry.symbol}`);
+    if (entry.callers.length > 0) console.log(`    src/ caller(s): ${entry.callers.join(", ")}`);
+    for (const s of entry.suites) console.log(`    -> ${s}`);
   }
   return 0;
 }
@@ -18961,8 +19026,25 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let oldById: Map<string, Task> | undefined;
   let newTaskIds: Set<string> | undefined;
   let newMonolithIds: Set<string> | undefined;
+  let addedExports: AddedExport[] = [];
+  let pathExistsAtBase: ((repoRelPath: string) => boolean) | undefined;
   if (baseRef) {
     const relPath = relative(repoRoot, planPath);
+    const basePathCache = new Map<string, boolean>();
+    pathExistsAtBase = (rel: string) => {
+      const cached = basePathCache.get(rel);
+      if (cached !== undefined) return cached;
+      let exists = false;
+      try {
+        execFileSync("git", ["-C", repoRoot, "cat-file", "-e", `${baseRef}:${rel}`], { stdio: "ignore" });
+        exists = true;
+      } catch (e) {
+        void e;
+        exists = false; // absent at base, or ref/path unreadable — either way, no opinion
+      }
+      basePathCache.set(rel, exists);
+      return exists;
+    };
     // W1-T246 (recon): a plain `git show <base>:<relPath>` only ever materializes the MONOLITH
     // — every `plan/tasks.d/*.yaml` shard is invisible to it, so every shard-only task looked
     // "new/changed" on EVERY `lint-plan --base` run regardless of whether the PR touched it (the
@@ -19048,6 +19130,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         [headMonolithRaw, ...readShardTexts(join(dirname(planPath), "tasks.d"))],
       );
       for (const id of rawChanged) scope.add(id);
+      const diffText = execFileSync("git", ["-C", repoRoot, "diff", "--no-ext-diff", "--unified=0", `${baseRef}...HEAD`, "--", "src"], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      addedExports = addedExportsFromPatch(diffText, pathExistsAtBase);
     } catch (e) {
       console.error(`### rmd lint-plan: cannot resolve --base ${baseRef}: ${(e as Error).message}`);
       return 2;
@@ -19176,6 +19263,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         mergedTaskIds: creditedMergedIds,
         // impl-DS: only ever populated in --base mode, so the check is silent whole-plan.
         newMonolithIds,
+        // W1-T3218: added exported functions/consts/classes in existing src modules, derived
+        // once from the --base diff and consumed by callSiteViolations without git I/O.
+        addedExports,
         // W1-T1076: `scope` is populated iff `--base` was given, so this branch IS the
         // changed-tasks pass and `duplicateCorpusOpts`' scoped arm is the right one here.
         ...duplicateCorpusOpts(true, task.id, openShardCorpus, shardSlugById),
@@ -19208,20 +19298,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           return undefined;
         }
       };
-      // W1-T2835: the BASE-tree counterpart of `opts.moduleExists` above, wired ONLY here — the
-      // `--base` pass — for the same reason `blockedDisposition` and `newMonolithIds` are: a
-      // whole-plan run has no base to compare against and must not report the standing population,
-      // and the PRE-DISPATCH site must never see it because a queued task's proof legitimately
-      // forward-references the test its own PR will create. One `cat-file -e` per pure-path proof
-      // over the handful of tasks a PR actually changes; no worktree, no network.
-      opts.pathExistsAtBase = (rel: string) => {
-        try {
-          execFileSync("git", ["-C", repoRoot, "cat-file", "-e", `${baseRef}:${rel}`], { stdio: "ignore" });
-          return true;
-        } catch {
-          return false; // absent at base, or ref/path unreadable — either way, no opinion
-        }
-      };
+      if (pathExistsAtBase) {
+        // W1-T2835: the BASE-tree counterpart of `opts.moduleExists` above, wired ONLY here —
+        // the `--base` pass — for the same reason `blockedDisposition` and `newMonolithIds` are.
+        opts.pathExistsAtBase = pathExistsAtBase;
+      }
     }
     const { violations: lintViolations } = lintTask(task, opts);
     // W1-T1225: proofGrepUnmatchableViolations( is called HERE, directly, rather than folded into
@@ -23378,6 +23459,10 @@ async function drainCommand(
         refreshMerged,
         isOpenPr,
         isCreditIndeterminate,
+        // W1-T3216: THE PRODUCER. `resolveReleasedIds` (drain.ts) turns these lines into the
+        // released set once per pass. Omitting this line is not a degraded feature — it is the
+        // dead one #4715 shipped, so it is asserted by test rather than left to review.
+        readLedgerLines: () => readLedgerRawLines(ledgerPathFor(config)),
         // W1-T2397: the two halves of the observation. #3120 shipped the predicate live and said so
         // — `openSiblingBuild` is computed on every projection pass while
         // `NextRunnableOpts.openSiblingBuildFor`/`onOpenSiblingBuild` had no production caller,
@@ -24695,6 +24780,9 @@ export async function daemonCommand(
         refreshMerged,
         isOpenPr,
         isCreditIndeterminate,
+        // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
+        // W1-T534/W1-T916 hit two lines below, and the one #4715 shipped for this very feature.
+        readLedgerLines: () => readLedgerRawLines(ledgerPathFor(config)),
         // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
         // `repo:` field — the SAME value, never a second resolution that could drift from it.
         targetRepo: target.repo,
@@ -28971,7 +29059,13 @@ export function buildSweepEffects(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   // W1-T254: injectable review runner so the post-review effect's attempt/
   // done/failed logging path is unit-covered without spawning a real review.
-  reviewRunner: (prNumber: number) => Promise<number> = (prNumber) => reviewCommand(String(prNumber), ["--repo", repo], { executionMode: "semantic" }),
+  /* c8 ignore next 5 -- the injected recorder below proves the handoff; these lines are the
+   * irreducible production binding to reviewCommand, whose own semantic path is tested directly. */
+  reviewRunner: (prNumber: number, isPlanFiling?: boolean) => Promise<number> = (prNumber, isPlanFiling) =>
+    reviewCommand(String(prNumber), ["--repo", repo], {
+      executionMode: "semantic",
+      planOnlyFiling: isPlanFiling,
+    }),
   // Injectable worker spawn, same shape and rationale as `reviewRunner` directly above: the
   // fix rung's own effects (including its best-effort push) were unreachable from any offline
   // test because the adapter below hardcoded `spawnWorker`. Optional with no default body, so
@@ -29324,7 +29418,7 @@ export function buildSweepEffects(
     postReview: async (pr) => {
       log("sweep.post_review.attempt", { pr_number: pr.prNumber, head_sha: pr.headSha });
       try {
-        const exit = await reviewRunner(pr.prNumber);
+        const exit = await reviewRunner(pr.prNumber, pr.isPlanFiling);
         log("sweep.post_review.done", { pr_number: pr.prNumber, head_sha: pr.headSha, exit });
       } catch (e) {
         log("sweep.post_review.failed", {
@@ -34411,11 +34505,94 @@ export async function ruleCommand(
  * {@link approveProposal}; this command is the thin real-world glue (mirrors
  * `inboxCommand`/`planCommand`'s split).
  */
+/** W1-T3216 — SHAPE ONLY: does this token name a TASK rather than a proposal? `W1-T1041` takes
+ *  the release path, `P7` the proposal path. Deliberately not an EXISTENCE test: a well-formed
+ *  but unknown id is refused BY NAME one step later, which reads better than "unknown proposal". */
+export function namesATask(token: string): boolean {
+  return /^W\d+-T[0-9A-Za-z]+$/.test(token);
+}
+
+/**
+ * W1-T3216 — RATIFY A PARKED `verify: human` TASK through the pipeline proposals already use.
+ *
+ * Writes the SAME `ratify.approved` row a proposal ratification writes, which `releasedTaskIds`
+ * (plan.ts) reads back and `resolveReleasedIds` (drain.ts) turns into dispatch eligibility — so
+ * the plan record is NEVER edited and the decision is auditable on the one ledger step that
+ * already means "the operator spent his bit".
+ *
+ * REFUSES, NAMING THE STATE, WITH ZERO SIDE EFFECTS: an unknown id, a task that is not
+ * `verify: human` (it needs no release), one that is blocked or retired, and one ALREADY
+ * released — that last returns 0 and writes NO second row, because a second bit is not a second
+ * release.
+ */
+export function approveParkedTask(
+  taskId: string,
+  deps: {
+    plan: Plan;
+    ledgerPath: string;
+    runId: string;
+    ledgerLines?: readonly string[];
+    append?: typeof appendLedger;
+  },
+): { code: number; message: string } {
+  const task = deps.plan.byId.get(taskId);
+  if (!task) return { code: 2, message: `rmd approve: unknown task '${taskId}' — not in the plan` };
+  if (task.verify !== "human") {
+    return {
+      code: 2,
+      message: `rmd approve: ${taskId} is verify:${task.verify} — it needs no release; only a verify:human task is parked`,
+    };
+  }
+  if (task.status !== "queued") {
+    return { code: 2, message: `rmd approve: ${taskId} is status:${task.status} — only a queued task can be released` };
+  }
+  const already = releasedTaskIds(deps.ledgerLines ?? readLedgerRawLines(deps.ledgerPath));
+  if (already.has(taskId)) {
+    return { code: 0, message: `rmd approve: ${taskId} is already released — no second row written` };
+  }
+  (deps.append ?? appendLedger)(deps.ledgerPath, {
+    run_id: deps.runId,
+    task_id: taskId,
+    step: RELEASE_LEDGER_STEP,
+    released: "verify-human",
+  });
+  return { code: 0, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
+}
+
+/** The ledger's RAW lines. `releasedTaskIds` parses them itself (it rejects on a cheap substring
+ *  before spending a JSON.parse), so handing it pre-parsed rows would parse every line twice.
+ *  An unreadable ledger yields NO releases — the safe direction: the wall stands. */
+export function readLedgerRawLines(path: string): readonly string[] {
+  try {
+    return readFileSync(path, "utf8").split("\n").filter(Boolean);
+  } catch {
+    // no ledger yet (a fresh checkout) or unreadable — releases nothing, never throws into dispatch
+    return [];
+  }
+}
+
 export async function approveCommand(
   rest: string[],
   deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway; overlap?: OverlapWarningDeps } = {},
 ): Promise<number> {
   const proposalId = rest[0];
+  // W1-T3216: a TASK id takes the release path. Taken BEFORE the proposal registry is consulted,
+  // so the proposal path below is byte-for-byte unchanged, and keyed on SHAPE so an unknown but
+  // well-formed task id is refused as a task rather than as a missing proposal.
+  if (proposalId && rest.length === 1 && namesATask(proposalId)) {
+    const config = deps.config ?? loadConfig();
+    const outcome = approveParkedTask(proposalId, {
+      plan: loadPlan(join(config.root, "plan", "tasks.yaml")),
+      ledgerPath: ledgerPathFor(config),
+      // Clock-free BY CONSTRUCTION — and the comment may not NAME the shape it avoids, because
+      // clock-signature-census.test.ts counts by SOURCE TEXT, comments included. The row is already
+      // unique per task, so keying it on the task id is deterministic AND makes the
+      // row findable by the very thing it releases.
+      runId: `APPROVE-${proposalId}`,
+    });
+    console.log(outcome.message);
+    return outcome.code;
+  }
   const badArg = unknownArgError("approve", rest.slice(1), [], []);
   // W1-T2471: more than one bare id named (e.g. `rmd approve P1 P2 P3`) is what the SINGLE-id
   // parse above already flags as a bad arg — every token after the first is "unexpected".
@@ -36661,6 +36838,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2969: the answer censusSuiteMembership (W1-T2523) has always been able to give and nothing could ask for. A census suite WALKS a population and asserts a property of the whole set, so it names none of a caller's symbols and `git grep -l <symbol>` — the caller sweep this repo mandates before a PR — is structurally blind to it. MEASURED 2026-09-06: four CI failures across #4283 and #4290 were census baselines, and a correctly-run symbol sweep found none of them. Models both halves: the fast-gate census members, DERIVED from CENSUS_ADMITTED_MEMBERS, and the registry-shaped suites (the COMMANDS name list, the policy key set, the source-text-read ratchet) that are not fast-gate members and must not become them. A suite the model cannot place is NAMED as unmodelled rather than dropped, so 'joins nothing' is never confused with 'the model does not know'. REPORT-ONLY: runs no suite, gates nothing, exits 0 whatever it finds. `--files` emits the same membership as the bare TEST FILE PATHS on stdout, one per line, so a caller can run them without carrying a second copy of the table; incompleteness (an unmodelled or unmappable suite) is named on stderr, never folded into the list, because a caller that cannot tell a partial enumeration from a complete one reads its own subset pass as covering the whole set.",
   },
   {
+    name: "caller-sweep",
+    syntax: "rmd caller-sweep <symbol> [<symbol>...] [--files]",
+    summary: "Name the suites reachable from a changed symbol, including through its src/ callers.",
+    detail: "W1-T3215: the SECOND hop `census-membership` above does not take. `git grep -l <symbol>` — the mandated sweep — finds every suite naming a changed symbol directly and is structurally blind to a suite that instead drives the symbol's IN-FILE CALLER. MEASURED on #4722: a diff changing only prewarmBoardGithub's body named four suites by the mandated sweep, all green, while CI reddened a fifth, test/serve-prewarm-clientgate.test.ts — zero prewarmBoardGithub hits, 22 hits on gatePrewarmOnClients, the only src/ function calling it. `callerReachableSuites` walks src/ at run time for every caller of each named symbol (never a hand list — a caller added in the same commit is walked by the run that adds it) and unions in the suites naming those callers too. An empty symbol list is refused as a usage error, never run as 'every suite'. REPORT-ONLY: names suites, runs none, gates nothing, exits 0 whatever it finds. `--files` emits the same union as bare TEST FILE PATHS on stdout, one per line.",
+  },
+  {
     name: "ci-learning",
     syntax: "rmd ci-learning [--days N] [--force]",
     summary: "Draft a marked, parked shard for each repaired CI failure in the window.",
@@ -37654,6 +37837,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(censusMembershipCommand(rest)) cannot carry a DA hit without forking the process; censusMembershipCommand's own logic — arg validation, the --base bound, the unreadable-diff arm, and every render path (joining, none, unmodelled) — is unit-tested in test/the-census-map-names-four-suites-and-no-verb-reads-it.test.ts (same irreducible-glue shape as the sibling ci-learning/ci-failures/rule-efficacy dispatch cases).
   if (cmd === "census-membership") {
     process.exit(censusMembershipCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(callerSweepCommand(rest)) cannot carry a DA hit without forking the process; callerSweepCommand's own logic — arg validation, the empty-symbol refusal, and the report/--files render paths — is unit-tested in test/the-caller-sweep-stops-at-one-hop.test.ts (same irreducible-glue shape as the sibling census-membership/ci-learning/ci-failures dispatch cases).
+  if (cmd === "caller-sweep") {
+    process.exit(callerSweepCommand(rest));
   }
   if (cmd === "ci-learning") {
     process.exit(ciLearningCommand(rest));
