@@ -62,6 +62,7 @@
     "test/a-net-positive-claude-md-diff-is-not-refused.test.ts": 1255,
     "test/a-new-census-gate-cannot-ship-itself.test.ts": 800,
     "test/a-new-ci-yml-job-cannot-ship-its-own-registration.test.ts": 1089,
+    "test/a-new-export-in-an-old-module-needs-a-caller.test.ts": 0,
     "test/a-new-repo-starts-from-zero-and-one-repos-quirks-become-global-law.test.ts": 169,
     "test/a-new-test-that-passes-on-the-base-tree-proves-nothing.test.ts": 5084,
     "test/a-permanent-diff-refusal-is-not-retried-forever.test.ts": 0,
