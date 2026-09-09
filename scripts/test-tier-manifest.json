@@ -21,6 +21,7 @@
     "test/a-codex-worker-uses-a-private-temporary-root.test.ts": 341,
     "test/a-corrected-title-reaches-the-worker.test.ts": 3205,
     "test/a-count-assertion-names-its-members.test.ts": 520,
+    "test/a-credit-backfill-does-not-forget-the-correction-it-just-wrote.test.ts": 0,
     "test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts": 4548,
     "test/a-criterion-names-the-test-that-proves-it.test.ts": 1300,
     "test/a-criterion-restated-is-not-a-claim.test.ts": 0,

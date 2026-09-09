@@ -2,7 +2,17 @@ import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { diagnoseBodyDefects } from "./body-repair.js";
 import { appendLedger } from "./ledger.js";
-import { readLedgerLines, readMergeCreditedTaskIds, taskIdFromRunBranch } from "./status.js";
+import {
+  defaultCreditStorePath,
+  hasCreditBackfillReceipt,
+  loadCreditStore,
+  readLedgerLines,
+  readMergeCreditedTaskIds,
+  recordCreditBackfillReceipt,
+  saveCreditStore,
+  taskIdFromRunBranch,
+} from "./status.js";
+import type { CreditBackfillReceipt, CreditStore } from "./status.js";
 import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
 import { loadDefaultCostAnomalyPolicy, recordCostAnomalies, type CostAnomalyPolicy } from "./cost-anomaly.js";
 import {
@@ -6122,8 +6132,10 @@ export interface CreditBackfillResult {
   prUrl: string;
   /** True ⇒ a NEW `verdict.merged` correction was appended this pass. */
   corrected: boolean;
-  /** True ⇒ the ledger already carried merge credit for this task (dedup). */
+  /** True ⇒ the ledger already carried merge credit OR a durable backfill receipt suppressed it. */
   alreadyCredited: boolean;
+  /** True ⇒ a durable receipt from an earlier completed pass suppressed this candidate. */
+  durablyBackfilled: boolean;
 }
 
 /** The whole credit-backfill pass's outcome. */
@@ -6159,7 +6171,21 @@ export interface CreditBackfillSummary {
    * uncredited, and is the re-credit loop if it repeats for the same task.
    */
   creditScanUnknown: number;
+  /** Candidates suppressed by a durable backfill receipt. Summary-only so the fixed path remains
+   * measurable without restoring the old per-candidate log loop. */
+  durableReceiptSuppressions: number;
 }
+
+/** Credit-backfill-specific persistence seams. Production shares the existing atomic credit store;
+ * tests can make append/write ordering and the load-bearing lookup directly observable. */
+export type CreditBackfillDeps = Pick<
+  SweepDeps,
+  "ledgerPath" | "runId" | "readLedger" | "appendLine" | "log" | "dryRun"
+> & {
+  creditStorePath?: string;
+  readCreditStore?: () => CreditStore;
+  writeCreditStore?: (store: CreditStore) => void;
+};
 
 /*
  * `hasMergeCredit` USED TO LIVE HERE and was removed 2026-08-13. It answered "has this task's merge
@@ -6178,19 +6204,22 @@ export interface CreditBackfillSummary {
  *  from {@link runSweep}, whose input domain is one view per OPEN PR. */
 export async function runCreditBackfill(
   candidates: CreditCandidate[],
-  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "readLedger" | "appendLine" | "log" | "dryRun">,
+  deps: CreditBackfillDeps,
 ): Promise<CreditBackfillSummary> {
   const appendLine = deps.appendLine ?? appendLedger;
   const log = deps.log ?? (() => {});
+  const creditStorePath = deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath);
+  const creditStoreAtStart = deps.readCreditStore?.() ?? loadCreditStore(creditStorePath);
+  const writeCreditStore = deps.writeCreditStore ?? ((store: CreditStore) => saveCreditStore(creditStorePath, store));
 
   // THE CREDIT QUESTION IS "EVER", AND ONE FILE CANNOT ANSWER IT. This used to read
   // `readLedgerLines`, which opens exactly ONE path, against a step whose rows rotation caps. Credit
   // older than the cap left the live file, this check said "not credited", the task was re-credited,
   // and the fresh row evicted another — self-sustaining. // Why: docs/forensics/sweep.md.
   // W1-T3019: `complete` and `filesRead` are CARRIED, not discarded. See CreditBackfillSummary's
-  // own doc — an unfinished walk's "not credited" is an absence of evidence, and this rung acts on
-  // it. Measuring that is a precondition for changing it. TELEMETRY ONLY: nothing below branches on
-  // these, so every correction this rung would have made, it still makes.
+  // own doc — an unfinished walk's "not credited" is an absence of evidence. W1-T3223 does not
+  // branch on that absence either: only the separate durable proof that THIS WRITER already
+  // appended may suppress it, so a genuinely new merge still receives its first correction.
   const creditScan = readMergeCreditedTaskIds(deps.ledgerPath, {
     // Only the tasks this pass could ask about, so the walk stops as soon as they are all resolved
     // rather than reading to the cap. Measured: real plan ids resolve below depth 8.
@@ -6213,13 +6242,22 @@ export async function runCreditBackfill(
 
   const results: CreditBackfillResult[] = [];
   let corrected = 0;
+  let durableReceiptSuppressions = 0;
+  const receiptsToPersist: Array<{ taskId: string; receipt: CreditBackfillReceipt }> = [];
 
   for (const c of candidates) {
-    const alreadyCredited = credited.has(c.taskId);
+    // Only a receipt that existed BEFORE this pass is a durable suppression. A duplicate candidate
+    // later in this array is suppressed by `credited.add` below and must not inflate this metric.
+    const durablyBackfilled = hasCreditBackfillReceipt(creditStoreAtStart, c.taskId);
+    const alreadyCredited = credited.has(c.taskId) || durablyBackfilled;
     const shouldCorrect = c.merged && !alreadyCredited;
     const acted = shouldCorrect && !deps.dryRun;
 
+    if (c.merged && durablyBackfilled) durableReceiptSuppressions++;
+
     if (acted) {
+      // ORDERING INVARIANT: append first. A false receipt can hide real merge credit; a missing
+      // receipt can only cause an at-least-once duplicate after a crash or best-effort save failure.
       appendLine(deps.ledgerPath, {
         run_id: deps.runId,
         task_id: c.taskId,
@@ -6228,6 +6266,10 @@ export async function runCreditBackfill(
         pr_number: c.prNumber,
         pr_url: c.prUrl,
         source: "sweep.credit_backfill",
+      });
+      receiptsToPersist.push({
+        taskId: c.taskId,
+        receipt: { source: "sweep.credit_backfill", prUrl: c.prUrl, prNumber: c.prNumber },
       });
       // Reflected into THIS pass's own view, not just re-read on the next sweep, so a duplicate
       // candidate naming the same task later in the same array credits exactly once.
@@ -6253,7 +6295,24 @@ export async function runCreditBackfill(
       });
     }
 
-    results.push({ taskId: c.taskId, prNumber: c.prNumber, prUrl: c.prUrl, corrected: acted, alreadyCredited });
+    results.push({
+      taskId: c.taskId,
+      prNumber: c.prNumber,
+      prUrl: c.prUrl,
+      corrected: acted,
+      alreadyCredited,
+      durablyBackfilled,
+    });
+  }
+
+  // One atomic best-effort store write per COMPLETED pass, never one fsync per candidate. Dry-run
+  // queues no receipts because `acted` is false. If append throws, control never reaches this save.
+  if (receiptsToPersist.length > 0) {
+    const nextStore = receiptsToPersist.reduce(
+      (store, pending) => recordCreditBackfillReceipt(store, pending.taskId, pending.receipt),
+      creditStoreAtStart,
+    );
+    writeCreditStore(nextStore);
   }
 
   const summary: CreditBackfillSummary = {
@@ -6264,6 +6323,7 @@ export async function runCreditBackfill(
     creditScanExhaustedBudget,
     creditScanFilesRead: creditScan.filesRead,
     creditScanUnknown,
+    durableReceiptSuppressions,
   };
   log("sweep.credit_backfill.summary", {
     total: summary.total,
@@ -6273,6 +6333,7 @@ export async function runCreditBackfill(
     credit_scan_exhausted_budget: summary.creditScanExhaustedBudget,
     credit_scan_files_read: summary.creditScanFilesRead,
     credit_scan_unknown: summary.creditScanUnknown,
+    durable_receipt_suppressions: summary.durableReceiptSuppressions,
   });
   return summary;
 }
