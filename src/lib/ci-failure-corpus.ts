@@ -77,6 +77,11 @@ export interface CiFailurePair {
   state: CiFailurePairState;
 }
 
+export interface CiFullyObservedGatePr {
+  pr: number;
+  gate: string;
+}
+
 /** `"clear"` — every rollup was read and no gate was red. `"unreadable"` — nothing was found AND at
  *  least one rollup could not be read, so the window was never actually seen. `"populated"` — at
  *  least one pair. A measured absence, never a bare zero (P48's no-naked-zero clause). */
@@ -88,6 +93,7 @@ export interface CiFailureCorpus {
   /** Every sha whose rollup could not be read, NAMED rather than silently treated as green. */
   unreadableShas: string[];
   pairs: CiFailurePair[];
+  fullyObservedGatePrs: CiFullyObservedGatePr[];
 }
 
 /**
@@ -107,8 +113,11 @@ export interface CiFailureCorpus {
 export function collectCiFailureCorpus(input: CiFailureCorpusInput): CiFailureCorpus {
   const pairs: CiFailurePair[] = [];
   const unreadableShas: string[] = [];
+  const fullyObservedGatePrs: CiFullyObservedGatePr[] = [];
 
   for (const pr of input.prs) {
+    const fullyObserved = pr.commits.length > 0 && pr.commits.every((commit) => commit.rollup !== undefined);
+    const terminalGates = new Set<string>();
     // Gate -> the pair still awaiting a repair on THIS pull request. Cleared when one is observed,
     // so a gate that reddens, is fixed, and reddens again yields two pairs rather than one.
     const openByGate = new Map<string, CiFailurePair>();
@@ -121,6 +130,9 @@ export function collectCiFailureCorpus(input: CiFailureCorpusInput): CiFailureCo
         const gate = gateName(entry);
         if (!gate) continue;
         const state = gateState(entry);
+        if (fullyObserved && (REQUIRED_CHECK_FAIL.has(state) || REQUIRED_CHECK_OK.has(state))) {
+          terminalGates.add(gate);
+        }
         if (REQUIRED_CHECK_FAIL.has(state)) {
           if (openByGate.has(gate)) continue; // already tracking this gate's red on this PR
           const pair: CiFailurePair = { pr: pr.number, gate, redSha: commit.sha, state: "open" };
@@ -136,11 +148,14 @@ export function collectCiFailureCorpus(input: CiFailureCorpusInput): CiFailureCo
         }
       }
     }
+    for (const gate of terminalGates) fullyObservedGatePrs.push({ pr: pr.number, gate });
   }
+
+  fullyObservedGatePrs.sort((a, b) => a.pr - b.pr || a.gate.localeCompare(b.gate));
 
   const status: CiFailureCorpusStatus =
     pairs.length > 0 ? "populated" : unreadableShas.length > 0 ? "unreadable" : "clear";
-  return { status, prsScanned: input.prs.length, unreadableShas, pairs };
+  return { status, prsScanned: input.prs.length, unreadableShas, pairs, fullyObservedGatePrs };
 }
 
 /** Read one gate rollup at `sha`, as the two endpoints that together see every gate. `undefined`

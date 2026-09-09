@@ -2099,7 +2099,8 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string)
  *
  * The outcome is: after a lesson about gate G landed, did G go on refusing pull requests? Pull
  * request numbers are monotonic, so the highest number the lesson was derived from is a watermark
- * and no clock is needed. Anything above it is the "after" population.
+ * and no clock is needed. The "after" population is later pull requests where G had a terminal
+ * outcome and the complete commit-rollup history was readable — existence alone is not exposure.
  *
  * `unmeasurable` IS A VERDICT, and the important one. A lesson filed from the newest pull requests
  * in a window has no "after" yet, and reporting it as `held` would be a vacuous pass — a claim of
@@ -2125,14 +2126,10 @@ export interface CiLessonEfficacy {
  * plan read. A caller supplies lessons parsed from the plan's own `ci_learning_prs` records.
  */
 export function judgeCiLessonEfficacy(
-  corpus: Pick<CiFailureCorpus, "pairs">,
+  corpus: Pick<CiFailureCorpus, "pairs" | "fullyObservedGatePrs">,
   lessons: readonly { findingId: string; gate: string; watermarkPr: number }[],
 ): CiLessonEfficacy[] {
   return lessons.map((lesson) => {
-    // Every pull request in the window that came AFTER the lesson, whatever gate it tripped: the
-    // denominator. Without it, a gate that simply saw no traffic reads identically to one a lesson
-    // actually fixed.
-    const laterPrs = new Set(corpus.pairs.filter((p) => p.pr > lesson.watermarkPr).map((p) => p.pr));
     const recurredPrs = [
       ...new Set(
         corpus.pairs
@@ -2140,8 +2137,17 @@ export function judgeCiLessonEfficacy(
           .map((p) => p.pr),
       ),
     ].sort((a, b) => a - b);
+    // Count this gate's own terminal exposures, never the mere existence of an unrelated later PR.
+    // A definite recurrence remains evidence even when another sha on that PR was unreadable, so
+    // recurrence PRs join the fully-readable denominator instead of being erased by partial data.
+    const laterPrs = new Set([
+      ...corpus.fullyObservedGatePrs
+        .filter((seen) => seen.gate === lesson.gate && seen.pr > lesson.watermarkPr)
+        .map((seen) => seen.pr),
+      ...recurredPrs,
+    ]);
     const verdict: CiLessonEfficacy["verdict"] =
-      laterPrs.size === 0 ? "unmeasurable" : recurredPrs.length > 0 ? "recurred" : "held";
+      recurredPrs.length > 0 ? "recurred" : laterPrs.size > 0 ? "held" : "unmeasurable";
     return { gate: lesson.gate, findingId: lesson.findingId, watermarkPr: lesson.watermarkPr, recurredPrs, laterPrsSeen: laterPrs.size, verdict };
   });
 }
