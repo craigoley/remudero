@@ -38,7 +38,9 @@
 
     `status: blocked` IS THE RETIREMENT RECORD, not a live blocker: `withdrawn` is not a valid task
     status, and W1-T270/W1-T467 establish the in-place tombstone convention. The original rationale,
-    acceptance, falsifier and provenance remain below as the historical record. No replacement task
+    acceptance, falsifier and provenance remain below as the historical record, with the withdrawn
+    acceptance contract moved into `note` so it is preserved without remaining the active contract.
+    No replacement task
     is filed here. If a future operator raises `reviewLanes.max` above `reviewLanes.value`, above-base
     widening becomes reachable again and must earn a fresh task plus a discriminating test at that
     time. This retirement grants no authority to change review lanes, host-worker budget, telemetry
@@ -85,15 +87,27 @@
     raises what the widener HOLDS, but 47% of decisions narrow below base regardless, so the
     committed value cannot deliver three lanes on its own while this stands.
   acceptance:
-    - claim: "an unreadable telemetry sample is distinguished from an unhealthy one, so a stream of missing readings cannot masquerade as observed pressure"
-      proof: "unit test: test/adaptive-review-widener-can-widen.test.ts"
-    - claim: "a sustained window that is healthy on every reading the host CAN supply widens above base_width at least once, with a test that fails if the widening arm is unreachable"
-      proof: "unit test: test/adaptive-review-widener-can-widen.test.ts"
-    - claim: "genuine pressure still narrows — the cpu-pressure arm observed at 75.9% PSI keeps its current behaviour"
-      proof: "unit test: test/adaptive-review-widener-can-widen.test.ts"
-    - claim: "the decision row names whether a refusal came from an OBSERVED reading or an ABSENT one, so this measurement can be re-derived from the ledger without re-reading source"
-      proof: "unit test: test/adaptive-review-widener-can-widen.test.ts"
+    - claim: "W1-T3025 is retired through the repository's structured blocked-task disposition"
+      proof: "grep: retirement: withdrawn in plan/tasks.d/W1-T3025-the-adaptive-review-widener-has-never-widened.yaml"
+    - claim: "the retirement records the checked falsifier instead of deleting the task history"
+      proof: "grep: ARITHMETICALLY UNSATISFIABLE in plan/tasks.d/W1-T3025-the-adaptive-review-widener-has-never-widened.yaml"
+    - claim: "the original rationale and acceptance contract remain in the task record"
+      proof: "grep: ORIGINAL ACCEPTANCE, PRESERVED VERBATIM in plan/tasks.d/W1-T3025-the-adaptive-review-widener-has-never-widened.yaml"
   note: |
+    --- ORIGINAL ACCEPTANCE, PRESERVED VERBATIM ---
+    (1) claim: "an unreadable telemetry sample is distinguished from an unhealthy one, so a stream
+    of missing readings cannot masquerade as observed pressure"; proof: "unit test:
+    test/adaptive-review-widener-can-widen.test.ts".
+    (2) claim: "a sustained window that is healthy on every reading the host CAN supply widens above
+    base_width at least once, with a test that fails if the widening arm is unreachable"; proof:
+    "unit test: test/adaptive-review-widener-can-widen.test.ts".
+    (3) claim: "genuine pressure still narrows — the cpu-pressure arm observed at 75.9% PSI keeps
+    its current behaviour"; proof: "unit test: test/adaptive-review-widener-can-widen.test.ts".
+    (4) claim: "the decision row names whether a refusal came from an OBSERVED reading or an ABSENT
+    one, so this measurement can be re-derived from the ledger without re-reading source"; proof:
+    "unit test: test/adaptive-review-widener-can-widen.test.ts".
+
+    --- ORIGINAL FILING NOTE, PRESERVED VERBATIM ---
     THE FALSIFIER IS THE ZERO. If a `review.capacity` row with `effective_width` greater than
     `base_width` exists anywhere in the ledger union, the premise above is wrong and this closes
     without implementation. Re-derive before building: the query is
