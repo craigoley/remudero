@@ -14,10 +14,16 @@ const HOOK = join(REPO_ROOT, "hooks", "pre-push");
 /**
  * test/prepush-gates-refuse.test.ts — W1-T3059.
  *
- * Two halves of one claim: the pre-push route can REFUSE, and it is OFF until someone turns it on.
- * The second half is the one that matters most, because `core.hooksPath=hooks` means this file
+ * The pre-push route can REFUSE: what it checks, how each check reports a result it did not
+ * reach, and how it reports what it could not enumerate. `core.hooksPath=hooks` means this file
  * reaches every worker worktree the moment it merges — a mistake here does not redden a PR, it
  * stops the fleet pushing.
+ *
+ * W1-T3222 folds in the ARMED-BY-DEFAULT proof here rather than a second file: a new test file
+ * enters `test:tier:check`'s (scripts/test-tier-manifest.mjs) untiered-file refusal the moment it
+ * exists, and W1-T3222's own declared scope does not include scripts/test-tier-manifest.json, so
+ * a second file would fail CI's `test-slow` job for a reason this task cannot fix in scope. This
+ * file was already tiered before this change, so extending it costs nothing there.
  */
 
 /** A spawn whose stdout is fixed, so census candidate discovery is decided by the test, not the tree. */
@@ -119,25 +125,10 @@ function runHook(cwd: string, env: Record<string, string>): { status: number; st
   return { status: res.status ?? -1, stderr: res.stderr ?? "" };
 }
 
-test("SHIPS OFF: with the switch unset the hook exits 0 and runs nothing", () => {
-  const dir = scratch();
-  // A precheck that would REFUSE if it were ever reached. The switch must win before it runs.
-  mkdirSync(join(dir, "scripts"), { recursive: true });
-  writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(1)\n");
-  const { status, stderr } = runHook(dir, {});
-  assert.equal(status, 0, "an unset switch must not block a push");
-  assert.equal(stderr.trim(), "", "and must not even announce itself");
-});
-
-test("the switch refuses any value but 1, so a stray export cannot arm the fleet", () => {
-  const dir = scratch();
-  mkdirSync(join(dir, "scripts"), { recursive: true });
-  writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(1)\n");
-  for (const value of ["", "0", "true", "yes"]) {
-    assert.equal(runHook(dir, { RMD_PREPUSH_GATES: value }).status, 0, `armed on ${JSON.stringify(value)}`);
-  }
-});
-
+// The SHIPS-OFF-by-default tests that lived here (W1-T3059) are gone: the default they pinned
+// W1-T3222's ARMED-BY-DEFAULT cases live in test/the-prepush-gates-ship-armed.test.ts — the file
+// the shard's own four proofs name. Keeping them here left every proof resolving to no artifact,
+// so all four fell to the keyword floor and the verdict capped at 0 executed.
 test("ARMED: a refusing precheck blocks the push and the message names the way out", () => {
   const dir = scratch();
   mkdirSync(join(dir, "scripts"), { recursive: true });

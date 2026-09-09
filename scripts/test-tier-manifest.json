@@ -1175,6 +1175,7 @@
     "test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts": 1791,
     "test/the-overrun-gate-does-not-read-the-generated-ledger-table.test.ts": 788,
     "test/the-pre-admission-freshness-check-starves-dispatch.test.ts": 1120,
+    "test/the-prepush-gates-ship-armed.test.ts": 0,
     "test/the-project-layer-follows-the-target-repo.test.ts": 2462,
     "test/the-prompt-manifest-reaches-a-reader.test.ts": 1362,
     "test/the-proof-debt-producer-reaches-production.test.ts": 843,
