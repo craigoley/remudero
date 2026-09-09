@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { appendLedger } from "./ledger.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 import { readLedgerLines } from "./status.js";
 import { alertOriginId, alertTaskId, priorEscalatedAlertIds, type AlertSeverity, type RawAlert } from "./ops.js";
 
@@ -174,6 +175,14 @@ export function loadAlertPolicy(path: string): AlertPolicy {
     throw new AlertPolicyError(`alert-policy.yaml is not valid YAML (${path}): ${String(err)}`);
   }
   return validateAlertPolicy(raw);
+}
+
+/** {@link loadAlertPolicy}, resolved for a target root through {@link resolveRepoLayout}
+ *  (W1-T2922) rather than a caller re-deriving the house-literal join itself — the layout-aware
+ *  counterpart callers reach for once they hold a root rather than an already-built path. House
+ *  defaults resolve to today's exact path, so the house behaves unchanged. */
+export function loadAlertPolicyForRepo(repoRoot: string): AlertPolicy {
+  return loadAlertPolicy(resolveRepoLayout(repoRoot).alertPolicy);
 }
 
 // ── The pure decision ────────────────────────────────────────────────────────
