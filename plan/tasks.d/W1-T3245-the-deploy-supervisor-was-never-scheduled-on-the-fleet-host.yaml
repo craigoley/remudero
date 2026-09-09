@@ -66,6 +66,34 @@
     and a scheduled supervisor that cannot see drift reports `up-to-date` over a stale image
     forever. W1-T3240 is already built; this is the half that makes it reachable on Azure.
 
+    OPERATOR RULING 2026-09-09, AFTER RESEARCH: FOLD IT INTO THE WATCHDOG'S EXISTING TICK, DO NOT
+    ADD A SECOND TIMER. The controller literature is unambiguous that reconciliation must be
+    LEVEL-TRIGGERED — a loop that reads observed state and converges, correct "regardless of how
+    many intermediate updates were missed", with edge-triggering permitted only as an optimisation.
+    The watchdog ALREADY IS that loop: every five minutes it observes "is the daemon running" and
+    converges. Asking "is the image current" is the SAME loop asking a second question about the
+    same desired state, and a separate timer would be a second reconciler over one subject — the
+    thing the pattern exists to avoid.
+
+    TWO DECISION FUNCTIONS IN ONE TICK, NEVER ONE WEIGHTED SCORE. A restart and a recycle are
+    different in KIND, not degree:
+      RESTART  mount-side, tens of commits a day, seconds, no preconditions, costs churn when wrong,
+               and is ALREADY HANDLED — the daemon's own freshness check exits 75 and the entrypoint
+               re-fetches. This task does not touch it.
+      RECYCLE  image-side, ~1 baked-path commit a day, minutes, and gated on credentials, an idle
+               fleet, a successful pull and a digest match — every one of which took the fleet down
+               once, which is why `recycle-container.sh`'s four refusals exist. Costs stranded
+               workers and a wrong image when wrong.
+    Collapsing them into one pressure number would average a cheap frequent action with an
+    expensive rare one, and the number would be DOMINATED BY THE CHEAP FREQUENT SIGNAL — precisely
+    backwards. THE THRESHOLD IS NOT THE DIFFERENTIATOR EITHER: one baked-path commit already
+    warrants a recycle, and there is no useful "accumulate five" rule when baked commits are rare
+    and each one matters. What differs is which REFUSALS must pass first.
+
+    WHERE THE PRESSURE INSTINCT DOES APPLY IS DEFERRAL, AND THAT MACHINERY EXISTS. `daemonIsIdle`
+    plus `DEPLOY_IDLE_DEFER_CEILING_MS` already say "wait for quiet, but not forever". Nothing new
+    is needed and nothing new should be invented.
+
     WHY A SYSTEMD TIMER AND NOT A GITHUB ACTION. `acr-build.yml` states that it stores "no Azure
     secrets in the repo; only the non-sensitive client/tenant/subscription IDs are repo vars", and
     that property is deliberate. Deploying from Actions needs a credentialed path INTO the VM,
@@ -90,9 +118,9 @@
     session to queue behind that task.
 
   acceptance:
-    - claim: "the renderer emits a deploy-supervisor service and timer alongside the units it already writes"
-      proof: "unit test: W1-T3245: the renderer emits a deploy supervisor unit and timer"
-    - claim: "the rendered unit invokes the supervisor rather than restarting the daemon directly, so the idle gate, health check and rollback all still apply"
-      proof: "unit test: W1-T3245: the deploy unit runs the supervisor, never a bare restart"
-    - claim: "the STOP lever still outranks it, so a halted fleet is never deployed into"
-      proof: "unit test: W1-T3245: a STOP marker refuses the scheduled deploy"
+    - claim: "a healthy fleet's watchdog tick evaluates a recycle through the supervisor, and no second timer is rendered"
+      proof: "unit test: W1-T3245: the watchdog tick evaluates a recycle and no second timer exists"
+    - claim: "the tick acts on IMAGE drift only — mount-side staleness stays the daemon's own freshness restart"
+      proof: "unit test: W1-T3245: the tick recycles for image drift and never for mount drift"
+    - claim: "a daemon that is DOWN is still revived from the cached image, never pulled into mid-crash-loop"
+      proof: "unit test: W1-T3245: a down daemon is revived from cache, not recycled"
