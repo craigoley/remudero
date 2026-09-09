@@ -38,10 +38,15 @@
     repository. Every timed spawn - the proof spawner, the `npm ci` priming at 120s, the 600s spawn
     beside them - carries a bound that any CPU-bound child can outlive.
   design: |
-    (i) A BOUND THAT CANNOT BE IGNORED. The timeout must escalate to a signal the child cannot
-    handle. SIGTERM first is still right - a well-behaved child deserves the chance to exit cleanly
-    and say why - but it must be followed by SIGKILL, and the wait for the second one must itself be
-    bounded.
+    (i) A BOUND THAT CANNOT BE IGNORED, WHICH ON A SYNCHRONOUS SPAWN MEANS AN UNTRAPPABLE SIGNAL.
+    MEASURED 2026-09-09 with a child that ignores SIGTERM and spins: under `killSignal: "SIGTERM"`
+    the call returned only after 120s, when the child finished on its own; under SIGKILL it returned
+    in 3s, and in 3s again with a grandchild still holding the pipe. A polite-then-forceful
+    escalation is what a reader expects, and this seam CANNOT express it: `execFileSync` sends one
+    signal and then blocks, so escalation needs either an async spawn (this seam is synchronous by
+    contract - `ProofSpawner` returns a string) or a shell `timeout`, which this spawner
+    deliberately avoids. The polite phase is also precisely what failed: a synchronous CPU loop can
+    never run the handler that would honour it.
     (ii) THE VERDICT FOR A KILLED PROOF IS UNCHANGED, and this is the load-bearing constraint. A
     proof stopped by its bound already grades as a timeout/exec error (W1-T2742's ground); this task
     changes WHETHER the bound takes effect, never WHAT a bounded proof scores. A change that turns
@@ -58,8 +63,8 @@
   acceptance:
     - claim: "a child that ignores SIGTERM and spins is still terminated when its bound expires, and the spawner returns rather than blocking"
       proof: "unit test: test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts"
-    - claim: "a well-behaved child still receives the polite signal first and is allowed to exit on its own"
-      proof: "unit test: test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts"
+    - claim: "the bound's signal is recorded with the measurement that chose it, so an untrappable kill is a stated decision rather than a default nobody read"
+      proof: "grep: killSignal in src/lib/review.ts"
     - claim: "a child that finishes well inside its bound is untouched and returns its output unchanged"
       proof: "unit test: test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts"
     - claim: "a grandchild of the spawned process does not survive the bound and keep the pipe open"
@@ -73,14 +78,26 @@
     POSITIVE CONTROL, because "the child is dead" is satisfied by killing everything immediately:
     the suite must ALSO show a fast, well-behaved child completing untouched and returning its
     stdout. A spawner that kills eagerly has traded a hang for a fleet that cannot run a slow proof.
-    SECOND CONTROL: the polite signal must be tried FIRST. A suite that only proves SIGKILL works
-    cannot distinguish this design from one that never lets a child clean up.
+    SECOND CONTROL: a child that exits on its own INSIDE the bound must never be signalled at all,
+    and its stdout must come back byte-identical. Without that arm this design is indistinguishable
+    from one that kills every proof it runs.
     DO NOT raise `proofTimeoutMs` as the remedy. The bound was not too short - it fired correctly.
     A longer bound multiplies the outage instead of ending it.
     DO NOT make a killed proof grade as a FAILED criterion. Design (ii): the verdict semantics for a
     bounded proof are settled elsewhere and a change here that alters them turns every slow test on
     a loaded runner into a false refusal.
   note: |
+    DESIGN (i) WAS CORRECTED AFTER FILING AND BEFORE MERGE, on a measurement rather than an argument:
+    the first draft demanded SIGTERM-then-SIGKILL, which a synchronous spawner cannot express. The
+    probe that settled it is recorded in design (i). A reader should know the escalation was WANTED
+    and refused for a reason, not overlooked.
+    THE COST OF THE UNTRAPPABLE SIGNAL, STATED: a proof killed this way gets no chance to flush a
+    partial diagnostic or clean up a temp dir. That is a real loss, accepted because the alternative
+    is measured at six hours of total fleet stall, and because tmp-hygiene already reaps proof dirs
+    on the next boot.
+    KNOWN RESIDUE, NOT CLOSED HERE: the probe showed a GRANDCHILD survives the kill as an orphan
+    while the orchestrator is correctly unblocked. That is a process leak, not a stall, and killing
+    the whole process group needs a group-aware spawn this seam does not have.
     Rule 25 CHECKED: `src/lib/review.ts` is ordinary src, not an instrument surface.
     RISK IS HIGH BECAUSE THIS CODE RUNS UNATTENDED AND KILLS PROCESSES. A kill that is too eager
     breaks every slow proof on a loaded runner; one that reaches the wrong process group could
