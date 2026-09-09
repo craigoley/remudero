@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 // @ts-expect-error — this executable .mjs intentionally has no declaration output; the complete
 // seam consumed by this TypeScript suite is declared immediately below rather than left as any.
-import * as workflowGuard from "../scripts/workflow-guard-mutation-check-ratchet.mjs";
+import * as workflowGuard from "../scripts/workflow-guard-mutation-ratchet.mjs";
 
 interface SkipGuard {
   key: string;
@@ -31,7 +31,8 @@ interface GuardResult {
   by: string | undefined;
 }
 
-const { enumerateSkipGuards, mutateGuardLine, ciReadingSuites, classifyGuard } = workflowGuard as {
+const { enumerateSkipGuards, mutateGuardLine, ciReadingSuites, classifyGuard, redCorpus, OWN_SUITE } =
+  workflowGuard as {
   enumerateSkipGuards(text: string): SkipGuard[];
   mutateGuardLine(text: string, guard: SkipGuard): string;
   ciReadingSuites(root?: string): string[];
@@ -42,6 +43,11 @@ const { enumerateSkipGuards, mutateGuardLine, ciReadingSuites, classifyGuard } =
     runSuite?: (suite: string) => { failed: boolean | undefined; out?: string },
     apply?: (guard: SkipGuard, original: string, fn: () => GuardResult) => GuardResult,
   ): GuardResult;
+  redCorpus(
+    suites: string[],
+    runSuite?: (suite: string) => { failed: boolean | undefined; out?: string },
+  ): Array<{ suite: string; why: string }>;
+  OWN_SUITE: string;
 };
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
@@ -153,6 +159,47 @@ test("W1-T3220: a suite that produced NO summary is not read as a pass", () => {
   const [guard] = enumerateSkipGuards(CI_YML);
   const out = classifyGuard(guard, CI_YML, ["test/truncated.test.ts"], () => ({ failed: undefined }), inMemory);
   assert.equal(out.covered, false, "absent totals must never be counted as a suite noticing the mutant");
+});
+
+test("W1-T3220: an already-failing suite makes the corpus RED, because it would make every guard read COVERED", () => {
+  // THE FAILURE THIS RATCHET COMMITTED AGAINST ITSELF. classifyGuard calls a guard covered the
+  // moment any suite fails under the mutant, and cannot tell "failed because of the mutant" from
+  // "was already failing". MEASURED while building this: a stale baseline entry left THIS suite
+  // red, it sorts first in the corpus, and a full re-seed reported "0 uncovered" against a tree
+  // with ten. A vacuous pass, produced by the gate written to refuse vacuous passes.
+  const red = redCorpus(["test/ok.test.ts", "test/broken.test.ts"], (s) => ({ failed: s === "test/broken.test.ts" }));
+  assert.deepEqual(
+    red.map((r) => r.suite),
+    ["test/broken.test.ts"],
+    "an already-failing suite must be named before any mutant is written",
+  );
+  assert.match(red[0].why, /already failing/);
+});
+
+
+test("W1-T3220: a suite that produced no summary makes the corpus RED too, never quietly green", () => {
+  // A killed or timed-out suite proves nothing about the tree, and counting "no totals" as green
+  // is the same mistake one level down from the control itself.
+  const red = redCorpus(["test/truncated.test.ts"], () => ({ failed: undefined }));
+  assert.equal(red.length, 1);
+  assert.match(red[0].why, /no `# fail` summary/);
+});
+
+
+test("W1-T3220: a green corpus produces no refusal, so the control does not block an ordinary run", () => {
+  assert.deepEqual(redCorpus(["test/a.test.ts", "test/b.test.ts"], () => ({ failed: false })), []);
+});
+
+
+test("W1-T3220: this suite is NOT in its own corpus, or it would fake coverage for every guard", () => {
+  // It asserts the guard INVENTORY, so it fails under ANY mutation of ANY guard - including a
+  // correct edit. Left in the corpus it "distinguishes" all sixteen mutants while testing no
+  // behaviour at all. MEASURED: a re-seed with it included read 14 covered / 2 uncovered where the
+  // honest figure was 4 / 10. The general hazard is a purely structural suite over ci.yml's text
+  // reacting to the edit rather than to what the guard does.
+  const corpus = ciReadingSuites(REPO_ROOT);
+  assert.ok(!corpus.includes(OWN_SUITE), `${OWN_SUITE} must not measure itself`);
+  assert.ok(corpus.length > 10, "and excluding it must not empty the corpus");
 });
 
 test("W1-T3220: every baselined guard carries a real recorded reason and still exists in ci.yml", () => {

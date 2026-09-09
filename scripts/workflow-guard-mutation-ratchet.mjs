@@ -17,10 +17,10 @@
 // is UNCOVERED.
 //
 // USAGE:
-//   node scripts/workflow-guard-mutation-check-ratchet.mjs            # gate: non-baselined guards must be COVERED
-//   node scripts/workflow-guard-mutation-check-ratchet.mjs --all      # measure every guard, report only, exit 0
-//   node scripts/workflow-guard-mutation-check-ratchet.mjs --list     # enumerate the guards and exit
-//   node scripts/workflow-guard-mutation-check-ratchet.mjs --seed     # record every currently-UNCOVERED guard
+//   node scripts/workflow-guard-mutation-ratchet.mjs            # gate: non-baselined guards must be COVERED
+//   node scripts/workflow-guard-mutation-ratchet.mjs --all      # measure every guard, report only, exit 0
+//   node scripts/workflow-guard-mutation-ratchet.mjs --list     # enumerate the guards and exit
+//   node scripts/workflow-guard-mutation-ratchet.mjs --seed     # record every currently-UNCOVERED guard
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -29,6 +29,8 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CI_YML = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const BASELINE = join(REPO_ROOT, "scripts", "workflow-guard-mutation-baseline.json");
+/** Excluded from the corpus - see {@link ciReadingSuites}. */
+export const OWN_SUITE = "test/a-ci-skip-guard-can-fire-unconditionally.test.ts";
 
 // A guard is skip-shaped when its block reaches `exit 0` - that is what makes an always-true
 // condition a SILENT PASS rather than a visible failure. The window is deliberately small: a
@@ -98,6 +100,14 @@ export function mutateGuardLine(text, guard) {
 /**
  * The suites that READ the workflow - enumerated the same way, so a suite added tomorrow runs.
  *
+ * THIS RATCHET'S OWN SUITE IS EXCLUDED, and the reason generalises. It asserts the guard
+ * INVENTORY - that every baselined key still exists in ci.yml - so it fails under ANY mutation of
+ * any guard, including a correct edit. Left in, it "distinguishes" every mutant without testing
+ * one behaviour: MEASURED, a re-seed with it in the corpus read 14 covered / 2 uncovered where the
+ * honest figure was 5 / 11. That is the general hazard - a purely STRUCTURAL suite over ci.yml's
+ * text reacts to the edit, not to what the guard does - and it is stated here rather than
+ * detected, because only this one suite is guaranteed to have the property.
+ *
  * `--untracked` IS LOAD-BEARING, not tidiness. `git grep` reads the index, so a suite added in the
  * very commit that adds a guard is INVISIBLE to it until staged - and this check's whole job is to
  * ask whether the new guard is covered, usually by that same new suite. MEASURED while building
@@ -109,7 +119,10 @@ export function ciReadingSuites(root = REPO_ROOT) {
   const out = execFileSync("git", ["-C", root, "grep", "-l", "--untracked", "--", "workflows/ci.yml", "test/"], {
     encoding: "utf8",
   });
-  return out.split("\n").map((l) => l.trim()).filter((l) => l.endsWith(".test.ts"));
+  return out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.endsWith(".test.ts") && l !== OWN_SUITE);
 }
 
 function suiteFails(suite) {
@@ -153,6 +166,27 @@ function withMutant(guard, original, fn) {
  * decision is testable without a four-minute real run -- the seam is the whole reason this is a
  * separate export rather than an inline loop.
  */
+/**
+ * THE POSITIVE CONTROL, AND IT IS NOT OPTIONAL. {@link classifyGuard} calls a guard COVERED the
+ * moment any suite fails under the mutant, and it cannot tell "failed BECAUSE of the mutant" from
+ * "was already failing". So a single red suite anywhere in the corpus makes EVERY guard read
+ * covered and this whole ratchet reports a clean tree it never measured.
+ *
+ * MEASURED while building this, which is why it exists: a stale entry left this ratchet's own
+ * suite red, that suite sorted first in the corpus, and a full re-seed reported "0 uncovered"
+ * against a tree with eleven. A vacuous pass, produced by the gate written to refuse them.
+ *
+ * A run with no `# fail` summary counts as red too: a killed or timed-out suite proves nothing,
+ * and treating "no totals" as green is the same mistake one level down.
+ */
+export function redCorpus(suites, runSuite = suiteFails) {
+  return suites.flatMap((suite) => {
+    const { failed } = runSuite(suite);
+    if (failed === false) return [];
+    return [{ suite, why: failed === undefined ? "produced no `# fail` summary" : "is already failing" }];
+  });
+}
+
 export function classifyGuard(guard, original, suites, runSuite = suiteFails, apply = withMutant) {
   return apply(guard, original, () => {
     for (const suite of suites) {
@@ -185,6 +219,18 @@ export function main(argv) {
   const suites = ciReadingSuites();
   if (suites.length === 0) {
     console.error("workflow-guard-mutation: no ci.yml-reading suites found - every guard would read UNCOVERED for want of a corpus, not for want of coverage. FAILING.");
+    return 1;
+  }
+  // THE CONTROL RUNS FIRST, BEFORE A SINGLE MUTANT IS WRITTEN - see redCorpus.
+  const red = redCorpus(suites);
+  if (red.length > 0) {
+    console.error(
+      "workflow-guard-mutation: REFUSING to measure - the corpus is not green on the UNMUTATED tree:\n" +
+        red.map((r) => `  - ${r.suite} ${r.why}`).join("\n") +
+        "\nA guard is called covered when a suite fails under its mutant, and that cannot be told apart\n" +
+        "from a suite that was already failing. Every guard would read COVERED and this ratchet would\n" +
+        "report a clean tree it never measured. Fix the corpus, then re-run.",
+    );
     return 1;
   }
   const uncovered = [];
@@ -230,6 +276,6 @@ export function main(argv) {
   return 0;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("workflow-guard-mutation-check-ratchet.mjs")) {
+if (process.argv[1] && process.argv[1].endsWith("workflow-guard-mutation-ratchet.mjs")) {
   process.exit(main(process.argv.slice(2)));
 }

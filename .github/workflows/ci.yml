@@ -290,7 +290,7 @@ jobs:
           # baseline in place (MEASURED 2026-09-08, 14 guards over 35 ci.yml-reading suites), so
           # running it four times on every PR would buy nothing at four times the cost.
           if [ "${{ matrix.shard }}" = "1" ] && grep -qxF ".github/workflows/ci.yml" changed-files.txt; then
-            node scripts/workflow-guard-mutation-check.mjs
+            node scripts/workflow-guard-mutation-ratchet.mjs
           else
             echo "workflow-guard-mutation: not shard 1, or ci.yml is not in this diff — the guard population cannot have moved."
           fi

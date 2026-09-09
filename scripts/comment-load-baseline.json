@@ -114,6 +114,8 @@
   "scripts/tracked-source-write-check.mjs": 108,
   "scripts/unwired-gate-check.mjs": 80,
   "scripts/worker-branch-shape.mjs": 250,
+  "scripts/workflow-guard-mutation-baseline.json": 0,
+  "scripts/workflow-guard-mutation-ratchet.mjs": 88,
   "src/lib/account-usage.ts": 180,
   "src/lib/alert-lane.ts": 133,
   "src/lib/analytics-route.ts": 118,

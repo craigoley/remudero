@@ -9,8 +9,14 @@
     "test-slow#1: if [ \"${{ steps.plan-reading.outputs.established }}\" = \"true\" ]; then": {
       "reason": "The duplicate-execution suppressor. Always-skip means the slow tier never runs on any diff -- a real vacuous pass, and the highest-value entry in this file to cover. It needs the same runBash treatment as the `ci` Test step got in W1-T3207."
     },
+    "test-slow#1: if [ \"${{ steps.plan-reading.outputs.class }}\" = \"SOURCE\" ]; then": {
+      "reason": "W1-T3207's test-slow half: on a source diff the slow tier stands down because coverage-ratchet owns the single instrumented run. Its sibling in the `ci` job IS covered, by the push-side case added in #4733; this one has no equivalent, so an always-skip here means the slow tier never runs on any diff and nothing says so. The same runBash treatment closes it."
+    },
     "coverage-ratchet#1: if [ \"$CLASS\" != \"SOURCE\" ]; then": {
       "reason": "W1-T2428's fast lane: plan/docs diffs skip coverage work. Always-skip means a SOURCE PR is certified with no coverage measured at all. test/fast-lane-classifier.test.ts asserts the CLASSIFIER's verdicts, never that this step acts on them, so the two are not connected by any test."
+    },
+    "coverage-ratchet#1: if [ \"$TEST_EXIT\" -ne 0 ]; then": {
+      "reason": "W1-T3207 made coverage-ratchet the surviving test verdict, and this arm carries a failing suite into the job's exit code. An always-true mutant makes it report a failure that did not happen -- LOUD, not silent, so it is the safe direction -- but the inverse is what matters and no test pins either. Enumerated because the block reaches `exit 0`."
     },
     "coverage-ratchet-required#1: [ \"${GITHUB_EVENT_NAME}\" = \"pull_request\" ] || { echo \"coverage-ratchet: push event \u2014 no PR coverage merge required.\"; exit 0; }": {
       "reason": "The push-event bypass on the aggregator's merge step. Its four siblings in the same job ARE covered by test/push-ci-on-main.test.ts; this one is worded differently and that suite's assertion does not reach it. Closing it is a wording or assertion fix, not new machinery."
