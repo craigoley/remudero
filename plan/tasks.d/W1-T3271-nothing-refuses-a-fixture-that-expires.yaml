@@ -1,0 +1,99 @@
+- id: W1-T3271
+  title: "NOTHING REFUSES A TEST FIXTURE THAT WILL EXPIRE — the wall-clock time bomb is a NAMED rule in CLAUDE.md, it has now taken main red twice, and it is enforced by nothing; four more suites carry hardcoded activity stamps that are aged against `Date.now()` by the sweep's 14-day rung"
+  repo: remudero
+  depends_on: ["W1-T3270"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files:
+    - scripts/expiring-fixture-census.mjs
+    - test/expiring-fixture-census.test.ts
+  origin: "operator-session#main-red-clock-boundary-2026-09-09"
+  plan_refs: ["W1-T3270", "W1-T2250", "W1-T2732"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: span`. The script is small; the risk is that a census
+    which cannot see its whole population reports a confident zero, which is the exact defect class
+    CLAUDE.md's "positive control" section exists for. The falsifiers weight that over the feature.
+  rationale: |
+    TWICE NOW, AND THE RULE WAS ALREADY WRITTEN BOTH TIMES. W1-T2250 recorded "a fixed date constant
+    compared against rows stamped at REAL time is a time bomb; the signature is a red beginning at a
+    clock boundary with no diff involved" and put it in CLAUDE.md's "Code traps". On 2026-09-09 a
+    fixture in `test/stale-ci-gate-wiring.test.ts` crossed the sweep's 14-day staleness threshold and
+    took `main` red, blocking every PR in the repo (W1-T3270).
+
+    CLAUDE.md'S OWN PREAMBLE SAYS WHAT TO DO ABOUT THIS, IN AS MANY WORDS: "Nothing in this file is a
+    gate ... a rule stated ONLY here can be violated silently and repeatedly, which is why several of
+    these bullets exist at all. When a rule below turns out to matter, the fix is to make something
+    refuse it — file the task; do not sharpen the wording and call it closed." Sharpening the wording
+    is the one response already proven not to work here.
+
+    THE POPULATION IS REAL AND MEASURED, NOT HYPOTHETICAL. `git grep -o 'lastActivityAt: "20' -- test/` returns
+    97 hardcoded stamps across 38 files. (An earlier reading of "20 across 12" was a `head -20`
+    truncation written down as a population -- the count itself demonstrates why this task needs a
+    census rather than a manual sweep.) Of those, five suites drive `runSweep`, whose rung ages
+    them against `Date.now()`:
+
+        test/stale-ci-gate-wiring.test.ts        2026-08-26  — EXPIRED 2026-09-09, took main red
+        test/review-claim-timing.test.ts         2026-09-03  — expires 2026-09-17
+        test/failed-ci-infrastructure-requeue.ts 2026-09-08  — expires 2026-09-22
+        test/a-permanent-diff-refusal-...ts      2026-09-08  — expires 2026-09-22
+        test/cost-anomaly.test.ts                2026-08-16  — already past; passes, so it either
+                                                               wants staleness or overrides it
+
+    That last row is why this must be a census with a REASON, not a blanket ban: a fixture that is
+    deliberately stale is correct, and a check that cannot tell the two apart would be reverted
+    within a week.
+
+  design: |
+    (i) THE CHECK IS "DOES THIS EXPIRE", NOT "IS THIS A DATE". A hardcoded ISO stamp is fine; a
+    hardcoded stamp that some threshold ages against `Date.now()` is the defect. The census pairs
+    each fixture stamp with the threshold it is judged by and reports the DATE IT GOES RED.
+
+    (ii) IT MUST FAIL BEFORE THE BOUNDARY, NOT AT IT. A check that goes red the same hour the suite
+    does has bought nothing. Report any fixture whose expiry is inside a margin — a week — so the
+    failure lands as a named warning with days to spare rather than as a mystery red.
+
+    (iii) A DELIBERATELY STALE FIXTURE OPTS OUT BY SAYING SO. An inline marker naming why the stamp
+    must stay fixed is the carve-out, and the census prints the opted-out set so the exemption is
+    visible rather than silent. `test/cost-anomaly.test.ts` is the first known member and the case
+    that proves the carve-out is required.
+
+    (iv) ⚠ THE CENSUS MUST PROVE IT CAN SEE ITS CORPUS. A sweep like this answers with a confident
+    zero when its glob or its regex misses — the failure mode CLAUDE.md's positive-control section
+    documents four separate instruments for. The suite must include a fixture the census MUST find
+    and one it MUST NOT, and must assert the population COUNT, so a query that silently stops
+    matching fails rather than reporting all-clear. `grep` here is the harness's ugrep wrapper with
+    `-I` injected; use `git grep` or `grep -ar`.
+
+    (v) IT REPORTS, IT DOES NOT REWRITE. Auto-rewriting a fixture's date is the same fix as moving
+    the constant forward, which CLAUDE.md names explicitly as re-arming the bomb.
+
+  acceptance:
+    - claim: "the census finds a fixture whose hardcoded stamp expires against a real threshold and names the date it goes red"
+      proof: "unit test: test/expiring-fixture-census.test.ts"
+    - claim: "it fails a margin BEFORE the boundary rather than at it, so the warning arrives with days to spare"
+      proof: "unit test: test/expiring-fixture-census.test.ts"
+    - claim: "a fixture that is deliberately stale opts out by naming why, and the opted-out set is printed rather than silently skipped"
+      proof: "unit test: test/expiring-fixture-census.test.ts"
+    - claim: "the census asserts its own population count, so a query that stops matching fails instead of reporting all-clear"
+      proof: "unit test: test/expiring-fixture-census.test.ts"
+    - claim: "a fixture with no expiring threshold is not reported, so the check does not ban hardcoded dates as such"
+      proof: "unit test: test/expiring-fixture-census.test.ts"
+
+  falsifier: |
+    Close this without implementation if the sweep's staleness rung and every sibling threshold gain
+    an injected clock the suites pin — no fixture could then age against the wall clock and the
+    census would have an empty population by construction.
+
+    Re-design rather than build if the "which threshold ages this stamp" link cannot be established
+    without hand-maintaining a list: a census whose population is a hardcoded file list is the
+    unwired-instrument shape W1-T2732 measured, and it would go stale exactly like the fixtures it
+    polices.
+
+    Do NOT resolve this by adding another CLAUDE.md bullet. That is the response this task exists
+    because of, and it has now failed twice.
