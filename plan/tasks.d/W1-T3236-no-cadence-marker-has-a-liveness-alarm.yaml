@@ -1,0 +1,66 @@
+- id: W1-T3236
+  title: "NOT ONE OF THE NINE CADENCE MARKERS HAS A LIVENESS ALARM — `state/last-retro.json` sat frozen for six days while the fleet merged 28-40 runs a day, and the only thing that noticed was an operator asking why the board had gone quiet"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: high
+  origin: "operator-session#six-days-of-silence-2026-09-09"
+  plan_refs: ["W1-T3229", "W1-T2988", "W1-T2270"]
+  files: [src/lib/status-board.ts, test/a-cadence-marker-that-stops-advancing-is-reported.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FLEET RAN A SELF-IMPROVEMENT RUNG THAT HAD BEEN DEAD FOR SIX DAYS AND NOTHING SAID SO.
+    `state/last-retro.json` read 2026-09-03T02:24:39.835Z on 2026-09-09. Across that window the
+    fleet completed 28-40 runs a day and merged normally; a day-by-day replay of the retro over the
+    fortnight recovered 426 follow-up candidates it should have been publishing. The condition was
+    found by an operator asking why the board had gone quiet, which is not a monitoring strategy.
+
+    NINE MARKERS, ZERO ALARMS. `last-auto-triage.json`, `last-board-review.json`,
+    `last-ci-learning-cadence.json`, `last-digest-cadence.json`, `last-feedback-docket.json`,
+    `last-measurement-cadence.json`, `last-retro.json`, `last-seen.json` and
+    `last-wipe-test-cadence.json` are written by their rungs. MEASURED: `grep -c` for any of the
+    cadence marker names in `src/lib/status-board.ts` reads **0**, and no code anywhere compares any
+    of their ages against a threshold. The one machinery that looks like it does is not it.
+
+    THE LATCH TABLE IS NOT THIS, AND MISTAKING IT FOR THIS IS THE TRAP. `STATIC_LATCHES`
+    (status-board.ts) reads marker JSON and computes `markerAgeMs`, so a reader skimming for
+    "does anything watch a marker's age" finds a yes. It watches OPERATOR LEVERS — STOP, PAUSE,
+    DEPLOY_AUTO — the files a human creates to hold the fleet, where AGE is context for a decision
+    already taken. Not one cadence marker is in that table. And its loop opens
+    `if (!fs.existsSync(path)) continue`, which is right for a latch (absent = no hold) and exactly
+    wrong for a cadence marker, where absent means the rung has NEVER FIRED — the loudest state
+    there is, rendered as silence.
+
+    THE THRESHOLD MUST COME FROM EACH RUNG'S OWN CADENCE, NOT FROM ONE NUMBER. `plan/policy.yaml`
+    already declares `minIntervalMinutes` per rung (`measurementCadence`, `digestCadence`,
+    `boardReview`, the wipe-test row, `retro`). A marker is stale when it is older than a MULTIPLE
+    of the interval its own rung is paced by — so a six-hourly rung and a daily one are judged on
+    their own terms and a policy edit moves the alarm with the rung. A single global age would fire
+    on the healthy slow rung and stay silent on the dead fast one, which is this repo's recurring
+    defect wearing the opposite face.
+
+    ABSENT IS A THIRD STATE AND MUST NOT COLLAPSE INTO EITHER. `fresh`, `stale` and `never fired`
+    are three different operator actions. Reporting a never-fired rung as stale sends someone
+    looking for a regression in a rung that has no history; skipping it, as the latch loop does,
+    reports a dead rung as nothing at all.
+
+    WHY THE STATUS BOARD. It is the surface an operator already reads, it already holds
+    `markerAgeMs` and the latch-row shape this reuses, and it is generated where the ledger row can
+    be written beside it. This adds a table, not a mechanism, and it schedules nothing.
+
+    SCOPE, STATED. This REPORTS. It does not page anyone, and it does not restart a dead rung. A
+    push-style escalation is a separate task and this one does not pretend to it — the honest claim
+    is that the six-day silence becomes visible on the surface an operator opens, and a row in the
+    ledger the heartbeat watch already reads.
+
+  acceptance:
+    - claim: "a cadence marker older than a multiple of its own rung's interval is reported stale, naming the marker and its age"
+      proof: "unit test: W1-T3236: a marker older than its own rung's interval is reported stale"
+    - claim: "a marker that has NEVER been written is reported as never-fired, never skipped and never merged into stale"
+      proof: "unit test: W1-T3236: an absent marker is reported never-fired, not skipped"
+    - claim: "a rung paced slowly is judged on its own interval, so one global age cannot fire on it"
+      proof: "unit test: W1-T3236: a slow rung within its own interval is fresh while a fast one at the same age is stale"
