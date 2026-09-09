@@ -1,0 +1,78 @@
+- id: W1-T3232
+  title: "THE FORWARD-REFERENCE CARVE-OUT IS ASYMMETRIC: the `grep:` half gates on a plan-only head and the `unit test:` half does not, so an IMPLEMENTATION PR whose proof names a test file it never built is excused and falls to the keyword floor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: "operator-session#4770-shipped-without-the-file-its-own-proof-named-2026-09-09"
+  plan_refs: ["W1-T456", "W1-T2737", "W1-T72"]
+  files: [src/lib/review.ts, test/the-forward-reference-carve-out-is-asymmetric.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    TWO SIBLING BRANCHES IN `judgeCriterion` (src/lib/review.ts) DECIDE THE SAME QUESTION AND ONLY
+    ONE OF THEM ASKS THE HEAD WHAT KIND OF PR THIS IS.
+
+    W1-T456 built the carve-out for `unit test:`: an exact-path proof whose target is ABSENT on the
+    head but DECLARED by this diff's own plan shard is a FORWARD REFERENCE, not a failure. Its four
+    conditions are `kind === "test"`, `!nameFiltered`, the path is in the shard's `files:`, and the
+    file does not exist. It exists because on a FILING PR — a plan-only head — spawning
+    `node --test` at an absent path exits nonzero, which the branch below reads as `executed_fail`,
+    the hard block that made a filing unrepairable.
+
+    W1-T2737 later built the same carve-out for `grep:`, and gave it a FIFTH condition:
+    `execCtx.planOnlyDiff === true`. The comment on that line states the reason in as many words —
+    "`planOnlyDiff` is the filing-scope half". The `unit test:` half was never given it.
+
+    SO THE CARVE-OUT FIRES ON AN IMPLEMENTATION PR, WHICH IS PRECISELY WHERE IT MUST NOT.
+    On a head that changes source, a `unit test:` proof naming a declared-but-absent test file is
+    not a forward reference to work not yet built. It is work the PR claimed and did not build. The
+    criterion is excused, `proof_exec` reads `not_yet_built`, and the verdict falls back to the
+    KEYWORD FLOOR — which the body's own prose satisfies, because the body describes the work.
+
+    MEASURED, #4770 (2026-09-09). W1-T2925 declared `test/measurement-cadence-delta.test.ts` in
+    `files:` and its second criterion proved itself with `unit test:
+    test/measurement-cadence-delta.test.ts`. The implementation shipped the behaviour into
+    `test/measurement-cadence.test.ts` under a different filename and never created the declared
+    file. The mechanical gate PASSED it — "matched 5/5 proof keywords ... a forward reference to
+    work not yet built, not a failure; not executed, keyword floor applied". Only the LLM
+    reviewer's semantic downgrade stopped it, and that is the slow, non-deterministic path: the
+    deterministic half had already said yes. The file was written afterwards, by hand, and the two
+    cases the shard's own rationale described — first fire null, identical window zero — turned out
+    never to have been written at all.
+
+    THE FIX IS THE FIFTH CONDITION, AND SYMMETRY IS THE ARGUMENT. Same situation, same dialect
+    family, same head shape, so the same verdict: on a non-plan-only head the proof executes, finds
+    nothing, and grades `executed_fail` exactly as the `grep:` half already does today. This is not
+    a new policy; it is the policy W1-T2737 already ratified, applied to the branch it was not
+    applied to.
+
+    THE COST IS REAL AND IS STATED UP FRONT. A task deliberately SPLIT across two PRs, whose first
+    PR changes source but leaves a declared test file for the second, will now BLOCK on that first
+    PR where today it passes with an advisory. The review's own "Untouched declared scope" note
+    already tells an author what to do — "If the declaration was wrong, narrow the task's `files:`"
+    — and rule 15 already pushes one shard toward one implementation PR. This makes that guidance
+    binding on the implementation head only; a filing PR is untouched, which is the whole point of
+    the carve-out and is a criterion below.
+
+    ONE NAMED CONDITION, NOT A SECOND COPY. The fix binds `filingScopeHead` once and both halves
+    read it. Open-coding `execCtx.planOnlyDiff === true` a second time would leave the asymmetry
+    one edit away from returning, and this shard exists because that is exactly what happened when
+    W1-T2737 added the condition to one branch and not its sibling.
+
+    WHY NOT A SOFTER GRADE. A third outcome that neither blocks nor floors would leave the
+    deterministic gate saying "I cannot judge this" on a criterion whose proof is simply not
+    satisfiable at this head — and this repo's recorded failure mode is precisely a gate that
+    answers something other than what it was asked. `executed_fail` is the honest reading: the
+    proof ran and did not pass.
+
+  acceptance:
+    - claim: "on a head that changes source, a unit-test proof naming a declared-but-absent file fails rather than being excused"
+      proof: "unit test: W1-T3232: an implementation head does not get the forward-reference carve-out"
+    - claim: "on a plan-only head the carve-out still applies, so a filing PR remains repairable"
+      proof: "unit test: W1-T3232: a plan-only head still gets the forward-reference carve-out"
+    - claim: "both dialect halves read the head's filing scope from ONE named condition, not two open-coded copies"
+      proof: "grep: filingScopeHead in src/lib/review.ts"
