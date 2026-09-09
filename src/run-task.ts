@@ -21368,15 +21368,18 @@ async function retroCommand(
   // 270MB corpus and SIGABRT'd the subprocess on every fire from 2026-09-03 onward. The marker
   // resolution above was moved ABOVE this read to supply the window — it is a pure file read, and
   // failing a corrupt marker before ~60s of decompression is strictly better ordering besides.
+  // ONE clock read for this whole block: the window and the row id below must agree, and two
+  // separate reads straddling a ~60s decompression would not.
+  const retroReadStartedMs = Date.now();
   const retroLedgerRead = await readRetroLedgerNdjson(dirname(ledgerPath), {
-    sinceTs: retroLedgerWindowSince(marker?.ts, Date.now()),
+    sinceTs: retroLedgerWindowSince(marker?.ts, retroReadStartedMs),
   });
   const ledgerNdjson = retroLedgerRead.ndjson;
   if (retroLedgerRead.droppedRows > 0) {
     // NEVER SILENT. The budget kept the newest rows and discarded older ones; the retro is
     // reasoning over less than its own window and both the ledger and the report must say so.
     appendLedger(ledgerPath, {
-      run_id: `RETRO-${Date.now()}`,
+      run_id: `RETRO-${retroReadStartedMs}`,
       task_id: "RETRO",
       step: "retro.ledger_read.truncated",
       since_ts: retroLedgerRead.sinceTs,
