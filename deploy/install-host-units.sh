@@ -27,6 +27,13 @@
 #                              dead for three hours while PRs piled up green and unreviewed.
 #   rmd-reap-stray.*           a leaked ad-hoc container spawned 158 nested daemons and held ~90% of
 #                              a core; load hit 9.5 and sshd could not complete a handshake.
+#   rmd-deploy.*               W1-T3245: nothing on this host ever PULLED. The launcher reaches
+#                              `docker run` with no `docker pull`, so a watchdog revival recreates
+#                              the container from the cached image — correct during a crash loop,
+#                              and it means a published image can sit unfetched indefinitely.
+#                              MEASURED 2026-09-09: acr-build published at 11:14Z, the container
+#                              (revived 10:15Z) still ran the 09-06 build, and the commit it was
+#                              missing was the repair for that morning's 7h32m outage.
 #
 # THE LAUNCHER'S FOUR GUARDS ARE LOAD-BEARING AND A PORT THAT DROPS ANY OF THEM IS WORSE THAN NONE:
 #   * refuses when state/STOP exists            — no timer or boot unit may undo a deliberate stop
@@ -318,6 +325,56 @@ WantedBy=timers.target
 EOF
 }
 
+render_deploy_service() {
+  cat <<EOF
+[Unit]
+Description=Remudero deploy supervisor (one cycle: fast-forward + recycle when the fleet is idle)
+# W1-T3245 — THE DELIBERATE DEPLOY PATH, SEPARATE FROM THE WATCHDOG ON PURPOSE. The watchdog's
+# launcher reaches \`docker run\` with no \`docker pull\`, so a revival recreates the container from
+# the LOCALLY CACHED image — which is right: adopting a freshly built, untested image mid-crash-loop
+# is the wrong instinct, and the known-good cached image is what a recovery wants. Nothing else on
+# this host ever pulled. MEASURED 2026-09-09: acr-build published a new image at 11:14Z; the
+# container, created by a watchdog revival at 10:15Z, still ran the 09-06 build, and the commit it
+# was missing was the repair for that morning's 7h32m outage.
+Requires=docker.service
+After=docker.service network-online.target
+RequiresMountsFor=/mnt/rmd ${STATE_DIR}
+
+[Service]
+Type=oneshot
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+WorkingDirectory=${STATE_DIR}/remudero
+# THE STOP LEVER OUTRANKS THIS UNIT, exactly as it outranks the launcher. ExecCondition SKIPS the
+# unit (never fails it) when state/STOP exists, so a deliberately halted fleet is not deployed into
+# and the timer does not accumulate failures while an operator holds it down. Enforced HERE rather
+# than in decideDeployTrigger, whose STOP semantics are pinned by recon-GF and are not this task's
+# to change.
+ExecCondition=/bin/sh -c '! [ -e ${STATE_DIR}/state/STOP ]'
+# The SUPERVISOR, never a bare restart: rmd deploy-run owns the idle gate, the health check and the
+# rollback, and reaches deploy/recycle-container.sh — which pulls, and REFUSES on a failed pull
+# rather than starting whatever is cached (the 2026-08-18 incident).
+ExecStart=${STATE_DIR}/remudero/bin/rmd deploy-run
+EOF
+}
+
+render_deploy_timer() {
+  cat <<'EOF'
+[Unit]
+Description=Deploy-supervisor cadence — the watchdog revives, this one deploys
+
+[Timer]
+# Slower than the watchdog's five minutes on purpose: reviving a dead fleet is urgent, adopting a
+# new image is not, and every fire costs a pull plus an idle-gate wait.
+OnBootSec=15min
+OnUnitActiveSec=30min
+Unit=rmd-deploy.service
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
 # path : renderer : mode
 UNITS="
 ${LAUNCHER}:render_launcher:0755
@@ -327,6 +384,8 @@ ${UNIT_DIR}/rmd-fleet-watchdog.service:render_watchdog_service:0644
 ${UNIT_DIR}/rmd-fleet-watchdog.timer:render_watchdog_timer:0644
 ${UNIT_DIR}/rmd-reap-stray.service:render_reaper_service:0644
 ${UNIT_DIR}/rmd-reap-stray.timer:render_reaper_timer:0644
+${UNIT_DIR}/rmd-deploy.service:render_deploy_service:0644
+${UNIT_DIR}/rmd-deploy.timer:render_deploy_timer:0644
 "
 
 drift=0

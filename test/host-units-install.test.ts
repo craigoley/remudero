@@ -50,7 +50,10 @@ test("W1-T2877: check mode reports missing units and changes nothing", () => {
 
     const install = run(["--install"], {}, root);
     assert.equal(install.status, 0, `install failed: ${install.stderr}`);
-    assert.equal(countFiles(root), 7, "install must render all seven units");
+    // W1-T3245 added rmd-deploy.service + .timer — the deliberate deploy path, which no unit on
+    // this host provided. The count is asserted rather than ranged so a unit lost in a refactor is
+    // a red test, which is the whole reason it was written as a count.
+    assert.equal(countFiles(root), 9, "install must render all nine units");
 
     const after = run([], {}, root);
     assert.equal(after.status, 0, "check after install must be clean");
@@ -213,6 +216,93 @@ test("W1-T3233: a zero exit and a varied history report nothing", () => {
     // `none` is what docker inspect prints for a container that does not exist — a first boot, not
     // a crash. It must not be counted as a repeating exit code.
     assert.equal(checkCrashLoop(launcher, Array(8).fill(revive("none")), root), "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T3245: the deploy supervisor, which this host never had ───────────────────────────────
+//
+// MEASURED 2026-09-09. `acr-build.yml` fired on #4785's merge and published a new image at 11:14Z.
+// The running container was created at 10:15:01.930Z by a watchdog revival (the revival log
+// carries `revive ... prev_exit=1` at 10:15:01Z), and its own /etc/rmd-build-sha still read
+// c6baa842 — the 09-06 build. The commit it was missing was the repair for that morning's 7h32m
+// outage.
+//
+// NOTHING ON THIS HOST EVER PULLED. `rmd-relaunch.sh` reaches `docker run` with no `docker pull`,
+// so every revival recreates from the cached image — and that is RIGHT: adopting a freshly built,
+// untested image mid-crash-loop is the wrong instinct. `deploy/recycle-container.sh` does pull and
+// refuses on a failed pull, but its only executing caller is deployer.ts's recycle backend, via
+// `rmd deploy-run`, and nothing under /etc/systemd/system, /etc/cron* or root's crontab invoked it.
+// The gap was the trigger, not the tool.
+
+test("W1-T3245: the renderer emits a deploy supervisor unit and timer", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-deploy-"));
+  try {
+    assert.equal(run(["--install"], {}, root).status, 0);
+
+    const service = readFileSync(join(root, "systemd", "rmd-deploy.service"), "utf8");
+    const timer = readFileSync(join(root, "systemd", "rmd-deploy.timer"), "utf8");
+
+    assert.match(service, /\[Service\]/, "the service must render");
+    assert.match(timer, /\[Timer\]/, "the timer must render");
+    assert.match(timer, /Unit=rmd-deploy\.service/, "the timer must drive THIS service");
+    assert.match(timer, /WantedBy=timers\.target/, "it must be installable as a timer");
+
+    // Slower than the watchdog's five minutes, deliberately: reviving a dead fleet is urgent,
+    // adopting a new image is not, and each fire costs a pull plus an idle-gate wait.
+    assert.match(timer, /OnUnitActiveSec=30min/);
+
+    // A second state root must produce a different unit — the path comes from the input, never a
+    // constant baked into the rendered file (the same property the launcher is asserted for).
+    const other = mkdtempSync(join(tmpdir(), "rmd-hostunits-deploy-alt-"));
+    try {
+      assert.equal(run(["--install"], { RMD_STATE_DIR: "/srv/other-fleet" }, other).status, 0);
+      assert.match(readFileSync(join(other, "systemd", "rmd-deploy.service"), "utf8"), /\/srv\/other-fleet/);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3245: the deploy unit runs the supervisor, never a bare restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-deploy-verb-"));
+  try {
+    assert.equal(run(["--install"], {}, root).status, 0);
+    const service = readFileSync(join(root, "systemd", "rmd-deploy.service"), "utf8");
+
+    // `rmd deploy-run` owns the idle gate, the health check and the rollback, and reaches
+    // recycle-container.sh — which PULLS and refuses on a failed pull. A unit that shortcut to
+    // docker or to the launcher would skip every one of those and re-run from the cached image,
+    // which is precisely the state this task exists to end.
+    assert.match(service, /ExecStart=.*\/bin\/rmd deploy-run$/m);
+    assert.doesNotMatch(service, /ExecStart=.*docker /, "never a bare docker call");
+    assert.doesNotMatch(service, /ExecStart=.*rmd-relaunch\.sh/, "never the watchdog's launcher");
+    assert.doesNotMatch(service, /ExecStart=.*recycle-container\.sh/, "the supervisor reaches it, not this unit");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3245: a STOP marker refuses the scheduled deploy", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-deploy-stop-"));
+  try {
+    assert.equal(run(["--install"], { RMD_STATE_DIR: "/srv/fleet" }, root).status, 0);
+    const service = readFileSync(join(root, "systemd", "rmd-deploy.service"), "utf8");
+
+    // The launcher's first guard is "refuses when state/STOP exists", and a scheduled deploy must
+    // not become the back door around it. ExecCondition SKIPS the unit rather than failing it, so a
+    // held-down fleet does not accumulate unit failures for as long as an operator holds it.
+    assert.match(service, /^ExecCondition=/m, "the STOP guard must be an ExecCondition, not a failure");
+    assert.match(service, /state\/STOP/, "it must test the STOP marker under the state root");
+    assert.match(service, /!\s*\[ -e \/srv\/fleet\/state\/STOP \]/, "the path comes from the state root, not a constant");
+    // And the guard must run BEFORE the supervisor, or it guards nothing.
+    assert.ok(
+      service.indexOf("ExecCondition=") < service.indexOf("ExecStart="),
+      "ExecCondition must precede ExecStart",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

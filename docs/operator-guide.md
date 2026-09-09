@@ -1073,7 +1073,7 @@ container lifecycle was exercised by running it — proof 3 is a separate, delib
 operator-timed action, because taking an unscheduled reboot of a live fleet host is exactly the
 kind of decision this script does not make on its own.
 
-### Host units: the launcher, boot unit, watchdog and reaper (W1-T2877)
+### Host units: the launcher, boot unit, watchdog, reaper and deploy supervisor (W1-T2877, W1-T3245)
 
 `deploy/install-host-units.sh` provisions everything that makes a VM a **fleet host**, as opposed to
 a machine that merely has the image. Before W1-T2877 all of it was installed by hand and lived in no
@@ -1096,6 +1096,7 @@ the host cannot be run to find out whether it needs running. It reports both **m
 | `rmd-fleet.service` | reboot survival — the daemon runs `--restart=on-failure:5` so a clean STOP is not undone, which also means docker will not restart it after a reboot |
 | `rmd-fleet-watchdog.{service,timer}` | crash recovery — that budget is a **count, not a rate**; on 2026-09-05 six heap aborts exhausted it and the fleet sat dead for three hours |
 | `rmd-reap-stray.{service,timer}` + `rmd-reap-stray-containers` | a leaked ad-hoc container spawned 158 nested daemons and held ~90% of a core |
+| `rmd-deploy.{service,timer}` | **nothing on this host ever pulled.** `rmd-relaunch.sh` reaches `docker run` with no `docker pull`, so a watchdog revival recreates the container from the *cached* image — right during a crash loop, and it means a published image sits unfetched. MEASURED 2026-09-09: `acr-build` published at 11:14Z, the container (revived 10:15Z) still ran the 09-06 build, and the commit it was missing was the repair for that morning's 7h32m outage |
 
 **Host-specific values are inputs, and an unresolvable one is refused rather than guessed** (exit 2).
 `RMD_STATE_DIR`, `RMD_IMAGE`, `RMD_SERVICE_USER`, `RMD_NODE_MAX_OLD_SPACE_MB`, the `RMD_GH_APP_*`
