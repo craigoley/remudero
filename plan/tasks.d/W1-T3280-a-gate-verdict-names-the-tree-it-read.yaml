@@ -1,0 +1,94 @@
+- id: W1-T3280
+  title: "`rmd preflight --ci-parity` SHELLS CI'S COMMANDS AGAINST THE WRONG TREE — three gates are merge-base-relative, so a branch behind `origin/main` gets a GREEN preflight and a RED CI from the identical command, and the verdict never says which tree it read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 14.00
+  files:
+    - src/lib/ci-parity.ts
+    - test/a-gate-verdict-names-the-tree-it-read.test.ts
+  origin: "operator-session#pr-fix-sweep-2026-09-09"
+  plan_refs: ["W1-T294", "W1-T338", "W1-T2630"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 ON PR #4790, THE SAME COMMAND ON TWO TREES:
+
+        branch head, 41 commits behind origin/main ... comment-load-ratchet: OK
+        after merging origin/main (= CI's merge ref) ... comment-load-ratchet: BLOCKED
+                                                        src/run-task.ts: 15530 > ceiling 15521 (+9)
+
+    `rmd preflight --ci-parity` runs on the BRANCH. `actions/checkout` on a `pull_request` event
+    checks out the MERGE commit. For any gate whose verdict is relative to the merge base, those are
+    different questions, and preflight answers the one nobody asked.
+
+    AT LEAST THREE SHIPPED GATES ARE MERGE-BASE-RELATIVE: `comment-load-ratchet` (it re-judges a
+    breaching file against the base and records inherited growth), `diff-coverage` (it grades ADDED
+    lines, derived from `origin/main...HEAD`), and `source-size` (it reports a before/after pair).
+
+    THE FAILURE IS SILENT AND READS AS A PASS, which is what makes it expensive: the operator runs
+    the shipped gate exactly as CLAUDE.md instructs, gets a green run, pushes, and CI is red on a
+    gate that preflight just declared clean. The gate is honest about WHAT it read and silent about
+    WHICH TREE that was — the same shape CLAUDE.md's investigation-discipline item (h) already
+    records for a checkout that is behind, where a budget ratchet printed `OK` against two stale
+    operands and exit 0.
+
+    AND THE RULE IS ALREADY WRITTEN AND ALREADY UNENFORCED. CLAUDE.md (h) says to print
+    `git rev-list --count HEAD..origin/main` beside any gate verdict taken outside a fresh worktree.
+    Nothing does. Per that file's own header — "when a rule turns out to matter, the fix is to make
+    something refuse it; do not sharpen the wording and call it closed" — this is the filing.
+  design: |
+    (i) EVERY PREFLIGHT VERDICT CARRIES ITS BEHIND-COUNT. Resolve `git rev-list --count HEAD..origin/main`
+    once per run and print it in the summary line, beside the sha the report already names. A reader
+    then sees "0 behind" and can trust the run, or sees a number and knows what it did not measure.
+    (ii) A BEHIND TREE IS A NAMED, NON-SILENT OUTCOME — reported, not refused. Refusing would make the
+    gate unusable in the ordinary case (a branch is behind almost immediately on a repo merging ~100
+    PRs a day), and this repo's own recurring defect is "a bound that fires on a HEALTHY condition".
+    So: state it loudly, always, and let the operator decide.
+    (iii) NAME THE MERGE-BASE-RELATIVE ENTRIES SPECIFICALLY. A generic "you are behind" is easy to
+    scroll past. The line must say which of the run's OWN entries are graded against the base, so the
+    warning is about THIS run rather than a general caution.
+    (iv) AN UNRESOLVABLE COUNT IS UNKNOWN, NEVER ZERO. No fetch, a detached head, a shallow clone or
+    an absent `origin/main` must print UNKNOWN and say why. Reading "0 behind" off a failed git call
+    would manufacture exactly the false confidence this task removes — the repo's own law, "a read
+    failure degrades to UNKNOWN, never to zero".
+    (v) NOT IN SCOPE: making preflight FETCH (a gate that mutates refs behind the operator is a
+    different decision), running the entries against a synthesized merge commit, or changing any
+    gate's own logic. This task makes the verdict legible about its tree; rebasing stays the
+    operator's call.
+  acceptance:
+    - claim: "the preflight summary states how many commits the tree is behind origin/main, so a verdict names the tree it was taken on"
+      proof: "unit test: test/a-gate-verdict-names-the-tree-it-read.test.ts"
+    - claim: "a non-zero behind-count names the merge-base-relative entries by name, not a generic caution"
+      proof: "unit test: test/a-gate-verdict-names-the-tree-it-read.test.ts"
+    - claim: "an unresolvable behind-count prints UNKNOWN with its reason and NEVER prints zero"
+      proof: "unit test: test/a-gate-verdict-names-the-tree-it-read.test.ts"
+    - claim: "a behind tree is REPORTED and never refused — the run's exit code is identical with and without the drift"
+      proof: "unit test: test/a-gate-verdict-names-the-tree-it-read.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF preflight already reports the behind-count: read `src/lib/ci-parity.ts`
+    and name the field. MEASURED 2026-09-09: its summary names the sha and the entry verdicts and no
+    count of any kind.
+    PROVE THE DIVERGENCE IS REAL BEFORE BUILDING, because a fix for a condition nobody has observed
+    is this repo's recurring defect: take one branch behind `origin/main` whose merge would breach a
+    merge-base-relative gate, run that gate on the branch and on the merged tree, and require the two
+    verdicts to DISAGREE. Measured on #4790 above: OK versus BLOCKED (+9).
+    THE UNKNOWN ARM NEEDS ITS OWN FIXTURE AND IT IS THE ONE MOST LIKELY TO BE FAKED: a stub whose git
+    call THROWS must print UNKNOWN, and a test that only drives the happy path passes on an
+    implementation that coerces a failure to 0 — which is the defect, not the fix.
+    DO NOT make this a refusal. An advisory that blocks is a bound firing on a healthy population;
+    the exit code must not move.
+    DO NOT add a fetch. `rmd drain --dry-run` already taught this repo that a verb which mutates
+    while claiming to observe is worse than one that admits what it cannot see.
+  note: |
+    Rule 25 CHECKED: `src/lib/ci-parity.ts` is NOT on INSTRUMENT_SURFACE (the surface names
+    `src/lib/(config|settings|mounts).ts`, `(review|task-linter).ts`, `(run-result|status|ledger|flight-judge).ts`,
+    `src/run-task.ts`, `bin/` and the named scripts). The declared files are that module and its own
+    new test, so there is no instrument path in the diff and `detectInstrumentEntanglement` cannot fire.
+    THE OPERATOR-FACING POINT, stated because it is the reason this is worth building: CLAUDE.md
+    tells every session to run this gate before its first push and to trust a green run as "the real
+    signal". That instruction is correct and the gate is good; it is the TREE that is unstated. A
+    session following the rule exactly still shipped a red PR on 2026-09-09.

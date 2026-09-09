@@ -1,0 +1,102 @@
+- id: W1-T3279
+  title: "A HEAD REF THAT NAMES A TASK ID BUT MISSES THE `run-<taskId>-<epochMs>` SHAPE IS EXEMPT FROM THE SHAPE GATE AND CREDITED BY NOTHING — `run-W1-T3166-build` passed `worker-branch-shape` as \"claims no task\", earned zero merge credit by either path, and left a dependent shard permanently undispatchable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files:
+    - scripts/worker-branch-shape.mjs
+    - test/a-near-miss-run-branch-earns-no-credit.test.ts
+  origin: "operator-session#pr-fix-sweep-2026-09-09"
+  plan_refs: ["W1-T2491", "W1-T2530", "W1-T3166", "W1-T3201"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 by running the gate itself:
+
+        $ node scripts/worker-branch-shape.mjs --head-ref run-W1-T3166-build
+        worker-branch-shape: OK — claims no task by trailer or filed shard — exempt from the
+        run-<taskId>-<epochMs> shape check
+        exit 0
+
+    THE GATE READS THE TRAILER AND THE SHARD, NEVER THE BRANCH NAME. `requiresShape` (the gate's own
+    predicate) collects task ids from the `Remudero-Task:` trailer and from any `plan/tasks.d/*.yaml`
+    shard the diff files. A head ref that spells a task id in its OWN NAME claims nothing by that
+    reading, so the gate exempts it — while `findMergedByHeadBranch` (src/lib/status.ts) refuses to
+    credit it because the suffix is not `\d+`.
+
+    SO THE BRANCH SITS IN THE ONE POSITION THAT IS WORSE THAN EITHER ALTERNATIVE: it claims a task to
+    a human reader and claims nothing to every machine. A branch named `fix/whatever` is honestly
+    uncredited; this one LOOKS credited and is not.
+
+    THE MEASURED COST, AND IT IS NOT HYPOTHETICAL. #4640 merged 2026-09-08 on head
+    `run-W1-T3166-build`, implementing W1-T3166's producer wiring. Its body carries ZERO
+    `Remudero-Task:` lines (`grep -acE '^Remudero-Task:'` on the fetched body = 0) and its head fails
+    the `\d+$` test, so BOTH credit paths read nothing. W1-T3166 was later withdrawn as already
+    satisfied, and because `unmetDependencies` (src/lib/plan.ts) counts any dependency that is not
+    MERGED as unmet, a withdrawn dependency can never be satisfied: W1-T3201 declared
+    `depends_on: [W1-T3199, W1-T3200, W1-T3166]` and was PERMANENTLY UNDISPATCHABLE. Confirmed by
+    running the repo's own function rather than by reading the YAML:
+
+        unmetDependencies(plan, W1-T3201) = ["W1-T3199", "W1-T3166"]
+
+    It took a hand-written plan edit (#4842) to remove the edge. That is the real cost of the
+    silence: not one uncredited PR, but a downstream shard that no sweep could ever offer.
+  design: |
+    (i) A HEAD REF THAT SPELLS A KNOWN TASK ID IS A CLAIM. Extend the gate's claim detection with a
+    THIRD source beside the trailer and the filed shard: the head ref itself. If the ref matches
+    `^run-(.+?)-` and that capture resolves to an id the plan actually declares, the branch claims
+    that task and must carry the full `run-<taskId>-<epochMs>` shape.
+    (ii) THE PREDICATE IS A NEAR-MISS DETECTOR, NOT A SECOND NAMING RULE. It fires only when the ref
+    already begins `run-<known-id>-` AND fails `^run-<id>-\d+$`. A branch called `fix/x`, `docs/y` or
+    `chore/z` is untouched — this adds no requirement to name a branch any particular way, it refuses
+    a name that is one character from working and silently is not.
+    (iii) THE ID MUST RESOLVE AGAINST THE PLAN, so a branch like `run-of-the-mill-thing` cannot be
+    read as claiming a task. The gate already loads plan shards for its filing check; this reuses
+    that read rather than adding a second definition of "is this a task id".
+    (iv) THE MESSAGE NAMES BOTH CONSEQUENCES, because either alone reads as pedantry: dispatch cannot
+    see the branch while it is open (`projectPlan` attributes an open PR by `/^run-(.+)-\d+$/` on
+    `headRefName`), and the merge earns no credit if the trailer is also absent. The remedy is one
+    rename before the first push.
+    (v) NOT IN SCOPE: changing `findMergedByHeadBranch`'s regex to accept other suffixes (that would
+    widen what counts as credit, which is the opposite of this task), the plan-only filing exemption
+    W1-T2530 added, or any change to how the trailer is read.
+  acceptance:
+    - claim: "a head ref that names a declared task id with a NON-NUMERIC suffix is refused, and the message names the id it would have credited"
+      proof: "unit test: test/a-near-miss-run-branch-earns-no-credit.test.ts"
+    - claim: "the conforming `run-<taskId>-<epochMs>` shape still passes unchanged, so the gate gains a refusal and loses no acceptance"
+      proof: "unit test: test/a-near-miss-run-branch-earns-no-credit.test.ts"
+    - claim: "a branch whose name resolves to NO declared task id passes under any shape, so ordinary branch names are untouched"
+      proof: "unit test: test/a-near-miss-run-branch-earns-no-credit.test.ts"
+    - claim: "the plan-only filing exemption survives: a shard-filing branch is still exempt from the shape requirement"
+      proof: "unit test: test/a-near-miss-run-branch-earns-no-credit.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF the gate already refuses the near-miss. THE COMMAND, and it must
+    be run rather than reasoned about:
+        node scripts/worker-branch-shape.mjs --head-ref run-<a declared id>-build
+    MEASURED 2026-09-09 against a real declared id: exit 0, "claims no task by trailer or filed
+    shard — exempt". A non-zero exit naming the id closes this task.
+    POSITIVE CONTROL FOR THAT ZERO, because "the gate passed" and "the gate did not look" are
+    indistinguishable from the exit code alone: the SAME invocation with a conforming
+    `run-<id>-<digits>` ref must also pass, and a ref that genuinely claims a task by TRAILER with a
+    wrong shape must still be REFUSED. A gate that passes everything has not been tested.
+    PROVE THE ID RESOLUTION IS LOAD-BEARING: a ref of the form `run-something-else` where
+    `something-else` is not a declared id must PASS. Without that case the new predicate is a
+    prefix match on the word `run-`, which would refuse ordinary branch names.
+    DO NOT widen `findMergedByHeadBranch` to accept `run-<id>-<anything>`. The epoch suffix is what
+    makes the branch unique per attempt; accepting any suffix would credit a merge to a task whose
+    branch was reused, and this task exists to make credit MORE reliable, not looser.
+  note: |
+    Rule 25 CHECKED: `scripts/worker-branch-shape.mjs` is NOT on INSTRUMENT_SURFACE (src/lib/review.ts)
+    — the surface names `scripts/*-ratchet.mjs`, `diff-coverage.mjs`, `diff-class.mjs` and the
+    named check scripts, not this one. The declared files are that script and its own new test, so
+    `detectInstrumentEntanglement` has no product-`src/` path to pair with anything and cannot fire.
+    THE GATE IS RIGHT TODAY AND THIS ONLY ADDS A CASE. W1-T2491 built it and W1-T2530 added the
+    plan-only exemption; neither considered a ref that names an id without the shape. This is a gap
+    in claim DETECTION, not a disagreement with either ruling.
+    WHY THIS IS WORTH A GATE RATHER THAN A CLAUDE.md LINE. The convention is already written down in
+    CLAUDE.md's "Plan and task hygiene" section, and #4640 violated it anyway — which is the file's
+    own stated reason for existing: "a rule stated ONLY here can be violated silently and repeatedly".
