@@ -840,6 +840,112 @@ export function deployFailedConsequence(json: Record<string, unknown> | null): s
 }
 
 /** Ordered by operational urgency — also the order rows render in (most-actionable first). */
+// ── W1-T3236: CADENCE-MARKER LIVENESS ────────────────────────────────────────────────────────
+//
+// `state/last-retro.json` sat frozen from 2026-09-03 to 2026-09-09 while the fleet completed 28-40
+// runs a day and merged normally. A day-by-day replay over that fortnight recovered 426 follow-up
+// candidates the rung should have published. Nothing said so; an operator asked why the board had
+// gone quiet.
+//
+// THE LATCH TABLE BELOW IS NOT THIS, and mistaking it for this is the trap. It reads marker JSON
+// and computes `markerAgeMs`, so skimming for "does anything watch a marker's age" finds a yes —
+// but it watches OPERATOR LEVERS (STOP, PAUSE, DEPLOY_AUTO), where age is context for a decision
+// already taken. No cadence marker is in it, and its `if (!existsSync) continue` is right for a
+// latch and exactly wrong here, where ABSENT means the rung has NEVER FIRED.
+
+/** One periodic rung's marker, and the policy interval its own cadence is paced by. */
+export interface CadenceMarkerDef {
+  /** The rung, as an operator names it. */
+  name: string;
+  /** Marker filename under `<root>/state`. */
+  file: string;
+  /** `plan/policy.yaml` key whose `minIntervalMinutes` paces this rung, when one exists. */
+  policyKey?: string;
+}
+
+/** How many of a rung's OWN intervals may elapse before its marker reads stale.
+ *
+ *  PRIMARY CONTROL for this table — nothing else bounds it. Denominated in the rung's own cadence
+ *  rather than in wall-clock, because ONE global age would fire on the healthy slow rung and stay
+ *  silent on the dead fast one: this repo's bound-fires-on-a-healthy-condition defect wearing the
+ *  opposite face. Three is deliberate slack — a rung that missed one fire is not news; one that has
+ *  missed three has stopped. */
+export const CADENCE_STALE_INTERVALS = 3;
+
+/** Fallback pacing for a rung whose interval `plan/policy.yaml` does not declare. A DAY, which is
+ *  longer than every declared interval, so an undeclared rung is judged conservatively and this
+ *  default can only ever under-report. */
+export const CADENCE_DEFAULT_INTERVAL_MINUTES = 24 * 60;
+
+/** The nine markers periodic rungs write. DATA — a rung added later is a row, not a branch. */
+export const CADENCE_MARKERS: readonly CadenceMarkerDef[] = [
+  { name: "retro", file: "last-retro.json", policyKey: "retro" },
+  { name: "measurement-cadence", file: "last-measurement-cadence.json", policyKey: "measurementCadence" },
+  { name: "digest-cadence", file: "last-digest-cadence.json", policyKey: "digestCadence" },
+  { name: "board-review", file: "last-board-review.json", policyKey: "boardReview" },
+  { name: "wipe-test-cadence", file: "last-wipe-test-cadence.json", policyKey: "wipeTestCadence" },
+  { name: "ci-learning-cadence", file: "last-ci-learning-cadence.json", policyKey: "ciLearningCadence" },
+  { name: "auto-triage", file: "last-auto-triage.json", policyKey: "autoTriage" },
+  { name: "feedback-docket", file: "last-feedback-docket.json" },
+  { name: "last-seen", file: "last-seen.json" },
+];
+
+/** THREE STATES, NEVER TWO. `fresh`, `stale` and `never` are three different operator actions:
+ *  reporting a never-fired rung as stale sends someone hunting a regression in a rung with no
+ *  history, and SKIPPING it — what the latch loop does with an absent file — reports a dead rung as
+ *  nothing at all. */
+export type CadenceMarkerState = "fresh" | "stale" | "never";
+
+export interface CadenceMarkerRow {
+  name: string;
+  state: CadenceMarkerState;
+  /** Age of the marker's own timestamp; absent when the marker is. */
+  ageMs?: number;
+  /** The interval this row was judged against, in minutes — so a reader can see WHY it is stale. */
+  intervalMinutes: number;
+  /** What an operator should take from it. */
+  consequence: string;
+}
+
+/**
+ * Judge every cadence marker against its own rung's interval.
+ *
+ * PURE over injected reads: `readMarkerAgeMs` returns `undefined` for an absent or unparseable
+ * marker, which is the `never` state and never a skip. `intervalMinutesFor` returns the rung's
+ * declared `minIntervalMinutes`, or `undefined` to take {@link CADENCE_DEFAULT_INTERVAL_MINUTES}.
+ */
+export function cadenceMarkerRows(
+  markers: readonly CadenceMarkerDef[],
+  readMarkerAgeMs: (def: CadenceMarkerDef) => number | undefined,
+  intervalMinutesFor: (def: CadenceMarkerDef) => number | undefined,
+): CadenceMarkerRow[] {
+  return markers.map((def) => {
+    const intervalMinutes = intervalMinutesFor(def) ?? CADENCE_DEFAULT_INTERVAL_MINUTES;
+    const ageMs = readMarkerAgeMs(def);
+    if (ageMs === undefined) {
+      return {
+        name: def.name,
+        state: "never",
+        intervalMinutes,
+        consequence: `no ${def.file} has ever been written — this rung has never fired, which is not the same as overdue`,
+      };
+    }
+    const budgetMs = intervalMinutes * 60_000 * CADENCE_STALE_INTERVALS;
+    if (ageMs <= budgetMs) {
+      return { name: def.name, state: "fresh", ageMs, intervalMinutes, consequence: `advanced within ${CADENCE_STALE_INTERVALS} of its own intervals` };
+    }
+    return {
+      name: def.name,
+      state: "stale",
+      ageMs,
+      intervalMinutes,
+      consequence:
+        `${def.file} has not advanced in ${Math.floor(ageMs / 3_600_000)}h against a ${intervalMinutes}-minute cadence ` +
+        `(${CADENCE_STALE_INTERVALS} intervals allowed) — the rung is firing and failing, or not firing`,
+    };
+  });
+}
+
 const STATIC_LATCHES: readonly StaticLatchDef[] = [
   {
     name: "DEPLOY_FAILED",
