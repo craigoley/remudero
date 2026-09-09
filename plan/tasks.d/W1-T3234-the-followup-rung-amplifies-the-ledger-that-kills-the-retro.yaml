@@ -1,0 +1,71 @@
+- id: W1-T3234
+  title: "THE FOLLOW-UP RUNG WRITES 22,082 LEDGER ROWS A DAY CARRYING 80 DISTINCT FACTS, AND THE AMPLIFICATION GROWS AS THE CONTENT SHRINKS — 15:1 on 2026-08-26, 447:1 on 2026-09-05; this is what inflated the corpus that OOM-killed the retro that was supposed to consume it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: high
+  origin: "operator-session#14-day-retro-replay-2026-09-09"
+  plan_refs: ["W1-T3229", "W1-T1013", "W1-T105", "W1-T2833"]
+  files: [src/run-task.ts, src/lib/followup-dedup-census.ts, test/the-followup-rung-amplifies-the-ledger.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    FOUND BY REPLAYING THE RETRO OVER THE LAST FOURTEEN DAYS, ONE DAY AT A TIME (2026-09-09), which
+    is the first time that rung has run since its marker froze on 2026-09-03. The replay was meant
+    to prove the rung works. It does — and the first thing it measured was this.
+
+    THE MEASUREMENT. `report.followups` rows in the ledger union, per calendar day, against the
+    DISTINCT row payloads in the same day:
+
+      day          rows     distinct   amplification
+      2026-08-26   1,330      90          15:1
+      2026-09-01   2,601      67          39:1
+      2026-09-03  15,543      48         324:1
+      2026-09-05  11,622      26         447:1
+      2026-09-07  22,082      80         276:1
+
+    THE CONTENT SHRINKS WHILE THE VOLUME GROWS, WHICH IS THE WHOLE SHAPE. Distinct payloads fall
+    from 90 to 26 while rows rise from 1,330 to 22,082. The rung is not learning more; it is
+    RE-EMITTING a shrinking set of facts more and more times per day. A rate that rises as the
+    signal falls is an amplifier, not a producer.
+
+    IT IS A CLOSED LOOP AND IT EXPLAINS THIS MORNING'S OUTAGE. The follow-up rung inflates the
+    ledger corpus; the corpus OOM-killed the retro (W1-T3229 — 646 rotations, 2.7GB uncompressed,
+    900,813 distinct rows against a 1792MB heap); a dead retro publishes no proposals; unpublished
+    proposals never dedup the follow-ups; so every run re-emits its whole backlog again. The
+    inflection is 2026-09-03 in BOTH series — the day the retro marker froze and the day
+    amplification jumped from 39:1 to 324:1. W1-T3229 bounded the READER so the retro survives the
+    corpus. This is the WRITER, and nothing bounds it.
+
+    WHAT THE HARVEST ACTUALLY YIELDS FROM ALL OF IT. Replaying each day's gather over its own
+    window returned 426 follow-up CANDIDATES across the fortnight — and on the four days with the
+    highest row counts it returned 2, 0, 0 and 6. Twenty-plus thousand rows a day producing single
+    digits of candidate is not a harvest; it is a rung talking to itself.
+
+    NOT A ROTATION ARTEFACT, AND THE CONTROL SAYS SO. The counts are taken over the three-form
+    union (`ledger.ndjson`, `ledger.*.ndjson`, `ledger.*.ndjson.gz`) with `zgrep`, and the DISTINCT
+    figure is `sort -u` over the same corpus in the same invocation — so archive duplication across
+    rotations is already collapsed by the distinct count and cannot be what produces the ratio.
+    A same-invocation positive control: 2026-08-26 through the identical pipeline reads 15:1, so
+    the query can see a low ratio when one exists.
+
+    WHAT THIS TASK MUST NOT DO. It must not silence the rung. The 80 distinct facts on 2026-09-07
+    are real follow-ups from real runs and they are the input the retro's proposal miner exists to
+    consume. The defect is the WRITE RATE, not the content — a fix that drops follow-ups to quiet
+    the ledger destroys the signal the amplification is burying.
+
+    WHERE IT IS WRITTEN. `ctx.log("report.followups", { ...prUrl, entries: followups })` in
+    src/run-task.ts, documented one line above as "present ⇒ ONE `report.followups` ledger line with
+    every typed entry". ONE line per report is the stated contract; 276 identical lines per distinct
+    payload is not that contract being honoured.
+
+  acceptance:
+    - claim: "a follow-up set already recorded unchanged for this run is not written to the ledger a second time"
+      proof: "unit test: W1-T3234: an unchanged follow-up set is written once, not once per pass"
+    - claim: "a CHANGED or NEW follow-up set is still written, so deduplication never costs a real finding"
+      proof: "unit test: W1-T3234: a new or changed follow-up set is still recorded"
+    - claim: "the rung reports its own amplification, so this can never again be discovered only by replaying a fortnight"
+      proof: "grep: followup_write_suppressed in src/run-task.ts"
