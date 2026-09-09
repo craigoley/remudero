@@ -133,6 +133,7 @@
         "askuserquestion-headless-unverified",
         "bashrc-accident",
         "browser-egress-needs-dedicated-profile",
+        "canonical-checkout-lags-by-design",
         "claude-json-tier-keys",
         "daemon-launchd-keepalive-restart",
         "maxbudget-between-turns",
@@ -291,6 +292,9 @@
     "testing": [
       "failures.yaml",
       "testing.yaml"
+    ],
+    "worktrees": [
+      "platform.yaml"
     ]
   }
 }

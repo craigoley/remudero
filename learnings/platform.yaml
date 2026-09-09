@@ -282,3 +282,21 @@
     grep -qa RMD_ENVIRON_PROBE /proc/$$/environ && exit 1 || exit 0'
   src: operator-session token investigation withdrawn 2026-09-04; probe re-derived 2026-09-06
   cited: "2026-09-06"
+- id: canonical-checkout-lags-by-design
+  subsystem: worktrees
+  lifecycle: active
+  files: [ src/lib/worker.ts ]
+  fact: >-
+    The fleet host's canonical checkout (`~/Remudero/repos/remudero`) has a
+    local `main` branch that LAGS origin/main, often by hundreds or thousands of
+    commits, and that is expected — nothing fast-forwards it on a schedule. It
+    is NOT your task's base. `worktreeAdd` runs `git fetch origin` and cuts your
+    worktree from the freshly-read `origin/main` tracking ref, so your base is
+    current no matter how stale that local branch is, and the "canonical
+    checkout is behind" line is an INFORMATIONAL drift warning, not a defect to
+    investigate. MEASURED 2026-09-09: a fortnight of retro follow-ups carried 63
+    worktree and 52 stale mentions out of 426, many of them recon re-deriving
+    exactly this; readings of 181, 1522 and 1903 commits behind were all
+    observed and all harmless.
+  src: operator-session#14-day-retro-replay-2026-09-09
+  cited: "2026-09-09"
