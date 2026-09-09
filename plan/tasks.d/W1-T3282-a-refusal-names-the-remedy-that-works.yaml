@@ -1,0 +1,105 @@
+- id: W1-T3282
+  title: "`diff-coverage` REFUSES AN UNCOVERABLE ADDED LINE WITHOUT NAMING THE ONE REMEDY THAT WORKS — a fix worker spent a strike adding a `process-boundary` directive the gate cannot honour for an external-tool spawn, then deleted it, and the block still stood"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files:
+    - scripts/diff-coverage.mjs
+    - test/a-refusal-names-the-remedy-that-works.test.ts
+  origin: "operator-session#pr-fix-sweep-2026-09-09"
+  plan_refs: ["W1-T221", "W1-T83", "W1-T1075", "W1-T3266"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 ON PR #4841, AS A SPENT STRIKE. The PR added `killSignal: "SIGKILL"` to three
+    synchronous spawns in `src/lib/review.ts`. Run against a CI-shaped lcov, the gate reported:
+
+        diff-coverage: exempt (process-boundary) src/lib/review.ts:1242 -- the irreducible browser download
+        diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests:
+          - src/lib/review.ts:1108
+
+    The asymmetry is correct and is invisible from the message. `installPinnedChromium` re-execs
+    `process.execPath`, which is what `BOUNDARY_CALL` admits, so its directive is honoured.
+    `ensureDeps` shells `npm`, which that regex deliberately does not admit.
+
+    A FIX WORKER TRIED THE EXEMPTION ANYWAY AND BURNED A STRIKE ON IT. Commit `6576a6ce` on that
+    branch reads "fix(census-test): drop an invalid diff-cov directive from ensureDeps" — the worker
+    added a `// diff-cov: process-boundary` comment, the gate rejected it as invalid, and the worker
+    removed it. The BLOCK was still there afterwards, because removing an invalid exemption is not a
+    remedy. The block was only cleared by injecting a seam and asserting the call.
+
+    THE GATE IS RIGHT AND ITS SILENCE IS THE DEFECT. `computeBoundaryRanges` already emits a precise
+    reason when a directive is invalid — "guarded declaration contains no process-boundary call ...
+    the directive may only exempt re-exec/exit glue". But the BLOCKED message, which is what an
+    author or a fix worker reads first, names only the file and line. It states what is wrong and
+    nothing about what would be right, so the cheapest-looking next move is the one that cannot work.
+
+    THIS IS A MESSAGE DEFECT WITH A MEASURED PRICE. The fix rung runs on a two-strike budget
+    (`strike 1/2` in the ledger); a strike spent on a remedy the gate can never accept is a strike
+    not spent on the fix. W1-T186's emitter discipline — name the observed evidence and the action —
+    already governs this class of output.
+  design: |
+    (i) THE BLOCK NAMES THE TWO REMEDIES AND WHICH ONE APPLIES HERE. Cover the line, or — only for
+    re-exec/exit glue — exempt it with a `process-boundary` directive. The message must say that the
+    second is unavailable unless the guarded declaration makes a boundary call, so an author does not
+    discover that by trying it.
+    (ii) WHEN THE OFFENDING LINE IS A SPAWN THAT THE DIRECTIVE CANNOT EXEMPT, SAY SO ON THAT LINE.
+    The gate can already read the source it is grading; a blocked line whose text spawns an EXTERNAL
+    binary (not `process.execPath`) is the case that just cost a strike, and it is exactly the case
+    where the directive looks applicable and is not.
+    (iii) NAME THE SEAM REMEDY, because it is what actually worked: inject the spawn as a parameter
+    defaulted to the real one, appended LAST so no positional caller shifts, and assert the recorded
+    call. That is this repo's own documented shape for an unreachable default, and it converts a
+    written bound into an asserted one.
+    (iv) THE ADVICE IS DERIVED, NEVER A FIXED PARAGRAPH ON EVERY BLOCK. A line that is ordinary
+    uncovered logic must NOT be told to inject a spawn seam — that would teach the wrong fix at
+    scale and is worse than saying nothing. The extra sentence appears only when the line's own text
+    carries a spawn the directive cannot exempt.
+    (v) NOT IN SCOPE: widening `BOUNDARY_CALL` to admit external binaries. That would exempt every
+    `execFileSync("<tool>")` line in the repo and is the opposite of what the #4841 evidence supports
+    — the seam was both achievable and better, because it made the bound assertable.
+  acceptance:
+    - claim: "a blocked line whose text spawns an EXTERNAL binary is told the process-boundary directive cannot exempt it, and is pointed at the injectable-seam remedy"
+      proof: "unit test: test/a-refusal-names-the-remedy-that-works.test.ts"
+    - claim: "a blocked line of ordinary logic gets NO spawn-seam advice, so the guidance is derived from the line rather than printed on every block"
+      proof: "unit test: test/a-refusal-names-the-remedy-that-works.test.ts"
+    - claim: "a line that IS re-exec glue still receives its existing exemption unchanged — the gate gains a message and loses no verdict"
+      proof: "unit test: test/a-refusal-names-the-remedy-that-works.test.ts"
+    - claim: "the BLOCKED exit code is unchanged, so this is a legibility change and never a relaxation"
+      proof: "unit test: test/a-refusal-names-the-remedy-that-works.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF the block already names a remedy: run the gate over a diff that
+    adds an uncovered `execFileSync("npm", …)` line and read the BLOCKED output verbatim. MEASURED
+    2026-09-09 on #4841: the block named the file and line and no remedy of any kind.
+    THE VERDICT MUST NOT MOVE, AND THIS IS THE CONTROL THAT MATTERS MOST: the same corpus must
+    produce the SAME blocked set and the SAME exit code before and after. A message change that
+    silently exempts a line has relaxed a coverage gate, which is the one outcome worse than the
+    silence being fixed. Diff the blocked paths on both sides and require them identical.
+    PROVE THE ADVICE IS CONDITIONAL: a fixture whose blocked line is plain uncovered logic must NOT
+    carry the seam sentence. Without that case the implementation passes by appending the paragraph
+    unconditionally, which the design refuses.
+    DO NOT widen BOUNDARY_CALL. If a later measurement shows external-tool spawns genuinely cannot be
+    seamed, that is its own task with its own evidence — #4841 proved the opposite by shipping the
+    seam.
+  note: |
+    THE PROOFS NAME A NEW SUITE, NOT `test/diff-coverage.test.ts`, AND THE LINTER IS WHY. Naming the
+    existing file earned four `proof-base-discrimination` warnings: that file EXISTS and passes at the
+    merge base, so `classifyBaseProofOutcome` would re-run each proof there, grade it
+    `executed_stale`, and drop every criterion to the keyword floor SILENTLY — a PR that merges on
+    prose with no red check naming it. A new suite is absent at base, which is the one condition that
+    makes a pure-path `unit test:` proof discriminate. The existing suite keeps its own
+    process-boundary cases; this task adds beside it rather than inside it.
+
+    Rule 25 CHECKED: `scripts/diff-coverage.mjs` IS on INSTRUMENT_SURFACE (`^scripts/diff-coverage.mjs$`).
+    `detectInstrumentEntanglement` fires on an instrument path PLUS a product `src/` path; the declared
+    files are the instrument and its own `test/` falsifier, which its doc names as the SANCTIONED
+    shape and which returns false. No `src/` file may join this diff — if the implementation seems to
+    need one, that is the signal to split, not to widen.
+    SCOPE DISCIPLINE, STATED BECAUSE THE TEMPTATION IS OBVIOUS: the cheap-looking fix is to make the
+    directive accept `execFileSync("npm", …)`. That would have unblocked #4841 in one line and left
+    the bound unexecuted and unasserted, which is the defect W1-T3266 exists to remove. The gate's
+    refusal was correct; only its silence was not.
