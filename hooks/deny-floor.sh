@@ -192,8 +192,15 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
       gh_now="$(date +%s 2>/dev/null || echo 0)"
       gh_prev=0
       if [ -f "$gh_stamp" ]; then
-        # `stat` is not portable: BSD/macOS takes -f, GNU/Linux takes -c. Try both, then give up.
-        gh_prev="$(stat -f %m "$gh_stamp" 2>/dev/null || stat -c %Y "$gh_stamp" 2>/dev/null || echo 0)"
+        # `stat` is not portable, and CHAINING ON EXIT STATUS DOES NOT WORK HERE — that is what made
+        # this floor inert on the host it runs on. GNU/Linux `stat -f` is VALID: it means
+        # --file-system, so it SUCCEEDS and prints "  File: ..." instead of failing through to -c.
+        # The non-numeric result was then sanitised to 0 below, gh_prev > 0 was false, and no read
+        # was ever refused on Linux. MEASURED via `bash -x`: gh_prev='  File: "…/gh-last-read"'.
+        # So SELECT ON THE SHAPE OF THE OUTPUT, not on exit status: take the first form that yields
+        # digits. Order no longer matters, and a future platform that succeeds with prose is caught.
+        gh_prev="$(stat -c %Y "$gh_stamp" 2>/dev/null || true)"
+        case "$gh_prev" in ''|*[!0-9]*) gh_prev="$(stat -f %m "$gh_stamp" 2>/dev/null || true)" ;; esac
       fi
       case "$gh_prev" in ''|*[!0-9]*) gh_prev=0 ;; esac
       if [ "$gh_now" -gt 0 ] && [ "$gh_prev" -gt 0 ]; then
