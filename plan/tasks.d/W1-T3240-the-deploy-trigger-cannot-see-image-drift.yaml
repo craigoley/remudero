@@ -10,7 +10,7 @@
   origin: "operator-session#the-core-bare-repair-merged-built-and-never-shipped-2026-09-09"
   plan_refs: ["W1-T496", "W1-T3200", "W1-T2856"]
   files: [src/lib/deployer.ts, test/the-deploy-trigger-sees-image-drift.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-09, ON THE LIVE FLEET HOST. `#4785` repaired `deploy/entrypoint.sh` so a

@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§3A", "§8A", "§10"]
   files: [src/lib/repo-location.ts, src/lib/plan.ts, src/lib/learnings.ts, src/lib/alert-lane.ts, src/lib/plan-architect.ts, test/repo-layout.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 §6, move 1 (OBSERVED counts, re-counted by the orchestrator). The

@@ -10,7 +10,7 @@
   origin: "operator-session#six-days-of-silence-2026-09-09"
   plan_refs: ["W1-T3229", "W1-T2988", "W1-T2270"]
   files: [src/lib/status-board.ts, test/a-cadence-marker-that-stops-advancing-is-reported.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE FLEET RAN A SELF-IMPROVEMENT RUNG THAT HAD BEEN DEAD FOR SIX DAYS AND NOTHING SAID SO.

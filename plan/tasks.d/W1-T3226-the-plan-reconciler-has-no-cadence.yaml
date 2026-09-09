@@ -10,7 +10,7 @@
   files: [src/lib/measurement-cadence.ts, test/the-plan-reconciler-runs-on-a-cadence.test.ts]
   origin: "operator-session#ci-cost-items-2026-09-09"
   plan_refs: ["W1-T3218", "W1-T2735", "W1-T3059"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

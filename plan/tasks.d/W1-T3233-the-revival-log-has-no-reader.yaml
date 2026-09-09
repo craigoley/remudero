@@ -10,7 +10,7 @@
   origin: "operator-session#7h32m-of-identical-revivals-2026-09-09"
   plan_refs: ["W1-T2877", "W1-T2953", "W1-T2856"]
   files: [deploy/install-host-units.sh, test/host-units-install.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE EVIDENCE ALREADY EXISTS AND NOTHING READS IT. `render_launcher`

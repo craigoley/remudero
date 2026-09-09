@@ -10,7 +10,7 @@
   files: [hooks/pre-push, test/the-hook-spawns-no-test-suite.test.ts]
   origin: "operator-session#prepush-arming-2026-09-09"
   plan_refs: ["W1-T3224", "W1-T3222", "W1-T3059", "W1-T3205", "W1-T2969"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

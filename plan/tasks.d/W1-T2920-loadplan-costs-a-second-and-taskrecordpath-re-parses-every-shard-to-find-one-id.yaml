@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§2", "§9", "W1-T2513"]
   files: [src/lib/plan.ts, src/run-task.ts, test/task-record-path-is-constant-time.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-25 (OBSERVED). At f7ceb86, `loadPlan` (`src/lib/plan.ts:432-479`)

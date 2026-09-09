@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§5D", "§7", "§8A"]
   files: [src/lib/measurement-cadence.ts, src/lib/serve.ts, test/measurement-cadence-delta.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 §6, move 4 (OBSERVED: `grep -c delta_vs_previous
