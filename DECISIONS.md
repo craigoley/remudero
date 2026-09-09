@@ -8,6 +8,67 @@ decision reversible.
 
 <!-- Entries below are appended verbatim by the runner. -->
 
+## 2026-09-09 — OPERATOR DECISION: W1-T3076 chosen bound — (a) first, then (c); NOT (b)
+
+*Operator-authored, not a machine auto-choose resolution. Recorded by hand at the operator's
+instruction on 2026-09-09 ("go with your recommendations"), resolving W1-T3076, which was parked at
+`verify: human` because it asks a design question rather than describing a build.*
+
+- **CHOSEN: (a) GIVE RETIREMENT A REAL EFFECT, FIRST.** A retired shard must leave the selector's
+  population and the plan-health sweep. This is the W1-T1287 line, and it is chosen ahead of any
+  governor because **it fixes a correctness bug, not just a volume one**. MEASURED 2026-09-09:
+  W1-T3166 carries `retirement: withdrawn`, yet `unmetDependencies` (plan.ts) counts any dependency
+  that is not `merged` as unmet — so the withdrawn task silently made **W1-T3201, the deploy judge,
+  permanently undispatchable**. Retirement that leaves the file in place is not merely untidy; it
+  holds live work hostage.
+- **THEN (c) CLOSURE-RATE ADMISSION, if (a) is not enough.** Refuse automatic filing into a task
+  class whose closure rate is zero over N cycles. It retires dead classes rather than throttling
+  everything, and it cannot misfire on a healthy burst — a genuinely productive week looks like a
+  burst to a rate governor and like nothing to a closure-rate one.
+- **REJECTED FOR NOW: (b) A FILING GOVERNOR ON THE CORPUS**, and the reason is specific rather than
+  a preference. (b) refuses filing when `open_unmerged > k x trailing_14d_merged`, so it **requires
+  the credit projection at filing time** — and that projection is exactly what is unreliable.
+  MEASURED 2026-09-09: a credit read over two of the four credit paths reported **294**
+  credited-but-queued shards; `reconcilePlan`'s own predicate reported **28**. A throttle built on a
+  measurement that varies ten-fold by which paths you read is how you get the failure this repo
+  names as its own recurring defect — "a bound that fires on a healthy condition". W1-T3076's own
+  series makes the same point: the filed/ship ratio moved 0.13 -> 1.20 -> 0.75 in five weeks, so a
+  fixed `k` would have fired in W34 and been silent in W36 on a corpus that doubled either way.
+- **CAVEAT RECORDED WITH THE DECISION.** (a) fixes a real bug and shrinks the corpus. It will **not**
+  make the open-PR board smaller. MEASURED the same day: board pressure came from staleness (every
+  red PR 10-11 commits behind main, one 51), three pipeline wedges, and gate registrations — PRs
+  arriving faster than REVIEW and CI, not shards arriving faster than ships. W1-T3277 (auto-refresh)
+  addresses that; no filing governor would have.
+- **ROLLBACK:** (a) is additive to the selector's population filter and reversible by restoring the
+  prior predicate; nothing is deleted from `plan/tasks.d`.
+
+## 2026-09-09 — OPERATOR DECISION: the deterministic ratchet repair is RATIFIED, and it is not a config flip
+
+*Operator-authored, recorded at the operator's instruction on 2026-09-09.*
+
+- **RATIFIED: a red ratchet whose remedy is a RECORDED NUMBER may be repaired automatically.**
+  `recordableRatchetRepairEnabled`'s own doc calls this "an operator ratification, not a default".
+  It is hereby ratified. MEASURED 2026-09-09: the identical repair was performed **by hand five
+  times in one session** (#4790, #4843, #4856, #4858, #4862) — each time the gate printed the exact
+  value and a human typed it.
+- **THE BLAST RADIUS IS BOUNDED BY CONSTRUCTION, which is why this is safe to ratify.**
+  `REGENERABLE_ARTIFACT_GENERATORS` holds exactly two paths — `scripts/source-size-baseline.json`
+  and `scripts/comment-load-baseline.json` — and both are LEDGERS, not score floors. Neither grades
+  a falsifier, so raising a row records debt and **cannot make a failing test pass**. The mutation
+  and coverage FLOORS, where a lowered number would let a weakened suite through, are not in the
+  registry and must never be added to it under this ruling.
+- **IT IS NOT A CONFIG FLIP, and the record says so to prevent a wasted attempt.** MEASURED:
+  `recordableRatchetRepairEnabled` is an optional field on `SweepPolicy` that
+  `DEFAULT_SWEEP_POLICY` never populates and `plan/policy.yaml` has no row for. Enabling it
+  requires wiring the policy row, not editing a value. Filed as W1-T3289.
+- **TWO CONDITIONS ON THE IMPLEMENTATION, both from measurement:** the repair must RE-DERIVE the
+  baseline from the merge base and never union two sides — `comment-load-ratchet` refused a
+  duplicate-keyed baseline on 2026-09-09 and named it "the signature of a rebase conflict resolved
+  by unioning both sides"; and every automatic repair must be VISIBLE on the PR and in the ledger,
+  because a silently raised ceiling is the one way this becomes a way to hide growth.
+- **ROLLBACK:** set the policy row false; the classifier keeps naming the remedy exactly as it does
+  today with the repair withheld.
+
 ## 2026-09-09 — OPERATOR DECISION: a deploy is CHANGE-AND-RISK GATED, not human gated
 
 *Operator-authored, not a machine auto-choose resolution. Recorded by hand at the operator's
