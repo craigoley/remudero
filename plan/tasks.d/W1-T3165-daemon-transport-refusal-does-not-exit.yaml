@@ -43,5 +43,5 @@
   origin: "oper#queue-lag-daemon-check-rollup-exit-2026-09-08"
   plan_refs: ["W1-T197", "W1-T254", "W1-T484", "W1-T976", "W1-T1007", "W1-T2537", "W1-T2546"]
   files: [src/lib/daemon.ts, test/daemon.test.ts]
-  status: queued
+  status: merged
   attempts: 0

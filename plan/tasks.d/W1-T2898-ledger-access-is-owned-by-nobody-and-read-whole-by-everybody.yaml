@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§9", "W1-T2257", "W1-T1013", "W1-T2388", "W1-T2884"]
   files: [src/lib/ledger-union.ts, src/lib/ledger-path.ts, src/lib/status.ts, src/lib/ledger-grep.ts, src/lib/ledger-replay.ts, src/lib/receipt.ts, src/lib/analytics-route.ts, src/lib/autonomy.ts, src/lib/retro.ts, src/lib/ledger.ts, test/ledger-union.test.ts, test/ledger-literal-census.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-38 and R-27 (both OBSERVED). At f7ceb86 the literal

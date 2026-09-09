@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/run-task.test.ts]
   origin: "operator-brief#unverifiable-vs-refuted-2026-08-27"
   plan_refs: ["W1-T119", "W1-T441", "W1-T458", "W1-T2339", "W1-T1066"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-08-27 over a ledger union reading 35 archives with the live file read, 0 unread

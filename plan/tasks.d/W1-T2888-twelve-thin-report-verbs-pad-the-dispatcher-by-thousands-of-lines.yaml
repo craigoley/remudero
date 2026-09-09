@@ -20,7 +20,7 @@
     - scripts/comment-load-baseline.json
     - scripts/clock-signature-baseline.json
     - scripts/test-tier-manifest.json
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Step 5 of the run-task.ts decomposition chain (audit recon-2026-09-05 T6; R-29). OBSERVED at

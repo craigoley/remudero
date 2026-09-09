@@ -257,7 +257,14 @@ test("W1-T913 criterion 1 (rmd review's own start): reviewCommand posts remudero
 test("W1-T913 criterion 1 (light-sweep ticker): SweepDeps.postReview's default reviewRunner routes through reviewCommand, so its own pending post (the test above) covers the sweep's post-review dispatch too", () => {
   assert.match(
     runTaskSrc,
-    /reviewRunner:\s*\(prNumber: number, isPlanFiling\?: boolean\) => Promise<number> = \(prNumber, isPlanFiling\) =>\s*reviewCommand\(/,
+    // The DECLARATION's syntax is not the subject. This has now been re-derived twice for shape
+    // changes that preserved the routing exactly (W1-T2889's deps-object collapse moved it to a
+    // typed local, then gave its call an injectable seam whose default IS reviewCommand). What it
+    // protects is that the sweep's post-review lane reaches reviewCommand rather than a SECOND
+    // review entry point — so the binding is matched through a bounded gap and the callee is
+    // matched in either spelling. test/build-sweep-effects-takes-one-deps-object.test.ts now also
+    // DRIVES this default through postReview, which is the stronger half of the same claim.
+    /reviewRunner\b[\s\S]{0,120}?=\s*\(prNumber, isPlanFiling\) =>\s*reviewCommand(?:Impl)?\(/,
     "the sweep's post-review lane must dispatch through reviewCommand, never a second review entry point",
   );
 });

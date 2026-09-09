@@ -13,7 +13,7 @@
     - test/two-gates-demand-opposite-proof-dialects-for-a-new-module.test.ts
   origin: "operator-session#pr-3733-dialect-conflict-2026-09-02"
   plan_refs: ["W1-T456", "W1-T2292", "W1-T1214", "W1-T2716"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING. The change is small and lands in

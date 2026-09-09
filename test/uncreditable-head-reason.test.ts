@@ -106,16 +106,16 @@ async function driveDispatchFix(headRefName: string | undefined, taskId: string 
   let threw: unknown;
   try {
     mkdirSync(join(root, "repos"), { recursive: true });
-    const effects = buildSweepEffects(
-      "acme",
-      "scratch-uch-repo",
-      { root } as never,
-      join(root, "ledger.ndjson"),
-      "SWEEP-UCH",
-      PLAN,
-      (step, extra) => void logs.push({ step, extra }),
-      DEFAULT_SWEEP_POLICY,
-    );
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "scratch-uch-repo",
+      config: { root } as never,
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "SWEEP-UCH",
+      plan: PLAN,
+      log: (step, extra) => void logs.push({ step, extra }),
+      policy: DEFAULT_SWEEP_POLICY,
+    });
     // An ACCEPTED head does not stop here — it proceeds to `createFixRungWorktree`, which needs a
     // real repository this gateway-free suite deliberately does not create, so it throws. That
     // throw is EVIDENCE (the guard let the head through), not a failure: it is captured, never

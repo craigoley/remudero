@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§12", "§5C"]
   files: [src/lib/review.ts, test/rule15-block-scalar-proof.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-16 (OBSERVED, reproduced by the audit against

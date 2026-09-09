@@ -175,7 +175,7 @@ test("MUTANT: keying liveness on ONE daemon step instead of the prefix is caught
   // tick, so a single-step rule reports a stale or absent poll on a perfectly live daemon.
   const beat = runBeat({
     ledger: MIXED_LEDGER,
-    mutate: [`grep '"step":"daemon\\.' "$LEDGER"`, `grep '"step":"daemon.iteration"' "$LEDGER"`],
+    mutate: [`ledger_union_grep '"step":"daemon\\.'`, `ledger_union_grep '"step":"daemon.iteration"'`],
   });
   assert.notEqual(
     field(beat.published, "daemon_last_ts"),
@@ -193,8 +193,8 @@ test("MUTANT: taking the LAST daemon line instead of the max is caught", () => {
   const beat = runBeat({
     ledger: MIXED_LEDGER,
     mutate: [
-      `grep '"step":"daemon\\.' "$LEDGER" 2>/dev/null \\\n    | sed -n 's/^{"ts":"\\([^"]*\\)".*/\\1/p' | sort | tail -n 1`,
-      `grep '"step":"daemon\\.' "$LEDGER" 2>/dev/null \\\n    | sed -n 's/^{"ts":"\\([^"]*\\)".*/\\1/p' | tail -n 1`,
+      `ledger_union_grep '"step":"daemon\\.' \\\n    | sed -n 's/^{"ts":"\\([^"]*\\)".*/\\1/p' | sort | tail -n 1`,
+      `ledger_union_grep '"step":"daemon\\.' \\\n    | sed -n 's/^{"ts":"\\([^"]*\\)".*/\\1/p' | tail -n 1`,
     ],
   });
   assert.equal(
@@ -361,7 +361,7 @@ test("THE OTHER DIRECTION: a daemon that DIED mid-dispatch still reads STALE —
 test("MUTANT: a reader that excludes daemon.alive from the prefix is caught — the whole fix rides on that prefix", () => {
   const beat = runBeat({
     ledger: MID_DISPATCH_LEDGER,
-    mutate: [`grep '"step":"daemon\\.' "$LEDGER"`, `grep '"step":"daemon\\.\\(idle\\|iteration\\|headroom\\)"' "$LEDGER"`],
+    mutate: [`ledger_union_grep '"step":"daemon\\.'`, `ledger_union_grep '"step":"daemon\\.\\(idle\\|iteration\\|headroom\\)"'`],
   });
   const v = field(beat.published, "daemon_verdict");
   assert.ok(
@@ -782,4 +782,69 @@ test("W1-T2767 mutant: taking the minimum over the state root alone is caught", 
   });
   assert.equal(field(beat.published, "disk_min_free_kb"), "107000000", "the mutant reports the roomy device");
   assert.notEqual(field(beat.published, "disk_min_free_kb"), "500000", "and therefore misses the full one");
+});
+
+// ── W1-T3227: THE BEAT READ ONE LEDGER FORM AND CALLED A LIVE DAEMON FIVE DAYS DEAD ────────────
+//
+// The live ledger STRUCTURALLY cannot answer "when did the daemon last poll". rotateLedger keeps
+// only DECISION_RELEVANT steps — `daemon.poll` and `daemon.sweep.*` are not among them, so they
+// are archived as noise on every rotation — and then bounds the health-windowed ones, `daemon.boot`
+// included, to HEALTH_STEP_RETENTION_WINDOW_MS (fifteen minutes). What survives indefinitely is the
+// handful of daemon ESCALATION steps, so after any rotation the newest `daemon.*` line left in the
+// live file is whichever escalation last fired, however old.
+//
+// MEASURED 2026-09-09 on heartbeat-azure: the 05:08 beat read "STALE — last poll 2h34m ago" and
+// the 10:05 beat read "STALE — last poll 123h34m ago". The last poll moved BACKWARD five days in
+// five hours, which no elapsed time can do — a rotation in between had dropped the recent daemon
+// lines and left daemon.headroom_reserve.escalated from Sept 4 as the newest survivor. The watch
+// workflow escalated issue #4782 on that reading.
+
+const ROTATION_SHAPE = {
+  /** What rotation leaves behind: an old escalation, kept because it is decision-relevant. */
+  live: ['{"ts":"2026-09-04T06:30:55.030Z","run_id":"d","task_id":"daemon","step":"daemon.headroom_reserve.escalated"}'],
+  /** Where the recent liveness evidence actually went. */
+  rotated: ['{"ts":"2026-09-09T09:58:00.000Z","run_id":"d","task_id":"daemon","step":"daemon.poll"}'],
+};
+
+test("W1-T3227: a daemon that polled minutes ago is LIVE even though rotation moved the evidence out of the live file", () => {
+  const beat = runBeat({ ledger: ROTATION_SHAPE.live, rotatedLedger: ROTATION_SHAPE.rotated });
+  const step = /^daemon_last_step=(.*)$/m.exec(beat.published)?.[1];
+  assert.equal(
+    step,
+    "daemon.poll",
+    `the newest daemon step across the UNION is the poll, not the surviving escalation; got ${step}`,
+  );
+  assert.match(
+    beat.published,
+    /^daemon_last_ts=2026-09-09T09:58:00\.000Z$/m,
+    "and its timestamp must come from the rotation, which is the only place it exists",
+  );
+});
+
+test("W1-T3227: the GZIPPED rotation counts too — the form an unadorned grep skips in silence", () => {
+  const beat = runBeat({
+    ledger: ROTATION_SHAPE.live,
+    gzippedLedger: ['{"ts":"2026-09-09T09:59:00.000Z","run_id":"d","task_id":"daemon","step":"daemon.sweep.completed"}'],
+  });
+  assert.match(
+    beat.published,
+    /^daemon_last_step=daemon\.sweep\.completed$/m,
+    "a .gz rotation is a real form, and reading it is what makes the union three patterns rather than two",
+  );
+});
+
+test("W1-T3227: with NO rotation the live file still answers — the union never loses what it already read", () => {
+  const beat = runBeat({
+    ledger: ['{"ts":"2026-09-09T09:57:00.000Z","run_id":"d","task_id":"daemon","step":"daemon.poll"}'],
+  });
+  assert.match(beat.published, /^daemon_last_step=daemon\.poll$/m);
+  assert.match(beat.published, /^daemon_last_ts=2026-09-09T09:57:00\.000Z$/m);
+});
+
+test("W1-T3227: an ABSENT daemon line across every form still reads UNKNOWN, never a healthy zero", () => {
+  // The one direction the union must NOT change: a genuinely silent daemon is still reported as
+  // such. A fix that made every beat read `live` would be worse than the bug it replaced.
+  const beat = runBeat({ ledger: ['{"ts":"2026-09-09T09:57:00.000Z","run_id":"x","task_id":"t","step":"pr.opened"}'] });
+  assert.match(beat.published, /^daemon_last_step=none$/m, "no daemon line in any form means none, not live");
+  assert.match(beat.published, /^daemon_last_age_s=unknown$/m);
 });

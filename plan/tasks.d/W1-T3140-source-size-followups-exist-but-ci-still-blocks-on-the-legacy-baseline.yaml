@@ -24,7 +24,7 @@
     - test/source-size-baseline-is-enforced.test.ts
     - test/sweep.test.ts
     - test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN AT 41231c670. The required `source-size` workflow job runs

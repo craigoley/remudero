@@ -29,7 +29,7 @@
     - test/test-tier-manifest.test.ts
     - test/test-with-retry.test.ts
     - test/workflow-playwright-install.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-40 and R-45 (OBSERVED mechanics; INFERRED masking). At f7ceb86,

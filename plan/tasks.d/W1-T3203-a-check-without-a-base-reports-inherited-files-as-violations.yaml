@@ -10,7 +10,7 @@
   files: [scripts/test-tier-manifest.mjs, test/a-check-without-a-base-reports-inherited-files-as-violations.test.ts]
   origin: "operator-session#gate-degrade-2026-09-08"
   plan_refs: ["W1-T2904", "W1-T3022"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE CARVE-OUT IS BUILT AND CI USES IT. `inheritedUntieredFiles` (scripts/test-tier-manifest.mjs)

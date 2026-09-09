@@ -340,23 +340,23 @@ function question() {
 }
 
 /** Build a `buildSweepEffects` instance wired to `gw`, with every optional dep left at its default
- *  apart from the recording issue gateway (the 12th positional param — the same seam
- *  test/post-review-stall-escalation.test.ts's own fixture uses). */
+ *  apart from the recording issue gateway — the same seam
+ *  test/post-review-stall-escalation.test.ts's own fixture uses. */
 function effectsWith(gw: IssueGateway, ledgerPath: string, runId: string) {
-  return buildSweepEffects(
-    "acme",
-    "remudero",
-    { root: "/nonexistent-w1-t983-root" } as never,
-    ledgerPath,
-    runId,
-    { tasks: [] } as never,
-    () => {},
-    DEFAULT_SWEEP_POLICY,
-    undefined, // reviewRunner
-    undefined, // spawnImpl
-    undefined, // pushEmptyCommit
-    gw, // issuesImpl — the recording gateway, never real `gh`
-  );
+  return buildSweepEffects({
+    owner: "acme",
+    repo: "remudero",
+    config: { root: "/nonexistent-w1-t983-root" } as never,
+    ledgerPath: ledgerPath,
+    runId: runId,
+    plan: { tasks: [] } as never,
+    log: () => {},
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: gw,
+  });
 }
 
 test("W1-T983: a capped green review-orphaned PR escalates at the reaching class", () => {

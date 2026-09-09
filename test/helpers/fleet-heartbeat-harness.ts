@@ -4,6 +4,7 @@
 // importing one test file from another RE-RUNS its whole suite — 38 extra executions per pass.
 // Nothing about the runner's behaviour changed in the move; only `REPO_ROOT` gains one `..`.
 import assert from "node:assert/strict";
+import { gzipSync } from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -58,8 +59,15 @@ function gitStub(): string {
 }
 
 export interface BeatOpts {
-  /** Lines written to the ledger, verbatim. */
+  /** Lines written to the LIVE ledger, verbatim. */
   ledger?: string[];
+  /** Lines written to a PLAIN rotation (`state/ledger.<stamp>.ndjson`). rotateLedger moves most
+   *  `daemon.*` steps here within minutes, so a beat that reads only the live file cannot see
+   *  them — which is the whole subject of the union test (W1-T3227). */
+  rotatedLedger?: string[];
+  /** Lines written to a GZIPPED rotation (`state/ledger.<stamp>.ndjson.gz`) — the third form, and
+   *  the one an unadorned `grep` silently skips. */
+  gzippedLedger?: string[];
   /** Install a working `node_modules/.bin/tsx`. Default true. */
   tsx?: boolean;
   /** Seed a previous-beat state file so `since_prev_beat_s` is computable. Default true. */
@@ -122,6 +130,15 @@ export function runBeat(opts: BeatOpts = {}): Beat {
     chmodSync(join(dir, "node_modules", ".bin", "tsx"), 0o755);
   }
   if (opts.ledger) writeFileSync(join(root, "state", "ledger.ndjson"), opts.ledger.join("\n") + "\n");
+  if (opts.rotatedLedger) {
+    writeFileSync(join(root, "state", "ledger.2026-09-09T00-00-00-000Z.ndjson"), opts.rotatedLedger.join("\n") + "\n");
+  }
+  if (opts.gzippedLedger) {
+    writeFileSync(
+      join(root, "state", "ledger.2026-09-08T00-00-00-000Z.ndjson.gz"),
+      gzipSync(Buffer.from(opts.gzippedLedger.join("\n") + "\n", "utf8")),
+    );
+  }
   if (opts.prevBeat !== false) {
     writeFileSync(join(root, "state", "heartbeat-last.txt"), "2020-01-01T00:00:00Z\n");
   }

@@ -113,7 +113,7 @@
   origin: "recon#review-orphan-escalation-tier-2026-08-18"
   plan_refs: ["W1-T915", "W1-T913", "W1-T514"]
   files: [src/lib/sweep.ts, src/run-task.ts, test/review-orphan-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify: human IS SET UP FRONT. Design item (ii) is an ESCALATION-TIER POLICY CHOICE — which

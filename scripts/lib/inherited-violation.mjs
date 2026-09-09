@@ -45,6 +45,25 @@ export function contentAtRef(run, ref, path) {
 }
 
 /**
+ * Does `ref` resolve to a commit in THIS checkout?
+ *
+ * `git show <ref>:<path>` exits 128 for a MISSING REF and for a MISSING PATH alike, so {@link
+ * contentAtRef} cannot tell them apart and reads an unfetched base as `absent` — which classifies
+ * every violation as INTRODUCED. `rev-parse --verify --quiet` separates them: 0 for a real ref, 1
+ * for one that is not there. A caller that can ask this must, before trusting any `absent`.
+ *
+ * @param {(cmd: string, args: string[]) => { status: number | null, stdout: string }} run
+ */
+export function refResolvable(run, ref) {
+  try {
+    return run("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).status === 0;
+  } catch {
+    // Git not answering is not git saying yes. W1-T3037's own rule, applied one level up.
+    return false;
+  }
+}
+
+/**
  * Partition violations into those that reproduce at `ref` and those that do not.
  *
  * `measure` takes the file's content at the ref and returns the same figure the ratchet compares —
@@ -55,7 +74,12 @@ export function contentAtRef(run, ref, path) {
  *
  * @returns {{ inherited: object[], introduced: object[], undetermined: object[] }}
  */
-export function splitInheritedViolations(violations, { run, ref, measure, baselineFor }) {
+export function splitInheritedViolations(violations, { run, ref, measure, baselineFor, refPresent }) {
+  // W1-T3141: a caller that can establish the ref is believed over `git show`'s ambiguous 128. When
+  // the ref is not there, NOTHING about the base is knowable, so every violation is undetermined
+  // rather than blamed on this diff. OPTIONAL on purpose: a caller passing no predicate gets
+  // W1-T3037's behaviour unchanged, and its eleven falsifiers keep holding.
+  if (refPresent && !refPresent()) return { inherited: [], introduced: [], undetermined: [...violations] };
   const inherited = [];
   const introduced = [];
   const undetermined = [];
@@ -100,5 +124,18 @@ export function inheritedNotice(inherited, ref, tool) {
     `INHERITED, not introduced by this diff. Every open pull request sees the same refusal, and no ` +
     `diff can be written that avoids it. Recording it here is a real repair of ${ref}, not an ` +
     `admission about this change; it is worth saying so in the commit message.`
+  );
+}
+
+/** The sentence a gate prints when it could NOT make the split. An absent notice and "we could not
+ * ask" are the two readings this module exists to keep apart, and without this they render
+ * identically — as silence. */
+export function undeterminedNotice(undetermined, ref, tool) {
+  if (undetermined.length === 0) return undefined;
+  const names = undetermined.map((v) => v.path).join(", ");
+  return (
+    `${tool}: could not determine whether ${undetermined.length} of these are INHERITED from ${ref} ` +
+    `(${names}) — that ref is not readable in this checkout, so no claim is made either way. This ` +
+    `says nothing about whether the violation is yours; it says the comparison could not be run.`
   );
 }

@@ -14,7 +14,7 @@
     - test/stale-green-direct-merge.test.ts
   origin: "operator-session#main-poisoned-by-stale-green-2026-09-04"
   plan_refs: ["W1-T230", "W1-T528", "W1-T1050", "W1-T1095", "W1-T1255", "W1-T2671"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON PR #3997. Its required CI completed against base 02c75c1c. PR #3985 then moved

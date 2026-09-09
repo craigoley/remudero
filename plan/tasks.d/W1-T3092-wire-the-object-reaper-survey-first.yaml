@@ -16,7 +16,7 @@
     - test/object-reaper-rung-wiring.test.ts
   origin: "operator-session#please-wire-up-the-reaper-2026-09-07"
   plan_refs: ["W1-T3090", "W1-T2694"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     DEPENDS ON W1-T3090 IN SUBSTANCE THOUGH NOT IN `depends_on:` — that shard is still in flight

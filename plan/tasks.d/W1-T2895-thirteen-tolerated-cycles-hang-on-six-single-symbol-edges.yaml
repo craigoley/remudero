@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§1", "§8A"]
   files: [.dependency-cruiser.cjs, scripts/cycle-baseline.json, src/lib/review.ts, src/lib/status.ts, src/lib/retro.ts, src/lib/daemon-health.ts, src/lib/worker-home.ts, src/lib/worker.ts, src/lib/plan-scope.ts, src/lib/time-window.ts, src/lib/poll-interval.ts, test/no-circular-is-an-error.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-31 (OBSERVED for the rings; INFERRED that no ring is masked by

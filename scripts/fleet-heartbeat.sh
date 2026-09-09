@@ -214,13 +214,38 @@ else
   # literally `{"ts":"…"` with no whitespace — that anchor is why one sed extracts the timestamp
   # unambiguously without a JSON parser. A torn or differently-shaped line simply does not match
   # and is skipped, which reads as UNKNOWN rather than as a wrong age.
-  DAEMON_LAST_TS="$(grep '"step":"daemon\.' "$LEDGER" 2>/dev/null \
+  # ── THE UNION, NOT THE LIVE FILE (W1-T3227) ─────────────────────────────────────────────────
+  # The live ledger STRUCTURALLY CANNOT answer "when did the daemon last poll", and reading it
+  # alone produced a five-day-old false STALE on a running fleet. rotateLedger keeps only
+  # DECISION_RELEVANT steps (`daemon.poll` and `daemon.sweep.*` are not among them, so they are
+  # archived as noise on every rotation) and then bounds the health-windowed ones — `daemon.boot`
+  # included — to HEALTH_STEP_RETENTION_WINDOW_MS, fifteen minutes. What survives indefinitely is
+  # the handful of daemon ESCALATION steps, so after any rotation the newest `daemon.*` line in
+  # the live file is whichever escalation last fired, however old.
+  #
+  # MEASURED 2026-09-09 on heartbeat-azure: the 05:08 beat read `STALE — last poll 2h34m ago` and
+  # the 10:05 beat read `STALE — last poll 123h34m ago`. The last poll moved BACKWARD five days in
+  # five hours, which no elapsed time can do; a rotation in between had dropped the recent daemon
+  # lines and left `daemon.headroom_reserve.escalated` from Sept 4 as the newest survivor. The
+  # watch workflow escalated #4782 on that reading.
+  #
+  # So this reads all THREE forms, which is CLAUDE.md's standing rule for any ledger question:
+  # `state/ledger.ndjson`, the plain rotations, and the gzipped ones. `zgrep` reads plain input
+  # transparently, so the fix is the GLOB, never the tool. A form that matches nothing contributes
+  # nothing; the union is still whatever the other forms hold.
+  LEDGER_UNION_GLOB="${RMD_ROOT}/state/ledger.ndjson ${RMD_ROOT}/state/ledger.*.ndjson ${RMD_ROOT}/state/ledger.*.ndjson.gz"
+  ledger_union_grep() {
+    # shellcheck disable=SC2086 — the glob is intentional; unmatched patterns fall through and fail
+    # into /dev/null per form, which is exactly "this form contributes nothing".
+    zgrep -h "$1" $LEDGER_UNION_GLOB 2>/dev/null
+  }
+  DAEMON_LAST_TS="$(ledger_union_grep '"step":"daemon\.' \
     | sed -n 's/^{"ts":"\([^"]*\)".*/\1/p' | sort | tail -n 1)"
   if [ -n "$DAEMON_LAST_TS" ]; then
-    DAEMON_LAST_STEP="$(grep -F "\"ts\":\"${DAEMON_LAST_TS}\"" "$LEDGER" 2>/dev/null \
+    DAEMON_LAST_STEP="$(ledger_union_grep "\"ts\":\"${DAEMON_LAST_TS}\"" \
       | grep -o '"step":"daemon\.[^"]*"' | tail -n 1 | cut -d'"' -f4)"
   fi
-  BOOT_LINE="$(grep -F '"step":"daemon.boot"' "$LEDGER" 2>/dev/null | tail -n 1)"
+  BOOT_LINE="$(ledger_union_grep '"step":"daemon.boot"' | tail -n 1)"
   if [ -n "$BOOT_LINE" ]; then
     DAEMON_BOOT_TS="$(printf '%s' "$BOOT_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
     DAEMON_BOOT_SHA="$(printf '%s' "$BOOT_LINE" | grep -o '"head_sha":"[^"]*"' | head -n 1 | cut -d'"' -f4)"

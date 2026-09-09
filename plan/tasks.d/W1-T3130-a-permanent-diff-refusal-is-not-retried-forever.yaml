@@ -12,7 +12,7 @@
   files: [src/lib/sweep.ts, test/a-permanent-diff-refusal-is-not-retried-forever.test.ts]
   origin: "operator-session#daemon-telemetry-2026-09-08"
   plan_refs: ["W1-T2844", "W1-T913"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED in the live ledger, 2026-09-05..2026-09-08.

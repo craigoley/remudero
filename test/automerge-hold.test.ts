@@ -389,20 +389,31 @@ test("armOutcomeReason: a hold refusal names the hold and says only a release li
 
 test("the sweep's converging withdrawal calls the disarm leaf with the held PR's own url", () => {
   const disarmed: string[] = [];
-  // `disarmImpl` is the 21st parameter — the LAST, per this function's own append-only
-  // convention — so every dep between `log` and it is defaulted here rather than restated.
-  const effects = buildSweepEffects(
-    "craigoley",
-    "remudero",
-    { root: "/nonexistent-for-this-fixture" } as never,
-    "/nonexistent-for-this-fixture/ledger.ndjson",
-    "RUN-hold-withdrawal",
-    { tasks: [], byId: new Map() },
-    () => {},
-    undefined, undefined, undefined, undefined, undefined, undefined,
-    undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-    (prUrl: string) => void disarmed.push(prUrl),
-  );
+  // `disarmImpl` is the only seam this fixture overrides, so every other optional dep stays at
+  // its default rather than being restated.
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    config: { root: "/nonexistent-for-this-fixture" } as never,
+    ledgerPath: "/nonexistent-for-this-fixture/ledger.ndjson",
+    runId: "RUN-hold-withdrawal",
+    plan: { tasks: [], byId: new Map() },
+    log: () => {},
+    policy: undefined,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: undefined,
+    stallNotice: undefined,
+    armImpl: undefined,
+    armSessionPrsOverride: undefined,
+    updateBranchImpl: undefined,
+    captureRepairFeedbackImpl: undefined,
+    ghRunImpl: undefined,
+    spawnWallClockBoundMsOverride: undefined,
+    reclaimWorkerImpl: undefined,
+    disarmImpl: (prUrl: string) => void disarmed.push(prUrl),
+  });
   effects.disarmAutoMerge?.(
     { prUrl: "https://github.com/craigoley/remudero/pull/2376" } as never,
     { by: "craig", reason: "holding for review" } as never,
