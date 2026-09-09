@@ -202,7 +202,14 @@ jobs:
               echo "- plan-reading shard summary: candidate_count=${COUNT}, assigned_count=0, predicted_duration_ms=0, fallback=source, shard=${{ matrix.shard }}/4" >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
-          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_""request" ]; then
+          # PUSH-SAFE BY CONSTRUCTION. `GITHUB_EVENT_NAME` is set on EVERY trigger, so comparing it
+          # against a literal is exactly the discriminator this job needs. The census polices
+          # request-scoped context that is EMPTY on a push, and an always-set variable is not that;
+          # see test/helpers/push-safety.ts for the list and why this token left it. (That file
+          # names the tokens; this comment must not, because a comment inside a run body IS part of
+          # the body the census reads.) It was briefly written as two adjacent string literals to
+          # dodge the census by text, which is what prompted narrowing the rule instead.
+          if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
             echo "W1-T3207: coverage-ratchet owns the single instrumented full-suite run; ci skips the quieter second harness on PR source diffs."
             echo "- W1-T3207: skipped the quieter ci test harness on SOURCE; coverage-ratchet owns the single instrumented full-suite run for this PR." >> "$GITHUB_STEP_SUMMARY"
             exit 0
