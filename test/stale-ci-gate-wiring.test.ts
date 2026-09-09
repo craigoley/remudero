@@ -48,6 +48,17 @@ function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-stale-gate-wiring-")), "ledger.ndjson");
 }
 
+/** An activity stamp that is ALWAYS recent, whenever the suite happens to run.
+ *
+ *  A fixed date compared against a real `Date.now()` is a time bomb whose signature is a red
+ *  beginning at a clock boundary with no diff involved — which is exactly how this suite failed,
+ *  and why the commit that merged minutes afterwards looked like the cause. Anything the sweep
+ *  ages against the wall clock has to be stamped from the wall clock.
+ */
+function recentActivityIso(): string {
+  return new Date(Date.now() - 60 * 60 * 1000).toISOString();
+}
+
 function pr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: 2612,
@@ -57,7 +68,14 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "red",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-08-26T18:15:00Z",
+    // W1-T3270 — DERIVED FROM THE CLOCK, NEVER A CONSTANT. This read `"2026-08-26T18:15:00Z"`, and
+    // the sweep's staleness rung fires at `ageDays >= policy.staleDays` (14). At
+    // 2026-09-09T18:15:00Z that fixture turned 14 days old and `runSweep` began disposing this PR
+    // `stale` BEFORE the stale-ci-gate lane it exists to exercise, so all three end-to-end cases
+    // failed. MEASURED: main's last green CI ran 18:05 and the first red 18:22, with no source
+    // change between them — the commit that merged at 18:22 touched no `src/` file at all and was
+    // simply the first one after the boundary.
+    lastActivityAt: recentActivityIso(),
     headSha: SHA,
     headRefName: "run-W1-TX-1785378652634",
     autoMergeArmed: false,
@@ -270,6 +288,24 @@ test("reaggregateCiGate is a NAMED no-op when ci-gate's own rollup entry carries
 
   assert.equal(captured.length, 0, "no job id — no gh call at all");
   assert.ok(logged.some((l) => l.step === "sweep.ci_gate_reaggregate.no_job_id"), "the stand-down is legible on the ledger log, never a silent no-op");
+});
+
+test("W1-T3270: the PR fixture ages from the wall clock, so no calendar date can flip its disposition out from under this suite", () => {
+  // THE FIXTURE MUST BE FRESH BY CONSTRUCTION. Every end-to-end case below reaches the stale-ci-gate
+  // lane only because `runSweep` does NOT dispose this PR `stale` first; a fixture that ages is a
+  // suite that expires.
+  const fixtureAgeDays = (Date.now() - Date.parse(pr().lastActivityAt!)) / 86_400_000;
+  assert.ok(fixtureAgeDays < 1, `the fixture must be hours old, not days — measured ${fixtureAgeDays.toFixed(2)}d`);
+  assert.ok(fixtureAgeDays < DEFAULT_SWEEP_POLICY.staleDays, "and it must sit clear of the staleness threshold it is judged against");
+
+  // AND THE CONSTANT IT REPLACED IS THE CONTROL: it is past the threshold today and grows further
+  // past it every day, so this assertion is what proves the old shape was genuinely a time bomb
+  // rather than a coincidence.
+  const retiredConstantAgeDays = (Date.now() - Date.parse("2026-08-26T18:15:00Z")) / 86_400_000;
+  assert.ok(
+    retiredConstantAgeDays >= DEFAULT_SWEEP_POLICY.staleDays,
+    `the retired constant must be stale, proving the bomb was real — measured ${retiredConstantAgeDays.toFixed(2)}d against a ${DEFAULT_SWEEP_POLICY.staleDays}d threshold`,
+  );
 });
 
 // ── acceptance 1+2+4 — end to end through runSweep, using the REAL wired effects ─────────────────
