@@ -1,0 +1,79 @@
+- id: W1-T3270
+  title: "A TEST FIXTURE'S HARDCODED ACTIVITY DATE CROSSED THE SWEEP'S 14-DAY STALENESS THRESHOLD AND TURNED main RED WITH NO DIFF INVOLVED — three end-to-end cases in test/stale-ci-gate-wiring.test.ts began failing at 2026-09-09T18:15:00Z, exactly 14 days after the fixture's own timestamp, and the commit that merged seven minutes later reads as the cause on every signal except the clock"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 6.00
+  files:
+    - test/stale-ci-gate-wiring.test.ts
+  origin: "operator-session#main-red-clock-boundary-2026-09-09"
+  plan_refs: ["W1-T3001", "W1-T1275", "W1-T2250"]
+  status: queued
+  attempts: 0
+  note: |
+    SHIPPED AS #4845 BEFORE THIS SHARD WAS FILED, DELIBERATELY. `main` was red and every PR in the
+    repo was blocked behind it; the record follows the repair rather than gating it. The branch is
+    `run-W1-T3270-1788982383411`, so the merge credits this id by head ref.
+  rationale: |
+    MEASURED 2026-09-09. `test/stale-ci-gate-wiring.test.ts` stamped its PR fixture
+
+        lastActivityAt: "2026-08-26T18:15:00Z"
+
+    and `runSweep`'s staleness rung fires at `ageDays >= policy.staleDays`, which is 14. At
+    2026-09-09T18:15:00Z that fixture turned exactly 14 days old, so the sweep disposed the PR
+
+        sweep.dispose {"disposition":"stale","reason":"abandoned — no activity in 14d (>= 14d threshold)"}
+
+    BEFORE reaching the stale-ci-gate lane the suite exists to exercise. Three end-to-end cases
+    asserted on a `gh` rerun call that consequently never happened: `expected exactly one real gh
+    rerun call, got []`.
+
+    ⚠ THE INNOCENT COMMIT LOOKS GUILTY ON EVERY SIGNAL EXCEPT THE CLOCK. main's last green CI ran at
+    18:05 and the first red at 18:22. `git diff --stat 5d9d721b5 258c097bf -- src/` is EMPTY — the
+    commit that merged at 18:22 (#4829) touched no source file at all. A bisect confirms the suite
+    also fails at the commit that first added it, which reads as "never passed" and is equally
+    wrong: it passed for two weeks and then expired. Three plausible and false diagnoses were
+    available before the timestamps were compared — a bad merge, an order-dependent suite exposed by
+    a reshard, and a test that never worked.
+
+    THE RULE ALREADY EXISTED AND DID NOT BIND. CLAUDE.md's "Code traps" section states it almost
+    verbatim: "A fixed date constant compared against rows stamped at REAL time is a time bomb; the
+    signature is a red beginning at a clock boundary with no diff involved ... Stamp through the
+    injected clock at the write seam; moving the constant only re-arms it." It is UNENFORCED PROSE,
+    and by that file's own preamble a rule that turns out to matter is fixed by making something
+    refuse it. This shard is the record; the refusal is W1-T3272.
+
+  design: |
+    (i) STAMP THE FIXTURE FROM `Date.now()`. Anything the sweep ages against the wall clock must be
+    written from the wall clock. A helper returning one hour ago keeps the fixture unambiguously
+    fresh without pretending the PR was updated this instant.
+
+    (ii) THE GUARD ASSERTS BOTH HALVES, AND THE SECOND IS THE ONE THAT MATTERS. Asserting the
+    fixture is fresh only proves today's state. Asserting that the RETIRED CONSTANT is past the
+    threshold proves the bomb was real rather than a coincidence — and that assertion grows more
+    true every day, so it can never silently stop discriminating.
+
+    (iii) SCOPE IS ONE FILE ON PURPOSE. Four other suites drive `runSweep` with hardcoded activity
+    stamps and all four pass today (328/328 across the whole set). Converting them under a red main
+    would widen an urgent repair into a refactor. The class is W1-T3272's problem, and a guard that
+    names the population is worth more than five hand edits.
+
+  acceptance:
+    - claim: "the three end-to-end cases reach the stale-ci-gate lane again instead of being disposed stale first"
+      proof: "unit test: a PR red only because ci-gate's own verdict went stale re-drives its job exactly once"
+    - claim: "the still-red control case is restored too, so the lane's negative side is proven and not merely quiet"
+      proof: "unit test: a genuinely still-red gate (no stale transition) is untouched by this lane"
+    - claim: "the fixture ages from the wall clock and a guard pins it, so the bomb cannot be re-armed silently"
+      proof: "unit test: W1-T3270: the PR fixture ages from the wall clock"
+
+  falsifier: |
+    Close this without implementation if the sweep's staleness rung gains an injected clock that the
+    suite already pins — the fixture would then age against a fixed test clock and no wall-clock
+    boundary could reach it.
+
+    Do NOT resolve this by raising `staleDays`, which moves the boundary rather than removing it,
+    and do NOT resolve it by moving the constant forward: CLAUDE.md names that explicitly as
+    re-arming the same bomb on a later date.

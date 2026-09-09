@@ -1,0 +1,122 @@
+- id: W1-T3269
+  title: "THE TRACKED UNIT INSTALLER HAS NO AUTOMATIC CALLER, SO EVERY MERGE TO IT SITS INERT UNTIL A HUMAN SSHes IN — `install-host-units.sh` is referenced only by its own test and the operator guide, and on 2026-09-09 the live host was running a launcher that had drifted from the repo since that morning's merge; fold the drift check into the watchdog tick that already asks two other convergence questions"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - deploy/install-host-units.sh
+    - test/host-unit-drift-converges-on-the-watchdog-tick.test.ts
+  origin: "operator-session#lean-into-automation-2026-09-09"
+  plan_refs: ["W1-T2877", "W1-T2953", "W1-T3233", "W1-T3245", "W1-T3240"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING. The diff is small and lands in
+    one rendered script, but it grants a five-minute timer the ability to REWRITE ROOT-OWNED SYSTEMD
+    UNITS from a checkout. The falsifier set is weighted almost entirely toward what must refuse.
+  rationale: |
+    MEASURED, TWO WAYS, 2026-09-09.
+
+    (1) THE INSTALLER HAS NO CALLER. Every reference to `install-host-units.sh` in the tree, with
+    `grep -rn` over the whole repo excluding node_modules and plan/:
+
+        test/host-units-install.test.ts    the suite
+        deploy/install-host-units.sh       itself
+        docs/operator-guide.md             two lines telling a human to run it
+        scripts/comment-load-baseline.json a size record
+
+    No workflow, no unit, no `src/`, no timer. It converges only when a person remembers.
+
+    (2) SO IT HAD DRIFTED. On the live Azure host, check mode read
+
+        install-host-units: DRIFTED /home/craigoleyagent/rmd-relaunch.sh
+        install-host-units: 1 unit(s) missing or drifted
+
+    The drift was W1-T3233's crash-loop reader, MERGED THAT MORNING and inert on the host all day.
+    The checkout was clean and exactly at origin/main throughout — the code had shipped; only the
+    rendered artifact had not. This is the mount/image boundary in CLAUDE.md one rung further out:
+    a path that ships on merge, into a file that ships on a human.
+
+    THE TICK ALREADY ASKS TWO CONVERGENCE QUESTIONS AND THIS IS THE THIRD. `rmd-fleet-watchdog.timer`
+    fires every 5 minutes into the launcher, which asks "is the daemon down" (revive from cache) and,
+    since W1-T3245, "is the image behind" (`deploy-run --image-drift-only`). "Have my own units
+    drifted" is the same question about a third artifact class, on the same cadence, and it belongs
+    in the same tick rather than in a fourth process — level-triggered reconciliation, one loop
+    reading observed state and converging, which is what the other two already are.
+
+    ⚠ THE PRIVILEGE BOUNDARY IS THE REASON THIS WAS NOT ALREADY DONE, AND IT IS REAL.
+    `render_watchdog_service` sets `User=${SERVICE_USER}`, so the tick runs UNPRIVILEGED, while
+    `${UNIT_DIR}` is `/etc/systemd/system` and `${BIN_DIR}` is `/usr/local/bin` — both root-owned.
+    MEASURED: `sudo -n true` succeeds for that user on this host. So the capability exists, and the
+    task is to spend it as narrowly as possible rather than to widen `User=`.
+
+  design: |
+    (i) THREE DECISION FUNCTIONS IN ONE TICK, NEVER ONE SCORE. Same argument W1-T3245 settled for
+    recycle-vs-restart: the signals differ in frequency, cost and blast radius, so a weighted sum is
+    dominated by the cheapest and most frequent one. Revive is seconds and many times a day; recycle
+    is minutes and roughly daily; unit convergence is sub-second and rare. Each asks its own question
+    and answers independently in the same pass.
+
+    (ii) THE ORDER IS FIXED AND CONVERGENCE IS LAST. The daemon's liveness outranks the tidiness of
+    its unit files. Nothing in this path may run before the STOP refusal, the mount refusal or the
+    revive decision, and a failure to converge must never prevent a revive.
+
+    (iii) THE REFUSALS ARE THE DELIVERABLE. A five-minute root-capable writer of systemd units is
+    only safe because it declines in every case it cannot justify:
+      * `state/STOP` present            — the stop lever outranks every actor, this one included.
+      * `--boot`                        — boot revives from cache; it does not reconcile. Same rule
+                                          W1-T3245 applied to recycle, for the same reason: a host
+                                          coming up is the worst moment to change its unit files.
+      * checkout DIRTY or not at `origin/main` — this is the guard that keeps a worktree experiment
+                                          from becoming root systemd config. Convergence targets the
+                                          reviewed, merged tree or it does not run.
+      * `sudo -n` unavailable           — report and continue; never prompt, never block the tick.
+      * check mode reports no drift     — silent no-op, which is the overwhelmingly common case.
+
+    (iv) CHECK BEFORE INSTALL, ALWAYS. The tick runs the comparison first and installs only on a
+    non-zero drift count. This is what makes the steady state free and what makes a converge event
+    rare enough to be worth logging.
+
+    (v) A CONVERGE IS ANNOUNCED IN THE RECORD THAT ALREADY EXISTS. The revival log is the host's
+    one durable operator-visible trace; a converge appends a line in the same shape. An automated
+    root write that leaves no evidence is worse than a manual one that does.
+
+    (vi) IT SELF-MAINTAINS AFTER ONE BOOTSTRAP, AND THAT LIMIT IS HONEST. Once installed, a later
+    merge to any rendered unit — including the watchdog's own — converges on the next tick, because
+    `--install` ends in `systemctl daemon-reload` and systemd applies a rewritten unit at its next
+    activation. What CANNOT be automated away is the FIRST install on a host that has never had
+    these units: that one remains a provisioning step, and the operator guide must say so in exactly
+    those terms rather than implying full autonomy.
+
+  acceptance:
+    - claim: "a healthy tick whose rendered units match the host runs the check and installs nothing, so the steady state is a silent no-op"
+      proof: "unit test: test/host-unit-drift-converges-on-the-watchdog-tick.test.ts"
+    - claim: "a healthy tick that finds drifted units converges them and appends a record naming the converge"
+      proof: "unit test: test/host-unit-drift-converges-on-the-watchdog-tick.test.ts"
+    - claim: "convergence refuses when the checkout is dirty or is not at origin/main, so an unreviewed tree can never become root systemd config"
+      proof: "unit test: test/host-unit-drift-converges-on-the-watchdog-tick.test.ts"
+    - claim: "convergence refuses on the boot path and refuses while state/STOP is present"
+      proof: "unit test: test/host-unit-drift-converges-on-the-watchdog-tick.test.ts"
+    - claim: "a convergence that cannot elevate or that fails reports and returns without preventing the revive decision that follows it"
+      proof: "unit test: test/host-unit-drift-converges-on-the-watchdog-tick.test.ts"
+
+  falsifier: |
+    Close this without implementation if the fleet moves to an image-baked unit set or to a real
+    configuration-management agent — either owns convergence properly and a launcher-side check
+    becomes a second actor writing the same files, which is worse than the gap it closes.
+
+    Re-design rather than build if the dirty/at-origin-main guard cannot be evaluated cheaply and
+    reliably from the launcher: that guard is the entire safety argument for granting a timer root
+    write access, and a version of this that converges from an arbitrary working tree must not ship.
+
+    Do NOT resolve this by widening `User=` on the watchdog service to root. The tick's job is to
+    run docker as the service user; making the whole recovery path root to win one narrow write
+    trades a large standing privilege for a small one.
+    Do NOT resolve it by scheduling `install-host-units.sh --install` on its own timer with no
+    guards — that is the shape rejected for the recycle path in W1-T3245, and it bypasses every
+    refusal above.
