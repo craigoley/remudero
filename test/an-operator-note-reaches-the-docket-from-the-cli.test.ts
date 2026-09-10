@@ -110,3 +110,48 @@ test("W1-T3351: a SUCCEEDING approve chains the note, and the same approve witho
   assert.equal(rows[0].ts, "2026-09-10T13:00:00.000Z");
   assert.equal(loadOperatorNotesForTask(root, "W1-T1041").length, 1, "the stamped note reads back");
 });
+
+test("W1-T3351: `rmd note` reports a REFUSED store write — exit 1, nothing crashes, the ledger says why", async () => {
+  const { noteCommand } = await import("../src/run-task.js");
+  const { writeFileSync } = await import("node:fs");
+  const root = makeTempDir("note-cli-refused");
+  // A file sits where `appendOperatorNote` needs the `plan/` DIRECTORY — `mkdirSync(..., {
+  // recursive: true })` throws EEXIST on it, `appendOperatorNote` catches and returns `false`.
+  // This is the store-refusal arm `written` guards, distinct from the usage-error arm above.
+  writeFileSync(join(root, "plan"), "blocks the plan/ directory appendOperatorNote needs");
+  const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
+
+  const code = await noteCommand(["W1-T42", "this write cannot land"], {
+    root,
+    log: (step, extra = {}) => logged.push({ step, extra }),
+  });
+
+  assert.equal(code, 1, "a refused store write is reported, not swallowed as success");
+  assert.equal(logged.filter((l) => l.step === "operator_note.refused").length, 1, "the refusal is ledgered");
+  assert.equal(loadOperatorNotesForTask(root, "W1-T42").length, 0, "nothing readable was written");
+});
+
+test("W1-T3351: a SUCCEEDING approve whose note-store write is REFUSED still reports the release's own code", async () => {
+  const { approveCommand } = await import("../src/run-task.js");
+  const { mkdirSync, writeFileSync, statSync, readdirSync } = await import("node:fs");
+  const root = makeTempDir("note-approve-store-refused");
+  mkdirSync(join(root, "plan"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(
+    join(root, "plan", "tasks.yaml"),
+    ["- id: W1-T1042", "  title: a parked shard", "  repo: remudero", "  type: implement", "  verify: human", "  status: queued", "  depends_on: []"].join("\n"),
+  );
+  // A DIRECTORY sits where the note store's own file needs to be — `appendFileSync` throws
+  // EISDIR, `appendOperatorNote` catches and returns `false`, `approveNoteChain` prints the
+  // refusal but never disturbs the release path's own verdict. (`loadOperatorNotesForTask`
+  // itself throws EISDIR on a directory in this path's place, so the read-back check below
+  // asserts the poisoned path stayed an EMPTY directory rather than calling that reader.)
+  mkdirSync(join(root, "plan", "operator-notes.ndjson"));
+  const config = { root } as never;
+
+  const code = await approveCommand(["W1-T1042", "--note", "this note cannot land"], { config, root });
+
+  assert.equal(code, 0, "the release still succeeded — a note-store failure never demotes it");
+  assert.ok(statSync(join(root, "plan", "operator-notes.ndjson")).isDirectory(), "still a directory — untouched");
+  assert.deepEqual(readdirSync(join(root, "plan", "operator-notes.ndjson")), [], "nothing was ever appended into it");
+});
