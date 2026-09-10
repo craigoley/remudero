@@ -20356,6 +20356,23 @@ export function defaultProofDebtCadenceInput(
   }
 }
 
+/**
+ * Stage one proposal into the inbox registry, IDEMPOTENTLY: an id already present is left alone and
+ * the registry is not rewritten. Extracted from {@link defaultVerifyHumanCadenceResult}'s
+ * `stageProposal` callback so the dedupe rule can be exercised without a real judge.
+ *
+ * THE RULE IS THE POINT, not the plumbing. This cadence re-judges a standing backlog on every pass,
+ * so the SAME parked shard yields the SAME proposal id repeatedly; without the guard each pass would
+ * append another copy and the operator's inbox would grow one duplicate per tick. Returning `null`
+ * from the updater is what tells {@link updateProposalRegistry} to leave the file untouched — a
+ * no-op write here would still churn the registry's lock on every pass for no change.
+ */
+export function stageInboxProposalOnce(registryPath: string, proposal: Proposal): Proposal[] | null {
+  return updateProposalRegistry(registryPath, (current) =>
+    current.some((existing) => existing.id === proposal.id) ? null : [...current, proposal],
+  );
+}
+
 export async function defaultVerifyHumanCadenceResult(
   root: string,
   config: Config,
@@ -20376,10 +20393,7 @@ export async function defaultVerifyHumanCadenceResult(
         cwd: root,
         settingsFile: join(root, "settings", "worker.json"),
       }),
-      stageProposal: (proposal) =>
-        void updateProposalRegistry(registryPath, (current) =>
-          current.some((existing) => existing.id === proposal.id) ? null : [...current, proposal],
-        ),
+      stageProposal: (proposal) => void stageInboxProposalOnce(registryPath, proposal),
       appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
       runId,
     });

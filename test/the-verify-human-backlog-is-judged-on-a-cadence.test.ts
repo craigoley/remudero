@@ -219,3 +219,39 @@ test("W1-T3271: runMeasurementCadenceReport carries the verify-human cadence res
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ── the staging callback: idempotent, because this cadence re-judges a STANDING backlog ───────
+//
+// diff-coverage named src/run-task.ts:20380-20381 — the `stageProposal` callback this cadence
+// hands to `verifyHumanCadence`. Nothing reached it, because reaching it through the real wiring
+// needs a real judge. It is now `stageInboxProposalOnce`, and the rule it carries is worth its own
+// test rather than its own mock: the SAME parked shard yields the SAME proposal id on every pass,
+// so without the dedupe the operator's inbox grows one duplicate per tick.
+
+test("W1-T3271: staging the same proposal twice leaves the registry untouched the second time", async () => {
+  const { stageInboxProposalOnce } = await import("../src/run-task.js");
+  const { loadProposalRegistry } = await import("../src/lib/inbox.js");
+  const root = mkdtempSync(join(tmpdir(), "rmd-t3271-stage-"));
+  try {
+    const registryPath = join(root, "inbox-proposals.json");
+    const proposal = { id: "VH-1", summary: "judge me", evidenceAnchors: [] };
+
+    const first = stageInboxProposalOnce(registryPath, proposal);
+    assert.ok(first, "a proposal with a new id is written");
+    assert.equal(loadProposalRegistry(registryPath).length, 1);
+
+    // THE SECOND PASS IS THE POINT. `updateProposalRegistry` treats a null updater result as
+    // leave-it-alone, so this must not rewrite the file at all — not merely produce the same
+    // contents by luck.
+    const second = stageInboxProposalOnce(registryPath, proposal);
+    assert.equal(second, null, "an id already present yields null, which is what skips the write");
+    assert.equal(loadProposalRegistry(registryPath).length, 1, "and the registry still holds exactly one");
+
+    // POSITIVE CONTROL: a DIFFERENT id must still append, or the dedupe would be a mute button.
+    const other = stageInboxProposalOnce(registryPath, { ...proposal, id: "VH-2" });
+    assert.ok(other, "a genuinely new proposal is still staged");
+    assert.equal(loadProposalRegistry(registryPath).length, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
