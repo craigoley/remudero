@@ -18524,6 +18524,12 @@ export type LintPlanStatusDeps = {
   /** W1-T1076: the OPEN-PR shard slug corpus reader, injected on the same axis as every dep
    *  above so a test can drive the duplicate check without a network. */
   openPlanShardSlugs?: typeof openPlanShardSlugs;
+  /**
+   * Run only the deterministic checkout-local subset. This is an execution boundary, not a
+   * manufactured GitHub result: status and open-PR readers are never called, and the summary
+   * names every check or refinement that becomes unavailable.
+   */
+  offline?: boolean;
 };
 
 // ── W1-T1076: THE FILING-TIME DUPLICATE CORPUS ──────────────────────────────────────────────
@@ -19280,6 +19286,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // "--all". Meaningless (and silently ignored) in --base mode: --base's own scope already
   // defines what's in-bounds, and that mode stays byte-identical whether or not this is set.
   const allFlag = rest.includes("--all");
+  const offline = deps.offline === true;
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(repoRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan resolving OUTSIDE the resolved root is REFUSED right
@@ -19465,7 +19472,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // wrote and nothing updates it on merge; the credit projection is this repo's only
       // completion signal, and asking the wrong one manufactured a 156-record landmine field out
       // of finished work.
-      const credited = creditedMergedIdsForWholePlan(statusOpen, deps);
+      const credited = offline ? undefined : creditedMergedIdsForWholePlan(statusOpen, deps);
       const open = credited === undefined ? statusOpen : statusOpen.filter((t) => !credited.has(t.id));
       wholePlanScopeKey = credited === undefined ? "status" : "credit";
       creditRetiredCount = statusOpen.length - open.length;
@@ -19481,7 +19488,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // is skipped rather than redding a plan-only PR during a GitHub outage.
   let statusByTaskId: Map<string, StatusProjection> | undefined;
   let statusResolvable = false;
-  if (scope && scope.size > 0) {
+  if (!offline && scope && scope.size > 0) {
     try {
       const config = (deps.loadConfig ?? loadConfig)();
       const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
@@ -19503,11 +19510,13 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let openShardCorpus: DuplicateCorpusEntry[] = [];
   let shardSlugById: Map<string, string> | undefined;
   if (scope && scope.size > 0) {
-    try {
-      const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
-      openShardCorpus = (deps.openPlanShardSlugs ?? openPlanShardSlugs)((deps.ghGateway ?? ghGateway)(owner, repo));
-    } catch {
-      openShardCorpus = [];
+    if (!offline) {
+      try {
+        const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
+        openShardCorpus = (deps.openPlanShardSlugs ?? openPlanShardSlugs)((deps.ghGateway ?? ghGateway)(owner, repo));
+      } catch {
+        openShardCorpus = [];
+      }
     }
     shardSlugById = shardSlugIndex(join(dirname(planPath), "tasks.d"));
   }
@@ -19749,7 +19758,12 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // W1-T120: the READ-IDENTITY ASSERTION — the abs path + content hash of the plan file
   // ACTUALLY opened, so a wrong-file run (a false green pointed at the wrong tree) is
   // legible in the gate's own output, not merely inferable from cwd.
-  console.log(`\nrmd lint-plan: ${summary}${evidenceRuleLine}\n  read: ${formatReadIdentity(planPath, planRaw)}`);
+  const offlineNotice = offline
+    ? "\n  offline subset: GitHub reads disabled; post-merge-amendment (block) omitted; " +
+      "duplicate-title (warn) omitted; duplicate-surface merge-credit filtering unavailable and may over-report warnings; " +
+      "whole-plan merge-credit scoping falls back to status"
+    : "";
+  console.log(`\nrmd lint-plan: ${summary}${evidenceRuleLine}\n  read: ${formatReadIdentity(planPath, planRaw)}${offlineNotice}`);
   return failing > 0 ? 1 : 0;
 }
 
@@ -20040,6 +20054,52 @@ function retroShippedGithubGateway(): ShippedGithub {
 const RUN_LEDGER_STEP_PATTERN =
   '"step":"run\\.start"|"step":"verdict"|"step":"pr\\.opened"|"step":"recon\\.done"|"step":"implement\\.done"|"step":"implement\\.resumed"|"step":"correction\\.provenance"';
 
+/** Last unavailable observation already reported by this process. `retroTriggerCheck` is a
+ * self-target-only command, so one fixed-width record is sufficient. This is transition memory for
+ * telemetry only: it never changes the trigger decision, schedules no retry, and creates no
+ * persisted latch. A healthy read clears it so a later outage is reported as a new incident. */
+let lastRetroTriggerDecline:
+  | { ledgerPath: string; fingerprint: string }
+  | undefined;
+
+function reportRetroTriggerDecline(
+  ledgerPath: string,
+  marker: { ts: string } | undefined,
+  now: Date,
+  reason: string,
+): void {
+  const fingerprint = `${marker?.ts ?? "absent"}\u0000${reason}`;
+  if (
+    lastRetroTriggerDecline?.ledgerPath === ledgerPath &&
+    lastRetroTriggerDecline.fingerprint === fingerprint
+  ) {
+    return;
+  }
+  let markerAgeMs: number | "unbounded" | "unknown";
+  if (marker === undefined) {
+    markerAgeMs = "unbounded";
+  } else {
+    const parsedMarkerMs = Date.parse(marker.ts);
+    markerAgeMs = Number.isFinite(parsedMarkerMs)
+      ? Math.max(0, now.getTime() - parsedMarkerMs)
+      : "unknown";
+  }
+  try {
+    appendProducerLedger(ledgerPath, "daemon", {
+      run_id: "RETRO-TRIGGER",
+      step: "daemon.retro_trigger.declined",
+      outcome: "declined",
+      reason,
+      marker_ts: marker?.ts ?? null,
+      marker_age_ms: markerAgeMs,
+    });
+    lastRetroTriggerDecline = { ledgerPath, fingerprint };
+  } catch {
+    // Best-effort evidence. A failed append must not turn an unreadable GitHub corpus into a
+    // retro decision; leaving the fingerprint unset lets the next tick retry the report.
+  }
+}
+
 /**
  * W1-T160: evaluate the retro cadence trigger against the REAL marker + ledger +
  * GitHub read — the impure wiring behind `evaluateRetroTrigger` (retro.ts, pure).
@@ -20089,7 +20149,14 @@ export function retroTriggerCheck(
   if (markerResolution.kind === "corrupt") return undefined;
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
   const github = deps.github ?? retroShippedGithubGateway();
-  if (github.unavailable?.()) return undefined;
+  const githubUnavailable = github.unavailable?.();
+  if (githubUnavailable) {
+    reportRetroTriggerDecline(ledgerPath, marker, now, githubUnavailable);
+    return undefined;
+  }
+  if (lastRetroTriggerDecline?.ledgerPath === ledgerPath) {
+    lastRetroTriggerDecline = undefined;
+  }
   // MERGE RESOLUTION (W1-T2289 x the ledger-union and runless-merge fixes on main). Both sides
   // rewrote this block and each carries behaviour the other lacks, so neither could be taken whole:
   // main supplies the SOURCE (`resolveLedgerUnion`, which sees rotated archives a bare
