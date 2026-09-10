@@ -750,6 +750,110 @@ export interface DoctorInputs {
   nvmrcVersion?: string;
 }
 
+
+// ── Capture-surface liveness (W1-T3348) ───────────────────────────────────────────────────────
+
+/** The five surfaces `buildFeedbackDocket` names in every `counts_by_source`. Restated here
+ *  rather than imported so this check keeps judging the surfaces the LEDGER actually reports even
+ *  if the docket's own list moves — a rename there must show up as a surface this check stops
+ *  seeing, not as a silent pass. */
+const CAPTURE_SURFACES = ["reframe", "operator_feedback", "rejected_feedback", "question_answer", "operator_note"] as const;
+
+/** Fires needed before "never fed" is a claim rather than a small sample. */
+const CAPTURE_MIN_FIRES = 3;
+
+type CaptureState = "fresh" | "stale" | "never";
+
+/**
+ * W1-T3348 — does the feedback docket's INPUT still carry anything?
+ *
+ * `state/last-feedback-docket.json` proves only that the weekly rung FIRED. The rung fires whether
+ * or not a human ever typed anything, so a cadence marker reads `fresh` over permanently-empty
+ * surfaces forever. This judges the surfaces themselves, from the `counts_by_source` the docket
+ * already emits on every empty fire — no new sensor, no new write.
+ *
+ * THREE STATES, NEVER TWO, mirroring `cadenceMarkerRows`' own discipline: `fresh` (carried an item
+ * on the most recent fire), `stale` (carried one once, but not on the most recent fire) and
+ * `never` (has never carried one). Reporting a never-fed channel as merely stale sends an operator
+ * hunting a regression in a channel that has no history to regress from.
+ *
+ * IT REFUSES RATHER THAN RENDERS. The verdict rides `buildDoctorReport` into `exitCodeFor`, so a
+ * dead capture surface makes `rmd doctor` exit non-zero. That is the whole point: a capture loop
+ * that stops at reporting rebuilds the failure it is fixing.
+ *
+ * AND IT NEVER FIRES ON AN UNOBSERVED POPULATION. Below {@link CAPTURE_MIN_FIRES} observed fires
+ * the check is OK and SAYS it has not yet judged — this repo's recurring defect is a bound that
+ * binds on a healthy condition, and a fresh host has simply not run the rung enough times yet.
+ */
+export function judgeCaptureSurfaceLiveness(ledgerLines: ReadonlyArray<Record<string, unknown>>): Check {
+  const countsOf = (row: Record<string, unknown>): Record<string, unknown> | undefined => {
+    const c = row.counts_by_source;
+    return c && typeof c === "object" ? (c as Record<string, unknown>) : undefined;
+  };
+  const allFires = ledgerLines
+    .filter((l) => l.step === "feedback_docket.empty" || l.step === "feedback_docket.published")
+    .sort((a, b) => (String(a.ts ?? "") < String(b.ts ?? "") ? -1 : 1));
+  // ONLY A FIRE THAT CARRIES `counts_by_source` CAN WITNESS SILENCE. `feedback_docket.published`
+  // rows carry none, and a publish is positive evidence that SOME surface fed — so counting one
+  // as a silent fire would let this check report a demonstrably live channel as `never`. MEASURED
+  // on the daemon host: both publishes came from `rejected_feedback`, which an all-fires reading
+  // called `never`. Unjudgeable fires are NAMED instead, never silently folded in either
+  // direction. Giving `.published` its own counts is a separate concern, filed as follow-up.
+  const fires = allFires.filter((f) => countsOf(f) !== undefined);
+  const unjudgeable = allFires.length - fires.length;
+  const unjudgeableNote =
+    unjudgeable > 0
+      ? ` ${unjudgeable} publish fire(s) carry no per-surface counts and cannot witness silence, so a surface that fed ONLY on those reads never here.`
+      : "";
+  const threshold = `every surface carries an item within ${CAPTURE_MIN_FIRES} counted docket fires`;
+
+  if (fires.length < CAPTURE_MIN_FIRES) {
+    return {
+      name: "capture-surfaces",
+      verdict: "OK",
+      measured: `${fires.length} counted fire(s) of ${allFires.length} observed`,
+      threshold,
+      detail:
+        `not yet judged — a "never fed" claim needs at least ${CAPTURE_MIN_FIRES} counted docket ` +
+        `fires, and the ledger holds ${fires.length}. This is an unobserved population, not a ` +
+        `healthy one.${unjudgeableNote}`,
+    };
+  }
+  const fedAt = (row: Record<string, unknown>, surface: string): boolean => {
+    const n = (countsOf(row) ?? {})[surface];
+    return typeof n === "number" && n > 0;
+  };
+
+  const newest = fires[fires.length - 1]!;
+  const states = new Map<string, CaptureState>();
+  for (const surface of CAPTURE_SURFACES) {
+    if (fedAt(newest, surface)) states.set(surface, "fresh");
+    else if (fires.some((f) => fedAt(f, surface))) states.set(surface, "stale");
+    else states.set(surface, "never");
+  }
+
+  const never = CAPTURE_SURFACES.filter((s) => states.get(s) === "never");
+  const stale = CAPTURE_SURFACES.filter((s) => states.get(s) === "stale");
+  const verdict: Verdict = never.length > 0 ? "FAIL" : stale.length > 0 ? "WARN" : "OK";
+  // Every surface is NAMED with its own state. A bare count here would be the same vacuous
+  // report this check exists to replace.
+  const detail = CAPTURE_SURFACES.map((s) => `${s}: ${states.get(s)}`).join(", ");
+  const consequence =
+    never.length > 0
+      ? ` — ${never.length} surface(s) have NEVER carried an item across ${fires.length} counted fires; that channel reaches the docket in name only.${unjudgeableNote}`
+      : stale.length > 0
+        ? " — every surface has carried something once, but some carried nothing on the most recent fire."
+        : "";
+
+  return {
+    name: "capture-surfaces",
+    verdict,
+    measured: `${fires.length} counted fire(s) of ${allFires.length} observed; ${never.length} never, ${stale.length} stale`,
+    threshold,
+    detail: detail + consequence,
+  };
+}
+
 /** Assemble every check from already-measured inputs. Pure — no I/O — so the whole check list,
  *  every verdict combination and the exit-code mapping are testable with no filesystem or daemon. */
 export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
@@ -771,6 +875,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     judgeDiskHeadroom(inputs.diskFreeBytes, inputs.diskTotalBytes),
     judgeMemory(inputs.mem.availableBytes, inputs.mem.totalBytes, inputs.mem.swapTotalBytes),
     judgeNodeVersionPin(inputs.runningNodeVersion, inputs.nvmrcVersion),
+    judgeCaptureSurfaceLiveness(inputs.ledgerLines),
   ];
   const worst = worstVerdict(checks);
   return { checks, worst, exitCode: exitCodeFor(worst), text: renderDoctor(checks) };
