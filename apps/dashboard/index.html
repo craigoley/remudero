@@ -1,19 +1,78 @@
 <!DOCTYPE html>
 <!--
-  W1-T3177 — the first screen on the new stack. Vite's entry: it rewrites the module script below
-  to the hashed bundle at build time, so there is no import map here and no path into `build/`
-  written by hand (dashboard v0's page needed both; it is archived beside this file as
-  v0.index.html, unbuilt and undeleted).
+  Dashboard v0 (shell 0, MASTER-PLAN §7 WS-5a -> W3-T2): read-only live board, plus the
+  human-in-the-loop panel actions (W3-T5): answer/approve/Pause-Resume-STOP,
+  plus the plan→task→PR graph + interactive plan adjustment (W3-T6, MASTER-PLAN §7B):
+  submit feedback, answer grills, accept/reject a proposal.
+
+  This source file remains the legacy no-bundler page that test/dashboard-loads.test.ts opens after
+  `tsc -p apps/dashboard/tsconfig.json`. The React/Vite console that W1-T3177 adds is emitted to
+  build/index.html by vite.config.ts, with its own /console/ asset URLs.
 -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Remudero — console</title>
+    <title>Remudero — Dashboard v0</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <h1>Remudero — task board</h1>
+    <div id="board">Loading…</div>
+
+    <section id="controls" aria-label="Human-in-the-loop panel actions">
+      <h2>Fleet control</h2>
+      <p id="controls-status" role="status"></p>
+
+      <div>
+        <label>reason (optional) <input id="control-reason" type="text" /></label>
+        <button id="pause-btn" type="button">Pause</button>
+        <button id="resume-btn" type="button">Resume</button>
+        <button id="stop-btn" type="button">STOP</button>
+      </div>
+
+      <h3>Answer a question</h3>
+      <form id="answer-question-form">
+        <label>task id <input id="answer-task-id" type="text" required /></label>
+        <label>answer <input id="answer-text" type="text" required /></label>
+        <button type="submit">Answer</button>
+      </form>
+
+      <h3>Approve a MANUAL item</h3>
+      <form id="approve-manual-form">
+        <label>task id <input id="approve-task-id" type="text" required /></label>
+        <label>issue url <input id="approve-issue-url" type="url" required /></label>
+        <button type="submit">Approve</button>
+      </form>
+    </section>
+
+    <section id="feedback" aria-label="Feedback inbox + plan→task→PR graph">
+      <h2>Feedback inbox</h2>
+      <p id="feedback-status" role="status"></p>
+
+      <h3>Submit feedback</h3>
+      <form id="submit-feedback-form">
+        <input id="submit-feedback-reply-to" type="hidden" />
+        <p id="submit-feedback-reply-banner" hidden></p>
+        <label>text <input id="submit-feedback-text" type="text" required /></label>
+        <label>attachment url (optional) <input id="submit-feedback-attachment" type="url" /></label>
+        <button type="submit">Submit</button>
+        <button id="submit-feedback-cancel-reply" type="button" hidden>Cancel reply</button>
+      </form>
+
+      <h3>Inbox</h3>
+      <div id="inbox-list">Loading…</div>
+
+      <h3>Plan→task→PR graph</h3>
+      <form id="trace-form">
+        <label>task or feedback id <input id="trace-id" type="text" required /></label>
+        <button type="submit">Trace</button>
+      </form>
+      <div id="trace-graph"></div>
+    </section>
+
+    <script type="importmap">
+      { "imports": { "@remudero/api-client/client": "./build/packages/api-client/src/client.js" } }
+    </script>
+    <script type="module" src="./build/apps/dashboard/src/main.js"></script>
   </body>
 </html>
