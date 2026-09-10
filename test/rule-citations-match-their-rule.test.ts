@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -34,7 +35,10 @@ function readMasterPlan(): string {
 }
 
 function readClaudeMd(): string {
-  return readFileSync(CLAUDE_MD_PATH, "utf8");
+  // W1-T3323: CLAUDE.md is an INDEX and the rule bodies — the decoding row this suite pins among
+  // them — live in `doctrine/`. `resolveDoctrineForReader` follows every pointer and fails LOUD on
+  // one that dangles, so a moved fact reddens here rather than passing as an absence.
+  return resolveDoctrineForReader(() => readFileSync(CLAUDE_MD_PATH, "utf8"));
 }
 
 // ── Namespace A: §12 "Standing rule N" ────────────────────────────────────────────────────────────

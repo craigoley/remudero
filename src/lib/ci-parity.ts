@@ -1,4 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -6,6 +8,153 @@ import { parse as parseYaml } from "yaml";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
+
+const require = createRequire(import.meta.url);
+
+/** BACKSTOP (W1-T1266) — it cannot fire on a healthy run, only on one that has already stopped
+ * making progress, and the measurement is why: the two full local suites completed in 1,024,664 ms
+ * (17.1 minutes) on 2026-09-09. Thirty minutes leaves nearly thirteen minutes of headroom while
+ * still refusing a stalled suite. Naming the kind is what stops a later resize from quietly
+ * promoting this into the thing that normally stops the run, which is the defect W1-T1266 exists
+ * for. THE SIBLING TAG IS DELIBERATELY NOT SPELLED HERE: the census matches either kind word
+ * anywhere in the block, so naming the other one would leave this declaration ambiguous and
+ * satisfied by the wrong tag. This is deliberately LOCAL: CI keeps its independently configured
+ * 35-minute job timeouts. */
+export const LOCAL_FULL_SUITE_TIMEOUT_MS = 30 * 60 * 1_000;
+
+const BOUNDED_SUITE_OUTPUT_TAIL_CHARS = 4_096;
+const BOUNDED_SUITE_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
+const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
+const TSX_LOADER_PATH = require.resolve("tsx");
+const WORKER_CONTAINMENT_URL = new URL("./worker-containment.ts", import.meta.url).href;
+
+/** The isolated supervisor for {@link runBoundedSuite}. It imports the established detached-group
+ * spawn and negative-pgid SIGKILL helpers instead of copying either mechanism into ci-parity. The
+ * parent stays synchronous (as the preflight API requires); this child owns the timer so it can
+ * kill the group while the parent is waiting. */
+function boundedSuiteSupervisorProgram(workerContainmentUrl: string): string {
+  return [
+    'import { writeFileSync } from "node:fs";',
+    `import { killProcessGroup, spawnDetachedGroup } from ${JSON.stringify(workerContainmentUrl)};`,
+    "const [timeoutFile, timeoutMsText, label, file, ...args] = process.argv.slice(1);",
+    "const timeoutMs = Number(timeoutMsText);",
+    "let outputTail = \"\";",
+    "let timedOut = false;",
+    "const appendOutput = (chunk) => {",
+    "  const text = String(chunk);",
+    `  outputTail = (outputTail + text).slice(-${BOUNDED_SUITE_OUTPUT_TAIL_CHARS});`,
+    "  return text;",
+    "};",
+    "try {",
+    "  const contained = spawnDetachedGroup(",
+    "    { command: file, args, cwd: process.cwd(), env: process.env },",
+    "    (chunk) => process.stderr.write(appendOutput(chunk)),",
+    "  );",
+    "  contained.process.stdout.on(\"data\", (chunk) => process.stdout.write(appendOutput(chunk)));",
+    "  const timer = setTimeout(() => {",
+    "    timedOut = true;",
+    "    writeFileSync(timeoutFile, JSON.stringify({ label, lastOutput: outputTail }), \"utf8\");",
+    "    process.stderr.write(`SUITE TIMEOUT — ${label} exceeded ${timeoutMs}ms; killing its process group with SIGKILL.\\n`);",
+    "    killProcessGroup(contained.pid);",
+    "  }, timeoutMs);",
+    "  contained.process.once(\"error\", (error) => {",
+    "    clearTimeout(timer);",
+    "    process.stderr.write(`SUITE SPAWN FAILURE — ${label}: ${error.message}\\n`);",
+    "    process.exitCode = 70;",
+    "  });",
+    "  contained.process.once(\"close\", (code, signal) => {",
+    "    clearTimeout(timer);",
+    "    if (timedOut) { process.exitCode = 124; return; }",
+    "    process.exitCode = typeof code === \"number\" ? code : 1;",
+    "    if (signal) process.stderr.write(`SUITE SIGNAL — ${label}: ${signal}\\n`);",
+    "  });",
+    "} catch (error) {",
+    "  process.stderr.write(`SUITE SPAWN FAILURE — ${label}: ${error instanceof Error ? error.message : String(error)}\\n`);",
+    "  process.exitCode = 70;",
+    "}",
+  ].join("\n");
+}
+
+export interface BoundedSuiteRunOptions {
+  /** Human-readable suite identity carried into the timeout verdict. */
+  label: string;
+  /** Explicit caller-owned wall-clock ceiling. */
+  timeoutMs: number;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  /** Matches {@link PreflightSpawn}'s streaming contract. */
+  stream?: boolean;
+}
+
+export interface BoundedSuiteRunResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: string;
+  signal?: string;
+  /** Present only when the supervisor's clock, rather than the suite's exit code, ended the run. */
+  timeout?: { label: string; lastOutput: string };
+}
+
+/**
+ * Run a full suite under a hard wall-clock ceiling without changing the synchronous preflight
+ * contract. The supervisor starts the actual suite with `spawnDetachedGroup`, then uses that
+ * module's `killProcessGroup` on timeout; therefore a descendant cannot survive after its direct
+ * parent is killed. A timeout flag is a file rather than an exit-code convention, so a healthy
+ * command that itself exits 124 is never misclassified as a timeout.
+ */
+export function runBoundedSuite(file: string, args: string[], opts: BoundedSuiteRunOptions): BoundedSuiteRunResult {
+  const timeoutDir = mkdtempSync(join(tmpdir(), "rmd-bounded-suite-"));
+  const timeoutFile = join(timeoutDir, "timeout.json");
+  const env = { ...process.env, ...opts.env };
+  delete env[SELF_SYNC_GUARD_ENV_NAME];
+  try {
+    const res = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        TSX_LOADER_PATH,
+        "--input-type=module",
+        "--eval",
+        boundedSuiteSupervisorProgram(WORKER_CONTAINMENT_URL),
+        timeoutFile,
+        String(opts.timeoutMs),
+        opts.label,
+        file,
+        ...args,
+      ],
+      {
+        cwd: opts.cwd,
+        env,
+        encoding: "utf8",
+        maxBuffer: BOUNDED_SUITE_SPAWN_MAX_BUFFER,
+        ...(opts.stream ? { stdio: ["ignore", "inherit", "inherit"] as const } : {}),
+      },
+    );
+    let timeout: BoundedSuiteRunResult["timeout"];
+    if (existsSync(timeoutFile)) {
+      try {
+        const parsed = JSON.parse(readFileSync(timeoutFile, "utf8")) as { label?: unknown; lastOutput?: unknown };
+        if (typeof parsed.label === "string" && typeof parsed.lastOutput === "string") {
+          timeout = { label: parsed.label, lastOutput: parsed.lastOutput };
+        }
+      } catch {
+        // A missing or malformed flag is not evidence of a timeout. The supervisor's nonzero
+        // result still fails normally, without claiming a reason it could not record.
+      }
+    }
+    return {
+      status: res.status,
+      stdout: res.stdout ?? "",
+      stderr: res.stderr ?? "",
+      error: res.error?.message,
+      signal: res.signal ?? undefined,
+      ...(timeout ? { timeout } : {}),
+    };
+  } finally {
+    rmSync(timeoutDir, { recursive: true, force: true });
+  }
+}
 
 /**
  * lib/ci-parity.ts — `rmd preflight --ci-parity` (W1-T294, MASTER-PLAN §5/§5C): a second,
@@ -229,6 +378,34 @@ export function shellOut(
   return { ok, detail: `FAIL — ${label}\n${body}` };
 }
 
+/** The full-suite leaf. Production takes the contained, hard-bounded route; injected spawns are
+ * deterministic test seams and retain their existing synchronous command/argv contract. */
+export function boundedSuiteLeaf(
+  spawn: PreflightSpawn,
+  label: string,
+  file: string,
+  args: string[],
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv; stream?: boolean },
+  timeoutMs = LOCAL_FULL_SUITE_TIMEOUT_MS,
+): CiParityLeafResult {
+  if (spawn !== defaultPreflightSpawn) return shellOut(spawn, label, file, args, opts);
+  const res = runBoundedSuite(file, args, { label, timeoutMs, ...opts });
+  if (res.timeout) {
+    const lastOutput = res.timeout.lastOutput.trim();
+    return {
+      ok: false,
+      detail:
+        `FAIL — ${res.timeout.label} exceeded its ${timeoutMs}ms wall-clock ceiling; its process group was killed with SIGKILL. ` +
+        `The suite's failure set is UNVERIFIED.${lastOutput ? ` Last output before termination:\n${lastOutput}` : " No suite output arrived before termination."}`,
+    };
+  }
+  const spawnFailed = spawnFailureDetail(label, res);
+  if (spawnFailed) return { ok: false, detail: spawnFailed };
+  if (res.status === 0) return { ok: true, detail: `PASS — ${label}` };
+  const captured = (res.stdout + res.stderr).trim();
+  return { ok: false, detail: `FAIL — ${label}\n${opts.stream ? "(output streamed above as it ran — not re-captured here)" : captured}` };
+}
+
 /** A trigger leaf: both trigger scripts exit 0 in EITHER verdict and say matched/skip only in
  *  stdout text, so unlike {@link shellOut} this always folds stdout into the detail and sets
  *  `matched` from it. */
@@ -440,9 +617,9 @@ function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath:
   } catch {
     // best-effort — an injected spawn may point repoRoot at a fixture needing no coverage/ directory.
   }
-  return shellOut(
+  return boundedSuiteLeaf(
     spawn,
-    "node scripts/test-with-retry.mjs node --enable-source-maps --experimental-test-coverage --test-coverage-exclude=test/** --test --import tsx --import ./test/setup/tmp-hygiene.ts test/**/*.test.ts",
+    "coverage-ratchet:test-with-coverage (test/**/*.test.ts)",
     process.execPath,
     [
       join(repoRoot, "scripts", "test-with-retry.mjs"),
@@ -1019,7 +1196,9 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       // process.stdout while accumulating it); the only thing swallowing that stream was this
       // process capturing it. Its `FLAKE-RETRY:` line — the record that a second full pass began —
       // was invisible for the same reason.
-      runStep("ci:test", () => shellOut(spawn, "npm run test:ci", "npm", ["run", "test:ci"], { cwd: repoRoot, stream: true })),
+      runStep("ci:test", () =>
+        boundedSuiteLeaf(spawn, "ci:test (test/**/*.test.ts)", "npm", ["run", "test:ci"], { cwd: repoRoot, stream: true }),
+      ),
       // W1-T2234: named separately from ci:test, never gating it — see the file comment above
       // "ci:host-caused-suite-reds". ci:test's own command/argv/stream mode are untouched by
       // this entry; it only ADDS a report of which known clusters this host is expected to

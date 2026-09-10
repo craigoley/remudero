@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -26,7 +27,12 @@ import { ACCEPTANCE_HEADER_RE, ACCEPTANCE_BULLET_RE, PROOF_DIALECT, parseWhiteli
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "generate-proof-dialect.mjs");
-const CLAUDE_MD = readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8");
+// W1-T3323: CLAUDE.md is an INDEX and the rule bodies live in `doctrine/`, so a raw read of
+// the file no longer contains the prose this pins. `resolveDoctrineForReader` follows every
+// pointer and fails LOUD on one that dangles, which is exactly the discipline W1-T3322 named:
+// a test asserting a doctrine fact must fail when it cannot read that fact, never pass because
+// the fact moved.
+const CLAUDE_MD = resolveDoctrineForReader(() => readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8"));
 
 function runCheck(out: string) {
   return spawnSync(process.execPath, ["--import", "tsx", SCRIPT, "--check", "--out", out], {

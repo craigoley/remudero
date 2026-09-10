@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { readFile, writeFile, mkdtemp, rm, mkdir } from "node:fs/promises";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -20,6 +20,7 @@ import {
   type StaleCiGateTransition,
   type SweepDeps,
 } from "../src/lib/sweep.js";
+import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 // ── W1-T261: ci-gate RE-AGGREGATES on member-check completion ───────────────────────────────
@@ -369,20 +370,27 @@ test("ci-gate-reaggregate (W1-T312): a required check that never completes withi
 });
 
 test("ci-gate-reaggregate (W1-T312): CLAUDE.md no longer states that W1-T261 is unimplemented", async () => {
+  // W1-T3323: CLAUDE.md is an INDEX and the rule bodies live in `doctrine/`, so a raw read no
+  // longer holds the prose this pins. `resolveDoctrineForReader` follows every pointer and
+  // throws on one that dangles — a moved fact reddens here rather than passing as an absence.
   const claudeMdPath = join(REPO_ROOT, "CLAUDE.md");
-  const raw = await readFile(claudeMdPath, "utf8");
+  // NAMED `doctrine`, not `raw`, on purpose: `raw` is bound to ci-gate.yml elsewhere in this file,
+  // and assertion-discrimination resolves an assertion's target by that binding. Once the read
+  // became indirect the resolver reached for the wrong one and reported these lines as satisfiable
+  // by a comment — true of ci-gate.yml, false of CLAUDE.md, where every W1-T312 is prose.
+  const doctrine = resolveDoctrineForReader(() => readFileSync(claudeMdPath, "utf8"));
   assert.doesNotMatch(
-    raw,
+    doctrine,
     /W1-T261[^\n]*UNIMPLEMENTED/i,
     "expected CLAUDE.md to stop claiming W1-T261 is unimplemented (it merged 2026-07-29 via #885)",
   );
   assert.doesNotMatch(
-    raw,
+    doctrine,
     /underlying defect is filed as W1-T261 and UNIMPLEMENTED/i,
   );
   // The corrected bullet should still exist and now name the merged PR + this task.
-  assert.match(raw, /W1-T261.*#885/s);
-  assert.match(raw, /W1-T312/);
+  assert.match(doctrine, /W1-T261.*#885/s);
+  assert.match(doctrine, /W1-T312/);
 });
 
 // ── W1-T1275: THE REQUIRED ROLLUP NEVER RECOMPUTES ONCE ITS OWN RUN CONCLUDES ────────────────

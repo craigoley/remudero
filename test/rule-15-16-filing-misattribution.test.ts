@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
+import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 import { gitGrepRunner, resolveSymbolDefinitions } from "./helpers/rule-citation-symbols.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -93,7 +94,10 @@ test("every enforcing symbol the decoding row names is DEFINED in src/ — a cit
 });
 
 test("CLAUDE.md's decoding row names every mapped rule number and symbol, so the two surfaces cannot drift apart", () => {
-  const claude = read("CLAUDE.md");
+  // W1-T3323: CLAUDE.md is an INDEX and the rule bodies live in `doctrine/`, so a raw read no
+  // longer holds the prose this pins. `resolveDoctrineForReader` follows every pointer and
+  // throws on one that dangles — a moved fact reddens here rather than passing as an absence.
+  const claude = resolveDoctrineForReader(() => read("CLAUDE.md"));
   const row = /Decoding rule citations[\s\S]{0,1600}/.exec(claude)?.[0];
   assert.ok(row, "CLAUDE.md must still carry the decoding row");
   for (const { n, symbols } of MAPPED_RULES) {

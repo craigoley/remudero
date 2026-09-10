@@ -155,8 +155,8 @@
     entry point as the local pre-push check -- not a hand-rolled scoped-lcov + `git diff --cached`
     recipe that approximates CI rather than running it."
   plan_section: "CLAUDE.md#before-you-push"
-  assertion: 'grep -qF "preflight --ci-parity" CLAUDE.md && ! grep -qE "diff-coverage\.mjs --lcov [^ ]+ --diff" CLAUDE.md'
-  precondition_paths: ["CLAUDE.md"]
+  assertion: 'grep -rqF "preflight --ci-parity" CLAUDE.md doctrine/ && ! grep -rqE "diff-coverage\.mjs --lcov [^ ]+ --diff" CLAUDE.md doctrine/'
+  precondition_paths: ["CLAUDE.md", "doctrine"]
 
 # Added by W1-T409 (the offline half of W1-T392's split): MASTER-PLAN.md's "## SHIPPED log"
 # section and its not-shipped prose ("not shipped"/"unbuilt"/"did not ship") are two lists a
@@ -201,8 +201,8 @@
     accepts), not the hyphenated \"P-N\" metavariable notation that no live citation or parser
     recognizes -- while the G-N and DR-N clauses keep their own, literal and correct, hyphens."
   plan_section: "CLAUDE.md#decoding-rule-citations"
-  assertion: 'grep -qF "\"P48\"" CLAUDE.md && ! grep -qF "\"P-N\"" CLAUDE.md && grep -qF "G-17" CLAUDE.md && grep -qF "\"DR-N\"" CLAUDE.md'
-  precondition_paths: ["CLAUDE.md"]
+  assertion: 'grep -rqF "\"P48\"" CLAUDE.md doctrine/ && ! grep -rqF "\"P-N\"" CLAUDE.md doctrine/ && grep -rqF "G-17" CLAUDE.md doctrine/ && grep -rqF "\"DR-N\"" CLAUDE.md doctrine/'
+  precondition_paths: ["CLAUDE.md", "doctrine"]
 
 # Added by W1-T2640 (follow-up of W1-T2477): MASTER-PLAN.md §2 named only `plan/tasks.yaml` as
 # the plan format while src/lib/triage.ts and src/lib/task-linter.ts both REQUIRE a NEW task to be
