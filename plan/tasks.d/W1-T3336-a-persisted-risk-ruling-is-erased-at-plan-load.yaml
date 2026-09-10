@@ -1,0 +1,87 @@
+- id: W1-T3336
+  title: "A PERSISTED RISK RULING IS ERASED AT PLAN LOAD — Task declares `risk_ruling`, the filing producer writes it and the linter consumes it, but `loadPlanFromYaml` never copies the YAML field into the loaded Task, so every on-disk proceed ruling becomes absent and every machine-filed record still parks"
+  repo: remudero
+  depends_on: [W1-T3143]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files:
+    - src/lib/plan.ts
+    - test/a-persisted-risk-ruling-reaches-the-linter.test.ts
+  origin: "codex-recon#risk-ruling-persistence-boundary-2026-09-10"
+  plan_refs: ["W1-T2977", "W1-T3143", "W1-T3216"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-10 at origin/main 98eaabf0. W1-T2977 added `Task.risk_ruling`,
+    `taskRulingPin` and the `machineAuthorVerifyViolation` consumer. W1-T3143 added
+    `buildFilingRiskJudgeInput` and `recordFilingRiskRuling`. The current tree has exactly one
+    source write (`risk-judge.ts`), one source read (`task-linter.ts`) and the type declaration in
+    `plan.ts`; `loadPlanFromYaml` constructs Task without reading `e.risk_ruling`.
+
+    THE POSITIVE CONTROL FAILS TODAY. A YAML shard carrying a valid, pinned `proceed` ruling loads
+    with `task.risk_ruling === undefined`, and `machineAuthorVerifyViolation` therefore returns the
+    unjudged block. Both shipped suites build Task objects in memory, so neither crosses this
+    persistence boundary: `test/law-5-is-judged-never-assumed.test.ts` hand-builds rulings and
+    `test/a-filing-time-ruling-nothing-produces.test.ts` asserts the producer's returned object.
+
+    THIS SUPERSEDES ONE PREMISE OF THE 2026-09-10 GATE-POSTURE RECON. The missing production caller
+    is real, but it is not yet the first executable repair. Giving the producer a caller now would
+    write a field the next plan load silently erases. The parser seam must land first; the caller
+    remains a separate successor because it adds model-spawn and automatic-release authority.
+
+    W1-T3216 is a manual release path through `rmd approve` and `ratify.approved`; it means the
+    parked queue is not literally consumerless. It does not make W1-T3143 automatic and does not
+    repair this parser omission.
+  design: |
+    (i) PARSE THE AUTHORITY-BEARING FIELD STRICTLY. Add one parser for `risk_ruling` and call it
+    from `loadPlanFromYaml`. A valid record must carry a non-empty verdict, action exactly
+    `proceed` or `escalate`, finite confidence in [0,1], an array of string reasons, a non-empty
+    `judged_at`, and a 64-character lowercase hexadecimal pin. Do not cast an unvalidated object.
+
+    (ii) ABSENT STAYS ABSENT; MALFORMED FAILS LOUD. A task with no `risk_ruling` loads exactly as
+    today. A present but malformed ruling throws PlanError naming the task and field. It must never
+    degrade to `undefined`, because that would erase evidence and make corruption look merely
+    unjudged.
+
+    (iii) DRIVE THE REAL ROUND TRIP. The test loads a machine-authored verify:auto YAML record,
+    computes the shared `taskRulingPin` over that record, reloads the same YAML with the pinned
+    ruling, and passes the loaded Task through the real `machineAuthorVerifyViolation`. A matching
+    proceed clears; an escalate remains loaded and blocks with its reasons; editing a pinned field
+    after load still drifts and blocks.
+
+    (iv) NO CALLER AND NO POLICY CHANGE HERE. Do not spawn a judge, change the CI-learning filer,
+    auto-release a task, alter `machineAuthorVerifyViolation`, or change `rmd approve`. This repairs
+    only the persistence boundary the already-merged producer and consumer require. The first
+    automatic filing-time caller remains the next one-concern task after this lands.
+  acceptance:
+    - claim: "a valid risk_ruling survives YAML plan loading and the real machineAuthorVerifyViolation consumer clears a matching pinned proceed record"
+      proof: "unit test: W1-T3336: a pinned proceed ruling survives plan YAML and clears the real machine-author gate"
+    - claim: "a persisted escalate ruling survives loading and still blocks with the judge's recorded reasons"
+      proof: "unit test: W1-T3336: a persisted escalate ruling survives and blocks with its reasons"
+    - claim: "a missing risk_ruling remains a supported absence while a present malformed ruling throws PlanError instead of being erased into that absence"
+      proof: "unit test: W1-T3336: missing is absent while malformed risk rulings fail plan load"
+    - claim: "changing a pin-covered field after the persisted ruling loads still causes the real consumer to refuse it as drift"
+      proof: "unit test: W1-T3336: a persisted ruling re-blocks when a pin-covered field changes"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if `loadPlanFromYaml` already preserves and validates
+    `risk_ruling`, proven by loading a real YAML string and then driving
+    `machineAuthorVerifyViolation` on the returned Task. A grep hit in the interface, producer or
+    linter is not the falsifier; the defect is specifically the disk-to-Task boundary.
+
+    THE TEST MUST FAIL WHEN THE NEW PLAN-PARSER ASSIGNMENT IS REMOVED. It must also fail if a
+    malformed present ruling is changed to load as `undefined`. In-memory Task literals do not
+    count, because both predecessor tasks already proved that half while missing this seam.
+  note: |
+    W1-T3336 was reserved atomically on origin at `refs/rmd-id/W1-T3336`. The authenticated REST
+    budget was exhausted, so the reservation command was invoked through its documented injected
+    `openPrTexts` seam using the current unauthenticated REST list (11 open pull requests), while
+    the unchanged `gitRemoteRefReserver` performed the atomic claim. The mint reported max 3335
+    across the plan, open PRs, remote plan, history and remote reservation namespace.
+
+    risk:high is blast radius, not span: the diff is one parser field and one test, but plan loading
+    feeds lint, dispatch and every control-plane reader. Strict rejection of malformed authority is
+    the safe direction. No open PR at filing time changed `src/lib/plan.ts`.
