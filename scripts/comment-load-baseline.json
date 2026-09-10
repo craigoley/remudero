@@ -106,6 +106,7 @@
   "scripts/recovery-drill.mjs": 148,
   "scripts/rmd-help.mjs": 250,
   "scripts/rule15-precheck.mjs": 250,
+  "scripts/rule25-precheck.mjs": 250,
   "scripts/shell-screenshot.mjs": 16,
   "scripts/source-size-baseline.json": 0,
   "scripts/source-size-ratchet.mjs": 250,

@@ -1036,6 +1036,7 @@
     "test/rule15-block-scalar-proof.test.ts": 0,
     "test/rule15-guard-sees-yml-and-block-scalars.test.ts": 1111,
     "test/rule15-shard-path.test.ts": 1486,
+    "test/rule25-precheck-refuses-before-the-push.test.ts": 0,
     "test/run-branch-claim-is-unenforced.test.ts": 855,
     "test/run-branch-pr-state.test.ts": 1291,
     "test/run-review-holdout-integration.test.ts": 1429,

@@ -3,7 +3,7 @@
 // unmappable suite. They are deleted rather than skipped — a test whose subject no longer exists is
 // a fixture for a thing that is gone, not coverage. What the step guarded now lives in CI's
 // ci-shard, unchanged; test/the-hook-spawns-no-test-suite.test.ts asserts the absence and that the
-// two surviving checks still run, in order.
+// the surviving checks still run, in order.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -146,6 +146,16 @@ test("ARMED: a refusing precheck blocks the push and the message names the way o
   assert.match(stderr, /RMD_PREPUSH_GATES=0 git push/, "a hook with no escape hatch is its own hazard");
 });
 
+test("ARMED: rule25 independently blocks a push that rule15 clears", () => {
+  const dir = scratch();
+  mkdirSync(join(dir, "scripts"), { recursive: true });
+  writeFileSync(join(dir, "scripts", "rule15-precheck.mjs"), "process.exit(0)\n");
+  writeFileSync(join(dir, "scripts", "rule25-precheck.mjs"), "process.exit(1)\n");
+  const { status, stderr } = runHook(dir, { RMD_PREPUSH_GATES: "1" });
+  assert.equal(status, 1, "rule25 must stop the push without borrowing rule15's refusal");
+  assert.match(stderr, /pre-push REFUSED/);
+});
+
 test("an UNREADABLE diff (exit 2) is not a violation — the bound must not fire on a healthy tree", () => {
   const dir = scratch();
   mkdirSync(join(dir, "scripts"), { recursive: true });
@@ -160,6 +170,7 @@ test("a MISSING check is named as skipped, never reported as cleared", () => {
   const { status, stderr } = runHook(dir, { RMD_PREPUSH_GATES: "1" });
   assert.equal(status, 0, "a missing entry point is not a violation");
   assert.match(stderr, /rule15-precheck\.mjs absent — skipped, NOT passed/);
+  assert.match(stderr, /rule25-precheck\.mjs absent — skipped, NOT passed/);
   // W1-T3225 removed the census step, and with it the `./bin/rmd absent` arm this used to assert.
   // The PROPERTY is unchanged and still worth holding: a check that could not RUN is named as
   // skipped, never reported as cleared.
@@ -188,4 +199,13 @@ test("rule15-precheck is invoked through the tsx loader, or its exit code means 
   const invocation = /node [^\n]*rule15-precheck\.mjs/.exec(hook);
   assert.ok(invocation, "the hook must run the precheck");
   assert.match(invocation[0], /--import tsx/, `bare node cannot load it: ${invocation[0]}`);
+});
+
+test("rule25-precheck is wired into the hook, with the same loader and exit-2 discipline", () => {
+  const hook = readFileSync(HOOK, "utf8");
+  const invocation = /node [^\n]*rule25-precheck\.mjs/.exec(hook);
+  assert.ok(invocation, "the hook must run the rule-25 precheck");
+  assert.match(invocation[0], /--import tsx/, `bare node cannot load it: ${invocation[0]}`);
+  assert.match(hook, /rule25-precheck could not read the diff/, "exit 2 must be named, not counted as a violation");
+  assert.match(hook, /rule25-precheck\.mjs absent — skipped, NOT passed/, "a missing check is skipped, never cleared");
 });
