@@ -651,6 +651,7 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // Still NOT sourced from plan/policy.yaml: a hardcoded literal, the same choice
   // `conceptCoexistenceEnabled` just above already made.
   mergeConflictAdmissionEnabled: true,
+  recordableRatchetRepairEnabled: POLICY_SWEEP.recordableRatchetRepairEnabled,
   // W1-T3277: flagged because this writes to contributor branches unattended. The threshold is the
   // measured split from 2026-09-09: ordinary clean PRs were 1-8 behind, red stale-base PRs 10-11.
   reviewWaitingBranchRefreshEnabled: true,

@@ -87,6 +87,9 @@ export interface PolicyValues {
     /** W1-T920: gates the supersession disposition (`sweep.ts`'s `DISPOSITION_RULES`). Default
      *  off, same shape as `armSessionPrs`. Why: docs/forensics/policy.md#sweep-block. */
     supersessionDisposal: boolean;
+    /** W1-T3289: gates unattended deterministic repair of recordable ratchets. Default off; making
+     *  the row reachable is the operator switch, not an enablement. */
+    recordableRatchetRepairEnabled: boolean;
     /** W1-T2847: ARMS the ad-hoc lane reap rung. `runAdhocLaneReapRung` shipped survey-first with
      *  `enabled` defaulting false and its doc calling arming "a separate operator decision" — but
      *  the call site passed no `enabled` at all, so there was nothing an operator could decide.
@@ -266,6 +269,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.repairFilingThreshold": "net-new",
   "sweep.repairFilingWindowDays": "net-new",
   "sweep.supersessionDisposal": "net-new",
+  "sweep.recordableRatchetRepairEnabled": "net-new",
   "sweep.memoryFloorMib": "net-new",
   "drain.max": "lifted",
   "autoTriage.enabled": "net-new",
@@ -560,6 +564,11 @@ export function validatePolicy(raw: unknown): Policy {
   const repairFilingThreshold = numberField("sweep.repairFilingThreshold", sweepRaw.repairFilingThreshold, origin);
   const repairFilingWindowDays = numberField("sweep.repairFilingWindowDays", sweepRaw.repairFilingWindowDays, origin);
   const supersessionDisposal = booleanField("sweep.supersessionDisposal", sweepRaw.supersessionDisposal, origin);
+  const recordableRatchetRepairEnabled = booleanField(
+    "sweep.recordableRatchetRepairEnabled",
+    sweepRaw.recordableRatchetRepairEnabled,
+    origin,
+  );
   const memoryFloorMib = numberField("sweep.memoryFloorMib", sweepRaw.memoryFloorMib, origin);
 
   const drainRaw = raw.drain;
@@ -711,6 +720,7 @@ export function validatePolicy(raw: unknown): Policy {
         repairFilingThreshold,
         repairFilingWindowDays,
         supersessionDisposal,
+        recordableRatchetRepairEnabled,
         memoryFloorMib,
       },
       drain: { max: drainMax },
