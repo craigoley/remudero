@@ -525,7 +525,7 @@ function requiredSweepRuntime<T extends SweepRuntimeFn>(name: string): T {
   }) as unknown as T;
 }
 
-function requiredSweepRuntimeCtor<T extends SweepRuntimeCtor>(name: string): T {
+export function requiredSweepRuntimeCtor<T extends SweepRuntimeCtor>(name: string): T {
   return (class {
     constructor() {
       throw new Error(`buildSweepEffects requires ${name} from its entrypoint adapter`);

@@ -1199,6 +1199,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "selectAdaptiveReviewWidth"
   | "repairMissingTaskTrailer"
 > {
+  // W1-T2890: the sweep-side real-wiring call site now lives in src/lib/sweep.ts as
+  // `await runFixRung(`; this CLI wrapper only supplies the entrypoint adapters below.
   return buildSweepEffectsFromLib({
     updateBranchImpl: updateBranchViaGh,
     captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log),
