@@ -344,6 +344,7 @@
     "test/codex-model-console.test.ts": 1073,
     "test/codex-preflight-contract.test.ts": 1067,
     "test/codex-quota-window-refusal.test.ts": 285,
+    "test/codex-reset-readiness-is-exposed-safely.test.ts": 0,
     "test/codex-reviewer-materialized-checkout.test.ts": 1635,
     "test/codex-reviewer-production-wiring.test.ts": 1105,
     "test/codex-spark-economy-routing.test.ts": 374,
