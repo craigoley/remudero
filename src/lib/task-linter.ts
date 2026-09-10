@@ -56,6 +56,7 @@ export type LintCheck =
   | "proof-engine-divergence"
   | "proof-scope"
   | "proof-name-resolution"
+  | "shared-proof"
   | "unbound-criterion"
   | "post-merge-amendment"
   | "post-merge-field-drift"
@@ -1379,6 +1380,52 @@ export function proofNameResolutionViolations(task: Task, opts: LintOpts = {}): 
   return violations;
 }
 
+function exactUnitTestTargetPath(proof: string): string | undefined {
+  const whitelisted = parseWhitelistedProof(proof);
+  if (!whitelisted || whitelisted.kind !== "test" || whitelisted.nameFiltered) return undefined;
+  return whitelisted.label;
+}
+
+// ── SHARED-PROOF (W1-T2967 — one proof cannot answer several claims) ──────────────────────
+// Review asks whether EACH criterion's proof is responsive to THAT claim. When two criteria carry
+// the exact same executable proof, the reviewer is handed the same evidence for different questions,
+// and a path-form `unit test:` proof can also pass at base for every row. This is advisory only:
+// one falsifier can legitimately prove two claims, but the author should make that choice visible.
+
+export function sharedProofViolations(task: Task): LintViolation[] {
+  const byProof = new Map<string, number[]>();
+  (task.acceptance ?? []).forEach((c, index) => {
+    if (c.satisfied_by) return;
+    const proof = (c.proof ?? "").trim();
+    if (!proof) return;
+    if (!parseWhitelistedProof(proof)) return; // malformed proofs are proof-dialect's concern.
+    const entries = byProof.get(proof) ?? [];
+    entries.push(index + 1);
+    byProof.set(proof, entries);
+  });
+
+  const declaredFiles = new Set(task.files ?? []);
+  const violations: LintViolation[] = [];
+  for (const [proof, indices] of byProof) {
+    if (indices.length < 2) continue;
+    const path = exactUnitTestTargetPath(proof);
+    const declaredWholeFile =
+      path !== undefined && declaredFiles.has(path)
+        ? ` Because this is a whole-file unit-test proof for ${path}, and ${path} is also in files:, it is likely to pass at the merge base too; a proof that passes on both trees cannot carry the positive override.`
+        : "";
+    violations.push({
+      check: "shared-proof",
+      severity: "warn",
+      message:
+        `criteria ${indices.join(", ")} share the identical proof ${JSON.stringify(proof)}. ` +
+        "That asks the reviewer different claims with the same evidence, so the proof may be non-responsive to one of them. " +
+        "Use a distinct per-criterion test-title proof such as `unit test: <exact test title>` for each claim, or keep the shared proof only when one falsifier deliberately answers every named criterion." +
+        declaredWholeFile,
+    });
+  }
+  return violations;
+}
+
 // ── UNBOUND-CRITERION (W1-T3217 — file-level proof targets hide sibling gaps) ───────────────
 // A path-form `unit test: test/x.test.ts` proof executes the WHOLE FILE, then review applies that
 // single result to every criterion naming it. So a sibling's passing test can certify a criterion
@@ -1414,12 +1461,6 @@ export function literalTestTitlesIn(fileText: string): string[] {
     titles.push(decodeTestTitle(m[2] ?? ""));
   }
   return titles;
-}
-
-function exactUnitTestTargetPath(proof: string): string | undefined {
-  const whitelisted = parseWhitelistedProof(proof);
-  if (!whitelisted || whitelisted.kind !== "test" || whitelisted.nameFiltered) return undefined;
-  return whitelisted.label;
 }
 
 function criterionDeclaredTags(c: AcceptanceCriterion): string[] {
@@ -2882,6 +2923,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofGrepSafetyViolations(task));
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofNameResolutionViolations(task, opts));
+  violations.push(...sharedProofViolations(task));
   violations.push(...unboundCriterionViolations(task, opts));
   violations.push(...proofBaseDiscriminationViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
