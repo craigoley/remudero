@@ -12,11 +12,10 @@ import {
   consoleBuildStatus,
   type ServeDeps,
 } from "../src/lib/serve.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
-import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 
 // W1-T3176 — A CONSOLE BUILD IS THE FIRST BUILD ARTIFACT THIS SYSTEM HAS EVER HAD.
 //
@@ -61,19 +60,6 @@ function task(over: Partial<Task> = {}): Task {
 
 function planOf(tasks: Task[]): Plan {
   return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
-}
-
-function fakeGitHub(byRef: Record<string, PrRef> = {}): GitHub {
-  return {
-    prByRef: (ref) => byRef[String(ref)] ?? null,
-    findMergedByTrailer: () => null,
-    headRefName: () => undefined,
-    prBody: () => undefined,
-  };
-}
-
-function fakeTraceGithub(byRef: Record<string, TracePrView> = {}): TraceGithub {
-  return { prView: (ref) => byRef[String(ref)] ?? null };
 }
 
 function fakeIssueCloser(): IssueCloser & { closed: string[] } {
@@ -132,7 +118,7 @@ function serveDepsFor(root: string, over: Partial<ServeDeps> = {}): ServeDeps {
   const planPath = writePlan(root, plan);
   return {
     board: { plan, ledgerPath, github: fakeGitHub() },
-    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: fakeGitHub(), ratify: fakeRatifyGateway() },
+    panelGraph: { root, planPath, ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: fakeRatifyGateway() },
     ledgerPath,
     issues: fakeIssueCloser(),
     fleetControlRoot: root,
