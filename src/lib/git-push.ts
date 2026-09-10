@@ -23,8 +23,55 @@ import { assertLiveWriteAllowed } from "./live-write-guard.js";
  * The `exec` seam is the whole point of the extraction: a test drives the real guard and
  * the real argv construction with an injected recorder, no worker and no remote.
  */
+export class PushFailedError extends Error {
+  /** The child's stderr, verbatim. The whole point: a caller deciding how to REACT to a failed push
+   *  needs the reason, and `execFileSync`'s own message carries only the argv. */
+  readonly stderrText: string;
+  constructor(message: string, stderrText: string, readonly cause: unknown) {
+    super(message);
+    this.name = "PushFailedError";
+    this.stderrText = stderrText;
+  }
+}
+
+/**
+ * W1-T3310 — CAPTURE THE PUSH'S STDERR, AND RE-EMIT IT.
+ *
+ * MEASURED: with `stdio: "inherit"` the child's stderr goes straight to the terminal and
+ * `execFileSync`'s thrown error keeps NONE of it —
+ *
+ *     execFileSync("bash", ["-c", "echo TEXT >&2; exit 1"], { stdio: "inherit" })
+ *       e.message -> "Command failed: bash -c echo TEXT >&2; exit 1"
+ *       e.stderr  -> null
+ *
+ * so the daemon saw `Command failed: git -C <worktree> push origin HEAD` and could not tell this
+ * repo's own pre-push gate refusing from a dead credential or a non-fast-forward. It therefore
+ * classified every push failure as a crash and spent three of docker's five restarts on gate
+ * refusals in one day, while dispatching normally in between.
+ *
+ * THE TRADE, STATED. stderr is now PIPED rather than inherited, which means git's progress output is
+ * buffered for the duration of the push instead of streaming. It is re-emitted immediately
+ * afterwards, on success and on failure alike, so nothing is hidden — only delayed, by the length of
+ * one push. That is the right side of the trade: a push takes seconds, and a failure whose reason
+ * was invisible to the process that had to react to it took the fleet down three times.
+ * `stdio: "ignore"` is untouched — those two fix-rung call sites asked for silence deliberately.
+ */
 export function defaultPushExec(file: string, args: string[], opts: { stdio: "inherit" | "ignore" }): void {
-  execFileSync(file, args, opts);
+  if (opts.stdio === "ignore") {
+    execFileSync(file, args, opts);
+    return;
+  }
+  try {
+    const out = execFileSync(file, args, { stdio: ["inherit", "inherit", "pipe"] });
+    void out;
+  } catch (err) {
+    const captured = (err as { stderr?: Buffer | string } | null)?.stderr;
+    const text = captured === undefined || captured === null ? "" : String(captured);
+    // RE-EMITTED BEFORE THROWING, so the operator's terminal shows exactly what it showed before
+    // this change — the refusal, verbatim — and the caller additionally gets it as data.
+    if (text.length > 0) process.stderr.write(text);
+    throw new PushFailedError(`${String((err as Error)?.message ?? err)}\n${text}`.trimEnd(), text, err);
+  }
 }
 
 /** Injected by tests to observe the argv without running git. */
