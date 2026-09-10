@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REAL_SCRIPT = join(REPO_ROOT, "scripts", "fleet-heartbeat.sh");
@@ -299,7 +300,7 @@ test("MUTANT: removing the non-sha rejection is caught — 'unknown' would other
 // ── Claim 4: the mount-versus-rebuild boundary is written down so an author can tell which half
 // a diff lands in ───────────────────────────────────────────────────────────────────────────────
 test("CLAUDE.md documents the bind-mount-versus-image-rebuild boundary", () => {
-  const text = readFileSync(CLAUDE_MD, "utf8");
+  const text = resolveDoctrineForReader(() => readFileSync(CLAUDE_MD, "utf8"));
   assert.match(
     text,
     /bind-mount|mounted checkout|image rebuild|baked/i,
@@ -318,7 +319,7 @@ test("CLAUDE.md documents the bind-mount-versus-image-rebuild boundary", () => {
 });
 
 test("CLAUDE.md names the operator-triggered build workflow, not an automatic one", () => {
-  const text = readFileSync(CLAUDE_MD, "utf8");
+  const text = resolveDoctrineForReader(() => readFileSync(CLAUDE_MD, "utf8"));
   assert.match(
     text,
     /acr-build\.yml/,

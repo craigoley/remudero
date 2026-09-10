@@ -1432,6 +1432,45 @@ export function retrieveRuleBody(index: Map<string, string>, headline: string): 
   return index.get(headline);
 }
 
+/** Resolve the complete rule corpus a doctrine reader sees. This is deliberately STRICTER than
+ * {@link retrieveRuleBodyOrDegrade}: a worker prompt must degrade rather than go silent, but a
+ * test asserting a doctrine fact must fail when it cannot read that fact. The parser and index are
+ * the same primitives the worker path uses; `readBody` is the future body-store seam, while its
+ * default reads today's inline bodies from that index. */
+export function resolveDoctrineForReader(
+  readSource: () => string,
+  readBody?: (headline: string) => string | undefined,
+): string {
+  let source: string;
+  try {
+    source = readSource();
+  } catch {
+    throw new LearningsError("resolveDoctrineForReader: doctrine source is unreadable");
+  }
+
+  const rules = parseRuleHeadlines(source);
+  if (rules.length === 0) {
+    throw new LearningsError("resolveDoctrineForReader: doctrine source contains no rule bullets");
+  }
+  const index = buildHeadlineIndex(rules);
+  const retrieve = readBody ?? ((headline: string) => retrieveRuleBody(index, headline));
+
+  return rules
+    .map((rule) => {
+      let body: string | undefined;
+      try {
+        body = retrieve(rule.headline);
+      } catch {
+        throw new LearningsError(`resolveDoctrineForReader: body for "${rule.headline}" is unreadable`);
+      }
+      if (body === undefined) {
+        throw new LearningsError(`resolveDoctrineForReader: body for "${rule.headline}" is absent`);
+      }
+      return `- **${rule.headline}**${body}`;
+    })
+    .join("\n");
+}
+
 /** Resolve one rule's body on demand through the injected `retrieve`. INVARIANT: a failed
  *  retrieval degrades to the FULL rule (`- **headline**body`), never to `""` and never a throw.
  *  W1-T2508's rationale names the hazard: a headline whose body cannot be fetched leaves the
