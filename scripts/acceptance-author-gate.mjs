@@ -44,7 +44,15 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
-import { acceptanceAuthorTimeCheck, filingSelfCreditCheck } from "../src/lib/review.ts";
+import {
+  acceptanceAuthorTimeCheck,
+  explainGrepProofRefusal,
+  explainUnitTestProofRefusal,
+  filingSelfCreditCheck,
+  parseAcceptanceBlock,
+  parseWhitelistedProof,
+  wrappedGrepPattern,
+} from "../src/lib/review.ts";
 import { execFileSync } from "node:child_process";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
 
@@ -196,9 +204,9 @@ export function planTrailerResolver(root = REPO_ROOT) {
 }
 
 /**
- * The gate's own verdict: the bot exemption first, then `acceptanceAuthorTimeCheck` verbatim (no
+ * The gate's own verdict: the bot exemption first, then `acceptanceAuthorTimeCheck` (no
  * `expectedTaskId` — this job has no PR-to-task binding of its own, the same general-case call
- * shape `rmd check-acceptance` itself uses).
+ * shape `rmd check-acceptance` itself uses), then the stricter author-time proof-shape refusal.
  *
  * W1-T2297's OTHER HALF. The predicate has taken an optional `trailerResolves` since #2934; this
  * caller is what supplies it, so a `Remudero-Task:` trailer naming an id the plan does not declare
@@ -218,7 +226,44 @@ export function evaluateGate({ body, authorLogin, trailerResolves, introducedTas
   // value), so ordering it second would leave it unreachable on exactly the bodies it is for.
   const selfCredit = filingSelfCreditCheck(body, introducedTaskIds);
   if (!selfCredit.ok) return { ok: false, defect: "files-and-credits-the-same-task", message: selfCredit.message };
-  return acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
+  const result = acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
+  return result.ok ? authorTimeProofShapeRefusal(body, result) : result;
+}
+
+function authorTimeProofShapeRefusal(body, result) {
+  const criteria = parseAcceptanceBlock(body);
+  const defects = [];
+  criteria.forEach((criterion, index) => {
+    const proof = criterion.proof ?? "";
+    const criterionNumber = index + 1;
+    const wrapped = wrappedGrepPattern(proof);
+    if (wrapped !== undefined) {
+      defects.push(
+        `criterion ${criterionNumber} wraps its grep pattern in ${wrapped.delimiter}; ` +
+          `use: grep: ${wrapped.bare} in <path>`,
+      );
+    }
+    if (parseWhitelistedProof(proof) === null) {
+      defects.push(`criterion ${criterionNumber} cannot execute: ${proofShapeReason(proof)}`);
+    }
+  });
+  if (defects.length === 0) return result;
+  return {
+    ok: false,
+    defect: "proof-shape",
+    message: `${result.message}. ${defects.join("; ")}.`,
+  };
+}
+
+function proofShapeReason(proof) {
+  const trimmed = proof.trim();
+  return (
+    explainGrepProofRefusal(trimmed) ??
+    explainUnitTestProofRefusal(trimmed) ??
+    (trimmed.length === 0
+      ? "empty proof"
+      : `no runnable dialect prefix (\`grep:\` or \`unit test:\`) in proof \`${trimmed}\``)
+  );
 }
 
 /**
