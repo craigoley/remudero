@@ -1211,6 +1211,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     });
 
   dispatchFix: async (pr, evidence) => {
+    // const spawnWallClockBoundMsOverride = deps.spawnWallClockBoundMsOverride ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs;
     const strikeCap = fixDispatchBudget(pr, evidence);
     if (strikeCap == null) {
       return;
@@ -1242,6 +1243,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     reclaimWorkerImpl: (info) => reclaimAbandonedWorker(info, { log: deps.log }),
     registeredWorktreeOwnerImpl: registeredFixWorktreeOwner,
     reviewCommandImpl: reviewCommand,
+    stallNotice: escalatePostReviewStall,
     registeredOwnerRecovery: {
       capture: captureRegisteredFixOwnerSnapshot,
       remove: removeAbandonedFixWorktreeOwner,
