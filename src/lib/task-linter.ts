@@ -2980,8 +2980,10 @@ function mergeTaskBlockTexts(texts: readonly string[]): Map<string, string> {
  *  hand edit included), not only the reconciler's own writes. Two-space indent: a record's
  *  top-level fields (W1-T3274 measured against the real monolith and real shards) are always
  *  indented exactly this far; a deeper `status:` nested inside a prose block (e.g. `design: |`)
- *  never matches, by construction. */
-const STATUS_LINE_RE = /^( {2}status:)[ \t]*(\S+)[ \t]*$/m;
+ *  never matches, by construction. Exported so its unhealthy arm (a line that does NOT carry a
+ *  top-level `status:` field) has a direct fixture — test/a-status-flip-is-not-a-task-edit.test.ts
+ *  drives both arms by identifier (test/negative-reachability-ratchet.test.ts, W1-T2317). */
+export const STATUS_LINE_RE = /^( {2}status:)[ \t]*(\S+)[ \t]*$/m;
 
 /** Closed/landed statuses — a flip TO one of these is what LEAVES the open-task population that
  *  `lint-plan --base`'s changed-tasks rules govern; a flip to any other (still-open) status

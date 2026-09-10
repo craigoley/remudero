@@ -26,7 +26,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { statusFlipOnlyTaskIds } from "../src/lib/task-linter.js";
+import { statusFlipOnlyTaskIds, STATUS_LINE_RE } from "../src/lib/task-linter.js";
 import { lintPlanCommand } from "../src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -34,9 +34,12 @@ const FIXTURE_PLAN = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "s
 const FIXTURE_DIR = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "status-flip", "tasks.d");
 
 function shard(id: string, status: string, extraLine = ""): string {
-  return [`- id: ${id}`, `  title: "t ${id}"`, "  repo: remudero", "  type: implement", `  status: ${status}`, extraLine, ""]
-    .filter((l) => l !== "")
-    .join("\n");
+  const lines = [`- id: ${id}`, `  title: "t ${id}"`, "  repo: remudero", "  type: implement", `  status: ${status}`];
+  if (extraLine) lines.push(extraLine);
+  // ALWAYS a trailing blank line, regardless of `extraLine` — several tests concatenate multiple
+  // `shard()` calls into one multi-record text, and splitTaskRecordBlocks/STATUS_LINE_RE both
+  // need a real line boundary between one record's last field and the next record's `- id:`.
+  return lines.join("\n") + "\n\n";
 }
 
 // ── (i) the pure comparator ──────────────────────────────────────────────────────────────────
@@ -97,6 +100,21 @@ test("in a multi-task corpus, only the genuinely flipped id is carved", () => {
   assert.deepEqual([...statusFlipOnlyTaskIds([oldText], [newText])], ["T2"]);
 });
 
+// ── STATUS_LINE_RE's own arms (test/negative-reachability-ratchet.test.ts, W1-T2317) ───────────
+
+test("STATUS_LINE_RE's healthy arm: a real top-level status field, captures the value", () => {
+  const m = STATUS_LINE_RE.exec("  status: merged");
+  assert.ok(m !== null, "a genuine top-level status: line must match");
+  assert.equal(m?.[2], "merged");
+});
+
+test("STATUS_LINE_RE's unhealthy arm: a status: line nested inside a prose block never matches", () => {
+  // Four-space indent — exactly the shape a `design: |` block's own body carries (see the
+  // fixtures above) — must NOT be mistaken for the record's own top-level `status:` field.
+  const m = STATUS_LINE_RE.exec("    status: queued");
+  assert.ok(m === null, "a nested status: line (wrong indent) must never match");
+});
+
 // ── (ii) the real --base path, over a committed fixture plan ───────────────────────────────────
 
 /** Mirrors test/changed-tasks-raw-text.test.ts's own `runLintPlanBase` helper. */
@@ -141,8 +159,9 @@ test("scenario A: a PURE status flip (queued -> merged) is carved, reported, and
     // `lintTask` — a regression to a no-op carve would flip this assertion, not merely leave a
     // feature unexercised.
     assert.match(stdout, /0 task\(s\) checked \(0 new\/changed vs HEAD\)/, "a pure status-flip-only shard must not enter the checked/changed count");
-    assert.doesNotMatch(stdout, /STATUS-FLIP-A/, "a carved shard's violations must never print");
-    // STILL REPORT, NEVER SILENTLY SKIP (design point (iv)).
+    assert.doesNotMatch(stdout, /✗ STATUS-FLIP-A/, "a carved shard's violations must never print — it never reached lintTask");
+    // STILL REPORT, NEVER SILENTLY SKIP (design point (iv)) — the id itself DOES appear, in the
+    // carve note asserted right below; only its VIOLATIONS are suppressed.
     assert.match(stdout, /1 status-flip-only, excluded from --base scope: STATUS-FLIP-A/, "the carve must be NAMED in the summary");
     assert.equal(exitCode, 0, "a carved-only diff must not fail the run");
   } finally {
