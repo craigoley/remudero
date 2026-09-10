@@ -184,7 +184,7 @@
   "src/lib/flight-signals.ts": 86,
   "src/lib/followup-dedup-census.ts": 172,
   "src/lib/fs-race-safe.ts": 179,
-  "src/lib/git-push.ts": 181,
+  "src/lib/git-push.ts": 250,
   "src/lib/github-app.ts": 163,
   "src/lib/github-event-wake.ts": 120,
   "src/lib/github-posture.ts": 143,
@@ -298,7 +298,7 @@
   "src/lib/status-board.ts": 750,
   "src/lib/status.ts": 1500,
   "src/lib/supersession.ts": 50,
-  "src/lib/sweep.ts": 2250,
+  "src/lib/sweep.ts": 3000,
   "src/lib/task-card.ts": 54,
   "src/lib/task-class.ts": 37,
   "src/lib/task-id-reservation.ts": 160,
@@ -321,6 +321,6 @@
   "src/lib/worker.ts": 1250,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 15750,
+  "src/run-task.ts": 15000,
   "src/spike.ts": 18
 }

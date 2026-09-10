@@ -81,11 +81,19 @@ export function parseLedger(ndjson: string): LedgerRecord[] {
  *  window does not catch the fall.
  *
  *  Sized against the retro subprocess's own 1792MB heap with the measured multiplier: the retained
- *  ndjson is held as an array of strings, joined into a second flat string, and parsed into objects
- *  costing roughly 3x their text — so the retained side peaks near 5x this number, leaving the
- *  union's `seen` Set (641MB at the full measured corpus, the one term this cap does NOT bound)
- *  room to coexist with it. */
+ *  ndjson is held in one insertion-ordered identity map, joined into a flat string, and parsed into
+ *  objects costing roughly 3x their text. The identity map owns only this retained window; it no
+ *  longer grows over every line ever streamed. */
 export const RETRO_LEDGER_MAX_BYTES = 96 * 1024 * 1024;
+
+/** PRIMARY CONTROL: maximum retained rows, and therefore maximum exact-string identity-map entries.
+ *
+ *  A byte ceiling alone does not bound Set bookkeeping when rows are very small. The live read
+ *  retained 318,931 rows on 2026-09-09; 350k preserves that measured byte-bounded population while
+ *  preventing a small-row corpus from rebuilding the 900,813-entry / 641MB Set that SIGABRT'd the
+ *  1792MB subprocess. When this ceiling binds, the oldest retained row is dropped and reported by
+ *  the same honesty path as the byte ceiling — dedupe never silently degrades. */
+export const RETRO_LEDGER_MAX_ROWS = 350_000;
 
 /** How far back {@link retroLedgerWindowSince} reaches when there is NO marker — a first-ever
  *  retro, or one whose marker was deleted. Not a correctness bound (the byte budget is); this
@@ -112,6 +120,10 @@ export interface RetroLedgerRead {
   /** Rows dropped to stay under the budget. ALWAYS the OLDEST ones — see the loop below. */
   droppedRows: number;
   droppedBytes: number;
+  /** Exact duplicate output lines suppressed while their first copy remained in the window. */
+  duplicatesCollapsed: number;
+  /** Largest exact-string identity-map population reached; bounded by the configured row ceiling. */
+  dedupeEntriesPeak: number;
 }
 
 /** The window to read from, given the marker's timestamp (absent on a first-ever retro).
@@ -129,44 +141,62 @@ export function retroLedgerWindowSince(markerTs: string | undefined, nowMs: numb
 
 export async function readRetroLedgerNdjson(
   stateDir: string,
-  opts: { sinceTs?: string; maxBytes?: number } = {},
+  opts: { sinceTs?: string; maxBytes?: number; maxRows?: number } = {},
 ): Promise<RetroLedgerRead> {
   const maxBytes = opts.maxBytes ?? RETRO_LEDGER_MAX_BYTES;
-  const kept: string[] = [];
-  let head = 0;
+  const maxRows = opts.maxRows ?? RETRO_LEDGER_MAX_ROWS;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error(`retro ledger maxBytes must be a positive safe integer, got ${maxBytes}`);
+  if (!Number.isSafeInteger(maxRows) || maxRows < 1) throw new Error(`retro ledger maxRows must be a positive safe integer, got ${maxRows}`);
+  // Map insertion order IS retention order. The value is the line's encoded cost, so evicting the
+  // oldest identity does not allocate or re-encode it. A duplicate is delete+set: the newest
+  // occurrence takes ownership instead of an old copy being evicted later while the newer one was
+  // already forgotten.
+  const retained = new Map<string, number>();
   let bytes = 0;
   let droppedRows = 0;
   let droppedBytes = 0;
+  let duplicatesCollapsed = 0;
+  let dedupeEntriesPeak = 0;
 
-  for await (const row of openLedgerUnion(stateDir, opts.sinceTs === undefined ? {} : { sinceTs: opts.sinceTs })) {
+  // The generic union dedupes the WHOLE stream. Retro instead dedupes the RETAINED window below,
+  // so its identity map is bounded and a newer duplicate can survive after its older copy is evicted.
+  const unionOpts = opts.sinceTs === undefined ? { dedupe: false } : { sinceTs: opts.sinceTs, dedupe: false };
+  for await (const row of openLedgerUnion(stateDir, unionOpts)) {
     const line = JSON.stringify(row);
+    const priorCost = retained.get(line);
+    if (priorCost !== undefined) {
+      duplicatesCollapsed += 1;
+      retained.delete(line);
+      bytes -= priorCost;
+    }
     // +1 for the separator `join` will add. An over-count by one separator across the whole read;
     // deliberately conservative, since the budget exists to stay UNDER a hard ceiling.
-    const cost = line.length + 1;
-    kept.push(line);
-    bytes += cost;
-    // Drop from the FRONT — the union yields oldest-first (rotations in stamp order, then live), so
-    // the survivors are the NEWEST rows, which is what a retro reasons about. `kept.length - 1`
-    // keeps one row alive so a single row larger than the whole budget terminates instead of
-    // spinning.
-    while (bytes > maxBytes && head < kept.length - 1) {
-      const evicted = kept[head];
-      kept[head] = "";
-      head += 1;
-      bytes -= evicted.length + 1;
+    const cost = Buffer.byteLength(line, "utf8") + 1;
+    // Evict BEFORE retaining the new row. The union yields oldest-first and Map preserves that
+    // order, so survivors are newest. One oversized row still survives by itself: an empty map
+    // ends the loop, then takes the row, with no spin.
+    while (retained.size > 0 && (bytes + cost > maxBytes || retained.size >= maxRows)) {
+      const oldest = retained.entries().next().value as [string, number];
+      retained.delete(oldest[0]);
+      bytes -= oldest[1];
       droppedRows += 1;
-      droppedBytes += evicted.length + 1;
+      droppedBytes += oldest[1];
     }
-    // Compact rather than let the array grow without bound behind `head`. Amortised: only when the
-    // dead prefix is at least half the array, so this is O(n) over the whole read, not per row.
-    if (head > 4_096 && head * 2 > kept.length) {
-      kept.splice(0, head);
-      head = 0;
-    }
+    retained.set(line, cost);
+    bytes += cost;
+    dedupeEntriesPeak = Math.max(dedupeEntriesPeak, retained.size);
   }
 
-  const rows = head === 0 ? kept : kept.slice(head);
-  return { ndjson: rows.join("\n"), sinceTs: opts.sinceTs, rowsKept: rows.length, droppedRows, droppedBytes };
+  const rows = [...retained.keys()];
+  return {
+    ndjson: rows.join("\n"),
+    sinceTs: opts.sinceTs,
+    rowsKept: rows.length,
+    droppedRows,
+    droppedBytes,
+    duplicatesCollapsed,
+    dedupeEntriesPeak,
+  };
 }
 
 /** Report a truncated read — a ledger row and a stderr line — or do NOTHING when nothing was
@@ -200,10 +230,14 @@ export function reportRetroLedgerTruncation(
     dropped_rows: read.droppedRows,
     dropped_bytes: read.droppedBytes,
     max_bytes: RETRO_LEDGER_MAX_BYTES,
+    max_rows: RETRO_LEDGER_MAX_ROWS,
+    duplicates_collapsed: read.duplicatesCollapsed,
+    dedupe_entries_peak: read.dedupeEntriesPeak,
   });
   (ctx.warn ?? ((m: string) => console.error(m)))(
     `\n### [retro] ledger read truncated: kept ${read.rowsKept} row(s), dropped ${read.droppedRows} ` +
-      `older row(s) (${read.droppedBytes} bytes) to stay under ${RETRO_LEDGER_MAX_BYTES} bytes ` +
+      `older row(s) (${read.droppedBytes} bytes) to stay under ${RETRO_LEDGER_MAX_BYTES} bytes and ` +
+      `${RETRO_LEDGER_MAX_ROWS} rows ` +
       `since ${String(read.sinceTs)}`,
   );
   return true;
@@ -222,7 +256,8 @@ export function retroLedgerScopeNote(read: RetroLedgerRead): string {
   const truncation =
     read.droppedRows > 0
       ? ` ${read.droppedRows} older row(s) (${read.droppedBytes} bytes) were DROPPED to stay under the ` +
-        `${RETRO_LEDGER_MAX_BYTES}-byte read budget, so this window is itself incomplete at its old end.`
+        `${RETRO_LEDGER_MAX_BYTES}-byte and ${RETRO_LEDGER_MAX_ROWS}-row read budgets, so this window is itself ` +
+        `incomplete at its old end.`
       : "";
   return `\n_Scope: counted over ${window} — ${read.rowsKept} row(s), not over all history._${truncation}`;
 }
@@ -1605,6 +1640,12 @@ export interface RetroGather {
   /** W1-T87/P13: the other half of the flywheel — merged-run shapes shared by two or more runs,
    *  mined as procedural-learning candidates for the Architect to phrase and ratify. */
   proceduralCandidates: ProceduralCandidate[];
+  /** W1-T2928: failed review rows carry `unmet_criteria`/`reasons`; this is the bounded,
+   *  marker-scoped evidence before recurrence decides whether it becomes a candidate. */
+  failedReviewFeedback: FailedReviewFeedback[];
+  /** W1-T2928: review reasons recurring across independent tasks, proposed for Architect
+   *  ratification into the learning corpus. No corpus write happens in the gather. */
+  failedReviewCandidates: FailedReviewReasonCandidate[];
   /** W1-T2766: a drafted SKILL.md beside each `proceduralCandidates` entry that cleared the
    *  two-run floor — the flywheel's other half, a procedure the runtime EXECUTES rather than a
    *  fact line it only recalls. Rendering never writes; `rmd approve` is the only ratifying path. */
@@ -1704,6 +1745,7 @@ export function buildGather(opts: {
   // Mined ONCE, read by both `proceduralCandidates` and `skillDrafts` below — a draft with no
   // matching candidate in the gather would be a procedure the gather never actually observed.
   const proceduralCandidates = mineProceduralCandidates(merged, records);
+  const failedReviewFeedback = failedReviewFeedbackForRuns(scoped, records);
   return {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
@@ -1725,6 +1767,8 @@ export function buildGather(opts: {
     degradedSuccess: mineDegradedSuccess(merged, records),
     // Same marker-scoped window as degradedSuccess above (W1-T87/P13).
     proceduralCandidates,
+    failedReviewFeedback,
+    failedReviewCandidates: mineFailedReviewReasonCandidatesFromFeedback(failedReviewFeedback),
     // Drafted from the SAME candidates above, never re-mined (W1-T2766).
     skillDrafts: proceduralCandidates.map((c) => renderSkillDraft(c)).filter((d): d is SkillDraft => d !== undefined),
     learningsNow: learningsCount(opts.learningsMd),
@@ -1886,6 +1930,8 @@ export function renderGather(g: RetroGather): string {
     renderDegradedSuccess(g.degradedSuccess),
     "",
     renderProceduralCandidates(g.proceduralCandidates),
+    "",
+    renderFailedReviewFeedback(g.failedReviewCandidates),
     "",
     renderSkillDrafts(g.skillDrafts),
     "",
@@ -2081,14 +2127,25 @@ export function renderOverrunProposals(proposals: ClassOverrunProposal[]): strin
 export interface ReviewPostedSummary {
   runId: string;
   taskId: string;
+  /** The posted review state: `failure` rows are the feedback source W1-T2928 mines. */
+  state?: string;
   /** Count of criteria whose `proof_exec` is `executed_pass`/`executed_fail`. */
   executed: number;
   /** Total criteria judged (the ledgered `proof_exec` array's length). */
   total: number;
+  /** Visible unmet criterion claims, already filtered before `review.posted` was written. */
+  unmetCriteria: string[];
+  /** The reviewer's structured failure reasons, carried verbatim from `review.posted`. */
+  reasons: string[];
   /** W1-T72's flag: EVERY criterion floored while at least one dialect proof was written. */
   floorDegraded: boolean;
   /** W1-T63/P10-a: the advisory reviewer's terminal subtype, when logged; absent otherwise. */
   reviewerOutcome?: string;
+}
+
+function ledgerStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((v) => (typeof v === "string" ? v.trim() : "")).filter((v) => v.length > 0);
 }
 
 /** Reduce every `review.posted` line to the LATEST posting per run_id. A run that never posted has
@@ -2102,13 +2159,147 @@ export function latestReviewPostedByRun(records: LedgerRecord[]): Map<string, Re
     out.set(String(r.run_id), {
       runId: String(r.run_id),
       taskId: String(r.task_id ?? ""),
+      ...(typeof r.state === "string" ? { state: r.state } : {}),
       executed,
       total: proofExec.length,
+      unmetCriteria: ledgerStringArray(r.unmet_criteria),
+      reasons: ledgerStringArray(r.reasons),
       floorDegraded: r.floor_degraded === true,
       ...(typeof r.reviewer_outcome === "string" ? { reviewerOutcome: r.reviewer_outcome } : {}),
     });
   }
   return out;
+}
+
+/** One failed review's feedback payload, reduced from its latest `review.posted` row. */
+export interface FailedReviewFeedback {
+  runId: string;
+  taskId: string;
+  unmetCriteria: string[];
+  reasons: string[];
+}
+
+/** The stable recurrence key for a reason with a reviewer classifier prefix. Free prose is
+ *  preserved as evidence on {@link FailedReviewFeedback}, but never grouped into a candidate. */
+export function reviewReasonClassifierKey(reason: string): string | undefined {
+  const normalized = reason.trim().replace(/\s+/g, " ");
+  const classifier = normalized.match(/^([a-z][a-z0-9 -]{1,60}):\s+(.+)$/i);
+  if (!classifier) return undefined;
+  const prefix = classifier[1]!.toLowerCase();
+  if (prefix === "remudero-review") return undefined;
+  return `${prefix}: ${classifier[2]!.toLowerCase()}`;
+}
+
+/** Failed review feedback for the runs this retro is allowed to reason about. Pure projection:
+ *  no LLM, no filesystem, no corpus write. */
+export function failedReviewFeedbackForRuns(runs: RunSummary[], records: LedgerRecord[]): FailedReviewFeedback[] {
+  const posted = latestReviewPostedByRun(records);
+  const feedback: FailedReviewFeedback[] = [];
+  for (const r of runs) {
+    const summary = posted.get(r.runId);
+    if (!summary || summary.state !== "failure") continue;
+    if (summary.unmetCriteria.length === 0 && summary.reasons.length === 0) continue;
+    feedback.push({
+      runId: r.runId,
+      taskId: r.taskId,
+      unmetCriteria: summary.unmetCriteria,
+      reasons: summary.reasons,
+    });
+  }
+  feedback.sort((a, b) => {
+    const ka = a.taskId + a.runId;
+    const kb = b.taskId + b.runId;
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
+  return feedback;
+}
+
+/** ONE mined failed-review candidate: a classifier-shaped reason repeated across independent
+ *  tasks, ready for Architect ratification into the learning corpus. */
+export interface FailedReviewReasonCandidate {
+  kind: "failed_review_reason";
+  reasonKey: string;
+  reason: string;
+  supportingTasks: number;
+  occurrences: number;
+  runIds: string[];
+  taskIds: string[];
+  evidence: FailedReviewFeedback[];
+}
+
+/** Mine recurring failed-review reasons. Threshold counts DISTINCT task ids, not occurrences, so
+ *  one task that re-posts the same reason cannot manufacture a learning candidate by itself. */
+export function mineFailedReviewReasonCandidatesFromFeedback(
+  feedback: FailedReviewFeedback[],
+  opts: { threshold?: number } = {},
+): FailedReviewReasonCandidate[] {
+  const threshold = opts.threshold ?? 2;
+  const byKey = new Map<string, { reason: string; evidence: FailedReviewFeedback[]; occurrences: number }>();
+  for (const f of feedback) {
+    const seenInRow = new Set<string>();
+    for (const reason of f.reasons) {
+      const key = reviewReasonClassifierKey(reason);
+      if (!key) continue;
+      const bucket = byKey.get(key) ?? { reason: reason.trim().replace(/\s+/g, " "), evidence: [], occurrences: 0 };
+      bucket.occurrences += 1;
+      if (!seenInRow.has(key)) bucket.evidence.push(f);
+      seenInRow.add(key);
+      byKey.set(key, bucket);
+    }
+  }
+
+  const candidates: FailedReviewReasonCandidate[] = [];
+  for (const [reasonKey, bucket] of byKey) {
+    const taskIds = [...new Set(bucket.evidence.map((f) => f.taskId))].sort();
+    if (taskIds.length < threshold) continue;
+    candidates.push({
+      kind: "failed_review_reason",
+      reasonKey,
+      reason: bucket.reason,
+      supportingTasks: taskIds.length,
+      occurrences: bucket.occurrences,
+      runIds: [...new Set(bucket.evidence.map((f) => f.runId))].sort(),
+      taskIds,
+      evidence: [...bucket.evidence].sort((a, b) => {
+        const ka = a.taskId + a.runId;
+        const kb = b.taskId + b.runId;
+        return ka < kb ? -1 : ka > kb ? 1 : 0;
+      }),
+    });
+  }
+  candidates.sort((a, b) => (a.reasonKey < b.reasonKey ? -1 : a.reasonKey > b.reasonKey ? 1 : 0));
+  return candidates;
+}
+
+export function mineFailedReviewReasonCandidates(
+  runs: RunSummary[],
+  records: LedgerRecord[],
+  opts: { threshold?: number } = {},
+): FailedReviewReasonCandidate[] {
+  return mineFailedReviewReasonCandidatesFromFeedback(failedReviewFeedbackForRuns(runs, records), opts);
+}
+
+function renderFailedReviewEvidence(e: FailedReviewFeedback): string {
+  const reasons = e.reasons.length ? e.reasons.join(" / ") : "(no reason text)";
+  const unmet = e.unmetCriteria.length ? e.unmetCriteria.join(" / ") : "(no visible unmet criterion)";
+  return `${e.taskId} (${e.runId}) reasons: ${reasons}; unmet: ${unmet}`;
+}
+
+/** Render recurring failed-review feedback candidates. The wording is deliberately candidate-shaped:
+ *  the Architect ratifies any learning later; this module never writes `learnings/`. */
+export function renderFailedReviewFeedback(candidates: FailedReviewReasonCandidate[]): string {
+  if (candidates.length === 0) {
+    return "## Failed-review feedback mining (W1-T2928)\n\nNo failed-review reason recurred across >=2 independent tasks.";
+  }
+  return [
+    "## Failed-review feedback mining (W1-T2928) — recurring reasons proposed for Architect learning ratification",
+    "",
+    ...candidates.map(
+      (c) =>
+        `- ${c.reason} — ${c.supportingTasks} task(s), ${c.occurrences} occurrence(s): ` +
+        `${c.taskIds.join(", ")}; evidence: ${c.evidence.map(renderFailedReviewEvidence).join(" | ")}`,
+    ),
+  ].join("\n");
 }
 
 /** One weaker-path-than-claimed signal — DATA: the next class is a ROW, never new executor code. */

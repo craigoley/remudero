@@ -1,5 +1,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { acceptanceAuthorTimeCheck, wrappedGrepPattern } from "../src/lib/review.js";
 
 /**
@@ -19,6 +24,55 @@ import { acceptanceAuthorTimeCheck, wrappedGrepPattern } from "../src/lib/review
 
 const BODY = (proofs: string[]) =>
   ["Some prose.", "", "Acceptance:", ...proofs.map((p, i) => `- claim ${i + 1} | ${p}`), ""].join("\n");
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, "..");
+const SCRIPT = join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs");
+
+function runGateForBody(body: string) {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-author-time-proof-shape-"));
+  const eventPath = join(dir, "event.json");
+  writeFileSync(eventPath, JSON.stringify({ pull_request: { body, user: { login: "a-human" } } }));
+  try {
+    return spawnSync(process.execPath, ["--import", "tsx", SCRIPT, "--event-path", eventPath], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("W1-T2966: the author-time gate exits non-zero on a grep proof with no path target", () => {
+  const run = runGateForBody(BODY(["grep: REAL THING"]));
+  assert.equal(run.status, 1, run.stdout + run.stderr);
+  assert.match(run.stderr, /REFUSED \(proof-shape\)/);
+  assert.match(run.stderr, /criterion 1 cannot execute/);
+  assert.match(run.stderr, /no `in <path>` clause/);
+});
+
+test("W1-T2966: the author-time gate exits non-zero on a wrapped grep pattern", () => {
+  const run = runGateForBody(BODY(["grep: `FOLDED BY R39` in MASTER-PLAN.md"]));
+  assert.equal(run.status, 1, run.stdout + run.stderr);
+  assert.match(run.stderr, /REFUSED \(proof-shape\)/);
+  assert.match(run.stderr, /criterion 1 wraps its grep pattern/);
+  assert.match(run.stderr, /grep: FOLDED BY R39 in <path>/);
+});
+
+test("W1-T2966: the author-time gate exits non-zero on a proof with no dialect prefix", () => {
+  const run = runGateForBody(BODY(["the operator observes the console"]));
+  assert.equal(run.status, 1, run.stdout + run.stderr);
+  assert.match(run.stderr, /REFUSED \(proof-shape\)/);
+  assert.match(run.stderr, /criterion 1 cannot execute/);
+  assert.match(run.stderr, /no runnable dialect prefix/);
+});
+
+test("W1-T2966: a future pure-path unit test proof still passes author time", () => {
+  const run = runGateForBody(BODY(["unit test: test/does-not-exist-yet.test.ts"]));
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, /OK/);
+  assert.doesNotMatch(run.stdout + run.stderr, /REFUSED|cannot execute|wraps its grep pattern/);
+});
 
 test("W1-T2544 criterion 1: a backticked grep pattern is reported, and the note names the bare pattern", () => {
   const r = acceptanceAuthorTimeCheck(BODY(["grep: `FOLDED BY R39` in MASTER-PLAN.md"]));

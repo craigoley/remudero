@@ -1,0 +1,115 @@
+- id: W1-T3318
+  title: "RULING — REPAIR, ROUTE, OR CLOSE: BLOCKED IS NOT A RESTING STATE. Record the operator's 2026-09-10 direction that a gate fixes a PR and gets it through, or spins off a follow-up; and that the only cause to stop a change is that it is bad, malicious, or a meaningful regression — in which case the PR is CLOSED, never left blocked"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 6.00
+  files: [DECISIONS.md, test/a-gate-repairs-or-routes.test.ts]
+  origin: "operator-session#gate-posture-2026-09-10"
+  plan_refs: ["W1-T3311", "W1-T3319", "W1-T3320", "W1-T3321", "W1-T3205"]
+  status: queued
+  attempts: 0
+  note: |
+    TRANSCRIBED, NOT AUTHORED. DECISIONS.md's own decision-authority ruling
+    (fb-1785882211812-bafd8f) says "an agent may recommend a ruling and may never record one of its
+    own"; the sanctioned shape for transcribing an attributable one is the form fifteen existing
+    entries already use. The operator's words are quoted verbatim below and the entry must carry
+    them, because a paraphrase of a ruling is an agent's ruling.
+  rationale: |
+    THE OPERATOR'S DIRECTION, 2026-09-10, verbatim:
+
+      "the goal should never be to block prs. The goal should be to fix them and get them through
+       the system or spin off follow-up tasks if they can't be easily fixed in-line"
+
+      "the only time to block is if it is truly a bad change, a malicious change, or something that
+       is going to really negatively regress rmd in a meaningful way"
+
+      "in which case it should be closed anyway"
+
+    THE THIRD CLAUSE IS THE SHARPEST AND MUST NOT BE SOFTENED IN THE RECORD. It abolishes BLOCKED AS
+    A RESTING STATE. A change is repaired and lands, or it is routed and lands with a follow-up
+    filed, or it is genuinely harmful and is CLOSED with the reason. What no longer exists is the
+    fourth outcome the system currently spends most on: a PR that sits blocked, gets re-dispatched,
+    and blocks again.
+
+    IT IS ALREADY PROVEN IN THIS REPO, which is why it is a ruling rather than a preference.
+    W1-T3205's test-tier admission refused any commit adding an untiered test file. MEASURED over
+    one day: two operator pushes blocked, and FOUR daemon crashes across W1-T3226, W1-T3242 and
+    W1-T3274 twice — each one exiting 1 against docker's `on-failure:5`, taking `RestartCount` to 4
+    of 5. Zero defects caught in exchange.
+
+    W1-T3311 did not delete that gate. It made the gate PERFORM the remedy its own refusal message
+    already named. MEASURED AFTER: #4923 merged 04:52Z, the daemon restarted 04:55Z, and in the
+    ~1000 log lines since there has been not one `pre-push REFUSED` and not one error stop. The
+    single most expensive thing in the system became invisible, and the protection is unchanged —
+    the push-time admission still refuses a commit made with the hook bypassed.
+
+    THE DISTINCTION THE RULING DRAWS is between a remedy that is COMPUTABLE and one that needs
+    judgement. Seeding a manifest line is computable: there is exactly one right answer and the
+    refusal message already stated it. Deciding WHICH rule to fold out of a full CLAUDE.md is not —
+    and that gate's response to not knowing is to drop the rule entirely (W1-T3320).
+
+    AND THE COST OF THE FOURTH OUTCOME IS MEASURED, on the same night as the crashes. W1-T2923,
+    W1-T2924 and W1-T2962 each ended `blocked_ci` TWICE; W1-T2926 and W1-T2995 blocked; W1-T3274 was
+    attempted three times. Meanwhile the cost-anomaly detector fired 18 times, with W1-T2924 at
+    $11.37 against a $2.90 median and W1-T2906 at $12.06 — one drain pass alone cost $19.88. The
+    fleet's most expensive activity that night was re-running tasks into the same block. Twelve
+    merges landed; the churn is where the money went. Under this ruling that third attempt does not
+    happen: the second block routes or closes.
+  design: |
+    (i) THE RULING IS RECORDED, NOT IMPLEMENTED HERE. This task's whole deliverable is the
+    DECISIONS.md entry; W1-T3319/3320/3321 are the work it authorises. A ruling that ships with its
+    own implementation cannot be cited by the next task as settled prior art.
+    (ii) THREE TERMINAL POSTURES, NAMED — and "terminal" is the load-bearing word, because each one
+    ENDS the change's journey. "Do not block" is not "do not check":
+      REPAIR  — the remedy is computable: apply it, stage it, say so, and the change lands.
+                (W1-T3311's shape, and the only one that needs no human.)
+      ROUTE   — the remedy needs judgement: the change LANDS and the follow-up is FILED, naming it.
+      CLOSE   — the change is bad, malicious, or a meaningful regression to rmd: close the PR with
+                the reason. Not blocked, not parked, not retried. Closed.
+    (iii) THERE IS NO FOURTH OUTCOME, and the entry must say so in as many words. `blocked` as a
+    resting state is what this ruling removes: a PR that neither lands nor closes is the state the
+    fleet spent most of its money on. A gate that today reports "blocked" must be re-read as asking
+    which of the three it actually meant.
+    (iii-a) CLOSE IS NARROW AND MUST NOT BE READ AS THE OLD REFUSE. The bar is HARM — a secret in the
+    diff, a destructive migration, a change that breaks the fleet's own recovery path, a meaningful
+    regression. INCOMPLETENESS IS NOT HARM: a missing manifest line, an untiered file, an unfolded
+    doctrine byte is a REPAIR or a ROUTE, never a close.
+    (iv) THE RECORD NAMES THE MEASUREMENT, not just the preference. Four daemon crashes and two
+    blocked pushes against zero defects is what makes this a ruling rather than a taste; an entry
+    that records only "the operator prefers not to block" is a sales document (W1-T3173's caveat).
+    (v) NAME THE COST ADMITTED: a REPAIR posture means a gate now WRITES to the tree it checks, which
+    is a larger surface than reading it. W1-T3311's own falsifier — that the seed must be idempotent
+    and byte-identical when idle — is the shape every repair gate must carry, or a gate that fixes
+    becomes a gate that churns.
+  acceptance:
+    - claim: "DECISIONS.md records the ruling, quoting the operator's direction verbatim"
+      proof: "grep: the goal should never be to block prs in DECISIONS.md"
+    - claim: "the record names the three terminal postures, so a builder knows repair, route and close are distinct and none of them is a resting block"
+      proof: "grep: REPAIR, ROUTE, CLOSE in DECISIONS.md"
+    - claim: "the record states there is no fourth outcome — blocked is not a resting state"
+      proof: "grep: blocked is not a resting state in DECISIONS.md"
+    - claim: "the record states that CLOSE is reserved for harm and that incompleteness is never harm, so the ruling is not read as licence to close unfinished work"
+      proof: "grep: INCOMPLETENESS IS NOT HARM in DECISIONS.md"
+    - claim: "the record carries the measurement that motivated it, not only the preference"
+      proof: "grep: four daemon crashes against zero defects in DECISIONS.md"
+    - claim: "the record admits the cost: a repairing gate writes to the tree it checks, so it must be idempotent"
+      proof: "unit test: test/a-gate-repairs-or-routes.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if DECISIONS.md already carries a gate-posture ruling.
+    MEASURED 2026-09-10: it carries fifteen `Operator-ruled` entries and none of them is about
+    whether a gate may block.
+    DO NOT record this as an agent's own conclusion. The decision-authority ruling forbids it, and
+    the operator's words are available verbatim — transcribe them.
+    DO NOT let the entry read as "remove the gates". The measurement that motivates it is a gate
+    that REFUSED where it could have REPAIRED, not a gate that existed. An entry a reader can cite
+    to delete a ratchet has inverted the ruling.
+    DO NOT let CLOSE become the new default refusal. The bar is harm, and the falsifier for any
+    implementation is that an INCOMPLETE change — an untiered file, an unfolded byte — still lands.
+    A system that closes what it used to block has kept the block and lost the work as well.
+    DO NOT implement W1-T3319/3320/3321 in this task. The record is the deliverable; a ruling that
+    ships with its own implementation cannot be cited as settled prior art by the work it authorises.
