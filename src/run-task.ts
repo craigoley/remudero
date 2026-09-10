@@ -10802,6 +10802,45 @@ export function resolveRunMounts(
   };
 }
 
+interface RunTaskBodyOptions {
+  armAdhocLaneReap?: boolean;
+  binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
+  claimReserver?: DispatchClaimReserver;
+  containmentExec?: ProbeExecutor;
+  isolationExec?: IsolationProbeExecutor;
+  maskLearnings?: boolean;
+  maskRecon?: boolean;
+  maskRules?: boolean;
+  noMerge?: boolean;
+  readHeadShaForProvenance?: (prUrl: string) => string;
+  spawnWallClockBoundMs?: number;
+  workerRuleHeadlinesEnabled?: boolean;
+  worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
+}
+
+export interface RunTaskContext {
+  config: Config;
+  fetchPrBodyFn: typeof fetchPrBodyViaGh;
+  github: GitHub;
+  isMerged: (task: Task) => boolean;
+  ledgerPath: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  openTaskIds: ReadonlySet<string>;
+  opts: RunTaskBodyOptions;
+  owner: string;
+  plan: Plan;
+  planPath: string;
+  recordDecisionFn: typeof recordDecision;
+  repoRoot: string;
+  runId: string;
+  runReviewFn: typeof runReview;
+  say: (msg: string) => void;
+  spawn: typeof spawnWorker;
+  task: Task;
+  taskId: string;
+  workerStateSensor: WorkerStateSensor;
+}
+
 /**
  * W1-T2862: report the maintainability obligation without ever changing the implementation
  * verdict. The consumer owns durable filing and its decision-relevant receipt; this wrapper owns
@@ -11287,12 +11326,58 @@ async function runTask(
     throw e;
   }
   try {
-    return await runTaskBody();
+    const ctx: RunTaskContext = {
+      config,
+      fetchPrBodyFn,
+      github,
+      isMerged,
+      ledgerPath,
+      log,
+      openTaskIds,
+      opts,
+      owner,
+      plan,
+      planPath,
+      recordDecisionFn,
+      repoRoot,
+      runId,
+      runReviewFn,
+      say,
+      spawn,
+      task,
+      taskId,
+      workerStateSensor,
+    };
+    return await runTaskBody(ctx);
   } finally {
     inflightLock.release();
   }
+}
 
-  async function runTaskBody(): Promise<RunResult> {
+export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
+  const {
+    config,
+    fetchPrBodyFn,
+    github,
+    isMerged,
+    ledgerPath,
+    log,
+    openTaskIds,
+    opts,
+    owner,
+    plan,
+    planPath,
+    recordDecisionFn,
+    repoRoot,
+    runId,
+    runReviewFn,
+    say,
+    spawn,
+    task,
+    taskId,
+    workerStateSensor,
+  } = ctx;
+
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
   // task omits it; the SOFT threshold ($25 default, config-tunable) only surfaces an
@@ -13284,8 +13369,7 @@ async function runTask(
       log("dispatch.claim_release_error", { error: String((e as Error)?.message ?? e) });
     }
   }
-  } // ── end runTaskBody
-}
+} // ── end runTaskBody
 
 /**
  * `rmd review <pr-number>` — the ESCAPE HATCH for hand-opened PRs. PR #13 made
