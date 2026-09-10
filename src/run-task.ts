@@ -24501,7 +24501,7 @@ export function buildCiLearningDaemonHooks(deps: {
       checkoutRoot: repoRoot,
       loadWindow: (days) => (deps.loadWindow ? deps.loadWindow(days) : loadCiFailureWindow(days)),
       loadLessons: deps.loadLessons,
-      now: () => deps.now?.() ?? new Date(),
+      clock: deps.now ? clockFromDateFn(deps.now) : systemClock,
     }),
   };
 }
@@ -24541,10 +24541,13 @@ export function buildCiLearningCadenceRunner(deps: {
   recordFire?: (root: string, at: Date) => void;
   releaseFire?: (root: string) => void;
   windowDays?: number;
-  now?: () => Date;
+  /** W1-T3324: the time source as src/lib/clock.ts's shared {@link Clock} port. A bare
+   *  `() => Date` with a `?? new Date()` fallback is the legacy shape the clock-signature census
+   *  counts, and this rung added two of them — `src/run-task.ts: legacy 20 > baseline 19`. */
+  clock?: Clock;
 }): () => Promise<CiLearningCadenceRunnerResult> {
   return async () => {
-    const at = deps.now?.() ?? new Date();
+    const at = (deps.clock ?? systemClock).date();
     (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
     let corpus: ReturnType<typeof collectCiFailureCorpus>;
     try {

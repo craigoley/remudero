@@ -13,6 +13,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { fixedClock } from "../src/lib/clock.js";
 import { buildCiLearningCadenceRunner } from "../src/run-task.js";
 
 /** One repaired pair is the minimum mintable corpus — the lesson is in the DELTA. */
@@ -180,4 +181,28 @@ test("W1-T3324: every record the scheduled path drafts still carries author_clas
     assert.equal(d.author_class, "machine", "a machine-filed record must say so");
     assert.equal(d.verify, "human", "and must park until a ruling or an operator releases it");
   }
+});
+
+test("W1-T3324: the recorded fire is stamped from the injected clock, never from the wall clock", async () => {
+  // This rung read its instant as `deps.now?.() ?? new Date()` — the legacy shape the
+  // clock-signature census counts, and it pushed src/run-task.ts to `legacy 20 > baseline 19`. It
+  // reads through src/lib/clock.ts's Clock port now, and THIS is what stops that port being a seam
+  // nothing passes: the fire the rung records must carry the injected instant exactly, so a wall
+  // clock leaking back in fails here rather than in a census weeks later.
+  const STAMP = Date.parse("2026-03-04T05:06:07.000Z");
+  const fires: Date[] = [];
+  const run = buildCiLearningCadenceRunner({
+    root: "/tmp/w1t3324-clock-root",
+    checkoutRoot: "/tmp/w1t3324-clock-checkout",
+    loadWindow: () => windowWithOneRepair(),
+    fileShards: recordingFiler().fn as never,
+    planOrigins: ["operator-session#something-else"],
+    recordFire: (_root, at) => fires.push(at),
+    clock: fixedClock(STAMP),
+  });
+
+  await run();
+
+  assert.equal(fires.length, 1, "one firing records exactly one fire");
+  assert.equal(fires[0].toISOString(), "2026-03-04T05:06:07.000Z", "the fire carries the injected instant");
 });
