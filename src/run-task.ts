@@ -20865,7 +20865,10 @@ export function buildIntakeRungsDaemonHooks(deps: {
   config?: Config;
   policy?: Policy;
   ratifications?: Ratifications;
-  now?: () => Date;
+  /** W1-T2923: the time source, as the shared {@link Clock} port rather than a bare
+   *  `() => Date`. No caller passes one — the daemon wires `{ config, policy }` — so the seam
+   *  is expressible either way, and src/lib/clock.ts is what it exists for. */
+  clock?: Clock;
   check?: () => readonly IntakeRungDecision[];
   runRung?: (decision: Extract<IntakeRungDecision, { fire: true }>) => Promise<IntakeRungRunResult> | IntakeRungRunResult;
   loadManagedRepos?: (root: string) => ManagedRepo[];
@@ -20896,7 +20899,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
           root: configFor().root,
           rung,
           policy: row,
-          now: deps.now?.(),
+          now: deps.clock?.date(),
         });
       });
     });
@@ -20908,7 +20911,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
       }
       const rung = decision.rung as IntakeCadenceRung;
       const config = configFor();
-      const at = deps.now?.() ?? new Date();
+      const at = (deps.clock ?? systemClock).date();
       const ledgerPath = ledgerPathFor(config);
       const runId = `INTAKE-${rung}-${at.getTime()}`;
       recordIntakeRungCadenceFire(config.root, rung, at);

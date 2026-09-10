@@ -89,6 +89,10 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   PANEL: producer("panel", "Console Panel"),
   DEPLOY: producer("deploy", "Deploy Supervisor"),
   ISSUES: producer("issues", "Issues Intake"),
+  // W1-T2923: the daemon-tick cadence SCHEDULER that runs the intake rungs (ops, issues,
+  // alertFix, inbox, feedbackDocket) — distinct from ISSUES above, which is one intake SOURCE.
+  // Its rows carry lane "intake" and a run id of `INTAKE-<rung>-<epoch>`.
+  INTAKE: producer("intake", "Intake Cadence"),
   GOVERNOR: producer("governor", "Governor"),
   inbox: producer("inbox", "Inbox"),
   _ledger: producer("_ledger", "Ledger Internals"),

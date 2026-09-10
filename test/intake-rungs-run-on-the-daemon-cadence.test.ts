@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
+import { fixedClock } from "../src/lib/clock.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { loadPlan } from "../src/lib/plan.js";
@@ -61,7 +62,7 @@ test("one daemon tick polls issues when enabled, and the next tick inside the in
     let disabledPolls = 0;
     const disabledHooks = buildIntakeRungsDaemonHooks({
       config: { root: disabled.root, claudeBin: "/bin/true" },
-      now: () => NOW,
+      clock: fixedClock(NOW.getTime()),
       policy: policyWithIssues(false),
       loadManagedRepos: () => [{ owner: "acme", repo: "app" }],
       pollIssues: async () => {
@@ -81,7 +82,7 @@ test("one daemon tick polls issues when enabled, and the next tick inside the in
     let polls = 0;
     const hooks = buildIntakeRungsDaemonHooks({
       config: { root: enabled.root, claudeBin: "/bin/true" },
-      now: () => NOW,
+      clock: fixedClock(NOW.getTime()),
       policy: policyWithIssues(true),
       loadManagedRepos: () => [{ owner: "acme", repo: "app" }],
       pollIssues: async (managed, deps) => {
