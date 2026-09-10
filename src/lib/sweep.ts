@@ -5187,6 +5187,99 @@ export interface FixDispatchEvidence {
   instrumentEntangled?: true;
   /** W1-T3172: exact validated path sets from the authoritative review ledger row. */
   instrumentEntanglementPaths?: InstrumentEntanglementPaths;
+  /** W1-T3306: the exact capped proofs that need a body-only discrimination repair. */
+  proofDiscrimination?: ProofDiscriminationEvidence;
+}
+
+/** The only proof grades that establish the capped-green repair has a mechanical body remedy. */
+export interface ProofDiscriminationEvidence {
+  readonly proofs: ReadonlyArray<{
+    readonly claim: string;
+    readonly proof: string;
+    readonly proofExec: "executed_stale" | "not_executable";
+  }>;
+}
+
+/**
+ * Extract the only proof rows a capped-green repair worker may act on. This is
+ * deliberately structural: a reason string is rendered prose and must never
+ * decide whether a strike is spent.
+ */
+export function proofDiscriminationEvidenceFromCriteria(
+  criteria: readonly CriterionVerdict[],
+): ProofDiscriminationEvidence | undefined {
+  const proofs = criteria.flatMap((criterion) =>
+    criterion.proof_exec === "executed_stale" || criterion.proof_exec === "not_executable"
+      ? [{ claim: criterion.claim, proof: criterion.proof, proofExec: criterion.proof_exec }]
+      : [],
+  );
+  return proofs.length > 0 ? { proofs } : undefined;
+}
+
+function isProofExecOutcome(value: unknown): value is CriterionVerdict["proof_exec"] {
+  return (
+    value === "executed_stale" ||
+    value === "not_executable" ||
+    value === "executed_pass" ||
+    value === "executed_fail" ||
+    value === "exec_error" ||
+    value === "base_unreadable" ||
+    value === "not_yet_built" ||
+    value === "stale_self_path"
+  );
+}
+
+function criteriaFromLedgerValue(value: unknown): CriterionVerdict[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const criteria: CriterionVerdict[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") return undefined;
+    const criterion = entry as Record<string, unknown>;
+    if (
+      typeof criterion.claim !== "string" ||
+      typeof criterion.proof !== "string" ||
+      typeof criterion.met !== "boolean" ||
+      typeof criterion.reason !== "string" ||
+      !isProofExecOutcome(criterion.proof_exec)
+    ) {
+      return undefined;
+    }
+    criteria.push({
+      claim: criterion.claim,
+      proof: criterion.proof,
+      met: criterion.met,
+      reason: criterion.reason,
+      proof_exec: criterion.proof_exec,
+    });
+  }
+  return criteria;
+}
+
+/**
+ * Recover proof-discrimination evidence from the exact current `review.posted`
+ * row. A later malformed or non-capped row clears prior evidence: a dispatch
+ * must never act on a verdict it cannot bind to this PR and head.
+ */
+export function cappedProofDiscriminationFromLedger(
+  pr: Pick<OpenPrView, "taskId" | "prUrl" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): ProofDiscriminationEvidence | undefined {
+  if (!pr.taskId) return undefined;
+  let evidence: ProofDiscriminationEvidence | undefined;
+  for (const line of lines) {
+    if (line.step !== "review.posted" || line.task_id !== pr.taskId) continue;
+    if (line.pr_url !== pr.prUrl || line.head_sha !== pr.headSha) continue;
+    evidence = undefined;
+    if (line.state !== "success" || line.capped !== true || line.plan_only === true) continue;
+    const verdict = line.decision_verdict;
+    if (!verdict || typeof verdict !== "object") continue;
+    const structured = verdict as Record<string, unknown>;
+    if (structured.state !== "success" || structured.capped !== true || structured.planOnly === true) continue;
+    const criteria = criteriaFromLedgerValue(structured.criteria);
+    if (!criteria || criteria.some((criterion) => !criterion.met)) continue;
+    evidence = proofDiscriminationEvidenceFromCriteria(criteria);
+  }
+  return evidence;
 }
 
 /** TERMINAL-STATE PREDICATE (W1-T177) — the ONE definition every spending site and the operator
@@ -6752,7 +6845,25 @@ export async function runSweep(
 
   for (let prIndex = 0; prIndex < openPrs.length; prIndex++) {
     const pr = openPrs[prIndex];
-    const { disposition, reason } = postReviewFailureHistoryDisposition(pr, prior, policy, now) ?? deriveDisposition(pr, policy, now);
+    let { disposition, reason } = postReviewFailureHistoryDisposition(pr, prior, policy, now) ?? deriveDisposition(pr, policy, now);
+    // W1-T3306: `deriveDisposition` has no ledger input, while capped proof grades live only on
+    // `review.posted`. Route the exact capped-green arm refusal through the EXISTING fix rung;
+    // its claim re-read and shared strike cap remain the sole spending boundary. An operator
+    // override keeps `arm` true and therefore retains the ordinary mergeable arm route.
+    const proofDiscrimination =
+      disposition === "mergeable" && automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined
+        ? cappedProofDiscriminationFromLedger(pr, ledgerLines)
+        : undefined;
+    if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines).arm) {
+      const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
+      if (pr.priorStrikes >= ceiling) {
+        disposition = "blocked-ambiguous";
+        reason = `capped review still has non-discriminating proofs, but its shared fix budget is exhausted (${pr.priorStrikes}/${ceiling})`;
+      } else {
+        disposition = "blocked-fixable";
+        reason = "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
+      }
+    }
     byDisposition[disposition]++;
 
     // W1-T2345 — computed for EVERY disposition, never only blocked-ambiguous, and BEFORE the
@@ -7257,6 +7368,7 @@ export async function runSweep(
                     actionableGateFailures: pr.actionableGateFailures,
                     instrumentEntangled: pr.instrumentEntangled,
                     instrumentEntanglementPaths: pr.instrumentEntanglementPaths,
+                    proofDiscrimination,
                   };
               // W1-T2752 — a delivered terminal decision for this EXACT PR@head is FINAL:
               // `dispatchFix` already declines it internally (W1-T2723's `priorTerminal?.escalated`
