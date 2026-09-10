@@ -6,12 +6,14 @@ import { test } from "node:test";
 
 import {
   DEFAULT_SWEEP_POLICY,
+  rebaseDirtyFleetBranchViaGit,
   runSweep,
   type ClarificationQuestion,
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
 } from "../src/lib/sweep.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 const NOW = Date.parse("2026-09-07T12:00:00.000Z");
@@ -37,9 +39,9 @@ function dirtyFleetPr(over: Partial<OpenPrView> = {}): OpenPrView {
     mergeable: false,
     mergeableState: "dirty",
     mergeConflict: {
-      files: [{ path: "scripts/comment-load-baseline.json", oursDeleted: 1, theirsDeleted: 0 }],
-      oursLog: "branch changed the baseline",
-      theirsLog: "main changed the baseline too",
+      files: [{ path: "src/lib/sweep.ts", oursDeleted: 1, theirsDeleted: 0 }],
+      oursLog: "branch changed sweep.ts",
+      theirsLog: "main changed sweep.ts too",
     },
     ...over,
   };
@@ -107,6 +109,40 @@ test("W1-T2999: a conflicting rebase still escalates", async () => {
 });
 
 test("W1-T2999: a branch advanced by another writer is left alone", async () => {
+  const commands: string[][] = [];
+  const removed: string[] = [];
+  const branch = "run-W1-T2999-1789036344804";
+  const helperOutcome = withLiveWritesAllowed(() =>
+    rebaseDirtyFleetBranchViaGit("/repo", "/tmp/w1-t2999-rebase", dirtyFleetPr(), {
+      git: (_file, args) => {
+        commands.push([...args]);
+        const command = args.slice(2);
+        if (command[0] === "fetch") return "";
+        if (command[0] === "rev-parse" && command[1] === `refs/remotes/origin/${branch}`) return "old-head\n";
+        if (command[0] === "worktree") return "";
+        if (command[0] === "rebase") return "";
+        if (command[0] === "rev-parse" && command[1] === "HEAD") return "rebased-head\n";
+        if (command[0] === "push") throw new Error("stale lease");
+        throw new Error(`unexpected git command: ${command.join(" ")}`);
+      },
+      worktreeRemoveImpl: (_repoDir, worktreePath) => {
+        removed.push(worktreePath);
+      },
+    }),
+  );
+  assert.equal(helperOutcome.outcome, "lease-mismatch");
+  assert.deepEqual(
+    commands.find((args) => args.includes("push"))?.slice(2),
+    [
+      "push",
+      `--force-with-lease=refs/heads/${branch}:old-head`,
+      "origin",
+      `HEAD:refs/heads/${branch}`,
+    ],
+    "the only publish attempt is leased to the head the sweep judged",
+  );
+  assert.deepEqual(removed, ["/tmp/w1-t2999-rebase"], "a refused leased push still cleans up its worktree");
+
   const deps = fakeDeps({
     rebaseDirtyFleetBranch: async () => ({
       outcome: "lease-mismatch",
