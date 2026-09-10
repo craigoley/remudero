@@ -40,12 +40,12 @@ function block(file: string, hunkContext: string, added: string[], opts: { newFi
  *  CENSUS_POPULATION classification. */
 function stepWiredGate(): { files: string[]; diff: string } {
   const diff =
-    block(CI, "jobs:", ["      - name: Expiring-fixture census", "        run: node scripts/expiring-fixture-census.mjs"]) +
-    block("scripts/expiring-fixture-census.mjs", "", ["#!/usr/bin/env node", "// the gate"], { newFile: true }) +
+    block(CI, "jobs:", ["      - name: Expiring-fixture census", "        run: node scripts/zz-census-probe.mjs"]) +
+    block("scripts/zz-census-probe.mjs", "", ["#!/usr/bin/env node", "// the gate"], { newFile: true }) +
     block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", [
-      '  refusedForPredicate("test/expiring-fixture-census.test.ts", "a", "not a src-population walk"),',
+      '  refusedForPredicate("test/zz-census-probe.test.ts", "a", "not a src-population walk"),',
     ]);
-  return { files: [CI, "scripts/expiring-fixture-census.mjs", PARITY], diff };
+  return { files: [CI, "scripts/zz-census-probe.mjs", PARITY], diff };
 }
 
 test("W1-T3272 criterion 1: a step-wired NEW census gate with its mandatory registration is not entanglement", () => {
@@ -62,11 +62,11 @@ test("W1-T3272 criterion 1: a step-wired NEW census gate with its mandatory regi
 
 test("W1-T3272 CONTROL: an ORDINARY src file beside the same workflow is still entangled", () => {
   const diff =
-    block(CI, "jobs:", ["        run: node scripts/expiring-fixture-census.mjs"]) +
-    block("scripts/expiring-fixture-census.mjs", "", ["// the gate"], { newFile: true }) +
+    block(CI, "jobs:", ["        run: node scripts/zz-census-probe.mjs"]) +
+    block("scripts/zz-census-probe.mjs", "", ["// the gate"], { newFile: true }) +
     block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/x.test.ts", "a", "r"),']) +
     block("src/lib/sweep.ts", "export function runSweep(", ["  const smuggled = 1;"]);
-  const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY, "src/lib/sweep.ts"], diff);
+  const r = detectInstrumentEntanglement([CI, "scripts/zz-census-probe.mjs", PARITY, "src/lib/sweep.ts"], diff);
   assert.equal(r.entangled, true, "a product change riding along must still be refused — this is the whole rule");
 });
 
@@ -84,10 +84,10 @@ test("W1-T3272 CONTROL: wiring one script while registering ANOTHER carves out n
   // Co-presence is not the test — the pair must agree on the stem, the same discrimination the job
   // form makes on the job name.
   const diff =
-    block(CI, "jobs:", ["        run: node scripts/expiring-fixture-census.mjs"]) +
-    block("scripts/expiring-fixture-census.mjs", "", ["// the gate"], { newFile: true }) +
+    block(CI, "jobs:", ["        run: node scripts/zz-census-probe.mjs"]) +
+    block("scripts/zz-census-probe.mjs", "", ["// the gate"], { newFile: true }) +
     block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/unrelated.test.ts", "a", "names a different stem entirely"),']);
-  const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY], diff);
+  const r = detectInstrumentEntanglement([CI, "scripts/zz-census-probe.mjs", PARITY], diff);
   assert.equal(r.entangled, true, "the registration must name the script that was wired");
 });
 
@@ -95,10 +95,10 @@ test("W1-T3272 CONTROL: a ci-parity hunk OUTSIDE both declarations is still enta
   // The confinement guard is what stops the registry file becoming freely editable beside a
   // workflow. Two declarations are now accepted; a hunk in neither is not.
   const diff =
-    block(CI, "jobs:", ["        run: node scripts/expiring-fixture-census.mjs"]) +
-    block("scripts/expiring-fixture-census.mjs", "", ["// the gate"], { newFile: true }) +
+    block(CI, "jobs:", ["        run: node scripts/zz-census-probe.mjs"]) +
+    block("scripts/zz-census-probe.mjs", "", ["// the gate"], { newFile: true }) +
     block(PARITY, "export function somethingElseEntirely(", ["  const loosened = true;"]);
-  const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY], diff);
+  const r = detectInstrumentEntanglement([CI, "scripts/zz-census-probe.mjs", PARITY], diff);
   assert.equal(r.entangled, true, "confinement to a declared registry is what makes the subtraction safe");
 });
 
@@ -119,11 +119,11 @@ test("W1-T3272: the surface declaration rides along too — script, registration
   // declaration 13/13, without it 12 pass and that suite fails. So a new gate cannot ship without
   // all three halves, which is exactly the circularity this carve-out exists for.
   const diff =
-    block(CI, "jobs:", ["        run: node scripts/expiring-fixture-census.mjs"]) +
-    block("scripts/expiring-fixture-census.mjs", "", ["// the gate"], { newFile: true }) +
-    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/expiring-fixture-census.test.ts", "a", "r"),']) +
-    block(REVIEW, "export const INSTRUMENT_SURFACE: readonly string[] = [", ['  "^scripts/expiring-fixture-census\\\\.mjs$",']);
-  const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY, REVIEW], diff);
+    block(CI, "jobs:", ["        run: node scripts/zz-census-probe.mjs"]) +
+    block("scripts/zz-census-probe.mjs", "", ["// the gate"], { newFile: true }) +
+    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/zz-census-probe.test.ts", "a", "r"),']) +
+    block(REVIEW, "export const INSTRUMENT_SURFACE: readonly string[] = [", ['  "^scripts/zz-census-probe\\\\.mjs$",']);
+  const r = detectInstrumentEntanglement([CI, "scripts/zz-census-probe.mjs", PARITY, REVIEW], diff);
   assert.equal(r.entangled, false, "all three halves together are one indivisible introducing commit");
 });
 
@@ -136,11 +136,11 @@ test("W1-T3272 CONTROL: a DELETION from a registry is never subtracted, however 
     "@@ -1,2 +1,1 @@ export const INSTRUMENT_SURFACE: readonly string[] = [\n" +
     '-  "^scripts/some-existing-ratchet\\\\.mjs$",\n';
   const diff =
-    block(CI, "jobs:", ["        run: node scripts/expiring-fixture-census.mjs"]) +
-    block("scripts/expiring-fixture-census.mjs", "", ["// the gate"], { newFile: true }) +
-    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/expiring-fixture-census.test.ts", "a", "r"),']) +
+    block(CI, "jobs:", ["        run: node scripts/zz-census-probe.mjs"]) +
+    block("scripts/zz-census-probe.mjs", "", ["// the gate"], { newFile: true }) +
+    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/zz-census-probe.test.ts", "a", "r"),']) +
     del;
-  const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY, REVIEW], diff);
+  const r = detectInstrumentEntanglement([CI, "scripts/zz-census-probe.mjs", PARITY, REVIEW], diff);
   assert.equal(r.entangled, true, "an unprotection beside a workflow edit is the thing rule 25 is FOR");
 });
 
@@ -159,12 +159,12 @@ test("W1-T3272 CONTROL: a DELETION from a registry is never subtracted, however 
 
 test("W1-T3272: the introduced gate does not veto its own registration when it is DECLARED ON THE SURFACE", () => {
   const diff =
-    block(CI, "jobs:", ["        run: node scripts/expiring-fixture-census.mjs"]) +
-    block("scripts/expiring-fixture-census.mjs", "", ["// the gate"], { newFile: true }) +
-    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/expiring-fixture-census.test.ts", "a", "r"),']) +
-    block(REVIEW, "export const INSTRUMENT_SURFACE: readonly string[] = [", ['  "^scripts/expiring-fixture-census\\\\.mjs$",']);
+    block(CI, "jobs:", ["        run: node scripts/zz-census-probe.mjs"]) +
+    block("scripts/zz-census-probe.mjs", "", ["// the gate"], { newFile: true }) +
+    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/zz-census-probe.test.ts", "a", "r"),']) +
+    block(REVIEW, "export const INSTRUMENT_SURFACE: readonly string[] = [", ['  "^scripts/zz-census-probe\\\\.mjs$",']);
   // The script is passed as an instrument here, which is what the PR's own tree produces.
-  const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY, REVIEW], diff);
+  const r = detectInstrumentEntanglement([CI, "scripts/zz-census-probe.mjs", PARITY, REVIEW], diff);
   assert.equal(r.entangled, false, "an introduced gate that is already carved out must not also veto condition (a)");
 });
 
@@ -173,10 +173,10 @@ test("W1-T3272 CONTROL: an instrument that is NOT an introduced gate still vetoe
   // it for the introduced gate must not relax it for anything else — a pre-existing ratchet script
   // changed in the same diff is exactly the passenger it was written to stop.
   const diff =
-    block(CI, "jobs:", ["        run: node scripts/expiring-fixture-census.mjs"]) +
-    block("scripts/expiring-fixture-census.mjs", "", ["// the gate"], { newFile: true }) +
-    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/expiring-fixture-census.test.ts", "a", "r"),']) +
+    block(CI, "jobs:", ["        run: node scripts/zz-census-probe.mjs"]) +
+    block("scripts/zz-census-probe.mjs", "", ["// the gate"], { newFile: true }) +
+    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/zz-census-probe.test.ts", "a", "r"),']) +
     block("scripts/comment-load-ratchet.mjs", "export function ceilingForComments(", ["  return 999999;"]);
-  const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY, "scripts/comment-load-ratchet.mjs"], diff);
+  const r = detectInstrumentEntanglement([CI, "scripts/zz-census-probe.mjs", PARITY, "scripts/comment-load-ratchet.mjs"], diff);
   assert.equal(r.entangled, true, "a PRE-EXISTING instrument weakened in the same diff must still refuse");
 });
