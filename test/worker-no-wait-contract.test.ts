@@ -160,7 +160,9 @@ test("W1-T465: the classifier is a PROSE matcher and its fragility is recorded w
   // they landed `no_pr` rather than `already_satisfied`), so there is no structured field that
   // separates them. Design (iii)'s fallback is to make the fragility EXPLICIT rather than
   // implicit — a sixth phrasing will not match, and that must be written down, not discovered.
-  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  // W1-T2891: classifyNoPrShape's definition (and its doc comment) moved to
+  // src/lib/fix-rung-classify.ts; run-task.ts now only imports and re-exports the name.
+  const src = readFileSync(join(REPO_ROOT, "src", "lib", "fix-rung-classify.ts"), "utf8");
   const doc = src.slice(Math.max(0, src.indexOf("export function classifyNoPrShape") - 2600), src.indexOf("export function classifyNoPrShape"));
   assert.match(doc, /prose/i, "the doc comment must admit it is a prose matcher");
   assert.match(doc, /sixth phrasing|will not match|fragile/i, "and must state that a new phrasing escapes it");

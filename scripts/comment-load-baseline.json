@@ -181,6 +181,7 @@
   "src/lib/feedback-landing.ts": 160,
   "src/lib/feedback.ts": 225,
   "src/lib/fix-fence.ts": 42,
+  "src/lib/fix-rung-classify.ts": 250,
   "src/lib/fleet-control.ts": 250,
   "src/lib/flight-judge.ts": 170,
   "src/lib/flight-signals.ts": 86,

@@ -552,6 +552,7 @@
     "test/fix-prompt-inherited-scope.test.ts": 1567,
     "test/fix-rung-authorship-stand-down.test.ts": 1345,
     "test/fix-rung-birth-snapshot.test.ts": 1454,
+    "test/fix-rung-classify.test.ts": 0,
     "test/fix-rung-empty-failures-stand-down.test.ts": 1328,
     "test/fix-rung-no-progress-stop.test.ts": 1399,
     "test/fix-rung-no-task.test.ts": 1363,
