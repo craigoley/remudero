@@ -91,6 +91,7 @@ usage:
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
   rmd verify-human-sweep [--dry-run]   # Judge the parked verify:human backlog and surface only the shards that still need you.
   rmd rule --task <W#-T#> --author <name> --title "<line>" --ruling "<text>" --evidence "<text>" [--evidence ...] --rollback "<text>" [--supersedes <anchor>]   # An agent records a ruling, behind an LLM judge that routes the risky ones to the operator.
+  rmd note <id> <text...>   # Record an operator guidance note against a task or proposal, for the weekly feedback docket.
   rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]   # The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.
 
 An UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits
@@ -864,6 +865,16 @@ rmd rule --task <W#-T#> --author <name> --title "<line>" --ruling "<text>" --evi
 ```
 
 an agent records a ruling behind a judge (W1-T3212, operator ruling 2026-09-08): the judge assesses whether THIS ruling is safe for an agent to land — reversible, inside its competence, evidenced, narrow — never whether it is RIGHT, which is what the operator's bit is for when the answer is no. On record, the entry lands in plan/decisions.d/ through the same bridge decision records already use, attributed to its agent author with its evidence and a rollback line. On escalate it lands NOTHING and stages an ordinary inbox proposal the operator ratifies with `rmd approve` — the same gated, ledgered, one-bit path, never a second channel. FAILS CLOSED, the opposite polarity to the escalation judge: a throwing, timing-out or unparseable verdict escalates, because the costly direction here is installing a decision nobody reviewed. A ruling that declares it supersedes a standing record goes to the operator unconditionally, without the judge being asked. Every verdict writes one ruling.judged ledger row naming decision and reason, on both arms
+
+### `rmd note`
+
+Record an operator guidance note against a task or proposal, for the weekly feedback docket.
+
+```
+rmd note <id> <text...>
+```
+
+the operator's own words, into `plan/operator-notes.ndjson` — the feedback docket's fifth capture surface, gathered across ALL tasks (the task scoping applies to prompt injection only, never to the docket's gather). THE TEXT IS POSITIONAL, DELIBERATELY: `rmd reframe` already captures operator words verbatim behind a required `--feedback` flag and that surface reads ZERO across the entire ledger union, so this one costs an id and the sentence you were going to type anyway. Also available as `rmd approve <id> --note "<text>"`, which chains this exact write AFTER the ratification lands — absent `--note`, approve stays the one bit it documents. Writes state-side only: no git, no gh, no PR
 
 ### `rmd reframe`
 

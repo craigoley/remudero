@@ -909,7 +909,7 @@ import {
 } from "./lib/learnings.js";
 import type { LearningEntry, LearningsIndex, PromotionJudgeDeps, RuleHeadline } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
-import { loadOperatorNotesForTask, renderOperatorNotes } from "./lib/operator-notes.js";
+import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
 import { applyOperatorMergeHold, parseOperatorMergeHoldArgs } from "./lib/operator-merge-hold.js";
 import {
   computeMatchedLearningsForArm,
@@ -33672,13 +33672,26 @@ export function readLedgerRawLines(path: string): readonly string[] {
 
 export async function approveCommand(
   rest: string[],
-  deps: { config?: Config; gateway?: RatifyGateway; batchGateway?: RatifyBatchGateway; overlap?: OverlapWarningDeps } = {},
+  // W1-T3351 appended `root`/`now`/`log` LAST, all optional: the `--note` chain needs a store root
+  // and a clock a test can pin, and no existing caller passes either.
+  deps: {
+    config?: Config;
+    gateway?: RatifyGateway;
+    batchGateway?: RatifyBatchGateway;
+    overlap?: OverlapWarningDeps;
+    root?: string;
+    now?: () => Date;
+    log?: (step: string, extra?: Record<string, unknown>) => void;
+  } = {},
 ): Promise<number> {
   const proposalId = rest[0];
   // W1-T3216: a TASK id takes the release path. Taken BEFORE the proposal registry is consulted,
   // so the proposal path below is byte-for-byte unchanged, and keyed on SHAPE so an unknown but
   // well-formed task id is refused as a task rather than as a missing proposal.
-  if (proposalId && rest.length === 1 && namesATask(proposalId)) {
+  // W1-T3351: `--note` may ride the TASK-release path too. The guard still requires exactly ONE
+  // bare id — it is the flag tokens, not the id count, that widened.
+  const bareTokens = rest.filter((t, i) => !t.startsWith("--") && !(i > 0 && rest[i - 1] === "--note"));
+  if (proposalId && bareTokens.length === 1 && namesATask(proposalId)) {
     const config = deps.config ?? loadConfig();
     const outcome = approveParkedTask(proposalId, {
       plan: loadPlan(join(config.root, "plan", "tasks.yaml")),
@@ -33690,9 +33703,12 @@ export async function approveCommand(
       runId: `APPROVE-${proposalId}`,
     });
     console.log(outcome.message);
+    // CHAINED ONLY ON SUCCESS: guidance attached to a refused release would describe a state the
+    // plan was never in.
+    if (outcome.code === 0) approveNoteChain(rest, proposalId, config, deps);
     return outcome.code;
   }
-  const badArg = unknownArgError("approve", rest.slice(1), [], []);
+  const badArg = unknownArgError("approve", rest.slice(1), ["--note"], []);
   // W1-T2471: more than one bare id named (e.g. `rmd approve P1 P2 P3`) is what the SINGLE-id
   // parse above already flags as a bad arg — every token after the first is "unexpected".
   // Reinterpreted here, and ONLY here, as an EXPLICIT batch (Q4: never an implicit "approve
@@ -34060,6 +34076,11 @@ export async function approveCommand(
     const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
     console.log(`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
+    // CHAINED AFTER THE RATIFICATION LANDED, never before: the note describes work that is now
+    // really in the plan. Scoped to the proposal id — the docket gathers notes across ALL tasks,
+    // so an id that is not a task id still reaches the weekly gather (the task scoping applies to
+    // prompt injection only).
+    approveNoteChain(rest, proposalId, config, deps);
     return reviewCode;
   } catch (e) {
     log("approve.error", { error: String((e as Error)?.message ?? e) });
@@ -34356,6 +34377,97 @@ async function approveBatchCommand(
  * {@link inboxDraftPrompt} from carrying their text into the NEXT redraft. An invalid
  * expression (out of range, unparseable) is a usage error; nothing is written.
  */
+
+/** The one author string a CLI-written note carries. `operator-notes.ts` states this deployment
+ *  has no per-human identity, so inventing a `--author` flag would offer precision the system
+ *  cannot back — the note's accountability is the SURFACE it arrived on, recorded in its own
+ *  ledger step (`operator_note.added` for the CLI, `panel.operator_note_added` for the console). */
+const CLI_OPERATOR_NOTE_AUTHOR = "operator";
+
+/**
+ * W1-T3351 — write ONE stamped operator note, from the CLI, to the docket's fifth capture surface.
+ *
+ * Shared by `rmd note` and `rmd approve --note` so the two cannot drift: one stamp, one store, one
+ * ledger step. `appendOperatorNote` REFUSES an unstamped entry and never throws, so a filesystem
+ * failure is a `false` the caller reports rather than a crash mid-ratification.
+ */
+export function recordCliOperatorNote(
+  root: string,
+  taskId: string,
+  text: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  now: () => Date,
+): boolean {
+  const note = text.trim().replace(/\s+/g, " ");
+  const entry = { ts: now().toISOString(), taskId, author: CLI_OPERATOR_NOTE_AUTHOR, note };
+  const written = appendOperatorNote(root, entry);
+  log(written ? "operator_note.added" : "operator_note.refused", {
+    task_id: taskId,
+    author: CLI_OPERATOR_NOTE_AUTHOR,
+    chars: note.length,
+  });
+  return written;
+}
+
+
+/** `rmd approve <id> --note "<text>"` — the optional half. Absent `--note` is a NO-OP, so the
+ *  one-bit ratification `approve` documents stays exactly one bit unless the operator chose to
+ *  say more. Never called before the approve succeeded. */
+function approveNoteChain(
+  rest: string[],
+  scopeId: string,
+  config: Config,
+  deps: { root?: string; now?: () => Date; log?: (step: string, extra?: Record<string, unknown>) => void },
+): void {
+  const text = flagValue(rest, "--note");
+  if (text === undefined || text.trim().length === 0) return;
+  const log =
+    deps.log ??
+    ((step: string, extra: Record<string, unknown> = {}) =>
+      appendLedger(ledgerPathFor(config), { run_id: `APPROVE-${scopeId}`, task_id: scopeId, step, ...extra }));
+  const written = recordCliOperatorNote(deps.root ?? repoRoot, scopeId, text, log, deps.now ?? (() => new Date()));
+  console.log(
+    written
+      ? `rmd approve: note recorded for ${scopeId} — it enters the next weekly feedback docket.`
+      : `rmd approve: the note store refused this entry — the ratification stands, the note was NOT recorded.`,
+  );
+}
+
+/**
+ * `rmd note <id> <text...>` — the operator's own words, into the surface the weekly feedback docket
+ * already gathers across ALL tasks.
+ *
+ * THE TEXT IS POSITIONAL, DELIBERATELY. `rmd reframe` already captures operator words verbatim into
+ * `ratify.reframed` — the docket's FIRST surface, fully wired — behind a required
+ * `--feedback "<text>"` flag, and that step reads ZERO across the entire ledger union. A capture
+ * path that costs a flag is a capture path that does not get used. This one costs an id and the
+ * sentence you were going to type anyway.
+ */
+export async function noteCommand(
+  rest: string[],
+  deps: { root?: string; now?: () => Date; log?: (step: string, extra?: Record<string, unknown>) => void; config?: Config } = {},
+): Promise<number> {
+  const taskId = rest[0];
+  const text = rest.slice(1).join(" ");
+  if (!taskId || taskId.startsWith("--") || text.trim().length === 0) {
+    console.error(
+      `rmd note: <id> and <text...> are both required — usage: ${commandSyntax("note")}\n` + USAGE,
+    );
+    return 2;
+  }
+  const root = deps.root ?? repoRoot;
+  const log =
+    deps.log ??
+    ((step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPathFor(deps.config ?? loadConfig()), { run_id: `NOTE-${taskId}`, task_id: taskId, step, ...extra }));
+  const written = recordCliOperatorNote(root, taskId, text, log, deps.now ?? (() => new Date()));
+  if (!written) {
+    console.error(`rmd note: the note store refused this entry (unwritable ${join(root, "plan", "operator-notes.ndjson")}?) — nothing was recorded`);
+    return 1;
+  }
+  console.log(`rmd note: recorded for ${taskId} — it enters the next weekly feedback docket.`);
+  return 0;
+}
+
 export async function reframeCommand(rest: string[], deps: { config?: Config } = {}): Promise<number> {
   const proposalId = rest[0];
   const badArg = unknownArgError("reframe", rest.slice(1), ["--feedback", "--supersedes"], []);
@@ -36286,6 +36398,12 @@ const COMMANDS: readonly CommandSpec[] = [
       "an agent records a ruling behind a judge (W1-T3212, operator ruling 2026-09-08): the judge assesses whether THIS ruling is safe for an agent to land — reversible, inside its competence, evidenced, narrow — never whether it is RIGHT, which is what the operator's bit is for when the answer is no. On record, the entry lands in plan/decisions.d/ through the same bridge decision records already use, attributed to its agent author with its evidence and a rollback line. On escalate it lands NOTHING and stages an ordinary inbox proposal the operator ratifies with `rmd approve` — the same gated, ledgered, one-bit path, never a second channel. FAILS CLOSED, the opposite polarity to the escalation judge: a throwing, timing-out or unparseable verdict escalates, because the costly direction here is installing a decision nobody reviewed. A ruling that declares it supersedes a standing record goes to the operator unconditionally, without the judge being asked. Every verdict writes one ruling.judged ledger row naming decision and reason, on both arms",
   },
   {
+    name: "note",
+    syntax: "rmd note <id> <text...>",
+    summary: "Record an operator guidance note against a task or proposal, for the weekly feedback docket.",
+    detail: "the operator's own words, into `plan/operator-notes.ndjson` — the feedback docket's fifth capture surface, gathered across ALL tasks (the task scoping applies to prompt injection only, never to the docket's gather). THE TEXT IS POSITIONAL, DELIBERATELY: `rmd reframe` already captures operator words verbatim behind a required `--feedback` flag and that surface reads ZERO across the entire ledger union, so this one costs an id and the sentence you were going to type anyway. Also available as `rmd approve <id> --note \"<text>\"`, which chains this exact write AFTER the ratification lands — absent `--note`, approve stays the one bit it documents. Writes state-side only: no git, no gh, no PR",
+  },
+  {
     name: "reframe",
     syntax: "rmd reframe <P##> --feedback \"<text>\" [--supersedes <rounds>]",
     summary: "The feedback path: ledger reframe feedback, invalidate a proposal's cached draft.",
@@ -37170,6 +37288,10 @@ export async function main(
   if (cmd === "rule") {
     /* c8 ignore next -- process-boundary dispatch; ruleCommand is exercised directly above. */
     process.exit(await ruleCommand(rest));
+  }
+  if (cmd === "note" && arg) {
+    /* c8 ignore next -- process-boundary dispatch; noteCommand is exercised directly above. */
+    process.exit(await noteCommand(rest));
   }
   if (cmd === "reframe" && arg) {
     process.exit(await reframeCommand(rest));

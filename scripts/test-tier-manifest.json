@@ -199,6 +199,7 @@
     "test/an-onboarded-repo-has-a-learnings-home.test.ts": 1500,
     "test/an-open-pr-does-not-rot-while-it-waits.test.ts": 0,
     "test/an-open-trailered-build-owns-dispatch.test.ts": 700,
+    "test/an-operator-note-reaches-the-docket-from-the-cli.test.ts": 0,
     "test/an-operator-stop-is-undone-by-the-restart-policy.test.ts": 23135,
     "test/an-operator-verdict-releases-a-parked-task.test.ts": 0,
     "test/an-outcome-metric-reports-per-repo.test.ts": 1275,
