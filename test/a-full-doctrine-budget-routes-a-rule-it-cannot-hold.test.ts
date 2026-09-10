@@ -114,7 +114,24 @@ test("W1-T3320: a run that cannot FILE the follow-up refuses — a router that l
   // a refusal upstream: a filer that returns an id it never wrote lands the change and loses the fold.
   assert.notEqual(failed, m.foldDebtEntryId("CLAUDE.md", 44_000));
   // AND THE REAL DEFAULT IO IS EXERCISED, not only the fake: an unwritable root really fails.
-  assert.equal(m.fileFoldDebt("CLAUDE.md", 1, 2, OVER, { dir: "/proc/definitely-not-writable" }), null);
+  //
+  // NOT /proc, AND THAT IS NOT A STYLE PREFERENCE. `mkdirSync` under procfs BLOCKS on this kernel
+  // instead of returning EACCES — measured at exit 124 under a 20s bound. This one call stalled
+  // coverage-shard (2/4) for 39.5 minutes until `timeout-minutes` killed the job, and a killed job
+  // is labelled `cancelled`, which the required aggregators read as a shard failure. So a blocking
+  // syscall in one assertion was reported to the operator as a broken diff, on PRs that never
+  // touched this file.
+  //
+  // A FILE where a directory must be is the same test of the same real IO and fails at once with
+  // ENOTDIR — no kernel-specific behaviour, no unbounded call.
+  const unwritableRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}budget-unwritable-`));
+  const notADirectory = join(unwritableRoot, "not-a-dir");
+  writeFileSync(notADirectory, "x");
+  try {
+    assert.equal(m.fileFoldDebt("CLAUDE.md", 1, 2, OVER, { dir: join(notADirectory, "inbox") }), null);
+  } finally {
+    rmSync(unwritableRoot, { recursive: true, force: true });
+  }
 });
 
 test("W1-T3320: the finding itself is unchanged — routing decides the consequence, never whether the file is over", async () => {
