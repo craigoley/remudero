@@ -267,5 +267,10 @@ test("runDraftRung still reports genuinely malformed output as malformed — the
   );
   assert.equal(outcomes[0].ok, false);
   assert.equal(outcomes[0].ok === false && outcomes[0].refused, undefined, "no refusal field, so W1-T192 still keys it");
-  assert.match(outcomes[0].ok === false ? outcomes[0].error : "", /no FRAGMENT\/STAMP markers/);
+  // W1-T3350 SHARPENED THIS, it did not relax it. The malformed message is now the SPECIFIC cause
+  // ("NEITHER marker" — output present, both markers absent) rather than the one string that
+  // covered four causes. This assertion is strictly narrower than the `no FRAGMENT/STAMP markers`
+  // it replaces, so the refusal-vs-malformed guard above still binds and now binds on more.
+  assert.match(outcomes[0].ok === false ? outcomes[0].error : "", /NEITHER marker/);
+  assert.doesNotMatch(outcomes[0].ok === false ? outcomes[0].error : "", /refused by the account/);
 });
