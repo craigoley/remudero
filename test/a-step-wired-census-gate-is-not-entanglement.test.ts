@@ -26,6 +26,7 @@ import { detectInstrumentEntanglement } from "../src/lib/review.js";
 
 const CI = ".github/workflows/ci.yml";
 const PARITY = "src/lib/ci-parity.ts";
+const REVIEW = "src/lib/review.ts";
 
 /** A unified diff block, in the shape `walkDiff`/`diffHunkContexts` actually parse. */
 function block(file: string, hunkContext: string, added: string[], opts: { newFile?: boolean } = {}): string {
@@ -108,4 +109,37 @@ test("W1-T3272: the job form still works exactly as it did — this extension ad
     block(PARITY, "export const CI_PARITY_TABLE: readonly CiParityRow[] = [", ['  { job: "brand-new-job", script: "x" },']);
   const r = detectInstrumentEntanglement([CI, ".github/workflows/ci-gate.yml", PARITY], diff);
   assert.equal(r.entangled, false, "W1-T3171's original shape must be untouched");
+});
+
+// ── the surface declaration is the THIRD mandatory half, and deletions are not carved out ─────
+
+test("W1-T3272: the surface declaration rides along too — script, registration and declaration are one commit", () => {
+  // I first measured this one as OPTIONAL and was wrong: I ran four suites, none of which polices
+  // it. `test/instrument-surface-completeness.test.ts` does. MEASURED 2026-09-10 on #4851: with the
+  // declaration 13/13, without it 12 pass and that suite fails. So a new gate cannot ship without
+  // all three halves, which is exactly the circularity this carve-out exists for.
+  const diff =
+    block(CI, "jobs:", ["        run: node scripts/expiring-fixture-census.mjs"]) +
+    block("scripts/expiring-fixture-census.mjs", "", ["// the gate"], { newFile: true }) +
+    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/expiring-fixture-census.test.ts", "a", "r"),']) +
+    block(REVIEW, "export const INSTRUMENT_SURFACE: readonly string[] = [", ['  "^scripts/expiring-fixture-census\\\\.mjs$",']);
+  const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY, REVIEW], diff);
+  assert.equal(r.entangled, false, "all three halves together are one indivisible introducing commit");
+});
+
+test("W1-T3272 CONTROL: a DELETION from a registry is never subtracted, however confined it is", () => {
+  // ADD-ONLY, and this tightens the two entries that predate this change. These declarations DEFINE
+  // the protected set: removing a path from INSTRUMENT_SURFACE unprotects it. Subtracting that from
+  // the verdict would let an unprotection ride beside the very workflow edit rule 25 exists to catch.
+  const del =
+    `diff --git a/${REVIEW} b/${REVIEW}\n--- a/${REVIEW}\n+++ b/${REVIEW}\n` +
+    "@@ -1,2 +1,1 @@ export const INSTRUMENT_SURFACE: readonly string[] = [\n" +
+    '-  "^scripts/some-existing-ratchet\\\\.mjs$",\n';
+  const diff =
+    block(CI, "jobs:", ["        run: node scripts/expiring-fixture-census.mjs"]) +
+    block("scripts/expiring-fixture-census.mjs", "", ["// the gate"], { newFile: true }) +
+    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/expiring-fixture-census.test.ts", "a", "r"),']) +
+    del;
+  const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY, REVIEW], diff);
+  assert.equal(r.entangled, true, "an unprotection beside a workflow edit is the thing rule 25 is FOR");
 });

@@ -5674,6 +5674,13 @@ const MANDATORY_REGISTRIES: ReadonlyArray<{ path: string; declaration: string }>
   // its registration, arriving on the other registry in the file.
   { path: CENSUS_REGISTRATION_PATH, declaration: "CENSUS_POPULATION" },
   { path: "src/lib/review.ts", declaration: "INSTRUMENT_SURFACE_EXCLUSIONS" },
+  // W1-T3272: DECLARING the new gate on the surface is mandatory in the same way. A gate-rule-like
+  // path this tree's workflows or package.json reference must be declared or carry a recorded
+  // exclusion, and `test/instrument-surface-completeness.test.ts` is what enforces it. MEASURED
+  // 2026-09-10 on #4851: with the entry, 13/13; without it, 12 pass and that suite fails. So the
+  // script, its registration and its surface declaration are three halves of one indivisible commit
+  // — which is precisely the circularity W1-T2521 named and W1-T3171 subtracts.
+  { path: "src/lib/review.ts", declaration: "INSTRUMENT_SURFACE" },
 ];
 
 /** Each `@@` hunk's trailing context for `file`, in order; `undefined` where git emitted none.
@@ -5715,7 +5722,16 @@ function changeIsConfinedToRegistry(diff: string, file: string): boolean {
   if (declarations.length === 0) return false;
   const contexts = diffHunkContexts(diff, file);
   if (contexts.length === 0) return false;
-  return contexts.every((c) => c !== undefined && declarations.some((d) => c.includes(d)));
+  if (!contexts.every((c) => c !== undefined && declarations.some((d) => c.includes(d)))) return false;
+
+  // ADD-ONLY, AND THIS TIGHTENS THE TWO ENTRIES THAT PREDATE IT. A registration ADDS a row; nothing
+  // about the mandatory-registration shape requires deleting one. But these declarations are what
+  // DEFINE the protected set — removing a path from INSTRUMENT_SURFACE, or adding one to
+  // INSTRUMENT_SURFACE_EXCLUSIONS by deleting its neighbour, unprotects something. Subtracting a
+  // deletion from the verdict would let that ride beside the very workflow edit rule 25 exists to
+  // catch. A diff that genuinely needs to remove a registration is not an introducing commit and
+  // can say so in its own PR.
+  return !walkDiff(diff).some((l) => l.file === file && l.kind === "del");
 }
 
 /**
