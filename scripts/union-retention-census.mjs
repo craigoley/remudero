@@ -1,34 +1,15 @@
 #!/usr/bin/env node
-// union-retention-census — refuse a ledger read that pays for the archives to recover a row
-// retention was told to throw away.
+// union-retention-census — refuse union reads for rows rotation is told it may archive.
 //
-// WHY THIS IS A GATE AND NOT A CLAUDE.md BULLET (W1-T3360). On 2026-09-10 the fleet daemon
-// OOM-crash-looped for eight hours: 66 restarts, exit 134, no build dispatched. The cause was a
-// 4.0 GB `resolveLedgerUnion` scan against an 8 GB heap. `sweep.fix.uncreditable_head` — the row
-// the sweep reads to decide NOT to re-dispatch a permanently uncreditable PR head — is written,
-// then classified as pure noise by `rotateLedger` (it is absent from
-// `DECISION_RELEVANT_LEDGER_STEPS`), then archived wholesale, and then read back out of 954
-// archives on every daemon cycle. MEASURED that night: 0 of its 324 rows were in the live ledger.
-// All 324 were in archives, including one written ninety minutes earlier.
+// INVARIANT: a step read through `resolveLedgerUnion` must either be retained or acknowledged with
+// the planned repair. The union requires archive history; omitting the same step from retention
+// declares that old rows are disposable.
 //
-// So the outage's root cause was a step name missing from a list, and finding it took a person
-// reading two files and noticing they disagreed. That is what a gate is for.
+// TRAP: W1-T3360 found `sweep.fix.uncreditable_head` read from 954 archives after rotation archived
+// every live row. That contradiction caused the 2026-09-10 daemon OOM loop measured in #5017.
 //
-// THE RULE, AND WHY IT HAS ALMOST NO FALSE POSITIVES. Calling `resolveLedgerUnion` is a DECLARATION
-// that you need history: it requires archives and refuses an incomplete corpus. Leaving a step out
-// of the retention sets is the OPPOSITE declaration — that losing old rows is acceptable. Holding
-// both about the same step is a contradiction, and the repo pays for it in gigabytes.
-//
-// MEASURED on the tree that shipped this: 122 step names are read somewhere in `src/`, and 74 of
-// them are not retained — so a naive "every read step must be retained" check would name 74 rows
-// and get reverted in a week (the shape `expiring-fixture-census` was written to avoid). Narrowing
-// to steps read THROUGH THE UNION cuts that to 8, across 3 call sites, and two of those three are
-// named in #5017's own measured OOM table. The narrowing is the whole design.
-//
-// IT NAMES, IT DOES NOT PRESCRIBE. Two fixes are legitimate and the census cannot tell them apart:
-// retain the step (right when the population is small and bounded), or keep a PROJECTION and stop
-// scanning (right when it is large, e.g. 76,131 `followup.harvested` rows). So a row is cleared by
-// an ACKNOWLEDGEMENT carrying a reason, and a NEW contradiction fails closed.
+// FALSIFIER: test/a-union-read-of-an-unretained-step-is-refused.test.ts covers new contradictions,
+// stale acknowledgements, unresolved patterns, and the committed-tree census wiring.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";

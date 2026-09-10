@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { DECISION_RELEVANT_LEDGER_STEPS, RENDER_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import is a TS7016 — the same reason
 // test/docs-index.test.ts and test/clock-sweep.test.ts reach their scripts through a runtime
@@ -19,7 +20,6 @@ const {
   censusFindings,
   contradictions,
   main,
-  retentionSetFrom,
   staleAcknowledgements,
   stepsInPatternText,
   trackedSourceFiles,
@@ -38,7 +38,6 @@ const {
     acknowledged?: Map<string, string>,
   ) => Array<{ file: string; pattern: string; step: string }>;
   main: (argv: string[], deps: Record<string, unknown>) => number;
-  retentionSetFrom: (src: string, name: string) => Set<string>;
   staleAcknowledgements: (findings: ReturnType<typeof censusFindings>, acknowledged?: Map<string, string>) => string[];
   stepsInPatternText: (text: string) => string[];
   trackedSourceFiles: (root: string, exec?: unknown) => string[];
@@ -57,8 +56,11 @@ const {
 // that reads them instead.
 
 const RETENTION = (): Map<string, Set<string>> => {
-  const src = readFileSync(join(REPO_ROOT, "src", "lib", "ledger.ts"), "utf8");
-  return new Map(RETENTION_SET_NAMES.map((n) => [n, retentionSetFrom(src, n)]));
+  const sets = new Map([
+    ["DECISION_RELEVANT_LEDGER_STEPS", new Set(DECISION_RELEVANT_LEDGER_STEPS)],
+    ["RENDER_RELEVANT_LEDGER_STEPS", new Set(RENDER_RELEVANT_LEDGER_STEPS)],
+  ]);
+  return new Map(RETENTION_SET_NAMES.map((n) => [n, sets.get(n) ?? new Set<string>()]));
 };
 const readReal = (rel: string): string => readFileSync(join(REPO_ROOT, rel), "utf8");
 
