@@ -29823,6 +29823,67 @@ function readOperatorNotesNdjson(root: string): Array<Record<string, unknown>> {
  * that must emit weekly manufactures drift; the no-op path is first-class" (design). Own
  * try/catch: a read failure here must never take down the sweep composite it rides inside.
  */
+/**
+ * The two ledger-derived docket surfaces, as the JSON substring their `step` field occupies.
+ * `resolveLedgerUnion` greps the WHOLE raw line, so this pre-filters the corpus to candidate rows
+ * before anything is parsed — the same shape `rule-efficacy.ts` builds for the same reader.
+ */
+const DOCKET_LEDGER_STEPS = /"step":"(?:ratify\.reframed|operator_feedback)"/;
+
+/**
+ * W1-T1273 — the docket's ledger corpus: EVERY rotation plus the live file, not the live file alone.
+ *
+ * `rotateLedger` keeps only `MAX_RETAINED_LINES_PER_STEP` newest rows per step in
+ * `state/ledger.ndjson` and archives the rest, so the previous `readLedgerLines(ledgerPath)` read
+ * a sliver: any `ratify.reframed` or `operator_feedback` row old enough to have rotated was
+ * invisible to the weekly gather. Two of the five capture surfaces are fed from here, and
+ * `counts_by_source` — the per-surface number an operator reads to decide whether a channel is
+ * alive — is produced by this read. A narrow read does not report "narrow"; it reports ZERO,
+ * which is indistinguishable from a channel nobody used.
+ *
+ * DEGRADES TO THE LIVE FILE, NEVER TO ZERO. `resolveLedgerUnion` refuses a corpus it cannot fully
+ * enumerate (`requireArchives`, `refuseIncomplete`) — including the honest fresh-host case with no
+ * `.gz` at all. Refusing must not be read as "no feedback": on `ok === false` this falls back to
+ * exactly the previous behaviour and NAMES the degradation in its own ledger row, so a narrow read
+ * is legible as narrow instead of arriving as five zeros. Strictly wider than before on every
+ * path; never blank.
+ */
+export function readDocketLedgerCorpus(
+  ledgerPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Array<Record<string, unknown>> {
+  const liveOnly = (reason: string, extra: Record<string, unknown> = {}): Array<Record<string, unknown>> => {
+    log("feedback_docket.corpus_degraded", { reason, live_only: true, ...extra });
+    return [...readLedgerLines(ledgerPath)];
+  };
+  let union: ReturnType<typeof resolveLedgerUnion>;
+  try {
+    union = resolveLedgerUnion(dirname(ledgerPath), DOCKET_LEDGER_STEPS);
+  } catch (e) {
+    return liveOnly(String((e as Error)?.message ?? e));
+  }
+  if (!union.ok) {
+    return liveOnly("union refused this corpus", { archive_count: union.archiveCount, unread: union.unread });
+  }
+  const rows: Array<Record<string, unknown>> = [];
+  let torn = 0;
+  for (const raw of union.matches) {
+    try {
+      rows.push(JSON.parse(raw) as Record<string, unknown>);
+    } catch {
+      torn++;
+    }
+  }
+  log("feedback_docket.corpus", {
+    source: "union",
+    archive_count: union.archiveCount,
+    live_file_read: union.liveFileRead,
+    rows: rows.length,
+    torn,
+  });
+  return rows;
+}
+
 export function runFeedbackDocketRung(
   config: Config,
   ledgerPath: string,
@@ -29841,7 +29902,7 @@ export function runFeedbackDocketRung(
     }
 
     const window = feedbackDocketLookbackWindow(now);
-    const ledgerLines = readLedgerLines(ledgerPath);
+    const ledgerLines = readDocketLedgerCorpus(ledgerPath, log);
     const rejectedFeedback = listFeedback(root, { status: "rejected" }).map((e) => ({ id: e.id, ts: e.ts, raw: e.raw }));
     const questionLines = readQuestionsNdjson(root);
     const operatorNotes = readOperatorNotesNdjson(root)
