@@ -29859,14 +29859,23 @@ const DOCKET_LEDGER_STEPS = /"step":"(?:ratify\.reframed|operator_feedback)"/;
 export function readDocketLedgerCorpus(
   ledgerPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  // W1-T1273: the union reader, injectable and APPENDED LAST so no positional caller shifts. The
+  // real `resolveLedgerUnion` is defensive to the point of never throwing for any corpus a test can
+  // build on disk — an absent state dir and a state dir that is really a FILE both return
+  // `ok: false` rather than raising. The catch arm below is therefore unreachable through the
+  // filesystem, and an unreachable catch that swallows a degradation is exactly the arm this repo
+  // has shipped uncovered before. This seam exists so ONE test can drive it; every other test runs
+  // the real default.
+  deps: { resolve?: typeof resolveLedgerUnion } = {},
 ): Array<Record<string, unknown>> {
+  const resolve = deps.resolve ?? resolveLedgerUnion;
   const liveOnly = (reason: string, extra: Record<string, unknown> = {}): Array<Record<string, unknown>> => {
     log("feedback_docket.corpus_degraded", { reason, live_only: true, ...extra });
     return [...readLedgerLines(ledgerPath)];
   };
   let union: ReturnType<typeof resolveLedgerUnion>;
   try {
-    union = resolveLedgerUnion(dirname(ledgerPath), DOCKET_LEDGER_STEPS);
+    union = resolve(dirname(ledgerPath), DOCKET_LEDGER_STEPS);
   } catch (e) {
     // DELIBERATE, AND IT IS THE WHOLE POINT OF THE UNION BEING BEST-EFFORT: an unreadable archive
     // must not cost the docket the rows it CAN see. Degrade to the live sliver and carry the

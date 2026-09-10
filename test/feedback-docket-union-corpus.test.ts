@@ -250,3 +250,68 @@ test("W1-T1273: an empty window still writes the marker, files nothing, and name
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+// ── The two degradation arms, driven rather than assumed (coverage-ratchet, W1-T1273) ─────────
+
+test("W1-T1273: ONE torn row in an archive costs that row and no other — the corpus is not discarded", async () => {
+  const { readDocketLedgerCorpus } = await import("../src/run-task.js");
+  const instanceRoot = makeTempDir("fd-union-torn");
+  try {
+    const stateDir = join(instanceRoot, "state");
+    // A rotation truncated mid-write leaves exactly one unterminated line. It MATCHES the docket's
+    // step pattern, so it reaches the parse — and must cost only itself.
+    writeGzArchive(stateDir, "ledger.2026-08-04T00-00-00-000Z.ndjson.gz", [
+      reframeRow("P1", "a well-formed row [CLAUDE.md#7]", "2026-08-04T00:00:00.000Z"),
+      '{"ts":"2026-08-05T00:00:00.000Z","step":"ratify.reframed","feedback":"tr',
+    ]);
+    writeFileSync(join(stateDir, "ledger.ndjson"), "");
+
+    const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    const rows = readDocketLedgerCorpus(join(stateDir, "ledger.ndjson"), (step, extra = {}) => lines.push({ step, extra }));
+
+    assert.equal(rows.length, 1, "the well-formed row survives its torn neighbour");
+    const corpus = lines.find((l) => l.step === "feedback_docket.corpus");
+    assert.ok(corpus, "a union read reports its corpus");
+    assert.equal(corpus!.extra.torn, 1, "the torn row is COUNTED, never silently dropped");
+    assert.equal(corpus!.extra.rows, 1);
+  } finally {
+    rmSync(instanceRoot, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1273: a union reader that THROWS degrades to the live file and names the reason", async () => {
+  const { readDocketLedgerCorpus } = await import("../src/run-task.js");
+  const instanceRoot = makeTempDir("fd-union-throw");
+  try {
+    const ledgerPath = join(instanceRoot, "state", "ledger.ndjson");
+    appendLedger(ledgerPath, {
+      run_id: "r1",
+      task_id: "L1",
+      step: "ratify.reframed",
+      feedback: "live row that must survive a thrown union read [CLAUDE.md#9]",
+      ts: "2026-08-04T00:00:00.000Z",
+    });
+
+    const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    const rows = readDocketLedgerCorpus(
+      ledgerPath,
+      (step, extra = {}) => lines.push({ step, extra }),
+      {
+        resolve: () => {
+          throw new Error("EACCES: permission denied, scandir");
+        },
+      },
+    );
+
+    // THE POLARITY THIS ARM EXISTS FOR: a thrown archive read costs the ARCHIVE half, never the
+    // live half, and never degrades to zero — zero would read as "no feedback".
+    assert.equal(rows.length, 1, "the live row survives a thrown union read");
+    const degraded = lines.find((l) => l.step === "feedback_docket.corpus_degraded");
+    assert.ok(degraded, "the degradation is NAMED, not silent");
+    assert.equal(degraded!.extra.live_only, true);
+    assert.match(String(degraded!.extra.reason), /EACCES/, "the thrown reason is carried verbatim, not replaced by a guess");
+    assert.equal(lines.some((l) => l.step === "feedback_docket.corpus"), false, "a degraded read must not also claim a union read");
+  } finally {
+    rmSync(instanceRoot, { recursive: true, force: true });
+  }
+});
