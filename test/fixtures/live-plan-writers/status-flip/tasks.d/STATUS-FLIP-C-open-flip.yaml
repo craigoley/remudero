@@ -1,0 +1,18 @@
+# W1-T3274: the OPEN-STATUS-FLIP fixture (the falsifier's SECOND control). Its proof is
+# deliberately DIRTY, same as fixture A. The suite flips `status:` to `recon` — still an OPEN
+# status, not a closed/landed one — and asserts the shard stays fully in scope and still fails on
+# its own violation: the carve is about LEAVING the open population, never about the `status:`
+# field merely being the one that moved.
+- id: STATUS-FLIP-C
+  title: "status-flip carve fixture C: a flip to another OPEN status, never carved"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  status: queued
+  attempts: 0
+  origin: architect
+  files: [test/a-status-flip-is-not-a-task-edit.test.ts]
+  acceptance:
+    - claim: "the fixture shard parses and lints"
+      proof: "the existing suite passes unchanged, verified by hand"

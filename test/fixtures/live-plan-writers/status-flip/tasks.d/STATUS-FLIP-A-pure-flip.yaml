@@ -1,0 +1,18 @@
+# W1-T3274: the PURE-FLIP fixture. Its proof is deliberately DIRTY (free prose, not a whitelisted
+# dialect) — proof-dialect BLOCKS on it every time this shard actually reaches `lintTask`. The
+# suite flips ONLY the `status:` line (queued -> merged) and asserts the run stays "0 checked":
+# if the carve ever regressed to a no-op, this shard's baked-in violation would surface and the
+# assertion would catch it, not merely a missing feature staying silently unexercised.
+- id: STATUS-FLIP-A
+  title: "status-flip carve fixture A: a pure status flip, nothing else"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  status: queued
+  attempts: 0
+  origin: architect
+  files: [test/a-status-flip-is-not-a-task-edit.test.ts]
+  acceptance:
+    - claim: "the fixture shard parses and lints"
+      proof: "the existing suite passes unchanged, verified by hand"
