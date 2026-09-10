@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { buildOpenPrViews } from "../src/run-task.js";
+
 import {
   DEFAULT_SWEEP_POLICY,
   missingTaskTrailerRepairDecision,
@@ -260,4 +262,21 @@ test("W1-T3283: a declared-files GLOB covers the paths under it, so no scope ove
     false,
     "and the advisory line is omitted entirely rather than emitted empty",
   );
+});
+
+test("W1-T3283 UNREADABLE PLAN: an unreadable main plan disables trailer repair for the pass, it does not throw", () => {
+  // THE ARM IS OTHERWISE UNREACHABLE. `repoRoot` is a module-level import, so the checkout this
+  // test runs in always has a readable plan/tasks.yaml and the catch below it can never fire.
+  // The seam is what makes the failure expressible at all — see its own doc in run-task.ts.
+  let reached = false;
+  const views = buildOpenPrViews("craigoley", "remudero", ledgerPath(), {
+    fetch: () => [] as never,
+    readMainPlan: () => {
+      reached = true;
+      throw new Error("plan/tasks.yaml is unreadable");
+    },
+  });
+
+  assert.equal(reached, true, "precondition: the injected reader actually ran");
+  assert.deepEqual(views, [], "an unreadable plan must not take the whole pass down with it");
 });

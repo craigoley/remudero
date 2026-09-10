@@ -27630,6 +27630,11 @@ export function buildOpenPrViews(
     planFilingFileMissCap?: number;
     /** Bounded classification telemetry; production de-duplicates unchanged head/source pairs. */
     onPlanFilingClassification?: (event: PlanFilingClassificationEvent) => void;
+    /** W1-T3283 — the main-plan read that branch-derived trailer repair depends on. Injectable for
+     *  the same reason `readCiGateRequired` above is: `repoRoot` is a MODULE-level import, not a
+     *  parameter, so without a seam no test can reach the unreadable-plan arm below — the checkout
+     *  a test runs in always has a readable plan. Omitted, it is `loadPlan` on the real path. */
+    readMainPlan?: (root: string) => Plan;
   } = {},
 ): ClassifiedOpenPrView[] {
   const fetch = deps.fetch ?? ghJson;
@@ -27669,7 +27674,7 @@ export function buildOpenPrViews(
     : readCiGateRequiredChecks(repoRoot);
   let mainPlan: Plan | undefined;
   try {
-    mainPlan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+    mainPlan = deps.readMainPlan ? deps.readMainPlan(repoRoot) : loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   } catch {
     // An unreadable local plan only disables branch-derived trailer repair for this pass.
     mainPlan = undefined;
