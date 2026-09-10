@@ -6031,7 +6031,22 @@ export function detectInstrumentEntanglement(
   // the two carve-outs above it subtracts on BOTH sides at once, because the mixture it clears is
   // symmetric: the workflows are the instrument, the registry entries are the `src/` half, and
   // neither exists without the other. Same subtract-from-the-verdict-only discipline.
-  const registration = diff === undefined ? { instruments: [], srcs: [] } : mandatoryRegistrationPaths(diff, instrumentPaths, srcPaths);
+  // W1-T3272 — CONDITION (a) MUST NOT SEE AN INSTRUMENT THAT IS ALREADY CARVED OUT. `mandatoryRegistrationPaths`
+  // refuses unless every instrument in the diff is one of the two CI workflows, so that an unrelated
+  // instrument cannot ride along on a registration. An INTRODUCED CENSUS GATE is not unrelated and is
+  // not riding along: it is the very thing being registered, and `introducedGates` has already
+  // subtracted it on W1-T2521's own reasoning — a script that never existed before this diff has no
+  // prior version to be mis-graded against.
+  //
+  // THE TRAP THIS CLOSES, AND IT IS A SUBTLE ONE. `INSTRUMENT_SURFACE` is read from the tree the
+  // detector RUNS IN. The same diff is therefore not entangled when judged from a tree that does not
+  // yet declare the new script, and IS entangled when judged from the PR's own tree, which declares
+  // it — the declaration being mandatory (test/instrument-surface-completeness.test.ts). MEASURED
+  // 2026-09-10: #4851 read `entangled=false` from a lane without the declaration and `true` from its
+  // own rebased branch, on byte-identical file lists. The reviewer uses the PR's tree, so the second
+  // reading is the one that decides — and it was the wrong one.
+  const registrationInstruments = instrumentPaths.filter((f) => !introducedGates.includes(f));
+  const registration = diff === undefined ? { instruments: [], srcs: [] } : mandatoryRegistrationPaths(diff, registrationInstruments, srcPaths);
   const subtracted = new Set([...introducedGates, ...harmlessInstruments, ...registration.instruments]);
   const effectiveInstrumentPaths = subtracted.size === 0 ? instrumentPaths : instrumentPaths.filter((f) => !subtracted.has(f));
   const subtractedSrc = new Set(registration.srcs);
