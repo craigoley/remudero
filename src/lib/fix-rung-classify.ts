@@ -95,8 +95,7 @@ export function detectReviewFalseBlock(check: {
  * ABSTAINS (`undefined`, strike normally) on anything short of two directly comparable annotation
  * sets for EVERY still-failing check name shared between the two rounds: the failing NAME SET
  * itself moved, either round carries no evidence, or any shared check's tail did not come from
- * annotations on BOTH sides. Design rule: fail toward spending the strike, never toward a false
- * stand-down.
+ * annotations on BOTH sides. Design rule: fail toward spending the strike, never a false stand-down.
  *
  * Pure and exported — mirrors {@link detectReviewFalseBlock}'s own reason for being pure.
  */
