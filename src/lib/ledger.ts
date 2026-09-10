@@ -408,6 +408,15 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T2436: `priorPrerequisitePrFor` (run-task.ts) folds these by `pr_url`; the ledger is that
   // capability's only memory, so archived away the rung opens a SECOND prerequisite PR.
   "fix.prerequisite_opened",
+  // W1-T3309: `previousInstrumentEntanglementFromLedger` (run-task.ts) replays these rows to recover
+  // the instrument/src paths a PREVIOUS fix round faced, and compares them with this round's. That
+  // comparison is the whole of "a remedy that changed nothing is dispatched again" — an unchanged
+  // pair means the last dispatch moved nothing and the next one should escalate rather than repeat.
+  // The read is deliberately NOT scoped to head_sha, so it looks arbitrarily far back; rotate the row
+  // away and the comparison silently finds no prior value, which reads exactly like a first attempt.
+  // That is the "derived from consumers, not hardcoded" case this set exists for, arriving on the
+  // rung whose own defect is that it repeats.
+  "fix.instrument_entangled",
   "dep-review.decided",
   // W1-T2705: the dedup marker for a migration already submitted. `depReviewOutcomeFor`
   // (run-task.ts) reads it back per PR + head and answers "migrate" only when present —
