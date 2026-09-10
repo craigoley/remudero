@@ -464,26 +464,87 @@ export function computeTypeOnlyRanges(fileText) {
 export const MAX_BOUNDARY_EXEC_LINES = 15;
 const BOUNDARY_CALL =
   /\b(?:spawnSync|execFileSync)\(\s*process\.execPath\b|\bprocess\.exit(?:Code\s*=|\s*\()|\bspawnWorker\s*\(/;
+
+/**
+ * W1-T3304 — A REAL BROWSER IS A SECOND KIND OF IRREDUCIBLE I/O, AND IT GETS ITS OWN WORD.
+ *
+ * `process-boundary` stays exactly as narrow as it is: re-exec and exit glue, nothing else. Widening
+ * it to cover browsers would have made one word mean two things and put a 46-line function under a
+ * predicate written for a 3-line one. A blanket exemption is how coverage gates die.
+ *
+ * WHY A SEPARATE CAP AND NOT THE SAME 15. Re-exec glue is irreducibly TINY -- spawn, exit, done.
+ * Driving a browser is irreducibly WORDIER: launch, context, page, navigate, evaluate, close, and
+ * the error arm for each. MEASURED 2026-09-09 on the only real instance in the tree,
+ * `defaultOpenViewport` in scripts/console-live-review.mjs (#4865): 66 raw lines, 46 executable by
+ * this file's own `isNonExecutableLine` metric. 60 clears that with modest headroom and still
+ * refuses an orchestration function that has grown a second job.
+ *
+ * THE COST, STATED PLAINLY: 60 is a lot of unmeasured lines to hand out on one comment, and the
+ * only thing bounding it is the predicate below — which demands a REAL launch call in the guarded
+ * declaration, so the directive cannot be pasted over ordinary logic. That is ONE guard where
+ * `process-boundary` effectively has two (a rare call AND a tiny ceiling). Every honoured exemption
+ * is still printed by main() with its reason, so none of this is silent.
+ * RE-DERIVE THIS NUMBER once more instances exist; it is sized from a population of one.
+ */
+export const MAX_BROWSER_EXEC_LINES = 60;
+const BROWSER_LAUNCH_CALL =
+  /\b(?:chromium|firefox|webkit|browserType|puppeteer)\s*\.\s*(?:launch|launchPersistentContext)\s*\(/;
+
+/** The author-written `diff-cov:` directives, each with the call its guarded declaration must
+ *  actually contain and the ceiling it may not exceed. A directive whose predicate is unenforceable
+ *  is a comment (W1-T3304 design (ii)), so every entry here carries one. */
+const DIRECTIVE_KINDS = {
+  'process-boundary': {
+    call: BOUNDARY_CALL,
+    maxExecLines: MAX_BOUNDARY_EXEC_LINES,
+    missing:
+      'guarded declaration contains no process-boundary call (spawnSync/execFileSync(process.execPath …) or process.exit) — the directive may only exempt re-exec/exit glue',
+    extract: 'the non-boundary logic',
+  },
+  'browser-boundary': {
+    call: BROWSER_LAUNCH_CALL,
+    maxExecLines: MAX_BROWSER_EXEC_LINES,
+    missing:
+      'guarded declaration contains no browser launch (chromium/firefox/webkit/browserType/puppeteer .launch(…)) — the directive may only exempt a region that genuinely drives a real browser',
+    extract: 'the pure result-shaping beside the browser calls',
+  },
+};
+
+/** Every directive word an author may write, for the fail-closed message when they write another. */
+export const DIFF_COV_DIRECTIVES = Object.keys(DIRECTIVE_KINDS).sort();
 export function computeBoundaryRanges(fileText) {
   const lines = fileText.split('\n');
   const ranges = [];
   const errors = [];
-  const DIRECTIVE_TAG = /^\s*\/\/\s*diff-cov:\s*process-boundary\b(.*)$/;
+  // ANY word, not just the one that existed — an unrecognised directive must REFUSE and say which
+  // words exist (W1-T3304 design (iii)). Before this, `// diff-cov: anything-else` matched nothing,
+  // was silently ignored, and the author learned only that their lines were uncovered. #4865 stalled
+  // on the neighbouring version of that: told the directive it used was wrong, and no right one.
+  const DIRECTIVE_TAG = /^\s*\/\/\s*diff-cov:\s*([a-z][a-z-]*)\b(.*)$/;
   const CLOSER = /^(\s*)\}/;
   for (let i = 0; i < lines.length; i++) {
     const tag = DIRECTIVE_TAG.exec(lines[i]);
     if (!tag) continue;
     const directiveLine = i + 1; // 1-indexed, matches lcov/diff line numbers
-    const reasonMatch = /^\s*[—–-]+\s*(\S.*)$/.exec(tag[1]);
+    const word = tag[1];
+    const spec = DIRECTIVE_KINDS[word];
+    if (!spec) {
+      errors.push({
+        directiveLine,
+        message: `unrecognised diff-cov directive "${word}" — the directives that exist are: ${DIFF_COV_DIRECTIVES.join(', ')}`,
+      });
+      continue;
+    }
+    const reasonMatch = /^\s*[—–-]+\s*(\S.*)$/.exec(tag[2]);
     if (!reasonMatch) {
-      errors.push({ directiveLine, message: 'process-boundary directive requires "— <reason>"' });
+      errors.push({ directiveLine, message: `${word} directive requires "— <reason>"` });
       continue;
     }
     const reason = reasonMatch[1].trim();
     let j = i + 1;
     while (j < lines.length && lines[j].trim() === '') j++; // the declaration it guards
     if (j >= lines.length) {
-      errors.push({ directiveLine, message: 'no declaration follows the process-boundary directive' });
+      errors.push({ directiveLine, message: `no declaration follows the ${word} directive` });
       continue;
     }
     const declIndent = (lines[j].match(/^\s*/) ?? [''])[0];
@@ -499,25 +560,21 @@ export function computeBoundaryRanges(fileText) {
     const start = j + 1; // 1-indexed decl line
     const endLine = end + 1;
     const bodyText = lines.slice(j, end + 1).join('\n');
-    if (!BOUNDARY_CALL.test(bodyText)) {
-      errors.push({
-        directiveLine,
-        message:
-          'guarded declaration contains no process-boundary call (spawnSync/execFileSync(process.execPath …) or process.exit) — the directive may only exempt re-exec/exit glue',
-      });
+    if (!spec.call.test(bodyText)) {
+      errors.push({ directiveLine, message: spec.missing });
       continue;
     }
     const execCount = lines
       .slice(j, end + 1)
       .filter((t) => !isNonExecutableLine(t)).length;
-    if (execCount > MAX_BOUNDARY_EXEC_LINES) {
+    if (execCount > spec.maxExecLines) {
       errors.push({
         directiveLine,
-        message: `guarded declaration has ${execCount} executable lines (> ${MAX_BOUNDARY_EXEC_LINES}) — too large to exempt; extract the non-boundary logic and test it`,
+        message: `guarded declaration has ${execCount} executable lines (> ${spec.maxExecLines}) — too large to exempt; extract ${spec.extract} and test it`,
       });
       continue;
     }
-    ranges.push({ start, end: endLine, reason, directiveLine, kind: 'process-boundary' });
+    ranges.push({ start, end: endLine, reason, directiveLine, kind: word });
   }
   return { ranges, errors };
 }
