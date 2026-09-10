@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 
 /**
@@ -23,12 +24,14 @@ import { assertLiveWriteAllowed } from "./live-write-guard.js";
  * The `exec` seam is the whole point of the extraction: a test drives the real guard and
  * the real argv construction with an injected recorder, no worker and no remote.
  */
-export class PushFailedError extends Error {
+export class PushFailedError extends RmdError {
   /** The child's stderr, verbatim. The whole point: a caller deciding how to REACT to a failed push
    *  needs the reason, and `execFileSync`'s own message carries only the argv. */
   readonly stderrText: string;
   constructor(message: string, stderrText: string, readonly cause: unknown) {
-    super(message);
+    // GENERIC_EXIT_CODE, which is what a plain `extends Error` already resolved to through
+    // exitCodeFor — so adopting the envelope changes the discriminant and NOT the exit status.
+    super("git", GENERIC_EXIT_CODE, message, { stderrText });
     this.name = "PushFailedError";
     this.stderrText = stderrText;
   }
