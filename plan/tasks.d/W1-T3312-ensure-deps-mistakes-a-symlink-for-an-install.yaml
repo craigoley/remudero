@@ -1,0 +1,93 @@
+- id: W1-T3312
+  title: "A PROOF WHOSE RUNNER IS NOT INSTALLED GRADES `fail`, SO PASSING CODE IS REFUSED — `ensureDeps` returns early whenever `node_modules` EXISTS, a worktree's `node_modules` is a SYMLINK to a shared tree that predates the dependency, and `pinnedVitestCli` does no existence check, so an absent toolchain and a broken assertion are recorded identically"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: medium
+  origin: "operator-session#4915-false-review-refusal-2026-09-10"
+  plan_refs: ["W1-T3266", "W1-T3177", "W1-T1036"]
+  files: [src/lib/review.ts, test/ensure-deps-mistakes-a-symlink-for-an-install.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10 on #4915. The reviewer refused two acceptance criteria, both citing
+    `apps/dashboard/src/__tests__/series.test.tsx` as "proof executed and FAILED on the PR head —
+    overrides any keyword coverage". THE SAME SUITE, SAME COMMAND, SAME HEAD, PASSES 11/11 once the
+    dependencies are installed. The only difference between the two runs is `npm ci`.
+    THE CHAIN, EVERY LINK OBSERVED ON THIS HOST:
+      1. `ensureDeps` (src/lib/review.ts:1179) returns early when `node_modules` EXISTS:
+           if (!existsSync(join(cwd,"package.json")) || existsSync(join(cwd,"node_modules"))) return;
+      2. a worktree's `node_modules` IS a symlink to the shared tree, and src/run-task.ts:37730 calls
+         that "the NORMAL worktree state". OBSERVED live:
+           run-W1-T3283-.../node_modules -> /home/node/Remudero/remudero/node_modules
+      3. `existsSync` FOLLOWS symlinks. MEASURED on that exact path: true. So (1) returns early and
+         `npm ci` never runs.
+      4. the shared tree does not carry the dependency. MEASURED: `vitest`, `react` and
+         `@vitejs/plugin-react` are ABSENT from it.
+      5. `pinnedVitestCli` (src/lib/review.ts:618) does no existence check — it joins a path and
+         returns it. `node <missing>/vitest.mjs` exits NON-ZERO, so the proof grades `fail`, NOT
+         `not_executable`.
+    SO A MISSING TOOLCHAIN AND A FAILING ASSERTION ARE THE SAME OBSERVATION, and the verdict states
+    the stronger of the two: "executed and FAILED ... overrides any keyword coverage". No amount of
+    correct code clears it.
+    THIS CLASS OF BUG IS ALREADY DOCUMENTED TWENTY LINES AWAY, in `requiredChromiumDirs`' own comment:
+    "TRAP: `ci` installs before every test job and the review host never did, so #863's bump posted
+    `executed_fail` on passing code (#892)." That was fixed for Playwright's browsers specifically.
+    The general case — a declared dependency the review host does not have — was not, and the first
+    workspace to need one hit it.
+    WHY THE OBVIOUS REMEDY IS WRONG. "Just run `npm ci`" is refused on purpose: src/run-task.ts:37745
+    refuses an install through a symlinked `node_modules` because the clear phase would EMPTY THE
+    SHARED TREE the link points at — the 2026-07-29 outage. The early return is therefore protecting
+    something real. What it must not do is protect it SILENTLY.
+  design: |
+    (i) THE GUARD DECIDES ON THE DEPENDENCY, NOT ON THE DIRECTORY. `node_modules` existing is not
+    evidence that this proof's runner is present. The question `ensureDeps` should answer is whether
+    the runner this proof will execute actually resolves.
+    (ii) AN ABSENT RUNNER GRADES `not_executable`, NEVER `fail`. `fail` is a claim about the CODE.
+    A missing binary is a claim about the HOST, and the two must not collapse. This alone fixes the
+    false refusal, because `not_executable` does not override keyword coverage.
+    (iii) THE VERDICT SAYS WHICH ONE IT WAS. A criterion whose proof could not run reads as "the
+    runner was absent", naming it — not as a bare grade the operator has to reverse-engineer.
+    (iv) NEVER INSTALL THROUGH THE SYMLINK. The 2026-07-29 mechanism stands. Refusing loudly is the
+    remedy; emptying a shared tree is not, and no part of this task may weaken that guard.
+    (v) FAIL CLOSED AND STAY QUIET OTHERWISE. A proof whose runner IS present behaves exactly as
+    today, byte for byte. The addition can only reclassify a run that could not have happened.
+    (vi) OUT OF SCOPE: installing workspace dependencies on the review host, and #4915's own stale
+    `test/dashboard-loads.test.ts` fixture. Both are real; neither is this task.
+  acceptance:
+    - claim: "W1-T3312 criterion 1: a proof whose runner is absent from the checkout grades not_executable, not fail"
+      proof: "unit test: test/ensure-deps-mistakes-a-symlink-for-an-install.test.ts"
+    - claim: "W1-T3312 criterion 2: a node_modules that EXISTS but lacks the proof's runner is not treated as a satisfied install"
+      proof: "unit test: test/ensure-deps-mistakes-a-symlink-for-an-install.test.ts"
+    - claim: "W1-T3312 criterion 3: the reported reason names the absent runner, so an operator can tell a host gap from a code failure"
+      proof: "unit test: test/ensure-deps-mistakes-a-symlink-for-an-install.test.ts"
+    - claim: "W1-T3312 criterion 4: an install is still never attempted through a symlinked node_modules, and a present runner behaves exactly as before"
+      proof: "unit test: test/ensure-deps-mistakes-a-symlink-for-an-install.test.ts"
+  falsifier: |
+    CLOSE IF an absent runner ALREADY grades `not_executable`. MEASURED 2026-09-10 that it does not:
+    #4915 carries two criteria refused as "proof executed and FAILED on the PR head" whose suite
+    passes 11/11 with the dependency installed, and `pinnedVitestCli` performs no existence check.
+    THE PRESENT-RUNNER CONTROL, because "grade not_executable when something is missing" is trivially
+    satisfiable by grading everything not_executable: a proof whose runner IS installed must still
+    grade exactly as today — `pass` on passing code and `fail` on a genuinely broken assertion. A
+    change that cannot still fail real code has removed the gate, not fixed it.
+    THE SYMLINK CONTROL: an install must still NEVER be attempted through a symlinked `node_modules`.
+    If a test can drive this code into `npm ci` on a symlinked tree, the 2026-07-29 outage has been
+    rebuilt and the task is worse than not doing it.
+    DO NOT FIX THIS BY INSTALLING. Making the review host carry every workspace dependency would hide
+    the defect rather than repair it — the next undeclared runner grades `fail` on passing code again,
+    and the operator has no way to see that it happened.
+  note: |
+    Rule 25 CHECKED: `src/lib/review.ts` is ordinary src, not an instrument surface.
+    THE SLUG MATCHES THE FALSIFIER (`ensure-deps-mistakes-a-symlink-for-an-install`), so W1-T2525's
+    own-falsifier discount applies to Rule 19's span: the suite is declared in `files:`, is named by
+    every criterion, and does not exist on origin/main — so the `unit test:` proofs DISCRIMINATE
+    against the merge base rather than passing on both trees.
+    CAVEAT WITH EQUAL WEIGHT: the worktree that produced #4915's verdict is transient and gone, so
+    the specific cwd behind THAT refusal was not captured. What is established is the general path and
+    that the suite passes with the dependency present. A run-scoped log line naming the proof's cwd
+    and its resolved runner would have made this a one-line diagnosis instead of a six-step one, and
+    its absence is part of what this task should leave behind.
