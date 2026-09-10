@@ -9,7 +9,7 @@
   risk: high
   origin: "operator-session#eight-fleet-prs-none-merging-2026-09-07"
   plan_refs: ["W1-T1116", "W1-T2397"]
-  files: [src/lib/sweep.ts, test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts]
+  files: [src/lib/sweep.ts, test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts, test/helpers/dirty-fleet-repo.ts]
   status: queued
   attempts: 0
   rationale: |

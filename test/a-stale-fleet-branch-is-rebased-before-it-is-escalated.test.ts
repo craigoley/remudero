@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { remoteHeadSha, seedDirtyFleetRepo } from "./helpers/dirty-fleet-repo.js";
+
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import {
@@ -112,32 +114,9 @@ test("W1-T2999: a cleanly-rebasable fleet branch is rebased instead of escalated
 test("W1-T2999: buildSweepEffects wires the default dirty-fleet rebase through real git", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t2999-real-git-"));
   const branch = "run-W1-T2999-1789036344804";
-  const repoDir = join(root, "checkout");
-  const originDir = join(root, "origin.git");
   const configRoot = join(root, "daemon");
   try {
-    mkdirSync(repoDir, { recursive: true });
-    git(root, ["init", "--bare", originDir]);
-    git(repoDir, ["init"]);
-    git(repoDir, ["checkout", "-b", "main"]);
-    writeFileSync(join(repoDir, "README.md"), "base\n");
-    git(repoDir, ["add", "README.md"]);
-    git(repoDir, ["commit", "-m", "initial"]);
-    git(repoDir, ["remote", "add", "origin", originDir]);
-    git(repoDir, ["push", "-u", "origin", "main"]);
-
-    git(repoDir, ["checkout", "-b", branch]);
-    writeFileSync(join(repoDir, "branch.txt"), "branch change\n");
-    git(repoDir, ["add", "branch.txt"]);
-    git(repoDir, ["commit", "-m", "branch change"]);
-    const oldHead = git(repoDir, ["rev-parse", "HEAD"]).trim();
-    git(repoDir, ["push", "-u", "origin", branch]);
-
-    git(repoDir, ["checkout", "main"]);
-    writeFileSync(join(repoDir, "main.txt"), "main change\n");
-    git(repoDir, ["add", "main.txt"]);
-    git(repoDir, ["commit", "-m", "main change"]);
-    git(repoDir, ["push", "origin", "main"]);
+    const { repoDir, oldHead } = seedDirtyFleetRepo(root, branch);
 
     const effects = buildSweepEffects({
       owner: "craigoley",
@@ -156,10 +135,17 @@ test("W1-T2999: buildSweepEffects wires the default dirty-fleet rebase through r
       effects.rebaseDirtyFleetBranch!(dirtyFleetPr({ headSha: oldHead, headRefName: branch })),
     );
 
-    assert.equal(outcome.outcome, "rebased");
+    // `conflict` is the helper's catch-all for ANY rebase failure, so the bare outcome is not a
+    // diagnosis. Carry the reason it captured, or the next environment-shaped break costs a
+    // reproduction to read.
+    assert.equal(
+      outcome.outcome,
+      "rebased",
+      `expected a clean rebase of disjoint files; got ${outcome.outcome}: ${"reason" in outcome ? outcome.reason : "(no reason)"}`,
+    );
     assert.equal(outcome.oldHeadSha, oldHead);
     assert.notEqual(outcome.newHeadSha, oldHead);
-    const remoteHead = git(repoDir, ["ls-remote", "origin", `refs/heads/${branch}`]).trim().split(/\s+/)[0];
+    const remoteHead = remoteHeadSha(repoDir, `refs/heads/${branch}`);
     assert.equal(remoteHead, outcome.newHeadSha, "the default effect updates the fleet branch on its origin");
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -673,6 +673,23 @@ export function defaultSweepGhRun(file: string, args: readonly string[]): void {
   execFileSync(file, [...args], { stdio: "pipe" });
 }
 
+/**
+ * The words a failed `git` spawn actually printed, for the `reason` these outcomes carry.
+ *
+ * `execFileSync`'s Error.message is only `Command failed: <the argv>` — it restates what we already
+ * know and drops what git said. The diagnosis is on `.stderr`, which `stdio: "pipe"` captured.
+ * MEASURED on #4946: a rebase that failed because no committer identity was configured reported
+ * `conflict` with reason "Command failed: git -C … rebase origin/main", so a CI log showed
+ * `+ 'conflict' - 'rebased'` and nothing about the cause; git's own "Please tell me who you are"
+ * was sitting in a field nobody read. Falls back to the message when stderr is empty, so this can
+ * only ever add detail.
+ */
+function spawnFailureText(error: unknown): string {
+  const e = error as { stderr?: unknown; message?: unknown };
+  const stderrText = e?.stderr === undefined || e?.stderr === null ? "" : String(e.stderr).trim();
+  return stderrText.length > 0 ? stderrText : String(e?.message ?? error);
+}
+
 export type DirtyFleetRebaseOutcome =
   | { outcome: "rebased"; oldHeadSha: string; newHeadSha: string }
   | { outcome: "conflict"; reason: string }
@@ -741,7 +758,7 @@ export function rebaseDirtyFleetBranchViaGit(
       }
       return {
         outcome: "conflict",
-        reason: capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP),
+        reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP),
       };
     }
     const newHeadSha = run(worktreePath, ["rev-parse", "HEAD"]).trim();
@@ -753,7 +770,7 @@ export function rebaseDirtyFleetBranchViaGit(
         outcome: "lease-mismatch",
         reason:
           `force-with-lease refused ${branch}: expected ${pr.headSha}, attempted ${newHeadSha}; ` +
-          capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP),
+          capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP),
       };
     }
     const observedRemote = run(worktreePath, ["ls-remote", "origin", ref]).trim().split(/\s+/)[0];
@@ -767,7 +784,7 @@ export function rebaseDirtyFleetBranchViaGit(
   } catch (error) {
     return {
       outcome: "error",
-      reason: capStderrExcerpt(String((error as Error)?.message ?? error), STDERR_EXCERPT_CAP),
+      reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP),
     };
   } finally {
     if (worktreeCreated) {
