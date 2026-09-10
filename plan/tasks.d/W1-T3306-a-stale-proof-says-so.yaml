@@ -1,0 +1,87 @@
+- id: W1-T3306
+  title: "A CRITERION WHOSE PROOF GRADED `executed_stale` FALLS BACK TO THE KEYWORD FLOOR SILENTLY, THE VERDICT CAPS, AND AUTOMERGE NEVER ARMS — the PR still reads READY-TO-MERGE on the board, so a code PR that adds cases to an EXISTING test file becomes permanently unmergeable with nothing anywhere saying why"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium
+  origin: "operator-session#capped-verdicts-2026-09-10"
+  plan_refs: ["W1-T123", "W1-T3278"]
+  files: [src/lib/review.ts, test/a-stale-proof-says-so.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09/10 across four pull requests on one board.
+    THE CHAIN, EACH LINK CORRECT ON ITS OWN. `classifyBaseProofOutcome` re-runs every proof against
+    the MERGE BASE. A `unit test: <path>` proof naming a file that ALREADY EXISTS there passes on
+    both trees, discriminates nothing, and grades `executed_stale`. The criterion then falls back to
+    the keyword floor — silently. The verdict renders CAPPED. Arming requires, verbatim from the
+    ledger row that does it, "verdict is a full PASS". So automerge never arms.
+    AND THE CHECK IS STILL GREEN. `remudero-review` posts `state: success`, so `mergeStateStatus`
+    reads CLEAN and the board renders READY-TO-MERGE. The PR is not blocked, not failing, and not
+    mergeable, and nothing on it says so.
+    THE MEASUREMENTS. #4887 `proof_exec: ["executed_stale","executed_stale","executed_stale"]`,
+    status `CAPPED — 0/3 proofs executed; not certified`. #4879 four of four the same. #4867 three of
+    four plus one `not_executable`. All three sat READY-TO-MERGE indefinitely.
+    THE REPAIR IS KNOWN AND IT IS NOT DISCOVERABLE. Rewriting #4887's criteria as `grep:` proofs on
+    branch-only text moved it to `PASS — 3 criteria substantiated, no test theater`; it armed and
+    merged within minutes. `lint-plan` already emits `[proof-base-discrimination]` describing exactly
+    this, and it is ADVISORY-ONLY and fires at FILING time, on a different day, to a different reader
+    than the one staring at a green PR that will not merge.
+    WHY THIS IS NOT "AUTHORS SHOULD WRITE BETTER PROOFS". The shape that triggers it — adding cases
+    to an EXISTING suite — is usually the RIGHT engineering call. Of the reds repaired that evening,
+    five were fixed by extending a suite that already existed. A `unit test:` proof can only
+    discriminate when the file it names is NEW, which makes the dialect quietly hostile to the most
+    ordinary kind of change in this repo.
+  design: |
+    (i) SAY IT ON THE PR. A criterion that graded `executed_stale` must be named in the posted
+    review, with the file whose proof did not discriminate. The verdict itself does not change —
+    CAPPED stays CAPPED and the floor still applies — this is about the run being legible.
+    (ii) NAME THE REMEDY, NOT JUST THE FACT. `lint-plan` already knows the answer ("prove it with a
+    `grep:` on the changed line instead, which can miss at base"); the review must carry the same
+    sentence. A diagnosis whose remedy the reader has to go and find is half a diagnosis.
+    (iii) SAY THAT IT WILL NOT MERGE. This is the part the board hides. The text must state that a
+    capped verdict does not arm automerge, because "not certified" reads as a grading nuance and the
+    consequence is that the PR is stuck.
+    (iv) FACT, NOT GATE. This adds no refusal and changes no verdict. A PR that would merge today
+    still merges; a PR that is capped today is still capped, and now says why.
+    (v) SILENT WHEN THERE IS NOTHING TO SAY. Zero stale criteria must render byte-identical to today.
+  acceptance:
+    - claim: "W1-T3306 criterion 1: a criterion that graded executed_stale is named in the posted review, with the proof path that did not discriminate"
+      proof: "unit test: test/a-stale-proof-says-so.test.ts"
+    - claim: "W1-T3306 criterion 2: the text names the grep remedy and states that a capped verdict does not arm automerge"
+      proof: "unit test: test/a-stale-proof-says-so.test.ts"
+    - claim: "W1-T3306 criterion 3: a run with zero stale criteria renders byte-identical to today, so the addition can never subtract"
+      proof: "unit test: test/a-stale-proof-says-so.test.ts"
+    - claim: "W1-T3306 criterion 4: the verdict is unchanged — a capped run stays capped and a passing run stays passing, whatever this reports"
+      proof: "unit test: test/a-stale-proof-says-so.test.ts"
+  falsifier: |
+    CLOSE IF the posted review already names stale criteria: read the status description and body of
+    a CAPPED PR. MEASURED 2026-09-09 on #4887, #4879 and #4867 — the description is
+    "CAPPED — 0/N proofs executed; not certified (a keyword match is a claim, not evidence)" and
+    names no criterion, no file, and no remedy.
+    THE SILENT-RUN CONTROL, because "more text on the PR" is not the claim: a fixture with zero stale
+    criteria must render EXACTLY as it does today. Without that arm this is indistinguishable from a
+    change that adds noise to every review.
+    THE VERDICT CONTROL: a capped run must stay capped and a full PASS must stay a full PASS. If any
+    fixture's verdict MOVES because of this task, the task has become a gate change and must be
+    refused — design (iv) is the whole safety argument.
+    DO NOT make `executed_stale` a refusal. It is CORRECT grading: the proof genuinely does not
+    discriminate. Turning a correct grade into a red is a different, much larger decision.
+    DO NOT change `classifyBaseProofOutcome`. The grading is right; its invisibility is the defect.
+  note: |
+    Rule 25 CHECKED: `src/lib/review.ts` is ordinary src, not an instrument surface.
+    THE SLUG MATCHES THE FALSIFIER (`a-stale-proof-says-so`) so W1-T2525's own-falsifier discount
+    applies to Rule 19's span: `test/a-stale-proof-says-so.test.ts` is declared in `files:`, is named
+    by every criterion as its proof, and does not exist on origin/main — it is the suite written to
+    prove THESE criteria and not one that already exists for another concern.
+    THE PROOFS ARE PURE-PATH `unit test:` ON A FILE THAT DOES NOT EXIST AT BASE, which is the
+    forward-referencing case `judgeCriterion`'s `not_yet_built` carve-out is for — and, pointedly,
+    the one shape of `unit test:` proof that this very task exists because the dialect handles badly
+    once the file DOES exist.
+    CAVEAT WITH EQUAL WEIGHT: this makes a stuck PR legible; it does not unstick it. The author still
+    has to rewrite the proofs, and for a task whose deliverable genuinely is "add cases to an
+    existing suite" the dialect still has no discriminating form. That gap is real and is NOT closed
+    here — naming it on the PR is the cheap half.
