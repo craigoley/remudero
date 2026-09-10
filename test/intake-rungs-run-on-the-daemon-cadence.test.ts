@@ -239,6 +239,54 @@ test("runIntakeRung refuses a rung the policy never declared", async () => {
   }
 });
 
+test("the codeqlQuality rung's SUCCESS arm partitions the alerts it was handed and ledgers the counts", async () => {
+  // The sibling test drives this rung with `{ok:false}` (the 403), which exercises the refusal and
+  // leaves the whole success arm unrun — the gap diff-coverage named. Same harness, real alerts.
+  const f = fixture();
+  const config = { root: f.root, claudeBin: "/bin/true" };
+  try {
+    const alert = (number: number, tags: string[]) => ({
+      source: "code-scanning" as const, id: String(number), severity: "low" as const, state: "open",
+      createdAt: "2026-09-10T00:00:00Z", summary: `rule ${number}`,
+      url: `https://github.com/o/r/security/code-scanning/${number}`,
+      toolName: "CodeQL", ruleTags: tags, ruleId: "js/unused-local-variable",
+    });
+    const hooks = buildIntakeRungsDaemonHooks({
+      config,
+      clock: fixedClock(NOW.getTime()),
+      policy: policyWithIssues(true),
+      // Two eligible, one excluded by tool — so the counts below cannot all be the same number,
+      // which is what makes the partition assertions load-bearing rather than shape-only.
+      readCodeScanningAlerts: () => ({
+        ok: true,
+        alerts: [
+          alert(1, ["quality", "maintainability"]),
+          alert(2, ["quality", "maintainability"]),
+          { ...alert(3, ["security"]), toolName: "Scorecard" },
+        ],
+      }),
+    });
+
+    const result = await hooks.runIntakeRung({ rung: "codeqlQuality", fire: true, reason: "due" });
+    assert.equal(result.rung, "codeqlQuality");
+    assert.notEqual(result.status, "refused", "a readable alert list is not a refusal");
+
+    const row = readLedgerRows(ledgerPathFor(config)).find((r) => r.step === "codeql_quality.partitioned");
+    assert.ok(row, "the success arm ledgers its partition — the refusal row alone is not evidence it ran");
+    assert.equal(row?.scanned_alerts, 3, "every alert handed in is counted as scanned");
+    assert.equal(row?.eligible_alerts, 2, "only the CodeQL quality+maintainability alerts are eligible");
+    assert.equal(row?.excluded_alerts, 1, "the Scorecard alert is excluded, not silently dropped");
+    // THE PARTITION IS TOTAL: every eligible alert lands in exactly one disposition.
+    assert.equal(
+      Number(row?.rejected_alerts) + Number(row?.covered_alerts) + Number(row?.unassigned_alerts),
+      Number(row?.eligible_alerts),
+      "rejected + covered + unassigned must account for every eligible alert",
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("each declared rung dispatches to its own verb and reports that verb's own numbers", async () => {
   const f = fixture();
   const config = { root: f.root, claudeBin: "/bin/true" };
@@ -258,6 +306,7 @@ test("each declared rung dispatches to its own verb and reports that verb's own 
         reconciled,
         escalated: [{}, {}, {}, {}, {}],
       })) as unknown as IntakeHookDeps["pollAlerts"],
+      readCodeScanningAlerts: () => ({ ok: false, error: "HTTP 403: Resource not accessible by integration" }),
       alertFix: (async () => alertFixExit) as unknown as IntakeHookDeps["alertFix"],
       inbox: (async () => inboxExit) as unknown as IntakeHookDeps["inbox"],
       feedbackDocket: ((
@@ -290,6 +339,15 @@ test("each declared rung dispatches to its own verb and reports that verb's own 
     assert.deepEqual(await run("alertFix"), { rung: "alertFix", status: "ok", exit_code: 0 });
     alertFixExit = 2;
     assert.deepEqual(await run("alertFix"), { rung: "alertFix", status: "refused", exit_code: 2 });
+
+    assert.deepEqual(await run("codeqlQuality"), {
+      rung: "codeqlQuality",
+      status: "refused",
+      reason: "code-scanning read failed",
+    });
+    const codeqlRefusal = readLedgerRows(ledgerPathFor(config)).find((row) => row.step === "codeql_quality.refused");
+    assert.ok(codeqlRefusal, "a 403 is visible as a refusal, not reported as a successful zero-alert sweep");
+    assert.match(String(codeqlRefusal?.error), /403/);
 
     assert.deepEqual(await run("inbox"), { rung: "inbox", status: "ok", exit_code: 0 });
     inboxExit = 1;

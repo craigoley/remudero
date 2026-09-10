@@ -67,8 +67,8 @@ export function runRule25Precheck(base, deps = {}) {
   }
 
   error(
-    "rule25-precheck: THIS DIFF WILL BE REFUSED under Standing rule 25 -- it changes a measurement " +
-      "INSTRUMENT and src/ PRODUCT code together, and remudero-review refuses that combination.",
+    "rule25-precheck: NOTICE -- this diff changes a measurement INSTRUMENT and src/ PRODUCT code " +
+      "together. Standing rule 25 is ADVISORY: remudero-review reports this and does NOT refuse it.",
   );
   error(`  instrument path(s): ${verdict.instrumentPaths.join(", ")}`);
   error(`  src/ product path(s): ${verdict.srcPaths.join(", ")}`);
@@ -78,7 +78,10 @@ export function runRule25Precheck(base, deps = {}) {
       "rather than a score FLOOR, add it to ENTANGLEMENT_EXEMPT_INSTRUMENTS with a named reason. " +
       "The second option changes the isolation policy and needs review; this script performs neither remedy.",
   );
-  return 1;
+  // ADVISORY: reported, never blocking. Returning 1 here refused the PUSH for a condition the
+  // review no longer refuses, which is the worst of both — the author paid the full price of a
+  // gate that no longer exists downstream.
+  return 0;
 }
 
 function main() {

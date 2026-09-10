@@ -1039,6 +1039,20 @@ intakeCadence:
       origin: "net-new"
       min: 1
       max: 24
+  codeqlQuality:
+    enabled:
+      value: false
+      origin: "net-new"
+    minIntervalMinutes:
+      value: 1440
+      origin: "net-new"
+      min: 15
+      max: 10080
+    maxPerDay:
+      value: 1
+      origin: "net-new"
+      min: 1
+      max: 24
   inbox:
     enabled:
       value: false

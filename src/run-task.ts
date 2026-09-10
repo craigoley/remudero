@@ -394,9 +394,11 @@ import {
   buildAlertEscalation,
   ghAlertGateway,
   pollAlerts,
+  readCodeScanningAlerts,
   renderAlertsSummary,
   type AlertGateway,
 } from "./lib/ops.js";
+import { reconcileCodeqlQualityProposals } from "./lib/codeql-quality-intake.js";
 import {
   decideAlertDisposition,
   loadAlertPolicy,
@@ -10802,6 +10804,45 @@ export function resolveRunMounts(
   };
 }
 
+interface RunTaskBodyOptions {
+  armAdhocLaneReap?: boolean;
+  binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
+  claimReserver?: DispatchClaimReserver;
+  containmentExec?: ProbeExecutor;
+  isolationExec?: IsolationProbeExecutor;
+  maskLearnings?: boolean;
+  maskRecon?: boolean;
+  maskRules?: boolean;
+  noMerge?: boolean;
+  readHeadShaForProvenance?: (prUrl: string) => string;
+  spawnWallClockBoundMs?: number;
+  workerRuleHeadlinesEnabled?: boolean;
+  worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
+}
+
+export interface RunTaskContext {
+  config: Config;
+  fetchPrBodyFn: typeof fetchPrBodyViaGh;
+  github: GitHub;
+  isMerged: (task: Task) => boolean;
+  ledgerPath: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  openTaskIds: ReadonlySet<string>;
+  opts: RunTaskBodyOptions;
+  owner: string;
+  plan: Plan;
+  planPath: string;
+  recordDecisionFn: typeof recordDecision;
+  repoRoot: string;
+  runId: string;
+  runReviewFn: typeof runReview;
+  say: (msg: string) => void;
+  spawn: typeof spawnWorker;
+  task: Task;
+  taskId: string;
+  workerStateSensor: WorkerStateSensor;
+}
+
 /**
  * W1-T2862: report the maintainability obligation without ever changing the implementation
  * verdict. The consumer owns durable filing and its decision-relevant receipt; this wrapper owns
@@ -11287,12 +11328,58 @@ async function runTask(
     throw e;
   }
   try {
-    return await runTaskBody();
+    const ctx: RunTaskContext = {
+      config,
+      fetchPrBodyFn,
+      github,
+      isMerged,
+      ledgerPath,
+      log,
+      openTaskIds,
+      opts,
+      owner,
+      plan,
+      planPath,
+      recordDecisionFn,
+      repoRoot,
+      runId,
+      runReviewFn,
+      say,
+      spawn,
+      task,
+      taskId,
+      workerStateSensor,
+    };
+    return await runTaskBody(ctx);
   } finally {
     inflightLock.release();
   }
+}
 
-  async function runTaskBody(): Promise<RunResult> {
+export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
+  const {
+    config,
+    fetchPrBodyFn,
+    github,
+    isMerged,
+    ledgerPath,
+    log,
+    openTaskIds,
+    opts,
+    owner,
+    plan,
+    planPath,
+    recordDecisionFn,
+    repoRoot,
+    runId,
+    runReviewFn,
+    say,
+    spawn,
+    task,
+    taskId,
+    workerStateSensor,
+  } = ctx;
+
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
   // task omits it; the SOFT threshold ($25 default, config-tunable) only surfaces an
@@ -13284,8 +13371,7 @@ async function runTask(
       log("dispatch.claim_release_error", { error: String((e as Error)?.message ?? e) });
     }
   }
-  } // ── end runTaskBody
-}
+} // ── end runTaskBody
 
 /**
  * `rmd review <pr-number>` — the ESCAPE HATCH for hand-opened PRs. PR #13 made
@@ -20143,6 +20229,7 @@ export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
   "intakeCadence.ops": INTAKE_CADENCE_CONTRACT_VERSION,
   "intakeCadence.issues": INTAKE_CADENCE_CONTRACT_VERSION,
   "intakeCadence.alertFix": INTAKE_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.codeqlQuality": INTAKE_CADENCE_CONTRACT_VERSION,
   "intakeCadence.inbox": INTAKE_CADENCE_CONTRACT_VERSION,
   "intakeCadence.feedbackDocket": INTAKE_CADENCE_CONTRACT_VERSION,
   boardReview: BOARD_REVIEW_CONTRACT_VERSION,
@@ -20961,6 +21048,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
   loadManagedRepos?: (root: string) => ManagedRepo[];
   pollIssues?: typeof pollIssues;
   pollAlerts?: typeof pollAlerts;
+  readCodeScanningAlerts?: typeof readCodeScanningAlerts;
   alertFix?: typeof alertFixCommand;
   inbox?: typeof inboxCommand;
   feedbackDocket?: typeof runFeedbackDocketRung;
@@ -21043,6 +21131,57 @@ export function buildIntakeRungsDaemonHooks(deps: {
       if (rung === "alertFix") {
         const exitCode = await (deps.alertFix ?? alertFixCommand)([], { config, ledgerPath, runId });
         return { rung, status: exitCode === 0 ? "ok" : "refused", exit_code: exitCode };
+      }
+      if (rung === "codeqlQuality") {
+        const { owner, repo } = resolveOwnerRepo();
+        const source = (deps.readCodeScanningAlerts ?? readCodeScanningAlerts)(owner, repo);
+        if (!source.ok) {
+          appendLedger(ledgerPath, {
+            run_id: runId,
+            task_id: "INTAKE",
+            step: "codeql_quality.refused",
+            lane: "intake",
+            rung,
+            reason: "code-scanning read failed",
+            error: source.error.replace(/\s+/g, " ").slice(0, 300),
+          });
+          return { rung, status: "refused", reason: "code-scanning read failed" };
+        }
+        const result = reconcileCodeqlQualityProposals(
+          join(config.root, "state", "inbox-proposals.json"),
+          source.alerts,
+          listFeedback(repoRoot),
+        );
+        const partition = result.partition;
+        appendLedger(ledgerPath, {
+          run_id: runId,
+          task_id: "INTAKE",
+          step: "codeql_quality.partitioned",
+          lane: "intake",
+          rung,
+          scanned_alerts: partition.scannedTotal,
+          eligible_alerts: partition.eligible.length,
+          excluded_alerts: partition.excluded.length,
+          rejected_alerts: partition.rejected.length,
+          covered_alerts: partition.covered.length,
+          unassigned_alerts: partition.unassigned.length,
+          proposal_created: result.createdProposalId ?? null,
+          proposals_updated: result.updatedProposalIds,
+          proposals_retired: result.retiredProposalIds,
+        });
+        return {
+          rung,
+          status: "ok",
+          scanned_alerts: partition.scannedTotal,
+          eligible_alerts: partition.eligible.length,
+          excluded_alerts: partition.excluded.length,
+          rejected_alerts: partition.rejected.length,
+          covered_alerts: partition.covered.length,
+          unassigned_alerts: partition.unassigned.length,
+          proposal_created: result.createdProposalId ?? null,
+          proposals_updated: result.updatedProposalIds.length,
+          proposals_retired: result.retiredProposalIds.length,
+        };
       }
       if (rung === "inbox") {
         const exitCode = await (deps.inbox ?? inboxCommand)([], { config });
@@ -23280,12 +23419,16 @@ export function breakerDetailDep(
  * ever omitted — the fallback is the shipped default, never an unbounded one, so an unwired
  * caller degrades to the pre-task ceiling rather than to "no ceiling at all."
  */
-function costGovernorGateFor(
+export function costGovernorGateFor(
   ledgerPath: string,
   runId: string,
+  now: () => number = Date.now,
 ): (dailyCostCeilingUsd?: number) => CostGovernorResult | undefined {
   return (dailyCostCeilingUsd) => {
-    const dayCostUsd = deriveDayCostUsd(readLedgerLines(ledgerPath), Date.now());
+    // Capture one instant for the whole consultation: a re-read after midnight
+    // would put the same ledger snapshot in a different UTC day window.
+    const consultationNow = now();
+    const dayCostUsd = deriveDayCostUsd(readLedgerLines(ledgerPath), consultationNow);
     const policy = dailyCostCeilingUsd === undefined ? DEFAULT_SWEEP_POLICY : { ...DEFAULT_SWEEP_POLICY, dailyCostCeilingUsd };
     const result = checkCostGovernor(dayCostUsd, policy);
     if (!result.deferred) return undefined;
@@ -23667,6 +23810,8 @@ async function drainCommand(
      *  `gh` round-trip or a real issue. Production passes nothing and gets the real reader,
      *  the real predicate and the real escalator. */
     quotaCheck?: { readGhQuota?: () => GhRateLimitBuckets; escalate?: typeof escalateQuotaExhaustion };
+    /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
+    now?: () => number;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
@@ -24031,7 +24176,7 @@ async function drainCommand(
         // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
-        checkCostGovernor: costGovernorGateFor(ledgerPath, runId),
+        checkCostGovernor: costGovernorGateFor(ledgerPath, runId, deps.now),
         // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
         // 23-open-PR incident): the SAME `openPrCount` closure the W1-T172 lanes budget already
         // reads (below), never a second GitHub read path — see queueGovernorGateFor's doc.
@@ -24763,6 +24908,8 @@ export async function daemonCommand(
     processKill?: (pid: number, signal: NodeJS.Signals) => boolean;
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
+    /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
+    now?: () => number;
   } = {},
 ): Promise<number> {
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
@@ -25434,7 +25581,7 @@ export async function daemonCommand(
         // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
-        checkCostGovernor: costGovernorGateFor(ledgerPath, runId),
+        checkCostGovernor: costGovernorGateFor(ledgerPath, runId, deps.now),
         // W1-T331: THE LIVE CEILING costGovernorGateFor's own doc, immediately above, describes —
         // re-reads the SAME repoRoot-scoped plan/policy.yaml the boot-time `policy` (line ~8754,
         // loaded ONCE for pollIntervalMs/the headroom curve) also reads, but THIS one is called

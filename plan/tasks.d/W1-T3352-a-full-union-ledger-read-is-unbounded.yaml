@@ -1,0 +1,110 @@
+- id: W1-T3352
+  title: "THE FLEET DAEMON HAS BEEN OOM CRASH-LOOPING SINCE 13:22Z AND NOTHING NAMES WHY — a full-union ledger read is unbounded, the union reached 4.0 GB across 954 rotations, and the 8 GB heap now dies ~3 minutes into every boot, so no build has dispatched in 7 hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files: [src/lib/ledger-union.ts, src/lib/daemon.ts, test/a-union-read-is-bounded-before-it-is-parsed.test.ts]
+  origin: "operator-session#fleet-oom-2026-09-10"
+  plan_refs: ["W1-T3319", "W1-T3011", "W1-T503"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED ON THE LIVE FLEET HOST 2026-09-10T21:00-21:30Z, not inferred:
+
+      docker restarts          66 (and climbing ~10/hour)
+      exit                     134 (SIGABRT — V8 OOM), entrypoint sleeps 120s per cycle
+      heap ceiling             --max-old-space-size=8192, container Memory=0 (uncapped), host 32 GB / 29 GB free
+      first OOM                2026-09-10T13:22:36Z
+      last build dispatch      2026-09-10T14:04:28Z  (nothing since)
+      OOM per hour since       2,7,7,11,10,9,9,10
+
+    IT IS A SPIKE, NOT A LEAK, AND THAT IS THE WHOLE DIAGNOSIS. RSS sampled through one boot:
+    441 MB at 00:50, 406 MB at 01:35, 743 MB at 02:20, **4122 MB at 03:05**, dead before 03:50 —
+    3.4 GB in 45 seconds. A leak accumulates across a long-lived process; this is ONE allocation.
+    The V8 report agrees: `Mark-Compact (reduce) 8189.0 (8205.6) -> 8189.0 (8206.1) MB` — the heap
+    is full of live, reachable objects, so GC cannot reduce it.
+
+    AND IT HAPPENS IN A SILENT WINDOW. In the 21:18:59 boot the last log line before the crash is a
+    `gh read cadence` advisory at 21:20:49 and the OOM lands at 21:22:15 — 86 seconds with NO step
+    logged, immediately after `### rmd daemon — SELF-HOSTING: draining` and `reclaimStaleLock`.
+    Whatever allocates 3.4 GB reports nothing at all, which is why the heartbeat can only say
+    `dispatch_verdict=STALLED ... block_reason=none`.
+  rationale: |
+    THE INPUT CROSSED A THRESHOLD; NO COMMIT DID. Measured on the fleet's state dir:
+
+      plain rotations            2
+      gzip rotations           954
+      plain + live bytes        12,520,548
+      gz EXPANDED bytes      4,001,941,605   (~4.0 GB)
+
+    `resolveLedgerUnion` (`src/lib/ledger-union.ts`) globs every `ledger.*.ndjson[.gz]` rotation plus
+    the live file. At 4.0 GB of NDJSON, any caller that materialises the union — as text, as lines,
+    or as parsed rows — cannot fit an 8 GB heap once JS object overhead is applied. Rotations accrue
+    at 145-190/day (09-07: 190, 09-08: 180, 09-09: 145, 09-10: 186), so the corpus grew INTO the
+    ceiling on 2026-09-10 with no code change to blame. That is why commit correlation is a dead
+    end: the nearest merge, `23451cfc2 fix(sweep): rebase dirty fleet branches` at 13:21:20Z, lands
+    76 seconds before the first OOM and is a NEAR-PERFECT DECOY — its lane fires 1 time in 6 hours
+    of logs, and that one hit is a substring match on an unrelated review line. It was checked and
+    cleared; do not re-derive it.
+
+    CLAUDE.md ALREADY WARNS ABOUT THIS CORPUS FROM THE OTHER DIRECTION — "the archives are NOT
+    cumulative snapshots ... most history exists ONLY in older archives", written to stop a reader
+    UNDER-counting. Nobody priced the same corpus for a reader that takes ALL of it. The rule that
+    made the union authoritative is the rule that made it unbounded.
+
+    THE MITIGATION SHIPPED SIX MINUTES AFTER THE OUTAGE BEGAN AND NOTHING RUNS IT.
+    `db5d5f0ba feat(ledger): expose bounded archive compaction (#4950)` merged 13:28:45Z; the first
+    OOM was 13:22:36Z. `rmd ledger-compact` is documented "operator-only ... never runs from
+    rotateLedger or a daemon cadence". DRY RUN on the live host: 613 rotations eligible at
+    `--older-than 2`, and one bounded 50-source pass writes 392,957 rows while collapsing 216,012
+    DUPLICATES — 35% of that window is redundant. The corpus that killed the daemon is a third
+    duplicate rows nobody collapses.
+  design: |
+    (i) BOUND THE READ AT THE UNION SEAM, NOT AT EACH CALLER. `resolveLedgerUnion` is the one place
+    that knows how many bytes it is about to hand over; every caller downstream sees only rows.
+    A byte/row ceiling there fails LOUD and NAMED ("union is N bytes over the M-byte ceiling; run
+    `rmd ledger-compact`") rather than as SIGABRT with no step logged. `ledger-compact` already
+    proves the ceiling shape is acceptable: it declares `LEDGER_COMPACT_MAX_SOURCES = 50` as its
+    "PRIMARY CONTROL: bounds the exact-row Set and gzip inputs held by one invocation".
+    (ii) STREAM WHERE THE ANSWER IS A REDUCTION. Most union readers count, filter or take a newest-N;
+    none of them needs every row resident at once. A streaming read makes the ceiling in (i) a
+    backstop rather than a refusal for the common case.
+    (iii) A CRASH THIS LOUD MUST NOT READ AS SILENCE ON THE ONE SURFACE AN OPERATOR CHECKS. The
+    heartbeat published `daemon_verdict=live` throughout, because it samples a daemon that really is
+    alive — for three minutes at a time. `dispatch_verdict=STALLED ... block_reason=none` was the
+    only hint, and "none" is exactly wrong. The beat must carry the container restart count, or a
+    crash-loop is invisible to every off-host reader.
+    (iv) COMPACTION NEEDS A CADENCE, OR (i) JUST MOVES THE OUTAGE. Operator-only was the right call
+    for a NEW primitive; it is the wrong steady state for a corpus growing 145-190 rotations a day.
+    Whether that cadence lives in the daemon or a scheduled rung is this task's call, but a bounded
+    ceiling with no collector reaches the ceiling and stops the fleet just as surely.
+  acceptance:
+    - claim: "a union read whose corpus exceeds the ceiling refuses by name and tells the operator which command collapses it, instead of aborting the process"
+      proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
+    - claim: "a corpus UNDER the ceiling still returns every distinct row, so the bound is not a silent truncation"
+      proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
+    - claim: "the reader that only counts or filters never holds the whole union resident, proved by a corpus larger than the ceiling succeeding through the streaming path"
+      proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
+    - claim: "an off-host reader can tell a crash-looping daemon from a healthy one — the beat carries the restart count, and a live-verdict beat with a climbing count is not reported as healthy"
+      proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
+  falsifier: |
+    REPRODUCE BEFORE FIXING, AND THE REPRO IS CHEAP: on the fleet host,
+    `zcat state/ledger.*.ndjson.gz | wc -c` must still read in the billions. If an operator has since
+    run `rmd ledger-compact` the corpus may be back under the ceiling and the daemon healthy — the
+    DEFECT survives that (the bound is still absent) but the OUTAGE does not, and the shard must say
+    which it is fixing.
+    DO NOT "FIX" THIS BY RAISING --max-old-space-size. The host has 29 GB free so it would buy
+    days, and the corpus grows 145-190 rotations/day: that is the ceiling-raise this repo has
+    already measured as buying under two days on a different gate. A bound that moves is not a bound.
+    DO NOT BLAME A COMMIT. `23451cfc2` sits 76 seconds before the first OOM and is a decoy; its lane
+    fires once in six hours. The onset is a data threshold. A fix that reverts a commit fixes nothing
+    and the loop resumes the next day.
+    PROVE THE STREAMING CLAIM WITH A CORPUS LARGER THAN THE CEILING. A streaming test over a corpus
+    that would have fit anyway proves nothing — it must be a corpus the resident path would refuse.
+    DO NOT DELETE ARCHIVES TO SHRINK THE CORPUS. `rotateLedger` keeps only 200 newest rows per step,
+    so most history exists ONLY in older archives; compaction MERGES and is safe, deletion is not.

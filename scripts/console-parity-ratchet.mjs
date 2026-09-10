@@ -39,7 +39,9 @@ export const ROUTE_MATCH = {
   inbox: "GET /v1/inbox",
   approve: "POST /v1/inbox/approve",
   // W1-T3351: the CLI verb and the console route write the SAME store through the SAME
-  // `appendOperatorNote`, so this is genuine parity, not a cli-only carve-out.
+  // `appendOperatorNote`, so this is genuine parity, not a cli-only carve-out. Pre-registered
+  // AHEAD of the `note` COMMANDS entry — `classifyVerbs` iterates the verbs it is given, so this
+  // row is inert until that verb lands. Falsifier: test/note-is-preregistered-as-console-routed.test.ts.
   note: "POST /v1/operator-notes/add",
   reframe: "POST /v1/inbox/reframe",
   peek: "GET /v1/peek",

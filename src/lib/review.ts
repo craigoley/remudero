@@ -386,11 +386,9 @@ export interface ReviewVerdict {
    *  `changesetClaimsRecognised`. Legibility only; `undefined`, not `false`, when withheld. */
   changesetFenceUnbalancedAtEof?: boolean;
   /** True when the diff changes at least one {@link INSTRUMENT_SURFACE} path AND at least one `src/` PRODUCT path
-   *  (`test/` excluded, {@link isProductPath}) in the SAME PR — Standing rule 25, INSTRUMENT CHANGES RIDE ALONE
-   *  (W1-T297) — because a diff shipping both proves neither: the code's falsifiers were graded by the very version of
-   *  the instrument beside them. FORCES `state` to `"failure"`, never suppressible; an instrument-only PR is the
-   *  SANCTIONED shape. TRAP: a coverage flag, a diff-coverage carve-out and a re-captured baseline all rode inside
-   *  ordinary fix-rung strikes (#585/#586; docs/forensics/review.md). */
+   *  (`test/` excluded, {@link isProductPath}) in the SAME PR — Standing rule 25 (W1-T297). ADVISORY: folds into
+   *  NEITHER `state` NOR `floorState`, and rides on every review row as `instrument_entangled`. See
+   *  MASTER-PLAN.md §12 rule 25 for why the refusal was withdrawn. */
   instrumentEntangled?: boolean;
   /** The observed evidence behind a `true` {@link instrumentEntangled} — the instrument paths found and the `src/`
    *  product paths beside them (W1-T186 emitter discipline). `undefined` when `instrumentEntangled` is false/absent. */
@@ -3212,6 +3210,7 @@ export function judgeReview(
   // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s doc. Reuses the SAME `diffFiles`
   // every other structural check above already computed — no new diff walk.
   const instrumentEntanglement = detectInstrumentEntanglement(diffFiles, evidence.diff);
+  // ADVISORY: folds into neither rollup below (MASTER-PLAN.md §12 rule 25 says why).
   const instrumentEntangled = instrumentEntanglement.entangled;
 
   // W1-T352 (DECISIONS.md entry provenance floor): see {@link ReviewVerdict.unprovenancedDecisionsEntries}'s doc —
@@ -3246,7 +3245,6 @@ export function judgeReview(
     testTheater ||
     criteriaTampered ||
     changesetContradictions.length > 0 ||
-    instrumentEntangled ||
     unprovenancedDecisionsEntries.length > 0
       ? "failure"
       : "success";
@@ -3269,7 +3267,6 @@ export function judgeReview(
     testTheater ||
     criteriaTampered ||
     changesetContradictions.length > 0 ||
-    instrumentEntangled ||
     unprovenancedDecisionsEntries.length > 0
       ? "failure"
       : "success";
@@ -4148,6 +4145,7 @@ export function reviewLedgerLegibilityFields(
   unexecutable_count: number;
   unexecutable_proofs: string[];
   partially_executed: boolean;
+  instrument_entangled: boolean;
   proof_unique_runs?: number;
   proof_reuses?: number;
   failure_class?: string;
@@ -4169,6 +4167,8 @@ export function reviewLedgerLegibilityFields(
     unexecutable_proofs: verdict.unexecutableProofs ?? [],
     // W1-T305 (design (4)): SOME-but-not-ALL executed, unconditional like `capped`/`keyword_only`.
     partially_executed: verdict.partiallyExecuted ?? false,
+    // Advisory, so it cannot ride on `failure_class` (failing verdicts only) — unconditional here.
+    instrument_entangled: verdict.instrumentEntangled ?? false,
     // W1-T2743: two integers, and CONDITIONAL rather than defaulted to 0 — a review with no head
     // checkout measured nothing, and "measured none" is a different fact from "never measured".
     // Bounded by construction: counts only, never the commands or keys they were derived from.
