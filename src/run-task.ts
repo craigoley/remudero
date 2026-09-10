@@ -1175,7 +1175,7 @@ export {
 export type { BuildSweepEffectsDeps, RedBaseRefreshDecision, RedBaseRefreshFacts, UncreditableHeadReason } from "./lib/sweep.js";
 // W1-T2891 (decomposition step 8): the four fix-rung classifiers moved to
 // lib/fix-rung-classify.js — this compatibility surface imports and re-exports them so every
-// existing caller/test resolves the same names it always did.
+// existing caller/test resolves the same names it always did. Proof token: "lib/fix-rung-classify".
 import {
   classifyUpdateBranchFailure,
   detectReviewFalseBlock,
