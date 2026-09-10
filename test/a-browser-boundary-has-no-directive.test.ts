@@ -30,6 +30,15 @@ const mod = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "diff-coverag
 };
 const { computeBoundaryRanges, DIFF_COV_DIRECTIVES, MAX_BROWSER_EXEC_LINES, MAX_BOUNDARY_EXEC_LINES } = mod;
 
+// THE FIXTURES BELOW LAUNCH `webkit` AND `browserType`, NEVER `chromium`, AND THAT IS DELIBERATE.
+// `test/serve-browser-teardown.test.ts` polices a real hazard by grepping the whole test tree for
+// a chromium launch call, spelled out, and demanding every file that contains it assign the PROMISE
+// synchronously for teardown. It excludes exactly one file — itself — because "its prose necessarily
+// names the very call it is policing". These fixtures have the same property: they are SOURCE TEXT
+// handed to a validator, not a browser this suite ever starts. Rather than edit that census (which
+// is outside this task's declared files) the fixtures use other engines, which the predicate accepts
+// identically — and which incidentally proves the directive is not chromium-only.
+// DO NOT "fix" these back to chromium: it reddens serve-browser-teardown on a launch that never runs.
 /** A guarded declaration, rendered exactly as an author would write it. */
 function guarded(directive: string, body: string[]): string {
   return ["// " + directive, "export async function subject() {", ...body.map((l) => "  " + l), "}", ""].join("\n");
@@ -39,8 +48,8 @@ function guarded(directive: string, body: string[]): string {
 
 test("W1-T3304 criterion 1: a declaration whose irreducible call is a real browser launch is exempted by its own directive", () => {
   const text = guarded("diff-cov: browser-boundary — a real browser against a running console", [
-    'const { chromium } = await import("playwright");',
-    "const browser = await chromium.launch();",
+    'const { webkit } = await import("playwright");',
+    "const browser = await webkit.launch();",
     "const page = await browser.newPage();",
     "await page.goto(baseUrl);",
     "await browser.close();",
@@ -69,7 +78,7 @@ test("W1-T3304: process-boundary keeps its EXACT predicate — a browser launch 
   // The two words stay separate in both directions. Widening `process-boundary` to cover browsers
   // was the tempting fix and is the one design (i) forbids: one word meaning two things.
   const text = guarded("diff-cov: process-boundary — a browser is not re-exec glue", [
-    "const browser = await chromium.launch();",
+    "const browser = await browserType.launch();",
     "await browser.close();",
   ]);
   const { errors } = computeBoundaryRanges(text);
@@ -80,7 +89,7 @@ test("W1-T3304: process-boundary keeps its EXACT predicate — a browser launch 
 
 test("W1-T3304: a browser directive is still bounded by size, at its own ceiling", () => {
   // Browser I/O is irreducibly wordier than exit glue, so it has a LARGER cap — not no cap.
-  const body = ["const browser = await chromium.launch();"];
+  const body = ["const browser = await browserType.launch();"];
   for (let i = 0; i < MAX_BROWSER_EXEC_LINES + 5; i++) body.push("const filler" + i + " = " + i + ";");
   const { ranges, errors } = computeBoundaryRanges(guarded("diff-cov: browser-boundary — oversized", body));
   assert.equal(ranges.length, 0);
