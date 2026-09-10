@@ -37565,8 +37565,8 @@ export async function main(
     /* c8 ignore next -- process-boundary dispatch; ruleCommand is exercised directly above. */
     process.exit(await ruleCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await noteCommand(rest)) cannot carry a DA hit without forking the process; noteCommand's own logic — the usage refusal on a missing id or empty text, the verbatim note write and its ledger step, and the store-failure exit — is unit-tested in test/an-operator-note-reaches-the-docket-from-the-cli.test.ts (same shape as the sibling verify-human-sweep/inbox/approve dispatch cases).
   if (cmd === "note" && arg) {
-    /* c8 ignore next -- process-boundary dispatch; noteCommand is exercised directly above. */
     process.exit(await noteCommand(rest));
   }
   if (cmd === "reframe" && arg) {
