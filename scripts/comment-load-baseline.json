@@ -93,6 +93,7 @@
   "scripts/lib/json-duplicate-keys.mjs": 29,
   "scripts/lib/lcov.mjs": 43,
   "scripts/lib/repo-root.mjs": 28,
+  "scripts/lint-plan-offline.mjs": 250,
   "scripts/mkdtemp-callsite-check.mjs": 50,
   "scripts/mount-headroom-sweep.mjs": 125,
   "scripts/mutation-baseline.json": 0,
