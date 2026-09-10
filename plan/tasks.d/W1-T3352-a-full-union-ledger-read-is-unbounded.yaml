@@ -86,14 +86,25 @@
     DUPLICATES — 35% of that window is redundant. The corpus that killed the daemon is a third
     duplicate rows nobody collapses.
   design: |
-    (0) AMENDED, AND THIS IS NOW THE LEAD: ANSWER THE QUESTION WITHOUT THE SCAN. The hot-path
-    question is "has this PR head ever been recorded permanently uncreditable" — 667 distinct rows
-    out of 1,001,632, a 0.067% yield, and the set is APPEND-ONLY. That is a projection, not a query:
+    (0) AMENDED, AND THIS IS NOW THE LEAD: ANSWER THE QUESTION WITHOUT THE SCAN — BUT DO KEEP
+    ANSWERING IT. The hot-path question is "has this PR head ever been recorded permanently
+    uncreditable". MEASURED against the pattern the CODE actually greps
+    (`sweep.fix.uncreditable_head` / `_escalated`, not the wider one an earlier draft of this note
+    used): 324 distinct rows out of 1,001,632 — a 0.032% yield — naming 49 distinct head shas, and
+    the set is APPEND-ONLY. That is a projection, not a query:
     about 100 kB of state answering in milliseconds, maintained where the row is written. This repo
     already keeps a dozen such files in `state/*.json`, so the pattern needs no invention. The
     property the union protects is real and survives intact — `rotateLedger` keeps only 200 newest
     rows per step, so a marker written weeks ago exists ONLY in an archive, and forgetting it
     re-enables the dispatch loop the sweep's own comment names. We need the ANSWER, not the scan.
+    (0b) AND THE GUARD IS NOT OPTIONAL — THIS IS THE MEASUREMENT THAT PROVES IT, AND IT SURPRISED
+    THE READING THAT PRODUCED THIS AMENDMENT. Of those 324 rows, the number present in the LIVE
+    ledger right now is ZERO. All 324 are in archives. `rotateLedger` keeps 200 newest per step, so
+    whether any survive in the live file is an accident of when rotation last ran — and tonight it
+    is none of them, including a row written at 22:03:34Z, ninety minutes before the measurement.
+    A reader restricted to the live file would have found NOTHING and re-enabled the loop for all
+    49 heads. So "drop the union and read the live file" is not on the table; the projection is
+    REQUIRED precisely because the live file cannot be trusted to hold this population at all.
     (0a) AND IF A SCAN IS UNAVOIDABLE, SHELL OUT RATHER THAN RE-IMPLEMENT. `zgrep` does it in 5.40s
     and 9.6 MB, measured above. An in-process scan that must beat that is a cost this task should
     justify explicitly rather than inherit.
@@ -143,8 +154,13 @@
     the daemon OOMed three more times on a checkout carrying it. A patch whose evidence is "the scan
     now holds less" must ALSO show the `seen` Set and `rows[]` accumulation cannot reach the heap
     cap on the live corpus, or it is the same fix again.
-    MEASURE ANY IN-PROCESS READER AGAINST `zgrep`: 5.40s / 9.6 MB for the same 667 rows. A reader
+    MEASURE ANY IN-PROCESS READER AGAINST `zgrep`: 5.40s / 9.6 MB over the same corpus. A reader
     that cannot get within an order of magnitude of that has not earned being in-process.
+    DO NOT "SIMPLIFY" THIS BY READING THE LIVE LEDGER. MEASURED 2026-09-11: 0 of the 324 terminal
+    rows are in the live file. Dropping the archive side silently re-enables the dispatch loop for
+    49 heads and the tests would stay green, because a fixture with no rotations reads the live file
+    by design. Any patch that narrows the corpus must prove, on a corpus WITH rotations, that the
+    marker set it returns is unchanged.
     PROVE THE STREAMING CLAIM WITH A CORPUS LARGER THAN THE CEILING. A streaming test over a corpus
     that would have fit anyway proves nothing — it must be a corpus the resident path would refuse.
     DO NOT DELETE ARCHIVES TO SHRINK THE CORPUS. `rotateLedger` keeps only 200 newest rows per step,
