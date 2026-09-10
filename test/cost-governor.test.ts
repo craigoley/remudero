@@ -504,8 +504,10 @@ test("W1-T317: drainCommand's WIRED checkCostGovernor reads a REAL ledger — de
   const config = costGovernorFixtureConfig();
   try {
     const ledgerPath = join(config.root, "state", "ledger.ndjson");
-    seedTodaySpendUsd(ledgerPath, DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd + 1);
     const deps = await captureDrainDeps(config, emptyPlanPath());
+    // Same day-window hazard as the daemon case below — see its comment. The gap is smaller here,
+    // not absent, and a test that is only usually deterministic is a nightly red waiting to happen.
+    seedTodaySpendUsd(ledgerPath, DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd + 1);
     const result = deps.checkCostGovernor!();
     assert.ok(result, "over the ceiling, the REAL wiring — not a hand-built fixture — must report deferred");
     assert.equal(result!.deferred, true);
@@ -523,8 +525,9 @@ test("W1-T317: drainCommand's WIRED checkCostGovernor reads a REAL ledger — we
   const config = costGovernorFixtureConfig();
   try {
     const ledgerPath = join(config.root, "state", "ledger.ndjson");
-    seedTodaySpendUsd(ledgerPath, 1);
     const deps = await captureDrainDeps(config, emptyPlanPath());
+    // Same reordering as the sibling above, for the same reason.
+    seedTodaySpendUsd(ledgerPath, 1);
     assert.equal(deps.checkCostGovernor!(), undefined, "well under the ceiling, the real wiring must NOT defer");
     const afterLog = readLedgerLines(ledgerPath);
     assert.equal(
@@ -543,8 +546,17 @@ test("W1-T317: daemonCommand's WIRED checkCostGovernor reads a REAL ledger, defe
   process.env.HOME = home;
   try {
     const ledgerPath = join(root, "state", "ledger.ndjson");
-    seedTodaySpendUsd(ledgerPath, DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd + 1);
     const deps = await captureDaemonDeps(planPath);
+    // SEEDED AFTER THE CAPTURE, AND THE ORDER IS THE WHOLE POINT. The row's `ts` is stamped when it
+    // is appended; the governor's window is `utcDayWindowMs(Date.now())`, computed when the closure
+    // is CALLED. Seeding first put the multi-second capture between them, so a UTC midnight landing
+    // in that gap dropped the row out of the window, the day cost read 0, the governor answered
+    // CLEAR, and `costGovernorGateFor` returns `undefined` when not deferred — failing the assert
+    // below with "not a stub that always says clear" while nothing was stubbed at all.
+    // MEASURED 2026-09-09/10: #4889's `coverage-shard (2/4)` failed exactly this way on a run
+    // crossing 00:00 UTC, on a diff touching none of this. The capture takes ~1.9s locally and 5.5s
+    // under CI instrumentation; capturing first shrinks the exposed window to microseconds.
+    seedTodaySpendUsd(ledgerPath, DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd + 1);
     const result = deps.checkCostGovernor!();
     assert.ok(result, "the daemon's real wiring must read the actual ledger, not a stub that always says clear");
     assert.equal(result!.deferred, true);
