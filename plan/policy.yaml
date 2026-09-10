@@ -790,6 +790,19 @@ sweep:
     value: false
     origin: "net-new"
 
+  # W1-T3289: gates deterministic repair of recordable ratchets whose remedy is a committed ledger
+  # row (for example source-size/comment-load baselines). DEFAULT OFF: this task only makes the
+  # operator's switch reachable from policy, and deliberately does not start unattended branch
+  # writes. With the value false, sweep still names the exact `npm run ...` remedy and then falls
+  # through to the ordinary ci-log fix rung, byte-identical to the pre-wiring disabled path.
+  #
+  # THE REGISTRY IS THE FENCE: `src/lib/sweep.ts` derives the admitted check names from
+  # REGENERABLE_ARTIFACT_GENERATORS. A floor-shaped ratchet such as coverage/mutation is not in
+  # that registry, so no lowered score floor can be written by this switch.
+  recordableRatchetRepairEnabled:
+    value: false
+    origin: "lifted:src/lib/sweep.ts (recordableRatchetRepairEnabled === true guards; absent shipped false)"
+
   # W1-T1038 (the 2026-08-19 host stall). Dispatch has priced every draw in dollars
   # (dailyCostCeilingUsd above) and never once in bytes: across the full deduped ledger, zero
   # fields carry mem/rss/heap/swap/avail against 1,109 rows carrying cost_usd. At 18:43:54.955Z

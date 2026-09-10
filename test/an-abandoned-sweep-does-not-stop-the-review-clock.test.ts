@@ -38,6 +38,20 @@ function fixturePlan(): Plan {
   return loadPlan(path);
 }
 
+/**
+ * STAMPED FROM THE CLOCK, NOT FROM A CONSTANT. This fixture is aged against `sweep.staleDays`, so a
+ * hardcoded date is a bomb with a known fuse: `expiring-fixture-census` (W1-T3272) measured this one
+ * at `lastActivityAt="2026-09-03T01:00:00Z"` going red on 2026-09-17, seven days out.
+ *
+ * The same shape took `main` red on 2026-09-09 — a fixture stamped 2026-08-26T18:15:00Z crossed the
+ * 14-day rung at exactly 18:15:00Z, blocking every open PR (W1-T3270). Moving the constant forward
+ * only re-arms it on a later date; anything the sweep ages against the wall clock has to be stamped
+ * from the wall clock. Same helper, same reasoning, as test/stale-ci-gate-wiring.test.ts.
+ */
+function recentActivityIso(): string {
+  return new Date(Date.now() - 60 * 60 * 1000).toISOString();
+}
+
 function pr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: 1,
@@ -49,7 +63,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
       { claim: "fix it", proof: "unit test: x", met: false, reason: "not done", proof_exec: "executed_fail" },
     ],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-03T01:00:00Z",
+    lastActivityAt: recentActivityIso(),
     headSha: "blocked-head",
     autoMergeArmed: false,
     ...over,

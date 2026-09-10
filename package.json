@@ -74,6 +74,7 @@
     "build:console": "npm --prefix apps/dashboard run build",
     "comment-load-signal": "node scripts/comment-load-ratchet.mjs --no-record",
     "comment-load": "node scripts/comment-load-ratchet.mjs --print",
+    "console-parity": "node --import tsx scripts/console-parity-ratchet.mjs",
     "census:bound-kind": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/bound-kind-declared.test.ts",
     "census:ledger-literal": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/ledger-literal-census.test.ts",
     "census:catch-erasure": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/catch-erasure-ratchet.test.ts",

@@ -23,6 +23,53 @@ if ! REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
   exit 0
 fi
 
+
+# ── W1-T3311: TIER A NEW TEST FILE, rather than describing how ────────────────────────────────
+#
+# THE GATE THIS SERVES IS AT PUSH TIME AND IS CORRECT. `hooks/pre-push`'s W1-T3205 admission
+# refuses a commit carrying a test file with no entry in scripts/test-tier-manifest.json, because
+# the fast/slow split cannot trust an untiered file. What was missing is that NOTHING PERFORMED
+# THE REMEDY the refusal names: `git grep 'test-tier-manifest.*--seed'` across src/, hooks/ and
+# .github/ returned ZERO matches, so the fix existed only in prose a human reads and a dispatched
+# worker does not.
+#
+# MEASURED COST: on the fleet host that refusal fired three times in one day. Each time the
+# orchestrator's fallback push failed, the drain ended `stopped: error`, and the daemon exited 1
+# against docker's `on-failure:5` budget — three of five restarts spent on a missing manifest
+# line, while the daemon was dispatching normally in between (W1-T3310 fixes that half).
+#
+# WHY HERE AND NOT AT PUSH TIME: a pre-push hook cannot add a file to a commit that already
+# exists, so seeding there would still refuse — one round trip shorter, but still a blocked
+# worker. This runs while the change is still being authored, and stages the manifest with it.
+#
+# THE PUSH-TIME ADMISSION STAYS. It is the backstop for a commit made with this hook bypassed
+# (`--no-verify`, a hand-edited index, a different client), which is precisely when it matters.
+if [ -f "$REPO_ROOT/scripts/test-tier-manifest.mjs" ]; then
+  # Only when this commit actually ADDS a test file — an ordinary commit pays nothing.
+  NEW_TESTS="$(git diff --cached --name-only --diff-filter=A | grep -E '^test/.*\.test\.ts$' || true)"
+  if [ -n "$NEW_TESTS" ]; then
+    TIER_MANIFEST="$REPO_ROOT/scripts/test-tier-manifest.json"
+    TIER_BEFORE="$(cat "$TIER_MANIFEST" 2>/dev/null || true)"
+    # `--seed` is idempotent: on an already-tiered tree it leaves the file BYTE-IDENTICAL and says
+    # so. Its output is swallowed here and re-reported below only when something really changed,
+    # because a line on every commit is noise that trains a reader to skip this hook's output.
+    node "$REPO_ROOT/scripts/test-tier-manifest.mjs" --seed >/dev/null 2>&1 || true
+    TIER_AFTER="$(cat "$TIER_MANIFEST" 2>/dev/null || true)"
+    if [ "$TIER_BEFORE" != "$TIER_AFTER" ]; then
+      # STAGED, or the seed lands in the working tree and the commit still trips the push gate.
+      git add -- "$TIER_MANIFEST"
+      echo "pre-commit: tiered $(printf '%s\n' "$NEW_TESTS" | wc -l | tr -d ' ') new test file(s) into scripts/test-tier-manifest.json and staged it (W1-T3311)." >&2
+      echo "  Seeded at duration 0 — unmeasured, the fast tier — which a later --record-evidence pass replaces." >&2
+    fi
+  fi
+fi
+
+# W1-T3311 ORDERING, LOAD-BEARING: the tier seeding above runs BEFORE the mkdtemp fast-path below,
+# because that path's two `exit 0`s are correct for the mkdtemp check and would make anything after
+# them unreachable for every commit that does not add a mkdtempSync callsite — which is nearly every
+# commit that adds a test file. Measured while writing this: appended at the end, the seeding was
+# dead code.
+
 # Only run if a staged file is a candidate — mkdtempSync-free commits pay nothing.
 STAGED="$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|mjs)$' | grep -E '^(src|scripts|test)/' || true)"
 if [ -z "$STAGED" ]; then

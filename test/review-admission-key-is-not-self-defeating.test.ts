@@ -9,6 +9,20 @@ import {
   type OpenPrView,
 } from "../src/lib/sweep.js";
 
+// W1-T3272 — CLOCK-ANCHORED, NOT CALENDAR-STAMPED. These fixtures were dated 2026-08-27/28 and the
+// sweep's staleness rung ages `lastActivityAt` against `Date.now()` at 14 days, so on 2026-09-10
+// they would have crossed and taken one case red: "a PR whose review just failed is still chosen
+// ahead of PRs that have waited less". VERIFIED by ageing ONLY these stamps ten days and re-running
+// -- that case, and only that case, failed. (A cruder first pass that aged every stamp in the file
+// showed two different failures; ageing rows the census does not flag perturbs the ranking these
+// cases assert on and proves nothing about the boundary.) The
+// offsets below preserve the original spacing to the second, so every ordering and monotonicity
+// assertion is unchanged; only the anchor moves with the clock.
+const ANCHOR_MS = 60 * 60 * 1000; // the newest fixture sits one hour in the past
+function activityAgo(secondsBeforeNewest: number): string {
+  return new Date(Date.now() - ANCHOR_MS - secondsBeforeNewest * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
 // ── W1-T2426 — THE ADMISSION KEY IS BUMPED BY THE ADMISSION ─────────────────────────────────
 //
 // `selectReviewAdmission`'s own doc argues oldest-first cannot starve because "a PR that loses
@@ -31,7 +45,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-08-28T11:00:00Z",
+    lastActivityAt: activityAgo(3599),
     headSha: "aaaa111",
     autoMergeArmed: false,
     ...over,
@@ -42,8 +56,8 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
 
 test("W1-T2426 (acceptance 1): the admission comparator ranks on createdAt, which a posted verdict cannot move", () => {
   // Same PR, same createdAt, updatedAt bumped as a review post bumps it.
-  const before = pr({ createdAt: "2026-08-01T00:00:00Z", lastActivityAt: "2026-08-28T11:00:00Z" });
-  const after = { ...before, lastActivityAt: "2026-08-28T11:59:52Z" }; // +8s, a measured post delta
+  const before = pr({ createdAt: "2026-08-01T00:00:00Z", lastActivityAt: activityAgo(3599) });
+  const after = { ...before, lastActivityAt: activityAgo(7) }; // +8s, a measured post delta
   assert.equal(
     reviewAdmissionKey(before),
     reviewAdmissionKey(after),
@@ -67,8 +81,8 @@ test("W1-T2426 (acceptance 1, fallback): an absent createdAt falls back to lastA
 
 test("W1-T2426 (acceptance 2): a PR whose review just failed is still chosen ahead of PRs that have waited less", () => {
   // OLD is the oldest PR and has just been reviewed, so its updatedAt is NOW-ish.
-  const old = pr({ prNumber: 10, createdAt: "2026-08-01T00:00:00Z", lastActivityAt: "2026-08-28T11:59:52Z" });
-  const younger = pr({ prNumber: 11, createdAt: "2026-08-20T00:00:00Z", lastActivityAt: "2026-08-27T00:00:00Z" });
+  const old = pr({ prNumber: 10, createdAt: "2026-08-01T00:00:00Z", lastActivityAt: activityAgo(7) });
+  const younger = pr({ prNumber: 11, createdAt: "2026-08-20T00:00:00Z", lastActivityAt: activityAgo(129599) });
   const youngest = pr({ prNumber: 12, createdAt: "2026-08-25T00:00:00Z", lastActivityAt: "2026-08-26T00:00:00Z" });
 
   const chosen = selectReviewAdmission([younger, old, youngest], DEFAULT_SWEEP_POLICY, NOW);
@@ -83,7 +97,7 @@ test("W1-T2426 (acceptance 2): a PR whose review just failed is still chosen ahe
 // ── acceptance 3: reviewing one PR does not reorder the rest ────────────────────────────────
 
 test("W1-T2426 (acceptance 3): posting a verdict on one PR leaves the relative order of the others unchanged", () => {
-  const a = pr({ prNumber: 20, createdAt: "2026-08-01T00:00:00Z", lastActivityAt: "2026-08-27T00:00:00Z" });
+  const a = pr({ prNumber: 20, createdAt: "2026-08-01T00:00:00Z", lastActivityAt: activityAgo(129599) });
   const b = pr({ prNumber: 21, createdAt: "2026-08-05T00:00:00Z", lastActivityAt: "2026-08-26T00:00:00Z" });
   const c = pr({ prNumber: 22, createdAt: "2026-08-10T00:00:00Z", lastActivityAt: "2026-08-25T00:00:00Z" });
 
@@ -91,7 +105,7 @@ test("W1-T2426 (acceptance 3): posting a verdict on one PR leaves the relative o
   assert.equal(first?.prNumber, 20);
 
   // Review `a`: its updatedAt moves to now. Nothing else changes.
-  const aReviewed = { ...a, lastActivityAt: "2026-08-28T11:59:55Z" };
+  const aReviewed = { ...a, lastActivityAt: activityAgo(4) };
   const second = selectReviewAdmission([aReviewed, b, c], DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(second?.prNumber, 20, "a's own age is unchanged by reviewing it, so it still leads");
 
@@ -105,7 +119,7 @@ test("W1-T2426 (acceptance 3, monotonicity): the loser of a pass is never overta
   const loser = pr({ prNumber: 31, createdAt: "2026-08-02T00:00:00Z", lastActivityAt: "2026-08-21T00:00:00Z" });
   assert.equal(selectReviewAdmission([winner, loser], DEFAULT_SWEEP_POLICY, NOW)?.prNumber, 30);
   // The winner is reviewed; it stays first because createdAt did not move — which is the point.
-  const reviewed = { ...winner, lastActivityAt: "2026-08-28T11:59:59Z" };
+  const reviewed = { ...winner, lastActivityAt: activityAgo(0) };
   assert.equal(selectReviewAdmission([reviewed, loser], DEFAULT_SWEEP_POLICY, NOW)?.prNumber, 30);
 });
 
@@ -113,7 +127,7 @@ test("W1-T2426 (acceptance 3, monotonicity): the loser of a pass is never overta
 
 test("W1-T2426 (acceptance 4): selectReviewAdmission still returns at most ONE PR and no second lane is added", () => {
   const many = [10, 11, 12, 13, 14].map((n) =>
-    pr({ prNumber: n, createdAt: `2026-08-0${n - 9}T00:00:00Z`, lastActivityAt: "2026-08-27T00:00:00Z" }),
+    pr({ prNumber: n, createdAt: `2026-08-0${n - 9}T00:00:00Z`, lastActivityAt: activityAgo(129599) }),
   );
   const chosen = selectReviewAdmission(many, DEFAULT_SWEEP_POLICY, NOW);
   assert.ok(chosen, "one PR is admitted");
@@ -171,7 +185,7 @@ test("W1-T2426 (acceptance 6): the shared comparator keeps its tie-break and its
   assert.equal(oldestActivityFirst(tie, NOW)?.prNumber, 2, "ties break on ascending prNumber");
   const unreadable = [
     { prNumber: 1, lastActivityAt: "not-a-date" },
-    { prNumber: 2, lastActivityAt: "2026-08-27T00:00:00Z" },
+    { prNumber: 2, lastActivityAt: activityAgo(129599) },
   ];
   assert.equal(oldestActivityFirst(unreadable, NOW)?.prNumber, 2, "an unreadable date never outranks a readable one");
   assert.equal(oldestActivityFirst([{ prNumber: 5, lastActivityAt: "nope" }], NOW)?.prNumber, 5, "but it can still win when alone");

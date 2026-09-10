@@ -133,3 +133,26 @@ than wherever this page is hosted from still fails its CORS preflight — the cr
 deployment story `main.ts`'s own header already named as deferred follow-on work ("wiring the
 daemon to actually serve this directory ... over Tailscale"). That is a distinct concern from
 "can the page load at all," which is what this ruling closes.
+
+## The console is the primary control surface (W1-T2926)
+
+The mission statement's rule is that every human interaction and all operator control goes
+through **the console** (`rmd serve`) — the CLI above is the daemon's own operator/dev tool, not
+the intended day-to-day surface. That rule had nothing measuring how far the real tree was from
+it: audit recon-2026-09-05 §6, move 5 found 48 of the CLI's 65 `COMMANDS` verbs reachable only
+from a shell against 49 console routes, including `deploy`, `sync`, `retro`, `triage`, `plan`,
+`review`, `fix`, `sweep` and `onboard` — and this doc never mentioned the console at all.
+
+`scripts/console-parity-ratchet.mjs` (wired into CI as the `console-parity` step of the
+`comment-load-ratchet` job) closes that measurement gap: every `COMMANDS` verb must map to a
+declared console route, or to a stated reason in the script's `CLI_ONLY` table
+(`"operator-shell-only: ..."`, or a route it is superseded by) — a verb with neither fails the
+build outright. The set of verbs currently cli-only is recorded in
+[`scripts/console-parity-baseline.json`](../scripts/console-parity-baseline.json) — a ratchet
+that may only **shrink**: a verb added to `CLI_ONLY` without also being recorded there fails the
+same build. MEASURED 2026-09-10: 76 `COMMANDS` entries, 50 declared routes, 14 already
+console-routed (`status`, `pause`, `resume`, `stop`, `merge-hold`, `feedback`, `trace`, `inbox`,
+`approve`, `reframe`, `peek`, `replay`, `skill`, `drain`), 62 recorded cli-only. Routing any of
+the remaining verbs — `deploy`, `sync`, `retro`, `triage`, `plan`, `review`, `fix` and `sweep`
+among them — is deliberately **not** this ratchet's job; it is what makes each of those
+fileable as its own measured shrink, one task, one route, one baseline edit.

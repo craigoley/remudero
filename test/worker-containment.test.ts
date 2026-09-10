@@ -414,7 +414,7 @@ test("defaultReadMarkers: a real child spawned WITH marker env vars is attribute
   const marked = spawnDetachedGroup({
     command: "/bin/sh",
     args: ["-c", "sleep 300"],
-    env: { ...process.env, [RUN_ID_ENV]: "run-real-1", [TASK_ID_ENV]: "W1-T117" },
+    env: { PATH: process.env.PATH, [RUN_ID_ENV]: "run-real-1", [TASK_ID_ENV]: "W1-T117" },
   });
   const unmarked = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
   try {
@@ -569,7 +569,7 @@ test("W1-T356 wiring: the REAL daemonCommand boots with the orphan sweep wired f
 // pass today and fail on a slower host — so these tests pin the SHAPE, not a number.
 
 test("waitUntilMarkersVisible returns as soon as ps publishes the markers — a condition poll, never a fixed beat", async () => {
-  const env = { ...process.env, [RUN_ID_ENV]: "run-poll-shape", [TASK_ID_ENV]: "T-poll-shape" };
+  const env = { PATH: process.env.PATH, [RUN_ID_ENV]: "run-poll-shape", [TASK_ID_ENV]: "T-poll-shape" };
   const p = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 30"], env });
   try {
     const t0 = Date.now();

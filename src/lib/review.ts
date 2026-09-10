@@ -5300,6 +5300,7 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and `coverage-ratchet` jobs RUN, so a
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
+  "^scripts/expiring-fixture-census\\.mjs$",
   "^scripts/baseline-monotonic-check\\.mjs$", // W1-T2906: refuses a baseline-score regression against origin/main
   // W1-T2764: the ledger-step ratchet's rule logic, behind the required `ledger-steps` ci.yml job —
   // the same shape as the task-id-existence and assertion-discrimination entries above. Before that
@@ -6091,8 +6092,25 @@ export function detectInstrumentEntanglement(
   const subtracted = new Set([...introducedGates, ...harmlessInstruments, ...registration.instruments]);
   const effectiveInstrumentPaths = subtracted.size === 0 ? instrumentPaths : instrumentPaths.filter((f) => !subtracted.has(f));
   const subtractedSrc = new Set(registration.srcs);
-  const effectiveSrcPaths = (introducedGates.length === 0 ? srcPaths : srcPaths.filter((f) => f !== CENSUS_REGISTRATION_PATH))
-    .filter((f) => !subtractedSrc.has(f));
+  // W1-T3272 — THE SRC-SIDE STRIP IS GONE, AND THE INSTRUMENT HALF DECIDES. W1-T2521 also subtracted
+  // CENSUS_REGISTRATION_PATH from the src half whenever ANY gate was introduced, on the reasoning
+  // that the registration exists only because the gate does. That is true of the registration and
+  // not of the diff around it: applied unconditionally it emptied the src half where OTHER
+  // instruments were still standing, and an empty src half makes the verdict false however those
+  // instruments changed. MEASURED on main by the CONTROL PAIR below, which differ in one variable —
+  // whether the introduced gate's own name is on INSTRUMENT_SURFACE. Off the surface introducedGates
+  // is empty, the strip never fired, and a weakened comment-load-ratchet.mjs refused as it should;
+  // on the surface it fired and the same weakening rode along. A real census gate's PR always
+  // declares its own script (test/instrument-surface-completeness.test.ts makes it mandatory), so
+  // the on-surface reading is the one that happens.
+  //
+  // DELETED RATHER THAN GUARDED. Every legitimate carve-out is already settled on the INSTRUMENT
+  // side — harmlessInstruments and registration.instruments empty effectiveInstrumentPaths on their
+  // own — so once that hole is closed the strip has no verdict left to change, and effectiveSrcPaths
+  // never escapes this function (it has exactly one reader, the conjunct below). A guard that made
+  // it unreachable would read as behaviour worth preserving and is not. MEASURED both ways across
+  // the 23 suites that reference this detector: identical results.
+  const effectiveSrcPaths = srcPaths.filter((f) => !subtractedSrc.has(f));
   return {
     entangled: effectiveInstrumentPaths.length > 0 && effectiveSrcPaths.length > 0,
     instrumentPaths,

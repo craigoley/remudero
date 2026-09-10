@@ -1653,6 +1653,22 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // W1-T2647's OWN proof file — self-reference shape as its siblings above; only real git call
   // is `git grep`, never `git ls-files`, so it fails clause (a).
   refusedForPredicate("test/census-population-is-derived-not-counted.test.ts", "a", "this file — W1-T2647's falsifier; its one real git call is `git grep`, never `git ls-files`"),
+  // W1-T3272's own census. It DOES shell a real `git ls-files` (unlike the three entries above,
+  // which fail clause (a) for making no such call at all) — but the population it walks is
+  // `test/*.test.ts`, the TEST corpus, not `src/`. Clause (a) asks whether a candidate is a
+  // SRC-population walk, and every ADMITTED member above carries `walks: ["src/"]` for exactly
+  // that reason. So this is refused on the same clause by a different route, and the distinction
+  // is recorded here because the next reader will see a genuine `git ls-files` and expect ADMITTED.
+  // It is also why this suite is NOT projected into FAST_GATE_STEPS: the census it covers runs as
+  // a step on `comment-load-ratchet`, and an ADMITTED member with no npm script of its own cannot
+  // be projected (CENSUS_ADMITTED_MEMBERS narrows on `script`).
+  refusedForPredicate(
+    "test/expiring-fixture-census.test.ts",
+    "a",
+    "this file — W1-T3272's expiring-fixture census; it shells a real `git ls-files` but over " +
+      "`test/*.test.ts`, the TEST corpus, so it is not a src-population walk. Its gate rides the " +
+      "`comment-load-ratchet` job as a step rather than a projected fast-gate census entry",
+  ),
   // W1-T2916's suite. The recognizer matches it on `src/` text that is its import of
   // src/lib/settings.js plus prose ("src runtime package uses are dependencies"), but the
   // population it actually enumerates is package.json's own dependency maps read against

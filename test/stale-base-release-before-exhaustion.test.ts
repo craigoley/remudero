@@ -24,7 +24,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "red",
     unmetCriteria: [],
     priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap,
-    lastActivityAt: "2026-09-02T12:00:00Z",
+    lastActivityAt: "2026-09-02T12:00:00Z", // expiring-fixture: exempt -- aged 10d past the rung, nothing failed; this case ignores the disposition
     headSha: "head-9100",
     headRefName: "run-W1-T2789-1",
     autoMergeArmed: false,
@@ -122,8 +122,8 @@ test("W1-T2789: an exhausted red PR with an exact newer-base path refreshes befo
 });
 
 test("W1-T2789: oldest eligible input wins and a successful (PR, head, main tip) release is deduplicated", async () => {
-  const newer = pr({ prNumber: 9102, prUrl: "https://github.com/acme/remudero/pull/9102", headSha: "head-9102", lastActivityAt: "2026-09-03T10:00:00Z" });
-  const older = pr({ prNumber: 9101, prUrl: "https://github.com/acme/remudero/pull/9101", headSha: "head-9101", lastActivityAt: "2026-09-01T10:00:00Z" });
+  const newer = pr({ prNumber: 9102, prUrl: "https://github.com/acme/remudero/pull/9102", headSha: "head-9102", lastActivityAt: "2026-09-03T10:00:00Z" }); // expiring-fixture: exempt -- aged 10d past the rung, nothing failed; this case ignores the disposition
+  const older = pr({ prNumber: 9101, prUrl: "https://github.com/acme/remudero/pull/9101", headSha: "head-9101", lastActivityAt: "2026-09-01T10:00:00Z" }); // expiring-fixture: exempt -- aged 10d past the rung, nothing failed; this case ignores the disposition
   const first = await sweep([newer, older]);
   assert.deepEqual(first.updated, [9101], "only the oldest eligible PR is updated");
 
