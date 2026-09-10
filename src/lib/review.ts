@@ -5664,7 +5664,23 @@ const CI_GATE_WORKFLOW_PATH = ".github/workflows/ci-gate.yml";
  */
 const MANDATORY_REGISTRIES: ReadonlyArray<{ path: string; declaration: string }> = [
   { path: CENSUS_REGISTRATION_PATH, declaration: "CI_PARITY_TABLE" },
+  // W1-T3272: the SECOND registry in the same file, and it is mandatory for a different reason than
+  // the job table above. `CENSUS_POPULATION` classifies every census-SHAPED test file the
+  // recognizer can find, so ADDING a census suite obliges an entry in the same tree. MEASURED
+  // 2026-09-10 on #4851, in both directions: removing the one member fails two live-drift suites
+  // ("every census-shaped file this run's own recognizer discovers in the CURRENT tree is a
+  // CENSUS_POPULATION member"), and adding the member WITHOUT its test file fails the same check.
+  // Neither half can land first, which is the same circularity W1-T2521 records for the script and
+  // its registration, arriving on the other registry in the file.
+  { path: CENSUS_REGISTRATION_PATH, declaration: "CENSUS_POPULATION" },
   { path: "src/lib/review.ts", declaration: "INSTRUMENT_SURFACE_EXCLUSIONS" },
+  // W1-T3272: DECLARING the new gate on the surface is mandatory in the same way. A gate-rule-like
+  // path this tree's workflows or package.json reference must be declared or carry a recorded
+  // exclusion, and `test/instrument-surface-completeness.test.ts` is what enforces it. MEASURED
+  // 2026-09-10 on #4851: with the entry, 13/13; without it, 12 pass and that suite fails. So the
+  // script, its registration and its surface declaration are three halves of one indivisible commit
+  // — which is precisely the circularity W1-T2521 named and W1-T3171 subtracts.
+  { path: "src/lib/review.ts", declaration: "INSTRUMENT_SURFACE" },
 ];
 
 /** Each `@@` hunk's trailing context for `file`, in order; `undefined` where git emitted none.
@@ -5699,11 +5715,23 @@ function diffHunkContexts(diff: string, file: string): Array<string | undefined>
  * workflow change.
  */
 function changeIsConfinedToRegistry(diff: string, file: string): boolean {
-  const registry = MANDATORY_REGISTRIES.find((r) => r.path === file);
-  if (registry === undefined) return false;
+  // ONE PATH MAY DECLARE SEVERAL REGISTRIES (src/lib/ci-parity.ts carries two), so this asks whether
+  // every hunk sits in ONE OF that file's declarations — never whether they all sit in the same one.
+  // Still fails closed: a hunk with no context, or one outside every declaration, is not confined.
+  const declarations = MANDATORY_REGISTRIES.filter((r) => r.path === file).map((r) => r.declaration);
+  if (declarations.length === 0) return false;
   const contexts = diffHunkContexts(diff, file);
   if (contexts.length === 0) return false;
-  return contexts.every((c) => c !== undefined && c.includes(registry.declaration));
+  if (!contexts.every((c) => c !== undefined && declarations.some((d) => c.includes(d)))) return false;
+
+  // ADD-ONLY, AND THIS TIGHTENS THE TWO ENTRIES THAT PREDATE IT. A registration ADDS a row; nothing
+  // about the mandatory-registration shape requires deleting one. But these declarations are what
+  // DEFINE the protected set — removing a path from INSTRUMENT_SURFACE, or adding one to
+  // INSTRUMENT_SURFACE_EXCLUSIONS by deleting its neighbour, unprotects something. Subtracting a
+  // deletion from the verdict would let that ride beside the very workflow edit rule 25 exists to
+  // catch. A diff that genuinely needs to remove a registration is not an introducing commit and
+  // can say so in its own PR.
+  return !walkDiff(diff).some((l) => l.file === file && l.kind === "del");
 }
 
 /**
@@ -5722,6 +5750,19 @@ function changeIsConfinedToRegistry(diff: string, file: string): boolean {
  *       job at all, a `run:`/trigger/timeout change, never reaches the carve-out);
  *   (c) every product `src/` path is a registry file confined to its own declaration.
  */
+/** True when this diff ADDS a `scripts/<stem>.*` file — the "new in this diff" half of the
+ *  step-wired pairing. A step invoking a PRE-EXISTING script is an ordinary workflow edit and earns
+ *  no carve-out; only a gate that did not exist before has no prior version to be mis-graded. */
+function diffFilesForStem(diff: string, stem: string): boolean {
+  return /^new file mode\b/m.test(diff)
+    ? diff.split(/(?=^diff --git )/m).some((block) => {
+        const header = block.match(/^diff --git a\/\S+ b\/(scripts\/\S+)/);
+        if (!header) return false;
+        return scriptStem(header[1]) === stem && (/^new file mode\b/m.test(block) || /^--- \/dev\/null\s*$/m.test(block));
+      })
+    : false;
+}
+
 function mandatoryRegistrationPaths(
   diff: string,
   instrumentPaths: readonly string[],
@@ -5736,15 +5777,38 @@ function mandatoryRegistrationPaths(
     .filter((l) => l.file === CI_WORKFLOW_PATH && l.kind === "add")
     .map((l) => /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(l.text)?.[1])
     .filter((name): name is string => name !== undefined);
-  if (addedJobs.length === 0) return none;
 
   const gateAdds = lines.filter((l) => l.file === CI_GATE_WORKFLOW_PATH && l.kind === "add");
   const parityAdds = lines.filter((l) => l.file === CENSUS_REGISTRATION_PATH && l.kind === "add");
-  const registeredBothSides = addedJobs.every(
-    (job) =>
-      gateAdds.some((l) => l.text.includes(`"${job}"`)) && parityAdds.some((l) => l.text.includes(`job: "${job}"`)),
-  );
-  if (!registeredBothSides) return none;
+
+  // W1-T3272 — A CENSUS GATE MAY BE WIRED AS A STEP, AND THE PAIR IS STILL THE DISCRIMINATION.
+  //
+  // The job form above pairs two adds that agree on one NAME. A step has no job key to pair on, so
+  // this pairs on the SCRIPT instead: ci.yml gains a `run:` invoking `scripts/<stem>`, that script
+  // is NEW IN THIS DIFF, and src/lib/ci-parity.ts gains a line naming the same stem. Co-presence is
+  // not enough for the same reason it is not enough above — a diff wiring one script while
+  // registering another carves out the wrong unit and gets nothing.
+  //
+  // WHY THIS SHAPE EXISTS AT ALL: growing an existing job's step list is what an author reaches for
+  // precisely BECAUSE a new job looks like entanglement. #4851's own ci.yml comment says so in as
+  // many words. It then hit the rule anyway, through the registration its new census suite forces —
+  // so the escape the author chose to obey Rule 25 is the one the rule refused.
+  const newScriptSteps = lines
+    .filter((l) => l.file === CI_WORKFLOW_PATH && l.kind === "add")
+    .map((l) => /\bscripts\/([A-Za-z0-9_.-]+?)\.(?:mjs|[cm]?[jt]s|sh)\b/.exec(l.text)?.[1])
+    .filter((stem): stem is string => stem !== undefined)
+    .filter((stem) => diffFilesForStem(diff, stem));
+  const registeredSteps =
+    newScriptSteps.length > 0 && newScriptSteps.every((stem) => parityAdds.some((l) => l.text.includes(stem)));
+
+  if (addedJobs.length === 0 && !registeredSteps) return none;
+  if (addedJobs.length > 0) {
+    const registeredBothSides = addedJobs.every(
+      (job) =>
+        gateAdds.some((l) => l.text.includes(`"${job}"`)) && parityAdds.some((l) => l.text.includes(`job: "${job}"`)),
+    );
+    if (!registeredBothSides) return none;
+  }
 
   if (srcPaths.length === 0 || !srcPaths.every((f) => changeIsConfinedToRegistry(diff, f))) return none;
   return { instruments: [...instrumentPaths], srcs: [...srcPaths] };
