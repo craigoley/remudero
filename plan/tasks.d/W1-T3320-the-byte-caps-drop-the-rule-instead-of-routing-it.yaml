@@ -1,0 +1,82 @@
+- id: W1-T3320
+  title: "THE DOCTRINE BYTE CAPS DROP KNOWLEDGE ON THE FLOOR — §8A refuses ANY net-positive CLAUDE.md diff whatever the headroom, and `learnings` sits at 41714/42000, so a retro that harvests a real rule has nowhere to put it and reports the ceiling as the blocker; MEASURED twice, both times the rule was simply lost"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 10.00
+  files: [scripts/claude-md-budget-ratchet.mjs, test/a-full-doctrine-budget-routes-a-rule-it-cannot-hold.test.ts]
+  origin: "operator-session#gate-posture-2026-09-10"
+  plan_refs: ["W1-T3318", "W1-T503", "W1-T2507", "W1-T2831"]
+  status: queued
+  attempts: 0
+  note: |
+    THE OPERATOR'S RULING (W1-T3318) APPLIED TO THE CLEAREST CASE IN THE REPO. This gate does not
+    merely block a PR — it blocks the PR and the knowledge dies with it, because a retro's output is
+    prose that exists nowhere else. Every other blocking gate at least leaves the work on a branch.
+  rationale: |
+    TWO MEASURED LOSSES, and in both the rule was harvested, drafted, and then dropped.
+
+    2026-08-28: a retro drafted +1374 bytes against 48 bytes of headroom, opened NO PR, and reported
+    the ceiling as the blocker. Its own baseline entry records the outcome: "a ceiling that stops a
+    rule from being written at all is no longer taxing prose, it is dropping knowledge on the floor."
+    The response was to raise the cap — which bought, by that entry's own arithmetic, under two days.
+
+    2026-09-09: the same thing. One landable rule, measured at exactly 315 bytes, refused. The zsh
+    word-splitting hazard it carried then bit the very next session twice more.
+
+    THE CAP IS NOT THE BINDING CONSTRAINT, and this is the part that makes raising it useless.
+    MEASURED against the real function: with CLAUDE.md at 43685 and the cap at 44000, a +315-byte
+    change PASSES the cap and is still REFUSED by §8A's net-bytes rule, which compares head against
+    `git merge-base HEAD origin/main` PER PR. Raising the cap to 99999 changes nothing. There is no
+    way to bank bytes: every change must be byte-neutral-or-smaller ON ITS OWN, so a fold PR buys
+    headroom against a ceiling that was never what stopped anything.
+
+    AND THE CHEAP ROUTE IS ALSO FULL. §8A's own refusal message names it — "content that names a
+    concrete repo path belongs in learnings/*.yaml" — but that corpus reads 41714 of 42000 chars,
+    286 free. Both destinations are closed at once, which is why the retro's only remaining move was
+    to drop the rule.
+  design: |
+    (i) THE GATE ROUTES; IT DOES NOT REFUSE. When a diff cannot fit, the change lands and the gate
+    FILES the fold as a follow-up naming the exact bytes and the candidate destinations. That is the
+    operator's ruling: get the work through, spin off what cannot be fixed inline. Choosing WHICH
+    rule to fold is judgement, so it is a ROUTE, not a REPAIR.
+    (ii) THE ACCOUNTING SURVIVES. This is not "remove the ceiling". The gate still MEASURES, still
+    reports size against cap and net bytes against the merge base, and still fails the run when the
+    follow-up cannot be filed — because a router that silently drops its own routing is the original
+    defect with extra steps.
+    (iii) DEBT IS BOUNDED AND VISIBLE. An unbounded router turns a ceiling into a suggestion. The
+    outstanding fold debt must be readable in one place and must itself have a bound; what that bound
+    is, and what happens at it, is the builder's call — that it must EXIST is not.
+    (iv) `learnings` GETS THE SAME TREATMENT OR THE ROUTE DEAD-ENDS. §8A points at learnings as the
+    cheaper destination; a router that routes into a corpus 286 chars from its own ceiling has moved
+    the block, not removed it.
+    (v) DO NOT SOLVE THIS BY RAISING EITHER NUMBER. MEASURED above: the cap is not what refuses. A
+    raise buys days, has been spent twice already, and leaves the per-PR net rule exactly where it is.
+  acceptance:
+    - claim: "a net-positive diff that cannot fit LANDS, with the fold filed as a follow-up rather than the change refused"
+      proof: "unit test: test/a-full-doctrine-budget-routes-a-rule-it-cannot-hold.test.ts"
+    - claim: "the gate still measures and reports size-against-cap and net-bytes-against-merge-base, so the accounting is not lost"
+      proof: "unit test: test/a-full-doctrine-budget-routes-a-rule-it-cannot-hold.test.ts"
+    - claim: "a run that cannot file the follow-up FAILS, so a router that silently drops its routing is refused"
+      proof: "unit test: test/a-full-doctrine-budget-routes-a-rule-it-cannot-hold.test.ts"
+    - claim: "outstanding fold debt is readable in one place and carries a bound"
+      proof: "unit test: test/a-full-doctrine-budget-routes-a-rule-it-cannot-hold.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if the ratchet already routes rather than refuses. MEASURED
+    2026-09-10: `evaluateNetBytes` returns a violation string on any positive delta and the caller
+    fails the run; nothing files anything.
+    PROVE THE ROUTE LOAD-BEARING: a fixture diff that adds bytes must land AND produce a follow-up
+    naming the byte count; removing the routing must return it to a refusal. If both land, the
+    routing is decorative.
+    RUN THE ACCOUNTING CONTROL: the same fixture must still REPORT the overage. A router that stops
+    measuring has removed the budget rather than routed around it, and the next reader has no idea
+    the file is over.
+    DO NOT resolve this by raising capBytes or the learnings cap. That has been done twice, the
+    arithmetic in the baseline's own bumpRationale predicts how little it buys, and it does not touch
+    the per-PR net rule that actually refuses.
+    DO NOT resolve it by deleting the ratchet. The measurement is what keeps the file's weight
+    honest; the defect is the REFUSAL, not the counting.
