@@ -18522,6 +18522,12 @@ export type LintPlanStatusDeps = {
   /** W1-T1076: the OPEN-PR shard slug corpus reader, injected on the same axis as every dep
    *  above so a test can drive the duplicate check without a network. */
   openPlanShardSlugs?: typeof openPlanShardSlugs;
+  /**
+   * Run only the deterministic checkout-local subset. This is an execution boundary, not a
+   * manufactured GitHub result: status and open-PR readers are never called, and the summary
+   * names every check or refinement that becomes unavailable.
+   */
+  offline?: boolean;
 };
 
 // ── W1-T1076: THE FILING-TIME DUPLICATE CORPUS ──────────────────────────────────────────────
@@ -19278,6 +19284,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // "--all". Meaningless (and silently ignored) in --base mode: --base's own scope already
   // defines what's in-bounds, and that mode stays byte-identical whether or not this is set.
   const allFlag = rest.includes("--all");
+  const offline = deps.offline === true;
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(repoRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan resolving OUTSIDE the resolved root is REFUSED right
@@ -19463,7 +19470,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // wrote and nothing updates it on merge; the credit projection is this repo's only
       // completion signal, and asking the wrong one manufactured a 156-record landmine field out
       // of finished work.
-      const credited = creditedMergedIdsForWholePlan(statusOpen, deps);
+      const credited = offline ? undefined : creditedMergedIdsForWholePlan(statusOpen, deps);
       const open = credited === undefined ? statusOpen : statusOpen.filter((t) => !credited.has(t.id));
       wholePlanScopeKey = credited === undefined ? "status" : "credit";
       creditRetiredCount = statusOpen.length - open.length;
@@ -19479,7 +19486,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // is skipped rather than redding a plan-only PR during a GitHub outage.
   let statusByTaskId: Map<string, StatusProjection> | undefined;
   let statusResolvable = false;
-  if (scope && scope.size > 0) {
+  if (!offline && scope && scope.size > 0) {
     try {
       const config = (deps.loadConfig ?? loadConfig)();
       const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
@@ -19501,11 +19508,13 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let openShardCorpus: DuplicateCorpusEntry[] = [];
   let shardSlugById: Map<string, string> | undefined;
   if (scope && scope.size > 0) {
-    try {
-      const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
-      openShardCorpus = (deps.openPlanShardSlugs ?? openPlanShardSlugs)((deps.ghGateway ?? ghGateway)(owner, repo));
-    } catch {
-      openShardCorpus = [];
+    if (!offline) {
+      try {
+        const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
+        openShardCorpus = (deps.openPlanShardSlugs ?? openPlanShardSlugs)((deps.ghGateway ?? ghGateway)(owner, repo));
+      } catch {
+        openShardCorpus = [];
+      }
     }
     shardSlugById = shardSlugIndex(join(dirname(planPath), "tasks.d"));
   }
@@ -19747,7 +19756,12 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // W1-T120: the READ-IDENTITY ASSERTION — the abs path + content hash of the plan file
   // ACTUALLY opened, so a wrong-file run (a false green pointed at the wrong tree) is
   // legible in the gate's own output, not merely inferable from cwd.
-  console.log(`\nrmd lint-plan: ${summary}${evidenceRuleLine}\n  read: ${formatReadIdentity(planPath, planRaw)}`);
+  const offlineNotice = offline
+    ? "\n  offline subset: GitHub reads disabled; post-merge-amendment (block) omitted; " +
+      "duplicate-title (warn) omitted; duplicate-surface merge-credit filtering unavailable and may over-report warnings; " +
+      "whole-plan merge-credit scoping falls back to status"
+    : "";
+  console.log(`\nrmd lint-plan: ${summary}${evidenceRuleLine}\n  read: ${formatReadIdentity(planPath, planRaw)}${offlineNotice}`);
   return failing > 0 ? 1 : 0;
 }
 

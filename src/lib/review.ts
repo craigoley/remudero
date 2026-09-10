@@ -5337,6 +5337,13 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "not the rule logic itself, same shape as openapi/daemon.yaml above",
   // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
+  "scripts/lint-plan-offline.mjs":
+    "VERIFIED NON-INSTRUMENT — a latency-path convenience for git hooks, exposed only as " +
+    "the `lint-plan:offline` package.json script; no workflow `run:` step invokes it (only its own " +
+    "test does, through that alias). It RESTATES NO RULE: it is three lines that call the reviewer's " +
+    "own `lintPlanCommand` with `{ offline: true }` and exit on its code, so a diff touching it " +
+    "cannot change what any gate MEASURES — the same claim, for the same reason, as " +
+    "scripts/rule15-precheck.mjs above.",
   "scripts/rule15-precheck.mjs":
     "VERIFIED NON-INSTRUMENT (W1-T3040) — an author-time convenience exposed only as the " +
     "`rule15-precheck` package.json script; no workflow `run:` step invokes it. It RESTATES NO " +

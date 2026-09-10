@@ -35,6 +35,7 @@
     "test:fast": "node scripts/test-tier-manifest.mjs --run fast",
     "test:slow": "node scripts/test-tier-manifest.mjs --run slow",
     "lint-plan": "tsx src/run-task.ts lint-plan",
+    "lint-plan:offline": "node --import tsx scripts/lint-plan-offline.mjs",
     "depcruise": "depcruise src --config .dependency-cruiser.cjs",
     "cycle-ratchet": "node scripts/cycle-ratchet.mjs",
     "jscpd": "jscpd src scripts --config .jscpd.json",
