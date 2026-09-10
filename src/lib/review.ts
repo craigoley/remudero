@@ -7232,14 +7232,9 @@ export interface AcquireReviewStatusLockOpts {
   info?: Partial<ReviewStatusLockInfo>;
   /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
   isPidAlive?: (pid: number) => boolean;
-  /** This host's identity, compared against a recorded `host` by {@link isHolderStale}'s first
-   *  rung. Injectable so a test can simulate a FOREIGN container without controlling the real
-   *  machine. Defaults to `os.hostname()`. */
+  /** Forwarded to {@link isHolderStale}; injectable so a test can simulate a foreign container. */
   hostname?: () => string;
-  /** True when this process runs inside a container — gates the same first rung. Defaults to the
-   *  `/.dockerenv` marker. */
   inContainer?: () => boolean;
-  /** Epoch ms a pid actually started, for the boot and pid-recycle rungs. */
   getProcessStartTime?: (pid: number) => number | null;
   /** Poll cadence while a LIVE holder blocks acquisition (tests speed this up). */
   retryMs?: number;
@@ -7292,12 +7287,8 @@ export async function acquireReviewStatusLock(
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseReviewStatusLockInfo,
-        // W1-T3335: the SHARED ladder, not a private rung-2-only copy. A bare `!isAlive(pid)`
-        // asks THIS container's process table about a pid another container recorded: a holder
-        // that died with its container reads LIVE whenever the number is reused here, and the
-        // lock is then never reclaimed. isHolderStale checks the recorded host FIRST, then this
-        // container's boot clock, then liveness, then pid recycling — the same four rungs this
-        // file already applies to a pending review's owner at reviewOwnerLiveness.
+        // The SHARED four-rung ladder, not a rung-2-only copy: a bare `!isAlive(pid)` asks THIS
+        // container about a pid another one recorded, so a dead holder reads LIVE on pid reuse.
         isStale: (held) =>
           isHolderStale(held, {
             isPidAlive: isAlive,
