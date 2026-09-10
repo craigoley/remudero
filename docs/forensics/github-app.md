@@ -115,10 +115,11 @@ pointer wherever that history still matters.
 // `board_gateway.fetch_bytes` ledger shape carries no duration field to fit against (10.9s bought
 // 26.7 MB over 14 REST calls, but that figure is wall-clock observation, not a re-readable value),
 // so 20s is chosen as roughly TWICE that ceiling for a call two orders of magnitude smaller (one
-// POST, a tiny JSON body) — generous enough that a healthy-but-slow network never trips it, and
-// still two orders inside the five-minute `REFRESH_MARGIN_MS` retry cadence, so a timeout costs
-// one retry, never a missed refresh. Exported so a test can advance a mocked clock by EXACTLY
-// this amount rather than a magic number that would silently drift out of sync with it.
+// POST, a tiny JSON body) — generous enough that a healthy-but-slow network never trips it. A
+// failed scheduled refresh must not spend the whole five-minute margin again; the daemon retains
+// the last successful expiry and schedules any failure retry early enough for another full bounded
+// exchange to settle before that token expires. Exported so a test can advance a mocked clock by
+// EXACTLY this amount rather than a magic number that would silently drift out of sync with it.
 export const EXCHANGE_TIMEOUT_MS = 20 * 1000;
 ```
 

@@ -307,6 +307,159 @@ test("startInstallationTokenRefresh: a FAILED mint still reschedules on the marg
   assert.deepEqual(delays, [REFRESH_MARGIN_MS], "a failed mint retries on the margin");
 });
 
+// ── W1-T3011: A failed scheduled refresh must not outwait the retained expiry ─────────────────
+
+test("W1-T3011: a failed scheduled refresh cannot rearm beyond the retained token expiry", async () => {
+  const mintedAt = Date.parse("2026-09-07T10:33:03.213Z");
+  const expiresAt = Date.parse("2026-09-07T11:33:03.000Z");
+  const healthyRefreshAt = expiresAt - REFRESH_MARGIN_MS;
+  let now = mintedAt;
+  let refreshes = 0;
+  const delays: number[] = [];
+  const timers: Array<() => void> = [];
+
+  const res = startInstallationTokenRefresh({
+    log: () => {},
+    env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    refresh: async () => {
+      refreshes += 1;
+      if (refreshes === 1) return { ok: true, expiresAtMs: expiresAt };
+      now = healthyRefreshAt + EXCHANGE_TIMEOUT_MS;
+      return { ok: false, reason: "exchange timed out" };
+    },
+    setTimer: (fn, ms) => {
+      delays.push(ms);
+      timers.push(fn);
+      return {};
+    },
+    now: () => now,
+  });
+
+  assert.equal(res.armed, true);
+  await res.ready;
+  assert.equal(delays[0], nextRefreshDelayMs(expiresAt, mintedAt));
+
+  now = healthyRefreshAt;
+  timers[0]!();
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(refreshes, 2);
+  const retryDelay = delays[1]!;
+  assert.ok(retryDelay < REFRESH_MARGIN_MS, "a post-timeout retry must spend less than the full margin");
+  assert.ok(
+    now + retryDelay + EXCHANGE_TIMEOUT_MS < expiresAt,
+    "the next retry plus one full exchange timeout must settle before the retained expiry",
+  );
+});
+
+test("W1-T3011: a rejected scheduled refresh cannot rearm beyond the retained token expiry", async () => {
+  const mintedAt = Date.parse("2026-09-07T10:33:03.213Z");
+  const expiresAt = Date.parse("2026-09-07T11:33:03.000Z");
+  const healthyRefreshAt = expiresAt - REFRESH_MARGIN_MS;
+  let now = mintedAt;
+  let refreshes = 0;
+  const delays: number[] = [];
+  const timers: Array<() => void> = [];
+  const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
+
+  const res = startInstallationTokenRefresh({
+    log: (step, extra = {}) => logs.push({ step, extra }),
+    env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    refresh: async () => {
+      refreshes += 1;
+      if (refreshes === 1) return { ok: true, expiresAtMs: expiresAt };
+      now = healthyRefreshAt + EXCHANGE_TIMEOUT_MS;
+      throw new Error("ledger write failed: ENOSPC");
+    },
+    setTimer: (fn, ms) => {
+      delays.push(ms);
+      timers.push(fn);
+      return {};
+    },
+    now: () => now,
+  });
+
+  assert.equal(res.armed, true);
+  await res.ready;
+
+  now = healthyRefreshAt;
+  timers[0]!();
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(refreshes, 2);
+  const retryDelay = delays[1]!;
+  assert.ok(
+    now + retryDelay + EXCHANGE_TIMEOUT_MS < expiresAt,
+    "the rejected arm must leave room for one bounded exchange before the retained expiry",
+  );
+  assert.ok(
+    logs.some((line) => String(line.extra.reason).startsWith("refresh threw: ledger write failed")),
+    "the rejected arm still logs the W1-T1068 survival reason after rearming",
+  );
+});
+
+test("W1-T3011: a first-mint failure retains the existing bounded retry cadence", async () => {
+  const NOW = Date.parse("2026-09-07T10:33:03.213Z");
+  let refreshes = 0;
+  const delays: number[] = [];
+
+  const res = startInstallationTokenRefresh({
+    log: () => {},
+    env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    refresh: async () => {
+      refreshes += 1;
+      return { ok: false, reason: "exchange timed out" };
+    },
+    setTimer: (_fn, ms) => {
+      delays.push(ms);
+      return {};
+    },
+    now: () => NOW,
+  });
+
+  assert.equal(res.armed, true);
+  await res.ready;
+  assert.equal(refreshes, 1);
+  assert.deepEqual(delays, [REFRESH_MARGIN_MS], "without a prior expiry there is no edge to derive from");
+});
+
+test("W1-T3011: an expired retained token clamps the failure retry to immediate", async () => {
+  const mintedAt = Date.parse("2026-09-07T10:33:03.213Z");
+  const expiresAt = mintedAt + REFRESH_MARGIN_MS;
+  let now = mintedAt;
+  let refreshes = 0;
+  const delays: number[] = [];
+  const timers: Array<() => void> = [];
+
+  const res = startInstallationTokenRefresh({
+    log: () => {},
+    env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    refresh: async () => {
+      refreshes += 1;
+      if (refreshes === 1) return { ok: true, expiresAtMs: expiresAt };
+      now = expiresAt + 1;
+      return { ok: false, reason: "exchange timed out" };
+    },
+    setTimer: (fn, ms) => {
+      delays.push(ms);
+      timers.push(fn);
+      return {};
+    },
+    now: () => now,
+  });
+
+  assert.equal(res.armed, true);
+  await res.ready;
+  assert.equal(delays[0], 0, "the healthy timer is already at the edge");
+
+  now = expiresAt;
+  timers[0]!();
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(refreshes, 2);
+  assert.equal(delays[1], 0, "a stale retained expiry must clamp the failure retry to now");
+});
+
 // ── the two failure arms of the exchange response, one test each ────────────────────────────
 
 test("refreshInstallationToken: an UNPARSABLE exchange response degrades with a named reason, never a throw", async () => {
@@ -459,7 +612,7 @@ test("W1-T1068: a rejected refresh still arms the next timer", async () => {
   assert.deepEqual(
     delays,
     [REFRESH_MARGIN_MS],
-    "a rejected refresh must retry on the margin, exactly like a resolved { ok: false } failure — a dead loop is the outage this task exists to close",
+    "a rejected first mint must retry on the margin when no retained expiry exists yet",
   );
 });
 
