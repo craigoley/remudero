@@ -3343,8 +3343,12 @@ function rebuildChangesetEnumeration(raw: string, diffFiles: string[]): string |
  */
 export function deriveChangesetClaimUpdate(body: string, diffFiles: string[]): string | undefined {
   if (diffFiles.length === 0) return undefined;
-  const contradictions = bodyContradictsDiff(body, diffFiles);
-  const countClaims = contradictions.filter((c) => /^exactly\s+\w+\s+files?\b/i.test(c.claim));
+  // A drifted count stopped being a REFUSAL (lib/review.ts) but did not stop being worth tidying,
+  // and those are different decisions. `staleCountClaims` carries exactly the claims the count arm
+  // used to refuse; reading both keeps this rung's behaviour identical to before that change.
+  const recognition = recognizeChangesetClaims(body, diffFiles);
+  const repairable = [...recognition.contradictions, ...recognition.staleCountClaims];
+  const countClaims = repairable.filter((c) => /^exactly\s+\w+\s+files?\b/i.test(c.claim));
   if (countClaims.length !== 1) return undefined; // none, or ambiguous — fail safe
 
   const claim = countClaims[0].claim;
@@ -9037,6 +9041,10 @@ export async function runFixRung(opts: {
           strike: strikes,
           recognised: recognition.recognisedCount,
           contradictions: recognition.contradictions.length,
+          // A drifted count is no longer a contradiction but is still what this rung repairs, so it
+          // is counted here as well. Without it the row would read 0/0 on every body the rung goes
+          // on to rewrite, and the log would say nothing happened.
+          stale_counts: recognition.staleCountClaims.length,
           fence_unbalanced_at_eof: recognition.fenceUnbalancedAtEof,
         });
         const updatedBody = deriveChangesetClaimUpdate(reviewReport, diffFiles);

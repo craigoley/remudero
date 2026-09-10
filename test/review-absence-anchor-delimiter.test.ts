@@ -30,7 +30,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { bodyContradictsDiff, noClaimIsAboutChangeset } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing, noClaimIsAboutChangeset } from "../src/lib/review.js";
 
 /** A diff that touches src/, so any "no code"/"no src/…" claim over it is a real contradiction. */
 const DIFF = ["src/lib/review.ts", "test/review-absence-anchor-delimiter.test.ts"];
@@ -169,8 +169,8 @@ test("bodyContradictsDiff: the count arm ('exactly N files') is unaffected by de
   // noClaimIsAboutChangeset at all, so a delimiter around the count must make no difference before
   // or after this fix. Assert both the undelimited and the delimited phrasing produce the SAME
   // verdict against a diff whose file count actually disagrees.
-  const bare = bodyContradictsDiff("This PR changes exactly one file.", DIFF);
-  const delimited = bodyContradictsDiff("This PR changes exactly one file` — see the stat.", DIFF);
+  const bare = changesetClaimsDisagreeing("This PR changes exactly one file.", DIFF);
+  const delimited = changesetClaimsDisagreeing("This PR changes exactly one file` — see the stat.", DIFF);
   assert.equal(bare.length, 1, "bare count claim over a 2-file diff still contradicts");
   assert.equal(
     delimited.length,

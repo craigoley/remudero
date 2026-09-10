@@ -113,13 +113,15 @@ diff --git a/src/lib/widget.ts b/src/lib/widget.ts
 
 // ── bodyContradictsDiff: unit fixtures ──────────────────────────────────────
 
-test("bodyContradictsDiff: #974's own shape — 'exactly one file: MASTER-PLAN.md' over a 3-file diff is a count contradiction AND 'no docs/ORIENTATION.md' is a named-absence contradiction (docs/ORIENTATION.md IS in the diff)", () => {
+test("bodyContradictsDiff: #974's own shape — 'no docs/ORIENTATION.md' is a named-absence contradiction (docs/ORIENTATION.md IS in the diff), while the file-count half is now silent", () => {
   const body = "exactly one file: MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md.";
   const contradictions = bodyContradictsDiff(body, THREE_FILE_DIFF_FILES);
-  assert.ok(contradictions.length >= 2, `expected at least 2 contradictions, got ${JSON.stringify(contradictions)}`);
-  const countHit = contradictions.find((c) => /exactly one file/i.test(c.claim));
-  assert.ok(countHit, "the file-count claim ('exactly one file') must be flagged");
-  assert.deepEqual(new Set(countHit.files), new Set(THREE_FILE_DIFF_FILES), "the count claim's refuting files are the ACTUAL changeset");
+  assert.ok(contradictions.length >= 1, `expected at least 1 contradiction, got ${JSON.stringify(contradictions)}`);
+  assert.equal(
+    contradictions.find((c) => /exactly one file/i.test(c.claim) && !/ORIENTATION/.test(c.claim)),
+    undefined,
+    "the bare file-count half is NO LONGER a contradiction — a stale sentence about how many files changed refutes nothing",
+  );
   const namedFileHit = contradictions.find((c) => /docs\/ORIENTATION\.md/.test(c.claim));
   assert.ok(namedFileHit, "the 'no docs/ORIENTATION.md' claim must be flagged — that file IS in the diff");
   assert.deepEqual(namedFileHit.files, ["docs/ORIENTATION.md"]);
@@ -134,10 +136,11 @@ test("bodyContradictsDiff: #1025's own shape — 'data-only: no code' over a dif
   }
 });
 
-test("bodyContradictsDiff: acceptance criterion 1 — a bare file-count claim that disagrees with the diff is flagged even with no absence language at all", () => {
-  const contradictions = bodyContradictsDiff("This PR touches exactly two files.", ["a.ts", "b.ts", "c.ts"]);
-  assert.equal(contradictions.length, 1);
-  assert.match(contradictions[0].claim, /exactly two files/i);
+test("bodyContradictsDiff: a bare file-count claim that disagrees with the diff is NOT flagged — the count arm is gone", () => {
+  // Was acceptance criterion 1 of the original check, REMOVED by operator decision: a body whose
+  // stated file count drifted from its diff was never evidence of a defect in the change, and it
+  // refused real PRs over a sentence nobody had reread. The named-file arm below is what remains.
+  assert.deepEqual(bodyContradictsDiff("This PR touches exactly two files.", ["a.ts", "b.ts", "c.ts"]), []);
 });
 
 test("bodyContradictsDiff: a file-count claim that MATCHES the diff is not flagged", () => {
@@ -181,10 +184,12 @@ test("bodyContradictsDiff: prose this check cannot decide ('no bugs', 'no issues
 });
 
 test("bodyContradictsDiff acceptance criterion 4 — the returned contradiction NAMES the contradicted claim text AND the actual files that refute it", () => {
-  const contradictions = bodyContradictsDiff("exactly one file: MASTER-PLAN.md.", THREE_FILE_DIFF_FILES);
+  // Vehicle is a NAMED-absence claim, not a count claim: the subject here is that a contradiction
+  // reports both halves, and that property is unchanged by the count arm's removal.
+  const contradictions = bodyContradictsDiff("No docs/ORIENTATION.md.", THREE_FILE_DIFF_FILES);
   assert.equal(contradictions.length, 1);
-  assert.match(contradictions[0].claim, /exactly one file/i);
-  assert.deepEqual(new Set(contradictions[0].files), new Set(THREE_FILE_DIFF_FILES));
+  assert.match(contradictions[0].claim, /docs\/ORIENTATION\.md/);
+  assert.deepEqual(contradictions[0].files, ["docs/ORIENTATION.md"]);
 });
 
 // ── judgeReview integration: the check is BINDING (a genuine block, not a downgrade) ──
@@ -199,12 +204,11 @@ test("judgeReview: a body contradicting its own diff FORCES state=failure and fl
 });
 
 test("judgeReview acceptance criterion 4 (posted summary): the FAIL summary names the contradicted claim and the actual changed files", () => {
-  const body = "exactly one file: MASTER-PLAN.md.";
+  const body = "No docs/ORIENTATION.md.";
   const v = judgeReview(CRITERIA, { diff: THREE_FILE_DIFF, report: body });
   assert.equal(v.state, "failure");
   assert.match(v.summary, /body contradicts its own diff/i);
-  assert.match(v.summary, /exactly one file/i);
-  assert.match(v.summary, /MASTER-PLAN\.md/);
+  assert.match(v.summary, /docs\/ORIENTATION\.md/);
 });
 
 test("judgeReview: '#1025 shape' — 'data-only: no code' over a diff that reverts src/+test/ files fails the review", () => {
@@ -273,19 +277,37 @@ test("bodyContradictsDiff: a count claim about something OTHER than the changese
   );
 });
 
-test("bodyContradictsDiff: an ENUMERATED count claim is still caught without any changeset word (the #974 shape)", () => {
+test("bodyContradictsDiff: an enumeration whose named file IS in the changeset is silent, even when the count disagrees", () => {
   const hits = bodyContradictsDiff("exactly one file: MASTER-PLAN.md", ["MASTER-PLAN.md", "docs/ORIENTATION.md"]);
-  assert.equal(hits.length, 1, "the enumeration is unambiguous on its own — this is what the check was built for");
-  assert.match(hits[0].claim, /exactly one file: MASTER-PLAN\.md/);
+  assert.deepEqual(hits, [], "MASTER-PLAN.md IS in the diff; that the body undercounts is not a contradiction");
 });
 
-test("bodyContradictsDiff: a PROSE count claim in changeset context is still caught", () => {
+test("bodyContradictsDiff: a claim wrong BOTH ways — miscounted AND naming a file the diff lacks — still REFUSES", () => {
+  // THE TRAP IN MAKING ONE ARM ADVISORY. The original judged the enumeration only when the count
+  // AGREED, which is safe while either half refuses. Once the count stops refusing, that ordering
+  // lets a body escape on the half that no longer blocks: it miscounts, so the enumeration is never
+  // examined, and the only fault reported is the advisory one. The two halves are judged
+  // independently for exactly this case.
+  const hits = bodyContradictsDiff("exactly one file: NOT-IN-DIFF.ts", ["a.ts", "b.ts"]);
+  assert.equal(hits.length, 1, "the enumeration half is checkable and must still refuse");
+  assert.match(hits[0].claim, /NOT-IN-DIFF\.ts/);
+});
+
+test("bodyContradictsDiff: an enumeration naming a file the diff does NOT contain is still caught", () => {
+  // The arm that survives, and the reason removing the count arm is not the same as removing the
+  // check: this body makes a false statement about WHICH files it touched, which is checkable.
+  const hits = bodyContradictsDiff("exactly one file: MASTER-PLAN.md", ["docs/ORIENTATION.md"]);
+  assert.equal(hits.length, 1, "a body naming a file it did not touch is a real contradiction");
+  assert.match(hits[0].claim, /MASTER-PLAN\.md/);
+});
+
+test("bodyContradictsDiff: a PROSE count claim in changeset context is no longer caught", () => {
   for (const body of [
     "This PR changes exactly one file.",
     "git show --stat listed exactly one file.",
     "The diff touches exactly two files.",
   ]) {
-    assert.equal(bodyContradictsDiff(body, ["a.ts", "b.ts", "c.ts"]).length, 1, `must still catch: ${body}`);
+    assert.deepEqual(bodyContradictsDiff(body, ["a.ts", "b.ts", "c.ts"]), [], `must stay silent: ${body}`);
   }
 });
 

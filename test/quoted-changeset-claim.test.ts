@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bodyContradictsDiff } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing } from "../src/lib/review.js";
 
 // ── W1-T308 ──────────────────────────────────────────────────────────────────
 //
@@ -72,7 +72,7 @@ test("bodyContradictsDiff: a real (unquoted) claim following a quoted one in the
     "",
     "In reality this PR touches exactly 3 files.",
   ].join("\n");
-  const hits = bodyContradictsDiff(body, TWO_FILE_DIFF);
-  assert.equal(hits.length, 1, "the quoted claim is silent but the real, unquoted claim after it must still fire");
+  const hits = changesetClaimsDisagreeing(body, TWO_FILE_DIFF);
+  assert.equal(hits.length, 1, "the quoted claim is silent but the real, unquoted claim after it must still be read");
   assert.match(hits[0].claim, /exactly 3 files/i);
 });
