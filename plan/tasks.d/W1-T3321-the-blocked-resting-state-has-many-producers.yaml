@@ -8,12 +8,19 @@
   risk: medium
   band_meaning: blast-radius
   budget_usd: 12.00
-  files: [src/lib/gate-posture.ts, test/every-refusal-surface-declares-its-posture.test.ts]
+  files: [src/lib/gate-posture.ts, test/the-blocked-resting-state-has-many-producers.test.ts]
   origin: "operator-session#gate-posture-2026-09-10"
   plan_refs: ["W1-T3318", "W1-T3319", "W1-T3320", "W1-T3311", "W1-T3206", "W1-T3275"]
   status: queued
   attempts: 0
   note: |
+    THE FALSIFIER IS NAMED FOR THIS SHARD'S SLUG, AND THAT DIRECTION IS FORCED. Rule 19 refused the
+    original pairing for spanning two concerns and offered the rename; taking it on the SHARD FILE
+    made `task-id-existence` refuse instead — "the base declares it in
+    plan/tasks.d/W1-T3321-the-blocked-resting-state-has-many-producers.yaml, so this change RE-ISSUED
+    it" — because that gate reads a renamed shard as a second declaration of the same id. Two gates,
+    opposite demands. The suite does not exist yet, so renaming IT satisfies Rule 19's own-falsifier
+    discount at zero cost and re-issues nothing. Do not "tidy" this back.
     THE CENSUS IS THE DELIVERABLE, NOT THE CONVERSIONS. Converting a gate is that gate's own task,
     sized and reviewed on its own evidence (W1-T3311 was one; W1-T3319 and W1-T3320 are two more).
     What does not exist is the LIST — which surfaces can refuse, and which of the three postures each
@@ -94,17 +101,17 @@
     would report the fleet compliant while its most expensive resting block is untouched.
   acceptance:
     - claim: "the refusal-surface population is derived from the tree, so a new gate joins the census without anyone editing a list"
-      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+      proof: "unit test: test/the-blocked-resting-state-has-many-producers.test.ts"
     - claim: "a surface with no declared posture FAILS the census by name, rather than being silently absent"
-      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+      proof: "unit test: test/the-blocked-resting-state-has-many-producers.test.ts"
     - claim: "the report names each surface, its posture and whether it complies — never only a count"
-      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+      proof: "unit test: test/the-blocked-resting-state-has-many-producers.test.ts"
     - claim: "state-deciding surfaces are counted too — anything that can mark a task merged, credited or parked, since a silent DONE removes work more completely than a refusal"
-      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+      proof: "unit test: test/the-blocked-resting-state-has-many-producers.test.ts"
     - claim: "task-stopping surfaces are in scope, not only diff-stopping ones, so verify:human and blocked_ci re-dispatch are counted"
-      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+      proof: "unit test: test/the-blocked-resting-state-has-many-producers.test.ts"
     - claim: "the census changes no gate's behaviour — it reports posture and does not convert"
-      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+      proof: "unit test: test/the-blocked-resting-state-has-many-producers.test.ts"
   falsifier: |
     CLOSE THIS WITHOUT IMPLEMENTATION if the repo already enumerates its refusal surfaces with a
     declared posture. MEASURED 2026-09-10: `INSTRUMENT_SURFACE` lists gates that GRADE other PRs (a
