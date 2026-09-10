@@ -1,0 +1,150 @@
+- id: W1-T3306
+  title: "A CAPPED VERDICT LEAVES A GREEN PR WITH NO ACTOR AT ALL — the sweep correctly refuses to arm, no rung is dispatched because the checks are GREEN, and three PRs stood down six times in fourteen minutes with the streak still climbing; nothing in the fleet drains this state"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 45.00
+  files:
+    - src/lib/sweep.ts
+    - src/lib/prompt-render.ts
+    - test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts
+  origin: "operator-session#capped-stall-2026-09-09"
+  plan_refs: ["W1-T93", "W1-T230", "W1-T1020", "W1-T273", "W1-T362"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR DIRECTION 2026-09-09, verbatim: "why would it review something and fail to act?! ...
+    rmd should not be able to refuse to act! The whole point is for it to act!"
+
+    MEASURED THE SAME EVENING, on the three PRs open at the time (#4867, #4879, #4887):
+
+        disposition = mergeable
+        acted       = False
+        reason      = review success, required checks green — arming auto-merge
+        stand_down_reason = CAPPED verdict (zero proofs executed) — refuses to arm auto-merge
+                            without executed proof or an explicit, ledgered operator override
+
+        #4887 stand-downs=6  23:39:27 -> 23:53:16  streak=2
+        #4879 stand-downs=6  23:39:29 -> 23:53:17  streak=2
+        #4867 stand-downs=6  23:39:29 -> 23:53:17  streak=2
+
+    THE REFUSAL IS CORRECT AND MUST SURVIVE THIS TASK. Every proof on all three graded
+    `executed_stale`: it passed at the head AND at the merge base, so it discriminated nothing and
+    the criteria fell back to the keyword floor (`floor_degraded: true`, `capped: true`). Arming
+    that is merging on prose, and `decideSweepArm`'s own comment records the cost: "#800 armed at
+    proof_exec 0/5 and merged 35 seconds later."
+
+    THE DEFECT IS THAT NOTHING ELSE HAPPENS EITHER. The state is terminal with no actor:
+      - checks are GREEN, so no `blocked-fixable` disposition and no fix rung;
+      - the verdict is CAPPED, so `decideAutoMergeArm` refuses;
+      - `deriveDisposition` classifies it `mergeable`, which has exactly one action — arm — and that
+        action stands down every pass.
+    The PR sits until a human intervenes. Nothing drains the queue and nothing bounds it.
+
+    AND THE FIX RUNG COULD NOT ACT EVEN IF DISPATCHED, which is why this is not a one-line routing
+    change. Every `FIX_MODE_RULES` row (prompt-render.ts) keys off `unmetCriteria`, and these
+    verdicts carry `unmet_criteria: []` — every criterion was MET, on the keyword floor.
+    `body-coverage` and `reviewer-unmet` both require `unmet.length > 0`; the table would fall
+    through to `reviewer-unmet` with nothing to hand a worker.
+
+    SCOPE MEASURED, so this is sized honestly: 8 capped-and-not-plan-only verdicts across 159 PRs
+    with a ledgered verdict; 5 already closed by other means; the 3 open ones are the population
+    above. Small today. Unbounded, because nothing drains it.
+  design: |
+    (i) THE CAPPED REFUSAL BECOMES A DISPATCH, AT THE ARM SITE — not a new disposition row.
+    CORRECTED 2026-09-10 AGAINST THE CODE, and the correction is the important part of this design.
+    A new `deriveDisposition` row was the obvious shape and is NOT BUILDABLE: that function is pure
+    over `OpenPrView` (`deriveDisposition(pr, policy, now)`, no ledger access), the capped flag lives
+    in the ledgered verdict, and the view is assembled in `src/run-task.ts` — which IS on
+    INSTRUMENT_SURFACE. Adding the field there alongside `sweep.ts`/`prompt-render.ts` makes the
+    diff instrument-plus-product-src, which `detectInstrumentEntanglement` refuses. Splitting it in
+    two would ship an unreachable mode first, the exact W1-T349 anti-pattern this repo records.
+    SO THE CHANGE LANDS WHERE THE LEDGER IS ALREADY IN SCOPE: the `mergeable` case already calls
+    `decideSweepArm(pr, ledgerLines)`. When that refusal is specifically the CAPPED one — read from
+    `postedArmFactsFromLedger`, never by matching the reason prose — the case DISPATCHES A FIX
+    instead of standing down. Everything stays in product `src/`, and the run-flow's own rung
+    (`src/run-task.ts`'s fix evidence) is a SIBLING concern, deliberately untouched: the stall
+    measured here is a SWEEP stall, and the sweep builds its own fix evidence already.
+    (ii) THE ARM PREDICATE IS NOT TOUCHED. `decideAutoMergeArm` and `decideSweepArm` keep their
+    current refusal byte for byte. This task changes WHICH DISPOSITION a capped PR receives, never
+    whether a capped verdict may arm. A reviewer's instinct will be to "just arm it"; that is the
+    one change this task must not make.
+    (iii) A NEW FIX MODE, `proof-discrimination`, ADDED AS A TABLE ROW. `FIX_MODE_RULES` is
+    injectable and its own doc says a new row must derive a new mode "with zero change to
+    `deriveFixMode`". The row matches a review that is capped with NO unmet criteria and at least
+    one proof graded `executed_stale` or `not_executable`.
+    (iv) THE PROMPT CARRIES THE STALE PROOFS AND THE REMEDY, not the whole review. Each criterion's
+    claim, its proof string, and its grade — plus the repo's own rule: a pure-path `unit test:`
+    proof discriminates ONLY where its file is ABSENT or FAILING at base, so a criterion over an
+    existing suite must be proven with a `grep:` on a CHANGED LINE instead. That remedy is
+    mechanical and is what a human applies to this class today.
+    (v) THE REPAIR IS A BODY EDIT AND THAT IS ALREADY A REVIEW INPUT. Review retries key on the
+    versioned digest of head plus exact body, so a repaired body re-earns review on the SAME commit
+    with no new push. The loop therefore closes without a rebuild: repair -> re-review -> proofs
+    discriminate -> the EXISTING arm path fires on real evidence.
+    (vi) THE STRIKE BUDGET IS SHARED WITH THE EXISTING RUNG, DELIBERATELY. A PR that has already
+    burned its strikes on CI failures does not get a fresh budget here — an unbounded repair loop on
+    a PR nobody can fix is the failure mode a strike cap exists to stop. Exhaustion escalates on the
+    existing path rather than looping.
+    (vii) NOT IN SCOPE: arming a capped verdict, changing the CAPPED override mechanism, promoting
+    `lint-plan`'s `proof-base-discrimination` warning to a refusal (prevention is a separate task
+    with its own population), or changing what `executed_stale` means.
+  acceptance:
+    - claim: "a capped arm refusal DISPATCHES a fix instead of standing down, so the pass acts rather than re-deriving the same refusal forever"
+      proof: "unit test: test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts"
+    - claim: "the arm predicate is unchanged: a capped verdict still refuses to arm, and a non-capped verdict still arms"
+      proof: "unit test: test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts"
+    - claim: "a capped review with zero unmet criteria and a stale proof derives the proof-discrimination mode, which no existing rule could match"
+      proof: "unit test: test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts"
+    - claim: "the rendered prompt names each stale proof with its grade and states the discrimination remedy, and carries no other mode's inputs"
+      proof: "unit test: test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts"
+    - claim: "a ledgered operator override still routes the PR to mergeable, so the existing escape is not removed by the new row"
+      proof: "unit test: test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts"
+    - claim: "the new disposition shares the existing strike budget: an exhausted PR is not re-dispatched"
+      proof: "unit test: test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF a capped green PR already reaches a rung: read
+    `deriveDisposition`'s rule table (sweep.ts) for a row matching capped, and the `mergeable`
+    case in the action switch. MEASURED 2026-09-09: the only capped reference in that path is
+    `cappedOverrideFromLedger`, consulted to decide whether to arm — never to route.
+    THE ARM REFUSAL IS THE CONTROL AND IT MUST BE PROVEN UNMOVED. A fixture with a capped verdict
+    must STILL refuse to arm after this change. A suite that only proves the new disposition passes
+    on an implementation that also relaxed the gate, which would be the single most damaging
+    outcome available here.
+    PROVE THE NEW MODE IS UNREACHABLE TODAY: run `deriveFixMode` over the capped-with-zero-unmet
+    evidence against the CURRENT table and require it NOT to be the new mode. Without that control
+    the new row may be matching something the old table already handled, and the task is moving code
+    rather than closing a gap.
+    PROVE THE LOOP TERMINATES. A repair that lands and still grades stale must consume a strike and
+    reach the existing escalation, not re-dispatch. A fix rung with no ceiling on a PR nobody can
+    repair is worse than the stall it replaces.
+    DO NOT ARM A CAPPED VERDICT. Stated twice on purpose, here and in design (ii).
+    DO NOT MATCH ON `reason` PROSE. The keyword-floor sentence is rendered text and rots; match on
+    the structured `proof_exec` grades and the `capped` flag.
+  note: |
+    Rule 25 CHECKED: neither `src/lib/sweep.ts` nor `src/lib/prompt-render.ts` is on
+    INSTRUMENT_SURFACE (which names config/settings/mounts, review/task-linter,
+    run-result/status/ledger/flight-judge, `src/run-task.ts`, `bin/` and the named scripts). Two
+    product src files plus this task's own falsifier, so `detectInstrumentEntanglement` cannot fire.
+    risk:high on BLAST RADIUS: two files is a narrow span, but this is the merge path. A defect here
+    either arms something that should not merge or stalls something that should — and the first is
+    unrecoverable. The falsifier is written against that direction specifically.
+    A CORRECTION IS RECORDED HERE BECAUSE IT CHANGED THE TASK. The first diagnosis claimed the
+    ledger line LIES — that `sweep.disposed` says "arming auto-merge" while `acted:false` and the
+    refusal never reaches the ledger. That was WRONG: `stand_down_reason` carries the capped refusal
+    verbatim, and the first read simply printed the `reason` field and dropped it. There is no
+    legibility defect. The stall is real; the invisibility was the reader's.
+    THE CAPPED FLAG IS READ STRUCTURALLY, NEVER FROM PROSE. `postedArmFactsFromLedger` already
+    returns it; the stale criteria come from the same `review.posted` row's own verdict. Matching
+    `armDecision.reason` text would rot the moment that sentence is reworded, and this task's own
+    falsifier forbids it.
+
+    PREVENTION IS A SIBLING AND IS DELIBERATELY NOT FOLDED IN. `lint-plan` already reports this
+    shape at filing time as `proof-base-discrimination`, as a WARNING — which is how all three of
+    the measured PRs shipped. Promoting it is a separate task with a separate population and its own
+    false-positive question (a task REPAIRING a currently-failing suite legitimately names an
+    existing file).
