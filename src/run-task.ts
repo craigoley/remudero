@@ -20052,6 +20052,52 @@ function retroShippedGithubGateway(): ShippedGithub {
 const RUN_LEDGER_STEP_PATTERN =
   '"step":"run\\.start"|"step":"verdict"|"step":"pr\\.opened"|"step":"recon\\.done"|"step":"implement\\.done"|"step":"implement\\.resumed"|"step":"correction\\.provenance"';
 
+/** Last unavailable observation already reported by this process. `retroTriggerCheck` is a
+ * self-target-only command, so one fixed-width record is sufficient. This is transition memory for
+ * telemetry only: it never changes the trigger decision, schedules no retry, and creates no
+ * persisted latch. A healthy read clears it so a later outage is reported as a new incident. */
+let lastRetroTriggerDecline:
+  | { ledgerPath: string; fingerprint: string }
+  | undefined;
+
+function reportRetroTriggerDecline(
+  ledgerPath: string,
+  marker: { ts: string } | undefined,
+  now: Date,
+  reason: string,
+): void {
+  const fingerprint = `${marker?.ts ?? "absent"}\u0000${reason}`;
+  if (
+    lastRetroTriggerDecline?.ledgerPath === ledgerPath &&
+    lastRetroTriggerDecline.fingerprint === fingerprint
+  ) {
+    return;
+  }
+  let markerAgeMs: number | "unbounded" | "unknown";
+  if (marker === undefined) {
+    markerAgeMs = "unbounded";
+  } else {
+    const parsedMarkerMs = Date.parse(marker.ts);
+    markerAgeMs = Number.isFinite(parsedMarkerMs)
+      ? Math.max(0, now.getTime() - parsedMarkerMs)
+      : "unknown";
+  }
+  try {
+    appendProducerLedger(ledgerPath, "daemon", {
+      run_id: "RETRO-TRIGGER",
+      step: "daemon.retro_trigger.declined",
+      outcome: "declined",
+      reason,
+      marker_ts: marker?.ts ?? null,
+      marker_age_ms: markerAgeMs,
+    });
+    lastRetroTriggerDecline = { ledgerPath, fingerprint };
+  } catch {
+    // Best-effort evidence. A failed append must not turn an unreadable GitHub corpus into a
+    // retro decision; leaving the fingerprint unset lets the next tick retry the report.
+  }
+}
+
 /**
  * W1-T160: evaluate the retro cadence trigger against the REAL marker + ledger +
  * GitHub read — the impure wiring behind `evaluateRetroTrigger` (retro.ts, pure).
@@ -20101,7 +20147,14 @@ export function retroTriggerCheck(
   if (markerResolution.kind === "corrupt") return undefined;
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
   const github = deps.github ?? retroShippedGithubGateway();
-  if (github.unavailable?.()) return undefined;
+  const githubUnavailable = github.unavailable?.();
+  if (githubUnavailable) {
+    reportRetroTriggerDecline(ledgerPath, marker, now, githubUnavailable);
+    return undefined;
+  }
+  if (lastRetroTriggerDecline?.ledgerPath === ledgerPath) {
+    lastRetroTriggerDecline = undefined;
+  }
   // MERGE RESOLUTION (W1-T2289 x the ledger-union and runless-merge fixes on main). Both sides
   // rewrote this block and each carries behaviour the other lacks, so neither could be taken whole:
   // main supplies the SOURCE (`resolveLedgerUnion`, which sees rotated archives a bare
