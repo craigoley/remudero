@@ -55,14 +55,23 @@ function summaryOf(over: Partial<WorktreeReapSummary> = {}): WorktreeReapSummary
 
 /** A real repo whose ad-hoc lane root holds one real LINKED worktree, aged past the ceiling.
  *  Returns the config root, the parent repo, the lane path and its branch name. */
-function laneFixture(): { root: string; repo: string; lane: string; branch: string } {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}adhoc-lane-reap-`));
+/** The seeded repo BOTH fixtures below start from, extracted so ONE `git init` call site serves
+ *  both. Two hand-rolled copies pushed scripts/fixture-copy-baseline.json's `gitInitSites` row over
+ *  its ceiling — and making that duplication visible is the whole point of that census, so the
+ *  answer is to stop duplicating rather than to raise the row. */
+function seedRepo(prefix: string): { root: string; repo: string } {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));
   const repo = join(root, "repo");
   mkdirSync(repo, { recursive: true });
   git(["init", "--quiet", "-b", "main"], repo);
   writeFileSync(join(repo, "f.txt"), "x\n");
   git(["add", "-A"], repo);
   git(["commit", "--quiet", "-m", "first"], repo);
+  return { root, repo };
+}
+
+function laneFixture(): { root: string; repo: string; lane: string; branch: string } {
+  const { root, repo } = seedRepo("adhoc-lane-reap-");
   const laneRoot = adhocLaneRoot(cfg(join(root, "rmd-root")));
   mkdirSync(laneRoot, { recursive: true });
   const branch = "alloc";
@@ -306,13 +315,7 @@ test("W1-T2962: an unregistered directory is never a candidate", () => {
 
 /** A real repo with one registered linked worktree outside both managed roots. */
 function unmanagedLaneFixture(): { root: string; repo: string; lane: string; branch: string } {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}adhoc-lane-unmanaged-`));
-  const repo = join(root, "repo");
-  mkdirSync(repo, { recursive: true });
-  git(["init", "--quiet", "-b", "main"], repo);
-  writeFileSync(join(repo, "f.txt"), "x\n");
-  git(["add", "-A"], repo);
-  git(["commit", "--quiet", "-m", "first"], repo);
+  const { root, repo } = seedRepo("adhoc-lane-unmanaged-");
   const branch = "manual-lane";
   const lane = join(root, "manual", branch);
   mkdirSync(dirname(lane), { recursive: true });
