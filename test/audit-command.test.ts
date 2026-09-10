@@ -18,12 +18,14 @@
  *        unreproduced through the full command, not just the pure grader.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import {
+  buildDefaultCorpus,
   gatherFindings,
   gradeFixture,
   parseEvidenceCitations,
@@ -160,6 +162,47 @@ test("gatherFindings: execFileSync with no nearby timeout is flagged; the SAME c
   assert.ok(!gatherFindings(safe).some((f) => f.gatherer === "exec-file-sync-without-timeout"));
 });
 
+test("gatherFindings: malformed JSON inputs are ignored rather than thrown", () => {
+  const corpus: AuditCorpus = new Map([
+    ["scripts/source-size-baseline.json", "{not-json"],
+    ["stryker.conf.json", "{also-not-json"],
+    ["src/lib/env.ts", "export const x = process.env.X;"],
+  ]);
+  const findings = gatherFindings(corpus);
+  assert.ok(findings.some((f) => f.gatherer === "process-env-reads"));
+  assert.ok(!findings.some((f) => f.gatherer === "source-size-over-baseline"));
+  assert.ok(!findings.some((f) => f.gatherer === "mutation-ratchet-scope"));
+});
+
+test("gatherFindings: dangling doc-to-source citations are reported once per doc", () => {
+  const corpus: AuditCorpus = new Map([
+    ["README.md", "See src/lib/missing.ts:10 for the old claim."],
+    ["CONTRIBUTING.md", "See src/lib/present.ts:3 for a line past EOF."],
+    ["src/lib/present.ts", "one\ntwo"],
+  ]);
+  const findings = gatherFindings(corpus).filter((f) => f.gatherer === "dangling-doc-citations");
+  assert.deepEqual(
+    findings.map((f) => [f.file, f.symbol]),
+    [
+      ["README.md", "src/lib/missing.ts"],
+      ["CONTRIBUTING.md", "src/lib/present.ts"],
+    ],
+  );
+});
+
+test("buildDefaultCorpus: missing optional dirs and dangling walk entries are skipped", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-audit-corpus-"));
+  try {
+    mkdirSync(join(root, "src"), { recursive: true });
+    symlinkSync("missing-target.ts", join(root, "src", "dangling.ts"));
+    const corpus = buildDefaultCorpus(root);
+    assert.equal(corpus.has("src/dangling.ts"), false);
+    assert.equal(corpus.size, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── (ii) THE CALLER — real fixture, real checkout, no injected deps ─────────────────────────
 
 async function runAuditCapturing(args: string[]): Promise<{ exitCode: number; stdout: string }> {
@@ -190,6 +233,19 @@ test("auditFixtureCommand: --fixture is required, exit 2", async () => {
 test("auditFixtureCommand: an unreadable --fixture path is refused, exit 2", async () => {
   const { exitCode } = await runAuditCapturing(["--fixture", join(REPO_ROOT, "no-such-w1-t2924-fixture.md")]);
   assert.equal(exitCode, 2);
+});
+
+test("auditFixtureCommand: a fixture with no finding rows prints a no-grade report, exit 0", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-audit-empty-fixture-"));
+  try {
+    const fixturePath = join(dir, "empty.md");
+    writeFileSync(fixturePath, "# no findings here\n\n| ID | Evidence |\n|---|---|\n", "utf8");
+    const { exitCode, stdout } = await runAuditCapturing(["--fixture", fixturePath]);
+    assert.equal(exitCode, 0);
+    assert.match(stdout, /no '\| R-n \| .* \|' finding rows parsed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("auditFixtureCommand: reproduces at least 29 of recon-2026-07-21.md's 36 findings from THIS real checkout", async () => {
