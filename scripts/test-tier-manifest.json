@@ -31,6 +31,7 @@
     "test/a-declared-file-absent-from-a-diff-is-not-proof-of-drift.test.ts": 1338,
     "test/a-deferred-follow-up-names-no-filed-id.test.ts": 2505,
     "test/a-denied-scope-claim-is-not-a-claim.test.ts": 1022,
+    "test/a-drafted-skill-is-selectable-for-its-own-task-type.test.ts": 0,
     "test/a-described-rule-is-not-a-claim.test.ts": 1029,
     "test/a-detached-retro-does-not-steal-the-dispatch-ticker.test.ts": 0,
     "test/a-digest-reaches-a-surface-the-operator-reads.test.ts": 0,
