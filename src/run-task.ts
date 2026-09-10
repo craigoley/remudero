@@ -899,10 +899,12 @@ import {
   loadLearningsIndex,
   loadLearningsCorpus,
   parsePromotionJudgeVerdict,
+  parseRuleBodyPointer,
   parseRuleHeadlines,
   projectLearningsHome,
   renderExportBundle,
   renderHeadlineOnlyIndex,
+  resolveRuleBodyPointer,
   retrieveRuleBodyOrDegrade,
   runPromotionPass,
   verifyBundlePin,
@@ -10579,7 +10581,41 @@ export function retrieveRuleBodyOnDemand(
     headline,
     body: ` (unavailable — no headline matches "${headline}" in ${sourcePath})`,
   };
-  return retrieveRuleBodyOrDegrade(rule, (h) => index.get(h));
+  return retrieveRuleBodyOrDegrade(rule, (h) => followRuleBodyPointer(h, index.get(h), sourcePath, readFile));
+}
+
+/**
+ * W1-T3323: CLAUDE.md's index now answers `index.get(headline)` with `→ doctrine/…`, the ADDRESS
+ * of the body rather than the body. This lane follows it.
+ *
+ * IT DEGRADES WHERE {@link resolveRuleBodyPointer} THROWS, and that difference is deliberate,
+ * the same split `learnings.ts` already documents between the reader path and the worker path: a
+ * test asserting a doctrine fact must FAIL when it cannot read that fact, but a worker prompt must
+ * never go silent — a headline whose body cannot be fetched leaves the worker knowing a rule
+ * exists, unable to read it, and proceeding anyway. So an unreadable or mismatched target yields a
+ * NAMED unavailability that {@link retrieveRuleBodyOrDegrade} turns into the full rule, and the
+ * pointer text itself is what the worker sees: an address it can open with its own tools.
+ */
+export function followRuleBodyPointer(
+  headline: string,
+  body: string | undefined,
+  sourcePath: string,
+  readFile: (path: string) => string | undefined,
+): string | undefined {
+  if (body === undefined) return undefined;
+  const pointer = parseRuleBodyPointer(body);
+  if (pointer === undefined) return body;
+  const stored = readFile(join(dirname(sourcePath), pointer.target));
+  if (stored === undefined) {
+    return ` (unavailable — could not read doctrine body ${pointer.target} for "${headline}")`;
+  }
+  try {
+    return resolveRuleBodyPointer(headline, pointer, () => stored);
+  } catch {
+    // The stored file does not open with this headline — a mis-pointed rule. Say so by name;
+    // handing back another rule's evidence under this rule's instruction is the worse failure.
+    return ` (unavailable — doctrine body ${pointer.target} does not carry the headline "${headline}")`;
+  }
 }
 
 /** The one citation every `rule_headlines` line carries — the task that shipped the
@@ -10634,9 +10670,19 @@ export function buildRuleHeadlinesPart(
     .split("\n")
     .filter((l) => l.length > 0)
     .map((l) => `    ${l.replace(/^- /, "")}`);
-  const pointer =
-    `    Read a headline's full body from ${sourcePath} in your own worktree when you need it — ` +
-    "this index carries headlines only.";
+  // W1-T3323: the bodies left CLAUDE.md for `doctrine/`, so the line telling a worker WHERE to
+  // read one has to move with them or it sends the worker to a file that no longer holds the
+  // evidence. The 56 paths themselves stay OUT of the prompt — that is ~2800 bytes on every
+  // turn-0 to save one `grep`, and this part exists to spend fewer bytes, not more; the source
+  // names the exact path beside every headline and the worker has it in its own worktree.
+  // A corpus whose bodies are still inline (any un-migrated tree) keeps the original line.
+  const migrated = rules.some((r) => parseRuleBodyPointer(r.body) !== undefined);
+  const pointer = migrated
+    ? `    Each headline's full body — the measurement that earned it — is a file under ` +
+      `doctrine/ in your own worktree, and ${sourcePath} names the exact path beside every ` +
+      `headline. Read one when you are about to apply that rule precisely, or you doubt it.`
+    : `    Read a headline's full body from ${sourcePath} in your own worktree when you need it — ` +
+      "this index carries headlines only.";
   return [introLine, ...indexLines, pointer].join("\n");
 }
 

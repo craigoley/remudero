@@ -16,6 +16,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -135,7 +136,12 @@ test("W1-T2849: no `git grep` pattern anywhere in the tree relies on a word boun
 // ── criterion 4 ──────────────────────────────────────────────────────────────────────────────
 
 test("W1-T2849: the investigation-discipline clause no longer asserts that `git grep` honours a word boundary", () => {
-  const md = readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8");
+  // W1-T3323: CLAUDE.md is an INDEX and the rule bodies live in `doctrine/`, so a raw read of
+  // the file no longer contains the prose this pins. `resolveDoctrineForReader` follows every
+  // pointer and fails LOUD on one that dangles, which is exactly the discipline W1-T3322 named:
+  // a test asserting a doctrine fact must fail when it cannot read that fact, never pass because
+  // the fact moved.
+  const md = resolveDoctrineForReader(() => readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8"));
   // CONTROL: the clause must still be there at all, or this passes because the file moved.
   assert.match(md, /A POSIX REGEX ENGINE HERE SILENTLY DROPS/, "clause (a) must still exist");
   assert.doesNotMatch(

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { citation } from "./provenance.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -1432,6 +1433,91 @@ export function retrieveRuleBody(index: Map<string, string>, headline: string): 
   return index.get(headline);
 }
 
+/**
+ * W1-T3323: a rule body that is NOTHING BUT A POINTER to the file holding its evidence.
+ *
+ * CLAUDE.md is now an INDEX — 56 headlines, each followed by `→ doctrine/<section>/<rule>.md` —
+ * because the headline IS the instruction and the body is the measurement that makes it
+ * believable. An interactive agent cannot call {@link retrieveRuleBody}; Claude Code reads
+ * CLAUDE.md natively and offers no hook. So the address has to be READABLE TEXT ON THE LINE,
+ * which is the design's one load-bearing constraint: an agent that never fetches still holds
+ * every instruction, and one that needs the evidence has a path it can `cat`.
+ *
+ * THE TRAILING GROUP IS NOT COSMETIC. {@link parseRuleHeadlines} ends a bullet at the NEXT bullet
+ * or heading, so the blank line separating a section's last rule from the next `##` lands inside
+ * that rule's body. Capturing it and replaying it after the resolved body is what makes
+ * {@link resolveDoctrineForReader} reproduce the pre-migration file BYTE FOR BYTE (proved at
+ * 43685 -> 43685 by test/the-doctrine-index-points-at-every-body.test.ts). An anchored `$` alone
+ * would have silently refused every section-final pointer and left those five rules unresolved.
+ *
+ * EVERY SEGMENT MUST OPEN WITH AN ALPHANUMERIC, WHICH IS WHAT KEEPS A POINTER INSIDE THE STORE.
+ * A first draft used the flat class `[A-Za-z0-9._/-]+` and happily accepted
+ * `doctrine/../../etc/shadow.md` — and the pointer's target is READ AND RETURNED AS DOCTRINE, so a
+ * pattern that admits traversal turns a rule body into an arbitrary-file read. `..` has no leading
+ * alphanumeric, and neither does the empty segment in `doctrine//x.md`, so both are refused; the
+ * fixture in test/the-doctrine-index-points-at-every-body.test.ts drives that arm directly.
+ */
+export const RULE_BODY_POINTER_RE =
+  /^[ \t]*(?:→|->)[ \t]+(doctrine(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)+\.md)([ \t]*\n*)$/;
+
+/** One parsed `→ doctrine/…` body: where the evidence lives, and the separator whitespace that
+ *  followed the pointer and must survive the round trip. */
+export interface RuleBodyPointer {
+  /** Repo-relative path to the markdown file holding this rule's full bullet. */
+  target: string;
+  /** Whitespace that trailed the pointer — section separators {@link parseRuleHeadlines} folds
+   *  into the body. Replayed verbatim after the resolved body. */
+  trailer: string;
+}
+
+/** `undefined` for an ordinary inline body — which is how a corpus that has NOT been migrated,
+ *  and every synthetic fixture, keeps resolving exactly as it did before W1-T3323. */
+export function parseRuleBodyPointer(body: string): RuleBodyPointer | undefined {
+  const m = RULE_BODY_POINTER_RE.exec(body);
+  return m ? { target: m[1], trailer: m[2] } : undefined;
+}
+
+/**
+ * Follow one pointer to its body. FAILS LOUD IN BOTH DIRECTIONS, because design (v) of W1-T3323
+ * says a doctrine that silently loses its evidence is worse than one that is merely long:
+ * an unreadable target throws, and so does a target whose stored bullet does not open with THIS
+ * headline — the case a careless rename or a copy-pasted pointer produces, where every byte is
+ * readable and the reader is handed another rule's evidence under this rule's instruction.
+ */
+export function resolveRuleBodyPointer(
+  headline: string,
+  pointer: RuleBodyPointer,
+  readStoreFile: (target: string) => string,
+): string {
+  let stored: string;
+  try {
+    stored = readStoreFile(pointer.target);
+  } catch {
+    throw new LearningsError(
+      `resolveRuleBodyPointer: doctrine body "${pointer.target}" for "${headline}" is unreadable`,
+    );
+  }
+  const prefix = `- **${headline}**`;
+  const text = stored.replace(/\n$/, "");
+  if (!text.startsWith(prefix)) {
+    throw new LearningsError(
+      `resolveRuleBodyPointer: doctrine body "${pointer.target}" does not open with its own headline "${headline}"`,
+    );
+  }
+  return text.slice(prefix.length) + pointer.trailer;
+}
+
+/** The repo root this module was loaded from, so the default store reader resolves a
+ *  repo-relative `doctrine/…` pointer with no caller passing a root. `src/lib/learnings.ts` ->
+ *  two levels up. */
+export const DOCTRINE_STORE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/** Default store reader: a real repo-relative read. Injected in every test, so the pointer logic
+ *  is provable without a fixture tree on disk. */
+export function readDoctrineStoreFile(target: string, root: string = DOCTRINE_STORE_ROOT): string {
+  return readFileSync(join(root, target), "utf8");
+}
+
 /** Resolve the complete rule corpus a doctrine reader sees. This is deliberately STRICTER than
  * {@link retrieveRuleBodyOrDegrade}: a worker prompt must degrade rather than go silent, but a
  * test asserting a doctrine fact must fail when it cannot read that fact. The parser and index are
@@ -1440,6 +1526,7 @@ export function retrieveRuleBody(index: Map<string, string>, headline: string): 
 export function resolveDoctrineForReader(
   readSource: () => string,
   readBody?: (headline: string) => string | undefined,
+  readStoreFile: (target: string) => string = (target) => readDoctrineStoreFile(target),
 ): string {
   let source: string;
   try {
@@ -1466,7 +1553,13 @@ export function resolveDoctrineForReader(
       if (body === undefined) {
         throw new LearningsError(`resolveDoctrineForReader: body for "${rule.headline}" is absent`);
       }
-      return `- **${rule.headline}**${body}`;
+      // W1-T3323: after the migration the INDEX holds a pointer where the body used to sit, so a
+      // reader that asks for the doctrine gets the evidence followed, not the address quoted. An
+      // inline body (an un-migrated corpus, any synthetic fixture) parses to `undefined` here and
+      // passes through byte-unchanged.
+      const pointer = parseRuleBodyPointer(body);
+      const resolved = pointer === undefined ? body : resolveRuleBodyPointer(rule.headline, pointer, readStoreFile);
+      return `- **${rule.headline}**${resolved}`;
     })
     .join("\n");
 }

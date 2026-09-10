@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { readFile, writeFile, mkdtemp, rm, mkdir } from "node:fs/promises";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -20,6 +20,7 @@ import {
   type StaleCiGateTransition,
   type SweepDeps,
 } from "../src/lib/sweep.js";
+import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 // ── W1-T261: ci-gate RE-AGGREGATES on member-check completion ───────────────────────────────
@@ -369,8 +370,11 @@ test("ci-gate-reaggregate (W1-T312): a required check that never completes withi
 });
 
 test("ci-gate-reaggregate (W1-T312): CLAUDE.md no longer states that W1-T261 is unimplemented", async () => {
+  // W1-T3323: CLAUDE.md is an INDEX and the rule bodies live in `doctrine/`, so a raw read no
+  // longer holds the prose this pins. `resolveDoctrineForReader` follows every pointer and
+  // throws on one that dangles — a moved fact reddens here rather than passing as an absence.
   const claudeMdPath = join(REPO_ROOT, "CLAUDE.md");
-  const raw = await readFile(claudeMdPath, "utf8");
+  const raw = resolveDoctrineForReader(() => readFileSync(claudeMdPath, "utf8"));
   assert.doesNotMatch(
     raw,
     /W1-T261[^\n]*UNIMPLEMENTED/i,
