@@ -238,3 +238,77 @@ test("W1-T3306: malformed current verdict evidence fails closed", () => {
   const malformed = { ...cappedPosted(), decision_verdict: { state: "success", capped: true, criteria: "not an array" } };
   assert.equal(cappedProofDiscriminationFromLedger(pr(), [malformed]), undefined);
 });
+
+// ── the ledger reader's two rejection surfaces ────────────────────────────────────────────────
+// `cappedProofDiscriminationFromLedger` is what turns a stored review row back into evidence a
+// dispatch can act on, so its parser is the boundary between "a verdict we can bind to this PR and
+// head" and "prose we must not act on". Both tests below drive it through its exported entry point;
+// neither reaches for an internal.
+
+test("W1-T3306: every declared proof_exec outcome is accepted, so a stored verdict is not silently dropped", () => {
+  // The guard is an alternation, and the LAST member is the one that forces every earlier
+  // comparison to be evaluated — a value matching the first alternative proves nothing about the
+  // rest. `stale_self_path` is that member. A verdict carrying a legitimate outcome the guard
+  // forgot would be discarded here as malformed, and the rung would stand down on a PR whose
+  // evidence was fine.
+  const outcomes: CriterionVerdict["proof_exec"][] = [
+    "executed_stale",
+    "not_executable",
+    "executed_pass",
+    "executed_fail",
+    "exec_error",
+    "base_unreadable",
+    "not_yet_built",
+    "stale_self_path",
+  ];
+  // EACH OUTCOME IS PAIRED WITH A STALE CRITERION, and that pairing is the whole design of this
+  // test. Evidence is derived ONLY from `executed_stale`/`not_executable` criteria
+  // (proofDiscriminationEvidenceFromCriteria), so asserting "evidence exists" for a lone
+  // `executed_pass` conflates the PARSER with the FILTER and fails for the wrong reason — it did,
+  // on the first version of this test. With a stale sibling present, evidence appears iff the
+  // parser ACCEPTED both criteria; a rejected outcome makes criteriaFromLedgerValue return
+  // undefined and takes the sibling's evidence down with it.
+  for (const proof_exec of outcomes) {
+    const line = cappedPosted();
+    (line.decision_verdict as Record<string, unknown>).criteria = [
+      cappedCriterion({ proof_exec }),
+      cappedCriterion({ proof_exec: "executed_stale" }),
+    ];
+    const evidence = cappedProofDiscriminationFromLedger({ taskId: TASK, prUrl: PR_URL, headSha: HEAD }, [line]);
+    assert.ok(
+      evidence,
+      `a stored verdict carrying proof_exec "${proof_exec}" beside a stale criterion must parse; ` +
+        "an unrecognised outcome would discard the whole row",
+    );
+  }
+});
+
+test("W1-T3306: a criterion missing a required field is refused, and clears the evidence rather than half-reading it", () => {
+  // FAIL CLOSED IS THE POINT. A partially-read criterion is worse than none: the dispatch would act
+  // on a verdict it cannot bind. Each case below breaks exactly one field, so a parser that stopped
+  // checking any single one reddens here rather than passing on the strength of the others.
+  const broken: Array<[string, Record<string, unknown>]> = [
+    ["claim is not a string", { claim: 1 }],
+    ["proof is not a string", { proof: 1 }],
+    ["met is not a boolean", { met: "yes" }],
+    ["reason is not a string", { reason: 1 }],
+    ["proof_exec is not a declared outcome", { proof_exec: "invented_outcome" }],
+  ];
+  for (const [label, over] of broken) {
+    // THE VALID STALE SIBLING IS WHAT MAKES EACH ARM DISCRIMINATE. Alone, a broken criterion
+    // yields no evidence whether the parser REJECTED the row or merely produced nothing from it —
+    // measured: dropping the proof_exec check changed nothing observable. With a sibling that WOULD
+    // produce evidence, a parser that stopped checking any single field accepts the row and the
+    // sibling's evidence appears, so this assertion fails for the right reason.
+    const line = cappedPosted();
+    (line.decision_verdict as Record<string, unknown>).criteria = [
+      { ...cappedCriterion(), ...over },
+      cappedCriterion({ proof_exec: "executed_stale" }),
+    ];
+    assert.equal(
+      cappedProofDiscriminationFromLedger({ taskId: TASK, prUrl: PR_URL, headSha: HEAD }, [line]),
+      undefined,
+      `a criterion whose ${label} must yield NO evidence, never a partial read`,
+    );
+  }
+});
