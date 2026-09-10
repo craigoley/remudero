@@ -1,0 +1,90 @@
+- id: W1-T3325
+  title: "A RETRO THAT CANNOT READ GITHUB DECLINES IN SILENCE — `retroTriggerCheck` returns `undefined` on an unavailable gateway and NOTHING is ledgered, so a 49-hour stall and 'nothing was worth a retro' are indistinguishable on every signal the fleet emits"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 14.00
+  files:
+    - src/run-task.ts
+    - test/a-retro-that-cannot-read-github-declines-in-silence.test.ts
+  origin: "operator-session#ci-learning-repair-2026-09-10"
+  plan_refs: ["W1-T2981", "W1-T2289", "W1-T186"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10. The last `retro.start` anywhere in the three-form ledger union is
+    2026-09-08T09:12:26Z — about 49 hours before this filing. The retro marker
+    `state/last-retro.json` reads 2026-09-03T02:24:39Z, five days behind even that.
+
+    THE SILENT PATH. `retroTriggerCheck` (src/run-task.ts:19907):
+
+        if (github.unavailable?.()) return undefined;
+
+    `undefined` makes `decision?.fire` falsy in daemon.ts:2399, so no retro fires — and NOTHING is
+    written. The sibling `daemon.retro_trigger.check_failed` (daemon.ts:2391) logs only when the
+    check THROWS, never on this early return. MEASURED: zero `retro_trigger.already_detached` rows
+    and zero `retro.*` rows in the live ledger, so the stall is not a stuck detached action; the
+    trigger is declining and saying nothing.
+
+    THE STARVING INPUT IS REAL AND ONGOING: 16 `Bad credentials (HTTP 401)` lines in the daemon
+    container log since midnight 2026-09-10, against a GitHub App token that refreshes hourly. Any
+    401 landing on a retro tick silently skips that tick.
+
+    THIS IS THE REPO'S OWN NAMED DEFECT CLASS. `escalate.ts`'s polarity note, W1-T186's emitter
+    discipline, and CLAUDE.md's "a read failure degrades to UNKNOWN, never to zero" all say the same
+    thing: an outage and an absence must not render identically. Here they render as nothing at all.
+
+    THE REFUSAL ITSELF IS CORRECT and this task does not touch it — a retro synthesised over an
+    unreadable corpus would be worse than none. Only its silence is the defect.
+  design: |
+    (i) THE UNAVAILABLE RETURN IS LEDGERED, with the gateway's own reason. One row, at the moment of
+    the decision, naming that the retro was DECLINED because GitHub could not be read — never a
+    generic skip and never the `check_failed` row, which means something different (a throw).
+    (ii) THE ROW CARRIES MARKER AGE, because that is what makes a single decline actionable. A
+    decline over a two-hour-old marker is routine; one over a five-day-old marker is the condition
+    observed here and must be visible without a ledger archaeology pass.
+    (iii) DECLINE IS NOT SKIP AND NOT FIRE. Three distinct outcomes, three distinct rows: fired,
+    skipped-because-nothing-qualified, declined-because-unreadable. Folding the third into the second
+    is exactly the conflation this task exists to remove.
+    (iv) NO RETRY, NO BACKOFF, NO STATE. The next tick re-derives; a decline is a report, not a
+    latch. Adding a retry here would put a second scheduler on a rung that already has one.
+    (v) NOT IN SCOPE: the 401 itself (a credential fact, not a code one), the retro's own trigger
+    thresholds, the marker-advance path, and whether a detached retro should bound itself.
+  acceptance:
+    - claim: "an unavailable gateway writes a ledger row naming the decline, where today it writes nothing"
+      proof: "unit test: test/a-retro-that-cannot-read-github-declines-in-silence.test.ts"
+    - claim: "the decline row carries the marker's age, so a routine decline and a multi-day stall are distinguishable"
+      proof: "unit test: test/a-retro-that-cannot-read-github-declines-in-silence.test.ts"
+    - claim: "a decline, a nothing-qualified skip, and a fire are three distinct outcomes, never folded together"
+      proof: "unit test: test/a-retro-that-cannot-read-github-declines-in-silence.test.ts"
+    - claim: "a readable gateway is byte-identical to today: no new row on the healthy path"
+      proof: "unit test: test/a-retro-that-cannot-read-github-declines-in-silence.test.ts"
+    - claim: "the decline still returns no decision, so an unreadable corpus can never produce a retro"
+      proof: "unit test: test/a-retro-that-cannot-read-github-declines-in-silence.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF the decline is already visible: drive `retroTriggerCheck` with a
+    gateway whose `unavailable()` returns true and read every row it writes. MEASURED 2026-09-10 at
+    4ca042d3: it returns `undefined` at src/run-task.ts:19907 before any logging call is reached.
+    THE POSITIVE CONTROL IS A READABLE GATEWAY, because "no row because healthy" and "no row because
+    the fixture never ran" are the same absence: the same suite must show the healthy path producing
+    its existing rows unchanged.
+    PROVE THE DECLINE STILL DECLINES. A test that asserts the row but lets a decision through has
+    turned a diagnostic into a behaviour change — the retro must still refuse to run on an unreadable
+    corpus, and that assertion must be in the same test as the row.
+    DO NOT ADD A RETRY OR A BACKOFF. The tick is the scheduler; a second one here would fire retros
+    against exactly the outage this row exists to report.
+    DO NOT LOG ON EVERY TICK. A decline row per poll would bury the ledger — the row belongs to the
+    DECISION, and a fixture driving repeated declines must show the row is not per-tick noise.
+  note: |
+    Rule 25 CHECKED: `src/run-task.ts` IS on INSTRUMENT_SURFACE; the declared files are that module
+    and this task's own falsifier, which is the sanctioned instrument-plus-test shape, so
+    `detectInstrumentEntanglement` has no product-`src/` path to pair and cannot fire.
+    SEQUENCING WITH W1-T3324: both edit `src/run-task.ts` and are not independently mergeable.
+    They are separate concerns — one is a rung that files nothing, the other a trigger that says
+    nothing — but whichever lands first, the other rebases.
+    WHAT THIS DOES NOT FIX, STATED SO IT IS NOT MISREAD AS A CURE: the retro will still decline while
+    the 401s continue. This task makes the decline VISIBLE and counted; it does not make the retro
+    run. The operator has ruled the credential out of scope for this pass.
