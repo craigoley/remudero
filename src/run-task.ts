@@ -27229,6 +27229,15 @@ export function classifyPlanFiling(
     : { isPlanFiling: false, source: "not-plan-only" };
 }
 
+function introducedTaskIdsFromPlanPaths(paths: readonly string[]): string[] {
+  const ids = new Set<string>();
+  for (const path of paths) {
+    const match = /^plan\/tasks\.d\/(W\d+-T\d+)-/.exec(path);
+    if (match) ids.add(match[1]);
+  }
+  return [...ids].sort();
+}
+
 /** One bounded ledger row per classification transition, never one row per unchanged poll. */
 export function createPlanFilingClassificationTelemetry(
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -27621,6 +27630,11 @@ export function buildOpenPrViews(
     planFilingFileMissCap?: number;
     /** Bounded classification telemetry; production de-duplicates unchanged head/source pairs. */
     onPlanFilingClassification?: (event: PlanFilingClassificationEvent) => void;
+    /** W1-T3283 — the main-plan read that branch-derived trailer repair depends on. Injectable for
+     *  the same reason `readCiGateRequired` above is: `repoRoot` is a MODULE-level import, not a
+     *  parameter, so without a seam no test can reach the unreadable-plan arm below — the checkout
+     *  a test runs in always has a readable plan. Omitted, it is `loadPlan` on the real path. */
+    readMainPlan?: (root: string) => Plan;
   } = {},
 ): ClassifiedOpenPrView[] {
   const fetch = deps.fetch ?? ghJson;
@@ -27658,6 +27672,13 @@ export function buildOpenPrViews(
   const ciGateRequired = deps.readCiGateRequired
     ? deps.readCiGateRequired(repoRoot)
     : readCiGateRequiredChecks(repoRoot);
+  let mainPlan: Plan | undefined;
+  try {
+    mainPlan = deps.readMainPlan ? deps.readMainPlan(repoRoot) : loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  } catch {
+    // An unreadable local plan only disables branch-derived trailer repair for this pass.
+    mainPlan = undefined;
+  }
 
   // W1-T2864: the local emitter receipt is still the zero-request positive answer. Only PRs
   // without it enter the bounded REST hydrator; complete reads are cached by exact head.
@@ -27741,6 +27762,9 @@ export function buildOpenPrViews(
   return raw.map((pr) => {
     const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
     const taskId = resolveOpenPrTaskId(pr, ledger);
+    const taskRecord = taskId ? mainPlan?.byId.get(taskId) : undefined;
+    const fileObservation = planFilingFiles.get(pr.number);
+    const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
     const reviewLedgerKey = taskId ?? `PR-${pr.number}`;
     const inputDigest = reviewInputDigest(pr.headRefOid, pr.body ?? "");
     const peers = taskId ? (byTask.get(taskId) ?? []) : [];
@@ -27861,6 +27885,11 @@ export function buildOpenPrViews(
       // The ABSENT-check-suite remedy pushes an empty commit to THIS branch. Already fetched
       // for isDependabot above — carried through rather than re-queried.
       headRefName: pr.headRefName,
+      body: pr.body,
+      taskExistsOnMain: taskId === undefined ? undefined : taskRecord !== undefined,
+      introducedTaskIds: observedFiles === undefined ? undefined : introducedTaskIdsFromPlanPaths(observedFiles),
+      changedFiles: observedFiles,
+      taskDeclaredFiles: taskRecord?.files,
       // W1-T528: the operator's hold, straight off the SAME list row the enumeration already
       // fetched — no extra request, because `draft` rides on GitHub's `pull-request-simple`
       // schema. This is the producer `test/producer-completeness.test.ts` demands; without it
@@ -29442,6 +29471,11 @@ export interface BuildSweepEffectsDeps {
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
   readJsonImpl?: (args: string[]) => Promise<unknown>;
+  /** W1-T3283 — the body write the trailer-repair effect performs. Injectable for the SAME reason
+   *  `deps.updatePrBody` already is at this file's two other body-write sites: the effect is a thin
+   *  wrapper around one network call, so without a seam the only way to cover it is to make a real
+   *  one. Omitted, it is {@link updatePrBodyViaGh} — production behaviour is unchanged. */
+  updatePrBodyImpl?: typeof updatePrBodyViaGh;
   registeredWorktreeOwnerImpl?: (repoDir: string, branchRef: string) => string | undefined;
   registeredOwnerRecovery?: RegisteredFixOwnerRecoveryDeps;
 }
@@ -29480,6 +29514,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readMainTip"
   | "releaseBaseCausedStandDown"
   | "selectAdaptiveReviewWidth"
+  | "repairMissingTaskTrailer"
 > {
   const {
     owner,
@@ -29686,6 +29721,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // caller (sweep.ts's own `automerge.hold_withdrawal`), never duplicated here.
     disarmAutoMerge: (pr) => {
       disarmImpl(pr.prUrl);
+    },
+
+    repairMissingTaskTrailer: async (pr, repair) => {
+      await (deps.updatePrBodyImpl ?? updatePrBodyViaGh)(pr.prUrl, repair.repairedBody);
+      log("sweep.missing_task_trailer_body_write", {
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        task_id: repair.taskId,
+        refire_event: repair.refireEvent,
+        rerun_failed_jobs: repair.rerunFailedJobs,
+      });
     },
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
