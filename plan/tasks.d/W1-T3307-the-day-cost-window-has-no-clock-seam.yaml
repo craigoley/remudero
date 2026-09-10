@@ -1,0 +1,88 @@
+- id: W1-T3307
+  title: "THE DAILY COST GOVERNOR READS `Date.now()` INSIDE ITS OWN CLOSURE, SO NOTHING CAN PIN THE DAY WINDOW — a UTC midnight landing between a ledger write and the read that follows it drops the row, the day cost reads 0, and the governor answers CLEAR on spend it should have deferred"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: "operator-session#4889-midnight-2026-09-10"
+  plan_refs: ["W1-T317", "W1-T331", "W1-T3207"]
+  files: [src/run-task.ts, test/the-day-cost-window-has-no-clock-seam.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09/10 from a live CI failure and reproduced directly.
+    `costGovernorGateFor` (run-task.ts) returns a closure that calls `Date.now()` ITSELF and passes
+    it to `deriveDayCostUsd`, whose window is `utcDayWindowMs(now)` — a UTC calendar day. A ledger
+    row's `ts` is stamped when it is APPENDED. Nothing can make those two agree, because no caller
+    can supply the clock.
+    THE DROP, REPRODUCED — one row of 999 against a ceiling of 500:
+      read BEFORE midnight   dayCost=999  deferred=true   closure returns the result object
+      read AFTER  midnight   dayCost=  0  deferred=false  closure returns undefined
+    THE LIVE INSTANCE. #4889's `coverage-shard (2/4)` failed on a run crossing 00:00 UTC, on a diff
+    touching `serve.ts` and the entrypoint and nothing near this. The capture between the seed and
+    the read takes ~1.9s locally and 5.5s under CI instrumentation, and the boundary landed in it.
+    THE FAILURE TEXT POINTS AT THE WRONG THING, which is what makes this worth a task rather than a
+    retry: the assertion reads "the daemon's real wiring must read the actual ledger, not a stub that
+    always says clear", so a reader goes hunting a wiring defect that is not there. The wiring is
+    fine; the clock moved.
+    W1-T3207 REMOVED THE RETRY FROM THE COVERAGE JOB ON PURPOSE, so a flake here is a red PR rather
+    than a papered-over second pass. That ruling is correct and it is precisely why a time-dependent
+    read in a required path has to be fixed at the source.
+    NOT ONLY A TEST PROBLEM. The same closure runs in production every daemon tick. A tick that
+    starts at 23:59:59 and reads at 00:00:00 sees a day cost of 0 and admits dispatch it would
+    otherwise have deferred. It is a narrow window and it is a SPEND CONTROL, which is the one place
+    a narrow window is still worth closing.
+  design: |
+    (i) THE CLOCK BECOMES AN ARGUMENT, DEFAULTING TO `Date.now`. `costGovernorGateFor` takes a `now`
+    it can be given; every existing caller that supplies none behaves byte-identically to today.
+    (ii) ONE INSTANT PER CONSULTATION. The closure must read the clock ONCE per call and use that
+    same value for the window, so two reads inside one consultation cannot straddle a boundary.
+    (iii) THREADED THROUGH THE DEPS THE CALLERS ALREADY HAVE, not a module-level mutable. `DrainDeps`
+    and `DaemonDeps` already carry injectables; the clock joins them rather than becoming global
+    state a test has to reset.
+    (iv) THE DEFAULT IS THE REAL CLOCK, ALWAYS. An absent injection must never mean "no ceiling" or
+    a frozen time — the fallback is `Date.now`, the same read as today.
+    (v) OUT OF SCOPE: the ceiling's value, the override store, `deriveDayCostUsd`'s window shape, and
+    any change to what `checkCostGovernor` decides. This task moves WHERE the instant comes from.
+  acceptance:
+    - claim: "W1-T3307 criterion 1: the governor's day window can be pinned by an injected clock, so a seeded row and the read that follows it cannot straddle a UTC boundary"
+      proof: "unit test: test/the-day-cost-window-has-no-clock-seam.test.ts"
+    - claim: "W1-T3307 criterion 2: with no clock injected the closure reads Date.now exactly as today, and a spend over the ceiling still defers"
+      proof: "unit test: test/the-day-cost-window-has-no-clock-seam.test.ts"
+    - claim: "W1-T3307 criterion 3: one consultation reads the clock ONCE, so two reads inside it cannot fall on opposite sides of midnight"
+      proof: "unit test: test/the-day-cost-window-has-no-clock-seam.test.ts"
+    - claim: "W1-T3307 criterion 4: a row stamped before midnight and read after it is counted when the clock is pinned, and the pre-task drop is reproduced when it is not"
+      proof: "unit test: test/the-day-cost-window-has-no-clock-seam.test.ts"
+  falsifier: |
+    CLOSE IF the closure already accepts a clock: read `costGovernorGateFor` in src/run-task.ts.
+    MEASURED 2026-09-09: its body is `deriveDayCostUsd(readLedgerLines(ledgerPath), Date.now())` —
+    the call is literal and there is no parameter to supply.
+    THE UNINJECTED CONTROL, because "the test can now pin time" is not the claim: a fixture with NO
+    clock injected must still defer on a spend over the ceiling, reading the real clock. Without that
+    arm this is indistinguishable from a change that makes the governor depend on being told the time
+    and answer CLEAR when it is not.
+    REPRODUCE THE DROP, do not merely assert the fix: the suite must show a row stamped before
+    midnight reading as 0 when the window is computed after it. A test that only shows the pinned
+    case passing proves the seam exists, not that it closes anything.
+    DO NOT freeze time by default. An absent injection must be the real clock; a frozen fallback
+    would turn a spend ceiling into a spend ceiling that stops noticing the day changed.
+    DO NOT widen this into the ceiling's value or the override store (W1-T332/W1-T363). Those are
+    resolved elsewhere and are not what moved.
+  note: |
+    Rule 25 CHECKED: `src/run-task.ts` is ordinary src, not an instrument surface.
+    RISK IS HIGH BECAUSE THIS IS A SPEND CONTROL, not because the diff is large. The failure mode of
+    getting it wrong is a governor that stops deferring, which costs money quietly. The band reflects
+    what the path guards, not the line count.
+    THE SLUG MATCHES THE FALSIFIER (`the-day-cost-window-has-no-clock-seam`) so W1-T2525's
+    own-falsifier discount applies to Rule 19's span: the suite is declared in `files:`, is named by
+    every criterion, and does not exist on origin/main.
+    A NARROWER FIX ALREADY SHIPPED AND IS NOT THIS: #4896 reorders the test's seed to sit after the
+    capture, shrinking the exposed window from seconds to microseconds. That is a flake fix and it
+    leaves the production path exactly as it is. This task is the seam that makes the window
+    pinnable at all; the two are complementary and #4896 should land first.
+    CAVEAT WITH EQUAL WEIGHT: closing the test's race does not close production's. A daemon tick
+    still reads whatever the clock says when it runs, and SHOULD — the point is that one consultation
+    now uses ONE instant instead of re-reading, not that the daemon stops caring what day it is.
