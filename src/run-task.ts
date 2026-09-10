@@ -27671,6 +27671,7 @@ export function buildOpenPrViews(
   try {
     mainPlan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   } catch {
+    // An unreadable local plan only disables branch-derived trailer repair for this pass.
     mainPlan = undefined;
   }
 
