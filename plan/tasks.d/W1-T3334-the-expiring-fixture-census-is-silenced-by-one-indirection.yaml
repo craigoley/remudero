@@ -1,0 +1,88 @@
+- id: W1-T3334
+  title: "THE EXPIRING-FIXTURE CENSUS IS SILENCED BY ONE INDIRECTION — moving a date literal behind a helper drops the fixture out of the measured population entirely, and the only symptom is a stamp count that quietly falls by one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 16.00
+  files:
+    - scripts/expiring-fixture-census.mjs
+    - test/expiring-fixture-census.test.ts
+  origin: "operator-session#4970-conflict-resolution-2026-09-10"
+  plan_refs: ["W1-T3272"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10, by accident, while judging two competing fixes to the same expiry bomb.
+    `test/review-claim-timing.test.ts` carried `lastActivityAt: "2026-09-03T12:00:00Z"` and the census
+    refused it — `goes red 2026-09-17 (7.0d)`. Two fixes existed. Run against a clean main, with the
+    suite passing 4/0 in BOTH cases:
+      main's fix, the stamp moved back to 2026-01-05    85 stamp(s) measured, 67 already past
+      the other fix, literal behind a helper            84 stamp(s) measured, 66 already past
+    THE POPULATION SHRANK. The second fix hoisted the date into
+    `const REVIEW_CLAIM_NOW_MS = Date.parse("2026-09-03T12:10:00Z")` and returned
+    `new Date(REVIEW_CLAIM_NOW_MS - 10*60*1000).toISOString()` from a helper. The date is STILL
+    2026-09-03 and the bomb is still armed — the census simply cannot see it any more, because it
+    reads the field's literal and there is no longer a literal on that field.
+    THIS IS NOT AN ACCUSATION AND THE SHARD SAYS SO. The author was fixing a red, the suite passed,
+    the census went green, and nothing anywhere reported a loss of coverage. That is precisely the
+    defect: the evasion is indistinguishable from a repair on every signal the fleet emits, and the
+    census's own summary line reports the smaller number as a success.
+    WHAT THIS DOES THAT W1-T3272 DOES NOT, since both declare the same two files and the dispatcher
+    is blind to intent. W1-T3272 built the census's REPORT — it added the already-expired population
+    line, so a settled stamp reads as state rather than a transition, and it reasons entirely about
+    stamps the census CAN see. This task is about the ones it cannot: the population itself becoming
+    a number nobody guards. Neither supersedes the other and W1-T3272 should not be retired for it.
+    IT GENERALISES BEYOND THIS ONE FILE. Any fixture in the population can leave it the same way, and
+    the ratchet that exists to stop time bombs will report OK while they accumulate.
+  design: |
+    (i) THE POPULATION SIZE IS ITSELF RATCHETED. The census records how many stamps it measured and
+    refuses a DROP it was not told about, the same way it refuses a stamp about to cross. A fixture
+    legitimately deleted is a recorded, reviewed decrease; a fixture that vanished because its date
+    moved behind a helper is a refusal.
+    (ii) THE COUNT IS THE PREDICATE, NOT AN ATTEMPT TO PARSE THE INDIRECTION. Chasing
+    `Date.parse(CONST)` through a helper is a source-analysis arms race the census cannot win and
+    should not enter. Whether the date is still reachable is not the question; whether the census can
+    still SEE it is, and a count answers that exactly.
+    (iii) A DECREASE FAILS CLOSED AND SAYS WHICH FILE LEFT. The refusal names the files present in the
+    baseline and absent now, so an author reads what happened rather than a bare number.
+    (iv) IT MUST NOT PUNISH A REAL DELETION. Deleting a test file is normal. The remedy is the same
+    one every ledger in this repo uses — record the new lower count deliberately — and the message
+    must say so, so the fix is one reviewed line and not a puzzle.
+  acceptance:
+    - claim: "W1-T3334 criterion 1: moving a fixture's date behind a helper drops it from the population and is REFUSED"
+      proof: "grep: refusePopulationDrop( in scripts/expiring-fixture-census.mjs"
+    - claim: "W1-T3334 criterion 2: a genuinely deleted fixture is refused with a message naming the file and the recorded remedy"
+      proof: "unit test: test/expiring-fixture-census.test.ts"
+    - claim: "W1-T3334 criterion 3: an unchanged population, and one that GROWS, still pass"
+      proof: "unit test: test/expiring-fixture-census.test.ts"
+  falsifier: |
+    CLOSE IF A SHRINKING POPULATION IS ALREADY REFUSED: run the census over a tree with a fixture's
+    literal hoisted behind a helper. MEASURED 2026-09-10: `OK -- 84 fixture stamp(s) measured`
+    against 85 the line before, exit 0, no mention that anything left.
+    THE GROWTH ARM IS MANDATORY. A ratchet that refuses any change in population blocks every PR that
+    adds a test, which is most of them. Only a DECREASE may refuse.
+    THE REAL-DELETION ARM IS MANDATORY TOO, and it is the one most likely to be skipped: the fixture
+    must show a plain file deletion producing a refusal whose message names the remedy, because
+    without it the first person to delete a stale test is stuck in front of a gate with no exit.
+    DO NOT SATISFY THIS BY TEACHING THE SCANNER TO FOLLOW ONE INDIRECTION. A parser that resolves
+    `Date.parse(CONST)` passes this task's headline fixture and is defeated by the next shape
+    (a template literal, an imported constant, an array index). The count does not care.
+  note: |
+    CRITERION 1 IS PROVED BY `grep:`, NOT BY THE SUITE, DELIBERATELY. `test/expiring-fixture-census.test.ts`
+    already exists on the base ref, so a whole-file `unit test:` proof passes on BOTH trees,
+    discriminates nothing, grades executed_stale and lets the criterion fall back to the keyword floor
+    silently. The grep names a symbol that cannot exist at base. `refusePopulationDrop` is a CONTRACT
+    on the name, not a design instruction — if the implementer picks another, the proof moves with it.
+    Rule 25 CHECKED: `scripts/expiring-fixture-census.mjs` IS a measurement instrument and matches
+    INSTRUMENT_SURFACE, so this task must land WITHOUT a src/ change beside it — its own test/
+    falsifier may ride with it. That is the ordinary rule-25 split and it is satisfiable here,
+    unlike W1-T2891's case, because nothing in src/ needs to move for this.
+    A NEW BASELINE FILE MAY BE NEEDED to record the population count. If so it is a per-file LEDGER,
+    not a score floor, and the implementer should say which of ENTANGLEMENT_EXEMPT_INSTRUMENTS'
+    stated reasons applies rather than inheriting one.
+    CAVEAT WITH EQUAL WEIGHT: this detects that a fixture LEFT the population. It does not prove the
+    departed fixture was safe or unsafe, and it cannot: the count is a tripwire, not a diagnosis. The
+    author still has to look. What it buys is that somebody looks at all.

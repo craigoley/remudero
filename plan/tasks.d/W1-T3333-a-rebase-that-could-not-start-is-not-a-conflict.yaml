@@ -1,0 +1,72 @@
+- id: W1-T3333
+  title: "THE DIRTY-FLEET REBASE REPORTS `conflict` FOR EVERY FAILURE IT HAS — a missing committer identity, a locked config and a real content conflict are one indistinguishable outcome, and the sweep routes all three down the escalation path a real conflict deserves"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 14.00
+  files:
+    - src/lib/sweep.ts
+    - test/a-rebase-that-could-not-start-is-not-a-conflict.test.ts
+  origin: "operator-session#4946-real-git-rebase-2026-09-10"
+  plan_refs: ["W1-T2999", "W1-T186"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10 while diagnosing #4946. `rebaseDirtyFleetBranchViaGit` wraps
+    `git rebase origin/main` in one try/catch and returns `{ outcome: "conflict" }` for anything that
+    throws. The type already distinguishes the cases — `conflict`, `lease-mismatch` and `error` are
+    three separate members of `DirtyFleetRebaseOutcome` — and the rebase arm can only ever produce
+    the first.
+    THE CASE THAT EXPOSED IT WAS NOT A CONFLICT AT ALL. #4946's acceptance test rebases two commits
+    touching DISJOINT files (branch.txt and main.txt); a content conflict is impossible by
+    construction. It still reported `conflict` in CI, because the runner had no global git identity
+    for a repo under /tmp and git refused with "Committer identity unknown" before it did any work.
+    Reproduced locally by removing exactly that one thing: 10 pass 0 fail normally,
+    9 pass 1 fail under `GIT_CONFIG_GLOBAL=/dev/null`.
+    THE COST IS A WRONG DISPOSITION, NOT ONLY A WRONG WORD. A real conflict means the branch needs a
+    human or a merge-conflict fix worker. A rebase that never started means the ENVIRONMENT is
+    broken and the same PR will "conflict" forever, on every pass, while the sweep keeps spending
+    the escalation that a genuine conflict deserves.
+    WHAT IS ALREADY FIXED AND MUST NOT BE RE-DONE: the `reason` field now carries git's real stderr
+    rather than `execFileSync`'s "Command failed: <argv>" (measured: "Rebasing (1/1)Committer identity
+    unknown"). That made the failure READABLE. It did not make it CLASSIFIED, and the sweep still
+    branches on `outcome`, never on `reason`.
+  design: |
+    (i) A REBASE THAT NEVER STARTED IS `error`, NOT `conflict`. The distinction is not a guess about
+    the message: `git rebase` leaves a rebase-in-progress state (`.git/rebase-merge` or
+    `rebase-apply` in the worktree) when it stopped ON a conflict, and leaves none when it refused
+    before starting. That directory's presence is the predicate — a fact on disk, not a string match.
+    (ii) STRING SNIFFING IS FORBIDDEN AS THE PRIMARY TEST. Matching "CONFLICT" or "Committer identity"
+    in stderr is locale-dependent and version-dependent, and would silently reclassify on a git
+    upgrade. If a secondary signal is wanted it may only NARROW, never widen.
+    (iii) THE `reason` IS CARRIED UNCHANGED ON BOTH ARMS. Whatever the classification, the operator
+    still gets git's own words; this task adds a class, it does not replace the evidence.
+    (iv) THE SWEEP TREATS `error` AS IT ALREADY TREATS `error`. No new disposition and no new rung —
+    the point is that an environmental failure stops consuming the conflict remedy.
+  acceptance:
+    - claim: "W1-T3333 criterion 1: a rebase that refuses before starting is reported as error, not conflict"
+      proof: "unit test: test/a-rebase-that-could-not-start-is-not-a-conflict.test.ts"
+    - claim: "W1-T3333 criterion 2: a rebase that stops ON a real content conflict is still reported as conflict"
+      proof: "unit test: test/a-rebase-that-could-not-start-is-not-a-conflict.test.ts"
+    - claim: "W1-T3333 criterion 3: both arms carry git's own stderr in reason, so neither classification hides the evidence"
+      proof: "unit test: test/a-rebase-that-could-not-start-is-not-a-conflict.test.ts"
+  falsifier: |
+    CLOSE IF THE ARMS ARE ALREADY DISTINCT: read the catch around `run(worktreePath, ["rebase",
+    "origin/main"])` in src/lib/sweep.ts. MEASURED 2026-09-10: one catch, one `outcome: "conflict"`,
+    no branch of any kind.
+    THE REAL-CONFLICT CONTROL IS MANDATORY, because "call it error" is trivially satisfiable by
+    renaming the outcome and would then mis-route every genuine conflict. The suite must drive a TRUE
+    content conflict — two commits editing the SAME line — and prove it still reports `conflict`.
+    test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts already has a fixture of that
+    shape to borrow from, and test/helpers/dirty-fleet-repo.ts is the seam that seeds the repo.
+    DO NOT PROVE THIS BY DELETING THE GLOBAL GIT IDENTITY IN CI. The environmental failure must be
+    injected inside the fixture (an unset identity on that repo alone), never by changing the runner.
+  note: |
+    Rule 25 CHECKED: `src/lib/sweep.ts` is ordinary src, not an instrument surface.
+    CAVEAT WITH EQUAL WEIGHT: production has a global git identity, so this is not a live outage
+    today — it is a misclassification that made ONE test failure cost an afternoon and would do the
+    same to any future environmental break. The daemon's reliance on ambient global git config is a
+    SEPARATE latent issue this task does not address.
