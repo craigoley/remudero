@@ -1,0 +1,95 @@
+- id: W1-T3319
+  title: "ONE TASK'S THROWN EXCEPTION EXITS THE WHOLE DAEMON AS A CRASH — both `summary(\"error\")` sites in drain.ts wrap a single `runOne`, so EVERY drain-level error is already a per-task failure, and exit 1 is reachable by nothing else; MEASURED five times, taking RestartCount to 4 of 5"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 10.00
+  files: [src/lib/daemon.ts, test/a-tasks-throw-is-not-the-daemons-crash.test.ts]
+  origin: "operator-session#gate-posture-2026-09-10"
+  plan_refs: ["W1-T3310", "W1-T2537", "W1-T2546", "W1-T490", "W1-T3318"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` / `band_meaning: blast-radius`: the diff is one predicate in one function; the
+    reach is whether the fleet keeps running. Priced on reach, not size.
+
+    THIS SUPERSEDES W1-T3310's TEXT RULE, and says so rather than stacking on it. That task matched
+    `hooks/pre-push`'s banner in the stop detail to route a gate refusal to 76. Correct as far as it
+    went, and it shipped the prerequisite that made ANY of this possible (the push leaf now attaches
+    its stderr). But it treats one symptom: the very next crash was `gh api .../check-runs` failing,
+    which carries no banner and would still exit 1. A builder must REMOVE the now-unreachable branch
+    rather than leave it as dead code that reads as a covered decision.
+  rationale: |
+    THE MEASUREMENT. Five error stops on the live fleet host, all one shape:
+
+      W1-T3226   Command failed: git ... push origin HEAD      (pre-push gate)
+      W1-T3242   Command failed: git ... push origin HEAD      (pre-push gate)
+      W1-T3274   Command failed: git ... push origin HEAD      (pre-push gate)
+      W1-T3274   Command failed: git ... push origin HEAD      (pre-push gate)
+      W1-T3290   Command failed: gh api .../check-runs?per_page=100
+
+    `RestartCount` reached 4 against `RestartPolicy=on-failure:5`. At five, docker stops restarting
+    and the fleet stays down behind a green board with nothing failing to notice.
+
+    THE STRUCTURAL FACT THAT MAKES THIS CLEAN. `drain.ts` has exactly TWO `summary("error", ...)`
+    sites, and BOTH build their detail as `${taskId}: ${message}` — one wrapping `deps.runOne` in a
+    try/catch, one reporting a lane's recorded failure. So every drain-level error is ALREADY a
+    per-task failure, and exit 1 is reachable by nothing else. A task-id prefix is therefore a
+    STRUCTURAL discriminator, not a text guess about a particular tool's error prose.
+
+    WHY THIS IS SAFE, and it is the part a reviewer should check hardest: exits 75/76/77 each get a
+    BOUNDED in-container retry in deploy/entrypoint.sh (100 attempts, then fall through to the
+    throttle and a real docker restart). So routing a per-task failure to a soft code does not
+    delete the crash budget — it puts a bound in front of it. A genuinely broken daemon still
+    reaches docker, after 100 bounded attempts instead of on the first task that trips a tool.
+
+    AND IT IS THE OPERATOR'S RULING APPLIED TO THE DAEMON ITSELF (W1-T3318): the goal is to get work
+    through, not to stop. One task failing is that task's problem; stopping the fleet for it is the
+    daemon blocking on something it could have routed.
+  design: |
+    (i) CLASSIFY STRUCTURALLY, ON THE TASK-ID PREFIX, not on any tool's error text. `${taskId}: ` is
+    what BOTH error sites emit by construction, so the discriminator cannot drift when a tool
+    rewords its failure — which is exactly how the gh failure escaped W1-T3310's banner rule.
+    (ii) ROUTE TO 76 (`DAEMON_EXIT_BLOCKED`) RATHER THAN MINT A FIFTH CODE. 76 already means "this
+    pass completed and something cannot proceed", the entrypoint already retries it on the right
+    pause (60s, the poll interval), and a fifth code would need a matching entrypoint arm —
+    `deploy/entrypoint.sh` is IMAGE-BAKED, so that change would sit inert until an image rebuild
+    while the fleet is one restart from stopping. Reusing 76 ships on the mount, immediately.
+    (iii) THE STOP DETAIL STILL CARRIES THE TASK AND THE REASON. Routing must not make the failure
+    quieter: the operator's next action depends on WHICH task and WHY, and a softer exit that hides
+    the cause is worse than the crash it replaced.
+    (iv) FAIL CLOSED ON ANYTHING UNPREFIXED. A detail that does not name a task is not a per-task
+    failure and stays 1. That is the arm that keeps docker's budget meaningful, and it is the one a
+    falsifier must drive.
+    (v) REMOVE W1-T3310's BANNER BRANCH IN THE SAME CHANGE, because this makes it unreachable for
+    every path that reaches it. A branch that can never be false reads as a covered decision and is
+    the dead-code shape this repo's own ratchets exist to catch.
+  acceptance:
+    - claim: "a drain that stopped because ONE task threw exits blocked (76), whatever tool failed — a push, a gh call, or anything else"
+      proof: "unit test: test/a-tasks-throw-is-not-the-daemons-crash.test.ts"
+    - claim: "the measured gh-api failure that W1-T3310's banner rule could not see now routes to 76"
+      proof: "unit test: test/a-tasks-throw-is-not-the-daemons-crash.test.ts"
+    - claim: "a stop detail that names no task still exits 1, so docker's crash budget still means something"
+      proof: "unit test: test/a-tasks-throw-is-not-the-daemons-crash.test.ts"
+    - claim: "the stale (75), blocked (76) and environmental (77) mappings are unchanged and environmental keeps precedence"
+      proof: "unit test: test/a-tasks-throw-is-not-the-daemons-crash.test.ts"
+    - claim: "W1-T3310's now-unreachable banner branch is gone rather than left as a covered-looking dead decision"
+      proof: "unit test: test/a-tasks-throw-is-not-the-daemons-crash.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if a per-task throw already avoids exit 1. MEASURED
+    2026-09-10: `daemonExitCodeForSummary` routes `error` to 1 unless the detail classifies transient
+    (77) or carries the pre-push banner (76, W1-T3310) — the gh-api failure matched neither.
+    PROVE IT LOAD-BEARING: a fixture detail carrying a real task id must map to 76, and REMOVING the
+    new case must return it to 1.
+    RUN THE FAIL-CLOSED CONTROL IN THE SAME TEST: an unprefixed detail — a bare TypeError, an OOM
+    message — must STILL be 1. A change that maps every error to 76 has deleted the crash budget
+    rather than bounded it, and would leave a genuinely broken daemon spinning quietly.
+    DO NOT resolve this by raising `on-failure:5`, and do not resolve it by making the daemon swallow
+    task failures silently. The bound must stay reachable and the reason must stay legible.
+    DO NOT widen the task-id pattern to "anything with a colon". `W\d+-T...` is the shape both error
+    sites emit; a loose pattern would catch a tool's own `error:`-prefixed prose and reclassify a
+    real crash.
