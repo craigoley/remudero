@@ -650,7 +650,17 @@ test("BEHAVIORAL (W1-T977): sweepPostFixReverification's own default reader does
         "\"detailsUrl\":\"https://github.com/o/r/actions/runs/1/job/42\"}]}'",
       "  exit 0",
       "fi",
+      // W1-T3278 CHANGED THE TRANSPORT, and this fake has to follow it. The default reader no
+      // longer shells `gh run view --job … --log-failed`: that returned ZERO BYTES under the
+      // fleet's own token, which is the whole finding the shard was re-premised on. It now reads
+      // `gh api repos/{o}/{r}/actions/jobs/{id}/logs`, which does not. Both arms are answered here
+      // — the old one so this fixture still documents what it replaced, the new one because it is
+      // what the code under test actually calls.
       "if [[ \"$1\" == 'run' && \"$2\" == 'view' ]]; then",
+      "  echo 'ci-gate: timed out waiting for required check(s) to complete: mutation-ratchet'",
+      "  exit 0",
+      "fi",
+      "if [[ \"$1\" == 'api' && \"$2\" == *'/logs' ]]; then",
       "  echo 'ci-gate: timed out waiting for required check(s) to complete: mutation-ratchet'",
       "  exit 0",
       "fi",
