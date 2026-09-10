@@ -1214,6 +1214,7 @@
     "test/the-prompt-manifest-reaches-a-reader.test.ts": 1362,
     "test/the-proof-debt-producer-reaches-production.test.ts": 843,
     "test/the-quotation-guard-covers-one-arm-of-four.test.ts": 1179,
+    "test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts": 0,
     "test/the-read-only-escape-cannot-silently-fail-the-suite.test.ts": 972,
     "test/the-recovery-path-merges-into-a-shared-checkout.test.ts": 2598,
     "test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts": 692,
