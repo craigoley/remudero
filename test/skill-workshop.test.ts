@@ -59,6 +59,7 @@ test("renderSkillDraft: a candidate with two or more supporting runs drafts a SK
   const draft = renderSkillDraft(candidate());
   assert.ok(draft, "a two-run candidate must render a draft");
   assert.match(draft!.markdown, new RegExp(`name: ${draft!.name}`));
+  assert.match(draft!.markdown, /^applies-to: implement$/m);
   assert.match(draft!.name, /^implement-clean-single-strike/);
   assert.match(draft!.markdown, /## Procedure/);
   assert.match(draft!.markdown, /Resolve the task on the first attempt/);
