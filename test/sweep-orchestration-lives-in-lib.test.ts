@@ -35,6 +35,7 @@ const EFFECT_KEYS = [
   "reaggregateCiGate",
   "releaseBaseCausedStandDown",
   "repairMissingTaskTrailer",
+  "rebaseDirtyFleetBranch",
   "repushAbsent",
   "requeueCheck",
   "selectAdaptiveReviewWidth",
