@@ -3004,28 +3004,25 @@ const STATUS_FLIP_CARVE_TARGETS = new Set<TaskStatus>(["merged", "done"]);
  * W1-T3274 — task ids CARVED by a status-flip: ids whose ENTIRE diff between two corpora is the
  * `status:` line's VALUE, flipping to a closed/landed status in {@link STATUS_FLIP_CARVE_TARGETS}
  * (`merged`/`done` — NOT `blocked`, see that Set's own doc). THE FLIP THAT REMOVES A TASK FROM THE
- * OPEN POPULATION IS, TODAY, ALSO THE EDIT THAT DRAGS IT INTO `--base`'s CHANGED
- * POPULATION: `changedTaskIds`/`rawChangedTaskIds` both treat any record-text difference as a
- * task edit, so a bare `plan-reconcile --write` (queued → merged, nothing else) lints every
- * shard it touches in full and inherits whatever pre-existing violations already sat on them —
- * the reconcile is then red on arrival for debt it did not create (see this file's own header
- * for the measured #4846 shape). The caller (`lint-plan --base`, run-task.ts) subtracts this
- * result from its changed-tasks scope; nothing here decides an exit code by itself.
+ * OPEN POPULATION IS, TODAY, ALSO THE EDIT THAT DRAGS IT INTO `--base`'s CHANGED POPULATION:
+ * `changedTaskIds`/`rawChangedTaskIds` both treat any record-text difference as a task edit, so a
+ * bare `plan-reconcile --write` (queued → merged, nothing else) lints every shard it touches in
+ * full and inherits whatever pre-existing violations already sat on them — the reconcile is then
+ * red on arrival for debt it did not create (see this file's own header for the measured #4846
+ * shape). The caller (`lint-plan --base`, run-task.ts) subtracts this result from its
+ * changed-tasks scope; nothing here decides an exit code by itself.
  *
  * NARROWED TO THE RAW TEXT, deliberately, not the parsed `Task` — the same trap
  * {@link rawChangedTaskIds}'s own doc names: a `design:`/`plan_refs:`/etc. edit riding alongside
  * the flip is invisible to the parser (six fields it drops), so a parsed-only comparison would
  * carve a shard that was ALSO genuinely edited. Comparing every byte outside the status line's
  * value catches those dropped fields by construction, exactly as the raw side already does for
- * `rawChangedTaskIds`.
- *
- * A flip to a still-OPEN status (`queued`, `recon`, `prompted`, ...) is NEVER carved — the
+ * `rawChangedTaskIds`. A flip to a still-OPEN status (`queued`, `recon`, `prompted`, ...) is NEVER carved — the
  * task's own design point (ii) and falsifier's second control: the carve is about LEAVING the
  * open population, not about the `status:` field merely being the one that moved. A task absent
  * on either side (newly filed, or removed outright) is never carved either — only a byte-level
- * edit of an EXISTING id's block ever qualifies. A flip INTO `blocked` is never carved either
- * (see {@link STATUS_FLIP_CARVE_TARGETS}'s own doc) — it stays in scope so
- * `blockedDispositionViolations` still sees the transition.
+ * edit of an EXISTING id's block ever qualifies. A flip INTO `blocked` is ALSO never carved —
+ * see {@link STATUS_FLIP_CARVE_TARGETS}'s own doc for why.
  */
 export function statusFlipOnlyTaskIds(oldTexts: readonly string[], newTexts: readonly string[]): Set<string> {
   const oldBlocks = mergeTaskBlockTexts(oldTexts);
