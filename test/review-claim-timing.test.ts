@@ -11,6 +11,23 @@ function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-review-claim-timing-")), "ledger.ndjson");
 }
 
+// THESE STAMPS AND `deps().now` MOVED BACKWARD TOGETHER, AND THE MOVE IS SAFE FOR A MEASURED
+// REASON RATHER THAN AN ARGUED ONE. On 2026-09-10 the expiring-fixture census refused this
+// file — `goes red 2026-09-17 (7.0d)` against sweep.staleDays — because it reads the absolute
+// date against the REAL clock, while every test here judges through the injected `deps.now`.
+//
+// THE CENSUS'S OWN SECOND REMEDY IS THE EXPERIMENT, AND IT WAS RUN: age the fixture past the
+// threshold, re-run, see whether anything fails. Aged to 2025-01-05 against an unmoved `now`,
+// so the PR reads eight months stale rather than ten minutes old: 4 pass, 0 fail, unchanged.
+// `lastActivityAt` is INERT in this suite — these four tests exercise the review mutex and the
+// action-time re-read, and never reach the staleness rung that would consult it.
+//
+// So the two stamps move together for COHERENCE, not because the gap is load-bearing: a reader
+// adding a fifth test here should still see a PR touched ten minutes before `now`, not one that
+// silently reads as stale. And the direction is the point. Moving a fixture FORWARD is what the
+// census's message rules out — it re-arms the same bomb on a later date. Backward disarms it for
+// good, because a stamp already past its threshold cannot cross it again; the census counts 66
+// others in that state and passes them as state rather than as a transition.
 function reviewablePr(): OpenPrView {
   return {
     prNumber: 100,
@@ -20,8 +37,8 @@ function reviewablePr(): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-03T12:00:00Z",
-    createdAt: "2026-09-03T12:00:00Z",
+    lastActivityAt: "2026-01-05T12:00:00Z",
+    createdAt: "2026-01-05T12:00:00Z",
     headSha: "review-head",
     autoMergeArmed: false,
   };
@@ -63,7 +80,7 @@ function deps(path: string, overrides: Partial<SweepDeps> = {}): SweepDeps {
     escalate: () => {},
     ledgerPath: path,
     runId: "SWEEP-TEST",
-    now: () => Date.parse("2026-09-03T12:10:00Z"),
+    now: () => Date.parse("2026-01-05T12:10:00Z"),
     ...overrides,
   };
 }
