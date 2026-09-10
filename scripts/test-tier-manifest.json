@@ -9,6 +9,7 @@
     "test/a-browser-boundary-has-no-directive.test.ts": 0,
     "test/a-cadence-marker-that-stops-advancing-is-reported.test.ts": 0,
     "test/a-cancelled-matrix-and-a-failing-test-render-as-the-same-red-check.test.ts": 367,
+    "test/a-cancelled-shard-is-not-a-broken-diff.test.ts": 0,
     "test/a-capability-ladder-is-data-not-a-substring-match.test.ts": 385,
     "test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts": 0,
     "test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts": 4481,
