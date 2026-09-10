@@ -111,6 +111,25 @@ test("W1-T3345: an unreadable current head FAILS CLOSED — 'could not tell' is 
   }
 });
 
+test("W1-T3345: with PR_NUMBER absent the head cannot be read at all, and the gate still blocks", () => {
+  // THE GUARD'S OTHER SIDE. Every case above sets PR_NUMBER and reaches the unreadable branch via a
+  // FAILING gh, so a `[ -n "${PR_NUMBER:-}" ]` that always skipped would satisfy all of them —
+  // workflow-guard-mutation caught exactly that. Here the guard's condition is FALSE with gh
+  // perfectly healthy, which is the real shape on a push event, and the answer must not change:
+  // no readable head means no permission to pass an unmeasured one.
+  for (const g of gates()) {
+    const env = { ...CANCELLED };
+    delete (env as Record<string, string | undefined>).PR_NUMBER;
+    const r = runGate(g.run, env, ghSays(SHA_NEW));
+    assert.equal(r.code, 1, `${g.jobName} passed with no PR_NUMBER to read a head from:\n${r.out}`);
+    assert.match(r.out, /not permission to pass/, `${g.jobName}: it must say why it refused`);
+    // AND IT MUST NOT CLAIM SUPERSESSION. gh would have answered a DIFFERENT sha here; only the
+    // absent PR_NUMBER stopped it being asked. Reading that as "superseded" would pass a head
+    // nothing measured.
+    assert.doesNotMatch(r.out, /SUPERSEDED/, `${g.jobName}: an unasked question is not a moved head`);
+  }
+});
+
 test("W1-T3345: the arms this change does not own are untouched", () => {
   // A relaxation that quietly widened into the other results would pass every assertion above.
   for (const g of gates()) {
