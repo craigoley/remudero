@@ -51,6 +51,14 @@ import {
 import { handRunCensus, type HandRunCensusCadenceOpts, type HandRunCensusCadenceResult } from "./hand-run-census.js";
 import { lintTask } from "./task-linter.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
+import {
+  judgeVerifyHumanShard,
+  observedStateKey,
+  proposalFromJudgedShard,
+  verifyHumanVerdictRow,
+  type ShardUnderJudgement,
+  type VerifyHumanVerdict,
+} from "./verify-human-judge.js";
 
 /**
  * lib/measurement-cadence.ts — W1-T1259: runs `rule-efficacy`, `verdict-calibration` and
@@ -1159,6 +1167,113 @@ export function planReconcileCadence(opts: PlanReconcileCadenceOpts): PlanReconc
   return { drift: taskIds.length, taskIds, status: "landed", threshold: opts.threshold };
 }
 
+const VERIFY_HUMAN_AGE_BANDS = [14, 30, 60] as const;
+
+export type VerifyHumanCadenceDueReason = "state_changed" | "age_band";
+
+export interface VerifyHumanCadenceResult {
+  /** Parked `verify: human` shards seen this cycle, including settled/skipped ones. */
+  parked: number;
+  judged: number;
+  needsOperator: string[];
+  backlog: string[];
+  judgeFailed: string[];
+  skipped: string[];
+  stateChanged: string[];
+  ageBandReasks: string[];
+  status: "clear" | "judged" | "refused";
+  refusedReason?: string;
+}
+
+export interface VerifyHumanCadenceOpts {
+  shards: readonly ShardUnderJudgement[];
+  priorVerdicts: ReadonlyMap<string, VerifyHumanVerdict>;
+  /** Non-failed age-band rows already written by this cadence. */
+  priorAgeBandKeys?: ReadonlySet<string>;
+  judge: (shard: ShardUnderJudgement) => Promise<VerifyHumanVerdict>;
+  stageProposal: (proposal: Proposal) => void;
+  appendRow: (row: Record<string, unknown>) => void;
+  runId: string;
+}
+
+function verifyHumanAgeBand(ageDays: number): number | undefined {
+  let band: number | undefined;
+  for (const candidate of VERIFY_HUMAN_AGE_BANDS) {
+    if (ageDays >= candidate) band = candidate;
+  }
+  return band;
+}
+
+export function verifyHumanAgeBandKey(shard: ShardUnderJudgement): string | undefined {
+  const band = verifyHumanAgeBand(shard.ageDays);
+  return band === undefined ? undefined : `${observedStateKey(shard)}:age_band=${band}`;
+}
+
+export function priorVerifyHumanAgeBandKeys(rows: readonly Record<string, unknown>[]): Set<string> {
+  const keys = new Set<string>();
+  for (const row of rows) {
+    if (row.judge_failed === true) continue;
+    if (typeof row.verify_human_age_band_key === "string" && row.verify_human_age_band_key) {
+      keys.add(row.verify_human_age_band_key);
+    }
+  }
+  return keys;
+}
+
+function verifyHumanDueReason(
+  shard: ShardUnderJudgement,
+  priorVerdicts: ReadonlyMap<string, VerifyHumanVerdict>,
+  priorAgeBandKeys: ReadonlySet<string>,
+): VerifyHumanCadenceDueReason | undefined {
+  const prior = priorVerdicts.get(observedStateKey(shard));
+  if (prior === undefined || prior.judgeFailed === true) return "state_changed";
+  const bandKey = verifyHumanAgeBandKey(shard);
+  return bandKey !== undefined && !priorAgeBandKeys.has(bandKey) ? "age_band" : undefined;
+}
+
+/**
+ * W1-T3271 — one verify-human cadence pass. The judge's verdict semantics stay in
+ * `verify-human-judge.ts`; this layer decides only whether a parked shard is due this cycle.
+ */
+export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<VerifyHumanCadenceResult> {
+  const priorAgeBandKeys = opts.priorAgeBandKeys ?? new Set<string>();
+  const due = opts.shards
+    .map((shard) => ({ shard, reason: verifyHumanDueReason(shard, opts.priorVerdicts, priorAgeBandKeys) }))
+    .filter((entry): entry is { shard: ShardUnderJudgement; reason: VerifyHumanCadenceDueReason } => entry.reason !== undefined);
+  const dueIds = new Set(due.map((entry) => entry.shard.id));
+  const result: VerifyHumanCadenceResult = {
+    parked: opts.shards.length,
+    judged: 0,
+    needsOperator: [],
+    backlog: [],
+    judgeFailed: [],
+    skipped: opts.shards.filter((shard) => !dueIds.has(shard.id)).map((shard) => shard.id),
+    stateChanged: due.filter((entry) => entry.reason === "state_changed").map((entry) => entry.shard.id),
+    ageBandReasks: due.filter((entry) => entry.reason === "age_band").map((entry) => entry.shard.id),
+    status: due.length === 0 ? "clear" : "judged",
+  };
+
+  for (const { shard, reason } of due) {
+    const verdict = await judgeVerifyHumanShard(shard, { judge: opts.judge });
+    const ageBandKey = reason === "age_band" ? verifyHumanAgeBandKey(shard) : undefined;
+    opts.appendRow({
+      ...verifyHumanVerdictRow(shard, verdict, opts.runId),
+      verify_human_cadence_reason: reason,
+      ...(ageBandKey ? { verify_human_age_band_key: ageBandKey } : {}),
+    });
+    result.judged += 1;
+    if (verdict.judgeFailed) result.judgeFailed.push(shard.id);
+    if (verdict.decision === "needs_operator") {
+      opts.stageProposal(proposalFromJudgedShard(shard, verdict));
+      result.needsOperator.push(shard.id);
+      continue;
+    }
+    result.backlog.push(shard.id);
+  }
+
+  return result;
+}
+
 export interface MeasurementCadenceRunResult {
   ruleEfficacy: RuleEfficacyCadenceResult;
   verdictCalibration: VerdictCalibrationCadenceResult;
@@ -1187,6 +1302,8 @@ export interface MeasurementCadenceRunResult {
   /** The hand-run census (W1-T2697), set when `opts.handRunCensus` is supplied — see
    *  {@link handRunCensus}. */
   handRunCensus?: HandRunCensusCadenceResult;
+  /** The verify-human backlog's judged cadence, set when the daemon supplies its async result. */
+  verifyHuman?: VerifyHumanCadenceResult;
 }
 
 /** The verdict-calibration/autonomy-rate git join's only I/O — same shallow-clone refusal as
@@ -1257,6 +1374,8 @@ export interface MeasurementCadenceReportOpts {
    *  `coverageImprovement` above uses (both need a caller-supplied `run_id` for their own ledger
    *  marker, so neither can run unconditionally off `stateDir` alone). */
   handRunCensus?: Omit<HandRunCensusCadenceOpts, "stateDir">;
+  /** W1-T3271's async verify-human cadence result. Optional: omitted skips the row member. */
+  verifyHuman?: VerifyHumanCadenceResult;
 }
 
 function finiteMetric(value: unknown): number | null {
@@ -1682,6 +1801,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     verbCensus,
     ...(handRunCensusResult ? { handRunCensus: handRunCensusResult } : {}),
     ...(planReconcile ? { planReconcile } : {}),
+    ...(opts.verifyHuman ? { verifyHuman: opts.verifyHuman } : {}),
   };
 }
 

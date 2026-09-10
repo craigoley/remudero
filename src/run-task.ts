@@ -665,7 +665,7 @@ import {
   markDaemonProcessActor,
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
-import { systemClock, type Clock } from "./lib/clock.js";
+import { clockFromDateFn, systemClock, type Clock } from "./lib/clock.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
   judgeVerifyHumanShard,
@@ -723,12 +723,15 @@ import {
   recordMeasurementCadenceFire,
   recordWipeTestCadenceFire,
   renderVerbCensusDigestLine,
+  priorVerifyHumanAgeBandKeys,
   runMeasurementCadenceReport,
   runVerbCensus,
+  verifyHumanCadence,
   wipeTestCadenceCheck,
   type MeasurementCadenceDecision,
   type MeasurementCadenceReportOpts,
   type MeasurementCadenceRunResult,
+  type VerifyHumanCadenceResult,
   type WipeTestCadenceDecision,
   type WipeTestCadencePolicy,
   type WipeTestCadenceRunResult,
@@ -20353,6 +20356,49 @@ export function defaultProofDebtCadenceInput(
   }
 }
 
+export async function defaultVerifyHumanCadenceResult(
+  root: string,
+  config: Config,
+  runId: string,
+  clock: Clock = systemClock,
+): Promise<VerifyHumanCadenceResult> {
+  try {
+    const plan = loadPlan(join(root, "plan", "tasks.yaml"));
+    const ledgerPath = ledgerPathFor(config);
+    const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
+    const registryPath = join(config.root, "state", "inbox-proposals.json");
+    return await verifyHumanCadence({
+      shards: parkedVerifyHumanShards(plan, root, clock),
+      priorVerdicts: priorVerifyHumanVerdicts(rows),
+      priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
+      judge: realVerifyHumanJudge({
+        mounts: loadMounts(mountsPath(root)),
+        cwd: root,
+        settingsFile: join(root, "settings", "worker.json"),
+      }),
+      stageProposal: (proposal) =>
+        void updateProposalRegistry(registryPath, (current) =>
+          current.some((existing) => existing.id === proposal.id) ? null : [...current, proposal],
+        ),
+      appendRow: (row) => appendLedger(ledgerPath, row as LedgerLine),
+      runId,
+    });
+  } catch (e) {
+    return {
+      parked: 0,
+      judged: 0,
+      needsOperator: [],
+      backlog: [],
+      judgeFailed: [],
+      skipped: [],
+      stateChanged: [],
+      ageBandReasks: [],
+      status: "refused",
+      refusedReason: `verify-human cadence unavailable: ${String((e as Error)?.message ?? e)}`,
+    };
+  }
+}
+
 /**
  * W1-T1259: the measurement-cadence rung's PRODUCER, mirroring {@link buildAutoTriageDaemonHooks}
  * exactly — the CONSUMER (`daemon.ts` reads `deps.checkMeasurementCadence`/
@@ -20405,12 +20451,15 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
     deps.run ??
     (async () => {
       const root = configFor().root;
+      const cadenceClock = clockFromDateFn(deps.now);
       // RECORD THE FIRE FIRST, deliberately — the SAME crash-safety discipline
       // `buildAutoTriageDaemonHooks`'s `runAutoTriage` uses: if the report run throws or the
       // process dies mid-run, the marker has already advanced and the interval/cap bounds still
       // hold, so a failure costs one skipped period rather than an unbounded immediate retry.
-      recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), deps.now?.() ?? new Date(), 24 * 60 * 60 * 1000);
-      const coverageRunId = `MEASUREMENT-CADENCE-${(deps.now?.() ?? new Date()).getTime()}`;
+      recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
+      const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
+      const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
+      const verifyHuman = await defaultVerifyHumanCadenceResult(root, configFor(), verifyHumanRunId, cadenceClock);
       return runMeasurementCadenceReport({
         stateDir: join(root, "state"),
         cwd: repoRoot,
@@ -20431,6 +20480,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
           reader: deps.coverageImprovementReader,
           ...resolveOwnerRepo(),
         },
+        verifyHuman,
       });
     });
   return { checkMeasurementCadence: check, runMeasurementCadence: run };
