@@ -7,8 +7,14 @@ import { appendLedger } from "../src/lib/ledger.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
+const REVIEW_CLAIM_NOW_MS = Date.parse("2026-09-03T12:10:00Z");
+
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-review-claim-timing-")), "ledger.ndjson");
+}
+
+function recentReviewActivityIso(): string {
+  return new Date(REVIEW_CLAIM_NOW_MS - 10 * 60 * 1000).toISOString();
 }
 
 function reviewablePr(): OpenPrView {
@@ -20,8 +26,8 @@ function reviewablePr(): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-03T12:00:00Z",
-    createdAt: "2026-09-03T12:00:00Z",
+    lastActivityAt: recentReviewActivityIso(),
+    createdAt: recentReviewActivityIso(),
     headSha: "review-head",
     autoMergeArmed: false,
   };
@@ -63,7 +69,7 @@ function deps(path: string, overrides: Partial<SweepDeps> = {}): SweepDeps {
     escalate: () => {},
     ledgerPath: path,
     runId: "SWEEP-TEST",
-    now: () => Date.parse("2026-09-03T12:10:00Z"),
+    now: () => REVIEW_CLAIM_NOW_MS,
     ...overrides,
   };
 }
