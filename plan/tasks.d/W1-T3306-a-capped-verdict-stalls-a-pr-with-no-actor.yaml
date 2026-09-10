@@ -59,10 +59,13 @@
     CORRECTED 2026-09-10 AGAINST THE CODE, and the correction is the important part of this design.
     A new `deriveDisposition` row was the obvious shape and is NOT BUILDABLE: that function is pure
     over `OpenPrView` (`deriveDisposition(pr, policy, now)`, no ledger access), the capped flag lives
-    in the ledgered verdict, and the view is assembled in `src/run-task.ts` — which IS on
-    INSTRUMENT_SURFACE. Adding the field there alongside `sweep.ts`/`prompt-render.ts` makes the
-    diff instrument-plus-product-src, which `detectInstrumentEntanglement` refuses. Splitting it in
-    two would ship an unreachable mode first, the exact W1-T349 anti-pattern this repo records.
+    in the ledgered verdict, and the view is assembled in `src/run-task.ts` — so routing there means
+    threading a new field through a second module for a fact the arm site already holds.
+    THE RULE 25 HALF OF THIS ARGUMENT WAS WRONG AND IS WITHDRAWN (2026-09-10): an earlier revision
+    claimed `src/run-task.ts` is on INSTRUMENT_SURFACE and that the combined diff would be refused as
+    entangled. It is not on that list, and `detectInstrumentEntanglement` returns `entangled: false`
+    for exactly this file set. The design below stands on the LEDGER-ACCESS reason alone, which is
+    sufficient and was always the real one.
     SO THE CHANGE LANDS WHERE THE LEDGER IS ALREADY IN SCOPE: the `mergeable` case already calls
     `decideSweepArm(pr, ledgerLines)`. When that refusal is specifically the CAPPED one — read from
     `postedArmFactsFromLedger`, never by matching the reason prose — the case DISPATCHES A FIX
@@ -126,10 +129,11 @@
     DO NOT MATCH ON `reason` PROSE. The keyword-floor sentence is rendered text and rots; match on
     the structured `proof_exec` grades and the `capped` flag.
   note: |
-    Rule 25 CHECKED: neither `src/lib/sweep.ts` nor `src/lib/prompt-render.ts` is on
-    INSTRUMENT_SURFACE (which names config/settings/mounts, review/task-linter,
-    run-result/status/ledger/flight-judge, `src/run-task.ts`, `bin/` and the named scripts). Two
-    product src files plus this task's own falsifier, so `detectInstrumentEntanglement` cannot fire.
+    Rule 25 CHECKED BY RUNNING THE PREDICATE, not by reading the list — the earlier revision of this
+    note described INSTRUMENT_SURFACE wrongly (it named `src/run-task.ts`, `bin/` and the
+    `src/lib/(...)` groups, which belong to USER_VISIBLE_SURFACE_RE; the real list ends at
+    `^scripts/generate-ledger-steps\.mjs$` and holds no `src/` path). MEASURED: this task's file set
+    returns `entangled: false` with `instrumentPaths: []`.
     risk:high on BLAST RADIUS: two files is a narrow span, but this is the merge path. A defect here
     either arms something that should not merge or stalls something that should — and the first is
     unrecoverable. The falsifier is written against that direction specifically.
