@@ -210,6 +210,7 @@
   "src/lib/last-seen.ts": 41,
   "src/lib/launchd.ts": 148,
   "src/lib/learnings.ts": 346,
+  "src/lib/ledger-compact.ts": 250,
   "src/lib/ledger-grep.ts": 202,
   "src/lib/ledger-path.ts": 250,
   "src/lib/ledger-replay.ts": 86,
