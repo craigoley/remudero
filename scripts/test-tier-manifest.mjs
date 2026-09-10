@@ -125,6 +125,58 @@ export function balanceFilesByDuration(testFiles, manifest, shardCount) {
   return shards.map((shard) => shard.files);
 }
 
+function splitFilesByCount(testFiles, shardCount) {
+  if (!Number.isInteger(shardCount) || shardCount < 1) throw new RangeError("shardCount must be a positive integer");
+  const ordered = [...testFiles].sort();
+  return Array.from({ length: shardCount }, (_unused, index) => {
+    const start = Math.floor((index * ordered.length) / shardCount);
+    const end = Math.floor(((index + 1) * ordered.length) / shardCount);
+    return ordered.slice(start, end);
+  });
+}
+
+function shardDurationMs(files, manifest) {
+  return files.reduce((sum, file) => sum + (manifest.files[file] ?? 0), 0);
+}
+
+function maxDurationFile(files, manifest) {
+  return files.reduce((best, file) => {
+    const durationMs = manifest.files[file] ?? 0;
+    if (durationMs !== best.durationMs) return durationMs > best.durationMs ? { file, durationMs } : best;
+    return file < best.file ? { file, durationMs } : best;
+  }, { file: "", durationMs: 0 });
+}
+
+export function summarizeShardBalance(testFiles, manifest, shardCount, balancedShards) {
+  if (!Number.isInteger(shardCount) || shardCount < 1) throw new RangeError("shardCount must be a positive integer");
+  const selectedDurationMs = testFiles.reduce((sum, file) => sum + (manifest.files[file] ?? 0), 0);
+  const selectedMeanDurationMs = selectedDurationMs / shardCount;
+  const balancedDurations = balancedShards.map((files) => shardDurationMs(files, manifest));
+  const countSplitDurations = splitFilesByCount(testFiles, shardCount).map((files) => shardDurationMs(files, manifest));
+  const slowestShardDurationMs = Math.max(...balancedDurations, 0);
+  const fastestShardDurationMs = balancedDurations.length === 0 ? 0 : Math.min(...balancedDurations);
+  const countSplitSlowestDurationMs = Math.max(...countSplitDurations, 0);
+  const longestFile = maxDurationFile(testFiles, manifest);
+  const bindingFloor = longestFile.durationMs > selectedMeanDurationMs
+    ? {
+        file: longestFile.file,
+        durationMs: longestFile.durationMs,
+        excessOverMeanMs: longestFile.durationMs - selectedMeanDurationMs,
+      }
+    : null;
+  return {
+    selectedDurationMs,
+    selectedMeanDurationMs,
+    slowestShardDurationMs,
+    fastestShardDurationMs,
+    shardSpreadMs: slowestShardDurationMs - fastestShardDurationMs,
+    slowestShardExcessMs: slowestShardDurationMs - selectedMeanDurationMs,
+    countSplitSlowestDurationMs,
+    countSplitSlowestExcessMs: countSplitSlowestDurationMs - selectedMeanDurationMs,
+    bindingFloor,
+  };
+}
+
 /** Validate one newline-delimited conservative candidate set and select a duration-balanced
  * shard. The caller may execute only this returned subset. Any ambiguity throws so workflow
  * callers can take the complete source-CI fallback instead of manufacturing an empty green. */
@@ -169,10 +221,12 @@ export function selectPlanReadingShard(candidateText, testFiles, manifest, shard
   }
   const balanced = balanceFilesByDuration(candidates, manifest, shard.count);
   const files = balanced[shard.index - 1];
+  const balance = summarizeShardBalance(candidates, manifest, shard.count, balanced);
   return {
     candidates,
     files,
     predictedDurationMs: files.reduce((sum, file) => sum + manifest.files[file], 0),
+    balance,
   };
 }
 
@@ -392,7 +446,15 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
       console.error(
         "test-tier-manifest: plan-reading shard summary " +
           `candidate_count=${selection.candidates.length} assigned_count=${selection.files.length} ` +
-          `predicted_duration_ms=${selection.predictedDurationMs} fallback=none shard=${shard.index}/${shard.count}`,
+          `predicted_duration_ms=${selection.predictedDurationMs} ` +
+          `selected_total_duration_ms=${selection.balance.selectedDurationMs} ` +
+          `selected_mean_duration_ms=${selection.balance.selectedMeanDurationMs} ` +
+          `slowest_shard_excess_ms=${selection.balance.slowestShardExcessMs} ` +
+          `count_split_slowest_excess_ms=${selection.balance.countSplitSlowestExcessMs} ` +
+          `binding_floor_file=${selection.balance.bindingFloor?.file ?? "none"} ` +
+          `binding_floor_duration_ms=${selection.balance.bindingFloor?.durationMs ?? 0} ` +
+          `binding_floor_excess_ms=${selection.balance.bindingFloor?.excessOverMeanMs ?? 0} ` +
+          `fallback=none shard=${shard.index}/${shard.count}`,
       );
       if (candidateMode === "select") {
         console.log(selection.files.join("\n"));

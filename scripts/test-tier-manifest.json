@@ -121,6 +121,7 @@
     "test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts": 1311,
     "test/a-runaway-worker-is-visible-before-it-finishes.test.ts": 1422,
     "test/a-self-certifying-proof-warns-at-filing-time.test.ts": 1319,
+    "test/a-shard-split-balances-by-measured-duration.test.ts": 0,
     "test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts": 1667,
     "test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts": 4098,
     "test/a-size-ledger-is-not-a-score-floor.test.ts": 1036,
