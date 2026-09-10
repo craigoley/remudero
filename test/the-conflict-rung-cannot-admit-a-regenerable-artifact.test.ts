@@ -43,7 +43,7 @@ function dirtyPr(files: ConflictFileDiff[]): OpenPrView {
     unmetCriteria: [],
     priorStrikes: 0,
     strikeHistory: [],
-    lastActivityAt: "2026-08-30T23:55:00.000Z",
+    lastActivityAt: "2026-08-30T23:55:00.000Z", // expiring-fixture: exempt -- aged 10d past the rung, nothing failed; this case ignores the disposition
     headSha: "cafef00d",
     autoMergeArmed: false,
     isDependabot: false,

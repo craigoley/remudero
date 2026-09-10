@@ -1327,6 +1327,18 @@ jobs:
         run: npm ci
       - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
         run: npm run --silent comment-load-signal
+      # EXPIRING-FIXTURE census (W1-T3272) — refuse a fixture whose hardcoded date will cross a live
+      # threshold, a margin BEFORE the day it takes CI red. It rides this job as a STEP rather than
+      # as its own job on purpose: a new ci.yml job must be registered in ci-gate.yml AND in
+      # src/lib/ci-parity.ts's table, and a diff touching a workflow beside a `src/` product path is
+      # Standing rule 25 entanglement, refused outright. Growing a real job's step list is not drift.
+      #
+      # WHY IT EXISTS: "a fixed date constant compared against rows stamped at REAL time is a time
+      # bomb" has been in CLAUDE.md since W1-T2250 and bound nothing. On 2026-09-09 a fixture
+      # stamped 2026-08-26T18:15:00Z crossed the sweep's 14-day rung at exactly 18:15:00Z and took
+      # `main` red, blocking every PR (W1-T3270). FALSIFIER: test/expiring-fixture-census.test.ts.
+      - name: Expiring-fixture census (no fixture crosses its threshold inside the margin)
+        run: node scripts/expiring-fixture-census.mjs
 
       # CONTRACT-COVERAGE ratchet (W1-T3174) — every `/v1/` route a first-party client calls must be
       # declared in openapi/daemon.yaml; the uncovered count may FALL and never RISE.

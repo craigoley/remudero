@@ -37,7 +37,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-08-28T11:00:00Z",
+    lastActivityAt: "2026-08-28T11:00:00Z", // expiring-fixture: exempt -- aged 10d past the rung, nothing failed; this case ignores the disposition
     createdAt: "2026-08-01T00:00:00Z",
     headSha: "aaaa111",
     autoMergeArmed: false,
@@ -153,7 +153,7 @@ test("W1-T2439 (acceptance 5): isPlanFiling false is also SPAWNING, not merely u
 
 test("W1-T2439 (acceptance 6): both lanes rank on reviewAdmissionKey, which a posted verdict cannot move", () => {
   const old = filing(60, "2026-08-01T00:00:00Z");
-  const reviewed = { ...old, lastActivityAt: "2026-08-28T11:59:55Z" }; // a verdict just bumped updatedAt
+  const reviewed = { ...old, lastActivityAt: "2026-08-28T11:59:55Z" }; // a verdict just bumped updatedAt // expiring-fixture: exempt -- aged 10d past the rung, nothing failed; this case ignores the disposition
   const younger = filing(61, "2026-08-20T00:00:00Z");
   const { planFilings } = selectReviewAdmissions([younger, reviewed], DEFAULT_SWEEP_POLICY, NOW);
   assert.deepEqual(planFilings.map((p) => p.prNumber), [60, 61], "createdAt still leads; the review did not reorder it");
