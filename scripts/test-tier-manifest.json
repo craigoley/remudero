@@ -131,6 +131,7 @@
     "test/a-source-text-assertion-cannot-survive-instrumentation.test.ts": 261,
     "test/a-staged-skill-reaches-the-worker-prompt.test.ts": 0,
     "test/a-starvation-episode-closes-its-own-escalation.test.ts": 1343,
+    "test/a-status-flip-is-not-a-task-edit.test.ts": 0,
     "test/a-step-wired-census-gate-is-not-entanglement.test.ts": 0,
     "test/a-suite-is-not-a-second-concern.test.ts": 1008,
     "test/a-task-trailer-redirects-review-to-an-unrelated-shard.test.ts": 1612,

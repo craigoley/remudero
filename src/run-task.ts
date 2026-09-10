@@ -787,6 +787,7 @@ import {
   breMetacharsIn,
   changedTaskIds,
   rawChangedTaskIds,
+  statusFlipOnlyTaskIds,
   criteriaAdded,
   DUPLICATE_SLUG_SHINGLE_K,
   followUpCarriesCriteria,
@@ -19172,6 +19173,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let newMonolithIds: Set<string> | undefined;
   let addedExports: AddedExport[] = [];
   let pathExistsAtBase: ((repoRelPath: string) => boolean) | undefined;
+  // W1-T3274: ids CARVED out of `scope` below because their entire diff against `baseRef` is a
+  // status flip to a closed state (queued -> merged, e.g. `plan-reconcile --write`'s own write) —
+  // named here so the summary can report them, never silently drop them (design point (iv)).
+  let statusFlipCarvedIds: string[] = [];
   if (baseRef) {
     const relPath = relative(repoRoot, planPath);
     const basePathCache = new Map<string, boolean>();
@@ -19269,11 +19274,20 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           return [];
         }
       };
-      const rawChanged = rawChangedTaskIds(
-        [oldRaw, ...readShardTexts(join(tmpDir, "tasks.d"))],
-        [headMonolithRaw, ...readShardTexts(join(dirname(planPath), "tasks.d"))],
-      );
+      const oldCorpusTexts = [oldRaw, ...readShardTexts(join(tmpDir, "tasks.d"))];
+      const newCorpusTexts = [headMonolithRaw, ...readShardTexts(join(dirname(planPath), "tasks.d"))];
+      const rawChanged = rawChangedTaskIds(oldCorpusTexts, newCorpusTexts);
       for (const id of rawChanged) scope.add(id);
+      // W1-T3274: A STATUS FLIP TO A CLOSED STATE IS NOT A TASK EDIT. Subtract the carve from
+      // `scope` AFTER the raw-text union above (design point (ii): a flip riding alongside any
+      // other field change is a genuine edit and got no carve at all from
+      // `statusFlipOnlyTaskIds` itself, so it stays in `scope` here regardless). Every downstream
+      // consumer of `scope` — the status/credit projection, the duplicate-shard corpus, and the
+      // `lintTask` loop below — reads it AFTER this point, so a carved id reaches none of them;
+      // it has left the population the open-task rules govern (design point (i)).
+      const statusFlipCarve = statusFlipOnlyTaskIds(oldCorpusTexts, newCorpusTexts);
+      for (const id of statusFlipCarve) scope.delete(id);
+      statusFlipCarvedIds = [...statusFlipCarve].sort();
       const diffText = execFileSync("git", ["-C", repoRoot, "diff", "--no-ext-diff", "--unified=0", `${baseRef}...HEAD`, "--", "src"], {
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
@@ -19572,7 +19586,15 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     }
   }
   if (scope) {
-    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseRef}) — ${failing} failing, ${warned} warning(s)`;
+    // W1-T3274 design point (iv): a carved shard is NAMED, never silently dropped from the
+    // count. Appended after the pre-existing "N new/changed vs <ref>" shape (test/lint-plan-
+    // open-only.test.ts's byte-identical-with---all check only pins that substring, plus the
+    // absence of the whole-plan/--all wording — neither of which this string touches).
+    const carvedNote =
+      statusFlipCarvedIds.length > 0
+        ? ` (${statusFlipCarvedIds.length} status-flip-only, excluded from --base scope: ${statusFlipCarvedIds.join(", ")})`
+        : "";
+    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseRef})${carvedNote} — ${failing} failing, ${warned} warning(s)`;
   } else if (wholePlanScope) {
     summary =
       `${checked} task(s) checked (open tasks only) [scoped by ${wholePlanScopeKey}` +

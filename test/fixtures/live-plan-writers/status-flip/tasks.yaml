@@ -1,0 +1,10 @@
+# W1-T3274 FIXTURE — a dedicated plan root for the status-flip-carve suite
+# (test/a-status-flip-is-not-a-task-edit.test.ts). Committed on purpose: `lintPlanCommand`'s
+# `--base` runs `git show <ref>:<relPath>`, which exits 2 on a path absent at the ref, so a temp
+# directory cannot serve a `--base` run at all. Under the repo root on purpose too: an explicit
+# `--plan` resolving outside it is refused by name (W1-T120).
+#
+# ONE ROOT PER SUITE (mirrors test/fixtures/live-plan-writers/changed-tasks/'s own note): every
+# task this suite needs lives in tasks.d/ so each scenario's transient in-place edit touches only
+# its own file, never a sibling suite's fixture.
+[]

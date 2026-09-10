@@ -1,0 +1,18 @@
+# W1-T3274: the FLIP-PLUS-EDIT fixture. Its baseline proof is CLEAN (a real `unit test:` path), so
+# the shard lints clean until the suite edits it. The suite flips `status:` to `merged` AND
+# rewrites the proof to free prose IN THE SAME EDIT — design point (ii): a flip riding alongside
+# any other field change gets no carve at all, so this shard must stay in scope and fail on its
+# own (newly introduced) proof-dialect violation.
+- id: STATUS-FLIP-B
+  title: "status-flip carve fixture B: a status flip riding alongside a real field edit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  status: queued
+  attempts: 0
+  origin: architect
+  files: [test/a-status-flip-is-not-a-task-edit.test.ts]
+  acceptance:
+    - claim: "the fixture shard parses and lints"
+      proof: "unit test: test/a-status-flip-is-not-a-task-edit.test.ts"

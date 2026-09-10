@@ -2957,17 +2957,90 @@ export function splitTaskRecordBlocks(text: string): Map<string, string> {
  *  the parsed side still owns semantic equivalence. The gate consumes the UNION, which dedups.
  *  Why: W1-T428, #1544. */
 export function rawChangedTaskIds(oldTexts: readonly string[], newTexts: readonly string[]): Set<string> {
-  const merge = (texts: readonly string[]): Map<string, string> => {
-    const all = new Map<string, string>();
-    for (const t of texts) for (const [id, block] of splitTaskRecordBlocks(t)) all.set(id, block);
-    return all;
-  };
-  const oldBlocks = merge(oldTexts);
-  const newBlocks = merge(newTexts);
+  const oldBlocks = mergeTaskBlockTexts(oldTexts);
+  const newBlocks = mergeTaskBlockTexts(newTexts);
   const changed = new Set<string>();
   for (const [id, block] of newBlocks) if (oldBlocks.get(id) !== block) changed.add(id);
   for (const id of oldBlocks.keys()) if (!newBlocks.has(id)) changed.add(id);
   return changed;
+}
+
+/** Folds MANY corpus texts (a monolith plus every shard) into one id→raw-block-text map, a later
+ *  text's block overriding an earlier one for the same id — the shared substrate
+ *  {@link rawChangedTaskIds} and {@link statusFlipOnlyTaskIds} both fold over, so the two raw-text
+ *  diff readers can never disagree about which bytes belong to which task. */
+function mergeTaskBlockTexts(texts: readonly string[]): Map<string, string> {
+  const all = new Map<string, string>();
+  for (const t of texts) for (const [id, block] of splitTaskRecordBlocks(t)) all.set(id, block);
+  return all;
+}
+
+/** The `status:` field line {@link "./plan-reconcile.js".reconcileShardStatus} writes — matched
+ *  here STRUCTURALLY rather than imported, because this file characterizes an arbitrary diff (a
+ *  hand edit included), not only the reconciler's own writes. Two-space indent: a record's
+ *  top-level fields (W1-T3274 measured against the real monolith and real shards) are always
+ *  indented exactly this far; a deeper `status:` nested inside a prose block (e.g. `design: |`)
+ *  never matches, by construction. Exported so its unhealthy arm (a line that does NOT carry a
+ *  top-level `status:` field) has a direct fixture — test/a-status-flip-is-not-a-task-edit.test.ts
+ *  drives both arms by identifier (test/negative-reachability-ratchet.test.ts, W1-T2317). */
+export const STATUS_LINE_RE = /^( {2}status:)[ \t]*(\S+)[ \t]*$/m;
+
+/** Closed/landed statuses a flip may carve INTO — NOT the same set as {@link NON_OPEN_FILING_STATUSES}
+ *  a few hundred lines up, and deliberately so: `blocked` is EXCLUDED here even though it is a
+ *  non-open status. MEASURED 2026-09-10 (this task's own CI, coverage-shard 3/4):
+ *  `blockedDispositionViolations` fires ONLY inside the changed-tasks pass and specifically on the
+ *  TRANSITION into `blocked` (`ctx.baseTask?.status !== "blocked"`) — a task whose entire diff is
+ *  `queued` → `blocked` with no `retirement:` field is the exact shape
+ *  test/a-blocked-task-must-name-its-disposition.test.ts's criterion 1 requires `lint-plan --base`
+ *  to REFUSE (exit 1). Carving that id out of `scope` removes it from the changed-tasks loop
+ *  entirely, so the transition check never runs and the refusal silently vanishes — proven by that
+ *  suite's own red run when `blocked` was still a member here. `merged`/`done` carry no such
+ *  per-transition rule (grepped: no other check in this file reads a `ctx.baseTask` to gate on the
+ *  status the DIFF moves a task TO), so they stay carvable; `merged` is also the only value
+ *  `reconcileShardStatus` (plan-reconcile.ts) ever writes, which is this task's actual trigger. */
+const STATUS_FLIP_CARVE_TARGETS = new Set<TaskStatus>(["merged", "done"]);
+
+/**
+ * W1-T3274 — task ids CARVED by a status-flip: ids whose ENTIRE diff between two corpora is the
+ * `status:` line's VALUE, flipping to a closed/landed status in {@link STATUS_FLIP_CARVE_TARGETS}
+ * (`merged`/`done` — NOT `blocked`, see that Set's own doc). THE FLIP THAT REMOVES A TASK FROM THE
+ * OPEN POPULATION IS, TODAY, ALSO THE EDIT THAT DRAGS IT INTO `--base`'s CHANGED POPULATION:
+ * `changedTaskIds`/`rawChangedTaskIds` both treat any record-text difference as a task edit, so a
+ * bare `plan-reconcile --write` (queued → merged, nothing else) lints every shard it touches in
+ * full and inherits whatever pre-existing violations already sat on them — the reconcile is then
+ * red on arrival for debt it did not create (see this file's own header for the measured #4846
+ * shape). The caller (`lint-plan --base`, run-task.ts) subtracts this result from its
+ * changed-tasks scope; nothing here decides an exit code by itself.
+ *
+ * NARROWED TO THE RAW TEXT, deliberately, not the parsed `Task` — the same trap
+ * {@link rawChangedTaskIds}'s own doc names: a `design:`/`plan_refs:`/etc. edit riding alongside
+ * the flip is invisible to the parser (six fields it drops), so a parsed-only comparison would
+ * carve a shard that was ALSO genuinely edited. Comparing every byte outside the status line's
+ * value catches those dropped fields by construction, exactly as the raw side already does for
+ * `rawChangedTaskIds`. A flip to a still-OPEN status (`queued`, `recon`, `prompted`, ...) is NEVER carved — the
+ * task's own design point (ii) and falsifier's second control: the carve is about LEAVING the
+ * open population, not about the `status:` field merely being the one that moved. A task absent
+ * on either side (newly filed, or removed outright) is never carved either — only a byte-level
+ * edit of an EXISTING id's block ever qualifies. A flip INTO `blocked` is ALSO never carved —
+ * see {@link STATUS_FLIP_CARVE_TARGETS}'s own doc for why.
+ */
+export function statusFlipOnlyTaskIds(oldTexts: readonly string[], newTexts: readonly string[]): Set<string> {
+  const oldBlocks = mergeTaskBlockTexts(oldTexts);
+  const newBlocks = mergeTaskBlockTexts(newTexts);
+  const withoutStatusLine = (block: string, m: RegExpMatchArray): string =>
+    block.slice(0, m.index!) + block.slice(m.index! + m[0].length);
+  const carved = new Set<string>();
+  for (const [id, newBlock] of newBlocks) {
+    const oldBlock = oldBlocks.get(id);
+    if (oldBlock === undefined || oldBlock === newBlock) continue; // new task, or byte-identical
+    const oldMatch = oldBlock.match(STATUS_LINE_RE);
+    const newMatch = newBlock.match(STATUS_LINE_RE);
+    if (!oldMatch || !newMatch) continue; // no (or malformed) status field on either side
+    if (oldMatch[2] === newMatch[2]) continue; // the status VALUE itself did not move
+    if (!STATUS_FLIP_CARVE_TARGETS.has(newMatch[2] as TaskStatus)) continue; // flip to an OPEN status
+    if (withoutStatusLine(oldBlock, oldMatch) === withoutStatusLine(newBlock, newMatch)) carved.add(id);
+  }
+  return carved;
 }
 
 /** The task ids NEW or CHANGED between two plan snapshots, by deep value rather than reference — a
