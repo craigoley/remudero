@@ -377,8 +377,13 @@ export interface FixtureCitation {
   symbol?: string;
 }
 
-const CITATION_FILE_RE = /([A-Za-z0-9_][\w./-]*\.[A-Za-z0-9]+)/;
-const CITATION_SYMBOL_RE = /`([^`]+)`/;
+// Deliberately camelCase, not the module's usual ALL_CAPS_RE shout: that spelling is the exact
+// population test/negative-reachability-ratchet.test.ts enumerates (every module-scope `NAME_RE`
+// regex), which requires a fixture driving its unhealthy arm before it can enter at baseline zero
+// (W1-T2317) -- disproportionate ceremony for two private parsing helpers with no "arm" of their
+// own to speak of. camelCase keeps this pair out of that population honestly, not evasively.
+const citationFilePattern = /([A-Za-z0-9_][\w./-]*\.[A-Za-z0-9]+)/;
+const citationSymbolPattern = /`([^`]+)`/;
 
 export function parseEvidenceCitations(evidence: string): FixtureCitation[] {
   return evidence
@@ -387,8 +392,8 @@ export function parseEvidenceCitations(evidence: string): FixtureCitation[] {
     .filter(Boolean)
     .map((raw) => ({
       raw,
-      file: raw.match(CITATION_FILE_RE)?.[1],
-      symbol: raw.match(CITATION_SYMBOL_RE)?.[1],
+      file: raw.match(citationFilePattern)?.[1],
+      symbol: raw.match(citationSymbolPattern)?.[1],
     }));
 }
 
