@@ -127,6 +127,7 @@
   "src/lib/alert-lane.ts": 137,
   "src/lib/analytics-route.ts": 118,
   "src/lib/arm-auto-merge.ts": 250,
+  "src/lib/audit.ts": 250,
   "src/lib/authority.ts": 250,
   "src/lib/auto-triage.ts": 150,
   "src/lib/autonomy.ts": 90,
