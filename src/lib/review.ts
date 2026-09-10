@@ -2502,12 +2502,12 @@ function fileUnderClaimedPath(file: string, path: string): boolean {
 }
 
 /** A QUOTATION IS NOT AN ASSERTION (W1-T308). `bodyContradictsDiff` scans the whole body for the claim shape, so a
- * blockquote or fenced block quoting ANOTHER PR's body read identically to its own assertion (#1194 was failed over
- * #1192's fixture; #1206 likewise). Blanks blockquote lines and fenced-block contents, preserving every other
- * character's position so match indices still line up. DELIBERATELY NARROW: widening to inline code spans would let a
- * real contradiction hide behind a single backtick. ALSO REPORTS `fenceUnbalancedAtEof` (W1-T1264 (iv)), since an
- * unbalanced fence blanks the REMAINDER of the body. */
-function stripQuotedRegions(report: string): { scan: string; fenceUnbalancedAtEof: boolean } {
+ * blockquote, fenced block or HTML comment quoting ANOTHER PR's body reads identically to its own assertion (#1194
+ * was failed over #1192's fixture; #1206 likewise; #4867/#4879 were failed by an operator note in an HTML comment).
+ * Blanks those regions while preserving every other character's position so match indices still line up.
+ * DELIBERATELY NARROW: widening to inline code spans would let a real contradiction hide behind a single backtick.
+ * ALSO REPORTS `fenceUnbalancedAtEof` (W1-T1264 (iv)), since an unbalanced fence blanks the REMAINDER of the body. */
+export function stripQuotedRegions(report: string): { scan: string; fenceUnbalancedAtEof: boolean } {
   // W1-T3142: ...AND THE ACCEPTANCE BLOCK IS THE THIRD SUCH REGION — a RESTATEMENT of criteria living
   // in `plan/tasks.d/`, which the gate resolves FROM THE SHARD whenever a `Remudero-Task:` trailer is
   // present, so scanning it as the body's own assertion refuses a PR for words its task file wrote.
@@ -2516,17 +2516,58 @@ function stripQuotedRegions(report: string): { scan: string; fenceUnbalancedAtEo
   // CLAIM SCANNING ONLY — `parseAcceptanceBlock` and the author-time checks still read it unchanged.
   const acceptance = acceptanceBlockRegion(report);
   let inFence = false;
+  let inHtmlComment = false;
   const scan = report
     .split("\n")
     .map((line, index) => {
-      if (/^\s*```/.test(line)) {
-        inFence = !inFence;
+      // A fence owns everything inside it, including comment-looking examples. Conversely, an HTML comment owns
+      // every fence marker inside the comment. The ordering is load-bearing: #4867's hidden repair note must not
+      // become a claim, and a hidden ``` must not leave the rest of the rendered body looking fenced to this scan.
+      if (inFence) {
+        if (/^\s*```/.test(line)) inFence = false;
         return " ".repeat(line.length);
       }
-      if (inFence || /^\s*>/.test(line)) return " ".repeat(line.length);
+      if (!inHtmlComment && /^\s*```/.test(line)) {
+        inFence = true;
+        return " ".repeat(line.length);
+      }
+
+      let cursor = 0;
+      let commentStripped = "";
+      while (cursor < line.length) {
+        if (inHtmlComment) {
+          const close = line.indexOf("-->", cursor);
+          if (close < 0) {
+            commentStripped += " ".repeat(line.length - cursor);
+            cursor = line.length;
+          } else {
+            commentStripped += " ".repeat(close + 3 - cursor);
+            cursor = close + 3;
+            inHtmlComment = false;
+          }
+          continue;
+        }
+        const open = line.indexOf("<!--", cursor);
+        if (open < 0) {
+          commentStripped += line.slice(cursor);
+          cursor = line.length;
+        } else {
+          commentStripped += line.slice(cursor, open) + " ".repeat(4);
+          cursor = open + 4;
+          inHtmlComment = true;
+        }
+      }
+
+      // A comment may close before a real fence on the same line. Test the stripped line so a marker still inside
+      // the comment can never toggle the state.
+      if (/^\s*```/.test(commentStripped)) {
+        inFence = true;
+        return " ".repeat(line.length);
+      }
+      if (/^\s*>/.test(commentStripped)) return " ".repeat(line.length);
       // AFTER the fence arms, never before: a fence opened inside the block must still toggle.
       if (acceptance && index > acceptance.headerLine && index < acceptance.endLine) return " ".repeat(line.length);
-      return line;
+      return commentStripped;
     })
     .join("\n");
   return { scan, fenceUnbalancedAtEof: inFence };
