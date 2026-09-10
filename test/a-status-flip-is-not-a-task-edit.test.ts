@@ -83,6 +83,12 @@ test("same status value on both sides, some OTHER field differing, is not a flip
   assert.equal(statusFlipOnlyTaskIds([oldText], [newText]).size, 0);
 });
 
+test("a changed record missing a top-level status line is never carved", () => {
+  const oldText = shard("T1", "queued").replace(/^  status: queued\n/m, "");
+  const newText = shard("T1", "merged");
+  assert.equal(statusFlipOnlyTaskIds([oldText], [newText]).size, 0);
+});
+
 test("a task absent at the base (newly filed) is never carved", () => {
   const carved = statusFlipOnlyTaskIds([shard("T1", "queued")], [shard("T1", "queued"), shard("T2", "merged")]);
   assert.equal(carved.size, 0);
