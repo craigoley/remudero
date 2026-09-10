@@ -1,0 +1,93 @@
+- id: W1-T3359
+  title: "THE SWEEP WRITES 189 COPIES OF EVERY FACT AND THEN READS THEM ALL BACK — 1,138,942 `sweep.disposed` rows carry 6,017 distinct (pr, disposition) pairs, half the ledger is the daemon's own polling noise, and that noise is what grew the corpus until it OOM-killed the daemon"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 18.00
+  files: [src/lib/sweep.ts, src/lib/ledger.ts, test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts]
+  origin: "operator-session#fleet-oom-2026-09-10"
+  plan_refs: ["W1-T3352", "W1-T3335", "W1-T503"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED ON THE LIVE FLEET CORPUS 2026-09-10T23:30Z, after compaction:
+
+      total rows in the union                     3,631,209
+      sweep.* + github.wake.* rows                1,845,336   (50.8%)
+      sweep.disposed rows                         1,138,942   (31.4%)
+      DISTINCT (pr_number, disposition) pairs          6,017
+      write amplification                             189 : 1
+
+    A sample row, verbatim, and note the field that settles it:
+
+      {"ts":"2026-09-10T23:22:45.538Z",...,"step":"sweep.disposed","pr_number":5029,
+       "disposition":"blocked-fixable","acted":false,"reason":"...}
+
+    `"acted":false`. The sweep looked at PR #5029, did nothing, and wrote a row saying so — and it
+    writes that same row again every poll, for as long as the PR stays in that state. The
+    disposition histogram is the same story at scale: 453,773 `post-review`, 289,155
+    `blocked-fixable`, 281,095 `wait` — three steady states, re-logged forever.
+
+    THIS IS THE CAUSE OF W1-T3352's OUTAGE, ONE LEVEL UPSTREAM. That task fixed the READ (a
+    4 GB union blew an 8 GB heap and crash-looped the daemon 66 times over eight hours). This is
+    what made the union 4 GB. The daemon's own logging grew the corpus until the daemon could no
+    longer read it — a closed loop, and the repo's recurring "a second fix follows the first
+    immediately" signature says to trace upstream to where the bad value originates. This is it.
+  rationale: |
+    A LEDGER ROW SHOULD RECORD THAT SOMETHING HAPPENED. 189 of every 190 `sweep.disposed` rows
+    record that nothing happened, again. They are not evidence; they are a poll counter with a
+    timestamp, and they are written at full row width (the sample above is 300+ bytes before its
+    `reason` field even begins).
+
+    THE COST IS NOT STORAGE, IT IS THAT EVERY READER PAYS FOR THEM. `rotateLedger` keeps only 200
+    newest rows per step, so this volume forces rotation constantly: 145-190 new archives a DAY.
+    Every union reader then decompresses all of it. MEASURED: the sweep's own hot-path question —
+    "has this PR head ever been permanently uncreditable?" — returns 667 distinct rows out of
+    1,001,632. A 0.067% yield, against a corpus the sweep itself is half the author of.
+
+    AND THE DEDUPE PROVES IT IS REDUNDANT AT THE SOURCE, NOT JUST IN AGGREGATE. `ledger-compact`
+    collapsed 4.2 MILLION duplicate rows across 14 bounded passes, and the union still reads
+    3,631,209 lines for 1,001,632 distinct ones — 72% duplication AFTER compaction. Compaction is
+    collecting litter that a write-side guard would never have dropped.
+  design: |
+    (i) LOG A TRANSITION, NOT A STATE. Write `sweep.disposed` when a PR's disposition CHANGES from
+    what the last row for that PR said, and not when it repeats. 6,017 distinct pairs is the honest
+    row count; 1,138,942 is a poll log. The previous disposition per PR is already the kind of small
+    derived state this repo keeps in `state/*.json` (a dozen such files exist).
+    (ii) A SUPPRESSED REPEAT MUST STILL BE COUNTABLE. "How long has #5029 been blocked-fixable" and
+    "how often did we poll" are real questions, so the transition row carries a count and a
+    last-seen stamp updated in place, rather than a new row per poll. Losing the ability to answer
+    them would be trading one blindness for another.
+    (iii) DO NOT SOLVE THIS BY LOWERING THE ROTATION THRESHOLD. That shrinks each archive and makes
+    MORE of them, which is the axis that actually hurts every union reader (145-190/day already).
+    (iv) THE GUARD BELONGS AT THE `log()` SEAM FOR THIS STEP, NOT AT EACH CALL SITE. `sweep.ts`
+    disposes from several rungs; a per-call-site check is the shape that goes stale the next time a
+    rung is added.
+    (v) NAME THE SAVING IN THE SAME UNITS THE OUTAGE WAS MEASURED IN. Rows suppressed per day, and
+    archives per day — a patch that reduces rows but not archive churn has not helped the readers.
+  acceptance:
+    - claim: "a repeated disposition for the same PR writes no new row, and the transition row's count and last-seen stamp advance instead"
+      proof: "unit test: test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts"
+    - claim: "a CHANGED disposition still writes a row, so suppression never hides a real transition"
+      proof: "unit test: test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts"
+    - claim: "the guard sits at the log seam and covers every rung that disposes, proved by driving two different rungs through it"
+      proof: "unit test: test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts"
+    - claim: "the measured reduction is reported in rows/day AND archives/day, over a fixture replaying a real poll sequence"
+      proof: "unit test: test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts"
+  falsifier: |
+    REPRODUCE FIRST, AND THE REPRO IS ONE COMMAND on the fleet host:
+    `zcat state/ledger.*.ndjson.gz | grep -c '"step":"sweep.disposed"'` against the distinct
+    `(pr_number, disposition)` pair count. If the ratio is no longer ~189:1 an intervening PR has
+    already changed the write side and this shard must be re-measured before it is built.
+    DO NOT DELETE HISTORY TO PROVE THE SAVING. The win is rows NOT WRITTEN from here on; rewriting
+    the past is `ledger-compact`'s job and it is already done.
+    DO NOT SUPPRESS A ROW WHOSE `acted` IS TRUE, EVER, whatever its disposition. An action is
+    evidence by definition. The suppression is for the repeated no-op only.
+    PROVE THE COUNT SURVIVES. A patch that suppresses repeats and loses "how long has this been
+    stuck" has broken the sweep's own staleness rungs, which age against exactly that.
+    DO NOT ASSUME THE 50.8% IS ALL SUPPRESSIBLE. `github.wake.*` is 225,447 rows of the 1,845,336
+    and is a different mechanism; this task owns `sweep.disposed` and must say plainly what it left.

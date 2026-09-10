@@ -34,6 +34,27 @@
     logged, immediately after `### rmd daemon — SELF-HOSTING: draining` and `reclaimStaleLock`.
     Whatever allocates 3.4 GB reports nothing at all, which is why the heartbeat can only say
     `dispatch_verdict=STALLED ... block_reason=none`.
+
+    AMENDED 2026-09-10T23:40Z, AFTER THE OUTAGE WAS CLEARED BY COMPACTION. Two measurements move
+    this task's direction, and neither was available when it was filed.
+
+    FIRST: `grep` ALREADY ANSWERS THIS QUESTION IN FIVE SECONDS. Same corpus, same pattern, on the
+    same host:
+
+      zgrep -ahE 'pr_attribution_failed|uncreditable' …  wall 5.40s   maxRSS 9,600 kB   -> 667 rows
+      full corpus scan (zcat | wc -l)                    wall 4.98s   maxRSS 2,132 kB   -> 3,615,737 lines
+      the daemon, same question                          ~16 min      up to 8 GB        -> SIGABRT
+
+    About 180x the wall clock and 850x the memory for an identical answer. The in-process reader is
+    not doing something grep cannot; it is doing grep's job in JavaScript while retaining every line
+    it passes in a dedupe `Set<string>` alongside the parsed `rows[]`.
+
+    SECOND: A FIX FOR THIS ALREADY SHIPPED AND DID NOT HOLD. `78d34a1b0 fix(ledger-union): scan the
+    corpus, do not split it (#5017)` merged 19:59:12Z carrying its own measured table (four callers,
+    ~13.7 GB against an 8 GB cap). The daemon OOMed at 20:58:19Z, 21:07:01Z and 21:22:15Z on a
+    checkout that HAD it. Scanning removed the per-file whole-string-plus-split; the `seen` Set and
+    `rows[]` that accumulate the whole RESULT set were untouched, and for a reader with no narrow
+    filter that is the entire corpus. A second bound on the same seam is the shape that just failed.
   rationale: |
     THE INPUT CROSSED A THRESHOLD; NO COMMIT DID. Measured on the fleet's state dir:
 
@@ -65,7 +86,30 @@
     DUPLICATES — 35% of that window is redundant. The corpus that killed the daemon is a third
     duplicate rows nobody collapses.
   design: |
-    (i) BOUND THE READ AT THE UNION SEAM, NOT AT EACH CALLER. `resolveLedgerUnion` is the one place
+    (0) AMENDED, AND THIS IS NOW THE LEAD: ANSWER THE QUESTION WITHOUT THE SCAN — BUT DO KEEP
+    ANSWERING IT. The hot-path question is "has this PR head ever been recorded permanently
+    uncreditable". MEASURED against the pattern the CODE actually greps
+    (`sweep.fix.uncreditable_head` / `_escalated`, not the wider one an earlier draft of this note
+    used): 324 distinct rows out of 1,001,632 — a 0.032% yield — naming 49 distinct head shas, and
+    the set is APPEND-ONLY. That is a projection, not a query:
+    about 100 kB of state answering in milliseconds, maintained where the row is written. This repo
+    already keeps a dozen such files in `state/*.json`, so the pattern needs no invention. The
+    property the union protects is real and survives intact — `rotateLedger` keeps only 200 newest
+    rows per step, so a marker written weeks ago exists ONLY in an archive, and forgetting it
+    re-enables the dispatch loop the sweep's own comment names. We need the ANSWER, not the scan.
+    (0b) AND THE GUARD IS NOT OPTIONAL — THIS IS THE MEASUREMENT THAT PROVES IT, AND IT SURPRISED
+    THE READING THAT PRODUCED THIS AMENDMENT. Of those 324 rows, the number present in the LIVE
+    ledger right now is ZERO. All 324 are in archives. `rotateLedger` keeps 200 newest per step, so
+    whether any survive in the live file is an accident of when rotation last ran — and tonight it
+    is none of them, including a row written at 22:03:34Z, ninety minutes before the measurement.
+    A reader restricted to the live file would have found NOTHING and re-enabled the loop for all
+    49 heads. So "drop the union and read the live file" is not on the table; the projection is
+    REQUIRED precisely because the live file cannot be trusted to hold this population at all.
+    (0a) AND IF A SCAN IS UNAVOIDABLE, SHELL OUT RATHER THAN RE-IMPLEMENT. `zgrep` does it in 5.40s
+    and 9.6 MB, measured above. An in-process scan that must beat that is a cost this task should
+    justify explicitly rather than inherit.
+    (i) BOUND THE READ AT THE UNION SEAM AS A BACKSTOP, NOT AS THE FIX — #5017 already bounded this
+    seam once and the daemon still died. NOT AT EACH CALLER. `resolveLedgerUnion` is the one place
     that knows how many bytes it is about to hand over; every caller downstream sees only rows.
     A byte/row ceiling there fails LOUD and NAMED ("union is N bytes over the M-byte ceiling; run
     `rmd ledger-compact`") rather than as SIGABRT with no step logged. `ledger-compact` already
@@ -92,6 +136,8 @@
       proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
     - claim: "an off-host reader can tell a crash-looping daemon from a healthy one — the beat carries the restart count, and a live-verdict beat with a climbing count is not reported as healthy"
       proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
+    - claim: "the hot-path question is answered from a projection rather than a corpus scan, and the projection agrees with a full scan of the same corpus row for row"
+      proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
   falsifier: |
     REPRODUCE BEFORE FIXING, AND THE REPRO IS CHEAP: on the fleet host,
     `zcat state/ledger.*.ndjson.gz | wc -c` must still read in the billions. If an operator has since
@@ -104,6 +150,17 @@
     DO NOT BLAME A COMMIT. `23451cfc2` sits 76 seconds before the first OOM and is a decoy; its lane
     fires once in six hours. The onset is a data threshold. A fix that reverts a commit fixes nothing
     and the loop resumes the next day.
+    DO NOT SHIP A SECOND BOUND ON THE SEAM #5017 ALREADY BOUNDED. That fix landed at 19:59:12Z and
+    the daemon OOMed three more times on a checkout carrying it. A patch whose evidence is "the scan
+    now holds less" must ALSO show the `seen` Set and `rows[]` accumulation cannot reach the heap
+    cap on the live corpus, or it is the same fix again.
+    MEASURE ANY IN-PROCESS READER AGAINST `zgrep`: 5.40s / 9.6 MB over the same corpus. A reader
+    that cannot get within an order of magnitude of that has not earned being in-process.
+    DO NOT "SIMPLIFY" THIS BY READING THE LIVE LEDGER. MEASURED 2026-09-11: 0 of the 324 terminal
+    rows are in the live file. Dropping the archive side silently re-enables the dispatch loop for
+    49 heads and the tests would stay green, because a fixture with no rotations reads the live file
+    by design. Any patch that narrows the corpus must prove, on a corpus WITH rotations, that the
+    marker set it returns is unchanged.
     PROVE THE STREAMING CLAIM WITH A CORPUS LARGER THAN THE CEILING. A streaming test over a corpus
     that would have fit anyway proves nothing — it must be a corpus the resident path would refuse.
     DO NOT DELETE ARCHIVES TO SHRINK THE CORPUS. `rotateLedger` keeps only 200 newest rows per step,
