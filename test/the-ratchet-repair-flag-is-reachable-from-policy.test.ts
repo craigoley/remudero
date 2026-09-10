@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -86,6 +86,15 @@ test("W1-T3289: DEFAULT_SWEEP_POLICY collects the shipped plan row and keeps the
     DEFAULT_SWEEP_POLICY.recordableRatchetRepairEnabled,
     shipped.values.sweep.recordableRatchetRepairEnabled,
   );
+
+  const strippedPath = join(mkdtempSync(join(tmpdir(), "rmd-ratchet-policy-row-")), "policy.yaml");
+  const stripped = readFileSync(policyPath(REPO_ROOT), "utf8").replace(
+    /\n  recordableRatchetRepairEnabled:\n    value: false\n    origin: "[^"]+"\n/,
+    "\n",
+  );
+  assert.doesNotMatch(stripped, /\n  recordableRatchetRepairEnabled:/);
+  writeFileSync(strippedPath, stripped);
+  assert.equal(loadPolicy(strippedPath).values.sweep.recordableRatchetRepairEnabled, false);
 });
 
 test("W1-T3289: an absent or false flag still names the remedy and withholds the repair", async () => {

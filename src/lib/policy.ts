@@ -269,7 +269,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.repairFilingThreshold": "net-new",
   "sweep.repairFilingWindowDays": "net-new",
   "sweep.supersessionDisposal": "net-new",
-  "sweep.recordableRatchetRepairEnabled": "net-new",
+  "sweep.recordableRatchetRepairEnabled": "lifted",
   "sweep.memoryFloorMib": "net-new",
   "drain.max": "lifted",
   "autoTriage.enabled": "net-new",
@@ -564,11 +564,9 @@ export function validatePolicy(raw: unknown): Policy {
   const repairFilingThreshold = numberField("sweep.repairFilingThreshold", sweepRaw.repairFilingThreshold, origin);
   const repairFilingWindowDays = numberField("sweep.repairFilingWindowDays", sweepRaw.repairFilingWindowDays, origin);
   const supersessionDisposal = booleanField("sweep.supersessionDisposal", sweepRaw.supersessionDisposal, origin);
-  const recordableRatchetRepairEnabled = booleanField(
-    "sweep.recordableRatchetRepairEnabled",
-    sweepRaw.recordableRatchetRepairEnabled,
-    origin,
-  );
+  const recordableRatchetRepairEnabled = sweepRaw.recordableRatchetRepairEnabled === undefined
+    ? false
+    : booleanField("sweep.recordableRatchetRepairEnabled", sweepRaw.recordableRatchetRepairEnabled, origin);
   const memoryFloorMib = numberField("sweep.memoryFloorMib", sweepRaw.memoryFloorMib, origin);
 
   const drainRaw = raw.drain;

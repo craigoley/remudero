@@ -801,7 +801,7 @@ sweep:
   # that registry, so no lowered score floor can be written by this switch.
   recordableRatchetRepairEnabled:
     value: false
-    origin: "net-new"
+    origin: "lifted:src/lib/sweep.ts (recordableRatchetRepairEnabled === true guards; absent shipped false)"
 
   # W1-T1038 (the 2026-08-19 host stall). Dispatch has priced every draw in dollars
   # (dailyCostCeilingUsd above) and never once in bytes: across the full deduped ledger, zero
