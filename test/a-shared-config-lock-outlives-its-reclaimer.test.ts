@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   DEFAULT_CONFIG_LOCK_GRACE_MS,
   configLockPath,
+  runConfigLockReclaimRung,
   runWorktreeReapRung,
   wireCredentialHelperSocket,
   worktreeAdd,
@@ -135,6 +136,43 @@ test("W1-T3308 criterion 4: the cadence preserves a live or uncheckable config l
       assert.ok(existsSync(lock), "a live or uncheckable lock is never evidence authorising removal");
       rmSync(lock);
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3308 criterion 5: a reclaimer that THROWS is reported and yields no lock path", () => {
+  // The catch arm of `runConfigLockReclaimRung`. Reachable only through the `reclaim` seam the rung
+  // already exposes — no new seam, no widened signature. It matters because this rung runs on the
+  // idle cadence: a predicate that throws (an unreadable lock, a probe that dies, a permission
+  // change under it) must degrade to "no lock reclaimed" and SAY so, never take the cadence down and
+  // never report a path it did not reclaim. A caller that received a path here would go on to treat
+  // a still-held lock as freed.
+  const root = tmp("rmd-config-lock-reap-error-");
+  const repo = join(root, "repos", "remudero");
+  try {
+    seedClone(repo);
+    const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    const result = runConfigLockReclaimRung(
+      repo,
+      (step, extra = {}) => logs.push({ step, extra: extra ?? {} }),
+      {
+        reclaim: () => {
+          throw new Error("probe exploded");
+        },
+      },
+    );
+
+    assert.equal(result, null, "a throwing reclaimer yields no lock path, never a path it did not free");
+    const errs = logs.filter((l) => l.step === "worktree.config_lock_reap.error");
+    assert.equal(errs.length, 1, "the failure is reported exactly once");
+    assert.equal(errs[0].extra.config_lock, configLockPath(repo), "the row names WHICH lock it was working on");
+    assert.match(String(errs[0].extra.error), /probe exploded/, "and carries the cause, not a bare marker");
+    assert.equal(
+      logs.filter((l) => l.step === "worktree.config_lock.reclaiming").length,
+      0,
+      "a throw before any reclaim reports no reclaiming",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
