@@ -1249,6 +1249,7 @@
     "test/the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy.test.ts": 1104,
     "test/the-run-length-credential-gate-has-no-callers.test.ts": 1126,
     "test/the-scarce-resource-is-the-window-not-the-notional-dollar.test.ts": 454,
+    "test/the-scheduled-learning-rung-drafts-and-discards.test.ts": 0,
     "test/the-served-model-is-not-the-model-that-was-requested.test.ts": 665,
     "test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts": 455,
     "test/the-sweep-fan-out-respects-the-host-budget.test.ts": 1247,

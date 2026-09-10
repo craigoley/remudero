@@ -1960,6 +1960,30 @@ export function recordCiLearningCadenceFire(root: string, at: Date): void {
   recordMeasurementCadenceFire(path, at, 24 * 60 * 60 * 1000);
 }
 
+/**
+ * W1-T3324 — RETURN AN ALLOWANCE A FIRING NEVER SPENT. `recordCiLearningCadenceFire` writes the fire
+ * BEFORE the run, which is right against a crash-loop re-running an expensive window and wrong
+ * against a transient outage that did no work: MEASURED 2026-09-09, a `Bad credentials (HTTP 401)`
+ * from the window read consumed the day's only allowance at `maxPerDay: 1` and produced nothing.
+ *
+ * DROPS THE NEWEST FIRE ONLY, never the file: an older fire in the same day still counts, so this
+ * cannot be used to re-run past the cadence. Absent or unreadable marker is a no-op — a release that
+ * created a marker would invent an allowance rather than return one.
+ */
+export function releaseCiLearningCadenceFire(root: string): void {
+  const path = ciLearningCadenceMarkerPath(root);
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { fires?: unknown };
+    if (!Array.isArray(raw.fires) || raw.fires.length === 0) return;
+    writeFileSync(path, JSON.stringify({ fires: raw.fires.slice(0, -1) }, null, 2));
+  } catch {
+    // Unreadable or absent: nothing to return. Never creates the marker.
+  }
+}
+
+/** The window one scheduled firing reads. A NAMED default, not a literal at the call site: the arm
+ *  hardcoded `1` where the CLI takes `--days N`, so a missed firing lost that day permanently. */
+export const CI_LEARNING_WINDOW_DAYS = 3;
 /** One scheduled CI-learning firing as the operator needs to read it — counts AND what they were
  *  about. The ledger row already carried counts; the causes and filed ids are what made a firing
  *  worth opening. */
