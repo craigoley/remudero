@@ -20078,7 +20078,7 @@ const RUN_LEDGER_STEP_PATTERN =
  */
 export function retroTriggerCheck(
   now: Date = new Date(),
-  deps: { config?: Config; github?: ShippedGithub; policy?: Policy } = {},
+  deps: { config?: Config; github?: ShippedGithub; policy?: Policy; appendLedger?: typeof appendLedger } = {},
 ): RetroTriggerDecision | undefined {
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -20087,7 +20087,27 @@ export function retroTriggerCheck(
   if (markerResolution.kind === "corrupt") return undefined;
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
   const github = deps.github ?? retroShippedGithubGateway();
-  if (github.unavailable?.()) return undefined;
+  if (github.unavailable?.()) {
+    // W1-T3325 — DECLINE OUT LOUD. The refusal is CORRECT (a retro synthesised over an unreadable
+    // corpus is worse than none) and is unchanged: this still returns `undefined` and no retro
+    // fires. What changes is that it stops being invisible. `daemon.retro_trigger.check_failed`
+    // logs only on a THROW, so before this row an outage and "nothing qualified" rendered
+    // identically — MEASURED as a 49-hour stall nothing in the fleet reported.
+    //
+    // THE MARKER'S AGE RIDES THE ROW because that is what makes ONE decline actionable: a decline
+    // over a two-hour-old marker is routine, one over a five-day-old marker is the observed
+    // condition. An ABSENT marker is UNBOUNDED, never 0 — reading "never written" as "written just
+    // now" would render the most-stalled case as the freshest.
+    (deps.appendLedger ?? appendLedger)(ledgerPath, {
+      task_id: "RETRO",
+      step: "retro_trigger.declined",
+      lane: "daemon",
+      reason: "github unreadable — refusing to synthesise a retro over a corpus that cannot be read",
+      days_since_marker: marker?.ts ? (now.getTime() - Date.parse(marker.ts)) / (24 * 60 * 60 * 1000) : "unbounded",
+      marker_ts: marker?.ts ?? "absent",
+    } as never);
+    return undefined;
+  }
   // MERGE RESOLUTION (W1-T2289 x the ledger-union and runless-merge fixes on main). Both sides
   // rewrote this block and each carries behaviour the other lacks, so neither could be taken whole:
   // main supplies the SOURCE (`resolveLedgerUnion`, which sees rotated archives a bare
