@@ -6,13 +6,16 @@ import { test } from "node:test";
 
 import {
   DEFAULT_SWEEP_POLICY,
+  conflictRefusalCause,
   deriveDisposition,
+  isRedundantRefixConflict,
   runSweep,
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
 } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import type { MergeConflictEvidence } from "../src/lib/merge-state.js";
 
 const NOW = Date.parse("2026-09-09T20:00:00.000Z");
 const RECENT = "2026-09-09T19:00:00.000Z";
@@ -187,4 +190,59 @@ test("both admission and decline write a ledger row naming the byte comparison t
   assert.equal(declinedRow.acted, true);
   assert.match(String(declinedRow.reason), /redundant re-fix byte comparison differed from main/);
   assert.match(String(declinedRow.reason), /never auto-resolved/);
+});
+
+// ── The DECLINE causes: why a redundant-refix claim was NOT honoured ──────────────────────────
+//
+// diff-coverage named sweep.ts:335 and :338 -- two arms of redundantRefixConflictDeclineCause that
+// nothing reached. They matter more than their two lines suggest: each turns a silent
+// "not classifiable as a pure concurrent addition" into a sentence naming what was wrong with the
+// evidence, and a refusal that cannot say why is the shape this whole task exists to remove.
+//
+// Driven through `conflictRefusalCause`, the exported caller, rather than the private helper --
+// the cause has to survive the caller's precedence to be worth anything.
+
+test("W1-T3273: evidence that is not a BYTE comparison declines by name, not as 'not classifiable'", () => {
+  const files = [{ path: "src/a.ts", oursDeleted: 0, theirsDeleted: 0 }];
+  // `compared` is a literal type because typed callers only ever write "bytes". This evidence
+  // arrives from the ledger as JSON, which is exactly why a RUNTIME guard exists for a value the
+  // type system says cannot occur -- so the fixture has to cast to reach it.
+  const evidence = {
+    files,
+    oursLog: "",
+    theirsLog: "",
+    redundantRefix: { compared: "prose", verdict: "main-byte-identical", comparedPaths: ["src/a.ts"] },
+  } as unknown as MergeConflictEvidence;
+
+  const cause = conflictRefusalCause(files, { mergeConflictAdmissionEnabled: true }, undefined, evidence);
+  assert.match(cause, /not a byte comparison/);
+  assert.doesNotMatch(cause, /not classifiable/, "the specific cause must win over the generic fallback");
+  assert.equal(isRedundantRefixConflict(evidence), false, "and the admission predicate refuses the same evidence");
+});
+
+test("W1-T3273: a byte comparison that misses a conflicting path declines by name -- a partial proof is not a proof", () => {
+  const files = [
+    { path: "src/a.ts", oursDeleted: 0, theirsDeleted: 0 },
+    { path: "src/b.ts", oursDeleted: 0, theirsDeleted: 0 },
+  ];
+  const evidence: MergeConflictEvidence = {
+    files,
+    oursLog: "",
+    theirsLog: "",
+    // src/b.ts conflicts and was never compared. Honouring this would admit a merge on evidence
+    // that covered half of it.
+    redundantRefix: { compared: "bytes", verdict: "main-byte-identical", comparedPaths: ["src/a.ts"] },
+  };
+
+  const cause = conflictRefusalCause(files, { mergeConflictAdmissionEnabled: true }, undefined, evidence);
+  assert.match(cause, /did not cover every conflicting path/);
+  assert.equal(isRedundantRefixConflict(evidence), false, "and the admission predicate refuses it too");
+
+  // POSITIVE CONTROL: the SAME evidence with every path covered is admitted, so this test fails
+  // for the coverage gap it names and not because the fixture is malformed.
+  const complete: MergeConflictEvidence = {
+    ...evidence,
+    redundantRefix: { compared: "bytes", verdict: "main-byte-identical", comparedPaths: ["src/a.ts", "src/b.ts"] },
+  };
+  assert.equal(isRedundantRefixConflict(complete), true, "covering every path is what makes the claim honourable");
 });
