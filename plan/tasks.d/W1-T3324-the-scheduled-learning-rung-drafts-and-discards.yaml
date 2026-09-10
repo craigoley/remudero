@@ -1,0 +1,113 @@
+- id: W1-T3324
+  title: "THE SCHEDULED CI-LEARNING RUNG DRAFTS AND DISCARDS — the daemon arm mints shards and never files them, passes an EMPTY idempotency surface, hardcodes a one-day window, and records its fire BEFORE the run, so a transient 401 spends the whole day's only allowance; six drafts were minted on 2026-09-07 and 2026-09-08 and the plan holds zero ci-learning records"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 30.00
+  files:
+    - src/run-task.ts
+    - plan/policy.yaml
+    - test/the-scheduled-learning-rung-drafts-and-discards.test.ts
+  origin: "operator-session#ci-learning-repair-2026-09-10"
+  plan_refs: ["W1-T2959", "W1-T2968", "W1-T3032", "W1-T3044"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR OBSERVATION 2026-09-10, and it was correct against my own first reading: "how can it
+    have not recorded what it found ... that makes no sense. shouldn't what we filed be in a PR too?"
+
+    IT DID RECORD, AND IT FILED NOTHING. MEASURED across all three ledger rotation forms:
+
+        ci_learning_cadence.ran  2026-09-07T18:45:42Z  status=backlog drafts=3 excluded=20
+        ci_learning_cadence.ran  2026-09-08T19:22:03Z  status=backlog drafts=3 excluded=30
+        ci_learning_cadence.run_failed 2026-09-09T20:31:38Z  gh: Bad credentials (HTTP 401)
+
+    And `grep -rl 'origin:.*ci-learning' plan/tasks.d/` returns ZERO. Six drafts minted, none filed.
+
+    THE TWO CALLERS DISAGREE, AND ONLY ONE IS WIRED. `rmd ci-learning` typed by hand files:
+    `fileCiLearningShards(result.drafts, checkoutRoot, {...})` (src/run-task.ts:16788), printing
+    `FILED <taskId> -> <relPath>`. The DAEMON arm (src/run-task.ts:24251-24263) calls
+    `mintCiLearningShards(corpus, [])` and returns four counts. It never calls the filer.
+
+    `plan/policy.yaml:1026` turned this rung ON by operator direction 2026-09-07, and its own comment
+    states "this rung FILES" and "Verified after: a 14-day run filed three shards with real ids".
+    THAT VERIFICATION WAS OF THE CLI PATH. The scheduled path has never filed anything.
+
+    FOUR DEFECTS IN THIRTEEN LINES, each independently sufficient to lose the lesson:
+      1. NO FILER CALL. The drafts are returned as counts and dropped.
+      2. EMPTY IDEMPOTENCY SURFACE. `mintCiLearningShards(corpus, [])` — the CLI passes real
+         `planOrigins` (:16753). Wired as-is, the same cause would re-file on every run forever.
+      3. A HARDCODED ONE-DAY WINDOW. `loadCiFailureWindow(1)` where the CLI takes `--days N`. With
+         `maxPerDay: 1`, a single missed firing loses that day's lessons permanently.
+      4. THE FIRE IS RECORDED BEFORE THE RUN (:24253, "THE FIRE FIRST"). The 2026-09-09 401 spent
+         the day's only allowance and produced nothing. Correct against a crash-loop; wrong against
+         a transient outage, which is the observed failure.
+  design: |
+    (i) THE SCHEDULED PATH FILES WHAT IT DRAFTS, through the SAME `fileCiLearningShards` the CLI
+    already calls. Not a second filer: one function, two callers, the second finally wired. Its
+    result (`filed`/`skipped`/`refused`) rides the `ci_learning_cadence.ran` row so the ledger says
+    what LANDED, not only what was drafted.
+    (ii) THE REAL IDEMPOTENCY SURFACE, not `[]`. The daemon passes the same `planOrigins` the CLI
+    derives, so a cause already in the plan is skipped rather than re-filed. Without this, (i) alone
+    turns one lost lesson into a duplicate every firing.
+    (iii) A FAILED FIRING MUST NOT CONSUME THE BUDGET. Keep "fire first" for the crash-loop it
+    guards, and RELEASE the allowance when the run throws before doing any work — the observed 401
+    shape. A run that filed, or partially filed, keeps its fire: the guard exists to stop repeating
+    expensive work, not to punish an outage that did none.
+    (iv) THE WINDOW IS A POLICY VALUE, NOT A LITERAL. `loadCiFailureWindow(1)` becomes a named
+    default so a missed day can be recovered by widening the window rather than lost.
+    (v) CADENCE 1/DAY -> 4/DAY, by operator direction 2026-09-10. `minIntervalMinutes: 1440 -> 360`
+    and `maxPerDay: 1 -> 4` in plan/policy.yaml — both inside the schema bounds already declared
+    there (min 15/max 1440; min 1/max 24), so this is a DATA edit and no schema changes. Four
+    firings also bound the cost of one lost firing to six hours instead of twenty-four.
+    (vi) EVERY RECORD STILL PARKS. `author_class: machine` + `verify: human` is unchanged here:
+    `isDispatchEligible` refuses it and `machineAuthorVerifyViolation` blocks it at `verify: auto`.
+    Releasing drafts automatically is a SEPARATE, later task under its own operator ruling; this one
+    must not anticipate it.
+  acceptance:
+    - claim: "the scheduled rung calls the same filer the CLI calls, so a drafted shard reaches the plan instead of a counter"
+      proof: "unit test: test/the-scheduled-learning-rung-drafts-and-discards.test.ts"
+    - claim: "the scheduled rung passes a real plan-origins surface, so a cause already filed is skipped rather than re-filed"
+      proof: "unit test: test/the-scheduled-learning-rung-drafts-and-discards.test.ts"
+    - claim: "a firing whose window read THROWS before any work releases its allowance, so a transient outage does not spend the day"
+      proof: "unit test: test/the-scheduled-learning-rung-drafts-and-discards.test.ts"
+    - claim: "a firing that filed anything KEEPS its fire, so the crash-loop guard the ordering exists for still holds"
+      proof: "unit test: test/the-scheduled-learning-rung-drafts-and-discards.test.ts"
+    - claim: "the ledger row names what LANDED, not only what was drafted, so a filed-nothing run is distinguishable from a drafted-nothing run"
+      proof: "unit test: test/the-scheduled-learning-rung-drafts-and-discards.test.ts"
+    - claim: "every record the scheduled path writes still carries author_class machine and verify human"
+      proof: "unit test: test/the-scheduled-learning-rung-drafts-and-discards.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF the scheduled path already files: read
+    `runCiLearningCadence` (src/run-task.ts) and name the filer call. MEASURED 2026-09-10 at
+    4ca042d3: it calls `mintCiLearningShards(corpus, [])` and returns counts; `fileCiLearningShards`
+    appears at :16788 (the CLI) and nowhere in the daemon arm.
+    THE POSITIVE CONTROL IS THE PLAN ITSELF, because "it filed and I could not see it" and "it never
+    filed" print the same absence: `grep -rl 'origin:.*ci-learning' plan/tasks.d/` must be ZERO
+    before, and NON-ZERO after a driven run. A count that is zero on both sides means the test drove
+    nothing.
+    PROVE THE DEDUP ARM SEPARATELY. Drive the rung TWICE over the same corpus: the second run must
+    file nothing and report the cause as already present. Without this, (i) ships a rung that
+    re-files the same lesson four times a day, which is worse than the silence it replaces.
+    PROVE THE RELEASE ARM WITH A THROWING WINDOW, and prove its MIRROR: a run that threw before work
+    releases the allowance; a run that filed keeps it. A suite that only drives the happy path passes
+    on an implementation that never records a fire at all, which re-opens the crash-loop.
+    DO NOT REORDER THE FIRE UNCONDITIONALLY. "Fire first" guards a crash-loop re-running an expensive
+    window; only a run that did NO work may release it.
+    DO NOT RELEASE A DRAFT TO verify: auto here. That is a separate task under its own ruling.
+  note: |
+    Rule 25 CHECKED: `src/run-task.ts` IS on INSTRUMENT_SURFACE. `plan/policy.yaml` is neither an
+    instrument nor a product `src/` path, so `detectInstrumentEntanglement`'s `srcPaths` half stays
+    EMPTY and it cannot fire — instrument plus policy data plus this task's own falsifier.
+    risk:high on BLAST RADIUS, not span: this rung WRITES RECORDS INTO THE OPERATOR'S PLAN, four
+    times a day once (v) lands. A defect here does not fail loudly — it either keeps filing nothing
+    (today) or files duplicates on a cadence. The falsifier is written against both directions.
+    WHY 1+2 ARE ONE TASK. They are four defects in the same thirteen-line function; splitting them
+    guarantees a conflict in `runCiLearningCadence` and would land a filer that re-files duplicates.
+    THE POLICY COMMENT WILL BE STALE THE MOMENT THIS MERGES: plan/policy.yaml:1028 justifies the ON
+    switch with a verification of the CLI path. Correct it in the same diff to say which path was
+    verified and when the scheduled path was wired.
