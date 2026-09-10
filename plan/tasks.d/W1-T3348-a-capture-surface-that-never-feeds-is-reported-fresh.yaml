@@ -1,0 +1,114 @@
+- id: W1-T3348
+  title: "A CAPTURE SURFACE THAT HAS NEVER FED IS REPORTED FRESH — the feedback docket's cadence marker proves only that the weekly rung FIRED, and the rung fires whether or not a human ever typed anything, so four of five capture surfaces have carried zero items across the entire ledger while every liveness signal read green; judge the docket's INPUTS from the counts it already emits, in a check that REFUSES rather than renders"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files: [src/lib/doctor.ts, test/a-capture-surface-that-never-feeds-is-refused.test.ts, test/doctor.test.ts]
+  origin: "oper#operator-feedback-loop-does-not-close-2026-09-10"
+  plan_refs: ["W1-T436", "W1-T1273", "W1-T3236"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10 on the daemon host over the ledger union (919 archives + the live file,
+    `rmd ledger-grep 'feedback_docket'`; newest row in the corpus 2026-09-10T17:12:26.766Z, so it
+    covers today). The WHOLE population is 5 rows: 3 `feedback_docket.empty`, 2 `.published`, 0
+    `.duplicate`. Every `.empty` row carries the same five zeros in `counts_by_source`.
+
+    THE MARKER SAYS FRESH THE ENTIRE TIME. `state/last-feedback-docket.json` read
+    `{"lastFireIso":"2026-09-10T01:34:34.560Z"}` — 15.6h old against a 7-day gate, so
+    `feedbackDocketDue` is false and the rung is behaving exactly as designed. That is the defect:
+    a rung firing weekly over permanently-empty surfaces reports green forever. The cadence marker
+    answers "did the rung run", and nobody asks "did anything reach it".
+
+    FOUR OF FIVE SURFACES HAVE NEVER PRODUCED AN ITEM, by exact-step queries (substring queries
+    read 48 and 3 for the first two and are WRONG — the `.empty` rows contain the word "reframe"
+    in their own counts_by_source):
+      "step":"ratify.reframed"      -> 0   (control: "step":"ratify.approved" -> 44)
+      "step":"operator_feedback"    -> 0
+      question_answer               -> 0 of 349 rows in plan/questions.ndjson carry an `answer`
+      operator_note                 -> plan/operator-notes.ndjson has never been created
+      rejected_feedback             -> 157 files; the ONLY feeder, and machine-written
+    Both publishes came from that machine surface. No human's words have ever entered this loop,
+    while the console is demonstrably in use: `panel.question_answered` 0 and `operator_note.added`
+    0 against a control of 51 `panel.*` rows and 44 approvals.
+
+    WHY THIS DOES NOT LAND BESIDE `CADENCE_MARKERS`. The obvious home is `cadenceMarkerRows`
+    (status-board.ts, W1-T3236's liveness alarm). That whole family is ITSELF unwired: measured by
+    `git grep` over src/, EIGHT status-board exports have no production consumer — `serviceKind`,
+    `SUPERVISOR_TICK_OVERDUE_MS`, `livenessState`, `deployFailedConsequence`,
+    `CADENCE_STALE_INTERVALS`, `CADENCE_DEFAULT_INTERVAL_MINUTES`, `CADENCE_MARKERS` and
+    `cadenceMarkerRows` — only tests reference them. A capture-surface row added there would
+    inherit exactly the deadness this task exists to end. `buildDoctorReport` is pure over injected
+    `ledgerLines` and its worst verdict drives `exitCodeFor`, so a check placed there REFUSES.
+  design: |
+    (i) JUDGE THE INPUTS FROM DATA THAT ALREADY EXISTS. `judgeCaptureSurfaceLiveness` reads the
+    `counts_by_source` the docket already writes on every empty fire. No new sensor, no new write,
+    no second cadence.
+
+    (ii) THREE STATES, NEVER TWO — `fresh` (carried an item on the most recent counted fire),
+    `stale` (carried one once, but not on the most recent) and `never`. Reporting a never-fed
+    channel as merely stale sends an operator hunting a regression in a channel with no history to
+    regress from; this mirrors `cadenceMarkerRows`' own fresh/stale/never discipline.
+
+    (iii) A PUBLISH FIRE CANNOT WITNESS SILENCE. `feedback_docket.published` rows carry no
+    `counts_by_source`. The first draft folded them in as fires and reported `rejected_feedback:
+    never` — the channel that caused BOTH publishes. Only counted fires witness silence; publish
+    fires are NAMED in `measured` and in the detail. Giving `.published` its own counts is a
+    SEPARATE concern and is deliberately not done here.
+
+    (iv) IT NEVER FIRES ON AN UNOBSERVED POPULATION. Under three counted fires the check reads OK
+    and says it has not yet judged. A bound that binds on a healthy condition is this repo's
+    recurring defect; a fresh host has simply not run the rung enough times.
+
+    (v) NOT A CAPTURE WIRING. This task adds no new way for an operator to record anything. Routing
+    the interactive-session channel into `plan/operator-notes.ndjson` is a separate successor and
+    must not ship without this gate — capture that stops at "write it down" rebuilds the failure.
+  acceptance:
+    - claim: "a surface silent across every counted fire is refused rather than reported fresh, and every dead surface is named"
+      proof: "unit test: test/a-capture-surface-that-never-feeds-is-refused.test.ts"
+    - claim: "the refusal reaches rmd doctor's exit code, so it is a gate and not a rendered row"
+      proof: "unit test: test/a-capture-surface-that-never-feeds-is-refused.test.ts"
+    - claim: "fresh, stale and never are three distinct states and a surface carrying items is never reported never"
+      proof: "unit test: test/a-capture-surface-that-never-feeds-is-refused.test.ts"
+    - claim: "a corpus with too few counted fires reads OK and says it has not yet judged"
+      proof: "unit test: test/a-capture-surface-that-never-feeds-is-refused.test.ts"
+    - claim: "a publish fire cannot witness silence and is named rather than counted as evidence either way"
+      proof: "unit test: test/a-capture-surface-that-never-feeds-is-refused.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if some production reader already refuses on a capture surface
+    that has never fed — proven by driving that reader, not by a grep hit. A `counts_by_source`
+    field in a ledger row is NOT the falsifier: the row is written and read by nobody.
+
+    EACH ARM MUST BE LOAD-BEARING, PROVEN BY DELETION. Unwiring the check from
+    `buildDoctorReport` must redden the exit-code test. Downgrading `never` from FAIL to WARN must
+    redden the refusal tests. Counting publish fires as counted fires must redden the
+    publish-cannot-witness-silence test. Removing the minimum-fires guard must redden the
+    unobserved-population test.
+  note: |
+    W1-T3348 was reserved atomically on origin at `refs/rmd-id/W1-T3348` (max 3347 across
+    tasks.yaml 280, shards 3338, open PRs 3345, remote plan 3338, history 3338, reservations 3347).
+    Both scope-time checks were run before building: `git ls-remote --heads origin 'run-W1-T3348-*'`
+    returned 0 against a control of 62 live `run-*` heads, and the merged-trailer scan returned 0
+    against a control of 1 for W1-T3336.
+
+    risk:high is BLAST RADIUS, not span: the diff is one pure function and its wiring, but it
+    changes `rmd doctor`'s exit code, which is a gate. On the daemon host today the check reads
+    FAIL — `3 counted fire(s) of 5 observed; 5 never, 0 stale` — which is the true state of the
+    loop, not a false alarm.
+
+    test/doctor.test.ts is in `files:` because two census assertions there pin the exact number of
+    doctor arms and name every arm that has joined. Adding an arm requires updating that census by
+    design; the count and the message were updated and nothing else in that file was touched.
+
+    THE SHARED-PROOF WARNING IS ACCEPTED DELIBERATELY. `lint-plan` advises a distinct per-criterion
+    test-title proof. In a PLAN SHARD the pure-path form is required instead: `judgeCriterion`'s
+    `not_yet_built` carve-out needs `!nameFiltered`, a flow-style single-line `files:` containing
+    the path, and the file NOT existing at that head — all true on the filing PR, none true of a
+    name-filtered proof. A title-filtered proof here would resolve to zero candidates on a
+    plan-only head and grade unexecutable. The build PR carries the same five claims against the
+    real file, where every title does resolve.
