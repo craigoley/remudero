@@ -1,0 +1,82 @@
+- id: W1-T3328
+  title: "A DRAFTED LESSON NAMES A CAUSE BUT NO ACTION — the rung ranks causes by how many pull requests each refused and stops there, so an operator reading three drafts cannot tell which wants a gate, which wants a doc, and which wants nothing but a note"
+  repo: remudero
+  depends_on: [W1-T3327]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 18.00
+  files:
+    - src/lib/measurement-cadence.ts
+    - test/a-lesson-names-no-action-to-take.test.ts
+  origin: "operator-session#ci-learning-repair-2026-09-10"
+  plan_refs: ["W1-T3044", "W1-T3327", "W1-T2959"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR DIRECTION 2026-09-10: "make sure it is prioritizing the most important learnings to
+    file, build, or update the docs for."
+
+    HALF OF THAT IS ALREADY TRUE AND SHOULD NOT BE REBUILT. W1-T3044 already compacts findings BY
+    CAUSE and ranks by how many pull requests each gate refused: over a real 14-day window, 119
+    findings across 22 distinct gates, and the three-draft budget covers 65 of 119 by taking
+    ci-gate (26), ci (20) and coverage-ratchet (19). Prioritisation by impact EXISTS.
+
+    WHAT DOES NOT EXIST IS THE ACTION. Every draft is the same shape — a task record proposing a
+    build — whether the right response is a new gate, a correction to an existing gate, a
+    documented convention, or nothing at all beyond a recorded note. The operator's three verbs
+    (file, build, update the docs) have no representation in the draft.
+
+    AND THE DISTINCTION IS MEASURABLE FROM THE CORPUS THIS RUNG ALREADY READS, which is why this is
+    a task rather than a wish: `collectCiFailureCorpus` carries each pair's REPAIR FILES, and
+    W1-T3051 already surfaces the dominant ones. A cause whose repairs keep landing in `docs/` is a
+    documentation lesson; one whose repairs land in `scripts/` or a gate module is an instrument
+    lesson; one whose repairs scatter with no dominant file is the case where a note is the honest
+    output.
+  design: |
+    (i) CLASSIFY FROM THE REPAIR FILES THE CORPUS ALREADY CARRIES, never from the gate NAME. A name
+    is a label an author chose; the repair paths are what the fix actually touched. This is the same
+    reasoning W1-T3044 used to reject commit-type prefixes as a proxy.
+    (ii) THREE ACTIONS, MATCHING THE OPERATOR'S OWN THREE VERBS, plus an explicit fourth for the
+    honest absence: `gate` (repairs concentrate in an instrument or script), `docs` (repairs
+    concentrate under docs/), `build` (repairs concentrate in product src/), and `unclear` when no
+    file dominates. `unclear` is NOT a failure — it is the measured statement that this cause has no
+    single shape yet, and inventing one would be worse than saying so.
+    (iii) THE ACTION RIDES THE DRAFT AND THE INBOX REPORT, so an operator sorting three drafts sees
+    what each wants before opening any of them.
+    (iv) RANKING IS UNCHANGED. W1-T3044's cause-compaction and PR-count ordering already decide
+    WHICH three; this decides what each of the three is FOR. Re-ranking by action would silently
+    demote the highest-impact cause because of its file shape.
+    (v) NOT IN SCOPE: acting on the classification automatically, changing the ceiling, changing
+    which causes are selected, or writing to docs/.
+  acceptance:
+    - claim: "a cause whose repairs concentrate under docs/ classifies as a documentation action, not a build"
+      proof: "unit test: test/a-lesson-names-no-action-to-take.test.ts"
+    - claim: "a cause whose repairs concentrate in a gate or script classifies as an instrument action"
+      proof: "unit test: test/a-lesson-names-no-action-to-take.test.ts"
+    - claim: "a cause whose repairs scatter with no dominant file classifies UNCLEAR rather than defaulting to build"
+      proof: "unit test: test/a-lesson-names-no-action-to-take.test.ts"
+    - claim: "the selection and ordering of causes is byte-identical to before, so classification never re-ranks impact"
+      proof: "unit test: test/a-lesson-names-no-action-to-take.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF a draft already names an action: read `CiLearningShardDraft` and
+    `mintCiLearningShards`. MEASURED 2026-09-10: a draft carries `findingId`, `title`, `prs`,
+    `dominantRepairFiles`, `author_class` and `verify` — no action field of any kind.
+    THE UNCLEAR ARM IS THE ONE MOST LIKELY TO BE FAKED, and it must have its own fixture: a corpus
+    whose repairs share no dominant file must classify `unclear`. An implementation that defaults to
+    `build` passes every other test in this suite.
+    PROVE RANKING IS UNMOVED. The same corpus must produce the SAME three causes in the SAME order
+    before and after. A classifier that re-orders has changed what gets drafted, which is a
+    different task and a worse one.
+    DO NOT CLASSIFY FROM THE GATE NAME. W1-T3044 already measured that a label the author chose
+    carries no signal; the repair paths are the evidence.
+    DO NOT ACT ON THE CLASSIFICATION HERE. Naming an action and taking it are different tasks with
+    different blast radii.
+  note: |
+    Rule 25 CHECKED WITH THE PREDICATE: `src/lib/measurement-cadence.ts` plus this task's own
+    falsifier returns `entangled: false`.
+    DEPENDS ON W1-T3327 because the action is only useful where a human reads it, and W1-T3327 is
+    what puts a firing in front of one. Building this first would classify into a report nobody sees.
+    HALF THE OPERATOR'S ASK WAS ALREADY SATISFIED and this shard says so rather than re-implementing
+    it: W1-T3044's cause-compaction is the prioritisation. Only the action verb is missing.
