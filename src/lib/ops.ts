@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { ghExec } from "./github-transport.js";
 import { join } from "node:path";
 import { appendLedger } from "./ledger.js";
-import { escalate, type Escalation, type IssueGateway } from "./escalate.js";
+import { escalate, splitConcatenatedJsonPages, type Escalation, type IssueGateway } from "./escalate.js";
 import type { LandFeedbackOpts } from "./feedback-landing.js";
 import { readLedgerLines } from "./status.js";
 import { captureFeedback, feedbackDir, feedbackEntryPath, setFeedbackStatus, type FeedbackEntry } from "./feedback.js";
@@ -226,9 +226,12 @@ export function readCodeScanningAlerts(owner: string, repo: string): CodeScannin
       ["api", `repos/${owner}/${repo}/code-scanning/alerts`, "--paginate"],
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
     );
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return { ok: false, error: "GitHub returned a non-array code-scanning response" };
-    return { ok: true, alerts: (parsed as GhCodeScanningAlertJson[]).map(normalizeCodeScanningAlert) };
+    const pages = splitConcatenatedJsonPages(raw).map((chunk) => {
+      const parsed = JSON.parse(chunk) as unknown;
+      if (!Array.isArray(parsed)) throw new Error("GitHub returned a non-array code-scanning response");
+      return parsed as GhCodeScanningAlertJson[];
+    });
+    return { ok: true, alerts: pages.flat().map(normalizeCodeScanningAlert) };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "code-scanning read failed" };
   }
@@ -236,10 +239,9 @@ export function readCodeScanningAlerts(owner: string, repo: string): CodeScannin
 
 /**
  * Real gateway: `gh api repos/<owner>/<repo>/<kind>/alerts --paginate`, scoped to
- * `owner/repo` (the v0 single-repo target). `--paginate` is `gh`'s own flag for
- * merging every page of a list endpoint into one JSON array — no separate
- * page-loop here, and no silent truncation past page 1. Each source's `gh`
- * call is wrapped independently so ONE disabled/forbidden scanner (a 404/403,
+ * `owner/repo` (the v0 single-repo target). `gh` writes each paginated REST page as
+ * a separate JSON value; `readCodeScanningAlerts` reassembles its pages before it
+ * returns success. Each source's `gh` call is wrapped independently so ONE disabled/forbidden scanner (a 404/403,
  * or `gh` erroring for any other reason) degrades only that source to `[]`,
  * mirroring status.ts's `ghRequiredStatusCheckContexts` fail-soft discipline —
  * never throws, never crashes the other two sources' reads.
