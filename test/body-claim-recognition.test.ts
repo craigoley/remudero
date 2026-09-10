@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { bodyContradictsDiff, recognizeChangesetClaims, judgeReview, CHANGESET_CLAIM_FALSIFIER_NOTE } from "../src/lib/review.js";
+import { CHANGESET_CLAIM_FALSIFIER_NOTE, bodyContradictsDiff, changesetClaimsDisagreeing, judgeReview, recognizeChangesetClaims } from "../src/lib/review.js";
 import { runFixRung } from "../src/run-task.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -65,11 +65,12 @@ const TWO_FILE_DIFF_FILES = ["a.ts", "b.ts"];
 
 // ── acceptance 1: the gate reports a RECOGNISED count, not only a contradicted one ─────────────
 
-test("recognizeChangesetClaims (acceptance 1): a false 'exactly N files' claim is BOTH recognised AND contradictory — the count is not merely a re-derivation of contradictions.length", () => {
+test("recognizeChangesetClaims (acceptance 1): a false 'exactly N files' claim is recognised and reported STALE, not contradictory — the count is not merely a re-derivation of contradictions.length", () => {
   const body = "This PR touches exactly two files.";
   const recognition = recognizeChangesetClaims(body, ONE_FILE_DIFF_FILES); // diff has 1 file, claim says 2
   assert.equal(recognition.recognisedCount, 1, "the claim shape was read — a fact bodyContradictsDiff's [] alone cannot report");
-  assert.equal(recognition.contradictions.length, 1, "and it disagreed with the diff");
+  assert.equal(recognition.staleCountClaims.length, 1, "and its number disagreed with the diff");
+  assert.equal(recognition.contradictions.length, 0, "a drifted count is not a false statement about WHAT changed, so it does not refuse");
   assert.deepEqual(
     recognition.contradictions,
     bodyContradictsDiff(body, ONE_FILE_DIFF_FILES),
@@ -153,8 +154,10 @@ test("recognizeChangesetClaims: a body with NO fence at all is never flagged (co
 
 test("bodyContradictsDiff (acceptance 6 — regression): unchanged in shape and behaviour — recognizeChangesetClaims is strictly additive, never a widened or narrowed arm", () => {
   // #974's shape: still caught.
+  // #974 carried BOTH faults: a drifted count and a false denial. Both are still READ; only the
+  // denial now refuses, so the regression check reads recognition rather than refusal.
   assert.ok(
-    bodyContradictsDiff("exactly one file: MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md.", [
+    changesetClaimsDisagreeing("exactly one file: MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md.", [
       "MASTER-PLAN.md",
       "plan/tasks.yaml",
       "docs/ORIENTATION.md",
@@ -173,12 +176,20 @@ test("bodyContradictsDiff (acceptance 6 — regression): unchanged in shape and 
 });
 
 test("judgeReview (acceptance 6 — regression): a false changeset claim still FORCES state=failure exactly as before, and now ALSO carries changesetClaimsRecognised", () => {
-  const body = `${RESPONSIVE_REPORT}\n\nThis PR touches exactly one file: a.ts.`;
+  // The VEHICLE is now a claim that is false about WHAT changed — an enumeration naming a file the
+  // diff does not contain — because that is the class that still forces a failure. A drifted count
+  // no longer does, and the second half of this test pins exactly that.
+  const body = `${RESPONSIVE_REPORT}\n\nThis PR touches exactly two files: a.ts, NOT-IN-DIFF.ts.`;
   const v = judgeReview(CRITERIA, { diff: TWO_FILE_DIFF, report: body });
   assert.equal(v.state, "failure");
   assert.equal(v.floorState, "failure");
   assert.ok(v.changesetContradictions && v.changesetContradictions.length > 0);
   assert.equal(v.changesetClaimsRecognised, 1, "the false claim was recognised, not merely contradicted");
+
+  // AND THE COUNT-ONLY CASE DOES NOT FAIL, which is the change this suite exists to pin.
+  const staleOnly = judgeReview(CRITERIA, { diff: TWO_FILE_DIFF, report: `${RESPONSIVE_REPORT}\n\nThis PR touches exactly one file: a.ts.` });
+  assert.equal(staleOnly.state, "success", staleOnly.summary);
+  assert.equal(staleOnly.changesetStaleCountClaims?.length ?? 0, 1, "…but it is still reported, so the fix rung can tidy it");
 });
 
 test("judgeReview: a TRUE 'exactly one file' claim over a genuinely one-file diff PASSES, with changesetContradictions empty AND changesetClaimsRecognised = 1 — 'checked, and it agrees' now legible on the verdict itself", () => {
@@ -344,8 +355,8 @@ test("runFixRung (design (iii) — 'both consumers carry it'): the fix rung logs
   assert.ok(recognitionLog, "the fix rung must log its own recognition count independently of judgeReview's verdict");
   assert.deepEqual(
     recognitionLog?.fields,
-    { strike: 1, recognised: 1, contradictions: 1, fence_unbalanced_at_eof: false },
-    "the STALE_BODY's 'exactly 4 files' claim is recognised (1) and, against the CURRENT 5-file diff, contradictory (1)",
+    { strike: 1, recognised: 1, contradictions: 0, stale_counts: 1, fence_unbalanced_at_eof: false },
+    "the STALE_BODY's 'exactly 4 files' claim is recognised (1) and, against the CURRENT 5-file diff, STALE (1) — every path it names is present, so it is not contradictory",
   );
   assert.equal(outcome.outcome, "fixed", "the count is observability only — the repair still lands exactly as before");
 });
@@ -381,6 +392,6 @@ test("runFixRung: a body with no changeset claim at all logs recognised: 0 along
 
   const recognitionLog = logs.find((l) => l.step === "fix.body_claim_recognition");
   assert.ok(recognitionLog);
-  assert.deepEqual(recognitionLog?.fields, { strike: 1, recognised: 0, contradictions: 0, fence_unbalanced_at_eof: false });
+  assert.deepEqual(recognitionLog?.fields, { strike: 1, recognised: 0, contradictions: 0, stale_counts: 0, fence_unbalanced_at_eof: false });
   assert.equal(outcome.outcome, "fixed");
 });

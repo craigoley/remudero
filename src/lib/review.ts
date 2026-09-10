@@ -372,6 +372,10 @@ export interface ReviewVerdict {
    *  enumeration; see {@link bodyContradictsDiff} for why anything outside them is silence. Non-empty FORCES `state`
    *  to `"failure"`, and the contradiction is NAMED ({@link failSummary}) since an unexplained red gets overridden. */
   changesetContradictions?: ChangesetClaimContradiction[];
+  /** Claims disagreeing with the diff's file COUNT alone, every path they name being present.
+   *  Reported, never refusing. Kept on the verdict so "did the reviewer count this diff correctly"
+   *  stays observable once a wrong count no longer surfaces as a contradiction. */
+  changesetStaleCountClaims?: ChangesetClaimContradiction[];
   /** How many changeset claims {@link recognizeChangesetClaims} RECOGNISED (W1-T1264) — THE FIELD THAT MAKES A SILENT
    *  `changesetContradictions: []` LEGIBLE, since that array reads identically whether the body made no claim or made
    *  one that agreed. `0` is the former, `> 0` beside an empty array is "checked, and it agrees", and `undefined`
@@ -2672,6 +2676,7 @@ function enumeratedTokenMatchesChangeset(token: string, diffFiles: readonly stri
  * // Why: #974 claimed "exactly one file: MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md" over a 3-file diff that DID touch it; #1025 claimed "data-only: no code" while reverting 8 files. */
 export function recognizeChangesetClaims(report: string, diffFiles: string[]): ChangesetClaimRecognition {
   const out: ChangesetClaimContradiction[] = [];
+  const staleCounts: ChangesetClaimContradiction[] = [];
   // How many claim-shaped tokens, across every arm below, were RECOGNISED as being about the changeset — whether or
   // not they went on to disagree with `diffFiles` (W1-T1264). A recognised-and-consistent claim increments this
   // WITHOUT reaching `out`, the one fact `bodyContradictsDiff`'s `[]` could never distinguish from "never read a claim
@@ -2692,8 +2697,19 @@ export function recognizeChangesetClaims(report: string, diffFiles: string[]): C
     if (claimed === undefined) continue;
     if (!m[2] && !claimsChangesetContext(scan, m.index ?? 0)) continue;
     recognisedCount++; // past both the parse and the subject anchor — a genuine claim, true or not
-    let contradicted = claimed !== diffFiles.length;
-    if (!contradicted && m[2]) {
+    // A DRIFTED COUNT NO LONGER REFUSES A PR, by operator decision (2026-09-10): the diff is
+    // whatever it is, so a sentence that miscounts it is STALE, not false about the change. What
+    // still refuses is an enumeration naming a file the changeset does not contain.
+    //
+    // THE TWO HALVES ARE JUDGED INDEPENDENTLY. Previously the enumeration was only evaluated when
+    // the count agreed, which was safe while either half refused; it is not safe once one half
+    // stops refusing, because a body that BOTH miscounts AND names a file it never touched would
+    // escape on the half that no longer blocks. A stale count is still reported, on
+    // `staleCountClaims`, because `deriveChangesetClaimUpdate` (run-task.ts) repairs one in place:
+    // not refusing it and not tidying it are different decisions, and only the first was made.
+    const countDisagrees = claimed !== diffFiles.length;
+    let enumerationIsFalse = false;
+    if (m[2]) {
       // MARKDOWN QUOTING IS STRIPPED BEFORE THE COMPARISON, because a body writes a path in backticks while
       // `diffFiles` holds bare paths, so `includes` fails on every correctly enumerated file (#1192 reported one
       // contradiction over three backticked paths; with backticks stripped, zero; #1209 then parenthesised its
@@ -2709,9 +2725,13 @@ export function recognizeChangesetClaims(report: string, diffFiles: string[]): C
             .replace(/[`'")\].,;:\s]+$/, ""),
         )
         .filter(looksLikePath);
-      contradicted = named.some((f) => !enumeratedTokenMatchesChangeset(f, diffFiles));
+      enumerationIsFalse = named.some((f) => !enumeratedTokenMatchesChangeset(f, diffFiles));
     }
-    if (contradicted) out.push({ claim: m[0].trim(), files: [...diffFiles] });
+    const entry = { claim: m[0].trim(), files: [...diffFiles] };
+    // A claim that is wrong BOTH ways is a contradiction, not merely stale: the enumeration half is
+    // the checkable one, so it decides.
+    if (enumerationIsFalse) out.push(entry);
+    else if (countDisagrees) staleCounts.push(entry);
   }
 
   // (b): "no <path>" claims, plus the "plan-only"/"data-only" house shorthands.
@@ -2755,7 +2775,7 @@ export function recognizeChangesetClaims(report: string, diffFiles: string[]): C
     break;
   }
 
-  return { recognisedCount, contradictions: out, fenceUnbalancedAtEof };
+  return { recognisedCount, contradictions: out, staleCountClaims: staleCounts, fenceUnbalancedAtEof };
 }
 
 /** Everything {@link bodyContradictsDiff} decides, plus the two facts (W1-T1264) that make its silence legible: how
@@ -2769,6 +2789,9 @@ export interface ChangesetClaimRecognition {
   recognisedCount: number;
   /** Identical to {@link bodyContradictsDiff}'s own return value — the FALSE-claim subset. */
   contradictions: ChangesetClaimContradiction[];
+  /** Claims whose only fault is a drifted NUMBER — every path they name IS in the changeset.
+   *  Deliberately not contradictions; reported so the fix rung can tidy the sentence in place. */
+  staleCountClaims: ChangesetClaimContradiction[];
   /** True when {@link stripQuotedRegions}'s fence toggle was still OPEN after every line was walked (W1-T1264 design
    *  (iv)). An unbalanced ``` delimiter blanks the body to EOF, so every later claim goes unread and `recognisedCount`
    *  under-counts without saying why. NAMED here, never auto-repaired: guessing the author's intent is forbidden. */
@@ -2786,6 +2809,20 @@ export const CHANGESET_CLAIM_FALSIFIER_NOTE =
   "(bump an \"exactly N files\" count, or negate a \"no <path>\" claim) and re-run: if the false " +
   "variant also recognises as 0, the gate is blind to that wording; if it fires a contradiction, " +
   "your original claim was read, and it was true.";
+
+/**
+ * Every claim the detector READ and found disagreeing with the diff — {@link
+ * ChangesetClaimRecognition.contradictions} plus {@link ChangesetClaimRecognition.staleCountClaims}.
+ *
+ * NOT what a verdict refuses on. It answers "was the claim read, and was it wrong", which is what a
+ * PARSER test asks — anchoring, quoting, delimiters and spans are properties of recognition, and a
+ * wrong count is the cheapest probe for them. Asking `bodyContradictsDiff` instead conflates "the
+ * parser saw it" with "the gate refuses it", so relaxing the gate silently blinds those tests.
+ */
+export function changesetClaimsDisagreeing(report: string, diffFiles: string[]): ChangesetClaimContradiction[] {
+  const recognition = recognizeChangesetClaims(report, diffFiles);
+  return [...recognition.contradictions, ...recognition.staleCountClaims];
+}
 
 /** The FALSE-claim subset of {@link recognizeChangesetClaims}, unchanged from before W1-T1264. Prefer {@link
  *  recognizeChangesetClaims} at any NEW call site that can use `recognisedCount` — `judgeReview` and
@@ -3170,6 +3207,7 @@ export function judgeReview(
   // `undefined`, never `0`/`false` — so "not computed" is never confused with "found nothing".
   const changesetRecognition = evidence.reportIsSubstitute ? undefined : recognizeChangesetClaims(evidence.report, diffFiles);
   const changesetContradictions = changesetRecognition?.contradictions ?? [];
+  const changesetStaleCountClaims = changesetRecognition?.staleCountClaims ?? [];
 
   // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s doc. Reuses the SAME `diffFiles`
   // every other structural check above already computed — no new diff walk.
@@ -3314,6 +3352,7 @@ export function judgeReview(
     planOnly,
     criteriaTampered,
     changesetContradictions,
+    changesetStaleCountClaims,
     changesetClaimsRecognised: changesetRecognition?.recognisedCount,
     changesetFenceUnbalancedAtEof: changesetRecognition?.fenceUnbalancedAtEof,
     instrumentEntangled,
