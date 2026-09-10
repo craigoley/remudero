@@ -83,6 +83,7 @@ export const CLI_ONLY = {
       "authority",
       "check-proof",
       "reap-branches",
+      "ledger-compact",
       "ledger-grep",
       "hand-runs",
       "ci-failures",
