@@ -153,10 +153,44 @@ export function daemonExitCode(stopReason: DaemonStopReason): number {
  *  {@link daemonExitCode} deliberately cannot see: the stop detail. A second function rather than a
  *  second parameter, because point-free callers would otherwise be handed an array index as a stop
  *  detail. Fail-closed: anything not positively transient stays `error` (W1-T2546). Forensics: docs/forensics/daemon.md. */
+/**
+ * W1-T3310 — THIS REPO'S OWN PRE-PUSH GATE, REFUSING. `hooks/pre-push` prints this banner at the
+ * start of a line and exits non-zero; the push then fails and the task cannot proceed.
+ *
+ * NARROW AND ANCHORED ON PURPOSE. A bare `/REFUSED/` would catch a worker echoing the word, and an
+ * unanchored match would catch this file's own prose quoted in a task's output. The banner is stable
+ * text emitted by a checked-in hook, which is the strongest thing available to match on.
+ */
+/** EXPORTED FOR ITS OWN FIXTURE. negative-reachability-ratchet requires a regex surface to be driven
+ *  directly with BOTH arms asserted — a match and a non-match — because a caller that happens to work
+ *  proves nothing about where the pattern stops. The non-match arm is the one that matters here: this
+ *  must NOT fire on a task merely mentioning the phrase, or an ordinary crash would be reclassified
+ *  as blocked and the crash budget would stop protecting anything. */
+export const PRE_PUSH_GATE_REFUSAL_RE = /(?:^|\n)pre-push REFUSED\b/;
+
+/**
+ * A GATE REFUSAL IS NOT A CRASH — the third instance of one pattern (W1-T490's stale restart,
+ * W1-T2537's blocked pass, W1-T2546's environmental refusal), and the one still mapped to 1.
+ *
+ * MEASURED on the fleet host 2026-09-10: three `exited 1`, three `pre-push REFUSED`, three
+ * `test-tier-manifest: 1 test file` — a 1:1:1 correspondence — against `RestartPolicy=on-failure:5`.
+ * The daemon dispatched normally between each exit. At five, docker stops restarting and the fleet
+ * stays down behind a green board.
+ *
+ * IT IS BLOCKED, NOT A FIFTH CODE: the task genuinely cannot proceed and must be reported, which is
+ * exactly what {@link DAEMON_EXIT_BLOCKED} already means. A new code would need a new meaning.
+ *
+ * ORDER IS LOAD-BEARING. The transient check runs FIRST and keeps precedence, so a push that failed
+ * on a network fault or a rate limit is still environmental (77) even if a gate banner is somewhere
+ * in the same buffer. Fail-closed is unchanged: text matching neither stays `error` → 1, because a
+ * push can fail for reasons that ARE crashes — a dead credential, a non-fast-forward — and mapping
+ * every push failure to 76 would hide a real credential outage as "blocked".
+ */
 export function daemonExitCodeForSummary(summary: Pick<DaemonSummary, "stopReason" | "stopDetail">): number {
   if (summary.stopReason !== "error") return daemonExitCode(summary.stopReason);
   const detail = summary.stopDetail;
   if (detail !== undefined && classifyFailure({ text: detail }) === "transient") return DAEMON_EXIT_ENVIRONMENTAL;
+  if (detail !== undefined && PRE_PUSH_GATE_REFUSAL_RE.test(detail)) return DAEMON_EXIT_BLOCKED;
   return daemonExitCode(summary.stopReason);
 }
 
