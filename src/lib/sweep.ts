@@ -1536,7 +1536,13 @@ export function missingTaskTrailerRepairDecision(
       reason: `missing trailer repair refused: no plan record for ${taskId} on main, so the branch id is not resolvable`,
     };
   }
-  if ((pr.introducedTaskIds ?? []).includes(taskId)) {
+  if (pr.introducedTaskIds === undefined) {
+    return {
+      action: "stand-down",
+      reason: `missing trailer repair refused: changed files for #${pr.prNumber} were not observed, so self-credit cannot be ruled out`,
+    };
+  }
+  if (pr.introducedTaskIds.includes(taskId)) {
     return {
       action: "stand-down",
       reason: `missing trailer repair refused: this PR adds ${taskId}'s own plan record, so adding its trailer would self-credit the filing`,

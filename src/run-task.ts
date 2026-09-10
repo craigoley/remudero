@@ -27229,6 +27229,15 @@ export function classifyPlanFiling(
     : { isPlanFiling: false, source: "not-plan-only" };
 }
 
+function introducedTaskIdsFromPlanPaths(paths: readonly string[]): string[] {
+  const ids = new Set<string>();
+  for (const path of paths) {
+    const match = /^plan\/tasks\.d\/(W\d+-T\d+)-/.exec(path);
+    if (match) ids.add(match[1]);
+  }
+  return [...ids].sort();
+}
+
 /** One bounded ledger row per classification transition, never one row per unchanged poll. */
 export function createPlanFilingClassificationTelemetry(
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -27658,6 +27667,12 @@ export function buildOpenPrViews(
   const ciGateRequired = deps.readCiGateRequired
     ? deps.readCiGateRequired(repoRoot)
     : readCiGateRequiredChecks(repoRoot);
+  let mainPlan: Plan | undefined;
+  try {
+    mainPlan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  } catch {
+    mainPlan = undefined;
+  }
 
   // W1-T2864: the local emitter receipt is still the zero-request positive answer. Only PRs
   // without it enter the bounded REST hydrator; complete reads are cached by exact head.
@@ -27741,6 +27756,9 @@ export function buildOpenPrViews(
   return raw.map((pr) => {
     const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
     const taskId = resolveOpenPrTaskId(pr, ledger);
+    const taskRecord = taskId ? mainPlan?.byId.get(taskId) : undefined;
+    const fileObservation = planFilingFiles.get(pr.number);
+    const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
     const reviewLedgerKey = taskId ?? `PR-${pr.number}`;
     const inputDigest = reviewInputDigest(pr.headRefOid, pr.body ?? "");
     const peers = taskId ? (byTask.get(taskId) ?? []) : [];
@@ -27861,6 +27879,11 @@ export function buildOpenPrViews(
       // The ABSENT-check-suite remedy pushes an empty commit to THIS branch. Already fetched
       // for isDependabot above — carried through rather than re-queried.
       headRefName: pr.headRefName,
+      body: pr.body,
+      taskExistsOnMain: taskId === undefined ? undefined : taskRecord !== undefined,
+      introducedTaskIds: observedFiles === undefined ? undefined : introducedTaskIdsFromPlanPaths(observedFiles),
+      changedFiles: observedFiles,
+      taskDeclaredFiles: taskRecord?.files,
       // W1-T528: the operator's hold, straight off the SAME list row the enumeration already
       // fetched — no extra request, because `draft` rides on GitHub's `pull-request-simple`
       // schema. This is the producer `test/producer-completeness.test.ts` demands; without it
@@ -29480,6 +29503,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readMainTip"
   | "releaseBaseCausedStandDown"
   | "selectAdaptiveReviewWidth"
+  | "repairMissingTaskTrailer"
 > {
   const {
     owner,
@@ -29686,6 +29710,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // caller (sweep.ts's own `automerge.hold_withdrawal`), never duplicated here.
     disarmAutoMerge: (pr) => {
       disarmImpl(pr.prUrl);
+    },
+
+    repairMissingTaskTrailer: async (pr, repair) => {
+      await updatePrBodyViaGh(pr.prUrl, repair.repairedBody);
+      log("sweep.missing_task_trailer_body_write", {
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        task_id: repair.taskId,
+        refire_event: repair.refireEvent,
+        rerun_failed_jobs: repair.rerunFailedJobs,
+      });
     },
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
