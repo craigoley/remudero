@@ -1,0 +1,96 @@
+- id: W1-T3323
+  title: "CLAUDE.md IS 83% EVIDENCE AND EVERY SESSION PAYS FOR ALL OF IT — invert the file into the headline index it is already written as (7301 bytes, MEASURED with the repo's own renderHeadlineOnlyIndex) and move the 34198 bytes of bodies to a store both lanes can reach, saving ~9100 tokens per interactive session"
+  repo: remudero
+  depends_on: [W1-T3320, W1-T3322]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 25.00
+  files: [CLAUDE.md, src/lib/learnings.ts, src/run-task.ts, test/the-doctrine-index-points-at-every-body.test.ts]
+  origin: "operator-session#doctrine-modularization-2026-09-10"
+  plan_refs: ["W1-T2508", "W1-T2507", "W1-T3320", "W1-T3322", "W1-T503"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` / `blast-radius`: the diff is a file reorganisation, but CLAUDE.md is the
+    doctrine every interactive session loads and 79 suites read. Priced on reach.
+
+    DEPENDS ON BOTH, AND THE ORDER IS NOT NEGOTIABLE. W1-T3322 makes the tests read what a reader
+    resolves, without which this reverts exactly as W1-T2507's three bullets did. W1-T3320 makes the
+    budget gate ROUTE rather than refuse, without which this PR cannot land at all: the migration is
+    net-NEGATIVE for CLAUDE.md and net-POSITIVE for `learnings`, which sits at 41714 of 42000 — so
+    today's gate would refuse the very change that fixes the byte problem.
+  rationale: |
+    MEASURED 2026-09-10 on `origin/main`, using the repo's OWN primitives rather than an estimate:
+
+      full CLAUDE.md        43685 bytes · 56 rules · 8 sections
+      headline-only index    7301 bytes  (17% of full) — via renderHeadlineOnlyIndex
+      bodies addressable       56 of 56  by headline   — via buildHeadlineIndex
+      saving                36384 bytes  ≈ 9100 tokens per interactive session
+
+    THE FILE IS ALREADY WRITTEN FOR THIS. Every one of the 56 rules is `- **HEADLINE** body
+    *(citation)*` with ZERO exceptions, and the split is semantic rather than typographic: the
+    HEADLINE IS THE INSTRUCTION, THE BODY IS THE EVIDENCE. "A test run with no `# tests` summary is
+    NOT A RESULT" is the entire rule; the 610 bytes beneath it are the measurement that makes it
+    believable. A reader needs the instruction always and the evidence only when applying the rule
+    precisely or doubting it.
+
+    HALF THE MECHANISM IS IN PRODUCTION ALREADY, FOR THE WRONG LANE. W1-T2508 shipped the parse,
+    index, retrieve and degrade primitives, and `run-task.ts` hands a WORKER a headline index plus
+    on-demand bodies. The INTERACTIVE lane — the one CLAUDE.md's own maintenance note says pays the
+    tax per session — loads all 43685 bytes, because Claude Code reads the file natively and there is
+    no runtime hook to make it lazy.
+
+    WHICH IS WHY THE POINTER MUST BE IN THE TEXT. This is the design's load-bearing constraint: an
+    interactive agent cannot call `retrieveRuleBody`, so each headline must carry the PATH to its own
+    body as readable text. One restructure then serves both lanes — the worker keeps programmatic
+    retrieval, the interactive agent gets a path it can open — with no new plumbing for either.
+  design: |
+    (i) THE HEADLINE CARRIES ITS OWN POINTER, as text. Not a runtime lookup, not an index the reader
+    must know to consult: the path is on the line. An agent that never fetches still has the
+    instruction; one that needs the evidence has the address.
+    (ii) DO NOT COMPRESS THE PROSE. The bodies are where the measurements live, and this repo's
+    history is that a rule stripped of its evidence gets re-litigated — several bullets carry their
+    own "MEASURED <date>" for exactly that reason. This task MOVES bytes; it does not rewrite them.
+    A migration that also edits prose cannot be reviewed for either job.
+    (iii) SPLIT BY SCOPE WHERE SCOPE EXISTS. A rule naming a concrete repo path belongs in
+    `learnings/*.yaml`, whose `files:` glob delivers it to the task that governs that path and to no
+    one else — strictly better than a headline, because it costs nothing until relevant. W1-T2507
+    already moved 19 bullets this way and 88 entries carry globs today. Only rules with no single
+    governing path stay in the index.
+    (iv) THE INDEX MUST REMAIN READABLE AS A DOCUMENT, not become a table of contents nobody reads.
+    The eight section headings are how a reader finds a rule by the question they are asking, and the
+    file's own preamble says so; they survive.
+    (v) FAIL LOUD ON A DANGLING POINTER. A headline whose body cannot be resolved is a NAMED
+    unavailability (`retrieveRuleBodyOrDegrade` already does this), never silence — and a pointer to
+    a body that does not exist must fail a test, because a doctrine that silently loses its evidence
+    is worse than one that is merely long.
+  acceptance:
+    - claim: "every headline in the index resolves to exactly one body, and a dangling pointer fails rather than degrading silently"
+      proof: "unit test: test/the-doctrine-index-points-at-every-body.test.ts"
+    - claim: "no rule is lost in the move: the resolved doctrine contains every rule the pre-migration file did"
+      proof: "unit test: test/the-doctrine-index-points-at-every-body.test.ts"
+    - claim: "the bodies are moved verbatim, not rewritten — the measurements that make each rule believable survive byte-for-byte"
+      proof: "unit test: test/the-doctrine-index-points-at-every-body.test.ts"
+    - claim: "each headline carries its body's path as readable text, so an interactive reader with no runtime hook can still reach the evidence"
+      proof: "unit test: test/the-doctrine-index-points-at-every-body.test.ts"
+    - claim: "the eight sections survive, so a reader still finds a rule by the question they are asking"
+      proof: "unit test: test/the-doctrine-index-points-at-every-body.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if CLAUDE.md is already an index. MEASURED 2026-09-10: it is
+    43685 bytes of which 34198 are rule bodies, and every interactive session loads all of it.
+    PROVE THE SAVING, DO NOT ASSERT IT: measure the post-migration file with the same
+    `renderHeadlineOnlyIndex` used to size this task. A migration that lands at 30KB has moved
+    furniture, not solved the problem.
+    PROVE NOTHING WAS LOST, BY DIFF: the resolved doctrine before and after must contain the same
+    rules, and each body must be byte-identical. A migration verified only by "the tests still pass"
+    is verified by tests that W1-T3322 just taught to read the resolver — which would pass on a
+    truncated body.
+    DO NOT compress, reword or "tighten" a body while moving it. Two changes in one diff, and the
+    evidence is exactly what a reviewer cannot check by eye at this volume.
+    DO NOT start before W1-T3320 lands. The migration is net-positive for `learnings` (41714 of
+    42000) and today's gate refuses that outright — the PR cannot land, whatever its merits.
+    DO NOT split into more markdown files that all get loaded anyway. That is the same bytes with
+    more paths, and it is the failure mode this task exists to avoid.
