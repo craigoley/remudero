@@ -1,0 +1,93 @@
+- id: W1-T3341
+  title: "THE DOCTRINE CAP STILL PRICES A FILE THAT NO LONGER EXISTS — re-derive capBytes 44000 -> 17000 and foldDebtCeilingBytes 48000 -> 18400 against the 15501-byte INDEX W1-T3323 left behind, in the instrument-only PR Standing rule 25 requires"
+  repo: remudero
+  depends_on: [W1-T3323]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 6.00
+  files: [scripts/claude-md-budget-baseline.json, test/claude-md-budget-ratchet.test.ts, test/the-doctrine-cap-tracks-the-index.test.ts]
+  origin: "operator-session#doctrine-modularization-2026-09-10"
+  plan_refs: ["W1-T3323", "W1-T3320", "W1-T2507", "W1-T503", "W1-T297"]
+  status: queued
+  attempts: 0
+  note: |
+    WHY THIS IS A SEPARATE TASK AND NOT THE LAST COMMIT OF W1-T3323. `scripts/[^/]*-baseline\.json$`
+    is on Standing rule 25's `INSTRUMENT_SURFACE`, and W1-T3323 changes `src/lib/learnings.ts` and
+    `src/run-task.ts`. MEASURED through `detectInstrumentEntanglement` against that PR's real diff
+    WITH the baseline edit in it: `entangled: true`, `instrumentPaths: [scripts/claude-md-budget-baseline.json]`,
+    `srcPaths: [src/lib/learnings.ts, src/run-task.ts]` — which forces `state: "failure"`, never
+    suppressible. Removing the baseline edit re-measured `entangled: false`. So this is the
+    SANCTIONED shape rule 25 names: the instrument rides alone. Every file here is outside `src/`,
+    so this task cannot re-entangle however it grows.
+
+    BAND. `risk: high` / `band_meaning: span`, and the honest reading is SPAN, not danger: three
+    files, no `src/`, and the failure mode is a gate too loose for a window rather than a wrong
+    verdict — the cap is a CEILING and CLAUDE.md sits far under it until this lands. `span` is what
+    Rule 19 asks a real two-concern task to declare (the baseline itself, and the suite that pins
+    its figure); `blast-radius` would EXEMPT this silently, which claims less and says less.
+    THE SHARED WHOLE-FILE PROOF IS DELIBERATE, NOT AN OVERSIGHT. `lint-plan` warns that four
+    criteria share one proof; its own message names the carve-out — "keep the shared proof only
+    when one falsifier deliberately answers every named criterion" — and that is this suite. The
+    alternative it suggests, a per-criterion `unit test: <exact title>`, would BREAK the grading:
+    `judgeCriterion`'s `not_yet_built` carve-out needs `!nameFiltered`, so on a plan-only head a
+    name-filtered proof for a file that does not exist yet grades `executed_fail` and fails the PR.
+    The pure-path form is the only one that reaches forward.
+  rationale: |
+    MEASURED 2026-09-10, after W1-T3323 landed:
+
+      CLAUDE.md                 15501 bytes  (was 43685)
+      capBytes                  44000        — 28499 bytes of slack, 184% of the file
+      foldDebtCeilingBytes      48000        — an allowance 3x the whole file
+
+    A CEILING AT 284% OF THE FILE IS NOT A RATCHET. `claude-md-budget-ratchet` exists to force a
+    fold-or-migrate decision on the NEXT addition; at 44000 the next 150 additions are all free.
+    The gate would report `OK` on every one of them and the file would be back at its
+    pre-migration weight before anything refused, which is the exact failure the ceiling was
+    lowered to 44000 to prevent in the first place (W1-T2507's own rationale says so).
+
+    THE UNIT OF GROWTH CHANGED, AND THAT IS THE WHOLE ARITHMETIC. A rule used to cost this file its
+    entire body: 610 bytes on the MEASURED average of 56 rules over 34198 bytes. It now costs a
+    HEADLINE plus a pointer — 7301 bytes of headlines over 56 rules is 130 each, plus about 55 for
+    `-> doctrine/<section>/<rule>.md` — so about 190 bytes. So the old numbers cannot simply be
+    scaled: 17000 leaves 1499 bytes over the real 15501, about EIGHT new rules, or roughly thirteen
+    days once the 374 bytes/day fortnightly rate W1-T2507 measured is repriced to 190-byte rules
+    (~115 bytes/day). The shape it replaces bought under two days.
+  design: |
+    (i) BOTH BOUNDS MOVE TOGETHER OR NEITHER DOES. `foldDebtCeilingBytes` is where the gate really
+    refuses and `capBytes` is where it starts FILING fold debt and lets the change land (W1-T3320,
+    operator ruling 2026-09-10). Lowering only the cap turns every ordinary addition into a filed
+    debt against an allowance three times the file; lowering only the ceiling leaves the routing
+    threshold meaningless. 18400 sits about SEVEN 190-byte rules past 17000 — deliberately the same
+    seven the old 4000-byte allowance bought at 610 bytes a rule.
+    (ii) THE SUPERSEDED ARGUMENT SURVIVES THE ONE THAT SUPERSEDES IT. W1-T3323 already shifted
+    W1-T2507's rationale into `priorBumpRationale`; this task must not drop it, and
+    `test/claude-md-budget-ratchet.test.ts` pins both dates for exactly that reason.
+    (iii) DOCTRINE/ GETS NO CEILING OF ITS OWN, and the rationale must say why rather than leave it
+    to be re-litigated: `learnings/*.yaml` is budgeted because it is INJECTED into a prompt, and
+    this store is RETRIEVED — prose there costs an interactive session nothing, so cutting it buys
+    nothing. Folding now means shortening a HEADLINE.
+  acceptance:
+    - claim: "the cap and the fold-debt ceiling both track the index the migration left, and a cap left at the pre-migration size fails the suite"
+      proof: "unit test: test/the-doctrine-cap-tracks-the-index.test.ts"
+    - claim: "the ratchet still passes on the committed CLAUDE.md at the new cap, and a file one byte over it is refused"
+      proof: "unit test: test/the-doctrine-cap-tracks-the-index.test.ts"
+    - claim: "the superseded W1-T2507 rationale survives the change that supersedes it, dates and all"
+      proof: "unit test: test/the-doctrine-cap-tracks-the-index.test.ts"
+    - claim: "this PR touches no src/ path, so Standing rule 25 reads entangled false on its own diff"
+      proof: "unit test: test/the-doctrine-cap-tracks-the-index.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if `capBytes` already tracks the index — MEASURED 2026-09-10
+    it is 44000 against a 15501-byte file.
+    DO NOT PICK THE NUMBERS BY FEEL. Re-measure the per-rule cost on the LIVE index before
+    committing to 17000/18400: `renderHeadlineOnlyIndex(parseRuleHeadlines(CLAUDE.md))` over the
+    rule count gives the headline half, and the pointer half is the mean length of
+    `-> doctrine/<section>/<rule>.md` across the index. If the file has grown since this was filed,
+    the headroom is what moves, never the arithmetic.
+    DO NOT ADD A `src/` FILE. The entire reason this is its own task is that a `src/` path beside a
+    `scripts/*-baseline.json` is an unsuppressible rule 25 failure. A task that needs one has
+    discovered a different task.
+    DO NOT lower `capBytes` below the committed file to force a fold. The ratchet fails closed and
+    would take main red for a reason no PR caused.
