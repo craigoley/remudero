@@ -4,8 +4,10 @@
 // PURE text-to-verdict classifiers it consults sat between its halves in the same file:
 // `classifyUpdateBranchFailure`, `detectReviewFalseBlock`, `detectCiLogVerdictUnchanged` (plus the
 // two private helpers only it uses) and `classifyNoPrShape`. None of the four reads process state
-// — each is a pure function of its argument — so they move here unchanged, byte-for-byte, and
-// run-task.ts now imports and RE-EXPORTS the same names so every existing caller and test
+// — each is a pure function of its argument — so they move here with their implementations
+// unchanged; two of the four doc comments are compacted to satisfy comment-load-ratchet's 25-line
+// added-block cap (docs/comment-standard.md), never dropping the invariant/trap/falsifier each
+// stated. run-task.ts imports and RE-EXPORTS the same names so every existing caller and test
 // resolves exactly as before the move.
 
 import type { CiFailure } from "./sweep.js";
@@ -27,33 +29,21 @@ export function classifyUpdateBranchFailure(stderrText: string): "conflict" | "e
 }
 
 /**
- * W1-T168 (the #349/#360 stuck class): does THIS round's just-computed review
- * verdict show a REVIEW FALSE-BLOCK the fix rung structurally cannot resolve
- * by dispatching more code — so it must escalate for re-judgment instead of
- * spending the round as an ordinary strike toward exhaustion? Two
- * independent, OR'd signals (either alone is sufficient):
+ * W1-T168 (#349/#360): does THIS round's review verdict show a REVIEW FALSE-BLOCK the fix rung
+ * cannot resolve by dispatching more code, so it must escalate instead of spending an ordinary
+ * strike? Two OR'd signals (either alone is sufficient):
+ *  (a) NO-PROGRESS — this round posted against the SAME head sha the fix worker was dispatched
+ *      to resolve, with the SAME unmet criteria (by claim text): striking again against
+ *      identical code can only reproduce the identical verdict.
+ *  (b) FLOOR-VS-REVIEWER DISAGREEMENT (the SHARPEST signal) — the deterministic floor
+ *      ({@link ReviewVerdict.floorState}) passed while the advisory reviewer still blocks,
+ *      regardless of (a).
  *
- *  (a) NO-PROGRESS: this round's push landed no new commit — the review just
- *      posted against the SAME head sha the round's fix worker was DISPATCHED
- *      to resolve (`priorHeadSha`) — AND the SAME set of criteria (by claim
- *      text) remains unmet. The worker could not add work, so striking again
- *      against byte-identical code is guaranteed to reproduce the identical
- *      verdict; no further strike can ever change the outcome.
- *  (b) FLOOR-VS-REVIEWER DISAGREEMENT (the SHARPEST signal, #349/#360's own
- *      shape): the deterministic floor ({@link ReviewVerdict.floorState}) —
- *      every whitelisted proof this run could execute — observed PASS, yet
- *      the advisory LLM reviewer's semantic layer downgraded the verdict to
- *      failure anyway. Fires regardless of (a): a strike whose push DID
- *      change the diff, whose floor now passes, but whose reviewer still
- *      blocks is false-blocked exactly the same.
+ * A GENUINE deficiency trips NEITHER: a changed diff whose floor also still fails falls through
+ * to `undefined`, so the caller strikes normally — the escape never weakens the rung for real
+ * work still owed.
  *
- * A GENUINE deficiency trips NEITHER signal: a changed diff (headSha differs,
- * so (a) never fires) whose floor ALSO still fails (so (b) never fires)
- * always falls through to `undefined` here, so the caller strikes normally —
- * the escape never weakens the rung for real work still owed (criterion 3).
- *
- * Pure and exported so the two signals are unit-testable falsifiers
- * independent of the rung's spawn/push/CI plumbing.
+ * Pure and exported so both signals are unit-testable independent of the rung's plumbing.
  */
 export function detectReviewFalseBlock(check: {
   /** The head sha the review THIS ROUND'S fix worker was dispatched to resolve carried. */
@@ -85,52 +75,30 @@ export function detectReviewFalseBlock(check: {
 }
 
 /**
- * W1-T2328 (the "inert fix" defect this closes — a strike whose push landed but changed nothing
- * a re-check could see): the ci-log SIBLING of {@link detectReviewFalseBlock} — does THIS round's
- * freshly refreshed failing-check evidence show the SAME findings as the evidence the strike that
- * just ran was dispatched to fix, so a further strike could only re-discover what this one already
- * showed?
+ * W1-T2328 (the "inert fix" defect — a strike whose push landed but changed nothing a re-check
+ * could see): the ci-log SIBLING of {@link detectReviewFalseBlock} — does THIS round's freshly
+ * refreshed failing-check evidence show the SAME findings the strike that just ran was dispatched
+ * to fix?
  *
- * DROPS detectReviewFalseBlock's head-sha conjunct ON PURPOSE (design Q2): that function requires
- * BOTH "same criteria" AND "same head sha" because a reviewer re-posting against an UNCHANGED head
- * is the only way it can be certain no new work was even offered. Here a fix worker's push landing
- * a real commit is not in question — the rung already pushed and CI already re-ran against a new
- * head before this is ever called — so an identical finding set after that landed push IS the
- * evidence on its own; requiring the sha to ALSO be unchanged would make this never fire on the
- * exact shape it exists for.
+ * DROPS the head-sha conjunct ON PURPOSE: the rung already pushed and CI already re-ran against a
+ * new head before this is ever called, so an identical finding set after that landed push IS the
+ * evidence on its own — requiring the sha to also be unchanged would make this never fire on the
+ * shape it exists for.
  *
- * COMPARES THE ANNOTATION MESSAGE SET, NEVER THE LOG TAIL OR THE CONCLUSION (design Q1):
- *  - The CONCLUSION alone can only ever prove "fixed" (failure→success needs no comparison — the
- *    rung is already done); failure→failure is the ambiguous case this exists for, so the
- *    conclusion can never answer it alone.
- *  - The LOG TAIL is unusable as the comparison KEY: {@link CiFailure.logUnavailable} documents
- *    that a denied read once behaved exactly as if nothing had failed, so keying on an
- *    always-empty string would report "unchanged" on every round — the worst possible failure for
- *    this feature, since it would stand a healthy rung down.
- *  - The ANNOTATION message set (`tailSource === "annotations"`, {@link CiFailure.logTail} split
- *    into lines, normalised and compared as a SET rather than a raw string diff, because two runs
- *    of the same gate can legitimately order their findings differently) is the one surface
- *    {@link fetchCiFailures} names as load-bearing evidence rather than a best-effort blob:
- *    {@link CiAnnotationFallback}'s three-way union already distinguishes "this check published
- *    nothing" (`empty`) from "the fetch itself broke" (`failed`) from a real read (`recovered`),
- *    so silence is never confused with a match.
+ * COMPARES THE ANNOTATION MESSAGE SET, never the log tail or the conclusion: the conclusion alone
+ * can only ever prove "fixed"; the log tail is unusable as the comparison key
+ * ({@link CiFailure.logUnavailable} documents a denied read once behaving exactly as if nothing
+ * had failed). The annotation set (`tailSource === "annotations"`, {@link CiFailure.logTail}
+ * split into lines, normalised, compared as a SET) is the one surface `fetchCiFailures` names as
+ * load-bearing evidence rather than a best-effort blob.
  *
- * ABSTAINS (returns `undefined`, meaning "strike normally") on anything short of two directly
- * comparable annotation sets for EVERY still-failing check name shared between the two rounds:
- *  - the failing check NAME SET itself moved (a check resolved, or a different one turned red) —
- *    real ground moved, the same signal {@link unchangedTreeStandDownReason}'s own `gateKey`
- *    conjunct already uses to mean exactly that;
- *  - either round carries no evidence at all (the very first round, or an unrefreshed/throwing
- *    fetch);
- *  - ANY shared check's tail did not come from `tailSource: "annotations"` on BOTH sides (a
- *    readable log tail, a `no-job-id`/`fetch-failed`/`empty-log` read, or a failed/empty
- *    annotation fallback are all "not comparable", never "comparable and equal") — per design
- *    Q1's own rule: "fail toward spending the strike, never toward standing down, because a false
- *    stand-down destroys a legitimate strike while a missed detection only costs what today
- *    already costs."
+ * ABSTAINS (`undefined`, strike normally) on anything short of two directly comparable annotation
+ * sets for EVERY still-failing check name shared between the two rounds: the failing NAME SET
+ * itself moved, either round carries no evidence, or any shared check's tail did not come from
+ * annotations on BOTH sides. Design rule: fail toward spending the strike, never toward a false
+ * stand-down.
  *
- * Pure and exported so the comparison is unit-testable independent of the rung's fetch/spawn
- * plumbing — mirrors {@link detectReviewFalseBlock}'s own reason for being pure.
+ * Pure and exported — mirrors {@link detectReviewFalseBlock}'s own reason for being pure.
  */
 export function detectCiLogVerdictUnchanged(check: {
   /** The ci-log evidence THIS round's fix worker was dispatched to resolve. */
