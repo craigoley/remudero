@@ -76,6 +76,7 @@
     "test/a-new-ci-yml-job-cannot-ship-its-own-registration.test.ts": 1089,
     "test/a-new-export-in-an-old-module-needs-a-caller.test.ts": 0,
     "test/a-new-repo-starts-from-zero-and-one-repos-quirks-become-global-law.test.ts": 169,
+    "test/a-new-test-file-tiers-itself.test.ts": 0,
     "test/a-new-test-that-passes-on-the-base-tree-proves-nothing.test.ts": 5084,
     "test/a-permanent-diff-refusal-is-not-retried-forever.test.ts": 0,
     "test/a-permanently-uncreditable-head-is-re-dispatched-forever.test.ts": 1115,
