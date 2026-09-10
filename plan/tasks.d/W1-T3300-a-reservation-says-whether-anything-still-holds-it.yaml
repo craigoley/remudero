@@ -98,11 +98,18 @@
     DO NOT USE AGE AS THE PREDICATE. 161 of 341 dangling ids are under a week old; an age-only sweep
     reclaims work in flight, which is the race the reservation settles.
   note: |
-    Rule 25 CHECKED, AND IT DECIDED THE FILE LIST. `src/run-task.ts` IS on INSTRUMENT_SURFACE
-    (`^src/run-task.ts$`), and `detectInstrumentEntanglement` fires on an instrument path PLUS a
-    product `src/` path. So the implementation belongs in `src/run-task.ts` beside the verb that
-    already owns this namespace rather than in a new `src/lib` module: instrument plus its own
-    `test/` falsifier is the sanctioned shape, while instrument-plus-lib would be refused.
+    Rule 25 CHECKED — AND THE FIRST READING OF IT WAS WRONG, CORRECTED 2026-09-10 BY RUNNING THE
+    PREDICATE INSTEAD OF READING THE LIST. `src/run-task.ts` is NOT on INSTRUMENT_SURFACE. That list
+    (src/lib/review.ts) ends at `^scripts/generate-ledger-steps\.mjs$` and contains NO `src/` path at
+    all; the entries naming `^src/run-task\.ts$`, `^bin/` and the `src/lib/(...)` groups belong to
+    USER_VISIBLE_SURFACE_RE, a different constant for a different purpose. The earlier note here
+    conflated them because a `sed` range anchored on `export const INSTRUMENT_SURFACE` also
+    prefix-matched `INSTRUMENT_SURFACE_EXCLUSIONS` and ran on past it.
+    MEASURED with the real function: `detectInstrumentEntanglement` over a file list containing
+    `src/run-task.ts` plus a `src/lib/*.ts` module returns `entangled: false`, `instrumentPaths: []`,
+    both paths in `srcPaths`. SO THERE IS NO RULE 25 CONSTRAINT ON THIS TASK, and a `src/lib` module
+    was always available. The file list stands on its own merits — keeping a CLI verb's body beside
+    the other command bodies is ordinary here — but it is a CHOICE, not a fence.
     WHY A REPORT IS THE WHOLE TASK, stated because the obvious next step is a reaper and it is the
     wrong one. The standing ruling assigns reclaiming to a human. A human currently cannot do it: the
     numbers in the rationale took a fetch of 1331 refs and a cross-join against the plan to produce.
