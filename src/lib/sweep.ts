@@ -311,6 +311,43 @@ export function isRegenerableArtifactConflict(
   return files.length > 0 && files.every((f) => Object.hasOwn(generators, f.path));
 }
 
+function coversEveryConflictPath(evidence: MergeConflictEvidence): boolean {
+  const paths = new Set(evidence.redundantRefix?.comparedPaths ?? []);
+  return evidence.files.length > 0 && evidence.files.every((f) => paths.has(f.path));
+}
+
+/** W1-T3273 — REDUNDANT-REFIX is a THIRD admission arm: resolving every conflicting path to
+ *  main's bytes must have been performed already and recorded as byte evidence. This predicate
+ *  refuses every prose/semantic lookalike by construction; task ids, commit subjects and
+ *  similarity never enter the decision. */
+export function isRedundantRefixConflict(evidence: MergeConflictEvidence | undefined): boolean {
+  return (
+    evidence?.redundantRefix?.compared === "bytes" &&
+    evidence.redundantRefix.verdict === "main-byte-identical" &&
+    coversEveryConflictPath(evidence)
+  );
+}
+
+function redundantRefixConflictDeclineCause(evidence: MergeConflictEvidence | undefined): string | undefined {
+  const redundant = evidence?.redundantRefix;
+  if (!redundant) return undefined;
+  if (redundant.compared !== "bytes") {
+    return "redundant re-fix evidence was not a byte comparison";
+  }
+  if (!evidence || !coversEveryConflictPath(evidence)) {
+    return "redundant re-fix byte comparison did not cover every conflicting path";
+  }
+  if (redundant.verdict === "different-from-main") {
+    const paths = redundant.differingPaths?.length ? redundant.differingPaths.join(", ") : redundant.comparedPaths.join(", ");
+    return `redundant re-fix byte comparison differed from main on ${paths}`;
+  }
+  if (redundant.verdict === "non-conflicting-files-failed") {
+    const paths = redundant.failedApplyPaths?.length ? redundant.failedApplyPaths.join(", ") : "an uncaptured non-conflicting path";
+    return `redundant re-fix byte comparison matched main, but non-conflicting files failed to apply: ${paths}`;
+  }
+  return undefined;
+}
+
 /** W1-T2548 — the conflicting path(s) the registry declares no generator for, so a refusal NAMES
  *  which path broke admission instead of making a reader re-derive it (acceptance 5). */
 function undeclaredGeneratorPaths(
@@ -328,8 +365,11 @@ export function conflictRefusalCause(
   files: readonly ConflictFileDiff[],
   policy: Pick<SweepPolicy, "mergeConflictAdmissionEnabled">,
   generators: Readonly<Record<string, string>> = REGENERABLE_ARTIFACT_GENERATORS,
+  evidence?: MergeConflictEvidence,
 ): string {
   if (files.length === 0) return "no file evidence was captured";
+  const redundantDecline = redundantRefixConflictDeclineCause(evidence);
+  if (redundantDecline) return redundantDecline;
   if (files.some((f) => f.oursDeleted > 0 || f.theirsDeleted > 0)) {
     const undeclared = undeclaredGeneratorPaths(files, generators);
     // Name the offending path(s) only when the conflict STRADDLES the registry: where no path is
@@ -2205,26 +2245,38 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // W1-T106 — CONFLICTED is a POSITIVE disposition, ABOVE mergeable: a dirty PR is NEVER armed
     // however green. None of rows 3-7 reference `mergeState`, so this placement changes no
     // precedence; it only guarantees row 8 never sees a dirty PR. Deterministically fixable (rule
-    // 2, never an LLM judgment) ONLY when {@link isPureConcurrentAddition} or
-    // {@link isRegenerableArtifactConflict} clears EVERY file; a conflict satisfying neither arm
-    // falls to the next row. Why: the flag's history and the #170 incident — docs/forensics/sweep.md.
+    // 2, never an LLM judgment) ONLY when {@link isPureConcurrentAddition},
+    // {@link isRegenerableArtifactConflict}, or {@link isRedundantRefixConflict} clears EVERY file;
+    // a conflict satisfying none of those arms falls to the next row. Why: the flag's history and
+    // the #170 incident — docs/forensics/sweep.md.
     disposition: "conflicted",
     when: (pr, policy) => {
       if (policy.mergeConflictAdmissionEnabled !== true || pr.mergeState !== "dirty") return false;
-      const files = pr.mergeConflict?.files ?? [];
+      const evidence = pr.mergeConflict;
+      const files = evidence?.files ?? [];
       // W1-T2548: a SECOND, independent admission arm — either clears this row alone, never both
       // required. The registry arm is checked first only because its reason is the more specific
       // of the two when both happen to hold.
-      return isRegenerableArtifactConflict(files) || isPureConcurrentAddition(files);
+      return isRegenerableArtifactConflict(files) || isRedundantRefixConflict(evidence) || isPureConcurrentAddition(files);
     },
     reason: (pr) => {
-      const files = pr.mergeConflict?.files ?? [];
+      const evidence = pr.mergeConflict;
+      const files = evidence?.files ?? [];
       if (isRegenerableArtifactConflict(files)) {
         const named = files.map((f) => `${f.path} (generator: ${REGENERABLE_ARTIFACT_GENERATORS[f.path]})`).join(", ");
         return (
           `merge conflict (mergeState dirty) — every conflicting path has a declared generator: ${named} — ` +
           `dispatching the merge-conflict fix mode to RE-RUN the generator(s) on the merged tree — the ` +
           `resolution is that output, never either side's recorded value`
+        );
+      }
+      if (isRedundantRefixConflict(evidence)) {
+        const paths = evidence!.redundantRefix!.comparedPaths.join(", ");
+        return (
+          `merge conflict (mergeState dirty) — redundant re-fix byte comparison matched main for ` +
+          `${paths}; resolving those conflicting path(s) to main is byte-identical to main and the ` +
+          `branch's non-conflicting files apply cleanly — dispatching the merge-conflict fix mode to ` +
+          `take main for the redundant hunk(s)`
         );
       }
       return (
@@ -2245,10 +2297,11 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "blocked-ambiguous",
     when: (pr) => pr.mergeState === "dirty",
     reason: (pr, policy) => {
-      const files = pr.mergeConflict?.files ?? [];
+      const evidence = pr.mergeConflict;
+      const files = evidence?.files ?? [];
       const fileList = files.map((f) => `${f.path} (ours -${f.oursDeleted}, theirs -${f.theirsDeleted})`).join(", ");
       return (
-        `merge conflict (mergeState dirty) — ${conflictRefusalCause(files, policy)} — never auto-resolved — ` +
+        `merge conflict (mergeState dirty) — ${conflictRefusalCause(files, policy, REGENERABLE_ARTIFACT_GENERATORS, evidence)} — never auto-resolved — ` +
         `files: ${files.length > 0 ? fileList : "none captured"} — escalating`
       );
     },

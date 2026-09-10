@@ -49,6 +49,14 @@ export interface ConflictFileDiff {
   theirsDeleted: number;
 }
 
+export interface RedundantRefixEvidence {
+  compared: "bytes";
+  verdict: "main-byte-identical" | "different-from-main" | "non-conflicting-files-failed";
+  comparedPaths: string[];
+  differingPaths?: string[];
+  failedApplyPaths?: string[];
+}
+
 /**
  * The merge-conflict fix mode's ONLY input (W1-T94's mode table gains
  * merge-conflict, design note iii): the conflicting file list plus BOTH
@@ -63,4 +71,5 @@ export interface MergeConflictEvidence {
   oursLog: string;
   /** `git log <merge-base>..origin/main`, the same shape for the target side. */
   theirsLog: string;
+  redundantRefix?: RedundantRefixEvidence;
 }

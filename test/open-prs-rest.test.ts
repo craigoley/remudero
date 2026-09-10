@@ -8,6 +8,7 @@ import {
   checkRunsRestArgs,
   combinedStatusRestArgs,
   compareRestArgs,
+  contentRestArgs,
   createGhCallPacer,
   DEFAULT_GH_PACE_FLOOR_FRACTION,
   DEFAULT_GH_PACE_LOW_WATER_FRACTION,
@@ -1344,6 +1345,13 @@ test("compareRestArgs requests the three-dot merge-base-relative compare, never 
   assert.deepEqual(compareRestArgs(OWNER, REPO, "main", "deadbeef"), ["api", "repos/craigoley/remudero/compare/main...deadbeef"]);
 });
 
+test("contentRestArgs requests one path at one ref without flattening repository path separators", () => {
+  assert.deepEqual(contentRestArgs(OWNER, REPO, "test/a file.ts", "head/branch"), [
+    "api",
+    "repos/craigoley/remudero/contents/test/a%20file.ts?ref=head%2Fbranch",
+  ]);
+});
+
 /** A compare response fake keyed by its `base...head` argv suffix, mirroring the shape of the
  *  fixtures already used for check-runs/combined-status above. */
 function compareFake(byPair: Record<string, unknown>): GhApiFetcher {
@@ -1354,6 +1362,18 @@ function compareFake(byPair: Record<string, unknown>): GhApiFetcher {
     const key = `${m[1]}...${m[2]}`;
     if (!(key in byPair)) throw new Error(`no fixture for ${key}`);
     return byPair[key];
+  };
+}
+
+function compareAndContentFake(byPair: Record<string, unknown>, byContent: Record<string, string>): GhApiFetcher {
+  return (args: string[]) => {
+    const path = args[args.length - 1] ?? "";
+    if (/\/compare\//.test(path)) return compareFake(byPair)(args);
+    const m = /\/contents\/(.+)\?ref=(.+)$/.exec(path);
+    if (!m) throw new Error(`unexpected fetch: ${path}`);
+    const key = `${decodeURIComponent(m[1])}@${decodeURIComponent(m[2])}`;
+    if (!(key in byContent)) throw new Error(`no content fixture for ${key}`);
+    return { encoding: "base64", content: Buffer.from(byContent[key], "utf8").toString("base64") };
   };
 }
 
@@ -1381,6 +1401,65 @@ test("fetchMergeConflictEvidence composes two compares into the INTERSECTION of 
   assert.deepEqual(ev.files, [{ path: "src/lib/sweep.ts", oursDeleted: 0, theirsDeleted: 2 }], "only the path BOTH sides touched survives");
   assert.equal(ev.oursLog, "abc1234 add REQUIRED entry for #177", "one line per commit, first line of the message only");
   assert.equal(ev.theirsLog, "def5678 remove a stale entry");
+});
+
+test("fetchMergeConflictEvidence records redundant re-fix byte evidence when every conflicting path matches main", () => {
+  const fetch = compareAndContentFake(
+    {
+      "main...deadbeef": {
+        merge_base_commit: { sha: "base123" },
+        files: [{ filename: "test/stale-gate-fixture.test.ts", deletions: 1 }],
+        commits: [{ sha: "abc1234000", commit: { message: "fix stale-gate fixture" } }],
+      },
+      "base123...main": {
+        merge_base_commit: { sha: "base123" },
+        files: [{ filename: "test/stale-gate-fixture.test.ts", deletions: 1 }],
+        commits: [{ sha: "def5678000", commit: { message: "fix stale-gate fixture" } }],
+      },
+    },
+    {
+      "test/stale-gate-fixture.test.ts@main": "assert.equal(days, 14);\n",
+      "test/stale-gate-fixture.test.ts@deadbeef": "assert.equal(days, 14);\n",
+    },
+  );
+
+  const ev = fetchMergeConflictEvidence(OWNER, REPO, "main", "deadbeef", fetch);
+
+  assert.deepEqual(ev.redundantRefix, {
+    compared: "bytes",
+    verdict: "main-byte-identical",
+    comparedPaths: ["test/stale-gate-fixture.test.ts"],
+  });
+});
+
+test("fetchMergeConflictEvidence records a byte decline when prose matches but the path differs from main", () => {
+  const fetch = compareAndContentFake(
+    {
+      "main...deadbeef": {
+        merge_base_commit: { sha: "base123" },
+        files: [{ filename: "test/stale-gate-fixture.test.ts", deletions: 1 }],
+        commits: [{ sha: "abc1234000", commit: { message: "fix stale-gate fixture" } }],
+      },
+      "base123...main": {
+        merge_base_commit: { sha: "base123" },
+        files: [{ filename: "test/stale-gate-fixture.test.ts", deletions: 1 }],
+        commits: [{ sha: "def5678000", commit: { message: "fix stale-gate fixture" } }],
+      },
+    },
+    {
+      "test/stale-gate-fixture.test.ts@main": "assert.equal(days, 14);\n",
+      "test/stale-gate-fixture.test.ts@deadbeef": "assert.equal(days, 13);\n",
+    },
+  );
+
+  const ev = fetchMergeConflictEvidence(OWNER, REPO, "main", "deadbeef", fetch);
+
+  assert.deepEqual(ev.redundantRefix, {
+    compared: "bytes",
+    verdict: "different-from-main",
+    comparedPaths: ["test/stale-gate-fixture.test.ts"],
+    differingPaths: ["test/stale-gate-fixture.test.ts"],
+  });
 });
 
 test("fetchMergeConflictEvidence throws when the compare response carries no merge_base_commit.sha, so the caller's best-effort catch can degrade cleanly", () => {
