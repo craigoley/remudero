@@ -37,6 +37,8 @@ import {
 // the runtime specifier below on its emitted `.js` form.
 import { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
 export { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs };
+import { ledgerCompactCommand } from "./lib/ledger-compact.js";
+export { ledgerCompactCommand } from "./lib/ledger-compact.js";
 // Compatibility re-export target: lib/escalation-catalogue"
 import {
   DISK_HEADROOM_EPISODE_MS,
@@ -35828,6 +35830,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
   },
   {
+    name: "ledger-compact",
+    syntax: "rmd ledger-compact [--older-than <days>] [--max-sources <n>] [--dry-run]",
+    summary: "Compact one bounded window of old ledger rotations without losing a distinct row.",
+    detail: "operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement, then removes only the source files that replacement covers. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, never runs from rotateLedger or a daemon cadence, and refuses to overwrite an unselected archive if a row timestamp would collide with its name.",
+  },
+  {
     name: "hand-runs",
     syntax: "rmd hand-runs",
     summary: "Print which verb sequence the operator keeps hand-running, on demand.",
@@ -36836,6 +36844,11 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(ledgerGrepCommand(rest, ...)) cannot carry a DA hit without forking the process; ledgerGrepCommand's own logic is unit-tested in test/report-commands.test.ts (same irreducible-glue shape as the hand-runs dispatch case below).
   if (cmd === "ledger-grep") {
     process.exit(ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") }));
+  }
+  // diff-cov: process-boundary — main() only translates ledgerCompactCommand's tested return into
+  // process.exit; selection, dry-run, collision refusal, atomic replacement and cleanup are unit-tested.
+  if (cmd === "ledger-compact") {
+    process.exit(ledgerCompactCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(handRunsCommand(rest)) cannot carry a DA hit without forking the process; handRunsCommand's own logic — arg validation, the state-dir resolution, the refused/measured render — is unit-tested in test/hand-run-census.test.ts (same irreducible-glue shape as the sibling ledger-grep dispatch case).
   if (cmd === "hand-runs") {
