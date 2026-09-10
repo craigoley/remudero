@@ -184,7 +184,7 @@
   "src/lib/flight-signals.ts": 86,
   "src/lib/followup-dedup-census.ts": 172,
   "src/lib/fs-race-safe.ts": 179,
-  "src/lib/git-push.ts": 181,
+  "src/lib/git-push.ts": 250,
   "src/lib/github-app.ts": 163,
   "src/lib/github-event-wake.ts": 120,
   "src/lib/github-posture.ts": 143,

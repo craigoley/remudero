@@ -576,6 +576,75 @@ test("W1-T1225 ACCEPTANCE: whole-plan mode (no --base) stays UNWIRED on purpose 
   }
 });
 
+// ── W1-T2967: shared executable proofs are visible at filing time ───────────────────────────
+
+const SHARED_PROOF_ID = "W1-T92967";
+const WHOLE_FILE_SHARED_PROOF = "unit test: test/shared-proof.test.ts";
+const TITLE_SHARED_PROOF = "unit test: shared proof fixture handles both claims";
+
+function sharedProofShardYaml(proofs: string[]): string {
+  return [
+    `- id: ${SHARED_PROOF_ID}`,
+    `  title: "W1-T2967 shared-proof probe (fixture only — never a real task)"`,
+    "  repo: remudero",
+    "  origin: architect",
+    "  depends_on: []",
+    "  type: implement",
+    "  verify: auto",
+    "  risk: low",
+    "  status: queued",
+    "  attempts: 0",
+    "  files: [test/shared-proof.test.ts]",
+    "  acceptance:",
+    '    - claim: "the first claim has evidence"',
+    `      proof: "${proofs[0]}"`,
+    '    - claim: "the second claim has evidence"',
+    `      proof: "${proofs[1]}"`,
+    "",
+  ].join("\n");
+}
+
+async function runSharedProofProbe(proofs: string[]): Promise<{ exitCode: number; combined: string }> {
+  const dir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t2967-shared-proof-"));
+  try {
+    mkdirSync(join(dir, "plan"), { recursive: true });
+    const tasksPath = join(dir, "plan", "tasks.yaml");
+    writeFileSync(tasksPath, sharedProofShardYaml(proofs), "utf8");
+    return await runLintPlanCapturingEverything(["--plan", tasksPath]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("two criteria sharing one identical proof are named with their indices", async () => {
+  const { combined } = await runSharedProofProbe([WHOLE_FILE_SHARED_PROOF, WHOLE_FILE_SHARED_PROOF]);
+
+  assert.match(combined, new RegExp(`⚠ ${SHARED_PROOF_ID}: \\[shared-proof\\]`), `expected shared-proof warning; saw:\n${combined}`);
+  assert.match(combined, /criteria 1, 2 share the identical proof/, "the warning names both colliding criterion indices");
+  assert.match(combined, new RegExp(WHOLE_FILE_SHARED_PROOF), "the warning names the shared proof string");
+});
+
+test("distinct proofs per criterion draw no shared-proof warning", async () => {
+  const { combined } = await runSharedProofProbe([WHOLE_FILE_SHARED_PROOF, "unit test: unique proof title"]);
+
+  assert.doesNotMatch(combined, /\[shared-proof\]/, `distinct proofs must stay silent; saw:\n${combined}`);
+});
+
+test("the shared-proof warning names the test-title remedy", async () => {
+  const { combined } = await runSharedProofProbe([TITLE_SHARED_PROOF, TITLE_SHARED_PROOF]);
+
+  assert.match(combined, /per-criterion test-title proof/, "the warning names the remedy, not only the fault");
+  assert.match(combined, /unit test: <exact test title>/, "the warning gives the concrete title-proof shape");
+});
+
+test("a shared-proof shard still lints with zero failures", async () => {
+  const { exitCode, combined } = await runSharedProofProbe([WHOLE_FILE_SHARED_PROOF, WHOLE_FILE_SHARED_PROOF]);
+
+  assert.equal(exitCode, 0, `warn-only shared-proof must not fail lint-plan; saw:\n${combined}`);
+  assert.match(combined, /shared-proof/, "control: the advisory actually fired");
+  assert.doesNotMatch(combined, new RegExp(`✗ ${SHARED_PROOF_ID}`), "the advisory must not become a blocking failure");
+});
+
 // ── W1-T515: the probe no longer lands in the live plan tree ─────────────────────────────────
 test("the wiring probe shard lands outside the live plan tree", () => {
   // Asserted on the SOURCE of the probe's own path, so a future edit that points it back at
