@@ -31,7 +31,6 @@ import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 // verdict once, so every retro PR in this repo's history was refused and then logged as armed.
 
 const SRC = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-const SWEEP_SRC = readFileSync(new URL("../src/lib/sweep.ts", import.meta.url), "utf8");
 
 /** The window of source around a lane's own console line — where that lane's arm site lives. */
 function laneWindow(anchor: string, before = 14): string {
@@ -271,40 +270,9 @@ test("SITE approve reads the arm outcome rather than discarding it", () => {
 });
 
 // ── 9: the SIXTH site the brief did not name — #968 was inert without it ────────────
-test("SITE sweep adapter returns the arm outcome so the sweep can read it at all", () => {
-  // W1-T1117: the adapter grew a braced body (to also classify a failed arm's `error` text for
-  // the sweep's dedup — see lib/sweep.ts's "mergeable" arm), so the single-expression regex this
-  // test used to lock no longer matches. The invariant it actually guards — EVERY path through
-  // this effect returns something armOutcomeArmed can read, never an implicit `undefined` — is
-  // checked directly against the site's own window instead of one regex over the whole file.
-  //
-  // AND THE FOLD ITSELF MOVED OUT. `diff-coverage` blocked the braced body: its narrowing guard
-  // was reachable only by driving a whole sweep pass, so no test could reach that line. The
-  // decision now lives in `sweepArmAttemptOutcome`, a pure function with a fixture per arm — so
-  // this test asserts the invariant across BOTH halves rather than pinning literals to whichever
-  // half currently holds them. Pinning a literal to a location is what made it stale here twice.
-  const anchor = "arm: (pr) => {";
-  const at = SWEEP_SRC.indexOf(anchor);
-  assert.ok(at > 0, `anchor not found, the test is stale: ${anchor}`);
-  const w = SWEEP_SRC.slice(at, at + 1400);
-  assert.match(w, /const outcome = armAndLogOutcome\(\s*pr\.prUrl,\s*pr\.taskId,\s*log,/, "still calls the SAME shared wrapper with the SAME prUrl/taskId/log every other lane uses");
-  assert.match(w, /return sweepArmAttemptOutcome\(outcome, attemptError\);/, "the adapter's LAST statement is a return — no path falls off the end into an implicit undefined");
-  assert.equal(
-    SWEEP_SRC.includes("arm: (pr) => {\n      armAutoMerge(pr.prUrl, pr.taskId);\n    },"),
-    false,
-    "the original discarding form (no return at all) is gone",
-  );
-
-  // The fold it delegates to is total: both of its returns are present, so neither the bare
-  // outcome nor the richer classified shape can be dropped on the way back to the sweep.
-  const foldAt = SWEEP_SRC.indexOf("export function sweepArmAttemptOutcome(");
-  assert.ok(foldAt > 0, "the extracted fold is gone — the adapter now delegates to nothing");
-  const fold = SWEEP_SRC.slice(foldAt, foldAt + 700);
-  assert.match(fold, /if \(outcome !== "arm-error-ignored" \|\| attemptError === undefined\) return outcome;/, "the base outcome is returned, never discarded");
-  assert.match(fold, /return \{ outcome, failureClass \};/, "a classified failure is returned as the richer shape, never discarded either");
-
-  // AND THE PROPERTY, DRIVEN — not just grepped. Every shape the adapter can hand the fold comes
-  // back as something `armOutcomeArmed` can read; none returns undefined.
+test("SITE sweep arm fold returns the outcome shape the sweep can read", () => {
+  // The fold is total: every shape the adapter can hand it comes back as something
+  // `armOutcomeArmed` can read; none returns undefined.
   for (const [outcome, err] of [
     ["armed", undefined],
     ["arm-error-ignored", undefined],

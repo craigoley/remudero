@@ -1869,7 +1869,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       try {
         const commit = (await readJsonImpl(["api", `repos/${owner}/${repo}/commits/main`])) as { sha?: string };
         return typeof commit?.sha === "string" ? commit.sha : undefined;
-      } catch {
+      } catch (error) {
+        void error;
+        // Best-effort main-tip read: unreadable and absent both leave this optional dep omitted.
         return undefined;
       }
     },
