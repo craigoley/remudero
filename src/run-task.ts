@@ -29438,7 +29438,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // --dry-run takes no effects, matching every other rung in this command.
   let reapSummary: WorktreeReapSummary = { reaped: [], reapedLocks: [], kept: [] };
   if (!dryRun) {
-    reapSummary = runWorktreeReapRung(config, log);
+    reapSummary = runWorktreeReapRung(config, log, { configLockRepoDir: join(config.root, "repos", repo) });
   }
 
   // W1-T448 — `rmd reap-branches` is deliberately NOT a rung here, unlike the worktree reaper
@@ -30336,7 +30336,7 @@ export function buildSweepHook(
       // run-start trigger never fires) leaving crashed-run debris to grow unbounded. Own
       // try/catch, folded into runWorktreeReapRung (distinct from the shared "sweep.error"
       // below) so a reap hiccup never masks — or is masked by — the rungs above it.
-      runWorktreeReapRung(config, log);
+      runWorktreeReapRung(config, log, { configLockRepoDir: join(config.root, "repos", repo) });
       // W1-T320 — the tmp-dir backstop's PER-POLL rung (design clause ii): rides this SAME
       // composite so it re-fires on a long-running healthy daemon, not only at boot. Own
       // try/catch (folded into runTmpSweepRung), same discipline as the reap rung above.
