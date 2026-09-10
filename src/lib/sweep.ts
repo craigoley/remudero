@@ -16,6 +16,7 @@ import type { CreditBackfillReceipt, CreditStore } from "./status.js";
 import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
 import { loadDefaultCostAnomalyPolicy, recordCostAnomalies, type CostAnomalyPolicy } from "./cost-anomaly.js";
 import {
+  acceptanceBlockDiagnostics,
   automergeHoldFromLedger,
   cappedOverrideFromLedger,
   decideAutoMergeArm,
@@ -785,6 +786,17 @@ export interface OpenPrView {
   /** The head BRANCH name, needed by the ABSENT-check-suite remedy, which pushes an empty commit
    *  to it to mint a fresh head sha. Optional so every existing fixture stays valid. */
   headRefName?: string;
+  /** Current PR body, when the gateway already has it. Omitted means body-only repair rungs stand
+   *  down to the pre-existing path rather than guessing. */
+  body?: string;
+  /** True only when the branch-derived task id resolved to a task record on main. */
+  taskExistsOnMain?: boolean;
+  /** Task ids whose plan records this PR added. Used only to refuse missing-trailer self-credit. */
+  introducedTaskIds?: readonly string[];
+  /** This PR's changed paths, when already observed by the gateway. */
+  changedFiles?: readonly string[];
+  /** The branch-derived task's declared files, when already observed from its main-plan record. */
+  taskDeclaredFiles?: readonly string[];
   /** Observed: is GitHub auto-merge already armed on this PR? */
   autoMergeArmed: boolean;
   /** Head ref starts with `dependabot/` — routed to the W1-T54 dep-review lane and its own
@@ -1432,6 +1444,124 @@ export function recordableRatchetRepairFor(
     if (!scripts.includes(script)) scripts.push(script);
   }
   return scripts.length > 0 ? scripts.sort() : undefined;
+}
+
+export const MISSING_TASK_TRAILER_REPAIR_STEP = "sweep.missing_task_trailer_repaired" as const;
+
+export interface MissingTaskTrailerRepair {
+  taskId: string;
+  trailer: string;
+  repairedBody: string;
+  reason: string;
+  scopeOverrunPaths: string[];
+  refireEvent: "pull_request.edited";
+  rerunFailedJobs: false;
+}
+
+export type MissingTaskTrailerRepairDecision =
+  | { action: "ignore"; reason: string }
+  | { action: "stand-down"; reason: string }
+  | { action: "repair"; repair: MissingTaskTrailerRepair };
+
+function bodyAlreadyCarriesGateInput(body: string): boolean {
+  const missingTrailer = diagnoseBodyDefects(body, [], {}).some((d) => d.kind === "no-trailer");
+  return !missingTrailer || acceptanceBlockDiagnostics(body).headerFound;
+}
+
+function declaredPathCovers(declared: string, changed: string): boolean {
+  const clean = declared.replace(/\/$/, "");
+  if (clean === "" || clean === changed) return true;
+  if (changed.startsWith(`${clean}/`)) return true;
+  if (!clean.includes("*")) return false;
+  const escaped = clean
+    .split("*")
+    .map((part) => part.replace(/[|\\{}()[\]^$+?.]/g, "\\$&"))
+    .join("[^\\n]*");
+  return new RegExp(`^${escaped}$`).test(changed);
+}
+
+export function changedPathsOutsideDeclaredFiles(
+  changedFiles: readonly string[] | undefined,
+  taskDeclaredFiles: readonly string[] | undefined,
+): string[] {
+  if (changedFiles === undefined || taskDeclaredFiles === undefined || taskDeclaredFiles.length === 0) return [];
+  return changedFiles.filter((changed) => !taskDeclaredFiles.some((declared) => declaredPathCovers(declared, changed)));
+}
+
+function renderMissingTaskTrailerRepairBody(
+  body: string,
+  taskId: string,
+  headRefName: string,
+  scopeOverrunPaths: readonly string[],
+): string {
+  const trailer = `Remudero-Task: ${taskId}`;
+  const note = [
+    "## rmd sweep note",
+    `rmd sweep added the trailer below because this body had neither a Remudero-Task trailer nor an Acceptance block.`,
+    `It derived ${taskId} from branch ${headRefName}; this only gives the gate the task identity it already uses.`,
+    scopeOverrunPaths.length > 0
+      ? `Changed paths outside ${taskId}'s declared files were observed and left advisory: ${scopeOverrunPaths.join(", ")}.`
+      : undefined,
+  ].filter((line): line is string => line !== undefined);
+  const prefix = body.trim().length > 0 ? `${body.trimEnd()}\n\n` : "";
+  return `${prefix}${note.join("\n")}\n\n${trailer}\n`;
+}
+
+export function missingTaskTrailerRepairDecision(
+  pr: Pick<
+    OpenPrView,
+    | "body"
+    | "changedFiles"
+    | "headRefName"
+    | "introducedTaskIds"
+    | "prNumber"
+    | "taskDeclaredFiles"
+    | "taskExistsOnMain"
+  >,
+): MissingTaskTrailerRepairDecision {
+  if (pr.body === undefined) return { action: "ignore", reason: "body was not observed by this sweep input" };
+  if (bodyAlreadyCarriesGateInput(pr.body)) {
+    return { action: "ignore", reason: "body already carries an accepted gate input" };
+  }
+  const taskId = taskIdFromRunBranch(pr.headRefName);
+  if (taskId === undefined) {
+    return {
+      action: "stand-down",
+      reason: "missing trailer repair refused: head branch does not match run-<taskId>-<epoch>, so no task id is derivable",
+    };
+  }
+  if (pr.taskExistsOnMain !== true) {
+    return {
+      action: "stand-down",
+      reason: `missing trailer repair refused: no plan record for ${taskId} on main, so the branch id is not resolvable`,
+    };
+  }
+  if ((pr.introducedTaskIds ?? []).includes(taskId)) {
+    return {
+      action: "stand-down",
+      reason: `missing trailer repair refused: this PR adds ${taskId}'s own plan record, so adding its trailer would self-credit the filing`,
+    };
+  }
+  const scopeOverrunPaths = changedPathsOutsideDeclaredFiles(pr.changedFiles, pr.taskDeclaredFiles);
+  const repairedBody = renderMissingTaskTrailerRepairBody(
+    pr.body,
+    taskId,
+    pr.headRefName ?? "",
+    scopeOverrunPaths,
+  );
+  return {
+    action: "repair",
+    repair: {
+      taskId,
+      trailer: `Remudero-Task: ${taskId}`,
+      repairedBody,
+      reason:
+        "body had neither accepted gate input; trailer is branch-derived and the body edit emits a fresh pull_request.edited event",
+      scopeOverrunPaths,
+      refireEvent: "pull_request.edited",
+      rerunFailedJobs: false,
+    },
+  };
 }
 
 /** W1-T2998 — a CI check name to the npm script that regenerates its artifact. Exact names and the
@@ -3181,6 +3311,12 @@ export interface SweepDeps {
     pr: OpenPrView,
     scripts: readonly string[],
   ) => boolean | void | Promise<boolean | void>;
+  /** W1-T3283 — body-only missing-trailer repair. The write itself is the `pull_request.edited`
+   *  refire; this seam must never re-run a failed Actions job with its stale pre-edit payload. */
+  repairMissingTaskTrailer?: (
+    pr: OpenPrView,
+    repair: MissingTaskTrailerRepair,
+  ) => boolean | void | Promise<boolean | void>;
   /** Escalate a BLOCKED-AMBIGUOUS PR. `question` is the rung's rendered
    *  {@link ClarificationQuestion}: the real wiring logs it to the §2 backlog AND uses `escalate()`
    *  as the notification transport, carrying the same two resolutions as its options. */
@@ -3395,6 +3531,8 @@ interface PriorActions {
    *  the BOUND — a re-push mints a NEW sha, so a sha key alone would license an unbounded chain of
    *  empty commits. */
   absentRepushes: Map<number, { count: number; shas: Set<string> }>;
+  /** `${prNumber}@${headSha}@${taskId}` body edits already made for the missing-trailer repair. */
+  missingTaskTrailerRepairs: Set<string>;
 }
 
 /** One review outcome key. Attributed rows use the material input; legacy rows and unwired
@@ -3546,6 +3684,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const reviewRetryableThrowCounts = new Map<string, number>();
   const riskRefused = new Map<string, string | undefined>();
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
+  const missingTaskTrailerRepairs = new Set<string>();
   for (const line of lines) {
     // W1-T254/W1-T1213: OUTCOME-KEYED, off the review lane's OWN ledger lines — never
     // `sweep.disposed`. See PriorActions.reviewDelivered/reviewRefused's docs.
@@ -3603,6 +3742,16 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       }
       continue;
     }
+    if (line.step === MISSING_TASK_TRAILER_REPAIR_STEP) {
+      if (
+        typeof line.pr_number === "number" &&
+        typeof line.head_sha === "string" &&
+        typeof line.task_id === "string"
+      ) {
+        missingTaskTrailerRepairs.add(`${line.pr_number}@${line.head_sha}@${line.task_id}`);
+      }
+      continue;
+    }
     if (line.step !== "sweep.disposed" || line.acted !== true) continue;
     const pr = typeof line.pr_number === "number" ? line.pr_number : undefined;
     if (pr === undefined) continue;
@@ -3652,6 +3801,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
     reviewRetryableThrowCounts,
     riskRefused,
     absentRepushes,
+    missingTaskTrailerRepairs,
   };
 }
 
@@ -4353,6 +4503,61 @@ export async function runSweep(
     };
   }
 
+  async function applyMissingTaskTrailerRepair(pr: OpenPrView): Promise<
+    | { handled: false }
+    | { handled: true; standDownReason: string }
+  > {
+    const decision = missingTaskTrailerRepairDecision(pr);
+    if (decision.action === "ignore") return { handled: false };
+    if (decision.action === "stand-down") return { handled: true, standDownReason: decision.reason };
+    const repair = decision.repair;
+    const key = `${pr.prNumber}@${pr.headSha}@${repair.taskId}`;
+    if (prior.missingTaskTrailerRepairs.has(key)) {
+      return {
+        handled: true,
+        standDownReason:
+          `missing trailer already repaired for ${repair.taskId} on this head — awaiting the fresh ` +
+          `pull_request.edited gate result, never rerunning the stale failed job`,
+      };
+    }
+    if (!deps.repairMissingTaskTrailer) {
+      return {
+        handled: true,
+        standDownReason: `missing trailer repair not wired — derived ${repair.trailer} but left the PR body unchanged`,
+      };
+    }
+    const written = await deps.repairMissingTaskTrailer(pr, repair);
+    if (written === false) {
+      return {
+        handled: true,
+        standDownReason: `missing trailer repair declined while writing ${repair.trailer} — re-derived next pass`,
+      };
+    }
+    prior.missingTaskTrailerRepairs.add(key);
+    appendLine(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: repair.taskId,
+      step: MISSING_TASK_TRAILER_REPAIR_STEP,
+      pr_number: pr.prNumber,
+      pr_url: pr.prUrl,
+      head_sha: pr.headSha,
+      trailer: repair.trailer,
+      refire_event: repair.refireEvent,
+      rerun_failed_jobs: repair.rerunFailedJobs,
+      scope_overrun_paths: repair.scopeOverrunPaths,
+      reason: repair.reason,
+    });
+    return {
+      handled: true,
+      standDownReason:
+        `missing trailer repaired by editing the PR body with ${repair.trailer}; GitHub will emit ` +
+        `pull_request.edited for the fresh body, and no failed job was rerun` +
+        (repair.scopeOverrunPaths.length > 0
+          ? `; scope overrun reported: ${repair.scopeOverrunPaths.join(", ")}`
+          : ""),
+    };
+  }
+
     // Reviews eligible this pass, deferred out of the main walk so they can run CONCURRENTLY with
     // each other, bounded by `reviewLanes` after the loop.
   const pendingReviews: Array<{
@@ -4774,6 +4979,12 @@ export async function runSweep(
               if (terminal) {
                 acted = false;
                 standDownReason = terminal;
+                break;
+              }
+              const missingTrailerRepair = await applyMissingTaskTrailerRepair(pr);
+              if (missingTrailerRepair.handled) {
+                acted = false;
+                standDownReason = missingTrailerRepair.standDownReason;
                 break;
               }
               // W1-T527 — CLASSIFY BEFORE SELECTING, because the strike is spent at dispatch and
@@ -5205,6 +5416,12 @@ export async function runSweep(
               // `unattributableFiling` above. No escalate call and no issue, but NEVER silent: the
               // stand-down reason names both the PR and the unresolved attribution on this pass's
               // own disposed line.
+              const missingTrailerRepair = await applyMissingTaskTrailerRepair(pr);
+              if (missingTrailerRepair.handled) {
+                acted = false;
+                standDownReason = missingTrailerRepair.standDownReason;
+                break;
+              }
               const absentDecision = absentChecksRepushDecision(
                 pr,
                 policy,
