@@ -999,6 +999,25 @@ export function hostCausedSuiteRedsStep(facts: HostFacts): CiParityLeafResult {
 export const CI_PARITY_TABLE: CiParityEntry[] = [
   { job: "ci-required", mirrored: false, reason: "GitHub-only stable-name aggregator; the ci entry below runs the equivalent complete test surface locally" },
   {
+    // W1-T3177 — the dashboard's own job, MIRRORED rather than excluded: it is a deterministic,
+    // offline npm-script gate, so the local run can be the same commands rather than an argument
+    // that they are equivalent. `dashboard:ci` is the one script the ci.yml job's three steps also
+    // run, in the same order, so the job and this mirror cannot diverge without that script
+    // changing. Typecheck is separate from the build on purpose: `vite build` transpiles per-file
+    // through oxc and does NOT typecheck, so a build-only mirror goes green on a type error.
+    job: "dashboard",
+    mirrored: true,
+    run: (repoRoot, spawn) => [
+      runStep("dashboard:ci", () => {
+        const r = spawn("npm", ["run", "--silent", "dashboard:ci"], { cwd: repoRoot });
+        const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`.trim();
+        return r.status === 0
+          ? { ok: true, detail: "PASS -- dashboard typechecks, its Vitest suite passes and the console bundle emits" }
+          : { ok: false, detail: `FAIL -- ${out.slice(-400) || `exit ${String(r.status)}`}` };
+      }),
+    ],
+  },
+  {
     job: "ci",
     mirrored: true,
     run: (repoRoot, spawn) => [

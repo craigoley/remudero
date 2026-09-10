@@ -1043,6 +1043,34 @@ jobs:
       - name: jscpd duplication gate (blocks a duplicate above the recorded threshold)
         run: npm run --silent jscpd
 
+  dashboard:
+    # W1-T3177 — THE DASHBOARD'S OWN SUITE, AS ITS OWN JOB, and that separation is the point.
+    # Vitest here collects `apps/dashboard/src/**/*.{test,spec}.{ts,tsx}` (apps/dashboard/vite.config.ts)
+    # and the repo's own runner globs `test/**/*.test.ts` (`npm run test:ci`). Neither can collect the
+    # other's files, so this is a SECOND runner rather than a competing one — which is why the
+    # `npm run test:ci` invocation elsewhere in this file is byte-identical to what it was before this
+    # task, and why adding React did not touch the coverage-ratchet job's command.
+    # The typecheck step is separate from the build on purpose: `vite build` does NOT typecheck (it
+    # transpiles per-file through oxc), so a build-only job would go green on a type error.
+    name: dashboard
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Typecheck under the dashboard's OWN browser-shaped tsconfig
+        run: npm run --silent typecheck:dashboard
+      - name: Dashboard suite (Vitest)
+        run: npm run --silent test:dashboard
+      - name: Build the console bundle (proves the toolchain emits, not just typechecks)
+        run: npm run --silent build:console
+
   claims:
     # PLAN-CLAIMS gate (W1-T29, MASTER-PLAN §12A) — the awareness layer for prose. Plan prose is
     # unverifiable; a falsifiable claim paired with a shell assertion that must exit 0 is not.

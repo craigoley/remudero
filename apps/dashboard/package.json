@@ -1,14 +1,31 @@
 {
   "name": "@remudero/dashboard",
   "version": "0.1.0",
-  "description": "Dashboard v0 (shell 0, MASTER-PLAN §7 WS-5a -> W3-T2): a read-only live board over the daemon's task/ledger-state surface. Consumes ONLY @remudero/api-client (no hand-rolled fetch, MASTER-PLAN §7A) -- see src/main.ts and scripts/no-hand-rolled-fetch-check.mjs. Browser shell today; the same web build is wrapped by the Tauri macOS (W3-T3) and iOS (W3-T4) shells.",
+  "description": "The operator console. React 19 + Vite + TypeScript, per the 2026-09-08 operator ruling recorded in DECISIONS.md (W1-T3173) which reversed 'No bundler by design'. Reads ONLY through @remudero/api-client (MASTER-PLAN \u00a77A; scripts/no-hand-rolled-fetch-check.mjs walks this tree). Its own tsconfig is browser-shaped and its own Vitest job runs beside -- never inside -- the repo's `node --test` suite.",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "vite build",
+    "dev": "vite",
+    "test": "vitest run --config vite.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@remudero/api-client": "0.1.0"
+    "@remudero/api-client": "0.1.0",
+    "@tanstack/react-query": "^5.102.8",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "recharts": "^3.10.1"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "jsdom": "^30.0.1",
+    "oxc-transform-react": "^0.145.0",
+    "vite": "^8.2.2",
+    "vitest": "^5.0.0"
   }
 }

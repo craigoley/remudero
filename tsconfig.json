@@ -13,6 +13,20 @@
     "outDir": "dist",
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "packages/*/src/**/*.ts", "apps/*/src/**/*.ts"],
+  "//": [
+    "W1-T3177: `apps/*/src/**/*.ts` was REMOVED from include. This config is Node-shaped -- module",
+    "nodenext, types [node], lib without a bundler's resolution and no `jsx` at all -- and",
+    "apps/dashboard is now a browser SPA (React 19 + Vite). With the glob in place this run",
+    "typechecked that tree under Node rules and failed on every .tsx; the two cannot be one config.",
+    "apps/dashboard carries its own browser-shaped tsconfig and its own typecheck script, so the two",
+    "typecheck INDEPENDENTLY, neither borrowing the other's module resolution.",
+    "CONSEQUENCE, STATED: apps/dashboard/src/main.ts (dashboard v0, archived in place and unbuilt) is",
+    "now typechecked by neither config -- the dashboard's own tsconfig excludes it because it does",
+    "not compile under bundler resolution. Nothing imports it. Removing that pair is a later parity",
+    "task; the strangler ruling is why this one does not delete it.",
+    "packages/*/src STAYS: packages/api-client is consumed by src/ under Node rules as well as by the",
+    "browser bundle, so the root remains its type authority."
+  ],
+  "include": ["src/**/*.ts", "test/**/*.ts", "packages/*/src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }
