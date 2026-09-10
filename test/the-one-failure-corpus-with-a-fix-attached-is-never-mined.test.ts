@@ -146,7 +146,18 @@ test("W1-T2957 the collector is reachable from the command surface, and writes n
     loadWindow: () => ({ prs: [pr(78, [{ sha: "s", rollup: [run("ci-gate", "FAILURE")] }])] }),
   });
   assert.ok(planBefore.equals(readFileSync("plan/tasks.yaml")), "the collector must not touch the plan");
-  assert.equal(execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }), treeBefore, "and must leave no file behind");
+  // W1-T3338: compare ADDED entries, never the whole porcelain string. `git status --porcelain` is
+  // REPO-GLOBAL while suites share one working tree, so a neighbour restoring its own fixture between
+  // these two reads deletes a line and fails byte-equality — accusing the collector of a write that
+  // provably did not happen. "Left behind" was only ever a claim about ADDITIONS; someone else's
+  // removal is not this subject's business, and asserting on it made the verdict a function of who
+  // else happened to be running.
+  const porcelainEntries = (text: string) => new Set(text.split("\n").filter((line) => line.trim().length > 0));
+  const entriesBefore = porcelainEntries(treeBefore);
+  const leftBehind = [...porcelainEntries(execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }))].filter(
+    (entry) => !entriesBefore.has(entry),
+  );
+  assert.deepEqual(leftBehind, [], "and must leave no file behind");
 });
 
 // ── The command surface and the real loader, both over an INJECTED fetcher ──────────────────────
