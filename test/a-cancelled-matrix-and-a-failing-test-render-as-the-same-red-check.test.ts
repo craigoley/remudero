@@ -10,11 +10,13 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
+
+import { makeTempDir } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -50,6 +52,40 @@ test("W1-T3014 criterion 1: a cancelled matrix NAMES cancellation and does not a
     assert.match(out, /Open the shard log/, `${job}: design (v) — it still means go look`);
     assert.equal(status, 1, `${job}: cancelled must still be red — it proves nothing about the tree`);
   }
+});
+
+test("W1-T3345: a cancellation the PR HEAD MOVED PAST is a non-result, and is the one cancelled shape that does not block", () => {
+  // W1-T3014 above asserts "cancelled must still be red — it proves nothing about the tree", and
+  // that stays true for every shape it can reach: with no PR_NUMBER the gate cannot read a current
+  // head, so it refuses. THIS row exercises the shape that suite never reaches.
+  //
+  // A run cancelled because a newer push superseded it measured a sha that is NOT the head any
+  // more. Branch protection gates the HEAD's checks, so the superseded sha cannot merge whatever
+  // this says, and the new head runs its own shards. Blocking on it is a red with nothing behind
+  // it. That is narrow on purpose: the head must be READABLE and DIFFERENT, and every other
+  // cancelled shape still blocks.
+  const dir = makeTempDir("w1-t3345-super-");
+  const bin = join(dir, "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\necho bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n");
+  chmodSync(join(bin, "gh"), 0o755);
+  for (const job of JOBS) {
+    const r = spawnSync("bash", ["-c", collapseScript(job)], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        SHARD_RESULT: "cancelled",
+        RUN_HEAD_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        PR_NUMBER: "1",
+        GH_REPO_SLUG: "o/r",
+      },
+    });
+    const out = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 0, `${job}: a superseded run must not block — it measured a sha that cannot merge:\n${out}`);
+    assert.match(out, /SUPERSEDED/, `${job}: it must name why it is not blocking`);
+  }
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("W1-T3014 criterion 2: a failure NAMES a failing shard and still exits non-zero", () => {

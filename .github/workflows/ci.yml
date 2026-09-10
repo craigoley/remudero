@@ -414,14 +414,16 @@ jobs:
               if [ -z "$CURRENT_HEAD" ]; then
                 echo "::error::ci: the shard matrix was CANCELLED and the current PR head could not be"
                 echo "  read — refusing, because an unreadable answer is not permission to pass an"
-                echo "  unmeasured head."
+                echo "  unmeasured head. A cancellation is not by itself evidence of a test failure."
+                echo "  Open the shard log."
                 exit 1
               fi
               echo "::error::ci: SHARD HANG — the matrix was cancelled while the PR head"
               echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
               echo "  timeout-minutes ceiling. THE TEST TESTS DID NOT RUN — this is NOT a failure of this"
-              echo "  diff, and re-running the same sha will hang again. Open the shard log and find the"
-              echo "  test that started and never finished."
+              echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
+              echo "  evidence of a test failure. Open the shard log and find the test that started and"
+              echo "  never finished."
               exit 1
               ;;
             skipped)
@@ -808,14 +810,16 @@ jobs:
               if [ -z "$CURRENT_HEAD" ]; then
                 echo "::error::coverage-ratchet: the shard matrix was CANCELLED and the current PR head could not be"
                 echo "  read — refusing, because an unreadable answer is not permission to pass an"
-                echo "  unmeasured head."
+                echo "  unmeasured head. A cancellation is not by itself evidence of a test failure."
+                echo "  Open the shard log."
                 exit 1
               fi
               echo "::error::coverage-ratchet: SHARD HANG — the matrix was cancelled while the PR head"
               echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
               echo "  timeout-minutes ceiling. THE COVERAGE TESTS DID NOT RUN — this is NOT a failure of this"
-              echo "  diff, and re-running the same sha will hang again. Open the shard log and find the"
-              echo "  test that started and never finished."
+              echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
+              echo "  evidence of a test failure. Open the shard log and find the test that started and"
+              echo "  never finished."
               exit 1
               ;;
             skipped)
