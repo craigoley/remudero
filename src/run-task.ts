@@ -462,6 +462,9 @@ import {
   resolveServiceTokens,
   SERVE_EXPECTED_BRANCH,
   serviceTokensPath,
+  consoleBuildBannerLine,
+  consoleBuildRealpath,
+  consoleBuildStatus,
 } from "./lib/serve.js";
 import { runRelayClient } from "./lib/relay-client.js";
 import { consoleUrlCommand, defaultIsListening } from "./lib/console-url.js";
@@ -26516,6 +26519,16 @@ export async function serveCommand(
   // one-time cost of reading the 0600 tokens file. See resolveServiceTokens for rotation.
   console.log(`### rmd serve — listening on ${hosts.map((h) => `http://${h}:${port}`).join(", ")} (repo ${self.owner}/${self.repo})`);
   for (const h of hosts) console.log(`    console:     http://${h}:${port}/?token=${tokens.read}`);
+  // W1-T3176 — the console BUILD's state, on the line under the console URL, because the failure
+  // this prevents is an operator opening that URL and getting a blank tab. Absent when no build is
+  // configured (`RMD_CONSOLE_BUILD_ROOT` unset), so a daemon serving only the string shell says
+  // nothing rather than reporting a missing build it was never asked for.
+  {
+    const line = consoleBuildBannerLine(
+      consoleBuildStatus(process.env.RMD_CONSOLE_BUILD_ROOT, { realpath: consoleBuildRealpath }),
+    );
+    if (line) console.log(line);
+  }
   console.log(`    write token: ${serviceTokensPath(config.root)} (0600, not printed)`);
 
   await new Promise<void>((resolve) => {

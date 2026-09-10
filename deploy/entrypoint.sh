@@ -322,6 +322,20 @@ else
   log "node_modules present — leaving install freshness to ensureInstallFresh"
 fi
 
+# W1-T3176 — THE CONSOLE BUILD RUNS WHEREVER `npm ci` RUNS; this is one of the two such places, the
+# other being deploy/Dockerfile, and they are reached independently.
+#
+# ONLY WHEN ABSENT, mirroring the tsx bootstrap above. An unconditional build is the silent cost
+# test/entrypoint-boot.test.ts already refuses for `npm ci` — this host restarts tens of times a day
+# and a Vite build on each is waste. STALENESS IS OUT OF SCOPE (design iv): "older than its source"
+# needs a provenance stamp, and folding it in puts two mechanisms behind one falsifier. It does not
+# `die` — `/v1` is what the fleet runs on, and `rmd serve` reports the missing build instead.
+if [ -n "${RMD_CONSOLE_BUILD_ROOT:-}" ] && [ ! -f "${RMD_CONSOLE_BUILD_ROOT}/index.html" ]; then
+  log "no console build at ${RMD_CONSOLE_BUILD_ROOT} — building"
+  ( cd "$TREE" && npm run --silent build:console ) \
+    || log "WARNING: build:console failed — rmd serve will report the console build as missing"
+fi
+
 cd "$TREE"
 
 # ── The restart rate limit: the container counterpart of launchd's ThrottleInterval ───────────
