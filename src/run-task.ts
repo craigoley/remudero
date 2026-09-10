@@ -29860,6 +29860,10 @@ export function readDocketLedgerCorpus(
   try {
     union = resolveLedgerUnion(dirname(ledgerPath), DOCKET_LEDGER_STEPS);
   } catch (e) {
+    // DELIBERATE, AND IT IS THE WHOLE POINT OF THE UNION BEING BEST-EFFORT: an unreadable archive
+    // must not cost the docket the rows it CAN see. Degrade to the live sliver and carry the
+    // reason, so the caller reports a narrowed corpus rather than an empty one — and never a
+    // silently narrowed one, which is the shape this rung was filed to remove.
     return liveOnly(String((e as Error)?.message ?? e));
   }
   if (!union.ok) {
@@ -29871,6 +29875,10 @@ export function readDocketLedgerCorpus(
     try {
       rows.push(JSON.parse(raw) as Record<string, unknown>);
     } catch {
+      // DELIBERATE: one malformed row is not a malformed corpus. A rotation truncated mid-write
+      // leaves exactly one torn line, and throwing here would discard every well-formed row
+      // beside it. Counted rather than swallowed — `torn` is reported, so the narrowing stays
+      // visible to whoever reads the docket.
       torn++;
     }
   }
