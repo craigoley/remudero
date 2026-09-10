@@ -8,7 +8,7 @@
   risk: medium
   band_meaning: blast-radius
   budget_usd: 8.00
-  files: [scripts/test-tier-manifest.mjs, hooks/pre-push, test/a-new-test-file-tiers-itself.test.ts]
+  files: [hooks/pre-commit, test/a-new-test-file-tiers-itself.test.ts]
   origin: "operator-session#daemon-health-2026-09-10"
   plan_refs: ["W1-T3205", "W1-T3310", "W1-T2734"]
   status: queued
@@ -57,9 +57,15 @@
     commit that already exists, so a hook that seeds and then refuses is still a refusal — one round
     trip shorter, but still a blocked worker. Seed where the change is still being authored: the
     worker's own pre-commit path, alongside the checks that already run there.
-    (ii) THE SEED IS IDEMPOTENT AND SILENT WHEN THERE IS NOTHING TO DO. It must add nothing, touch no
-    mtime and print nothing on a tree whose test files are all tiered, or every commit carries a
-    spurious manifest diff and the file becomes a merge-conflict magnet across concurrent workers.
+    (ii) THE SEED IS ALREADY IDEMPOTENT — MEASURED, AND IT NARROWS THIS TASK. Running
+    `node scripts/test-tier-manifest.mjs --seed` on an already-tiered tree leaves the manifest
+    BYTE-IDENTICAL and reports "nothing to seed — every test file already has a recorded duration",
+    exit 0. So the property this design asked for exists; the script needs no change and is no longer
+    in `files:`. What remains is only that NOTHING CALLS IT. The hook must still suppress that line
+    when nothing changed, because a message on every commit is noise that trains a reader to skip the
+    hook's output entirely.
+    ALSO UNCHANGED, and the reason `hooks/pre-push` left `files:` too: the push-time admission is the
+    backstop of design (iv) and this task must not touch it.
     (iii) THE MANIFEST STAYS APPEND-SHAPED, one entry per line, for the reason its own comment gives:
     concurrent PRs each adding a check append a line instead of both editing one line and conflicting.
     (iv) THE PUSH-TIME ADMISSION STAYS EXACTLY AS IT IS. It is the backstop that catches a commit made
