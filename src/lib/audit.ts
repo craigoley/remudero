@@ -1,38 +1,18 @@
 /**
  * `rmd audit` — the T2 monthly rung `docs/audits/README.md` names and stores fixtures for, and
  * until this module had zero consumers: `name: "audit"` never appeared in the `COMMANDS`
- * registry (src/run-task.ts), so two frozen findings tables (`recon-2026-07-21.md`,
- * `recon-2026-09-05.md`) sat beside a README describing a bar — "reproduces >= 80% of these 36
- * findings from source" — nothing measured.
+ * registry (src/run-task.ts), so two frozen findings tables sat beside a README bar — "reproduces
+ * >= 80% of these 36 findings from source" — nothing measured. See docs/audits/README.md's own
+ * "Invocation" section for the full three-step design (gather / parse / grade); each step's own
+ * doc comment below (on {@link gatherFindings}, {@link parseFixtureFindings}, {@link gradeFixture})
+ * carries its half of that design, not repeated here.
  *
- * THE DESIGN, KEPT DETERMINISTIC (no LLM call, so the rate is a measurement, not a judgement):
- *
- *   1. A fixed set of GATHERERS ({@link AUDIT_GATHERERS}) walk a source corpus and each produce
- *      zero or more {@link AuditFinding}s, every one tagged with the repo-relative evidence path
- *      (and, where the gatherer's own check names one, a `symbol` — the literal substring the
- *      gatherer matched on, e.g. `"Date.now()"`, `"process.env"`, `"execFileSync"`).
- *   2. {@link parseFixtureFindings} reads a frozen `recon-YYYY-MM-DD.md`'s `| R-n | … |` table and
- *      pulls out every row's `Evidence` cell; {@link parseEvidenceCitations} splits that cell into
- *      its semicolon-separated citations and extracts each citation's file token (and backtick
- *      symbol, if any).
- *   3. {@link gradeFixture} marks a fixture finding REPRODUCED when ANY of its citations names a
- *      file some gatherer also flagged — a symbol-bearing citation additionally requires that
- *      gatherer's own `symbol` to contain the citation's backtick text. A finding with several
- *      evidence citations only needs ONE to land; that is why a still-true "god file" citation
- *      keeps reproducing a finding whose narrower defect was long since fixed (docs/audits/
- *      README.md's "known corrections" already record that a fixture is graded byte-identical
- *      to the day it was written, not to what is still true).
- *
- * INVARIANT: every gatherer here is a plain, offline read of the corpus it is handed — no
- * network, no subprocess, no `Date.now()`/`Math.random()` — so a grading run is reproducible byte
- * for byte given the same corpus.
- * INVARIANT: {@link gradeFixture} and {@link parseFixtureFindings}/{@link parseEvidenceCitations}
- * are PURE — no I/O — so a test drives them over a hand-built corpus/fixture with no filesystem
- * and no real repo. {@link buildDefaultCorpus} is the one impure seam, isolated so the command
- * caller (`auditFixtureCommand`, src/run-task.ts) can inject a fake one instead.
- * INVARIANT: a REPORT, never a gate — nothing here decides pass/fail; the caller always exits 0
- * on a well-formed invocation, exactly like `proof-queue-audit`/`plan-reconcile` (lib/proof-queue-
- * audit.ts's own module doc states the same posture for the sibling rung this one completes).
+ * INVARIANT: every gatherer is a plain, offline read of the corpus it is handed — no network, no
+ * subprocess, no `Date.now()`/`Math.random()` — so a grading run is reproducible byte for byte.
+ * INVARIANT: grading and parsing are PURE — no I/O — so a test drives them over a hand-built
+ * corpus/fixture with no filesystem. {@link buildDefaultCorpus} is the one impure seam.
+ * INVARIANT: a REPORT, never a gate — the caller always exits 0 on a well-formed invocation,
+ * same posture lib/proof-queue-audit.ts's own module doc states for the sibling rung.
  * FALSIFIER: test/audit-command.test.ts.
  */
 
