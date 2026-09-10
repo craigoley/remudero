@@ -1,0 +1,119 @@
+- id: W1-T3310
+  title: "A DETERMINISTIC PRE-PUSH GATE REFUSAL EXITS THE DAEMON AS A CRASH — one task's `git push` refused by this repo's own `hooks/pre-push` ends the drain `stopped: error`, which `daemonExitCode` maps to 1, which docker counts against `on-failure:5`; MEASURED three times in one day, all three from the same gate, leaving the fleet three restarts from a permanent stop"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 10.00
+  files: [src/lib/git-push.ts, src/lib/daemon.ts, test/a-gate-refusal-is-not-a-crash.test.ts]
+  origin: "operator-session#daemon-health-2026-09-10"
+  plan_refs: ["W1-T2537", "W1-T2546", "W1-T490", "W1-T3205", "W1-T3311"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: high` with `band_meaning: blast-radius` — the two are not the same axis and this is
+    the case that shows why. The DIFF is one classifier and one exit-code mapping, a few lines; the
+    BLAST RADIUS is whether the fleet keeps running at all, because this function decides what docker
+    counts. A wrong widening here is the outage it exists to prevent, so `high` prices the reach, not
+    the size.
+
+    THIS IS THE THIRD INSTANCE OF ONE PATTERN, not a new idea. W1-T490 gave a freshness restart its
+    own code because docker "counts every non-zero exit and cannot read the value, so routine
+    restarts spent the crash budget and a 2h56m outage followed". W1-T2537 gave a blocked pass code
+    76 because "a red board is what produces blocked passes, so the budget was spent fastest when
+    the fleet was most needed". W1-T2546 gave an environmental refusal 77. A gate refusal is the
+    same shape and is still mapped to 1.
+  rationale: |
+    MEASURED ON THE LIVE FLEET HOST, 2026-09-10T03:1x UTC, from `docker logs remudero-daemon`:
+
+        grep -c "exited 1 —"                                    -> 3
+        grep -c "pre-push REFUSED"                               -> 3
+        grep -c "test-tier-manifest: 1 test file"                 -> 3
+
+    A 1:1:1 correspondence. `docker inspect` at the same moment:
+
+        RestartCount=2  RestartPolicy=on-failure:5  Status=running  ExitCode=0
+
+    THE MECHANISM, END TO END. A worker adds a test file. `hooks/pre-push`'s W1-T3205 test-tier
+    admission refuses the push because the file is not in `scripts/test-tier-manifest.json`. The
+    orchestrator's fallback push (`fallback: pushing branch from orchestrator (outside sandbox)`)
+    therefore fails with `Command failed: git -C <worktree> push origin HEAD`. The drain summary ends
+
+        stopped   : error — W1-T3274: Command failed: git ... push origin HEAD
+
+    and `daemonExitCode` maps `error` to 1. Docker counts it. Three of the five restarts are gone,
+    and the daemon was still dispatching normally between each one — it was not sick.
+
+    THE REFUSAL IS NOT A CRASH AND NOT TRANSIENT. It is deterministic, it is task-local, and it is
+    this repo's OWN gate doing exactly what it was built to do. Retrying it changes nothing (the
+    manifest is still unseeded) and exiting punishes the fleet for one task's missing registration.
+    `classifyFailure` (src/lib/classify.ts) currently reaches `strike` for it, because no
+    TRANSIENT_TEXT_PATTERN matches and there is no CI conclusion.
+
+    WHY THIS IS URGENT RATHER THAN TIDY: at five, docker stops restarting. The fleet then stays down
+    with a green board, a healthy host and no failing check anywhere — the daemon simply is not
+    there. Every future deterministic pre-push gate inherits the same fault, which is why the fix
+    belongs at the exit-code boundary and not in the one gate that happened to fire first.
+  design: |
+    (i) A PUSH REFUSED BY THIS REPO'S OWN PRE-PUSH GATE ENDS THE TASK, NOT THE PROCESS. The task is
+    genuinely stuck and must be reported as such; the daemon has no reason to stop. Route it to the
+    BLOCKED outcome W1-T2537 already built (`DAEMON_EXIT_BLOCKED`, 76) rather than minting a fifth
+    code — a blocked task is precisely what this is, and a new code would need its own meaning.
+    (ii) CLASSIFY ON THE GATE'S OWN REFUSAL TEXT, NOT ON "git push failed". A push can fail for
+    reasons that ARE crashes or environmental faults — a dead credential, an unreachable origin, a
+    non-fast-forward. Only the gate's own refusal (`hooks/pre-push`'s stable banner) may be
+    reclassified; anything else keeps today's mapping exactly.
+
+    (ii-a) AND THAT TEXT DOES NOT REACH THE CLASSIFIER TODAY — MEASURED, and it is why this shard
+    also names `src/lib/git-push.ts`. `defaultPushExec` runs `execFileSync` with `stdio: "inherit"`,
+    so the hook's refusal goes straight to the terminal and the thrown error carries NOTHING of it:
+
+        execFileSync("bash", ["-c", "echo TEXT >&2; exit 1"], { stdio: "inherit" })
+          e.message -> "Command failed: bash -c echo TEXT >&2; exit 1"
+          e.stderr  -> null
+
+    So `stopDetail` reads only `Command failed: git -C <worktree> push origin HEAD`, which is
+    indistinguishable from every other push failure and would make design (ii) unimplementable as a
+    text rule. THE FIX IS TO CAPTURE STDERR WITHOUT HIDING IT: pipe stderr, re-emit it to the parent
+    so the operator still sees the refusal live, and attach it to the thrown error. That is worth
+    doing on its own terms — a push failure whose reason is invisible to the process that must react
+    to it is a defect regardless of this task — and it is the minimum that makes (ii) possible.
+    DO NOT instead swallow the output: `stdio: "inherit"` exists so a long push is not silent, and a
+    capture that stops re-emitting trades one blind spot for another.
+    (iii) FAIL CLOSED. Text that does not positively match the gate's refusal stays `error`. The
+    existing classifier's own stated discipline — "maybe transient is never good enough" — carries
+    over unchanged: maybe-a-gate is never good enough either.
+    (iv) THE SUMMARY MUST STILL SAY WHAT HAPPENED. A task blocked this way names the gate and the
+    remedy in `stopDetail`, because the operator's next action is to seed a manifest, not to read
+    docker logs. A quieter exit that hides the cause is a worse outcome than the crash.
+    (v) DO NOT WEAKEN THE GATE. This task does not touch hooks/pre-push, does not add an
+    `RMD_PREPUSH_GATES=0` path for the orchestrator, and does not make the admission advisory. The
+    gate is right; the daemon's reaction to it is wrong. W1-T3311 fixes the cause separately.
+  acceptance:
+    - claim: "a drain that stopped because this repo's own pre-push gate refused a push exits BLOCKED (76), not 1, so docker's crash budget is untouched"
+      proof: "unit test: test/a-gate-refusal-is-not-a-crash.test.ts"
+    - claim: "a push that failed for any OTHER reason — bad credential, unreachable origin, non-fast-forward — still exits 1 exactly as today"
+      proof: "unit test: test/a-gate-refusal-is-not-a-crash.test.ts"
+    - claim: "the blocked summary names the refusing gate and the remedy in its stop detail, so the cause is legible without reading docker logs"
+      proof: "unit test: test/a-gate-refusal-is-not-a-crash.test.ts"
+    - claim: "the existing stale (75), blocked (76) and environmental (77) mappings are unchanged, so this is additive"
+      proof: "unit test: test/a-gate-refusal-is-not-a-crash.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if `daemonExitCode`/`daemonExitCodeForSummary` already routes a
+    pre-push gate refusal away from 1, OR if the push leaf already attaches its stderr to the error it
+    throws — the classifier cannot see what the leaf discards, so that half is a prerequisite and not
+    a nice-to-have. MEASURED 2026-09-10: it does not — `error` falls through to
+    `return 1` and `classifyFailure` reaches `strike` on the gate's text, which is why three restarts
+    were spent.
+    PROVE IT LOAD-BEARING: a fixture summary carrying the gate's real refusal banner must map to 76,
+    and REMOVING the new case must return it to 1. If both readings are 1, the case is not wired.
+    RUN THE NEGATIVE CONTROL IN THE SAME TEST: a `Command failed: git push` with authentication or
+    non-fast-forward text must STILL be 1. A change that maps every push failure to 76 has removed
+    the crash budget rather than protecting it, and would hide a real credential outage as "blocked".
+    DO NOT resolve this by raising `on-failure:5`. A higher ceiling buys restarts for a fault that
+    should not be spending them, and the measured cause recurs on every worker that adds a test file.
+    DO NOT resolve this by making the daemon swallow every task error. The `error` path exists and
+    must keep exiting 1 for a genuine crash, or a real fault becomes an infinite quiet loop.
