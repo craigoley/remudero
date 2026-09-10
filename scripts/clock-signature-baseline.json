@@ -390,7 +390,7 @@
     "newDate": 2
   },
   "src/run-task.ts": {
-    "dateNow": 55,
+    "dateNow": 56,
     "legacy": 19,
     "newDate": 41
   },
@@ -398,5 +398,10 @@
     "dateNow": 1,
     "legacy": 0,
     "newDate": 1
+  },
+  "src/lib/audit.ts": {
+    "legacy": 0,
+    "dateNow": 5,
+    "newDate": 0
   }
 }
