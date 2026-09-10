@@ -1,0 +1,90 @@
+- id: W1-T3343
+  title: "A PUSH REFUSED BY THIS REPO'S OWN PRE-PUSH HOOK IS REPORTED AS 'origin is unreachable' — the id reservation blames the network for a local gate, and the operator's next move is wrong in every case"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  files: [src/lib/task-id-reservation.ts, test/a-refused-push-is-not-an-unreachable-origin.test.ts]
+  origin: "operator-session#doctrine-modularization-2026-09-10"
+  plan_refs: ["W1-T1055", "W1-T3323"]
+  status: queued
+  attempts: 0
+  note: |
+    OBSERVED, NOT INFERRED, 2026-09-10 while building W1-T3323. `rmd next-task-id --reserve` printed:
+
+      REFUSED — origin is unreachable, so no id was claimed
+      cannot reach origin to reserve W1-T3341 — refusing to mint rather than minting optimistically
+
+    twice, on a host where `git ls-remote --heads origin` returned exit 0 in the same second. The
+    real cause was `hooks/pre-push` refusing the ref push because a NEW TEST FILE was not yet in
+    `scripts/test-tier-manifest.json`. Seeding the manifest made the identical command succeed on
+    the next try. The network was never involved.
+
+    THIS IS THE LEDGER-REASON CLASS, ONE LEVEL DOWN. CLAUDE.md already carries "a ledger line must
+    carry the reason from the DECISION THAT PRODUCED ITS OUTCOME", earned when `automerge.armed`
+    logged an outcome from one gate beside a reason from another. Here the outcome is right (no id
+    was claimed) and the REASON is imported from a hypothesis nobody tested. A self-contradictory
+    refusal is worse than a terse one: it sends the next diagnosis at connectivity, credentials and
+    the remote, when the answer was on stdout the whole time.
+
+    BAND. `risk: low`: one classifier and its message. The refusal is FAIL-CLOSED and must stay
+    that way — this task changes what it SAYS, never whether it refuses. The shard's filename slug
+    matches `test/a-refused-push-is-not-an-unreachable-origin.test.ts` because that suite IS this
+    task's own falsifier, which is the condition W1-T2525's Rule 19 discount states; the span the
+    linter first measured existed solely because the two names differed.
+    THE SHARED WHOLE-FILE PROOF IS DELIBERATE, NOT AN OVERSIGHT. `lint-plan` warns that four
+    criteria share one proof; its own message names the carve-out — "keep the shared proof only
+    when one falsifier deliberately answers every named criterion" — and that is this suite. The
+    alternative it suggests, a per-criterion `unit test: <exact title>`, would BREAK the grading:
+    `judgeCriterion`'s `not_yet_built` carve-out needs `!nameFiltered`, so on a plan-only head a
+    name-filtered proof for a file that does not exist yet grades `executed_fail` and fails the PR.
+    The pure-path form is the only one that reaches forward.
+  rationale: |
+    `reserveTaskIdRemote` (`src/lib/task-id-reservation.ts`) branches on
+    `reserver.attempt(...) === "unreachable"` and throws a message naming the network. The reserver
+    reaches that verdict from a FAILED `git push`, and a `git push` fails for at least three
+    unrelated reasons: the remote is unreachable, the remote REJECTED the ref (a real contention
+    signal), or a LOCAL hook refused before a packet was sent. Only the first is what the message
+    says, and the third is the one an operator on this repo will hit most, because `hooks/pre-push`
+    runs three gates on every push by design.
+
+    THE COST IS NOT THE MINUTE IT WASTES. It is that the stated cause is ACTIONABLE and wrong: the
+    operator checks the network, finds it healthy, and now has a refusal that reproduces with no
+    explanation — the (e) shape CLAUDE.md already records, where an environmental-looking result
+    reproduces exactly and the agreement between two readings is counterfeit confidence.
+  design: |
+    (i) CLASSIFY ON THE EVIDENCE THE PUSH ACTUALLY EMITS, never on the exit code alone. This repo's
+    own hook prints `pre-push REFUSED.` and names each failing gate; git prints a distinct
+    `fatal: could not read from remote repository` / `Could not resolve host` family for a genuine
+    network failure, and `[rejected]` / `stale info` for contention. Three outcomes, three messages.
+    (ii) A CAUSE THE CLASSIFIER CANNOT NAME IS REPORTED AS UNKNOWN, WITH THE STDERR QUOTED. An
+    unrecognised failure must not fall back to "unreachable" — that is how this defect exists. The
+    fourth arm says it does not know and shows what it saw, which is strictly more useful than a
+    confident wrong answer.
+    (iii) FAIL-CLOSED IS UNCHANGED. Every arm still refuses to mint. W1-T1055's reasoning holds:
+    minting optimistically already took origin/main down twice.
+    (iv) THE HOOK ARM NAMES THE FIX. `pre-push` already tells the operator what to run; the
+    reservation should carry that text through rather than replace it with a network claim.
+  acceptance:
+    - claim: "a push refused by a local pre-push hook is reported as a local gate refusal, quoting the gate, not as an unreachable origin"
+      proof: "unit test: test/a-refused-push-is-not-an-unreachable-origin.test.ts"
+    - claim: "a genuine network failure is still reported as an unreachable origin, so the fix is not a swap of one wrong answer for another"
+      proof: "unit test: test/a-refused-push-is-not-an-unreachable-origin.test.ts"
+    - claim: "an unrecognised push failure is reported as UNKNOWN with its stderr quoted, never defaulted to unreachable"
+      proof: "unit test: test/a-refused-push-is-not-an-unreachable-origin.test.ts"
+    - claim: "every arm still refuses to mint — the classification changes what is said, never whether an id is claimed"
+      proof: "unit test: test/a-refused-push-is-not-an-unreachable-origin.test.ts"
+  falsifier: |
+    REPRODUCE BEFORE FIXING. Add an untiered test file, run `rmd next-task-id --reserve`, and
+    confirm the message still blames the network — this was OBSERVED on 2026-09-10 and an
+    intervening PR may already have repaired it.
+    DO NOT WEAKEN THE REFUSAL. Every arm keeps refusing; a task that makes the hook arm mint is a
+    different and much worse change.
+    DO NOT MATCH ON THIS ONE HOOK'S CURRENT WORDING ALONE. `hooks/pre-push` is edited often; anchor
+    on the shape it is guaranteed to emit (its own refusal banner) and prove the UNKNOWN arm catches
+    a wording this classifier has never seen, or the fix expires the next time the hook is reworded.
+    DO NOT infer the cause from the exit code. `git push` exits 1 for all three families.

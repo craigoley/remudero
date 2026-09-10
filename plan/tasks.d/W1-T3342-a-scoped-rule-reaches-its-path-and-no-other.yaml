@@ -1,0 +1,88 @@
+- id: W1-T3342
+  title: "A RULE THAT GOVERNS ONE PATH IS STILL CHARGED TO EVERY SESSION — route the doctrine headlines that name a concrete repo path into learnings/*.yaml, whose files: glob delivers them to the task that governs that path and to no one else"
+  repo: remudero
+  depends_on: [W1-T3323]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 15.00
+  files: [CLAUDE.md, learnings/architecture.yaml, test/a-scoped-rule-reaches-its-path-and-no-other.test.ts]
+  origin: "operator-session#doctrine-modularization-2026-09-10"
+  plan_refs: ["W1-T3323", "W1-T2507", "W1-T3341", "W1-T33", "W1-T38"]
+  status: queued
+  attempts: 0
+  note: |
+    DEFERRED FROM W1-T3323 DELIBERATELY, AND THIS IS THE DEVIATION BEING DECLARED. That shard's
+    design (iii) said "SPLIT BY SCOPE WHERE SCOPE EXISTS", and the build did NOT do it. The reason
+    is the same shard's design (ii) and its own falsifier: "This task MOVES bytes; it does not
+    rewrite them. A migration that also edits prose cannot be reviewed for either job." Turning a
+    headline+body into a learnings entry with a `files:` glob is a REWRITE — the prose is reshaped
+    into a YAML block scalar with new indentation and a new `src:` citation, at which point the
+    byte-identity proof W1-T3323 turns on (56 frozen sha256 digests) can say nothing about it. Two
+    changes in one diff, over 34KB of prose, is precisely what a reviewer cannot check by eye.
+    So the move is real and it is filed, not dropped.
+
+    BAND. `risk: high` / `band_meaning: span`: no `src/` change, but this edits two knowledge
+    corpora at once and the failure mode is a rule that silently stops reaching the reader who
+    needed it — W1-T2507 had to REVERT three of its own migrations for exactly that, and the reason
+    it caught them is that existing suites pinned those bullets. `span` rather than `blast-radius`
+    because the span is real and Rule 19 should REPORT it, not be exempted from counting it.
+    THE SHARED WHOLE-FILE PROOF IS DELIBERATE, NOT AN OVERSIGHT. `lint-plan` warns that four
+    criteria share one proof; its own message names the carve-out — "keep the shared proof only
+    when one falsifier deliberately answers every named criterion" — and that is this suite. The
+    alternative it suggests, a per-criterion `unit test: <exact title>`, would BREAK the grading:
+    `judgeCriterion`'s `not_yet_built` carve-out needs `!nameFiltered`, so on a plan-only head a
+    name-filtered proof for a file that does not exist yet grades `executed_fail` and fails the PR.
+    The pure-path form is the only one that reaches forward.
+  rationale: |
+    W1-T2507 ALREADY PROVED THE DESTINATION, AND ITS NUMBERS ARE THE PRECEDENT: 19 CLAUDE.md
+    bullets that each named a concrete repo path became `learnings/architecture.yaml` entries whose
+    `files:` glob matches exactly that path, and 88 entries carry globs today. A scoped learning is
+    STRICTLY BETTER than a headline in the index: it costs an unrelated task nothing at all, where
+    even a 130-byte headline is charged to every session forever.
+
+    WHAT IS LEFT TO ROUTE, AND WHY IT SURVIVED W1-T2507. That task moved the bullets whose whole
+    subject was one path. What stayed includes rules that name a path but read as general
+    discipline — the `deploy/` mount-vs-image boundary came BACK for that reason. After W1-T3323
+    the calculus changed: the index is now 56 headlines, and a headline that only ever fires for
+    one directory is the clearest remaining waste in it. The candidate set must be re-derived on
+    the LIVE index, never carried from this filing.
+  design: |
+    (i) THE TEST THAT PINS A BULLET IS THE VETO, AND IT IS CHECKED FIRST. W1-T2507's own rationale
+    records why: four suites pin exact CLAUDE.md prose, which proves those facts are read by every
+    task author regardless of `files:` — migrating one LOSES reach rather than preserving it.
+    `grep -ar` the distinctive phrase across `test/**` BEFORE proposing any rule for the move, and
+    treat a hit as a refusal, not a conversation.
+    (ii) EACH MOVED RULE PROVES IT REACHES ITS OWN PATH AND NOT ANOTHER. The falsifier shape
+    `test/claude-md-rules-reach-their-scope.test.ts` already ships: select for a task whose `files:`
+    hit the glob, then DROP the glob and prove the same task stops selecting it. A move with no
+    such pair is an assertion, not a proof.
+    (iii) THE LEARNINGS BUDGET IS THE REAL BOUND, AND IT IS NEARLY SPENT. `learnings-budget-ratchet`
+    reads 41714 of 42000 chars active. Every rule moved here SPENDS that budget while freeing
+    CLAUDE.md's — so this task must measure both sides and stop at the ceiling rather than
+    discovering it at the gate. W1-T3320's routing lands a fold follow-up rather than refusing, but
+    a rule routed into a corpus that then cannot inject it has helped nobody.
+    (iv) THE BODY GOES WITH THE RULE, NOT BEHIND IT. A migrated rule's evidence belongs in the
+    learnings entry; leaving a `doctrine/` orphan behind would fail W1-T3323's own no-orphan
+    assertion, which is the check that makes this safe to attempt at all.
+  acceptance:
+    - claim: "every rule this task moves is selected for a task whose files: hit its glob, and dropping the glob removes it from that same selection"
+      proof: "unit test: test/a-scoped-rule-reaches-its-path-and-no-other.test.ts"
+    - claim: "no rule whose prose is pinned by an existing suite is moved, and the check that proves it is run against the live test corpus"
+      proof: "unit test: test/a-scoped-rule-reaches-its-path-and-no-other.test.ts"
+    - claim: "the learnings budget still passes after the move, measured on both corpora rather than asserted"
+      proof: "unit test: test/a-scoped-rule-reaches-its-path-and-no-other.test.ts"
+    - claim: "no doctrine body is orphaned by a headline this task removes from the index"
+      proof: "unit test: test/a-scoped-rule-reaches-its-path-and-no-other.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if no headline in the LIVE index names a single governing
+    path that no test pins. Re-derive that set; do not trust a count from this filing.
+    PROVE REACH, NOT SHRINKAGE. W1-T2507's suite exists because "CLAUDE.md got smaller" is not the
+    claim — "the fact now reaches the task that governs it" is. A move whose only evidence is a
+    byte delta has not been verified.
+    DO NOT MOVE A RULE A TEST PINS. Three of W1-T2507's were reverted for this and the reversion is
+    recorded in the budget baseline's own rationale.
+    DO NOT ROUTE PAST THE LEARNINGS BUDGET. 41714 of 42000 is 286 chars of headroom; a rule body
+    averages 610. Measure before moving, and stop where the ceiling is.
