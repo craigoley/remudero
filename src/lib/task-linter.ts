@@ -2985,18 +2985,26 @@ function mergeTaskBlockTexts(texts: readonly string[]): Map<string, string> {
  *  drives both arms by identifier (test/negative-reachability-ratchet.test.ts, W1-T2317). */
 export const STATUS_LINE_RE = /^( {2}status:)[ \t]*(\S+)[ \t]*$/m;
 
-/** Closed/landed statuses — a flip TO one of these is what LEAVES the open-task population that
- *  `lint-plan --base`'s changed-tasks rules govern; a flip to any other (still-open) status
- *  stays a live edit and keeps its full lint. Declared locally, mirroring
- *  {@link NON_OPEN_FILING_STATUSES} a few hundred lines up rather than importing it — a
- *  3-literal Set carries none of an algorithm's drift risk (W1-T369). */
-const STATUS_FLIP_CARVE_TARGETS = new Set<TaskStatus>(["blocked", "merged", "done"]);
+/** Closed/landed statuses a flip may carve INTO — NOT the same set as {@link NON_OPEN_FILING_STATUSES}
+ *  a few hundred lines up, and deliberately so: `blocked` is EXCLUDED here even though it is a
+ *  non-open status. MEASURED 2026-09-10 (this task's own CI, coverage-shard 3/4):
+ *  `blockedDispositionViolations` fires ONLY inside the changed-tasks pass and specifically on the
+ *  TRANSITION into `blocked` (`ctx.baseTask?.status !== "blocked"`) — a task whose entire diff is
+ *  `queued` → `blocked` with no `retirement:` field is the exact shape
+ *  test/a-blocked-task-must-name-its-disposition.test.ts's criterion 1 requires `lint-plan --base`
+ *  to REFUSE (exit 1). Carving that id out of `scope` removes it from the changed-tasks loop
+ *  entirely, so the transition check never runs and the refusal silently vanishes — proven by that
+ *  suite's own red run when `blocked` was still a member here. `merged`/`done` carry no such
+ *  per-transition rule (grepped: no other check in this file reads a `ctx.baseTask` to gate on the
+ *  status the DIFF moves a task TO), so they stay carvable; `merged` is also the only value
+ *  `reconcileShardStatus` (plan-reconcile.ts) ever writes, which is this task's actual trigger. */
+const STATUS_FLIP_CARVE_TARGETS = new Set<TaskStatus>(["merged", "done"]);
 
 /**
  * W1-T3274 — task ids CARVED by a status-flip: ids whose ENTIRE diff between two corpora is the
- * `status:` line's VALUE, flipping to a closed/landed status (`blocked`/`merged`/`done`). THE
- * FLIP THAT REMOVES A TASK FROM THE OPEN POPULATION IS, TODAY, ALSO THE EDIT THAT DRAGS IT INTO
- * `--base`'s CHANGED
+ * `status:` line's VALUE, flipping to a closed/landed status in {@link STATUS_FLIP_CARVE_TARGETS}
+ * (`merged`/`done` — NOT `blocked`, see that Set's own doc). THE FLIP THAT REMOVES A TASK FROM THE
+ * OPEN POPULATION IS, TODAY, ALSO THE EDIT THAT DRAGS IT INTO `--base`'s CHANGED
  * POPULATION: `changedTaskIds`/`rawChangedTaskIds` both treat any record-text difference as a
  * task edit, so a bare `plan-reconcile --write` (queued → merged, nothing else) lints every
  * shard it touches in full and inherits whatever pre-existing violations already sat on them —
@@ -3015,7 +3023,9 @@ const STATUS_FLIP_CARVE_TARGETS = new Set<TaskStatus>(["blocked", "merged", "don
  * task's own design point (ii) and falsifier's second control: the carve is about LEAVING the
  * open population, not about the `status:` field merely being the one that moved. A task absent
  * on either side (newly filed, or removed outright) is never carved either — only a byte-level
- * edit of an EXISTING id's block ever qualifies.
+ * edit of an EXISTING id's block ever qualifies. A flip INTO `blocked` is never carved either
+ * (see {@link STATUS_FLIP_CARVE_TARGETS}'s own doc) — it stays in scope so
+ * `blockedDispositionViolations` still sees the transition.
  */
 export function statusFlipOnlyTaskIds(oldTexts: readonly string[], newTexts: readonly string[]): Set<string> {
   const oldBlocks = mergeTaskBlockTexts(oldTexts);

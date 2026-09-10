@@ -49,9 +49,18 @@ test("a pure status flip to a closed status (queued -> merged) is carved", () =>
   assert.deepEqual([...carved], ["T1"]);
 });
 
-test("queued -> blocked and queued -> done are carved too — any closed/landed target, not only merged", () => {
-  assert.deepEqual([...statusFlipOnlyTaskIds([shard("T1", "queued")], [shard("T1", "blocked")])], ["T1"]);
+test("queued -> done is carved too — any closed/landed target besides blocked", () => {
   assert.deepEqual([...statusFlipOnlyTaskIds([shard("T1", "queued")], [shard("T1", "done")])], ["T1"]);
+});
+
+test("queued -> blocked is NEVER carved, deliberately — the transition disposition check needs it in scope", () => {
+  // MEASURED 2026-09-10 (this task's own CI, coverage-shard 3/4): blockedDispositionViolations
+  // (task-linter.ts) fires only inside lint-plan --base's changed-tasks pass and only on the
+  // TRANSITION into `blocked` — carving a pure queued->blocked flip out of scope would silently
+  // defeat test/a-blocked-task-must-name-its-disposition.test.ts's criterion 1 (a task moved into
+  // blocked with no `retirement:` must be refused). See STATUS_FLIP_CARVE_TARGETS's own doc.
+  const carved = statusFlipOnlyTaskIds([shard("T1", "queued")], [shard("T1", "blocked")]);
+  assert.equal(carved.size, 0, "a flip INTO blocked must stay in scope so the disposition check still sees it");
 });
 
 test("design point (ii): a flip riding alongside another field edit is NOT carved", () => {
