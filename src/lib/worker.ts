@@ -3828,9 +3828,9 @@ function mergeWorktreeReapSummaries(summaries: readonly WorktreeReapSummary[]): 
 
 /** THE AD-HOC LANE RUNG: the same reaper, pointed at {@link adhocLaneRoot}, shipping SURVEY-FIRST. NO SECOND REMOVAL, BY
  * CONSTRUCTION — it delegates to {@link reapStaleWorktrees} and makes no filesystem call at all, so the 2026-07-31 defect
- * cannot be reinstated here, and the liveness doctrine is inherited whole. It adds one thing only: a different root and a
- * different age ceiling. SURVEY-FIRST IS THE DEFAULT AND THE DEFAULT IS OFF: `enabled` defaults to `false`, so the pass
- * ledgers what it WOULD reclaim while removing nothing. Arming is a separate operator decision (W1-T2847;
+ * cannot be reinstated here, and the liveness doctrine is inherited whole. It adds roots/candidates only: the ad-hoc root,
+ * the registered unmanaged paths, and the lane age ceiling. SURVEY-FIRST IS THE DEFAULT AND THE DEFAULT IS OFF: `enabled`
+ * defaults to `false`, so the pass ledgers what it WOULD reclaim while removing nothing. Arming is a separate operator decision (W1-T2847;
  * docs/forensics/worker.md). */
 export function runAdhocLaneReapRung(
   config: Config,
@@ -3900,10 +3900,10 @@ export function runAdhocLaneReapRung(
   }
 }
 
-/** The REPORTING half: every worktree git registers for `repoDir` under NEITHER {@link worktreesDir} NOR {@link adhocLaneRoot}
+/** The registered-unmanaged census: every worktree git registers for `repoDir` under NEITHER {@link worktreesDir} NOR {@link adhocLaneRoot}
  * — the lanes no cadence can reach. Reads git's own registration, never a shell-command pattern, because lanes cut by another
- * agent leave no matching command log. REPORTS, NEVER REAPS: these sit outside both managed roots by definition (W1-T2847;
- * docs/forensics/worker.md). */
+ * agent leave no matching command log. It only enumerates; {@link runAdhocLaneReapRung} feeds the resulting paths back into
+ * {@link reapStaleWorktrees} when a caller supplies `repoDir` (W1-T2847/W1-T2962; docs/forensics/worker.md). */
 export function unmanagedWorktreeLanes(
   config: Config,
   repoDir: string,
