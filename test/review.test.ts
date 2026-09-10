@@ -2581,6 +2581,8 @@ test("a seeded materialization failure posts a verdict whose description names i
   // whether execution was partial — 0/[]/false is not applicable here (nothing at all executed).
   assert.deepEqual(reviewLedgerLegibilityFields(v), {
     capped: true,
+    // Standing rule 25 is advisory, so this rides on EVERY row, passing or failing — false here.
+    instrument_entangled: false,
     keyword_only: true,
     plan_only: false,
     capped_reason: "no-exec-context:2",

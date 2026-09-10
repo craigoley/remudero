@@ -92,23 +92,31 @@ test("the detector receives the diff, so a comment-only src change is not produc
   assert.equal(judgeRule25(instrumentDiff + diffAdding(product, "export const w = 4;"), files).ok, false);
 });
 
-test("the runner's real diff readers report this instrument-only branch clean", () => {
+test("the runner's real diff readers run end to end against this branch and never refuse it", () => {
+  // WHAT THIS OWES: that the real readers (git diff + changed files) work against a real branch —
+  // not that the branch is rule-25 clean. Demanding cleanliness here made this the strictest of the
+  // four enforcement points: it reddened CI for ANY entangled branch, independent of the review.
   const res = capturePrecheck("origin/main");
-  assert.equal(res.code, 0, `this branch should be rule-25 clean; stderr:\n${res.err.join("\n")}`);
-  assert.deepEqual(res.err, []);
-  assert.match(res.out.join("\n"), /rule25-precheck: OK --/);
+  assert.equal(res.code, 0, `the precheck is advisory and never refuses; stderr:\n${res.err.join("\n")}`);
+  // A clean branch says "OK --" on stdout; an entangled one says NOTICE on stderr. Either proves
+  // the readers ran and reached a verdict, which is the thing under test.
+  assert.match([...res.out, ...res.err].join("\n"), /rule25-precheck: (OK --|NOTICE)/);
 });
 
-test("the runner prints the reviewer refusal and names both sides of an entangled diff", () => {
+test("the runner NOTICES an entangled diff and names both sides, without refusing the push", () => {
   const files = ["scripts/console-parity-ratchet.mjs", "src/lib/ledger-compact.ts"];
   const diff = diffAdding(files[0], "export const instrument = true;") + diffAdding(files[1], "export const product = true;");
   const res = capturePrecheck("HEAD^", {
     diffAgainstBase: () => diff,
     changedFiles: () => files,
   });
-  assert.equal(res.code, 1);
+  // ADVISORY: the evidence still prints on stderr, and the push proceeds. Returning 1 here would
+  // refuse a push for a condition remudero-review no longer refuses — the author paying the full
+  // price of a gate that no longer exists downstream. THE FALSIFIER: restore `return 1` in
+  // scripts/rule25-precheck.mjs and this goes red.
+  assert.equal(res.code, 0, "an advisory never refuses the push");
   assert.deepEqual(res.out, []);
-  assert.match(res.err.join("\n"), /THIS DIFF WILL BE REFUSED under Standing rule 25/);
+  assert.match(res.err.join("\n"), /NOTICE .* Standing rule 25 is ADVISORY/s);
   assert.match(res.err.join("\n"), /instrument path\(s\): scripts\/console-parity-ratchet\.mjs/);
   assert.match(res.err.join("\n"), /src\/ product path\(s\): src\/lib\/ledger-compact\.ts/);
   assert.match(res.err.join("\n"), /TO FIX, either: \(1\) split/);
