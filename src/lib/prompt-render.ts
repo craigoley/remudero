@@ -7,7 +7,14 @@ import { isInPlanScope, outOfPlanScopeFiles } from "./plan-architect.js";
 import type { Task } from "./plan.js";
 import { citation } from "./provenance.js";
 import type { CriterionVerdict } from "./review.js";
-import { describeCiLogUnavailable, REGENERABLE_ARTIFACT_GENERATORS, type ActionableGateFailure, type CiFailure, type MergeConflictEvidence } from "./sweep.js";
+import {
+  describeCiLogUnavailable,
+  REGENERABLE_ARTIFACT_GENERATORS,
+  type ActionableGateFailure,
+  type CiFailure,
+  type MergeConflictEvidence,
+  type ProofDiscriminationEvidence,
+} from "./sweep.js";
 import { envelope } from "./untrusted-envelope.js";
 
 /**
@@ -128,8 +135,8 @@ export function outOfDeclaredScopeFiles(
 // because `OpenPrView` carries it and this module already imports OpenPrView
 // from sweep.js; the reverse import would be circular (W1-T100).
 
-/** The five known fix-rung failure modes. See the taxonomy note above. */
-export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | "gate-fix" | (string & {});
+/** The six known fix-rung failure modes. See the taxonomy note above. */
+export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | "gate-fix" | "proof-discrimination" | (string & {});
 
 /**
  * The block evidence a fix dispatch derives its MODE from. `review` carries a
@@ -170,6 +177,8 @@ export interface FixEvidence {
   mergeConflict?: MergeConflictEvidence;
   /** W1-T2236: the `gate-fix` mode's ONLY input — see this interface's own doc, above. */
   actionableGateFailures?: ActionableGateFailure[];
+  /** W1-T3306: exact stale or non-executable proof rows from a capped green verdict. */
+  proofDiscrimination?: ProofDiscriminationEvidence;
   /**
    * W1-T78: an operator's answer to a clarification question, carried VERBATIM
    * as an added constraint on the prompt — never paraphrased, never dropped.
@@ -291,6 +300,10 @@ export const FIX_MODE_RULES: readonly FixModeRule[] = [
   {
     mode: "gate-fix",
     when: (e) => (e.actionableGateFailures?.length ?? 0) > 0,
+  },
+  {
+    mode: "proof-discrimination",
+    when: (e) => (e.proofDiscrimination?.proofs.length ?? 0) > 0,
   },
   {
     mode: "body-coverage",
@@ -650,6 +663,26 @@ export function renderFixPrompt(opts: {
       `diagnosed it precisely; do not invent a different fix or re-litigate a criterion that already passed.`,
       "",
       rendered,
+      ...footer,
+    ].join("\n");
+  }
+
+  if (mode === "proof-discrimination") {
+    const proofs = opts.evidence.proofDiscrimination?.proofs ?? [];
+    const rendered = proofs.map((proof, index) => {
+      return `${index + 1}. claim: ${neutralizeFenceMarkers(proof.claim)}\n   proof: ${neutralizeFenceMarkers(proof.proof)}\n   grade: ${proof.proofExec}`;
+    });
+    return [
+      header,
+      ...constraintBlock,
+      ...scopeBlock,
+      `The review was CAPPED: every named criterion read MET, but the proof(s) below did not discriminate this`,
+      `branch from its merge base. Repair the PR BODY's Acceptance block only; do not change code merely to`,
+      `manufacture a proof. A pure-path \`unit test:\` proof discriminates only when its file is absent or`,
+      `failing at merge base. For an existing suite, replace it with a \`grep:\` proof on a CHANGED line instead.`,
+      `Update each named proof precisely, then re-review the same branch and body.`,
+      "",
+      ...rendered,
       ...footer,
     ].join("\n");
   }

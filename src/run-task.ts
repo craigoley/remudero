@@ -1134,6 +1134,7 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type PostFixReverificationSummary,
+  type ProofDiscriminationEvidence,
   type QueueGovernorResult,
   type RedBaseRefreshFacts,
   type PostReviewStallVerdict,
@@ -1158,6 +1159,7 @@ import {
   isDispatchedRunBranch,
   detectPostReviewStall,
   isCappedReviewOrphanEscalation,
+  proofDiscriminationEvidenceFromCriteria,
   type ArmAttemptOutcome,
   type ArmOutcomeName,
   type BuildSweepEffectsDeps,
@@ -7493,6 +7495,8 @@ export async function runFixRung(opts: {
    * for a review-mode dispatch whose `unmetCriteria` is empty; undefined otherwise.
    */
   actionableGateFailures?: ActionableGateFailure[];
+  /** W1-T3306: capped-green evidence that makes a same-head PR-body repair actionable. */
+  proofDiscrimination?: ProofDiscriminationEvidence;
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     /**
@@ -7730,6 +7734,10 @@ export async function runFixRung(opts: {
     });
   const retriggerCap = opts.retriggerCap ?? DEFAULT_FIX_RETRIGGER_CAP;
   let review = opts.initialReview;
+  const proofDiscriminationStillNeedsRepair = () =>
+    opts.proofDiscrimination !== undefined &&
+    review.capped === true &&
+    proofDiscriminationEvidenceFromCriteria(review.criteria) !== undefined;
   let strikes = 0;
   let retriggers = 0;
   let sessionToResume: string | undefined = opts.initialSessionId;
@@ -7822,7 +7830,7 @@ export async function runFixRung(opts: {
   // this, an all-retrigger run would spin forever since `strikes < opts.strikeCap` alone would
   // never trip. Nothing here paces, throttles, or sleeps a call: the bound is a COUNT, never a
   // timer.
-  while (review.state !== "success" && strikes < opts.strikeCap && retriggers < retriggerCap) {
+  while ((review.state !== "success" || proofDiscriminationStillNeedsRepair()) && strikes < opts.strikeCap && retriggers < retriggerCap) {
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
     // point that stops a strike being SPENT on a PR that went terminal
     // (merged/closed) since the previous round. Read FRESH every round —
@@ -8627,6 +8635,14 @@ export async function runFixRung(opts: {
     // the latter must keep dispatching off the review's own redacted summary, never stand down.
     const rawUnmet = review.criteria.filter((c) => !c.met);
     const unmet = visibleCriteria(rawUnmet);
+    const proofDiscriminationNow =
+      opts.proofDiscrimination !== undefined &&
+      currentMergeConflict === undefined &&
+      !noReviewYet &&
+      rawUnmet.length === 0 &&
+      review.capped === true
+        ? proofDiscriminationEvidenceFromCriteria(review.criteria)
+        : undefined;
     // W1-T2236: this round's structured gate-failure remedy (the `gate-fix` mode's ONLY input —
     // see {@link FixEvidence.actionableGateFailures}'s own doc). Review-mode rounds only (never
     // ci-log/merge-conflict, which carry their own evidence shape). ROUND 1 (`strikes === 0`)
@@ -8681,7 +8697,8 @@ export async function runFixRung(opts: {
       !noReviewYet &&
       strikes > 0 &&
       rawUnmet.length === 0 &&
-      (gateFailuresNow?.length ?? 0) === 0
+      (gateFailuresNow?.length ?? 0) === 0 &&
+      proofDiscriminationNow === undefined
     ) {
       const reason =
         "review failing with no unmet acceptance criterion and no actionable gate failure named, " +
@@ -8763,7 +8780,12 @@ export async function runFixRung(opts: {
           // through unconditionally: `deriveFixMode`'s `gate-fix` row only fires when it is
           // actually non-empty, so a `[]`/`undefined` value here is inert for a genuine
           // reviewer-unmet dispatch (unmet.length > 0) exactly as before this task.
-          { review: { unmetCriteria: unmet, summary: review.summary }, actionableGateFailures: gateFailuresNow, constraint: opts.constraint };
+          {
+            review: { unmetCriteria: unmet, summary: review.summary },
+            actionableGateFailures: gateFailuresNow,
+            proofDiscrimination: proofDiscriminationNow,
+            constraint: opts.constraint,
+          };
     const fixMode = deriveFixMode(evidence);
     const prompt = renderFixPrompt({
       task: opts.task,
@@ -9141,7 +9163,7 @@ export async function runFixRung(opts: {
     // so "never-fetched" is the truth and the mode name is the actionable half of it. Only
     // the catch below may overwrite it, so a fetch failure can never be asserted by accident.
     let reviewReportSubstituteCause: import("./lib/review.js").ReportSubstituteCause = { kind: "never-fetched", fixMode };
-    if (fixMode === "body-coverage") {
+    if (fixMode === "body-coverage" || fixMode === "proof-discrimination") {
       const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
       try {
         reviewInputBodyFetchAttempted = true;
@@ -9154,6 +9176,7 @@ export async function runFixRung(opts: {
         reviewReportSubstituteCause = { kind: "fetch-failed" };
         deps.log("fix.body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
       }
+      if (fixMode === "body-coverage") {
       // W1-T307: THE COMMIT THAT CHANGES THE DIFF OWNS THE CLAIM ABOUT THE DIFF. This strike
       // is exactly the shape that repairs coverage by ADDING a file (the #1202/W1-T301
       // fixture) — check whether the body just fetched now carries a stale file-count/
@@ -9200,6 +9223,7 @@ export async function runFixRung(opts: {
         }
       } catch (e) {
         deps.log("fix.body_claim_update_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
+      }
       }
     }
     // The other fix modes deliberately judge worker prose, but retry/backoff still belongs to
@@ -9358,7 +9382,7 @@ export async function runFixRung(opts: {
     }
   }
 
-  if (review.state === "success") {
+  if (review.state === "success" && !proofDiscriminationStillNeedsRepair()) {
     deps.log("fix.resolved", { strikes, reason: "review passed" });
     deps.say(`fix rung: resolved after ${strikes} strike(s) — review now passes`);
     return { outcome: "fixed", review, strikes, retriggers, reason: "review passed" };
@@ -28777,6 +28801,7 @@ export function buildFixRungDispatchArgs(args: {
   const isMergeConflict = evidence.mergeConflict !== undefined;
   const isCiLog = !isMergeConflict && evidence.ciFailures !== undefined;
   const unmet = evidence.unmetCriteria;
+  const proofDiscrimination = evidence.proofDiscrimination;
 
   // A failing verdict seeded from the ledger's unmet criteria (review mode) —
   // OR, for a blocked_ci/conflicted dispatch (W1-T100, broadened by W1-T106/
@@ -28813,11 +28838,22 @@ export function buildFixRungDispatchArgs(args: {
       }
     : {
         state: "failure",
-        criteria: unmet,
+        criteria:
+          proofDiscrimination?.proofs.map((proof) => ({
+            claim: proof.claim,
+            proof: proof.proof,
+            met: true,
+            reason: "capped proof requires base discrimination",
+            proof_exec: proof.proofExec,
+          })) ?? unmet,
         testTheater: false,
-        summary: pr.reviewSummary ?? `sweep-reconstructed failing review (${unmet.length} unmet)`,
+        summary:
+          pr.reviewSummary ??
+          (proofDiscrimination
+            ? `sweep-reconstructed capped review (${proofDiscrimination.proofs.length} proof(s) need discrimination)`
+            : `sweep-reconstructed failing review (${unmet.length} unmet)`),
         floorDegraded: false,
-        capped: false,
+        capped: proofDiscrimination !== undefined,
         keywordOnly: false,
         planOnly: false,
         instrumentEntangled:
@@ -28863,6 +28899,7 @@ export function buildFixRungDispatchArgs(args: {
     // `runFixRung`'s round-1 gate only reads this when it is ALSO a review-mode round (neither
     // merge-conflict nor ci-log), so its presence here for those two branches is inert.
     actionableGateFailures: evidence.actionableGateFailures,
+    proofDiscrimination,
     reviewBase: args.reviewBase,
   };
 }
