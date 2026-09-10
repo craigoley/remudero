@@ -386,11 +386,9 @@ export interface ReviewVerdict {
    *  `changesetClaimsRecognised`. Legibility only; `undefined`, not `false`, when withheld. */
   changesetFenceUnbalancedAtEof?: boolean;
   /** True when the diff changes at least one {@link INSTRUMENT_SURFACE} path AND at least one `src/` PRODUCT path
-   *  (`test/` excluded, {@link isProductPath}) in the SAME PR — Standing rule 25, INSTRUMENT CHANGES RIDE ALONE
-   *  (W1-T297) — because a diff shipping both proves neither: the code's falsifiers were graded by the very version of
-   *  the instrument beside them. FORCES `state` to `"failure"`, never suppressible; an instrument-only PR is the
-   *  SANCTIONED shape. TRAP: a coverage flag, a diff-coverage carve-out and a re-captured baseline all rode inside
-   *  ordinary fix-rung strikes (#585/#586; docs/forensics/review.md). */
+   *  (`test/` excluded, {@link isProductPath}) in the SAME PR — Standing rule 25 (W1-T297). ADVISORY: folds into
+   *  NEITHER `state` NOR `floorState`, and rides on every review row as `instrument_entangled`. See
+   *  MASTER-PLAN.md §12 rule 25 for why the refusal was withdrawn. */
   instrumentEntangled?: boolean;
   /** The observed evidence behind a `true` {@link instrumentEntangled} — the instrument paths found and the `src/`
    *  product paths beside them (W1-T186 emitter discipline). `undefined` when `instrumentEntangled` is false/absent. */
@@ -3212,12 +3210,7 @@ export function judgeReview(
   // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s doc. Reuses the SAME `diffFiles`
   // every other structural check above already computed — no new diff walk.
   const instrumentEntanglement = detectInstrumentEntanglement(diffFiles, evidence.diff);
-  // ADVISORY, NOT BLOCKING. This is computed, reported on the verdict and ledgered exactly as
-  // before, but folded into NEITHER `state` NOR `floorState` below — the same shape W1-T322's
-  // SHIPS-UNWIRED floor already has in this function. The refusal was withdrawn deliberately: four
-  // carve-outs had accumulated against it, and this file's own note records that "the rule had begun
-  // shaping code to avoid itself". The evidence still travels so a reviewer can act on it; what
-  // changed is that it no longer strands a PR that is otherwise correct.
+  // ADVISORY: folds into neither rollup below (MASTER-PLAN.md §12 rule 25 says why).
   const instrumentEntangled = instrumentEntanglement.entangled;
 
   // W1-T352 (DECISIONS.md entry provenance floor): see {@link ReviewVerdict.unprovenancedDecisionsEntries}'s doc —
@@ -4174,11 +4167,7 @@ export function reviewLedgerLegibilityFields(
     unexecutable_proofs: verdict.unexecutableProofs ?? [],
     // W1-T305 (design (4)): SOME-but-not-ALL executed, unconditional like `capped`/`keyword_only`.
     partially_executed: verdict.partiallyExecuted ?? false,
-    // Standing rule 25 is ADVISORY (it no longer folds into `state`), so it can no longer ride on
-    // `failure_class` — that key only exists on a failing verdict. It rides here instead, and
-    // UNCONDITIONALLY, for the reason `unexecutable_count` above states: a consumer counting this
-    // class across the fleet must never have to special-case "the field wasn't there". An advisory
-    // nobody can query is a deletion wearing a different word.
+    // Advisory, so it cannot ride on `failure_class` (failing verdicts only) — unconditional here.
     instrument_entangled: verdict.instrumentEntangled ?? false,
     // W1-T2743: two integers, and CONDITIONAL rather than defaulted to 0 — a review with no head
     // checkout measured nothing, and "measured none" is a different fact from "never measured".
