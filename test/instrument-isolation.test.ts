@@ -269,7 +269,7 @@ diff --git a/test/knowledge-budget-derivation.test.ts b/test/knowledge-budget-de
 // in CI, but each is a size LEDGER and not a score FLOOR, so raising an entry cannot make a failing
 // falsifier pass), and test/a-size-ledger-is-not-a-score-floor.test.ts /
 // test/comment-load-baseline-is-exempt.test.ts pin that the reasons stay distinct.
-test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the seven named, reviewed paths — no blanket widening", () => {
+test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the nine named, reviewed paths — no blanket widening", () => {
   // W1-T2897 raised this from three to four. The list is deepEqual'd rather than counted precisely
   // so a widening must NAME its path here, and this is the second of two tripwires on the same set
   // (test/a-size-ledger-is-not-a-score-floor.test.ts holds the other) — both had to be edited, which
@@ -287,6 +287,16 @@ test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the seven named, reviewed paths �
       "scripts/source-size-baseline.json",
       "scripts/comment-load-baseline.json",
       "scripts/clock-signature-baseline.json",
+      // W1-T2891 added these two, and they are the only entries here that are not baseline files.
+      // Same SECOND reason as the fourth: R-42 requires stryker's command to name the suites that
+      // import the mutated module and requires relevant-paths to name that command's files, so a PR
+      // extracting a module and giving it a suite must edit both — and the instrument-only PR rule
+      // 25 prescribes cannot exist, because the entry names a test file that does not exist until
+      // the product change lands. Their score-gaming vectors are closed elsewhere and measured:
+      // narrowing `mutate` is refused by test/mutation-ratchet.test.ts's deepEqual pin, and padding
+      // the command is refused by test/mutation-trigger-covers-its-own-command.test.ts.
+      "stryker.conf.json",
+      "scripts/mutation-relevant-paths.json",
       // W1-T2901 and W1-T2896 added the fifth, sixth and seventh. All three earn the fourth's
       // SECOND reason, the one the first three do not need: each belongs to a census that
       // re-measures the REAL tree, so the instrument-only PR rule 25 normally prescribes cannot

@@ -136,7 +136,7 @@ test("removing the exemption entry makes the ordinary-growth case refuse again",
   // UNSATISFIABLE without it, because that suite's own falsifiers read the MEASURED tree
   // (`scanClockSignatures()`) and assert the post-migration counts, so the instrument cannot be
   // landed alone in the instrument-only PR rule 25 normally prescribes.
-  assert.equal(ENTANGLEMENT_EXEMPT_INSTRUMENTS.size, 7, "exactly seven paths are exempt — an eighth would need its own reviewed reason");
+  assert.equal(ENTANGLEMENT_EXEMPT_INSTRUMENTS.size, 9, "exactly nine paths are exempt — a tenth would need its own reviewed reason");
   // Each added path is named individually, so a bare count bump can never stand in for a reviewed
   // one. The three added after clock-signature all earn ITS argument, not the knowledge-budget one:
   // each census re-measures the real tree, so the instrument-only PR rule 25 normally prescribes
@@ -146,6 +146,13 @@ test("removing the exemption entry makes the ordinary-growth case refuse again",
     "scripts/error-subclass-baseline.json",
     "scripts/bound-kind-baseline.json",
     "scripts/gh-transport-baseline.json",
+    // W1-T2891's two, and they are the first entries here that are NOT baselines. Both earn the
+    // clock-signature SECOND reason — unsatisfiable for the task that introduces them, since R-42
+    // makes a PR that adds a mutated-module suite list it in both files at once. The ledger/floor
+    // half is argued at the entries themselves rather than inherited: the FLOOR is scorePct in
+    // scripts/mutation-baseline.json, which is NOT exempt and is this file's own control below.
+    "stryker.conf.json",
+    "scripts/mutation-relevant-paths.json",
   ]) {
     assert.ok(ENTANGLEMENT_EXEMPT_INSTRUMENTS.has(named), `${named} is named, so a bare count bump cannot stand in for a reviewed path`);
   }
