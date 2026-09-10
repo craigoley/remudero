@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { updateProposalRegistry, type UpdateProposalRegistryOpts } from "./inbox.js";
+import type { Task } from "./plan.js";
 
 /** The fields {@link renderSkillDraft} reads off a mined procedural candidate — see this module's
  *  header for why this duplicates retro.ts's `ProceduralCandidate` rather than importing it. */
@@ -38,6 +39,21 @@ export const PROCEDURAL_STEP_TEXT: Readonly<Record<string, string>> = {
   clean_single_strike: "Resolve the task on the first attempt — land a fix that needs no `fix.dispatch` rung.",
   fully_executed_proof: "Execute every acceptance criterion as a real, observed proof — never let the keyword floor stand in for a run.",
 };
+
+/** Task classes the plan schema can assign to a mined procedural candidate. Keeping this as a
+ *  total record over {@link Task.type} makes a future task class a compile-time decision here,
+ *  while an unrecognised runtime value remains unselectable rather than defaulting to implement. */
+const INJECTABLE_SKILL_TASK_TYPES = {
+  recon: true,
+  implement: true,
+  diagnose: true,
+  review: true,
+  manual: true,
+} as const satisfies Readonly<Record<Task["type"], true>>;
+
+function injectableSkillTaskType(taskType: string): Task["type"] | undefined {
+  return Object.hasOwn(INJECTABLE_SKILL_TASK_TYPES, taskType) ? taskType as Task["type"] : undefined;
+}
 
 /** One drafted skill: the rendered SKILL.md text plus the fields a scanner/stager needs without
  *  re-parsing markdown. `candidateHash` is the dedup key {@link stageSkillDraft} keys off. */
@@ -71,6 +87,7 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike): SkillDraft
   const hash = proceduralCandidateHash(candidate);
   const name = `${kebabSlug(candidate.shapeKey)}-${hash.slice(0, 8)}`;
   const description = `A procedure shape proven across ${candidate.supportingRuns} merged ${candidate.taskType} run(s): ${candidate.signals.join(" + ")}.`;
+  const appliesTo = injectableSkillTaskType(candidate.taskType);
   const steps = candidate.signals.map((key) => `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`);
   const evidence = [
     ...candidate.runIds.map((runId) => `- [src: run#${runId}]`),
@@ -80,6 +97,7 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike): SkillDraft
     "---",
     `name: ${name}`,
     `description: ${description}`,
+    ...(appliesTo ? [`applies-to: ${appliesTo}`] : []),
     "---",
     "",
     "<!-- DRAFTED by skill-workshop.ts (W1-T2766) from a mined procedural candidate — a Rule 15",
