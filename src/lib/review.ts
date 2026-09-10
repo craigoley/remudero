@@ -5648,6 +5648,34 @@ export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
   // is a diff MOVING the instrument that judges it; here the instrument is introduced WITH the product it was
   // written to measure, and its ceiling only ever ratchets debt down from that first recording.
   "scripts/clock-signature-baseline.json",
+  // W1-T2891 — STRYKER'S PR-GATE CONFIG. Exempt for the clock-signature entry's SECOND reason:
+  // UNSATISFIABLE FOR THE TASK THAT INTRODUCES IT. R-42 requires `commandRunner.command` to name the
+  // suites importing the mutated module, so a PR that extracts a module and gives it a suite must
+  // list that suite here — and the instrument-only PR rule 25 prescribes cannot exist, because the
+  // entry names a test file that does not exist until the product change lands. The blocking gate
+  // says so itself: "add it to stryker.conf.json (an instrument-only PR; Standing rule 25 forbids
+  // shipping that edit beside a src/ change)".
+  //
+  // THE LEDGER/FLOOR TEST IS ARGUED HERE, NOT ASSERTED, because this file is not a baseline and can
+  // move a score. THE FLOOR IS ELSEWHERE — `scorePct` in scripts/mutation-baseline.json, still on
+  // the surface and still refused beside a src/ change. The two vectors this file does carry are
+  // each closed by a gate that does not depend on rule 25, MEASURED by attempting both cheats with
+  // this exemption in place (#4951, 2026-09-10):
+  //   - narrowing `mutate` — test/mutation-ratchet.test.ts pins it with deepEqual, not a bound:
+  //     refused.
+  //   - padding `command` with an unrelated suite — test/mutation-trigger-covers-its-own-command.test.ts
+  //     refuses it, alone or with relevant-paths padded to match. Named explicitly because a first
+  //     probe that OMITTED that suite reported the padding passing, and a fault injection aimed at
+  //     the wrong gate is indistinguishable from a gate that does not work.
+  //
+  // TRAP FOR WHOEVER TOUCHES THOSE TWO ASSERTIONS: they are load-bearing for this exemption and do
+  // not say so locally. Loosen either and this becomes the hole rule 25 exists to prevent.
+  "stryker.conf.json",
+  // W1-T2891's sibling, and the easy half: a per-file LIST of the test paths that command runs.
+  // Ledger-shaped in the source-size sense — adding a path records what already runs and cannot make
+  // a failing falsifier pass. It is exempt for the same unsatisfiability reason as the entry above,
+  // since R-42 requires the two files to agree and neither can move without the other.
+    "scripts/mutation-relevant-paths.json",
   // W1-T2901's sibling of the clock-signature entry, and it earns that entry's SECOND argument, not
   // just its first. LEDGER, NOT FLOOR: a per-population CEILING on classes extending the built-in
   // error type directly; raising a row records debt and cannot make a failing falsifier pass, which

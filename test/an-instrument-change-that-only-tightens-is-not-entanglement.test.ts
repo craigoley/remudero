@@ -171,7 +171,18 @@ test("W1-T3133: a new baseline key naming a file this diff ADDS is admitted; the
 // ── acceptance 6: evidence unedited, and the per-file list untouched ─────────────────────────────
 
 test("W1-T3133: the per-FILE exemption set is unchanged — this task adds an axis beside it, not instead of it", () => {
-  assert.equal(ENTANGLEMENT_EXEMPT_INSTRUMENTS.size, 7, "the reviewed per-path list keeps exactly its entries");
+  // W1-T2891 took this from seven to nine. THE ASSERTION'S POINT SURVIVES THE BUMP: it is not "the
+  // set never changes" — a reviewed addition is exactly how the set is meant to grow — it is that
+  // W1-T3133's TIGHTENING AXIS did not quietly replace the per-path list. The four names below are
+  // the ones that existed when this control was written and they are all still exempt by path, which
+  // is the property this test actually holds.
+  //
+  // THIS IS THE THIRD TRIPWIRE ON THIS SET, and I found it by breaking it: W1-T2891's own commit
+  // claimed there were two (test/a-size-ledger-is-not-a-score-floor.test.ts and
+  // test/instrument-isolation.test.ts) because those were the two that reddened first. A count that
+  // has to be edited in three places is friction working, but only if a later author can find all
+  // three — so each of the three now names the other two.
+  assert.equal(ENTANGLEMENT_EXEMPT_INSTRUMENTS.size, 9, "the reviewed per-path list keeps exactly its entries");
   for (const named of [
     "scripts/knowledge-budget-baseline.json",
     "scripts/source-size-baseline.json",

@@ -18,7 +18,15 @@ import test from "node:test";
 import { ENTANGLEMENT_EXEMPT_INSTRUMENTS, detectInstrumentEntanglement } from "../src/lib/review.js";
 
 const COMMENT_LOAD_BASELINE = "scripts/comment-load-baseline.json";
-const NOT_EXEMPT_INSTRUMENT = "scripts/mutation-relevant-paths.json";
+// THE CONTROL MOVED, AND WHY MATTERS MORE THAN WHICH PATH IT IS. This was
+// `scripts/mutation-relevant-paths.json` until W1-T2891 exempted it, at which point this file's
+// discriminator was comparing two EXEMPT paths and asserting they differ — a control that had
+// quietly become part of the thing it was controlling for. The replacement is chosen to be hard to
+// exempt later: `scripts/mutation-baseline.json` holds `scorePct`, the mutation SCORE FLOOR, and a
+// floor is exactly what ENTANGLEMENT_EXEMPT_INSTRUMENTS' own ledger/floor test refuses to exempt —
+// lowering it lets a weakened suite pass. If this line ever needs moving again, that is a signal to
+// re-read the exemption set, not to find a third path.
+const NOT_EXEMPT_INSTRUMENT = "scripts/mutation-baseline.json";
 const SHRUNK_SRC = "src/lib/review.ts";
 
 /** A patch whose `src/` half carries real executable content, so the `diff`-aware arm of
@@ -52,7 +60,7 @@ test("a diff carrying the comment-load ledger's ratcheted-down entry beside the 
 // proving the exemption is narrow rather than the whole predicate having gone inert.
 test("the exemption is narrow — a different, real instrument path (not exempt) still entangles alongside the same src/ hunk", () => {
   const verdict = detectInstrumentEntanglement([NOT_EXEMPT_INSTRUMENT, SHRUNK_SRC], patchBesideInstrument(NOT_EXEMPT_INSTRUMENT));
-  assert.equal(verdict.entangled, true, "mutation-relevant-paths.json is a real mutation-ratchet diff-scoping config — nothing exempts it");
+  assert.equal(verdict.entangled, true, "mutation-baseline.json is the mutation SCORE FLOOR — a floor is never exempt");
   assert.deepEqual(verdict.instrumentPaths, [NOT_EXEMPT_INSTRUMENT], "and it is named as the evidence");
   assert.notEqual(
     detectInstrumentEntanglement([COMMENT_LOAD_BASELINE, SHRUNK_SRC], patchBesideInstrument(COMMENT_LOAD_BASELINE)).entangled,
