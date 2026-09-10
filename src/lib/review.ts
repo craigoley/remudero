@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
@@ -1226,10 +1227,27 @@ function argsWithCheckoutRunner(whitelisted: WhitelistedProof, args: readonly st
   return runner === undefined ? args : [runner, ...args.slice(1)];
 }
 
-/** A runner absent from the checkout is a host gap, not evidence that its proof failed. */
-class ProofRunnerUnavailableError extends Error {
+/**
+ * A runner absent from the checkout is a host gap, not evidence that its proof failed.
+ *
+ * ON THE SHARED ENVELOPE because the error-subclass census refused this PR for the count growing
+ * 59 -> 60, and src/lib/errors.ts's header names adoption as the remedy: "each later migration that
+ * adopts this envelope lowers its own recorded number instead of the census silently absorbing more
+ * debt". Raising the ceiling is the option that census exists to make deliberate, not the default.
+ *
+ * `kind: "usage"` IS THE NEAREST OF THREE, NOT THE RIGHT ONE, and saying so is cheaper than a
+ * reader later inferring a meaning that was never intended. A host missing a runner is neither a
+ * plan fault nor a git fault nor CLI misuse; a `host` kind would be truer and means editing
+ * src/lib/errors.ts, which is outside W1-T3312's declared `files:`. Nothing depends on the label:
+ * this error is caught by `instanceof` inside `review.ts` and never reaches the process boundary,
+ * which is also why `GENERIC_EXIT_CODE` keeps behaviour identical.
+ *
+ * `runnerPath` stays a public field because the catch site reads it; `details` carries it too so a
+ * ledger row need not re-parse the message.
+ */
+class ProofRunnerUnavailableError extends RmdError {
   constructor(readonly runnerPath: string) {
-    super(`proof runner is absent from this checkout: ${runnerPath}`);
+    super("usage", GENERIC_EXIT_CODE, `proof runner is absent from this checkout: ${runnerPath}`, { runnerPath });
   }
 }
 
