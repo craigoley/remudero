@@ -297,11 +297,32 @@ test("W1-T2831: no override exists — the script offers no flag, env read or tr
   assert.deepEqual([...new Set(envReads)], ["env.BASE_SHA"], "BASE_SHA is the only env read");
   assert.deepEqual(evaluateNetBytes(101, 100).length, 1, "and growth is refused regardless of it");
 
-  // parseArgs declares exactly the two pre-existing options; a new one would show up here.
+  // THE OPTION TRIPWIRE, AND WHY IT NOW ALLOWLISTS RATHER THAN COUNTS. A flat "exactly two options"
+  // did its job: W1-T3320 added `--feedback-dir` and this assertion reddened, forcing the question
+  // rather than letting a new flag in unnoticed. The answer is that the PROPERTY changed and the
+  // PROTECTION did not.
+  //
+  // W1-T3318's operator ruling made an over-budget doctrine file ROUTE — the change lands and the
+  // fold is filed — so "no growth ever passes" is no longer the invariant. What must still hold is
+  // that no affordance lets growth pass UNBOUNDED, and `--feedback-dir` cannot: it selects WHERE the
+  // follow-up is written, never WHETHER the diff is allowed. It exists because this gate now WRITES,
+  // and without it a fixture run files a real entry into the repo's real inbox (measured: two did).
+  //
+  // The list is EXPLICIT so a third option still reddens this. An allowlist that grew by counting
+  // would be no tripwire at all.
   const optionBlock = src.slice(src.indexOf("options: {"), src.indexOf("});", src.indexOf("options: {")));
-  assert.match(optionBlock, /file:/);
-  assert.match(optionBlock, /baseline:/);
-  assert.equal((optionBlock.match(/type: "string"/g) ?? []).length, 2, "no third CLI option");
+  // Sliced PAST the `options: {` header, or the header's own key joins the list and the allowlist
+  // silently gains a member nobody declared.
+  const inner = optionBlock.slice(optionBlock.indexOf("{") + 1);
+  const declared = [...inner.matchAll(/^\s*"?([a-z-]+)"?:\s*\{/gm)].map((m) => m[1]);
+  assert.deepEqual(declared.sort(), ["baseline", "feedback-dir", "file"], "a new CLI option must be justified here");
+
+  // AND THE BOUND ITSELF HAS NO RUNTIME OVERRIDE, which is the invariant that replaced "no growth".
+  // Routing is capped by `foldDebtCeilingBytes` read from the BASELINE FILE — reviewed, committed,
+  // and covered by baseline-monotonic-check — with no flag and no env read able to move it.
+  assert.ok(src.includes("foldDebtCeilingBytes"), "the routing bound must exist");
+  assert.ok(!/env\.[A-Z_]*(?:CEILING|DEBT|FOLD)/.test(src), "no env read may move the routing bound");
+  assert.ok(!/"fold-debt|--fold-debt|ceiling:\s*\{/.test(optionBlock), "no CLI flag may move the routing bound");
 });
 
 // ── the seams, driven for real ─────────────────────────────────────────────────────────────────

@@ -46,6 +46,7 @@
     "test/a-filing-time-ruling-nothing-produces.test.ts": 0,
     "test/a-fired-retro-must-not-hold-the-dispatch-rung.test.ts": 1403,
     "test/a-fired-triage-must-not-hold-the-dispatch-rung.test.ts": 1126,
+    "test/a-full-doctrine-budget-routes-a-rule-it-cannot-hold.test.ts": 0,
     "test/a-gate-refusal-is-not-a-crash.test.ts": 0,
     "test/a-gate-repairs-or-routes.test.ts": 0,
     "test/a-gate-run-leaves-the-tracked-tree-clean.test.ts": 15674,
