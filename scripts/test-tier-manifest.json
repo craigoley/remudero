@@ -60,6 +60,7 @@
     "test/a-judge-names-its-settings-and-its-state-root.test.ts": 0,
     "test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts": 4923,
     "test/a-lane-force-push-drops-the-head-it-never-saw.test.ts": 0,
+    "test/a-learning-firing-reports-into-the-inbox.test.ts": 0,
     "test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts": 1187,
     "test/a-live-console-review-is-runnable.test.ts": 0,
     "test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts": 5609,
