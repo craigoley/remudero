@@ -1,34 +1,18 @@
 #!/usr/bin/env node
-// scripts/console-parity-ratchet.mjs — W1-T2926.
+// scripts/console-parity-ratchet.mjs — W1-T2926 (rationale: this task's own plan shard).
 //
-// Audit recon-2026-09-05 §6, move 5: at f7ceb86 the console served 49 routes against 65
-// `COMMANDS` entries — 48 verbs reachable ONLY from a shell, including `deploy`, `sync`,
-// `retro`, `triage`, `plan`, `review`, `fix`, `sweep` and `onboard`. The mission statement says
-// every human interaction and all operator control goes through the console, and nothing
-// measured how far the surface was from that goal, so a new verb landed CLI-first by default
-// and the gap grew silently.
+// INVARIANT: every `COMMANDS` verb maps to a console route (declaredConsoleRoutes(), shared with
+// test/route-registration.test.ts) OR carries a reason in {@link CLI_ONLY}; neither is UNMAPPED
+// and always fails. THE RATCHET: {@link CLI_ONLY}'s key set may not grow past
+// `scripts/console-parity-baseline.json` without the baseline being edited in the SAME PR (same
+// discipline as scripts/comment-load-baseline.json) — a shrink is reported, never refused.
 //
-// THE RULE: every `COMMANDS` verb must map to a console route (declaredConsoleRoutes(), the
-// same derivation test/route-registration.test.ts and test/route-wiring.test.ts already share)
-// OR carry a stated reason in {@link CLI_ONLY}. A verb in neither table is UNMAPPED and fails —
-// that is what stops a new verb from landing with no route and no accounting for its absence.
-//
-// THE RATCHET: {@link CLI_ONLY}'s current key set is compared against the recorded
-// `scripts/console-parity-baseline.json`. A key present in CLI_ONLY but absent from the
-// baseline is a verb ADDED to the cli-only set without recording it — refused, same as a
-// verb-with-neither. Recording it (editing the baseline in the same PR, same discipline as
-// scripts/comment-load-baseline.json / scripts/source-size-baseline.json) is what "ships with a
-// reason" means for a verb that stays cli-only. A verb that leaves CLI_ONLY (because it gained a
-// route) is reported but never fails — a shrink is the whole point.
-//
-// A STEP, NOT A JOB: it rides ci.yml's `comment-load-ratchet` job as a second step, the same
-// place contract-coverage-ratchet.mjs and expiring-fixture-census.mjs already ride — a new
-// ci.yml JOB needs an entry in ci-gate.yml too, and a workflow change beside a src/ product
-// path is Standing rule 25 entanglement.
+// A STEP, NOT A JOB: rides ci.yml's `comment-load-ratchet` job, beside
+// contract-coverage-ratchet.mjs — a new ci.yml JOB needs ci-gate.yml too, and Standing rule 25
+// refuses a workflow change beside a src/ product path.
 //
 // Run via `node --import tsx` (like scripts/generate-macro-skills.mjs): COMMANDS and
-// declaredConsoleRoutes both live in .ts modules, and only tsx's loader can import those from a
-// plain .mjs script.
+// declaredConsoleRoutes both live in .ts modules.
 //
 // FALSIFIER: test/console-parity-ratchet.test.ts.
 
