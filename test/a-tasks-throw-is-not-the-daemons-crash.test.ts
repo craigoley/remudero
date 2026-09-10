@@ -78,6 +78,10 @@ test("W1-T3319: the stale, blocked and environmental mappings are unchanged, so 
   assert.equal(daemonExitCodeForSummary({ stopReason: "blocked" }), DAEMON_EXIT_BLOCKED);
 });
 
+// @source-text-subject — the census's own remedy (2). This suite's SUBJECT is drain.ts's text: it
+// counts the `summary("error", …)` call sites and asserts every one leads with a task id, so a
+// third site that does not is caught here rather than silently classifying a real crash as blocked.
+// Importing the symbol cannot answer "how many call sites are there and do all of them conform".
 test("W1-T3319: the discriminator matches the shape drain.ts really emits — asserted against drain.ts itself", () => {
   // THE CLAIM THIS WHOLE CHANGE RESTS ON: both `summary("error", ...)` sites build their detail as
   // `${taskId}: ${message}`. If a third site is added that does NOT, this fails here rather than
