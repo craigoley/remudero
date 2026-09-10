@@ -1173,9 +1173,9 @@ export {
   uncreditableHeadReason,
 } from "./lib/sweep.js";
 export type { BuildSweepEffectsDeps, RedBaseRefreshDecision, RedBaseRefreshFacts, UncreditableHeadReason } from "./lib/sweep.js";
-// W1-T2891 (decomposition step 8): this compatibility surface imports the four fix-rung
-// classifiers from the lib/fix-rung-classify" module; NodeNext keeps the runtime specifier below
-// on its emitted `.js` form. run-task.ts re-exports the same names every existing caller/test used.
+// W1-T2891 (decomposition step 8): the four fix-rung classifiers moved to
+// lib/fix-rung-classify.js — this compatibility surface imports and re-exports them so every
+// existing caller/test resolves the same names it always did.
 import {
   classifyUpdateBranchFailure,
   detectReviewFalseBlock,
