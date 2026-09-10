@@ -21,7 +21,8 @@ import {
   type StageSkillDraftResult,
   type WorkerAllowlist,
 } from "../src/lib/skill-workshop.js";
-import { implementPromptParts, renderImplementPrompt } from "../src/lib/prompt-render.js";
+import { implementPromptParts, renderImplementPrompt, renderImplementPromptWithParts } from "../src/lib/prompt-render.js";
+import { buildPromptManifest } from "../src/lib/prompt-manifest.js";
 import type { Task } from "../src/lib/plan.js";
 
 // W1-T3101 — `stageSkillDraft` had ZERO production callers and `skill.staged` fired ZERO times in
@@ -126,6 +127,40 @@ test("W1-T3101: the skills part is a named member of implementPromptParts, so th
   assert.equal(skills?.value, "SKILLTEXT");
   assert.ok(parts.findIndex((p) => p.name === "skills") > parts.findIndex((p) => p.name === "matched_learnings"),
     "beside the learnings it shares a budget with");
+});
+
+test("the manifest parts come from the SAME render as the worker's prompt, so an injected skill cannot read present:false", () => {
+  // THE DEFECT THIS PINS: runTask rendered the prompt with `skillsPart` and then derived the
+  // ledgered manifest from a SECOND `implementPromptParts` call that omitted it, so a skill the
+  // worker genuinely received was ledgered `present: false`. Both argument lists end in optional
+  // parameters, so nothing caught it.
+  //
+  // It is pinned on BEHAVIOUR, not on the text of the call site. An earlier version of this test
+  // asserted a regex against src/run-task.ts; that is the read `source-text-assertion-census`
+  // (W1-T2905) refuses, and rightly — it passes when the prose is right rather than when the
+  // wiring is, and it goes stale the moment the call is reformatted.
+  const { prompt, parts } = renderImplementPromptWithParts(
+    task(), "recon", "RUN-1", "", "", "", "SKILLTEXT",
+  );
+  const manifest = buildPromptManifest(parts);
+  const skills = manifest.find((m) => m.name === "skills");
+  assert.ok(skills?.present, "the skills part must be present in the manifest the ledger records");
+
+  // AND the parts must be the ones the prompt was actually built from — a manifest derived from a
+  // separately-computed array is exactly what broke, so returning any other array must fail here.
+  assert.ok(prompt.includes("SKILLTEXT"), "the worker's prompt must carry the skill's bytes");
+  for (const part of parts) {
+    if (!part.value) continue;
+    assert.ok(prompt.includes(part.value),
+      `manifest part "${part.name}" is not in the prompt it claims to describe`);
+  }
+});
+
+test("renderImplementPrompt is the same render with its parts dropped, never a second one", () => {
+  // The thin wrapper is the whole reason the two can no longer disagree; if it ever grows its own
+  // derivation, this fails.
+  const args = [task(), "recon", "RUN-1", "learnings", "notes", "headlines", "SKILLTEXT"] as const;
+  assert.equal(renderImplementPrompt(...args), renderImplementPromptWithParts(...args).prompt);
 });
 
 // ── staging writes a proposal, never a skill ──────────────────────────────────────────────────

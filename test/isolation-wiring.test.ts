@@ -24,8 +24,17 @@ test("the isolation preflight runs BEFORE any task worker (recon/implement) or w
   const isoCallIdx = runTaskSrc.indexOf("probeIsolation(");
   const worktreeAddIdx = runTaskSrc.indexOf("worktreeAdd(");
   const reconIdx = runTaskSrc.indexOf('"recon worker"');
-  const implPromptIdx = runTaskSrc.indexOf("renderImplementPrompt(task,");
+  // NOT `indexOf("renderImplementPrompt(task,")`. That needle assumed the call's exact spelling AND
+  // its formatting, and both changed: the render now returns its parts too, so run-task calls
+  // `renderImplementPromptWithParts` across several lines. `indexOf` answered -1, every ordering
+  // assertion below compared against -1, and the suite reported "preflight must precede the
+  // implement prompt/spawn" — which is not what was wrong. An anchor that has MOVED and an anchor
+  // that is GONE must not produce the same failure.
+  const implPromptIdx = runTaskSrc.search(/renderImplementPrompt(?:WithParts)?\(/);
   assert.ok(isoCallIdx >= 0, "probeIsolation must be called somewhere in run-task.ts");
+  assert.ok(worktreeAddIdx >= 0, "worktreeAdd must be locatable in run-task.ts — this test cannot order what it cannot find");
+  assert.ok(reconIdx >= 0, "the recon worker spawn must be locatable in run-task.ts");
+  assert.ok(implPromptIdx >= 0, "the implement prompt render must be locatable in run-task.ts");
   assert.ok(isoCallIdx < worktreeAddIdx, "preflight must precede worktreeAdd (repo/worktree setup)");
   assert.ok(isoCallIdx < reconIdx, "preflight must precede the recon worker spawn");
   assert.ok(isoCallIdx < implPromptIdx, "preflight must precede the implement prompt/spawn");
