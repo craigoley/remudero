@@ -7232,6 +7232,10 @@ export interface AcquireReviewStatusLockOpts {
   info?: Partial<ReviewStatusLockInfo>;
   /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
   isPidAlive?: (pid: number) => boolean;
+  /** Forwarded to {@link isHolderStale}; injectable so a test can simulate a foreign container. */
+  hostname?: () => string;
+  inContainer?: () => boolean;
+  getProcessStartTime?: (pid: number) => number | null;
   /** Poll cadence while a LIVE holder blocks acquisition (tests speed this up). */
   retryMs?: number;
   /** Give up and throw {@link ReviewStatusLockTimeoutError} after this long. */
@@ -7283,7 +7287,15 @@ export async function acquireReviewStatusLock(
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseReviewStatusLockInfo,
-        isStale: (held) => !isAlive(held.pid),
+        // The SHARED four-rung ladder, not a rung-2-only copy: a bare `!isAlive(pid)` asks THIS
+        // container about a pid another one recorded, so a dead holder reads LIVE on pid reuse.
+        isStale: (held) =>
+          isHolderStale(held, {
+            isPidAlive: isAlive,
+            hostname: opts.hostname,
+            inContainer: opts.inContainer,
+            getProcessStartTime: opts.getProcessStartTime,
+          }),
         onLostReclaim: opts.onLostReclaim,
         beforeDelete: opts.__beforeReclaimDelete,
       });

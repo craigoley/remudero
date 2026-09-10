@@ -939,6 +939,48 @@ export function stripMarkdownFence(fragmentYaml: string): string {
   return lines.slice(start + 1, end).join("\n");
 }
 
+
+/** What a failed draft parse can be told apart into. COUNTS AND A LENGTH ONLY — never worker
+ *  content: a draft that failed may still have printed credentials, and a diagnostic that leaks
+ *  them is a worse defect than the one it explains. */
+export interface DraftParseFailure {
+  fragments: number;
+  stamps: number;
+  outputChars: number;
+  /** Absent when BOTH markers were present — that is not a parse failure at all. */
+  reason?: string;
+}
+
+/**
+ * W1-T3350 — WHY a draft failed to parse, as four distinguishable causes rather than one string.
+ *
+ * `parseDraftedCandidate` returns `null` when either marker is missing, and the failure site logged
+ * one fixed message for every case. MEASURED over the ledger union: 951 `inbox.draft_error` rows,
+ * 947 of them that identical message, carrying nothing but `proposal_id` — no size, no
+ * which-marker, no empty-vs-prose. Four causes with four different fixes, recorded as one.
+ *
+ * That is the #981 defect class — a row whose stated reason cannot identify the decision that
+ * produced it — and it is live: the same union shows the failure recurring at 46.1% / 74.7% / 69.7%
+ * on 2026-09-08/09/10, after running at 1-6% for the week before. Nobody noticed, because 947
+ * identical strings cannot show a shape.
+ */
+export function describeDraftParseFailure(text: string): DraftParseFailure {
+  const fragments = [...text.matchAll(FRAGMENT_RE)].length;
+  const stamps = [...text.matchAll(STAMP_RE)].length;
+  const outputChars = text.length;
+  const reason =
+    fragments > 0 && stamps > 0
+      ? undefined
+      : outputChars === 0
+        ? "the worker produced no output at all — nothing to parse (a refusal, a crash, or a spawn that never ran)"
+        : fragments === 0 && stamps === 0
+          ? "the worker produced output carrying NEITHER marker — it answered in prose instead of the fragment contract"
+          : stamps === 0
+            ? "the worker emitted a FRAGMENT but no STAMP line — the draft exists and its self-report does not"
+            : "the worker emitted a STAMP but no FRAGMENT — it reported on a draft it never printed";
+  return { fragments, stamps, outputChars, ...(reason === undefined ? {} : { reason }) };
+}
+
 /** Extract the worker's FRAGMENT and STAMP off its concatenated output. LAST-marker-wins, like `parseTriageVerdict`.
  *  `null` when either marker is missing — a malformed draft is never silently treated as a candidate. The fragment
  *  runs through {@link stripMarkdownFence} first; a malformed fence throws, which {@link runDraftRung} isolates. */
@@ -1047,12 +1089,18 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         // W1-T2564: A REFUSED RUN PRODUCES NO OUTPUT, SO IT LANDS HERE LOOKING MALFORMED. The bare error sent every
         // reader toward the prompt; `lastWorker.usageRefusal` re-labels it.
         const refusal = lastWorker?.usageRefusal;
+        // W1-T3350: the four ways a parse can fail are FOUR reasons, not one string, and the
+        // counts ride alongside so a rate spike has a shape a reader can act on.
+        const failure = describeDraftParseFailure([lastWorker?.text ?? "", (lastWorker?.blocks ?? []).join("\n")].join("\n"));
         const error = refusal
           ? `refused by the account before any output: ${refusal.matched}`
-          : "no FRAGMENT/STAMP markers in worker output";
+          : (failure.reason ?? "no FRAGMENT/STAMP markers in worker output");
         deps.log("inbox.draft_error", {
           proposal_id: proposal.id,
           error,
+          fragments: failure.fragments,
+          stamps: failure.stamps,
+          output_chars: failure.outputChars,
           ...(refusal
             ? {
                 usage_refused: true,
