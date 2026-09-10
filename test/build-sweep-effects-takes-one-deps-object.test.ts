@@ -35,6 +35,7 @@ const EFFECT_KEYS = [
   // W1-T3283: the sweep's trailer-repair effect. The assertion sorts both sides, so this entry's
   // position is free — it is listed last because it is the newest, not because order matters.
   "repairMissingTaskTrailer",
+  "rebaseDirtyFleetBranch",
 ] as const;
 
 test("buildSweepEffects takes one typed deps object and returns the sweep effects surface", () => {

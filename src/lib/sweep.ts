@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -19,6 +19,7 @@ import { ghJson, ghJsonAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { appendLedger } from "./ledger.js";
 import { resolveLedgerUnion } from "./ledger-union.js";
+import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
 import { DEFAULT_RISK, type AcceptanceCriterion, type Plan, type TaskRisk } from "./plan.js";
 import {
@@ -614,6 +615,7 @@ export interface BuildSweepEffectsDeps {
   armImpl?: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult;
   armSessionPrsOverride?: boolean;
   updateBranchImpl?: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome>;
+  rebaseDirtyFleetBranchImpl?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
   captureRepairFeedbackImpl?: (filing: RepairFilingCapture) => void;
   ghRunImpl?: (file: string, args: readonly string[]) => void;
   spawnWallClockBoundMsOverride?: number;
@@ -671,6 +673,130 @@ export function defaultSweepGhRun(file: string, args: readonly string[]): void {
   execFileSync(file, [...args], { stdio: "pipe" });
 }
 
+/**
+ * The words a failed `git` spawn actually printed, for the `reason` these outcomes carry.
+ *
+ * `execFileSync`'s Error.message is only `Command failed: <the argv>` — it restates what we already
+ * know and drops what git said. The diagnosis is on `.stderr`, which `stdio: "pipe"` captured.
+ * MEASURED on #4946: a rebase that failed because no committer identity was configured reported
+ * `conflict` with reason "Command failed: git -C … rebase origin/main", so a CI log showed
+ * `+ 'conflict' - 'rebased'` and nothing about the cause; git's own "Please tell me who you are"
+ * was sitting in a field nobody read. Falls back to the message when stderr is empty, so this can
+ * only ever add detail.
+ */
+function spawnFailureText(error: unknown): string {
+  const e = error as { stderr?: unknown; message?: unknown };
+  const stderrText = e?.stderr === undefined || e?.stderr === null ? "" : String(e.stderr).trim();
+  return stderrText.length > 0 ? stderrText : String(e?.message ?? error);
+}
+
+export type DirtyFleetRebaseOutcome =
+  | { outcome: "rebased"; oldHeadSha: string; newHeadSha: string }
+  | { outcome: "conflict"; reason: string }
+  | { outcome: "lease-mismatch"; reason: string }
+  | { outcome: "error"; reason: string };
+
+type DirtyFleetRebaseGit = (
+  file: string,
+  args: readonly string[],
+  opts?: { cwd?: string; stdio?: "pipe" | "ignore"; encoding?: BufferEncoding },
+) => string;
+
+function defaultDirtyFleetRebaseGit(
+  file: string,
+  args: readonly string[],
+  opts: { cwd?: string; stdio?: "pipe" | "ignore"; encoding?: BufferEncoding } = {},
+): string {
+  return execFileSync(file, [...args], {
+    cwd: opts.cwd,
+    encoding: opts.encoding ?? "utf8",
+    stdio: opts.stdio ?? "pipe",
+    maxBuffer: 1 << 24,
+  }) as string;
+}
+
+export function rebaseDirtyFleetBranchViaGit(
+  repoDir: string,
+  worktreePath: string,
+  pr: Pick<OpenPrView, "prNumber" | "headRefName" | "headSha">,
+  deps: { git?: DirtyFleetRebaseGit; worktreeRemoveImpl?: typeof worktreeRemove } = {},
+): DirtyFleetRebaseOutcome {
+  const branch = pr.headRefName;
+  if (!branch) return { outcome: "error", reason: `PR #${pr.prNumber} has no headRefName to rebase` };
+  const git = deps.git ?? defaultDirtyFleetRebaseGit;
+  const remove = deps.worktreeRemoveImpl ?? worktreeRemove;
+  const ref = `refs/heads/${branch}`;
+  const remoteRef = `refs/remotes/origin/${branch}`;
+  const run = (cwd: string, args: readonly string[]): string => git("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: "pipe" });
+  let worktreeCreated = false;
+  try {
+    mkdirSync(dirname(worktreePath), { recursive: true });
+    run(repoDir, [
+      "fetch",
+      "--no-tags",
+      "--quiet",
+      "origin",
+      "+refs/heads/main:refs/remotes/origin/main",
+      `+${ref}:${remoteRef}`,
+    ]);
+    const observedHead = run(repoDir, ["rev-parse", remoteRef]).trim();
+    if (observedHead !== pr.headSha) {
+      return {
+        outcome: "lease-mismatch",
+        reason: `origin/${branch} moved from ${pr.headSha} to ${observedHead} before the rebase started`,
+      };
+    }
+    run(repoDir, ["worktree", "add", "--detach", worktreePath, pr.headSha]);
+    worktreeCreated = true;
+    try {
+      run(worktreePath, ["rebase", "origin/main"]);
+    } catch (error) {
+      try {
+        run(worktreePath, ["rebase", "--abort"]);
+      } catch {
+        /* best-effort cleanup before the worktree is removed below */
+      }
+      return {
+        outcome: "conflict",
+        reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP),
+      };
+    }
+    const newHeadSha = run(worktreePath, ["rev-parse", "HEAD"]).trim();
+    assertLiveWriteAllowed("git-push", `rebasing dirty fleet branch ${branch} for PR #${pr.prNumber}`);
+    try {
+      run(worktreePath, ["push", `--force-with-lease=${ref}:${pr.headSha}`, "origin", `HEAD:${ref}`]);
+    } catch (error) {
+      return {
+        outcome: "lease-mismatch",
+        reason:
+          `force-with-lease refused ${branch}: expected ${pr.headSha}, attempted ${newHeadSha}; ` +
+          capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP),
+      };
+    }
+    const observedRemote = run(worktreePath, ["ls-remote", "origin", ref]).trim().split(/\s+/)[0];
+    if (observedRemote !== newHeadSha) {
+      return {
+        outcome: "lease-mismatch",
+        reason: `force-with-lease push reported success, but ${ref} reads ${observedRemote || "<absent>"} instead of ${newHeadSha}`,
+      };
+    }
+    return { outcome: "rebased", oldHeadSha: pr.headSha, newHeadSha };
+  } catch (error) {
+    return {
+      outcome: "error",
+      reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP),
+    };
+  } finally {
+    if (worktreeCreated) {
+      try {
+        remove(repoDir, worktreePath);
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  }
+}
+
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "arm"
@@ -693,6 +819,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reaggregateCiGate"
   | "readMainTip"
   | "releaseBaseCausedStandDown"
+  | "rebaseDirtyFleetBranch"
   | "selectAdaptiveReviewWidth"
   | "repairMissingTaskTrailer"
 > {
@@ -715,6 +842,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     armImpl = armAutoMergeDetailed,
     armSessionPrsOverride,
     updateBranchImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updateBranchImpl"]>>("updateBranchImpl"),
+    rebaseDirtyFleetBranchImpl,
     captureRepairFeedbackImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["captureRepairFeedbackImpl"]>>("captureRepairFeedbackImpl"),
     ghRunImpl = defaultSweepGhRun,
     spawnWallClockBoundMsOverride,
@@ -1862,6 +1990,16 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T528 — the action half of W1-T520. `runSweep` calls this AT MOST ONCE per pass, on the
     // single PR `selectUpdateBranchTarget` chose — see `SweepDeps.updateBranch`'s own doc.
     updateBranch: (pr) => updateBranchImpl(pr),
+
+    rebaseDirtyFleetBranch: (pr) =>
+      rebaseDirtyFleetBranchImpl
+        ? rebaseDirtyFleetBranchImpl(pr)
+        : rebaseDirtyFleetBranchViaGit(
+            repoDir,
+            join(worktreesDir(config), `dirty-fleet-rebase-${pr.prNumber}-${nowMsImpl()}`),
+            pr,
+            { worktreeRemoveImpl: worktreeRemoveForBuild },
+          ),
 
     // W1-T905 — "repair the instance, FILE THE CLASS". `runSweep` calls this AT MOST ONCE per
     // due surface, best-effort — see `SweepDeps.captureRepairFeedback`'s own doc.
@@ -5254,6 +5392,13 @@ export interface SweepDeps {
    *  {@link selectUpdateBranchTarget} chose: never a loop, never a second attempt this pass. A
    *  `"conflict"` outcome is REPORTED and never retried by this call. */
   updateBranch?: (pr: ArmedStalledPr) => UpdateBranchOutcome | Promise<UpdateBranchOutcome>;
+  /** W1-T2999 — before escalating a dirty PR on a fleet-owned `run-<id>-<epoch>` head, try the
+   *  one safe mechanical repair: rebase that head onto current main and push it back with an
+   *  explicit lease pinned to the observed head sha. A `"rebased"` result stands down the
+   *  escalation for this pass so GitHub reruns checks on the new head. Every other outcome falls
+   *  through to the existing escalation, preserving human visibility and never clobbering a
+   *  branch another writer advanced. */
+  rebaseDirtyFleetBranch?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
   /** W1-T528: task ids with a LIVE in-flight run right now, consulted by
    *  {@link selectUpdateBranchTarget} to skip a head a live worker is still pushing to. Omitted
    *  means an empty set, exactly as if every PR's worker had already finished. */
@@ -6265,6 +6410,38 @@ export async function runSweep(
   // W1-T2789: once this lane has attempted an update, the older armed/stale-gate update lane at
   // the end of the pass must not issue a second request against the same stale snapshot.
   let staleBaseAttemptedPrNumber: number | undefined;
+  const applyDirtyFleetRebase = async (
+    pr: OpenPrView,
+  ): Promise<{ handled: true; standDownReason: string } | { handled: false }> => {
+    if (pr.mergeState !== "dirty" || !isDispatchedRunBranch(pr.headRefName) || !deps.rebaseDirtyFleetBranch) {
+      return { handled: false };
+    }
+    const outcome = await deps.rebaseDirtyFleetBranch(pr);
+    appendLine(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: pr.taskId ?? "SWEEP",
+      step: `sweep.dirty_fleet_rebase.${outcome.outcome}`,
+      pr_number: pr.prNumber,
+      pr_url: pr.prUrl,
+      head_sha: pr.headSha,
+      head_ref_name: pr.headRefName,
+      ...(outcome.outcome === "rebased" ? { new_head_sha: outcome.newHeadSha } : { reason: outcome.reason }),
+    });
+    log("sweep.dirty_fleet_rebase", {
+      pr_number: pr.prNumber,
+      head_sha: pr.headSha,
+      head_ref_name: pr.headRefName,
+      outcome: outcome.outcome,
+      ...(outcome.outcome === "rebased" ? { new_head_sha: outcome.newHeadSha } : { reason: outcome.reason }),
+    });
+    if (outcome.outcome !== "rebased") return { handled: false };
+    return {
+      handled: true,
+      standDownReason:
+        `rebased dirty fleet branch ${pr.headRefName} from ${outcome.oldHeadSha} to ${outcome.newHeadSha} ` +
+        "before escalation; required checks will re-run on the new head and no human issue was filed",
+    };
+  };
 
   // ── W1-T473/W1-T513 — REVIEW CONCURRENCY BUDGET STATE ──────────────────────
   // `claimedReviewKeys` is the REAL mutual exclusion concurrency needs: a worker consults and updates
@@ -7195,6 +7372,14 @@ export async function runSweep(
               await deps.close(pr, reason);
               break;
             case "blocked-ambiguous":
+              {
+                const dirtyFleetRebase = await applyDirtyFleetRebase(pr);
+                if (dirtyFleetRebase.handled) {
+                  acted = false;
+                  standDownReason = dirtyFleetRebase.standDownReason;
+                  break;
+                }
+              }
               // W1-T2789 — an exhausted checks-red PR cannot reach the fix rung's own pre-strike
               // base-gap check, because the table routes it here first. When the shared exact-path
               // decision selected THIS oldest candidate, perform the same update-branch write before
