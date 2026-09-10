@@ -47,8 +47,12 @@ export const INSTALLATION_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
 
 /** How long before expiry to refresh — strictly inside the token's one-hour life, never at or
  *  past the edge. Five minutes leaves ample time for any single `gh`/`git` call, and doubles as
- *  the retry cadence on a failed mint. */
+ *  the bounded retry cadence before the loop has a retained expiry to protect. */
 export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+/** Positive slack so a retry scheduled after a failed refresh is not planned exactly at the last
+ *  millisecond one bounded exchange could finish before the retained token expires. */
+const REFRESH_FAILURE_RETRY_GUARD_MS = 1000;
 
 // GitHub's App-JWT contract: `iat` is backdated for clock skew and `exp` is capped at ten
 // minutes. This JWT mints one installation token and is then discarded, so nine minutes of life
@@ -59,9 +63,9 @@ const JWT_TTL_SEC = 9 * 60;
 /** Node's `fetch` has no default timeout; W1-T2896 leaves this App-JWT exchange outside CLI transport, so a hung connection would await forever and — since
  *  {@link startInstallationTokenRefresh}'s loop only arms its next timer after this promise
  *  settles — permanently kill the refresh loop. 20s is a generous multiple of a normal exchange's
- *  cost, a reasoned bound rather than a fitted measurement (see the forensics page), and stays
- *  well inside {@link REFRESH_MARGIN_MS}'s five-minute retry cadence. Exported so a test can
- *  advance a mocked clock by exactly this amount. */
+ *  cost and a reasoned bound rather than a fitted measurement (see the forensics page). Failed
+ *  scheduled refreshes keep enough retained-token life for another full bounded exchange. Exported
+ *  so a test can advance a mocked clock by exactly this amount. */
 // Why: docs/forensics/github-app.md#exchange_timeout_ms
 export const EXCHANGE_TIMEOUT_MS = 20 * 1000;
 
@@ -415,6 +419,14 @@ export function nextRefreshDelayMs(expiresAtMs: number, now: number = Date.now()
   return Math.max(0, expiresAtMs - REFRESH_MARGIN_MS - now);
 }
 
+function nextFailedRefreshDelayMs(expiresAtMs: number | undefined, now: number): number {
+  if (expiresAtMs === undefined) {
+    return REFRESH_MARGIN_MS;
+  }
+  const latestSafeStart = expiresAtMs - EXCHANGE_TIMEOUT_MS - REFRESH_FAILURE_RETRY_GUARD_MS;
+  return Math.max(0, Math.min(REFRESH_MARGIN_MS, latestSafeStart - now));
+}
+
 /**
  * Starts the daemon's own installation-token refresh loop and reports whether it armed.
  *
@@ -442,6 +454,7 @@ export function startInstallationTokenRefresh(opts: {
   const refresh = opts.refresh ?? refreshInstallationToken;
   const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
   const now = opts.now ?? Date.now;
+  let lastSuccessfulExpiresAtMs: number | undefined;
   // Arming the next timer must never depend on anything that can itself throw — `setTimer`
   // returning is the only thing this loop's survival rides on.
   const rearm = (delay: number): void => {
@@ -453,13 +466,14 @@ export function startInstallationTokenRefresh(opts: {
   const runOnce = (): Promise<void> =>
     refresh({ log: opts.log }).then(
       (result) => {
-        // A failed mint still reschedules — a transient outage keeps retrying on the margin
-        // rather than going silent.
-        const delay =
-          result.ok && result.expiresAtMs !== undefined
-            ? nextRefreshDelayMs(result.expiresAtMs, now())
-            : REFRESH_MARGIN_MS;
-        rearm(delay);
+        if (result.ok && result.expiresAtMs !== undefined) {
+          lastSuccessfulExpiresAtMs = result.expiresAtMs;
+          rearm(nextRefreshDelayMs(result.expiresAtMs, now()));
+          return;
+        }
+        // A failed mint still reschedules, but once the loop has a token expiry to protect, the
+        // retry is pulled inside that edge so one full exchange can settle before old credentials die.
+        rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
       },
       (err) => {
         // The promise itself rejected — a throw, not a `{ ok: false }` result. Only `refresh`'s
@@ -467,7 +481,7 @@ export function startInstallationTokenRefresh(opts: {
         // the next timer is armed FIRST, before explaining why — the loop's survival must never
         // depend on a second write to the filesystem that just failed. The explanatory write
         // below is best-effort and guarded: if it throws too, that is swallowed.
-        rearm(REFRESH_MARGIN_MS);
+        rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
         try {
           opts.log?.(TOKEN_REFRESH_FAILED_STEP, {
             reason: `refresh threw: ${err instanceof Error ? err.message : String(err)}`,
