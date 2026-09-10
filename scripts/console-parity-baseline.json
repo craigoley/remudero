@@ -33,6 +33,7 @@
     "install-checkout",
     "issues",
     "learnings",
+    "ledger-compact",
     "ledger-grep",
     "lint-plan",
     "next-task-id",
