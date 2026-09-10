@@ -102,6 +102,28 @@ test("W1-T3283: a body with neither accepted gate input gains the branch-derived
   assert.equal(summary.byDisposition["blocked-fixable"], 1);
 });
 
+test("W1-T3283: a strike-exhausted PR reaching the escalation table still gets the branch-derived trailer, and the escalation is skipped", async () => {
+  const deps = fakeDeps();
+
+  // priorStrikes >= policy.strikeCap (2) routes this PR to the `blocked-ambiguous` row instead of
+  // `blocked-fixable`'s ci-log-fix row, which reaches the SECOND `applyMissingTaskTrailerRepair`
+  // call site the escalation table's own dispatch loop carries. Only the disposition differs from
+  // the happy-path test above; the repair itself must still win over `escalate`.
+  const summary = await runSweep([subject({ priorStrikes: 2 })], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
+  assert.equal(deps.edits.length, 1);
+  assert.equal(deps.edits[0].repair.taskId, "W1-T3283");
+  assert.equal(deps.edits[0].repair.trailer, "Remudero-Task: W1-T3283");
+  assert.deepEqual(deps.escalations, [], "the trailer repair must stand down the escalation row, not run beside it");
+  assert.deepEqual(deps.dispatches, []);
+  assert.equal(summary.actions[0].acted, false);
+  assert.match(
+    String(deps.rows.at(-1)?.stand_down_reason),
+    /missing trailer repaired by editing the PR body with Remudero-Task: W1-T3283/,
+  );
+});
+
 test("W1-T3283: a body that already carries a trailer or Acceptance block is left byte-for-byte unchanged", () => {
   const withTrailer = "Summary.\n\nRemudero-Task: W1-OTHER\n";
   const withAcceptance = "## Acceptance\n\n- it proves itself | unit test: test/x.test.ts\n";
