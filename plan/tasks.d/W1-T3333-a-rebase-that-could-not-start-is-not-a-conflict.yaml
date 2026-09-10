@@ -10,6 +10,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-rebase-that-could-not-start-is-not-a-conflict.test.ts
+    - scripts/test-tier-manifest.json
   origin: "operator-session#4946-real-git-rebase-2026-09-10"
   plan_refs: ["W1-T2999", "W1-T186"]
   status: queued
@@ -65,6 +66,10 @@
     DO NOT PROVE THIS BY DELETING THE GLOBAL GIT IDENTITY IN CI. The environmental failure must be
     injected inside the fixture (an unset identity on that repo alone), never by changing the runner.
   note: |
+    SCOPE AMENDMENT 2026-09-10. This task adds a new test file. The mandatory tier-completeness
+    gate refuses every new test absent from `scripts/test-tier-manifest.json`; the required
+    registry entry is therefore implementation scope, not adjacent cleanup.
+
     Rule 25 CHECKED: `src/lib/sweep.ts` is ordinary src, not an instrument surface.
     CAVEAT WITH EQUAL WEIGHT: production has a global git identity, so this is not a live outage
     today — it is a misclassification that made ONE test failure cost an afternoon and would do the
