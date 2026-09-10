@@ -394,9 +394,11 @@ import {
   buildAlertEscalation,
   ghAlertGateway,
   pollAlerts,
+  readCodeScanningAlerts,
   renderAlertsSummary,
   type AlertGateway,
 } from "./lib/ops.js";
+import { reconcileCodeqlQualityProposals } from "./lib/codeql-quality-intake.js";
 import {
   decideAlertDisposition,
   loadAlertPolicy,
@@ -20143,6 +20145,7 @@ export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
   "intakeCadence.ops": INTAKE_CADENCE_CONTRACT_VERSION,
   "intakeCadence.issues": INTAKE_CADENCE_CONTRACT_VERSION,
   "intakeCadence.alertFix": INTAKE_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.codeqlQuality": INTAKE_CADENCE_CONTRACT_VERSION,
   "intakeCadence.inbox": INTAKE_CADENCE_CONTRACT_VERSION,
   "intakeCadence.feedbackDocket": INTAKE_CADENCE_CONTRACT_VERSION,
   boardReview: BOARD_REVIEW_CONTRACT_VERSION,
@@ -20961,6 +20964,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
   loadManagedRepos?: (root: string) => ManagedRepo[];
   pollIssues?: typeof pollIssues;
   pollAlerts?: typeof pollAlerts;
+  readCodeScanningAlerts?: typeof readCodeScanningAlerts;
   alertFix?: typeof alertFixCommand;
   inbox?: typeof inboxCommand;
   feedbackDocket?: typeof runFeedbackDocketRung;
@@ -21043,6 +21047,57 @@ export function buildIntakeRungsDaemonHooks(deps: {
       if (rung === "alertFix") {
         const exitCode = await (deps.alertFix ?? alertFixCommand)([], { config, ledgerPath, runId });
         return { rung, status: exitCode === 0 ? "ok" : "refused", exit_code: exitCode };
+      }
+      if (rung === "codeqlQuality") {
+        const { owner, repo } = resolveOwnerRepo();
+        const source = (deps.readCodeScanningAlerts ?? readCodeScanningAlerts)(owner, repo);
+        if (!source.ok) {
+          appendLedger(ledgerPath, {
+            run_id: runId,
+            task_id: "INTAKE",
+            step: "codeql_quality.refused",
+            lane: "intake",
+            rung,
+            reason: "code-scanning read failed",
+            error: source.error.replace(/\s+/g, " ").slice(0, 300),
+          });
+          return { rung, status: "refused", reason: "code-scanning read failed" };
+        }
+        const result = reconcileCodeqlQualityProposals(
+          join(config.root, "state", "inbox-proposals.json"),
+          source.alerts,
+          listFeedback(repoRoot),
+        );
+        const partition = result.partition;
+        appendLedger(ledgerPath, {
+          run_id: runId,
+          task_id: "INTAKE",
+          step: "codeql_quality.partitioned",
+          lane: "intake",
+          rung,
+          scanned_alerts: partition.scannedTotal,
+          eligible_alerts: partition.eligible.length,
+          excluded_alerts: partition.excluded.length,
+          rejected_alerts: partition.rejected.length,
+          covered_alerts: partition.covered.length,
+          unassigned_alerts: partition.unassigned.length,
+          proposal_created: result.createdProposalId ?? null,
+          proposals_updated: result.updatedProposalIds,
+          proposals_retired: result.retiredProposalIds,
+        });
+        return {
+          rung,
+          status: "ok",
+          scanned_alerts: partition.scannedTotal,
+          eligible_alerts: partition.eligible.length,
+          excluded_alerts: partition.excluded.length,
+          rejected_alerts: partition.rejected.length,
+          covered_alerts: partition.covered.length,
+          unassigned_alerts: partition.unassigned.length,
+          proposal_created: result.createdProposalId ?? null,
+          proposals_updated: result.updatedProposalIds.length,
+          proposals_retired: result.retiredProposalIds.length,
+        };
       }
       if (rung === "inbox") {
         const exitCode = await (deps.inbox ?? inboxCommand)([], { config });

@@ -258,6 +258,7 @@ test("each declared rung dispatches to its own verb and reports that verb's own 
         reconciled,
         escalated: [{}, {}, {}, {}, {}],
       })) as unknown as IntakeHookDeps["pollAlerts"],
+      readCodeScanningAlerts: () => ({ ok: false, error: "HTTP 403: Resource not accessible by integration" }),
       alertFix: (async () => alertFixExit) as unknown as IntakeHookDeps["alertFix"],
       inbox: (async () => inboxExit) as unknown as IntakeHookDeps["inbox"],
       feedbackDocket: ((
@@ -290,6 +291,15 @@ test("each declared rung dispatches to its own verb and reports that verb's own 
     assert.deepEqual(await run("alertFix"), { rung: "alertFix", status: "ok", exit_code: 0 });
     alertFixExit = 2;
     assert.deepEqual(await run("alertFix"), { rung: "alertFix", status: "refused", exit_code: 2 });
+
+    assert.deepEqual(await run("codeqlQuality"), {
+      rung: "codeqlQuality",
+      status: "refused",
+      reason: "code-scanning read failed",
+    });
+    const codeqlRefusal = readLedgerRows(ledgerPathFor(config)).find((row) => row.step === "codeql_quality.refused");
+    assert.ok(codeqlRefusal, "a 403 is visible as a refusal, not reported as a successful zero-alert sweep");
+    assert.match(String(codeqlRefusal?.error), /403/);
 
     assert.deepEqual(await run("inbox"), { rung: "inbox", status: "ok", exit_code: 0 });
     inboxExit = 1;

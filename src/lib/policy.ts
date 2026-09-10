@@ -36,7 +36,7 @@ export interface ArmCalibrationBandRow {
   note?: string;
 }
 
-export const INTAKE_CADENCE_RUNGS = ["ops", "issues", "alertFix", "inbox", "feedbackDocket"] as const;
+export const INTAKE_CADENCE_RUNGS = ["ops", "issues", "alertFix", "codeqlQuality", "inbox", "feedbackDocket"] as const;
 
 export type IntakeCadenceRung = (typeof INTAKE_CADENCE_RUNGS)[number];
 
@@ -302,6 +302,9 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "intakeCadence.alertFix.enabled": "net-new",
   "intakeCadence.alertFix.minIntervalMinutes": "net-new",
   "intakeCadence.alertFix.maxPerDay": "net-new",
+  "intakeCadence.codeqlQuality.enabled": "net-new",
+  "intakeCadence.codeqlQuality.minIntervalMinutes": "net-new",
+  "intakeCadence.codeqlQuality.maxPerDay": "net-new",
   "intakeCadence.inbox.enabled": "net-new",
   "intakeCadence.inbox.minIntervalMinutes": "net-new",
   "intakeCadence.inbox.maxPerDay": "net-new",
@@ -543,6 +546,7 @@ const DEFAULT_INTAKE_CADENCE: Record<IntakeCadenceRung, IntakeCadenceRungPolicy>
   ops: { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 },
   issues: { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 },
   alertFix: { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 },
+  codeqlQuality: { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 },
   inbox: { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 },
   feedbackDocket: { enabled: false, minIntervalMinutes: 10080, maxPerDay: 1 },
 };
@@ -557,6 +561,7 @@ function parseIntakeCadence(
       ops: { ...DEFAULT_INTAKE_CADENCE.ops },
       issues: { ...DEFAULT_INTAKE_CADENCE.issues },
       alertFix: { ...DEFAULT_INTAKE_CADENCE.alertFix },
+      codeqlQuality: { ...DEFAULT_INTAKE_CADENCE.codeqlQuality },
       inbox: { ...DEFAULT_INTAKE_CADENCE.inbox },
       feedbackDocket: { ...DEFAULT_INTAKE_CADENCE.feedbackDocket },
     };
