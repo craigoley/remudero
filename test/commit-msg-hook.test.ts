@@ -146,7 +146,12 @@ test(
     // Disable enforcement and retry the IDENTICAL message: it now succeeds. This is the
     // counterfactual half of the falsifier -- proof the block above came from the hook,
     // not from something else about the message (a stray typo, a bad fixture, etc).
-    execFileSync("git", ["-C", worktreePath, "config", "--unset", "core.hooksPath"]);
+    // --worktree, TO MATCH THE SCOPE worktreeAdd NOW WRITES AT. W1-T3308 moved this key off the
+    // shared `.git/config` — every worker creation was contending on the parent checkout's
+    // `.git/config.lock` — onto per-worktree config. A LOCAL unset then finds nothing to remove and
+    // git exits non-zero, so this line threw "Command failed: git … config --unset core.hooksPath"
+    // and took the falsifier's counterfactual half with it. Same scope in, same scope out.
+    execFileSync("git", ["-C", worktreePath, "config", "--worktree", "--unset", "core.hooksPath"]);
     const unenforced = tryCommit(worktreePath, malformed);
     assert.equal(
       unenforced.status,

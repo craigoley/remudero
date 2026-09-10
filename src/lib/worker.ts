@@ -2393,13 +2393,19 @@ function installRootDir(): string {
   return join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
 }
 
-/** W1-T2699: point `cwd`'s LOCAL git config at the socket-based credential helper, resetting any
+/** W1-T2699: point `cwd`'s PER-WORKTREE git config at the socket-based credential helper, resetting any
  *  accumulated `credential.helper` first — an empty value clears git's collected helper list
- *  (MEASURED against git 2.39.5), so the local entry added right after is the only one git tries
+ *  (MEASURED against git 2.39.5), so the worktree entry added right after is the only one git tries
  *  in this worktree, superseding `deploy/entrypoint.sh`'s global `$GH_TOKEN`-reading helper. */
-export function wireCredentialHelperSocket(cwd: string, socketPath: string): void {
+export function wireCredentialHelperSocket(
+  cwd: string,
+  socketPath: string,
+  writeConfig: (args: string[]) => void = (args) => {
+    execFileSync("git", ["-C", cwd, "config", "--worktree", ...args]);
+  },
+): void {
   const helperScript = join(installRootDir(), "scripts", "git-credential-socket-helper.mjs");
-  execFileSync("git", ["-C", cwd, "config", "--local", "credential.helper", ""], { stdio: "ignore" });
+  writeConfig(["credential.helper", ""]);
   // WITHOUT THIS, NOTHING IS EVER SCOPED. git's credential context carries protocol+host ONLY
   // unless `credential.useHttpPath` is set — MEASURED against git 2.39.5: the helper receives
   // "protocol=https\nhost=github.com" bare, and "protocol=https\nhost=github.com\npath=<owner>/<repo>.git"
@@ -2408,12 +2414,8 @@ export function wireCredentialHelperSocket(cwd: string, socketPath: string): voi
   // the broadest credential available, in the shard whose whole purpose is the narrowest one.
   // Setting the path here is what makes the scoping real; mintScopedToken now REFUSES rather
   // than widening if it ever arrives absent anyway.
-  execFileSync("git", ["-C", cwd, "config", "--local", "credential.useHttpPath", "true"], { stdio: "ignore" });
-  execFileSync(
-    "git",
-    ["-C", cwd, "config", "--local", "--add", "credential.helper", `!node "${helperScript}" "${socketPath}"`],
-    { stdio: "ignore" },
-  );
+  writeConfig(["credential.useHttpPath", "true"]);
+  writeConfig(["--add", "credential.helper", `!node "${helperScript}" "${socketPath}"`]);
 }
 
 /** Which `node_modules` a fresh worktree resolves its dev CLIs from. Prefers the PARENT CLONE's own install, and falls back to
@@ -2821,6 +2823,24 @@ function defaultCountBehind(repoDir: string, base: string, remoteHead: string): 
   }
 }
 
+/** Enable Git's split worktree config format before the first per-worktree write. This is a
+ * one-time repository migration, not worker preparation: once true, every credential and hook
+ * write below lands in that worktree's `config.worktree` and no subsequent spawn touches the
+ * shared `.git/config`. A failure stays loud, because silently falling back to `--local` would
+ * reintroduce the shared-lock race this guard exists to remove. */
+function ensureWorktreeConfigEnabled(repoDir: string): void {
+  try {
+    const enabled = execFileSync("git", ["-C", repoDir, "config", "--local", "--get", "extensions.worktreeConfig"], {
+      encoding: "utf8",
+    }).trim();
+    if (enabled === "true") return;
+  } catch {
+    // An absent setting is the migration case. The write below either enables it or exposes its
+    // failure to the caller; it is never mistaken for a successful per-worktree configuration.
+  }
+  execFileSync("git", ["-C", repoDir, "config", "--local", "extensions.worktreeConfig", "true"]);
+}
+
 /** `git worktree add` a fresh branch off origin/<base> for a repo checkout. */
 export function worktreeAdd(
   repoDir: string,
@@ -2841,6 +2861,7 @@ export function worktreeAdd(
     log?: (step: string, extra?: Record<string, unknown>) => void;
   } = {},
 ): void {
+  ensureWorktreeConfigEnabled(repoDir);
   execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "inherit" });
   const ref = base.replace(/^origin\//, "");
   // Read the LOCAL tracking ref right after the fetch, before the worktree is cut from it — see readLocalOriginRefHead for
@@ -2880,11 +2901,9 @@ export function worktreeAdd(
   });
   // Point this worktree at the repo's tracked hooks/ dir so `hooks/commit-msg` fires on every commit a worker authors itself.
   // A RELATIVE core.hooksPath resolves against each worktree's OWN top-level dir (verified against git 2.54), so "hooks" is
-  // correct even though `git config` writes it to the repo's one shared config file. Idempotent, so it is safe on every call
-  // (W1-T137, PR #407).
-  execFileSync("git", ["-C", worktreePath, "config", "core.hooksPath", "hooks"], {
-    stdio: "inherit",
-  });
+  // correct. `--worktree` keeps the setting in this linked worktree's config rather than taking
+  // the parent checkout's shared `.git/config.lock` on every worker creation (W1-T3308).
+  execFileSync("git", ["-C", worktreePath, "config", "--worktree", "core.hooksPath", "hooks"]);
   // …and give that hook the `commitlint` it resolves, or it rejects every commit made here. Must run AFTER the hooksPath line
   // and AFTER the worktree exists, and excluding FIRST keeps the link from ever being visible to git as an untracked file.
   excludeNodeModulesFromGit(worktreePath);
@@ -3245,6 +3264,30 @@ export function reclaimStaleConfigLock(repoDir: string, opts: ConfigLockReclaimO
     return false; // vanished, or unremovable, between the check above and here
   }
   return true;
+}
+
+/** Run the existing config-lock predicate on an idle-fleet cadence. `pruneStaleRuns` retains its
+ * before-add call as the last-line guard; this rung closes the gap after the most recent dispatch.
+ * The predicate, grace window, and live-process probe are inherited unchanged. */
+export function runConfigLockReclaimRung(
+  repoDir: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    reclaim?: typeof reclaimStaleConfigLock;
+    configLock?: ConfigLockReclaimOpts;
+  } = {},
+): string | null {
+  const lockPath = configLockPath(repoDir);
+  try {
+    const reclaimed = (deps.reclaim ?? reclaimStaleConfigLock)(repoDir, {
+      ...deps.configLock,
+      ledger: (message) => log("worktree.config_lock.reclaiming", { config_lock: lockPath, message }),
+    });
+    return reclaimed ? lockPath : null;
+  } catch (e) {
+    log("worktree.config_lock_reap.error", { config_lock: lockPath, error: String((e as Error)?.message ?? e) });
+    return null;
+  }
 }
 
 /** Reclaim leftovers from crashed prior runs so they cannot block this one: force-remove every DEAD `run-*` worktree, prune
@@ -3796,11 +3839,18 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
 }
 
 /** The worktree-reap RUNG: resolve `config`'s worktreesDir, run {@link reapStaleWorktrees}, ledger the outcome. Shared by `rmd
- * sweep` and the daemon's per-poll hook so both run the EXACT same rung. The try/catch guards ONLY `worktreesDir(config)`,
- * which throws on a malformed root, so a reap-rung failure never masks the caller's own error handling (W1-T175). */
+ * sweep` and the daemon's per-poll hook so both run the EXACT same rung. When a caller also knows
+ * the canonical repository, it runs the config-lock backstop on the same cadence. The two guards
+ * are isolated: a malformed worktrees root must not suppress config-lock reclamation, and vice
+ * versa. */
 export function runWorktreeReapRung(
   config: Config,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    configLockRepoDir?: string;
+    configLock?: ConfigLockReclaimOpts;
+    reclaimConfigLock?: typeof reclaimStaleConfigLock;
+  } = {},
 ): WorktreeReapSummary {
   let reapSummary: WorktreeReapSummary = { reaped: [], reapedLocks: [], kept: [] };
   try {
@@ -3813,6 +3863,12 @@ export function runWorktreeReapRung(
     if (undecidable.length) log("worktree.reap.undecidable", { kept: undecidable.map((k) => k.name) });
   } catch (e) {
     log("worktree.reap.error", { error: String((e as Error)?.message ?? e) });
+  }
+  if (deps.configLockRepoDir !== undefined) {
+    runConfigLockReclaimRung(deps.configLockRepoDir, log, {
+      configLock: deps.configLock,
+      reclaim: deps.reclaimConfigLock,
+    });
   }
   return reapSummary;
 }

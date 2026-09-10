@@ -701,7 +701,7 @@ test("W1-T2699 (6): wireCredentialHelperSocket leaves git ASKING for the path, w
   execFileSync("git", ["-C", repo, "init", "-q"]);
   const read = (key: string): string => {
     try {
-      return execFileSync("git", ["-C", repo, "config", "--local", "--get", key], { encoding: "utf8" }).trim();
+      return execFileSync("git", ["-C", repo, "config", "--worktree", "--get", key], { encoding: "utf8" }).trim();
     } catch {
       return "";
     }
@@ -715,7 +715,7 @@ test("W1-T2699 (6): wireCredentialHelperSocket leaves git ASKING for the path, w
     "true",
     "git must be asked for the path — without it the helper sees a bare host and nothing can be scoped",
   );
-  const helpers = execFileSync("git", ["-C", repo, "config", "--local", "--get-all", "credential.helper"], { encoding: "utf8" })
+  const helpers = execFileSync("git", ["-C", repo, "config", "--worktree", "--get-all", "credential.helper"], { encoding: "utf8" })
     .split("\n")
     .filter((l) => l.trim() !== "");
   assert.equal(helpers.length, 1, "exactly one helper — the reset must have cleared any inherited list");
