@@ -502,6 +502,7 @@
     "test/emissions.test.ts": 2381,
     "test/empty-diff-merge-gate.test.ts": 2028,
     "test/enforcement-data-carveout.test.ts": 5999,
+    "test/ensure-deps-mistakes-a-symlink-for-an-install.test.ts": 0,
     "test/entanglement-needs-the-patch.test.ts": 1016,
     "test/entanglement-split-dispatches-a-worker.test.ts": 1676,
     "test/entanglement-split-sweep-reachability.test.ts": 0,
