@@ -1234,6 +1234,7 @@
     "test/the-top-of-tick-freshness-exit-precedes-every-dispatch.test.ts": 771,
     "test/the-verb-census-proves-it-can-see-its-own-corpus.test.ts": 1731,
     "test/the-verb-census-reaches-a-reader.test.ts": 59315,
+    "test/the-verify-human-backlog-is-judged-on-a-cadence.test.ts": 0,
     "test/the-wipe-test-can-only-ask-about-learnings.test.ts": 2790,
     "test/the-worker-gets-the-headlines.test.ts": 964,
     "test/the-worker-git-failure-text-is-discarded.test.ts": 1981,
