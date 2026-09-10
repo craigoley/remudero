@@ -54,9 +54,9 @@ unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_OBJECT_DIRECTORY \
 
 fail=0
 
-# A CHECK THAT COULD NOT RUN IS NOT A CHECK THAT PASSED — AND IT IS NOT A VIOLATION EITHER. Both
-# checks below are skipped-with-a-name when their entry point is absent, and rule15-precheck's own
-# exit 2 (an unreadable diff) is honoured as unreadable. Blocking a push because a check was missing
+# A CHECK THAT COULD NOT RUN IS NOT A CHECK THAT PASSED — AND IT IS NOT A VIOLATION EITHER. All
+# checks below are skipped-with-a-name when their entry point is absent, and the prechecks' own exit
+# 2 (an unreadable diff) is honoured as unreadable. Blocking a push because a check was missing
 # would be this repo's recurring defect: a bound that fires on a healthy condition.
 if [ -f scripts/rule15-precheck.mjs ]; then
   # VIA THE LOADER, like every other entry point here: the script imports `src/lib/review.js`, a
@@ -72,6 +72,21 @@ if [ -f scripts/rule15-precheck.mjs ]; then
   fi
 else
   echo "pre-push: scripts/rule15-precheck.mjs absent — skipped, NOT passed" >&2
+fi
+
+# W1-T3072 — ask the reviewer's exact Rule 25 question while the diff is still local. This is
+# separate from rule15: one prevents a plan criterion riding with implementation, the other keeps
+# measurement instruments from riding with the product they judge.
+if [ -f scripts/rule25-precheck.mjs ]; then
+  node --import tsx scripts/rule25-precheck.mjs
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "pre-push: rule25-precheck could not read the diff — not blocking on an unreadable check" >&2
+  elif [ "$rc" -ne 0 ]; then
+    fail=1
+  fi
+else
+  echo "pre-push: scripts/rule25-precheck.mjs absent — skipped, NOT passed" >&2
 fi
 
 # W1-T3205: BEGIN test-tier admission
