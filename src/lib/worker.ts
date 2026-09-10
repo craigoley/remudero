@@ -3477,6 +3477,10 @@ export interface WorktreeReapOpts {
    * ledger exactly what it would reclaim, but nothing is removed from disk. Mirrors {@link reapStaleClones}'s own `dryRun`.
    * Default false, unchanged for every existing caller (W1-T406). */
   dryRun?: boolean;
+  /** Optional absolute worktree paths to evaluate instead of enumerating `root`. This is for git-registration-derived
+   * candidates such as {@link unmanagedWorktreeLanes}: the removal and keep predicates stay here, but no directory walk over
+   * the candidates' common parent is introduced. */
+  candidatePaths?: readonly string[];
 }
 
 /** A {@link WorktreeReapOpts.isPidAlive}-shaped predicate for the one-shot container boot rung: it answers "is THIS the
@@ -3683,16 +3687,22 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     keptReasons.push({ name, reason });
   };
 
-  let entries: string[];
+  const candidatePaths = opts.candidatePaths;
+  let entries: Array<{ name: string; path: string }>;
+  let rootEntries: string[] = [];
   try {
-    entries = fs.readdirSync(root);
+    if (candidatePaths !== undefined) {
+      entries = candidatePaths.map((path) => ({ name: path, path }));
+    } else {
+      rootEntries = fs.readdirSync(root);
+      entries = rootEntries.map((name) => ({ name, path: join(root, name) }));
+    }
   } catch {
     return { reaped, reapedLocks, kept, keptReasons }; // unreadable root — best-effort, never throws
   }
 
-  for (const name of entries) {
+  for (const { name, path: entryPath } of entries) {
     if (name.endsWith(".lock")) continue; // widowed-lock pass below, after dirs settle
-    const entryPath = join(root, name);
     let isDir: boolean;
     try {
       isDir = statSync(entryPath).isDirectory();
@@ -3769,7 +3779,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
   // only INSIDE a successful removal, so a sibling orphaned any other way lingers forever — a `.lock` makes a dead run read
   // as live. No age gate is owed, the owner is already gone (W1-T2628).
   const widowSuffixes = [".lock", ".base"];
-  for (const name of entries) {
+  for (const name of rootEntries) {
     const suffix = widowSuffixes.find((s) => name.endsWith(s));
     if (!suffix) continue;
     const dirPath = join(root, name.slice(0, -suffix.length));
@@ -3807,6 +3817,15 @@ export function runWorktreeReapRung(
   return reapSummary;
 }
 
+function mergeWorktreeReapSummaries(summaries: readonly WorktreeReapSummary[]): WorktreeReapSummary {
+  return {
+    reaped: summaries.flatMap((s) => s.reaped),
+    reapedLocks: summaries.flatMap((s) => s.reapedLocks),
+    kept: summaries.flatMap((s) => s.kept),
+    keptReasons: summaries.flatMap((s) => s.keptReasons ?? []),
+  };
+}
+
 /** THE AD-HOC LANE RUNG: the same reaper, pointed at {@link adhocLaneRoot}, shipping SURVEY-FIRST. NO SECOND REMOVAL, BY
  * CONSTRUCTION — it delegates to {@link reapStaleWorktrees} and makes no filesystem call at all, so the 2026-07-31 defect
  * cannot be reinstated here, and the liveness doctrine is inherited whole. It adds one thing only: a different root and a
@@ -3833,33 +3852,46 @@ export function runAdhocLaneReapRung(
     const enabled = (deps.enabled ?? (() => false))();
     const reap = deps.reap ?? reapStaleWorktrees;
     const root = (deps.root ?? (() => adhocLaneRoot(config)))();
-    const summary = reap(root, {
+    const baseOpts = {
       dryRun: !enabled,
       maxAgeMs: deps.maxAgeMs ?? ADHOC_LANE_REAP_GRACE_MS,
       isPidAlive: deps.isPidAlive ?? worktreeLockIsPidAlive,
-    });
+    };
+    const rootSummary = reap(root, baseOpts);
     // LEDGER THE SURVEY EVEN THOUGH NOTHING WAS REMOVED — that IS the deliverable while disarmed. `reapStaleWorktrees`
     // populates `reaped`/`reapedLocks` under `dryRun` precisely so a caller can record what it would have reclaimed
     // (W1-T406's own shape).
-    if (summary.reaped.length || summary.reapedLocks.length) {
+    if (rootSummary.reaped.length || rootSummary.reapedLocks.length) {
       log("adhoc_lane.reap", {
         dry_run: !enabled,
         root,
-        reaped: summary.reaped.length,
-        reaped_locks: summary.reapedLocks.length,
+        reaped: rootSummary.reaped.length,
+        reaped_locks: rootSummary.reapedLocks.length,
       });
     }
+    const summaries = [rootSummary];
+    // NAME AND SWEEP the lanes no cadence can reach: the source is still git's own registration, but the keep/remove
+    // decisions stay inside reapStaleWorktrees. Supplying `candidatePaths` is the safety boundary — no parent directory is
+    // walked to find unmanaged lanes.
+    if (deps.repoDir !== undefined) {
+      const unmanaged = (deps.listUnmanaged ?? unmanagedWorktreeLanes)(config, deps.repoDir);
+      if (unmanaged.length) {
+        const unmanagedSummary = reap(root, { ...baseOpts, candidatePaths: unmanaged });
+        summaries.push(unmanagedSummary);
+        log("adhoc_lane.unmanaged", {
+          count: unmanaged.length,
+          lanes: unmanaged,
+          dry_run: !enabled,
+          reaped: unmanagedSummary.reaped.length,
+          reaped_locks: unmanagedSummary.reapedLocks.length,
+        });
+      }
+    }
+    const summary = mergeWorktreeReapSummaries(summaries);
     // W1-T378's doctrine, unchanged: an `activity-unknown` keep is the reaper declining to decide, and it is what bounds
     // growth now that an ambiguous signal keeps rather than destroys.
     const undecidable = (summary.keptReasons ?? []).filter((k) => k.reason === "activity-unknown");
     if (undecidable.length) log("adhoc_lane.reap.undecidable", { kept: undecidable.map((k) => k.name) });
-    // NAME the lanes no cadence can reach: that population being invisible, not merely unreaped, is the whole reason 4.7G
-    // accumulated with no ledger row. Reported beside the survey and NEVER acted on — by definition these sit outside both
-    // managed roots (W1-T2847 design (vi)).
-    if (deps.repoDir !== undefined) {
-      const unmanaged = (deps.listUnmanaged ?? unmanagedWorktreeLanes)(config, deps.repoDir);
-      if (unmanaged.length) log("adhoc_lane.unmanaged", { count: unmanaged.length, lanes: unmanaged });
-    }
     return summary;
   } catch (e) {
     // Best-effort, exactly like the sibling boot sweeps — a reclaim rung never blocks a dispatch.

@@ -7,7 +7,13 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Config } from "../src/lib/config.js";
 import type { WorktreeReapSummary } from "../src/lib/worker.js";
-import { ADHOC_LANE_REAP_GRACE_MS, adhocLaneRoot, reapStaleWorktrees, runAdhocLaneReapRung } from "../src/lib/worker.js";
+import {
+  ADHOC_LANE_REAP_GRACE_MS,
+  adhocLaneRoot,
+  reapStaleWorktrees,
+  runAdhocLaneReapRung,
+  unmanagedWorktreeLanes,
+} from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 /**
@@ -235,21 +241,35 @@ test("W1-T2847 (wiring): runTaskBody CALLS runAdhocLaneReapRung — beside the w
   assert.ok(inComments.length > 0, "the filter is doing real work — prose really does name a rung here");
 });
 
-// ── design (vi): the unmanaged-lane report is WIRED, not an exported orphan ────────────────────
+// ── W1-T2962: registered unmanaged lanes are reaped by candidate, never by parent walk ─────────
 
-test("W1-T2847: given a repoDir the rung REPORTS the lanes outside both managed roots, and never acts on them", () => {
+test("W1-T2962: the registration-driven rung ships DISARMED and still counts", () => {
   const lines: Array<[string, Record<string, unknown> | undefined]> = [];
+  const unmanaged = ["/srv/rmd-root/atbase", "/Users/someone/board"];
+  let unmanagedDryRun: boolean | undefined;
+  let unmanagedCandidates: readonly string[] | undefined;
   const summary = runAdhocLaneReapRung(cfg("/srv/rmd-root"), (s, f) => lines.push([s, f]), {
     repoDir: "/srv/repo",
-    reap: (() => summaryOf()) as never,
-    listUnmanaged: (() => ["/srv/rmd-root/atbase", "/Users/someone/board"]) as never,
+    reap: ((_root: string, o: { dryRun?: boolean; candidatePaths?: readonly string[] }) => {
+      if (o.candidatePaths) {
+        unmanagedDryRun = o.dryRun;
+        unmanagedCandidates = o.candidatePaths;
+        return summaryOf({ reaped: [...o.candidatePaths] });
+      }
+      return summaryOf();
+    }) as never,
+    listUnmanaged: (() => unmanaged) as never,
   });
   assert.ok(summary);
+  assert.equal(unmanagedDryRun, true, "the shipped default surveys unmanaged registrations before any operator arms it");
+  assert.deepEqual(unmanagedCandidates, unmanaged, "the reaper receives git's registered unmanaged paths as its candidates");
+  assert.deepEqual(summary.reaped, unmanaged, "the returned summary includes what the unmanaged pass would reclaim");
   const row = lines.find(([s]) => s === "adhoc_lane.unmanaged");
-  assert.ok(row, "the invisible population is what let 4.7G accumulate with no ledger row");
+  assert.ok(row, "the invisible population is still named, now with its reclaim survey");
   assert.equal(row[1]?.count, 2);
-  assert.deepEqual(row[1]?.lanes, ["/srv/rmd-root/atbase", "/Users/someone/board"]);
-  assert.equal(summary.reaped.length, 0, "reported, never reaped — these are outside both managed roots by definition");
+  assert.deepEqual(row[1]?.lanes, unmanaged);
+  assert.equal(row[1]?.dry_run, true);
+  assert.equal(row[1]?.reaped, 2, "the survey counts what it would reclaim");
 });
 
 test("W1-T2847: with NO repoDir the report is skipped entirely rather than guessing a registration", () => {
@@ -261,6 +281,72 @@ test("W1-T2847: with NO repoDir the report is skipped entirely rather than guess
     }) as never,
   });
   assert.equal(lines.find(([s]) => s === "adhoc_lane.unmanaged"), undefined);
+});
+
+test("W1-T2962: an unregistered directory is never a candidate", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}adhoc-lane-unregistered-`));
+  const config = cfg(join(root, "rmd-root"));
+  const repo = join(root, "repo");
+  const unregistered = join(config.root, "state");
+  mkdirSync(unregistered, { recursive: true });
+  const porcelain = ["worktree " + repo, "HEAD abc", "branch refs/heads/main", ""].join("\n");
+  let candidatePasses = 0;
+  runAdhocLaneReapRung(config, () => {}, {
+    repoDir: repo,
+    root: () => join(config.root, "lanes"),
+    reap: ((_root: string, o: { candidatePaths?: readonly string[] }) => {
+      if (o.candidatePaths) candidatePasses += 1;
+      return summaryOf();
+    }) as never,
+    listUnmanaged: ((c: Config, r: string) => unmanagedWorktreeLanes(c, r, () => porcelain)) as never,
+  });
+  assert.equal(candidatePasses, 0, "only git's porcelain registrations feed the candidate pass");
+  assert.ok(existsSync(unregistered), "a same-root directory that git did not register remains structurally unreachable");
+});
+
+/** A real repo with one registered linked worktree outside both managed roots. */
+function unmanagedLaneFixture(): { root: string; repo: string; lane: string; branch: string } {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}adhoc-lane-unmanaged-`));
+  const repo = join(root, "repo");
+  mkdirSync(repo, { recursive: true });
+  git(["init", "--quiet", "-b", "main"], repo);
+  writeFileSync(join(repo, "f.txt"), "x\n");
+  git(["add", "-A"], repo);
+  git(["commit", "--quiet", "-m", "first"], repo);
+  const branch = "manual-lane";
+  const lane = join(root, "manual", branch);
+  mkdirSync(dirname(lane), { recursive: true });
+  git(["worktree", "add", "--quiet", "-b", branch, lane], repo);
+  const old = (Date.now() - ADHOC_LANE_REAP_GRACE_MS * 2) / 1000;
+  for (const p of [lane, join(lane, "f.txt"), join(lane, ".git")]) {
+    try {
+      utimesSync(p, old, old);
+    } catch {
+      /* best-effort ageing — the assertions below say whether it was enough */
+    }
+  }
+  return { root: join(root, "rmd-root"), repo, lane, branch };
+}
+
+test("W1-T2962: a lane with a live upstream branch survives a registration-driven pass", () => {
+  const { root, repo, lane } = unmanagedLaneFixture();
+  const summary = runAdhocLaneReapRung(cfg(root), () => {}, {
+    repoDir: repo,
+    enabled: () => true,
+    reap: ((r: string, o: Record<string, unknown>) =>
+      reapStaleWorktrees(r, {
+        ...o,
+        branchIsLiveUpstream: () => true,
+      })) as never,
+  });
+  assert.ok(summary);
+  assert.ok(existsSync(lane), "the unmanaged worktree survives because its branch is still live upstream");
+  assert.deepEqual(summary.reaped, [], "age never overrides a live branch on the registration-driven pass");
+  assert.ok(
+    (summary.keptReasons ?? []).some((k) => k.name === lane && k.reason === "live-branch"),
+    `the keep must be attributed to the branch on the unmanaged path — saw ${JSON.stringify(summary.keptReasons)}`,
+  );
+  assert.doesNotMatch(git(["worktree", "list", "--porcelain"], repo), /^prunable/m);
 });
 
 test("W1-T2847 (wiring): the run-task call site supplies repoDir, so the report has a producer rather than being an exported orphan", () => {
