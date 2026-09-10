@@ -11,8 +11,16 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "rule25-precheck.mjs");
 
 type Verdict = { ok: boolean; reason?: string; instrumentPaths: string[]; srcPaths: string[] };
-const { judgeRule25 } = (await import(pathToFileURL(SCRIPT).href)) as {
+type RunnerDeps = {
+  diffAgainstBase?: (base: string) => string;
+  changedFiles?: (base: string) => string[];
+  log?: (line: string) => void;
+  error?: (line: string) => void;
+};
+const { baseFromArgv, judgeRule25, runRule25Precheck } = (await import(pathToFileURL(SCRIPT).href)) as {
+  baseFromArgv: (argv: string[]) => string;
   judgeRule25: (diff: string, files: string[]) => Verdict;
+  runRule25Precheck: (base: string, deps?: RunnerDeps) => number;
 };
 
 function diffAdding(file: string, line: string): string {
@@ -25,6 +33,23 @@ function diffAdding(file: string, line: string): string {
     "",
   ].join("\n");
 }
+
+function capturePrecheck(base: string, deps: RunnerDeps = {}): { code: number; out: string[]; err: string[] } {
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = runRule25Precheck(base, {
+    ...deps,
+    log: (line) => out.push(line),
+    error: (line) => err.push(line),
+  });
+  return { code, out, err };
+}
+
+test("--base parsing defaults to origin/main and consumes the following argument", () => {
+  assert.equal(baseFromArgv(["node", "scripts/rule25-precheck.mjs"]), "origin/main");
+  assert.equal(baseFromArgv(["node", "scripts/rule25-precheck.mjs", "--base", "HEAD^"]), "HEAD^");
+  assert.equal(baseFromArgv(["node", "scripts/rule25-precheck.mjs", "--base"]), "origin/main");
+});
 
 test("#4950's repair shape is refused before push", () => {
   const files = [
@@ -65,6 +90,40 @@ test("the detector receives the diff, so a comment-only src change is not produc
   const instrumentDiff = diffAdding(instrument, "export const rule = true;");
   assert.equal(judgeRule25(instrumentDiff + diffAdding(product, "// comment only"), files).ok, true);
   assert.equal(judgeRule25(instrumentDiff + diffAdding(product, "export const w = 4;"), files).ok, false);
+});
+
+test("the runner's real diff readers report this instrument-only branch clean", () => {
+  const res = capturePrecheck("origin/main");
+  assert.equal(res.code, 0, `this branch should be rule-25 clean; stderr:\n${res.err.join("\n")}`);
+  assert.deepEqual(res.err, []);
+  assert.match(res.out.join("\n"), /rule25-precheck: OK --/);
+});
+
+test("the runner prints the reviewer refusal and names both sides of an entangled diff", () => {
+  const files = ["scripts/console-parity-ratchet.mjs", "src/lib/ledger-compact.ts"];
+  const diff = diffAdding(files[0], "export const instrument = true;") + diffAdding(files[1], "export const product = true;");
+  const res = capturePrecheck("HEAD^", {
+    diffAgainstBase: () => diff,
+    changedFiles: () => files,
+  });
+  assert.equal(res.code, 1);
+  assert.deepEqual(res.out, []);
+  assert.match(res.err.join("\n"), /THIS DIFF WILL BE REFUSED under Standing rule 25/);
+  assert.match(res.err.join("\n"), /instrument path\(s\): scripts\/console-parity-ratchet\.mjs/);
+  assert.match(res.err.join("\n"), /src\/ product path\(s\): src\/lib\/ledger-compact\.ts/);
+  assert.match(res.err.join("\n"), /TO FIX, either: \(1\) split/);
+});
+
+test("the runner reports an unreadable diff in-process rather than reporting clean", () => {
+  const res = capturePrecheck("refs/heads/no-such-base-xyzzy", {
+    diffAgainstBase: () => {
+      throw new Error("bad base");
+    },
+  });
+  assert.equal(res.code, 2);
+  assert.deepEqual(res.out, []);
+  assert.match(res.err.join("\n"), /could not read the diff against refs\/heads\/no-such-base-xyzzy \(bad base\)/);
+  assert.match(res.err.join("\n"), /REFUSING to report clean/);
 });
 
 test("an unreadable diff exits 2 rather than reporting clean", () => {

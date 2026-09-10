@@ -19,7 +19,12 @@ import { detectInstrumentEntanglement } from "../src/lib/review.js";
 import { isMainModule } from "./lib/argv.mjs";
 import { gitOrThrow } from "./lib/git.mjs";
 
-const BASE = process.argv.includes("--base") ? process.argv[process.argv.indexOf("--base") + 1] : "origin/main";
+export function baseFromArgv(argv) {
+  const baseIndex = argv.indexOf("--base");
+  return baseIndex === -1 ? "origin/main" : (argv[baseIndex + 1] ?? "origin/main");
+}
+
+const BASE = baseFromArgv(process.argv);
 
 function diffAgainstBase(base) {
   return gitOrThrow(["diff", `${base}...HEAD`]);
@@ -40,36 +45,44 @@ export function judgeRule25(diff, files) {
   return { ok: false, ...verdict };
 }
 
-function main() {
+export function runRule25Precheck(base, deps = {}) {
+  const readDiff = deps.diffAgainstBase ?? diffAgainstBase;
+  const readFiles = deps.changedFiles ?? changedFiles;
+  const log = deps.log ?? console.log;
+  const error = deps.error ?? console.error;
   let diff;
   let files;
   try {
-    diff = diffAgainstBase(BASE);
-    files = changedFiles(BASE);
+    diff = readDiff(base);
+    files = readFiles(base);
   } catch (e) {
-    console.error(`rule25-precheck: could not read the diff against ${BASE} (${e.message}) — REFUSING to report clean`);
+    error(`rule25-precheck: could not read the diff against ${base} (${e.message}) — REFUSING to report clean`);
     return 2;
   }
 
   const verdict = judgeRule25(diff, files);
   if (verdict.ok) {
-    console.log(`rule25-precheck: OK -- ${verdict.reason}`);
+    log(`rule25-precheck: OK -- ${verdict.reason}`);
     return 0;
   }
 
-  console.error(
+  error(
     "rule25-precheck: THIS DIFF WILL BE REFUSED under Standing rule 25 -- it changes a measurement " +
       "INSTRUMENT and src/ PRODUCT code together, and remudero-review refuses that combination.",
   );
-  console.error(`  instrument path(s): ${verdict.instrumentPaths.join(", ")}`);
-  console.error(`  src/ product path(s): ${verdict.srcPaths.join(", ")}`);
-  console.error(
+  error(`  instrument path(s): ${verdict.instrumentPaths.join(", ")}`);
+  error(`  src/ product path(s): ${verdict.srcPaths.join(", ")}`);
+  error(
     "  TO FIX, either: (1) split -- land the instrument alone (its own test/ falsifier and docs/ " +
       "may ride with it), then the product change; or (2) if the instrument is a per-file LEDGER " +
       "rather than a score FLOOR, add it to ENTANGLEMENT_EXEMPT_INSTRUMENTS with a named reason. " +
       "The second option changes the isolation policy and needs review; this script performs neither remedy.",
   );
   return 1;
+}
+
+function main() {
+  return runRule25Precheck(BASE);
 }
 
 if (isMainModule(import.meta.url)) process.exit(main());
