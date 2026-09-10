@@ -54,7 +54,11 @@ import {
   priorReviewVerdictFromLedger,
   type ReviewVerdict,
 } from "./review.js";
-import { armOutcomeArmed } from "./sweep.js";
+
+function armOutcomeArmed(outcome: ArmOutcome | void): boolean {
+  if (outcome === undefined) return true;
+  return outcome === "armed" || outcome === "direct-merged";
+}
 
 // ── PRIVATE REST mirrors — see this file's own header for why these are duplicates ─────────────
 

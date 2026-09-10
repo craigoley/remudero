@@ -31,6 +31,7 @@ import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 // verdict once, so every retro PR in this repo's history was refused and then logged as armed.
 
 const SRC = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+const SWEEP_SRC = readFileSync(new URL("../src/lib/sweep.ts", import.meta.url), "utf8");
 
 /** The window of source around a lane's own console line — where that lane's arm site lives. */
 function laneWindow(anchor: string, before = 14): string {
@@ -283,22 +284,22 @@ test("SITE sweep adapter returns the arm outcome so the sweep can read it at all
   // this test asserts the invariant across BOTH halves rather than pinning literals to whichever
   // half currently holds them. Pinning a literal to a location is what made it stale here twice.
   const anchor = "arm: (pr) => {";
-  const at = SRC.indexOf(anchor);
+  const at = SWEEP_SRC.indexOf(anchor);
   assert.ok(at > 0, `anchor not found, the test is stale: ${anchor}`);
-  const w = SRC.slice(at, at + 1400);
+  const w = SWEEP_SRC.slice(at, at + 1400);
   assert.match(w, /const outcome = armAndLogOutcome\(\s*pr\.prUrl,\s*pr\.taskId,\s*log,/, "still calls the SAME shared wrapper with the SAME prUrl/taskId/log every other lane uses");
   assert.match(w, /return sweepArmAttemptOutcome\(outcome, attemptError\);/, "the adapter's LAST statement is a return — no path falls off the end into an implicit undefined");
   assert.equal(
-    SRC.includes("arm: (pr) => {\n      armAutoMerge(pr.prUrl, pr.taskId);\n    },"),
+    SWEEP_SRC.includes("arm: (pr) => {\n      armAutoMerge(pr.prUrl, pr.taskId);\n    },"),
     false,
     "the original discarding form (no return at all) is gone",
   );
 
   // The fold it delegates to is total: both of its returns are present, so neither the bare
   // outcome nor the richer classified shape can be dropped on the way back to the sweep.
-  const foldAt = SRC.indexOf("export function sweepArmAttemptOutcome(");
+  const foldAt = SWEEP_SRC.indexOf("export function sweepArmAttemptOutcome(");
   assert.ok(foldAt > 0, "the extracted fold is gone — the adapter now delegates to nothing");
-  const fold = SRC.slice(foldAt, foldAt + 700);
+  const fold = SWEEP_SRC.slice(foldAt, foldAt + 700);
   assert.match(fold, /if \(outcome !== "arm-error-ignored" \|\| attemptError === undefined\) return outcome;/, "the base outcome is returned, never discarded");
   assert.match(fold, /return \{ outcome, failureClass \};/, "a classified failure is returned as the richer shape, never discarded either");
 
