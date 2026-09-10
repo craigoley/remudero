@@ -1,0 +1,41 @@
+/* apps/dashboard/src/theme.css — dark, dense, operator-first (design (v), from W1-T153).
+   Phone-first: the grid below starts at two columns and grows, rather than shrinking from a
+   desktop layout that then wraps badly on the device an operator actually carries. */
+:root {
+  --bg: #0d1117;
+  --panel: #151b23;
+  --fg: #e6edf3;
+  --fg-dim: #8b949e;
+  --grid: #232b36;
+  --accent: #4cc2ff;
+  --blocked: #f85149;
+  --running: #3fb950;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.app { padding: 12px; max-width: 1100px; margin: 0 auto; }
+.app__head h1 { font-size: 15px; letter-spacing: 0.12em; text-transform: uppercase; margin: 0 0 8px; }
+.app__unconfigured, .app__error { color: var(--blocked); margin: 4px 0; }
+.now, .series { background: var(--panel); border: 1px solid var(--grid); border-radius: 6px; padding: 10px; margin: 10px 0; }
+.now h2, .series figcaption { font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-dim); margin: 0 0 8px; }
+.now__stamp { color: var(--fg-dim); margin: 0 0 8px; font-size: 12px; }
+.now__grid { list-style: none; display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin: 0; padding: 0; }
+@media (min-width: 560px) { .now__grid { grid-template-columns: repeat(5, 1fr); } }
+.now__cell { display: flex; flex-direction: column; padding: 6px 8px; border: 1px solid var(--grid); border-radius: 4px; }
+.now__n { font-size: 20px; font-variant-numeric: tabular-nums; }
+.now__k { font-size: 11px; color: var(--fg-dim); }
+.now__cell--blocked .now__n { color: var(--blocked); }
+.now__cell--running .now__n { color: var(--running); }
+.series figcaption { display: flex; gap: 10px; flex-wrap: wrap; }
+.series__spec { color: var(--fg-dim); }
+.series__absent-reason { color: var(--fg-dim); margin: 0; }
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}

@@ -1,28 +1,37 @@
 {
   "//": [
-    "W1-T2902: apps/dashboard could not load as shipped -- index.html's <script src=\"./main.js\">",
-    "expected a compiled file BESIDE it, but the root tsconfig.json (outDir: dist, rootDir: .)",
-    "only ever emitted to dist/apps/dashboard/src/main.js, and nothing copied index.html there.",
-    "This package-local tsconfig is the 'a build that emits beside index.html' half of that fix",
-    "(the other half is index.html's own <script type=\"importmap\"> for the bare",
-    "@remudero/api-client/client specifier, since a browser -- unlike tsx/Node -- cannot resolve",
-    "a package.json 'exports' map on its own). `rootDir` is the repo root because this package's",
-    "one real dependency, packages/api-client/src/client.ts, lives outside apps/dashboard/ -- the",
-    "narrowest rootDir TypeScript accepts is their common ancestor. `outDir: build` keeps the",
-    "compiled tree out of apps/dashboard/src (never mixed with hand-written sources) while still",
-    "landing everything UNDER apps/dashboard/, i.e. beside index.html, not in the monorepo's",
-    "shared dist/. See index.html's own script/importmap tags for the exact resulting paths."
+    "W1-T3177: BROWSER-SHAPED, and deliberately not an extension of the repo root's config.",
+    "The root is Node-shaped -- module/moduleResolution nodenext, types [node], no jsx -- and this",
+    "is a browser SPA: bundler resolution (Vite owns resolution, not tsc), jsx react-jsx (the",
+    "runtime transform, so no React import per file) and vite/client types for import.meta.env.",
+    "Those two sets cannot be one config, which is why the root's `apps/*/src/**/*.ts` include was",
+    "removed in the same change: with it, the root run typechecked this tree under Node rules and",
+    "failed on every .tsx.",
+    "noEmit: Vite emits the bundle. tsc here is a TYPE GATE only -- an outDir would put a second,",
+    "unreferenced copy of the tree beside the real build.",
+    "src/main.ts (dashboard v0) is EXCLUDED rather than deleted: it is the pre-React shell, it does",
+    "not compile under bundler resolution (it resolves @remudero/api-client/client through a",
+    "package exports map tsc will not read here), and the strangler ruling says the thing being",
+    "replaced is not deleted by the task that replaces it. Nothing imports it; it is archived in",
+    "place, and removing it is a later parity task."
   ],
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ES2022",
+    "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2023", "DOM"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "jsx": "react-jsx",
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "rootDir": "../..",
-    "outDir": "build"
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true
   },
-  "include": ["src/**/*.ts", "../../packages/api-client/src/client.ts"]
+  "include": ["src", "vite.config.ts"],
+  "exclude": ["src/main.ts", "build", "node_modules"]
 }

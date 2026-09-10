@@ -72,10 +72,10 @@
     "source-size-signal": "node scripts/source-size-ratchet.mjs",
     "source-size-ratchet": "node scripts/source-size-ratchet.mjs",
     "source-size-baseline:legacy": "node scripts/source-size-ratchet.mjs --baseline scripts/source-size-baseline.json",
-  "comment-load-ratchet": "node scripts/comment-load-ratchet.mjs",
-  "build:console": "npm --prefix apps/dashboard run build",
+    "comment-load-ratchet": "node scripts/comment-load-ratchet.mjs",
+    "build:console": "npm --prefix apps/dashboard run build",
     "comment-load-signal": "node scripts/comment-load-ratchet.mjs --no-record",
-  "comment-load": "node scripts/comment-load-ratchet.mjs --print",
+    "comment-load": "node scripts/comment-load-ratchet.mjs --print",
     "console-parity": "node --import tsx scripts/console-parity-ratchet.mjs",
     "census:bound-kind": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/bound-kind-declared.test.ts",
     "census:ledger-literal": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/ledger-literal-census.test.ts",
@@ -86,7 +86,10 @@
     "census:authority": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/authority-ratchet.test.ts",
     "worker-branch-shape:check": "node scripts/worker-branch-shape.mjs",
     "commitlint": "commitlint",
-    "changelog": "commit-and-tag-version"
+    "changelog": "commit-and-tag-version",
+    "test:dashboard": "npm --prefix apps/dashboard run test",
+    "typecheck:dashboard": "npm --prefix apps/dashboard run typecheck",
+    "dashboard:ci": "npm run --silent typecheck:dashboard && npm run --silent test:dashboard && npm run --silent build:console"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.263",
@@ -117,7 +120,7 @@
   },
   "_overridesRationale": {
     "qs": "Forces typed-rest-client's qs 6.15.1 pin and Express/body-parser qs ranges to 6.16.0, patched for GHSA-4mjr-xmp4-gh2g and GHSA-x5fp-wj9c-mxmx.",
-    "js-yaml": "Forces cosmiconfig's js-yaml 4.3.1, reached only through @commitlint/cli, to 4.3.2 — patched for GHSA-2883-xcg3-v3hh (maxTotalMergeKeys does not bound CPU on empty merge keys). Dev-scope, and no direct dependency declares js-yaml, so an override is the only lever short of waiting on cosmiconfig."
+    "js-yaml": "Forces cosmiconfig's js-yaml 4.3.1, reached only through @commitlint/cli, to 4.3.2 \u2014 patched for GHSA-2883-xcg3-v3hh (maxTotalMergeKeys does not bound CPU on empty merge keys). Dev-scope, and no direct dependency declares js-yaml, so an override is the only lever short of waiting on cosmiconfig."
   },
   "commit-and-tag-version": {
     "skip": {

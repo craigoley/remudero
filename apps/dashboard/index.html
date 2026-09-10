@@ -1,105 +1,19 @@
 <!DOCTYPE html>
 <!--
-  Dashboard v0 (shell 0, MASTER-PLAN §7 WS-5a -> W3-T2): read-only live board, plus the
-  human-in-the-loop panel actions (W3-T5): answer/approve/Pause-Resume-STOP,
-  plus the plan→task→PR graph + interactive plan adjustment (W3-T6, MASTER-PLAN §7B):
-  submit feedback, answer grills, accept/reject a proposal.
-
-  No bundler by design (the W3-T2 decision): src/main.ts is plain TypeScript, typechecked
-  and compiled by `apps/dashboard`'s own `npm run build` (tsc -p tsconfig.json) -- no new
-  build tooling, just this package's own tsconfig rather than the repo root's (which emits
-  to the shared `dist/`, not beside this file -- W1-T2902). This page loads that compiled
-  output as a plain ES module, resolving the one bare specifier it imports
-  (`@remudero/api-client/client`) through the import map below -- a browser, unlike
-  tsx/Node, cannot read a package.json `exports` map on its own.
-
-  Wiring the daemon to actually SERVE this directory as static files over Tailscale (the
-  "browser" half of shell 0) is explicit follow-on work, same as the other design panels
-  this v0 slice defers (plan-doc render, worker stream tails, DECISIONS feed, a rendered
-  question/MANUAL backlog -- see this task's PR body). Until then: `npm run build` in this
-  directory, then open this file (served, not `file://` -- a module script's import map is
-  subject to the same CORS rules as any other module fetch), pointed at a reachable daemon
-  via `?daemon=<url>` with a WRITE-scoped `?token=` (the same query-param placeholder W3-T2
-  shipped -- a bearer token belongs in a query string even less than in localStorage; a real
-  auth UX is later work).
+  W1-T3177 — the first screen on the new stack. Vite's entry: it rewrites the module script below
+  to the hashed bundle at build time, so there is no import map here and no path into `build/`
+  written by hand (dashboard v0's page needed both; it is archived beside this file as
+  v0.index.html, unbuilt and undeleted).
 -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Remudero — Dashboard v0</title>
+    <title>Remudero — console</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
   </head>
   <body>
-    <h1>Remudero — task board</h1>
-    <div id="board">Loading…</div>
-
-    <section id="controls" aria-label="Human-in-the-loop panel actions">
-      <h2>Fleet control</h2>
-      <p id="controls-status" role="status"></p>
-
-      <div>
-        <label>reason (optional) <input id="control-reason" type="text" /></label>
-        <button id="pause-btn" type="button">Pause</button>
-        <button id="resume-btn" type="button">Resume</button>
-        <button id="stop-btn" type="button">STOP</button>
-      </div>
-
-      <div>
-      </div>
-
-      <h3>Answer a question</h3>
-      <form id="answer-question-form">
-        <label>task id <input id="answer-task-id" type="text" required /></label>
-        <label>answer <input id="answer-text" type="text" required /></label>
-        <button type="submit">Answer</button>
-      </form>
-
-      <h3>Approve a MANUAL item</h3>
-      <form id="approve-manual-form">
-        <label>task id <input id="approve-task-id" type="text" required /></label>
-        <label>issue url <input id="approve-issue-url" type="url" required /></label>
-        <button type="submit">Approve</button>
-      </form>
-    </section>
-
-    <!--
-      W3-T6 (MASTER-PLAN §7B): the plan→task→PR graph + interactive plan adjustment -- the
-      panel's front door onto the feedback inbox (plan/feedback/, W1-T40) and the provenance
-      graph (rmd trace, W1-T43). Submitting feedback here is ALWAYS captured with origin=ui
-      (src/lib/panel-graph.ts); answering a grill reuses the SAME submit form via the
-      "answering" hidden replyTo field, wired by #inbox-list's per-entry "Answer" button.
-    -->
-    <section id="feedback" aria-label="Feedback inbox + plan→task→PR graph">
-      <h2>Feedback inbox</h2>
-      <p id="feedback-status" role="status"></p>
-
-      <h3>Submit feedback</h3>
-      <form id="submit-feedback-form">
-        <input id="submit-feedback-reply-to" type="hidden" />
-        <p id="submit-feedback-reply-banner" hidden></p>
-        <label>text <input id="submit-feedback-text" type="text" required /></label>
-        <label>attachment url (optional) <input id="submit-feedback-attachment" type="url" /></label>
-        <button type="submit">Submit</button>
-        <button id="submit-feedback-cancel-reply" type="button" hidden>Cancel reply</button>
-      </form>
-
-      <h3>Inbox</h3>
-      <div id="inbox-list">Loading…</div>
-
-      <h3>Plan→task→PR graph</h3>
-      <form id="trace-form">
-        <label>task or feedback id <input id="trace-id" type="text" required /></label>
-        <button type="submit">Trace</button>
-      </form>
-      <div id="trace-graph"></div>
-    </section>
-
-    <!-- W1-T2902: resolves the ONE bare specifier build/apps/dashboard/src/main.js imports
-         (@remudero/api-client/client) to this same build's compiled copy of it -- must appear
-         before the module script below; a document may carry only one import map. -->
-    <script type="importmap">
-      { "imports": { "@remudero/api-client/client": "./build/packages/api-client/src/client.js" } }
-    </script>
-    <script type="module" src="./build/apps/dashboard/src/main.js"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
