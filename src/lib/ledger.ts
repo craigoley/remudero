@@ -408,6 +408,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T2436: `priorPrerequisitePrFor` (run-task.ts) folds these by `pr_url`; the ledger is that
   // capability's only memory, so archived away the rung opens a SECOND prerequisite PR.
   "fix.prerequisite_opened",
+  // W1-T3309: `previousInstrumentEntanglementFromLedger` (run-task.ts) replays these rows to compare
+  // this fix round's instrument/src paths against the previous round's — an unchanged pair means the
+  // last dispatch moved nothing. The read is NOT scoped to head_sha, so rotating the row away leaves
+  // no prior value, which reads exactly like a first attempt and repeats the dispatch it must stop.
+  "fix.instrument_entangled",
   "dep-review.decided",
   // W1-T2705: the dedup marker for a migration already submitted. `depReviewOutcomeFor`
   // (run-task.ts) reads it back per PR + head and answers "migrate" only when present —

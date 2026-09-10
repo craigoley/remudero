@@ -111,6 +111,7 @@
     "test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts": 0,
     "test/a-refused-draft-waits-out-the-stated-window.test.ts": 1506,
     "test/a-relocation-across-files-is-still-a-relocation.test.ts": 0,
+    "test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts": 0,
     "test/a-renamed-shard-silently-becomes-a-second-concern.test.ts": 713,
     "test/a-reply-is-understood-before-it-is-acted-on.test.ts": 1287,
     "test/a-report-with-no-reader-is-not-a-report.test.ts": 866,
