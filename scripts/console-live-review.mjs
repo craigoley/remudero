@@ -195,15 +195,16 @@ export function writeArtefacts(report, outDir) {
 }
 
 // ── THE LIVE PATH ────────────────────────────────────────────────────────────────────────────────
-//
-// diff-cov: process-boundary — a real browser against a real console. Every DECISION above is pure
-// and covered; what is below is the irreducible I/O those decisions are made about, and a unit test
-// cannot launch Chromium at a running daemon.
 
 /** Open one viewport against the live console and measure what it renders. */
-export async function defaultOpenViewport({ baseUrl, viewport, outDir }) {
-  const { chromium } = await import("playwright");
-  const { AxeBuilder } = await import("@axe-core/playwright");
+export async function defaultOpenViewport({
+  baseUrl,
+  viewport,
+  outDir,
+  playwright = import("playwright"),
+  axePlaywright = import("@axe-core/playwright"),
+}) {
+  const [{ chromium }, { AxeBuilder }] = await Promise.all([playwright, axePlaywright]);
 
   const browser = await chromium.launch();
   try {
@@ -270,12 +271,19 @@ export async function defaultOpenViewport({ baseUrl, viewport, outDir }) {
 
 /** The pinned browser's presence, in test/browser-absence.ts's own three-outcome shape. Imported
  *  lazily so this module stays loadable by plain `node` for the pure functions above. */
-async function defaultBrowserAbsence() {
+export async function defaultBrowserAbsence({
+  browserAbsence = import("../test/browser-absence.ts"),
+  fs = import("node:fs"),
+  review = import("../src/lib/review.ts"),
+  workerHome = import("../src/lib/worker-home.ts"),
+} = {}) {
   try {
-    const { classifyBrowserAbsence } = await import("../test/browser-absence.ts");
-    const { readFileSync: rf, existsSync: ex } = await import("node:fs");
-    const { requiredChromiumDirs } = await import("../src/lib/review.ts");
-    const { playwrightCacheRoot } = await import("../src/lib/worker-home.ts");
+    const [
+      { classifyBrowserAbsence },
+      { readFileSync: rf, existsSync: ex },
+      { requiredChromiumDirs },
+      { playwrightCacheRoot },
+    ] = await Promise.all([browserAbsence, fs, review, workerHome]);
     void requiredChromiumDirs;
     const root = playwrightCacheRoot();
     let text = null;
@@ -295,7 +303,14 @@ async function defaultBrowserAbsence() {
   }
 }
 
-export async function main({ argv = process.argv.slice(2), env = process.env, log = console.log } = {}) {
+export async function main({
+  argv = process.argv.slice(2),
+  env = process.env,
+  log = console.log,
+  openViewport = defaultOpenViewport,
+  browserAbsence = defaultBrowserAbsence,
+  write = writeArtefacts,
+} = {}) {
   const refusal = refuseTokenSurface({ argv, env });
   if (refusal) {
     log(refusal);
@@ -312,17 +327,19 @@ export async function main({ argv = process.argv.slice(2), env = process.env, lo
   const outDir = env.CONSOLE_REVIEW_OUT ?? join(process.cwd(), "console-review");
   const report = await reviewConsole({
     baseUrl,
-    openViewport: defaultOpenViewport,
-    browserAbsence: await defaultBrowserAbsence(),
+    openViewport,
+    browserAbsence: await browserAbsence(),
     outDir,
   });
   log(formatReport(report));
-  log(`\nartefacts: ${writeArtefacts(report, outDir)}`);
+  log(`\nartefacts: ${write(report, outDir)}`);
   // EXIT 0 EVEN WITH FINDINGS. This REPORTS; it does not gate (design i). A non-zero exit here would
   // recruit it into CI, where a restarting daemon becomes a red build.
   return everLooked(report) ? 0 : 1;
 }
 
+// diff-cov: process-boundary - direct CLI guard; imported tests cover `main()`, while this wrapper
+// only translates that return code into process.exit for a real invocation.
 if (process.argv[1] && process.argv[1].endsWith("console-live-review.mjs")) {
   main().then((code) => process.exit(code));
 }

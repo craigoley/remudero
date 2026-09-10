@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
-import { dirname, join, join as joinPath } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // W1-T3185 — NOTHING REVIEWED THE RUNNING CONSOLE.
@@ -36,13 +35,34 @@ const mod = (await import(SCRIPT_URL)) as {
     byClass: Array<{ kind: string; count: number }>;
     dominant: { kind: string; count: number; share: number } | null;
   };
+  defaultOpenViewport: (o: Record<string, unknown>) => Promise<{
+    lookedAt: boolean;
+    reason: string | null;
+    detail: string | null;
+    screenshot: string | null;
+    findings: {
+      axe: { violations: number; serious: number; nodes: number; rules: string[] };
+      composition: { total: number; dominant: { kind: string; count: number; share: number } };
+      typeScale: Array<{ px: number; count: number; small: boolean }>;
+      smallTargets: unknown[];
+    };
+  }>;
+  defaultBrowserAbsence: (o?: Record<string, unknown>) => Promise<{ kind: string; reason?: string; missing?: string[] }>;
+  writeArtefacts: (report: unknown, outDir: string) => string;
   everLooked: (r: { viewports: Array<{ lookedAt: boolean }> }) => boolean;
   formatReport: (r: unknown) => string;
   reviewConsole: (o: Record<string, unknown>) => Promise<{
     target: string;
     viewports: Array<{ name: string; lookedAt: boolean; reason: string | null; findings: unknown }>;
   }>;
-  main: (o: { argv?: string[]; env?: Record<string, string>; log?: (m: string) => void }) => Promise<number>;
+  main: (o: {
+    argv?: string[];
+    env?: Record<string, string>;
+    log?: (m: string) => void;
+    openViewport?: (o: { viewport: { name: string } }) => Promise<unknown>;
+    browserAbsence?: () => Promise<{ kind: string; reason?: string }>;
+    write?: (report: unknown, outDir: string) => string;
+  }) => Promise<number>;
 };
 
 /** A viewport opener that reports one plausible live reading. */
@@ -77,16 +97,260 @@ test("W1-T3185: the review reports axe, row composition, type scale and target s
   assert.match(out, /element\(s\) below 12px/, "called out as fine print");
   assert.match(out, /small targets  : 1 below 24px/, "and the sub-minimum tap target");
   assert.match(out, /screenshot/, "with an artefact the operator can actually look at");
+});
 
-  // AND THE LIVE PATH MUST ACTUALLY COLLECT ALL FOUR. The cases above inject a reading, so they
-  // prove the REPORT combines them; they cannot prove `defaultOpenViewport` still gathers them.
-  // MEASURED: a mutant that collected an EMPTY row set killed no test until this assertion existed.
-  // Asserted on source text because the collection itself is a real browser against a real console.
-  const src = readFileSync(joinPath(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "console-live-review.mjs"), "utf8");
-  const live = src.slice(src.indexOf("export async function defaultOpenViewport"));
-  for (const collected of ["composition(rows)", "typeScale(sizes)", "smallTargets(boxes)", "AxeBuilder"]) {
-    assert.ok(live.includes(collected), `the live path must still collect ${collected}`);
-  }
+test("W1-T3185: the live viewport opener collects the same four findings from the page", async () => {
+  const screenshotCalls: unknown[] = [];
+  const closed: string[] = [];
+  const page = {
+    goto: async () => ({ ok: () => true, status: () => 200 }),
+    $$eval: async (selector: string, fn: (els: unknown[]) => unknown) => {
+      if (selector.includes("data-row")) {
+        return fn([
+          { getAttribute: () => "verify-human" },
+          { getAttribute: () => "verify-human" },
+          { getAttribute: () => "escalation" },
+        ]);
+      }
+      if (selector === "body *") {
+        return fn([
+          { textContent: "tiny", children: [], fontSize: "11px" },
+          { textContent: "normal", children: [], fontSize: "14px" },
+          { textContent: "wrapper", children: [{}], fontSize: "20px" },
+        ]);
+      }
+      if (selector.includes("button")) {
+        return fn([
+          { tagName: "BUTTON", getBoundingClientRect: () => ({ width: 18, height: 20 }) },
+          { tagName: "A", getBoundingClientRect: () => ({ width: 44, height: 44 }) },
+        ]);
+      }
+      throw new Error(`unexpected selector ${selector}`);
+    },
+    screenshot: async (opts: unknown) => {
+      screenshotCalls.push(opts);
+    },
+  };
+  const context = { newPage: async () => page };
+  const browser = {
+    newContext: async (opts: unknown) => {
+      assert.deepEqual(opts, { viewport: { width: 390, height: 844 } });
+      return context;
+    },
+    close: async () => {
+      closed.push("closed");
+    },
+  };
+  const viewport = { name: "phone", width: 390, height: 844 };
+  const styleGlobal = globalThis as unknown as {
+    getComputedStyle?: (el: { fontSize: string }) => { fontSize: string };
+  };
+  const previousGetComputedStyle = styleGlobal.getComputedStyle;
+  const result = await (async () => {
+    styleGlobal.getComputedStyle = (el) => ({
+      fontSize: el.fontSize,
+    });
+    try {
+      return await mod.defaultOpenViewport({
+        baseUrl: "http://127.0.0.1:4317/",
+        viewport,
+        outDir: "/tmp/console-live-review-test",
+        playwright: Promise.resolve({ chromium: { launch: async () => browser } }),
+        axePlaywright: Promise.resolve({
+          AxeBuilder: class {
+            analyze() {
+              return {
+                violations: [
+                  { id: "label", impact: "serious", nodes: [{}, {}] },
+                  { id: "color-contrast", impact: "moderate", nodes: [{}] },
+                ],
+              };
+            }
+          },
+        }),
+      });
+    } finally {
+      styleGlobal.getComputedStyle = previousGetComputedStyle;
+    }
+  })();
+
+  assert.equal(result.lookedAt, true);
+  assert.equal(result.findings.axe.violations, 2);
+  assert.equal(result.findings.axe.serious, 1);
+  assert.equal(result.findings.axe.nodes, 3);
+  assert.deepEqual(result.findings.axe.rules, ["label"]);
+  assert.equal(result.findings.composition.total, 3);
+  assert.equal(result.findings.composition.dominant.kind, "verify-human");
+  assert.deepEqual(result.findings.typeScale, [
+    { px: 11, count: 1, small: true },
+    { px: 14, count: 1, small: false },
+  ]);
+  assert.equal(result.findings.smallTargets.length, 1);
+  assert.equal(result.screenshot, "/tmp/console-live-review-test/console-phone.png");
+  assert.deepEqual(screenshotCalls, [{ path: "/tmp/console-live-review-test/console-phone.png", fullPage: true }]);
+  assert.deepEqual(closed, ["closed"], "the live browser is closed after collection");
+});
+
+test("W1-T3185: the live viewport opener reports an unreachable target without findings", async () => {
+  const closed: string[] = [];
+  const browser = {
+    newContext: async () => ({
+      newPage: async () => ({
+        goto: async () => ({ ok: () => false, status: () => 502 }),
+      }),
+    }),
+    close: async () => {
+      closed.push("closed");
+    },
+  };
+
+  const result = await mod.defaultOpenViewport({
+    baseUrl: "http://down/",
+    viewport: { name: "phone", width: 390, height: 844 },
+    playwright: Promise.resolve({ chromium: { launch: async () => browser } }),
+    axePlaywright: Promise.resolve({
+      AxeBuilder: class {
+        analyze() {
+          throw new Error("axe must not run when the target is unreachable");
+        }
+      },
+    }),
+  });
+
+  assert.deepEqual(result, mod.notLookedAt("target unreachable", "HTTP 502"));
+  assert.deepEqual(closed, ["closed"], "even unreachable targets close the browser");
+});
+
+test("W1-T3185: browser absence classification uses the pinned Playwright manifest shape", async () => {
+  const installChecks: string[] = [];
+  const absence = await mod.defaultBrowserAbsence({
+    browserAbsence: Promise.resolve({
+      classifyBrowserAbsence: ({ browsersJsonText, isInstalled }: { browsersJsonText: string; isInstalled: (dir: string) => boolean }) => {
+        assert.equal(browsersJsonText, '{"browsers":[]}');
+        assert.equal(isInstalled("chromium-1234"), true);
+        assert.deepEqual(installChecks, ["/cache/chromium-1234/INSTALLATION_COMPLETE"]);
+        return { kind: "present" };
+      },
+    }),
+    fs: Promise.resolve({
+      readFileSync: () => '{"browsers":[]}',
+      existsSync: (path: string) => {
+        installChecks.push(path);
+        return true;
+      },
+    }),
+    review: Promise.resolve({ requiredChromiumDirs: () => [] }),
+    workerHome: Promise.resolve({ playwrightCacheRoot: () => "/cache" }),
+  });
+
+  assert.deepEqual(absence, { kind: "present" });
+
+  const missingManifest = await mod.defaultBrowserAbsence({
+    browserAbsence: Promise.resolve({
+      classifyBrowserAbsence: ({ browsersJsonText }: { browsersJsonText: string | null }) => {
+        assert.equal(browsersJsonText, null);
+        return { kind: "unknown", reason: "manifest missing" };
+      },
+    }),
+    fs: Promise.resolve({
+      readFileSync: () => {
+        throw new Error("missing");
+      },
+      existsSync: () => false,
+    }),
+    review: Promise.resolve({ requiredChromiumDirs: () => [] }),
+    workerHome: Promise.resolve({ playwrightCacheRoot: () => "/cache" }),
+  });
+
+  assert.deepEqual(missingManifest, { kind: "unknown", reason: "manifest missing" });
+});
+
+test("W1-T3185: browser absence classification fails closed when its imports cannot load", async () => {
+  const absence = await mod.defaultBrowserAbsence({
+    browserAbsence: Promise.reject(new Error("classifier unavailable")),
+    fs: Promise.resolve({}),
+    review: Promise.resolve({}),
+    workerHome: Promise.resolve({}),
+  });
+
+  assert.equal(absence.kind, "unknown");
+  assert.match(absence.reason!, /classifier unavailable/);
+});
+
+test("W1-T3185: artefacts are written beside screenshots for operator review", () => {
+  const outDir = join("/tmp", "console-live-review-artefacts");
+  const report = { target: "http://127.0.0.1:4317/", startedAt: "2026-09-08T00:00:00.000Z", viewports: [] };
+  const path = mod.writeArtefacts(report, outDir);
+
+  assert.equal(path, join(outDir, "console-live-review.json"));
+});
+
+test("W1-T3185: main reports usage, success artefacts and non-gating findings through injected live seams", async () => {
+  const missingUrl: string[] = [];
+  assert.equal(await mod.main({ argv: [], env: {}, log: (m) => missingUrl.push(m) }), 2);
+  assert.match(missingUrl.join("\n"), /set CONSOLE_BASE_URL/);
+
+  const lines: string[] = [];
+  const code = await mod.main({
+    argv: [],
+    env: { CONSOLE_BASE_URL: "http://127.0.0.1:4317/", CONSOLE_REVIEW_OUT: "/tmp/console-live-main" },
+    browserAbsence: async () => ({ kind: "present" }),
+    openViewport: async ({ viewport }: { viewport: { name: string } }) => ({
+      ...(await openOk({ viewport })),
+      screenshot: null,
+    }),
+    write: (_report: unknown, outDir: string) => join(outDir, "console-live-review.json"),
+    log: (m) => lines.push(m),
+  });
+
+  assert.equal(code, 0, "findings are reported without gating the operator run");
+  assert.match(lines.join("\n"), /axe\s+: 2 violation\(s\), 2 serious/);
+  assert.match(lines.join("\n"), /artefacts: \/tmp\/console-live-main\/console-live-review.json/);
+});
+
+test("W1-T3185: main returns a not-looked-at exit when the browser classifier quarantines the run", async () => {
+  const lines: string[] = [];
+  const code = await mod.main({
+    argv: [],
+    env: { CONSOLE_BASE_URL: "http://127.0.0.1:4317/" },
+    browserAbsence: async () => ({ kind: "unknown", reason: "manifest unreadable" }),
+    openViewport: async () => {
+      throw new Error("openViewport must not run when the browser is not known present");
+    },
+    write: (_report: unknown, outDir: string) => join(outDir, "console-live-review.json"),
+    log: (m) => lines.push(m),
+  });
+
+  assert.equal(code, 1);
+  assert.match(lines.join("\n"), /NOT LOOKED AT/);
+});
+
+test("W1-T3185: the live viewport opener can run without writing screenshots", async () => {
+  const browser = {
+    newContext: async () => ({
+      newPage: async () => ({
+        goto: async () => ({ ok: () => true, status: () => 200 }),
+        $$eval: async () => [],
+      }),
+    }),
+    close: async () => {},
+  };
+
+  const result = await mod.defaultOpenViewport({
+    baseUrl: "http://127.0.0.1:4317/",
+    viewport: { name: "phone", width: 390, height: 844 },
+    playwright: Promise.resolve({ chromium: { launch: async () => browser } }),
+    axePlaywright: Promise.resolve({
+      AxeBuilder: class {
+        analyze() {
+          return { violations: [] };
+        }
+      },
+    }),
+  });
+
+  assert.equal(result.lookedAt, true);
+  assert.equal(result.screenshot, null);
 });
 
 test("W1-T3185: an unreachable or timing-out target is reported as NOT LOOKED AT, never as zero findings", async () => {
