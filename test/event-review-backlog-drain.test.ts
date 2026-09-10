@@ -289,9 +289,27 @@ test("W1-T2584: the daemon sweep hook forwards its production continuation callb
   assert.ok(start >= 0 && end > start, "the production daemon sweep hook is present");
   const body = source.slice(start, end);
   assert.match(body, /return async \(continueReviewAdmissions = \(\) => true\) =>/);
+  // \s+ HERE PINNED ADJACENCY, NOT THE PROPERTY. The claim is that the callback reaches SweepDeps;
+  // the old needle also demanded that `updatedForWorkflow,` be the field IMMEDIATELY before the
+  // W1-T2584 comment. W1-T3277 legitimately added `behindMainByPr,` between them and this test
+  // reddened while the wiring it guards was untouched — the failure message said the callback
+  // "ends at a dead seam", which was simply false. Any field may sit between; what must hold is
+  // that the callback arrives in the SAME object literal, still carrying the comment that says
+  // where it comes from.
   assert.match(
     body,
-    /updatedForWorkflow,\s+\/\/ W1-T2584:[\s\S]*?continueReviewAdmissions,/,
+    /updatedForWorkflow,[\s\S]*?\/\/ W1-T2584:[\s\S]*?continueReviewAdmissions,/,
     "the callback received from runGatedSweep reaches SweepDeps rather than ending at a dead seam",
+  );
+  // AND THE RELAXATION MUST NOT SWALLOW THE CLAIM: `[\s\S]*?` spanning the whole function would
+  // match a `continueReviewAdmissions,` anywhere below, so pin that it is inside the deps object
+  // rather than merely somewhere in the hook.
+  const depsStart = body.indexOf("updatedForWorkflow,");
+  const depsEnd = body.indexOf("DEFAULT_SWEEP_POLICY", depsStart);
+  assert.ok(depsStart >= 0 && depsEnd > depsStart, "the SweepDeps literal must be locatable in the hook");
+  assert.match(
+    body.slice(depsStart, depsEnd),
+    /continueReviewAdmissions,/,
+    "the callback must be a MEMBER of the deps object handed to runSweep, not merely mentioned in the hook",
   );
 });

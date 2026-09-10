@@ -3988,7 +3988,15 @@ test("an armed pull request that has fallen behind is reported as needing an upd
 
   assert.deepEqual(
     found,
-    [{ prNumber: 41, prUrl: "https://github.com/o/r/pull/1", taskId: "W1-TX", headSha: "beef111" }],
+    [
+      {
+        prNumber: 41,
+        prUrl: "https://github.com/o/r/pull/1",
+        taskId: "W1-TX",
+        headSha: "beef111",
+        updateReason: "armed-stalled",
+      },
+    ],
     "both facts together are the stall, and the report carries each of them",
   );
 });
