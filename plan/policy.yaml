@@ -992,6 +992,82 @@ digestCadence:
     min: 1
     max: 24
 
+# W1-T2923: repository intake rungs. Each member has its OWN two-bound cadence so a short interval
+# on one intake verb cannot drag the others. All ship OFF: these rungs poll GitHub, write feedback,
+# draft proposals or may dispatch workers, so an operator enables each repository's intake path
+# deliberately instead of inheriting a read-only cadence's safe-on posture.
+intakeCadence:
+  ops:
+    enabled:
+      value: false
+      origin: "net-new"
+    minIntervalMinutes:
+      value: 1440
+      origin: "net-new"
+      min: 15
+      max: 10080
+    maxPerDay:
+      value: 1
+      origin: "net-new"
+      min: 1
+      max: 24
+  issues:
+    enabled:
+      value: false
+      origin: "net-new"
+    minIntervalMinutes:
+      value: 1440
+      origin: "net-new"
+      min: 15
+      max: 10080
+    maxPerDay:
+      value: 1
+      origin: "net-new"
+      min: 1
+      max: 24
+  alertFix:
+    enabled:
+      value: false
+      origin: "net-new"
+    minIntervalMinutes:
+      value: 1440
+      origin: "net-new"
+      min: 15
+      max: 10080
+    maxPerDay:
+      value: 1
+      origin: "net-new"
+      min: 1
+      max: 24
+  inbox:
+    enabled:
+      value: false
+      origin: "net-new"
+    minIntervalMinutes:
+      value: 1440
+      origin: "net-new"
+      min: 15
+      max: 10080
+    maxPerDay:
+      value: 1
+      origin: "net-new"
+      min: 1
+      max: 24
+  feedbackDocket:
+    enabled:
+      value: false
+      origin: "net-new"
+    minIntervalMinutes:
+      value: 10080
+      origin: "net-new"
+      min: 15
+      max: 10080
+    maxPerDay:
+      value: 1
+      origin: "net-new"
+      min: 1
+      max: 24
+
 # W1-T2304's board-review rung — the rung whose UNIT is the whole open board, not one PR. Its OWN
 # row, deliberately not folded into measurementCadence or digestCadence above, so the three
 # cadences can never drag one another (the rung's own design "Ownership" note).

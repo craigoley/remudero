@@ -36,6 +36,16 @@ export interface ArmCalibrationBandRow {
   note?: string;
 }
 
+export const INTAKE_CADENCE_RUNGS = ["ops", "issues", "alertFix", "inbox", "feedbackDocket"] as const;
+
+export type IntakeCadenceRung = (typeof INTAKE_CADENCE_RUNGS)[number];
+
+export interface IntakeCadenceRungPolicy {
+  enabled: boolean;
+  minIntervalMinutes: number;
+  maxPerDay: number;
+}
+
 /** The plain, consumer-facing values every W1-T253 read site will resolve against. */
 export interface PolicyValues {
   proofTimeoutMs: number;
@@ -131,6 +141,9 @@ export interface PolicyValues {
     minIntervalMinutes: number;
     maxPerDay: number;
   };
+  /** W1-T2923: repository-intake rungs. Defaults OFF because every member writes, polls GitHub,
+   *  or may spawn work; enabling a row is an explicit operator policy change. */
+  intakeCadence: Record<IntakeCadenceRung, IntakeCadenceRungPolicy>;
   /** W1-T2304's board-review rung — its own row, separate from {@link
    *  PolicyValues.measurementCadence}/{@link PolicyValues.digestCadence}. `minIntervalMinutes`/
    *  `maxPerDay` are measured off the board's own behaviour. Defaults enabled (read-only).
@@ -280,6 +293,21 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "digestCadence.enabled": "net-new",
   "digestCadence.minIntervalMinutes": "net-new",
   "digestCadence.maxPerDay": "net-new",
+  "intakeCadence.ops.enabled": "net-new",
+  "intakeCadence.ops.minIntervalMinutes": "net-new",
+  "intakeCadence.ops.maxPerDay": "net-new",
+  "intakeCadence.issues.enabled": "net-new",
+  "intakeCadence.issues.minIntervalMinutes": "net-new",
+  "intakeCadence.issues.maxPerDay": "net-new",
+  "intakeCadence.alertFix.enabled": "net-new",
+  "intakeCadence.alertFix.minIntervalMinutes": "net-new",
+  "intakeCadence.alertFix.maxPerDay": "net-new",
+  "intakeCadence.inbox.enabled": "net-new",
+  "intakeCadence.inbox.minIntervalMinutes": "net-new",
+  "intakeCadence.inbox.maxPerDay": "net-new",
+  "intakeCadence.feedbackDocket.enabled": "net-new",
+  "intakeCadence.feedbackDocket.minIntervalMinutes": "net-new",
+  "intakeCadence.feedbackDocket.maxPerDay": "net-new",
   "boardReview.enabled": "net-new",
   "boardReview.minIntervalMinutes": "net-new",
   "boardReview.maxPerDay": "net-new",
@@ -511,6 +539,43 @@ export const DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY = 500;
 /** See the shared doc above `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`. */
 export const DEFAULT_GITHUB_EVENT_WAKE_CHECK_SETTLE_MS = 10_000;
 
+const DEFAULT_INTAKE_CADENCE: Record<IntakeCadenceRung, IntakeCadenceRungPolicy> = {
+  ops: { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 },
+  issues: { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 },
+  alertFix: { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 },
+  inbox: { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 },
+  feedbackDocket: { enabled: false, minIntervalMinutes: 10080, maxPerDay: 1 },
+};
+
+function parseIntakeCadence(
+  raw: unknown,
+  origin: Record<string, PolicyFieldOrigin>,
+  bounds: Record<string, PolicyFieldBounds>,
+): Record<IntakeCadenceRung, IntakeCadenceRungPolicy> {
+  if (raw === undefined) {
+    return {
+      ops: { ...DEFAULT_INTAKE_CADENCE.ops },
+      issues: { ...DEFAULT_INTAKE_CADENCE.issues },
+      alertFix: { ...DEFAULT_INTAKE_CADENCE.alertFix },
+      inbox: { ...DEFAULT_INTAKE_CADENCE.inbox },
+      feedbackDocket: { ...DEFAULT_INTAKE_CADENCE.feedbackDocket },
+    };
+  }
+  if (!isPlainObject(raw)) throw new PolicyError("policy.yaml: 'intakeCadence' must be a mapping.");
+  const out = {} as Record<IntakeCadenceRung, IntakeCadenceRungPolicy>;
+  for (const rung of INTAKE_CADENCE_RUNGS) {
+    const path = `intakeCadence.${rung}`;
+    const row = raw[rung];
+    if (!isPlainObject(row)) throw new PolicyError(`policy.yaml: '${path}' must be a mapping.`);
+    out[rung] = {
+      enabled: booleanField(`${path}.enabled`, row.enabled, origin),
+      minIntervalMinutes: numberField(`${path}.minIntervalMinutes`, row.minIntervalMinutes, origin, bounds),
+      maxPerDay: numberField(`${path}.maxPerDay`, row.maxPerDay, origin),
+    };
+  }
+  return out;
+}
+
 /**
  * Validate a raw (parsed-YAML) value into a {@link Policy}. Throws {@link PolicyError} on any
  * structural violation, out-of-bound value, or origin-kind mismatch — mirrors
@@ -607,6 +672,7 @@ export function validatePolicy(raw: unknown): Policy {
         maxPerDay: numberField("digestCadence.maxPerDay", digestCadenceRaw.maxPerDay, origin),
       }
     : { enabled: true, minIntervalMinutes: 1440, maxPerDay: 24 };
+  const intakeCadence = parseIntakeCadence(raw.intakeCadence, origin, bounds);
   // The board-review row — same optional, absent-means-default shape as the two cadences above;
   // see PolicyValues.boardReview's doc for where 120/6 come from.
   const boardReviewRaw = raw.boardReview as Record<string, unknown> | undefined;
@@ -724,6 +790,7 @@ export function validatePolicy(raw: unknown): Policy {
       autoTriage,
       measurementCadence,
       digestCadence,
+      intakeCadence,
       boardReview,
       ciLearningCadence,
       wipeTestCadence,
