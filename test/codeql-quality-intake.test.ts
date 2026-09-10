@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { ghStubPath, pathWith } from "./helpers/gh-stub.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,7 @@ import { test } from "node:test";
 
 import type { FeedbackEntry } from "../src/lib/feedback.js";
 import { loadProposalRegistry, pruneRatifiedProposals, type Proposal } from "../src/lib/inbox.js";
-import type { RawAlert } from "../src/lib/ops.js";
+import { readCodeScanningAlerts, type RawAlert } from "../src/lib/ops.js";
 import {
   codeqlQualityProposalId,
   partitionCodeqlQualityAlerts,
@@ -110,5 +111,40 @@ test("a CodeQL rule gets one active proposal that is refreshed in place and reti
     assert.deepEqual(loadProposalRegistry(registryPath), []);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("readCodeScanningAlerts returns normalized alerts on a readable response, carrying the tool and rule tags the filter needs", () => {
+  // The refusal path (a 403) is already covered; this is the SUCCESS return, which no test reached.
+  // It also pins the two fields RawAlert gained for this feature: without `toolName`/`ruleTags`
+  // surviving normalization, every alert would fall out of the filter as ineligible.
+  const bin = ghStubPath(
+    "#!/bin/sh\ncat <<'JSON'\n" +
+      JSON.stringify([
+        {
+          number: 7,
+          state: "open",
+          created_at: "2026-09-10T00:00:00Z",
+          html_url: "https://github.com/o/r/security/code-scanning/7",
+          rule: { id: "js/unused-local-variable", description: "Unused variable", severity: "note", tags: ["quality", "maintainability"] },
+          tool: { name: "CodeQL" },
+        },
+      ]) +
+      "\nJSON\n",
+  );
+  const saved = process.env.PATH;
+  process.env.PATH = pathWith(bin);
+  try {
+    const read = readCodeScanningAlerts("o", "r");
+    assert.equal(read.ok, true, "a readable JSON array is a success, not a refusal");
+    assert.ok(read.ok && read.alerts.length === 1);
+    const [alert] = read.ok ? read.alerts : [];
+    assert.equal(alert?.id, "7");
+    assert.equal(alert?.source, "code-scanning");
+    assert.equal(alert?.toolName, "CodeQL", "the tool survives normalization — the filter keys on it");
+    assert.deepEqual(alert?.ruleTags, ["quality", "maintainability"], "and so do the rule tags");
+    assert.equal(alert?.ruleId, "js/unused-local-variable");
+  } finally {
+    process.env.PATH = saved;
   }
 });
