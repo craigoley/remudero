@@ -1,0 +1,115 @@
+- id: W1-T3330
+  title: "EVERY HARD GATE DECIDES CONSEQUENCE FROM A PREDICATE, WITH NO REASONING IN BETWEEN — wire the EXISTING risk judge (`runRiskJudge`, one consumer today) between a gate's deterministic FACT and its action, so a refusal becomes a judged choice of land / split / file-and-land / stop, and a stop is reserved for the unrecoverable"
+  repo: remudero
+  depends_on: [W1-T3318]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files: [src/lib/risk-judge.ts, src/lib/gate-posture.ts, test/a-gate-refusal-is-judged-not-asserted.test.ts]
+  origin: "operator-session#risk-judged-gates-2026-09-10"
+  plan_refs: ["W1-T3318", "W1-T3321", "W1-T3329", "W1-T3320", "W1-T297", "W1-T58"]
+  status: queued
+  attempts: 0
+  note: |
+    THE OPERATOR'S DIRECTION, 2026-09-10, and the frame that decides the design: "for all of these
+    hard gates, ceilings, and floors, it needs to be more based on reasoning over risk rather than
+    just hard preventing it. There is always wiggle room. We can always take on some tech debt and
+    file a task to fix it later." And: "the goal is automation."
+
+    LESS IS BEING BUILT THAN IT LOOKS. `src/lib/risk-judge.ts` already ships `assessRisk` and
+    `runRiskJudge`: verdict + reasons + confidence, PROCEED or ESCALATE, one `risk_judge.decision`
+    ledger row written verbatim, spend carried on the same row. It has ONE consumer
+    (`src/run-task.ts`). This task widens where it is consulted; it does not invent a judge.
+
+    RELATIONSHIP TO ITS SIBLINGS. W1-T3321 censuses which surfaces can refuse and what posture each
+    admits; this gives them somewhere to route the answer. W1-T3329 fixes Rule 25's SURFACE and is
+    the first conversion onto this seam. Neither subsumes the other: a correctly-drawn surface with
+    a hard refusal still stops the machine, and a judged consequence over a wrong surface judges the
+    wrong facts.
+  rationale: |
+    THE COST OF HARD PREVENTION IS MEASURED, ON THIS FLEET, YESTERDAY. `hooks/pre-push`'s test-tier
+    admission refused a missing manifest line — a computable remedy its own message named. Result:
+    two blocked operator pushes and FOUR daemon crashes across W1-T3226, W1-T3242 and W1-T3274
+    twice, taking docker's `RestartCount` to 4 of 5. Zero defects caught. A gate stopped the machine
+    over a line it could have written itself.
+
+    AND THE OPPOSITE COST IS ALSO MEASURED, WHICH IS WHY THE ANSWER IS NOT "REMOVE THE GATES". The
+    #585/#586 arc: a coverage flag, a diff-coverage carve-out and a re-captured baseline each rode
+    inside an ordinary fix-rung strike. That is the one case where "the tests passed" is worthless
+    evidence, because the diff changed the thing doing the grading.
+
+    THE REPO ALREADY CHOSE A POLARITY FOR EXACTLY THIS TENSION, and the choice must be understood
+    before it is changed. The semantic reviewer is DOWNGRADE-ONLY — `parseReviewerVerdicts`: "Only
+    ever record a downgrade; a PASS leaves the floor to decide", unparseable output yields
+    all-`undefined`, fail-closed. An LLM that can APPROVE is what an agent under pressure optimises
+    against, and under full automation that is not a hypothetical: it is every PR.
+
+    THE RESOLUTION IS A SPLIT, NOT A POLARITY FLIP. Keep the FACT deterministic — "does this diff
+    add or remove a `claim:`/`proof:` line", "does it touch an instrument AND a product path" are
+    greps: free, instant, unarguable, no tokens. Judge only the CONSEQUENCE — given that fact, is
+    this harm or incompleteness, and does the change land, split, land-with-debt, or stop. The judge
+    never decides whether the fact is true; it decides what the fact is worth.
+  design: |
+    (i) THE FACT IS NEVER JUDGED, ONLY ITS CONSEQUENCE. A gate keeps its deterministic predicate
+    unchanged and hands the judge a FINDING, not a question of whether the finding holds. This is
+    what keeps the cost near zero on the overwhelming majority of PRs (no finding, no spawn) and
+    what stops an agent arguing that its own diff did not do what the diff shows it did.
+    (ii) THE JUDGE IS NOT THE AUTHOR'S CONTEXT. Under automation every PR is otherwise marking its
+    own homework. `spawnReviewer` already establishes the separate-worker shape; the judgment must
+    inherit it, and a judge invoked inside the authoring context is the defect this clause exists to
+    forbid.
+    (iii) FOUR OUTCOMES, MATCHING W1-T3318's RULING, and a stop is the rare one:
+      LAND        — the finding is immaterial; proceed, ledger the reason.
+      REPAIR      — the remedy is computable; apply it and land (W1-T3311's shape).
+      LAND+DEBT   — land, and FILE the follow-up naming what was deferred. The operator's "we can
+                    always take on some tech debt" is this outcome, and it is the default for
+                    incompleteness.
+      STOP        — reserved for the UNRECOVERABLE. Not "risky" in the abstract: the test is whether
+                    the machine can still fix its next problem. A change that breaks the fleet's own
+                    recovery path, a secret, a destructive migration.
+    (iv) DEBT MUST BE BOUNDED AND COLLECTED OR THIS IS A SLOWER FAILURE. "File a task and fix it
+    later" is only automation if the queue drains, and it currently does not: 45 `verify: human`
+    shards sit parked, the oldest seven weeks (W1-T3206). A LAND+DEBT outcome that files into a
+    queue nothing drains has converted a loud stop into a silent one.
+    (v) EVERY JUDGMENT IS AUDITABLE AND CHEAP TO OVERRULE. `runRiskJudge` already ledgers verdict,
+    reasons and confidence verbatim on one row with its own spend. A judged gate must be readable
+    after the fact — which decisions were made, on what reasoning, at what cost — because a judge
+    that drifts is discoverable only from its record.
+    (vi) FAIL CLOSED WHEN THE JUDGE CANNOT ANSWER. An unreachable or unparseable judgment is not a
+    LAND. It falls back to the gate's CURRENT behaviour, so an outage in the judging path can only
+    ever restore today's strictness, never relax past it.
+  acceptance:
+    - claim: "a gate hands the judge a deterministic finding and the judge decides only the consequence — it cannot overturn the finding itself"
+      proof: "unit test: test/a-gate-refusal-is-judged-not-asserted.test.ts"
+    - claim: "the four outcomes are distinct and a STOP is reachable only for an unrecoverable change, not for incompleteness"
+      proof: "unit test: test/a-gate-refusal-is-judged-not-asserted.test.ts"
+    - claim: "a LAND+DEBT outcome files its follow-up, and a run that cannot file one does not silently land"
+      proof: "unit test: test/a-gate-refusal-is-judged-not-asserted.test.ts"
+    - claim: "an unreachable or unparseable judgment falls back to the gate's current behaviour, so a judging outage can only restore strictness"
+      proof: "unit test: test/a-gate-refusal-is-judged-not-asserted.test.ts"
+    - claim: "a PR with no finding never spawns a judge, so the common path costs nothing"
+      proof: "unit test: test/a-gate-refusal-is-judged-not-asserted.test.ts"
+    - claim: "every judgment writes verdict, reasons and confidence verbatim, so a drifting judge is discoverable from the record"
+      proof: "unit test: test/a-gate-refusal-is-judged-not-asserted.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if a gate refusal already consults the risk judge. MEASURED
+    2026-09-10: `runRiskJudge`/`assessRisk` have exactly one consumer, `src/run-task.ts`, and no
+    refusal surface calls either.
+    PROVE (i) LOAD-BEARING WITH AN ADVERSARIAL FIXTURE: a judgment that claims the finding is FALSE
+    ("this diff does not touch a proof line") must not change the outcome — only its consequence is
+    the judge's to decide. If a judge can talk a finding away, #585/#586 is reachable again and this
+    task has removed the protection it was meant to preserve.
+    PROVE (vi) BY BREAKING THE JUDGE: an unreachable judging path must reproduce the gate's CURRENT
+    verdict exactly. A fallback that lands is an outage that ships whatever was in flight.
+    RUN THE COST CONTROL: a PR with no finding must spawn nothing. A design that judges every PR has
+    replaced a free predicate with a paid one across the whole fleet.
+    DO NOT convert the FACTS to judgment. "Does this diff add a `proof:` line" is a grep, and making
+    it a judgment makes it slower, dearer and arguable at once.
+    DO NOT make Rule 15's surface part of this task. Rule 15 is narrow and correct — three fields,
+    exempt when plan-only, and it fired correctly on eight of eight pushes in the session that filed
+    this. It inherits the POSTURE (a judged consequence); its predicate is not in question.
+    DO NOT let STOP widen back into "risky". The bar is recoverability, and a judge that stops on
+    unease has restored the hard gate with a spawn cost attached.

@@ -1,0 +1,75 @@
+- id: W1-T3327
+  title: "A LEARNING FIRING THE OPERATOR CANNOT SEE — the rung prints its drafts to a stdout that is 0 bytes on this host, so the ledger keeps the COUNTS and what it actually found is unrecoverable; stage one report per firing into the inbox registry the console already renders"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 14.00
+  files:
+    - src/lib/measurement-cadence.ts
+    - test/a-learning-firing-reports-into-the-inbox.test.ts
+  origin: "operator-session#ci-learning-repair-2026-09-10"
+  plan_refs: ["W1-T2959", "W1-T3324", "W1-T110"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR DIRECTION 2026-09-10: "I do want to get a report of what it found in my inbox on the
+    console though."
+
+    THE COUNTS SURVIVE AND THE FINDINGS DO NOT. MEASURED 2026-09-10:
+      - `ci_learning_cadence.ran` rows carry `status`, `drafts`, `excluded`, `unreadable` — numbers.
+      - `state/logs/daemon.out.log` and `daemon.err.log` are BOTH 0 bytes, dated Aug 13.
+      - `docker logs remudero-daemon` over the 2026-09-09 firing window carried no draft lines.
+    So for the two firings that drafted (2026-09-07 and 2026-09-08, three drafts each), the drafts
+    themselves are unrecoverable. A count says a firing happened; it does not say the top cause was
+    `ci-gate` across 26 pull requests, or which records were filed, or that 30 more causes were
+    excluded by the ceiling.
+
+    THE PRECEDENT EXISTS AND IS NOT BEING REINVENTED. `escalateRepeatingRules` (rule-efficacy.ts)
+    already stages proposals into `state/inbox-proposals.json` for exactly this problem: a report
+    nobody reads becomes a registry row `rmd inbox` tiers and the console renders.
+  design: |
+    (i) ONE PROPOSAL PER FIRING, into the EXISTING registry through the EXISTING
+    `updateProposalRegistry`. No second registry, no new surface, no console change — the console
+    already renders this registry.
+    (ii) THE SUMMARY CARRIES WHAT A COUNT CANNOT: the top causes with how many pull requests each
+    refused, the task ids actually filed so an operator can open one, what the ceiling excluded
+    (named, never dropped), and the unreadable-rollup count so a partial window never reads clean.
+    (iii) IDEMPOTENT ON THE FIRING INSTANT, never a counter. A counter renumbers on restart and
+    would re-stage every past report; the instant is stable and a retry cannot duplicate it.
+    (iv) A BARREN FIRING STILL REPORTS. Drafts minted and nothing filed is the condition that ran
+    silently for two days — a reporter that only spoke on success would hide exactly the case worth
+    seeing.
+    (v) NOT IN SCOPE: changing what the console renders, the inbox's own tiering, the ceiling, or
+    whether a report proposal is ever auto-ratified. This stages a row; ratification is unchanged.
+  acceptance:
+    - claim: "a firing stages one proposal naming its top causes, the ids it filed, and what the ceiling excluded — not merely that it ran"
+      proof: "unit test: test/a-learning-firing-reports-into-the-inbox.test.ts"
+    - claim: "a repeated firing at the same instant stages no duplicate, so a retry cannot flood the inbox"
+      proof: "unit test: test/a-learning-firing-reports-into-the-inbox.test.ts"
+    - claim: "a later firing stages its own proposal, so the inbox is a history rather than a single overwritten slot"
+      proof: "unit test: test/a-learning-firing-reports-into-the-inbox.test.ts"
+    - claim: "a firing that filed NOTHING still reports and says so, because that is the case worth seeing"
+      proof: "unit test: test/a-learning-firing-reports-into-the-inbox.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF a firing already reaches the inbox: read the cadence arm and
+    `grep -n inbox-proposals src/lib/measurement-cadence.ts`. MEASURED 2026-09-10: zero hits; the
+    only durable trace of a firing is its cadence marker and a counts-only ledger row.
+    PROVE IDEMPOTENCE BY DELETING IT. Removing the id guard must redden the duplicate test; a suite
+    that only stages once passes on an implementation that appends on every call, which would flood
+    the registry four times a day.
+    PROVE THE ID IS DERIVED, NOT FIXED. Collapsing it to a constant must redden BOTH the history
+    test and the id test — a fixed id makes every firing after the first invisible.
+    DO NOT REPORT ONLY ON SUCCESS. The barren case is the one that ran silently for two days.
+    DO NOT BUILD A SECOND REGISTRY. `updateProposalRegistry` and `state/inbox-proposals.json` exist
+    and the console already reads them; a parallel store would need its own reader, its own rotation
+    and its own tiering.
+  note: |
+    Rule 25 CHECKED WITH THE PREDICATE: `src/lib/measurement-cadence.ts` and this task's own
+    falsifier return `entangled: false`, `instrumentPaths: []`.
+    THE WIRING IS SEPARATE FROM THE MECHANISM, deliberately. This task ships `stageCiLearningReport`
+    and its falsifier; calling it from the scheduled arm belongs with W1-T3324, which is the task
+    that owns that arm and is already changing it. Landing both in one diff would put two concerns
+    behind one review.

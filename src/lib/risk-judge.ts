@@ -768,3 +768,87 @@ export function realRiskJudge(opts: {
     throw new Error("realRiskJudge: unreachable — the loop above always returns by its last iteration");
   };
 }
+
+// ── FILING-TIME RULING (W1-T3143) ────────────────────────────────────────────────────────────
+//
+// W1-T2977 shipped the consumer, the schema and the drift pin for `risk_ruling` and no producer, so
+// only the BLOCKING rows of `machineAuthorVerifyViolation`'s ladder were reachable and every
+// machine-filed record parked forever. These two functions are that producer.
+//
+// POLARITY — UPLIFT-ONLY, the opposite of this module's dispatch-time caller and deliberately so. A
+// ruling may RELEASE a record to `verify: auto`; a judge that errors, times out or returns
+// unparseable text writes NOTHING, and absence keeps meaning "unjudged", which already blocks. A
+// judge outage therefore produces MORE operator review, never an unreviewed auto-file.
+
+/** What a filing-time judge concluded about ONE record. Structurally the judge's own verdict plus
+ *  `planRiskJudgeAction`'s kind — never a second scoring scheme, and never re-derived here. */
+export interface FilingRiskRuling {
+  verdict: string;
+  action: "proceed" | "escalate";
+  confidence: number;
+  reasons: string[];
+  /** ISO-8601, supplied by the caller so this stays pure and a test needs no clock seam. */
+  judgedAt: string;
+}
+
+/**
+ * The judge's input for ONE plan record — what the task may DO, never a diff (none exists at filing
+ * time). THE STATIC `risk:` FIELD IS DELIBERATELY ABSENT: W1-T248 binds this judge to the candidate
+ * change, and `risk:` is set by Rule 19's subsystem count, so feeding it here would launder a sizing
+ * band into a safety verdict. It stays inside `taskRulingPin`, which asks a different question.
+ */
+export function buildFilingRiskJudgeInput(task: {
+  id: string;
+  title: string;
+  type: string;
+  verify: string;
+  files?: readonly string[];
+  acceptance?: readonly { claim?: string; proof?: string }[];
+  prompt?: string;
+  plan_refs?: readonly string[];
+}): RiskJudgeInput {
+  const criteria = (task.acceptance ?? []).map((c, i) => `${i + 1}. ${c.claim ?? ""} | ${c.proof ?? ""}`);
+  const description = [
+    `FILED PLAN RECORD (no diff exists yet — this is what the task may DO).`,
+    `id: ${task.id}`,
+    `type: ${task.type}`,
+    `verify: ${task.verify}`,
+    `title: ${task.title}`,
+    task.prompt ? `prompt: ${task.prompt}` : undefined,
+    criteria.length > 0 ? `acceptance:\n${criteria.join("\n")}` : "acceptance: (none declared)",
+  ]
+    .filter((l): l is string => l !== undefined)
+    .join("\n");
+  return {
+    change: { description, files: [...(task.files ?? [])] },
+    gatesState: { filingTime: true },
+    planContext: { taskId: task.id, planRefs: [...(task.plan_refs ?? [])] },
+  };
+}
+
+/**
+ * Attach a filing-time ruling to a record, pinned by the SHARED {@link
+ * "./task-linter.js".taskRulingPin} — imported by the caller and passed in rather than re-derived
+ * here, so a pin written by this function and a pin checked by the linter cannot diverge.
+ *
+ * `ruling === undefined` is the FAIL-CLOSED arm and returns the task untouched: no field, no
+ * partial record, no synthesised proceed.
+ */
+export function recordFilingRiskRuling<T extends { id: string }>(
+  task: T,
+  ruling: FilingRiskRuling | undefined,
+  pinOf: (t: T) => string,
+): T {
+  if (!ruling) return task;
+  return {
+    ...task,
+    risk_ruling: {
+      verdict: ruling.verdict,
+      action: ruling.action,
+      confidence: ruling.confidence,
+      reasons: [...ruling.reasons],
+      judged_at: ruling.judgedAt,
+      pin: pinOf(task),
+    },
+  };
+}

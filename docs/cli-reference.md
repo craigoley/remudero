@@ -31,6 +31,7 @@ usage:
   rmd check-proof <proof> [--allow-full-suite] [--base <ref>]   # Run one acceptance proof through the reviewer's own executor and print its verdict.
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
+  rmd ledger-compact [--older-than <days>] [--max-sources <n>] [--dry-run]   # Compact one bounded window of old ledger rotations without losing a distinct row.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
   rmd census-membership [--base <ref>] [--files]   # Name the population-walking census suites this diff enters.
@@ -263,6 +264,16 @@ rmd ledger-grep <pattern>
 ```
 
 the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing
+
+### `rmd ledger-compact`
+
+Compact one bounded window of old ledger rotations without losing a distinct row.
+
+```
+rmd ledger-compact [--older-than <days>] [--max-sources <n>] [--dry-run]
+```
+
+operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement, then removes only the source files that replacement covers. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, never runs from rotateLedger or a daemon cadence, and refuses to overwrite an unselected archive if a row timestamp would collide with its name.
 
 ### `rmd hand-runs`
 
