@@ -230,16 +230,38 @@ export function readLedgerUnionRawLinesSync(
   const unread: string[] = [];
   let filesRead = 0;
 
-  const addText = (text: string): void => {
-    for (const raw of text.split("\n")) {
-      const line = raw.trim();
-      if (!line) continue;
-      if (opts.pattern && !opts.pattern.test(line)) continue;
-      if (opts.dedupe !== false) {
-        if (seen.has(line)) continue;
-        seen.add(line);
+  // W1-T3335 — SCANNED, NOT SPLIT. This decoded each corpus file into one JS string and then
+  // `split("\n")` it into an array of every line in that file. MEASURED on the live corpus
+  // (919 files, 3.84 GB decompressed), one call each through resolveLedgerUnion:
+  //
+  //   sweep uncreditable-head   +585 MB    323 matches
+  //   followup harvest        +3,804 MB  6,485 matches
+  //   credit timestamps       +3,846 MB 24,611 matches
+  //   authority table         +5,470 MB  9,115 matches
+  //
+  // Four callers, ~13.7 GB against an 8 GB heap cap — the daemon's abort. The first row is the
+  // tell: 323 retained lines still cost 585 MB, so the driver is the per-file whole-string plus
+  // split array, NOT what is kept. Scanning holds one file's decompressed buffer at a time.
+  //
+  // `buf.toString("utf8", start, end)` already yields an OWNED string, so the round-trip through
+  // `Buffer.from(line)` that used to sever slice-retention here is no longer needed.
+  const addBuffer = (buf: Buffer): void => {
+    let start = 0;
+    while (start < buf.length) {
+      let end = buf.indexOf(0x0a, start);
+      if (end === -1) end = buf.length;
+      if (end > start) {
+        const line = buf.toString("utf8", start, end).trim();
+        if (line && (!opts.pattern || opts.pattern.test(line))) {
+          if (opts.dedupe === false) {
+            rawLines.push(line);
+          } else if (!seen.has(line)) {
+            seen.add(line);
+            rawLines.push(line);
+          }
+        }
       }
-      rawLines.push(Buffer.from(line, "utf8").toString("utf8"));
+      start = end + 1;
     }
   };
 
@@ -248,7 +270,7 @@ export function readLedgerUnionRawLinesSync(
     try {
       const buf = fsDeps.readFileSync(entry.path);
       filesRead += 1;
-      addText((entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf).toString("utf8"));
+      addBuffer(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf);
     } catch {
       // deliberate: archive read failures are reported through unread rather than thrown.
       unread.push(entry.path);
@@ -259,7 +281,7 @@ export function readLedgerUnionRawLinesSync(
     if (!liveFileRead) return;
     try {
       filesRead += 1;
-      addText(fsDeps.readFileSync(livePath).toString("utf8"));
+      addBuffer(fsDeps.readFileSync(livePath));
     } catch {
       // deliberate: an unreadable live file is not an unread rotation and does not make the archive corpus partial.
       // Best-effort live read, matching the prior union readers' behavior.
@@ -328,18 +350,36 @@ export function readLedgerUnionRecordsSync(
     if (typeof row.step === "string") stepsSeen.add(row.step);
   };
 
-  const addText = (text: string): void => {
-    for (const raw of text.split("\n")) {
-      const line = raw.trim();
-      if (!line) continue;
-      if (opts.pattern && !opts.pattern.test(line)) continue;
-      try {
-        const parsed = parseObject(line);
-        if (parsed !== undefined) addRecord(parsed, line);
-      } catch {
-        // deliberate: a malformed row increments torn and the remaining corpus still parses.
-        torn += 1;
+  // W1-T3335 — SCANNED, NOT SPLIT. This decoded each corpus file into one JS string and then
+  // `split("\n")` it into an array of every line in that file. MEASURED on the live corpus
+  // (919 files, 3.84 GB decompressed), one call each through resolveLedgerUnion:
+  //
+  //   sweep uncreditable-head   +585 MB    323 matches
+  //   followup harvest        +3,804 MB  6,485 matches
+  //   credit timestamps       +3,846 MB 24,611 matches
+  //   authority table         +5,470 MB  9,115 matches
+  //
+  // Four callers, ~13.7 GB against an 8 GB heap cap — the daemon's abort. The first row is the
+  // tell: 323 retained lines still cost 585 MB, so the driver is the per-file whole-string plus
+  // split array, NOT what is kept. Scanning holds one file's decompressed buffer at a time.
+  const addBuffer = (buf: Buffer): void => {
+    let start = 0;
+    while (start < buf.length) {
+      let end = buf.indexOf(0x0a, start);
+      if (end === -1) end = buf.length;
+      if (end > start) {
+        const line = buf.toString("utf8", start, end).trim();
+        if (line && (!opts.pattern || opts.pattern.test(line))) {
+          try {
+            const parsed = parseObject(line);
+            if (parsed !== undefined) addRecord(parsed, line);
+          } catch {
+            // deliberate: a malformed row increments torn and the remaining corpus still parses.
+            torn += 1;
+          }
+        }
       }
+      start = end + 1;
     }
   };
 
@@ -354,7 +394,7 @@ export function readLedgerUnionRecordsSync(
     if (!liveFileRead) return false;
     try {
       filesRead += 1;
-      addText(fsDeps.readFileSync(livePath).toString("utf8"));
+      addBuffer(fsDeps.readFileSync(livePath));
       return opts.satisfied?.(stepsSeen) ?? false;
     } catch {
       // deliberate: an unreadable live file degrades to whatever rotations already supplied.
@@ -367,7 +407,7 @@ export function readLedgerUnionRecordsSync(
     try {
       const buf = fsDeps.readFileSync(entry.path);
       filesRead += 1;
-      addText((entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf).toString("utf8"));
+      addBuffer(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf);
       return opts.satisfied?.(stepsSeen) ?? false;
     } catch {
       // deliberate: archive read failures are surfaced in unread for callers that refuse partial coverage.
