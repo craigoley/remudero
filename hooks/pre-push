@@ -107,6 +107,28 @@ else
 fi
 # W1-T3205: END test-tier admission
 
+# BEGIN offline plan lint admission
+# The plan's deterministic checks belong here, while the diff is still local. The dedicated
+# offline entry point disables every GitHub-backed projection and names those omissions in its own
+# output; it therefore asks exactly the question this hook can answer without adding a network
+# dependency to every worker push. `lintPlanCommand` reserves exit 1 for blocking violations and
+# exit 2 for unreadable input. Preserve that distinction: a check that could not run is neither a
+# pass nor a reason to stop a healthy push.
+if [ -f package.json ] && node -e 'const p=require("./package.json"); process.exit(typeof p.scripts?.["lint-plan:offline"] === "string" ? 0 : 1)'; then
+  npm run --silent lint-plan:offline -- --base origin/main
+  rc=$?
+  if [ "$rc" -eq 1 ]; then
+    fail=1
+  elif [ "$rc" -eq 2 ]; then
+    echo "pre-push: lint-plan:offline could not read its inputs — skipped, NOT passed" >&2
+  elif [ "$rc" -ne 0 ]; then
+    echo "pre-push: lint-plan:offline could not execute (exit $rc) — skipped, NOT passed" >&2
+  fi
+else
+  echo "pre-push: package script lint-plan:offline unavailable — skipped, NOT passed" >&2
+fi
+# END offline plan lint admission
+
 # W1-T3225 — THE CENSUS STEP IS GONE, AND ITS ABSENCE IS THE POINT.
 #
 # This hook used to spawn the test runner over every census suite `rmd census-membership` could
