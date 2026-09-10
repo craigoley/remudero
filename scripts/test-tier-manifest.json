@@ -12,6 +12,7 @@
     "test/a-cancelled-shard-is-not-a-broken-diff.test.ts": 0,
     "test/a-capability-ladder-is-data-not-a-substring-match.test.ts": 385,
     "test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts": 0,
+    "test/a-capture-surface-that-never-feeds-is-refused.test.ts": 0,
     "test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts": 4481,
     "test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts": 1385,
     "test/a-check-that-could-not-run-is-reported-as-a-failed-check.test.ts": 252,
