@@ -55,10 +55,8 @@ test("W1-T3177: the dashboard carries a BROWSER-shaped config that contradicts t
   assert.equal(dash.moduleResolution, "bundler");
   assert.equal(dash.jsx, "react-jsx");
   assert.deepEqual(dash.types, ["vite/client"]);
-  // tsc still emits the legacy v0 entry for test/dashboard-loads.test.ts; the package script
-  // passes --noEmit when it is acting as the React type gate.
-  assert.equal(dash.outDir, "build");
-  assert.equal(dash.rootDir, "../..");
+  // tsc here is a TYPE GATE; Vite emits the bundle. An outDir would emit a second, dead copy.
+  assert.equal(dash.noEmit, true);
 
   // AND THE CONTRADICTION IS THE POINT — if these ever agree, one config is being borrowed and the
   // "typecheck independently" claim is empty.
@@ -67,9 +65,8 @@ test("W1-T3177: the dashboard carries a BROWSER-shaped config that contradicts t
   assert.equal(root.jsx, undefined, "the root config has no jsx and must not gain one");
   assert.deepEqual(root.types, ["node"]);
 
-  // The Vite entry is excluded from the legacy tsc emit because src/main.ts and src/main.tsx both
-  // map to build/apps/dashboard/src/main.js. Vite owns the React entry; tsc owns the v0 page.
-  assert.deepEqual(json("apps/dashboard/tsconfig.json").exclude, ["src/main.tsx", "build", "node_modules"]);
+  // v0 is excluded rather than deleted (the strangler ruling), and that must be explicit.
+  assert.deepEqual(json("apps/dashboard/tsconfig.json").exclude, ["src/main.ts", "build", "node_modules"]);
 });
 
 test("W1-T3177: the dashboard declares the ruled toolchain, and its vitest config sits where the proof dialect looks for it", () => {
@@ -173,12 +170,7 @@ test("W1-T3177: the dashboard's vite config is SELF-ROOTING, so the proof execut
   const vite = code("apps/dashboard/vite.config.ts");
   assert.match(
     vite,
-    /const dashboardRoot = fileURLToPath\(new URL\("\.", import\.meta\.url\)\)/,
-    "the config must derive its root from its own file, not inherit the caller's cwd",
-  );
-  assert.match(
-    vite,
-    /root:\s*dashboardRoot/,
+    /root:\s*fileURLToPath\(new URL\("\.", import\.meta\.url\)\)/,
     "the config must pin its own root, not inherit the caller's cwd",
   );
   assert.match(vite, /import \{ fileURLToPath \} from "node:url"/);

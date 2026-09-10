@@ -30,9 +30,8 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
-    "rootDir": "../..",
-    "outDir": "build"
+    "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts", "../../packages/api-client/src/client.ts"],
-  "exclude": ["src/main.tsx", "build", "node_modules"]
+  "include": ["src", "vite.config.ts"],
+  "exclude": ["src/main.ts", "build", "node_modules"]
 }

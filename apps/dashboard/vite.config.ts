@@ -18,41 +18,7 @@
 import { fileURLToPath } from "node:url";
 
 import react from "@vitejs/plugin-react";
-import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
-
-const dashboardRoot = fileURLToPath(new URL(".", import.meta.url));
-
-function dashboardIndexHtmlPlugin(): Plugin {
-  return {
-    name: "remudero-dashboard-index-html",
-    generateBundle(_options, bundle) {
-      const cssLinks = Object.values(bundle)
-        .filter((entry) => entry.type === "asset" && entry.fileName.endsWith(".css"))
-        .map((entry) => `    <link rel="stylesheet" href="/console/${entry.fileName}" />`)
-        .join("\n");
-      this.emitFile({
-        type: "asset",
-        fileName: "index.html",
-        source: `<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>Remudero console</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
-${cssLinks}
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/console/main.js"></script>
-  </body>
-</html>
-`,
-      });
-    },
-  };
-}
 
 export default defineConfig({
   // SELF-ROOTING, and this is load-bearing rather than tidy. Vite's `root` defaults to
@@ -61,10 +27,9 @@ export default defineConfig({
   // `include: ["src/**/..."]` then resolved against the repo's own src/, matched nothing, and every
   // dashboard proof graded `fail` while the same suite passed from this directory. Pinning root to
   // this file's own directory makes the config give the same answer from any cwd.
-  root: dashboardRoot,
+  root: fileURLToPath(new URL(".", import.meta.url)),
   base: "/console/",
   plugins: [
-    dashboardIndexHtmlPlugin(),
     // The React Compiler, ON from day one (operator ruling, 2026-09-08). It memoises for us, so
     // hand-written useMemo/useCallback in this tree is the exception and carries a stated reason.
     // `compiler: true` is plugin-react v6's own switch and drives it through oxc-transform-react;
@@ -76,14 +41,6 @@ export default defineConfig({
     outDir: "build",
     emptyOutDir: true,
     sourcemap: true,
-    rollupOptions: {
-      input: new URL("src/main.tsx", import.meta.url).pathname,
-      output: {
-        entryFileNames: "main.js",
-        chunkFileNames: "assets/[name]-[hash].js",
-        assetFileNames: "assets/[name]-[hash][extname]",
-      },
-    },
   },
   test: {
     environment: "happy-dom",
