@@ -1,0 +1,4 @@
+{
+  "_comment": "W1-T3174 \u2014 the CEILING on first-party /v1/ routes absent from openapi/daemon.yaml. It may FALL and must NEVER RISE without a reviewed bump saying why: a client calling a route the contract does not declare is a route the generated api-client cannot expose, and scripts/no-hand-rolled-fetch-check.mjs then makes apps/dashboard unable to call it at all. Captured on the tree at the time W1-T3174 landed; W1-T3177 lowers it for the routes its first screen consumes, per that shard's per-screen sequencing. This is a ceiling, not a target: the honest end state is 0.",
+  "uncoveredCeiling": 28
+}

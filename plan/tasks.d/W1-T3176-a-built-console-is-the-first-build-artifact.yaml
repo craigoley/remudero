@@ -7,7 +7,14 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 25.00
-  files: [deploy/Dockerfile, deploy/entrypoint.sh, src/lib/serve.ts, test/a-missing-console-build-fails-loudly.test.ts]
+  files:
+    - deploy/Dockerfile
+    - deploy/entrypoint.sh
+    - src/lib/serve.ts
+    - src/run-task.ts
+    - package.json
+    - test/a-missing-console-build-fails-loudly.test.ts
+    - test/entrypoint-boot.test.ts
   origin: "operator-session#console-architecture-2026-09-08"
   plan_refs: ["W1-T3173", "W1-T3175"]
   status: queued
@@ -37,6 +44,25 @@
     surface whose entire purpose is telling him what is wrong. A daemon that REFUSES TO SERVE a
     console it cannot find is strictly better than one that serves an empty frame.
   design: |
+    (0) SCOPE, WIDENED 2026-09-09 WITH ITS REASONS. `package.json` declares the `build:console`
+    script both deploy paths invoke — without it they are wired to nothing. `src/run-task.ts` holds
+    the startup banner, and design (ii) says the result is reported THERE, one line under the
+    console URL, because the failure being prevented is an operator opening that URL and getting a
+    blank tab. `test/entrypoint-boot.test.ts` encodes the boot's npm-invocation contract and this
+    change alters it.
+
+    (0b) ⚠ AND THAT TEST CORRECTED THE DESIGN. The first implementation ran `build:console`
+    UNCONDITIONALLY on every boot, and `entrypoint-boot.test.ts` refused it with its own stated
+    reason: "an unconditional install on every boot would be a silent cost nobody would notice."
+    That applies to a Vite build at least as hard — this host restarts tens of times a day (the
+    watchdog revives it, the daemon's freshness exit fires), so an unconditional build is waste that
+    nothing would ever have surfaced. It now builds ONLY when the console build is absent, mirroring
+    the tsx bootstrap directly above it.
+
+    (0c) THE GAP THAT LEAVES, NAMED RATHER THAN PAPERED OVER. A checkout that updates its SOURCE
+    without rebuilding still serves a stale console. Design (iv) scopes this shard to ABSENCE
+    deliberately, so rebuild-on-change is a separate task and not a silent omission here.
+
     (i) THE BUILD RUNS WHEREVER `npm ci` RUNS — the image build (`deploy/Dockerfile`) and the
     in-place checkout update (`deploy/entrypoint.sh`). Two paths update the running code; a build
     wired into only one of them is a stale console waiting for the other path to be taken.

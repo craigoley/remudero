@@ -1,0 +1,101 @@
+- id: W1-T3281
+  title: "NOTHING ANSWERS \"IS A LANE ALREADY FIXING THIS PR\" — the ledger records `fix.dispatch` with its strike count and the sweep's own disposition, but no verb reads them, so an operator session duplicated a fix the fleet had already landed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 16.00
+  files:
+    - src/run-task.ts
+    - test/a-pr-names-the-lane-that-owns-it.test.ts
+  origin: "operator-session#pr-fix-sweep-2026-09-09"
+  plan_refs: ["W1-T945", "W1-T43", "W1-T1066"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09, AS WASTED WORK. An operator session diagnosed PR #4844's red checks, wrote
+    the fix, committed it, and was refused at push with `! [rejected] (non-fast-forward)` — the fleet
+    had already landed the IDENTICAL remedy. The session then had to discard its own commit.
+
+    THE INFORMATION EXISTED THE WHOLE TIME, in the local ledger, and one `zgrep` found it:
+
+        21:22:30  sweep.disposed  W1-T3272 #4851  blocked-fixable
+                  reason = "required checks red — ci-log fix, strike 1/2"
+        21:23:13  fix.dispatch    strike 1, strike_cap 2, mode ci-log
+        21:23:15  pr.head_provider  provider codex, source fix
+        21:26:29  sweep.disposed  wait — "checks pending 6m (< 60m ceiling)"
+
+    That is a complete ownership answer: a lane holds this PR, it is on strike 1 of 2, it pushed a
+    head, and the sweep is waiting on checks. Nothing surfaces it.
+
+    THE REGISTRY WAS CHECKED AND HAS NO VERB FOR THIS. `rmd trace <id>` renders PROVENANCE
+    (feedback → proposal → task → run → PR → merge) — a history, not a live claim. `rmd peek <runId>`
+    tails ONE run's output and needs a run id the operator does not have. `rmd status` and the board
+    are fleet-wide. None answers "who owns PR #N right now".
+
+    AND IT WORKS WHEN GITHUB DOES NOT. Across this same session the shared REST budget was exhausted
+    for long stretches (403 at 21:01, 21:28 and 21:32 UTC; 5000/hr shared across every agent). The
+    ledger is a local file and answered every time. A ledger-backed ownership read is not merely a
+    convenience over `gh` — it is the only surface still available in the window where duplicated
+    work is most likely, because that window is exactly when the fleet is busiest.
+  design: |
+    (i) ONE READ-ONLY VERB: `rmd pr-owner <pr-number>`. It reports whether a lane holds the PR and
+    on what evidence: the newest `fix.dispatch` for the task, its strike and strike_cap, the newest
+    `sweep.disposed` disposition and reason, and the head sha each was about.
+    (ii) THE ANSWER IS A DISPOSITION, NOT A DUMP. Three states, each named: OWNED (a fix rung is
+    dispatched or the sweep is waiting on it), FREE (no lane row within the window), and UNKNOWN
+    (the ledger could not be read, or its newest row predates the PR). UNKNOWN must never render as
+    FREE — treating "I could not look" as "nobody is working" is the exact error that produced the
+    duplicate.
+    (iii) IT READS THE UNION OF ALL THREE ROTATION FORMS, or it is wrong in the direction that
+    matters. `state/ledger.ndjson`, `state/ledger.*.ndjson` and `state/ledger.*.ndjson.gz` — a glob
+    naming one form answers silently from the other, which this repo has already paid for. A read
+    that opened no compressed rotation must say so rather than report FREE.
+    (iv) IT PRINTS THE CORPUS'S NEWEST TIMESTAMP beside its verdict. A ledger whose newest row is
+    hours old cannot answer a question about the last ten minutes, and the verdict must expose that
+    rather than let a stale FREE read as current — CLAUDE.md's investigation item (i), where a
+    perfectly readable corpus answered about the wrong window.
+    (v) READ-ONLY BY CONSTRUCTION, on the `rmd peek` precedent: no flag here writes, signals, claims
+    or releases anything. It answers a question; acting on the answer stays the operator's.
+    (vi) NO NETWORK CALL. The whole value is that it works while the REST budget is spent, so a
+    `gh` call anywhere in this path defeats the task.
+  acceptance:
+    - claim: "a PR with a recent fix.dispatch row reports OWNED and names the strike and strike cap the lane is on"
+      proof: "unit test: test/a-pr-names-the-lane-that-owns-it.test.ts"
+    - claim: "a PR with no lane row in the window reports FREE, and a ledger that cannot be read reports UNKNOWN — the two are never the same answer"
+      proof: "unit test: test/a-pr-names-the-lane-that-owns-it.test.ts"
+    - claim: "the verdict names the corpus's newest timestamp, so a stale ledger cannot answer as if it were current"
+      proof: "unit test: test/a-pr-names-the-lane-that-owns-it.test.ts"
+    - claim: "the read covers all three ledger rotation forms, and a run that opened no compressed rotation says so instead of reporting FREE"
+      proof: "unit test: test/a-pr-names-the-lane-that-owns-it.test.ts"
+    - claim: "the verb spawns no worker and makes no network call, so it answers while the shared REST budget is exhausted"
+      proof: "unit test: test/a-pr-names-the-lane-that-owns-it.test.ts"
+    - claim: "the verb is registered in the command registry and dispatches to its implementation, so it is reachable as `rmd pr-owner`"
+      proof: "unit test: test/a-pr-names-the-lane-that-owns-it.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF a verb already answers live PR ownership. THE COMMAND:
+    `RMD_SELF_SYNC_DONE=1 ./bin/rmd --help` and read every verb's summary. MEASURED 2026-09-09
+    against the full registry: `trace` is provenance, `peek` needs a run id, neither is this.
+    POSITIVE CONTROL ON THE LEDGER READ, because "no lane owns it" and "my query saw nothing" print
+    the same word: the fixture corpus must yield a KNOWN row for a KNOWN pr number before any FREE
+    verdict is believed. Control by file count PER FORM — `ls` each of the three globs and require
+    every non-empty form to be non-zero — never by a raw cross-archive match count, which stays six
+    figures while a whole form is missed.
+    PROVE UNKNOWN IS REACHABLE AND DISTINCT: a fixture whose ledger read THROWS must print UNKNOWN,
+    and a suite that only drives OWNED and FREE passes on an implementation that folds the error into
+    FREE. That fold IS the defect.
+    DO NOT let this verb write, claim, or release ownership. A second actor that can claim a PR races
+    the fix rung it is meant to observe.
+    DO NOT reach for `gh`. A verb that needs the API to answer is unavailable in the exact window it
+    exists for.
+  note: |
+    Rule 25 CHECKED, AND IT DECIDED THE FILE LIST. `src/run-task.ts` IS on INSTRUMENT_SURFACE
+    (`^src/run-task.ts$`), and `detectInstrumentEntanglement` fires when a diff holds an instrument
+    path AND a product `src/` path. So the implementation lives in `src/run-task.ts` beside the other
+    command bodies rather than in a new `src/lib/*.ts` module: instrument plus its own `test/`
+    falsifier is the SANCTIONED shape and returns false, while script-plus-lib would be refused.
+    That is a deliberate design constraint recorded here, not an oversight about where logic belongs.
+    THE COST THIS PREVENTS IS MEASURED, not projected: one duplicated fix on #4844, and a near-miss
+    on #4841 avoided only because the session checked the ledger by hand first.

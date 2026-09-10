@@ -108,6 +108,8 @@ import { colourEnabled, paint, sectionRule } from "./tty.js";
 
 export type ServiceName = "daemon" | "serve" | "deploy-supervisor";
 
+export type LivenessSensor = "launchd" | "process-table";
+
 /** `"daemon"`/`"serve"` are RESIDENT (launchd `KeepAlive`), so `running: false` means dead. For the INTERVAL
  *  `"deploy-supervisor"` it is also normal rest between ticks, which a binary render cannot tell apart (W1-T301). */
 export type ServiceKind = "resident" | "interval";
@@ -127,6 +129,8 @@ export interface ServiceLivenessRow {
    *  "not loaded". Defaults to `true`. {@link livenessState} reads it FIRST, so an absent sensor renders `"unknown"`,
    *  never a wrong `"stopped"`. */
   sensed?: boolean;
+  /** Which host-local sensor answered this row. A process-table answer is weaker than launchd's service-identity read. */
+  sensor?: LivenessSensor;
   bootedAt?: string;
   bootedAgeMs?: number;
   headSha?: string;
@@ -527,7 +531,13 @@ export interface StatusBoardDeps {
   /** Per-service running/pid, plus the last run's exit code for `"deploy-supervisor"`. `launchctl` lives at the CLI
    *  layer (Rule 16), so this is required with no default in lib/. `lastExitCode` is `undefined` when unknown, never a
    *  fabricated `0`; `sensed` (W1-T2450) is `false` iff `launchctl` could not be invoked at all. */
-  queryService: (service: ServiceName) => { running: boolean; pid: number | null; lastExitCode?: number; sensed?: boolean };
+  queryService: (service: ServiceName) => {
+    running: boolean;
+    pid: number | null;
+    lastExitCode?: number;
+    sensed?: boolean;
+    sensor?: LivenessSensor;
+  };
   /** The checkout to compare against `origin/main` (the daemon's own repoRoot). */
   repoDir: string;
   /** The deploy-supervisor's OWN installed `StartInterval` (seconds), read from the unit on disk so an install-time
@@ -1164,15 +1174,14 @@ const LIVENESS_NEXT_ACTIONS: readonly NextActionRule<LivenessCtx>[] = [
     },
   },
   {
-    // W1-T2450: a daemon row reading `"unknown"` must never be advised on as a `"stopped"` one — `rmd up` is nonsense
-    // for a process this panel never asked about. Checked BEFORE the `"stopped"` rule so the unknown case wins.
+    // A daemon row reading `"unknown"` must never be advised on as a `"stopped"` one — `rmd up` is nonsense
+    // for a process this panel could not sense. Checked BEFORE the `"stopped"` rule so the unknown case wins.
     applies: (ctx) => {
       const row = ctx.services.find((s) => s.service === "daemon");
       return row !== undefined && livenessState(row) === "unknown";
     },
     action: () =>
-      "no launchd sensor on this host (`launchctl` unavailable) — daemon/deploy-supervisor " +
-      "liveness cannot be read here; confirm with `ps` instead",
+      "no liveness sensor on this host — daemon/deploy-supervisor liveness cannot be read here",
   },
   {
     applies: (ctx) => {
@@ -2002,7 +2011,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     const q = deps.queryService(service);
     // W1-T2450: `sensed` defaults to `true` when the caller does not report it — the old, sensor-implicit behaviour —
     // so every deps bundle predating this field reads exactly as before.
-    const row: ServiceLivenessRow = { service, running: q.running, pid: q.pid, sensed: q.sensed ?? true };
+    const row: ServiceLivenessRow = { service, running: q.running, pid: q.pid, sensed: q.sensed ?? true, sensor: q.sensor };
     if (service === "daemon") {
       row.bootedAt = boots.ts;
       const parsed = boots.ts ? Date.parse(boots.ts) : NaN;
@@ -2146,15 +2155,17 @@ function shortSha(sha: string | undefined): string {
 /** Render one row's {@link LivenessState} — the THREE-way text that replaced a binary render collapsing an interval
  *  service's healthy rest and a dead one into one "not running" line (W1-T301). `enabled` defaults to `false`. */
 function renderLivenessState(s: ServiceLivenessRow, enabled = false): string {
+  const sensor = s.sensor === "process-table" ? "process table" : s.sensor;
+  const sensorSuffix = sensor ? `; sensor: ${sensor}` : "";
   switch (livenessState(s)) {
     case "running":
-      return paint.ok(`running (pid ${s.pid ?? "unknown"})`, enabled);
+      return paint.ok(`running (pid ${s.pid ?? "unknown"}${sensorSuffix})`, enabled);
     case "stopped":
-      return paint.bad("not running", enabled);
+      return paint.bad(`not running${sensorSuffix}`, enabled);
     case "unknown":
-      // W1-T2450: names WHICH absence this is — "no sensor" here, vs the interval branch's own "no tick observed yet"
-      // below, which only ever fires once a sensor DID answer.
-      return paint.dim("unknown — no launchd sensor on this host (`launchctl` unavailable)", enabled);
+      // Names true sensor absence, vs the interval branch's own "no tick observed yet" below,
+      // which only ever fires once a sensor DID answer.
+      return paint.dim("unknown — no liveness sensor on this host", enabled);
     case "idle":
       return paint.ok(`idle — last tick ${s.tickAt ? `${formatAgeMs(s.tickAgeMs)} ago` : "unknown"} (${s.tickStep ?? "unknown"})`, enabled);
     case "overdue":

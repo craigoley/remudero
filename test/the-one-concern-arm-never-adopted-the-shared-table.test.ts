@@ -151,13 +151,22 @@ test("W1-T2823 the discount reads the shared table not a third rule private to t
   const byDefault = checkOneConcern(diffOf(["src/lib/foo.ts", "test/a-claim-about-foo.test.ts"]));
   assert.deepEqual(stems(byDefault), ["foo"]);
 
-  // And no FOURTH basename/path heuristic was added alongside it. `TEST_PATH_EXACT_RE` is the one
-  // pre-existing `^test/` literal in this file and answers a different question (proof-path
-  // validation); a second one would be the drift W1-T2790 ranks a shared definition above.
+  // And no FOURTH basename/path heuristic was added alongside it. `TEST_PATH_EXACT_RE` answers a
+  // different question (proof-path validation); a second one would be the drift W1-T2790 ranks a
+  // shared definition above.
+  //
+  // W1-T3178 — THE ANCHOR MOVED; THE INVARIANT DID NOT. This counted the literal `^test\/`, which
+  // lived in `TEST_PATH_EXACT_RE` back when `test/` was the only suite root. That rule now spells
+  // its roots as a declared set, so the old literal reads ZERO — and a guard asserting `=== 0`
+  // would pass vacuously forever. What is actually being guarded is that review.ts declares its
+  // suite roots ONCE and grows no private test-path rule beside the shared table, so that is what
+  // is asserted: the single `SUITE_ROOTS` declaration, and exactly one rule anchored on it.
   const src = readFileSync(REVIEW_SRC, "utf8");
-  const testPathLiterals = src.match(/\^test\\\//g) ?? [];
+  const rootDeclarations = src.match(/const SUITE_ROOTS = \[/g) ?? [];
+  assert.equal(rootDeclarations.length, 1, "review.ts must declare its suite roots exactly once");
+  const anchoredRootRules = src.match(/\^\(\?:test\|apps\\\/dashboard\\\/src\)\\\//g) ?? [];
   assert.equal(
-    testPathLiterals.length,
+    anchoredRootRules.length,
     1,
     "review.ts must not gain a private test-path rule beside the shared table",
   );

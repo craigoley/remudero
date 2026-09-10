@@ -21,16 +21,27 @@
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
+import { makeTempDir } from "../src/lib/tmp.js";
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import of a .mjs there is a TS7016 —
 // the same reason test/acceptance-author-gate.test.ts and test/mutation-ratchet.test.ts reach their
 // scripts through a runtime import rather than a typed one. A dynamic specifier is not statically
 // resolved, so this loads the REAL module with no shadow copy to drift from it.
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+/** What `isTypeOnlyModule` reports when it CANNOT decide — the verdict still fails closed. */
+type Undecidable = { file: string; stage: string; message: string };
+
 const mod = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "diff-coverage.mjs")).href)) as {
   isTypeOnlyModule: (file: string, readSource?: (f: string) => string) => boolean;
-  findMissingSourceCoverage: (diffText: string, lcov: Set<string>, isTypeOnly?: (f: string) => boolean) => string[];
+  findMissingSourceCoverage: (
+    diffText: string,
+    lcov: Set<string>,
+    isTypeOnly?: (f: string, readSource?: unknown, onUndecidable?: (d: Undecidable) => void) => boolean,
+    onUndecidable?: (d: Undecidable) => void,
+  ) => string[];
 };
 const { findMissingSourceCoverage, isTypeOnlyModule } = mod;
 
@@ -104,4 +115,89 @@ test("the type-only check is injectable, so the gate's own logic is provable wit
   assert.deepEqual(findMissingSourceCoverage(diff, new Set<string>(), (f) => f === "src/a.ts"), ["src/b.ts"]);
   assert.deepEqual(findMissingSourceCoverage(diff, new Set<string>(), () => true), [], "all exempt ⇒ nothing reported");
   assert.deepEqual(findMissingSourceCoverage(diff, new Set<string>(), () => false), ["src/a.ts", "src/b.ts"], "none exempt ⇒ both");
+});
+
+// ── CASE 3, ADDED 2026-09-09: the discriminator did not get to run at all ─────────────────────────
+//
+// A third cause of "no SF record" hid inside case 1's verdict for as long as the guard's only output
+// was a boolean. `isTypeOnlyModule` fails CLOSED on a read or transpile error — correct, and the
+// safe direction — but a type-only module then gets case 1's message anyway, and case 1's message
+// implies a remedy ("write a test that exercises this file") that is IMPOSSIBLE for a module that
+// compiles to nothing. There is nothing to instrument, so no test can ever produce its `SF:` record.
+//
+// MEASURED on #4872: `isTypeOnlyModule("src/lib/merge-state.ts")` returned TRUE locally while CI
+// blocked on that exact file, on that exact head (`a16c794eb`), across two independent runs. Feeding
+// the same diff a guard that always throws reproduces CI's output exactly — `["src/lib/merge-state.ts"]`
+// — so the guard is failing in the runner. A bare `false` cannot say which of read/require/transpile
+// failed, and a re-run reproduces it identically while teaching nothing.
+
+test("a type-only check that could not be DECIDED is reported, not silently folded into the vacuity verdict", () => {
+  const diff = diffTouching("src/lib/merge-state.ts");
+  const seen: Undecidable[] = [];
+  const throwingGuard = (file: string, _read?: unknown, onUndecidable?: (d: Undecidable) => void) => {
+    onUndecidable?.({ file, stage: "transpile", message: "Cannot find module 'esbuild'" });
+    return false; // the guard's own fail-closed verdict, unchanged
+  };
+  const missing = findMissingSourceCoverage(diff, new Set<string>(), throwingGuard, (d) => seen.push(d));
+
+  assert.deepEqual(missing, ["src/lib/merge-state.ts"],
+    "THE VERDICT MUST NOT MOVE — failing closed is still right, and an undecidable check must never become an exemption");
+  assert.deepEqual(seen, [{ file: "src/lib/merge-state.ts", stage: "transpile", message: "Cannot find module 'esbuild'" }],
+    "and the run must be able to SAY the exemption never got a chance to apply");
+});
+
+test("⚠ a check that DECIDES reports nothing — the diagnostic must not fire on the ordinary path", () => {
+  const diff = diffTouching("src/lib/merge-state.ts", "src/lib/sweep.ts");
+  const seen: Undecidable[] = [];
+  const missing = findMissingSourceCoverage(diff, new Set<string>(), (f: string) => f === "src/lib/merge-state.ts", (d) => seen.push(d));
+  assert.deepEqual(missing, ["src/lib/sweep.ts"], "exemption applied, real gap still named");
+  assert.deepEqual(seen, [],
+    "POSITIVE CONTROL: a guard that answers cleanly emits no diagnostic. Without this arm, a collector that fires on every file would pass the test above and flood every blocked report");
+});
+
+// ── CASE 4: the discriminator must work WITH NO node_modules ──────────────────────────────────
+//
+// THE JOB THIS GATE RUNS IN INSTALLS NOTHING. W1-T3207 asserts it in
+// test/workflow-single-suite-run.test.ts — "the artifact consumer installs neither npm
+// dependencies nor Playwright", and separately that it "must not need npm-installed tsx". For as
+// long as this guard reached for esbuild, that made it fail closed on EVERY run: with no
+// `node_modules`, `require('esbuild')` throws, every type-only module was reported as a
+// vacuous-coverage hazard, and the stated remedy — write a test that exercises the file — is
+// impossible for a module with no executable code.
+//
+// MEASURED 2026-09-09 on #4872: green locally, BLOCKED in CI on the same head across two
+// independent runs. NOTHING IN THE REPO COULD SEE IT, because every existing test runs here, where
+// node_modules exists. This is that test.
+
+test("the type-only check answers correctly from a checkout WITH NO node_modules, as the coverage job has", () => {
+  const sandbox = makeTempDir("no-node-modules");
+  try {
+    // scripts/ only — the gate must not need anything else on disk to answer this.
+    cpSync(join(REPO_ROOT, "scripts"), join(sandbox, "scripts"), { recursive: true });
+    mkdirSync(join(sandbox, "src", "lib"), { recursive: true });
+    writeFileSync(join(sandbox, "src", "lib", "types-only.ts"),
+      "/** A doc comment, which the stripper PRESERVES — the reason raw stripped output is not empty. */\n" +
+      "export interface OnlyAType { a: string }\nexport type Alias = OnlyAType | undefined;\n");
+    writeFileSync(join(sandbox, "src", "lib", "has-code.ts"),
+      "export interface Shape { a: string }\nexport function realCode(s: Shape): string { return s.a; }\n");
+    assert.equal(existsSync(join(sandbox, "node_modules")), false, "the sandbox must have no dependencies at all");
+
+    const probe = [
+      'const m = await import("./scripts/diff-coverage.mjs");',
+      'console.log(JSON.stringify({',
+      '  typesOnly: m.isTypeOnlyModule("src/lib/types-only.ts"),',
+      '  hasCode: m.isTypeOnlyModule("src/lib/has-code.ts"),',
+      '}));',
+    ].join("\n");
+    const out = execFileSync(process.execPath, ["--input-type=module", "--no-warnings", "-e", probe],
+      { cwd: sandbox, encoding: "utf8" });
+    const got = JSON.parse(out.trim().split("\n").pop()!) as { typesOnly: boolean; hasCode: boolean };
+
+    assert.equal(got.typesOnly, true,
+      "a pure type module must be EXEMPT with no node_modules — this is the arm that was failing in CI");
+    assert.equal(got.hasCode, false,
+      "POSITIVE CONTROL: a module with real code must still be a coverage gap. An exemption that fires for everything is worse than one that never fires");
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
 });

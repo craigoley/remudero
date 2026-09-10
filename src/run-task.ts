@@ -2977,7 +2977,7 @@ export async function updateBranchViaGh(pr: ArmedStalledPr): Promise<UpdateBranc
   const ownerRepo = ownerRepoFromPrUrl(pr.prUrl);
   if (!ownerRepo) return "error";
   try {
-    ghExec(ghUpdateBranchArgv(ownerRepo.owner, ownerRepo.repo, pr.prNumber), { stdio: "pipe" });
+    ghExec(ghUpdateBranchArgv(ownerRepo.owner, ownerRepo.repo, pr.prNumber, pr.headSha), { stdio: "pipe" });
     return "updated";
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
@@ -6615,8 +6615,14 @@ export function decideFixRebase(facts: FixRebaseFacts): FixRebaseDecision {
  * sweep-side gateway) is the SECOND caller alongside `runFixRebase` — one `gh api` mechanism for
  * both version-sensitive update-branch call sites, not one fixed and one left on the subcommand.
  */
-export function ghUpdateBranchArgv(owner: string, repo: string, prNumber: number): string[] {
-  return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/update-branch`];
+export function ghUpdateBranchArgv(owner: string, repo: string, prNumber: number, expectedHeadSha?: string): string[] {
+  return [
+    "api",
+    "--method",
+    "PUT",
+    `repos/${owner}/${repo}/pulls/${prNumber}/update-branch`,
+    ...(expectedHeadSha ? ["-f", `expected_head_sha=${expectedHeadSha}`] : []),
+  ];
 }
 
 /**
@@ -25804,6 +25810,33 @@ export function updatedForWorkflowFromLedger(ledgerPath: string): Set<string> {
 }
 
 /**
+ * W1-T3277 — the generic stale-PR distance reader. Scoped to PRs GitHub already reports as
+ * `behind`, so the full sweep pays only for heads whose base freshness is already suspicious; the
+ * pure selector in `sweep.ts` receives a map and decides from policy data.
+ */
+export function buildBehindMainByPr(
+  owner: string,
+  repo: string,
+  openPrs: readonly OpenPrView[],
+  fetch: GhApiFetcher = ghJson,
+): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const pr of openPrs) {
+    if (pr.mergeState !== "behind") continue;
+    if (pr.mergeable === false) continue;
+    try {
+      const compare = fetch(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...main`]) as { ahead_by?: unknown };
+      if (typeof compare?.ahead_by === "number" && Number.isFinite(compare.ahead_by)) {
+        out.set(pr.prNumber, compare.ahead_by);
+      }
+    } catch {
+      // Best-effort distance: an unreadable compare omits this PR from the distance rung.
+    }
+  }
+  return out;
+}
+
+/**
  * has-PR vs pre-PR recoverability for ONE run id (W1-T169's own acceptance vocabulary) —
  * mirrors daemon.ts's `reconstructOrphan` resume/clean split, but read straight from the
  * ledger instead of a live GitHub call: `rmd down` needs an immediate, network-independent
@@ -30519,6 +30552,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // I/O `selectUpdateBranchTarget` performs itself.
   const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
   const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
+  const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung);
   // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
   // composition change, not a new read: the credit rung already built exactly this set, just
   // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
@@ -30537,6 +30571,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       inFlightTaskIds: new Set(liveInflightRuns(inflightDir).map((r) => r.taskId)),
       staleGateWorkflowsByPr,
       updatedForWorkflow,
+      behindMainByPr,
     }),
     DEFAULT_SWEEP_POLICY,
   );
@@ -31417,6 +31452,7 @@ export function buildSweepHook(
       // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
       const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
       const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
+      const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung);
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
       // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
@@ -31434,6 +31470,7 @@ export function buildSweepHook(
           inFlightTaskIds: new Set(liveInflightRuns(inflightDir).map((r) => r.taskId)),
           staleGateWorkflowsByPr,
           updatedForWorkflow,
+          behindMainByPr,
           // W1-T2584: supplied by daemon.ts's `runGatedSweep`, which closes the callback on its
           // own wall-clock timeout and re-checks the existing STOP/PAUSE controls on every pull.
           // Direct/tests calls omit it and receive the true default above.

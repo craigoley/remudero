@@ -1328,6 +1328,21 @@ jobs:
       - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
         run: npm run --silent comment-load-signal
 
+      # CONTRACT-COVERAGE ratchet (W1-T3174) — every `/v1/` route a first-party client calls must be
+      # declared in openapi/daemon.yaml; the uncovered count may FALL and never RISE.
+      #
+      # WHY IT MATTERS AND WHY IT IS A RATCHET RATHER THAN A BAN. `no-hand-rolled-fetch:check` is
+      # already required and walks `apps`/`packages`, so `apps/dashboard` CANNOT call a route the
+      # generated client does not expose. MEASURED 2026-09-09: first-party clients call 39 routes and
+      # the spec declares 13, so a ban would redden every PR on day one. The ratchet makes the 28-route
+      # gap legible and stops it growing; W1-T3177 lowers it per screen.
+      #
+      # A STEP, NOT A JOB: a new ci.yml job needs an entry in ci-gate.yml AND in src/lib/ci-parity.ts,
+      # and a workflow changed beside a `src/` product path is Standing rule 25 entanglement.
+      # FALSIFIER: test/the-contract-covers-its-own-console.test.ts.
+      - name: Contract-coverage ratchet (no first-party route escapes the contract)
+        run: node scripts/contract-coverage-ratchet.mjs
+
   baseline-monotonic:
     # BASELINE-MONOTONIC gate (W1-T2906). Every ratchet above reads ITS OWN scripts/*-baseline.json
     # from this PR's tree, so a PR that edits one of those SCORE floors/ceilings down (or up, for a

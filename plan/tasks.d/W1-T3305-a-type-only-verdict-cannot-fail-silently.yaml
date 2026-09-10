@@ -1,0 +1,71 @@
+- id: W1-T3305
+  title: "THE TYPE-ONLY COVERAGE CARVE-OUT FAILS CLOSED AND SILENTLY, AND THE PR IT MISFIRES ON CANNOT BE FIXED BY ANY AMOUNT OF TESTING — `isTypeOnlyModule` returns the same `false` for 'this module emits real code' as for 'esbuild could not be reached', and because a type-only module can never earn an `SF:` record, that false verdict is an unappealable block; #4872 sits in exactly that state while the same call answers `true` locally"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-09-09 against origin/main and a live failure.
+    THE TWO ARMS ARE INDISTINGUISHABLE. `isTypeOnlyModule` (scripts/diff-coverage.mjs) has exactly
+    two catch arms and both answer the same way:
+      } catch { return false; // unreadable ⇒ not exempt
+      } catch { return false; // cannot transpile ⇒ not exempt
+    A caller cannot tell "this module emits real code" from "the tool that decides could not run".
+    WHY THAT IS WORSE HERE THAN IN AN ORDINARY FAIL-CLOSED GATE. Fail-closed is normally the right
+    default because the author can respond by covering the code. A TYPE-ONLY MODULE CANNOT BE
+    COVERED — it transpiles to zero bytes, so no test can ever put an `SF:` record in the lcov for
+    it. When this verdict is wrong the PR has no remedy at all, which is the property that makes a
+    silent wrong answer unacceptable rather than merely unhelpful.
+    THE LIVE INSTANCE, WITH A CONTROL. #4872 adds only an `interface` and one optional field to
+    `src/lib/merge-state.ts` — a file with ZERO runtime declarations in 75 lines. CI blocked it:
+      diff-coverage: BLOCKED -- changed source file(s) have no SF record in the coverage report;
+      coverage would otherwise pass vacuously:
+        - src/lib/merge-state.ts
+    Run locally against the SAME head, through the module's own exports:
+      isTypeOnlyModule('src/lib/merge-state.ts')            -> true
+      esbuild transformSync(...).code.trim().length          -> 0
+      findMissingSourceCoverage(<#4872 diff>, <empty lcov>)  -> ['src/lib/open-prs-rest.ts',
+                                                                'src/lib/prompt-render.ts',
+                                                                'src/lib/sweep.ts']
+    merge-state is correctly ABSENT from that list — the carve-out fires here and did not fire
+    there. The environment differs; the verdict does not say so.
+    NOT A GUESS ABOUT WHICH ARM. This shard deliberately does not assert WHY CI answered `false`.
+    That is the point: the current design makes the reason unrecoverable from the output, and the
+    fix is to make it recoverable rather than to divine it once.
+  design: |
+    (i) SEPARATE "NOT TYPE-ONLY" FROM "COULD NOT DECIDE". The three outcomes are distinct facts and
+    must be distinct return values: emits code / emits nothing / undecidable.
+    (ii) AN UNDECIDABLE VERDICT IS LOUD, NEVER A SILENT BLOCK. It names the module and why the
+    decision failed. Whether undecidable blocks or passes is a policy call the implementer should
+    state explicitly in the PR body — but it must not be reported as though the module were
+    measured and found wanting, which is what happens today.
+    (iii) THE DEPENDENCY READ IS DIAGNOSED ONCE, NOT PER FILE. `createRequire(import.meta.url)`
+    reaching esbuild either works for the whole run or for none of it; a per-file silent false
+    turns one environment fact into N unexplained blocks.
+    (iv) OUT OF SCOPE: changing WHICH modules count as type-only (the esbuild-emits-nothing test is
+    correct and stays); the `process-boundary` directive vocabulary (its own filing); any `src/`
+    path (Standing rule 25 — this instrument rides alone).
+  acceptance:
+    - claim: "a module esbuild cannot be reached for is reported as UNDECIDABLE, naming the module and the reason, and is never reported as a measured coverage gap"
+      proof: "unit test: test/a-type-only-verdict-cannot-fail-silently.test.ts"
+    - claim: "a genuinely type-only module is still exempt, and a module that emits real code is still blocked — the two decidable answers are unchanged"
+      proof: "unit test: test/a-type-only-verdict-cannot-fail-silently.test.ts"
+  risk: medium
+  origin: "operator-session#4872-blocked-2026-09-09"
+  plan_refs: ["W1-T3273"]
+  files: [scripts/diff-coverage.mjs, test/a-type-only-verdict-cannot-fail-silently.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    INSTRUMENT-ONLY BY CONSTRUCTION, same as its sibling filing: `scripts/diff-coverage.mjs` is
+    named in INSTRUMENT_SURFACE (src/lib/review.ts), so this declares the instrument and its own
+    test and NO `src/` path. That is also why #4872 cannot carry the fix itself — adding this
+    instrument to a PR that changes four `src/` files is Standing rule 25 entanglement.
+    THE PROOFS ARE PURE-PATH `unit test:` ON A FILE ABSENT AT BASE — the forward-referencing case
+    the `not_yet_built` carve-out exists for (path declared in `files:`, absent on origin/main as
+    VERIFIED 2026-09-09, no title filter). A `grep:` proof cannot discriminate before the work
+    exists.
+    SIBLING: the `process-boundary` directive-vocabulary filing, from the same session. They touch
+    the same instrument and should not be built concurrently; whichever lands second rebases.

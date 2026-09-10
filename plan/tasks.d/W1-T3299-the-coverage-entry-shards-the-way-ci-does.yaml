@@ -1,0 +1,106 @@
+- id: W1-T3299
+  title: "THE COVERAGE PARITY ENTRY OMITS THE ONE FLAG THAT MAKES CI'S RUN PARALLEL — ci.yml passes `--test-shard=n/4` across a four-way matrix and merges the shards; `--ci-parity` shells the identical argv WITHOUT it, serializing on one box the work CI does four ways"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 18.00
+  files:
+    - src/lib/ci-parity.ts
+    - test/the-coverage-entry-shards-the-way-ci-does.test.ts
+  origin: "operator-session#ci-parity-cost-2026-09-09"
+  plan_refs: ["W1-T294", "W1-T3207", "W1-T2597"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE TWO ARGVS ARE THE SAME COMMAND MINUS ONE FLAG. MEASURED 2026-09-09:
+
+      ci.yml, the coverage-shard job (a 4-way matrix):
+        NODE_V8_COVERAGE=coverage/raw node --enable-source-maps --experimental-test-coverage \
+          --test-coverage-exclude="test/**" --test-reporter=spec --test-reporter=lcov \
+          --test --test-shard=<n>/4 --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
+
+      ci-parity's coverage entry:
+        the same invocation, with NO --test-shard
+
+    So this entry is already faithful in every respect but one, and that one is what makes CI's
+    version finish. CI then merges four shard artifacts in its `coverage-ratchet` aggregator, which
+    refuses a missing or partial artifact by name.
+
+    THE TOOLING TO MERGE ALREADY EXISTS IN THIS REPO — `scripts/coverage-merge-ratchet.mjs`, with
+    its own suite in `test/merge-lcov.test.ts`. This task does not invent a merge; it reuses the one
+    CI's own aggregator depends on.
+
+    THE COST. This is the second of two full-suite passes a `--ci-parity` run performs (the first is
+    W1-T3298's concern). On a completed local run the plain pass alone reported
+    `# duration_ms 1024664` — 17.1 minutes — and total wall clock was ~45 minutes. The host has 8
+    CPUs (`nproc`), so the four shards CI runs in parallel are available locally and are simply not
+    used.
+
+    WHY THIS IS NOT MERELY A SPEED TASK. CLAUDE.md instructs every session to run this gate before
+    its first push. A 45-minute gate is one that gets skipped, run on a stale tree, or run
+    concurrently with other work — all three happened in the session that measured this, and the
+    third produced timing-sensitive failures that had to be discarded as untrustworthy. The cost of
+    a slow gate is not the minutes; it is that people stop trusting or stop running it.
+  design: |
+    (i) PASS `--test-shard=<n>/4` AND RUN THE FOUR SHARDS CONCURRENTLY, then merge. The shard count
+    matches ci.yml's matrix and is read from one place, never typed in two.
+    (ii) CONCURRENCY IS BOUNDED BY THE HOST, NOT HARDCODED. Four shards on an 8-CPU host is CI's
+    shape; a 2-CPU host must not launch four instrumented node runners. Size the pool from the
+    reported CPU count with the shard COUNT fixed at CI's 4, so the SELECTION stays identical to
+    CI's and only the scheduling adapts. Changing the shard count would change which tests land
+    together and is not this task's business.
+    (iii) MERGE THROUGH THE EXISTING SCRIPT. `scripts/coverage-merge-ratchet.mjs` produces the lcov
+    the later `coverage-ratchet` and `diff-coverage` steps already read from disk. Those two steps
+    are unchanged by this task.
+    (iv) A MISSING OR PARTIAL SHARD REFUSES, exactly as CI's aggregator does. Four shards that
+    produce three artifacts must fail loudly; merging three and reporting a coverage number is a
+    vacuous pass with a plausible-looking figure, which is worse than the serial run it replaced.
+    (v) EVERY SHARD MUST PRINT ITS OWN `# tests` SUMMARY (W1-T2597) before any total is believed. A
+    shard killed for time prints the assertions it reached and no totals, so a summed total over an
+    unverified shard is a subset reported as a whole.
+    (vi) NOT IN SCOPE: the `ci` entry's tier and class handling (W1-T3298), the shard COUNT, what
+    `coverage-ratchet` or `diff-coverage` measure, or the coverage baseline itself.
+  acceptance:
+    - claim: "the coverage entry passes a test-shard argument, so its argv matches the one ci.yml invokes"
+      proof: "unit test: test/the-coverage-entry-shards-the-way-ci-does.test.ts"
+    - claim: "the four shards' lcov is merged through the existing merge script, and the merged report instruments the same files the serial run did"
+      proof: "unit test: test/the-coverage-entry-shards-the-way-ci-does.test.ts"
+    - claim: "a missing or partial shard artifact REFUSES rather than merging what arrived, so a coverage number is never reported over an incomplete set"
+      proof: "unit test: test/the-coverage-entry-shards-the-way-ci-does.test.ts"
+    - claim: "a shard that produced no `# tests` summary is treated as unverified rather than folded into a total"
+      proof: "unit test: test/the-coverage-entry-shards-the-way-ci-does.test.ts"
+    - claim: "the concurrency is derived from the host's CPU count while the shard count stays CI's four, so selection is unchanged and only scheduling adapts"
+      proof: "unit test: test/the-coverage-entry-shards-the-way-ci-does.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF the entry already shards: read the coverage entry's argv in
+    `src/lib/ci-parity.ts`. MEASURED 2026-09-09: it carries `--enable-source-maps`,
+    `--experimental-test-coverage`, `--test-coverage-exclude`, both reporters and the glob, and NO
+    `--test-shard`.
+    THE MERGED LCOV MUST INSTRUMENT WHAT THE SERIAL ONE DID, and this is the control that catches a
+    sharding change which quietly narrows the corpus: `grep -c '^SF:' ` on both reports, plus a
+    per-file check that a known-covered source file still carries a non-zero DA record. A shard split
+    that drops a file makes `diff-coverage` pass VACUOUSLY over an empty set — the failure family
+    this repo has already paid for (#1399).
+    PROVE THE REFUSAL ARM WITH A DELIBERATELY MISSING SHARD. A suite that only drives four healthy
+    shards passes on an implementation that merges whatever it finds, which is the defect.
+    DO NOT change the shard count to tune speed. The count decides which tests share a process;
+    matching CI's 4 is what keeps a local red meaningful against a CI red.
+    DO NOT merge by concatenating lcov files. One `DA:<line>` record exists per file per report and
+    naive concatenation produces duplicate SF blocks that later readers resolve inconsistently;
+    `scripts/coverage-merge-ratchet.mjs` exists because this is not a text operation.
+  note: |
+    Rule 25 CHECKED: `src/lib/ci-parity.ts` is not on INSTRUMENT_SURFACE; declared files are that
+    module and its own new test, so `detectInstrumentEntanglement` cannot fire.
+    SEQUENCING WITH W1-T3298: both edit `src/lib/ci-parity.ts` and will conflict if built in
+    parallel. They are separable concerns — one is about WHICH command the `ci` entry shells, the
+    other about a MISSING FLAG on the coverage entry — but they are not independently mergeable.
+    Build W1-T3298 first (it removes a whole pass and may change what this one is measured against),
+    then rebase this onto it.
+    THE THIRD OPTION IS DELIBERATELY NOT FILED. Making `--fast` the documented pre-push default was
+    considered and held back: it argues from the current 45-minute cost, which these two tasks exist
+    to change, and the full suite is what catches a cross-file break in a file the diff never touched
+    (#2237/#2248, the dead-default case CLAUDE.md records). Re-open it with a fresh measurement after
+    both land, or not at all.

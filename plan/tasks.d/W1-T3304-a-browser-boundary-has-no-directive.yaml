@@ -1,0 +1,63 @@
+- id: W1-T3304
+  title: "DIFF-COVERAGE HAS ONE AUTHOR DIRECTIVE FOR AT LEAST TWO KINDS OF IRREDUCIBLE I/O — `process-boundary` exempts re-exec and exit glue and refuses everything else by name, so a path that can only be exercised by launching a real browser has no sanctioned exemption and no way to earn coverage either; #4865 is blocked on exactly that, with the gate telling the author the directive they reached for is the wrong one and naming no right one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: |
+    MEASURED 2026-09-09 against origin/main, from the gate's own source and a live failure.
+    THE VOCABULARY IS ONE WORD. `scripts/diff-coverage.mjs` recognises exactly one author-written
+    directive — `// diff-cov: process-boundary — <reason>` (its own doc at the recogniser). Three
+    `kind` values exist in the file (`type-only`, `process-boundary`, `relocated`) and the other two
+    are DERIVED, never written by a human: `type-only` from an esbuild transpile and `relocated`
+    from a diff-shape match. So an author with an uncoverable region has one word available.
+    AND THAT WORD IS DELIBERATELY NARROW. The validator refuses a directive whose guarded
+    declaration carries no `spawnSync`/`execFileSync(process.execPath …)` or `process.exit`, with
+    the message "the directive may only exempt re-exec/exit glue". That narrowness is correct and
+    must not be widened: a blanket exemption is how coverage gates die.
+    THE LIVE INSTANCE. #4865 (W1-T3185) ships `scripts/console-live-review.mjs`, whose
+    `defaultOpenViewport` calls `chromium.launch()` against a running console. The author placed a
+    `process-boundary` directive above it; the gate refused:
+      diff-coverage: INVALID process-boundary directive(s) -- the gate fails closed:
+        - scripts/console-live-review.mjs:199 -- guarded declaration contains no process-boundary
+          call ... the directive may only exempt re-exec/exit glue
+    THE PR IS THEN UNRESOLVABLE FROM INSIDE ITSELF, which is what makes this a gate defect rather
+    than an author error. Removing the directive does not help — the same lines are then simply
+    uncovered. Covering them needs a fixture server, and the task's whole thesis (its title) is
+    that a fixture is what the suite must STOP being pointed at. Adding a directive kind means
+    editing this instrument, which Standing rule 25 forbids inside a PR carrying product paths.
+  design: |
+    (i) A SECOND NAMED DIRECTIVE, NOT A WIDER FIRST ONE. `process-boundary` keeps its exact current
+    predicate. The new one is its own word with its own predicate and its own refusal message, so
+    a reader of either directive still learns which irreducible thing is being exempted.
+    (ii) THE PREDICATE MUST BE AS CHECKABLE AS THE ONE IT SITS BESIDE. `process-boundary` is
+    enforced by looking for a real re-exec/exit call in the guarded declaration; the browser
+    equivalent must look for a real browser-launch call, so a directive cannot be pasted over
+    ordinary logic. A directive whose predicate is unenforceable is a comment.
+    (iii) FAIL CLOSED ON AN UNRECOGNISED WORD, exactly as today. `diff-cov: anything-else` must
+    refuse and name the directives that exist — the current failure told the author what was wrong
+    and not what was right, which is most of why #4865 stalled.
+    (iv) OUT OF SCOPE: widening `process-boundary`; any change to the coverage thresholds; any
+    `src/` path (Standing rule 25 — this instrument rides alone).
+  acceptance:
+    - claim: "a declaration whose only irreducible call is a real browser launch can be exempted by a directive of its own, and the exemption is refused when the guarded declaration contains no such launch"
+      proof: "unit test: test/a-browser-boundary-has-no-directive.test.ts"
+    - claim: "an unrecognised diff-cov directive word fails closed and its message names the directives that do exist"
+      proof: "unit test: test/a-browser-boundary-has-no-directive.test.ts"
+  risk: medium
+  origin: "operator-session#4865-blocked-2026-09-09"
+  plan_refs: ["W1-T3185"]
+  files: [scripts/diff-coverage.mjs, test/a-browser-boundary-has-no-directive.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    INSTRUMENT-ONLY BY CONSTRUCTION. `scripts/diff-coverage.mjs` is named in INSTRUMENT_SURFACE
+    (src/lib/review.ts), so this shard declares the instrument and its own test and NO `src/` path.
+    Standing rule 25 forces that shape and it is also why #4865 cannot carry the fix itself.
+    THE PROOFS ARE PURE-PATH `unit test:` ON A FILE THAT DOES NOT EXIST AT BASE, which is the
+    forward-referencing TDD case `judgeCriterion`'s `not_yet_built` carve-out is for: the path is
+    declared in `files:`, the file is absent on origin/main (VERIFIED 2026-09-09), and no title
+    filter is used. A `grep:` proof would be wrong here — there is no changed line to point at
+    until the work exists.

@@ -1,0 +1,102 @@
+- id: W1-T3283
+  title: "A PR THAT FORGETS ITS TRAILER SPENDS A HUMAN AND A FULL CI CYCLE ON A ONE-LINE BODY EDIT — the gate names both accepted shapes, the branch name already carries the task id, and nothing joins them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 25.00
+  files: [src/lib/sweep.ts, test/a-missing-trailer-is-repairable-from-the-branch.test.ts]
+  origin: "operator-session#board-drive-2026-09-09"
+  plan_refs: ["W1-T1060", "W1-T3231", "W1-T2998"]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09 on the live board, twice in one hour. `acceptance-author-gate` went red on
+    #4862 and #4865 for the same reason: the PR body carried NEITHER a `Remudero-Task:` trailer NOR
+    an `## Acceptance` block, so the gate had nothing to resolve criteria from. Both were
+    implementation PRs on `run-<taskId>-<epoch>` branches whose task record was already on `main`.
+    THE REPAIR IS ONE LINE AND EVERY INPUT IS ALREADY IN HAND. The branch name carries the task id;
+    the shard says whether that task exists and what it declares; the diff says whether the PR adds
+    a plan record. Both were repaired by appending a single trailer line — no code change, no
+    judgement — and each had cost a full red CI cycle first.
+    THE GATE ALREADY NAMES ITS ACCEPTED SHAPES, which is what makes this mechanical rather than a
+    guess: a body satisfies it with a resolvable trailer or an `## Acceptance` block. A body with
+    neither is not ambiguous about what is missing.
+    NOT A WIDENING OF WHAT THE GATE ACCEPTS. The gate's rule is unchanged; this supplies the input it
+    was always asking for, from data the fleet already has.
+  design: |
+    (i) REPAIR ONLY THE ABSENT-BODY CASE. A body that already carries a trailer or an acceptance
+    block is untouched, whatever its verdict — a WRONG trailer is a different defect and must not be
+    silently rewritten.
+    (ii) REFUSE WHEN THE PR ADDS THE TASK'S OWN PLAN RECORD. That is exactly the self-credit
+    W1-T3231's `filingSelfCreditCheck` refuses: a PR filing a task must not also claim to implement
+    it. This repair must never manufacture the shape another gate exists to reject.
+    (iii) ATTRIBUTE FROM THE BRANCH, NEVER FROM PROSE. The id comes from the `run-<taskId>-<epoch>`
+    branch name and must resolve to a plan record on `main`. No id in the branch, or no record: stand
+    down. Reading the id out of a title or body would be a guess.
+    (iv) FLAG A SCOPE OVERRUN, NEVER BLOCK ON IT. Changed paths outside the shard's declared `files:`
+    are reported on the PR — the same flagged-not-blocked treatment the declared-scope check already
+    gives — because a legitimate widening and an accidental one look identical here.
+    (v) RE-FIRE THE EVENT, NEVER RE-RUN THE JOB — and this clause exists because the obvious move is
+    wrong. `acceptance-author-gate` reads the PR BODY out of the event payload, and GitHub's
+    `rerun-failed-jobs` REPLAYS THE ORIGINAL PAYLOAD: it re-reads the body as it was BEFORE the
+    repair, fails again, and posts a fresh red over the green the repair had already earned.
+    MEASURED 2026-09-09 on #4865: the trailer edit produced `acceptance-author-gate SUCCESS` at
+    21:45:46; a re-run of the old failed job then produced FAILURE at 22:23:22 on the same head, from
+    the same pre-edit body. The gate subscribes to `pull_request: edited`, so the repair must cause a
+    NEW edit event; a job re-run can never succeed and silently looks like the repair did not work.
+    (vi) SAY WHAT IT DID AND WHY, IN THE BODY IT EDITS. A body silently rewritten by a machine is
+    worse than a red check: the next reader cannot tell which claims are the author's.
+  acceptance:
+    - claim: "a body with neither a trailer nor an acceptance block gains a trailer resolved from the branch name"
+      proof: "unit test: test/a-missing-trailer-is-repairable-from-the-branch.test.ts"
+    - claim: "a body that ALREADY carries a trailer or an acceptance block is left byte-for-byte unchanged"
+      proof: "unit test: test/a-missing-trailer-is-repairable-from-the-branch.test.ts"
+    - claim: "a PR that adds the task's own plan record is REFUSED, never given a trailer that would be self-credit"
+      proof: "unit test: test/a-missing-trailer-is-repairable-from-the-branch.test.ts"
+    - claim: "a branch with no task id, or an id with no plan record on main, stands down rather than guessing"
+      proof: "unit test: test/a-missing-trailer-is-repairable-from-the-branch.test.ts"
+    - claim: "the repair re-fires the pull_request event and never re-runs the failed job, so a replayed pre-repair body cannot post a fresh red over the green the repair earned"
+      proof: "unit test: test/a-missing-trailer-is-repairable-from-the-branch.test.ts"
+    - claim: "changed paths outside the shard's declared files are reported and never block the repair"
+      proof: "unit test: test/a-missing-trailer-is-repairable-from-the-branch.test.ts"
+  falsifier: |
+    CLOSE IF the fleet already repairs this: watch an implementation PR opened with no trailer.
+    MEASURED 2026-09-09: #4862 and #4865 both went red on `acceptance-author-gate` and both waited
+    for a human to append one line.
+    POSITIVE CONTROL, because "more PRs pass the gate" is the failure mode this must not become: the
+    suite must show a PR that ADDS its own shard being REFUSED a trailer. Without that arm this is
+    indistinguishable from a rung that manufactures self-credit, which is precisely what W1-T3231
+    built a gate to catch.
+    SECOND CONTROL: a body that already has an acceptance block must come back byte-identical. A
+    repair that rewrites an author's own claims has done something much worse than fixing a red.
+    THE REPLAY CONTROL, because this failure is silent and reads as "the repair did not work": a
+    fixture whose gate is re-triggered by a JOB RE-RUN must be shown still failing, and the same
+    fixture re-triggered by a fresh EDIT must be shown passing. Without both arms the implementer
+    will reach for `rerun-failed-jobs` — it is the obvious tool — and pin the PR red permanently.
+    DO NOT infer the task id from the title or body. The branch is the only attribution the fleet
+    controls; prose is a guess.
+    DO NOT repair a body whose trailer is present but WRONG. That is a different defect with a
+    different remedy, and silently correcting it hides a mis-attributed PR.
+  note: |
+    Rule 25 CHECKED: `src/lib/sweep.ts` is ordinary src, not an instrument surface.
+    THE SHAPE IS PROVEN BEFORE THE SHARD. Both repairs were done by hand on 2026-09-09 with exactly
+    the guards in design (i)-(iv), including the self-credit refusal, so this describes a procedure
+    that has already run twice rather than a design sketch.
+    RELATION TO W1-T2998: that task asks whether a red ratchet whose remedy is a RECORDED NUMBER may
+    be repaired deterministically, and its flag ships OFF because an unattended write to a
+    contributor's branch is an operator ratification. This is the same class of question about a
+    PR BODY rather than a file, and it should ship behind a flag of the same shape.
+    THE REPLAY TRAP WAS HIT FOR REAL BEFORE THIS SHARD WAS AMENDED, which is why design (v) is
+    stated so bluntly: on 2026-09-09 the repair on #4865 worked, and a well-meant `rerun-failed-jobs`
+    then re-reddened it from the pre-edit payload. The green and the red sit on the same head in the
+    check list, 38 minutes apart, and only the timestamps distinguish them.
+    CAVEAT WITH EQUAL WEIGHT: this repairs the CHEAPEST red on the board. It does not make a PR
+    correct, and a PR whose trailer was merely missing may still fail review on its criteria - which
+    is the point, because the trailer is what lets review grade it at all.
+    SECOND CAVEAT: a machine editing a human's PR body is a real intrusion, which is why design (v)
+    requires it to say so in the text it adds. If that reads badly in practice, the honest fallback
+    is to POST the missing trailer as a comment and let the author paste it.
