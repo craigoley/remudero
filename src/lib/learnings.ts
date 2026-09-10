@@ -1445,6 +1445,77 @@ export function retrieveRuleBodyOrDegrade(
   return `- **${rule.headline}**${rule.body}`;
 }
 
+/** W1-T3322 — thrown when the doctrine cannot be resolved. A MISSING STORE IS A FAILURE, NEVER AN
+ *  EMPTY RESOLUTION: every suite that asserts "CLAUDE.md must say X" would otherwise pass vacuously
+ *  over nothing the moment a body store moved or a path went wrong, and they would all pass at once. */
+export class DoctrineUnresolvableError extends Error {
+  constructor(readonly sourcePath: string, reason: string) {
+    super(`doctrine unresolvable at ${sourcePath}: ${reason}`);
+    this.name = "DoctrineUnresolvableError";
+  }
+}
+
+export interface ResolvedDoctrine {
+  /** Index + every body, concatenated — what a reader ends up holding, whatever the storage shape. */
+  readonly text: string;
+  /** The headline index alone, as a worker receives it before retrieving anything. */
+  readonly index: string;
+  readonly rules: readonly RuleHeadline[];
+  /** Headlines whose body could not be retrieved — NAMED, never silently dropped. */
+  readonly unresolved: readonly string[];
+}
+
+/**
+ * W1-T3322 — THE DOCTRINE AS A READER RESOLVES IT, through the SAME primitives `run-task.ts` uses.
+ *
+ * WHY THIS EXISTS. The suites that guard doctrine assert that a FACT IS PRESENT — "CLAUDE.md must say
+ * what ships on merge" (test/fleet-heartbeat-image-sha.test.ts). They read the raw file, so they pin
+ * the CONTAINER when they mean the CONTENTS: a rule whose body moves to a store the reader can still
+ * reach fails them anyway. That is exactly why W1-T2507 migrated three bullets, watched tests redden,
+ * and reverted them — and it is what blocks W1-T3323.
+ *
+ * ONE RESOLVER, NOT A SECOND IMPLEMENTATION. It composes `parseRuleHeadlines`, `buildHeadlineIndex`
+ * and `retrieveRuleBodyOrDegrade`. Two resolvers would drift, and the drift would be invisible until
+ * a migration broke a suite that had been passing for the wrong reason.
+ *
+ * FAILS LOUD. An unreadable source, or one that parses to no rules at all, throws. A resolver that
+ * returns "" on a missing store makes every doctrine assertion in the repo vacuous simultaneously —
+ * the assertion-over-an-empty-set shape this repo has recorded repeatedly.
+ */
+export function resolveDoctrine(
+  sourcePath: string,
+  deps: { readFile?: (p: string) => string; retrieveBody?: (headline: string) => string | undefined } = {},
+): ResolvedDoctrine {
+  const readFile = deps.readFile ?? ((p: string) => readFileSync(p, "utf8"));
+  let raw: string;
+  try {
+    raw = readFile(sourcePath);
+  } catch (err) {
+    throw new DoctrineUnresolvableError(sourcePath, `unreadable — ${String((err as Error)?.message ?? err)}`);
+  }
+  const rules = parseRuleHeadlines(raw);
+  if (rules.length === 0) {
+    throw new DoctrineUnresolvableError(sourcePath, "parsed zero rules — an empty resolution is never a pass");
+  }
+  const index = buildHeadlineIndex(rules);
+  // A caller may supply a retriever that reaches a SEPARATE body store (W1-T3323's shape). Absent
+  // one, bodies come from the source itself — so this returns today's file today, and the migrated
+  // shape after the migration, with no assertion needing to know which.
+  const retrieve = deps.retrieveBody ?? ((h: string) => index.get(h));
+  const unresolved: string[] = [];
+  const bodies = rules.map((r) => {
+    const got = retrieve(r.headline);
+    if (got === undefined) unresolved.push(r.headline);
+    return retrieveRuleBodyOrDegrade(r, () => got);
+  });
+  return {
+    text: [renderHeadlineOnlyIndex(rules), ...bodies].join("\n"),
+    index: renderHeadlineOnlyIndex(rules),
+    rules,
+    unresolved,
+  };
+}
+
 /** The wider context-block shape this mechanism assembles into, mirroring
  *  {@link renderLearningsContext}'s stable-then-volatile ordering (W1-T35): the headline index is
  *  stable and sits first, `retrievedBodies` grows over a session and sits last. */

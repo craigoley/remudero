@@ -30,6 +30,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { resolveDoctrine } from "../src/lib/learnings.js";
+
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REAL_SCRIPT = join(REPO_ROOT, "scripts", "fleet-heartbeat.sh");
 const CLAUDE_MD = join(REPO_ROOT, "CLAUDE.md");
@@ -299,7 +301,12 @@ test("MUTANT: removing the non-sha rejection is caught — 'unknown' would other
 // ── Claim 4: the mount-versus-rebuild boundary is written down so an author can tell which half
 // a diff lands in ───────────────────────────────────────────────────────────────────────────────
 test("CLAUDE.md documents the bind-mount-versus-image-rebuild boundary", () => {
-  const text = readFileSync(CLAUDE_MD, "utf8");
+  // W1-T3322: the DOCTRINE A READER RESOLVES, not the raw file. These assertions mean "the fact is
+  // present where the reader loads it", so reading the container pins the wrong thing — a rule whose
+  // body moves to a store the reader can still reach would fail them though nothing was lost. That is
+  // what made W1-T2507 revert three migrations. `resolveDoctrine` throws rather than resolving empty,
+  // so this cannot start passing vacuously either.
+  const text = resolveDoctrine(CLAUDE_MD).text;
   assert.match(
     text,
     /bind-mount|mounted checkout|image rebuild|baked/i,
@@ -318,7 +325,12 @@ test("CLAUDE.md documents the bind-mount-versus-image-rebuild boundary", () => {
 });
 
 test("CLAUDE.md names the operator-triggered build workflow, not an automatic one", () => {
-  const text = readFileSync(CLAUDE_MD, "utf8");
+  // W1-T3322: the DOCTRINE A READER RESOLVES, not the raw file. These assertions mean "the fact is
+  // present where the reader loads it", so reading the container pins the wrong thing — a rule whose
+  // body moves to a store the reader can still reach would fail them though nothing was lost. That is
+  // what made W1-T2507 revert three migrations. `resolveDoctrine` throws rather than resolving empty,
+  // so this cannot start passing vacuously either.
+  const text = resolveDoctrine(CLAUDE_MD).text;
   assert.match(
     text,
     /acr-build\.yml/,
