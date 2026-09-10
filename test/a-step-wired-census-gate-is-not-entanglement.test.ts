@@ -143,3 +143,40 @@ test("W1-T3272 CONTROL: a DELETION from a registry is never subtracted, however 
   const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY, REVIEW], diff);
   assert.equal(r.entangled, true, "an unprotection beside a workflow edit is the thing rule 25 is FOR");
 });
+
+// ── the gate DECLARED ON THE SURFACE: the reading that actually decides ───────────────────────
+//
+// `INSTRUMENT_SURFACE` is read from the tree the detector RUNS IN, and the reviewer runs it on the
+// PR's own tree. A census gate's PR necessarily declares its own script there (the declaration is
+// mandatory — test/instrument-surface-completeness.test.ts), so the script is an INSTRUMENT by the
+// time the verdict is taken.
+//
+// MEASURED 2026-09-10 on #4851, on byte-identical file lists: entangled=FALSE judged from a lane
+// that did not declare the script, TRUE judged from the PR's own branch that did. The second is the
+// one the reviewer uses, and it failed the review after the carve-out had supposedly cleared it.
+// Condition (a) was refusing because an instrument was not a workflow — the very gate being
+// registered, which `introducedGates` had ALREADY subtracted on W1-T2521's reasoning.
+
+test("W1-T3272: the introduced gate does not veto its own registration when it is DECLARED ON THE SURFACE", () => {
+  const diff =
+    block(CI, "jobs:", ["        run: node scripts/expiring-fixture-census.mjs"]) +
+    block("scripts/expiring-fixture-census.mjs", "", ["// the gate"], { newFile: true }) +
+    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/expiring-fixture-census.test.ts", "a", "r"),']) +
+    block(REVIEW, "export const INSTRUMENT_SURFACE: readonly string[] = [", ['  "^scripts/expiring-fixture-census\\\\.mjs$",']);
+  // The script is passed as an instrument here, which is what the PR's own tree produces.
+  const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY, REVIEW], diff);
+  assert.equal(r.entangled, false, "an introduced gate that is already carved out must not also veto condition (a)");
+});
+
+test("W1-T3272 CONTROL: an instrument that is NOT an introduced gate still vetoes", () => {
+  // Condition (a) exists so an unrelated instrument cannot ride along on a registration. Relaxing
+  // it for the introduced gate must not relax it for anything else — a pre-existing ratchet script
+  // changed in the same diff is exactly the passenger it was written to stop.
+  const diff =
+    block(CI, "jobs:", ["        run: node scripts/expiring-fixture-census.mjs"]) +
+    block("scripts/expiring-fixture-census.mjs", "", ["// the gate"], { newFile: true }) +
+    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/expiring-fixture-census.test.ts", "a", "r"),']) +
+    block("scripts/comment-load-ratchet.mjs", "export function ceilingForComments(", ["  return 999999;"]);
+  const r = detectInstrumentEntanglement([CI, "scripts/expiring-fixture-census.mjs", PARITY, "scripts/comment-load-ratchet.mjs"], diff);
+  assert.equal(r.entangled, true, "a PRE-EXISTING instrument weakened in the same diff must still refuse");
+});
