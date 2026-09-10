@@ -985,6 +985,7 @@
     "test/review-engine-revision-rearm.test.ts": 1485,
     "test/review-evidence-provenance.test.ts": 1005,
     "test/review-failure-reason-ledgered.test.ts": 1478,
+    "test/review-feedback-reaches-the-learning-loop.test.ts": 0,
     "test/review-lane-budget.test.ts": 963,
     "test/review-lane-fairness.test.ts": 1109,
     "test/review-orphan-wiring.test.ts": 1564,
