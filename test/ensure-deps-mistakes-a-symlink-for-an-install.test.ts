@@ -13,29 +13,15 @@ import {
   type ProofSpawner,
 } from "../src/lib/review.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { absentRunnerCheckout, checkoutWithPackage } from "./helpers/proof-runner-checkout.js";
 
 const PROOF = "unit test: apps/dashboard/src/App.test.tsx";
-
-function checkoutWithPackage(): string {
-  const cwd = makeTempDir("w1t3312-checkout-");
-  writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "fixture", version: "1.0.0" }));
-  return cwd;
-}
 
 function dashboardProof() {
   const proof = parseWhitelistedProof(PROOF);
   assert.ok(proof, "the dashboard proof must resolve before its runner can be checked");
   assert.equal(proof!.runner, "vitest", "the resolver must name the checkout-local runner it needs");
   return proof!;
-}
-
-function absentRunnerCheckout(): string {
-  const cwd = checkoutWithPackage();
-  const shared = makeTempDir("w1t3312-shared-node-modules-");
-  // This is the worker's normal linked-worktree shape: the directory exists but lacks the new
-  // dependency. The target is deliberately empty; no test relies on a package manager or network.
-  symlinkSync(shared, join(cwd, "node_modules"), "dir");
-  return cwd;
 }
 
 test("W1-T3312: a symlinked node_modules without Vitest is not a satisfied install and is never cleared", () => {
