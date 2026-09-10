@@ -292,6 +292,48 @@ export function validateAcceptanceShape(raw: unknown, sourceLabel: string, taskI
   return raw as AcceptanceCriterion[];
 }
 
+function validateRiskRulingShape(raw: unknown, sourceLabel: string, taskId: string): TaskRiskRuling | undefined {
+  if (raw === undefined) return undefined;
+  const where = `${sourceLabel}: task ${taskId}: risk_ruling`;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new PlanError(`${where} must be a mapping, got ${yamlTypeOf(raw)}`);
+  }
+
+  const ruling = raw as Record<string, unknown>;
+  if (typeof ruling.verdict !== "string" || ruling.verdict.trim() === "") {
+    throw new PlanError(`${where}.verdict must be a non-empty string, got ${yamlTypeOf(ruling.verdict)}`);
+  }
+  if (ruling.action !== "proceed" && ruling.action !== "escalate") {
+    throw new PlanError(`${where}.action must be 'proceed' or 'escalate', got ${JSON.stringify(ruling.action)}`);
+  }
+  if (
+    typeof ruling.confidence !== "number" ||
+    !Number.isFinite(ruling.confidence) ||
+    ruling.confidence < 0 ||
+    ruling.confidence > 1
+  ) {
+    throw new PlanError(`${where}.confidence must be a finite number in [0,1], got ${JSON.stringify(ruling.confidence)}`);
+  }
+  if (!Array.isArray(ruling.reasons) || !ruling.reasons.every((reason) => typeof reason === "string")) {
+    throw new PlanError(`${where}.reasons must be a list of strings, got ${yamlTypeOf(ruling.reasons)}`);
+  }
+  if (typeof ruling.judged_at !== "string" || ruling.judged_at.trim() === "") {
+    throw new PlanError(`${where}.judged_at must be a non-empty string, got ${yamlTypeOf(ruling.judged_at)}`);
+  }
+  if (typeof ruling.pin !== "string" || !/^[0-9a-f]{64}$/.test(ruling.pin)) {
+    throw new PlanError(`${where}.pin must be a 64-character lowercase hexadecimal digest, got ${JSON.stringify(ruling.pin)}`);
+  }
+
+  return {
+    verdict: ruling.verdict,
+    action: ruling.action,
+    confidence: ruling.confidence,
+    reasons: [...ruling.reasons],
+    judged_at: ruling.judged_at,
+    pin: ruling.pin,
+  };
+}
+
 /**
  * Parse and field-validate a YAML task-list blob into {@link Task}s (schema v1), without checking
  * that every `depends_on` id resolves. Split out of {@link loadPlanFromYaml} so a caller validating
@@ -355,6 +397,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
       // identical in-memory task blocked. W1-T2959 shipped the rule and its tests built Task objects
       // directly, so the unit passed and the wire was never exercised.
       author_class: e.author_class as TaskAuthorClass | undefined,
+      risk_ruling: validateRiskRulingShape(e.risk_ruling, sourceLabel, id),
       prompt: e.prompt as string | undefined,
       context: e.context as ContextClaim[] | undefined,
       files: Array.isArray(e.files) ? (e.files as string[]) : undefined,
