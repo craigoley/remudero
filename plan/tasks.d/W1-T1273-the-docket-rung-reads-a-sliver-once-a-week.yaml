@@ -10,7 +10,7 @@
   files: [src/run-task.ts, test/feedback-docket-union-corpus.test.ts]
   origin: oper#feedback-docket-starved-and-locked-2026-08-23
   plan_refs: ["W1-T1262", "W1-T110"]
-  status: blocked
+  status: queued
   attempts: 0
   rationale: |
     ★ CLOSED UNBUILT. THE UNBLOCKING MEASUREMENT WAS TAKEN AND IT CLOSED THE TASK RATHER THAN
@@ -71,6 +71,31 @@
     auto-triage's 'record the fire first' discipline: a crash mid-file still costs one skipped
     week, never a re-gather storm on the next poll." So every attempt costs a full week whether it
     finds anything or not. That is the intended trade, not an oversight.
+
+    ★ RE-OPENED 2026-09-10 — THIS SHARD'S OWN TRIGGER FIRED. The close above wrote its reopening
+    condition verbatim: "any `feedback_docket.empty` row showing a NON-ZERO surface, or a
+    `feedback_docket.published` row appearing at all. Either observation falsifies the basis of
+    this close and this shard should be re-opened rather than re-filed." TWO published rows now
+    exist, measured on the daemon host over the union (919 archives + live file) with
+    `rmd ledger-grep 'feedback_docket'` — 5 rows total, 3 `.empty` / 2 `.published` / 0
+    `.duplicate`, newest ledger row 2026-09-10T17:12:26.766Z so the corpus covers today:
+      2026-09-03T01:29:53.207Z feedback_docket.published FD-2026-09-03-fb-repair-blocked-ambiguous-2956
+      2026-09-10T01:34:35.100Z feedback_docket.published FD-2026-09-10-fb-repair-conflicted-2957
+    Re-opened, not re-filed, exactly as instructed. No criterion is touched.
+
+    WHAT THE RE-MEASUREMENT CHANGED, AND WHAT IT DID NOT. The close's caveat named
+    `operator_feedback` as the one surface a live-file read could still be hiding. It was not
+    hiding anything: `"step":"operator_feedback"` and `"step":"ratify.reframed"` BOTH read 0 over
+    the full union, against a control of 44 on `"step":"ratify.approved"`. So the sliver read was
+    not masking live feedback — and that is precisely why it still had to be fixed rather than
+    closed again. `counts_by_source` is PRODUCED BY THAT READ, and a narrow read reports ZERO, not
+    "narrow": indistinguishable from a channel nobody used. Any liveness gate built on top of a
+    sliver bakes the sliver into the alarm.
+
+    THE REPAIR IS IN FLIGHT on `run-W1-T1273-1789061528000` and is credited to this id by both
+    paths (trailer and head ref). Because that PR's head is `run-W1-T1273-*`, `projectPlan`
+    attributes it as an OPEN PR for this task, so re-opening to `queued` cannot cause a duplicate
+    dispatch while it is open.
   design: |
     (i) Q1 — NEITHER CAUSE "DOMINATES", AND THE BRIEF'S TWO-CAUSE FRAME NEEDS ONE CORRECTION EACH.
     THE MARKER IS NOT A DEFECT: seven days is the designed cadence and "record the fire first" is a
