@@ -132,9 +132,60 @@ test("a branch whose non-conflicting files fail to apply is declined despite a r
   assert.match(result.reason, /never auto-resolved/);
 });
 
+test("a redundant re-fix claim not backed by byte evidence keeps the ambiguous refusal", () => {
+  const result = deriveDisposition(
+    dirtyPr({
+      prNumber: 4850,
+      mergeConflict: {
+        files: [{ path: "test/stale-gate-fixture.test.ts", oursDeleted: 1, theirsDeleted: 1 }],
+        oursLog: "8eaeb95 fix stale-gate fixture",
+        theirsLog: "f15dff6 fix stale-gate fixture",
+        redundantRefix: {
+          compared: "semantic" as "bytes",
+          verdict: "main-byte-identical",
+          comparedPaths: ["test/stale-gate-fixture.test.ts"],
+        },
+      },
+    }),
+    DEFAULT_SWEEP_POLICY,
+    NOW,
+  );
+
+  assert.equal(result.disposition, "blocked-ambiguous");
+  assert.match(result.reason, /redundant re-fix evidence was not a byte comparison/);
+  assert.match(result.reason, /never auto-resolved/);
+});
+
+test("a redundant re-fix byte comparison must cover every conflicting path", () => {
+  const result = deriveDisposition(
+    dirtyPr({
+      prNumber: 4851,
+      mergeConflict: {
+        files: [
+          { path: "test/stale-gate-fixture.test.ts", oursDeleted: 1, theirsDeleted: 1 },
+          { path: "src/lib/sweep.ts", oursDeleted: 1, theirsDeleted: 1 },
+        ],
+        oursLog: "8eaeb95 fix stale-gate fixture",
+        theirsLog: "f15dff6 fix stale-gate fixture",
+        redundantRefix: {
+          compared: "bytes",
+          verdict: "main-byte-identical",
+          comparedPaths: ["test/stale-gate-fixture.test.ts"],
+        },
+      },
+    }),
+    DEFAULT_SWEEP_POLICY,
+    NOW,
+  );
+
+  assert.equal(result.disposition, "blocked-ambiguous");
+  assert.match(result.reason, /redundant re-fix byte comparison did not cover every conflicting path/);
+  assert.match(result.reason, /never auto-resolved/);
+});
+
 test("the predicate reads byte evidence, not commit subjects or task ids", () => {
   const sameWordsDifferentBytes = dirtyPr({
-    prNumber: 4850,
+    prNumber: 4852,
     taskId: "W1-T3273",
     mergeConflict: {
       files: [{ path: "test/stale-gate-fixture.test.ts", oursDeleted: 1, theirsDeleted: 1 }],
@@ -192,7 +243,7 @@ test("both admission and decline write a ledger row naming the byte comparison t
   assert.match(String(declinedRow.reason), /never auto-resolved/);
 });
 
-// ── The DECLINE causes: why a redundant-refix claim was NOT honoured ──────────────────────────
+// -- The DECLINE causes: why a redundant-refix claim was NOT honoured --------------------------
 //
 // diff-coverage named sweep.ts:335 and :338 -- two arms of redundantRefixConflictDeclineCause that
 // nothing reached. They matter more than their two lines suggest: each turns a silent
