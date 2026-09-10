@@ -43,6 +43,7 @@
     "test/a-filing-pr-is-judged-against-criteria-it-cannot-satisfy.test.ts": 0,
     "test/a-fired-retro-must-not-hold-the-dispatch-rung.test.ts": 1403,
     "test/a-fired-triage-must-not-hold-the-dispatch-rung.test.ts": 1126,
+    "test/a-gate-refusal-is-not-a-crash.test.ts": 0,
     "test/a-gate-run-leaves-the-tracked-tree-clean.test.ts": 15674,
     "test/a-gate-shaped-instrument-that-nothing-invokes.test.ts": 1439,
     "test/a-gate-verdict-names-its-own-context.test.ts": 1431,
