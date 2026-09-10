@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { bodyContradictsDiff, claimsChangesetContext } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing, claimsChangesetContext } from "../src/lib/review.js";
 
 /**
  * W1-T2534 — a quotation is not an assertion, and W1-T308 already established that for BLOCK-level
@@ -15,7 +15,7 @@ import { bodyContradictsDiff, claimsChangesetContext } from "../src/lib/review.j
 
 const DIFF = ["scripts/source-size-ratchet.mjs", "test/a-source-file-cannot-outgrow-its-baseline.test.ts"];
 const body = (line: string) => ["Intro.", "", line, "", "Acceptance:", "- c | unit test: test/x.test.ts", ""].join("\n");
-const refused = (line: string, d = DIFF) => bodyContradictsDiff(body(line), d).length > 0;
+const refused = (line: string, d = DIFF) => changesetClaimsDisagreeing(body(line), d).length > 0;
 
 test("W1-T2534 criterion 1: a body reporting another PR's count is not refused as having made it", () => {
   for (const line of [
@@ -72,7 +72,7 @@ test("W1-T2534: the span is bounded to the match's OWN LINE", () => {
   // A stray unmatched quote earlier in a long body must not silence every claim after it.
   const stray = ['A sentence with one " unmatched quote.', "", "This changeset is exactly 4 files."].join("\n");
   assert.ok(
-    bodyContradictsDiff(["Intro.", "", stray, "", "Acceptance:", "- c | unit test: test/x.test.ts", ""].join("\n"), DIFF).length > 0,
+    changesetClaimsDisagreeing(["Intro.", "", stray, "", "Acceptance:", "- c | unit test: test/x.test.ts", ""].join("\n"), DIFF).length > 0,
     "an unmatched quote on an EARLIER line must not exempt a later real claim",
   );
 });

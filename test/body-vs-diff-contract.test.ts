@@ -22,12 +22,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { bodyVsDiffContractLines, outputContractLines } from "../src/lib/compaction.js";
-import { bodyContradictsDiff, claimsChangesetContext, noClaimIsAboutChangeset } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing, claimsChangesetContext, noClaimIsAboutChangeset } from "../src/lib/review.js";
 
 /** A typical implement changeset: two source files and a test. */
 const DIFF = ["src/lib/compaction.ts", "src/run-task.ts", "test/body-vs-diff-contract.test.ts"];
 
-const accepted = (body: string, files: string[] = DIFF) => bodyContradictsDiff(body, files);
+const accepted = (body: string, files: string[] = DIFF) => changesetClaimsDisagreeing(body, files);
 
 // ── WHAT THE CONTRACT CALLS SAFE — the real check must ACCEPT all of it ──────
 
@@ -105,7 +105,7 @@ test("the two hyphenated shorthands are SUBJECT-ANCHORED like the other two shap
 
 test("REPLAY #974: 'exactly one file: MASTER-PLAN.md' over a 3-file diff is still caught", () => {
   const body = "git show --stat listed exactly one file: MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md.";
-  const hits = bodyContradictsDiff(body, ["MASTER-PLAN.md", "docs/ORIENTATION.md", "src/lib/review.ts"]);
+  const hits = changesetClaimsDisagreeing(body, ["MASTER-PLAN.md", "docs/ORIENTATION.md", "src/lib/review.ts"]);
   assert.ok(hits.length >= 1, "the PR this check was built for must still fail");
   assert.ok(hits.some((h) => /exactly one file/.test(h.claim)), `got ${JSON.stringify(hits.map((h) => h.claim))}`);
 });

@@ -60,9 +60,14 @@ test("a deletion-heavy changeset is counted in full, so a truthful file count is
   // POSITIVE CONTRAST, same diff: the old, deletion-blind number must now BE the wrong one.
   const stale = judgeReview(CRITERIA, { diff, report: "This changeset touches exactly 7 files." });
   assert.equal(
-    stale.changesetContradictions?.length ?? 0,
+    stale.changesetStaleCountClaims?.length ?? 0,
     1,
-    "claiming the deletion-blind 7 against a 48-file diff must now contradict",
+    "claiming the deletion-blind 7 against a 48-file diff must still be READ as disagreeing — this is what proves the reviewer counted 48 and not 7",
+  );
+  assert.equal(
+    stale.changesetContradictions?.length ?? 0,
+    0,
+    "…and must not refuse the PR: a drifted count is stale, not a false statement about what changed",
   );
 });
 

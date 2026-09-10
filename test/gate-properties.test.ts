@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import fc from "fast-check";
-import { bodyContradictsDiff } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing } from "../src/lib/review.js";
 import { breMetacharsIn } from "../src/lib/task-linter.js";
 
 /**
@@ -134,8 +134,11 @@ test("PROPERTY bodyContradictsDiff: a FALSE count claim about the changeset is s
       const asNum: Record<string, number> = { one: 1, two: 2, three: 3, seven: 7, zero: 0 };
       const n = word in asNum ? asNum[word] : /^\d+$/.test(word) ? Number(word) : undefined;
       if (n === undefined || n === sevenFiles.length) return; // a TRUE claim must stay silent
+      // The lock still holds, on RECOGNITION rather than refusal: a count claim that disagrees must
+      // never be silently dropped. It is reported as stale instead of refusing, and a suite pinned
+      // to `bodyContradictsDiff` here would now pass against a recogniser gutted to `return []`.
       assert.notEqual(
-        bodyContradictsDiff(body, sevenFiles).length,
+        changesetClaimsDisagreeing(body, sevenFiles).length,
         0,
         `missed a false changeset claim: ${JSON.stringify(body)}`,
       );

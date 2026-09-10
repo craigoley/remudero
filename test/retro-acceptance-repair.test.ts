@@ -27,7 +27,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { repairRetroAcceptanceBlock, repairRetroChangesetClaim } from "../src/run-task.js";
-import { bodyContradictsDiff, parseAcceptanceBlock } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing, parseAcceptanceBlock } from "../src/lib/review.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/999";
 
@@ -235,8 +235,10 @@ test("W1-T908: a run that writes a different number of files still names them al
 
 test("W1-T908: the templated one-file claim is replaced rather than left standing", () => {
   // THE FALSIFIER, run first: the pre-change template really is refused by the real gate.
-  const before = bodyContradictsDiff(TEMPLATED_BODY, RETRO_PATHS);
-  assert.ok(before.length > 0, "the pre-change template must contradict the real three-file diff");
+  // Recognition, not refusal — a drifted count is reported as stale now, and the repair rung reads
+  // both buckets. If this asserted on refusal alone it would go silently vacuous.
+  const before = changesetClaimsDisagreeing(TEMPLATED_BODY, RETRO_PATHS);
+  assert.ok(before.length > 0, "the pre-change template must disagree with the real three-file diff");
 
   const r = recorder();
   repairRetroChangesetClaim(PR, r.log, {
@@ -246,8 +248,8 @@ test("W1-T908: the templated one-file claim is replaced rather than left standin
   });
 
   // And the repaired body satisfies the SAME detector — not a local restatement of it.
-  const after = bodyContradictsDiff(r.edits[0].body, RETRO_PATHS);
-  assert.deepEqual(after, [], "the repaired body must not contradict its own diff");
+  const after = changesetClaimsDisagreeing(r.edits[0].body, RETRO_PATHS);
+  assert.deepEqual(after, [], "the repaired body must agree with its own diff — stale AND contradictory both empty");
 
   // A body with no count claim is left completely alone, so the rung discriminates rather than
   // rewriting every retro body it is handed.

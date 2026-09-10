@@ -8,7 +8,7 @@ import {
   renderAcceptanceBlock,
   renderChangedFilesBlock,
 } from "../src/lib/plan-pr-emitter.js";
-import { bodyContradictsDiff, parseAcceptanceBlock } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing, parseAcceptanceBlock } from "../src/lib/review.js";
 
 /**
  * W1-T2535 — every "exactly N files" or scope sentence in a PR body is `git diff --name-only`
@@ -46,7 +46,7 @@ test("W1-T2535 criterion 2: a body carrying the rendered block is not refused fo
     changedFiles: FILES,
   });
   assert.deepEqual(
-    bodyContradictsDiff(body, FILES),
+    changesetClaimsDisagreeing(body, FILES),
     [],
     "a generated block must never contradict its own diff — it IS the diff",
   );
@@ -64,7 +64,7 @@ test("W1-T2535 criterion 2: a body carrying the rendered block is not refused fo
     "",
   ].join("\n");
   assert.ok(
-    bodyContradictsDiff(handWritten, FILES).length > 0,
+    changesetClaimsDisagreeing(handWritten, FILES).length > 0,
     "the control must FIRE — if a hand-written stale count passes, this test proves nothing",
   );
 });

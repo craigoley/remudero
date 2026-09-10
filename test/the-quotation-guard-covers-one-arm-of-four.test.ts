@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { bodyContradictsDiff } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing } from "../src/lib/review.js";
 import { writeMutantModule } from "./helpers/mutant-module.js";
 
 /**
@@ -33,7 +33,7 @@ const SRC_DIFF = ["src/lib/widget.ts"];
 const TWO_FILE_DIFF = ["src/lib/a.ts", "src/lib/b.ts"];
 
 function fires(body: string, diff: string[] = SRC_DIFF): boolean {
-  return bodyContradictsDiff(body, diff).length > 0;
+  return changesetClaimsDisagreeing(body, diff).length > 0;
 }
 
 // ── Criterion 1: an inline-quoted scope label is not read as this body's own claim ────────────
