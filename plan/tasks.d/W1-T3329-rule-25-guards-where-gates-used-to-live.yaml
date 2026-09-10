@@ -1,0 +1,110 @@
+- id: W1-T3329
+  title: "RULE 25 GUARDS WHERE GATES USED TO LIVE — INSTRUMENT_SURFACE contains no `src/` path at all, so `src/lib/review.ts` (the judge that refuses every PR) gets NO entanglement protection, while `src/lib/ci-parity.ts` (a registration table that grades nothing) counts as PRODUCT and makes every new ci.yml job an entanglement failure by construction"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 14.00
+  files: [src/lib/review.ts, test/rule-25-guards-the-gates-that-exist.test.ts]
+  origin: "operator-session#rule-25-2026-09-10"
+  plan_refs: ["W1-T297", "W1-T2521", "W1-T402", "W1-T3318", "W1-T3321"]
+  status: queued
+  attempts: 0
+  note: |
+    THE RULE IS NOT THE PROBLEM AND MUST NOT BE DELETED. Its motivating incident is measured and
+    real: the #585/#586 arc, where a coverage flag, a diff-coverage carve-out and a re-captured
+    baseline each rode inside an ordinary fix-rung strike. That is the one case where "the tests
+    passed" is worthless evidence, because the diff changed the thing doing the grading. This task
+    changes WHERE the rule looks and WHAT it does when it fires; it does not weaken WHY.
+
+    Rule 25 CHECKED FOR THIS TASK ITSELF, and the result is instructive: the diff is
+    `src/lib/review.ts` + a `test/` falsifier. `test/` is deliberately not the product half, and no
+    `src/` path is an instrument, so this reads NOT entangled — a src-only change to the judge. That
+    is precisely finding (1) below, demonstrated by the task that reports it.
+  rationale: |
+    MEASURED 2026-09-10 against `INSTRUMENT_SURFACE` (src/lib/review.ts) and `isProductPath`:
+
+      INSTRUMENT_SURFACE entries : `^\.github/workflows/`, `^scripts/[^/]*-ratchet\.mjs$`,
+                                   `scripts/diff-coverage.mjs`, `scripts/*-baseline.json`,
+                                   `stryker.conf.json`, and ~8 named `scripts/*.mjs` gate scripts
+      `src/` paths on it         : ZERO
+      isProductPath              : `path.startsWith("src/") && !isTestPath(path)`
+
+    (1) THE JUDGE IS UNGUARDED. `src/lib/review.ts` contains `judgeReview` — the function whose
+    verdict refuses PRs. Because no `src/` path is an instrument, a src-only diff that weakens it is
+    NOT entanglement and Rule 25 says nothing. The rule's own stated fear — "the code's own
+    falsifiers were graded by the very version of the instrument that shipped beside them" — applies
+    most sharply to the file the rule is IMPLEMENTED IN, and least protects it.
+
+    (2) A REGISTRATION TABLE IS CLASSIFIED AS PRODUCT. `src/lib/ci-parity.ts` holds
+    `CI_PARITY_TABLE`, which NAMES the ci.yml jobs the parity gate mirrors. It grades nothing; it is
+    an inventory. But it is `src/`, so it is the product half — and `test/preflight-ci-parity.ts`
+    couples table and workflow in BOTH directions (the table may neither lag the workflow nor lead
+    it). Therefore ADDING ANY ci.yml JOB FORCES an instrument+product diff, by construction, for a
+    change that cannot self-grade. MEASURED on W1-T3177: `detectInstrumentEntanglement` returned
+    `true` path-only and `false` against the real diff, saved only by W1-T2521's carve-out — a
+    carve-out that exists to patch this misclassification, and which #3331 and #3335 hit from
+    opposite sides before it did.
+
+    (3) THE POSTURE IS A HARD REFUSAL FOR A COMPUTABLE REMEDY. `instrumentEntangled` forces
+    `state`/`floorState` to `"failure"` and is never suppressible. But failing it does not mean the
+    change is bad — it means the PR is SPLIT WRONG, and the function already returns
+    `instrumentPaths` and `srcPaths`, so the gate knows exactly which files must ride separately.
+    Under the operator's 2026-09-10 ruling (W1-T3318) that is a REFUSE applied to incompleteness
+    rather than harm — the resting block the ruling abolished.
+
+    AND THE SURFACE'S OWN ALARM DOES NOT COVER THIS. W1-T402 added
+    test/instrument-surface-completeness.test.ts because a hand list "went stale by DROPPING
+    coverage". It derives candidates from `scripts/` and workflows; `src/lib/ci-parity.ts` appears
+    neither on the surface NOR in `INSTRUMENT_SURFACE_EXCLUSIONS`, because the alarm never considers
+    a `src/` path a candidate at all. The staleness guard has the same blind spot as the surface.
+  design: |
+    (i) THE SURFACE FOLLOWS GATE LOGIC, WHEREVER IT LIVES. A file whose content decides another PR's
+    pass/fail is an instrument, `src/lib/` included. What that list is, and whether it is derived or
+    declared, is the builder's call — that `src/lib/review.ts` must be ON it is not.
+    (ii) REGISTRATION IS NOT INSTRUMENTATION, and the distinction must be explicit rather than
+    incidental. A table naming WHICH gates run is an inventory; the code deciding WHAT a gate
+    concludes is the instrument. Getting this right retires W1-T2521's carve-out rather than adding
+    a second one beside it — and a builder should check whether that carve-out becomes dead code.
+    (iii) ROUTE, DO NOT REFUSE, per W1-T3318. The gate already knows both halves, so it can NAME THE
+    SPLIT: "these paths must ride in their own PR". Whether that is an automatic split, a filed
+    follow-up, or an advisory that lets the rest land is the builder's call; a hard unsuppressible
+    failure for a mechanical remedy is what this changes.
+    (iv) HARM STILL REFUSES. Widening the surface means MORE files can entangle, so the rule gets
+    stronger where it matters and softer where it did not. A diff that genuinely weakens a judge
+    alongside the code it judges is the #585/#586 shape and must still stop — that is the case the
+    ruling reserves a stop for.
+    (v) DO NOT WIDEN `isProductPath` TO INCLUDE `test/`. That carve-out is load-bearing and stated:
+    without it an instrument-only PR could never carry the fixture that proves it, and
+    `test/diff-coverage.test.ts` is the established home for exactly that.
+  acceptance:
+    - claim: "src/lib/review.ts is on the instrument surface, so a diff weakening the judge alongside product code is entanglement"
+      proof: "unit test: test/rule-25-guards-the-gates-that-exist.test.ts"
+    - claim: "a registration table that names which gates run is NOT the product half, so adding a ci.yml job no longer forces an entanglement failure"
+      proof: "unit test: test/rule-25-guards-the-gates-that-exist.test.ts"
+    - claim: "the #585/#586 shape still refuses: a diff changing a real instrument alongside the src/ code it grades is entangled"
+      proof: "unit test: test/rule-25-guards-the-gates-that-exist.test.ts"
+    - claim: "an entangled diff NAMES the split it requires — which paths must ride alone — rather than failing with no remedy"
+      proof: "unit test: test/rule-25-guards-the-gates-that-exist.test.ts"
+    - claim: "test/ is still not the product half, so an instrument-only PR can still carry its own fixture"
+      proof: "unit test: test/rule-25-guards-the-gates-that-exist.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if `INSTRUMENT_SURFACE` already covers gate logic under `src/`.
+    MEASURED 2026-09-10: it contains ZERO `src/` entries, and `src/lib/ci-parity.ts` is on neither
+    the surface nor `INSTRUMENT_SURFACE_EXCLUSIONS`.
+    PROVE (1) LOAD-BEARING: a diff of `src/lib/review.ts` + an unrelated `src/` product file must
+    read entangled AFTER this change and NOT entangled before it. If both read the same, the surface
+    did not actually widen.
+    PROVE (2) WITH THE REAL SHAPE: a ci.yml job addition plus its `CI_PARITY_TABLE` entry must stop
+    being entangled WITHOUT relying on W1-T2521's carve-out — pass the path-only form, which gets no
+    carve-out and is fail-closed today. If it only passes with the diff supplied, nothing was fixed.
+    RUN THE REGRESSION CONTROL EVERY TIME: `.github/workflows/ci.yml` + `src/lib/serve.ts` must STILL
+    be entangled. A change that widens the surface and accidentally softens the predicate has removed
+    the rule while appearing to strengthen it.
+    DO NOT delete Rule 25 or make it advisory-everywhere. The #585/#586 arc is measured, and a
+    src-only weakening of the judge is exactly what finding (1) says is unguarded today.
+    DO NOT resolve (2) by adding a second carve-out. A carve-out patching a misclassification is how
+    this surface accumulates special cases instead of a correct rule.
