@@ -1,0 +1,90 @@
+- id: W1-T3308
+  title: "EVERY WORKER SPAWN WRITES THE SHARED `.git/config` THREE TIMES WITH `stdio: \"ignore\"`, SO CONCURRENT SPAWNS RACE ON `.git/config.lock` AND A LOSER FAILS SILENTLY — and the W1-T1036 reclaimer that exists for exactly this lock only runs inside `pruneStaleRuns`, so a lock left between dispatches outlives its 2s grace by minutes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium
+  origin: "operator-session#config-lock-2026-09-10"
+  plan_refs: ["W1-T1036", "W1-T3224"]
+  files: [src/lib/worker.ts, test/a-shared-config-lock-outlives-its-reclaimer.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10 on the live daemon host, from the running tree and the filesystem.
+    THE LOCK IS REAL AND IT PERSISTS. Two independent observations, each against W1-T1036's
+    `DEFAULT_CONFIG_LOCK_GRACE_MS = 2000`:
+      created 00:45:41, still present 00:46:41  -- 60s
+      created 00:46:46, still present 00:47:55  -- 69s
+    Zero bytes both times, and no `git` process alive on either check. It blocks `git config` WRITES:
+    a rebase in a lane reported "could not lock config file .git/config: File exists / unable to
+    write upstream branch configuration" and left the branch with no tracking ref.
+    THREE SHARED WRITES PER SPAWN. `src/lib/worker.ts` runs `git -C <cwd> config --local` three times
+    while preparing a worker — `credential.helper` cleared, `credential.useHttpPath`, then
+    `credential.helper` added — plus `git config core.hooksPath hooks`. `--local` inside a LINKED
+    WORKTREE resolves to the SHARED `.git/config`, not a per-worktree file, so every spawn takes the
+    one repo-wide lock several times.
+    AND A LOSER SAYS NOTHING. All three carry `stdio: "ignore"`. A spawn that loses the race gets a
+    non-zero exit it never sees, and proceeds with credentials it believes it configured.
+    THE RECLAIMER EXISTS AND DOES NOT REACH THIS. W1-T1036 built exactly the right rung — a
+    zero-byte `.git/config.lock` older than its grace, with a live-git-process probe — and plugged it
+    into `pruneStaleRuns`. `pruneStaleRuns` is called from six DISPATCH sites (run-task.ts). A lock
+    created after the last dispatch is therefore reclaimed by nothing until the next one, which is
+    why a 2s grace was observed outliving it by over a minute.
+    NOT THE SAME AS W1-T3224. That task fixed a mechanism that damaged the gitdir. This is the
+    ordinary-operation case: nothing crashed, and the debris still accumulates.
+  design: |
+    (i) DO NOT WRITE THE SHARED CONFIG PER SPAWN. The credential and hooks settings are per-worktree
+    facts; `--worktree` (the repo already carries `extensions.worktreeConfig`) writes them where they
+    belong and takes no repo-wide lock. This removes the race rather than surviving it.
+    (ii) A CONFIG WRITE THAT FAILS MUST BE SEEN. Whatever the final call shape, `stdio: "ignore"` on
+    a write whose failure changes how the worker authenticates is the part that made this invisible
+    for as long as it has been. Failing loudly is worth more here than any retry.
+    (iii) THE RECLAIMER RUNS ON A CADENCE, NOT ONLY BEFORE AN ADD. A lock is debris whenever it is
+    stale, not only when something is about to need it. Keep the existing probe and grace exactly;
+    change only WHEN it is consulted.
+    (iv) THE LIVE-PROCESS PROBE IS NOT OPTIONAL AND MUST NOT BE WEAKENED. W1-T1036 already records
+    why: a probe that could not run is NOT evidence of staleness. Reclaiming a lock a live `git`
+    holds corrupts a concurrent write, which is far worse than the debris.
+    (v) OUT OF SCOPE: the grace value, the prune of worktree directories, and anything about the
+    gitdir damage W1-T3224 covers.
+  acceptance:
+    - claim: "W1-T3308 criterion 1: worker preparation writes its credential and hooks settings per-worktree, taking no repo-wide config lock"
+      proof: "unit test: test/a-shared-config-lock-outlives-its-reclaimer.test.ts"
+    - claim: "W1-T3308 criterion 2: a config write that fails is surfaced rather than discarded, so a worker never proceeds believing it configured credentials it did not"
+      proof: "unit test: test/a-shared-config-lock-outlives-its-reclaimer.test.ts"
+    - claim: "W1-T3308 criterion 3: a stale zero-byte config lock is reclaimed without a dispatch happening, and one younger than the grace is left alone"
+      proof: "unit test: test/a-shared-config-lock-outlives-its-reclaimer.test.ts"
+    - claim: "W1-T3308 criterion 4: a lock a LIVE git process holds is never reclaimed, and a probe that could not run is not treated as evidence of staleness"
+      proof: "unit test: test/a-shared-config-lock-outlives-its-reclaimer.test.ts"
+  falsifier: |
+    CLOSE IF the lock does not actually persist: watch `.git/config.lock` on the daemon host across
+    two minutes with no dispatch. MEASURED 2026-09-10: 60s and 69s, twice, against a 2000ms grace.
+    CLOSE IF the writes are already per-worktree: read `src/lib/worker.ts` for `config --local`.
+    MEASURED 2026-09-10: three `--local` calls plus a `core.hooksPath` write, all sharing one config.
+    THE LIVE-LOCK CONTROL, because a reclaimer on a cadence is more dangerous than one behind a
+    dispatch: a fixture with a lock held by a LIVE git process must be left untouched, and so must
+    one where the process probe could not answer. If either is reclaimed, this task has traded
+    accumulating debris for a corrupted concurrent write and must be refused.
+    THE YOUNG-LOCK CONTROL: a lock inside the grace window must survive. Without that arm a cadence
+    reclaimer is indistinguishable from one that races every legitimate `git config`.
+    DO NOT change DEFAULT_CONFIG_LOCK_GRACE_MS. W1-T1036 sized it against a measured `git config`
+    write; nothing here says that number is wrong, only that it is consulted too rarely.
+    DO NOT delete the lock from the dispatch path as well — moving the call is not the same as
+    removing the guarantee that a dispatch never begins against stale debris.
+  note: |
+    Rule 25 CHECKED: `src/lib/worker.ts` is ordinary src, not an instrument surface.
+    THE SLUG MATCHES THE FALSIFIER (`a-shared-config-lock-outlives-its-reclaimer`) so W1-T2525's
+    own-falsifier discount applies to Rule 19's span: the suite is declared in `files:`, is named by
+    every criterion, and does not exist on origin/main.
+    WHAT IS NOT EXPLAINED, AND IS RECORDED RATHER THAN GUESSED: the lock is created mode 0444. The
+    umask on that host is 0022 and `.git/config` itself is 0644, so neither accounts for it, and
+    nothing in the tree chmods a lock. The read-only mode is why an ordinary cleanup cannot remove it
+    in place. It may be incidental; it is stated so the implementer measures it rather than inheriting
+    my assumption.
+    CAVEAT WITH EQUAL WEIGHT: the observed cost so far is a failed upstream-tracking write and
+    accumulating debris, not a lost run. The silent-failure arm of design (ii) is the part that could
+    matter more than it currently appears to — a worker proceeding with credentials it did not set
+    would fail later and elsewhere, which is exactly the shape that is hard to trace back here.
