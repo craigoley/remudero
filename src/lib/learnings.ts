@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { citation } from "./provenance.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { EXTERNAL_SOURCE_CLASSES, type ExternalSourceClass } from "./untrusted-envelope.js";
@@ -1448,9 +1449,23 @@ export function retrieveRuleBodyOrDegrade(
 /** W1-T3322 — thrown when the doctrine cannot be resolved. A MISSING STORE IS A FAILURE, NEVER AN
  *  EMPTY RESOLUTION: every suite that asserts "CLAUDE.md must say X" would otherwise pass vacuously
  *  over nothing the moment a body store moved or a path went wrong, and they would all pass at once. */
-export class DoctrineUnresolvableError extends Error {
+/**
+ * W1-T3322 — ON THE SHARED ENVELOPE, NOT A HAND-ROLLED `Error`, because the error-subclass census
+ * refused this PR for the count growing 59 -> 60. src/lib/errors.ts's own header names the remedy:
+ * "each later migration that adopts this envelope lowers its own recorded number instead of the
+ * census silently absorbing more debt". Adopting is that remedy; bumping the ceiling is not.
+ *
+ * KIND IS `plan` AND EXIT CODE IS UNCHANGED. Doctrine is a plan-domain artifact, and `plan` is the
+ * nearest of the three kinds the closed union declares — a truer `doctrine` kind would mean editing
+ * src/lib/errors.ts, which is outside W1-T3322's declared `files:`. `GENERIC_EXIT_CODE` is passed
+ * deliberately: `exitCodeFor` returns exactly that for a plain `Error` today, so the process
+ * boundary behaves identically and this migration is observable only to the census.
+ *
+ * `details` carries the two fields the message flattens, so a ledger row need not re-parse prose.
+ */
+export class DoctrineUnresolvableError extends RmdError {
   constructor(readonly sourcePath: string, reason: string) {
-    super(`doctrine unresolvable at ${sourcePath}: ${reason}`);
+    super("plan", GENERIC_EXIT_CODE, `doctrine unresolvable at ${sourcePath}: ${reason}`, { sourcePath, reason });
     this.name = "DoctrineUnresolvableError";
   }
 }
