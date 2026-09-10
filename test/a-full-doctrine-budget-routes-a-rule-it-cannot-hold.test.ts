@@ -84,17 +84,14 @@ test("W1-T3320: filing is IDEMPOTENT — a gate on every CI job opens one entry,
     const second = m.fileFoldDebt("CLAUDE.md", 44_000, 48_000, OVER, { dir });
     assert.equal(second, first, "the same file at the same size must not refile");
     assert.equal(readdirSync(dir).length, 1, "a second run must not open a second entry");
-    // COUNTING FILES CANNOT SEE A REFILE: rewriting the same path leaves the count at 1. Measured —
-    // removing the exists() guard kept this suite green until the WRITE itself was observed. A
-    // rewrite is not harmless either: it re-stamps `ts`, so the entry looks new on every CI job and
-    // the inbox can never tell a fresh debt from an old one.
-    const writes: string[] = [];
-    const recorded = m.fileFoldDebt("CLAUDE.md", 44_000, 48_000, OVER, {
-      dir,
-      write: (path: string) => void writes.push(path),
-    });
-    assert.equal(recorded, first);
-    assert.deepEqual(writes, [], "an already-filed debt must not be written again");
+    // COUNTING FILES CANNOT SEE A REFILE: rewriting the same path leaves the count at 1, so this is
+    // asserted on the CONTENT instead. The entry stamps `ts` from `nowIso`; a second call with a
+    // DIFFERENT stamp must leave the original untouched. If it re-wrote, the inbox could never tell
+    // a fresh debt from one restamped by every CI job on the same PR.
+    const stamped = m.fileFoldDebt("CLAUDE.md", 44_000, 48_000, OVER, { dir, nowIso: "2099-01-01T00:00:00.000Z" });
+    assert.equal(stamped, first, "an already-filed debt reports the same id");
+    const body = readFileSync(join(dir, `${first}.yaml`), "utf8");
+    assert.doesNotMatch(body, /2099-01-01/, "an already-filed debt must not be re-stamped");
     // A DIFFERENT SIZE IS A DIFFERENT DEBT and does file — otherwise the first entry would mask
     // every later overage and the debt would stop being readable.
     m.fileFoldDebt("CLAUDE.md", 45_000, 48_000, OVER, { dir });
@@ -108,7 +105,6 @@ test("W1-T3320: a run that cannot FILE the follow-up refuses — a router that l
   const m = await load();
   const failed = m.fileFoldDebt("CLAUDE.md", 44_000, 48_000, OVER, {
     dir: "/x",
-    exists: () => false,
     mkdir: () => {
       throw new Error("EACCES");
     },
@@ -218,4 +214,23 @@ test("W1-T3320: when the follow-up cannot be filed the CLI REFUSES — the one r
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("W1-T3320: filing is atomic — EEXIST reports the existing entry, any other error still refuses", async () => {
+  const m = await load();
+  const withWrite = (write: (p: string, d: string, o?: unknown) => void) =>
+    m.fileFoldDebt("CLAUDE.md", 44_000, 48_000, OVER, { dir: "/tmp/never-used", mkdir: () => {}, write });
+  // CodeQL flagged the previous shape as `js/file-system-race` (high): an existsSync followed by a
+  // write is check-then-use, and two CI jobs on the same PR really can reach it at once. The `wx`
+  // flag makes the OS decide. These two arms are what that costs: EEXIST means someone else filed
+  // it (a success), everything else still fails closed.
+  const eexist = Object.assign(new Error("EEXIST: file already exists"), { code: "EEXIST" });
+  const asExisting = withWrite(() => {
+    throw eexist;
+  });
+  assert.equal(asExisting, "fold-debt-CLAUDE-md-44000", "EEXIST is an already-filed success");
+  const asFailure = withWrite(() => {
+    throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+  });
+  assert.equal(asFailure, null, "any other write error must still refuse");
 });

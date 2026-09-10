@@ -19,7 +19,7 @@
 // Why: the cap's zero-headroom history and the 2026-08-22 raise are archived in
 //   docs/forensics/claude-md-budget-ratchet.md#module-header.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { git as spawnGit } from "./lib/git.mjs";
@@ -58,20 +58,27 @@ export function evaluateRatchet(actualBytes, baseline) {
  *  so a gate running on every CI job opens one entry, not one per run. */
 export function fileFoldDebt(file, actualBytes, ceiling, violations, deps = {}) {
   const dir = deps.dir ?? "plan/feedback";
-  const exists = deps.exists ?? existsSync;
   const write = deps.write ?? writeFileSync;
   const mkdir = deps.mkdir ?? mkdirSync;
   const nowIso = deps.nowIso ?? new Date().toISOString();
   const id = foldDebtEntryId(file, actualBytes);
   const path = `${dir}/${id}.yaml`;
   try {
-    if (exists(path)) return id;
     mkdir(dir, { recursive: true });
-    write(path, renderFoldDebtEntry(id, file, actualBytes, ceiling, violations, nowIso));
+    // EXCLUSIVE CREATE, NOT check-then-write. An `existsSync` followed by a write is a TOCTOU race
+    // — CodeQL's `js/file-system-race`, and it flagged exactly that here at high severity. The
+    // window is real rather than theoretical: this gate runs on every CI job for a PR, so two jobs
+    // can reach it at once and the loser silently overwrites the winner's entry, re-stamping `ts`
+    // so the inbox cannot tell a fresh debt from an old one. `wx` makes the OS decide, atomically.
+    write(path, renderFoldDebtEntry(id, file, actualBytes, ceiling, violations, nowIso), { flag: "wx" });
     return id;
-  } catch {
-    // FAIL CLOSED, and the caller turns this into a refusal: losing the follow-up is the one
-    // routing failure that must not land silently.
+  } catch (err) {
+    // ALREADY FILED IS A SUCCESS, NOT A FAILURE: the same debt at the same size is one entry, and
+    // the second caller has nothing to add. This is what the removed `exists` check was for, now
+    // read off the atomic write's own outcome instead of a separate look.
+    if ((err ?? {}).code === "EEXIST") return id;
+    // FAIL CLOSED otherwise, and the caller turns this into a refusal: losing the follow-up is the
+    // one routing failure that must not land silently.
     return null;
   }
 }
