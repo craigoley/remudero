@@ -193,3 +193,49 @@ test("W1-T2889: the DEFAULT reviewRunner opts in explicitly — driven through p
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("W1-T3283 EFFECT: repairMissingTaskTrailer writes the repaired body and ledgers the write", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-trailer-effect-"));
+  try {
+    const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const writes: Array<{ url: string; body: string }> = [];
+    const deps: BuildSweepEffectsDeps = {
+      owner: "craigoley",
+      repo: "remudero",
+      config: { root, claudeBin: "/bin/true" } as Config,
+      ledgerPath: join(root, "state", "ledger.ndjson"),
+      runId: "SWEEP-W1-T3283",
+      plan: { tasks: [], byId: new Map() } as unknown as Plan,
+      log: (step, extra) => logs.push({ step, extra }),
+      policy: DEFAULT_SWEEP_POLICY,
+      // THE SEAM. Without it this effect can only be covered by making a real gh call, which is
+      // exactly why the line was uncovered — see the deps field's own comment.
+      updatePrBodyImpl: async (url, body) => {
+        writes.push({ url, body });
+      },
+    };
+
+    const effects = buildSweepEffects(deps);
+    const pr = { prNumber: 4920, prUrl: "https://github.com/craigoley/remudero/pull/4920", headSha: "deadbee" } as never;
+    const repair = {
+      taskId: "W1-T3283",
+      trailer: "Remudero-Task: W1-T3283",
+      repairedBody: "## Summary\n\nbody\n\nRemudero-Task: W1-T3283\n",
+      reason: "derived from branch",
+      scopeOverrunPaths: [],
+      refireEvent: "pull_request.edited",
+      rerunFailedJobs: false,
+    } as never;
+
+    await effects.repairMissingTaskTrailer?.(pr, repair);
+
+    assert.equal(writes.length, 1, "the effect must perform exactly one body write");
+    assert.match(writes[0].body, /Remudero-Task: W1-T3283/, "and it must write the REPAIRED body, not the original");
+    const row = logs.find((l) => l.step === "sweep.missing_task_trailer_body_write");
+    assert.ok(row, "the write must be ledgered — an unledgered body edit is invisible to the next pass");
+    assert.equal(row?.extra?.rerun_failed_jobs, false, "and the row must record that no failed job was rerun");
+    assert.equal(row?.extra?.refire_event, "pull_request.edited");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -29466,6 +29466,11 @@ export interface BuildSweepEffectsDeps {
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
   readJsonImpl?: (args: string[]) => Promise<unknown>;
+  /** W1-T3283 — the body write the trailer-repair effect performs. Injectable for the SAME reason
+   *  `deps.updatePrBody` already is at this file's two other body-write sites: the effect is a thin
+   *  wrapper around one network call, so without a seam the only way to cover it is to make a real
+   *  one. Omitted, it is {@link updatePrBodyViaGh} — production behaviour is unchanged. */
+  updatePrBodyImpl?: typeof updatePrBodyViaGh;
   registeredWorktreeOwnerImpl?: (repoDir: string, branchRef: string) => string | undefined;
   registeredOwnerRecovery?: RegisteredFixOwnerRecoveryDeps;
 }
@@ -29714,7 +29719,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     repairMissingTaskTrailer: async (pr, repair) => {
-      await updatePrBodyViaGh(pr.prUrl, repair.repairedBody);
+      await (deps.updatePrBodyImpl ?? updatePrBodyViaGh)(pr.prUrl, repair.repairedBody);
       log("sweep.missing_task_trailer_body_write", {
         pr_number: pr.prNumber,
         head_sha: pr.headSha,
