@@ -87,8 +87,6 @@ export interface PolicyValues {
     /** W1-T920: gates the supersession disposition (`sweep.ts`'s `DISPOSITION_RULES`). Default
      *  off, same shape as `armSessionPrs`. Why: docs/forensics/policy.md#sweep-block. */
     supersessionDisposal: boolean;
-    /** W1-T3289: gates unattended deterministic repair of recordable ratchets. Default off; making
-     *  the row reachable is the operator switch, not an enablement. */
     recordableRatchetRepairEnabled: boolean;
     /** W1-T2847: ARMS the ad-hoc lane reap rung. `runAdhocLaneReapRung` shipped survey-first with
      *  `enabled` defaulting false and its doc calling arming "a separate operator decision" — but
