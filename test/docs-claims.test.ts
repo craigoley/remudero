@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { COMMANDS } from "../src/run-task.js";
+import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 
 // ── W1-T213: the docs-claims checks (MASTER-PLAN §12A, plan/claims.yaml) ────────────────────
 //
@@ -248,14 +249,14 @@ test("docs-claims: docs/ci-gate.md is removed, not a one-line probe artifact", (
   assert.ok(result.ok, result.reason);
 });
 
-test("docs-claims: CLAUDE.md states a unit test: proof body is matched LITERALLY, against a grep: pattern's BASIC REGEX", async () => {
-  const claudeMd = await readFile(join(REPO_ROOT, "CLAUDE.md"), "utf8");
+test("docs-claims: CLAUDE.md states a unit test: proof body is matched LITERALLY, against a grep: pattern's BASIC REGEX", () => {
+  const claudeMd = resolveDoctrineForReader(() => readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8"));
   const result = checkUnitTestLiteralMatchClaim(claudeMd);
   assert.ok(result.ok, result.reason);
 });
 
-test("docs-claims: CLAUDE.md's decoding row states the literal retro-proposal form P48, not P-N, while G-N/DR-N keep their hyphens", async () => {
-  const claudeMd = await readFile(join(REPO_ROOT, "CLAUDE.md"), "utf8");
+test("docs-claims: CLAUDE.md's decoding row states the literal retro-proposal form P48, not P-N, while G-N/DR-N keep their hyphens", () => {
+  const claudeMd = resolveDoctrineForReader(() => readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8"));
   const result = checkRetroProposalIdDocFormClaim(claudeMd);
   assert.ok(result.ok, result.reason);
 });
