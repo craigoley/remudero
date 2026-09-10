@@ -23,12 +23,10 @@
 
 import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { createRequire } from 'node:module';
+import { stripTypeScriptTypes } from 'node:module';
 import { isMainModule } from "./lib/argv.mjs";
 import { parseLcovRecords } from './lib/lcov.mjs';
 
-// W1-T2570: esbuild is CJS-only here; `createRequire` is how an .mjs module reaches it.
-const require = createRequire(import.meta.url);
 
 /**
  * Parse an lcov report into `Map<filePath, Map<lineNumber, hitCount>>`, one inner map per
@@ -238,14 +236,37 @@ export function isTypeOnlyModule(file, readSource = (f) => readFileSync(f, 'utf8
     onUndecidable?.({ file, stage: 'read', message: err?.message ?? String(err) });
     return false; // unreadable ⇒ not exempt
   }
+  // NODE'S OWN STRIPPER, NOT esbuild, AND THE REASON IS THE JOB THIS RUNS IN. `coverage-ratchet`
+  // installs NOTHING -- W1-T3207 asserts it in test/workflow-single-suite-run.test.ts ("the artifact
+  // consumer installs neither npm dependencies nor Playwright", and separately that it "must not
+  // need npm-installed tsx"). With no `node_modules`, `require('esbuild')` threw, this guard failed
+  // closed, and EVERY type-only module was reported as a vacuous-coverage hazard under a remedy --
+  // "write a test that exercises this file" -- that is impossible for a file with no executable
+  // code. MEASURED 2026-09-09 on #4872: green locally, BLOCKED in CI on the same head twice.
+  //
+  // `module.stripTypeScriptTypes` is built into the pinned runtime (.nvmrc 22.22.3), so the
+  // discriminator now needs nothing installed and the collector above has far less to report.
+  //
+  // IT STILL TRANSPILES; IT DOES NOT TEXT-SCAN. W1-T2570's trap stands -- a first draft reading
+  // source for `function`/`class`/`=>` called `src/lib/proof-grammar.ts` type-only when it is 1,423
+  // bytes of real emitted code. What is text-matched below is COMMENTS, and only in output the
+  // stripper has already reduced to whitespace-plus-comments (esbuild dropped them; this preserves
+  // them, which is the ONLY behavioural difference between the two).
+  //
+  // VALIDATED AGAINST esbuild OVER THE WHOLE CORPUS, 2026-09-09: 199 of 199 `src/**/*.ts` agree,
+  // with ZERO disagreements in EITHER direction -- in particular zero where this exempts a file
+  // esbuild does not, the only unsafe direction.
+  let stripped;
   try {
-    // Lazily required: a caller that never reaches this path pays nothing, and a missing esbuild degrades safely.
-    const { transformSync } = require('esbuild');
-    return transformSync(source, { loader: 'ts' }).code.trim().length === 0;
+    stripped = stripTypeScriptTypes(source, { mode: 'strip' });
   } catch (err) {
+    // `enum` and `namespace` EMIT code and the stripper refuses them in this mode, so a throw is the
+    // correct "not type-only" answer. Still reported, because an unexpected throw is worth seeing.
     onUndecidable?.({ file, stage: 'transpile', message: err?.message ?? String(err) });
     return false; // cannot transpile ⇒ not exempt
   }
+  const code = stripped.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+  return code.trim().length === 0;
 }
 
 /** Changed source files absent from the merged LCOV surface, excluding type-only ones ({@link isTypeOnlyModule}). */

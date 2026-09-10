@@ -21,7 +21,10 @@
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
+import { makeTempDir } from "../src/lib/tmp.js";
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import of a .mjs there is a TS7016 —
 // the same reason test/acceptance-author-gate.test.ts and test/mutation-ratchet.test.ts reach their
@@ -150,4 +153,51 @@ test("⚠ a check that DECIDES reports nothing — the diagnostic must not fire 
   assert.deepEqual(missing, ["src/lib/sweep.ts"], "exemption applied, real gap still named");
   assert.deepEqual(seen, [],
     "POSITIVE CONTROL: a guard that answers cleanly emits no diagnostic. Without this arm, a collector that fires on every file would pass the test above and flood every blocked report");
+});
+
+// ── CASE 4: the discriminator must work WITH NO node_modules ──────────────────────────────────
+//
+// THE JOB THIS GATE RUNS IN INSTALLS NOTHING. W1-T3207 asserts it in
+// test/workflow-single-suite-run.test.ts — "the artifact consumer installs neither npm
+// dependencies nor Playwright", and separately that it "must not need npm-installed tsx". For as
+// long as this guard reached for esbuild, that made it fail closed on EVERY run: with no
+// `node_modules`, `require('esbuild')` throws, every type-only module was reported as a
+// vacuous-coverage hazard, and the stated remedy — write a test that exercises the file — is
+// impossible for a module with no executable code.
+//
+// MEASURED 2026-09-09 on #4872: green locally, BLOCKED in CI on the same head across two
+// independent runs. NOTHING IN THE REPO COULD SEE IT, because every existing test runs here, where
+// node_modules exists. This is that test.
+
+test("the type-only check answers correctly from a checkout WITH NO node_modules, as the coverage job has", () => {
+  const sandbox = makeTempDir("no-node-modules");
+  try {
+    // scripts/ only — the gate must not need anything else on disk to answer this.
+    cpSync(join(REPO_ROOT, "scripts"), join(sandbox, "scripts"), { recursive: true });
+    mkdirSync(join(sandbox, "src", "lib"), { recursive: true });
+    writeFileSync(join(sandbox, "src", "lib", "types-only.ts"),
+      "/** A doc comment, which the stripper PRESERVES — the reason raw stripped output is not empty. */\n" +
+      "export interface OnlyAType { a: string }\nexport type Alias = OnlyAType | undefined;\n");
+    writeFileSync(join(sandbox, "src", "lib", "has-code.ts"),
+      "export interface Shape { a: string }\nexport function realCode(s: Shape): string { return s.a; }\n");
+    assert.equal(existsSync(join(sandbox, "node_modules")), false, "the sandbox must have no dependencies at all");
+
+    const probe = [
+      'const m = await import("./scripts/diff-coverage.mjs");',
+      'console.log(JSON.stringify({',
+      '  typesOnly: m.isTypeOnlyModule("src/lib/types-only.ts"),',
+      '  hasCode: m.isTypeOnlyModule("src/lib/has-code.ts"),',
+      '}));',
+    ].join("\n");
+    const out = execFileSync(process.execPath, ["--input-type=module", "--no-warnings", "-e", probe],
+      { cwd: sandbox, encoding: "utf8" });
+    const got = JSON.parse(out.trim().split("\n").pop()!) as { typesOnly: boolean; hasCode: boolean };
+
+    assert.equal(got.typesOnly, true,
+      "a pure type module must be EXEMPT with no node_modules — this is the arm that was failing in CI");
+    assert.equal(got.hasCode, false,
+      "POSITIVE CONTROL: a module with real code must still be a coverage gap. An exemption that fires for everything is worse than one that never fires");
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
 });
