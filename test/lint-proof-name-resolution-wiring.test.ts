@@ -99,8 +99,12 @@ test("CLAIM 3: a name-filtered proof that resolves to exactly one real test file
 test("CLAIM 4: both push sites inside proofNameResolutionViolations hardcode severity: \"warn\", with no opts-driven override path", () => {
   const fnStart = taskLinterSrc.indexOf("export function proofNameResolutionViolations(");
   assert.ok(fnStart >= 0, "proofNameResolutionViolations must exist in task-linter.ts");
-  const fnEnd = taskLinterSrc.indexOf("// ── POST-MERGE-AMENDMENT", fnStart);
-  assert.ok(fnEnd > fnStart, "the next section boundary must follow the function");
+  // SCOPE THE SLICE TO THE FUNCTION THIS CLAIM NAMES. It used to run to the next SECTION marker,
+  // which spans eight other functions — so the count was a property of the whole region, not of
+  // `proofNameResolutionViolations`, and any sibling that legitimately warns broke it. A function
+  // body in this file ends at a `}` in column 0; that is the boundary the claim actually means.
+  const fnEnd = taskLinterSrc.indexOf("\n}\n", fnStart);
+  assert.ok(fnEnd > fnStart, "the function must terminate");
   const fnBody = taskLinterSrc.slice(fnStart, fnEnd);
 
   const hardcodedWarns = fnBody.match(/severity:\s*"warn"/g) ?? [];
