@@ -2550,3 +2550,45 @@ implementation. `rmd approve` remains the operator's ratification bit. An operat
 agent-recorded ruling lands as an amendment beneath it, exactly as today.
 
 **Rollback:** revert this entry; agents return to recommend-only and W1-T3212 returns to unbuilt.
+
+## 2026-09-10 — OPERATOR RULING (W1-T3318): REPAIR, ROUTE, CLOSE — blocked is not a resting state
+
+*Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. His words,
+2026-09-10: "the goal should never be to block prs. The goal should be to fix them and get them
+through the system or spin off follow-up tasks if they can't be easily fixed in-line"; "the only
+time to block is if it is truly a bad change, a malicious change, or something that is going to
+really negatively regress rmd in a meaningful way"; and "in which case it should be closed
+anyway."*
+
+**THE RULE: REPAIR, ROUTE, CLOSE.** Every gate finding ends in one of three terminal postures:
+
+1. **REPAIR** — the remedy is computable. Apply it, stage it, report it, and the change lands.
+2. **ROUTE** — the remedy needs judgement or is not small enough to fix in line. The change lands
+   and the follow-up is filed with the deferred work named.
+3. **CLOSE** — the change is bad, malicious, or a meaningful regression to Remudero. Close the PR
+   with the reason; do not park or retry it.
+
+There is no fourth outcome. **Blocked is not a resting state.** A gate still checks its predicate,
+but its result must move the change to repair, route, or close rather than leave a PR waiting for
+the same work to repeat.
+
+**INCOMPLETENESS IS NOT HARM.** A missing manifest line, an untiered file, or doctrine that needs to
+move behind a reader is a repair or route. CLOSE is reserved for harm: a secret, a destructive
+migration, a break in the fleet's recovery path, or another meaningful regression.
+
+**THE MEASURED COST.** The test-tier admission gate refused a missing manifest entry even though it
+could compute the entry itself. That produced two blocked operator pushes and four daemon crashes against zero defects.
+W1-T3311 then made the gate perform its own remedy; the protection remained and the refusal
+disappeared. Re-running work into the same block is cost, not supervision.
+
+**THE COST ADMITTED.** A repairing gate writes to the tree it checks. Each repair must therefore be
+idempotent and byte-identical when healthy, or the gate becomes a source of churn instead of a
+guard. A routed change must file its debt into a queue that can drain; otherwise ROUTE merely hides
+the old resting block.
+
+**WHAT THIS DOES NOT DO.** This entry records policy. It does not change a gate, weaken a predicate,
+or give an LLM authority to dispute a deterministic finding. Each conversion remains its own
+reviewable implementation.
+
+**Rollback:** revert this entry. Gate behaviour is unchanged; W1-T3318 returns to queued and its
+dependent conversions lose this settled policy reference.
