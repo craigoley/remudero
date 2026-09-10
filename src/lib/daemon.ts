@@ -84,12 +84,13 @@ import type { GithubPostureFinding } from "./github-posture.js";
 // convert them into a `Clock` at the read site instead of forcing every caller to change; the
 // headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
 import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
+import { getHeapStatistics } from "node:v8";
 
 /** Reason the scheduler loop returned. Every terminal state is one of these. `headroom_exhausted` and `paused` are
  * deliberately absent: both are awaiting-states whose exit the supervisor would relaunch straight back into, so both
  * idle in process instead (W1-T197; 2026-07-22). `stale` has the opposite polarity — it is a request to exit, because
  * a supervisor restart is the only way a long-running daemon gets off the code it loaded at boot (W1-T126). */
-export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale";
+export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale" | "heap_pressure";
 
 /** Default idle-poll pace: check back once a minute while nothing is runnable. The literal stays
  *  here because this module never touches the filesystem; `daemonCommand` threads the policy value
@@ -144,6 +145,42 @@ export const DAEMON_EXIT_BLOCKED = 76;
  * one-place fix and this can only ever narrow what counts as a crash. Forensics: docs/forensics/daemon.md. */
 export const DAEMON_EXIT_ENVIRONMENTAL = 77;
 
+/** W1-T3335 — the share of V8's OWN reported heap limit at which restarting beats continuing.
+ *  Deliberately a fraction, not a byte count: the limit comes from NODE_OPTIONS and any literal
+ *  here would drift out of agreement with it the moment that changed. 0.75 leaves a quarter of the
+ *  heap as headroom for the tick that discovers the pressure, which must itself allocate to log
+ *  and return. Forensics: docs/forensics/daemon.md. */
+export const HEAP_PRESSURE_RESTART_FRACTION = 0.75;
+
+/**
+ * W1-T3335 — is the heap far enough along that restarting beats continuing? Pure, so the arm can be
+ * falsified without allocating anything: the loop supplies the numbers and this decides.
+ *
+ * Returns the operator-facing detail when it is time to go, `undefined` when it is not. A
+ * non-positive or non-finite limit answers `undefined` — an unreadable limit is NOT pressure, and
+ * failing the other way would restart the daemon forever on a host whose V8 reported nothing.
+ */
+export function heapPressureDetail(
+  stats: { used_heap_size: number; heap_size_limit: number },
+  fraction: number = HEAP_PRESSURE_RESTART_FRACTION,
+): string | undefined {
+  const { used_heap_size: used, heap_size_limit: limit } = stats;
+  if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(used)) return undefined;
+  const usedFraction = used / limit;
+  if (usedFraction < fraction) return undefined;
+  return (
+    `heap at ${Math.round(usedFraction * 100)}% of V8's ${Math.round(limit / 1e6)} MB limit ` +
+    `(${Math.round(used / 1e6)} MB used) — restarting at a tick boundary rather than aborting mid-pass`
+  );
+}
+
+/** V8's live heap accounting. A function rather than an import binding so the daemon's deps can
+ *  substitute it without a module mock (Rule 18). */
+export function v8HeapStatistics(): { used_heap_size: number; heap_size_limit: number } {
+  const s = getHeapStatistics();
+  return { used_heap_size: s.used_heap_size, heap_size_limit: s.heap_size_limit };
+}
+
 /** The pure stop-reason to exit-code mapping, extracted so it is unit-testable with no process spawn
  *  (operator ruling, 2026-07-21; Rule 18). Deliberate exits map to 0; every other reason is non-zero
  *  so a supervisor restarts. Trap: neither headroom exhaustion nor pause may reach this function —
@@ -153,6 +190,13 @@ export const DAEMON_EXIT_ENVIRONMENTAL = 77;
 export function daemonExitCode(stopReason: DaemonStopReason): number {
   if (stopReason === "stopped" || stopReason === "max_reached") return 0;
   if (stopReason === "stale") return DAEMON_EXIT_STALE;
+  // W1-T3335: heap pressure maps to the SAME code as `stale` on purpose. Both mean "restart me now,
+  // this is not a crash", and the entrypoint's non-crash arm for 75 already does exactly the right
+  // thing — 5s pause, re-sync, docker's budget untouched. A distinct code would be more honest in
+  // the ENTRYPOINT's log line (it will say "freshness") but needs an entrypoint arm, and that is a
+  // Dockerfile/entrypoint change requiring an IMAGE REBUILD, which no self-sync delivers. The
+  // daemon's own ledger row carries the true reason, so nothing is lost where it is read.
+  if (stopReason === "heap_pressure") return DAEMON_EXIT_STALE;
   // `error` deliberately falls through to 1 below, so a genuine crash stays countable against
   // docker's on-failure budget exactly as it always was (W1-T2537).
   if (stopReason === "blocked") return DAEMON_EXIT_BLOCKED;
@@ -759,6 +803,9 @@ export interface DaemonDeps {
    *  and summary detail. Checked first, every tick, so it takes precedence over PAUSE and wins the
    *  race if both flags are set (W1-T11, MASTER-PLAN §4A/§4B). */
   checkStop?: () => string | undefined;
+  /** W1-T3335 — V8 heap accounting, injectable so the pressure arm is testable without allocating
+   *  gigabytes. Defaults to {@link v8HeapStatistics}. */
+  heapStatistics?: () => { used_heap_size: number; heap_size_limit: number };
   /** Fleet control: a defined return means a graceful PAUSE, a drain-and-hold. Checked between
    *  iterations only, after the current dispatch has resolved, so in-flight work always runs to full
    *  completion before a pause is honoured (W1-T11). */
@@ -1963,6 +2010,33 @@ export async function runDaemon(
     if (stopped) {
       log("daemon.stop", { detail: stopped });
       return summary("stopped", stopped);
+    }
+
+    // W1-T3335 — LEAVE BEFORE V8 THROWS YOU OUT. Measured 2026-09-10: this process reached
+    // 8,188 MB and died on "Ineffective mark-compacts near heap limit" after 184-197 SECONDS,
+    // 21 times, so a pass that needs longer than three minutes could never finish and the queue
+    // moved only in whatever fragments fit between aborts. An abort is the worst possible exit:
+    // in-flight work is lost, nothing is ledgered, and exit 134 is a crash, so the entrypoint
+    // adds its 120s throttle on top — roughly 40% of every cycle spent asleep.
+    //
+    // THE THRESHOLD IS A FRACTION OF V8'S OWN REPORTED LIMIT, never a megabyte literal: the cap
+    // is set by NODE_OPTIONS and would silently drift out of agreement with any number written
+    // here. This is NOT a bound on how much the daemon may use — it is the point at which
+    // restarting is cheaper than continuing, and it fires only between ticks, where there is
+    // nothing to lose.
+    //
+    // IT DOES NOT FIX THE LEAK and must not be read as fixing it. The growth is still there and
+    // still unexplained; this only stops it costing a crash and 120 seconds each time.
+    const heapStats = deps.heapStatistics?.() ?? v8HeapStatistics();
+    const heapPressure = heapPressureDetail(heapStats);
+    if (heapPressure !== undefined) {
+      log("daemon.heap_pressure_exit", {
+        used_heap_size: heapStats.used_heap_size,
+        heap_size_limit: heapStats.heap_size_limit,
+        threshold: HEAP_PRESSURE_RESTART_FRACTION,
+        ticks,
+      });
+      return summary("heap_pressure", heapPressure);
     }
 
     // Plan freshness. The plan arrives as a parameter and was never reassigned, so a task filed after this boot began
