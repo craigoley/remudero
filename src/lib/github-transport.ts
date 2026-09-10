@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { promisify } from "node:util";
 
 import { clockFromMillisFn, systemClock } from "./clock.js";
+import { RmdError } from "./errors.js";
 
 /** PRIMARY CONTROL: every GitHub CLI invocation gets a wall-clock ceiling unless a caller narrows it. */
 export const DEFAULT_GH_CALL_TIMEOUT_MS = 60_000;
@@ -472,14 +473,17 @@ export function stampGhRead(path: string | undefined): void {
 
 /** ENFORCE MODE ONLY. Distinct from a rate-limit refusal: nothing was spent and nothing failed —
  *  the call was declined before it left, so the remedy is to wait, not to retry harder. */
-export class GhReadCadenceRefusal extends Error {
+export class GhReadCadenceRefusal extends RmdError {
   readonly ageS: number;
   readonly windowS: number;
   readonly bucket: string;
   constructor(decision: GhReadCadenceDecision, bucket: string) {
     super(
+      "usage",
+      1,
       `gh read cadence floor: a read-shaped call ${decision.ageS}s after the last one on the ${bucket} limiter ` +
         `(floor ${decision.windowS}s, W1-T3297) — this limit counts cadence, not volume, so a full budget says nothing`,
+      { ageS: decision.ageS ?? 0, windowS: decision.windowS, bucket },
     );
     this.name = "GhReadCadenceRefusal";
     this.ageS = decision.ageS ?? 0;
