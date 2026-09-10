@@ -141,7 +141,7 @@ diff --git a/src/lib/widget.ts b/src/lib/widget.ts
   assert.match(fields.failure_reason!, /standing rule 15/i);
 });
 
-test("ACCEPTANCE 2: instrument entanglement (Standing rule 25, no unmet named criterion) carries failure_class=instrument_entangled", () => {
+test("ACCEPTANCE 2: instrument entanglement (Standing rule 25, ADVISORY) leaves the verdict passing and rides on instrument_entangled", () => {
   const entangledDiff = `
 diff --git a/scripts/coverage-ratchet.mjs b/scripts/coverage-ratchet.mjs
 +++ b/scripts/coverage-ratchet.mjs
@@ -156,11 +156,13 @@ diff --git a/src/lib/widget.ts b/src/lib/widget.ts
   const v = judgeReview(ONE_CRITERION, { diff: entangledDiff, report: RESPONSIVE_REPORT });
   assert.ok(v.criteria.every((c) => c.met));
   assert.equal(v.instrumentEntangled, true);
-  assert.equal(v.state, "failure");
+  // Standing rule 25 is ADVISORY: with every criterion met, entanglement alone no longer refuses.
+  assert.equal(v.state, "success");
   const fields = reviewLedgerLegibilityFields(v);
-  assert.equal(fields.failure_class, "instrument_entangled");
-  assert.equal(fields.failure_reason, v.summary);
-  assert.match(fields.failure_reason!, /entangled/i);
+  assert.equal(fields.failure_class, undefined, "a passing verdict carries no failure_class");
+  assert.equal(fields.failure_reason, undefined);
+  // ...and the fact is NOT lost: it rides unconditionally, so it stays countable fleet-wide.
+  assert.equal(fields.instrument_entangled, true, "the advisory is still queryable on a passing row");
 });
 
 test("ACCEPTANCE 2: a visible-pass + holdout-fail verdict (W1-T166) carries failure_class=holdout_unmet", () => {
@@ -258,8 +260,11 @@ diff --git a/src/lib/widget.ts b/src/lib/widget.ts
 @@
 +export function frobnicate() {}
 `.trim();
-  const v = judgeReview(ONE_CRITERION, { diff: entangledDiff, report: RESPONSIVE_REPORT });
+  // The criterion is deliberately UNRESPONSIVE so the verdict fails on its own merits; the
+  // entanglement prose still rides on that failure's reason, which is what this test measures.
+  const v = judgeReview(ONE_CRITERION, { diff: entangledDiff, report: "SUMMARY\n- nothing substantiating here.\nPR_URL: https://github.com/o/r/pull/1" });
   assert.equal(v.state, "failure");
+  assert.equal(v.instrumentEntangled, true);
   const fields = reviewLedgerLegibilityFields(v);
   // The SAME 140-char cap `postReviewStatus` applies to the posted GitHub
   // description (STATUS_DESC_MAX in src/lib/review.ts) would have silently

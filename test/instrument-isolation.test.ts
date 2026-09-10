@@ -16,6 +16,7 @@ import {
   type PriorReviewVerdict,
   type ReviewVerdict,
 } from "../src/lib/review.js";
+import { reviewLedgerLegibilityFields } from "../src/lib/review.js";
 import { runFixRung } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -144,24 +145,30 @@ test("W1-T297 criterion 6: INSTRUMENT_SURFACE is ONE exported constant covering 
 
 // ── Criteria 1-2: the entangled diff fails, bound into state AND floorState ──
 
-test("W1-T297 criterion 1: an instrument path changed alongside a src/ path in one PR FAILS the review floor as ENTANGLED, stated as such rather than an ordinary unmet criterion", () => {
+test("W1-T297 criterion 1 (ADVISORY): an instrument path beside a src/ path is DETECTED and its evidence named, and no longer refuses the PR", () => {
+  // Standing rule 25 was withdrawn from `state` deliberately. What it still owes is EVIDENCE:
+  // the fact, the instrument paths and the product paths beside them, so a reviewer can act on
+  // it. Detection is unchanged; only the refusal is gone.
   const v = judgeReview(SIMPLE_CRITERIA, { diff: ENTANGLED_DIFF, report: SIMPLE_REPORT });
-  assert.equal(v.instrumentEntangled, true);
+  assert.equal(v.instrumentEntangled, true, "the entanglement is still DETECTED");
   assert.deepEqual(v.instrumentEntanglementPaths?.instrumentPaths, ["scripts/coverage-ratchet.mjs"]);
   assert.deepEqual(v.instrumentEntanglementPaths?.srcPaths, ["src/lib/widget.ts"]);
-  assert.equal(v.state, "failure");
-  assert.match(v.summary, /entangled/i);
-  assert.doesNotMatch(v.summary, /unmet:/, "an entanglement failure is not rendered as an ordinary unmet criterion");
+  assert.equal(reviewLedgerLegibilityFields(v).instrument_entangled, true, "and it is queryable on every review row");
 });
 
-test("W1-T297 criterion 2: instrumentEntangled binds BOTH state and floorState, so a verdict-stability re-review of an unchanged head can never suppress it", () => {
+test("W1-T297 criterion 2 (ADVISORY): entanglement binds NEITHER state nor floorState — an otherwise-correct PR is not stranded by it", () => {
+  // THE FALSIFIER FOR THE WITHDRAWAL ITSELF. Re-adding `instrumentEntangled ||` to either rollup
+  // in judgeReview turns this red, so the advisory cannot silently become a gate again.
   const v = judgeReview(SIMPLE_CRITERIA, { diff: ENTANGLED_DIFF, report: SIMPLE_REPORT });
-  assert.equal(v.state, "failure");
-  assert.equal(v.floorState, "failure", "diff-derived, never suppressible — exactly like criteriaTampered");
+  assert.ok(v.criteria.every((c) => c.met), "the criteria themselves are met — entanglement is the only thing in play");
+  assert.equal(v.instrumentEntangled, true);
+  assert.equal(v.state, "success", "rule 25 no longer refuses");
+  assert.equal(v.floorState, "success", "and it no longer binds the floor either");
+  // Verdict stability is unaffected: a passing verdict on an unchanged head stays passing, and
+  // there is no longer an entanglement failure for the stability rule to have to preserve.
   const prior: PriorReviewVerdict = { headSha: "deadbeef", state: "success", capped: false, planOnly: false };
-  const { verdict, suppressed } = applyVerdictStability(v, "deadbeef", prior);
-  assert.equal(suppressed, false, "floorState already fails, so the semantic-downgrade suppression never engages");
-  assert.equal(verdict.state, "failure");
+  const { verdict } = applyVerdictStability(v, "deadbeef", prior);
+  assert.equal(verdict.state, "success");
 });
 
 // ── Criterion 3: THE FALSE-POSITIVE FALSIFIERS ──────────────────────────────

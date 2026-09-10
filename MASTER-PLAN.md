@@ -6314,8 +6314,17 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    console URL, so merely running the command leaked a fleet-control capability to disk (fixed #473, rotated
    the same day). R-31 — token generation is create-once/read-thereafter, making rotation a `rm` nobody had
    written down (documented #473). [recon intake, 2026-07-21]
-25. **INSTRUMENT CHANGES RIDE ALONE — a diff may change what a gate MEASURES, or what the gate concludes
-   about the product, never both in one PR.** RECORDED, NOT NEWLY DECIDED: this rule has been ENFORCED IN
+25. **INSTRUMENT CHANGES SHOULD RIDE ALONE — a diff that changes what a gate MEASURES and what the
+   gate concludes about the product is REPORTED, not refused.** WITHDRAWN AS A REFUSAL, 2026-09-10, at
+   the operator's direction: the rule is now ADVISORY. `detectInstrumentEntanglement` still runs, still
+   names its instrument and product paths, and now rides on every `review.posted` row as the
+   unconditional `instrument_entangled` field — but it folds into NEITHER `state` NOR `floorState`,
+   the same shape W1-T322's SHIPS-UNWIRED floor already had. WHY: four carve-outs had accumulated
+   against it (W1-T2521 census gates, W1-T3133 tightening/introduced, W1-T3171 mandatory registration,
+   plus `ENTANGLEMENT_EXEMPT_INSTRUMENTS`), and `src/lib/review.ts` carries its own note that "the rule
+   had begun shaping code to avoid itself". It was stranding correct work more often than it was
+   catching a weakened gate. The guidance below stands as GUIDANCE; what follows describes a rule that
+   no longer refuses. RECORDED, NOT NEWLY DECIDED: this rule has been ENFORCED IN
    CODE since W1-T297 while §12 carried no text for it. W1-T297's own shard promised the prose ("ships with
    the MASTER-PLAN §12 amendment that states the RULE (Standing rule 25) this task makes executable"); the
    enforcement landed and the amendment did not, so for roughly two hundred PRs every citation pointed at a

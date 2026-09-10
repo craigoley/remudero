@@ -3212,6 +3212,12 @@ export function judgeReview(
   // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s doc. Reuses the SAME `diffFiles`
   // every other structural check above already computed — no new diff walk.
   const instrumentEntanglement = detectInstrumentEntanglement(diffFiles, evidence.diff);
+  // ADVISORY, NOT BLOCKING. This is computed, reported on the verdict and ledgered exactly as
+  // before, but folded into NEITHER `state` NOR `floorState` below — the same shape W1-T322's
+  // SHIPS-UNWIRED floor already has in this function. The refusal was withdrawn deliberately: four
+  // carve-outs had accumulated against it, and this file's own note records that "the rule had begun
+  // shaping code to avoid itself". The evidence still travels so a reviewer can act on it; what
+  // changed is that it no longer strands a PR that is otherwise correct.
   const instrumentEntangled = instrumentEntanglement.entangled;
 
   // W1-T352 (DECISIONS.md entry provenance floor): see {@link ReviewVerdict.unprovenancedDecisionsEntries}'s doc —
@@ -3246,7 +3252,6 @@ export function judgeReview(
     testTheater ||
     criteriaTampered ||
     changesetContradictions.length > 0 ||
-    instrumentEntangled ||
     unprovenancedDecisionsEntries.length > 0
       ? "failure"
       : "success";
@@ -3269,7 +3274,6 @@ export function judgeReview(
     testTheater ||
     criteriaTampered ||
     changesetContradictions.length > 0 ||
-    instrumentEntangled ||
     unprovenancedDecisionsEntries.length > 0
       ? "failure"
       : "success";
@@ -4148,6 +4152,7 @@ export function reviewLedgerLegibilityFields(
   unexecutable_count: number;
   unexecutable_proofs: string[];
   partially_executed: boolean;
+  instrument_entangled: boolean;
   proof_unique_runs?: number;
   proof_reuses?: number;
   failure_class?: string;
@@ -4169,6 +4174,12 @@ export function reviewLedgerLegibilityFields(
     unexecutable_proofs: verdict.unexecutableProofs ?? [],
     // W1-T305 (design (4)): SOME-but-not-ALL executed, unconditional like `capped`/`keyword_only`.
     partially_executed: verdict.partiallyExecuted ?? false,
+    // Standing rule 25 is ADVISORY (it no longer folds into `state`), so it can no longer ride on
+    // `failure_class` — that key only exists on a failing verdict. It rides here instead, and
+    // UNCONDITIONALLY, for the reason `unexecutable_count` above states: a consumer counting this
+    // class across the fleet must never have to special-case "the field wasn't there". An advisory
+    // nobody can query is a deletion wearing a different word.
+    instrument_entangled: verdict.instrumentEntangled ?? false,
     // W1-T2743: two integers, and CONDITIONAL rather than defaulted to 0 — a review with no head
     // checkout measured nothing, and "measured none" is a different fact from "never measured".
     // Bounded by construction: counts only, never the commands or keys they were derived from.
