@@ -10,6 +10,7 @@
   files:
     - scripts/test-tier-manifest.mjs
     - test/a-slow-tier-suite-is-never-re-measured.test.ts
+    - .github/workflows/ci.yml
   origin: "operator-session#ci-parity-cost-2026-09-09"
   plan_refs: ["W1-T3191", "W1-T3207", "W1-T294"]
   status: queued
@@ -91,6 +92,11 @@
     DO NOT let evidence auto-apply to the manifest. The proposal boundary is deliberate and predates
     this task.
   note: |
+    SCOPE AMENDMENT 2026-09-10. The required slow-tier measurement is produced only by the
+    `test-slow` workflow job. That job presently exports no `RMD_TEST_DURATION_OUTPUT` and uploads
+    no duration artifact, while the two existing evidence paths are both in `.github/workflows/ci.yml`.
+    The workflow is therefore required implementation scope, not adjacent CI cleanup.
+
     Rule 25 CHECKED: `scripts/test-tier-manifest.mjs` is NOT on INSTRUMENT_SURFACE — the surface
     names `scripts/*-ratchet.mjs`, `diff-coverage.mjs`, `diff-class.mjs`, `*-baseline.json` and the
     named check scripts. `scripts/test-tier-manifest.json` IS matched by the baseline pattern, which
