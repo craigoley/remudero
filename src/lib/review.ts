@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
@@ -175,9 +175,9 @@ export async function claimReviewDecision(opts: {
 /** WHY a criterion produced no executed outcome (W1-T305). Diagnostic only: never affects `met`, `state`, the keyword
  * floor or capping — it exists so a CAPPED `0/N` says which kind of nothing it is. `no-dialect` no house prefix;
  * `dialect-parse-error` an authoring error; `prose-no-match` zero candidates on a prose body (W1-T161/#349);
- * `exec-error` threw, timed out, or its named PATH is absent; `runtime-broken` the only `not ok` names the FILE ITSELF
- * (W1-T1077); `incomplete-run` results then no `# duration_ms` summary (W1-T2740); `no-exec-context` no PR-head
- * checkout; `forward-reference` absent at head but declared by this diff's own shard (W1-T456, #1527) — see {@link
+ * `exec-error` threw or timed out; `runner-absent` names an unavailable checkout-local tool; `runtime-broken` the only
+ * `not ok` names the FILE ITSELF (W1-T1077); `incomplete-run` results then no `# duration_ms` summary (W1-T2740);
+ * `no-exec-context` no PR-head checkout; `forward-reference` absent at head but declared by this diff's own shard — see {@link
  * shardDeclaredFilesInDiff}. */
 export type ProofSkipReason =
   | "no-dialect"
@@ -186,6 +186,7 @@ export type ProofSkipReason =
   | "exec-error"
   | "runtime-broken"
   | "incomplete-run"
+  | "runner-absent"
   | "no-exec-context"
   | "forward-reference";
 
@@ -580,6 +581,10 @@ export interface WhitelistedProof {
    *  always compiles to the fixed `["-arn", "--", pattern, path]` argv — BRE, author-unselectable — while the legacy
    *  shape passes an author's own flags, `-E` among them, through unexamined. `args` alone cannot tell them apart. */
   authorSelectedArgv?: boolean;
+  /** A checkout-local runner whose path must be resolved against the checkout being proved, never
+   * the reviewer's own working directory. Node itself is the reviewer process's runtime and so
+   * needs no entry here; Vitest is a pinned dependency the checkout must actually contain. */
+  runner?: "vitest";
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
@@ -888,6 +893,7 @@ function parseTestTarget(body: string): WhitelistedProof | null {
         command: "node",
         args: [pinnedVitestCli(process.cwd()), "run", "--config", DASHBOARD_VITEST_CONFIG, trimmed],
         label: trimmed,
+        runner: "vitest",
       };
     }
     return {
@@ -1166,7 +1172,8 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
   });
 
 /** `npm ci` a fresh checkout ONCE before its first test proof, since fresh worktrees have no node_modules.
- *  Best-effort: a failed install surfaces as the test command's own exec_error, never a false pass.
+ *  When a proof names a checkout-local runner, return whether that exact path exists after priming.
+ *  A linked `node_modules` is deliberately NEVER reinstalled: `npm ci` would clear its shared target.
  *
  *  W1-T3266: `exec` is injectable and LAST, so no positional caller shifts. It exists because the
  *  bound below is otherwise UNASSERTABLE — the sibling boundary (`installPinnedChromium`) re-execs
@@ -1174,16 +1181,55 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
  *  shells `npm`, which that directive deliberately does not admit. An unexecuted, unasserted bound
  *  is the exact shape that let a SIGTERM default survive six hours, so this one is recorded by a
  *  test rather than merely written down. */
-export function ensureDeps(cwd: string, exec: typeof execFileSync = execFileSync): void {
-  if (npmCiPrimed.has(cwd)) return;
+export function ensureDeps(
+  cwd: string,
+  exec: typeof execFileSync = execFileSync,
+  requiredRunnerPath?: string,
+): boolean {
+  const runnerIsPresent = () => requiredRunnerPath === undefined || existsSync(requiredRunnerPath);
+  if (npmCiPrimed.has(cwd)) return runnerIsPresent();
   npmCiPrimed.add(cwd); // mark attempted regardless of outcome — never retry-storm a cwd
-  if (!existsSync(join(cwd, "package.json")) || existsSync(join(cwd, "node_modules"))) return;
+  if (!existsSync(join(cwd, "package.json"))) return runnerIsPresent();
+
+  const nodeModules = join(cwd, "node_modules");
+  try {
+    // `existsSync` follows a link, so ask lstat BEFORE deciding a partial shared tree is safe to
+    // clear. A dangling link is also a link and must receive the same protection.
+    if (lstatSync(nodeModules).isSymbolicLink()) return runnerIsPresent();
+  } catch {
+    // No node_modules yet: `npm ci` below is the ordinary fresh-checkout path.
+  }
+
+  // Preserve ordinary proof priming: with no checkout-local runner requirement, any real
+  // node_modules remains sufficient exactly as before. A Vitest proof instead asks whether its
+  // specific entrypoint is present, so a partial real directory receives a fresh install.
+  if (requiredRunnerPath === undefined ? existsSync(nodeModules) : runnerIsPresent()) return true;
+
   try {
     // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
     // outlive its timeout and hold the reviewer the way a wedged proof did.
     exec("npm", ["ci"], { cwd, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
   } catch {
     /* best-effort priming; see doc comment above */
+  }
+  return runnerIsPresent();
+}
+
+/** A parsed Vitest argv is rooted at parser time, but the proof may execute against another
+ * checkout. Resolve both its availability and its argv against that actual checkout. */
+function checkoutRunnerPath(whitelisted: WhitelistedProof, cwd: string): string | undefined {
+  return whitelisted.runner === "vitest" ? pinnedVitestCli(cwd) : undefined;
+}
+
+function argsWithCheckoutRunner(whitelisted: WhitelistedProof, args: readonly string[], cwd: string): readonly string[] {
+  const runner = checkoutRunnerPath(whitelisted, cwd);
+  return runner === undefined ? args : [runner, ...args.slice(1)];
+}
+
+/** A runner absent from the checkout is a host gap, not evidence that its proof failed. */
+class ProofRunnerUnavailableError extends Error {
+  constructor(readonly runnerPath: string) {
+    super(`proof runner is absent from this checkout: ${runnerPath}`);
   }
 }
 
@@ -1521,7 +1567,11 @@ export function execWhitelistedProof(
   // AFTER the fast path on purpose: priming a checkout's node_modules is only worth 120s of `npm ci` if we are
   // actually going to run node. `ensureDeps` is memoised per cwd, so a later proof in the same checkout still primes.
   if (whitelisted.kind === "test") {
-    ensureDeps(cwd);
+    const runner = checkoutRunnerPath(whitelisted, cwd);
+    if (!ensureDeps(cwd, execFileSync, runner)) {
+      throw new ProofRunnerUnavailableError(runner!);
+    }
+    args = argsWithCheckoutRunner(whitelisted, args, cwd);
     // Same placement as ensureDeps: a `grep` proof never launches a browser; a resolved set with no browser import skips this CDN-facing step.
     if (preflightFiles === undefined || preflightFiles.length === 0 || resolvedTestFilesNeedBrowserPreflight(cwd, preflightFiles)) {
       (deps.preflightBrowsers ?? ensureBrowsersOnce)(cwd);
@@ -2104,8 +2154,14 @@ export function judgeCriterion(
             reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
           }
         } catch (e) {
-          proofExec = "exec_error"; // met/reason stay EXACTLY the keyword-floor verdict for every OTHER thrown cause
-          if (e instanceof PureProofNeverExecutedError) {
+          if (e instanceof ProofRunnerUnavailableError) {
+            proofExec = "not_executable";
+            proofSkip = "runner-absent";
+            reason =
+              `${reason} — NOTE: proof runner is absent from this checkout (${e.runnerPath}); ` +
+              "not executed, keyword floor applied";
+          } else if (e instanceof PureProofNeverExecutedError) {
+            proofExec = "exec_error"; // met/reason stay EXACTLY the keyword-floor verdict for every OTHER thrown cause
             // W1-T1077 design (iv): record the DISCRIMINATOR, not the stream — the classification plus the wrapper
             // name the executor already parsed, so a `review.posted` row can say which of "real failure" or "broken
             // runtime" a failed pure-path proof was, never the unbounded raw TAP capture.
@@ -2116,6 +2172,7 @@ export function judgeCriterion(
               `loader, an uncaught module-load error, …), not the named test; not executed, keyword ` +
               `floor applied`;
           } else if (e instanceof PureProofIncompleteRunError) {
+            proofExec = "exec_error";
             // W1-T2740, the same rule as the sibling arm: record the DISCRIMINATOR, never the stream. The bounded
             // fact is that node's completion signal is absent after N real results.
             proofSkip = "incomplete-run";
@@ -2125,6 +2182,7 @@ export function judgeCriterion(
               `timeout kill, an external signal, or an OOM), so it never reached a verdict about ` +
               `this criterion; not executed, keyword floor applied`;
           } else {
+            proofExec = "exec_error";
             proofSkip = "exec-error";
           }
         }
