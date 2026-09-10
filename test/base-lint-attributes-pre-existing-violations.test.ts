@@ -37,6 +37,36 @@ import { lintPlanCommand } from "../src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+/**
+ * W1-T2995 — every call below is `--base` mode, so `lintPlanCommand` enters its status and
+ * duplicate-shard branches (`scope.size > 0`) and, with no deps injected, reaches for the REAL
+ * `loadConfig`/`projectPlan`/`ghGateway`/`openPlanShardSlugs` — a synchronous `gh` subprocess
+ * with a 60-second default timeout (`DEFAULT_GH_CALL_TIMEOUT_MS`, github-transport.ts), six
+ * times over across this file's tests. MEASURED 2026-09-07: that command line, run with a
+ * 25-second `--test-timeout`, is CANCELLED at file scope on macOS and completes clean in this
+ * container — the two hosts differ in exactly what a bare, un-injected `gh` call does (auth
+ * state, network reachability, proxy/VPN behavior), and a single call parked anywhere near 60s
+ * blows the file's 25s cap long before the other five tests get a turn.
+ *
+ * None of these tests are ABOUT status projection or the duplicate-shard corpus — the ids under
+ * test (`ZZ-Landmine`, `ZZ-Clean`) exist at both base and head in every case, so they are never
+ * "new" and the duplicate corpus never has an opinion on them either way. So the fix is the same
+ * shape `test/lint-plan-scopes-open-by-credit-not-status.test.ts` already established for this
+ * exact seam: inject synthetic deps so the fixture's result depends only on the plan text it
+ * wrote, never on the host's `gh`/network/auth state. `ghGateway: () => ({})` satisfies
+ * `OpenShardGateway` (both its methods are optional) with no process spawned, so the duplicate
+ * check degrades to "no corpus, no opinion" — already this suite's expected shape since none of
+ * its tasks are new. `projectPlan` returns every task unmerged, matching what the real gateway
+ * already resolved for these fixture-only ids (neither ever had a real PR).
+ */
+const LINT_DEPS: Parameters<typeof lintPlanCommand>[1] = {
+  loadConfig: (() => ({ root: "/synthetic" })) as never,
+  resolveOwnerRepo: (() => ({ owner: "o", repo: "r" })) as never,
+  ghGateway: (() => ({})) as never,
+  projectPlan: ((plan: { tasks: { id: string }[] }) =>
+    new Map(plan.tasks.map((t) => [t.id, { merged: false }]))) as never,
+};
+
 /** The fixture's OWN committer — see test/lint-plan-broken-base.test.ts for why this is
  *  required rather than borrowed from the checkout (`commit-tree` refuses with "Author
  *  identity unknown" on a CI runner with neither repo nor global config set). */
@@ -179,7 +209,7 @@ test("a base-failing task a diff merely touches still fails, and the line names 
     const cap = captureConsole();
     let code: number;
     try {
-      code = await lintPlanCommand(["--plan", planPath, "--base", base]);
+      code = await lintPlanCommand(["--plan", planPath, "--base", base], LINT_DEPS);
     } finally {
       cap.restore();
     }
@@ -209,7 +239,7 @@ test("a task with none of its own violations on the base is reported with a base
     const cap = captureConsole();
     let code: number;
     try {
-      code = await lintPlanCommand(["--plan", planPath, "--base", base]);
+      code = await lintPlanCommand(["--plan", planPath, "--base", base], LINT_DEPS);
     } finally {
       cap.restore();
     }
@@ -243,7 +273,7 @@ test("FALSIFIER: the attribution is a COUNT, not a violation-text comparison —
     const cap = captureConsole();
     let code: number;
     try {
-      code = await lintPlanCommand(["--plan", planPath, "--base", base]);
+      code = await lintPlanCommand(["--plan", planPath, "--base", base], LINT_DEPS);
     } finally {
       cap.restore();
     }
@@ -278,7 +308,7 @@ test("exit code is unchanged: 0 on a clean diff, 1 on a diff that introduces a v
       const cap = captureConsole();
       let code: number;
       try {
-        code = await lintPlanCommand(["--plan", planPath, "--base", base]);
+        code = await lintPlanCommand(["--plan", planPath, "--base", base], LINT_DEPS);
       } finally {
         cap.restore();
       }
@@ -300,7 +330,7 @@ test("exit code is unchanged: 0 on a clean diff, 1 on a diff that introduces a v
       const cap = captureConsole();
       let code: number;
       try {
-        code = await lintPlanCommand(["--plan", planPath, "--base", base]);
+        code = await lintPlanCommand(["--plan", planPath, "--base", base], LINT_DEPS);
       } finally {
         cap.restore();
       }
@@ -319,7 +349,7 @@ test("exit code is unchanged: 0 on a clean diff, 1 on a diff that introduces a v
       const cap = captureConsole();
       let code: number;
       try {
-        code = await lintPlanCommand(["--plan", planPath, "--base", base]);
+        code = await lintPlanCommand(["--plan", planPath, "--base", base], LINT_DEPS);
       } finally {
         cap.restore();
       }
@@ -356,7 +386,7 @@ test("a base ref that cannot itself be linted degrades the annotation, not the r
     const cap = captureConsole();
     let code: number;
     try {
-      code = await lintPlanCommand(["--plan", planPath, "--base", base]);
+      code = await lintPlanCommand(["--plan", planPath, "--base", base], LINT_DEPS);
     } finally {
       cap.restore();
     }
@@ -402,6 +432,95 @@ test("no run without --base performs a second lint pass: the annotation never ap
     assert.ok(
       cap.errLines.every((l) => !l.includes("pre-existing")),
       "the word 'pre-existing' must never appear anywhere in whole-plan output",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T2995 — THE TWO CRITERIA THIS TASK DECLARED, AS TESTS THAT CARRY THEIR TITLES ──────────
+//
+// The fix above (LINT_DEPS) is what this task is FOR; these two prove it, and they exist because
+// the task's acceptance names them by title. Review resolves a title-form proof by matching the
+// test name, so a criterion whose title matches nothing grades `not executed` and falls back to
+// the keyword floor — which is what happened here: 0 tests matched, twice.
+
+test("W1-T2995: the base-lint fixture completes without a file-scope hang", async () => {
+  // NOT A TIMING ASSERTION. "Completes without hanging" measured by a stopwatch is a flake
+  // generator, and a fast run proves nothing about WHY. The hang had one cause: with no deps
+  // injected, `--base` mode reached the REAL `ghGateway` — a synchronous `gh` subprocess with a
+  // 60s default timeout, six times over, against a 25s file cap. So this asserts the CAUSE is
+  // gone: the seams the fixture supplies are the ones the command actually reaches for, which
+  // means no host process is spawned to hang on.
+  const seen: string[] = [];
+  const spied: Parameters<typeof lintPlanCommand>[1] = {
+    loadConfig: (() => {
+      seen.push("loadConfig");
+      return { root: "/synthetic" };
+    }) as never,
+    resolveOwnerRepo: (() => {
+      seen.push("resolveOwnerRepo");
+      return { owner: "o", repo: "r" };
+    }) as never,
+    ghGateway: (() => {
+      seen.push("ghGateway");
+      return {};
+    }) as never,
+    projectPlan: ((plan: { tasks: { id: string }[] }) => {
+      seen.push("projectPlan");
+      return new Map(plan.tasks.map((t) => [t.id, { merged: false }]));
+    }) as never,
+  };
+
+  const { dir, planPath, relPath } = fixturePlanPaths();
+  try {
+    const base = baseCommitWithBlob(relPath, LANDMINE_TASK("landmine task, before the touch", "works"));
+    writeFileSync(planPath, LANDMINE_TASK("landmine task, after the touch", "works"), "utf8");
+
+    const cap = captureConsole();
+    let code: number;
+    try {
+      code = await lintPlanCommand(["--plan", planPath, "--base", base], spied);
+    } finally {
+      cap.restore();
+    }
+
+    assert.equal(code, 1, "the run still reaches its verdict — the point is that it reaches one at all");
+    assert.ok(
+      seen.includes("ghGateway"),
+      `--base mode must reach the INJECTED gateway, never the host's gh; seams touched: ${JSON.stringify(seen)}`,
+    );
+    assert.ok(seen.includes("loadConfig"), "and the injected config, not the host's");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2995: the base-lint fixture asserts its pre-existing-violation attribution unchanged", async () => {
+  // The injection must change what the fixture TOUCHES, never what it MEASURES. This drives
+  // W1-T2339's own subject — the pre-existing-violation COUNT — through the injected seams and
+  // asserts the identical annotation, so a seam change that quietly altered the verdict cannot
+  // pass as a hang fix.
+  const { dir, planPath, relPath } = fixturePlanPaths();
+  try {
+    const base = baseCommitWithBlob(relPath, LANDMINE_TASK("landmine task, before the touch", "works"));
+    writeFileSync(planPath, LANDMINE_TASK("landmine task, after the touch", "works"), "utf8");
+
+    const cap = captureConsole();
+    let code: number;
+    try {
+      code = await lintPlanCommand(["--plan", planPath, "--base", base], LINT_DEPS);
+    } finally {
+      cap.restore();
+    }
+
+    assert.equal(code, 1, "a task still carrying a blocking violation still fails the run");
+    const line = cap.errLines.find((l) => l.startsWith("✗ ZZ-Landmine:"));
+    assert.ok(line, `the failing task must still be reported; stderr was ${JSON.stringify(cap.errLines)}`);
+    assert.match(
+      line!,
+      new RegExp(`2 violation\\(s\\) \\(2 pre-existing on base ${base}\\)`),
+      "the attribution count and its wording must be exactly what it was before the seams were injected",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
