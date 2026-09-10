@@ -51,6 +51,16 @@
     through, not to stop. One task failing is that task's problem; stopping the fleet for it is the
     daemon blocking on something it could have routed.
   design: |
+    (i-a) NARROWED BY AN EXISTING TEST, BEFORE THE BUILD SHIPPED — recorded here because the filed
+    design was wrong and a builder reading only the original would repeat it. A first draft keyed on
+    the task-id prefix ALONE. W1-T2546's criterion 3 pins that "an unrecognised failure still exits
+    as a crash, so this can only ever NARROW what counts as one", and drives it with task-prefixed
+    `TypeError` / `AssertionError` / `SyntaxError`. Reclassifying those would have been WRONG, not
+    merely test-breaking: an in-process throw inside `runOne` is a defect in RMD ITSELF, it recurs on
+    every task, and it is exactly the "meaningful regression" W1-T3318's ruling still reserves a stop
+    for. The rule therefore requires `Command failed: ` as well — a SPAWNED COMMAND's failure is the
+    task's problem; the daemon's own code throwing is the daemon's. All five measured crashes are
+    `Command failed:`, so the narrow rule covers every observed case.
     (i) CLASSIFY STRUCTURALLY, ON THE TASK-ID PREFIX, not on any tool's error text. `${taskId}: ` is
     what BOTH error sites emit by construction, so the discriminator cannot drift when a tool
     rewords its failure — which is exactly how the gh failure escaped W1-T3310's banner rule.
@@ -73,7 +83,7 @@
       proof: "unit test: test/a-tasks-throw-is-not-the-daemons-crash.test.ts"
     - claim: "the measured gh-api failure that W1-T3310's banner rule could not see now routes to 76"
       proof: "unit test: test/a-tasks-throw-is-not-the-daemons-crash.test.ts"
-    - claim: "a stop detail that names no task still exits 1, so docker's crash budget still means something"
+    - claim: "a stop detail that names no task, OR names one but carries an in-process throw rather than a spawned-command failure, still exits 1"
       proof: "unit test: test/a-tasks-throw-is-not-the-daemons-crash.test.ts"
     - claim: "the stale (75), blocked (76) and environmental (77) mappings are unchanged and environmental keeps precedence"
       proof: "unit test: test/a-tasks-throw-is-not-the-daemons-crash.test.ts"
