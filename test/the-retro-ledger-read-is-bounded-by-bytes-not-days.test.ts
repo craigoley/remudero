@@ -23,6 +23,7 @@ import { gzipSync } from "node:zlib";
 
 import {
   RETRO_LEDGER_MAX_BYTES,
+  RETRO_LEDGER_MAX_ROWS,
   RETRO_LEDGER_NO_MARKER_LOOKBACK_MS,
   RETRO_LEDGER_WINDOW_LEAD_MS,
   readRetroLedgerNdjson,
@@ -194,6 +195,8 @@ test("W1-T3229: the report's scope note says the counts are windowed, and names 
     rowsKept: 12,
     droppedRows: 0,
     droppedBytes: 0,
+    duplicatesCollapsed: 0,
+    dedupeEntriesPeak: 12,
   });
   assert.match(clean, /since 2026-09-01T00:00:00\.000Z/);
   assert.match(clean, /12 row\(s\), not over all history/);
@@ -205,6 +208,8 @@ test("W1-T3229: the report's scope note says the counts are windowed, and names 
     rowsKept: 12,
     droppedRows: 7,
     droppedBytes: 4_096,
+    duplicatesCollapsed: 3,
+    dedupeEntriesPeak: 12,
   });
   assert.match(truncated, /7 older row\(s\) \(4096 bytes\) were DROPPED/);
   assert.match(truncated, /itself incomplete at its old end/);
@@ -231,7 +236,15 @@ test("W1-T3229: a truncated read is reported to the ledger AND to stderr, never 
   const rows: Array<{ path: string; row: Record<string, unknown> }> = [];
   const warnings: string[] = [];
   const reported = reportRetroLedgerTruncation(
-    { ndjson: "", sinceTs: "2026-09-01T00:00:00.000Z", rowsKept: 12, droppedRows: 7, droppedBytes: 4_096 },
+    {
+      ndjson: "",
+      sinceTs: "2026-09-01T00:00:00.000Z",
+      rowsKept: 12,
+      droppedRows: 7,
+      droppedBytes: 4_096,
+      duplicatesCollapsed: 3,
+      dedupeEntriesPeak: 12,
+    },
     { ledgerPath: "/synthetic/ledger.ndjson", runId: "RETRO-1", append: (path, row) => rows.push({ path, row }), warn: (m) => warnings.push(m) },
   );
 
@@ -244,6 +257,9 @@ test("W1-T3229: a truncated read is reported to the ledger AND to stderr, never 
   assert.equal(rows[0]!.row.rows_kept, 12);
   assert.equal(rows[0]!.row.since_ts, "2026-09-01T00:00:00.000Z");
   assert.equal(rows[0]!.row.max_bytes, RETRO_LEDGER_MAX_BYTES);
+  assert.equal(rows[0]!.row.max_rows, RETRO_LEDGER_MAX_ROWS);
+  assert.equal(rows[0]!.row.duplicates_collapsed, 3);
+  assert.equal(rows[0]!.row.dedupe_entries_peak, 12);
 
   // The stderr half is not decoration: the ledger row is for the fleet, this line is for whoever
   // is watching the run. A report that lands in only one place is the silent-truncation defect
@@ -257,7 +273,15 @@ test("W1-T3229: a read that dropped nothing reports NOTHING — no row, no warni
   const rows: unknown[] = [];
   const warnings: string[] = [];
   const reported = reportRetroLedgerTruncation(
-    { ndjson: "", sinceTs: "2026-09-01T00:00:00.000Z", rowsKept: 12, droppedRows: 0, droppedBytes: 0 },
+    {
+      ndjson: "",
+      sinceTs: "2026-09-01T00:00:00.000Z",
+      rowsKept: 12,
+      droppedRows: 0,
+      droppedBytes: 0,
+      duplicatesCollapsed: 0,
+      dedupeEntriesPeak: 12,
+    },
     { ledgerPath: "/synthetic/ledger.ndjson", runId: "RETRO-1", append: (_p, r) => rows.push(r), warn: (m) => warnings.push(m) },
   );
   assert.equal(reported, false);

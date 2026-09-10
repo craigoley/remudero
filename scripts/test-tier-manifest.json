@@ -1231,6 +1231,7 @@
     "test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts": 692,
     "test/the-restart-seam-adapts-to-its-host.test.ts": 0,
     "test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts": 9513,
+    "test/the-retro-dedupe-set-is-bounded-by-the-retained-window.test.ts": 2500,
     "test/the-retro-ledger-read-is-bounded-by-bytes-not-days.test.ts": 0,
     "test/the-retro-preflight-names-the-suite-that-hung.test.ts": 0,
     "test/the-retros-ledger-read-opens-every-rotation-forever.test.ts": 1481,
