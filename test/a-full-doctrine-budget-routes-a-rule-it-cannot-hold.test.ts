@@ -184,3 +184,38 @@ test("W1-T3320: a run NEVER writes outside --feedback-dir — a gate that writes
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("W1-T3320: when the follow-up cannot be filed the CLI REFUSES — the one routing failure that must not land silently", () => {
+  // COVERS THE CLI'S OWN REFUSE BRANCH, not just fileFoldDebt returning null. Measured: the unit
+  // test above exercised the filer and left seven lines of the command path — the branch that turns
+  // a lost follow-up into a blocked run — uncovered. That branch is the whole safety property: if it
+  // silently succeeded, the change would land and the fold would be remembered by nobody.
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}budget-unfilable-`));
+  try {
+    const file = join(dir, "doctrine.md");
+    const baseline = join(dir, "baseline.json");
+    // A FILE where the inbox directory should be: mkdir under it fails ENOTDIR for every uid, on
+    // every platform. A chmod 0o000 would be uid-DEPENDENT and root would sail through it —
+    // test/host-capability-fixtures.test.ts refuses that fixture by name for exactly this reason.
+    const blocker = join(dir, "not-a-dir");
+    writeFileSync(blocker, "");
+    writeFileSync(file, "x".repeat(900));
+    writeFileSync(baseline, JSON.stringify({ capBytes: 100, foldDebtCeilingBytes: 5_000 }));
+    const run = spawnSync(
+      process.execPath,
+      [
+        new URL("../scripts/claude-md-budget-ratchet.mjs", import.meta.url).pathname,
+        "--file", file,
+        "--baseline", baseline,
+        "--feedback-dir", join(blocker, "inbox"),
+      ],
+      { encoding: "utf8", cwd: new URL("..", import.meta.url).pathname },
+    );
+    assert.notEqual(run.status, 0, `an unfilable follow-up must refuse: ${run.stdout}${run.stderr}`);
+    assert.match(run.stderr, /the fold follow-up could not be filed/);
+    // AND IT MUST NOT READ AS A ROUTED SUCCESS — the two outcomes have opposite consequences.
+    assert.doesNotMatch(run.stderr, /ROUTED: fold filed as/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
