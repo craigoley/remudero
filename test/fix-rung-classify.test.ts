@@ -147,6 +147,14 @@ test("detectCiLogVerdictUnchanged: a genuinely different finding set is real pro
   assert.equal(got, undefined);
 });
 
+test("detectCiLogVerdictUnchanged: the failing check name set moving abstains, even with matching shared text", () => {
+  const got = detectCiLogVerdictUnchanged({
+    priorFailures: [annotated("check-a", ["finding A"])],
+    currentFailures: [annotated("check-a", ["finding A"]), annotated("check-b", ["finding B"])],
+  });
+  assert.equal(got, undefined, "a newly-red check is ground moving, not an unchanged verdict");
+});
+
 test("detectCiLogVerdictUnchanged: a non-annotation tail source is never comparable — abstains", () => {
   const got = detectCiLogVerdictUnchanged({
     priorFailures: [annotated("ci", ["finding A"])],

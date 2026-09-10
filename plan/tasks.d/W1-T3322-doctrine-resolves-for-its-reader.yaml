@@ -1,0 +1,84 @@
+- id: W1-T3322
+  title: "THE DOCTRINE TESTS PIN THE FILE, NOT WHAT A READER RESOLVES — 79 suites read CLAUDE.md and the ones that matter assert a FACT IS PRESENT (\"CLAUDE.md must say what ships on merge\"), so any move of a rule body breaks them even when the fact stays reachable; that is what forced W1-T2507 to revert three migrations"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 10.00
+  files: [src/lib/learnings.ts, test/doctrine-resolves-for-its-reader.test.ts]
+  origin: "operator-session#doctrine-modularization-2026-09-10"
+  plan_refs: ["W1-T2508", "W1-T2507", "W1-T3320", "W1-T3323"]
+  status: queued
+  attempts: 0
+  note: |
+    THIS IS THE PREREQUISITE, NOT THE MIGRATION. W1-T3323 moves the bodies; this makes the move
+    SAFE to attempt. Built the other way round it is whack-a-mole: W1-T2507 migrated three bullets,
+    watched tests redden, and reverted them — and the reversal was informative rather than wasted,
+    because it proved those facts are read by every task author, not only by editors of the one file
+    they happen to name.
+  rationale: |
+    MEASURED 2026-09-10 over `origin/main`'s CLAUDE.md:
+
+      43685 bytes · 56 rules · 8 sections
+      every rule is already `- **HEADLINE** body *(citation)*` — ZERO exceptions
+      headlines 6832 bytes (16%) · bodies 34198 bytes (83%)
+      79 suites read the file; only 5 of 56 rules have prose pinned by one
+
+    THE PINS ARE NOT ARBITRARY PROSE, which is the whole finding. They assert that a FACT IS PRESENT
+    WHERE THE READER LOADS IT:
+
+      test/fleet-heartbeat-image-sha.test.ts  "CLAUDE.md must say what ships on merge (the mount)"
+      test/docs-claims.test.ts                "CLAUDE.md never states, in one place, that a
+                                               `unit test:` proof body is matched as a LITERAL"
+
+    Both read the raw file. So a rule whose BODY moves to a store the reader can still reach fails
+    them anyway — the fact is reachable, the assertion is not. The tests pin the CONTAINER when what
+    they mean is the CONTENTS.
+
+    AND THE RESOLVER ALREADY EXISTS. W1-T2508 shipped `parseRuleHeadlines`, `buildHeadlineIndex`,
+    `retrieveRuleBody` and `retrieveRuleBodyOrDegrade`, and `run-task.ts` uses them to hand a WORKER
+    a headline index plus on-demand bodies. MEASURED: all 56 bodies are addressable by headline
+    today. What is missing is a way for a TEST to ask the same question the worker's retrieval asks.
+  design: |
+    (i) ONE RESOLVER, USED BY BOTH. A test must be able to obtain "the doctrine as a reader resolves
+    it" — the headline index plus every body, from wherever the bodies live — through the SAME
+    primitives `run-task.ts` already calls. Two resolvers would drift, and the drift would be
+    invisible until a migration broke a test that was passing for the wrong reason.
+    (ii) THE ASSERTION CHANGES FROM CONTAINER TO CONTENTS. `readFileSync("CLAUDE.md")` becomes
+    "resolve the doctrine". A suite asserting a fact is present then keeps working whether that fact
+    lives in the index, in a body file, or migrates again later — which is the property that makes
+    W1-T3323 safe rather than a second revert.
+    (iii) IT MUST STILL FAIL WHEN THE FACT IS GONE. A resolver that quietly returns the empty string
+    on a missing store turns every one of these suites vacuous — the exact "assertion satisfied over
+    an empty set" this repo has recorded repeatedly. An unreadable or absent body store is a FAILURE,
+    never an empty resolution.
+    (iv) NO RULE MOVES IN THIS TASK. The file is unchanged; only how the tests read it changes. That
+    keeps the diff reviewable as one question ("does the resolver see what the reader sees?") and
+    leaves the migration's own risk to the task that takes it.
+    (v) COVER THE DEGRADED PATH, because `retrieveRuleBodyOrDegrade` already has one: a headline whose
+    body cannot be resolved yields a NAMED unavailability, not silence. A test asserting a fact must
+    be able to tell "absent" from "unreadable" for the same reason the console's build check must.
+  acceptance:
+    - claim: "a test can resolve the doctrine a reader sees — index plus bodies — through the same primitives run-task.ts uses, not a second implementation"
+      proof: "unit test: test/doctrine-resolves-for-its-reader.test.ts"
+    - claim: "a fact asserted through the resolver is found whether it lives in the headline or in a body, so a later migration does not break the assertion"
+      proof: "unit test: test/doctrine-resolves-for-its-reader.test.ts"
+    - claim: "a missing or unreadable body store FAILS resolution rather than resolving empty, so these suites can never pass vacuously"
+      proof: "unit test: test/doctrine-resolves-for-its-reader.test.ts"
+    - claim: "the suites that today assert a fact is present in CLAUDE.md read the resolver instead of the raw file, and still fail when the fact is deleted"
+      proof: "unit test: test/doctrine-resolves-for-its-reader.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if the doctrine suites already read a resolver. MEASURED
+    2026-09-10: `test/fleet-heartbeat-image-sha.test.ts` and `test/docs-claims.test.ts` both
+    `readFileSync` CLAUDE.md and assert on its raw text.
+    PROVE IT LOAD-BEARING BY DELETING A FACT, not by moving one: remove a pinned sentence entirely and
+    require the suite to redden. A resolver that passes because it silently found nothing is the
+    vacuous-pass failure, and it would make every doctrine assertion in the repo worthless at once.
+    RUN THE MIGRATION REHEARSAL AS A CONTROL: move one rule's body to a temporary store in the fixture
+    and require the SAME assertion to still pass. If it fails, the resolver is reading the container
+    again and W1-T3323 will revert exactly as W1-T2507 did.
+    DO NOT move any rule in this task, and do not shrink CLAUDE.md. A diff that both changes how tests
+    read and changes what they read cannot be reviewed for either.
