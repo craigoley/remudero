@@ -9,7 +9,7 @@
   risk: high
   origin: "operator-session#4889-midnight-2026-09-10"
   plan_refs: ["W1-T317", "W1-T331", "W1-T3207"]
-  files: [src/run-task.ts, test/the-day-cost-window-has-no-clock-seam.test.ts]
+  files: [src/run-task.ts, test/the-day-cost-window-has-no-clock-seam.test.ts, scripts/test-tier-manifest.json]
   status: queued
   attempts: 0
   rationale: |
@@ -72,6 +72,10 @@
     DO NOT widen this into the ceiling's value or the override store (W1-T332/W1-T363). Those are
     resolved elsewhere and are not what moved.
   note: |
+    SCOPE AMENDMENT 2026-09-10. This task adds a new test file. The mandatory tier-completeness
+    gate refuses every new test absent from `scripts/test-tier-manifest.json`; the required
+    registry entry is therefore implementation scope, not adjacent cleanup.
+
     Rule 25 CHECKED: `src/run-task.ts` is ordinary src, not an instrument surface.
     RISK IS HIGH BECAUSE THIS IS A SPEND CONTROL, not because the diff is large. The failure mode of
     getting it wrong is a governor that stops deferring, which costs money quietly. The band reflects
