@@ -135,6 +135,7 @@
   "src/lib/bundle.ts": 250,
   "src/lib/ci-failure-corpus.ts": 65,
   "src/lib/ci-gate-required.ts": 2,
+  "src/lib/ci-lesson-recurrence.ts": 250,
   "src/lib/ci-parity.ts": 1000,
   "src/lib/classify.ts": 201,
   "src/lib/claude-model-health.ts": 20,

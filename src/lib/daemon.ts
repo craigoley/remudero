@@ -2127,6 +2127,7 @@ export async function runDaemon(
               drafts: result.draftCount,
               excluded: result.excludedCount,
               unreadable: result.unreadableCount,
+              lesson_recurrences: result.lessonRecurrences,
             });
           } catch (e) {
             log("ci_learning_cadence.run_failed", { error: String((e as Error)?.message ?? e) });

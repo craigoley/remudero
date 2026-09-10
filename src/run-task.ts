@@ -708,6 +708,7 @@ import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from 
 import {
   measurementCadenceCheck,
   ciLearningCadenceCheck,
+  CI_LEARNING_MINT_CEILING,
   type CiLearningCadencePolicy,
   type CiLearningCadenceRunResult,
   measurementCadenceMarkerPath,
@@ -727,6 +728,12 @@ import {
   type WipeTestCadencePolicy,
   type WipeTestCadenceRunResult,
 } from "./lib/measurement-cadence.js";
+import {
+  judgeCiLessonEfficacy,
+  readFiledCiLessons,
+  summarizeCiLessonRecurrences,
+  type FiledCiLessonsRead,
+} from "./lib/ci-lesson-recurrence.js";
 import {
   boardReviewMarkerPath,
   buildBoardReview,
@@ -24232,6 +24239,9 @@ export function buildCiLearningDaemonHooks(deps: {
   now?: () => Date;
   /** Injected so a test drives the whole rung with ZERO network; production reads the real window. */
   loadWindow?: (days: number) => CiFailureCorpusInput;
+  /** Injected so a test drives lesson outcomes without the real plan; production reads only the
+   *  machine filer's own shard directory. */
+  loadLessons?: () => FiledCiLessonsRead;
 } = {}): {
   checkCiLearningCadence: () => MeasurementCadenceDecision;
   runCiLearningCadence: () => Promise<CiLearningCadenceRunResult>;
@@ -24261,11 +24271,22 @@ export function buildCiLearningDaemonHooks(deps: {
       const input = deps.loadWindow ? deps.loadWindow(1) : loadCiFailureWindow(1);
       const corpus = collectCiFailureCorpus(input);
       const result = mintCiLearningShards(corpus, []);
+      const filedLessons = deps.loadLessons
+        ? deps.loadLessons()
+        : readFiledCiLessons(join(repoRoot, "plan", "tasks.d"));
+      const lessonRecurrences =
+        filedLessons.status === "measured"
+          ? summarizeCiLessonRecurrences(
+              judgeCiLessonEfficacy(corpus, filedLessons.lessons),
+              CI_LEARNING_MINT_CEILING,
+            )
+          : { status: "unreadable" as const };
       return {
         status: result.status,
         draftCount: result.drafts.length,
         excludedCount: result.excludedFindings.length,
         unreadableCount: result.unreadableShas.length,
+        lessonRecurrences,
       };
     },
   };
