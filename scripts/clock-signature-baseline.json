@@ -391,7 +391,7 @@
   },
   "src/run-task.ts": {
     "dateNow": 55,
-    "legacy": 19,
+    "legacy": 22,
     "newDate": 41
   },
   "src/spike.ts": {
