@@ -23,6 +23,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { loadOperatorNotesForTask } from "../src/lib/operator-notes.js";
+import { fixedClock } from "../src/lib/clock.js";
 
 function storeLines(root: string): Array<Record<string, unknown>> {
   const p = join(root, "plan", "operator-notes.ndjson");
@@ -36,7 +37,7 @@ test("W1-T3351: `rmd note <id> <text...>` writes one stamped note the docket's s
   const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const code = await noteCommand(["W1-T42", "prefer", "the", "union", "reader", "here"], {
     root,
-    now: () => new Date("2026-09-10T12:00:00.000Z"),
+    clock: fixedClock(Date.parse("2026-09-10T12:00:00.000Z")),
     log: (step, extra = {}) => logged.push({ step, extra }),
   });
 
@@ -99,7 +100,7 @@ test("W1-T3351: a SUCCEEDING approve chains the note, and the same approve witho
   const code = await approveCommand(["W1-T1041", "--note", "release this   one   early next   cycle"], {
     config,
     root,
-    now: () => new Date("2026-09-10T13:00:00.000Z"),
+    clock: fixedClock(Date.parse("2026-09-10T13:00:00.000Z")),
   });
   assert.equal(code, 0, "--note does not disturb the release path's own verdict");
 

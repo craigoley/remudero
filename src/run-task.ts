@@ -33796,15 +33796,16 @@ export function readLedgerRawLines(path: string): readonly string[] {
 
 export async function approveCommand(
   rest: string[],
-  // W1-T3351 appended `root`/`now`/`log` LAST, all optional: the `--note` chain needs a store root
-  // and a clock a test can pin, and no existing caller passes either.
+  // W1-T3351 appended `root`/`clock`/`log` LAST, all optional: the `--note` chain needs a store
+  // root and a clock a test can pin, and no existing caller passes either. `clock` is the shared
+  // {@link Clock} port, not a bespoke `now`-shaped field — see recordCliOperatorNote's own doc.
   deps: {
     config?: Config;
     gateway?: RatifyGateway;
     batchGateway?: RatifyBatchGateway;
     overlap?: OverlapWarningDeps;
     root?: string;
-    now?: () => Date;
+    clock?: Clock;
     log?: (step: string, extra?: Record<string, unknown>) => void;
   } = {},
 ): Promise<number> {
@@ -34514,16 +34515,20 @@ const CLI_OPERATOR_NOTE_AUTHOR = "operator";
  * Shared by `rmd note` and `rmd approve --note` so the two cannot drift: one stamp, one store, one
  * ledger step. `appendOperatorNote` REFUSES an unstamped entry and never throws, so a filesystem
  * failure is a `false` the caller reports rather than a crash mid-ratification.
+ *
+ * The time source is the shared {@link Clock} port, never a bespoke `now`-shaped field:
+ * clock-signature-census.test.ts tracks every new bare `() => Date` signature added to this file
+ * as legacy-shape growth, and this is new code with no legacy caller to stay compatible with.
  */
 export function recordCliOperatorNote(
   root: string,
   taskId: string,
   text: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  now: () => Date,
+  clock: Clock,
 ): boolean {
   const note = text.trim().replace(/\s+/g, " ");
-  const entry = { ts: now().toISOString(), taskId, author: CLI_OPERATOR_NOTE_AUTHOR, note };
+  const entry = { ts: clock.iso(), taskId, author: CLI_OPERATOR_NOTE_AUTHOR, note };
   const written = appendOperatorNote(root, entry);
   log(written ? "operator_note.added" : "operator_note.refused", {
     task_id: taskId,
@@ -34541,7 +34546,7 @@ function approveNoteChain(
   rest: string[],
   scopeId: string,
   config: Config,
-  deps: { root?: string; now?: () => Date; log?: (step: string, extra?: Record<string, unknown>) => void },
+  deps: { root?: string; clock?: Clock; log?: (step: string, extra?: Record<string, unknown>) => void },
 ): void {
   const text = flagValue(rest, "--note");
   if (text === undefined || text.trim().length === 0) return;
@@ -34549,7 +34554,7 @@ function approveNoteChain(
     deps.log ??
     ((step: string, extra: Record<string, unknown> = {}) =>
       appendLedger(ledgerPathFor(config), { run_id: `APPROVE-${scopeId}`, task_id: scopeId, step, ...extra }));
-  const written = recordCliOperatorNote(deps.root ?? repoRoot, scopeId, text, log, deps.now ?? (() => new Date()));
+  const written = recordCliOperatorNote(deps.root ?? repoRoot, scopeId, text, log, deps.clock ?? systemClock);
   console.log(
     written
       ? `rmd approve: note recorded for ${scopeId} — it enters the next weekly feedback docket.`
@@ -34569,7 +34574,7 @@ function approveNoteChain(
  */
 export async function noteCommand(
   rest: string[],
-  deps: { root?: string; now?: () => Date; log?: (step: string, extra?: Record<string, unknown>) => void; config?: Config } = {},
+  deps: { root?: string; clock?: Clock; log?: (step: string, extra?: Record<string, unknown>) => void; config?: Config } = {},
 ): Promise<number> {
   const taskId = rest[0];
   const text = rest.slice(1).join(" ");
@@ -34583,7 +34588,7 @@ export async function noteCommand(
   const log =
     deps.log ??
     ((step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPathFor(deps.config ?? loadConfig()), { run_id: `NOTE-${taskId}`, task_id: taskId, step, ...extra }));
-  const written = recordCliOperatorNote(root, taskId, text, log, deps.now ?? (() => new Date()));
+  const written = recordCliOperatorNote(root, taskId, text, log, deps.clock ?? systemClock);
   if (!written) {
     console.error(`rmd note: the note store refused this entry (unwritable ${join(root, "plan", "operator-notes.ndjson")}?) — nothing was recorded`);
     return 1;
