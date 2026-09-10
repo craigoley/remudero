@@ -6,6 +6,7 @@
     "test/a-blocked-task-must-name-its-disposition.test.ts": 3261,
     "test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts": 1907,
     "test/a-broken-body-is-repairable-not-ambiguous.test.ts": 1676,
+    "test/a-browser-boundary-has-no-directive.test.ts": 0,
     "test/a-cadence-marker-that-stops-advancing-is-reported.test.ts": 0,
     "test/a-cancelled-matrix-and-a-failing-test-render-as-the-same-red-check.test.ts": 367,
     "test/a-capability-ladder-is-data-not-a-substring-match.test.ts": 385,
