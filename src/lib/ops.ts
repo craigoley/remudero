@@ -75,6 +75,9 @@ export interface RawAlert {
   summary: string;
   /** html_url — the human-facing link into GitHub's own alert UI. */
   url: string;
+  ruleId?: string;
+  toolName?: string;
+  ruleTags?: string[];
 }
 
 /** `${source}-${id}` — the escalation taskId AND the dedup key ({@link alertTaskId}). */
@@ -109,12 +112,13 @@ export function renderAlertRaw(owner: string, repo: string, alert: RawAlert): st
 
 // ── Normalizers: GitHub's three alert-list response shapes → RawAlert ──────
 
-interface GhCodeScanningAlertJson {
+export interface GhCodeScanningAlertJson {
   number?: number;
   state?: string;
   created_at?: string;
   html_url?: string;
-  rule?: { id?: string; description?: string; security_severity_level?: string; severity?: string };
+  rule?: { id?: string; description?: string; security_severity_level?: string; severity?: string; tags?: string[] };
+  tool?: { name?: string };
 }
 
 /**
@@ -144,6 +148,9 @@ export function normalizeCodeScanningAlert(raw: GhCodeScanningAlertJson): RawAle
     createdAt: raw.created_at ?? "",
     summary: raw.rule?.description ?? raw.rule?.id ?? "code-scanning alert",
     url: raw.html_url ?? "",
+    ruleId: raw.rule?.id,
+    toolName: raw.tool?.name,
+    ruleTags: raw.rule?.tags,
   };
 }
 
@@ -209,6 +216,24 @@ export interface AlertGateway {
   secretScanning(owner: string, repo: string): RawAlert[];
 }
 
+export type CodeScanningAlertsRead =
+  | { ok: true; alerts: RawAlert[] }
+  | { ok: false; error: string };
+
+export function readCodeScanningAlerts(owner: string, repo: string): CodeScanningAlertsRead {
+  try {
+    const raw = ghExec(
+      ["api", `repos/${owner}/${repo}/code-scanning/alerts`, "--paginate"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return { ok: false, error: "GitHub returned a non-array code-scanning response" };
+    return { ok: true, alerts: (parsed as GhCodeScanningAlertJson[]).map(normalizeCodeScanningAlert) };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "code-scanning read failed" };
+  }
+}
+
 /**
  * Real gateway: `gh api repos/<owner>/<repo>/<kind>/alerts --paginate`, scoped to
  * `owner/repo` (the v0 single-repo target). `--paginate` is `gh`'s own flag for
@@ -231,11 +256,8 @@ export function ghAlertGateway(): AlertGateway {
   }
   return {
     codeScanning(owner, repo) {
-      return tryList<GhCodeScanningAlertJson>([
-        "api",
-        `repos/${owner}/${repo}/code-scanning/alerts`,
-        "--paginate",
-      ]).map(normalizeCodeScanningAlert);
+      const result = readCodeScanningAlerts(owner, repo);
+      return result.ok ? result.alerts : [];
     },
     dependabot(owner, repo) {
       return tryList<GhDependabotAlertJson>([

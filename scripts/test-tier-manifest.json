@@ -348,6 +348,7 @@
     "test/clone-reap-wiring.test.ts": 999,
     "test/clone-reaper.test.ts": 498,
     "test/code-moved-out-of-a-template-literal-is-still-a-relocation.test.ts": 0,
+    "test/codeql-quality-intake.test.ts": 0,
     "test/codex-capacity-singleflight.test.ts": 468,
     "test/codex-disposable-review-sandbox.test.ts": 343,
     "test/codex-model-console.test.ts": 1073,

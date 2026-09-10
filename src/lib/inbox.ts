@@ -80,6 +80,8 @@ export interface Proposal {
    *  `policy_proposals` row — absent for every other proposal family. Provenance for the receiving operator: which
    *  bundle this row travelled in, and the pin they verified it against before staging. */
   source?: BundleProposalSource;
+  /** Keep this ratified proposal in the active registry until its source reconciler retires it. */
+  retainAfterRatification?: boolean;
 }
 
 // ── BUNDLE-SOURCED POLICY PROPOSALS (W1-T2702) ────────────────────────────────────────────────
@@ -1627,9 +1629,11 @@ export function pruneRatifiedProposals(
 ): { proposals: Proposal[]; prunedIds: string[] } {
   const ratifiedIds = new Set(classifications.filter((c) => c.state === "ratified").map((c) => c.proposalId));
   if (ratifiedIds.size === 0) return { proposals, prunedIds: [] };
+  const prunedIds = proposals.filter((proposal) => ratifiedIds.has(proposal.id) && !proposal.retainAfterRatification).map((proposal) => proposal.id);
+  if (prunedIds.length === 0) return { proposals, prunedIds: [] };
   return {
-    proposals: proposals.filter((p) => !ratifiedIds.has(p.id)),
-    prunedIds: [...ratifiedIds],
+    proposals: proposals.filter((proposal) => !prunedIds.includes(proposal.id)),
+    prunedIds,
   };
 }
 
