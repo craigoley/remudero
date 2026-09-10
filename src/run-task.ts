@@ -26919,6 +26919,7 @@ export type CiAnnotationFetch = (owner: string, repo: string, checkRunId: string
 export type CiJobLogFetch = (owner: string, repo: string, jobId: string) => string;
 
 export const BARE_EXIT_CODE_ANNOTATION = "Process completed with exit code 1";
+/** PRIMARY CONTROL: per pass, this is the default ceiling on annotation API reads. */
 export const DEFAULT_CI_ANNOTATION_READ_LIMIT = 8;
 
 export interface CiFailureFetchOptions {
