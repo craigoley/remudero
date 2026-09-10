@@ -1,0 +1,68 @@
+- id: W1-T3338
+  title: "A SUITE ASSERTS ON REPO-GLOBAL `git status` WHILE ITS NEIGHBOURS MUTATE THE SAME WORKING TREE — the collector is blamed for a file it never wrote whenever another suite's fixture restore lands between the before and after reads, producing a red that cannot be reproduced by running the suite"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files:
+    - test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts
+  origin: "operator-session#shard2-global-status-2026-09-10"
+  plan_refs: ["W1-T2957", "W1-T2905"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on #4992, coverage-shard (2/4), job 102951750313:
+
+      ✖ W1-T2957 the collector is reachable from the command surface, and writes nothing
+        AssertionError: and must leave no file behind
+        + actual   '?? changed-files.txt\n'
+        - expected ' M test/fixtures/duplicate-surface-credit/tasks.yaml\n?? changed-files.txt\n'
+
+    READ THE DIRECTION OF THAT DIFF: the assertion did not catch a stray file. It caught a file that
+    STOPPED being modified between the two reads. The "expected" side — the before-image — contains a
+    modification to a fixture the subject under test has nothing to do with.
+
+    THE MECHANISM, OBSERVED, NOT INFERRED.
+      test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts:144 captures
+        `git status --porcelain` for the WHOLE REPOSITORY,
+      :149 re-reads it and asserts byte equality, to prove `ciFailuresCommand` writes nothing.
+    `git status --porcelain` is repo-global, and the runner executes many suites concurrently against
+    ONE working tree. test/the-mint-prevents-an-id-collision-and-nothing-prevents-a-duplicate-surface.test.ts
+    is the only other file referencing `duplicate-surface-credit` (measured: `grep -rln` over test/,
+    src/ and scripts/ returns exactly that one file); it modifies that fixture and restores it. Any
+    restore that lands between :144 and :149 fails this assertion and names the wrong culprit.
+
+    THE ASSERTION IS THEREFORE NOT A FUNCTION OF THE CODE UNDER TEST, which is the same defect class
+    as W1-T2813 — a verdict that tracks something other than its subject. It is worse here in one
+    respect: the failure message accuses a specific component ("the collector … must leave no file
+    behind") of a write that provably did not happen, so the message actively misdirects the reader.
+
+    IT DOES NOT REPRODUCE THE OBVIOUS WAY, which is why it must be fixed rather than re-run. MEASURED
+    2026-09-10 on a clean worktree at origin/main:
+
+      node --test test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts
+      # tests 12  # pass 12  # fail 0
+
+    Running the suite alone can never fail — the interference requires a neighbour. So the standard
+    triage ("re-run it in isolation; if it passes it was the host") reaches exactly the wrong
+    conclusion here, and a re-run of the shard papers over it by chance.
+
+    THE REMEDY IS TO ASSERT THE PROPERTY IT ACTUALLY MEANS. The test wants "the collector wrote no
+    file", not "no process on this machine changed the tree". Scope the comparison to what the
+    subject could plausibly touch — the collector's own output paths and `plan/` — or diff the two
+    porcelain reads and assert that no ADDED entry is attributable to the subject, rather than
+    demanding global byte equality. The plan-file check at :148 is already correctly scoped and is
+    the model to follow.
+
+    CAVEAT, WITH EQUAL WEIGHT. This was seen ONCE, on one shard, on one day; I have not established a
+    rate, and the ledger carries no prior occurrence of the string "must leave no file behind" across
+    917 ledger files and 7,764,550 rows back to 2026-08-13 (zero files unreadable during that scan).
+    So "newly exposed by shard timing" is the best reading, NOT a measured regression — the same
+    coupling could have existed unhit since the assertion was written. I also have not proven the
+    mint suite is the only possible perturber; it is the only one that references this fixture by
+    name, which is weaker than an exhaustive check of everything that writes under test/fixtures/.
+    Finally, the PR whose run surfaced this (#4992) touches only ci-parity's own test file, so it is
+    not a candidate cause beyond changing how the shard was packed.
