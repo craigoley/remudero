@@ -720,6 +720,8 @@ import {
   fileCiLearningShards,
   mintCiLearningShards,
   recordCiLearningCadenceFire,
+  releaseCiLearningCadenceFire,
+  CI_LEARNING_WINDOW_DAYS,
   recordMeasurementCadenceFire,
   recordWipeTestCadenceFire,
   renderVerbCensusDigestLine,
@@ -24494,31 +24496,101 @@ export function buildCiLearningDaemonHooks(deps: {
         now: deps.now?.(),
       });
     },
-    runCiLearningCadence: async () => {
-      const root = configFor().root;
-      // THE FIRE FIRST — see this function's own doc for why the order is the safety property.
-      recordCiLearningCadenceFire(root, deps.now?.() ?? new Date());
-      const input = deps.loadWindow ? deps.loadWindow(1) : loadCiFailureWindow(1);
-      const corpus = collectCiFailureCorpus(input);
-      const result = mintCiLearningShards(corpus, []);
-      const filedLessons = deps.loadLessons
-        ? deps.loadLessons()
-        : readFiledCiLessons(join(repoRoot, "plan", "tasks.d"));
-      const lessonRecurrences =
-        filedLessons.status === "measured"
-          ? summarizeCiLessonRecurrences(
-              judgeCiLessonEfficacy(corpus, filedLessons.lessons),
-              CI_LEARNING_MINT_CEILING,
-            )
-          : { status: "unreadable" as const };
-      return {
-        status: result.status,
-        draftCount: result.drafts.length,
-        excludedCount: result.excludedFindings.length,
-        unreadableCount: result.unreadableShas.length,
-        lessonRecurrences,
-      };
-    },
+    runCiLearningCadence: buildCiLearningCadenceRunner({
+      root: configFor().root,
+      checkoutRoot: repoRoot,
+      loadWindow: (days) => (deps.loadWindow ? deps.loadWindow(days) : loadCiFailureWindow(days)),
+      loadLessons: deps.loadLessons,
+      now: () => deps.now?.() ?? new Date(),
+    }),
+  };
+}
+
+/** What one scheduled CI-learning firing did — counts for what was DRAFTED and, separately, for what
+ *  LANDED. Reporting only drafts is what made a rung that filed nothing indistinguishable from a
+ *  clean one (W1-T3324). */
+export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResult {
+  filedCount: number;
+  skippedCount: number;
+  refusedCount: number;
+}
+
+/**
+ * THE SCHEDULED CI-LEARNING RUNG (W1-T3324) — extracted so the daemon's arm and a test drive the
+ * SAME body, and so the four defects below are pinned by a falsifier rather than by inspection.
+ *
+ * IT FILES. The previous arm minted drafts and returned counts; `rmd ci-learning` typed by hand
+ * called `fileCiLearningShards`. Two callers, one wired: six drafts were minted on 2026-09-07 and
+ * 2026-09-08 and the plan held zero ci-learning records.
+ *
+ * IT PASSES THE REAL ORIGIN SURFACE. The previous arm passed `[]`, so wiring the filer alone would
+ * re-file the same cause on every firing.
+ *
+ * THE FIRE IS STILL RECORDED FIRST — that ordering guards a crash-loop re-running an expensive
+ * window — but a run that THREW BEFORE DOING ANY WORK RELEASES IT. The observed shape: a
+ * `Bad credentials (HTTP 401)` from the window read, with `maxPerDay: 1`, spent the whole day and
+ * produced nothing. A run that filed keeps its fire.
+ */
+export function buildCiLearningCadenceRunner(deps: {
+  root: string;
+  checkoutRoot: string;
+  loadWindow: (days: number) => CiFailureCorpusInput;
+  loadLessons?: () => ReturnType<typeof readFiledCiLessons>;
+  fileShards?: typeof fileCiLearningShards;
+  planOrigins?: string[];
+  recordFire?: (root: string, at: Date) => void;
+  releaseFire?: (root: string) => void;
+  windowDays?: number;
+  now?: () => Date;
+}): () => Promise<CiLearningCadenceRunnerResult> {
+  return async () => {
+    const at = deps.now?.() ?? new Date();
+    (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
+    let corpus: ReturnType<typeof collectCiFailureCorpus>;
+    try {
+      corpus = collectCiFailureCorpus(deps.loadWindow(deps.windowDays ?? CI_LEARNING_WINDOW_DAYS));
+    } catch (e) {
+      // NO WORK WAS DONE, so the allowance is returned rather than spent. Rethrown, never swallowed:
+      // the caller's `ci_learning_cadence.run_failed` row is how this becomes visible.
+      (deps.releaseFire ?? releaseCiLearningCadenceFire)(deps.root);
+      throw e;
+    }
+    const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(deps.checkoutRoot);
+    const result = mintCiLearningShards(corpus, planOrigins);
+    const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
+    const lessonRecurrences =
+      filedLessons.status === "measured"
+        ? summarizeCiLessonRecurrences(judgeCiLessonEfficacy(corpus, filedLessons.lessons), CI_LEARNING_MINT_CEILING)
+        : { status: "unreadable" as const };
+    // FILING IS BEST-EFFORT AND MUST NOT TAKE THE RUN DOWN, the same contract the CLI path holds:
+    // drafts already exist, and losing the whole firing to a filer exception turns a partial success
+    // into nothing.
+    let filed = 0;
+    let skipped = 0;
+    let refused = 0;
+    if (result.drafts.length > 0) {
+      try {
+        const filing = (deps.fileShards ?? fileCiLearningShards)(result.drafts, deps.checkoutRoot, {
+          mintTaskId: ciLearningTaskIdMinter(deps.checkoutRoot),
+          planOrigins,
+        });
+        filed = filing.filed.length;
+        skipped = filing.skipped.length;
+        refused = filing.refused.length;
+      } catch {
+        // Counts stay zero — "drafted but not filed" is a distinct outcome and the row below says so.
+      }
+    }
+    return {
+      status: result.status,
+      draftCount: result.drafts.length,
+      excludedCount: result.excludedFindings.length,
+      unreadableCount: result.unreadableShas.length,
+      lessonRecurrences,
+      filedCount: filed,
+      skippedCount: skipped,
+      refusedCount: refused,
+    };
   };
 }
 
