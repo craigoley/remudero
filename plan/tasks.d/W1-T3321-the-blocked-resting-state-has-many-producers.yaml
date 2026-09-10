@@ -43,6 +43,26 @@
     until `rmd approve` shipped. That is a resting block on WORK rather than on a PR, and it shows
     the census must cover surfaces that stop a task, not only surfaces that stop a diff.
 
+    A SIXTH, AND IT FAILS IN THE DIRECTION NOBODY IS WATCHING: a lane can CREDIT UNBUILT WORK AS
+    DONE. MEASURED 2026-09-10 on this repo's own filing PR #4960. Its commit body says, in as many
+    words, "FILING ONLY: no Remudero-Task trailer, and this branch is not run-<id>-<epoch>." A
+    background lane then pushed `chore(plan): align W1-T3322 shard slug` onto that branch, and the
+    squash carried two `Remudero-Task:` lines onto main — four lines BELOW the sentence forbidding
+    them. W1-T3322 was at least genuinely built; W1-T3323 was not built at all, and is now credited.
+
+    WHY THIS BELONGS IN A CENSUS OF BLOCKING SURFACES even though it blocks nothing: it is the same
+    class inverted. A blocking gate stops work loudly and someone notices. This marks work DONE
+    silently — `isDispatchEligible` returns false at its `already-merged` arm, so the fleet will
+    never dispatch W1-T3323, and every credit check reports the migration finished. The census must
+    therefore count surfaces that decide a task's STATE, not only surfaces that refuse a diff; a
+    census seeing only refusals would report this repo compliant while a filed, unbuilt task sits
+    marked complete.
+
+    AND THE SANCTIONED CORRECTION DOES NOT FIT. `rmd correct <task-id> --pr <n>` writes a
+    `correction.provenance` line, but `applyCorrection` REQUIRES a resolving `prRef` and always
+    records an `actual_pr_url` — it expresses "the credit named the wrong PR", never "the credit is
+    false and there is no true PR". A wrongly-credited UNBUILT task has no sanctioned way back.
+
     AND ONE THAT MUST BE JUDGED, NOT ASSUMED: `hooks/deny-floor.sh`'s 180s read floor. It refused
     roughly eight operator reads in a single session — but the limit it models is real, and it was
     written after four secondary-limit 403s in that same session. Its defect is SHAPE, not existence:
@@ -64,6 +84,11 @@
     (iv) THE COUNT IS NOT THE ANSWER. Report each surface BY NAME with its declared posture and
     whether it currently complies. A bare "N surfaces, M non-compliant" is the technically-true
     aggregate this repo has already been misled by once (`lint-plan`'s failing-split).
+    (v-a) AND COVER STATE-DECIDING SURFACES, which is the sixth finding's lesson: anything that can
+    mark a task merged, credited, released or parked belongs in the census, because a surface that
+    silently says DONE removes work from the fleet more completely than any refusal. The two credit
+    paths (`Remudero-Task:` trailer, `run-<id>-<epoch>` head ref) and whatever can write them are in
+    scope; so is the absence of a correction path for a credit that is simply false.
     (v) COVER TASK-STOPPING SURFACES, not only diff-stopping ones. `verify: human` and `blocked_ci`
     re-dispatch stop WORK without ever touching a PR, and a census that sees only hooks and CI jobs
     would report the fleet compliant while its most expensive resting block is untouched.
@@ -73,6 +98,8 @@
     - claim: "a surface with no declared posture FAILS the census by name, rather than being silently absent"
       proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
     - claim: "the report names each surface, its posture and whether it complies — never only a count"
+      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+    - claim: "state-deciding surfaces are counted too — anything that can mark a task merged, credited or parked, since a silent DONE removes work more completely than a refusal"
       proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
     - claim: "task-stopping surfaces are in scope, not only diff-stopping ones, so verify:human and blocked_ci re-dispatch are counted"
       proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"

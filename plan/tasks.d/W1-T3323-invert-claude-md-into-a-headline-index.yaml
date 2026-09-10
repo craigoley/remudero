@@ -13,6 +13,14 @@
   plan_refs: ["W1-T2508", "W1-T2507", "W1-T3320", "W1-T3322", "W1-T503"]
   status: queued
   attempts: 0
+  # ⚠ WRONGLY CREDITED, AND THE FLEET CANNOT SEE THIS TASK. #4960 filed this shard and a background
+  # lane pushed a commit onto that branch adding `Remudero-Task: W1-T3323`; the squash carried it to
+  # main, so the trailer credit path reports this BUILT when nothing has been built. `isDispatchEligible`
+  # returns false at its already-merged arm, so no worker will ever pick this up. `rmd correct` cannot
+  # undo it — `applyCorrection` requires a resolving PR and records an `actual_pr_url`, so it expresses
+  # "the credit named the wrong PR", never "the credit is false". Until the class is fixed (W1-T3321,
+  # sixth finding) this task must be built BY HAND; a reader who sees it credited should not conclude
+  # the migration happened. Recorded 2026-09-10.
   note: |
     BAND. `risk: high` / `blast-radius`: the diff is a file reorganisation, but CLAUDE.md is the
     doctrine every interactive session loads and 79 suites read. Priced on reach.
