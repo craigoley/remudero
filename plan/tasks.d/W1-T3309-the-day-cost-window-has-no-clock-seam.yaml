@@ -1,4 +1,4 @@
-- id: W1-T3307
+- id: W1-T3309
   title: "THE DAILY COST GOVERNOR READS `Date.now()` INSIDE ITS OWN CLOSURE, SO NOTHING CAN PIN THE DAY WINDOW — a UTC midnight landing between a ledger write and the read that follows it drops the row, the day cost reads 0, and the governor answers CLEAR on spend it should have deferred"
   repo: remudero
   depends_on: []
@@ -48,13 +48,13 @@
     (v) OUT OF SCOPE: the ceiling's value, the override store, `deriveDayCostUsd`'s window shape, and
     any change to what `checkCostGovernor` decides. This task moves WHERE the instant comes from.
   acceptance:
-    - claim: "W1-T3307 criterion 1: the governor's day window can be pinned by an injected clock, so a seeded row and the read that follows it cannot straddle a UTC boundary"
+    - claim: "W1-T3309 criterion 1: the governor's day window can be pinned by an injected clock, so a seeded row and the read that follows it cannot straddle a UTC boundary"
       proof: "unit test: test/the-day-cost-window-has-no-clock-seam.test.ts"
-    - claim: "W1-T3307 criterion 2: with no clock injected the closure reads Date.now exactly as today, and a spend over the ceiling still defers"
+    - claim: "W1-T3309 criterion 2: with no clock injected the closure reads Date.now exactly as today, and a spend over the ceiling still defers"
       proof: "unit test: test/the-day-cost-window-has-no-clock-seam.test.ts"
-    - claim: "W1-T3307 criterion 3: one consultation reads the clock ONCE, so two reads inside it cannot fall on opposite sides of midnight"
+    - claim: "W1-T3309 criterion 3: one consultation reads the clock ONCE, so two reads inside it cannot fall on opposite sides of midnight"
       proof: "unit test: test/the-day-cost-window-has-no-clock-seam.test.ts"
-    - claim: "W1-T3307 criterion 4: a row stamped before midnight and read after it is counted when the clock is pinned, and the pre-task drop is reproduced when it is not"
+    - claim: "W1-T3309 criterion 4: a row stamped before midnight and read after it is counted when the clock is pinned, and the pre-task drop is reproduced when it is not"
       proof: "unit test: test/the-day-cost-window-has-no-clock-seam.test.ts"
   falsifier: |
     CLOSE IF the closure already accepts a clock: read `costGovernorGateFor` in src/run-task.ts.

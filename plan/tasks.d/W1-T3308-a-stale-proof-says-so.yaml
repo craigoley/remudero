@@ -1,4 +1,4 @@
-- id: W1-T3306
+- id: W1-T3308
   title: "A CRITERION WHOSE PROOF GRADED `executed_stale` FALLS BACK TO THE KEYWORD FLOOR SILENTLY, THE VERDICT CAPS, AND AUTOMERGE NEVER ARMS — the PR still reads READY-TO-MERGE on the board, so a code PR that adds cases to an EXISTING test file becomes permanently unmergeable with nothing anywhere saying why"
   repo: remudero
   depends_on: []
@@ -49,13 +49,13 @@
     still merges; a PR that is capped today is still capped, and now says why.
     (v) SILENT WHEN THERE IS NOTHING TO SAY. Zero stale criteria must render byte-identical to today.
   acceptance:
-    - claim: "W1-T3306 criterion 1: a criterion that graded executed_stale is named in the posted review, with the proof path that did not discriminate"
+    - claim: "W1-T3308 criterion 1: a criterion that graded executed_stale is named in the posted review, with the proof path that did not discriminate"
       proof: "unit test: test/a-stale-proof-says-so.test.ts"
-    - claim: "W1-T3306 criterion 2: the text names the grep remedy and states that a capped verdict does not arm automerge"
+    - claim: "W1-T3308 criterion 2: the text names the grep remedy and states that a capped verdict does not arm automerge"
       proof: "unit test: test/a-stale-proof-says-so.test.ts"
-    - claim: "W1-T3306 criterion 3: a run with zero stale criteria renders byte-identical to today, so the addition can never subtract"
+    - claim: "W1-T3308 criterion 3: a run with zero stale criteria renders byte-identical to today, so the addition can never subtract"
       proof: "unit test: test/a-stale-proof-says-so.test.ts"
-    - claim: "W1-T3306 criterion 4: the verdict is unchanged — a capped run stays capped and a passing run stays passing, whatever this reports"
+    - claim: "W1-T3308 criterion 4: the verdict is unchanged — a capped run stays capped and a passing run stays passing, whatever this reports"
       proof: "unit test: test/a-stale-proof-says-so.test.ts"
   falsifier: |
     CLOSE IF the posted review already names stale criteria: read the status description and body of
