@@ -1,0 +1,93 @@
+- id: W1-T3335
+  title: "THE FLEET HALTED ON A LEAK WITH A FINITE RESTART BUDGET — the daemon's V8 heap grows to its 8 GB cap and aborts after 22-52 minutes, `on-failure:5` spent its last restart at 13:49Z, and NOTHING reported that the fleet had stopped; the board simply went quiet"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files:
+    - src/lib/daemon.ts
+    - test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts
+  origin: "operator-session#fleet-halt-2026-09-10"
+  plan_refs: ["W1-T3331", "W1-T3309"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10T13:49Z, from the container itself, not inferred:
+      Exited (134)   RestartCount=5   RestartPolicy=on-failure:5   OOMKilled=false
+      FATAL ERROR: Ineffective mark-compacts near heap limit
+                   Allocation failed - JavaScript heap out of memory
+      Mark-Compact 8189.7 (8217.6) -> 8186.6 (8217.4) MB ... allocation failure
+    134 is SIGABRT, and `OOMKilled=false` says the CGROUP did not kill it — V8 aborted on its own
+    limit. `NODE_OPTIONS=--max-old-space-size=8192` sets that limit, while the HOST has 31 GB total
+    and 29 GB available and the container carries no memory limit at all (`Memory=0`). So the cap is
+    self-imposed and the machine was never short.
+    IT IS A LEAK, NOT A SPIKE. Two OOMs in one container life, with process uptimes of 3,111,637 ms
+    (~52 min) and 1,354,969 ms (~22.6 min) before the abort. A workload that legitimately needed
+    8 GB would fail fast on a big operation; this climbs until it cannot compact.
+    THE HALT IS THE PART THAT MATTERS. `on-failure:5` is a budget, and the fifth restart spent it.
+    From that moment nothing dispatched, nothing swept, nothing reviewed — and NO SIGNAL SAID SO.
+    The board did not go red; it went QUIET, which reads identically to a calm queue. The stop was
+    found only because a sweep ran `why.mjs` and docker answered "container is not running".
+    RAISING THE CAP IS NOT THE FIX AND MUST NOT BE FILED AS ONE. 8192 -> 16384 buys roughly double
+    the uptime and moves the halt to the middle of the night. The host's 29 GB of headroom is why
+    that will look like it worked.
+  design: |
+    (i) THE DAEMON WATCHES ITS OWN HEAP AND SAYS SO BEFORE V8 ABORTS. `process.memoryUsage()` against
+    the known limit, sampled on the tick it already runs. A row naming heapUsed, the limit and the
+    trend is the difference between "the fleet stopped" and "the fleet stopped because it was
+    leaking, here is the shape". V8's abort writes nothing to the ledger — the crash is only in
+    `docker logs`, which no rung reads.
+    (ii) IT DRAINS RATHER THAN DYING MID-FLIGHT. Past a high-water mark the daemon stops ACCEPTING
+    work, finishes what is in flight, writes a row, and exits non-zero deliberately. A clean exit
+    the supervisor restarts is a pause; an abort at an arbitrary allocation is whatever state the
+    worker was in.
+    (iii) THE LEAK IS FOUND, NOT PAPERED OVER. The observable in (i) is what makes that possible: a
+    per-tick heap series over 22-52 minutes says which rung grows. The ledger union read
+    (`readLedgerUnionBounded`) over 7.5 MILLION rows is the first place to look and is named here as
+    a HYPOTHESIS, not a finding — the implementer measures.
+    (iv) A HALTED FLEET IS VISIBLE WITHOUT THE FLEET'S HELP. Nothing inside a stopped process can
+    report that it stopped. The liveness signal must be something an outside reader can check —
+    the newest ledger mtime against the cadence that should have written it — so "quiet" and
+    "stopped" stop being the same observation.
+    (v) OUT OF SCOPE: the restart POLICY. Whether `on-failure:5` should be `unless-stopped` is an
+    operator's decision about how long a broken fleet should thrash, and this task must not smuggle
+    it in as a fix.
+  acceptance:
+    - claim: "W1-T3335 criterion 1: the daemon ledgers its heap against the limit on its own tick, before V8 can abort"
+      proof: "unit test: test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
+    - claim: "W1-T3335 criterion 2: past a high-water mark it stops accepting new work, drains what is in flight, and exits deliberately"
+      proof: "unit test: test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
+    - claim: "W1-T3335 criterion 3: a daemon comfortably inside its limit ledgers nothing and refuses no work"
+      proof: "unit test: test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
+    - claim: "W1-T3335 criterion 4: a stopped fleet is detectable from outside the process, by a stale ledger against its own cadence"
+      proof: "unit test: test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
+  falsifier: |
+    CLOSE IF THE HALT ALREADY REPORTS ITSELF: after an abort, grep the ledger for any row written
+    between the last tick and the exit. MEASURED 2026-09-10: none — the only trace of five restarts
+    and two OOMs is `docker logs`, and `rmd-entrypoint: exited 134 — sleeping 120s before exiting so
+    the restart is rate-limited` is printed to stdout, not recorded anywhere a rung can read.
+    THE QUIET CONTROL IS MANDATORY, and it is the arm most likely to be skipped: a fixture whose
+    daemon is HEALTHY and whose queue is genuinely empty must produce NO liveness alarm. Without it
+    this ships a rung that cries halt every time the board is calm, which is the state the fleet is
+    supposed to reach.
+    THE HEADROOM CONTROL IS EQUALLY MANDATORY: a daemon at 2 GB of an 8 GB limit must ledger nothing
+    and refuse nothing. A guard that fires on every tick is a guard nobody reads.
+    DO NOT SATISFY THIS BY RAISING --max-old-space-size. MEASURED: the host has 29 GB free and the
+    container has no limit, so raising the cap will make the symptom disappear for longer and prove
+    nothing. If the implementer's evidence is "it ran overnight after I doubled the heap", the leak
+    is still there and this task is not done.
+    DO NOT INFER THE LEAK'S LOCATION FROM THIS SHARD. The ledger union read over 7.5M rows is named
+    as the first place to LOOK because it is the largest allocation in the process, not because it
+    was measured to be the cause.
+  note: |
+    Rule 25 CHECKED: `src/lib/daemon.ts` is ordinary src, not an instrument surface.
+    IMMEDIATE STATE, so whoever picks this up is not misled: the container was restarted by hand at
+    2026-09-10T13:50:18Z and `docker start` RESET RestartCount to 0, which buys five more restarts —
+    roughly two to four hours at the observed 22-52 minute lifetime, not a fix. It will halt again.
+    CAVEAT WITH EQUAL WEIGHT: this makes the halt visible and bounded. It does not make the daemon
+    leak-free, and criterion 3 exists precisely so the guard cannot be satisfied by refusing work
+    early. If the leak is unbounded, a draining daemon still restarts every 22 minutes — better than
+    a silent halt, and still not healthy.
