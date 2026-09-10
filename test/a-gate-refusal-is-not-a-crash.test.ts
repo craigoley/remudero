@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   DAEMON_EXIT_BLOCKED,
-  PRE_PUSH_GATE_REFUSAL_RE,
+  PER_TASK_FAILURE_RE,
   DAEMON_EXIT_ENVIRONMENTAL,
   DAEMON_EXIT_STALE,
   daemonExitCode,
@@ -31,30 +31,31 @@ const REAL_GATE_DETAIL = [
 
 test("W1-T3310: a drain stopped by this repo's own pre-push gate exits BLOCKED, not 1, so docker's crash budget is untouched", () => {
   assert.equal(daemonExitCodeForSummary({ stopReason: "error", stopDetail: REAL_GATE_DETAIL }), DAEMON_EXIT_BLOCKED);
-  // AND THE CRASH CODE IS STILL 1 FOR AN ERROR WITH NO GATE BANNER — otherwise the assertion above
-  // would pass simply because everything became 76.
+  // AND THE CRASH CODE IS STILL 1 FOR A DETAIL THAT NAMES NO TASK — otherwise the assertion above
+  // would pass simply because everything became 76. (Under W1-T3319 the discriminator is WHOSE
+  // failure it is, not which tool failed, so the control must be an unowned one.)
   assert.equal(
-    daemonExitCodeForSummary({ stopReason: "error", stopDetail: "W1-T1: Command failed: git push origin HEAD" }),
+    daemonExitCodeForSummary({ stopReason: "error", stopDetail: "Command failed: git push origin HEAD" }),
     1,
   );
 });
 
-test("W1-T3310: a push that failed for any OTHER reason still exits 1 exactly as before", () => {
-  // THE NEGATIVE CONTROLS THAT MATTER. Mapping every push failure to 76 would hide a real credential
-  // outage or a diverged branch as "blocked" — a quieter fleet that ships nothing.
+test("W1-T3319 SUPERSEDES the narrow rule: a task's push failure routes to 76 for ANY cause, not just a gate refusal", () => {
+  // THESE ASSERTIONS ARE DELIBERATELY INVERTED FROM W1-T3310's. That task asked whether the pre-push
+  // banner was present; this one asks whose failure it is. A credential outage on ONE task's push is
+  // that task's problem, and stopping the fleet for it is the daemon blocking on something it could
+  // have routed. The "every task fails" case is handled by the entrypoint's bounded retry (100), not
+  // by killing the daemon on the first one.
   for (const detail of [
     "W1-T9: Command failed: git push origin HEAD\nremote: Invalid username or password\nfatal: Authentication failed",
     "W1-T9: Command failed: git push origin HEAD\n ! [rejected] HEAD -> br (non-fast-forward)",
-    "W1-T9: Command failed: git push origin HEAD\nerror: failed to push some refs",
-    "W1-T9: TypeError: cannot read properties of undefined",
   ]) {
-    assert.equal(daemonExitCodeForSummary({ stopReason: "error", stopDetail: detail }), 1, detail.slice(0, 60));
+    assert.equal(daemonExitCodeForSummary({ stopReason: "error", stopDetail: detail }), DAEMON_EXIT_BLOCKED, detail.slice(0, 50));
   }
-  // A worker merely MENTIONING the word must not be reclassified either — the pattern is anchored.
-  assert.equal(
-    daemonExitCodeForSummary({ stopReason: "error", stopDetail: "W1-T9: the test asserts pre-push REFUSED appears" }),
-    1,
-  );
+  // TWO ARMS KEEP THE BUDGET MEANINGFUL: a detail naming no task, and a task-prefixed IN-PROCESS
+  // error — rmd's own defect, which recurs on every task and is what a stop still exists for.
+  assert.equal(daemonExitCodeForSummary({ stopReason: "error", stopDetail: "TypeError: undefined is not a function" }), 1);
+  assert.equal(daemonExitCodeForSummary({ stopReason: "error", stopDetail: "W1-T9: TypeError: rmd's own bug" }), 1);
 });
 
 test("W1-T3310: an environmental refusal keeps precedence over the gate check, so a network fault stays 77", () => {
@@ -91,8 +92,11 @@ test("W1-T3310: the push leaf attaches the child's stderr to the error it throws
   const e = thrown as PushFailedError;
   assert.match(e.stderrText, /pre-push REFUSED\. banner/);
   assert.match(e.message, /pre-push REFUSED\. banner/);
-  // AND THE END-TO-END CLAIM: that message, used as a stop detail, now classifies as blocked.
-  assert.equal(daemonExitCodeForSummary({ stopReason: "error", stopDetail: e.message }), DAEMON_EXIT_BLOCKED);
+  // AND THE END-TO-END CLAIM. The drain prefixes the failing task id onto the message before it
+  // becomes a stop detail, which is the shape W1-T3319 keys on — so this composes the two halves
+  // exactly as production does, rather than asserting on a message no drain would ever emit.
+  const asDrainWouldEmit = `W1-T3274: ${e.message}`;
+  assert.equal(daemonExitCodeForSummary({ stopReason: "error", stopDetail: asDrainWouldEmit }), DAEMON_EXIT_BLOCKED);
 });
 
 test("W1-T3310: a successful push still returns normally and re-emits nothing spurious", () => {
@@ -154,21 +158,18 @@ test("W1-T3310: the refusal pattern is driven DIRECTLY, both arms — where it m
   //
   // THE STOPPING ARM IS THE LOAD-BEARING ONE. If this fired on a mere mention, an ordinary crash
   // would be reclassified as blocked and the crash budget would stop protecting anything.
-  for (const matching of [
-    "pre-push REFUSED. These are checks CI runs on this diff",
-    "some earlier output\npre-push REFUSED. and the rest",
-    "Command failed: git push\npre-push REFUSED.",
-  ]) {
-    assert.equal(PRE_PUSH_GATE_REFUSAL_RE.test(matching), true, `expected a match: ${JSON.stringify(matching)}`);
+  for (const matching of ["W1-T3274: Command failed: git push", "W1-T9: Command failed: x", "W12-T3a: Command failed: y"]) {
+    assert.equal(PER_TASK_FAILURE_RE.test(matching), true, `expected a match: ${JSON.stringify(matching)}`);
   }
   for (const stopping of [
-    "the assertion says pre-push REFUSED appears", // a mid-line MENTION, not the banner
-    "PRE-PUSH REFUSED.",                           // the banner is lower-case; this does not case-fold
-    "pre-push REFUSEDX",                           // \\b stops it
-    "pre-pushREFUSED",
-    "REFUSED",
+    "TypeError: undefined is not a function", // a bare crash names no task
+    " W1-T9: leading space breaks the anchor",
+    "see W1-T9: mid-string is not the emitter's shape",
+    "W1-T9 no colon",
+    "W1-T9: TypeError: an in-process defect is rmd's, not the task's",
+    "error: something failed",                // NOT "anything with a colon"
     "",
   ]) {
-    assert.equal(PRE_PUSH_GATE_REFUSAL_RE.test(stopping), false, `expected NO match: ${JSON.stringify(stopping)}`);
+    assert.equal(PER_TASK_FAILURE_RE.test(stopping), false, `expected NO match: ${JSON.stringify(stopping)}`);
   }
 });
