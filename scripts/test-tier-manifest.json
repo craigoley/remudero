@@ -157,6 +157,7 @@
     "test/a-test-outside-strykers-command-is-invisible.test.ts": 484,
     "test/a-test-that-writes-the-tracked-tree-is-observed-by-every-other-worker.test.ts": 638,
     "test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts": 0,
+    "test/a-union-read-of-an-unretained-step-is-refused.test.ts": 0,
     "test/a-verdict-class-is-not-a-failure-class-until-its-members-are-joined-to-merge-state.test.ts": 1115,
     "test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts": 1313,
     "test/a-verify-human-shard-is-judged.test.ts": 0,
