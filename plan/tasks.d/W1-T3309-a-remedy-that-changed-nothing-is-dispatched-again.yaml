@@ -1,0 +1,106 @@
+- id: W1-T3309
+  title: "THE SWEEP RE-DISPATCHES A REMEDY AGAINST AN UNCHANGED CAUSE FOREVER — W1-T1269 built the identity check that stops exactly this and left it inert for want of a producer, and the one dispatch arm that most needs it runs `with zero ordinary strikes` by design, so #4851 was handed the same fix three times across four hours and nothing noticed the remedy was not working"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: medium
+  origin: "operator-session#4851-five-hours-2026-09-10"
+  plan_refs: ["W1-T1269", "W1-T3172", "W1-T78", "W1-T2436"]
+  files: [src/lib/sweep.ts, test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-09/10 on #4851, which stood open five hours. Its disposition history, verbatim
+    from `state/ledger.ndjson`:
+      21:22  blocked-fixable  required checks red — ci-log fix, strike 1/2
+      22:36  blocked-fixable  structured instrument entanglement — dispatching W1-T2436 …
+      01:59  blocked-fixable  structured instrument entanglement — dispatching W1-T2436 …
+      02:18  blocked-fixable  structured instrument entanglement — dispatching W1-T2436 …
+    THE SAME REMEDY, THREE TIMES, AGAINST A CAUSE THAT NEVER CHANGED. The ci-log arm above it carries
+    `strike 1/2`; the entanglement arm carries no strike at all, because W1-T3172's row dispatches
+    "with zero ordinary strikes" — deliberately, so a structural refusal is not charged against a cap
+    meant for in-place fixes. That exemption is right and is NOT what this task changes. What it left
+    behind is an arm with NO failure detection of any kind.
+    THE STOP ALREADY EXISTS AND IS INERT. W1-T1269's row sits immediately ABOVE the entanglement arm
+    and is designed for precisely this: `fixRungRepeatsIdenticalFailure` escalates when the current
+    unmet set repeats, claim-for-claim, what the last strike was dispatched to resolve —
+    "KEYED ON IDENTITY, NEVER ON COUNT". Its own comment records why it never fires:
+    "No producer populates it and the predicate fails CLOSED, so row 5.5 stays inert in production."
+    `StrikeAttempt.unmetClaims` is declared, documented, and written by nothing.
+    AND EVEN LIVE IT WOULD NOT HAVE CAUGHT #4851. The identity is the unmet CRITERIA set, and an
+    entanglement refusal is a GATE refusal. MEASURED on #4851's own `review.posted` row:
+    `state: "failure"`, `unmet_criteria: []`, `reasons: []`. `fixRungRepeatsIdenticalFailure` fails
+    closed on an empty claim set — correctly, on its own terms — so the shape that most needs the
+    stop is the one shape its identity cannot express.
+    WHY NOT A BOUND, STATED BECAUSE IT IS THE OBVIOUS ALTERNATIVE AND IT IS WRONG HERE. A repeat
+    bound exists (`repeatDispositionBound: 50`) and a pending ceiling exists
+    (`pendingCeilingMinutes: 60`). Both are clocks in disguise: 50 passes is 1.5-4 hours at the
+    cadence measured this session, and the streak RESETS whenever the head moves — so a PR that keeps
+    changing while never progressing, which is exactly what #4851 did, never trips it. A threshold
+    tuned tight enough to catch this would have fired on the two PRs that were merely mid-CI the same
+    night (#4903, #4907), and an alarm that cries wolf is worse than none.
+  design: |
+    (i) A STRIKE RECORDS WHAT IT WAS DISPATCHED TO RESOLVE. Populate `StrikeAttempt.unmetClaims` at
+    the point a strike is recorded. This alone switches W1-T1269's row from inert to live for every
+    criterion-shaped failure, with no change to its predicate.
+    (ii) WIDEN THE IDENTITY, NEVER THE COUNT. When there are no unmet claims, the identity is the
+    STRUCTURED REFUSAL itself — for an entanglement refusal, the validated instrument and src path
+    sets already carried on `OpenPrView.instrumentEntanglementPaths`. Same rule as W1-T1269's:
+    EXACT match only, no inclusion-descent, fails closed on absent evidence.
+    (iii) ESCALATE ON THE FIRST RECURRENCE, and never on elapsed time or a count. A remedy that ran
+    and left its cause byte-identical is PROVEN ineffective for this PR; a second attempt cannot add
+    information. Two minutes apart or two days apart is the same fact.
+    (iv) THE ZERO-STRIKE EXEMPTION SURVIVES. W1-T3172's arm still spends no ordinary strikes and
+    still dispatches the prerequisite worker the FIRST time. This adds a stop on repetition; it does
+    not charge a structural refusal against the in-place cap, which is what that exemption protects.
+    (v) SILENT WHILE ANYTHING IS MOVING. A changed cause, a changed head with a changed refusal, or a
+    first dispatch must all render exactly as today.
+  acceptance:
+    - claim: "W1-T3309 criterion 1: a strike records the unmet claim set it was dispatched to resolve, so W1-T1269's identity check is live rather than inert"
+      proof: "unit test: test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts"
+    - claim: "W1-T3309 criterion 2: a GATE refusal with no unmet criteria is identified by its structured refusal evidence, so an entanglement refusal that repeats is caught"
+      proof: "unit test: test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts"
+    - claim: "W1-T3309 criterion 3: the escalation fires on the FIRST recurrence of an identical cause, with no count and no elapsed-time input"
+      proof: "unit test: test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts"
+    - claim: "W1-T3309 criterion 4: a cause that CHANGED between dispatches is not escalated, and a first dispatch is not escalated"
+      proof: "unit test: test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts"
+    - claim: "W1-T3309 criterion 5: the entanglement arm still spends zero ordinary strikes and still dispatches on the first refusal"
+      proof: "unit test: test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts"
+  falsifier: |
+    CLOSE IF the repeat is already caught: read `state/ledger.ndjson` for a PR dispositioned
+    `blocked-fixable` more than once on the same cause. MEASURED 2026-09-10 on #4851: three
+    identical `structured instrument entanglement` dispatches at 22:36, 01:59 and 02:18, no strike
+    recorded on any of them, no escalation.
+    THE MOVING-PR CONTROL, because "escalate when a PR is old" is the wrong shape and this must not
+    become it: a fixture whose cause CHANGES between dispatches must render exactly as today, and so
+    must a first dispatch. If either escalates, this has become a timer with extra steps and must be
+    refused.
+    THE EXEMPTION CONTROL: the entanglement arm must still dispatch on the FIRST refusal and still
+    spend zero ordinary strikes. W1-T3172 exempted it for a reason — a structural refusal is not an
+    in-place fix and must not be charged against that cap — and this task must not quietly undo it.
+    NO CLOCK AND NO COUNT MAY ENTER THE PREDICATE. If the implementation reads a timestamp, an age, a
+    pass count or a streak to decide, it has reproduced `repeatDispositionBound` at a different
+    number and inherits its defect: the streak resets when the head moves, which is exactly what
+    #4851 did while going nowhere.
+    DO NOT widen `fixRungRepeatsIdenticalFailure`'s EXACT-match rule to inclusion-descent. Its own
+    doc refuses that, because a lateral swap of one unmet claim for another is progress of a kind and
+    stopping it would be a longer leash, not an earlier stop.
+  note: |
+    Rule 25 CHECKED: `src/lib/sweep.ts` is ordinary src, not an instrument surface.
+    THE SLUG MATCHES THE FALSIFIER (`a-remedy-that-changed-nothing-is-dispatched-again`) so W1-T2525's
+    own-falsifier discount applies to Rule 19's span: the suite is declared in `files:`, is named by
+    every criterion, and does not exist on origin/main.
+    WHAT THIS DOES NOT FIX, GIVEN EQUAL WEIGHT. It makes an ineffective remedy VISIBLE at the first
+    recurrence; it does not make the remedy work. #4851's real cause was a carve-out narrower than the
+    work it governed (fixed in #4903/#4908), and no amount of escalation would have written that fix.
+    The claim here is narrower and worth stating plainly: the fleet should stop spending on a remedy
+    it has already watched fail once, and should say so where a human will see it.
+    SECOND CAVEAT: the escalation's destination is out of scope and is a known weak point.
+    `sweep.repeat_escalated` writes ONE ledger row and `renderRepeatEscalationQuestion` carries
+    "NO PRODUCTION CALLER" — so an escalation today reaches a file nobody watches. Routing it to a
+    surface is W1-T2381's territory and `digest.ts` is named there as the intended home; this task
+    deliberately does not touch it, because a stop that fires correctly is worth having even while
+    its delivery is weak, and conflating the two would make both harder to review.
