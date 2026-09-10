@@ -259,6 +259,9 @@ test("the review.posted ledger projection carries plan_only, so the sweep can te
   // unconditionally (0/[]/false here — this fixture supplies no `criteria` to derive them from).
   assert.deepEqual(reviewLedgerLegibilityFields({ capped: true, keywordOnly: false, planOnly: true }), {
     capped: true,
+    // Standing rule 25 is advisory, so this rides on EVERY row, passing or failing. This fixture
+    // supplies no verdict flag, so it is false — "never absent" is the whole contract.
+    instrument_entangled: false,
     keyword_only: false,
     plan_only: true,
     unexecutable_count: 0,
