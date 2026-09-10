@@ -43,7 +43,7 @@ export default defineConfig({
     sourcemap: true,
   },
   test: {
-    environment: "jsdom",
+    environment: "happy-dom",
     globals: false,
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
     // The repo's own runner globs `test/**/*.test.ts` and never reaches this tree; this globs only
