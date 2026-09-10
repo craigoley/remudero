@@ -1,0 +1,96 @@
+- id: W1-T3350
+  title: "THE INBOX DRAFTER'S DOMINANT FAILURE IS UNATTRIBUTABLE BY CONSTRUCTION — 947 of 951 `inbox.draft_error` rows carry the identical string `no FRAGMENT/STAMP markers in worker output` and nothing else, collapsing four causes with four different fixes into one; the failure has recurred to ~70% and nobody noticed because identical strings cannot show a shape"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 10.00
+  files: [src/lib/inbox.ts, test/a-draft-failure-names-which-marker-was-missing.test.ts, test/session-limit-is-a-refusal-not-a-success.test.ts]
+  origin: "oper#operator-feedback-loop-does-not-close-2026-09-10"
+  plan_refs: ["W1-T2564", "W1-T3094", "W1-T436"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10 over the ledger union (919 archives + live file). `inbox.draft_error` reads
+    951 rows; 947 carry the identical message `no FRAGMENT/STAMP markers in worker output`. Field
+    census across those 947: `ts`, `host`, `run_id`, `task_id`, `step`, `lane`, `proposal_id`,
+    `error` — and `actor`/`actor_pid` on 158. NOTHING records the worker's output size, which marker
+    was found, or whether there was any output at all.
+
+    `parseDraftedCandidate` returns `null` when EITHER marker is missing, so one string covers four
+    causes with four different fixes: the worker produced NOTHING (refusal, crash, spawn that never
+    ran); it produced prose carrying neither marker; it emitted a FRAGMENT and no STAMP; or a STAMP
+    and no FRAGMENT. This is the #981 defect class — a row whose stated reason cannot identify the
+    decision that produced it.
+
+    IT IS LIVE, NOT HISTORICAL, AND THAT IS THE POINT. Per-day rates over the same union
+    (`inbox.drafted` vs the 947, each query verified complete: header count equals printed rows):
+      2026-08-30  52 /  42   44.7%      2026-09-05  41 /   3    6.8%
+      2026-08-31 117 / 241   67.3%      2026-09-06  41 /   1    2.4%
+      2026-09-01  71 / 495   87.5%      2026-09-07  90 /   1    1.1%
+      2026-09-02  47 /   0    0.0%      2026-09-08  62 /  53   46.1%
+      2026-09-03  44 /   5   10.2%      2026-09-09  20 /  59   74.7%
+      2026-09-04  75 /   1    1.3%      2026-09-10  20 /  46   69.7%
+    W1-T3094's rationale records "the 43-86% spike was 2026-08-30..09-01 and has run 1-6% since
+    09-02". That was TRUE WHEN WRITTEN and is now stale: the failure recurred on 09-08 and is
+    running at ~70%. A rate that recurs unnoticed for three days is what an undiscriminated error
+    message buys.
+
+    NOT A DUPLICATE OF ITS NEIGHBOURS, both checked before filing. W1-T2566 (merged) fixed the
+    across-boot re-open storm. W1-T3094 (queued) is about the SELECTION predicate — which proposals
+    get drafted at all — not about why a draft fails or how the failure is recorded. Neither names
+    this message.
+
+    WHAT IT BLOCKS. Every producer that files through the inbox rides this drafter: the feedback
+    docket's proposals, the 202 `adoption:symbol-no-caller` detections, proof-debt and followup
+    proposals. A 70% unattributable failure at the drafter is a 70% loss on all of them.
+  design: |
+    (i) FOUR CAUSES, FOUR REASONS. `describeDraftParseFailure` returns `{fragments, stamps,
+    outputChars, reason?}`. `reason` is absent when both markers are present — that is not a parse
+    failure. The four failure reasons are distinct strings a reader can group by.
+
+    (ii) COUNTS AND A LENGTH ONLY, NEVER CONTENT. A failed draft may still have printed
+    credentials. No tail, no excerpt, not even a matched key NAME. The length is the only thing
+    read off the text, and a test asserts a secret-shaped input cannot appear in the serialized
+    diagnostic.
+
+    (iii) THE REFUSAL PATH IS UNTOUCHED. W1-T2564 relabels an account refusal before any output;
+    that arm keeps precedence and its own message. This only replaces the else-branch.
+
+    (iv) SHARPEN THE EXISTING GUARD, DO NOT RELAX IT. W1-T2564's test pins the malformed message.
+    Its real invariant is malformed-is-not-refusal, which still holds; its assertion is repointed to
+    the SPECIFIC cause, strictly narrower than the string it replaces, and gains an explicit
+    doesNotMatch on the refusal wording.
+
+    (v) NO RATE ALARM HERE. Making the failure legible and making something refuse on its RATE are
+    two concerns. This is the first; the second cannot be built until the first exists.
+  acceptance:
+    - claim: "each way a draft can fail to parse is recorded as a different reason rather than one shared string"
+      proof: "unit test: test/a-draft-failure-names-which-marker-was-missing.test.ts"
+    - claim: "the diagnostic carries counts and a length only, and never any worker content"
+      proof: "unit test: test/a-draft-failure-names-which-marker-was-missing.test.ts"
+    - claim: "output carrying both markers is not reported as a parse failure at all"
+      proof: "unit test: test/a-draft-failure-names-which-marker-was-missing.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if an `inbox.draft_error` row already distinguishes the cause —
+    proven by reading real rows off the union, not by a grep on the source. MEASURED at filing:
+    947 of 951 rows carry one identical string and no discriminating field.
+
+    EACH ARM LOAD-BEARING, PROVEN BY DELETION: collapsing the no-output case into the neither-marker
+    case must redden; zeroing the recorded length must redden; collapsing the FRAGMENT-missing and
+    STAMP-missing cases into one string must redden. A patch that does not apply is not a
+    falsifier — assert the replacement landed before believing a green run.
+  note: |
+    Reserved atomically at `refs/rmd-id/W1-T3350`. Both scope-time checks ran before building:
+    `git ls-remote --heads origin 'run-W1-T3350-*'` returned 0 against a control of 62 live `run-*`
+    heads; the merged-trailer scan returned 0 against a control of 1 for W1-T3336.
+
+    risk:high is BLAST RADIUS: the diff is one pure function plus a log call, but every proposal
+    producer in the fleet rides this drafter, and the changed message is a ledger contract later
+    readers group by.
+
+    `test/session-limit-is-a-refusal-not-a-success.test.ts` is in `files:` because W1-T2564's guard
+    lives there and its malformed assertion is repointed — sharpened, per design (iv).
