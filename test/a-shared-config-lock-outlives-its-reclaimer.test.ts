@@ -13,9 +13,15 @@ import {
   worktreeAdd,
 } from "../src/lib/worker.js";
 import type { Config } from "../src/lib/config.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
+/** Every temp dir this suite makes carries {@link RMD_TMP_PREFIX}, so `sweepStaleTempDirs` can
+ *  reap it on the next boot. The prefix arrives as a PARAMETER, which is why the callsite check
+ *  reported it '<unresolvable>' — the checker reads the literal at the callsite, and there was none.
+ *  Prepending the constant HERE resolves every caller at once, the same shape
+ *  test/adhoc-lane-reap.test.ts already uses. */
 function tmp(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix));
+  return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));
 }
 
 function seedClone(repoDir: string): void {
