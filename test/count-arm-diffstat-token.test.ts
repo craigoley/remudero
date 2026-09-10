@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bodyContradictsDiff } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing } from "../src/lib/review.js";
 
 // ── W1-T2224 ─────────────────────────────────────────────────────────────────
 //
@@ -61,8 +61,11 @@ test("bodyContradictsDiff: a genuinely wrong count is still reported", () => {
   const diff = ["src/lib/review.ts", "test/count-arm-diffstat-token.test.ts"];
   const body = "This PR touches exactly 3 files: `src/lib/review.ts`, `test/count-arm-diffstat-token.test.ts`.";
 
-  const hits = bodyContradictsDiff(body, diff);
-  assert.equal(hits.length, 1, "a wrong file count must still contradict");
+  // A drifted count is READ and REPORTED so the fix rung can tidy it, but no longer REFUSES the
+  // PR. This test's subject is the diffstat token being parsed at all, which is unchanged.
+  const hits = changesetClaimsDisagreeing(body, diff);
+  assert.equal(hits.length, 1, "a wrong file count must still be read and reported");
+  assert.deepEqual(bodyContradictsDiff(body, diff), [], "and must not refuse — the count arm no longer blocks");
 });
 
 test("bodyContradictsDiff: a genuinely wrong enumerated filename is still reported", () => {

@@ -385,6 +385,10 @@ jobs:
       - name: Collapse all test shards into the stable required check
         env:
           SHARD_RESULT: ${{ needs.ci.result }}
+          RUN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_REPO_SLUG: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           case "$SHARD_RESULT" in
             success)
@@ -395,7 +399,31 @@ jobs:
               exit 1
               ;;
             cancelled)
-              echo "ci: the shard matrix was CANCELLED (matrix result: cancelled) — usually a newer push superseded this head, so this is not by itself evidence of a test failure, and the current head's own run is the authoritative one. Still red on purpose: a cancelled matrix proves nothing about the tree. Open the shard log — a head sha tells you whether a failure is CURRENT, never whether it is REAL."
+              # W1-T3345: a newer push means this sha is not the one that merges (a non-result); an
+              # UNCHANGED head means a shard died at its ceiling: tests DID NOT run. Fails closed.
+              CURRENT_HEAD=""
+              if [ -n "${PR_NUMBER:-}" ]; then
+                CURRENT_HEAD="$(gh api "repos/${GH_REPO_SLUG}/pulls/${PR_NUMBER}" --jq .head.sha 2>/dev/null || true)"
+              fi
+              if [ -n "$CURRENT_HEAD" ] && [ -n "${RUN_HEAD_SHA:-}" ] && [ "$CURRENT_HEAD" != "$RUN_HEAD_SHA" ]; then
+                echo "ci: SUPERSEDED — this run measured ${RUN_HEAD_SHA}, the PR head is now ${CURRENT_HEAD}."
+                echo "  The newer head runs its own shards and is what merge gates on, so this cancelled"
+                echo "  run is a non-result rather than a failure. Not blocking."
+                exit 0
+              fi
+              if [ -z "$CURRENT_HEAD" ]; then
+                echo "::error::ci: the shard matrix was CANCELLED and the current PR head could not be"
+                echo "  read — refusing, because an unreadable answer is not permission to pass an"
+                echo "  unmeasured head. A cancellation is not by itself evidence of a test failure."
+                echo "  Open the shard log."
+                exit 1
+              fi
+              echo "::error::ci: SHARD HANG — the matrix was cancelled while the PR head"
+              echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
+              echo "  timeout-minutes ceiling. THE TEST TESTS DID NOT RUN — this is NOT a failure of this"
+              echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
+              echo "  evidence of a test failure. Open the shard log and find the test that started and"
+              echo "  never finished."
               exit 1
               ;;
             skipped)
@@ -752,6 +780,10 @@ jobs:
       - name: Require every coverage shard to produce an artifact
         env:
           SHARD_RESULT: ${{ needs.coverage-ratchet.result }}
+          RUN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_REPO_SLUG: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           case "$SHARD_RESULT" in
             success)
@@ -762,7 +794,32 @@ jobs:
               exit 1
               ;;
             cancelled)
-              echo "coverage-ratchet: the shard matrix was CANCELLED (matrix result: cancelled) — usually a newer push superseded this head, so this is not by itself evidence of a test failure, and the current head's own run is the authoritative one. Still red on purpose: a cancelled matrix proves nothing about the tree. Open the shard log — a head sha tells you whether a failure is CURRENT, never whether it is REAL."
+              # W1-T3345: a newer push means this sha is not the one that merges (a non-result); an
+              # UNCHANGED head means a shard was killed at its ceiling and the tests DID NOT run.
+              # Fails closed. Falsifier: test/a-cancelled-shard-is-not-a-broken-diff.test.ts.
+              CURRENT_HEAD=""
+              if [ -n "${PR_NUMBER:-}" ]; then
+                CURRENT_HEAD="$(gh api "repos/${GH_REPO_SLUG}/pulls/${PR_NUMBER}" --jq .head.sha 2>/dev/null || true)"
+              fi
+              if [ -n "$CURRENT_HEAD" ] && [ -n "${RUN_HEAD_SHA:-}" ] && [ "$CURRENT_HEAD" != "$RUN_HEAD_SHA" ]; then
+                echo "coverage-ratchet: SUPERSEDED — this run measured ${RUN_HEAD_SHA}, the PR head is now ${CURRENT_HEAD}."
+                echo "  The newer head runs its own shards and is what merge gates on, so this cancelled"
+                echo "  run is a non-result rather than a failure. Not blocking."
+                exit 0
+              fi
+              if [ -z "$CURRENT_HEAD" ]; then
+                echo "::error::coverage-ratchet: the shard matrix was CANCELLED and the current PR head could not be"
+                echo "  read — refusing, because an unreadable answer is not permission to pass an"
+                echo "  unmeasured head. A cancellation is not by itself evidence of a test failure."
+                echo "  Open the shard log."
+                exit 1
+              fi
+              echo "::error::coverage-ratchet: SHARD HANG — the matrix was cancelled while the PR head"
+              echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
+              echo "  timeout-minutes ceiling. THE COVERAGE TESTS DID NOT RUN — this is NOT a failure of this"
+              echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
+              echo "  evidence of a test failure. Open the shard log and find the test that started and"
+              echo "  never finished."
               exit 1
               ;;
             skipped)

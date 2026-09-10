@@ -10,6 +10,7 @@ test("an HTML-comment repair note is not parsed as the PR body's own changeset c
   assert.deepEqual(recognizeChangesetClaims(hidden, DIFF), {
     recognisedCount: 0,
     contradictions: [],
+    staleCountClaims: [],
     fenceUnbalancedAtEof: false,
   });
 
@@ -24,6 +25,7 @@ test("multiline and unterminated HTML comments are blanked through their close o
   assert.deepEqual(recognizeChangesetClaims(multiline, DIFF), {
     recognisedCount: 1,
     contradictions: [{ claim: "No test/.", files: ["test/html-comments-are-not-changeset-claims.test.ts"] }],
+    staleCountClaims: [],
     fenceUnbalancedAtEof: false,
   });
 
@@ -31,6 +33,7 @@ test("multiline and unterminated HTML comments are blanked through their close o
   assert.deepEqual(recognizeChangesetClaims(unterminated, DIFF), {
     recognisedCount: 0,
     contradictions: [],
+    staleCountClaims: [],
     fenceUnbalancedAtEof: false,
   });
 });
@@ -40,6 +43,7 @@ test("a fence marker inside an HTML comment cannot change fence state", () => {
   assert.deepEqual(recognizeChangesetClaims(body, DIFF), {
     recognisedCount: 1,
     contradictions: [{ claim: "No test/.", files: ["test/html-comments-are-not-changeset-claims.test.ts"] }],
+    staleCountClaims: [],
     fenceUnbalancedAtEof: false,
   });
 });
@@ -49,6 +53,7 @@ test("a real fence after an HTML comment closes on the same line still owns its 
   assert.deepEqual(recognizeChangesetClaims(body, DIFF), {
     recognisedCount: 1,
     contradictions: [{ claim: "No test/.", files: ["test/html-comments-are-not-changeset-claims.test.ts"] }],
+    staleCountClaims: [],
     fenceUnbalancedAtEof: false,
   });
 });
@@ -58,6 +63,7 @@ test("comment-looking text inside a fence remains owned by the fence", () => {
   assert.deepEqual(recognizeChangesetClaims(body, DIFF), {
     recognisedCount: 1,
     contradictions: [{ claim: "No test/.", files: ["test/html-comments-are-not-changeset-claims.test.ts"] }],
+    staleCountClaims: [],
     fenceUnbalancedAtEof: false,
   });
 });

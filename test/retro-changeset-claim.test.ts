@@ -32,7 +32,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { reconcileRetroChangesetClaim } from "../src/lib/plan-pr-emitter.js";
-import { bodyContradictsDiff } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing } from "../src/lib/review.js";
 
 const RETRO_PATHS = ["MASTER-PLAN.md", "docs/ORIENTATION.md", "plan/plan-index.json"];
 
@@ -67,15 +67,18 @@ test("W1-T533: the reconciled body names every path the run wrote and no others"
 test("W1-T533: the pre-change body is contradicted by the real diff and the reconciled one is not", () => {
   // THE FALSIFIER, run first: the pre-change template really is refused by the real gate — both
   // the count-shaped claim (arm (a)) AND the false denial (arm (b)) fire on it.
-  const before = bodyContradictsDiff(TEMPLATED_BODY, RETRO_PATHS);
-  assert.ok(before.length > 0, "the pre-change template must contradict the real three-file diff");
+  // The falsifier reads RECOGNITION, not refusal: the count half of this template is now reported
+  // as stale rather than refusing, while the false denial still refuses. Both must still be READ —
+  // that is what makes the reconciliation below meaningful.
+  const before = changesetClaimsDisagreeing(TEMPLATED_BODY, RETRO_PATHS);
+  assert.ok(before.length > 0, "the pre-change template must disagree with the real three-file diff");
   assert.ok(
     before.some((c) => /exactly/i.test(c.claim)),
-    "the count-shaped claim must be one of the contradictions",
+    "the count-shaped claim must be one of them (stale, not refusing)",
   );
   assert.ok(
     before.some((c) => /no\s+docs\/ORIENTATION\.md/i.test(c.claim)),
-    "the false 'no docs/ORIENTATION.md' denial must be one of the contradictions",
+    "the false 'no docs/ORIENTATION.md' denial must be one of them — this half still REFUSES",
   );
 
   const reconciled = reconcileRetroChangesetClaim(TEMPLATED_BODY, RETRO_PATHS);

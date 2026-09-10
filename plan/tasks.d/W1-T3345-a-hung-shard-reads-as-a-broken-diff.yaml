@@ -1,0 +1,82 @@
+- id: W1-T3345
+  title: "A CI SHARD THAT HANGS IS INDISTINGUISHABLE FROM ONE THAT BROKE — the job timeout kills it, GitHub labels the kill `cancelled`, the sweep reads `cancelled` as a required-check FAILURE, and the aggregator then fails for a missing artifact, so a hang is reported to the operator as a red diff"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files:
+    - .github/workflows/ci.yml
+    - test/a-hung-shard-does-not-read-as-a-broken-diff.test.ts
+  origin: "operator-session#shard-hang-2026-09-10"
+  plan_refs: ["W1-T3303", "W1-T3338", "W1-T2340"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10, 64 shard jobs across the 8 most recent completed `ci.yml` runs:
+
+      40.3 min  cancelled  coverage-shard (2/4)   started 16:56:31Z
+      40.0 min  cancelled  coverage-shard (2/4)   started 17:12:28Z
+      35.6 min  cancelled  ci-shard (4/4)         started 17:04:38Z
+      35.3 min  cancelled  ci-shard (4/4)         started 16:40:27Z
+      19.1 min  cancelled  coverage-shard (2/4)   started 17:22:18Z
+      14.3 min  success    coverage-shard (4/4)
+      ... healthy shards run 9-19 min ...
+
+      at/over the 35m ceiling: 4     in the 30-35m band: 0     of 64
+
+    THE EMPTY 30-35 BAND IS THE WHOLE ARGUMENT. A suite growing past its budget populates the
+    approach to the ceiling; these do not. Healthy runs finish in 9-19 minutes and the bad ones run
+    to the wall. That is a HANG being killed by `timeout-minutes`, not a slow suite, and it is
+    INTERMITTENT in the same partition — `coverage-shard (2/4)` measured 40.3, 40.0, 19.1 and 11.5
+    minutes across four runs of the same shard index.
+
+    WHY IT REACHES THE OPERATOR AS A LIE, which is the part worth fixing before the hang itself:
+
+      1. GitHub marks a job killed by `timeout-minutes` as `cancelled`, not `failure` or `timed_out`.
+      2. `REQUIRED_CHECK_FAIL` (src/lib/sweep.ts) contains "CANCELLED", so `checksState` reads `red`.
+      3. The aggregator then fails in 0.1 min on "Require every coverage shard to produce an
+         artifact" — a true statement about a missing artifact, and a misleading one about the diff.
+
+    So the operator is shown `coverage-ratchet FAILED` on a PR whose diff is irrelevant to it. TWO
+    OPEN PRs CARRIED EXACTLY THIS SHAPE at filing time, and one of them — #5003 — is PLAN-ONLY, a
+    single yaml file under plan/tasks.d/. Its diff cannot slow or break a test shard, which is the
+    cleanest possible proof that the shard's behaviour is independent of the change under test.
+
+    WHAT THIS TASK OWNS, in priority order.
+
+    (a) MAKE A HANG SAY SO. A shard killed at its ceiling must be reported as a HANG, distinctly
+    from a diff that broke a test — the same distinction W1-T3303 drew for the LOCAL full-suite run
+    ("FAIL — <label> exceeded its <n>ms wall-clock ceiling ... the suite's failure set is
+    UNVERIFIED") and the same one W1-T2340 already draws inside the sweep for a stalled run. The
+    local path has this and CI does not, which is the gap.
+
+    (b) NAME THE HANGING TEST. A killed job's log ends wherever the runner stopped, so the last
+    STARTED-but-never-FINISHED test name is recoverable and is the one fact an operator needs.
+    Nothing currently extracts it.
+
+    (c) ONLY THEN, the hang itself. A candidate is already recorded from this session and should be
+    checked first rather than hunted from scratch:
+    `test/a-full-doctrine-budget-routes-a-rule-it-cannot-hold.test.ts:121` calls `fileFoldDebt(...,
+    { dir: "/proc/definitely-not-writable" })` and `mkdirSync` BLOCKS there rather than failing
+    fast — measured in the dev container at exit 124 with one line of output, and confirmed
+    pre-existing by stashing. Whether the CI runner blocks identically is UNVERIFIED.
+
+    EXPLICITLY NOT THE REMEDY: raising `timeout-minutes`. It would convert a 35-minute false red
+    into a 50-minute one and delete the only signal that a hang happened. The operator has a
+    standing objection to upper bounds as a remedy and it applies here.
+
+    CAVEATS, WITH EQUAL WEIGHT.
+    - 64 jobs from 8 runs, all inside one ~80-minute window on one day. This is NOT a rate, and I
+      have not established whether the hang predates today.
+    - I did not prove WHICH test hangs. (c) names a candidate measured in a DEV CONTAINER, not on a
+      runner; treating it as the cause without re-measuring on CI would repeat the mistake this
+      filing exists to prevent.
+    - The two shard indices seen hanging (coverage 2/4, ci 4/4) may be coincidence rather than a
+      property of those partitions; the sample cannot separate those.
+    - `cancelled` is also produced by a genuine `cancel-in-progress` supersession, which IS correctly
+      a non-result. Any fix must keep telling those two apart rather than making all cancellations
+      benign.

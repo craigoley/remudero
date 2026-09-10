@@ -1,0 +1,99 @@
+- id: W1-T3349
+  title: "A PUBLISH ROW CANNOT SAY WHICH SURFACE FED IT — `feedback_docket.published` carries `proposal_id` and `consumed_count` but NOT `counts_by_source`, so the one fire that proves a capture surface is alive is the one fire that cannot attribute it; the liveness check must then report a demonstrably live channel as `never` or say nothing at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  files: [src/run-task.ts, test/a-publish-row-names-the-surface-that-fed-it.test.ts]
+  origin: "oper#operator-feedback-loop-does-not-close-2026-09-10"
+  plan_refs: ["W1-T436", "W1-T1273", "W1-T3348"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10 on the daemon host over the ledger union (919 archives + live file). The
+    whole `feedback_docket` population is 5 rows: 3 `.empty` and 2 `.published`. The `.empty` rows
+    carry `counts_by_source`; the `.published` rows carry `proposal_id`, `referent`,
+    `consumed_count` and `window`, and NO per-surface counts (`run-task.ts` writes them in the same
+    `log(...)` call at the publish site).
+
+    THIS IS THE ASYMMETRY: a fire that publishes is a fire where SOMETHING fed, and it is exactly
+    the fire whose per-surface attribution is missing. Both publishes on this host came from
+    `rejected_feedback` — read verbatim off the proposal summaries, which quote
+    `[rejected_feedback 2026-08-27T05:50:38.029Z]` and `[rejected_feedback 2026-09-05T20:21:04.954Z]`
+    — so `rejected_feedback` is the one surface with demonstrated life, and it is the one the
+    ledger cannot prove is alive.
+
+    IT ALREADY COST A WRONG ANSWER, CAUGHT ONLY BY RUNNING AGAINST REAL DATA. W1-T3348's first
+    draft counted every fire and reported `rejected_feedback: never` — a false accusation assembled
+    from missing data, not from evidence of silence. That draft shipped with the narrower reading
+    instead (only counted fires witness silence, publish fires are NAMED), which is correct and
+    strictly weaker: on this host the check now says `3 counted fire(s) of 5 observed` and carries
+    the caveat "a surface that fed ONLY on those reads never here". Two of five fires are
+    unusable, and the gate says so rather than guessing. THAT CAVEAT IS THE DEFECT THIS TASK CLOSES.
+
+    NOT A DUPLICATE OF W1-T3348. That task judges the surfaces from whatever the ledger says. This
+    one makes the ledger say it. `depends_on` is deliberately EMPTY rather than naming W1-T3348:
+    that shard is filed but unmerged, and an unresolved `depends_on` makes `loadPlan` throw for
+    every reader (`task X: depends_on unknown task`). The two are independent at the code level —
+    the field can be emitted whether or not the check exists.
+  design: |
+    (i) EMIT THE COUNTS ON EVERY DOCKET FIRE, NOT ONLY THE EMPTY ONE. The publish site already
+    holds the `docket` whose `countsBySource` the empty path logs. Add that one field to the
+    `.published`/`.duplicate` row. No new read, no new computation, no second cadence.
+
+    (ii) IT IS A LEDGER FIELD ADDITION, SO ROTATION MATTERS. If the step is
+    DECISION_RELEVANT-registered, the added field must survive rotation the same way the `.empty`
+    row's does; if it is not, say so explicitly rather than assuming.
+
+    (iii) DO NOT BACKFILL. The two historical publish rows cannot gain the field, and rewriting a
+    ledger archive is forbidden — they hold unique history. The check's "counted vs observed"
+    split stays permanently correct for rows written before this lands; it simply stops growing.
+
+    (iv) NO CHANGE TO THE GATE. `judgeCaptureSurfaceLiveness` needs no edit: once publish rows carry
+    counts they become counted fires by its existing predicate. Proving that is this task's
+    integration criterion, not a reason to touch the check.
+  acceptance:
+    - claim: "a publishing docket fire records counts_by_source, so the fire that proves a surface fed can also attribute it"
+      proof: "unit test: test/a-publish-row-names-the-surface-that-fed-it.test.ts"
+    - claim: "the counts on a publish row match the docket the same fire actually gathered, never a recomputed second reading"
+      proof: "unit test: test/a-publish-row-names-the-surface-that-fed-it.test.ts"
+    - claim: "a surface that feeds only on publishing fires is no longer reported never by the capture-surface check"
+      proof: "unit test: test/a-publish-row-names-the-surface-that-fed-it.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if a `feedback_docket.published` row already carries
+    `counts_by_source` — proven by reading a real row off the union, not by a grep on the source.
+    MEASURED at filing time: `rmd ledger-grep 'feedback_docket.published'` returns 2 rows and
+    neither has the key.
+
+    THE TEST MUST FAIL WHEN THE FIELD IS REMOVED FROM THE PUBLISH LOG CALL. And the third criterion
+    must fail if the counts are recomputed at the log site rather than taken from the docket the
+    fire gathered — a second reading could disagree with the one that produced the proposal, which
+    is the self-contradictory-ledger-line defect (#981) in a new place.
+  note: |
+    Reserved atomically at `refs/rmd-id/W1-T3349` (max 3348 across tasks.yaml 280, shards 3338,
+    open PRs 3348, remote plan 3338, history 3338). Both scope-time checks ran before filing:
+    `git ls-remote --heads origin 'run-W1-T3349-*'` returned 0 against a control of 64 live `run-*`
+    heads, and the merged-trailer scan returned 0 against a control of 1 for W1-T3336.
+
+    risk:med, not high: one added field on one log call, no gate semantics changed. It is
+    blast-radius rather than span because a ledger field feeds every later reader of that step.
+
+    FILED BECAUSE IT WAS ABOUT TO BE DROPPED. This gap was named in W1-T3348's design note and in
+    #5014's PR body as "a separate concern, left as a named follow-up" — prose in two places and a
+    task in none. CLAUDE.md's own preamble: "the fix is to make something refuse it — file the
+    task; do not sharpen the wording and call it closed."
+
+    THE SHARD SLUG MATCHES ITS FALSIFIER DELIBERATELY. `lint-plan` refused the first filename under
+    Rule 19: shard slug `a-publish-row-cannot-say-which-surface-fed-it` versus test slug
+    `a-publish-row-names-the-surface-that-fed-it` read as two concerns purely because the names
+    differed. The suite named here IS this task's own falsifier — written to prove these three
+    criteria, not an existing suite for another concern — so W1-T2525's own-falsifier discount
+    applies and renaming satisfies the rule rather than gaming it.
+
+    The shared-proof warning is accepted for the same reason W1-T3348's is: in a plan shard the
+    pure-path form is required for `judgeCriterion`'s `not_yet_built` carve-out, and a
+    title-filtered proof would resolve to zero candidates on a plan-only head.

@@ -207,8 +207,8 @@ test("W1-T1209: the existing doctor arms are unchanged", () => {
   // pin, so all five read OK.
   assert.equal(
     report.checks.length,
-    preExisting.length + 5,
-    "repair-stall, sweep-liveness, checkout-depth, worktree-base and node-version-pin all joined the report",
+    preExisting.length + 6,
+    "repair-stall, sweep-liveness, checkout-depth, worktree-base, node-version-pin and capture-surfaces all joined the report",
   );
 });
 
@@ -360,8 +360,8 @@ test("W1-T1236: the existing doctor arms are unchanged", () => {
   // matching node pin, so all three read OK.
   assert.equal(
     report.checks.length,
-    preExisting.length + 4,
-    "sweep-liveness, checkout-depth, worktree-base and node-version-pin all joined the report",
+    preExisting.length + 5,
+    "sweep-liveness, checkout-depth, worktree-base, node-version-pin and capture-surfaces all joined the report",
   );
 });
 

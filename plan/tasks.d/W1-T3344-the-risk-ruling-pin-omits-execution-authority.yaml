@@ -1,0 +1,92 @@
+- id: W1-T3344
+  title: "THE RISK-RULING PIN OMITS EXECUTION AUTHORITY — a filing-time judge can clear one task record and have that ruling survive later changes to its repository, dependencies, priority, spend, policy context, evidence ownership, or proof duty"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files:
+    - src/lib/task-linter.ts
+    - test/the-ruling-pin-binds-execution-authority.test.ts
+  origin: "codex-recon#filing-risk-ruling-pin-2026-09-10"
+  plan_refs: ["W1-T2977", "W1-T3143", "W1-T3336"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-10 at origin/main 888b2ffa. `taskRulingPin` hashes exactly id, title,
+    type, verify, risk, prompt, sorted files, and each acceptance criterion's claim and proof.
+    The loaded Task fields `repo`, `depends_on`, `priority`, `plan_refs`, `author_class`,
+    `budget_usd`, `band_meaning`, `principles`, and `context` can therefore change without
+    invalidating a ruling. So can the acceptance authority fields `satisfied_by` and `holdout`.
+    A ruling earned for one execution contract can be attached to a materially different one.
+
+    THE FALSIFIER FIRED FOR EVERY NAMED FIELD. Recomputing the current production pin after
+    changing each field leaves the digest unchanged. A second falsifier also fired: the plan
+    loader explicitly supports an Architect-authored acceptance criterion with `satisfied_by`
+    and no `proof`, while `taskRulingPin` calls its string-only hash helper with the missing proof
+    and throws. `buildFilingRiskJudgeInput` already represents that supported shape as
+    `criterion.proof ?? ""`; the pin is the inconsistent boundary.
+
+    MIGRATION IS FREE ONLY NOW. `grep '^risk_ruling:' plan/tasks.d/*.yaml` returns no material
+    record at this revision, and the only raw `risk_ruling:` matches on main are W1-T3143's
+    rationale prose. No open branch inspected at filing carries a material ruling. The pin can
+    therefore change in place before the first production filing-time judge writes one. After
+    that first write, the same change would require an explicit compatibility or migration rule.
+
+    THIS IS A PREDECESSOR, NOT THE CALLER. W1-T2977 supplied the synchronous consumer and pin;
+    W1-T3143 supplied the input builder and record helper; W1-T3336 made a persisted ruling survive
+    plan loading. The typed judge orchestrator and the first automatic filing caller remain two
+    separate successors. Starting either first would persist receipts keyed to a digest that does
+    not bind the authority the judge evaluated.
+  design: |
+    (i) BIND EVERY EXECUTION-AUTHORITY FIELD. Extend `taskRulingPin` with `repo`, `depends_on`,
+    `priority`, `plan_refs`, `author_class`, `budget_usd`, `band_meaning`, `principles`, `context`,
+    and each acceptance criterion's `satisfied_by` and `holdout`. Preserve deterministic ordering:
+    sort set-like string lists, use stable key ordering for structured values, and keep the existing
+    NUL-separated field boundary so adjacent values cannot alias.
+
+    (ii) ACCEPT THE PLAN SHAPE THE LOADER ALREADY ACCEPTS. Hash a missing acceptance `proof` as the
+    empty string with `c.proof ?? ""`, matching `buildFilingRiskJudgeInput`. A proofless
+    `{claim, satisfied_by}` criterion must produce a stable pin and must not throw.
+
+    (iii) KEEP NARRATIVE AND BOOKKEEPING OUT. Do not add `note`, `rationale`, `design`, `falsifier`,
+    `origin`, `hand_built`, `attempts`, `pr`, `status`, `retirement`, or `risk_ruling`. Narrative and
+    bookkeeping edits must not churn a semantic ruling; status and retirement remain self-lapsing
+    and independently gated; hashing `risk_ruling` would make recomputation impossible.
+
+    (iv) CHANGE NO AUTHORITY OR CALL PATH. Do not add a judge caller, receipt store, landing kind,
+    parser, linter row, or policy change. This PR repairs only the digest used by the already-shipped
+    producer and consumer boundaries.
+  acceptance:
+    - claim: "changing any execution-authority field changes taskRulingPin while changing narrative or bookkeeping fields leaves it unchanged"
+      proof: "unit test: W1-T3344 each execution-authority field changes the ruling pin and narrative fields do not"
+    - claim: "depends_on, plan_refs, files, and structured authority fields hash deterministically rather than by incidental input ordering"
+      proof: "unit test: W1-T3344 set-like authority fields and structured values have deterministic pins"
+    - claim: "an acceptance criterion with satisfied_by and no proof produces a stable pin, and changing satisfied_by or holdout invalidates it"
+      proof: "unit test: W1-T3344 proofless architect criteria are pinned without throwing"
+    - claim: "the existing Law 5 consumer and filing-risk record helper continue to share the corrected pin without changing their policy behavior"
+      proof: "unit test: W1-T3344 the corrected pin remains shared by the filing helper and Law 5 consumer"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if current `taskRulingPin` already changes when every authority
+    field named above changes and already accepts a proofless `{claim, satisfied_by}` criterion.
+    A type declaration or prompt-builder reference is not evidence; drive the exported production
+    function itself.
+
+    THE NEW TEST MUST DISCRIMINATE EVERY ADDED FIELD. Removing any one field from the digest must
+    make its mutation case fail. Removing `c.proof ?? ""` must make the proofless criterion case
+    throw. Conversely, adding any excluded narrative or bookkeeping field to the digest must make
+    the unchanged-pin case fail.
+  note: |
+    W1-T3344 was reserved atomically on origin at `refs/rmd-id/W1-T3344`. The reservation walk
+    advanced from W1-T3341 past concurrent claims and reported W1-T3344 as the id actually held.
+
+    risk:high is blast radius, not span: the diff is one digest function and one test, but every
+    future machine-authored filing-time ruling relies on this identity boundary. No persisted
+    rulings exist yet, which is the narrow window in which this can land without migration.
+
+    Reverified at filing: #4992's fetched branch changes `scripts/test-tier-manifest.json`,
+    `src/lib/ci-parity.ts`, and its test; #4999 changes only its test; W1-T3340 changes the tier
+    manifest, `src/lib/daemon.ts`, and its test. None touches either declared file.
