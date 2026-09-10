@@ -2746,6 +2746,12 @@ export interface OpenPrView {
   /** The validated path evidence paired with {@link instrumentEntangled}; both arrays are
    *  non-empty and bounded. Consumers still validate this field rather than trusting its type. */
   instrumentEntanglementPaths?: InstrumentEntanglementPaths;
+  /** W1-T3309 — the structured Rule-25 cause of the LAST prerequisite-worker dispatch for this
+   *  PR. This is deliberately separate from {@link instrumentEntanglementPaths}: the latter says
+   *  what is failing NOW; this one proves a worker already tried to resolve that exact refusal.
+   *  It is not head-keyed: a new head with the SAME refusal is the recurrence this stop exists to
+   *  catch. Absent or malformed ledger evidence fails closed. */
+  previousInstrumentEntanglementPaths?: InstrumentEntanglementPaths;
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
   priorStrikes: number;
   /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
@@ -3621,18 +3627,41 @@ export function projectMergedTaskCandidates(
   });
 }
 
-/** W1-T1269 — does the CURRENT unmet-criteria set repeat, claim-for-claim, what the most recent
- *  strike was already dispatched to resolve? THE EARLIER STOP, never a longer leash. KEYED ON
- *  IDENTITY, NEVER ON COUNT, and stops ONLY on an EXACT match — the inclusion-descent rule is
- *  refused, because it would stop a lateral swap too. FAILS CLOSED on an empty claim set. */
+/** W1-T1269/W1-T3309 — does the CURRENT failure repeat the exact cause a remedy already tried to
+ *  resolve? THE EARLIER STOP, never a longer leash. Ordinary strikes key on their unmet claim set;
+ *  the zero-strike Rule-25 refusal keys on its two structured path sets. Both arms are exact-set
+ *  comparisons only — inclusion-descent is refused because it would stop a lateral change too.
+ *  Missing or malformed prior evidence fails closed. */
 export function fixRungRepeatsIdenticalFailure(pr: OpenPrView): boolean {
+  const exactSet = (current: readonly string[], prior: readonly string[]): boolean => {
+    const currentSet = new Set(current);
+    const priorSet = new Set(prior);
+    return (
+      currentSet.size === current.length &&
+      priorSet.size === prior.length &&
+      currentSet.size === priorSet.size &&
+      [...currentSet].every((value) => priorSet.has(value))
+    );
+  };
   const history = pr.strikeHistory ?? [];
   const priorClaims = history[history.length - 1]?.unmetClaims;
-  if (!priorClaims || priorClaims.length === 0) return false;
   const currentClaims = pr.unmetCriteria.map((c) => c.claim);
-  if (currentClaims.length === 0 || currentClaims.length !== priorClaims.length) return false;
-  const priorSet = new Set(priorClaims);
-  return currentClaims.every((c) => priorSet.has(c));
+  if (currentClaims.length > 0) {
+    if (!priorClaims || priorClaims.length === 0 || currentClaims.length !== priorClaims.length) return false;
+    return exactSet(currentClaims, priorClaims);
+  }
+
+  if (
+    pr.instrumentEntangled !== true ||
+    !usableInstrumentEntanglementPaths(pr.instrumentEntanglementPaths) ||
+    !usableInstrumentEntanglementPaths(pr.previousInstrumentEntanglementPaths)
+  ) {
+    return false;
+  }
+  return (
+    exactSet(pr.instrumentEntanglementPaths.instrumentPaths, pr.previousInstrumentEntanglementPaths.instrumentPaths) &&
+    exactSet(pr.instrumentEntanglementPaths.srcPaths, pr.previousInstrumentEntanglementPaths.srcPaths)
+  );
 }
 
 /** W1-T923 — given the STRUCTURED `reasons` a gate failure carried, decide whether it names a
@@ -4864,10 +4893,9 @@ export interface StrikeAttempt {
   round: "resume" | "fresh";
   /** Unmet criteria count going INTO this strike. */
   unmetCount: number;
-  /** W1-T1269 — the unmet criteria CLAIM SET going into this strike, the identity
-   *  {@link fixRungRepeatsIdenticalFailure} compares: it tells a strike that failed IDENTICALLY
-   *  from one that fixed half, which {@link unmetCount} cannot. No producer populates it and the
-   *  predicate fails CLOSED, so row 5.5 stays inert in production. */
+  /** W1-T1269 — the unmet criteria CLAIM SET going into this strike, written by the same
+   *  `fix.dispatch` ledger event that spends it. It tells a strike that failed IDENTICALLY from one
+   *  that fixed half, which {@link unmetCount} cannot. */
   unmetClaims?: readonly string[];
   /** Whether CI reached green after this strike (a review only runs once it does). */
   ciGreen: boolean;

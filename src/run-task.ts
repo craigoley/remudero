@@ -8471,6 +8471,8 @@ export async function runFixRung(opts: {
       const srcList = paths ? srcPaths.join(", ") : "(unavailable)";
       deps.log("fix.instrument_entangled", {
         strike: strikes,
+        pr_url: opts.prUrl,
+        head_sha: review.headSha,
         summary: review.summary,
         instrument_paths: paths?.instrumentPaths,
         src_paths: paths?.srcPaths,
@@ -8925,6 +8927,7 @@ export async function runFixRung(opts: {
         strike: strikes,
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
+        unmet_claims: unmet.map((criterion) => criterion.claim),
         round,
         mode: fixMode,
         verdict_regime: verdictRegime,
@@ -27704,6 +27707,31 @@ function instrumentEntanglementFromLedger(
   return result;
 }
 
+/** W1-T3309 — the last Rule-25 refusal for THIS PR that reached the prerequisite-worker arm.
+ *
+ * The row is intentionally NOT scoped to `head_sha`: an author can push a new head that leaves the
+ * same instrument/src entanglement intact, and that is still an ineffective repeat. `pr_url`
+ * keeps the history from a different PR for the same task out. A malformed newer row clears an
+ * older value rather than letting a partial ledger record authorize an escalation. */
+function previousInstrumentEntanglementFromLedger(
+  lines: Array<Record<string, unknown>>,
+  key: string,
+  prUrl: string,
+): InstrumentEntanglementPaths | undefined {
+  let result: InstrumentEntanglementPaths | undefined;
+  for (const line of lines) {
+    if (line.step !== "fix.instrument_entangled" || line.task_id !== key || line.pr_url !== prUrl) continue;
+    result = undefined;
+    const candidate = { instrumentPaths: line.instrument_paths, srcPaths: line.src_paths };
+    if (!usableInstrumentEntanglementPaths(candidate)) continue;
+    result = {
+      instrumentPaths: [...candidate.instrumentPaths],
+      srcPaths: [...candidate.srcPaths],
+    };
+  }
+  return result;
+}
+
 /**
  * Fix strikes already attempted for a PR. W1-T78 fixed the cold-dispatch `log` wrapper (`buildSweepEffects`'s
  * `dispatchFix`) to stamp the REAL `task.id` on every `fix.dispatch`/`fix.review`
@@ -27814,10 +27842,14 @@ export function deriveStrikeHistory(
     const strike = typeof line.strike === "number" ? line.strike : undefined;
     if (strike === undefined) continue;
     if (line.step === "fix.dispatch") {
+      const unmetClaims = Array.isArray(line.unmet_claims) && line.unmet_claims.every((claim) => typeof claim === "string")
+        ? line.unmet_claims.map((claim) => String(claim))
+        : undefined;
       byStrike.set(strike, {
         strike,
         round: line.round === "fresh" ? "fresh" : "resume",
         unmetCount: typeof line.unmet_count === "number" ? line.unmet_count : 0,
+        ...(unmetClaims === undefined ? {} : { unmetClaims }),
         ciGreen: false,
       });
     } else if (line.step === "fix.review") {
@@ -28120,6 +28152,9 @@ export function buildOpenPrViews(
     const instrumentEntanglement = reviewState === "failure"
       ? instrumentEntanglementFromLedger(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest)
       : undefined;
+    const previousInstrumentEntanglement = reviewState === "failure"
+      ? previousInstrumentEntanglementFromLedger(ledger, reviewLedgerKey, pr.url)
+      : undefined;
     return {
       prNumber: pr.number,
       prUrl: pr.url,
@@ -28156,6 +28191,7 @@ export function buildOpenPrViews(
       actionableGateFailures: reviewState === "failure" ? actionableGateFailuresFromLedger(ledger, gateFailureKey) : [],
       instrumentEntangled: instrumentEntanglement === undefined ? undefined : true,
       instrumentEntanglementPaths: instrumentEntanglement,
+      previousInstrumentEntanglementPaths: previousInstrumentEntanglement,
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
       strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
       supersededBy,
