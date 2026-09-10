@@ -79,6 +79,7 @@ test("W1-T108/R-42: positive control -- the real command really does name more t
       "test/block-reason.test.ts",
       "test/classify.test.ts",
       "test/codex-quota-window-refusal.test.ts",
+      "test/fix-rung-classify.test.ts",
       "test/session-limit-is-a-refusal-not-a-success.test.ts",
       "test/three-retries-in-three-seconds-against-a-lockout.test.ts",
     ],
