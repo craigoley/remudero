@@ -437,3 +437,92 @@ test("no run without --base performs a second lint pass: the annotation never ap
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── W1-T2995 — THE TWO CRITERIA THIS TASK DECLARED, AS TESTS THAT CARRY THEIR TITLES ──────────
+//
+// The fix above (LINT_DEPS) is what this task is FOR; these two prove it, and they exist because
+// the task's acceptance names them by title. Review resolves a title-form proof by matching the
+// test name, so a criterion whose title matches nothing grades `not executed` and falls back to
+// the keyword floor — which is what happened here: 0 tests matched, twice.
+
+test("W1-T2995: the base-lint fixture completes without a file-scope hang", async () => {
+  // NOT A TIMING ASSERTION. "Completes without hanging" measured by a stopwatch is a flake
+  // generator, and a fast run proves nothing about WHY. The hang had one cause: with no deps
+  // injected, `--base` mode reached the REAL `ghGateway` — a synchronous `gh` subprocess with a
+  // 60s default timeout, six times over, against a 25s file cap. So this asserts the CAUSE is
+  // gone: the seams the fixture supplies are the ones the command actually reaches for, which
+  // means no host process is spawned to hang on.
+  const seen: string[] = [];
+  const spied: Parameters<typeof lintPlanCommand>[1] = {
+    loadConfig: (() => {
+      seen.push("loadConfig");
+      return { root: "/synthetic" };
+    }) as never,
+    resolveOwnerRepo: (() => {
+      seen.push("resolveOwnerRepo");
+      return { owner: "o", repo: "r" };
+    }) as never,
+    ghGateway: (() => {
+      seen.push("ghGateway");
+      return {};
+    }) as never,
+    projectPlan: ((plan: { tasks: { id: string }[] }) => {
+      seen.push("projectPlan");
+      return new Map(plan.tasks.map((t) => [t.id, { merged: false }]));
+    }) as never,
+  };
+
+  const { dir, planPath, relPath } = fixturePlanPaths();
+  try {
+    const base = baseCommitWithBlob(relPath, LANDMINE_TASK("landmine task, before the touch", "works"));
+    writeFileSync(planPath, LANDMINE_TASK("landmine task, after the touch", "works"), "utf8");
+
+    const cap = captureConsole();
+    let code: number;
+    try {
+      code = await lintPlanCommand(["--plan", planPath, "--base", base], spied);
+    } finally {
+      cap.restore();
+    }
+
+    assert.equal(code, 1, "the run still reaches its verdict — the point is that it reaches one at all");
+    assert.ok(
+      seen.includes("ghGateway"),
+      `--base mode must reach the INJECTED gateway, never the host's gh; seams touched: ${JSON.stringify(seen)}`,
+    );
+    assert.ok(seen.includes("loadConfig"), "and the injected config, not the host's");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2995: the base-lint fixture asserts its pre-existing-violation attribution unchanged", async () => {
+  // The injection must change what the fixture TOUCHES, never what it MEASURES. This drives
+  // W1-T2339's own subject — the pre-existing-violation COUNT — through the injected seams and
+  // asserts the identical annotation, so a seam change that quietly altered the verdict cannot
+  // pass as a hang fix.
+  const { dir, planPath, relPath } = fixturePlanPaths();
+  try {
+    const base = baseCommitWithBlob(relPath, LANDMINE_TASK("landmine task, before the touch", "works"));
+    writeFileSync(planPath, LANDMINE_TASK("landmine task, after the touch", "works"), "utf8");
+
+    const cap = captureConsole();
+    let code: number;
+    try {
+      code = await lintPlanCommand(["--plan", planPath, "--base", base], LINT_DEPS);
+    } finally {
+      cap.restore();
+    }
+
+    assert.equal(code, 1, "a task still carrying a blocking violation still fails the run");
+    const line = cap.errLines.find((l) => l.startsWith("✗ ZZ-Landmine:"));
+    assert.ok(line, `the failing task must still be reported; stderr was ${JSON.stringify(cap.errLines)}`);
+    assert.match(
+      line!,
+      new RegExp(`2 violation\\(s\\) \\(2 pre-existing on base ${base}\\)`),
+      "the attribution count and its wording must be exactly what it was before the seams were injected",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
