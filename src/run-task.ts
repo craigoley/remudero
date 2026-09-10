@@ -37,6 +37,8 @@ import {
 // the runtime specifier below on its emitted `.js` form.
 import { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
 export { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs };
+import { ledgerCompactCommand } from "./lib/ledger-compact.js";
+export { ledgerCompactCommand } from "./lib/ledger-compact.js";
 // Compatibility re-export target: lib/escalation-catalogue"
 import {
   DISK_HEADROOM_EPISODE_MS,
@@ -279,6 +281,8 @@ import {
   type DaemonOpts,
   type DaemonSummary,
   type HeadroomPolicy,
+  type IntakeRungDecision,
+  type IntakeRungRunResult,
   type StarvationCensus,
   type StarvationClearedInfo,
   priorUnrecognisedResetStrings,
@@ -400,7 +404,7 @@ import {
   type AlertLaneAlert,
 } from "./lib/alert-lane.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
-import { loadManagedRepos, ManagedReposError } from "./lib/managed-repos.js";
+import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
 import {
   captureFeedback,
   feedbackEntryPath,
@@ -711,6 +715,7 @@ import {
 import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import {
+  decideMeasurementCadence,
   measurementCadenceCheck,
   ciLearningCadenceCheck,
   CI_LEARNING_MINT_CEILING,
@@ -719,7 +724,10 @@ import {
   measurementCadenceMarkerPath,
   fileCiLearningShards,
   mintCiLearningShards,
+  readMeasurementCadenceMarker,
   recordCiLearningCadenceFire,
+  releaseCiLearningCadenceFire,
+  CI_LEARNING_WINDOW_DAYS,
   recordMeasurementCadenceFire,
   recordWipeTestCadenceFire,
   renderVerbCensusDigestLine,
@@ -823,12 +831,15 @@ import { mountRecommendationProposalCandidate, recommendMounts, type MountHeadro
 import {
   DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS,
   GATED_RUNGS,
+  INTAKE_CADENCE_RUNGS,
   loadDefaultPolicy,
   loadPolicy,
   policyPath,
   PolicyError,
   resolveDailyCostCeiling,
   resolveDailyCostCeilingForInstance,
+  type IntakeCadenceRung,
+  type IntakeCadenceRungPolicy,
   type Policy,
   type PolicyHeadroomRung,
 } from "./lib/policy.js";
@@ -19851,6 +19862,52 @@ function retroShippedGithubGateway(): ShippedGithub {
 const RUN_LEDGER_STEP_PATTERN =
   '"step":"run\\.start"|"step":"verdict"|"step":"pr\\.opened"|"step":"recon\\.done"|"step":"implement\\.done"|"step":"implement\\.resumed"|"step":"correction\\.provenance"';
 
+/** Last unavailable observation already reported by this process. `retroTriggerCheck` is a
+ * self-target-only command, so one fixed-width record is sufficient. This is transition memory for
+ * telemetry only: it never changes the trigger decision, schedules no retry, and creates no
+ * persisted latch. A healthy read clears it so a later outage is reported as a new incident. */
+let lastRetroTriggerDecline:
+  | { ledgerPath: string; fingerprint: string }
+  | undefined;
+
+function reportRetroTriggerDecline(
+  ledgerPath: string,
+  marker: { ts: string } | undefined,
+  now: Date,
+  reason: string,
+): void {
+  const fingerprint = `${marker?.ts ?? "absent"}\u0000${reason}`;
+  if (
+    lastRetroTriggerDecline?.ledgerPath === ledgerPath &&
+    lastRetroTriggerDecline.fingerprint === fingerprint
+  ) {
+    return;
+  }
+  let markerAgeMs: number | "unbounded" | "unknown";
+  if (marker === undefined) {
+    markerAgeMs = "unbounded";
+  } else {
+    const parsedMarkerMs = Date.parse(marker.ts);
+    markerAgeMs = Number.isFinite(parsedMarkerMs)
+      ? Math.max(0, now.getTime() - parsedMarkerMs)
+      : "unknown";
+  }
+  try {
+    appendProducerLedger(ledgerPath, "daemon", {
+      run_id: "RETRO-TRIGGER",
+      step: "daemon.retro_trigger.declined",
+      outcome: "declined",
+      reason,
+      marker_ts: marker?.ts ?? null,
+      marker_age_ms: markerAgeMs,
+    });
+    lastRetroTriggerDecline = { ledgerPath, fingerprint };
+  } catch {
+    // Best-effort evidence. A failed append must not turn an unreadable GitHub corpus into a
+    // retro decision; leaving the fingerprint unset lets the next tick retry the report.
+  }
+}
+
 /**
  * W1-T160: evaluate the retro cadence trigger against the REAL marker + ledger +
  * GitHub read — the impure wiring behind `evaluateRetroTrigger` (retro.ts, pure).
@@ -19900,7 +19957,14 @@ export function retroTriggerCheck(
   if (markerResolution.kind === "corrupt") return undefined;
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
   const github = deps.github ?? retroShippedGithubGateway();
-  if (github.unavailable?.()) return undefined;
+  const githubUnavailable = github.unavailable?.();
+  if (githubUnavailable) {
+    reportRetroTriggerDecline(ledgerPath, marker, now, githubUnavailable);
+    return undefined;
+  }
+  if (lastRetroTriggerDecline?.ledgerPath === ledgerPath) {
+    lastRetroTriggerDecline = undefined;
+  }
   // MERGE RESOLUTION (W1-T2289 x the ledger-union and runless-merge fixes on main). Both sides
   // rewrote this block and each carries behaviour the other lacks, so neither could be taken whole:
   // main supplies the SOURCE (`resolveLedgerUnion`, which sees rotated archives a bare
@@ -19972,6 +20036,7 @@ export function retroTriggerCheck(
 export const AUTO_TRIAGE_CONTRACT_VERSION = "v1";
 export const MEASUREMENT_CADENCE_CONTRACT_VERSION = "v1";
 export const DIGEST_CADENCE_CONTRACT_VERSION = "v1";
+export const INTAKE_CADENCE_CONTRACT_VERSION = "v1";
 export const BOARD_REVIEW_CONTRACT_VERSION = "v1";
 export const CI_LEARNING_CADENCE_CONTRACT_VERSION = "v1";
 export const WIPE_TEST_CADENCE_CONTRACT_VERSION = "v1";
@@ -19994,6 +20059,11 @@ export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
   autoTriage: AUTO_TRIAGE_CONTRACT_VERSION,
   measurementCadence: MEASUREMENT_CADENCE_CONTRACT_VERSION,
   digestCadence: DIGEST_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.ops": INTAKE_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.issues": INTAKE_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.alertFix": INTAKE_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.inbox": INTAKE_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.feedbackDocket": INTAKE_CADENCE_CONTRACT_VERSION,
   boardReview: BOARD_REVIEW_CONTRACT_VERSION,
   ciLearningCadence: CI_LEARNING_CADENCE_CONTRACT_VERSION,
   // W1-T2659's rung merged while this branch was open; the walk over GATED_RUNGS refused it as
@@ -20765,6 +20835,147 @@ export function buildDigestCadenceDaemonHooks(deps: {
       return report;
     });
   return { checkDigestCadence: check, runDigestCadence: run };
+}
+
+export function intakeRungCadenceMarkerPath(root: string, rung: IntakeCadenceRung): string {
+  return join(root, "state", `last-intake-cadence-${rung}.json`);
+}
+
+function intakeRungCadenceCheck(opts: {
+  root: string;
+  rung: IntakeCadenceRung;
+  policy: IntakeCadenceRungPolicy;
+  now?: Date;
+}): IntakeRungDecision {
+  if (!opts.policy.enabled) {
+    return {
+      rung: opts.rung,
+      fire: false,
+      reason: `intake cadence ${opts.rung} disabled (policy.intakeCadence.${opts.rung}.enabled=false)`,
+    };
+  }
+  const marker = readMeasurementCadenceMarker(intakeRungCadenceMarkerPath(opts.root, opts.rung));
+  const decision = decideMeasurementCadence({
+    policy: { ...opts.policy, escalate: false },
+    marker,
+    now: opts.now ?? new Date(),
+  });
+  return { rung: opts.rung, ...decision };
+}
+
+function recordIntakeRungCadenceFire(root: string, rung: IntakeCadenceRung, at: Date): void {
+  recordMeasurementCadenceFire(intakeRungCadenceMarkerPath(root, rung), at, 24 * 60 * 60 * 1000);
+}
+
+export function buildIntakeRungsDaemonHooks(deps: {
+  config?: Config;
+  policy?: Policy;
+  ratifications?: Ratifications;
+  /** W1-T2923: the time source, as the shared {@link Clock} port rather than a bare
+   *  `() => Date`. No caller passes one — the daemon wires `{ config, policy }` — so the seam
+   *  is expressible either way, and src/lib/clock.ts is what it exists for. */
+  clock?: Clock;
+  check?: () => readonly IntakeRungDecision[];
+  runRung?: (decision: Extract<IntakeRungDecision, { fire: true }>) => Promise<IntakeRungRunResult> | IntakeRungRunResult;
+  loadManagedRepos?: (root: string) => ManagedRepo[];
+  pollIssues?: typeof pollIssues;
+  pollAlerts?: typeof pollAlerts;
+  alertFix?: typeof alertFixCommand;
+  inbox?: typeof inboxCommand;
+  feedbackDocket?: typeof runFeedbackDocketRung;
+} = {}): {
+  checkIntakeRungs: () => readonly IntakeRungDecision[];
+  runIntakeRung: (decision: Extract<IntakeRungDecision, { fire: true }>) => Promise<IntakeRungRunResult> | IntakeRungRunResult;
+} {
+  const configFor = () => deps.config ?? loadConfig();
+  const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
+  const check =
+    deps.check ??
+    (() => {
+      const policy = policyFor().values.intakeCadence;
+      const pins = deps.ratifications ?? loadRatifications(ratificationsPath(repoRoot));
+      return INTAKE_CADENCE_RUNGS.map((rung) => {
+        const row = policy[rung];
+        const pin = ratificationPinCheck(`intakeCadence.${rung}`, row, INTAKE_CADENCE_CONTRACT_VERSION, pins);
+        if (!pin.fire) {
+          ledgerRungUnratified(ledgerPathFor(configFor()), `intakeCadence.${rung}`, pin.diff);
+          return { rung, fire: false, reason: pin.reason };
+        }
+        return intakeRungCadenceCheck({
+          root: configFor().root,
+          rung,
+          policy: row,
+          now: deps.clock?.date(),
+        });
+      });
+    });
+  const runRung =
+    deps.runRung ??
+    (async (decision: Extract<IntakeRungDecision, { fire: true }>) => {
+      if (!INTAKE_CADENCE_RUNGS.includes(decision.rung as IntakeCadenceRung)) {
+        throw new Error(`unknown intake rung: ${decision.rung}`);
+      }
+      const rung = decision.rung as IntakeCadenceRung;
+      const config = configFor();
+      const at = (deps.clock ?? systemClock).date();
+      const ledgerPath = ledgerPathFor(config);
+      const runId = `INTAKE-${rung}-${at.getTime()}`;
+      recordIntakeRungCadenceFire(config.root, rung, at);
+      if (rung === "ops") {
+        const { owner, repo } = resolveOwnerRepo();
+        const result = await (deps.pollAlerts ?? pollAlerts)(owner, repo, {
+          readLedger: (path) => readLedgerUnionBounded(path),
+          alerts: ghAlertGateway(),
+          issues: ghIssueGateway(owner, repo),
+          ledgerPath,
+          runId,
+          root: repoRoot,
+          dryRun: false,
+        });
+        return {
+          rung,
+          status: "ok",
+          alerts: result.summary.totalOpen,
+          feedback_created: result.feedbackCreated.length,
+          feedback_reconciled: result.reconciled?.length ?? 0,
+          escalated: result.escalated.length,
+        };
+      }
+      if (rung === "issues") {
+        const managed = (deps.loadManagedRepos ?? loadManagedRepos)(repoRoot);
+        const result = await (deps.pollIssues ?? pollIssues)(managed, {
+          issues: ghIssueListGateway(),
+          root: repoRoot,
+          ledgerPath,
+          runId,
+          dryRun: false,
+        });
+        return {
+          rung,
+          status: "ok",
+          repos: result.summary.repos.length,
+          reviewed: result.summary.reviewedCount,
+          created: result.created.length,
+          skipped_existing: result.skippedExisting,
+        };
+      }
+      if (rung === "alertFix") {
+        const exitCode = await (deps.alertFix ?? alertFixCommand)([], { config, ledgerPath, runId });
+        return { rung, status: exitCode === 0 ? "ok" : "refused", exit_code: exitCode };
+      }
+      if (rung === "inbox") {
+        const exitCode = await (deps.inbox ?? inboxCommand)([], { config });
+        return { rung, status: exitCode === 0 ? "ok" : "refused", exit_code: exitCode };
+      }
+      const log = (step: string, extra: Record<string, unknown> = {}) =>
+        appendLedger(ledgerPath, { run_id: runId, task_id: "INTAKE", step, lane: "intake", rung, ...extra });
+      const result = (deps.feedbackDocket ?? runFeedbackDocketRung)(config, ledgerPath, runId, log, {
+        root: repoRoot,
+        now: () => at,
+      });
+      return { rung, status: "ok", fired: result.fired };
+    });
+  return { checkIntakeRungs: check, runIntakeRung: runRung };
 }
 
 /**
@@ -24307,31 +24518,104 @@ export function buildCiLearningDaemonHooks(deps: {
         now: deps.now?.(),
       });
     },
-    runCiLearningCadence: async () => {
-      const root = configFor().root;
-      // THE FIRE FIRST — see this function's own doc for why the order is the safety property.
-      recordCiLearningCadenceFire(root, deps.now?.() ?? new Date());
-      const input = deps.loadWindow ? deps.loadWindow(1) : loadCiFailureWindow(1);
-      const corpus = collectCiFailureCorpus(input);
-      const result = mintCiLearningShards(corpus, []);
-      const filedLessons = deps.loadLessons
-        ? deps.loadLessons()
-        : readFiledCiLessons(join(repoRoot, "plan", "tasks.d"));
-      const lessonRecurrences =
-        filedLessons.status === "measured"
-          ? summarizeCiLessonRecurrences(
-              judgeCiLessonEfficacy(corpus, filedLessons.lessons),
-              CI_LEARNING_MINT_CEILING,
-            )
-          : { status: "unreadable" as const };
-      return {
-        status: result.status,
-        draftCount: result.drafts.length,
-        excludedCount: result.excludedFindings.length,
-        unreadableCount: result.unreadableShas.length,
-        lessonRecurrences,
-      };
-    },
+    runCiLearningCadence: buildCiLearningCadenceRunner({
+      root: configFor().root,
+      checkoutRoot: repoRoot,
+      loadWindow: (days) => (deps.loadWindow ? deps.loadWindow(days) : loadCiFailureWindow(days)),
+      loadLessons: deps.loadLessons,
+      clock: deps.now ? clockFromDateFn(deps.now) : systemClock,
+    }),
+  };
+}
+
+/** What one scheduled CI-learning firing did — counts for what was DRAFTED and, separately, for what
+ *  LANDED. Reporting only drafts is what made a rung that filed nothing indistinguishable from a
+ *  clean one (W1-T3324). */
+export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResult {
+  filedCount: number;
+  skippedCount: number;
+  refusedCount: number;
+}
+
+/**
+ * THE SCHEDULED CI-LEARNING RUNG (W1-T3324) — extracted so the daemon's arm and a test drive the
+ * SAME body, and so the four defects below are pinned by a falsifier rather than by inspection.
+ *
+ * IT FILES. The previous arm minted drafts and returned counts; `rmd ci-learning` typed by hand
+ * called `fileCiLearningShards`. Two callers, one wired: six drafts were minted on 2026-09-07 and
+ * 2026-09-08 and the plan held zero ci-learning records.
+ *
+ * IT PASSES THE REAL ORIGIN SURFACE. The previous arm passed `[]`, so wiring the filer alone would
+ * re-file the same cause on every firing.
+ *
+ * THE FIRE IS STILL RECORDED FIRST — that ordering guards a crash-loop re-running an expensive
+ * window — but a run that THREW BEFORE DOING ANY WORK RELEASES IT. The observed shape: a
+ * `Bad credentials (HTTP 401)` from the window read, with `maxPerDay: 1`, spent the whole day and
+ * produced nothing. A run that filed keeps its fire.
+ */
+export function buildCiLearningCadenceRunner(deps: {
+  root: string;
+  checkoutRoot: string;
+  loadWindow: (days: number) => CiFailureCorpusInput;
+  loadLessons?: () => ReturnType<typeof readFiledCiLessons>;
+  fileShards?: typeof fileCiLearningShards;
+  planOrigins?: string[];
+  recordFire?: (root: string, at: Date) => void;
+  releaseFire?: (root: string) => void;
+  windowDays?: number;
+  /** W1-T3324: the time source as src/lib/clock.ts's shared {@link Clock} port. A bare
+   *  `() => Date` with a `?? new Date()` fallback is the legacy shape the clock-signature census
+   *  counts, and this rung added two of them — `src/run-task.ts: legacy 20 > baseline 19`. */
+  clock?: Clock;
+}): () => Promise<CiLearningCadenceRunnerResult> {
+  return async () => {
+    const at = (deps.clock ?? systemClock).date();
+    (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
+    let corpus: ReturnType<typeof collectCiFailureCorpus>;
+    try {
+      corpus = collectCiFailureCorpus(deps.loadWindow(deps.windowDays ?? CI_LEARNING_WINDOW_DAYS));
+    } catch (e) {
+      // NO WORK WAS DONE, so the allowance is returned rather than spent. Rethrown, never swallowed:
+      // the caller's `ci_learning_cadence.run_failed` row is how this becomes visible.
+      (deps.releaseFire ?? releaseCiLearningCadenceFire)(deps.root);
+      throw e;
+    }
+    const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(deps.checkoutRoot);
+    const result = mintCiLearningShards(corpus, planOrigins);
+    const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
+    const lessonRecurrences =
+      filedLessons.status === "measured"
+        ? summarizeCiLessonRecurrences(judgeCiLessonEfficacy(corpus, filedLessons.lessons), CI_LEARNING_MINT_CEILING)
+        : { status: "unreadable" as const };
+    // FILING IS BEST-EFFORT AND MUST NOT TAKE THE RUN DOWN, the same contract the CLI path holds:
+    // drafts already exist, and losing the whole firing to a filer exception turns a partial success
+    // into nothing.
+    let filed = 0;
+    let skipped = 0;
+    let refused = 0;
+    if (result.drafts.length > 0) {
+      try {
+        const filing = (deps.fileShards ?? fileCiLearningShards)(result.drafts, deps.checkoutRoot, {
+          mintTaskId: ciLearningTaskIdMinter(deps.checkoutRoot),
+          planOrigins,
+        });
+        filed = filing.filed.length;
+        skipped = filing.skipped.length;
+        refused = filing.refused.length;
+      } catch {
+        // Counts stay zero — "drafted but not filed" is a distinct outcome and the row below says so.
+      }
+    }
+    return {
+      status: result.status,
+      draftCount: result.drafts.length,
+      excludedCount: result.excludedFindings.length,
+      unreadableCount: result.unreadableShas.length,
+      lessonRecurrences,
+      filedCount: filed,
+      skippedCount: skipped,
+      refusedCount: refused,
+    };
   };
 }
 
@@ -24993,6 +25277,9 @@ export async function daemonCommand(
   // undefined and the whole rung is dead code, exactly how #1066 merged auto-triage's consumer
   // with no producer.
   const digestCadenceHooks = target.isSelf ? buildDigestCadenceDaemonHooks({ config }) : undefined;
+  // W1-T2923: one policy-gated cadence over the repository-intake rungs that used to require
+  // hand-run verbs. SELF-TARGET ONLY: every runner writes this harness checkout/state.
+  const intakeRungHooks = target.isSelf ? buildIntakeRungsDaemonHooks({ config }) : undefined;
   // W1-T2304: the board-review rung. SELF-TARGET ONLY, same reason as the rungs above — the
   // marker, the report artifact and the proposal registry all live under THIS process's own
   // config.root. WITHOUT THIS LINE `deps.checkBoardReview` is undefined and the whole rung is
@@ -25282,6 +25569,8 @@ export async function daemonCommand(
         // and writes nothing (Law 5), so it is safe to run unattended from the start.
         checkDigestCadence: digestCadenceHooks?.checkDigestCadence,
         runDigestCadence: digestCadenceHooks?.runDigestCadence,
+        checkIntakeRungs: intakeRungHooks?.checkIntakeRungs,
+        runIntakeRung: intakeRungHooks?.runIntakeRung,
         // BOARD-REVIEW RUNG (W1-T2304's design, wired here). Same shape as the two cadences
         // immediately above and gated the same way — SAFE ON in policy data (plan/policy.yaml's
         // `boardReview` row): the rung writes one report artifact and drafts registry proposals,
@@ -30022,11 +30311,6 @@ export function buildSweepHook(
       // quiet one through §4 (never kills/signals it — see runWorkerStallDetectorRung's own
       // doc). Own try/catch inside the rung.
       runWorkerStallDetectorRung(owner, repo, config, ledgerPath, runId, workerStallMs ?? DEFAULT_WORKER_STALL_MS, log);
-      // W1-T436 — the weekly feedback docket rung: gathers the five human-feedback capture
-      // surfaces and files at most one inbox proposal per rolling 7-day window. Own
-      // try/catch inside the rung; a `state/last-feedback-docket.json` marker keeps this a
-      // no-op on every poll but the first one due each week.
-      runFeedbackDocketRung(config, ledgerPath, runId, log);
       // W1-T2575 — the mount-headroom sweep's missing recommendation leg: turns
       // scripts/mount-headroom-sweep.mjs's measured (type, risk, class) cells into ratifiable
       // inbox proposals (or, far more often, a named refusal) via `recommendMounts`. Own
@@ -35574,6 +35858,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
   },
   {
+    name: "ledger-compact",
+    syntax: "rmd ledger-compact [--older-than <days>] [--max-sources <n>] [--dry-run]",
+    summary: "Compact one bounded window of old ledger rotations without losing a distinct row.",
+    detail: "operator-only archive compaction over the existing compactRotations primitive: selects the oldest rotations strictly older than --older-than (default 7 days), refuses a --max-sources value above the 50-source memory ceiling, preserves every distinct row, atomically writes one gzip replacement, then removes only the source files that replacement covers. --dry-run executes the same reads and exact dedupe to print sourceCount, rowsWritten, duplicatesCollapsed and archiveName while writing nothing. It never touches the live ledger, never runs from rotateLedger or a daemon cadence, and refuses to overwrite an unselected archive if a row timestamp would collide with its name.",
+  },
+  {
     name: "hand-runs",
     syntax: "rmd hand-runs",
     summary: "Print which verb sequence the operator keeps hand-running, on demand.",
@@ -36582,6 +36872,11 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(ledgerGrepCommand(rest, ...)) cannot carry a DA hit without forking the process; ledgerGrepCommand's own logic is unit-tested in test/report-commands.test.ts (same irreducible-glue shape as the hand-runs dispatch case below).
   if (cmd === "ledger-grep") {
     process.exit(ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") }));
+  }
+  // diff-cov: process-boundary — main() only translates ledgerCompactCommand's tested return into
+  // process.exit; selection, dry-run, collision refusal, atomic replacement and cleanup are unit-tested.
+  if (cmd === "ledger-compact") {
+    process.exit(ledgerCompactCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(handRunsCommand(rest)) cannot carry a DA hit without forking the process; handRunsCommand's own logic — arg validation, the state-dir resolution, the refused/measured render — is unit-tested in test/hand-run-census.test.ts (same irreducible-glue shape as the sibling ledger-grep dispatch case).
   if (cmd === "hand-runs") {

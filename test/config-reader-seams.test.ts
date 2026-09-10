@@ -336,7 +336,18 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5. The file set is UNCHANGED
   // (`src/run-task.ts` already carried the other reads above), so the `files` assertion below
   // needed no edit.
-  assert.equal(readers.length, 29, `expected 29 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // THIRTY since `buildIntakeRungsDaemonHooks`'s own `policyFor` (run-task.ts, W1-T2923) landed —
+  // also SEAMED (`deps.policy ?? loadPolicy(policyPath(repoRoot))`), resolving the `intakeCadence`
+  // rows that give the repository-intake rungs (ops/issues/alertFix/inbox/feedbackDocket) their own
+  // daemon schedule. It is the SIXTH structural sibling of the hook-builder shape above, not a new
+  // kind of thing: the same thunk, a sibling row, beside measurementCadence, digestCadence,
+  // boardReview, ciLearningCadence and wipeTestCadence. IT PASSED TEST 2 BEFORE THIS NUMBER MOVED,
+  // which is the order this comment requires: the seam was written from the start (mirroring its
+  // five siblings), not added afterwards to quiet a red. So it is NOT allowlisted; adding it to
+  // ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5. The file set is UNCHANGED
+  // (`src/run-task.ts` already carried the other reads above), so the `files` assertion below
+  // needed no edit.
+  assert.equal(readers.length, 30, `expected 30 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

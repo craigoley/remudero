@@ -137,6 +137,20 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
 
   // ── EXEMPT: a raw `git worktree add`, deliberately not routed through worktreeAdd ──────────
   {
+    file: "src/lib/sweep.ts",
+    site: "rebaseDirtyFleetBranchViaGit",
+    creates: "a DETACHED worktree at the PR's own head sha, so that head can be rebased onto origin/main",
+    disposition: {
+      kind: "exempt",
+      because:
+        "origin/main currency is not this site's question: it cuts the worktree AT `pr.headSha`, under a " +
+        "lease the lines directly above it verify (the rung aborts on 'lease-mismatch' if origin moved), " +
+        "precisely so the rebase that follows can move THAT head onto origin/main. `worktreeAdd` cuts a " +
+        "fresh BRANCH off origin/main instead, which would discard the head this rung exists to move — the " +
+        "same shape as addWorktree above, whose exemption reads the same way.",
+    },
+  },
+  {
     file: "src/run-task.ts",
     site: "addWorktree",
     creates:

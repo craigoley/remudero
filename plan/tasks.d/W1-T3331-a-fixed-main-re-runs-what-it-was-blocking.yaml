@@ -1,0 +1,99 @@
+- id: W1-T3331
+  title: "A GREEN MAIN DOES NOT REACH THE PRs BLOCKED ON IT — main carried an expiring-fixture bomb for hours, nine open PRs were refused by it and NOTHING re-ran them when the fix landed; every one sat red on a defect that no longer existed until a human poked it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 22.00
+  files:
+    - src/lib/sweep.ts
+    - test/a-fixed-main-re-runs-what-it-was-blocking.test.ts
+  origin: "operator-session#board-wide-red-2026-09-10"
+  plan_refs: ["W1-T3309", "W1-T1127", "W1-T2999"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10, end to end, and this is a recording of one real incident rather than a
+    hypothetical. `test/review-claim-timing.test.ts:23` carried `lastActivityAt="2026-09-03T12:00:00Z"`
+    and drifted into the expiring-fixture census's seven-day margin. Reproduced on a CLEAN checkout
+    of main with no PR involved:
+      expiring-fixture-census: BLOCKED -- 1 fixture(s) CROSS their threshold within 7 day(s)
+        - test/review-claim-timing.test.ts:23 ... goes red 2026-09-17 (7.0d)
+    NINE OPEN PRs WERE REFUSED BY IT AND BY NOTHING ELSE — #4938, #4950, #4951, #4964, #4965,
+    #4967, #4968, #4969, #4970 — each `failing=1`, each on the same step. CI builds a PR as its
+    merge with main, so every one inherited a defect none of them introduced.
+    THE FIX LANDED AND CHANGED NOTHING ON THE BOARD. #4966 merged at 12:36:48Z and main's census
+    went to `OK -- 85 fixture stamp(s) measured, none crossing`. Ten minutes later all nine were
+    still red, because a PR's verdict is the verdict of ITS LAST RUN and nothing re-runs a PR whose
+    blocker was somebody else's. Every one of the nine had a newest-failure timestamp BEFORE
+    12:36:48Z — the staleness is machine-decidable, and no code decides it.
+    THE COST IS NOT THE MINUTES, IT IS THE DIAGNOSIS. Each red says `comment-load-ratchet`, because
+    the census runs inside that job. An operator reading the board sees nine unrelated
+    comment-load failures and starts nine investigations, all of which converge on one already-fixed
+    line in main. That happened, and it is why this shard exists.
+  design: |
+    (i) A PR REFUSED BY A DEFECT THAT NO LONGER EXISTS IS RE-RUN, ONCE. The sweep already reads
+    every open PR's failing checks. When a PR's newest failing check-run COMPLETED BEFORE the merge
+    commit that main now carries, its verdict describes a tree that is gone. That is the whole
+    predicate, and it is a fact about two timestamps rather than a judgement about the failure.
+    (ii) THE EVIDENCE IS THE MERGE, NOT THE CLOCK. A timestamp comparison alone is not enough and
+    MEASURED WHY: re-running on the timestamp alone produced a SECOND wave of false reds, because
+    GitHub had not yet recomputed `refs/pull/N/merge` and CI built the pre-fix main again. Before
+    re-running, the rung MERGES the PR's head with main and re-runs the failing gate locally. It
+    re-runs the PR only when that says the failure is gone. A cheap check that is wrong half the
+    time is worse than none.
+    (iii) IT RE-RUNS BY MAKING A NEW EVENT, NEVER BY REPLAYING ONE. `rerun-failed-jobs` replays the
+    pre-repair payload and is forbidden. A close/reopen produces a genuine `reopened` event that
+    carries the CURRENT body and builds against the CURRENT main.
+    (iv) ONCE PER (PR, MAIN TIP). A rung that re-runs on every pass while a real failure persists is
+    a spend loop. The pair is recorded and never repeated.
+    (iv-b) IT NEVER RE-RUNS A PR THAT ALREADY HAS A RUN IN FLIGHT, and this precondition is written
+    from damage rather than caution. `ci.yml`'s concurrency group is keyed by PR with
+    `cancel-in-progress: true`, so reopening a PR whose run is still going CANCELS it — and
+    `coverage-ratchet` reads a cancelled shard as a failed one ("a coverage shard FAILED (matrix
+    result: failure)"). MEASURED 2026-09-10 on #4938, #4950 and #4965: an operator re-trigger during
+    an in-flight run left five to six cancelled check-runs each — all four coverage shards plus
+    ci-gate — and turned three PRs that were about to go green red again. The rung must read the
+    PR's check-runs and stand down while any is `queued` or `in_progress`.
+    (v) IT WRITES ITS OWN TRACE, because W1-T3309's finding applies to this rung as much as any
+    other: a row naming the PR, the stale verdict's timestamp, the main tip it was judged against,
+    and the local gate result that justified the re-run.
+  acceptance:
+    - claim: "W1-T3331 criterion 1: a PR whose newest failure predates main's current tip, and whose failing gate passes on a local merge with main, is re-run exactly once"
+      proof: "unit test: test/a-fixed-main-re-runs-what-it-was-blocking.test.ts"
+    - claim: "W1-T3331 criterion 2: a PR whose failing gate STILL fails on a local merge with main is left alone, however stale its verdict looks"
+      proof: "unit test: test/a-fixed-main-re-runs-what-it-was-blocking.test.ts"
+    - claim: "W1-T3331 criterion 3: the same PR is not re-run twice against the same main tip"
+      proof: "unit test: test/a-fixed-main-re-runs-what-it-was-blocking.test.ts"
+    - claim: "W1-T3331 criterion 4: the re-run writes a ledger row naming the PR, the stale verdict and the main tip it was judged against"
+      proof: "unit test: test/a-fixed-main-re-runs-what-it-was-blocking.test.ts"
+  falsifier: |
+    CLOSE IF THE FLEET ALREADY DOES THIS: count PRs whose newest failing check-run predates main's
+    tip and which were re-run without a human. MEASURED 2026-09-10: nine PRs stale for at least ten
+    minutes after #4966 merged, zero re-run by anything but an operator.
+    THE STILL-BROKEN CONTROL IS MANDATORY, because "re-run stale PRs" is trivially satisfiable by
+    re-running everything. A fixture whose gate still fails on the merge must produce NO re-run.
+    Without that arm this is a loop that burns CI on PRs that were never going to pass.
+    THE MERGE-REF RACE IS THE SECOND CONTROL AND IT IS NOT THEORETICAL. MEASURED the same day:
+    reopening six PRs immediately after the fix merged produced six FRESH runs that failed on the
+    SAME already-fixed census, because GitHub served a stale `refs/pull/N/merge`. A design that
+    trusts the timestamp and skips the local merge check reproduces exactly that, so the test must
+    drive a fixture where the timestamp says stale and the local merge says still-broken, and prove
+    nothing is re-run.
+    DO NOT USE rerun-failed-jobs TO SATISFY THIS. It replays the pre-repair payload; a rung built on
+    it will appear to work on a fixture and re-run the old tree in production.
+    THE IN-FLIGHT CONTROL IS THE THIRD MANDATORY ARM. A fixture whose PR has a `queued` or
+    `in_progress` check-run must produce NO re-run, however stale its failing verdict is. Without it
+    the rung cancels the very run that would have cleared the PR, which is not a hypothetical: it is
+    what an operator doing this by hand did to three PRs on 2026-09-10.
+  note: |
+    Rule 25 CHECKED: `src/lib/sweep.ts` is ordinary src, not an instrument surface.
+    SCOPE, STATED SO IT IS NOT QUIETLY WIDENED: this re-runs PRs blocked by a defect main has since
+    fixed. It does not decide whether a failure is "real", does not rebase, does not merge, and
+    does not touch a PR whose own tree is broken.
+    CAVEAT WITH EQUAL WEIGHT: this makes a fixed main propagate; it does nothing about main going
+    red in the first place, and the expiring-fixture bomb that prompted it will recur — 67 stamps
+    sit past their thresholds today and the next to drift repeats the incident. Stamping fixtures
+    from the clock is the durable remedy and is NOT this task.

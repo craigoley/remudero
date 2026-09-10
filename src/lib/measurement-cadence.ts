@@ -1960,6 +1960,97 @@ export function recordCiLearningCadenceFire(root: string, at: Date): void {
   recordMeasurementCadenceFire(path, at, 24 * 60 * 60 * 1000);
 }
 
+/**
+ * W1-T3324 — RETURN AN ALLOWANCE A FIRING NEVER SPENT. `recordCiLearningCadenceFire` writes the fire
+ * BEFORE the run, which is right against a crash-loop re-running an expensive window and wrong
+ * against a transient outage that did no work: MEASURED 2026-09-09, a `Bad credentials (HTTP 401)`
+ * from the window read consumed the day's only allowance at `maxPerDay: 1` and produced nothing.
+ *
+ * DROPS THE NEWEST FIRE ONLY, never the file: an older fire in the same day still counts, so this
+ * cannot be used to re-run past the cadence. Absent or unreadable marker is a no-op — a release that
+ * created a marker would invent an allowance rather than return one.
+ */
+export function releaseCiLearningCadenceFire(root: string): void {
+  const path = ciLearningCadenceMarkerPath(root);
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { fires?: unknown };
+    if (!Array.isArray(raw.fires) || raw.fires.length === 0) return;
+    writeFileSync(path, JSON.stringify({ fires: raw.fires.slice(0, -1) }, null, 2));
+  } catch {
+    // Unreadable or absent: nothing to return. Never creates the marker.
+  }
+}
+
+/** The window one scheduled firing reads. A NAMED default, not a literal at the call site: the arm
+ *  hardcoded `1` where the CLI takes `--days N`, so a missed firing lost that day permanently. */
+export const CI_LEARNING_WINDOW_DAYS = 3;
+/** One scheduled CI-learning firing as the operator needs to read it — counts AND what they were
+ *  about. The ledger row already carried counts; the causes and filed ids are what made a firing
+ *  worth opening. */
+export interface CiLearningFiringReport {
+  firedAt: string;
+  status: string;
+  draftCount: number;
+  filedCount: number;
+  skippedCount: number;
+  refusedCount: number;
+  excludedCount: number;
+  unreadableCount: number;
+  filedTaskIds: readonly string[];
+  topCauses: readonly { gate: string; prs: number }[];
+}
+
+/** Keyed on the firing INSTANT, never a counter: a counter renumbers on restart and would re-stage
+ *  every past report. The same firing yields the same id, so a retry cannot duplicate it. */
+export function ciLearningReportProposalId(firedAt: string): string {
+  return `ci-learning-report:${firedAt}`;
+}
+
+/**
+ * W1-T3327 — STAGE ONE PROPOSAL PER FIRING into the registry `rmd inbox` tiers and the console
+ * renders, on the precedent `escalateRepeatingRules` (rule-efficacy.ts) sets for the same problem.
+ *
+ * WHY THE LEDGER ROW WAS NOT ENOUGH: it carries counts. A count says a firing happened; it does not
+ * say the top cause was `ci-gate` across 26 pull requests, which records were filed, or that 30
+ * more causes were excluded by the ceiling. MEASURED 2026-09-10: the daemon's stdout logs are 0
+ * bytes and the container log for the 2026-09-09 firing carried no draft lines, so the drafts
+ * themselves were unrecoverable.
+ *
+ * A BARREN FIRING STILL REPORTS. The condition that ran silently for two days was drafts minted and
+ * nothing filed; a reporter that only spoke on success would hide exactly the case worth seeing.
+ */
+export function stageCiLearningReport(
+  report: CiLearningFiringReport,
+  registryPath: string,
+  opts?: UpdateProposalRegistryOpts,
+): Proposal[] | null {
+  const id = ciLearningReportProposalId(report.firedAt);
+  const causes =
+    report.topCauses.length > 0
+      ? report.topCauses.map((c) => `${c.gate} (${c.prs} PRs)`).join(", ")
+      : "(no cause reached the ceiling)";
+  const filed = report.filedTaskIds.length > 0 ? report.filedTaskIds.join(", ") : "none";
+  return updateProposalRegistry(
+    registryPath,
+    (current) => {
+      if (current.some((p) => p.id === id)) return null; // idempotent — the instant is the key
+      return [
+        ...current,
+        {
+          id,
+          summary:
+            `ci-learning firing ${report.firedAt}: ${report.draftCount} drafted, ${report.filedCount} filed, ` +
+            `${report.skippedCount} already in the plan, ${report.refusedCount} refused by the linter, ` +
+            `${report.excludedCount} excluded by the ceiling (named, not dropped), ` +
+            `${report.unreadableCount} unreadable rollup(s). Top causes: ${causes}. Filed: ${filed}.`,
+          evidenceAnchors: [] as EvidenceAnchor[],
+        },
+      ];
+    },
+    opts,
+  );
+}
+
 /** PRIMARY CONTROL, never a BACKSTOP: nothing upstream bounds a window's repaired pairs, so this is
  *  what stops one fire flooding the plan. {@link ADOPTION_MINT_CEILING}'s number, for its reason. */
 export const CI_LEARNING_MINT_CEILING = ADOPTION_MINT_CEILING;

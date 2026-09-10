@@ -1,0 +1,72 @@
+- id: W1-T3332
+  title: "A GATE THAT READS THE PR BODY CAN NEVER SEE THE BODY BEING FIXED — `ci.yml` declares a bare `pull_request:`, which defaults to [opened, synchronize, reopened] and EXCLUDES `edited`, so repairing an acceptance block or a Remudero-Task trailer leaves the refusal standing until something unrelated pushes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 10.00
+  files:
+    - .github/workflows/ci.yml
+    - test/a-body-repair-re-evaluates-the-gate-that-read-it.test.ts
+  origin: "operator-session#board-wide-red-2026-09-10"
+  plan_refs: ["W1-T1033", "W1-T4939"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-10 on #4966, which was blocking nine other PRs at the time.
+    `acceptance-author-gate` refused it for proof-shape. Its own step name says where it reads from:
+    "Acceptance author-time gate (reads the pull_request event payload directly — no API call)". The
+    payload's `pull_request.body` IS the PR body, so the repair is a body edit — which is exactly what
+    the queue-sweep procedure prescribes, in terms: "repair a missing Remudero-Task trailer by editing
+    the body".
+    THE BODY WAS REPAIRED AND NOTHING HAPPENED. The proof was rewritten to a runnable dialect and the
+    body PATCHed. The gate stayed red, because `ci.yml` line 24 declares:
+      on:
+        pull_request:
+    with NO `types:` key. GitHub's default for that is [opened, synchronize, reopened]. `edited` is
+    not in it. So the one repair the procedure names cannot re-run the one gate that reads what was
+    repaired.
+    THE WORKAROUND COSTS A FULL CI RUN AND HAS A SHARP EDGE. Getting a fresh payload means a new
+    event: a push, or a close/reopen. Reopen was used, it worked, and it also cancelled in-flight
+    runs on three OTHER PRs the same afternoon because `cancel-in-progress` is keyed by PR — five to
+    six cancelled check-runs each, read by `coverage-ratchet` as failures. The cheap, correct event
+    was available all along and is not subscribed to.
+    `rerun-failed-jobs` IS NOT THE ANSWER AND THE PROCEDURE FORBIDS IT: it replays the pre-repair
+    payload, so a gate reading `pull_request.body` sees the OLD body and refuses again identically.
+  design: |
+    (i) THE WORKFLOW SUBSCRIBES TO `edited`. `types: [opened, synchronize, reopened, edited]` on the
+    `pull_request:` trigger, so a body repair produces a payload carrying the repaired body.
+    (ii) ONLY THE BODY-READING GATES NEED IT, and the cost of the rest is the reason this is not a
+    one-line change and must not be filed as one. An `edited` event fires on a title change, a base
+    change and every body tweak, and re-running the full matrix on each is a spend regression. The
+    jobs that do not read the payload body should skip an `edited` run, the same way they already
+    event-guard on `github.event_name == 'pull_request'` (W1-T1033's convention).
+    (iii) THE INVARIANT IS PINNED BY TEST, not by comment. `.github/workflows/ci.yml`'s trigger types
+    are asserted, and so is the set of jobs that run on `edited` — so a later editor cannot silently
+    widen it into a full re-run on every typo, nor narrow it back and re-break the repair path.
+  acceptance:
+    - claim: "W1-T3332 criterion 1: ci.yml's pull_request trigger subscribes to edited, so a body repair produces a fresh payload"
+      proof: "unit test: test/a-body-repair-re-evaluates-the-gate-that-read-it.test.ts"
+    - claim: "W1-T3332 criterion 2: an edited event runs the gates that read the PR body and does not run the full matrix"
+      proof: "unit test: test/a-body-repair-re-evaluates-the-gate-that-read-it.test.ts"
+    - claim: "W1-T3332 criterion 3: the trigger types and the edited-job set are pinned, so neither can drift unnoticed"
+      proof: "unit test: test/a-body-repair-re-evaluates-the-gate-that-read-it.test.ts"
+  falsifier: |
+    CLOSE IF `edited` IS ALREADY SUBSCRIBED: read `.github/workflows/ci.yml`'s `on:` block. MEASURED
+    2026-09-10 at lines 24-29: `pull_request:` with no `types:` key at all, and `push: branches:
+    [main]` beside it. The default excludes `edited`.
+    THE SPEND CONTROL IS MANDATORY, because "subscribe to edited" is trivially satisfiable by adding
+    one word and re-running everything. A fixture `edited` event must be shown NOT to start the
+    coverage shards or the mutation gate. Without that arm this task makes every title typo cost a
+    full matrix, which is a worse regression than the bug.
+    DO NOT PROVE THIS WITH `rerun-failed-jobs`. It replays the old payload by construction; a test
+    that uses it will pass while the real repair path stays broken.
+  note: |
+    Rule 25 CHECKED: `.github/workflows/ci.yml` is not a measurement instrument, but it IS the file
+    `isIntroducingCiYmlJob` inspects — a step-wired change here may interact with that predicate, and
+    the implementer should measure rather than assume.
+    CAVEAT WITH EQUAL WEIGHT: this fixes the RE-EVALUATION path only. It does not make any gate more
+    lenient, and a body that is still wrong after the edit is refused again — correctly. What it buys
+    is that a CORRECT repair takes effect without a full re-run or a close/reopen.

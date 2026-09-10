@@ -212,11 +212,21 @@ test("every exempt row in the real registry carries a non-blank reason (no row s
   assert.deepEqual(blanks, []);
 });
 
-test("the real registry declares EXACTLY the three exempt raw sites — the two this task's own recon found plus R-11's merge-base checkout — no more, no fewer", () => {
+test("the real registry declares EXACTLY the four exempt raw sites — the two this task's own recon found, R-11's merge-base checkout, and W1-T2999's dirty-branch rebase — no more, no fewer", () => {
   const exempt = WORKTREE_SITE_REGISTRY.filter((r) => r.disposition.kind === "exempt")
     .map((r) => `${r.file}::${r.site}`)
     .sort();
-  assert.deepEqual(exempt, ["src/run-task.ts::addWorktree", "src/run-task.ts::buildBaseProofDir", "src/run-task.ts::createFixRungWorktree"]);
+  // W1-T2999 adds the fourth: rebaseDirtyFleetBranchViaGit cuts a DETACHED worktree at the PR's
+  // own head sha so that head can be rebased onto origin/main. Routing it through `worktreeAdd`
+  // would cut a fresh branch off origin/main and discard the head the rung exists to move — the
+  // same reason addWorktree above is exempt. The count moves 3 -> 4 deliberately, which is what
+  // this pin exists to make someone say out loud.
+  assert.deepEqual(exempt, [
+    "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
+    "src/run-task.ts::addWorktree",
+    "src/run-task.ts::buildBaseProofDir",
+    "src/run-task.ts::createFixRungWorktree",
+  ]);
 });
 
 // ── (4) NO PROVISIONING BEHAVIOUR CHANGES — the census only ever reads text ──────────────────
@@ -285,6 +295,7 @@ test("findRawWorktreeAddSites finds the exact four real sites at their real line
   assert.deepEqual(
     sites.sort(),
     [
+      "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
       "src/lib/worker.ts::worktreeAdd",
       "src/run-task.ts::addWorktree",
       "src/run-task.ts::buildBaseProofDir", // R-11: the merge-base worktree the staleness check re-runs proofs in
