@@ -55,11 +55,20 @@
     with a ledgered verdict; 5 already closed by other means; the 3 open ones are the population
     above. Small today. Unbounded, because nothing drains it.
   design: |
-    (i) A CAPPED VERDICT BECOMES ITS OWN DISPOSITION, ordered STRICTLY BEFORE `mergeable`. Today
-    `deriveDisposition`'s positive match is `checksState === "green" && reviewState === "success"`,
-    which swallows this case into a disposition whose only action is one it cannot take. The new row
-    matches the same green+success pair AND a ledgered capped verdict for THIS head with no
-    recorded override, and routes to a FIXABLE disposition.
+    (i) THE CAPPED REFUSAL BECOMES A DISPATCH, AT THE ARM SITE — not a new disposition row.
+    CORRECTED 2026-09-10 AGAINST THE CODE, and the correction is the important part of this design.
+    A new `deriveDisposition` row was the obvious shape and is NOT BUILDABLE: that function is pure
+    over `OpenPrView` (`deriveDisposition(pr, policy, now)`, no ledger access), the capped flag lives
+    in the ledgered verdict, and the view is assembled in `src/run-task.ts` — which IS on
+    INSTRUMENT_SURFACE. Adding the field there alongside `sweep.ts`/`prompt-render.ts` makes the
+    diff instrument-plus-product-src, which `detectInstrumentEntanglement` refuses. Splitting it in
+    two would ship an unreachable mode first, the exact W1-T349 anti-pattern this repo records.
+    SO THE CHANGE LANDS WHERE THE LEDGER IS ALREADY IN SCOPE: the `mergeable` case already calls
+    `decideSweepArm(pr, ledgerLines)`. When that refusal is specifically the CAPPED one — read from
+    `postedArmFactsFromLedger`, never by matching the reason prose — the case DISPATCHES A FIX
+    instead of standing down. Everything stays in product `src/`, and the run-flow's own rung
+    (`src/run-task.ts`'s fix evidence) is a SIBLING concern, deliberately untouched: the stall
+    measured here is a SWEEP stall, and the sweep builds its own fix evidence already.
     (ii) THE ARM PREDICATE IS NOT TOUCHED. `decideAutoMergeArm` and `decideSweepArm` keep their
     current refusal byte for byte. This task changes WHICH DISPOSITION a capped PR receives, never
     whether a capped verdict may arm. A reviewer's instinct will be to "just arm it"; that is the
@@ -85,7 +94,7 @@
     `lint-plan`'s `proof-base-discrimination` warning to a refusal (prevention is a separate task
     with its own population), or changing what `executed_stale` means.
   acceptance:
-    - claim: "a green PR whose ledgered verdict is capped with no override receives a FIXABLE disposition, not one whose only action stands down"
+    - claim: "a capped arm refusal DISPATCHES a fix instead of standing down, so the pass acts rather than re-deriving the same refusal forever"
       proof: "unit test: test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts"
     - claim: "the arm predicate is unchanged: a capped verdict still refuses to arm, and a non-capped verdict still arms"
       proof: "unit test: test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts"
@@ -129,6 +138,11 @@
     refusal never reaches the ledger. That was WRONG: `stand_down_reason` carries the capped refusal
     verbatim, and the first read simply printed the `reason` field and dropped it. There is no
     legibility defect. The stall is real; the invisibility was the reader's.
+    THE CAPPED FLAG IS READ STRUCTURALLY, NEVER FROM PROSE. `postedArmFactsFromLedger` already
+    returns it; the stale criteria come from the same `review.posted` row's own verdict. Matching
+    `armDecision.reason` text would rot the moment that sentence is reworded, and this task's own
+    falsifier forbids it.
+
     PREVENTION IS A SIBLING AND IS DELIBERATELY NOT FOLDED IN. `lint-plan` already reports this
     shape at filing time as `proof-base-discrimination`, as a WARNING — which is how all three of
     the measured PRs shipped. Promoting it is a separate task with a separate population and its own
