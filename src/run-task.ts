@@ -23280,12 +23280,16 @@ export function breakerDetailDep(
  * ever omitted — the fallback is the shipped default, never an unbounded one, so an unwired
  * caller degrades to the pre-task ceiling rather than to "no ceiling at all."
  */
-function costGovernorGateFor(
+export function costGovernorGateFor(
   ledgerPath: string,
   runId: string,
+  now: () => number = Date.now,
 ): (dailyCostCeilingUsd?: number) => CostGovernorResult | undefined {
   return (dailyCostCeilingUsd) => {
-    const dayCostUsd = deriveDayCostUsd(readLedgerLines(ledgerPath), Date.now());
+    // Capture one instant for the whole consultation: a re-read after midnight
+    // would put the same ledger snapshot in a different UTC day window.
+    const consultationNow = now();
+    const dayCostUsd = deriveDayCostUsd(readLedgerLines(ledgerPath), consultationNow);
     const policy = dailyCostCeilingUsd === undefined ? DEFAULT_SWEEP_POLICY : { ...DEFAULT_SWEEP_POLICY, dailyCostCeilingUsd };
     const result = checkCostGovernor(dayCostUsd, policy);
     if (!result.deferred) return undefined;
@@ -23667,6 +23671,8 @@ async function drainCommand(
      *  `gh` round-trip or a real issue. Production passes nothing and gets the real reader,
      *  the real predicate and the real escalator. */
     quotaCheck?: { readGhQuota?: () => GhRateLimitBuckets; escalate?: typeof escalateQuotaExhaustion };
+    /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
+    now?: () => number;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
@@ -24031,7 +24037,7 @@ async function drainCommand(
         // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
-        checkCostGovernor: costGovernorGateFor(ledgerPath, runId),
+        checkCostGovernor: costGovernorGateFor(ledgerPath, runId, deps.now),
         // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
         // 23-open-PR incident): the SAME `openPrCount` closure the W1-T172 lanes budget already
         // reads (below), never a second GitHub read path — see queueGovernorGateFor's doc.
@@ -24763,6 +24769,8 @@ export async function daemonCommand(
     processKill?: (pid: number, signal: NodeJS.Signals) => boolean;
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
+    /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
+    now?: () => number;
   } = {},
 ): Promise<number> {
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
@@ -25434,7 +25442,7 @@ export async function daemonCommand(
         // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
-        checkCostGovernor: costGovernorGateFor(ledgerPath, runId),
+        checkCostGovernor: costGovernorGateFor(ledgerPath, runId, deps.now),
         // W1-T331: THE LIVE CEILING costGovernorGateFor's own doc, immediately above, describes —
         // re-reads the SAME repoRoot-scoped plan/policy.yaml the boot-time `policy` (line ~8754,
         // loaded ONCE for pollIntervalMs/the headroom curve) also reads, but THIS one is called
