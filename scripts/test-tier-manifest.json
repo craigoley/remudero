@@ -1168,6 +1168,7 @@
     "test/the-console-reads-like-a-mailbox.test.ts": 1198,
     "test/the-console-request-path-does-not-block.test.ts": 0,
     "test/the-console-serves-its-own-assets.test.ts": 0,
+    "test/the-contract-covers-its-own-console.test.ts": 0,
     "test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts": 1047,
     "test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts": 3048,
     "test/the-daily-rung-only-fires-when-a-human-types-it.test.ts": 5965,
