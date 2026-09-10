@@ -45,7 +45,6 @@ import {
 } from "./review.js";
 import type { ArmDecision, AutomergeHold, CriterionVerdict } from "./review.js";
 import { parseLedger } from "./retro.js";
-import { repoRoot, resolveOwnerRepo } from "./repo-location.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
   activeWorkerCount,
@@ -586,6 +585,9 @@ export interface RegisteredFixOwnerRecoveryDeps {
 export interface BuildSweepEffectsDeps {
   owner: string;
   repo: string;
+  repoRoot?: string;
+  localRepoName?: string;
+  nowMsImpl?: () => number;
   config: Config;
   ledgerPath: string;
   runId: string;
@@ -698,6 +700,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     owner,
     repo,
     config,
+    repoRoot: entrypointRepoRoot = config.root,
+    localRepoName = repo,
+    nowMsImpl = () => Number(new globalThis.Date()),
     ledgerPath,
     runId,
     plan,
@@ -767,7 +772,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     });
   if (deps.reviewRunner) reviewRunner = deps.reviewRunner;
 
-  const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
+  const repoDir = repo === localRepoName ? entrypointRepoRoot : join(config.root, "repos", repo);
+  const repoRoot = entrypointRepoRoot;
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
   // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
   // rung's per-(repo, branch) exclusive claim (dispatchFix, below) reuses this directory rather
@@ -1624,7 +1630,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           throw e;
         }
 
-        worktreePath = join(worktreesDir(config), `sweep-${task.id}-${Date.now()}`);
+        const dispatchNowMs = nowMsImpl();
+        worktreePath = join(worktreesDir(config), `sweep-${task.id}-${dispatchNowMs}`);
         try {
           const recoveredHead = createFixRungWorktree(repoDir, worktreePath, realBranch);
           if (recoveredHead) {
@@ -1661,7 +1668,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const settingsFile = renderWorkerSettings({
           templatePath: join(repoRoot, "settings", "worker.json"),
           hooksDir: join(repoRoot, "hooks"),
-          outPath: join(config.root, "tmp", `sweep-fix-settings-${task.id}-${Date.now()}.json`),
+          outPath: join(config.root, "tmp", `sweep-fix-settings-${task.id}-${dispatchNowMs}.json`),
         });
         const budgetUsd = task.budget_usd ?? defaultBudgetUsd;
 

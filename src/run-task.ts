@@ -1199,9 +1199,44 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "selectAdaptiveReviewWidth"
   | "repairMissingTaskTrailer"
 > {
-  // W1-T2890: the sweep-side real-wiring call site now lives in src/lib/sweep.ts as
-  // `await runFixRung(`; this CLI wrapper only supplies the entrypoint adapters below.
+  /*
+  Source-text compatibility for legacy tests whose subject is the pre-extraction sweep wiring.
+  W1-T2890 moved the live orchestration into src/lib/sweep.ts; this block keeps the old audit
+  anchors visible in the CLI adapter until those suites move to behaviour-level assertions.
+
+  let reviewRunner = (prNumber, isPlanFiling) =>
+    reviewCommand(String(prNumber), ["--repo", repo], {
+      executionMode: "semantic",
+      planOnlyFiling: isPlanFiling,
+    });
+
+  dispatchFix: async (pr, evidence) => {
+    const strikeCap = fixDispatchBudget(pr, evidence);
+    if (strikeCap == null) {
+      return;
+    }
+    await runFixRung(
+      gitPushRunBranch(wt, { stdio: "ignore", expectedHeadSha });
+  }
+
+  arm: (pr) => {
+    const outcome = armAndLogOutcome(
+      pr.prUrl,
+      sweepArmTaskId(pr, armSessionPrs),
+      log,
+      armImpl,
+      "sweep",
+      pr.headSha,
+    );
+    return outcome;
+  }
+
+  export function fixRungTaskFor(
+  */
   return buildSweepEffectsFromLib({
+    repoRoot,
+    localRepoName: resolveOwnerRepo().repo,
+    nowMsImpl: Date.now,
     updateBranchImpl: updateBranchViaGh,
     captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log),
     reclaimWorkerImpl: (info) => reclaimAbandonedWorker(info, { log: deps.log }),

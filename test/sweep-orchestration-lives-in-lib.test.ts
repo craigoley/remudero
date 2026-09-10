@@ -98,6 +98,8 @@ function baseDeps(root: string, overrides: Partial<BuildSweepEffectsDeps> = {}):
   return {
     owner: "craigoley",
     repo: "remudero-fixture",
+    repoRoot: process.cwd(),
+    localRepoName: "remudero",
     config: { root, claudeBin: "/bin/true" } as Config,
     ledgerPath: join(root, "state", "ledger.ndjson"),
     runId: "SWEEP-W1-T2890",
@@ -376,6 +378,73 @@ test("W1-T2890: dispatchFix moved to lib preserves diverged owner refs before re
       logs.find((l) => l.step === "sweep.fix.checkout_owner_divergence_preserved")?.extra?.recovery_ref,
       "refs/rmd-recovery/W1-T2890",
     );
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2890: dispatchFix moved to lib names unreadable owner salvage identity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-sweep-effects-dispatch-missing-sha-"));
+  const shim = ghShim(
+    [
+      {
+        when: "pr view https://github.com/craigoley/remudero/pull/2890 --json headRefName,headRefOid,body",
+        stdout: JSON.stringify({ headRefName: "run-W1-T2890-1789022939729", headRefOid: "remote123456789", body: "" }),
+      },
+    ],
+    { kind: "w1-t2890-missing-sha-gh" },
+  );
+  const oldPath = process.env.PATH;
+  try {
+    process.env.PATH = `${shim.dir}:${oldPath}`;
+    mkdirSync(join(root, "state", "inflight"), { recursive: true });
+    mkdirSync(join(root, "repos", "remudero-fixture"), { recursive: true });
+
+    const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const effects = buildLibSweepEffects({
+      ...baseDeps(root),
+      log: (step, extra) => logs.push({ step, extra }),
+      dispatchFixPreflightStandDownImpl: async () => undefined,
+      registeredWorktreeOwnerImpl: () => join(root, "worktrees", "owner"),
+      registeredOwnerRecovery: {
+        capture: () => ({
+          path: join(root, "worktrees", "owner"),
+          localSha: undefined,
+          remoteSha: "remote123456789",
+          ageMs: 10,
+          pathState: "managed",
+          attachmentState: "exact",
+          treeState: "clean",
+          remoteState: "exact",
+          historyState: "ahead",
+          claimState: "clear",
+          processState: "clear",
+        }),
+        remove: () => undefined,
+      },
+      decideRegisteredFixOwnerRecoveryImpl: () => ({ kind: "publish-ahead" }),
+      fixBranchClaimKeyImpl: () => "claim-key",
+    });
+
+    await effects.dispatchFix!(
+      {
+        prNumber: 2890,
+        prUrl: "https://github.com/craigoley/remudero/pull/2890",
+        headSha: "remote123456789",
+        taskId: "W1-T2890",
+        priorStrikes: 0,
+        mergeState: "clean",
+        checksState: "failure",
+      } as never,
+      { unmetCriteria: [], ciFailures: [] } as never,
+    );
+
+    const declined = logs.find(
+      (l) => l.step === "sweep.fix.checkout_claim_declined" && l.extra?.owner_recovery_reason === "owner_salvage_identity_unreadable",
+    );
+    assert.equal(declined?.extra?.worktree_path, join(root, "worktrees", "owner"));
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
