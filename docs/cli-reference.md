@@ -22,6 +22,7 @@ usage:
   rmd lint-plan [--plan <path>] [--base <git-ref>]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
   rmd plan-reconcile [--plan <path>] [--write]   # Flip status: queued to merged on shards the credit projection reports merged.
   rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
+  rmd audit --fixture <path> [--repo <target>]   # Grade a deterministic source gather against a frozen recon fixture's finding table.
   rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
   rmd next-task-id [--plan <path>] [--offline] [--reserve]   # Print (or --reserve atomically claim) the next free W1-T<n> task id.
   rmd emissions [--days N]   # Which CLI verbs wrote no ledger line in the window -- dead-capability detection.
@@ -173,6 +174,16 @@ rmd proof-queue-audit [--plan <path>]
 ```
 
 W1-T1053: resolves every OPEN, UNMERGED task's proof through the reviewer's OWN parser+resolver (lib/review.ts) against the real checkout and names every one that can never resolve — refused-parse, name-filtered-zero-match (W1-T229's shape), or grep-path-absent — split by cause with the offending task ids; a forward-referencing whole-file test path for a not-yet-written test is NEVER reported (CLAUDE.md). IT IS A REPORT, NOT A GATE (lib/proof-queue-audit.ts): exits 0 unconditionally on the analysis itself, regardless of how many offenders it names; only a malformed invocation exits non-zero. FAILS OPEN (prints nothing audited, still exit 0) on a shallow checkout, same posture as lint-plan's whole-plan split.
+
+### `rmd audit`
+
+Grade a deterministic source gather against a frozen recon fixture's finding table.
+
+```
+rmd audit --fixture <path> [--repo <target>]
+```
+
+W1-T2924: the T2 monthly rung docs/audits/README.md names and, until this task, had zero consumers for. Runs a fixed, deterministic gatherer set (lib/audit.ts's AUDIT_GATHERERS — file/function sizes vs scripts/source-size-baseline.json, execFileSync sites without a nearby timeout, direct `gh` spawns, Date.now() sites, process.env reads, readFileSync(src) in tests, the stryker.conf.json mutation-ratchet's module scope, continue-on-error security-scanner workflows unregistered in ci-gate.yml, tsconfig noUncheckedIndexedAccess, dangling doc-to-source citations, and existing baseline/ratchet script pairs) over --repo's source (default: this checkout), parses --fixture's own `| R-n | … |` findings table, and grades each fixture finding REPRODUCED when a gatherer's finding cites the same evidence file (and symbol, where the fixture's citation names one) — printing `reproduced: N/M` plus the unreproduced ids. NO LLM CALL: the README's bar is a reproduction rate, and a deterministic gather is what makes it a measurement rather than a judgement. IT IS A REPORT, NOT A GATE: a well-formed invocation always exits 0, regardless of the count; only a malformed invocation (bad flag, unreadable --fixture) exits non-zero.
 
 ### `rmd preflight`
 
