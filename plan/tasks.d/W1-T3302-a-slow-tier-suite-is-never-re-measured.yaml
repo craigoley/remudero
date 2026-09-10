@@ -5,7 +5,8 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
+  band_meaning: span
   budget_usd: 16.00
   files:
     - scripts/test-tier-manifest.mjs
