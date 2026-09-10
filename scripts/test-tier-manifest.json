@@ -99,6 +99,7 @@
     "test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts": 217,
     "test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts": 1010,
     "test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts": 981,
+    "test/a-red-check-arrives-with-its-reason.test.ts": 0,
     "test/a-red-pr-with-no-enumerable-check-hands-nothing-to-a-fixer.test.ts": 1318,
     "test/a-red-quality-gate-is-visible-to-the-sweep.test.ts": 915,
     "test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts": 0,

@@ -233,6 +233,8 @@ export type CiTailSource = "log" | "annotations";
 export type CiAnnotationFallback =
   | { outcome: "recovered" }
   | { outcome: "empty" }
+  | { outcome: "bare-exit-code" }
+  | { outcome: "skipped-limit" }
   | { outcome: "failed"; detail: string };
 
 /** The closed set of reasons a log tail came back empty — a NAMED outcome, never an absence.

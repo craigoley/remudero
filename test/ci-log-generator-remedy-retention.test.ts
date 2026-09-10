@@ -138,7 +138,13 @@ test("W1-T2733: fetchCiFailures ITSELF carries the early remedy through — the 
   const binDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t2733-gh-`));
   writeFileSync(
     join(binDir, "gh"),
-    ["#!/usr/bin/env node", `process.stdout.write(${JSON.stringify(log)});`, "process.exit(0);"].join("\n"),
+    [
+      "#!/usr/bin/env node",
+      "const args = process.argv.slice(2).join(' ');",
+      "if (args.includes('/check-runs/')) process.exit(0);",
+      `process.stdout.write(${JSON.stringify(log)});`,
+      "process.exit(0);",
+    ].join("\n"),
   );
   chmodSync(join(binDir, "gh"), 0o755);
   const originalPath = process.env.PATH;

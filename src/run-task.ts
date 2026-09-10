@@ -26916,6 +26916,32 @@ export function reviewOrphansFor(
  * test that lets this run proves the default is reachable at all.
  */
 export type CiAnnotationFetch = (owner: string, repo: string, checkRunId: string) => string[];
+export type CiJobLogFetch = (owner: string, repo: string, jobId: string) => string;
+
+export const BARE_EXIT_CODE_ANNOTATION = "Process completed with exit code 1";
+/** PRIMARY CONTROL: per pass, this is the default ceiling on annotation API reads. */
+export const DEFAULT_CI_ANNOTATION_READ_LIMIT = 8;
+
+export interface CiFailureFetchOptions {
+  fetchAnnotations?: CiAnnotationFetch;
+  fetchJobLog?: CiJobLogFetch;
+  annotationReadLimit?: number;
+}
+
+function ciFetchOptions(options: CiAnnotationFetch | CiFailureFetchOptions | undefined): Required<CiFailureFetchOptions> {
+  if (typeof options === "function") {
+    return {
+      fetchAnnotations: options,
+      fetchJobLog: defaultCiJobLogFetch,
+      annotationReadLimit: DEFAULT_CI_ANNOTATION_READ_LIMIT,
+    };
+  }
+  return {
+    fetchAnnotations: options?.fetchAnnotations ?? defaultCiAnnotationFetch,
+    fetchJobLog: options?.fetchJobLog ?? defaultCiJobLogFetch,
+    annotationReadLimit: options?.annotationReadLimit ?? DEFAULT_CI_ANNOTATION_READ_LIMIT,
+  };
+}
 
 /** The real annotations read: `gh api` against the endpoint that answers, parsed as JSON. */
 export function defaultCiAnnotationFetch(owner: string, repo: string, checkRunId: string): string[] {
@@ -26925,13 +26951,54 @@ export function defaultCiAnnotationFetch(owner: string, repo: string, checkRunId
   return out.split("\n").filter((l) => l.trim() !== "");
 }
 
+/** The real Actions job-log read. This endpoint stayed readable when `gh run view --log` returned zero bytes. */
+export function defaultCiJobLogFetch(owner: string, repo: string, jobId: string): string {
+  return ghExec(["api", `repos/${owner}/${repo}/actions/jobs/${jobId}/logs`], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    maxBuffer: 1 << 22,
+  });
+}
+
+export function extractCiFailureRegion(log: string, tailLines: number): string {
+  const lines = log.split("\n");
+  const failingTestsAt = lines.findIndex((line) => /(?:✖|✕|✗|x)\s+failing tests:/i.test(line.trim()));
+  if (failingTestsAt >= 0) {
+    const summaryAt = lines.findIndex(
+      (line, index) =>
+        index > failingTestsAt && /^\s*(?:#|ℹ)\s+(?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)\b/.test(line),
+    );
+    const end = summaryAt >= 0 ? summaryAt : failingTestsAt + tailLines;
+    return lines.slice(failingTestsAt, Math.min(end, failingTestsAt + tailLines)).join("\n").trim();
+  }
+  return lines.slice(-tailLines).join("\n").trim();
+}
+
+function retainGeneratorRemediesForRegion(fullLog: string, region: string): string {
+  const regionLines = region.split("\n");
+  const seen = new Set(regionLines.map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
+  const retained: string[] = [];
+  for (const line of (fullLog ?? "").split("\n")) {
+    if (remedyGeneratorNamedInLog(line) === undefined) continue;
+    const trimmed = line.trim();
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    retained.push(trimmed);
+    if (retained.length >= MAX_RETAINED_REMEDY_LINES) break;
+  }
+  if (retained.length === 0) return region;
+  return [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n");
+}
+
 export function fetchCiFailures(
   owner: string,
   repo: string,
   rollup: RollupCheck[] | undefined,
   tailLines = 60,
-  fetchAnnotations: CiAnnotationFetch = defaultCiAnnotationFetch,
+  options: CiAnnotationFetch | CiFailureFetchOptions = {},
 ): CiFailure[] {
+  const fetch = ciFetchOptions(options);
+  let annotationReads = 0;
   const failing = dedupeRollupByLatestAttempt(rollup ?? []).filter((c) => {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     return REQUIRED_CHECK_FAIL.has(s);
@@ -26953,56 +27020,21 @@ export function fetchCiFailures(
     // four PRs — so the annotation fallback below needs no new id plumbing and no new rollup field.
     // Hoisted out of the `try` so the fallback can reach it after the read has already failed.
     const jobId = c.detailsUrl?.match(/\/job\/(\d+)/)?.[1];
-    try {
-      if (jobId) {
-        const out = ghExec(["run", "view", "--job", jobId, "--repo", `${owner}/${repo}`, "--log-failed"], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-        });
-        // W1-T2733: the tail, PLUS any declared generator remedy the slice would have discarded.
-        // Identical bytes to the plain slice whenever the log names no recognised remedy.
-        logTail = retainGeneratorRemedyLines(out, tailLines);
-        // A read that SUCCEEDS but yields nothing is a genuinely quiet job, not a failed read —
-        // the one case where an empty tail is the honest answer, and the one the other two
-        // causes must stay distinguishable from.
-        logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
-        if (logUnavailable === undefined) tailSource = "log";
-      }
-    } catch (err) {
-      // Reading the error's own text must not itself throw, or the best-effort contract would
-      // leak an exception out of the very catch that exists to contain one.
-      let detail = "unknown error";
-      try {
-        const e = err as { code?: unknown; message?: unknown };
-        const code = typeof e?.code === "string" && e.code ? `${e.code}: ` : "";
-        const message = typeof e?.message === "string" && e.message ? e.message : String(err);
-        detail = `${code}${message}`.slice(0, MAX_CI_LOG_FAILURE_DETAIL);
-      } catch {
-        /* keep the placeholder — a cause is still named, which is the whole point */
-      }
-      logUnavailable = { kind: "fetch-failed", detail };
-      logTail = "";
-    }
-    // W1-T2298 - THE FALLBACK, PLACED WHERE THE BLOB READ GIVES UP RATHER THAN BESIDE IT. The log
-    // tail stays PREFERRED: this runs only when that read failed or returned nothing, so a readable
-    // log can never be displaced and every existing recogniser keeps matching exactly what it
-    // matched before. On a container lane the blob read is a standing 403 - measured with this
-    // function's own argv - which left every logTail-keyed recogniser scanning an empty string
-    // while the same detail sat unread in a check-run annotation the API serves 200.
-    //
-    // BEST-EFFORT, AND IT NEVER OVERWRITES THE LOG'S OWN NAMED CAUSE. W1-T2291 made `fetch-failed`
-    // and `empty-log` mean something; a fallback that replaced them would take that back. On
-    // success the cause is CLEARED because a tail now exists; on failure the cause stands and the
-    // attempt is recorded beside it.
     let annotationFallback: CiAnnotationFallback | undefined;
-    if (jobId && logUnavailable !== undefined) {
+    if (jobId && annotationReads < fetch.annotationReadLimit) {
       try {
-        const messages = fetchAnnotations(owner, repo, jobId).filter((m) => m.trim() !== "");
-        if (messages.length > 0) {
+        annotationReads += 1;
+        const messages = fetch.fetchAnnotations(owner, repo, jobId).filter((m) => m.trim() !== "");
+        const bareExitOnly =
+          messages.length > 0 &&
+          messages.every((m) => m.trim() === BARE_EXIT_CODE_ANNOTATION || m.trim() === `Error: ${BARE_EXIT_CODE_ANNOTATION}`);
+        if (messages.length > 0 && !bareExitOnly) {
           logTail = messages.join("\n").split("\n").slice(-tailLines).join("\n");
           logUnavailable = undefined;
           tailSource = "annotations";
           annotationFallback = { outcome: "recovered" };
+        } else if (bareExitOnly) {
+          annotationFallback = { outcome: "bare-exit-code" };
         } else {
           annotationFallback = { outcome: "empty" };
         }
@@ -27019,6 +27051,31 @@ export function fetchCiFailures(
           /* keep the placeholder - an outcome is still named, which is the whole point */
         }
         annotationFallback = { outcome: "failed", detail };
+      }
+    } else if (jobId) {
+      annotationFallback = { outcome: "skipped-limit" };
+    }
+    if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code")) {
+      try {
+        const out = fetch.fetchJobLog(owner, repo, jobId);
+        const extracted = extractCiFailureRegion(out, tailLines);
+        // W1-T2733: the region, PLUS any declared generator remedy the slice would have discarded.
+        // Identical bytes to the region whenever the log names no recognised remedy.
+        logTail = retainGeneratorRemediesForRegion(out, extracted);
+        logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
+        if (logUnavailable === undefined) tailSource = "log";
+      } catch (err) {
+        let detail = "unknown error";
+        try {
+          const e = err as { code?: unknown; message?: unknown };
+          const code = typeof e?.code === "string" && e.code ? `${e.code}: ` : "";
+          const message = typeof e?.message === "string" && e.message ? e.message : String(err);
+          detail = `${code}${message}`.slice(0, MAX_CI_LOG_FAILURE_DETAIL);
+        } catch {
+          /* keep the placeholder — a cause is still named, which is the whole point */
+        }
+        logUnavailable = { kind: "fetch-failed", detail };
+        logTail = "";
       }
     }
     return {
