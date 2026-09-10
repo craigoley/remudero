@@ -11,10 +11,15 @@ import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
 const require = createRequire(import.meta.url);
 
-/** The two full local suites completed in 1,024,664 ms (17.1 minutes) on 2026-09-09. Thirty
- * minutes leaves nearly thirteen minutes of headroom while still refusing a suite that has stopped
- * making progress. This is deliberately LOCAL: CI keeps its independently configured 35-minute
- * job timeouts. */
+/** BACKSTOP (W1-T1266) — it cannot fire on a healthy run, only on one that has already stopped
+ * making progress, and the measurement is why: the two full local suites completed in 1,024,664 ms
+ * (17.1 minutes) on 2026-09-09. Thirty minutes leaves nearly thirteen minutes of headroom while
+ * still refusing a stalled suite. Naming the kind is what stops a later resize from quietly
+ * promoting this into the thing that normally stops the run, which is the defect W1-T1266 exists
+ * for. THE SIBLING TAG IS DELIBERATELY NOT SPELLED HERE: the census matches either kind word
+ * anywhere in the block, so naming the other one would leave this declaration ambiguous and
+ * satisfied by the wrong tag. This is deliberately LOCAL: CI keeps its independently configured
+ * 35-minute job timeouts. */
 export const LOCAL_FULL_SUITE_TIMEOUT_MS = 30 * 60 * 1_000;
 
 const BOUNDED_SUITE_OUTPUT_TAIL_CHARS = 4_096;
