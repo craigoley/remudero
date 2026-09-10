@@ -157,7 +157,9 @@ export function sweepArmTaskId(pr: { taskId?: string; prNumber: number }, armSes
  * defect. With the id present the strike cap keys on it exactly as it does for a plan task.
  *
  * `risk` is DEFAULT_RISK because a mount must resolve and a PR carries no risk field.
- *
+ */
+
+/**
  * `acceptance` FOR A SYNTHETIC TASK (round 2, PR #1146's own review-floor failure): the ORIGINAL
  * premise here — "empty because a no-task PR has no plan criteria, which costs nothing since the
  * only disposition reaching this path seeds `criteria: []` and targets FAILING CHECKS, never a
@@ -219,6 +221,7 @@ function isSyntheticOrchestratorLaneId(taskId: string): boolean {
  * This never widens WHICH PRs are fixable — the disposition set is untouched — only whether the
  * rung can act on one the sweep has already classified.
  */
+
 /**
  * Is `head` ANY dispatched run's own branch — `run-<taskId>-<epochMs>`, the shape every
  * worker push takes (`const branch = \`run-${runId}\``)? TASK-AGNOSTIC, unlike status.ts's
@@ -266,7 +269,9 @@ export function fixHeadAcceptable(head: string | undefined, taskId: string, synt
  * reachable ONLY when the two disagree, so a future change to `fixHeadAcceptable` that this
  * function is not taught about surfaces in telemetry as an honest "unattributed" rather than as a
  * confidently wrong cause. It is named to read that way on a dashboard.
- *
+ */
+
+/**
  * The reasons, exhaustive over today's predicate:
  *   - `head_unresolved`    — `gh pr view` resolved no `headRefName`. The SAME `!head` case the
  *                            predicate's own first guard refuses, and the one the call site's
@@ -419,7 +424,9 @@ function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncr
  * unwrapped up through `collectWorkerResult`'s `if (!sawResult) throw err` and `spawnWorker`'s own
  * pass-through catch (worker.ts) whenever ITS OWN clock-bound watchdog did not itself trip, so the
  * `signal` property really does survive, unaltered, all the way to this catch.
- *
+ */
+
+/**
  * THE SIGNAL ALONE NEVER DECIDES ANYTHING (the shard's own correction to its brief): this fleet
  * sends itself the identical `SIGKILL` from at least three of its OWN paths (`killProcessGroup`'s
  * default, `deployer.ts`'s forced-deploy kickstart, W1-T1044's wall-clock reclaim) — so this
@@ -870,6 +877,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // (it preserves the pre-#968 assumption for fakes that return nothing), which meant the
     // real sweep kept recording `acted:true` for refused arms and #968 was inert in
     // production. A brace and a `return` are the whole difference.
+
     //
     // W1-T449 — ROUTED THROUGH THE SHARED WRAPPER, NOT A BARE CALL. This used to call
     // `armAutoMerge` directly, so a successful sweep arm left NO ledger trace of its own —
@@ -883,6 +891,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // the review lane already mints and ledgers under (gated on `armSessionPrs`) rather than
     // arming nothing for a session PR (no `Remudero-Task:` trailer). `pr.taskId` itself is
     // still passed straight through here, unchanged from before this task.
+
     //
     // W1-T1117: `attemptError` is a SIDE CHANNEL, not a second `gh pr merge` attempt — the
     // wrapped closure passed to `armAndLogOutcome` still calls `sweepArmImpl` exactly ONCE; it
