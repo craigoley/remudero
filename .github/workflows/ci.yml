@@ -1355,6 +1355,20 @@ jobs:
       - name: Contract-coverage ratchet (no first-party route escapes the contract)
         run: node scripts/contract-coverage-ratchet.mjs
 
+      # CONSOLE-PARITY ratchet (W1-T2926) — every COMMANDS verb maps to a console route or a
+      # stated cli-only reason; an unmapped verb fails outright, and the recorded cli-only SET
+      # in scripts/console-parity-baseline.json may only SHRINK.
+      #
+      # WHY IT MATTERS. Audit recon-2026-09-05 §6, move 5: the console served 49 routes against
+      # 65 COMMANDS entries at f7ceb86 — 48 verbs (deploy, sync, retro, triage, plan, review,
+      # fix, sweep, onboard among them) reachable only from a shell, and nothing measured the
+      # gap. MEASURED 2026-09-10: 76 COMMANDS entries, 50 declared routes, 62 recorded cli-only.
+      #
+      # A STEP, NOT A JOB, same reasoning as the contract-coverage step directly above it.
+      # FALSIFIER: test/console-parity-ratchet.test.ts.
+      - name: Console-parity ratchet (every verb maps to a route or a stated cli-only reason)
+        run: npm run --silent console-parity
+
   baseline-monotonic:
     # BASELINE-MONOTONIC gate (W1-T2906). Every ratchet above reads ITS OWN scripts/*-baseline.json
     # from this PR's tree, so a PR that edits one of those SCORE floors/ceilings down (or up, for a
