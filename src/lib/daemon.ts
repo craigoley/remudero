@@ -163,10 +163,80 @@ export function daemonExitCode(stopReason: DaemonStopReason): number {
  *  {@link daemonExitCode} deliberately cannot see: the stop detail. A second function rather than a
  *  second parameter, because point-free callers would otherwise be handed an array index as a stop
  *  detail. Fail-closed: anything not positively transient stays `error` (W1-T2546). Forensics: docs/forensics/daemon.md. */
+/**
+ * W1-T3310 — THIS REPO'S OWN PRE-PUSH GATE, REFUSING. `hooks/pre-push` prints this banner at the
+ * start of a line and exits non-zero; the push then fails and the task cannot proceed.
+ *
+ * NARROW AND ANCHORED ON PURPOSE. A bare `/REFUSED/` would catch a worker echoing the word, and an
+ * unanchored match would catch this file's own prose quoted in a task's output. The banner is stable
+ * text emitted by a checked-in hook, which is the strongest thing available to match on.
+ */
+/**
+ * W1-T3319 — ONE TASK'S FAILURE, RECOGNISED STRUCTURALLY RATHER THAN BY A TOOL'S PROSE.
+ *
+ * `drain.ts` has exactly TWO `summary("error", ...)` sites and BOTH build their detail as
+ * `${taskId}: ${message}` — one wrapping `deps.runOne` in a try/catch, one reporting a lane's
+ * recorded failure. So every drain-level error is ALREADY a per-task failure and exit 1 is
+ * reachable by nothing else. The task-id prefix is a property of the EMITTER, not a guess about how
+ * some tool words its failure.
+ *
+ * THIS REPLACES W1-T3310's BANNER MATCH, which keyed on the pre-push hook's refusal text. That was
+ * right about the case it saw and blind to the next one: the very next crash was a failed GitHub
+ * check-runs read, which carries no such banner and exited 1 like all the rest. Matching the
+ * emitter's own shape cannot drift when a tool rewords itself.
+ *
+ * EXPORTED FOR ITS OWN FIXTURE (negative-reachability-ratchet): a regex surface must be driven
+ * directly with BOTH arms, because a pattern exercised only through a caller proves nothing about
+ * where it STOPS — and stopping is the load-bearing arm here. If this matched an unprefixed detail,
+ * a genuine crash would be reclassified as blocked and docker's budget would protect nothing.
+ *
+ * NARROW BY CONSTRUCTION, IN TWO WAYS, and the second was forced by an existing test rather than
+ * chosen: the task-id prefix both sites emit, anchored at the start — not "anything with a colon" —
+ * AND `Command failed: `, the shape a SPAWNED COMMAND's failure carries.
+ *
+ * WHY THE SECOND HALF EXISTS. W1-T2546's criterion 3 pins that an UNRECOGNISED failure still exits
+ * as a crash, "so this can only ever NARROW what counts as one", and it drives that with
+ * task-prefixed `TypeError` / `AssertionError` / `SyntaxError` details. A first draft of this rule
+ * keyed on the task prefix alone and reclassified all three — which would have been wrong, not just
+ * test-breaking: a TypeError inside `runOne` is a defect in RMD ITSELF and will recur on every task,
+ * which is precisely the "meaningful regression" the operator's ruling still reserves a stop for.
+ * A spawned command failing is the task's problem; the daemon's own code throwing is the daemon's.
+ * All five measured fleet crashes are `Command failed:` — a push and a GitHub read — so the narrow
+ * rule covers every observed case and leaves the crash budget pointed at real defects.
+ */
+export const PER_TASK_FAILURE_RE = /^W\d+-T[0-9A-Za-z]+: Command failed: /;
+
+/**
+ * ONE TASK'S FAILURE IS NOT THE DAEMON'S CRASH — the fourth instance of one pattern (W1-T490's
+ * stale restart, W1-T2537's blocked pass, W1-T2546's environmental refusal, W1-T3310's gate
+ * refusal), and now the GENERAL case rather than another special one.
+ *
+ * MEASURED on the fleet host 2026-09-10: three `exited 1`, three `pre-push REFUSED`, three
+ * `test-tier-manifest: 1 test file` — a 1:1:1 correspondence — against `RestartPolicy=on-failure:5`.
+ * The daemon dispatched normally between each exit. At five, docker stops restarting and the fleet
+ * stays down behind a green board.
+ *
+ * IT IS BLOCKED, NOT A FIFTH CODE: the task genuinely cannot proceed and must be reported, which is
+ * exactly what {@link DAEMON_EXIT_BLOCKED} already means — and `deploy/entrypoint.sh` already
+ * retries 76 on the right pause. A fifth code would need a matching entrypoint arm, and that file is
+ * IMAGE-BAKED: it would sit inert until a rebuild while the fleet is one restart from stopping.
+ *
+ * THIS BOUNDS THE CRASH BUDGET, IT DOES NOT DELETE IT. Exits 75/76/77 each get a bounded
+ * in-container retry (100 attempts) before falling through to the throttle and a real docker
+ * restart. A genuinely broken daemon still reaches docker — after 100 bounded attempts instead of on
+ * the first task that trips a tool. A new code would need a new meaning.
+ *
+ * ORDER IS LOAD-BEARING. The transient check runs FIRST and keeps precedence, so a push that failed
+ * on a network fault or a rate limit is still environmental (77) even if a gate banner is somewhere
+ * in the same buffer. Fail-closed is unchanged: text matching neither stays `error` → 1, because a
+ * push can fail for reasons that ARE crashes — a dead credential, a non-fast-forward — and mapping
+ * every push failure to 76 would hide a real credential outage as "blocked".
+ */
 export function daemonExitCodeForSummary(summary: Pick<DaemonSummary, "stopReason" | "stopDetail">): number {
   if (summary.stopReason !== "error") return daemonExitCode(summary.stopReason);
   const detail = summary.stopDetail;
   if (detail !== undefined && classifyFailure({ text: detail }) === "transient") return DAEMON_EXIT_ENVIRONMENTAL;
+  if (detail !== undefined && PER_TASK_FAILURE_RE.test(detail)) return DAEMON_EXIT_BLOCKED;
   return daemonExitCode(summary.stopReason);
 }
 

@@ -1,0 +1,95 @@
+- id: W1-T3321
+  title: "NOTHING KNOWS WHICH GATES CAN ONLY BLOCK — census every refusal surface against the REPAIR/ROUTE/CLOSE ruling and report, per gate, whether its remedy is computable, needs judgement, or is a genuine harm bar; today the answer is tribal knowledge and the resting-block state has at least four measured producers"
+  repo: remudero
+  depends_on: [W1-T3318]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files: [src/lib/gate-posture.ts, test/every-refusal-surface-declares-its-posture.test.ts]
+  origin: "operator-session#gate-posture-2026-09-10"
+  plan_refs: ["W1-T3318", "W1-T3319", "W1-T3320", "W1-T3311", "W1-T3206", "W1-T3275"]
+  status: queued
+  attempts: 0
+  note: |
+    THE CENSUS IS THE DELIVERABLE, NOT THE CONVERSIONS. Converting a gate is that gate's own task,
+    sized and reviewed on its own evidence (W1-T3311 was one; W1-T3319 and W1-T3320 are two more).
+    What does not exist is the LIST — which surfaces can refuse, and which of the three postures each
+    one's remedy actually admits. Without it, "stop blocking" is applied wherever someone last got
+    stung, which is how the tier gate survived four daemon crashes before anyone looked at it.
+  rationale: |
+    THE RULING (W1-T3318) IS UNAPPLIABLE WITHOUT AN INVENTORY. It says a gate REPAIRS, ROUTES, or
+    CLOSES, and that a resting block is not an outcome. Nothing in the repo enumerates the surfaces
+    that can refuse, so nothing can say which ones already comply.
+
+    FOUR MEASURED PRODUCERS OF THE RESTING BLOCK, found by accident rather than by any census:
+
+      1. `hooks/pre-push`'s test-tier admission. Refused a computable remedy its own message named.
+         Cost: two operator pushes and FOUR daemon crashes in one day, zero defects caught. Converted
+         by W1-T3311 — after the fact.
+      2. `daemonExitCodeForSummary`. One task's throw exits the whole daemon; five occurrences took
+         RestartCount to 4 of 5. W1-T3319.
+      3. The doctrine byte caps. Refuse a rule and the knowledge dies with the PR — twice measured,
+         and raising the cap does not touch the per-PR net rule that actually refuses. W1-T3320.
+      4. `blocked_ci` re-dispatch. W1-T2923, W1-T2924 and W1-T2962 each ended blocked_ci TWICE in one
+         night, W1-T3274 was attempted three times, and the cost-anomaly detector fired 18 times
+         alongside — W1-T2924 at $11.37 against a $2.90 median. Re-running a task into the same block
+         is the resting state with a spend attached.
+
+    A FIFTH, DIFFERENT IN KIND AND WORTH THE CENSUS SEEING: `verify: human`. W1-T3206 measured 60
+    such shards, 45 still queued, the oldest parked seven weeks — "a one-way park with no release"
+    until `rmd approve` shipped. That is a resting block on WORK rather than on a PR, and it shows
+    the census must cover surfaces that stop a task, not only surfaces that stop a diff.
+
+    AND ONE THAT MUST BE JUDGED, NOT ASSUMED: `hooks/deny-floor.sh`'s 180s read floor. It refused
+    roughly eight operator reads in a single session — but the limit it models is real, and it was
+    written after four secondary-limit 403s in that same session. Its defect is SHAPE, not existence:
+    a flat 180s cannot tell GitHub's search bucket (~30/min) from core (5000/hour), so it over-refuses
+    the cheap case and under-protects the expensive one. The census should record it as REPAIR-able
+    (pace the call rather than refuse it) rather than as a harm bar.
+  design: |
+    (i) DERIVE THE POPULATION, NEVER HAND-ENUMERATE IT. A hand list goes stale by DROPPING coverage,
+    which is the failure INSTRUMENT_SURFACE already recorded (W1-T402). Find refusal surfaces from
+    the tree — non-zero exits in `hooks/`, `scripts/*-check.mjs` and `*-ratchet.mjs`, ci.yml jobs,
+    and the verdicts that halt a drain — and require every one found to carry a declared posture.
+    (ii) A DECLARED POSTURE, NOT AN INFERRED ONE. The census cannot decide whether a remedy is
+    computable; a human can. Each surface declares REPAIR / ROUTE / CLOSE with a reason, and the
+    census fails on an UNDECLARED surface — the same shape as ci-parity's "every real job has an
+    entry, mirrored or excluded with a reason".
+    (iii) REPORT, DO NOT ENFORCE THE CONVERSION. This task must not change any gate's behaviour. It
+    makes the posture visible and the gaps countable; converting is each gate's own task, on its own
+    evidence. A census that also converts cannot be reviewed for either job.
+    (iv) THE COUNT IS NOT THE ANSWER. Report each surface BY NAME with its declared posture and
+    whether it currently complies. A bare "N surfaces, M non-compliant" is the technically-true
+    aggregate this repo has already been misled by once (`lint-plan`'s failing-split).
+    (v) COVER TASK-STOPPING SURFACES, not only diff-stopping ones. `verify: human` and `blocked_ci`
+    re-dispatch stop WORK without ever touching a PR, and a census that sees only hooks and CI jobs
+    would report the fleet compliant while its most expensive resting block is untouched.
+  acceptance:
+    - claim: "the refusal-surface population is derived from the tree, so a new gate joins the census without anyone editing a list"
+      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+    - claim: "a surface with no declared posture FAILS the census by name, rather than being silently absent"
+      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+    - claim: "the report names each surface, its posture and whether it complies — never only a count"
+      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+    - claim: "task-stopping surfaces are in scope, not only diff-stopping ones, so verify:human and blocked_ci re-dispatch are counted"
+      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+    - claim: "the census changes no gate's behaviour — it reports posture and does not convert"
+      proof: "unit test: test/every-refusal-surface-declares-its-posture.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if the repo already enumerates its refusal surfaces with a
+    declared posture. MEASURED 2026-09-10: `INSTRUMENT_SURFACE` lists gates that GRADE other PRs (a
+    different question), `CI_PARITY_TABLE` lists ci.yml jobs (a subset), and neither records whether
+    a gate's remedy is computable.
+    PROVE THE DERIVATION LOAD-BEARING: plant a synthetic refusal surface with no declared posture and
+    require the census to name it; a hand-maintained list will not see it. That planted control is
+    the whole difference between this and a list someone has to remember to edit.
+    RUN THE OVER-COUNT CONTROL TOO: a script that exits non-zero for a REASON THAT IS NOT A REFUSAL —
+    a usage error, a missing argument — must not be counted as a gate, or the census reports noise
+    and gets ignored within a week.
+    DO NOT convert any gate in this task. A census that also changes behaviour cannot be reviewed for
+    either job, and the conversions each need their own measured evidence.
+    DO NOT resolve this by deleting refusal surfaces. The ruling narrows WHEN a gate may stop work;
+    it does not say a gate may not check.

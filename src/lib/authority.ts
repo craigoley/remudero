@@ -247,7 +247,7 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   {
     id: "sweep-close-superseded-pr",
     action: "close an unmerged PR the sweep judged superseded",
-    module: "src/run-task.ts",
+    module: "src/lib/sweep.ts",
     symbol: "buildSweepEffects(...).close",
     boundary: "gh-pr-close",
     gate: "policy",
@@ -259,7 +259,7 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   {
     id: "sweep-ci-job-rerun",
     action: "REST POST one failed CI job's rerun endpoint",
-    module: "src/run-task.ts",
+    module: "src/lib/sweep.ts",
     symbol: "buildSweepEffects(...).requeueCheck",
     boundary: "gh-job-rerun",
     gate: "always",
