@@ -5565,41 +5565,34 @@ export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
   // is a diff MOVING the instrument that judges it; here the instrument is introduced WITH the product it was
   // written to measure, and its ceiling only ever ratchets debt down from that first recording.
   "scripts/clock-signature-baseline.json",
-  // W1-T2891 — THE MUTATION TRIGGER'S TWO WIRING FILES. These earn the clock-signature entry's SECOND
-  // argument (unsatisfiable for the task that introduces it) and, unusually, need the FIRST one
-  // argued rather than asserted, because neither file is a baseline and one of them can move a score.
+  // W1-T2891 — STRYKER'S PR-GATE CONFIG. Exempt for the clock-signature entry's SECOND reason:
+  // UNSATISFIABLE FOR THE TASK THAT INTRODUCES IT. R-42 requires `commandRunner.command` to name the
+  // suites importing the mutated module, so a PR that extracts a module and gives it a suite must
+  // list that suite here — and the instrument-only PR rule 25 prescribes cannot exist, because the
+  // entry names a test file that does not exist until the product change lands. The blocking gate
+  // says so itself: "add it to stryker.conf.json (an instrument-only PR; Standing rule 25 forbids
+  // shipping that edit beside a src/ change)".
   //
-  // WHY IT IS UNSATISFIABLE. R-42 requires stryker's `commandRunner.command` to name exactly the test
-  // files that import the mutated module, and `scripts/mutation-relevant-paths.json` to name every
-  // file that command runs. A PR that EXTRACTS a module and gives it a suite therefore adds a test
-  // file that both wiring files must immediately list — MEASURED on #4951: without the entries,
-  // `test/mutation-ratchet.test.ts` refuses with "imports src/lib/classify.ts but is NOT in stryker's
-  // commandRunner, so its assertions kill no mutants and the score silently drops"; with them, rule 25
-  // refuses the same diff. The instrument-only PR the rule prescribes cannot exist, because the entry
-  // it would add names a test file that does not exist until the product change lands. That gate's own
-  // message states the trap in terms: "add it to stryker.conf.json (an instrument-only PR; Standing
-  // rule 25 forbids shipping that edit beside a src/ change)".
+  // THE LEDGER/FLOOR TEST IS ARGUED HERE, NOT ASSERTED, because this file is not a baseline and can
+  // move a score. THE FLOOR IS ELSEWHERE — `scorePct` in scripts/mutation-baseline.json, still on
+  // the surface and still refused beside a src/ change. The two vectors this file does carry are
+  // each closed by a gate that does not depend on rule 25, MEASURED by attempting both cheats with
+  // this exemption in place (#4951, 2026-09-10):
+  //   - narrowing `mutate` — test/mutation-ratchet.test.ts pins it with deepEqual, not a bound:
+  //     refused.
+  //   - padding `command` with an unrelated suite — test/mutation-trigger-covers-its-own-command.test.ts
+  //     refuses it, alone or with relevant-paths padded to match. Named explicitly because a first
+  //     probe that OMITTED that suite reported the padding passing, and a fault injection aimed at
+  //     the wrong gate is indistinguishable from a gate that does not work.
   //
-  // WHY EXEMPTING THEM CANNOT LAUNDER A SCORE, which is the question the LEDGER/FLOOR test asks and
-  // which these files do not answer on shape alone. THE FLOOR IS NOT HERE: it is `scorePct` in
-  // `scripts/mutation-baseline.json`, a separate path that stays on the surface and is still refused
-  // beside a src/ change. The two gaming vectors these files DO carry are each closed by a blocking
-  // gate that does not depend on rule 25:
-  //   - NARROWING `mutate` would raise the score by mutating less. `test/mutation-ratchet.test.ts`
-  //     asserts `deepEqual(strykerConfig.mutate, ["src/lib/classify.ts"])` — an exact pin, not a
-  //     bound. MEASURED by narrowing it to a nonexistent path with this exemption in place: refused.
-  //   - PADDING `commandRunner.command` with easy suites would raise the score by killing cheap
-  //     mutants. `test/mutation-trigger-covers-its-own-command.test.ts` is the gate that closes this
-  //     one, and it is named here because the first draft of this comment credited R-42 in the
-  //     abstract and a probe that omitted that suite reported the padding PASSING. MEASURED with all
-  //     three gates, adding `test/plan.test.ts` (which imports nothing from the mutated module):
-  //     command padded alone, refused (2 failures); command AND relevant-paths padded together,
-  //     still refused (1 failure). The contents are derived, not chosen.
-  // What is left after those two pins is bookkeeping: which already-required suite is listed. That is
-  // why these are exempt from ENTANGLEMENT only — both stay on INSTRUMENT_SURFACE for every other
-  // purpose, and the raw evidence stays readable.
+  // TRAP FOR WHOEVER TOUCHES THOSE TWO ASSERTIONS: they are load-bearing for this exemption and do
+  // not say so locally. Loosen either and this becomes the hole rule 25 exists to prevent.
   "stryker.conf.json",
-  "scripts/mutation-relevant-paths.json",
+  // W1-T2891's sibling, and the easy half: a per-file LIST of the test paths that command runs.
+  // Ledger-shaped in the source-size sense — adding a path records what already runs and cannot make
+  // a failing falsifier pass. It is exempt for the same unsatisfiability reason as the entry above,
+  // since R-42 requires the two files to agree and neither can move without the other.
+    "scripts/mutation-relevant-paths.json",
   // W1-T2901's sibling of the clock-signature entry, and it earns that entry's SECOND argument, not
   // just its first. LEDGER, NOT FLOOR: a per-population CEILING on classes extending the built-in
   // error type directly; raising a row records debt and cannot make a failing falsifier pass, which
