@@ -1,0 +1,94 @@
+- id: W1-T3337
+  title: "THE REVIEW GATE PUBLISHES AUTHORITATIVE VERDICTS FROM CODE IT HAS ALREADY RECORDED AS STALE — `daemon.stale_code` is ledgered and read by nothing, so the reviewer spent hours refusing PRs on a predicate that had been superseded on main, and the verdict carries no provenance that would let a reader tell a stale refusal from a real one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files:
+    - src/lib/self-sync.ts
+    - src/lib/review.ts
+    - test/a-stale-gate-cannot-publish-a-verdict.test.ts
+  origin: "operator-session#stale-gate-2026-09-10"
+  plan_refs: ["W1-T3312", "W1-T2813", "W1-T2630", "W1-T2964"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CLEANEST POSSIBLE EVIDENCE: THE SAME HEAD SHA, TWICE, WITH OPPOSITE VERDICTS AND NO CODE
+    CHANGE BETWEEN THEM. Measured 2026-09-10 from the commit-status timeline, not inferred:
+
+      #4951  head 1d1969bac  15:38:06Z  FAIL — entangled: instrument path(s)
+                                        scripts/mutation-relevant-paths.json, stryker.conf.json
+                             16:07:58Z  PASS — 3 criteria substantiated, no test theater
+      #4915  head 265093a88  15:29:55Z  FAIL — unmet: proof executed and FAILED on the PR head
+                             16:10:29Z  merged as 3b2774d3f
+
+    Neither PR's tree changed between its two verdicts. The only variable was which copy of
+    `src/lib/review.ts` the reviewer had loaded. #4988 put both of those instrument paths in
+    `ENTANGLEMENT_EXEMPT_INSTRUMENTS` on main at 15:00:18Z — THIRTY-EIGHT MINUTES BEFORE the refusal
+    that cited them. The daemon's checkout was 23 commits behind at the time.
+
+    THE STALENESS WAS NOT UNDETECTED. IT WAS DETECTED, RECORDED, AND IGNORED. This is the part that
+    makes it a design defect rather than an outage:
+
+      OBSERVED src/lib/self-sync.ts:392-393 — `checkServiceFreshness` "assesses only — no mutation,
+        no re-exec, no refusal; the caller ledgers `daemon.tree_dirty`/`daemon.stale_code` and
+        proceeds."
+      OBSERVED src/lib/self-sync.ts:414 — `MATERIAL_ADVANCE_PATHS` includes `src/`, so an advance
+        touching `src/lib/review.ts` is MATERIAL by this module's own definition. The daemon had
+        every fact it needed.
+      OBSERVED src/lib/sweep.ts:3775 — the codebase already names `daemon.tree_dirty` as one of the
+        "dead signal[s]", recorded and read by no decision. This filing is that comment's own
+        prediction coming true.
+      OBSERVED src/lib/self-sync.ts:421-423 — "a skipped [restart] leaves the daemon reasoning with
+        code it cannot account for, indefinitely." That is exactly what happened, for hours.
+
+    THE REMEDY ALREADY EXISTS ONE MODULE OVER, WHICH IS WHY THIS IS CHEAP. OBSERVED
+    src/lib/serve.ts:2034-2046 — `gateStaleCodeExit` resolves the current sha, compares it to the
+    boot sha, and when the code is stale AND no client or in-flight write would be cut off, it logs
+    `serve.stale_code_exit` and exits 0 so the supervisor restarts it on fresh code. The console
+    already refuses to serve from stale code. The REVIEWER, whose output is a required status that
+    blocks merge, does not.
+
+    WHY DIRT WAS ABLE TO PIN IT, AND WHY THAT IS NOT THE BUG TO FIX. self-sync's dirty check is
+    already scoped to the incoming diff rather than to every dirty path (OBSERVED
+    src/lib/self-sync.ts:189-202, W1-T446) — it refuses only on a CONFLICT. One tracked-modified
+    file, `test/review-claim-timing.test.ts`, was also touched by the incoming advance, so the
+    fast-forward refused, correctly and by design. DIRT NEVER BLOCKS A SERVICE is likewise
+    deliberate (OBSERVED src/lib/self-sync.ts:388): the daemon writes its own tree, so dirt is its
+    steady state. Both behaviours are right. The defect is not that the fast-forward refused; it is
+    that the refusal is survivable indefinitely WHILE STILL PUBLISHING BINDING VERDICTS.
+
+    TWO CHANGES, AND THE SECOND MATTERS MORE THAN THE FIRST.
+
+    (1) A stale reviewer must stop asserting. Mirror `gateStaleCodeExit` on the review path: when
+    the loaded module graph is behind origin/main on a MATERIAL path, the reviewer must not post a
+    `failure` status. Not posting is strictly better than posting a wrong refusal — a PR with no
+    verdict is visibly waiting, whereas a PR with a stale FAIL looks like it has a defect, and that
+    is what sent an operator after three PRs that had nothing wrong with them.
+
+    (2) A verdict must carry the provenance of the gate that produced it. The reviewer knows the sha
+    of the tree it evaluated and does not record it. Had the 15:38:06Z refusal on #4951 said which
+    `review.ts` it ran, the 38-minute gap would have been legible immediately instead of being
+    recovered by hand. This is the durable half: (1) narrows the window, (2) makes any future window
+    self-describing.
+
+    FALSIFIER SHAPE. Drive the reviewer with a boot sha deliberately behind an origin sha whose diff
+    touches `src/`, and assert NO failure status is published; then repeat with an immaterial advance
+    (`docs/`) and assert the verdict IS published, so the guard cannot degrade into "never review".
+    Both arms are required — a guard that refuses everything passes the first assertion and is
+    useless.
+
+    CAVEAT, WITH EQUAL WEIGHT TO THE ABOVE. This filing does NOT claim the reviewer was wrong about
+    every PR in that window, and the enumeration was not performed: #4915 and #4951 are two
+    confirmed cases, not a measured population, and I did not establish how many other PRs were
+    reviewed against the stale tree between roughly 15:00Z and 16:06Z. Nor does it claim the 23-commit
+    gap is typical — it is one observation on one day. It also does not settle where the restart
+    should come from: `gateStaleCodeExit` exits and leans on the supervisor, and whether the daemon
+    may do the same mid-sweep without abandoning in-flight work is a real question this rationale
+    does not answer. Finally, the operator has an explicit standing objection to upper bounds, so a
+    remedy shaped as "refuse after N minutes stale" should be expected to be rejected; the material/
+    immaterial distinction at src/lib/self-sync.ts:425 is the existing, non-arbitrary criterion and
+    the one to build on.
