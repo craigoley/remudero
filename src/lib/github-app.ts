@@ -50,8 +50,7 @@ export const INSTALLATION_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
  *  the bounded retry cadence before the loop has a retained expiry to protect. */
 export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
-/** Positive slack so a retry scheduled after a failed refresh is not planned exactly at the last
- *  millisecond one bounded exchange could finish before the retained token expires. */
+/** Slack so a failure retry is not scheduled exactly at the last bounded-exchange millisecond. */
 const REFRESH_FAILURE_RETRY_GUARD_MS = 1000;
 
 // GitHub's App-JWT contract: `iat` is backdated for clock skew and `exp` is capped at ten
@@ -471,8 +470,7 @@ export function startInstallationTokenRefresh(opts: {
           rearm(nextRefreshDelayMs(result.expiresAtMs, now()));
           return;
         }
-        // A failed mint still reschedules, but once the loop has a token expiry to protect, the
-        // retry is pulled inside that edge so one full exchange can settle before old credentials die.
+        // Once the loop has a retained expiry, failure retries must leave room for one full exchange.
         rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
       },
       (err) => {
