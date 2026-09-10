@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import { makeTempDir } from "../src/lib/tmp.js";
+import { ghStubPath, pathWith } from "./helpers/gh-stub.js";
 
 // ── W1-T3345 — A CANCELLED SHARD IS NOT A BROKEN DIFF ─────────────────────────────────────────
 //
@@ -53,18 +54,13 @@ function gates(): Gate[] {
 
 /** Run a gate's own script with a stubbed `gh` ahead of it on PATH. */
 function runGate(script: string, env: Record<string, string>, ghBody: string): { code: number; out: string } {
-  const dir = makeTempDir("w1-t3345-");
-  const bin = join(dir, "bin");
-  mkdirSync(bin, { recursive: true });
-  const gh = join(bin, "gh");
-  writeFileSync(gh, ghBody);
-  chmodSync(gh, 0o755);
-  const scriptPath = join(dir, "gate.sh");
+  const bin = ghStubPath(ghBody);
+  const scriptPath = join(makeTempDir("w1-t3345-gate-"), "gate.sh");
   writeFileSync(scriptPath, script);
   try {
     const out = execFileSync("bash", [scriptPath], {
       encoding: "utf8",
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, ...env },
+      env: { ...process.env, PATH: pathWith(bin), ...env },
     });
     return { code: 0, out };
   } catch (error) {

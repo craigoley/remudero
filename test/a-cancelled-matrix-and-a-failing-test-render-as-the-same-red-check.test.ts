@@ -16,7 +16,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 
-import { makeTempDir } from "../src/lib/tmp.js";
+import { ghAnswering, pathWith } from "./helpers/gh-stub.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -64,17 +64,13 @@ test("W1-T3345: a cancellation the PR HEAD MOVED PAST is a non-result, and is th
   // this says, and the new head runs its own shards. Blocking on it is a red with nothing behind
   // it. That is narrow on purpose: the head must be READABLE and DIFFERENT, and every other
   // cancelled shape still blocks.
-  const dir = makeTempDir("w1-t3345-super-");
-  const bin = join(dir, "bin");
-  mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, "gh"), "#!/bin/sh\necho bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n");
-  chmodSync(join(bin, "gh"), 0o755);
+  const bin = ghAnswering("b".repeat(40));
   for (const job of JOBS) {
     const r = spawnSync("bash", ["-c", collapseScript(job)], {
       encoding: "utf8",
       env: {
         ...process.env,
-        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        PATH: pathWith(bin),
         SHARD_RESULT: "cancelled",
         RUN_HEAD_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         PR_NUMBER: "1",
@@ -85,7 +81,6 @@ test("W1-T3345: a cancellation the PR HEAD MOVED PAST is a non-result, and is th
     assert.equal(r.status, 0, `${job}: a superseded run must not block — it measured a sha that cannot merge:\n${out}`);
     assert.match(out, /SUPERSEDED/, `${job}: it must name why it is not blocking`);
   }
-  rmSync(dir, { recursive: true, force: true });
 });
 
 test("W1-T3014 criterion 2: a failure NAMES a failing shard and still exits non-zero", () => {
