@@ -8,7 +8,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 10.00
-  files: [src/lib/daemon.ts, test/a-gate-refusal-is-not-a-crash.test.ts]
+  files: [src/lib/git-push.ts, src/lib/daemon.ts, test/a-gate-refusal-is-not-a-crash.test.ts]
   origin: "operator-session#daemon-health-2026-09-10"
   plan_refs: ["W1-T2537", "W1-T2546", "W1-T490", "W1-T3205", "W1-T3311"]
   status: queued
@@ -66,6 +66,23 @@
     reasons that ARE crashes or environmental faults — a dead credential, an unreachable origin, a
     non-fast-forward. Only the gate's own refusal (`hooks/pre-push`'s stable banner) may be
     reclassified; anything else keeps today's mapping exactly.
+
+    (ii-a) AND THAT TEXT DOES NOT REACH THE CLASSIFIER TODAY — MEASURED, and it is why this shard
+    also names `src/lib/git-push.ts`. `defaultPushExec` runs `execFileSync` with `stdio: "inherit"`,
+    so the hook's refusal goes straight to the terminal and the thrown error carries NOTHING of it:
+
+        execFileSync("bash", ["-c", "echo TEXT >&2; exit 1"], { stdio: "inherit" })
+          e.message -> "Command failed: bash -c echo TEXT >&2; exit 1"
+          e.stderr  -> null
+
+    So `stopDetail` reads only `Command failed: git -C <worktree> push origin HEAD`, which is
+    indistinguishable from every other push failure and would make design (ii) unimplementable as a
+    text rule. THE FIX IS TO CAPTURE STDERR WITHOUT HIDING IT: pipe stderr, re-emit it to the parent
+    so the operator still sees the refusal live, and attach it to the thrown error. That is worth
+    doing on its own terms — a push failure whose reason is invisible to the process that must react
+    to it is a defect regardless of this task — and it is the minimum that makes (ii) possible.
+    DO NOT instead swallow the output: `stdio: "inherit"` exists so a long push is not silent, and a
+    capture that stops re-emitting trades one blind spot for another.
     (iii) FAIL CLOSED. Text that does not positively match the gate's refusal stays `error`. The
     existing classifier's own stated discipline — "maybe transient is never good enough" — carries
     over unchanged: maybe-a-gate is never good enough either.
@@ -86,7 +103,9 @@
       proof: "unit test: test/a-gate-refusal-is-not-a-crash.test.ts"
   falsifier: |
     CLOSE THIS WITHOUT IMPLEMENTATION if `daemonExitCode`/`daemonExitCodeForSummary` already routes a
-    pre-push gate refusal away from 1. MEASURED 2026-09-10: it does not — `error` falls through to
+    pre-push gate refusal away from 1, OR if the push leaf already attaches its stderr to the error it
+    throws — the classifier cannot see what the leaf discards, so that half is a prerequisite and not
+    a nice-to-have. MEASURED 2026-09-10: it does not — `error` falls through to
     `return 1` and `classifyFailure` reaches `strike` on the gate's text, which is why three restarts
     were spent.
     PROVE IT LOAD-BEARING: a fixture summary carrying the gate's real refusal banner must map to 76,
