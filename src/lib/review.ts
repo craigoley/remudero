@@ -6091,8 +6091,25 @@ export function detectInstrumentEntanglement(
   const subtracted = new Set([...introducedGates, ...harmlessInstruments, ...registration.instruments]);
   const effectiveInstrumentPaths = subtracted.size === 0 ? instrumentPaths : instrumentPaths.filter((f) => !subtracted.has(f));
   const subtractedSrc = new Set(registration.srcs);
-  const effectiveSrcPaths = (introducedGates.length === 0 ? srcPaths : srcPaths.filter((f) => f !== CENSUS_REGISTRATION_PATH))
-    .filter((f) => !subtractedSrc.has(f));
+  // W1-T3272 — AN INTRODUCED GATE CLEARS ITS OWN REGISTRATION, NOT EVERYONE ELSE'S PASSENGERS.
+  // W1-T2521 subtracted CENSUS_REGISTRATION_PATH from the src half whenever ANY gate was introduced,
+  // on the reasoning that the registration exists only because the gate does. True — but applied
+  // unconditionally it also empties the src half in a diff where OTHER instruments are still
+  // standing, and an emptied src half makes the verdict false however those instruments changed.
+  // MEASURED on main by the control below, against the sibling control it differs from in ONE
+  // variable — whether the introduced gate's own name is on INSTRUMENT_SURFACE. Off the surface,
+  // introducedGates is empty, the strip never fires, and a weakened comment-load-ratchet.mjs refuses
+  // as it should. On it, the strip empties the src half and the same weakening rides along. A real
+  // census gate's PR always declares its own script (test/instrument-surface-completeness.test.ts
+  // makes it mandatory), so the on-surface reading is the one that happens.
+  // The strip therefore applies only once every instrument in the diff has itself been carved out;
+  // while one survives, the registration counts as the src half it is and the mixture refuses.
+  // Strictly stricter — it can only turn a false verdict true.
+  const everyInstrumentCarvedOut = effectiveInstrumentPaths.length === 0;
+  const effectiveSrcPaths = (introducedGates.length === 0 || !everyInstrumentCarvedOut
+    ? srcPaths
+    : srcPaths.filter((f) => f !== CENSUS_REGISTRATION_PATH)
+  ).filter((f) => !subtractedSrc.has(f));
   return {
     entangled: effectiveInstrumentPaths.length > 0 && effectiveSrcPaths.length > 0,
     instrumentPaths,
