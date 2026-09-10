@@ -26973,6 +26973,22 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
   return lines.slice(-tailLines).join("\n").trim();
 }
 
+function retainGeneratorRemediesForRegion(fullLog: string, region: string): string {
+  const regionLines = region.split("\n");
+  const seen = new Set(regionLines.map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
+  const retained: string[] = [];
+  for (const line of (fullLog ?? "").split("\n")) {
+    if (remedyGeneratorNamedInLog(line) === undefined) continue;
+    const trimmed = line.trim();
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    retained.push(trimmed);
+    if (retained.length >= MAX_RETAINED_REMEDY_LINES) break;
+  }
+  if (retained.length === 0) return region;
+  return [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n");
+}
+
 export function fetchCiFailures(
   owner: string,
   repo: string,
@@ -27044,7 +27060,7 @@ export function fetchCiFailures(
         const extracted = extractCiFailureRegion(out, tailLines);
         // W1-T2733: the region, PLUS any declared generator remedy the slice would have discarded.
         // Identical bytes to the region whenever the log names no recognised remedy.
-        logTail = retainGeneratorRemedyLines(extracted, tailLines);
+        logTail = retainGeneratorRemediesForRegion(out, extracted);
         logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
         if (logUnavailable === undefined) tailSource = "log";
       } catch (err) {
