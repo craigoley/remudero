@@ -9,6 +9,7 @@
     "test/a-cadence-marker-that-stops-advancing-is-reported.test.ts": 0,
     "test/a-cancelled-matrix-and-a-failing-test-render-as-the-same-red-check.test.ts": 367,
     "test/a-capability-ladder-is-data-not-a-substring-match.test.ts": 385,
+    "test/a-census-gate-needs-its-surface-declaration-first.test.ts": 0,
     "test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts": 4481,
     "test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts": 1385,
     "test/a-check-that-could-not-run-is-reported-as-a-failed-check.test.ts": 252,

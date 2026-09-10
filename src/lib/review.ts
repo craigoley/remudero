@@ -5259,6 +5259,17 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and `coverage-ratchet` jobs RUN, so a
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
+  // W1-T3272's expiring-fixture census, DECLARED AHEAD OF THE SCRIPT ITSELF — the one line in this
+  // list that names a path this tree does not yet carry, and the reason is Rule 25's own sequencing
+  // hole. Every OTHER carve-out arm subtracts a registration a new gate cannot ship without;
+  // NOTHING subtracts this one. Measured on #4851's real diff (a new `scripts/*-census.mjs`, its
+  // ci.yml step, its `src/lib/ci-parity.ts` disclosure and this declaration): entangled TRUE with
+  // the declaration in the diff, FALSE with the declaration already on the surface and the
+  // `src/lib/review.ts` hunk gone. `isIntroducingCensusGate` cannot reach it either way — it reads
+  // the surface COMPILED INTO THE REVIEWER, so a script whose path is declared only in the diff is
+  // not an instrument to it at all. Declaring first is the admissible ordering, and it is the whole
+  // of this entry's job. FALSIFIER: test/a-census-gate-needs-its-surface-declaration-first.test.ts.
+  "^scripts/expiring-fixture-census\\.mjs$",
   "^scripts/baseline-monotonic-check\\.mjs$", // W1-T2906: refuses a baseline-score regression against origin/main
   // W1-T2764: the ledger-step ratchet's rule logic, behind the required `ledger-steps` ci.yml job —
   // the same shape as the task-id-existence and assertion-discrimination entries above. Before that
