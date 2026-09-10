@@ -730,13 +730,13 @@ export function buildPlanFrontier(
 //
 // plan_refs is polymorphic — a ref is one of five kinds; only the section-shaped ones resolve
 // to a heading, the rest contribute nothing, or a task-id ref would fabricate a section.
-// `Task` carries no `plan_refs` field, so `readPlanRefs` below re-parses the same local files
-// {@link loadPlan} already read, pulling only `id` and `plan_refs` — never a new GitHub call.
+// `Task` now preserves `plan_refs` for the filing-risk identity boundary. `readPlanRefs` remains an
+// independent, exported rendering helper over `planPath`; changing that API is not part of the pin
+// repair. It re-parses the same local files {@link loadPlan} reads — never a new GitHub call.
 
-/** `id -> plan_refs` for every task in `planPath`, a narrow second parse of the same files
- *  {@link loadPlan} reads (see this section's header for why it can't come from {@link Task}
- *  itself). A file that fails to read or parse is skipped, never thrown — a rendering aid over
- *  the load-bearing validation {@link loadPlan} already did. */
+/** `id -> plan_refs` for every task in `planPath`, a narrow second parse retained for this exported
+ *  path-based API. A file that fails to read or parse is skipped, never thrown — a rendering aid
+ *  over the load-bearing validation {@link loadPlan} already did. */
 export function readPlanRefs(planPath: string): Map<string, string[]> {
   const refs = new Map<string, string[]>();
   const ingest = (text: string) => {

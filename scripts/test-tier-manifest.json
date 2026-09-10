@@ -1270,6 +1270,7 @@
     "test/the-review-rung-is-starved-by-the-lanes-it-shares-a-tick-with.test.ts": 1381,
     "test/the-reviewer-reads-a-sha-it-has-not-fetched.test.ts": 1037,
     "test/the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy.test.ts": 1104,
+    "test/the-ruling-pin-binds-execution-authority.test.ts": 0,
     "test/the-run-length-credential-gate-has-no-callers.test.ts": 1126,
     "test/the-scarce-resource-is-the-window-not-the-notional-dollar.test.ts": 454,
     "test/the-scheduled-learning-rung-drafts-and-discards.test.ts": 0,

@@ -2046,10 +2046,11 @@ export function machineAuthorVerifyViolation(task: Task): LintViolation | undefi
 }
 
 /**
- * W1-T2977 — the digest a `risk_ruling` pins itself to: what the task may DO (`type`, `verify`,
- * `risk`, `files`), must PROVE (`acceptance`), and TELLS a worker (`title`, `prompt`). Narrative
- * fields are OUT, so editing prose forces no re-judgment; `risk_ruling` is out too, or the pin
- * could never be recomputed for comparison. NUL-separated so `["a","b"]` and `["ab"]` differ.
+ * W1-T2977 / W1-T3344 — the digest a `risk_ruling` pins itself to: what the task may DO, what
+ * authority and evidence context it carries, what it must PROVE, and what it TELLS a worker.
+ * Narrative and bookkeeping fields are OUT, so editing prose forces no re-judgment;
+ * `risk_ruling` is out too, or the pin could never be recomputed for comparison. Values remain
+ * NUL-separated, and every set-like list has its own section marker so adjacent lists cannot alias.
  */
 export function taskRulingPin(task: Task): string {
   const h = createHash("sha256");
@@ -2057,17 +2058,45 @@ export function taskRulingPin(task: Task): string {
     h.update(v);
     h.update("\0");
   };
+  const section = (name: string): void => field(`\x01${name}`);
+  const stableValue = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(stableValue).join(",")}]`;
+    if (value !== null && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${stableValue(record[key])}`)
+        .join(",")}}`;
+    }
+    return value === undefined ? "undefined" : (JSON.stringify(value) ?? String(value));
+  };
+
   field(task.id);
   field(task.title);
+  field(task.repo);
   field(task.type);
   field(task.verify);
   field(task.risk ?? "");
+  field(task.band_meaning ?? "");
+  field(task.priority === undefined ? "" : String(task.priority));
+  field(task.author_class ?? "");
+  field(task.budget_usd === undefined ? "" : String(task.budget_usd));
   field(task.prompt ?? "");
+  field(stableValue(task.principles ?? null));
+  field(stableValue(task.context ?? null));
+
+  section("depends_on");
+  for (const dependency of [...task.depends_on].sort()) field(dependency);
+  section("plan_refs");
+  for (const ref of [...(task.plan_refs ?? [])].sort()) field(ref);
+  section("files");
   for (const f of [...(task.files ?? [])].sort()) field(f);
-  field("\x01acceptance");
+  section("acceptance");
   for (const c of task.acceptance ?? []) {
     field(c.claim);
-    field(c.proof);
+    field(c.proof ?? "");
+    field(c.satisfied_by ?? "");
+    field(c.holdout === undefined ? "" : String(c.holdout));
   }
   return h.digest("hex");
 }
@@ -2891,8 +2920,8 @@ export interface LintOpts {
   /** Jaccard cutoff for {@link unansweredDuplicateTitleViolations}. Default {@link
    *  NEAR_IDENTITY_DUPLICATE_CUTOFF}. */
   nearIdentityCutoff?: number;
-  /** THIS task's own `plan_refs` list, which `Task` carries no field for, so {@link
-   *  unansweredDuplicateTitleViolations} can see whether this shard already cites its match.
+  /** THIS task's own `plan_refs` list, supplied independently to preserve the existing pure
+   *  duplicate-detection call contract even though {@link Task.plan_refs} now survives plan load.
    *  Absent ⇒ only `task.rationale` is checked on this side. */
   taskPlanRefs?: readonly string[];
   /** A `grep:` proof's named path -> that file's text, or `undefined` when the path is not on
