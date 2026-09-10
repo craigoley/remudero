@@ -108,6 +108,8 @@ export interface ProviderCapacity {
   effort?: string;
   /** Bounded account-visible Codex broker decision captured by the same app-server read. */
   modelDecision?: CodexModelDecision;
+  /** Manual reset readiness — count and earliest expiry only, NEVER a credit id. */
+  resetCredits?: { availableCount: number; earliestExpiresAt?: number };
 }
 
 export type CodexModelTier = "economy" | "balanced" | "frontier";
@@ -430,6 +432,39 @@ interface CodexRateLimitResult {
   rateLimits?: CodexRateLimitBucket | null;
   rateLimitsByLimitId?: Record<string, CodexRateLimitBucket> | null;
   accountId?: unknown;
+  /** Manual rate-limit reset grants. Read for READINESS only — never for spending. */
+  rateLimitResetCredits?: CodexResetCreditsBlock | null;
+}
+
+/** The `rateLimitResetCredits` block as the app-server sends it. `credits[].id` is an actionable
+ *  handle for `account/rateLimitResetCredit/consume`; this module never calls that method and
+ *  {@link parseResetCredits} never carries the id out, so a leaked status file cannot become a
+ *  spend. Only `expiresAt` is read from a credit. */
+interface CodexResetCreditsBlock {
+  availableCount?: unknown;
+  credits?: Array<{ id?: unknown; status?: unknown; expiresAt?: unknown }> | null;
+}
+
+/**
+ * Non-sensitive reset readiness: how many manual resets are available, and the EARLIEST expiry
+ * when the detail is readable.
+ *
+ * THREE STATES, KEPT APART. Absent block or unreadable count => `undefined`, which the status
+ * projection renders as a missing field: the operator learns nothing was measured. A readable
+ * count with no usable expiry => the count alone, never a synthesised `0` or an invented date —
+ * a `0` would positively claim "no reset available", which is a different and wrong fact.
+ */
+export function parseResetCredits(block: unknown): { availableCount: number; earliestExpiresAt?: number } | undefined {
+  if (!block || typeof block !== "object") return undefined;
+  const raw = block as CodexResetCreditsBlock;
+  const count = raw.availableCount;
+  if (typeof count !== "number" || !Number.isFinite(count) || count < 0) return undefined;
+  const expiries = (Array.isArray(raw.credits) ? raw.credits : [])
+    .filter((credit) => credit && typeof credit === "object")
+    .map((credit) => credit.expiresAt)
+    .filter((at): at is number => typeof at === "number" && Number.isFinite(at) && at > 0);
+  const earliest = expiries.length > 0 ? Math.min(...expiries) : undefined;
+  return earliest === undefined ? { availableCount: count } : { availableCount: count, earliestExpiresAt: earliest };
 }
 
 export interface CodexModelInfo {
@@ -565,7 +600,10 @@ export function codexCapacityFromRateLimits(result: unknown): ProviderCapacity {
   }
   const reading = result as CodexRateLimitResult;
   const generic = reading.rateLimits ?? reading.rateLimitsByLimitId?.codex;
-  return capacityFromBucket(generic ?? undefined, typeof reading.accountId === "string" ? reading.accountId : undefined);
+  const capacity = capacityFromBucket(generic ?? undefined, typeof reading.accountId === "string" ? reading.accountId : undefined);
+  // Readiness rides the SAME read that already produced the buckets — no second RPC, no consume.
+  const resetCredits = parseResetCredits(reading.rateLimitResetCredits);
+  return resetCredits ? { ...capacity, resetCredits } : capacity;
 }
 
 /**

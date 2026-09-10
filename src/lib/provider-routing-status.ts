@@ -41,6 +41,20 @@ export interface ProviderRoutingProviderStatus {
   model?: string;
   effort?: string;
   modelDecision?: CodexModelDecisionStatus;
+  /** Manual reset readiness. Count and earliest expiry ONLY — see {@link projectResetCredits}. */
+  resetCredits?: ProviderRoutingResetCreditsStatus;
+}
+
+/**
+ * What the operator is allowed to learn about manual resets: that some exist, and when the
+ * soonest one lapses. Deliberately has NO id field. This status file is served verbatim by
+ * `/v1/provider-routing` (`src/lib/serve.ts`), so every property here is PUBLISHED to any reader
+ * holding the read scope; a reset-credit id is the argument to a spend, so it must not become
+ * readable through a status endpoint.
+ */
+export interface ProviderRoutingResetCreditsStatus {
+  availableCount: number;
+  earliestExpiresAt?: number;
 }
 
 export interface CodexModelDecisionOptionStatus {
@@ -251,12 +265,29 @@ function projectWindows(candidates: ReadonlyArray<ProviderCapacity["windows"][nu
   return windows;
 }
 
+/**
+ * Rebuild the readiness block FIELD BY FIELD. Never spread the parsed object: a spread would
+ * publish whatever the upstream shape gains next, and the field that grows here is the one that
+ * carries credit ids. Both numbers are re-validated because this projection is also the boundary
+ * a hand-built capacity crosses in tests and callers.
+ */
+function projectResetCredits(capacity: ProviderCapacity): ProviderRoutingResetCreditsStatus | undefined {
+  const credits = capacity.resetCredits;
+  if (!credits || typeof credits !== "object") return undefined;
+  const count = credits.availableCount;
+  if (typeof count !== "number" || !Number.isFinite(count) || count < 0) return undefined;
+  const expiresAt = credits.earliestExpiresAt;
+  const usable = typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > 0;
+  return usable ? { availableCount: count, earliestExpiresAt: expiresAt } : { availableCount: count };
+}
+
 function projectCapacity(capacity: ProviderCapacity): ProviderRoutingProviderStatus | undefined {
   const provider = providerId(capacity.provider);
   if (!provider) return undefined;
   const windows = projectWindows(capacity.windows);
   const allocationWindows = capacity.allocationWindows ? projectWindows(capacity.allocationWindows) : undefined;
   const modelDecision = projectModelDecision(capacity);
+  const resetCredits = projectResetCredits(capacity);
   return {
     provider,
     readable: capacity.readable === true,
@@ -267,6 +298,7 @@ function projectCapacity(capacity: ProviderCapacity): ProviderRoutingProviderSta
     ...(safeLabel(capacity.model) ? { model: safeLabel(capacity.model) } : {}),
     ...(safeLabel(capacity.effort) ? { effort: safeLabel(capacity.effort) } : {}),
     ...(modelDecision ? { modelDecision } : {}),
+    ...(resetCredits ? { resetCredits } : {}),
   };
 }
 
