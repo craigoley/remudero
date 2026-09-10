@@ -59,6 +59,7 @@
     "test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts": 4923,
     "test/a-lane-force-push-drops-the-head-it-never-saw.test.ts": 0,
     "test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts": 1187,
+    "test/a-live-console-review-is-runnable.test.ts": 0,
     "test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts": 5609,
     "test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts": 2282,
     "test/a-mandatory-registration-is-not-entanglement.test.ts": 0,
