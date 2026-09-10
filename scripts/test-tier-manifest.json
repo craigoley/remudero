@@ -212,6 +212,7 @@
     "test/arm-seam-default-is-opt-in.test.ts": 1365,
     "test/assertion-discrimination-check.test.ts": 13049,
     "test/attribution-unreadable-branch.test.ts": 885,
+    "test/audit-command.test.ts": 0,
     "test/authority-ratchet.test.ts": 405,
     "test/authority-table.test.ts": 1326,
     "test/auto-triage-daily-cap.test.ts": 1248,

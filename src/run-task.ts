@@ -991,6 +991,13 @@ import {
   type CreditedAmendmentReport,
   type ProofQueueAuditReport,
 } from "./lib/proof-queue-audit.js";
+import {
+  buildDefaultCorpus,
+  gatherFindings,
+  gradeFixture,
+  parseFixtureFindings,
+  type AuditCorpus,
+} from "./lib/audit.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
 import {
@@ -19054,6 +19061,77 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
   console.log(
     "\nrmd proof-queue-audit is a REPORT, not a gate — no dispatch, CI job or arm decision may consult this " +
       "verdict (lib/proof-queue-audit.ts). Exits 0 unconditionally, regardless of the count above.",
+  );
+  return 0;
+}
+
+/** Injectable seams for {@link auditFixtureCommand} — real defaults read the fixture file and
+ *  walk the real checkout, so a test can substitute either without a repo or a fixture on disk. */
+export interface AuditFixtureDeps {
+  readFixture?: (path: string) => string;
+  buildCorpus?: (repoRoot: string) => AuditCorpus;
+}
+
+/**
+ * `rmd audit --fixture <path> [--repo <target>]` — the T2 monthly rung `docs/audits/README.md`
+ * names and, until this task, had zero consumers for: `name: "audit"` never appeared in
+ * `COMMANDS` and its two frozen findings tables (`recon-2026-07-21.md`, `recon-2026-09-05.md`)
+ * graded nothing. Runs the fixed, deterministic gatherer set (lib/audit.ts's {@link
+ * AUDIT_GATHERERS}) over the target's source, parses the fixture's own `| R-n | … |` findings
+ * table, and grades every fixture finding REPRODUCED when a gatherer's finding cites the same
+ * evidence file (and symbol, where the fixture's citation names one) — lib/audit.ts's module doc
+ * has the full design.
+ *
+ * NO LLM CALL: the README's bar ("reproduces >= 80% of these 36 findings from source") is a
+ * reproduction RATE, and a deterministic gather is what makes that a measurement rather than a
+ * judgement. IT IS A REPORT, NOT A GATE, same posture as `proof-queue-audit`/`plan-reconcile`
+ * above: a well-formed invocation always exits 0, no matter how many fixture findings it fails to
+ * reproduce — only a malformed invocation (bad flag, unreadable fixture) exits non-zero.
+ */
+export function auditFixtureCommand(rest: string[], deps: AuditFixtureDeps = {}): number {
+  const badArg = unknownArgError("audit", rest, ["--fixture", "--repo"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const fixtureArg = flagValue(rest, "--fixture");
+  if (!fixtureArg) {
+    console.error("### rmd audit: --fixture <path> is required\n" + USAGE);
+    return 2;
+  }
+  const repoArg = flagValue(rest, "--repo");
+  const targetRoot = repoArg !== undefined ? resolve(repoArg) : repoRoot;
+  const fixturePath = resolve(fixtureArg);
+
+  let fixtureText: string;
+  try {
+    fixtureText = (deps.readFixture ?? ((p: string) => readFileSync(p, "utf8")))(fixturePath);
+  } catch (e) {
+    // An unreadable --fixture path is a malformed invocation, not report content -- same split
+    // lint-plan/plan-reconcile already draw between a bad argument and a bad analysis.
+    console.error(`### rmd audit: cannot read fixture ${fixturePath}: ${String((e as Error)?.message ?? e)}`);
+    return 2;
+  }
+
+  const rows = parseFixtureFindings(fixtureText);
+  if (rows.length === 0) {
+    console.log(`### rmd audit --fixture ${fixtureArg}: no '| R-n | … |' finding rows parsed — nothing to grade`);
+    return 0;
+  }
+
+  const corpus = (deps.buildCorpus ?? buildDefaultCorpus)(targetRoot);
+  const findings = gatherFindings(corpus);
+  const report = gradeFixture(findings, rows);
+  const unreproduced = report.rows.filter((r) => !r.reproduced).map((r) => r.id);
+
+  console.log(
+    `### rmd audit --fixture ${fixtureArg}: reproduced: ${report.reproducedCount}/${report.total} fixture finding(s) ` +
+      `from source (${findings.length} gatherer finding(s) over ${corpus.size} file(s))`,
+  );
+  console.log(`  unreproduced (${unreproduced.length}): ${unreproduced.join(", ") || "(none)"}`);
+  console.log(
+    "\nrmd audit is a REPORT, not a gate (docs/audits/README.md) — no dispatch, CI job or arm decision may " +
+      "consult this verdict; it grades a deterministic source gather against a frozen fixture's own findings table.",
   );
   return 0;
 }
@@ -37232,6 +37310,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T1053: resolves every OPEN, UNMERGED task's proof through the reviewer's OWN parser+resolver (lib/review.ts) against the real checkout and names every one that can never resolve — refused-parse, name-filtered-zero-match (W1-T229's shape), or grep-path-absent — split by cause with the offending task ids; a forward-referencing whole-file test path for a not-yet-written test is NEVER reported (CLAUDE.md). IT IS A REPORT, NOT A GATE (lib/proof-queue-audit.ts): exits 0 unconditionally on the analysis itself, regardless of how many offenders it names; only a malformed invocation exits non-zero. FAILS OPEN (prints nothing audited, still exit 0) on a shallow checkout, same posture as lint-plan's whole-plan split.",
   },
   {
+    name: "audit",
+    syntax: "rmd audit --fixture <path> [--repo <target>]",
+    summary: "Grade a deterministic source gather against a frozen recon fixture's finding table.",
+    detail: "W1-T2924: the T2 monthly rung docs/audits/README.md names and, until this task, had zero consumers for. Runs a fixed, deterministic gatherer set (lib/audit.ts's AUDIT_GATHERERS — file/function sizes vs scripts/source-size-baseline.json, execFileSync sites without a nearby timeout, direct `gh` spawns, Date.now() sites, process.env reads, readFileSync(src) in tests, the stryker.conf.json mutation-ratchet's module scope, continue-on-error security-scanner workflows unregistered in ci-gate.yml, tsconfig noUncheckedIndexedAccess, dangling doc-to-source citations, and existing baseline/ratchet script pairs) over --repo's source (default: this checkout), parses --fixture's own `| R-n | … |` findings table, and grades each fixture finding REPRODUCED when a gatherer's finding cites the same evidence file (and symbol, where the fixture's citation names one) — printing `reproduced: N/M` plus the unreproduced ids. NO LLM CALL: the README's bar is a reproduction rate, and a deterministic gather is what makes it a measurement rather than a judgement. IT IS A REPORT, NOT A GATE: a well-formed invocation always exits 0, regardless of the count; only a malformed invocation (bad flag, unreadable --fixture) exits non-zero.",
+  },
+  {
     name: "preflight",
     syntax: "rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]",
     summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.",
@@ -38278,6 +38362,13 @@ export async function main(
   }
   if (cmd === "proof-queue-audit") {
     process.exit(await proofQueueAuditCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(auditFixtureCommand(rest)) cannot carry a DA hit
+  // without forking the process; auditFixtureCommand's own logic — arg validation, the gather + fixture-parse +
+  // grade, and the report render — is unit-tested in test/audit-command.test.ts (same irreducible-glue shape as
+  // the sibling proof-queue-audit dispatch case above).
+  if (cmd === "audit") {
+    process.exit(auditFixtureCommand(rest));
   }
   if (cmd === "preflight") {
     process.exit(await preflightCommand(rest));

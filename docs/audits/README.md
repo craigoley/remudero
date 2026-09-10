@@ -13,6 +13,38 @@ corrections belong in the task that acts on a finding, never in the fixture.
 Read them as **a snapshot of what was true on their date**, not as current state. Several findings
 in the 2026-07-21 pass were fixed within hours of it being written.
 
+## Invocation — `rmd audit` (W1-T2924)
+
+`rmd audit --fixture <path> [--repo <target>]` is the rung's one consumer, and this document's
+own bar below is what it grades against. It runs a fixed, deterministic set of GATHERERS
+(`src/lib/audit.ts`'s `AUDIT_GATHERERS` — file sizes vs `scripts/source-size-baseline.json`,
+`execFileSync` sites with no nearby `timeout`, direct `gh` spawns, `Date.now()` sites,
+`process.env` reads, `readFileSync(src)` in tests, the `stryker.conf.json` mutation ratchet's
+module scope, `continue-on-error` security-scanner workflows absent from `ci-gate.yml`, tsconfig
+`noUncheckedIndexedAccess`, dangling doc-to-source citations, and existing baseline/ratchet script
+pairs) over `--repo`'s source (default: this checkout, never the fixture's own commit) — **no LLM
+call**, so the rate below is a measurement, not a judgement.
+
+**The grading rule.** `--fixture` names one of the `recon-YYYY-MM-DD.md` files below. Its own
+`| R-n | … | Evidence |` table is parsed, and each row's Evidence cell is split on `;` into
+citations. A fixture finding is **REPRODUCED** when ANY one of its citations names a file some
+gatherer also flagged — and, when that citation carries a backtick-quoted symbol
+(`` `daemon.boot` ``), only when a flagging on that same file also carries that symbol. One
+matching citation is enough: a finding with several evidence citations does not need all of them
+to still land, which is why a citation into a still-oversized "god file" keeps a finding
+reproducing long after its own narrower defect was fixed elsewhere.
+
+`rmd audit` prints `reproduced: N/M` plus the unreproduced ids, and — same posture as
+`proof-queue-audit`/`plan-reconcile` — **is a report, never a gate**: a well-formed invocation
+always exits 0, no matter how low the reproduction rate; only a malformed one (bad flag,
+unreadable `--fixture`) exits non-zero.
+
+**What it cannot see yet.** `depcruise`'s cycle count and `jscpd`'s clone count are named in this
+rung's design but not yet gathered — both need a subprocess this deterministic, offline gather
+deliberately avoids for now — so a fixture finding whose only evidence is a bare cycle/clone count
+with no cited file will not reproduce through this path. Extending `AUDIT_GATHERERS` with either
+is additive: no change to the grading rule above.
+
 ## `recon-2026-07-21.md` — fixture #1
 
 An external fresh-eyes production-readiness review: 36 findings across 8 pillars, every one labelled
