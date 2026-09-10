@@ -33,7 +33,7 @@ test("#4950's repair shape is refused before push", () => {
     "src/lib/ledger-compact.ts",
     "src/run-task.ts",
   ];
-  const diff = diffAdding("src/lib/ledger-compact.ts", "export function ledgerCompact() { return true; }");
+  const diff = diffAdding("src/lib/ledger-compact.ts", "export function compactedRows() { return true; }");
   const verdict = judgeRule25(diff, files);
   assert.equal(verdict.ok, false, "the precheck must refuse what the reviewer refused on #4950");
   assert.deepEqual(verdict.instrumentPaths, ["scripts/console-parity-baseline.json", "scripts/console-parity-ratchet.mjs"]);
