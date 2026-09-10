@@ -13,7 +13,7 @@
 //
 // So the outage's root cause was a step name missing from a list, and finding it took a person
 // reading two files and noticing they disagreed. That is what a gate is for.
-//
+
 // THE RULE, AND WHY IT HAS ALMOST NO FALSE POSITIVES. Calling `resolveLedgerUnion` is a DECLARATION
 // that you need history: it requires archives and refuses an incomplete corpus. Leaving a step out
 // of the retention sets is the OPPOSITE declaration — that losing old rows is acceptable. Holding
