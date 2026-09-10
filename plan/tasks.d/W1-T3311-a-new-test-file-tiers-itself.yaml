@@ -1,0 +1,100 @@
+- id: W1-T3311
+  title: "NOTHING TIERS A NEW TEST FILE, SO EVERY WORKER THAT ADDS ONE IS REFUSED AT PUSH — `hooks/pre-push`'s W1-T3205 admission demands an entry in scripts/test-tier-manifest.json and NO code path anywhere runs `--seed`, so the remedy exists only in the refusal's own prose and only a human ever performs it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  files: [hooks/pre-commit, test/a-new-test-file-tiers-itself.test.ts]
+  origin: "operator-session#daemon-health-2026-09-10"
+  plan_refs: ["W1-T3205", "W1-T3310", "W1-T2734"]
+  status: queued
+  attempts: 0
+  note: |
+    BAND. `risk: medium` with `band_meaning: blast-radius`: the diff is a seeding call and a hook
+    line, but it runs in EVERY worker's commit path, so a seed that is not idempotent turns one
+    blocked push into a permanent merge conflict across concurrent workers.
+
+    RELATIONSHIP TO W1-T3310, which must NOT be collapsed into this one. That task stops a gate
+    refusal from killing the daemon; this one stops the refusal happening. Either alone leaves a real
+    defect: without W1-T3310 any future deterministic pre-push gate reproduces the outage, and
+    without this one the fleet blocks a task per new test file forever and calls it correct.
+
+    Rule 25 CHECKED. `hooks/pre-push` is not on INSTRUMENT_SURFACE (which names
+    `^\.github/workflows/` and specific `scripts/*` rule files) and `scripts/test-tier-manifest.mjs`
+    is not a `*-ratchet.mjs`. A builder must re-measure with `detectInstrumentEntanglement` against
+    the REAL diff before pushing rather than trusting this line, since the surface list grows.
+  rationale: |
+    MEASURED 2026-09-10. `git grep 'test-tier-manifest.*--seed'` across `src/`, `hooks/` and
+    `.github/` returns ZERO matches: no worker path, no CI step, no hook, no npm script runs the
+    seed. The only place the remedy exists is the refusal message itself —
+
+        Record it with: node scripts/test-tier-manifest.mjs --seed
+
+    — which a human reads and a dispatched worker does not.
+
+    THE COST, OBSERVED THREE TIMES IN ONE DAY ON THE FLEET HOST, plus twice by hand in the same
+    session (#4910's suite, #4915's suite: both pushes refused on the first attempt for exactly this).
+    On the fleet it is worse than a wasted push: the orchestrator's fallback push fails, the drain
+    ends `stopped: error`, and the daemon exits 1 against docker's `on-failure:5` budget (W1-T3310).
+
+    WHY THE GATE IS RIGHT AND SHOULD NOT BE RELAXED. An untiered file cannot be trusted by the
+    fast/slow split, so admitting it silently would let a slow suite land in the fast lane and quietly
+    lengthen every subsequent run. The refusal is correct; what is missing is that the FIX IS PURELY
+    MECHANICAL — the seed writes `0`, a placeholder the manifest itself documents as "unmeasured,
+    defaults to the fast tier", replaced by the next `--record-evidence` pass. A gate whose remedy is
+    deterministic, has no judgement in it, and is stated in the refusal is a gate that should perform
+    it rather than describe it.
+
+    AND A REFUSAL WHOSE REMEDY NOTHING PERFORMS IS THE SHAPE W1-T2734 ALREADY NAMED from the other
+    side: an instrument that is real only when something invokes it. Here the instrument is invoked
+    and its remedy is not.
+  design: |
+    (i) THE FIX HAPPENS BEFORE THE COMMIT, NOT AT PUSH TIME. A pre-push hook cannot add a file to a
+    commit that already exists, so a hook that seeds and then refuses is still a refusal — one round
+    trip shorter, but still a blocked worker. Seed where the change is still being authored: the
+    worker's own pre-commit path, alongside the checks that already run there.
+    (ii) THE SEED IS ALREADY IDEMPOTENT — MEASURED, AND IT NARROWS THIS TASK. Running
+    `node scripts/test-tier-manifest.mjs --seed` on an already-tiered tree leaves the manifest
+    BYTE-IDENTICAL and reports "nothing to seed — every test file already has a recorded duration",
+    exit 0. So the property this design asked for exists; the script needs no change and is no longer
+    in `files:`. What remains is only that NOTHING CALLS IT. The hook must still suppress that line
+    when nothing changed, because a message on every commit is noise that trains a reader to skip the
+    hook's output entirely.
+    ALSO UNCHANGED, and the reason `hooks/pre-push` left `files:` too: the push-time admission is the
+    backstop of design (iv) and this task must not touch it.
+    (iii) THE MANIFEST STAYS APPEND-SHAPED, one entry per line, for the reason its own comment gives:
+    concurrent PRs each adding a check append a line instead of both editing one line and conflicting.
+    (iv) THE PUSH-TIME ADMISSION STAYS EXACTLY AS IT IS. It is the backstop that catches a commit made
+    without the hook (a `--no-verify`, a hand-edited index, a different client). Removing it because
+    the common path now self-seeds would remove the only thing that notices when the common path is
+    bypassed.
+    (v) NAME THE SEED IN THE COMMIT, NOT SILENTLY. A worker whose commit gained a manifest line should
+    be able to see why, so the seed reports what it added on stdout even though it is silent when idle.
+  acceptance:
+    - claim: "a tree with a new, untiered test file is seeded automatically before the commit, so the push-time admission has nothing left to refuse"
+      proof: "unit test: test/a-new-test-file-tiers-itself.test.ts"
+    - claim: "a tree whose test files are all tiered is left byte-identical — no entry added, no spurious diff for concurrent workers to conflict over"
+      proof: "unit test: test/a-new-test-file-tiers-itself.test.ts"
+    - claim: "the push-time admission still refuses an untiered file, so a commit made with the hook bypassed is still caught"
+      proof: "unit test: test/a-new-test-file-tiers-itself.test.ts"
+    - claim: "a seeded entry carries the documented unmeasured placeholder rather than a fabricated duration"
+      proof: "unit test: test/a-new-test-file-tiers-itself.test.ts"
+  falsifier: |
+    CLOSE THIS WITHOUT IMPLEMENTATION if any path already seeds the manifest before a worker pushes.
+    MEASURED 2026-09-10: `git grep 'test-tier-manifest.*--seed' -- src/ hooks/ .github/` is EMPTY, and
+    `package.json` carries no seeding script.
+    PROVE IT LOAD-BEARING: a fixture repo with one untiered test file must commit clean and then PASS
+    `--check`; with the seeding step removed it must fail `--check`. If both pass, the step is inert.
+    RUN THE IDEMPOTENCE CONTROL: seed twice on an already-tiered tree and assert the manifest is
+    byte-identical, including its trailing newline. A seed that rewrites the file every run replaces a
+    blocked push with a permanent conflict, which is worse.
+    DO NOT resolve this by relaxing the push-time admission, making it advisory, or exporting
+    RMD_PREPUSH_GATES=0 anywhere in the worker or orchestrator path. The gate is correct; the missing
+    piece is that nothing performs the remedy it names.
+    DO NOT resolve this by having the seed MEASURE the new suite's duration. That is a real run of
+    unknown length inside a commit path, and the manifest already documents `0` as the honest
+    placeholder that `--record-evidence` later replaces.
