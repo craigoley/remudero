@@ -196,12 +196,15 @@ test("an undecidable stamp reads as no stamp, so the decision allows", () => {
 });
 
 test("an unwritable stamp root never throws, so the floor cannot block work by failing", () => {
-  // Drives the DEFAULT write path: a directory that does not exist and cannot be created.
-  assert.doesNotThrow(() => stampGhRead("/proc/definitely-not-writable/gh-last-read"));
   assert.doesNotThrow(() => stampGhRead(undefined));
   // And the real path DOES write, or the two no-throws above would be vacuous.
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-stamp-`));
   try {
+    // Drives the DEFAULT write path through a deterministic ENOTDIR, rather than `/proc`, which
+    // can block under the sandbox before it returns an ordinary unwritable-path error.
+    const fileParent = join(dir, "file-parent");
+    writeFileSync(fileParent, "");
+    assert.doesNotThrow(() => stampGhRead(join(fileParent, "gh-last-read")));
     const p = join(dir, "nested", "gh-last-read");
     stampGhRead(p);
     assert.notEqual(readGhReadCadenceStampMs(p), undefined);
