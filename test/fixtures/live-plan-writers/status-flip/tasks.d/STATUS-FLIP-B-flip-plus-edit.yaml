@@ -9,10 +9,10 @@
   depends_on: []
   type: implement
   verify: auto
-  status: merged
+  status: queued
   attempts: 0
   origin: architect
   files: [test/a-status-flip-is-not-a-task-edit.test.ts]
   acceptance:
     - claim: "the fixture shard parses and lints"
-      proof: "the existing suite passes unchanged, verified by hand"
+      proof: "unit test: test/a-status-flip-is-not-a-task-edit.test.ts"
