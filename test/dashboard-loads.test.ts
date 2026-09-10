@@ -18,6 +18,7 @@
 // fetch, so a `file://` load would prove nothing about the served case this exists for).
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
+import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -33,6 +34,8 @@ const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
 };
 
 /**
@@ -52,6 +55,11 @@ const CONTENT_TYPES: Record<string, string> = {
  * header) — never `file://` either way, since a module script's import map is CORS-governed
  * the same as any other module fetch.
  */
+/** Vite writes `base: "/console/"` into the emitted index.html, so every asset URL the built page
+ *  requests is `/console/assets/...`. The mount strips that prefix; serving `build/` at the root
+ *  instead would 404 every module and prove nothing about the shipped page. */
+const CONSOLE_BASE = "/console/";
+
 function dashboardAndDaemonServer(root: string): Server {
   return createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://internal");
@@ -74,7 +82,11 @@ function dashboardAndDaemonServer(root: string): Server {
       res.end(JSON.stringify({ entries: [] }));
       return;
     }
-    const relPath = url.pathname === "/" ? "/index.html" : url.pathname;
+    // STRIP THE MOUNT PREFIX. Vite writes `base: "/console/"` into the emitted HTML, so the page
+    // asks for `/console/assets/...`; `root` here is the build directory those files sit at the
+    // top of. Serving without stripping would 404 every module and the page would prove nothing.
+    const mounted = url.pathname.startsWith(CONSOLE_BASE) ? url.pathname.slice(CONSOLE_BASE.length - 1) : url.pathname;
+    const relPath = mounted === "/" || mounted === "" ? "/index.html" : mounted;
     const filePath = join(root, relPath);
     if (!filePath.startsWith(root)) {
       res.writeHead(403).end();
@@ -117,18 +129,27 @@ after(async () => {
 
 test("apps/dashboard: npm run build emits main.js and its api-client dependency BESIDE index.html, and the page loads and renders the live board through them", async () => {
   await rm(join(DASHBOARD_ROOT, "build"), { recursive: true, force: true });
-  const buildResult = spawnSync(process.execPath, [join(process.cwd(), "node_modules", "typescript", "bin", "tsc"), "-p", "tsconfig.json"], {
-    cwd: DASHBOARD_ROOT,
-    encoding: "utf8",
-  });
+  // THE REAL BUILD, not a stand-in for it: `vite build`, exactly what `npm run build:console`
+  // runs and what ships. The previous `tsc -p tsconfig.json` here is now a TYPE GATE that emits
+  // nothing (that tsconfig carries `noEmit`), so it succeeded while producing no page at all.
+  const buildResult = spawnSync("npm", ["run", "--silent", "build"], { cwd: DASHBOARD_ROOT, encoding: "utf8" });
   assert.equal(buildResult.status, 0, `apps/dashboard's own build failed:\n${buildResult.stdout}\n${buildResult.stderr}`);
-  assert.ok(existsSync(join(DASHBOARD_ROOT, "build", "apps", "dashboard", "src", "main.js")), "build must emit main.js under build/, beside index.html");
+
+  // THE CONTRACT IS "index.html AND THE ASSET IT NAMES", never a fixed filename: Vite hashes the
+  // entry, so asserting `main.js` would pin a name the toolchain is free to change. Read the
+  // emitted HTML and require the file it actually points at.
+  const emittedHtml = join(DASHBOARD_ROOT, "build", "index.html");
+  assert.ok(existsSync(emittedHtml), "build must emit index.html");
+  const html = readFileSync(emittedHtml, "utf8");
+  const entry = /<script[^>]+src="([^"]+)"/.exec(html);
+  assert.ok(entry, `emitted index.html names no module script:\n${html}`);
+  assert.ok(entry[1].startsWith(CONSOLE_BASE), `the entry must be served under ${CONSOLE_BASE}, got ${entry[1]}`);
   assert.ok(
-    existsSync(join(DASHBOARD_ROOT, "build", "packages", "api-client", "src", "client.js")),
-    "build must also emit the api-client dependency the import map resolves to",
+    existsSync(join(DASHBOARD_ROOT, "build", entry[1].slice(CONSOLE_BASE.length))),
+    `index.html points at ${entry[1]} but the build emitted no such file`,
   );
 
-  const server = dashboardAndDaemonServer(DASHBOARD_ROOT);
+  const server = dashboardAndDaemonServer(join(DASHBOARD_ROOT, "build"));
   const port = await listen(server);
   try {
     const context = await browser.newContext();
@@ -141,12 +162,15 @@ test("apps/dashboard: npm run build emits main.js and its api-client dependency 
 
     // `?daemon=` names the page's OWN origin — isAllowedDaemonUrl's first sanctioned case (see
     // dashboardAndDaemonServer's own doc for why this test does not exercise a cross-origin one).
-    await page.goto(`http://127.0.0.1:${port}/index.html?daemon=http://127.0.0.1:${port}&token=t`);
-    await page.waitForFunction(() => document.getElementById("board")?.textContent !== "Loading…");
+    await page.goto(`http://127.0.0.1:${port}${CONSOLE_BASE}index.html?daemon=http://127.0.0.1:${port}&token=t`);
+    // `data-testid="now"` is Now.tsx's LOADED branch — it renders `now-absent` until a projection
+    // arrives. Waiting for it therefore proves the whole chain the old `W1-T9` assertion proved:
+    // built bundle -> module resolution -> React mount -> api-client GET /v1/status -> render.
+    await page.waitForSelector('[data-testid="now"]', { timeout: 15_000 });
 
     assert.deepEqual(pageErrors, [], "the page must load with no console/module-resolution errors");
-    const boardHtml = await page.evaluate(() => document.getElementById("board")?.innerHTML ?? "");
-    assert.match(boardHtml, /W1-T9/, "the fake daemon's one task must actually render");
+    const nowHtml = await page.evaluate(() => document.querySelector('[data-testid="now"]')?.innerHTML ?? "");
+    assert.match(nowHtml, /queued/, "the fake daemon's one queued task must reach the rendered Now panel");
     await context.close();
   } finally {
     server.close();
