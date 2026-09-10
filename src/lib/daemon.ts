@@ -105,6 +105,16 @@ export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" |
  *  is cut on `daemon-health.ts`'s side, not by turning this export into a re-export. */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
+export type IntakeRungDecision =
+  | { rung: string; fire: true; reason: string }
+  | { rung: string; fire: false; reason: string };
+
+export interface IntakeRungRunResult {
+  rung: string;
+  status: string;
+  [key: string]: unknown;
+}
+
 /** Default wall-clock bound on the full reconciliation pass, mirroring `plan/policy.yaml`'s
  *  `sweepWallClockBoundMs` row, which carries the healthy-versus-hung derivation. Same fs-free
  *  fallback reasoning as {@link DEFAULT_POLL_INTERVAL_MS} above (W1-T1044). */
@@ -822,6 +832,11 @@ export interface DaemonDeps {
   /** Build and deliver one digest, returning what got sent — never inside the producer itself. Never
    *  files a task, mints an id or spawns a worker (Law 5). Best-effort (W1-T2277). */
   runDigestCadence?: () => Promise<DigestCadenceRunResult>;
+  /** W1-T2923: one scheduler over repository-intake rungs. The check is pure from this module's
+   *  perspective; run-task.ts owns markers, policy, GitHub, filesystem and worker effects. */
+  checkIntakeRungs?: () => readonly IntakeRungDecision[];
+  /** Run one enabled intake rung selected by {@link checkIntakeRungs}. */
+  runIntakeRung?: (decision: Extract<IntakeRungDecision, { fire: true }>) => Promise<IntakeRungRunResult> | IntakeRungRunResult;
   /** The board-review rung, wired. Its unit is the whole open board rather than one PR, and it has its own policy row
    * and marker file so three cadences sharing one bound cannot drag each other. Why the check-and-run pair matters:
    * #2952 merged 385 tested lines and the rung never fired once, because nothing called it. It also carries retired
@@ -2447,6 +2462,33 @@ export async function runDaemon(
       if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
+    }
+
+    // Intake cadence: one scheduler over the hand-run repository intake verbs. These rungs can
+    // poll GitHub, write feedback, draft proposals or dispatch workers, so they sit behind the
+    // same tick-wide governors as retro/auto-triage/wipe-test instead of the read-only cadence
+    // block above. Best-effort: a failed rung costs one ledger row and the tick continues.
+    if (deps.checkIntakeRungs) {
+      let decisions: readonly IntakeRungDecision[] | undefined;
+      try {
+        decisions = deps.checkIntakeRungs();
+      } catch (e) {
+        log("intake_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      for (const decision of decisions ?? []) {
+        if (decision.fire) {
+          log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
+          if (deps.runIntakeRung) {
+            try {
+              log("intake_cadence.ran", await deps.runIntakeRung(decision));
+            } catch (e) {
+              log("intake_cadence.run_failed", { rung: decision.rung, error: String((e as Error)?.message ?? e) });
+            }
+          }
+        } else {
+          log("intake_cadence.skipped", { rung: decision.rung, reason: decision.reason });
+        }
+      }
     }
 
     // Retro cadence trigger, evaluated once per tick after headroom — an automated retro spawns a real run,

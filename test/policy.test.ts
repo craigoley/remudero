@@ -239,7 +239,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "sweepWallClockBoundMs",
     "fixSpawnWallClockBoundMs",
     "keychainProvisionLockWaitMs",
-    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "ciLearningCadence", "wipeTestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "objectReap", "githubEventWake",
+    "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "intakeCadence", "ciLearningCadence", "wipeTestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "objectReap", "githubEventWake",
     "armCalibrationBands", "workerRuleHeadlines",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
@@ -576,6 +576,23 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "digestCadence.enabled",
     "digestCadence.minIntervalMinutes",
     "digestCadence.maxPerDay",
+    // W1-T2923: the repository-intake rungs had CLI verbs but no daemon schedule, so every
+    // member's switch, interval and cap are net-new policy data.
+    "intakeCadence.ops.enabled",
+    "intakeCadence.ops.minIntervalMinutes",
+    "intakeCadence.ops.maxPerDay",
+    "intakeCadence.issues.enabled",
+    "intakeCadence.issues.minIntervalMinutes",
+    "intakeCadence.issues.maxPerDay",
+    "intakeCadence.alertFix.enabled",
+    "intakeCadence.alertFix.minIntervalMinutes",
+    "intakeCadence.alertFix.maxPerDay",
+    "intakeCadence.inbox.enabled",
+    "intakeCadence.inbox.minIntervalMinutes",
+    "intakeCadence.inbox.maxPerDay",
+    "intakeCadence.feedbackDocket.enabled",
+    "intakeCadence.feedbackDocket.minIntervalMinutes",
+    "intakeCadence.feedbackDocket.maxPerDay",
     // W1-T2304's wiring: the three `boardReview.*` fields join them for the same reason. The
     // whole-board rung had no prior source literal to lift from — it is a NEW schedule for a NEW
     // unit of work (the board, not one PR), and its 120/6 are derived from the board's own

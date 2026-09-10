@@ -281,6 +281,8 @@ import {
   type DaemonOpts,
   type DaemonSummary,
   type HeadroomPolicy,
+  type IntakeRungDecision,
+  type IntakeRungRunResult,
   type StarvationCensus,
   type StarvationClearedInfo,
   priorUnrecognisedResetStrings,
@@ -402,7 +404,7 @@ import {
   type AlertLaneAlert,
 } from "./lib/alert-lane.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
-import { loadManagedRepos, ManagedReposError } from "./lib/managed-repos.js";
+import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
 import {
   captureFeedback,
   feedbackEntryPath,
@@ -713,6 +715,7 @@ import {
 import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import {
+  decideMeasurementCadence,
   measurementCadenceCheck,
   ciLearningCadenceCheck,
   CI_LEARNING_MINT_CEILING,
@@ -721,6 +724,7 @@ import {
   measurementCadenceMarkerPath,
   fileCiLearningShards,
   mintCiLearningShards,
+  readMeasurementCadenceMarker,
   recordCiLearningCadenceFire,
   releaseCiLearningCadenceFire,
   CI_LEARNING_WINDOW_DAYS,
@@ -827,12 +831,15 @@ import { mountRecommendationProposalCandidate, recommendMounts, type MountHeadro
 import {
   DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS,
   GATED_RUNGS,
+  INTAKE_CADENCE_RUNGS,
   loadDefaultPolicy,
   loadPolicy,
   policyPath,
   PolicyError,
   resolveDailyCostCeiling,
   resolveDailyCostCeilingForInstance,
+  type IntakeCadenceRung,
+  type IntakeCadenceRungPolicy,
   type Policy,
   type PolicyHeadroomRung,
 } from "./lib/policy.js";
@@ -20230,6 +20237,7 @@ export function retroTriggerCheck(
 export const AUTO_TRIAGE_CONTRACT_VERSION = "v1";
 export const MEASUREMENT_CADENCE_CONTRACT_VERSION = "v1";
 export const DIGEST_CADENCE_CONTRACT_VERSION = "v1";
+export const INTAKE_CADENCE_CONTRACT_VERSION = "v1";
 export const BOARD_REVIEW_CONTRACT_VERSION = "v1";
 export const CI_LEARNING_CADENCE_CONTRACT_VERSION = "v1";
 export const WIPE_TEST_CADENCE_CONTRACT_VERSION = "v1";
@@ -20252,6 +20260,11 @@ export const RUNG_CONTRACT_VERSIONS: Readonly<Record<string, string>> = {
   autoTriage: AUTO_TRIAGE_CONTRACT_VERSION,
   measurementCadence: MEASUREMENT_CADENCE_CONTRACT_VERSION,
   digestCadence: DIGEST_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.ops": INTAKE_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.issues": INTAKE_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.alertFix": INTAKE_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.inbox": INTAKE_CADENCE_CONTRACT_VERSION,
+  "intakeCadence.feedbackDocket": INTAKE_CADENCE_CONTRACT_VERSION,
   boardReview: BOARD_REVIEW_CONTRACT_VERSION,
   ciLearningCadence: CI_LEARNING_CADENCE_CONTRACT_VERSION,
   // W1-T2659's rung merged while this branch was open; the walk over GATED_RUNGS refused it as
@@ -21023,6 +21036,147 @@ export function buildDigestCadenceDaemonHooks(deps: {
       return report;
     });
   return { checkDigestCadence: check, runDigestCadence: run };
+}
+
+export function intakeRungCadenceMarkerPath(root: string, rung: IntakeCadenceRung): string {
+  return join(root, "state", `last-intake-cadence-${rung}.json`);
+}
+
+function intakeRungCadenceCheck(opts: {
+  root: string;
+  rung: IntakeCadenceRung;
+  policy: IntakeCadenceRungPolicy;
+  now?: Date;
+}): IntakeRungDecision {
+  if (!opts.policy.enabled) {
+    return {
+      rung: opts.rung,
+      fire: false,
+      reason: `intake cadence ${opts.rung} disabled (policy.intakeCadence.${opts.rung}.enabled=false)`,
+    };
+  }
+  const marker = readMeasurementCadenceMarker(intakeRungCadenceMarkerPath(opts.root, opts.rung));
+  const decision = decideMeasurementCadence({
+    policy: { ...opts.policy, escalate: false },
+    marker,
+    now: opts.now ?? new Date(),
+  });
+  return { rung: opts.rung, ...decision };
+}
+
+function recordIntakeRungCadenceFire(root: string, rung: IntakeCadenceRung, at: Date): void {
+  recordMeasurementCadenceFire(intakeRungCadenceMarkerPath(root, rung), at, 24 * 60 * 60 * 1000);
+}
+
+export function buildIntakeRungsDaemonHooks(deps: {
+  config?: Config;
+  policy?: Policy;
+  ratifications?: Ratifications;
+  /** W1-T2923: the time source, as the shared {@link Clock} port rather than a bare
+   *  `() => Date`. No caller passes one — the daemon wires `{ config, policy }` — so the seam
+   *  is expressible either way, and src/lib/clock.ts is what it exists for. */
+  clock?: Clock;
+  check?: () => readonly IntakeRungDecision[];
+  runRung?: (decision: Extract<IntakeRungDecision, { fire: true }>) => Promise<IntakeRungRunResult> | IntakeRungRunResult;
+  loadManagedRepos?: (root: string) => ManagedRepo[];
+  pollIssues?: typeof pollIssues;
+  pollAlerts?: typeof pollAlerts;
+  alertFix?: typeof alertFixCommand;
+  inbox?: typeof inboxCommand;
+  feedbackDocket?: typeof runFeedbackDocketRung;
+} = {}): {
+  checkIntakeRungs: () => readonly IntakeRungDecision[];
+  runIntakeRung: (decision: Extract<IntakeRungDecision, { fire: true }>) => Promise<IntakeRungRunResult> | IntakeRungRunResult;
+} {
+  const configFor = () => deps.config ?? loadConfig();
+  const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
+  const check =
+    deps.check ??
+    (() => {
+      const policy = policyFor().values.intakeCadence;
+      const pins = deps.ratifications ?? loadRatifications(ratificationsPath(repoRoot));
+      return INTAKE_CADENCE_RUNGS.map((rung) => {
+        const row = policy[rung];
+        const pin = ratificationPinCheck(`intakeCadence.${rung}`, row, INTAKE_CADENCE_CONTRACT_VERSION, pins);
+        if (!pin.fire) {
+          ledgerRungUnratified(ledgerPathFor(configFor()), `intakeCadence.${rung}`, pin.diff);
+          return { rung, fire: false, reason: pin.reason };
+        }
+        return intakeRungCadenceCheck({
+          root: configFor().root,
+          rung,
+          policy: row,
+          now: deps.clock?.date(),
+        });
+      });
+    });
+  const runRung =
+    deps.runRung ??
+    (async (decision: Extract<IntakeRungDecision, { fire: true }>) => {
+      if (!INTAKE_CADENCE_RUNGS.includes(decision.rung as IntakeCadenceRung)) {
+        throw new Error(`unknown intake rung: ${decision.rung}`);
+      }
+      const rung = decision.rung as IntakeCadenceRung;
+      const config = configFor();
+      const at = (deps.clock ?? systemClock).date();
+      const ledgerPath = ledgerPathFor(config);
+      const runId = `INTAKE-${rung}-${at.getTime()}`;
+      recordIntakeRungCadenceFire(config.root, rung, at);
+      if (rung === "ops") {
+        const { owner, repo } = resolveOwnerRepo();
+        const result = await (deps.pollAlerts ?? pollAlerts)(owner, repo, {
+          readLedger: (path) => readLedgerUnionBounded(path),
+          alerts: ghAlertGateway(),
+          issues: ghIssueGateway(owner, repo),
+          ledgerPath,
+          runId,
+          root: repoRoot,
+          dryRun: false,
+        });
+        return {
+          rung,
+          status: "ok",
+          alerts: result.summary.totalOpen,
+          feedback_created: result.feedbackCreated.length,
+          feedback_reconciled: result.reconciled?.length ?? 0,
+          escalated: result.escalated.length,
+        };
+      }
+      if (rung === "issues") {
+        const managed = (deps.loadManagedRepos ?? loadManagedRepos)(repoRoot);
+        const result = await (deps.pollIssues ?? pollIssues)(managed, {
+          issues: ghIssueListGateway(),
+          root: repoRoot,
+          ledgerPath,
+          runId,
+          dryRun: false,
+        });
+        return {
+          rung,
+          status: "ok",
+          repos: result.summary.repos.length,
+          reviewed: result.summary.reviewedCount,
+          created: result.created.length,
+          skipped_existing: result.skippedExisting,
+        };
+      }
+      if (rung === "alertFix") {
+        const exitCode = await (deps.alertFix ?? alertFixCommand)([], { config, ledgerPath, runId });
+        return { rung, status: exitCode === 0 ? "ok" : "refused", exit_code: exitCode };
+      }
+      if (rung === "inbox") {
+        const exitCode = await (deps.inbox ?? inboxCommand)([], { config });
+        return { rung, status: exitCode === 0 ? "ok" : "refused", exit_code: exitCode };
+      }
+      const log = (step: string, extra: Record<string, unknown> = {}) =>
+        appendLedger(ledgerPath, { run_id: runId, task_id: "INTAKE", step, lane: "intake", rung, ...extra });
+      const result = (deps.feedbackDocket ?? runFeedbackDocketRung)(config, ledgerPath, runId, log, {
+        root: repoRoot,
+        now: () => at,
+      });
+      return { rung, status: "ok", fired: result.fired };
+    });
+  return { checkIntakeRungs: check, runIntakeRung: runRung };
 }
 
 /**
@@ -25324,6 +25478,9 @@ export async function daemonCommand(
   // undefined and the whole rung is dead code, exactly how #1066 merged auto-triage's consumer
   // with no producer.
   const digestCadenceHooks = target.isSelf ? buildDigestCadenceDaemonHooks({ config }) : undefined;
+  // W1-T2923: one policy-gated cadence over the repository-intake rungs that used to require
+  // hand-run verbs. SELF-TARGET ONLY: every runner writes this harness checkout/state.
+  const intakeRungHooks = target.isSelf ? buildIntakeRungsDaemonHooks({ config }) : undefined;
   // W1-T2304: the board-review rung. SELF-TARGET ONLY, same reason as the rungs above — the
   // marker, the report artifact and the proposal registry all live under THIS process's own
   // config.root. WITHOUT THIS LINE `deps.checkBoardReview` is undefined and the whole rung is
@@ -25613,6 +25770,8 @@ export async function daemonCommand(
         // and writes nothing (Law 5), so it is safe to run unattended from the start.
         checkDigestCadence: digestCadenceHooks?.checkDigestCadence,
         runDigestCadence: digestCadenceHooks?.runDigestCadence,
+        checkIntakeRungs: intakeRungHooks?.checkIntakeRungs,
+        runIntakeRung: intakeRungHooks?.runIntakeRung,
         // BOARD-REVIEW RUNG (W1-T2304's design, wired here). Same shape as the two cadences
         // immediately above and gated the same way — SAFE ON in policy data (plan/policy.yaml's
         // `boardReview` row): the rung writes one report artifact and drafts registry proposals,
@@ -30353,11 +30512,6 @@ export function buildSweepHook(
       // quiet one through §4 (never kills/signals it — see runWorkerStallDetectorRung's own
       // doc). Own try/catch inside the rung.
       runWorkerStallDetectorRung(owner, repo, config, ledgerPath, runId, workerStallMs ?? DEFAULT_WORKER_STALL_MS, log);
-      // W1-T436 — the weekly feedback docket rung: gathers the five human-feedback capture
-      // surfaces and files at most one inbox proposal per rolling 7-day window. Own
-      // try/catch inside the rung; a `state/last-feedback-docket.json` marker keeps this a
-      // no-op on every poll but the first one due each week.
-      runFeedbackDocketRung(config, ledgerPath, runId, log);
       // W1-T2575 — the mount-headroom sweep's missing recommendation leg: turns
       // scripts/mount-headroom-sweep.mjs's measured (type, risk, class) cells into ratifiable
       // inbox proposals (or, far more often, a named refusal) via `recommendMounts`. Own

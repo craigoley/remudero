@@ -657,6 +657,7 @@
     "test/instrument-isolation.test.ts": 1399,
     "test/instrument-surface-completeness.test.ts": 1325,
     "test/instrument-surface-fast-lane.test.ts": 681,
+    "test/intake-rungs-run-on-the-daemon-cadence.test.ts": 0,
     "test/intake-triggers-read-their-own-depth.test.ts": 1117,
     "test/inverse-scope-advisory-section.test.ts": 1118,
     "test/isolation-wiring.test.ts": 1870,
