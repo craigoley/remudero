@@ -43,13 +43,17 @@ test("W1-T3143: a proceed ruling pinned to the record clears it at verify:auto, 
   // state passes on an implementation that never blocked anything.
   assert.notEqual(machineAuthorVerifyViolation(task), undefined, "an unruled machine record must block");
 
-  const ruled = recordFilingRiskRuling(task, {
-    verdict: "low",
-    action: "proceed",
-    confidence: 0.9,
-    reasons: ["declared files are a lib module and its own test"],
-    judgedAt: "2026-09-10T12:00:00.000Z",
-  });
+  const ruled = recordFilingRiskRuling(
+    task,
+    {
+      verdict: "low",
+      action: "proceed",
+      confidence: 0.9,
+      reasons: ["declared files are a lib module and its own test"],
+      judgedAt: "2026-09-10T12:00:00.000Z",
+    },
+    taskRulingPin,
+  );
 
   assert.equal(ruled.risk_ruling?.action, "proceed");
   assert.equal(ruled.risk_ruling?.pin, taskRulingPin(task), "the pin must come from the shared function, never re-derived");
@@ -58,13 +62,17 @@ test("W1-T3143: a proceed ruling pinned to the record clears it at verify:auto, 
 
 test("W1-T3143: an escalate verdict IS recorded and still blocks, quoting the judge's own reasons", () => {
   const task = machineTask();
-  const ruled = recordFilingRiskRuling(task, {
-    verdict: "high",
-    action: "escalate",
-    confidence: 0.8,
-    reasons: ["touches the merge path", "no falsifier declared"],
-    judgedAt: "2026-09-10T12:00:00.000Z",
-  });
+  const ruled = recordFilingRiskRuling(
+    task,
+    {
+      verdict: "high",
+      action: "escalate",
+      confidence: 0.8,
+      reasons: ["touches the merge path", "no falsifier declared"],
+      judgedAt: "2026-09-10T12:00:00.000Z",
+    },
+    taskRulingPin,
+  );
 
   assert.equal(ruled.risk_ruling?.action, "escalate");
   const v = machineAuthorVerifyViolation(ruled);
@@ -76,20 +84,24 @@ test("W1-T3143: an escalate verdict IS recorded and still blocks, quoting the ju
 test("W1-T3143: an unreadable verdict writes NO ruling, so absence keeps meaning unjudged", () => {
   const task = machineTask();
   // The fail-closed arm. `undefined` in, nothing recorded — never a synthesised proceed.
-  const unruled = recordFilingRiskRuling(task, undefined);
+  const unruled = recordFilingRiskRuling(task, undefined, taskRulingPin);
   assert.equal(unruled.risk_ruling, undefined, "an unreadable verdict must write nothing at all");
   assert.notEqual(machineAuthorVerifyViolation(unruled), undefined, "and the record must still block");
 });
 
 test("W1-T3143: editing what the record may DO drifts the pin and re-blocks", () => {
   const task = machineTask();
-  const ruled = recordFilingRiskRuling(task, {
-    verdict: "low",
-    action: "proceed",
-    confidence: 0.9,
-    reasons: ["ok"],
-    judgedAt: "2026-09-10T12:00:00.000Z",
-  });
+  const ruled = recordFilingRiskRuling(
+    task,
+    {
+      verdict: "low",
+      action: "proceed",
+      confidence: 0.9,
+      reasons: ["ok"],
+      judgedAt: "2026-09-10T12:00:00.000Z",
+    },
+    taskRulingPin,
+  );
   assert.equal(machineAuthorVerifyViolation(ruled), undefined, "control: the ruling clears the record as judged");
 
   // Earn a pass on one text, then rewrite what the task may DO. W1-T2694's defeat-by-editing.

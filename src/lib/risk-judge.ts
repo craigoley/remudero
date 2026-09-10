@@ -1,9 +1,6 @@
 import type { Mount, Mounts } from "./mounts.js";
 import { MountsError } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
-// W1-T3143: the SHARED pin, imported rather than re-derived — a pin written here and a pin checked
-// by `machineAuthorVerifyViolation` must be the same function or the drift arm is defeated.
-import { taskRulingPin } from "./task-linter.js";
 
 /**
  * Risk judge — P34 clause (b), MASTER-PLAN §4B/§9, W1-T248. A lightweight judge on the
@@ -840,7 +837,7 @@ export function buildFilingRiskJudgeInput(task: {
 export function recordFilingRiskRuling<T extends { id: string }>(
   task: T,
   ruling: FilingRiskRuling | undefined,
-  pinOf: (t: T) => string = ((t: unknown) => taskRulingPin(t as Parameters<typeof taskRulingPin>[0])) as (t: T) => string,
+  pinOf: (t: T) => string,
 ): T {
   if (!ruling) return task;
   return {
