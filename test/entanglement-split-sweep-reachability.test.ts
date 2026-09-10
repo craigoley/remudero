@@ -6,10 +6,11 @@
  * `OpenPrView` fields: ledger -> board view -> disposition -> cold reconstruction -> fix rung.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   buildFixRungDispatchArgs,
@@ -81,6 +82,29 @@ function reviewRow(overrides: Record<string, unknown> = {}): Record<string, unkn
  *  It is deliberately a few minutes after the gateway's `updated_at`, so the fixture reads as
  *  recently-active and reaches the routes under test. */
 const JUDGED_AT_MS = Date.parse("2026-09-08T13:31:00.000Z");
+
+// ── THE FIXTURE'S OWN GUARD — the analogue of W1-T3270's in test/stale-ci-gate-wiring.test.ts, and
+// of the one this change puts in test/detached-sweep-drain-is-bounded.test.ts. Pinning `now` disarms
+// the bomb only while the DISTANCE between the pin and each fixture stays inside the rung; an edit
+// that adds a stamp, or moves one, re-arms it with nothing refusing until the routes below quietly
+// stop being exercised. BOTH OPERANDS HERE ARE CONSTANTS, so this assertion can never age either —
+// which is the whole property the suite was missing.
+test("every date literal in this file sits inside the staleness rung of the pinned instant, so no fixture here can age into a different route", () => {
+  const src = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const stamps = [...src.matchAll(/"(\d{4}-\d{2}-\d{2}T[0-9:.]+Z)"/g)].map((m) => m[1]!);
+  assert.ok(
+    stamps.length >= 5,
+    `expected this file's own fixture stamps to be readable — matched ${stamps.length}, so the guard measures nothing`,
+  );
+  for (const stamp of stamps) {
+    const gapDays = (JUDGED_AT_MS - Date.parse(stamp)) / 86_400_000;
+    assert.ok(
+      Math.abs(gapDays) < DEFAULT_SWEEP_POLICY.staleDays,
+      `${stamp} is ${gapDays.toFixed(2)}d from the pinned instant, outside staleDays ` +
+        `(${DEFAULT_SWEEP_POLICY.staleDays}) — a fixture that far from the pin flips the routes this suite proves`,
+    );
+  }
+});
 
 function openPrFetch(body = BODY, head = HEAD): (args: string[]) => unknown {
   return (args: string[]): unknown => {
