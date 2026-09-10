@@ -19,7 +19,7 @@
 // Why: the cap's zero-headroom history and the 2026-08-22 raise are archived in
 //   docs/forensics/claude-md-budget-ratchet.md#module-header.
 
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { git as spawnGit } from "./lib/git.mjs";
@@ -51,6 +51,102 @@ export function evaluateRatchet(actualBytes, baseline) {
     violations.push(`CLAUDE.md is ${actualBytes} bytes > cap ${baseline.capBytes} bytes (${overage} bytes over)`);
   }
   return violations;
+}
+
+/** Files the fold follow-up, returning its id, or `null` when it could not be written. IDEMPOTENT:
+ *  an entry already on disk for this file at this size is reported as filed rather than duplicated,
+ *  so a gate running on every CI job opens one entry, not one per run. */
+export function fileFoldDebt(file, actualBytes, ceiling, violations, deps = {}) {
+  const dir = deps.dir ?? "plan/feedback";
+  const exists = deps.exists ?? existsSync;
+  const write = deps.write ?? writeFileSync;
+  const mkdir = deps.mkdir ?? mkdirSync;
+  const nowIso = deps.nowIso ?? new Date().toISOString();
+  const id = foldDebtEntryId(file, actualBytes);
+  const path = `${dir}/${id}.yaml`;
+  try {
+    if (exists(path)) return id;
+    mkdir(dir, { recursive: true });
+    write(path, renderFoldDebtEntry(id, file, actualBytes, ceiling, violations, nowIso));
+    return id;
+  } catch {
+    // FAIL CLOSED, and the caller turns this into a refusal: losing the follow-up is the one
+    // routing failure that must not land silently.
+    return null;
+  }
+}
+
+/** W1-T3320 — THE FOLD-DEBT CEILING: the point at which routing stops and the run really refuses.
+ *
+ * The cap is no longer where work stops; it is where the gate starts FILING. This is the bound that
+ * keeps that from being unlimited — "we can always take on some tech debt" is only true while the
+ * debt is collected, and 45 parked `verify: human` shards (W1-T3206) are what an uncollected queue
+ * looks like. Absent from the baseline, routing is DISABLED and the gate behaves exactly as it did
+ * before this task: a missing bound must never read as an infinite one. */
+export function foldDebtCeiling(baseline) {
+  const v = baseline.foldDebtCeilingBytes;
+  if (v === undefined || v === null) return null;
+  if (typeof v !== "number") throw new Error(`'foldDebtCeilingBytes' must be a number, got ${JSON.stringify(v)}`);
+  return v;
+}
+
+/**
+ * W1-T3320 — DECIDE THE CONSEQUENCE OF A FINDING, never whether the finding holds.
+ *
+ * The violations are computed exactly as before by `evaluateRatchet`/`evaluateNetBytes`; this only
+ * decides what happens next. Operator ruling, 2026-09-10: a gate repairs, routes, or closes, and a
+ * stop is for harm rather than incompleteness. An over-budget doctrine file is incompleteness — the
+ * rule is right, the fold has not happened yet — so it LANDS and the fold is FILED.
+ *
+ * `stop` is reached ONLY past the fold-debt ceiling, and that is the whole safety property: without
+ * it this converts a loud refusal into an unbounded silent one, which is the same defect wearing
+ * the fix's clothes.
+ *
+ * FAIL CLOSED, TWICE OVER: no violations means no decision to make, and a ceiling that is absent or
+ * already exceeded returns `stop` — so a misconfigured baseline can only ever restore today's
+ * strictness, never relax past it.
+ */
+export function decideBudgetConsequence(violations, actualBytes, ceiling) {
+  if (violations.length === 0) return { outcome: "clean", violations };
+  if (ceiling === null) return { outcome: "stop", violations, reason: "no foldDebtCeilingBytes declared — routing disabled" };
+  if (actualBytes > ceiling) {
+    return {
+      outcome: "stop",
+      violations,
+      reason: `${actualBytes} bytes is past the fold-debt ceiling ${ceiling} — the debt was never collected`,
+    };
+  }
+  return { outcome: "route", violations, ceiling, headroom: ceiling - actualBytes };
+}
+
+/** The deterministic id for one file's outstanding fold debt. IDEMPOTENT BY CONSTRUCTION: the same
+ *  file at the same size re-files nothing, so a gate that runs on every CI job does not open a new
+ *  entry per run — an inbox filling at CI's rate is not a follow-up, it is a denial of service. */
+export function foldDebtEntryId(file, actualBytes) {
+  return `fold-debt-${file.replace(/[^A-Za-z0-9]+/g, "-")}-${actualBytes}`;
+}
+
+/** The feedback entry a routed finding files. Plain YAML on purpose: this script is self-contained
+ *  (no `src/` import, same convention as every scripts/*.mjs), and the daemon's own
+ *  `feedback.landing_sweep` already collects `plan/feedback/*.yaml` — so routing needs no new
+ *  plumbing and no second inbox. */
+export function renderFoldDebtEntry(id, file, actualBytes, ceiling, violations, nowIso) {
+  const lines = [
+    `id: ${id}`,
+    `ts: ${nowIso}`,
+    "origin: gate",
+    "status: new",
+    "raw: >-",
+    `  ${file} is over its size budget and the fold has not happened yet. The change that tripped this`,
+    `  LANDED — this is the follow-up, not a refusal (W1-T3320, operator ruling 2026-09-10).`,
+    `  Size ${actualBytes} bytes; fold-debt ceiling ${ceiling}; headroom ${ceiling - actualBytes}.`,
+    ...violations.map((v) => `  FINDING: ${v.replace(/\s+/g, " ")}`),
+    `  Cheapest destinations, in order: a rule naming ONE concrete repo path belongs in learnings/*.yaml,`,
+    `  whose files: glob delivers it to the task that governs that path; a rule with no single governing`,
+    `  path stays and something else folds. Do NOT raise the cap: at 43685 against 44000 a +315-byte`,
+    `  change passes the cap and is still refused by the per-PR net rule, so a raise buys nothing.`,
+  ];
+  return `${lines.join("\n")}\n`;
 }
 
 /**
@@ -139,6 +235,11 @@ function main(argv) {
     options: {
       file: { type: "string", default: "CLAUDE.md" },
       baseline: { type: "string", default: "scripts/claude-md-budget-baseline.json" },
+      // W1-T3320: WHERE THE FOLD FOLLOW-UP IS FILED. A flag rather than a constant because this gate
+      // now WRITES, and its own suite spawns it against fixture files — without an override, a
+      // fixture run over budget files a real entry into the repo's real inbox. MEASURED: two
+      // entries landed in plan/feedback/ from a single test run before this existed.
+      "feedback-dir": { type: "string", default: "plan/feedback" },
     },
   });
 
@@ -197,11 +298,34 @@ function main(argv) {
   }
 
   const violations = [...capViolations, ...netViolations];
-  if (violations.length > 0) {
+  // W1-T3320: THE FINDING IS UNCHANGED; ONLY THE CONSEQUENCE IS DECIDED HERE. Everything above still
+  // measures and still prints both operands on every run — routing must not cost the accounting,
+  // because a router that stops measuring has removed the budget rather than routed around it.
+  const decision = decideBudgetConsequence(violations, actualBytes, foldDebtCeiling(baseline));
+
+  if (decision.outcome === "route") {
+    console.error(`claude-md-budget-ratchet: OVER BUDGET -- ${values.file} does not fit, and the change LANDS anyway:`);
+    for (const v of violations) console.error(`  - ${v}`);
+    const filed = fileFoldDebt(values.file, actualBytes, decision.ceiling, violations, { dir: values["feedback-dir"] });
+    if (filed === null) {
+      // A ROUTER THAT CANNOT FILE ITS OWN ROUTING IS THE ORIGINAL DEFECT WITH EXTRA STEPS: the
+      // change would land and the fold would be remembered by nobody. That is the one routing
+      // failure that must still refuse.
+      console.error("claude-md-budget-ratchet: BLOCKED -- the fold follow-up could not be filed, so nothing recorded the debt.");
+      process.exitCode = 1;
+      return;
+    }
+    console.error(
+      `  ROUTED: fold filed as ${filed} (headroom to the fold-debt ceiling: ${decision.headroom} bytes). ` +
+        `The rule is not lost and the PR is not blocked.`,
+    );
+    return;
+  }
+
+  if (decision.outcome === "stop") {
     console.error(`claude-md-budget-ratchet: BLOCKED -- ${values.file} fails its size contract:`);
     for (const v of violations) console.error(`  - ${v}`);
-    // The cap's remedy prints only for a cap violation — "raise the ceiling" would read as the
-    // override §8A's design forbids. The net-byte violation carries its own remedy in its text.
+    console.error(`  ${decision.reason}`);
     if (capViolations.length > 0) {
       console.error(
         "  Fold, sharpen, or delete existing rules to bring it back under the cap, or -- if the growth is " +
