@@ -168,6 +168,34 @@ test("W1-T3272: the introduced gate does not veto its own registration when it i
   assert.equal(r.entangled, false, "an introduced gate that is already carved out must not also veto condition (a)");
 });
 
+// THE SAME CONTROL, WITH ONE VARIABLE CHANGED: THE GATE'S OWN NAME IS ON THE SURFACE.
+//
+// #4913 made these fixtures tree-independent by naming a gate no INSTRUMENT_SURFACE pattern matches,
+// which is right for every OTHER case here. It also means `introducedGates` is empty in all of them,
+// so the control below asserts its rule over a diff that never reaches the carve-out at all — and a
+// real census gate's PR is always the other case, because declaring its own script on the surface is
+// mandatory (test/instrument-surface-completeness.test.ts).
+//
+// `^scripts/[^/]*-ratchet\.mjs$` is a WILDCARD on the surface, so a brand-new `*-ratchet.mjs` is an
+// introduced gate on EVERY tree and this pair differs in nothing else. MEASURED on main before the
+// fix beside it: the probe-named gate refused (`true`) and this one did NOT (`false`), letting a
+// pre-existing ceiling raised to 999999 ride along beside the registration.
+test("W1-T3272 CONTROL: the passenger is still refused when the introduced gate IS on the surface", () => {
+  const GATE = "scripts/zz-census-probe-ratchet.mjs";
+  const PREEXISTING = "scripts/comment-load-ratchet.mjs";
+  const diff =
+    block(CI, "jobs:", [`        run: node ${GATE}`]) +
+    block(GATE, "", ["// the gate"], { newFile: true }) +
+    block(PARITY, "export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [", ['  refusedForPredicate("test/zz-census-probe-ratchet.test.ts", "a", "r"),']) +
+    block(PREEXISTING, "export function ceilingForComments(", ["  return 999999;"]);
+  const r = detectInstrumentEntanglement([CI, GATE, PARITY, PREEXISTING], diff);
+  assert.equal(
+    r.entangled,
+    true,
+    "an introduced gate clears ITS OWN registration; it must not empty the src half for a pre-existing instrument weakened beside it",
+  );
+});
+
 test("W1-T3272 CONTROL: an instrument that is NOT an introduced gate still vetoes", () => {
   // Condition (a) exists so an unrelated instrument cannot ride along on a registration. Relaxing
   // it for the introduced gate must not relax it for anything else — a pre-existing ratchet script
