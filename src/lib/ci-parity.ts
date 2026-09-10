@@ -1110,7 +1110,18 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   },
   npmScriptEntry("learnings-budget-ratchet", "learnings-budget-ratchet"),
   npmScriptEntry("jscpd-gate", "jscpd"),
-  npmScriptEntry("comment-load-ratchet", "comment-load-signal"),
+  // W1-T2926: the console-parity ratchet rides the SAME ci.yml job as `comment-load-signal`
+  // (contract-coverage-ratchet.mjs and expiring-fixture-census.mjs already ride it too, per the
+  // job's own "A STEP, NOT A JOB" comment), so this entry grew a second step rather than staying
+  // a plain npmScriptEntry — the original step keeps its original name, `comment-load-ratchet`.
+  {
+    job: "comment-load-ratchet",
+    mirrored: true,
+    run: (repoRoot, spawn) => [
+      runStep("comment-load-ratchet", () => shellOut(spawn, "npm run --silent comment-load-signal", "npm", ["run", "--silent", "comment-load-signal"], { cwd: repoRoot })),
+      runStep("comment-load-ratchet:console-parity", () => shellOut(spawn, "npm run --silent console-parity", "npm", ["run", "--silent", "console-parity"], { cwd: repoRoot })),
+    ],
+  },
   npmScriptEntry("claims", "claims"),
   {
     job: "lint-plan",

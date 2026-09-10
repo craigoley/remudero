@@ -356,6 +356,7 @@
     "test/console-freshness-wired.test.ts": 3598,
     "test/console-freshness.test.ts": 260,
     "test/console-merge-hold-control.test.ts": 1852,
+    "test/console-parity-ratchet.test.ts": 0,
     "test/console-pr-queue-cockpit.test.ts": 1100,
     "test/console-review-three-state.test.ts": 999,
     "test/console-shell-client.test.ts": 0,
