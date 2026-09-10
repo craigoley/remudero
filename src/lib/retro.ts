@@ -1605,6 +1605,12 @@ export interface RetroGather {
   /** W1-T87/P13: the other half of the flywheel — merged-run shapes shared by two or more runs,
    *  mined as procedural-learning candidates for the Architect to phrase and ratify. */
   proceduralCandidates: ProceduralCandidate[];
+  /** W1-T2928: failed review rows carry `unmet_criteria`/`reasons`; this is the bounded,
+   *  marker-scoped evidence before recurrence decides whether it becomes a candidate. */
+  failedReviewFeedback: FailedReviewFeedback[];
+  /** W1-T2928: review reasons recurring across independent tasks, proposed for Architect
+   *  ratification into the learning corpus. No corpus write happens in the gather. */
+  failedReviewCandidates: FailedReviewReasonCandidate[];
   /** W1-T2766: a drafted SKILL.md beside each `proceduralCandidates` entry that cleared the
    *  two-run floor — the flywheel's other half, a procedure the runtime EXECUTES rather than a
    *  fact line it only recalls. Rendering never writes; `rmd approve` is the only ratifying path. */
@@ -1704,6 +1710,7 @@ export function buildGather(opts: {
   // Mined ONCE, read by both `proceduralCandidates` and `skillDrafts` below — a draft with no
   // matching candidate in the gather would be a procedure the gather never actually observed.
   const proceduralCandidates = mineProceduralCandidates(merged, records);
+  const failedReviewFeedback = failedReviewFeedbackForRuns(scoped, records);
   return {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
@@ -1725,6 +1732,8 @@ export function buildGather(opts: {
     degradedSuccess: mineDegradedSuccess(merged, records),
     // Same marker-scoped window as degradedSuccess above (W1-T87/P13).
     proceduralCandidates,
+    failedReviewFeedback,
+    failedReviewCandidates: mineFailedReviewReasonCandidatesFromFeedback(failedReviewFeedback),
     // Drafted from the SAME candidates above, never re-mined (W1-T2766).
     skillDrafts: proceduralCandidates.map((c) => renderSkillDraft(c)).filter((d): d is SkillDraft => d !== undefined),
     learningsNow: learningsCount(opts.learningsMd),
@@ -1886,6 +1895,8 @@ export function renderGather(g: RetroGather): string {
     renderDegradedSuccess(g.degradedSuccess),
     "",
     renderProceduralCandidates(g.proceduralCandidates),
+    "",
+    renderFailedReviewFeedback(g.failedReviewCandidates),
     "",
     renderSkillDrafts(g.skillDrafts),
     "",
@@ -2081,14 +2092,25 @@ export function renderOverrunProposals(proposals: ClassOverrunProposal[]): strin
 export interface ReviewPostedSummary {
   runId: string;
   taskId: string;
+  /** The posted review state: `failure` rows are the feedback source W1-T2928 mines. */
+  state?: string;
   /** Count of criteria whose `proof_exec` is `executed_pass`/`executed_fail`. */
   executed: number;
   /** Total criteria judged (the ledgered `proof_exec` array's length). */
   total: number;
+  /** Visible unmet criterion claims, already filtered before `review.posted` was written. */
+  unmetCriteria: string[];
+  /** The reviewer's structured failure reasons, carried verbatim from `review.posted`. */
+  reasons: string[];
   /** W1-T72's flag: EVERY criterion floored while at least one dialect proof was written. */
   floorDegraded: boolean;
   /** W1-T63/P10-a: the advisory reviewer's terminal subtype, when logged; absent otherwise. */
   reviewerOutcome?: string;
+}
+
+function ledgerStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((v) => (typeof v === "string" ? v.trim() : "")).filter((v) => v.length > 0);
 }
 
 /** Reduce every `review.posted` line to the LATEST posting per run_id. A run that never posted has
@@ -2102,13 +2124,147 @@ export function latestReviewPostedByRun(records: LedgerRecord[]): Map<string, Re
     out.set(String(r.run_id), {
       runId: String(r.run_id),
       taskId: String(r.task_id ?? ""),
+      ...(typeof r.state === "string" ? { state: r.state } : {}),
       executed,
       total: proofExec.length,
+      unmetCriteria: ledgerStringArray(r.unmet_criteria),
+      reasons: ledgerStringArray(r.reasons),
       floorDegraded: r.floor_degraded === true,
       ...(typeof r.reviewer_outcome === "string" ? { reviewerOutcome: r.reviewer_outcome } : {}),
     });
   }
   return out;
+}
+
+/** One failed review's feedback payload, reduced from its latest `review.posted` row. */
+export interface FailedReviewFeedback {
+  runId: string;
+  taskId: string;
+  unmetCriteria: string[];
+  reasons: string[];
+}
+
+/** The stable recurrence key for a reason with a reviewer classifier prefix. Free prose is
+ *  preserved as evidence on {@link FailedReviewFeedback}, but never grouped into a candidate. */
+export function reviewReasonClassifierKey(reason: string): string | undefined {
+  const normalized = reason.trim().replace(/\s+/g, " ");
+  const classifier = normalized.match(/^([a-z][a-z0-9 -]{1,60}):\s+(.+)$/i);
+  if (!classifier) return undefined;
+  const prefix = classifier[1]!.toLowerCase();
+  if (prefix === "remudero-review") return undefined;
+  return `${prefix}: ${classifier[2]!.toLowerCase()}`;
+}
+
+/** Failed review feedback for the runs this retro is allowed to reason about. Pure projection:
+ *  no LLM, no filesystem, no corpus write. */
+export function failedReviewFeedbackForRuns(runs: RunSummary[], records: LedgerRecord[]): FailedReviewFeedback[] {
+  const posted = latestReviewPostedByRun(records);
+  const feedback: FailedReviewFeedback[] = [];
+  for (const r of runs) {
+    const summary = posted.get(r.runId);
+    if (!summary || summary.state !== "failure") continue;
+    if (summary.unmetCriteria.length === 0 && summary.reasons.length === 0) continue;
+    feedback.push({
+      runId: r.runId,
+      taskId: r.taskId,
+      unmetCriteria: summary.unmetCriteria,
+      reasons: summary.reasons,
+    });
+  }
+  feedback.sort((a, b) => {
+    const ka = a.taskId + a.runId;
+    const kb = b.taskId + b.runId;
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
+  return feedback;
+}
+
+/** ONE mined failed-review candidate: a classifier-shaped reason repeated across independent
+ *  tasks, ready for Architect ratification into the learning corpus. */
+export interface FailedReviewReasonCandidate {
+  kind: "failed_review_reason";
+  reasonKey: string;
+  reason: string;
+  supportingTasks: number;
+  occurrences: number;
+  runIds: string[];
+  taskIds: string[];
+  evidence: FailedReviewFeedback[];
+}
+
+/** Mine recurring failed-review reasons. Threshold counts DISTINCT task ids, not occurrences, so
+ *  one task that re-posts the same reason cannot manufacture a learning candidate by itself. */
+export function mineFailedReviewReasonCandidatesFromFeedback(
+  feedback: FailedReviewFeedback[],
+  opts: { threshold?: number } = {},
+): FailedReviewReasonCandidate[] {
+  const threshold = opts.threshold ?? 2;
+  const byKey = new Map<string, { reason: string; evidence: FailedReviewFeedback[]; occurrences: number }>();
+  for (const f of feedback) {
+    const seenInRow = new Set<string>();
+    for (const reason of f.reasons) {
+      const key = reviewReasonClassifierKey(reason);
+      if (!key) continue;
+      const bucket = byKey.get(key) ?? { reason: reason.trim().replace(/\s+/g, " "), evidence: [], occurrences: 0 };
+      bucket.occurrences += 1;
+      if (!seenInRow.has(key)) bucket.evidence.push(f);
+      seenInRow.add(key);
+      byKey.set(key, bucket);
+    }
+  }
+
+  const candidates: FailedReviewReasonCandidate[] = [];
+  for (const [reasonKey, bucket] of byKey) {
+    const taskIds = [...new Set(bucket.evidence.map((f) => f.taskId))].sort();
+    if (taskIds.length < threshold) continue;
+    candidates.push({
+      kind: "failed_review_reason",
+      reasonKey,
+      reason: bucket.reason,
+      supportingTasks: taskIds.length,
+      occurrences: bucket.occurrences,
+      runIds: [...new Set(bucket.evidence.map((f) => f.runId))].sort(),
+      taskIds,
+      evidence: [...bucket.evidence].sort((a, b) => {
+        const ka = a.taskId + a.runId;
+        const kb = b.taskId + b.runId;
+        return ka < kb ? -1 : ka > kb ? 1 : 0;
+      }),
+    });
+  }
+  candidates.sort((a, b) => (a.reasonKey < b.reasonKey ? -1 : a.reasonKey > b.reasonKey ? 1 : 0));
+  return candidates;
+}
+
+export function mineFailedReviewReasonCandidates(
+  runs: RunSummary[],
+  records: LedgerRecord[],
+  opts: { threshold?: number } = {},
+): FailedReviewReasonCandidate[] {
+  return mineFailedReviewReasonCandidatesFromFeedback(failedReviewFeedbackForRuns(runs, records), opts);
+}
+
+function renderFailedReviewEvidence(e: FailedReviewFeedback): string {
+  const reasons = e.reasons.length ? e.reasons.join(" / ") : "(no reason text)";
+  const unmet = e.unmetCriteria.length ? e.unmetCriteria.join(" / ") : "(no visible unmet criterion)";
+  return `${e.taskId} (${e.runId}) reasons: ${reasons}; unmet: ${unmet}`;
+}
+
+/** Render recurring failed-review feedback candidates. The wording is deliberately candidate-shaped:
+ *  the Architect ratifies any learning later; this module never writes `learnings/`. */
+export function renderFailedReviewFeedback(candidates: FailedReviewReasonCandidate[]): string {
+  if (candidates.length === 0) {
+    return "## Failed-review feedback mining (W1-T2928)\n\nNo failed-review reason recurred across >=2 independent tasks.";
+  }
+  return [
+    "## Failed-review feedback mining (W1-T2928) — recurring reasons proposed for Architect learning ratification",
+    "",
+    ...candidates.map(
+      (c) =>
+        `- ${c.reason} — ${c.supportingTasks} task(s), ${c.occurrences} occurrence(s): ` +
+        `${c.taskIds.join(", ")}; evidence: ${c.evidence.map(renderFailedReviewEvidence).join(" | ")}`,
+    ),
+  ].join("\n");
 }
 
 /** One weaker-path-than-claimed signal — DATA: the next class is a ROW, never new executor code. */
