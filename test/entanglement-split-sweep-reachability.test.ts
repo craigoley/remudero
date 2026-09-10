@@ -6,10 +6,11 @@
  * `OpenPrView` fields: ledger -> board view -> disposition -> cold reconstruction -> fix rung.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   buildFixRungDispatchArgs,
@@ -64,6 +65,46 @@ function reviewRow(overrides: Record<string, unknown> = {}): Record<string, unkn
     ...overrides,
   };
 }
+
+/** The instant every disposition in this file is judged at — PINNED, never `Date.now()`.
+ *
+ *  This suite's fixtures are date LITERALS (the gateway's `updated_at` below, and `base` further
+ *  down). `deriveDisposition` ages `lastActivityAt` against a `now` that DEFAULTS to `Date.now()`,
+ *  so a literal fixture judged at the real clock is a time bomb: `staleDays` is 14, and on
+ *  2026-09-22 both routes below would have flipped to `stale` and reported a split-route regression
+ *  that does not exist. MEASURED at +365d before this was pinned: 2 tests red.
+ *
+ *  Two of this file's four `deriveDisposition` call sites ALREADY passed this instant inline, which
+ *  is why they were immune while the other two were not. Pinning it here makes that the file's one
+ *  rule rather than a coincidence of which call site remembered. Both sides being constants is what
+ *  disarms it — bumping the fixtures instead would only re-arm the bomb (CLAUDE.md, code traps).
+ *
+ *  It is deliberately a few minutes after the gateway's `updated_at`, so the fixture reads as
+ *  recently-active and reaches the routes under test. */
+const JUDGED_AT_MS = Date.parse("2026-09-08T13:31:00.000Z");
+
+// ── THE FIXTURE'S OWN GUARD — the analogue of W1-T3270's in test/stale-ci-gate-wiring.test.ts, and
+// of the one this change puts in test/detached-sweep-drain-is-bounded.test.ts. Pinning `now` disarms
+// the bomb only while the DISTANCE between the pin and each fixture stays inside the rung; an edit
+// that adds a stamp, or moves one, re-arms it with nothing refusing until the routes below quietly
+// stop being exercised. BOTH OPERANDS HERE ARE CONSTANTS, so this assertion can never age either —
+// which is the whole property the suite was missing.
+test("every date literal in this file sits inside the staleness rung of the pinned instant, so no fixture here can age into a different route", () => {
+  const src = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const stamps = [...src.matchAll(/"(\d{4}-\d{2}-\d{2}T[0-9:.]+Z)"/g)].map((m) => m[1]!);
+  assert.ok(
+    stamps.length >= 5,
+    `expected this file's own fixture stamps to be readable — matched ${stamps.length}, so the guard measures nothing`,
+  );
+  for (const stamp of stamps) {
+    const gapDays = (JUDGED_AT_MS - Date.parse(stamp)) / 86_400_000;
+    assert.ok(
+      Math.abs(gapDays) < DEFAULT_SWEEP_POLICY.staleDays,
+      `${stamp} is ${gapDays.toFixed(2)}d from the pinned instant, outside staleDays ` +
+        `(${DEFAULT_SWEEP_POLICY.staleDays}) — a fixture that far from the pin flips the routes this suite proves`,
+    );
+  }
+});
 
 function openPrFetch(body = BODY, head = HEAD): (args: string[]) => unknown {
   return (args: string[]): unknown => {
@@ -155,7 +196,7 @@ test("an exact-input Rule-25 record reaches blocked-fixable through the real boa
     assert.deepEqual(view.unmetCriteria, [], "#4559 has no ordinary unmet criterion");
     assert.equal(view.instrumentEntangled, true);
     assert.deepEqual(view.instrumentEntanglementPaths, { instrumentPaths: INSTRUMENT_PATHS, srcPaths: SRC_PATHS });
-    const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, Date.parse("2026-09-08T13:31:00.000Z"));
+    const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
     assert.equal(disposition.disposition, "blocked-fixable");
     assert.match(disposition.reason, /W1-T2436/);
     assert.match(disposition.reason, /zero ordinary strikes/i);
@@ -189,7 +230,7 @@ test("the full #4559 cold path opens and parks on a prerequisite without an ordi
   const events: string[] = [];
   const sweepDir = mkdtempSync(join(tmpdir(), "rmd-w1-t3172-sweep-"));
   try {
-    const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, Date.parse("2026-09-08T13:31:00.000Z"));
+    const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
     assert.equal(disposition.disposition, "blocked-fixable", "the sweep must actually dispatch this view");
     let dispatched: FixDispatchEvidence | undefined;
     const sweepDeps: SweepDeps = {
@@ -254,7 +295,7 @@ test("stale, changed-input, malformed, and differently-classed evidence cannot a
     try {
       assert.equal(view.instrumentEntangled, undefined, fixture.name);
       assert.equal(view.instrumentEntanglementPaths, undefined, fixture.name);
-      assert.doesNotMatch(deriveDisposition(view, DEFAULT_SWEEP_POLICY).reason, /W1-T2436/, fixture.name);
+      assert.doesNotMatch(deriveDisposition(view, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS).reason, /W1-T2436/, fixture.name);
     } finally {
       cleanup();
     }
@@ -291,11 +332,11 @@ test("ordinary unmet and Rule-15 review routes remain unchanged", () => {
     autoMergeArmed: false,
     isDependabot: false,
   };
-  assert.deepEqual(deriveDisposition(base, DEFAULT_SWEEP_POLICY), {
+  assert.deepEqual(deriveDisposition(base, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS), {
     disposition: "blocked-fixable",
     reason: "1 unmet criterion — strike 1/2",
   });
-  const rule15 = deriveDisposition({ ...base, unmetCriteria: [], reviewSummary: "Standing rule 15" }, DEFAULT_SWEEP_POLICY);
+  const rule15 = deriveDisposition({ ...base, unmetCriteria: [], reviewSummary: "Standing rule 15" }, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
   assert.equal(rule15.disposition, "blocked-ambiguous");
   assert.match(rule15.reason, /Standing rule 15/);
 });
@@ -304,7 +345,7 @@ test("ordinary unmet and Rule-15 review routes remain unchanged", () => {
 test("strike exhaustion precedes the split route", () => {
   const { view, cleanup } = boardView([reviewRow()]);
   try {
-    const exhausted = deriveDisposition({ ...view, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, DEFAULT_SWEEP_POLICY);
+    const exhausted = deriveDisposition({ ...view, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
     assert.equal(exhausted.disposition, "blocked-ambiguous");
     assert.match(exhausted.reason, /strikes exhausted/);
     assert.doesNotMatch(exhausted.reason, /W1-T2436/);

@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { runDaemon, type DaemonFreshness } from "../src/lib/daemon.js";
 import { loadPlan } from "../src/lib/plan.js";
 import {
+  DEFAULT_SWEEP_POLICY,
   drainDetachedSweepActions,
   detachedSweepActionCount,
   runSweepLightPass,
@@ -23,6 +24,21 @@ function fixturePlan() {
   return loadPlan(path);
 }
 
+/** ACTIVE, measured against the REAL clock — deliberately not a constant.
+ *
+ *  `deriveDisposition` compares `lastActivityAt` to `Date.now()` against `staleDays` (14), so a
+ *  hardcoded stamp here is a time bomb: it reds at a clock boundary with no diff involved. Measured
+ *  by clock-shift probe — this fixture read `2026-09-06T06:00:00Z`, and at `2026-09-20` (exactly
+ *  `staleDays` later) both tests below would have begun classifying this PR `stale` instead of
+ *  `blocked-fixable`, so `actionable` never fires, no detached action is created, and the bound
+ *  these tests exist to prove is never exercised.
+ *
+ *  Moving the constant forward only re-arms it (CLAUDE.md, code traps). Anchoring to `Date.now()`
+ *  disarms it: this fixture is "an hour ago" on every run, forever. */
+function activeLastActivityAt(): string {
+  return new Date(Date.now() - 60 * 60 * 1000).toISOString();
+}
+
 function blockedPr(): OpenPrView {
   return {
     prNumber: 2913,
@@ -34,7 +50,7 @@ function blockedPr(): OpenPrView {
       { claim: "finish the repair", proof: "unit test: x", met: false, reason: "not done", proof_exec: "executed_fail" },
     ],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-06T06:00:00Z",
+    lastActivityAt: activeLastActivityAt(),
     headSha: "detached-fix-head",
     autoMergeArmed: false,
   };
@@ -114,4 +130,27 @@ test("W1-T2913 control: a detached action that settles within the bound emits no
   assert.equal(detachedSweepActionCount(), 0);
   assert.equal(rows.some((row) => row.step === "daemon.detached_action_abandoned"), false);
   assert.equal(rows.filter((row) => row.step === "daemon.freshness_drain.completed").length, 1);
+});
+
+// ── THE FIXTURE'S OWN GUARD. Same shape as W1-T3270's in test/stale-ci-gate-wiring.test.ts: without
+// it, a later edit can put a date literal back and nothing refuses until the wall clock reaches it.
+test("the blocked-PR fixture ages from the wall clock, so no calendar date can flip its disposition out from under this suite", () => {
+  // FRESH BY CONSTRUCTION. Both cases below reach the detached-drain bound only because `runSweep`
+  // does not dispose this PR `stale` first — `actionable` admits `blocked-fixable` and nothing else,
+  // so a fixture that ages is a suite that silently stops testing its own subject.
+  const fixtureAgeDays = (Date.now() - Date.parse(blockedPr().lastActivityAt!)) / 86_400_000;
+  assert.ok(fixtureAgeDays < 1, `the fixture must be hours old, not days — measured ${fixtureAgeDays.toFixed(2)}d`);
+  assert.ok(
+    fixtureAgeDays < DEFAULT_SWEEP_POLICY.staleDays,
+    "and it must sit clear of the staleness threshold it is judged against",
+  );
+
+  // THE RETIRED CONSTANT, AND WHY ITS CONTROL IS NOT WRITTEN AS AN ASSERTION HERE. W1-T3270's guard
+  // can assert its own retired literal is ALREADY stale, because that bomb had fired. This one had
+  // not: `2026-09-06T06:00:00Z` was still fresh when it was replaced, and an assertion that it is
+  // stale today would have been RED on the commit that fixed it and green only afterwards — a second
+  // time bomb in the guard against the first. The fuse is arithmetic on a constant, so asserting it
+  // proves nothing; the evidence the bomb was real is the +365d clock-shift run recorded in the
+  // commit, and `scripts/clock-sweep.mjs --only detached-sweep-drain-is-bounded` re-derives it.
+  // Its fuse was 2026-09-20.
 });
