@@ -81,11 +81,19 @@ export function parseLedger(ndjson: string): LedgerRecord[] {
  *  window does not catch the fall.
  *
  *  Sized against the retro subprocess's own 1792MB heap with the measured multiplier: the retained
- *  ndjson is held as an array of strings, joined into a second flat string, and parsed into objects
- *  costing roughly 3x their text — so the retained side peaks near 5x this number, leaving the
- *  union's `seen` Set (641MB at the full measured corpus, the one term this cap does NOT bound)
- *  room to coexist with it. */
+ *  ndjson is held in one insertion-ordered identity map, joined into a flat string, and parsed into
+ *  objects costing roughly 3x their text. The identity map owns only this retained window; it no
+ *  longer grows over every line ever streamed. */
 export const RETRO_LEDGER_MAX_BYTES = 96 * 1024 * 1024;
+
+/** PRIMARY CONTROL: maximum retained rows, and therefore maximum exact-string identity-map entries.
+ *
+ *  A byte ceiling alone does not bound Set bookkeeping when rows are very small. The live read
+ *  retained 318,931 rows on 2026-09-09; 350k preserves that measured byte-bounded population while
+ *  preventing a small-row corpus from rebuilding the 900,813-entry / 641MB Set that SIGABRT'd the
+ *  1792MB subprocess. When this ceiling binds, the oldest retained row is dropped and reported by
+ *  the same honesty path as the byte ceiling — dedupe never silently degrades. */
+export const RETRO_LEDGER_MAX_ROWS = 350_000;
 
 /** How far back {@link retroLedgerWindowSince} reaches when there is NO marker — a first-ever
  *  retro, or one whose marker was deleted. Not a correctness bound (the byte budget is); this
@@ -112,6 +120,10 @@ export interface RetroLedgerRead {
   /** Rows dropped to stay under the budget. ALWAYS the OLDEST ones — see the loop below. */
   droppedRows: number;
   droppedBytes: number;
+  /** Exact duplicate output lines suppressed while their first copy remained in the window. */
+  duplicatesCollapsed: number;
+  /** Largest exact-string identity-map population reached; bounded by the configured row ceiling. */
+  dedupeEntriesPeak: number;
 }
 
 /** The window to read from, given the marker's timestamp (absent on a first-ever retro).
@@ -129,44 +141,62 @@ export function retroLedgerWindowSince(markerTs: string | undefined, nowMs: numb
 
 export async function readRetroLedgerNdjson(
   stateDir: string,
-  opts: { sinceTs?: string; maxBytes?: number } = {},
+  opts: { sinceTs?: string; maxBytes?: number; maxRows?: number } = {},
 ): Promise<RetroLedgerRead> {
   const maxBytes = opts.maxBytes ?? RETRO_LEDGER_MAX_BYTES;
-  const kept: string[] = [];
-  let head = 0;
+  const maxRows = opts.maxRows ?? RETRO_LEDGER_MAX_ROWS;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error(`retro ledger maxBytes must be a positive safe integer, got ${maxBytes}`);
+  if (!Number.isSafeInteger(maxRows) || maxRows < 1) throw new Error(`retro ledger maxRows must be a positive safe integer, got ${maxRows}`);
+  // Map insertion order IS retention order. The value is the line's encoded cost, so evicting the
+  // oldest identity does not allocate or re-encode it. A duplicate is delete+set: the newest
+  // occurrence takes ownership instead of an old copy being evicted later while the newer one was
+  // already forgotten.
+  const retained = new Map<string, number>();
   let bytes = 0;
   let droppedRows = 0;
   let droppedBytes = 0;
+  let duplicatesCollapsed = 0;
+  let dedupeEntriesPeak = 0;
 
-  for await (const row of openLedgerUnion(stateDir, opts.sinceTs === undefined ? {} : { sinceTs: opts.sinceTs })) {
+  // The generic union dedupes the WHOLE stream. Retro instead dedupes the RETAINED window below,
+  // so its identity map is bounded and a newer duplicate can survive after its older copy is evicted.
+  const unionOpts = opts.sinceTs === undefined ? { dedupe: false } : { sinceTs: opts.sinceTs, dedupe: false };
+  for await (const row of openLedgerUnion(stateDir, unionOpts)) {
     const line = JSON.stringify(row);
+    const priorCost = retained.get(line);
+    if (priorCost !== undefined) {
+      duplicatesCollapsed += 1;
+      retained.delete(line);
+      bytes -= priorCost;
+    }
     // +1 for the separator `join` will add. An over-count by one separator across the whole read;
     // deliberately conservative, since the budget exists to stay UNDER a hard ceiling.
-    const cost = line.length + 1;
-    kept.push(line);
-    bytes += cost;
-    // Drop from the FRONT — the union yields oldest-first (rotations in stamp order, then live), so
-    // the survivors are the NEWEST rows, which is what a retro reasons about. `kept.length - 1`
-    // keeps one row alive so a single row larger than the whole budget terminates instead of
-    // spinning.
-    while (bytes > maxBytes && head < kept.length - 1) {
-      const evicted = kept[head];
-      kept[head] = "";
-      head += 1;
-      bytes -= evicted.length + 1;
+    const cost = Buffer.byteLength(line, "utf8") + 1;
+    // Evict BEFORE retaining the new row. The union yields oldest-first and Map preserves that
+    // order, so survivors are newest. One oversized row still survives by itself: an empty map
+    // ends the loop, then takes the row, with no spin.
+    while (retained.size > 0 && (bytes + cost > maxBytes || retained.size >= maxRows)) {
+      const oldest = retained.entries().next().value as [string, number];
+      retained.delete(oldest[0]);
+      bytes -= oldest[1];
       droppedRows += 1;
-      droppedBytes += evicted.length + 1;
+      droppedBytes += oldest[1];
     }
-    // Compact rather than let the array grow without bound behind `head`. Amortised: only when the
-    // dead prefix is at least half the array, so this is O(n) over the whole read, not per row.
-    if (head > 4_096 && head * 2 > kept.length) {
-      kept.splice(0, head);
-      head = 0;
-    }
+    retained.set(line, cost);
+    bytes += cost;
+    dedupeEntriesPeak = Math.max(dedupeEntriesPeak, retained.size);
   }
 
-  const rows = head === 0 ? kept : kept.slice(head);
-  return { ndjson: rows.join("\n"), sinceTs: opts.sinceTs, rowsKept: rows.length, droppedRows, droppedBytes };
+  const rows = [...retained.keys()];
+  return {
+    ndjson: rows.join("\n"),
+    sinceTs: opts.sinceTs,
+    rowsKept: rows.length,
+    droppedRows,
+    droppedBytes,
+    duplicatesCollapsed,
+    dedupeEntriesPeak,
+  };
 }
 
 /** Report a truncated read — a ledger row and a stderr line — or do NOTHING when nothing was
@@ -200,10 +230,14 @@ export function reportRetroLedgerTruncation(
     dropped_rows: read.droppedRows,
     dropped_bytes: read.droppedBytes,
     max_bytes: RETRO_LEDGER_MAX_BYTES,
+    max_rows: RETRO_LEDGER_MAX_ROWS,
+    duplicates_collapsed: read.duplicatesCollapsed,
+    dedupe_entries_peak: read.dedupeEntriesPeak,
   });
   (ctx.warn ?? ((m: string) => console.error(m)))(
     `\n### [retro] ledger read truncated: kept ${read.rowsKept} row(s), dropped ${read.droppedRows} ` +
-      `older row(s) (${read.droppedBytes} bytes) to stay under ${RETRO_LEDGER_MAX_BYTES} bytes ` +
+      `older row(s) (${read.droppedBytes} bytes) to stay under ${RETRO_LEDGER_MAX_BYTES} bytes and ` +
+      `${RETRO_LEDGER_MAX_ROWS} rows ` +
       `since ${String(read.sinceTs)}`,
   );
   return true;
@@ -222,7 +256,8 @@ export function retroLedgerScopeNote(read: RetroLedgerRead): string {
   const truncation =
     read.droppedRows > 0
       ? ` ${read.droppedRows} older row(s) (${read.droppedBytes} bytes) were DROPPED to stay under the ` +
-        `${RETRO_LEDGER_MAX_BYTES}-byte read budget, so this window is itself incomplete at its old end.`
+        `${RETRO_LEDGER_MAX_BYTES}-byte and ${RETRO_LEDGER_MAX_ROWS}-row read budgets, so this window is itself ` +
+        `incomplete at its old end.`
       : "";
   return `\n_Scope: counted over ${window} — ${read.rowsKept} row(s), not over all history._${truncation}`;
 }
