@@ -114,36 +114,44 @@ test("a CodeQL rule gets one active proposal that is refreshed in place and reti
   }
 });
 
-test("readCodeScanningAlerts returns normalized alerts on a readable response, carrying the tool and rule tags the filter needs", () => {
-  // The refusal path (a 403) is already covered; this is the SUCCESS return, which no test reached.
+test("readCodeScanningAlerts returns normalized alerts from every paginated response page, carrying the tool and rule tags the filter needs", () => {
+  // The refusal path (a 403) is covered separately; this drives the success return.
   // It also pins the two fields RawAlert gained for this feature: without `toolName`/`ruleTags`
   // surviving normalization, every alert would fall out of the filter as ineligible.
-  const bin = ghStubPath(
-    "#!/bin/sh\ncat <<'JSON'\n" +
-      JSON.stringify([
-        {
-          number: 7,
-          state: "open",
-          created_at: "2026-09-10T00:00:00Z",
-          html_url: "https://github.com/o/r/security/code-scanning/7",
-          rule: { id: "js/unused-local-variable", description: "Unused variable", severity: "note", tags: ["quality", "maintainability"] },
-          tool: { name: "CodeQL" },
-        },
-      ]) +
-      "\nJSON\n",
-  );
+  const firstPage = JSON.stringify([
+    {
+      number: 7,
+      state: "open",
+      created_at: "2026-09-10T00:00:00Z",
+      html_url: "https://github.com/o/r/security/code-scanning/7",
+      rule: { id: "js/unused-local-variable", description: "Unused variable", severity: "note", tags: ["quality", "maintainability"] },
+      tool: { name: "CodeQL" },
+    },
+  ]);
+  const secondPage = JSON.stringify([
+    {
+      number: 8,
+      state: "open",
+      created_at: "2026-09-10T00:00:00Z",
+      html_url: "https://github.com/o/r/security/code-scanning/8",
+      rule: { id: "js/unused-local-variable", description: "Unused variable", severity: "note", tags: ["quality", "maintainability"] },
+      tool: { name: "CodeQL" },
+    },
+  ]);
+  const bin = ghStubPath(`#!/bin/sh\ncat <<'JSON'\n${firstPage}${secondPage}\nJSON\n`);
   const saved = process.env.PATH;
   process.env.PATH = pathWith(bin);
   try {
     const read = readCodeScanningAlerts("o", "r");
     assert.equal(read.ok, true, "a readable JSON array is a success, not a refusal");
-    assert.ok(read.ok && read.alerts.length === 1);
-    const [alert] = read.ok ? read.alerts : [];
+    assert.ok(read.ok && read.alerts.length === 2, "both bare --paginate pages are normalized");
+    const [alert, secondAlert] = read.ok ? read.alerts : [];
     assert.equal(alert?.id, "7");
     assert.equal(alert?.source, "code-scanning");
     assert.equal(alert?.toolName, "CodeQL", "the tool survives normalization — the filter keys on it");
     assert.deepEqual(alert?.ruleTags, ["quality", "maintainability"], "and so do the rule tags");
     assert.equal(alert?.ruleId, "js/unused-local-variable");
+    assert.equal(secondAlert?.id, "8", "the second JSON page is not dropped or read as a failure");
   } finally {
     process.env.PATH = saved;
   }
