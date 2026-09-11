@@ -126,7 +126,7 @@ test("the REAL committed CLAUDE.md is currently within the recorded size budget 
 // third assertion pins so a raise cannot quietly erase the argument it had to answer.
 test("the real baseline pins the DECLARED cap, declares no measured figure, and carries a written reason", () => {
   const baseline = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "claude-md-budget-baseline.json"), "utf8"));
-  assert.equal(baseline.capBytes, 44000, `the cap must stay the declared figure: ${JSON.stringify(baseline)}`);
+  assert.equal(baseline.capBytes, 17000, `the cap must stay the declared figure: ${JSON.stringify(baseline)}`);
   assert.equal(
     Object.hasOwn(baseline, "measuredBytes"),
     false,
@@ -134,12 +134,12 @@ test("the real baseline pins the DECLARED cap, declares no measured figure, and 
   );
   assert.match(
     String(baseline.bumpRationale ?? ""),
-    /2026-08-31/,
+    /2026-09-11/,
     "a cap change must stay on the record in prose — an unexplained number is what this gate exists to prevent",
   );
   assert.match(
     String(baseline.priorBumpRationale ?? ""),
-    /2026-08-28/,
+    /2026-08-31/,
     "the superseded raise's reasoning must survive the raise that supersedes it — otherwise the record shows only the argument that won",
   );
 });
