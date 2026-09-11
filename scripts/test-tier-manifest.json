@@ -852,6 +852,7 @@
     "test/onboard-session.test.ts": 474,
     "test/onboard-synthesize.test.ts": 907,
     "test/one-fetch-and-one-plan-load-per-tick.test.ts": 1567,
+    "test/one-procedure-is-one-skill-proposal.test.ts": 0,
     "test/one-shot-disk-reclaim-rung.test.ts": 1222,
     "test/open-build-is-not-credit.test.ts": 7455,
     "test/open-pr-corroboration.test.ts": 855,
