@@ -11419,6 +11419,14 @@ async function runTask(
     const stopPolling = workerStateSensor.startPolling();
     return rawSpawn({
       ...spawnArgs,
+      // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
+      // routing assignment and terminal worker row join without inferring a task; an injected observer still runs, but after the ledger.
+      runId: spawnArgs.runId ?? runId,
+      taskId: spawnArgs.taskId ?? taskId,
+      onSelectionAssignment: (assignment) => {
+        log("worker.assignment", { worker_assignment: assignment });
+        spawnArgs.onSelectionAssignment?.(assignment);
+      },
       onSpawnError:
         spawnArgs.onSpawnError ??
         ((err) =>
