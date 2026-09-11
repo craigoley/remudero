@@ -5026,7 +5026,7 @@ export function toQuestionEntry(q: ClarificationQuestion, ts: string): QuestionE
 
 /** One PR's identical-verdict run, as folded off `sweep.disposed` rows already on the ledger —
  *  see {@link repeatDispositionStreaksFromLedger}'s own doc for the fold rules. */
-interface RepeatDispositionRun {
+export interface RepeatDispositionRun {
   headSha: string;
   disposition: string;
   /** Consecutive `sweep.disposed` rows ending at (and including) the last one read. */
@@ -5040,8 +5040,45 @@ interface RepeatDispositionRun {
  *  `(disposition, head_sha)`, NEVER ON THE RENDERED `reason`, which carries a live counter. EVERY
  *  ROW COUNTS REGARDLESS OF `acted` — gating on it would exempt exactly the shapes this bound exists
  *  for. `escalated` carries forward only while THE ROWS IT READS SURVIVE, so post-rotation this
- *  legitimately reports a fresh run (W1-T2382). */
-function repeatDispositionStreaksFromLedger(lines: ReadonlyArray<Record<string, unknown>>): Map<number, RepeatDispositionRun> {
+ *  legitimately reports a fresh run (W1-T2382).
+ *
+ * W1-T3359 — IT NOW READS THE STREAK THE WRITING PASS RECORDED, RATHER THAN RE-COUNTING ROWS, AND
+ * THAT IS A REPAIR, NOT AN OPTIMISATION.
+ *
+ * The emitter has always put `repeat_streak` on every row, and its own comment says why: "so the
+ * next pass's fold never has to guess it back out of row order". This fold guessed anyway. The cost
+ * of guessing is that the count lives in the NUMBER OF SURVIVING ROWS, and that number has a ceiling
+ * this bound cannot see past. `sweep.disposed` IS retained and always has been — a first draft of
+ * this change wrongly added it to the set a SECOND time and claimed rotation archived it wholesale;
+ * both were corrected before shipping, and the retention set is untouched here. But retention keeps
+ * {@link MAX_RETAINED_LINES_PER_STEP} = 200 newest rows PER STEP, shared across every PR, so a
+ * recount can only ever attribute about 200/N rows to any one of N live PRs.
+ *
+ * MEASURED on the live fleet 2026-09-11, which is what makes this a repair:
+ *   repeatDispositionBound                                      50
+ *   retained rows for this step, across ALL PRs                200
+ *   => live PRs above which a recount can never reach it         4
+ *   max rows for one (pr, disposition) in the live file          12
+ *   sweep.disposed share of the live file                        41% (3,225 of 7,774 lines)
+ * With more than four PRs sharing that window a recount systematically UNDER-reads, and the fleet
+ * routinely carries ten or more. The bound HAS fired — 53 rows carry `repeat_escalated: true` — but
+ * its sensitivity falls as the fleet gets busier, and nothing reported the decay. A bound whose
+ * sensitivity is inversely proportional to how much work the fleet is doing is this repo's recurring
+ * defect read backwards.
+ *
+ * READING THE RECORDED VALUE REMOVES THE CEILING: one surviving row states the true streak, so the
+ * horizon no longer depends on how many rows of this step survived beside how many other PRs. The
+ * recount remains as the fallback for rows written before this field could be trusted — a corpus
+ * mid-migration must not read as a fresh run.
+ *
+ * `escalated` IS DELIBERATELY UNCHANGED and still derives from surviving rows only: W1-T2382 made
+ * re-arming per rotation window the intended behaviour ("ONCE PER HEAD PER ROTATION WINDOW"), and
+ * making the escalation durable here would silently convert that into once-per-head-forever. */
+/** EXPORTED FOR ITS FALSIFIER, which is the only honest way to test it: mirroring this fold in
+ *  test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts made every behavioural mutation
+ *  of THIS function survive, because the mirror answered instead. Same precedent as
+ *  {@link renderRepeatEscalationQuestion} below — exported and pinned by a test. */
+export function repeatDispositionStreaksFromLedger(lines: ReadonlyArray<Record<string, unknown>>): Map<number, RepeatDispositionRun> {
   const runs = new Map<number, RepeatDispositionRun>();
   for (const line of lines) {
     if (line.step !== "sweep.disposed") continue;
@@ -5051,10 +5088,18 @@ function repeatDispositionStreaksFromLedger(lines: ReadonlyArray<Record<string, 
     if (prNumber === undefined || headSha === undefined || disposition === undefined) continue;
     const prev = runs.get(prNumber);
     const continuesRun = prev !== undefined && prev.headSha === headSha && prev.disposition === disposition;
+    // The recorded streak is authoritative when present: the pass that wrote it held the same fold
+    // plus its own position in the run, so it can only be better informed than a recount over
+    // whatever rows happen to have survived. A non-positive or non-integer value is not a reading.
+    const recorded =
+      typeof line.repeat_streak === "number" && Number.isInteger(line.repeat_streak) && line.repeat_streak > 0
+        ? line.repeat_streak
+        : undefined;
+    const counted = continuesRun && prev ? prev.streak + 1 : 1;
     runs.set(prNumber, {
       headSha,
       disposition,
-      streak: continuesRun && prev ? prev.streak + 1 : 1,
+      streak: recorded ?? counted,
       escalated: (continuesRun && prev ? prev.escalated : false) || line.repeat_escalated === true,
     });
   }
