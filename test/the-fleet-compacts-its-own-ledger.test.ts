@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
+import type { DaemonDeps } from "../src/lib/daemon.js";
 import {
   DEFAULT_LEDGER_COMPACTION_TRIGGER,
   decideLedgerCompaction,
@@ -21,7 +22,6 @@ import {
 // So this suite's subject is not "does compaction work" — #4950 owns that. It is: does the fleet
 // decide to run it, on the quantity that predicts the abort, without a human.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const NOW = Date.parse("2026-09-11T12:00:00.000Z");
 const MIN = 60_000;
 
@@ -140,39 +140,123 @@ test("W1-T3368: an archive that cannot be stat'd still COUNTS — it is a file a
 
 // ── the wiring, and the contract it changes ─────────────────────────────────────────────────────
 
-test("W1-T3368: the daemon consults the rung and carries the decision's OWN reason into the ledger", () => {
-  const daemon = readFileSync(join(REPO_ROOT, "src", "lib", "daemon.ts"), "utf8");
-  for (const step of [
-    "ledger_compaction.fired",
-    "ledger_compaction.skipped",
-    "ledger_compaction.ran",
-    "ledger_compaction.check_failed",
-    "ledger_compaction.run_failed",
-    "ledger_compaction.nothing_eligible",
-  ]) {
-    assert.ok(daemon.includes(step), `the daemon logs no ${step} row`);
+/**
+ * One daemon cycle with the rung wired however the caller asks, returning the rows it logged.
+ * Driving the REAL `runDaemon` is the point: what has to hold is that a decision reaches a ledger
+ * row still carrying its own reason, and a read of daemon.ts as text witnesses the spelling of that
+ * wiring rather than the wiring — it passes on a block no caller can reach (#981 sent a diagnosis
+ * the wrong way for hours on exactly that mismatch).
+ */
+async function daemonRows(deps: Partial<DaemonDeps>): Promise<Array<{ step: string; extra?: Record<string, unknown> }>> {
+  const { runDaemon } = await import("../src/lib/daemon.js");
+  const { loadPlan } = await import("../src/lib/plan.js");
+  const dir = mkdtempSync(join(tmpdir(), "rmd-lcr-"));
+  try {
+    const f = join(dir, "tasks.yaml");
+    writeFileSync(f, "- id: T1\n  title: t\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n");
+    const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    let stopChecks = 0;
+    await runDaemon(loadPlan(f), {
+      refreshMerged: () => () => true,
+      runOne: async () => {
+        throw new Error("never");
+      },
+      checkStop: () => {
+        stopChecks += 1;
+        return stopChecks > 1 ? "bound" : undefined;
+      },
+      sleep: async () => {},
+      log: (step: string, extra?: Record<string, unknown>) => rows.push({ step, extra }),
+      ...deps,
+    });
+    return rows.filter((r) => r.step.startsWith("ledger_compaction"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
-  // THE REASON TRAVELS WITH THE OUTCOME. A row whose outcome came from one gate and whose reason came
-  // from another sent a diagnosis the wrong way for hours once already (#981).
-  const ran = /log\("ledger_compaction\.ran",\s*\{[\s\S]{0,400}?\}\)/.exec(daemon)?.[0] ?? "";
-  assert.ok(ran.length > 0, "the .ran row is not in the shape this test can read");
-  assert.match(ran, /reason: compactionDecision\.reason/, "the .ran row must carry the deciding reason");
-  const failed = /log\("ledger_compaction\.run_failed",\s*\{[\s\S]{0,400}?\}\)/.exec(daemon)?.[0] ?? "";
-  assert.match(failed, /reason: compactionDecision\.reason/, "a failure must also say what it was trying to do");
+}
+
+const FIRES = { fire: true as const, reason: "959 archives over bound 400" };
+const OUTCOME = { sourceCount: 40, rowsWritten: 9_000, duplicatesCollapsed: 3, archiveName: "ledger.2026-09-01T00-00-00-000Z.ndjson.gz" };
+
+test("W1-T3368: a FIRING decision runs one pass, and the .ran row carries THAT decision's reason", async () => {
+  let passes = 0;
+  const rows = await daemonRows({
+    checkLedgerCompaction: () => FIRES,
+    runLedgerCompaction: async () => {
+      passes += 1;
+      return OUTCOME;
+    },
+  });
+  assert.equal(passes, 1, "a firing decision must actually invoke the runner, exactly once per cycle");
+  assert.deepEqual(rows.map((r) => r.step), ["ledger_compaction.fired", "ledger_compaction.ran"]);
+  assert.equal(rows[1].extra?.reason, FIRES.reason, "the reason must travel with the outcome, never be re-derived");
+  assert.equal(rows[1].extra?.source_count, OUTCOME.sourceCount);
+  assert.equal(rows[1].extra?.rows_written, OUTCOME.rowsWritten);
 });
 
-test("W1-T3368: the rung is OPTIONAL, so a host that never wires it behaves exactly as before", () => {
-  const daemon = readFileSync(join(REPO_ROOT, "src", "lib", "daemon.ts"), "utf8");
-  assert.match(daemon, /checkLedgerCompaction\?: \(\) => LedgerCompactionDecision/);
-  assert.match(daemon, /if \(deps\.checkLedgerCompaction\)/, "the whole block must be gated on the dep");
+test("W1-T3368: a pass that finds nothing eligible is a RESULT, distinguishable from a break", async () => {
+  const rows = await daemonRows({
+    checkLedgerCompaction: () => FIRES,
+    runLedgerCompaction: async () => undefined,
+  });
+  assert.deepEqual(rows.map((r) => r.step), ["ledger_compaction.fired", "ledger_compaction.nothing_eligible"]);
+  assert.equal(rows[1].extra?.reason, FIRES.reason);
 });
 
-test("W1-T3368: the verb's own help no longer claims it never runs from a daemon cadence", () => {
+test("W1-T3368: a compaction that THROWS is best-effort — the cycle survives and the row says what it was trying to do", async () => {
+  const rows = await daemonRows({
+    checkLedgerCompaction: () => FIRES,
+    runLedgerCompaction: async () => {
+      throw new Error("gzip write failed");
+    },
+  });
+  assert.deepEqual(rows.map((r) => r.step), ["ledger_compaction.fired", "ledger_compaction.run_failed"]);
+  assert.equal(rows[1].extra?.reason, FIRES.reason, "a failure must also say what it was trying to do");
+  assert.match(String(rows[1].extra?.error), /gzip write failed/);
+});
+
+test("W1-T3368: a REFUSING decision never runs a pass, and names why", async () => {
+  let passes = 0;
+  const rows = await daemonRows({
+    checkLedgerCompaction: () => ({ fire: false, reason: "12 archives under bound 400" }),
+    runLedgerCompaction: async () => {
+      passes += 1;
+      return OUTCOME;
+    },
+  });
+  assert.equal(passes, 0, "a refusing decision must never invoke the runner");
+  assert.deepEqual(rows.map((r) => r.step), ["ledger_compaction.skipped"]);
+  assert.match(String(rows[0].extra?.reason), /under bound/);
+});
+
+test("W1-T3368: a CHECK that throws is survivable too — an unreadable corpus never breaks a cycle", async () => {
+  let passes = 0;
+  const rows = await daemonRows({
+    checkLedgerCompaction: () => {
+      throw new Error("state dir vanished");
+    },
+    runLedgerCompaction: async () => {
+      passes += 1;
+      return OUTCOME;
+    },
+  });
+  assert.equal(passes, 0);
+  assert.deepEqual(rows.map((r) => r.step), ["ledger_compaction.check_failed"]);
+});
+
+test("W1-T3368: the rung is OPTIONAL, so a host that never wires it behaves exactly as before", async () => {
+  const rows = await daemonRows({});
+  assert.deepEqual(rows, [], "an unwired rung emits nothing at all");
+});
+
+test("W1-T3368: the verb's own help no longer claims it never runs from a daemon cadence", async () => {
   // A contract whose code disagrees with its own description is the defect class this change exists
   // to stop repeating, so retiring that half of the contract is part of the change, not a follow-up.
-  const runTask = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
-  const help = /detail: "operator-only archive compaction[\s\S]{0,1400}?",/.exec(runTask)?.[0] ?? "";
-  assert.ok(help.length > 0, "the ledger-compact help entry is not in the shape this test can read");
+  // Rendered through the same `commandHelp` an operator reaches, not read off the registry's source.
+  const { COMMANDS, commandHelp } = await import("../src/run-task.js");
+  const spec = COMMANDS.find((c) => c.name === "ledger-compact");
+  assert.ok(spec, "the ledger-compact verb must still be in the registry rmd --help renders from");
+  const help = commandHelp(spec);
   assert.equal(
     /never runs from rotateLedger or a daemon cadence/.test(help),
     false,
