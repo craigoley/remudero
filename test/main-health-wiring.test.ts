@@ -48,6 +48,14 @@ function fixture(overrides: Partial<MainHealthRungDeps> = {}) {
       };
     }
     if (path === `repos/${OWNER}/${REPO}/commits/${sha}/status`) return { statuses: [] };
+    if (path === `repos/${OWNER}/${REPO}/actions/runs?branch=trunk&event=push&status=completed&per_page=100`) {
+      return {
+        workflow_runs: [
+          { head_sha: sha, conclusion, html_url: `https://github.com/${OWNER}/${REPO}/actions/runs/1` },
+          { head_sha: GREEN_SHA, conclusion: "success" },
+        ],
+      };
+    }
     throw new Error(`unrouted gh api path: ${path}`);
   }) as GhApiFetcher;
 

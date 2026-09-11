@@ -3143,6 +3143,179 @@ export interface MainHealthObservation {
   readonly nonEvidenceChecks: readonly string[];
   /** Required check names with no terminal conclusion yet. */
   readonly pendingChecks: readonly string[];
+  /** Failing node-test titles parsed from the failed check log, capped for operator readability. */
+  readonly failingTestTitles?: readonly string[];
+  /** Count of parsed failing test titles hidden behind the cap. */
+  readonly hiddenFailingTestTitleCount?: number;
+  /** The boundary commit for the current red-main streak, when the fetched window proves one. */
+  readonly firstRedCommit?: MainHealthFirstRedCommit;
+  /** True when the fetched run-history window never reached the preceding green run. */
+  readonly runHistoryWindowExhausted?: boolean;
+  /** Named soft-failures from optional enrichment reads. */
+  readonly enrichmentFailures?: readonly string[];
+}
+
+export const MAIN_HEALTH_FAILING_TEST_TITLE_CAP = 3;
+
+export interface MainHealthPullRequestRef {
+  readonly number?: number;
+  readonly url?: string;
+}
+
+export interface MainHealthRunHistoryEntry {
+  readonly headSha: string;
+  readonly conclusion?: string;
+  readonly url?: string;
+  readonly pullRequests?: readonly MainHealthPullRequestRef[];
+}
+
+export interface MainHealthFirstRedCommit {
+  readonly headSha: string;
+  readonly afterGreenSha: string;
+  readonly runUrl?: string;
+  readonly pullRequest?: MainHealthPullRequestRef;
+}
+
+export interface MainHealthEnrichment {
+  readonly ciFailures?: readonly CiFailure[];
+  readonly ciFailuresUnavailable?: string;
+  readonly runHistory?: readonly MainHealthRunHistoryEntry[];
+  readonly runHistoryUnavailable?: string;
+  readonly failingTestTitleCap?: number;
+}
+
+export interface MainHealthFailingTestTitleSummary {
+  readonly titles: readonly string[];
+  readonly hiddenCount: number;
+  readonly logFailures: readonly string[];
+}
+
+function mainHealthFailureConclusion(conclusion: string | undefined): boolean {
+  return REQUIRED_CHECK_FAIL.has((conclusion ?? "").toUpperCase());
+}
+
+function mainHealthSuccessConclusion(conclusion: string | undefined): boolean {
+  return (conclusion ?? "").toUpperCase() === "SUCCESS";
+}
+
+export function mainHealthFailingTestTitles(
+  failures: readonly CiFailure[],
+  failingChecks: readonly string[],
+  cap: number = MAIN_HEALTH_FAILING_TEST_TITLE_CAP,
+): MainHealthFailingTestTitleSummary {
+  const failingCheckSet = new Set(failingChecks);
+  const titles: string[] = [];
+  const seen = new Set<string>();
+  const logFailures: string[] = [];
+  for (const failure of failures) {
+    if (failingCheckSet.size > 0 && !failingCheckSet.has(failure.name)) continue;
+    if (failure.logUnavailable) {
+      logFailures.push(`failing test log NOT read for ${failure.name}: ${describeCiLogUnavailable(failure.logUnavailable)}`);
+    }
+    for (const line of failure.logTail.split("\n")) {
+      const title = line.match(/^\s*not ok\s+\d+\s+-\s+(.+?)\s*$/i)?.[1]?.trim();
+      if (!title || seen.has(title)) continue;
+      seen.add(title);
+      titles.push(title);
+    }
+  }
+  const boundedCap = Math.max(0, cap);
+  return {
+    titles: titles.slice(0, boundedCap),
+    hiddenCount: Math.max(0, titles.length - boundedCap),
+    logFailures,
+  };
+}
+
+export function mainHealthFirstRedCommitFromRunHistory(
+  history: readonly MainHealthRunHistoryEntry[],
+): MainHealthFirstRedCommit | "window-exhausted" | undefined {
+  if (!history.some((run) => mainHealthFailureConclusion(run.conclusion))) return undefined;
+  if (!history.some((run) => mainHealthSuccessConclusion(run.conclusion))) return "window-exhausted";
+  let greenSha: string | undefined;
+  for (const run of [...history].reverse()) {
+    if (mainHealthSuccessConclusion(run.conclusion)) {
+      greenSha = run.headSha;
+      continue;
+    }
+    if (greenSha && mainHealthFailureConclusion(run.conclusion)) {
+      const [pullRequest] = run.pullRequests ?? [];
+      return {
+        headSha: run.headSha,
+        afterGreenSha: greenSha,
+        ...(run.url ? { runUrl: run.url } : {}),
+        ...(pullRequest ? { pullRequest } : {}),
+      };
+    }
+  }
+  return undefined;
+}
+
+export function enrichMainHealthObservation(
+  observation: MainHealthObservation,
+  enrichment: MainHealthEnrichment,
+): MainHealthObservation {
+  if (observation.state !== "red") return observation;
+  const enrichmentFailures: string[] = [];
+  let failingTestTitles: readonly string[] | undefined;
+  let hiddenFailingTestTitleCount: number | undefined;
+  if (enrichment.ciFailures) {
+    const summary = mainHealthFailingTestTitles(
+      enrichment.ciFailures,
+      observation.failingChecks,
+      enrichment.failingTestTitleCap,
+    );
+    failingTestTitles = summary.titles;
+    hiddenFailingTestTitleCount = summary.hiddenCount;
+    enrichmentFailures.push(...summary.logFailures);
+  } else if (enrichment.ciFailuresUnavailable) {
+    enrichmentFailures.push(`failing test log NOT read: ${enrichment.ciFailuresUnavailable}`);
+  }
+
+  let firstRedCommit: MainHealthFirstRedCommit | undefined;
+  let runHistoryWindowExhausted: boolean | undefined;
+  if (enrichment.runHistory) {
+    const boundary = mainHealthFirstRedCommitFromRunHistory(enrichment.runHistory);
+    if (boundary === "window-exhausted") {
+      runHistoryWindowExhausted = true;
+    } else {
+      firstRedCommit = boundary;
+    }
+  } else if (enrichment.runHistoryUnavailable) {
+    enrichmentFailures.push(`main push run history NOT read: ${enrichment.runHistoryUnavailable}`);
+  }
+
+  return {
+    ...observation,
+    ...(failingTestTitles ? { failingTestTitles } : {}),
+    ...(hiddenFailingTestTitleCount !== undefined ? { hiddenFailingTestTitleCount } : {}),
+    ...(firstRedCommit ? { firstRedCommit } : {}),
+    ...(runHistoryWindowExhausted !== undefined ? { runHistoryWindowExhausted } : {}),
+    ...(enrichmentFailures.length > 0 ? { enrichmentFailures } : {}),
+  };
+}
+
+function mainHealthOperatorDetail(observation: MainHealthObservation): string {
+  const lines: string[] = [];
+  const titles = observation.failingTestTitles ?? [];
+  if (titles.length > 0) {
+    const more = observation.hiddenFailingTestTitleCount ? ` (+${observation.hiddenFailingTestTitleCount} more)` : "";
+    lines.push(`failing test title(s): ${titles.join("; ")}${more}`);
+  }
+  if (observation.firstRedCommit) {
+    const pr = observation.firstRedCommit.pullRequest;
+    const prText = pr?.number
+      ? `; merged PR #${pr.number}${pr.url ? ` (${pr.url})` : ""}`
+      : "; merged PR unavailable from the fetched run";
+    const runText = observation.firstRedCommit.runUrl ? `; run ${observation.firstRedCommit.runUrl}` : "";
+    lines.push(
+      `first red main push run: ${observation.firstRedCommit.headSha}${prText}; after ${observation.firstRedCommit.afterGreenSha} was green${runText}`,
+    );
+  } else if (observation.runHistoryWindowExhausted) {
+    lines.push("main push run history window exhausted before a successful run; no first-red commit named");
+  }
+  lines.push(...(observation.enrichmentFailures ?? []));
+  return lines.length > 0 ? ` ${lines.join(". ")}.` : "";
 }
 
 /** Read main's rollup into a {@link MainHealthObservation}, reusing the exact dedupe and
@@ -3266,7 +3439,7 @@ export function mainHealthEscalationDecision(observation: MainHealthObservation)
   return {
     escalate: true,
     class: mainHealthEscalationClass(),
-    reason: `main (${observation.sha}) is red — never auto-reverted, an operator ruling decides next steps: ${observation.reason}`,
+    reason: `main (${observation.sha}) is red — never auto-reverted, an operator ruling decides next steps: ${observation.reason}.${mainHealthOperatorDetail(observation)}`,
   };
 }
 

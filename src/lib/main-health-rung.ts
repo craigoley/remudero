@@ -11,11 +11,13 @@ import { readLedgerLines } from "./status.js";
 import {
   CHECK_REQUEUE_STEP,
   classifyCiInfrastructureFailure,
+  enrichMainHealthObservation,
   mainHealthEscalationDecision,
   mainHealthFromRollup,
   requeuedCheckKeysFromLedger,
   type CiFailure,
   type MainHealthObservation,
+  type MainHealthRunHistoryEntry,
   type RollupCheckEntry,
 } from "./sweep.js";
 
@@ -35,6 +37,7 @@ export interface MainHealthRungDeps {
   readCiFailures?: (
     rollup: readonly RollupCheckEntry[] | undefined,
   ) => CiFailure[] | undefined | Promise<CiFailure[] | undefined>;
+  readMainRunHistory?: (branch: string) => MainHealthRunHistoryEntry[] | undefined | Promise<MainHealthRunHistoryEntry[] | undefined>;
   requeueCheck?: (failure: CiFailure) => boolean | void | Promise<boolean | void>;
 }
 
@@ -51,6 +54,48 @@ function requiredString(value: unknown, field: string): string {
     throw new Error(`GitHub response omitted ${field}`);
   }
   return value;
+}
+
+interface WorkflowRunHistoryResponse {
+  workflow_runs?: ReadonlyArray<{
+    head_sha?: unknown;
+    conclusion?: unknown;
+    html_url?: unknown;
+    pull_requests?: ReadonlyArray<{ number?: unknown; html_url?: unknown; url?: unknown }>;
+  }>;
+}
+
+export function mainPushRunHistoryRestArgs(owner: string, repo: string, branch: string): string[] {
+  return [
+    "api",
+    `repos/${owner}/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&event=push&status=completed&per_page=100`,
+  ];
+}
+
+export function fetchMainPushRunHistory(
+  owner: string,
+  repo: string,
+  branch: string,
+  fetch: GhApiFetcher,
+): MainHealthRunHistoryEntry[] {
+  const response = fetch(mainPushRunHistoryRestArgs(owner, repo, branch)) as WorkflowRunHistoryResponse;
+  return (response.workflow_runs ?? [])
+    .map((run): MainHealthRunHistoryEntry | undefined => {
+      if (typeof run.head_sha !== "string" || run.head_sha.trim() === "") return undefined;
+      const pullRequests = (run.pull_requests ?? [])
+        .map((pr) => ({
+          ...(typeof pr.number === "number" ? { number: pr.number } : {}),
+          ...(typeof pr.html_url === "string" ? { url: pr.html_url } : typeof pr.url === "string" ? { url: pr.url } : {}),
+        }))
+        .filter((pr) => pr.number !== undefined || pr.url !== undefined);
+      return {
+        headSha: run.head_sha,
+        ...(typeof run.conclusion === "string" ? { conclusion: run.conclusion } : {}),
+        ...(typeof run.html_url === "string" ? { url: run.html_url } : {}),
+        ...(pullRequests.length > 0 ? { pullRequests } : {}),
+      };
+    })
+    .filter((run): run is MainHealthRunHistoryEntry => run !== undefined);
 }
 
 export function escalationFor(observation: MainHealthObservation, branch: string): Escalation {
@@ -121,7 +166,7 @@ export function buildMainHealthRung(
       ]) as CommitMetadata;
       const sha = requiredString(commit?.sha, "default branch head sha");
       const rollup = rollupFor(owner, repo, sha, deps.fetch);
-      const observation = mainHealthFromRollup(sha, rollup, undefined);
+      let observation = mainHealthFromRollup(sha, rollup, undefined);
       deps.log("main.health.observed", {
         branch,
         sha,
@@ -140,15 +185,40 @@ export function buildMainHealthRung(
           return;
         }
         let failures: CiFailure[] | undefined;
+        let ciFailuresUnavailable: string | undefined;
         try {
           failures = deps.readCiFailures ? await deps.readCiFailures(rollup) : undefined;
+          if (!deps.readCiFailures) ciFailuresUnavailable = "no CI failure reader configured";
+          if (deps.readCiFailures && failures === undefined) ciFailuresUnavailable = "the CI failure reader returned no evidence";
         } catch (error) {
+          ciFailuresUnavailable = String((error as Error)?.message ?? error);
           deps.log("main.health.ci_evidence_unreadable", {
             branch,
             sha,
             error: String((error as Error)?.message ?? error),
           });
         }
+        let runHistory: MainHealthRunHistoryEntry[] | undefined;
+        let runHistoryUnavailable: string | undefined;
+        try {
+          const readMainRunHistory =
+            deps.readMainRunHistory ?? ((branchName: string) => fetchMainPushRunHistory(owner, repo, branchName, deps.fetch));
+          runHistory = await readMainRunHistory(branch);
+          if (runHistory === undefined) runHistoryUnavailable = "the main push run-history reader returned no evidence";
+        } catch (error) {
+          runHistoryUnavailable = String((error as Error)?.message ?? error);
+          deps.log("main.health.run_history_unreadable", {
+            branch,
+            sha,
+            error: String((error as Error)?.message ?? error),
+          });
+        }
+        observation = enrichMainHealthObservation(observation, {
+          ...(failures ? { ciFailures: failures } : {}),
+          ...(ciFailuresUnavailable ? { ciFailuresUnavailable } : {}),
+          ...(runHistory ? { runHistory } : {}),
+          ...(runHistoryUnavailable ? { runHistoryUnavailable } : {}),
+        });
         const failingNames = [...observation.failingChecks].sort();
         const evidenceNames = [...(failures ?? [])].map((failure) => failure.name).sort();
         const exactEvidenceSet =
