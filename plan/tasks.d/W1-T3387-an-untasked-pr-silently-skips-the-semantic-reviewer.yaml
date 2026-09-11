@@ -1,0 +1,50 @@
+- id: W1-T3387
+  title: "AN UNTASKED PR SILENTLY SKIPS THE SEMANTIC REVIEWER — no task id means no risk and no budget, so the reviewer is never spawned, the keyword floor decides the verdict, and the PR parks green with no escalation because escalation keys on the id that never existed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: medium
+  origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
+  plan_refs: ["W1-T3386", "W1-T3388"]
+  files: [src/run-task.ts, test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SKIP IS ONE CONDITIONAL AND IT HAS NO RECOVERY ARM. `run-task.ts` resolves review metadata
+    only inside `if (taskId)`, assigning `taskRisk` and `taskBudgetUsd` from the shard at the head.
+    When no task id resolves, both stay `undefined`, and the semantic arm then logs
+    `review.reviewer.skipped` with reason `head-task-metadata-unavailable` and never spawns a
+    reviewer. The deterministic review still runs, so a verdict IS posted — decided by the keyword
+    floor, with no proof execution behind it.
+
+    THE IDENTITY FALLBACK ALREADY EXISTS AND IS NOT USED FOR THIS. The same function already writes
+    every ledger line under `taskId ?? PR-<number>`, and `decideSweepArm` already computes its arm id
+    as `pr.taskId ?? PR-<prNumber>`. So the system is perfectly willing to call an untasked PR
+    `PR-5106` everywhere EXCEPT where it decides whether the reviewer may run.
+
+    MEASURED. PR 5106 opened on head branch `codex/codeql-rate-limit-retry`. That name does not match
+    `RUN_BRANCH_RE` (body-repair.ts), so no id was derivable, the trailer repair refused itself with
+    `missing trailer repair refused: head branch does not match run-<taskId>-<epoch>`, the reviewer
+    was skipped for `head-task-metadata-unavailable`, and the resulting verdict capped at 0/3. The PR
+    then swept 58 times across three heads over nearly two hours. It has NEVER been escalated: a
+    query for any escalation row naming that PR or any of its three heads returns ZERO against a
+    control of 753 escalation rows in the same union. Nobody was ever told.
+
+    WHY A DEFAULT IS SAFE AND SILENCE IS NOT. An untasked PR is not a low-value PR; it is a PR whose
+    risk nobody declared. Reading that as permission to skip the reviewer inverts the intent of the
+    whole gate. Resolve a default risk and budget for the `PR-<number>` identity so the semantic
+    reviewer runs, and reserve the skip for the case where the reviewer genuinely cannot be built.
+
+    SCOPE. Give the `PR-<number>` identity a default risk and budget so the semantic reviewer spawns.
+    Keep the skip only for an unresolvable reviewer mount or settings failure, and keep its ledger
+    reason distinct so the two causes never merge into one token again. Change no capping rule and
+    no arm predicate.
+
+  acceptance:
+    - claim: "a PR with no derivable task id still spawns the semantic reviewer, under a default risk and budget"
+      proof: "grep: Resolve a default risk and budget for the in plan/tasks.d/W1-T3387-an-untasked-pr-silently-skips-the-semantic-reviewer.yaml"
+    - claim: "the skip survives only for an unresolvable reviewer mount or settings failure, under its own distinct ledger reason"
+      proof: "grep: Keep the skip only for an unresolvable reviewer mount or settings failure in plan/tasks.d/W1-T3387-an-untasked-pr-silently-skips-the-semantic-reviewer.yaml"
