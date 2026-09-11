@@ -6,6 +6,7 @@ import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
+import { validateWorkerSettingsFile } from "./settings.js";
 import { withTempDir } from "./tmp.js";
 import {
   spawnDetachedGroup,
@@ -20,6 +21,8 @@ import {
 interface CodexSpawnArgs {
   cwd: string;
   prompt: string;
+  /** The validated worker policy whose PreToolUse floor is translated onto the Codex CLI. */
+  settingsFile: string;
   resumeSessionId?: string;
   /**
    * W1-T2800 — THE REDIRECTED PER-SPAWN WORKER HOME, threaded EXPLICITLY rather than left to
@@ -1212,7 +1215,12 @@ export function parseCodexJsonl(raw: string, nowMs = Date.now()): ParsedCodexEve
   };
 }
 
-function codexSpawnEnv(config: Config, args: CodexSpawnArgs): Record<string, string | undefined> {
+type CodexSpawnEnvArgs = Pick<
+  CodexSpawnArgs,
+  "cwd" | "prompt" | "workerHome" | "zdotdir" | "env" | "runId" | "taskId"
+>;
+
+function codexSpawnEnv(config: Config, args: CodexSpawnEnvArgs): Record<string, string | undefined> {
   const allowed = ["PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN"];
   const env: Record<string, string | undefined> = {};
   for (const key of allowed) if (process.env[key] !== undefined) env[key] = process.env[key];
@@ -1260,7 +1268,7 @@ function codexSpawnEnv(config: Config, args: CodexSpawnArgs): Record<string, str
 /** W1-T2800: {@link codexSpawnEnv} under test — the env boundary this task fixes is the whole
  *  subject, so it is reachable directly rather than only through a live spawn. Exported for the
  *  test seam ONLY; every production caller still goes through {@link codexSpawnEnv}. */
-export function codexSpawnEnvForTest(config: Config, args: CodexSpawnArgs): Record<string, string | undefined> {
+export function codexSpawnEnvForTest(config: Config, args: CodexSpawnEnvArgs): Record<string, string | undefined> {
   return codexSpawnEnv(config, args);
 }
 
@@ -1338,6 +1346,79 @@ export const CODEX_PROJECT_DOC_MAX_BYTES = 65536;
 export const CODEX_DOCTRINE_PRELUDE =
   "Before acting, read and follow the repository instruction files present in the checkout, starting with CLAUDE.md — this repository's standing instructions, which are also loaded as your project doc.\n\n";
 
+interface WorkerCommandHook {
+  type: "command";
+  command: string;
+  timeout?: number;
+}
+
+interface WorkerPreToolUseHook {
+  matcher: string;
+  hooks: WorkerCommandHook[];
+}
+
+/**
+ * Translate the already-validated worker settings' PreToolUse hooks into Codex's inline TOML
+ * profile. Claude consumes the JSON file directly; Codex has no settings-file flag, so omitting
+ * this translation silently dropped the repository's deterministic deny floor while preserving
+ * the same GitHub credential and network access.
+ *
+ * Fail closed on an unreadable hook shape. A worker policy without its floor is not a weaker but
+ * acceptable profile: it is a different authority boundary.
+ */
+export function codexPreToolUseProfile(settingsFile: string): string[] {
+  const settings = validateWorkerSettingsFile(settingsFile);
+  const configured = (settings.hooks as { PreToolUse?: unknown } | undefined)?.PreToolUse;
+  if (!Array.isArray(configured) || configured.length === 0) {
+    throw new Error("Codex worker settings must define at least one PreToolUse hook.");
+  }
+
+  const hooks = configured.map((entry, entryIndex): WorkerPreToolUseHook => {
+    const candidate = entry as { matcher?: unknown; hooks?: unknown };
+    if (typeof candidate?.matcher !== "string" || !Array.isArray(candidate.hooks) || candidate.hooks.length === 0) {
+      throw new Error(`Codex worker PreToolUse[${entryIndex}] has an unreadable matcher or empty hooks list.`);
+    }
+    return {
+      matcher: candidate.matcher,
+      hooks: candidate.hooks.map((hook, hookIndex): WorkerCommandHook => {
+        const commandHook = hook as { type?: unknown; command?: unknown; timeout?: unknown };
+        if (commandHook?.type !== "command" || typeof commandHook.command !== "string" || commandHook.command.length === 0) {
+          throw new Error(`Codex worker PreToolUse[${entryIndex}].hooks[${hookIndex}] is not a command hook.`);
+        }
+        if (commandHook.timeout !== undefined &&
+            (typeof commandHook.timeout !== "number" || !Number.isFinite(commandHook.timeout) || commandHook.timeout <= 0)) {
+          throw new Error(`Codex worker PreToolUse[${entryIndex}].hooks[${hookIndex}] has an invalid timeout.`);
+        }
+        return {
+          type: "command",
+          command: commandHook.command,
+          ...(commandHook.timeout === undefined ? {} : { timeout: commandHook.timeout }),
+        };
+      }),
+    };
+  });
+
+  const inlineToml = hooks
+    .map((entry) => {
+      const commands = entry.hooks
+        .map((hook) =>
+          `{type=${JSON.stringify(hook.type)},command=${JSON.stringify(hook.command)}` +
+          `${hook.timeout === undefined ? "" : `,timeout=${hook.timeout}`}}`,
+        )
+        .join(",");
+      return `{matcher=${JSON.stringify(entry.matcher)},hooks=[${commands}]}`;
+    })
+    .join(",");
+
+  return [
+    "--enable", "hooks",
+    // The source was validated above and is repository-owned. A headless worker cannot answer a
+    // first-use trust prompt, so this narrowly bypasses hook trust without bypassing the sandbox.
+    "--dangerously-bypass-hook-trust",
+    "-c", `hooks.PreToolUse=[${inlineToml}]`,
+  ];
+}
+
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
@@ -1364,6 +1445,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   const shared = [
     "--json",
     "--ignore-user-config",
+    ...codexPreToolUseProfile(args.settingsFile),
     ...disposableReviewProfile,
     // W1-T2754: Codex refuses to start when its `-C` cwd is neither a git repository nor a
     // configured trusted directory — "Not inside a trusted directory and --skip-git-repo-check

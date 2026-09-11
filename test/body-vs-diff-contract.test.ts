@@ -21,7 +21,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { bodyVsDiffContractLines, outputContractLines } from "../src/lib/compaction.js";
+import { bodyVsDiffContractLines, outputContractLines, WORKER_PR_AUTHORITY_LINES } from "../src/lib/compaction.js";
 import { bodyContradictsDiff, changesetClaimsDisagreeing, claimsChangesetContext, noClaimIsAboutChangeset } from "../src/lib/review.js";
 
 /** A typical implement changeset: two source files and a test. */
@@ -126,6 +126,7 @@ test("the contract reaches the implement worker's prompt, and is one shared lite
   assert.ok(contract.length > 0);
   const implement = outputContractLines("W1-T1").join("\n");
   assert.ok(implement.includes(contract.join("\n")), "the implement contract carries it verbatim");
+  assert.ok(implement.includes(WORKER_PR_AUTHORITY_LINES.join("\n")), "the implement worker is told where its PR authority ends");
 
   // And the fix rung — the prompt most prone to a stale body, because it amends an existing PR.
   const { renderFixPrompt } = await import("../src/run-task.js");
@@ -136,6 +137,7 @@ test("the contract reaches the implement worker's prompt, and is one shared lite
     evidence: {} as never,
   } as never);
   assert.ok(fix.includes(contract.join("\n")), "the fix rung carries the SAME literal, not a paraphrase");
+  assert.ok(fix.includes(WORKER_PR_AUTHORITY_LINES.join("\n")), "the fix worker carries the SAME merge boundary");
 });
 
 test("the contract's own claims about anchoring match the real anchoring helpers", () => {

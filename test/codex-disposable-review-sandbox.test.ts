@@ -37,6 +37,7 @@ async function captureCodexSpawn(
         workerHome,
         cwd: root,
         prompt: "exercise the sandbox contract",
+        settingsFile: join(process.cwd(), "settings", "worker.json"),
         tools,
         sandboxIntent,
         sandboxReadRoots,
