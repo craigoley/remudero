@@ -161,7 +161,21 @@ test("W1-T3030 criterion 4: every workflow that RAISES also RESOLVES", () => {
     if (!text.includes("needs-human-issue.mjs")) continue;
     raisers.push(f);
     assert.match(text, /--resolved --source \S+/, `${f} raises a needs-human issue but never resolves one`);
-    assert.match(text, /if: success\(\)/, `${f}'s resolver must be gated on success`);
+    if (f === "fleet-heartbeat-watch") {
+      // W1-T3367: this workflow judges and resolves EACH host independently in the same run, so
+      // gating the whole delivery step on `success()` cannot express "azure recovered, mini is
+      // still down" -- the ordinary state of a multi-host fleet (see the job's own comment).
+      // `always()` is still an explicit, deliberate guard here, not an unconditional run: it is
+      // paired with a `pull_request` exclusion, and raise-vs-resolve is decided PER HOST from
+      // heartbeat-state.tsv (asserted directly in test/fleet-heartbeat.test.ts).
+      assert.match(
+        text,
+        /if: always\(\) && github\.event_name != 'pull_request'/,
+        `${f}'s per-host delivery step must stay explicitly guarded off pull_request, not unconditional`,
+      );
+    } else {
+      assert.match(text, /if: success\(\)/, `${f}'s resolver must be gated on success`);
+    }
   }
   assert.equal(raisers.length, 4, "all four known raisers must be covered");
 });
