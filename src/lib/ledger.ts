@@ -393,6 +393,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T2604: inbox.ts's `declinedReasonInLedger` reads this row — the decline's one receipt.
   // Rotating it away un-declines a proposal and re-offers ratify on something already refused.
   "panel.proposal_declined",
+  // W1-T3407: the RESTORE half of that receipt, and it must be retained for the MIRROR of the
+  // reason above — rotating a restore away silently RE-DECLINES a proposal an operator deliberately
+  // re-opened, on a reason they had already rejected. Both halves are read by one latest-wins pass,
+  // so losing either one inverts the answer.
+  "panel.proposal_restored",
   "fix.dispatch",
   "fix.review",
   // W1-T1110: sweep.ts's `fixRungStalledWithoutNewHead` reads "fix.ci_not_green"/"fix.resolved"
