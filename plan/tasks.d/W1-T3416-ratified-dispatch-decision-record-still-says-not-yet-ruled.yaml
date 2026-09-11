@@ -1,0 +1,54 @@
+- id: W1-T3416
+  title: "THE RATIFIED W1-T3075 DISPATCH DECISION STILL CARRIES A COMPETING `NOT YET RULED` RECORD — MASTER-PLAN.md names the operator's 2026-09-11 `(b) then (c)` selection, but DECISIONS.md still presents the older recommendation as pending, so the same policy has two incompatible authority states"
+  repo: remudero
+  depends_on: [W1-T3412]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  priority: 24
+  budget_usd: 10.00
+  files: [DECISIONS.md]
+  origin: "operator-session#w1-t3075-ratification-record-2026-09-11"
+  plan_refs: ["W1-T3075", "W1-T3074", "W1-T3412", "P48"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main 03804ae. MASTER-PLAN.md records W1-T3075 as RATIFIED on 2026-09-11
+    and names the operator-selected `(b) then (c)` ordering, while DECISIONS.md's W1-T3075 header
+    still says `PREPARED FOR RATIFICATION, NOT YET RULED` and its body says the operator has not
+    ruled. The older text was a valid recommendation at 2026-09-08, but it is now historical
+    evidence, not a second active policy. Leaving both forms asserts incompatible decision states
+    to a future filer or reviewer.
+
+    W1-T3412 owns the selector implementation. This task owns only the decision-record correction:
+    it neither changes the selector, calibration threshold, task priority, dispatch eligibility,
+    nor any routing or capacity policy.
+  design: |
+    Replace the old W1-T3075 recommendation's pending-ruling framing with an explicit supersession
+    label. Add one operator-ratification amendment that names the chosen order: explicit priority
+    and undeclared-scope handling remain first; measured `mergeRate / costPerMerge` follows only
+    with a complete union, W1-T3074's population floor, and stable two-cycle evidence; equal or
+    unavailable values use open dependent fan-out and then existing id order. Name the safe fallback
+    for missing, thin, zero-merge, or unstable calibration as the prior priority/scope/id order.
+
+    Keep the 2026-09-08 recommendation as provenance, marked historical and superseded. Do not
+    rewrite its measurements as current facts, add a new policy field, or claim this document alone
+    implements the comparator. The result must contain one operative W1-T3075 ruling and one
+    clearly labelled historical recommendation.
+  acceptance:
+    - claim: "DECISIONS.md labels the prior W1-T3075 recommendation superseded rather than still pending an operator ruling"
+      proof: "grep: SUPERSEDED BY OPERATOR RATIFICATION in DECISIONS.md"
+    - claim: "the operative W1-T3075 amendment names measured value after priority, fan-out for ties, and the complete-union, population-floor, and stability gates"
+      proof: "grep: OPERATOR RATIFICATION (W1-T3075) in DECISIONS.md"
+    - claim: "missing, thin, zero-merge, or unstable calibration retains the prior priority/scope/id order"
+      proof: "grep: priority/scope/id order in DECISIONS.md"
+  falsifier: |
+    Close without implementation if the current W1-T3075 decision record already carries the
+    operator's 2026-09-11 amendment and no `NOT YET RULED` framing. At origin/main 03804ae it does
+    not: the Master Plan and DECISIONS record conflict directly.
+  note: |
+    One concern: reconcile one decision record after an operator ruling. The authoritative choice
+    is already recorded in MASTER-PLAN.md; this task prevents the previous recommendation from
+    remaining a competing statement. It does not reconsider the operator's choice.

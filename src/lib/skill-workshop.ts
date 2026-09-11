@@ -62,6 +62,13 @@ export interface SkillDraft {
   description: string;
   markdown: string;
   candidateHash: string;
+  /** W1-T3385c — THE PROCEDURE'S OWN IDENTITY, stable as its evidence grows. {@link
+   *  candidateHash} deliberately hashes the RUN SET, so every cadence pass that mines the same
+   *  procedure with one more supporting run produces a different hash and a different proposal. */
+  procedureKey: string;
+  /** How many merged runs backed this draft when it was rendered — carried so a stager can tell a
+   *  better-evidenced draft of the SAME procedure from a weaker one. */
+  supportingRuns: number;
 }
 
 /** Deterministic id for a candidate's draft, over its shape AND its run set — two candidates that
@@ -85,7 +92,10 @@ export function proceduralCandidateHash(candidate: ProceduralCandidateLike): str
 export function renderSkillDraft(candidate: ProceduralCandidateLike): SkillDraft | undefined {
   if (candidate.supportingRuns < 2) return undefined;
   const hash = proceduralCandidateHash(candidate);
-  const name = `${kebabSlug(candidate.shapeKey)}-${hash.slice(0, 8)}`;
+  const procedureKey = procedureKeyFor(candidate);
+  // The NAME follows the procedure too, so the written .claude/skills/<name>/ path is stable as
+  // evidence accrues rather than minting a new directory per cadence pass.
+  const name = `${kebabSlug(candidate.shapeKey)}-${procedureKey.slice(0, 8)}`;
   const description = `A procedure shape proven across ${candidate.supportingRuns} merged ${candidate.taskType} run(s): ${candidate.signals.join(" + ")}.`;
   const appliesTo = injectableSkillTaskType(candidate.taskType);
   const steps = candidate.signals.map((key) => `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`);
@@ -111,7 +121,7 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike): SkillDraft
     "",
     ...evidence,
   ].join("\n");
-  return { name, description, markdown, candidateHash: hash };
+  return { name, description, markdown, candidateHash: hash, procedureKey, supportingRuns: candidate.supportingRuns };
 }
 
 /** Render the drafted skills (markdown) beside `renderProceduralCandidates`'s own output — the
@@ -267,10 +277,24 @@ export function describeWorkerSkillReachability(settingSources: readonly string[
 
 // ── The lane (design clause iii) ────────────────────────────────────────────────────────────
 
-/** Deterministic proposal id for a drafted skill — derived from {@link SkillDraft.candidateHash},
- *  never random, so re-staging the SAME candidate names the SAME proposal. */
-export function skillDraftProposalId(candidateHash: string): string {
-  return `skill-draft:${candidateHash}`;
+/** W1-T3385c — the PROCEDURE's identity: its shape and the task type it applies to, and NOT its
+ *  run set. Hashed so the id stays the same shape as before. */
+export function procedureKeyFor(candidate: Pick<ProceduralCandidateLike, "shapeKey" | "taskType">): string {
+  return createHash("sha256").update(`${candidate.taskType}|${candidate.shapeKey}`).digest("hex").slice(0, 16);
+}
+
+/**
+ * Deterministic proposal id for a drafted skill, keyed on the PROCEDURE (W1-T3385c) rather than on
+ * {@link SkillDraft.candidateHash}.
+ *
+ * The hash keyed the run SET, which is correct for "two candidates sharing a shapeKey must not
+ * collide" — but a procedure's run set GROWS, so every cadence pass minted another proposal for the
+ * same procedure. MEASURED 2026-09-11: all SEVEN open skill-draft proposals staged the same mined
+ * procedure, `implement-clean-single-strike`, at 26/27/78/79/81/82/84 runs — two real procedures
+ * wearing seven operator decisions.
+ */
+export function skillDraftProposalId(procedureKey: string): string {
+  return `skill-draft:${procedureKey}`;
 }
 
 /** One {@link stageSkillDraft} call's outcome. `refused` means the scanner rejected the draft and
@@ -300,7 +324,7 @@ export function stageSkillDraft(
   if (!scan.ok) {
     return { refused: true, staged: false, alreadyStaged: false, reason: `${scan.reason} (offending line: "${scan.offendingLine}")` };
   }
-  const id = skillDraftProposalId(draft.candidateHash);
+  const id = skillDraftProposalId(draft.procedureKey);
   let staged = false;
   let alreadyStaged = false;
   updateProposalRegistry(
@@ -408,17 +432,60 @@ export function selectSkillsForTask(
   taskType: string,
   budgetChars: number,
 ): InjectableSkill[] {
+  return observeSkillSelection(skills, taskType, budgetChars).selected;
+}
+
+/**
+ * A prompt-assembly observation for the approved, opted-in skill tree.  Unlike the older
+ * `skills.injected` event, this has an explicit zero shape: a future report can distinguish
+ * "no procedure applied" from "the producer did not emit a row".
+ *
+ * This function is intentionally the one selection implementation.  Keeping the selected
+ * objects and their denominator together prevents a report from describing a different budget
+ * decision from the one whose text reached the worker.
+ */
+export interface SkillSelectionObservation extends Record<string, unknown> {
+  task_type: string;
+  approved_eligible_names: string[];
+  selected_names: string[];
+  budget_omitted_names: string[];
+  budget_chars: number;
+  zero_selection: boolean;
+}
+
+export interface ObservedSkillSelection {
+  selected: InjectableSkill[];
+  observation: SkillSelectionObservation;
+}
+
+export function observeSkillSelection(
+  skills: readonly InjectableSkill[],
+  taskType: string,
+  budgetChars: number,
+): ObservedSkillSelection {
   const want = taskType.toLowerCase();
-  const out: InjectableSkill[] = [];
+  const eligible = skills.filter((s) => s.appliesTo.includes(want));
+  const selected: InjectableSkill[] = [];
   let spent = 0;
-  for (const s of skills) {
-    if (!s.appliesTo.includes(want)) continue;
+  for (const s of eligible) {
     const cost = s.body.length;
     if (spent + cost > budgetChars) continue;
-    out.push(s);
+    selected.push(s);
     spent += cost;
   }
-  return out;
+  const selectedNames = selected.map((s) => s.name);
+  const selectedNameSet = new Set(selectedNames);
+  return {
+    selected,
+    observation: {
+      task_type: taskType,
+      approved_eligible_names: eligible.map((s) => s.name),
+      selected_names: selectedNames,
+      budget_omitted_names: eligible.filter((s) => !selectedNameSet.has(s.name)).map((s) => s.name),
+      budget_chars: budgetChars,
+      zero_selection: selected.length === 0,
+    },
+  };
 }
 
 /** The CONTEXT part. Empty string when nothing was selected, so the prompt is byte-identical to
@@ -445,6 +512,152 @@ export function skillsInjectedEvent(
     task_type: taskType,
     budget_chars: budgetChars,
   };
+}
+
+/** W1-T3379's deliberately small pilot measures only the existing implement-task path. */
+export const SKILL_EFFECTIVENESS_TASK_TYPE = "implement";
+/** Predeclared before observing any result, so the report cannot lower it after the fact. */
+export const SKILL_EFFECTIVENESS_HORIZON = 10;
+/** A terminal worker failure is the named harm signal for this descriptive pilot. */
+export const SKILL_EFFECTIVENESS_HARM_OUTCOMES = ["failed"] as const;
+
+export interface SkillEffectivenessCohort {
+  observed_eligible_runs: number;
+  terminal_runs: number;
+  merged_runs: number;
+  harmful_terminal_runs: number;
+  outcomes: Record<string, number>;
+}
+
+export type SkillEffectivenessStatus = "INSUFFICIENT EVIDENCE" | "RETIRE-CANDIDATE" | "REVIEW-CANDIDATE";
+
+export interface SkillEffectivenessReport {
+  skill_name: string;
+  task_type: typeof SKILL_EFFECTIVENESS_TASK_TYPE;
+  horizon: number;
+  status: SkillEffectivenessStatus;
+  basis: "below-horizon" | "zero-selection" | "named-harm-signal" | "not-better-than-control" | "favorable-comparison";
+  selected: SkillEffectivenessCohort;
+  control: SkillEffectivenessCohort;
+  harm_outcomes: readonly string[];
+}
+
+type SkillLedgerRow = Record<string, unknown>;
+
+const stringArray = (value: unknown): string[] =>
+  Array.isArray(value) && value.every((item): item is string => typeof item === "string") ? value : [];
+
+const emptyCohort = (): SkillEffectivenessCohort => ({
+  observed_eligible_runs: 0,
+  terminal_runs: 0,
+  merged_runs: 0,
+  harmful_terminal_runs: 0,
+  outcomes: {},
+});
+
+/**
+ * Deterministically joins the one `skills.selection` row emitted at prompt assembly to the
+ * terminal `verdict` row that carries the same run id.  It never reads or writes the approved
+ * tree: results are evidence for an operator's later decision, not a lifecycle action.
+ */
+export function buildSkillEffectivenessReport(
+  rows: readonly SkillLedgerRow[],
+  skillName: string,
+): SkillEffectivenessReport {
+  const terminalOutcomeByRun = new Map<string, string>();
+  const selectionByRun = new Map<string, { selected: boolean }>();
+
+  for (const row of rows) {
+    if (row.step === "verdict" && typeof row.run_id === "string" && typeof row.verdict === "string") {
+      terminalOutcomeByRun.set(row.run_id, row.verdict);
+      continue;
+    }
+    if (
+      row.step !== "skills.selection" ||
+      row.task_type !== SKILL_EFFECTIVENESS_TASK_TYPE ||
+      typeof row.run_id !== "string"
+    ) continue;
+    const eligible = stringArray(row.approved_eligible_names);
+    if (!eligible.includes(skillName)) continue;
+    selectionByRun.set(row.run_id, { selected: stringArray(row.selected_names).includes(skillName) });
+  }
+
+  const buildCohort = (selected: boolean): SkillEffectivenessCohort => {
+    const cohort = emptyCohort();
+    for (const [runId, observation] of selectionByRun) {
+      if (observation.selected !== selected) continue;
+      cohort.observed_eligible_runs++;
+      const outcome = terminalOutcomeByRun.get(runId);
+      if (!outcome) continue;
+      cohort.terminal_runs++;
+      cohort.outcomes[outcome] = (cohort.outcomes[outcome] ?? 0) + 1;
+      if (outcome === "merged") cohort.merged_runs++;
+      if ((SKILL_EFFECTIVENESS_HARM_OUTCOMES as readonly string[]).includes(outcome)) cohort.harmful_terminal_runs++;
+    }
+    return cohort;
+  };
+
+  const selected = buildCohort(true);
+  const control = buildCohort(false);
+  const zeroSelectionAtHorizon =
+    selected.observed_eligible_runs === 0 && control.terminal_runs >= SKILL_EFFECTIVENESS_HORIZON;
+  const belowComparisonHorizon =
+    selected.terminal_runs < SKILL_EFFECTIVENESS_HORIZON || control.terminal_runs < SKILL_EFFECTIVENESS_HORIZON;
+  const selectedMergeRate = selected.terminal_runs === 0 ? 0 : selected.merged_runs / selected.terminal_runs;
+  const controlMergeRate = control.terminal_runs === 0 ? 0 : control.merged_runs / control.terminal_runs;
+
+  let status: SkillEffectivenessStatus;
+  let basis: SkillEffectivenessReport["basis"];
+  if (zeroSelectionAtHorizon) {
+    status = "RETIRE-CANDIDATE";
+    basis = "zero-selection";
+  } else if (belowComparisonHorizon) {
+    status = "INSUFFICIENT EVIDENCE";
+    basis = "below-horizon";
+  } else if (selected.harmful_terminal_runs > 0) {
+    status = "RETIRE-CANDIDATE";
+    basis = "named-harm-signal";
+  } else if (selectedMergeRate <= controlMergeRate) {
+    status = "RETIRE-CANDIDATE";
+    basis = "not-better-than-control";
+  } else {
+    status = "REVIEW-CANDIDATE";
+    basis = "favorable-comparison";
+  }
+
+  return {
+    skill_name: skillName,
+    task_type: SKILL_EFFECTIVENESS_TASK_TYPE,
+    horizon: SKILL_EFFECTIVENESS_HORIZON,
+    status,
+    basis,
+    selected,
+    control,
+    harm_outcomes: SKILL_EFFECTIVENESS_HARM_OUTCOMES,
+  };
+}
+
+const renderOutcomes = (outcomes: Record<string, number>): string => {
+  const entries = Object.entries(outcomes).sort(([a], [b]) => a.localeCompare(b));
+  return entries.length === 0 ? "none" : entries.map(([outcome, count]) => `${outcome}=${count}`).join(", ");
+};
+
+/** A human-readable, read-only rendering.  It deliberately describes a comparison, not causation. */
+export function renderSkillEffectivenessReport(report: SkillEffectivenessReport): string {
+  const renderCohort = (name: string, cohort: SkillEffectivenessCohort): string =>
+    `${name}: observed_eligible_runs=${cohort.observed_eligible_runs}; terminal_runs=${cohort.terminal_runs}; ` +
+    `merged_runs=${cohort.merged_runs}; harmful_terminal_runs=${cohort.harmful_terminal_runs}; ` +
+    `outcomes=${renderOutcomes(cohort.outcomes)}`;
+  return [
+    `### rmd skill effectiveness — ${report.skill_name} (${report.task_type})`,
+    `status: ${report.status}`,
+    `basis: ${report.basis}`,
+    `horizon: ${report.horizon} terminal selected eligible runs and ${report.horizon} terminal unselected eligible controls`,
+    renderCohort("selected", report.selected),
+    renderCohort("control", report.control),
+    `named harm outcomes: ${report.harm_outcomes.join(", ")}`,
+    "interpretation: descriptive selection/outcome evidence only; this report does not prove causation or modify a skill.",
+  ].join("\n");
 }
 
 /**

@@ -513,17 +513,11 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
       }
       if (row.taskId !== undefined) {
         el.dataset.taskId = row.taskId;
-        // W1-T222: expand affordance lives on the ROW ELEMENT ITSELF, never inside its diffed
-        // html -- aria-expanded must survive a content re-render untouched (see class doc above),
-        // so it is only ever INITIALIZED here, never reset. Deliberately NO role="button": this
-        // <li> legitimately carries its OWN real interactive descendants (a PR link, NEEDS ME's
-        // mark-handled button, …), and a widget role on an ancestor of another focusable control
-        // is an axe-flagged "nested-interactive" a11y violation (also demotes the <li> out of the
-        // <ul>'s own required listitem content model — a SECOND violation from the same cause).
-        // tabindex + aria-expanded alone still give the row its own stop in the tab order with a
-        // legible expand state, without claiming a role it cannot honestly hold.
-        el.setAttribute("tabindex", "0");
-        if (!el.hasAttribute("aria-expanded")) el.setAttribute("aria-expanded", "false");
+        // W1-T3184: the row still accepts plain pointer clicks, but the keyboard/disclosure state
+        // belongs to the real chevron button in row.html. A list item with aria-expanded is still a
+        // list item, not a disclosure widget, and axe reports that mismatch on live escalation rows.
+        el.removeAttribute("tabindex");
+        el.removeAttribute("aria-expanded");
       } else {
         delete el.dataset.taskId;
         el.removeAttribute("tabindex");
@@ -534,6 +528,10 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
         el.innerHTML = row.html;
         el.dataset.html = row.html;
         if (!isNew) flashRow(el); // a genuine content CHANGE on an already-known row -- not a fresh insert.
+      }
+      if (row.taskId !== undefined) {
+        const controls = existingDetail && existingDetail.dataset.detailFor === row.key ? existingDetail.id : "";
+        syncRowDisclosure(el, row.taskId, expandedRowKey === row.key, controls);
       }
       const anchor = prev ? prev.nextSibling : list.firstChild;
       if (anchor !== el) list.insertBefore(el, anchor); // a no-op when el is already positioned correctly.
@@ -556,6 +554,15 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
       const key = child.dataset && child.dataset.key;
       if (key === undefined || !seen.has(key)) child.remove();
     }
+  }
+
+  function syncRowDisclosure(row, taskId, expanded, controls) {
+    const btn = row.querySelector(".row-chevron");
+    if (!btn) return;
+    btn.setAttribute("aria-expanded", expanded ? "true" : "false");
+    btn.setAttribute("aria-label", (expanded ? "Hide" : "Show") + " details for " + taskId);
+    if (expanded && controls) btn.setAttribute("aria-controls", controls);
+    else btn.removeAttribute("aria-controls");
   }
 
   // ── W1-T154: first-paint-is-never-cold — a last-snapshot cache (localStorage, survives a
@@ -1740,7 +1747,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   function saveMailboxState(state) { try { localStorage.setItem("rmd-console-mailbox-v1", JSON.stringify(state)); } catch { /* full/blocked storage must not break the click */ } }
   function buildMailboxThreads(tasks, replies, digests) { if (!Array.isArray(tasks) || (replies !== undefined && replies !== null && !Array.isArray(replies))) return null; const safeReplies = Array.isArray(replies) ? replies : []; const digestEntries = Array.isArray(digests && digests.entries) ? digests.entries : []; const threads = []; for (const d of digestEntries) { if (!d || typeof d.ts !== "string" || typeof d.text !== "string") continue; threads.push({ threadId: "digest:" + d.ts, taskId: "Daily digest", escClass: "", digest: true, messages: [{ role: "digest", sender: MAILBOX_SENDER.digest, body: d.text, ts: d.ts }], latestTs: d.ts }); } for (const t of tasks) { if (!t || !t.needsHuman || !t.escalationTitle || !t.taskId) continue; const cls = mailboxEscalationClass(t.escalationTitle); const key = mailboxThreadKey(t.taskId, cls); const messages = [{ role: "escalation", sender: MAILBOX_SENDER.escalation, body: t.escalationTitle, ts: t.escalationOpenedAt || "" }]; for (const r of safeReplies) if (r && typeof r.thread_id === "string" && r.thread_id.indexOf(key) === 0) messages.push({ role: "reply", sender: MAILBOX_SENDER.reply, body: r.raw || "", ts: r.ts || "" }); messages.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0)); threads.push({ threadId: key, taskId: t.taskId, escClass: cls, issueUrl: t.escalationIssueUrl, messages, latestTs: messages[messages.length - 1].ts }); } threads.sort((a, b) => (a.latestTs < b.latestTs ? 1 : a.latestTs > b.latestTs ? -1 : 0)); threads.digestOmitted = digests && typeof digests.omitted === "number" ? digests.omitted : 0; return threads; // one thread per mailbox source, latest-message order; shaped-wrong escalation feeds return null
   }
-  function mailboxThreadsHtml(threads, readIds, omittedDigests) { if (!Array.isArray(threads)) return ""; const omitted = omittedDigests || 0; if (threads.length === 0) return omitted > 0 ? `<p class="mailbox-empty">${omitted} older daily digest${omitted === 1 ? "" : "s"} omitted</p>` : `<p class="mailbox-empty">no open threads</p>`; const read = new Set(readIds || []); const rows = threads.map((t) => { const unread = !read.has(t.threadId); const issueLink = t.issueUrl ? `<a href="${escapeHtml(t.issueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a>` : ""; const messagesHtml = t.messages.map((m) => `<li class="mailbox-message mailbox-message-${m.role}"><span class="mailbox-sender">${escapeHtml(m.sender)}</span><span class="mailbox-body">${escapeHtml(m.body)}</span></li>`).join(""); const replyForm = t.digest ? "" : `<form class="mailbox-reply" data-task-id="${escapeHtml(t.taskId)}" data-class="${escapeHtml(t.escClass)}"><input type="text" placeholder="Reply…" /><button type="submit"${writeGateAttrs()}>Reply</button></form>`; return `<li class="mailbox-thread${unread ? " mailbox-thread-unread" : ""}" data-thread-id="${escapeHtml(t.threadId)}"><div class="mailbox-thread-head"><span class="task-id">${escapeHtml(t.taskId)}</span>${unread ? '<span class="mailbox-unread-dot" aria-label="unread"></span>' : ""}</div><ul class="mailbox-messages">${messagesHtml}</ul>` + `<span class="btn-row">${issueLink}<button type="button" class="mailbox-open"${unread ? "" : " disabled"} data-thread-id="${escapeHtml(t.threadId)}">Open</button><button type="button" class="mailbox-resolve" data-thread-id="${escapeHtml(t.threadId)}">Resolve</button></span>${replyForm}</li>`; }); const omittedHtml = omitted > 0 ? `<p class="mailbox-empty">${omitted} older daily digest${omitted === 1 ? "" : "s"} omitted</p>` : ""; return omittedHtml + rows.join(""); // ALREADY-BUILT threads as markup; shaped-wrong draws NOTHING
+  function mailboxThreadsHtml(threads, readIds, omittedDigests) { if (!Array.isArray(threads)) return ""; const omitted = omittedDigests || 0; if (threads.length === 0) return omitted > 0 ? `<li class="mailbox-empty">${omitted} older daily digest${omitted === 1 ? "" : "s"} omitted</li>` : `<li class="mailbox-empty">no open threads</li>`; const read = new Set(readIds || []); const rows = threads.map((t) => { const unread = !read.has(t.threadId); const issueLink = t.issueUrl ? `<a href="${escapeHtml(t.issueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a>` : ""; const messagesHtml = t.messages.map((m) => `<li class="mailbox-message mailbox-message-${m.role}"><span class="mailbox-sender">${escapeHtml(m.sender)}</span><span class="mailbox-body">${escapeHtml(m.body)}</span></li>`).join(""); const replyId = "mailbox-reply-" + t.threadId.replace(/[^A-Za-z0-9_-]/g, "-"); const replyForm = t.digest ? "" : `<form class="mailbox-reply" data-task-id="${escapeHtml(t.taskId)}" data-class="${escapeHtml(t.escClass)}"><label class="sr-only" for="${escapeHtml(replyId)}">Reply to ${escapeHtml(t.taskId)}</label><input id="${escapeHtml(replyId)}" type="text" placeholder="Reply…" /><button type="submit"${writeGateAttrs()}>Reply</button></form>`; return `<li class="mailbox-thread${unread ? " mailbox-thread-unread" : ""}" data-thread-id="${escapeHtml(t.threadId)}"><div class="mailbox-thread-head"><span class="task-id">${escapeHtml(t.taskId)}</span>${unread ? '<span class="mailbox-unread-dot" role="img" aria-label="unread thread"></span>' : ""}</div><ul class="mailbox-messages">${messagesHtml}</ul>` + `<span class="btn-row">${issueLink}<button type="button" class="mailbox-open"${unread ? "" : " disabled"} data-thread-id="${escapeHtml(t.threadId)}">Open</button><button type="button" class="mailbox-resolve" data-thread-id="${escapeHtml(t.threadId)}">Resolve</button></span>${replyForm}</li>`; }); const omittedHtml = omitted > 0 ? `<li class="mailbox-empty">${omitted} older daily digest${omitted === 1 ? "" : "s"} omitted</li>` : ""; return omittedHtml + rows.join(""); // ALREADY-BUILT threads as markup; shaped-wrong draws NOTHING
   }
   function mailboxHtml(tasks, replies, readIds, resolvedIds, includeResolved, existingRowsHtml, digests) { let inner = ""; try { const threads = buildMailboxThreads(tasks, replies, digests); inner = threads === null ? "" : mailboxThreadsHtml(mailboxVisibleThreads(threads, resolvedIds, includeResolved), readIds, threads.digestOmitted); } catch { inner = ""; /* unreachable feeds degrade to existingRowsHtml below, never a thrown error */ } return inner || existingRowsHtml || "";
   }
@@ -2253,6 +2260,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   // (jumpToTask/focusAndExpandTask, revealSectionOf, applyRecapVisibility, above) can look up a
   // section's owning tab without walking the tree.
   const SECTION_TAB_OWNER = {
+    "mailbox-section": "decisions",
     "needs-me": "decisions",
     "pr-queue": "queue",
     now: "now",
@@ -3327,7 +3335,8 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     if (expandedRowKey === null) return;
     const row = document.querySelector(`.row[data-key="${CSS.escape(expandedRowKey)}"]`);
     if (row) {
-      row.setAttribute("aria-expanded", "false");
+      syncRowDisclosure(row, row.dataset.taskId || "", false, "");
+      row.removeAttribute("aria-expanded");
       row.removeAttribute("aria-controls");
     }
     const detailEl = document.querySelector(".row-detail[data-detail-for]");
@@ -3336,7 +3345,6 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   }
   function expandRow(row, key, taskId) {
     expandedRowKey = key;
-    row.setAttribute("aria-expanded", "true");
     const detailEl = document.createElement("li");
     detailEl.className = "row-detail";
     detailEl.dataset.detailFor = key;
@@ -3347,9 +3355,10 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     // listitem content model, exactly like role="button" would on the row itself (see
     // reconcileRows's own note). aria-controls on the row is the accessible link between them.
     detailEl.setAttribute("aria-label", `Detail for ${taskId}`);
-    row.setAttribute("aria-controls", detailId);
     detailEl.innerHTML = rowDetailSkeletonHtml();
     row.after(detailEl); // W1-T222: DIRECTLY beneath the row -- never a scroll-away section.
+    row.removeAttribute("aria-controls");
+    syncRowDisclosure(row, taskId, true, detailId);
     loadRowDetail(taskId, detailEl);
   }
   /** Enter/Space (keydown) and a plain click on a row both funnel here -- re-toggling the SAME
@@ -3485,6 +3494,12 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     if (journeyTaskLink) { focusAndExpandTask(journeyTaskLink.dataset.taskId); return; }
     const journeyToggle = e.target.closest(".card-journey-toggle");
     if (journeyToggle) { toggleCardJourney(journeyToggle); return; }
+    const rowDisclosure = e.target.closest(".row-chevron");
+    if (rowDisclosure) {
+      const row = rowDisclosure.closest(".row[data-task-id]");
+      if (row) toggleRowDetail(row);
+      return;
+    }
     const markHandledBtn = e.target.closest(".card-mark-handled");
     if (markHandledBtn) {
       // W1-T202 defense-in-depth: cardActionsHtml already renders NO button at all when
@@ -3498,9 +3513,8 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     const row = e.target.closest(".row[data-task-id]");
     if (row) toggleRowDetail(row);
   });
-  // W1-T222: Enter/Space toggle -- ONLY when the ROW ITSELF is the keydown target (a nested
-  // control, e.g. the mark-handled button, already handles its own Enter/Space via native click
-  // semantics, which the click listener above already routes correctly).
+  // W1-T222 legacy guard: rows no longer receive tabindex, so keyboard disclosure is native on
+  // the chevron button. Keep this for cached/stale markup that may still focus a row.
   document.querySelector("main").addEventListener("keydown", (e) => {
     if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
     if (!e.target.classList || !e.target.classList.contains("row") || !e.target.dataset.taskId) return;

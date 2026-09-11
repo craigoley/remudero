@@ -1,0 +1,46 @@
+- id: W1-T3410
+  title: "strict:false plus a ratchet that lowers a ceiling on main lands drift nothing re-measures"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  files:
+    - test/a-pr-is-measured-against-the-main-it-lands-on.test.ts
+  origin: "operator-session#cross-pr-collision-2026-09-11"
+  rationale: |
+    Branch protection on main is `strict: false`, so a PR may merge on checks that were green
+    against an OLDER main and nothing re-measures it against the main it actually lands on.
+    Combined with ratchets that can LOWER a ceiling, that lands drift no gate ever sees.
+
+    MEASURED 2026-09-11 — TWO INSTANCES IN ONE DAY, both green alone and broken together:
+
+      1. #5089 and #5092 merged eight minutes apart. #5089 added a `type: investigate` route and
+         a test asserting a live investigate shard exists; #5092 retyped all five such shards.
+         main went RED on 2 of 3 tests in test/investigate-task-routing.test.ts and every open PR
+         inherited it until #5099 repaired it.
+
+      2. #5083 recorded a comment-ceiling SHRINK (src/run-task.ts 15250 -> 15000) while #5090 was
+         open across it carrying 15 lines of legitimate JSDoc. #5090 merged on a comment-load
+         check green against the pre-shrink ceiling. main then carried 15015 lines against a
+         recorded 15000, and `recordInheritedGrowth`'s all-or-nothing arm charged the FULL +16 to
+         the next PR that added one line of its own — #5087 and #5093 both refused for debt that
+         was not theirs.
+
+    WHAT THIS TASK IS AND IS NOT. It is a DIAGNOSE: measure how often a merge lands drift the
+    gates did not see, and recommend. It is NOT a mandate to turn on `strict: true` — that
+    serialises the merge queue and is exactly the kind of blunt guardrail the operator has ruled
+    against ("make sure any guardrails are actually needed and adding value"). Cheaper candidates
+    exist and should be priced: a post-merge re-measure that opens a repair PR, or a ratchet that
+    refuses to LOWER a ceiling while a PR is open across it.
+  acceptance:
+    - claim: "the measurement names how many merges in a bounded window landed a gate result the gates never saw on the resulting main"
+      proof: "unit test: test/a-pr-is-measured-against-the-main-it-lands-on.test.ts"
+    - claim: "the recommendation prices at least one option cheaper than strict:true, with the cost of each stated"
+      proof: "unit test: test/a-pr-is-measured-against-the-main-it-lands-on.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if main is already `strict: true`, or if a post-merge re-measure rung already
+    exists. Read `gh api repos/craigoley/remudero/branches/main/protection --jq
+    .required_status_checks.strict`; if it reads true, the window this task measures is closed.

@@ -485,17 +485,18 @@ test("W1-T2324 (Q3, open-vs-open): owner/repo AND head-ref are both derived from
   }
 });
 
-test("W1-T2324 (Q3, open-vs-open): the main-collision half still fires beside this one, independently", () => {
+test("W1-T2324 (Q3, open-vs-open): the main-collision half still fires when the base declaration survives, independently", () => {
   // POSITIVE CONTROL that the two halves of Q3 coexist: an id colliding with MAIN is still
   // refused (the pre-existing #2999 mechanism), even when the open-PR half finds nothing.
   const dir = planRepo({ "W1-T960-original.yaml": "W1-T960" });
   const gh = fakeGh([]);
   try {
-    rmSync(join(dir, "plan", "tasks.d", "W1-T960-original.yaml"));
-    writeFileSync(join(dir, "plan", "tasks.d", "W1-T960-reissued.yaml"), '- id: W1-T960\n  title: "t"\n');
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T960-collision.yaml"), '- id: W1-T960\n  title: "t"\n');
     const r = runCheckWithOpenPrs(dir, "main", "this-branch", gh.bin);
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /ALREADY DECLARED/, "the main-collision half's own message, unchanged by this task");
+    assert.match(r.stderr, /W1-T960-original\.yaml/);
+    assert.match(r.stderr, /W1-T960-collision\.yaml/);
   } finally {
     gh.cleanup();
     rmSync(dir, { recursive: true, force: true });

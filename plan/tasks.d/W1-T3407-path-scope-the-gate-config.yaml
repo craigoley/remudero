@@ -1,0 +1,59 @@
+- id: W1-T3407
+  title: "path-scope the gate config so the fleet cannot edit the gates that judge it, without a human on every merge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  status: queued
+  attempts: 0
+  files:
+    - CODEOWNERS
+    - test/codeowners-is-path-scoped.test.ts
+  origin: "operator-session#gate-integrity-2026-09-11"
+  rationale: |
+    OPERATOR RULING 2026-09-11: "I'm good with the gate-integrity cluster." This is W1-T204's
+    approved half — the other three (W1-T2914 reviewer identity, W1-T990 fleet identity,
+    W1-T3103 two-phase worker) were explicitly backlogged the same day.
+
+    THE DEFECT. The fleet merges its own PRs, and nothing stops a worker editing the very files
+    that define the gates — .github/workflows/ci.yml, ci-gate.yml, the required-checks list — in
+    the same PR those gates are supposed to judge. The obvious remedy, "require a human review",
+    was REFUSED by the operator in W1-T204's own filing: it would put him on every autonomous
+    merge and end the autonomy.
+
+    MEASURED 2026-09-11, and this is why the narrow remedy is available:
+
+      branches/main/protection: required_pull_request_reviews = null   (no review required at all)
+      CODEOWNERS:               `*  @craigoley`                        (owns EVERY path)
+      rulesets:                 none
+
+    So CODEOWNERS today is DECORATIVE — it enforces nothing, because no review is required. And
+    turning on `require_code_owner_reviews` as things stand would demand his review on every PR,
+    which is exactly the refused option.
+
+    THE DESIGN. Narrow CODEOWNERS from `*` to the gate-config paths only, THEN enable
+    `require_code_owner_reviews`. A code-owner requirement fires only when an owned path changes,
+    so an ordinary PR keeps merging autonomously and a PR touching the gates waits for him. That
+    is path-scoped protection using the one native GitHub mechanism that is path-aware: branch
+    protection and rulesets can RESTRICT file paths, but neither can require review conditionally
+    on a path — CODEOWNERS is the only lever that does.
+
+    ORDER MATTERS AND IS NOT OPTIONAL. Narrowing CODEOWNERS while reviews stay off is harmless
+    (it enforces nothing either way). Enabling the requirement while CODEOWNERS still reads `*`
+    would block every PR the fleet opens. The repo-side change must land first.
+  acceptance:
+    - claim: "CODEOWNERS names the gate-config paths rather than every path, so a code-owner requirement would be path-scoped"
+      proof: "unit test: test/codeowners-is-path-scoped.test.ts"
+    - claim: "the operator confirms the branch-protection flip and records the observed effect on one gate PR and one ordinary PR"
+      proof: "demonstration: enable require_code_owner_reviews on main, then observe that a PR touching .github/workflows/ waits for review while a PR touching only src/ still merges autonomously"
+  falsifier: |
+    CLOSE THIS TASK if `require_code_owner_reviews` is already enabled on main AND CODEOWNERS no
+    longer reads `*`. Re-derive both with one read each:
+    `gh api repos/craigoley/remudero/branches/main/protection --jq .required_pull_request_reviews`
+    and `cat CODEOWNERS`. If protection shows a code-owner requirement and CODEOWNERS is scoped,
+    the mechanism is in place and this shard is withdrawn.
+  notes: |
+    SCOPE FENCE: the repo-side half (CODEOWNERS) is the only part a worker may land. The
+    branch-protection flip is an operator action on GitHub — outward-facing, affects every open
+    PR, and is deliberately left as the `verify: human` half of this record.

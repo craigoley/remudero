@@ -197,7 +197,7 @@ function makeHarness(): Harness {
   };
 }
 
-test("a terminal descriptive head is read and escalated once per head sha, even across fresh sweep effects", async () => {
+test("a terminal descriptive head is read once per head sha while one open ownership ask records each observation", async () => {
   const h = makeHarness();
   try {
     await h.dispatch("sha-one");
@@ -207,7 +207,11 @@ test("a terminal descriptive head is read and escalated once per head sha, even 
 
     await h.dispatch("sha-two");
     assert.equal(h.ghViewCount(), 2, "a new sha is a new fact and is judged afresh");
-    assert.equal(h.createdIssues.length, 2, "a genuinely new terminal head gets its own escalation");
+    assert.equal(
+      h.createdIssues.length,
+      1,
+      "a later push on the same non-fleet branch updates the open ownership ask instead of opening a sibling",
+    );
     const declines = h.ledgerRows().filter((row) => row.step === "sweep.fix.uncreditable_head");
     assert.deepEqual(
       declines.map((row) => row.head_sha),

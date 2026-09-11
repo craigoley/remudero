@@ -1,0 +1,78 @@
+- id: W1-T3413
+  title: "A SKILL EFFECTIVENESS VERDICT HAS NO LIFECYCLE CONSUMER — `rmd skill effectiveness` can name REVIEW-CANDIDATE or RETIRE-CANDIDATE, but it only prints text, so a measured harmful or unused approved procedure cannot reach the existing ratified proposal/PR path without a person retyping its evidence"
+  repo: remudero
+  depends_on: [W1-T3379]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  priority: 25
+  budget_usd: 30.00
+  files: [src/lib/skill-workshop.ts, src/lib/inbox.ts, src/run-task.ts, test/skill-lifecycle.test.ts, test/skill-workshop.test.ts]
+  origin: "operator-session#skill-workshop-next-lifecycle-2026-09-11"
+  plan_refs: ["W1-T110", "W1-T111", "W1-T241", "W1-T2766", "W1-T3101", "W1-T3379", "W1-T3385c"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main baae0218. The workshop already mines two-or-more-run procedures,
+    scans a draft, stages one procedure-keyed `skill-draft:` proposal, and writes under
+    `.claude/skills/` only after `rmd approve` opens a reviewed PR (`src/lib/skill-workshop.ts`).
+    W1-T3379 added a complete-union evidence reader: `rmd skill effectiveness <approved-skill>`
+    joins `skills.selection` and terminal verdict rows, applies a ten-selected/ten-control horizon,
+    and reports `INSUFFICIENT EVIDENCE`, `RETIRE-CANDIDATE`, or `REVIEW-CANDIDATE`
+    (`src/run-task.ts`). It makes no write, including no inbox proposal.
+
+    That is a deliberate and safe first pilot, but it leaves an approved procedure with a named harm
+    signal, zero selection, or no improvement unable to enter the same auditable proposal-to-PR
+    lifecycle as its original creation. The current direct result is terminal text that an operator
+    must transcribe; it has no evidence pin, idempotency key, or release artifact. The workshop's
+    producer/release boundary remains correct and must not be bypassed.
+    W1-T110/W1-T111/W1-T241 own the general inbox, one-bit approval, and registry concurrency
+    mechanisms. This task reuses them for one structured skill-lifecycle disposition; it neither
+    changes generic proposal readiness nor creates another approval channel.
+  design: |
+    Add `rmd skill lifecycle <approved-skill>` as the one bridge from a W1-T3379 effectiveness
+    report to the existing inbox. It first reuses the full rotated-ledger-union read and exact report
+    reducer; it then confirms the named skill is presently in the approved, opted-in skill tree.
+    An incomplete union, absent/unapproved skill, or `INSUFFICIENT EVIDENCE` must refuse/stay
+    read-only, naming the missing condition and the observed selected/control counts.
+
+    A `RETIRE-CANDIDATE` stages exactly one structured `skill-lifecycle:<skill-name>` proposal,
+    keyed by the approved skill and carrying a deterministic evidence fingerprint, the report's
+    basis, both cohorts, and the sole proposed action: remove that one approved `SKILL.md`. Re-running
+    against identical evidence is idempotent; newer evidence refreshes the same proposal rather than
+    multiplying operator asks. Extend the existing ratification materializer so only an operator's
+    `rmd approve` can turn that structured proposal into a reviewed plan PR deleting precisely
+    `.claude/skills/<skill-name>/SKILL.md`. A staged proposal, a report, and a worker can never
+    delete or alter the approved tree.
+
+    `REVIEW-CANDIDATE` remains a report rather than a release action: correlation is not proof of
+    causation, and there is no automatic retain, revise, prompt synthesis, script generation, budget
+    expansion, or fleet-wide rollout. Do not change draft generation, the two-run floor, scanning,
+    `applies-to`, selection order, or prompt budget. This task completes the negative lifecycle
+    path only; a future revision experiment requires its own operator decision and evidence design.
+  acceptance:
+    - claim: "an incomplete ledger union, a non-approved name, and a below-horizon report each leave the inbox and approved skill tree unchanged while naming the exact refusal"
+      proof: "unit test: W1-T3413 refuses untrusted lifecycle input"
+    - claim: "a qualified zero-selection, harmful, or not-better-than-control report stages one evidence-fingerprinted RETIRE proposal, and an identical rerun creates no duplicate"
+      proof: "unit test: W1-T3413 stages one retire proposal"
+    - claim: "new evidence for the same approved skill refreshes its one lifecycle proposal instead of adding another operator decision"
+      proof: "unit test: W1-T3413 refreshes lifecycle evidence"
+    - claim: "only `rmd approve` materializes the candidate into a reviewed PR that removes the exact approved SKILL.md; a staged proposal or worker path cannot delete, revise, or inject any skill"
+      proof: "unit test: W1-T3413 approve owns precise removal"
+    - claim: "a favorable REVIEW-CANDIDATE does not stage a release action or change the skill tree"
+      proof: "unit test: W1-T3413 review stays read only"
+    - claim: "removing the approved-tree check permits an arbitrary staged name to request deletion and fails the mutation assertion"
+      proof: "unit test: W1-T3413 mutation rejects arbitrary removal"
+  falsifier: |
+    Close without implementation if `rmd skill effectiveness` already stages a structured lifecycle
+    proposal or if `rmd approve` already materializes a retirement of one approved skill. Measured
+    at origin/main baae0218: `skillEffectivenessCommand` reads the union, renders the report, and
+    returns with no proposal write; repository search finds `skill-draft` materialization only and
+    no `skill-lifecycle` proposal or one-skill removal path.
+  note: |
+    One concern: give measured negative skill evidence an auditable, operator-ratified removal path.
+    This is deliberately not autonomous skill/script creation or release. The machine may mine,
+    scan, measure, and propose; the operator still chooses the PR that changes an approved worker
+    prompt.

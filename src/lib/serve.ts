@@ -101,7 +101,13 @@ import {
   type ProviderRoutingPolicyOverrideInput,
 } from "./provider-routing-policy.js";
 import { appendLedger } from "./ledger.js";
-import { buildAnalyticsRoute, type AnalyticsRouteDeps } from "./analytics-route.js";
+import {
+  buildAnalyticsRoute,
+  coldAnalyticsSnapshot,
+  createAnalyticsSnapshotCache,
+  type AnalyticsSnapshot,
+  type AnalyticsSnapshotCacheDeps,
+} from "./analytics-route.js";
 import { escapeHtml, renderConsoleShellScript } from "./console-shell-script.js";
 import { consoleShellClientSource } from "./console-shell-client.js";
 import { inboxDigestsPath } from "./digest.js";
@@ -289,13 +295,11 @@ export interface ServeDeps {
     read?: (root: string, deps?: { now?: () => number }) => ProviderRoutingStatus;
   };
   /**
-   * W1-T477: `GET /v1/analytics`'s deps (see analytics-route.ts's header). OPTIONAL and defaults
-   * to a real rotation-union read against the real filesystem, the same "the assembler wires the
-   * real thing, a test injects a fake" split every other optional field here already follows. The
-   * `ledgerPath` half is always the console's own — see {@link accountUsage}'s doc immediately
-   * above for why that is never a caller-supplied override.
+   * W1-T3352: process-owned analytics refresh deps. OPTIONAL and defaults to the real streaming
+   * rotation-union reducer. The state directory and telemetry sink are always the console's own;
+   * callers can inject the reader/clock/timers but cannot point this cache at a second state root.
    */
-  analytics?: Omit<AnalyticsRouteDeps, "ledgerPath">;
+  analytics?: Omit<AnalyticsSnapshotCacheDeps, "stateDir" | "log">;
   /**
    * W1-T371: additive tailnet-identity auth — forwarded verbatim to `createService`'s
    * `identity` option (see service.ts's {@link IdentityAuth} for the two gates it enforces).
@@ -651,6 +655,188 @@ async function readConsoleInboxDigestsAsync(root: string, limit: number = CONSOL
   }
 }
 
+export const CONSOLE_TIME_SERIES_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const CONSOLE_TIME_SERIES_BUCKET_MS = 15 * 60 * 1000;
+
+export interface ConsoleTimeSeriesPoint {
+  bucketStart: string;
+  value: number;
+}
+
+export interface ConsoleTimeSeries {
+  id: string;
+  label: string;
+  windowLabel: string;
+  bucketLabel: string;
+  points: ConsoleTimeSeriesPoint[];
+}
+
+export interface ConsoleTimeSeriesSnapshot {
+  status: "ok" | "unreadable";
+  generatedAt: string;
+  windowMs: number;
+  bucketMs: number;
+  windowLabel: string;
+  bucketLabel: string;
+  series: ConsoleTimeSeries[];
+  reason?: string;
+}
+
+interface ConsoleTimeSeriesSpec {
+  id: string;
+  label: string;
+  value: (line: Record<string, unknown>) => number | undefined;
+}
+
+const CONSOLE_TIME_SERIES_SPECS: readonly ConsoleTimeSeriesSpec[] = [
+  {
+    id: "spend",
+    label: "spend",
+    value: (line) => (typeof line.cost_usd === "number" ? line.cost_usd : typeof line.total_cost_usd === "number" ? line.total_cost_usd : undefined),
+  },
+  {
+    id: "wake-volume",
+    label: "wake volume",
+    value: (line) => (line.step === "github.wake.accepted" ? 1 : undefined),
+  },
+  {
+    id: "sweep-prs",
+    label: "sweep PRs",
+    value: (line) => (line.step === "sweep.summary" && typeof line.total === "number" ? line.total : undefined),
+  },
+];
+
+function timeSeriesDurationLabel(ms: number): string {
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  if (ms % hour === 0) return `${ms / hour}h`;
+  if (ms % minute === 0) return `${ms / minute}m`;
+  return `${ms}ms`;
+}
+
+function consoleTimeSeriesBucketStart(tsMs: number, windowStartMs: number, bucketMs: number): number {
+  return windowStartMs + Math.floor((tsMs - windowStartMs) / bucketMs) * bucketMs;
+}
+
+export function buildConsoleTimeSeries(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  opts: { nowMs?: number; windowMs?: number; bucketMs?: number } = {},
+): ConsoleTimeSeriesSnapshot {
+  const clock = fixedClock(opts.nowMs ?? systemClock.now());
+  const nowMs = clock.now();
+  const windowMs = opts.windowMs ?? CONSOLE_TIME_SERIES_WINDOW_MS;
+  const bucketMs = opts.bucketMs ?? CONSOLE_TIME_SERIES_BUCKET_MS;
+  const windowStartMs = nowMs - windowMs;
+  const windowLabel = timeSeriesDurationLabel(windowMs);
+  const bucketLabel = timeSeriesDurationLabel(bucketMs);
+  const series = CONSOLE_TIME_SERIES_SPECS.map((spec) => {
+    const buckets = new Map<number, number>();
+    for (const line of lines) {
+      const ts = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
+      if (!Number.isFinite(ts) || ts < windowStartMs || ts > nowMs) continue;
+      const value = spec.value(line);
+      if (value === undefined || !Number.isFinite(value)) continue;
+      const bucketStartMs = consoleTimeSeriesBucketStart(ts, windowStartMs, bucketMs);
+      buckets.set(bucketStartMs, (buckets.get(bucketStartMs) ?? 0) + value);
+    }
+    const points = [...buckets.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([bucketStartMs, value]) => ({ bucketStart: fixedClock(bucketStartMs).iso(), value }));
+    return { id: spec.id, label: spec.label, windowLabel, bucketLabel, points };
+  });
+  return { status: "ok", generatedAt: clock.iso(), windowMs, bucketMs, windowLabel, bucketLabel, series };
+}
+
+export function unreadableConsoleTimeSeries(reason: string, opts: { nowMs?: number; windowMs?: number; bucketMs?: number } = {}): ConsoleTimeSeriesSnapshot {
+  const clock = fixedClock(opts.nowMs ?? systemClock.now());
+  const nowMs = clock.now();
+  const windowMs = opts.windowMs ?? CONSOLE_TIME_SERIES_WINDOW_MS;
+  const bucketMs = opts.bucketMs ?? CONSOLE_TIME_SERIES_BUCKET_MS;
+  return {
+    status: "unreadable",
+    generatedAt: clock.iso(),
+    windowMs,
+    bucketMs,
+    windowLabel: timeSeriesDurationLabel(windowMs),
+    bucketLabel: timeSeriesDurationLabel(bucketMs),
+    series: CONSOLE_TIME_SERIES_SPECS.map((spec) => ({
+      id: spec.id,
+      label: spec.label,
+      windowLabel: timeSeriesDurationLabel(windowMs),
+      bucketLabel: timeSeriesDurationLabel(bucketMs),
+      points: [],
+    })),
+    reason,
+  };
+}
+
+function escapeHtmlText(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeHtmlAttr(text: string): string {
+  return escapeHtmlText(text).replace(/"/g, "&quot;");
+}
+
+function formatSeriesValue(series: ConsoleTimeSeries, value: number): string {
+  if (series.id === "spend") return `$${value.toFixed(3)}`;
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function renderConsoleTimeSeriesSvg(series: ConsoleTimeSeries, windowStartMs: number, windowMs: number): string {
+  const positive = series.points.filter((point) => point.value > 0);
+  if (positive.length === 0) {
+    return `<p class="time-series-absent" data-series-state="absent">ABSENT — no ${escapeHtmlText(series.label)} rows in the stated window; not drawn as zero</p>`;
+  }
+  const width = 160;
+  const height = 40;
+  const pad = 3;
+  const max = Math.max(...positive.map((point) => point.value));
+  const coords = positive
+    .map((point) => {
+      const ts = Date.parse(point.bucketStart);
+      const x = Math.max(pad, Math.min(width - pad, pad + ((ts - windowStartMs) / windowMs) * (width - pad * 2)));
+      const y = Math.max(pad, Math.min(height - pad, height - pad - (point.value / max) * (height - pad * 2)));
+      return { x, y, point };
+    });
+  const polyline = coords.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+  const circles = coords
+    .map(
+      (p) =>
+        `<circle class="time-series-point" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.2" data-bucket="${escapeHtmlAttr(p.point.bucketStart)}" data-value="${escapeHtmlAttr(String(p.point.value))}"></circle>`,
+    )
+    .join("");
+  const maxLabel = formatSeriesValue(series, max);
+  return (
+    `<svg class="time-series-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtmlAttr(series.label)} over ${escapeHtmlAttr(series.windowLabel)} in ${escapeHtmlAttr(series.bucketLabel)} buckets">` +
+    `<title>${escapeHtmlText(series.label)} over ${escapeHtmlText(series.windowLabel)}, ${escapeHtmlText(series.bucketLabel)} buckets, max ${escapeHtmlText(maxLabel)}</title>` +
+    `<polyline class="time-series-line" points="${escapeHtmlAttr(polyline)}"></polyline>${circles}</svg>`
+  );
+}
+
+export function renderConsoleTimeSeriesHtml(snapshot: ConsoleTimeSeriesSnapshot): string {
+  const header =
+    `<h2>Time series <span class="section-summary" data-time-series-window="${snapshot.windowMs}" data-time-series-bucket="${snapshot.bucketMs}">` +
+    `${escapeHtmlText(snapshot.windowLabel)} window · ${escapeHtmlText(snapshot.bucketLabel)} buckets</span></h2>`;
+  if (snapshot.status === "unreadable") {
+    return (
+      `<section id="time-series" class="daemon-health time-series-panel" aria-label="Time series">${header}` +
+      `<p class="time-series-absent" data-series-state="unreadable">ABSENT — time series ledger unreadable: ${escapeHtmlText(snapshot.reason ?? "unknown")}</p></section>`
+    );
+  }
+  const windowStartMs = Date.parse(snapshot.generatedAt) - snapshot.windowMs;
+  const cards = snapshot.series
+    .map(
+      (series) =>
+        `<article class="time-series-card" data-series-id="${escapeHtmlAttr(series.id)}">` +
+        `<div class="time-series-head"><span class="glance-label">${escapeHtmlText(series.label)}</span><span class="glance-value">${escapeHtmlText(series.windowLabel)} / ${escapeHtmlText(series.bucketLabel)}</span></div>` +
+        renderConsoleTimeSeriesSvg(series, windowStartMs, snapshot.windowMs) +
+        `</article>`,
+    )
+    .join("");
+  return `<section id="time-series" class="daemon-health time-series-panel" aria-label="Time series">${header}${cards}</section>`;
+}
+
 export interface ConsoleResponseStaleness {
   stale: boolean;
   ageMs: number | null;
@@ -667,6 +853,9 @@ export interface ConsoleBlockingRequestPathViolation {
 
 export const CONSOLE_READ_ROUTE_BUDGET_MS = 750;
 export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
+export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500; // PRIMARY CONTROL
+export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120; // BACKSTOP
+export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
 const CONSOLE_STALENESS_FIELD = "staleness";
 const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health"]);
 const BLOCKING_REQUEST_PATH_SYMBOLS = [
@@ -705,6 +894,40 @@ function sendStaleJson(res: import("node:http").ServerResponse, status: number, 
     "x-rmd-cache-age-ms": staleness.ageMs === null ? "unknown" : String(staleness.ageMs),
   });
   res.end(withJsonStaleness(body, staleness));
+}
+
+export interface ConsoleStatusTaskProjection {
+  complete: boolean;
+  total: number;
+  returned: number;
+  omitted: number;
+  limit: number;
+  reason: string;
+}
+
+function taskRendersOnInitialBoard(row: BoardRow): boolean {
+  return row.phase !== undefined || row.needsHuman === true || row.verifyHumanPending === true;
+}
+
+export function projectConsoleStatusResponse(body: unknown): unknown {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const source = body as BoardSnapshot & Record<string, unknown>;
+  if (!Array.isArray(source.tasks)) return body;
+  const total = source.counts && typeof source.counts === "object" && typeof (source.counts as { total?: unknown }).total === "number"
+    ? (source.counts as { total: number }).total
+    : source.tasks.length;
+  const wholePlanFits = source.tasks.length <= CONSOLE_STATUS_FULL_TASK_THRESHOLD;
+  const rendered = wholePlanFits ? source.tasks : source.tasks.filter(taskRendersOnInitialBoard).slice(0, CONSOLE_STATUS_RENDERED_TASK_LIMIT);
+  const omitted = Math.max(0, total - rendered.length);
+  const taskProjection: ConsoleStatusTaskProjection = {
+    complete: omitted === 0,
+    total,
+    returned: rendered.length,
+    omitted,
+    limit: wholePlanFits ? CONSOLE_STATUS_FULL_TASK_THRESHOLD : CONSOLE_STATUS_RENDERED_TASK_LIMIT,
+    reason: omitted === 0 ? "complete" : "bounded-to-initial-board-rows",
+  };
+  return { ...source, tasks: rendered, taskProjection };
 }
 
 function fallbackStatusSnapshot(deps: BoardDeps, nowMs: number, staleness: ConsoleResponseStaleness): BoardSnapshot & { staleness: ConsoleResponseStaleness } {
@@ -746,7 +969,7 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
   const nowMs = systemClock.now();
   switch (path) {
     case "/v1/status":
-      return fallbackStatusSnapshot(deps.board, nowMs, staleness);
+      return projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness));
     case "/v1/recent":
       return { entries: [], staleness };
     case "/v1/inbox":
@@ -756,6 +979,26 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
     default:
       return { staleness };
   }
+}
+
+export function projectConsoleStatusRoute(route: Route): Route {
+  if (route.method !== "GET" || route.path !== "/v1/status") return route;
+  return {
+    ...route,
+    handler: async (req, res, ctx) => {
+      const buffer = new RouteResponseBuffer();
+      await route.handler(req, buffer as unknown as import("node:http").ServerResponse, ctx);
+      const buffered = buffer.buffered(systemClock.now());
+      const contentType = buffered.headers["content-type"] ?? "";
+      if (!/application\/json/i.test(contentType)) {
+        res.writeHead(buffered.status, buffered.headers);
+        res.end(buffered.body);
+        return;
+      }
+      res.writeHead(buffered.status, buffered.headers);
+      res.end(JSON.stringify(projectConsoleStatusResponse(JSON.parse(buffered.body))));
+    },
+  };
 }
 
 interface BufferedRouteResponse {
@@ -1171,6 +1414,7 @@ export function renderShellHtml(
   // chips above — so every existing caller and test is unaffected and the client script is
   // byte-identical to main.
   consoleCodeHtml: string = `<span class="console-code-current">current</span>`,
+  timeSeriesHtml: string = renderConsoleTimeSeriesHtml(unreadableConsoleTimeSeries("ledger reader unavailable")),
   runHistoryHtml: string = renderRecentRunHistoryHtml(recentConsoleRunHistory([])),
 ): string {
   return `<!doctype html>
@@ -1215,7 +1459,7 @@ export function renderShellHtml(
   main { max-width: 56rem; margin: 0 auto; display: flex; flex-direction: column; gap: 0.6rem; }
   h1 { font-size: 1.25rem; margin: 0.5rem 0; }
   h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 0.25rem; }
-  a { color: var(--accent); }
+  a { color: var(--accent); min-height: 24px; display: inline-flex; align-items: center; }
   code, .mono { font-family: var(--font-mono); }
   #top-status { color: var(--text-dim); font-size: 0.875rem; margin: 0; }
   /* W1-T183 round 2: the >=15-rows-above-the-fold bar was passing the SYNTHETIC (1-char-title)
@@ -1238,7 +1482,7 @@ export function renderShellHtml(
   .row {
     display: flex; flex-wrap: nowrap; align-items: center; gap: 0.5rem;
     background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px;
-    padding: 0.22rem 0.5rem; overflow: hidden;
+    min-height: 24px; padding: 0.22rem 0.5rem; overflow: hidden;
   }
   .row > * { flex-shrink: 0; }
   .row:has(form), .row:has(.btn-row), .row:has(.drain-feedback) { flex-wrap: wrap; overflow: visible; align-items: baseline; }
@@ -1313,6 +1557,14 @@ export function renderShellHtml(
   .glance-item { display: inline-flex; align-items: baseline; gap: 0.3em; font-size: 0.85rem; }
   .glance-label { color: var(--text-faint); }
   .glance-value { font-family: var(--font-mono); color: var(--text); font-weight: 600; }
+  .time-series-panel { align-items: stretch; }
+  .time-series-panel h2 { flex-basis: 100%; margin: 0; font-size: 0.85rem; }
+  .time-series-card { min-width: 12rem; flex: 1 1 12rem; }
+  .time-series-head { display: flex; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.2rem; font-size: 0.8rem; }
+  .time-series-svg { display: block; width: 100%; height: 2.5rem; overflow: visible; }
+  .time-series-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .time-series-point { fill: var(--status-needs-human); stroke: var(--bg-card); stroke-width: 1; }
+  .time-series-absent { margin: 0.35rem 0 0; color: var(--text-faint); font-size: 0.8rem; }
   /* The ACCOUNT strip's scope note — deliberately quiet and full-width-wrapping: it is a caveat
      ("whole account, not just the fleet"), not a metric, and must never read as one more number. */
   .glance-scope { flex-basis: 100%; }
@@ -1363,7 +1615,7 @@ export function renderShellHtml(
      ("Do"/"Decide") states the ask outright. */
   .ask-type-badge {
     display: inline-block; margin-right: 0.35em; padding: 0.05rem 0.4rem; border-radius: 999px;
-    font-size: 0.7rem; font-weight: 700; border: 1px solid transparent; vertical-align: middle;
+    font-size: 0.75rem; font-weight: 700; border: 1px solid transparent; vertical-align: middle;
   }
   .ask-type-badge.ask-type-action {
     background: rgba(255, 184, 77, 0.16); color: var(--status-needs-human); border-color: var(--status-needs-human);
@@ -1398,7 +1650,7 @@ export function renderShellHtml(
   .pr-queue-transition { border-top: 1px solid var(--border); padding: 0.45rem 0.65rem; color: var(--text-dim); font-size: 0.82rem; display: grid; gap: 0.2rem; }
   .pr-queue-transition strong { color: var(--text); }
   @media (max-width: 620px) { .pr-queue-toolbar { grid-template-columns: 1fr; } }
-  /* W1-T2497: THE MAILBOX -- inline, same <style> block (no stylesheet of its own). */ .mailbox-heading { font-size: 0.85rem; margin: 0.6rem 0 0.25rem; display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-count:empty { display: none; } .mailbox-unread-count { display: inline-block; min-width: 1.2em; padding: 0 0.4em; border-radius: 999px; text-align: center; font-size: 0.7rem; font-weight: 700; background: var(--status-needs-human); color: #241a02; } .mailbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; } .mailbox-empty { font-size: 0.85rem; opacity: 0.7; margin: 0.25rem 0; } .mailbox-thread { list-style: none; border: 1px solid var(--border, #333); border-radius: 6px; padding: 0.4rem 0.6rem; } .mailbox-thread-unread { border-color: var(--status-needs-human); } .mailbox-thread-head { display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-dot { width: 0.5em; height: 0.5em; border-radius: 999px; background: var(--status-needs-human); display: inline-block; } .mailbox-messages { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; } .mailbox-message { font-size: 0.85rem; } .mailbox-sender { font-weight: 700; margin-right: 0.4em; } .mailbox-reply { display: flex; gap: 0.4em; margin-top: 0.3rem; }
+  /* W1-T2497: THE MAILBOX -- inline, same <style> block (no stylesheet of its own). */ .mailbox-heading { font-size: 0.85rem; margin: 0.6rem 0 0.25rem; display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-count:empty { display: none; } .mailbox-unread-count { display: inline-block; min-width: 1.2em; padding: 0 0.4em; border-radius: 999px; text-align: center; font-size: 0.75rem; font-weight: 700; background: var(--status-needs-human); color: #241a02; } .tab-btn .mailbox-unread-count { margin-left: 0.35rem; } .mailbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; } .mailbox-empty { font-size: 0.85rem; opacity: 0.7; margin: 0.25rem 0; } .mailbox-thread { list-style: none; border: 1px solid var(--border, #333); border-radius: 6px; padding: 0.4rem 0.6rem; } .mailbox-thread-unread { border-color: var(--status-needs-human); } .mailbox-thread-head { display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-dot { width: 0.5em; height: 0.5em; border-radius: 999px; background: var(--status-needs-human); display: inline-block; } .mailbox-messages { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; } .mailbox-message { font-size: 0.85rem; } .mailbox-sender { font-weight: 700; margin-right: 0.4em; } .mailbox-reply { display: flex; gap: 0.4em; margin-top: 0.3rem; }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
@@ -1446,7 +1698,7 @@ export function renderShellHtml(
     display: inline-block; animation: live-pulse 1.2s ease-in-out infinite;
   }
   .live-badge-static {
-    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.03em; color: var(--status-running);
+    font-size: 0.75rem; font-weight: 700; letter-spacing: 0.03em; color: var(--status-running);
     border: 1px solid var(--status-running); border-radius: 4px; padding: 0 0.3em;
   }
   .row.flash { animation: row-flash 1.1s ease; }
@@ -1460,7 +1712,7 @@ export function renderShellHtml(
   }
   button {
     font: inherit; background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 0.4rem 0.75rem; cursor: pointer;
+    border-radius: 6px; min-width: 24px; min-height: 24px; padding: 0.4rem 0.75rem; cursor: pointer;
   }
   button:hover { border-color: var(--accent); }
   button[aria-pressed="true"], button.active { background: var(--accent); color: #04101f; border-color: var(--accent); }
@@ -1482,6 +1734,7 @@ export function renderShellHtml(
   .up-next-run-btn.confirming, #drain-now-btn.confirming { background: var(--accent); color: #04101f; border-color: var(--accent); }
   .up-next-actions { margin-bottom: 0.5rem; }
   #drain-now-btn { font-size: 0.85rem; padding: 0.25rem 0.6rem; }
+  input, select, textarea { min-height: 24px; }
   input[type="text"], input[type="url"] {
     font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 0.3rem 0.5rem; width: 100%; max-width: 24rem;
@@ -1490,7 +1743,7 @@ export function renderShellHtml(
     font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 0.3rem 0.5rem; width: 100%; max-width: 28rem; resize: vertical;
   }
-  label { display: block; font-size: 0.875rem; color: var(--text-dim); margin: 0.25rem 0; }
+  label { display: block; min-height: 24px; font-size: 0.875rem; color: var(--text-dim); margin: 0.25rem 0; }
   /* W1-T183 round 2: this label reuses W1-T156's existing .sr-only class (defined above) -- still
      in the a11y tree (for=/aria-label parity), just not eating a whole line above the fold for a
      control whose placeholder already names it. */
@@ -1506,7 +1759,7 @@ export function renderShellHtml(
   /* W1-T157 FIND layer: faceted filters, sort headers, live counts ─────────────────────────── */
   .find-facets { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; margin: 0.3rem 0; }
   .facet-group { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
-  .facet-group-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); margin-right: 0.15rem; }
+  .facet-group-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); margin-right: 0.15rem; }
   .facet-btn, .sort-header { font-size: 0.8rem; padding: 0.2rem 0.5rem; }
   .facet-count { color: var(--text-faint); font-variant-numeric: tabular-nums; }
   button[aria-pressed="true"] .facet-count { color: inherit; }
@@ -1530,19 +1783,19 @@ export function renderShellHtml(
     display: flex; align-items: center; gap: 0.5rem; overflow-wrap: anywhere;
   }
   .cmdk-item.active, .cmdk-item:hover { background: var(--bg-elevated); }
-  .cmdk-kind { font-size: 0.65rem; font-weight: 700; letter-spacing: 0.03em; color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.3em; }
+  .cmdk-kind { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.03em; color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.3em; }
   .cmdk-empty { padding: 0.6rem; color: var(--text-faint); font-size: 0.875rem; }
   /* W1-T222: the INLINE DETAIL layer. Every task row is itself the expand trigger -- a right-
      edge chevron is the visible affordance (the row LOOKS expandable, not merely IS), flipping
-     direction with the row's own aria-expanded so the toggle state is legible without reading
+     direction with the row detail button's own aria-expanded so the toggle state is legible without reading
      the card beneath it. */
   .row { cursor: pointer; }
   .row button, .row a, .row input, .row label, .row form { cursor: auto; }
   .row-chevron {
-    margin-left: auto; font-size: 0.9rem; color: var(--text-faint);
-    transition: transform 0.15s ease; display: inline-block;
+    margin-left: auto; min-width: 24px; min-height: 24px; padding: 0; font-size: 0.9rem; color: var(--text-faint);
+    transition: transform 0.15s ease; display: inline-flex; align-items: center; justify-content: center;
   }
-  .row[aria-expanded="true"] .row-chevron { transform: rotate(90deg); color: var(--accent); }
+  .row-chevron[aria-expanded="true"] { transform: rotate(90deg); color: var(--accent); }
   @media (prefers-reduced-motion: reduce) {
     .row-chevron { transition: none; }
   }
@@ -1647,6 +1900,7 @@ export function renderShellHtml(
     <span class="glance-item"><span class="glance-label">rate limit</span><span class="glance-value" id="dh-rate-limit">…</span></span>
     ${idleReasonsHtml}
   </section>
+  ${timeSeriesHtml}
   <!-- ACCOUNT strip: WHICH Anthropic account the fleet is spending, and how much of each usage
        window is gone (GET /v1/account-usage; see account-usage.ts's header for why usage comes
        from ~/.claude.json's cachedUsageUtilization and NOT from the daemon.headroom ledger line).
@@ -1698,7 +1952,7 @@ export function renderShellHtml(
        unreadable ledger union renders the whole list as unreadable -- never a silent zero and
        never a quietly-empty panel. -->
   <section id="self-measurement" class="daemon-health" aria-label="Self-measurement">
-    <h3>Self-measurement <span id="self-measurement-summary" class="section-summary"></span></h3>
+    <h2>Self-measurement <span id="self-measurement-summary" class="section-summary"></span></h2>
     <ol id="self-measurement-list" class="row-list"></ol>
   </section>
   <!-- Rendered SERVER-SIDE from the sha captured at start: a static span, deliberately NOT a
@@ -1735,14 +1989,14 @@ export function renderShellHtml(
 <!-- W1-T336: THE TABS ARE NOW AUTHORITATIVE -- third and last shard split out of W1-T314.
      W1-T334 built this bar as a scaffold that governed nothing but its own (still-empty) Plan
      panel; W1-T335 gave every serve suite a shared reachSection helper that tolerates either
-     shape. This shard is what makes the bar real: every one of the nine sections below carries
+     shape. This shard is what makes the bar real: every one of the ten sections below carries
      a \`data-owner-tab\` naming which tab governs it, and the script's own applyActiveTab hides
      every section whose owner isn't the active tab -- never a second copy, never rebuilt, never
      re-fetched. SECTION_TAB_OWNER (this shell's own script, near SECTION_IDS) is the single
      table this markup is a rendering of.
-     DOCUMENT ORDER IS DELIBERATELY UNCHANGED from the pre-tab flat shell (still NOW, NEEDS ME,
+     DOCUMENT ORDER IS DELIBERATELY PRESERVED around the existing task sections (NOW, NEEDS ME,
      ACCEPTED, UP NEXT, RECENT, rest, controls, more -- test/serve.test.ts's own structural check
-     polices this order and is NOT one of this task's own files to edit) -- ownership is
+     polices this order); MAILBOX is now a sibling before NEEDS ME. Ownership is
      expressed by the attribute below, never by re-parenting a section into a per-tab container,
      which is also why NOW and UP NEXT can sit on the SAME tab while NEEDS ME (a DIFFERENT tab)
      still renders between them in the markup.
@@ -1756,7 +2010,7 @@ export function renderShellHtml(
      below is the EXACT node W1-T156 already patches in place -- nothing here moves it, splits
      it, or wraps it in new DOM. -->
 <div id="console-tabs" class="console-tabs" role="tablist" aria-label="Console view">
-  <button type="button" class="tab-btn" id="tab-decisions" role="tab" data-tab="decisions" aria-selected="true">Decisions</button>
+  <button type="button" class="tab-btn" id="tab-decisions" role="tab" data-tab="decisions" aria-selected="true">Decisions<span id="mailbox-unread-count" class="mailbox-unread-count" aria-label="unread mailbox threads"></span></button>
   <button type="button" class="tab-btn" id="tab-queue" role="tab" data-tab="queue" aria-selected="false">Queue</button>
   <button type="button" class="tab-btn" id="tab-now" role="tab" data-tab="now" aria-selected="false">Now</button>
   <button type="button" class="tab-btn" id="tab-plan" role="tab" data-tab="plan" aria-selected="false" aria-controls="tab-plan-panel">Plan</button>
@@ -1799,6 +2053,12 @@ export function renderShellHtml(
   </div>
 </section>
 
+<section id="mailbox-section" class="panel-section" aria-label="Mailbox" data-owner-tab="decisions">
+  <h2><span>Mailbox</span></h2>
+  <div id="mailbox" class="mailbox" aria-label="Mailbox"></div>
+  <script>document.getElementById("mailbox")?.setAttribute("role", "list");</script>
+</section>
+
 <!-- DECISIONS: the needs-me set alone -- W1-T257's merged-proposal reconciler and the
      escalation-lifecycle reconciler already run ahead of this render (GET /v1/feedback,
      status.ts's deriveStatus), so an item they have already resolved never reaches
@@ -1817,7 +2077,6 @@ export function renderShellHtml(
          stays VISIBLE) survives exactly: this list is never collapsed, hidden or paginated. -->
     <h3>Awaiting verification <span id="needs-me-backlog-summary" class="section-summary">…</span></h3>
     <ul id="needs-me-backlog-list" class="row-list" aria-label="verify: human backlog, no action required"></ul>
-    <!-- W1-T2497: THE MAILBOX -- same escalations above, as a thread; ADDITIVE, needs-me-list untouched. --><h3 class="mailbox-heading">Mailbox<span id="mailbox-unread-count" class="mailbox-unread-count" aria-label="unread threads"></span></h3><div id="mailbox" class="mailbox" aria-label="Mailbox"></div>
   </div>
 </section>
 
@@ -2177,6 +2436,9 @@ export interface StaleCodeExitDeps {
   exit?: (code: number) => void;
   /** One ledger line naming the decision, mirroring {@link ServiceOptions.log}. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** Synchronous cleanup immediately before the process exit. The analytics cache supplies its
+   * stop hook here because `process.exit` does not emit the HTTP server's `close` event. */
+  beforeExit?: () => void;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -2225,6 +2487,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     const currentSha = resolveCurrentSha();
     if (!isConsoleCodeStale(deps.bootSha, currentSha)) return;
     log("serve.stale_code_exit", { bootSha: deps.bootSha, currentSha, clients, inFlightWrites });
+    deps.beforeExit?.();
     exit(0);
   };
   return {
@@ -2416,17 +2679,24 @@ export function buildShellRoute(
     allowQueryToken: true,
     handler: (_req, res) => {
       let panel: string;
+      let timeSeriesHtml: string;
       let runHistoryHtml: string;
       if (idle.readLedger && idle.ledgerPath) {
         try {
           // Tests and production use the same ledger reader for this server-rendered fragment; an
           // unreadable ledger must render UNKNOWN with the read failure's own reason.
           const lines = idle.readLedger(idle.ledgerPath);
-          panel = renderIdleReasonsHtml(readIdleReasons(lines, idle.now?.() ?? new Date()));
+          // MERGE NOTE: two independent features render into this same idle path — main's console
+          // time series and W1-T3158's run history. Both are computed in all three arms; neither
+          // reads the other, so the union is the whole resolution.
+          const now = idle.now?.() ?? new Date();
+          panel = renderIdleReasonsHtml(readIdleReasons(lines, now));
+          timeSeriesHtml = renderConsoleTimeSeriesHtml(buildConsoleTimeSeries(lines, { nowMs: now.getTime() }));
           runHistoryHtml = renderRecentRunHistoryHtml(recentConsoleRunHistory(lines as LedgerRecord[]));
         } catch (e) {
-          const reason = `ledger unreadable: ${String((e as Error)?.message ?? e)}`;
-          panel = renderIdleReasonsHtml({ kind: "unknown", why: reason });
+          const reason = String((e as Error)?.message ?? e);
+          panel = renderIdleReasonsHtml({ kind: "unknown", why: `ledger unreadable: ${reason}` });
+          timeSeriesHtml = renderConsoleTimeSeriesHtml(unreadableConsoleTimeSeries(reason));
           runHistoryHtml = renderRecentRunHistoryHtml({
             limit: CONSOLE_RUN_HISTORY_LIMIT,
             scannedRows: 0,
@@ -2435,7 +2705,7 @@ export function buildShellRoute(
                 runId: "unreadable",
                 taskId: "unreadable",
                 timestamp: "",
-                step: reason,
+                step: `ledger unreadable: ${reason}`,
                 model: "unattributed",
                 modelProvenance: "unattributed",
                 effort: "unattributed",
@@ -2446,6 +2716,7 @@ export function buildShellRoute(
         }
       } else {
         panel = renderIdleReasonsHtml({ kind: "unknown", why: "idle reasons refresh off the bounded console data routes" });
+        timeSeriesHtml = renderConsoleTimeSeriesHtml(unreadableConsoleTimeSeries("ledger reader unavailable"));
         runHistoryHtml = renderRecentRunHistoryHtml(recentConsoleRunHistory([]));
       }
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -2460,7 +2731,7 @@ export function buildShellRoute(
       } else {
         consoleCodeHtml = renderConsoleCodeStalenessHtml({ bootSha: consoleSha, currentSha: consoleSha });
       }
-      res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha, panel, renderGithubCredentialHtml(credential), consoleCodeHtml, runHistoryHtml));
+      res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha, panel, renderGithubCredentialHtml(credential), consoleCodeHtml, timeSeriesHtml, runHistoryHtml));
     },
   };
 }
@@ -2956,7 +3227,10 @@ interface ServeRoutesAssembly {
 }
 
 /** Internal route assembly that keeps the first-mint readiness signal beside the routes it protects. */
-function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
+function assembleServeRoutes(
+  deps: ServeDeps,
+  currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot,
+): ServeRoutesAssembly {
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
   // ever re-resolves it. See resolveConsoleSha for why re-reading per request would be worse
@@ -3021,7 +3295,7 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
     accountFilePath: resolveAccountFilePath(deps.accountUsage?.accountFilePath),
   };
   const rawRoutes = [
-    buildStatusRoute(deps.board, lastSeen),
+    projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen)),
     buildRecentRoute(deps.board),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     buildDaemonHealthRoute(daemonHealthDeps),
@@ -3107,9 +3381,9 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
     // the bot branch instead of dirtying the daemon's checkout.
     ...buildPanelSkillRunRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
-    // W1-T477: the operator's four analytics questions, aggregated over the rotation union — see
-    // analytics-route.ts's module header for the reader discipline and scope.
-    buildAnalyticsRoute({ ...deps.analytics, ledgerPath: deps.ledgerPath }),
+    // W1-T3352: synchronous read of process-owned state. The server assembly owns refresh and
+    // cancellation; this route receives no ledger path or reader capability.
+    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot }),
     buildAuthScopeRoute(),
     // W1-T2409: the in-console write-grant "ask" — see buildConsoleWriteGrantRoute's own doc.
     buildConsoleWriteGrantRoute(deps.tokens),
@@ -3229,13 +3503,18 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // instance ServeDeps.confirmNonces's own doc requires; resolving it independently in each place
   // (each defaulting on its own) would issue nonces into a store the dispatch never consults.
   const confirmNonces = deps.confirmNonces ?? createConfirmNonceStore();
+  const analyticsCache = createAnalyticsSnapshotCache({
+    ...deps.analytics,
+    stateDir: dirname(deps.ledgerPath),
+    log: deps.log,
+  });
   // W1-T2229: resolved ONCE, here, and threaded through to `buildServeRoutes` below (explicitly,
   // via the spread) so `GET /v1/version` and the shell's "console build" chip report the EXACT
   // sha {@link gateStaleCodeExit} is comparing against — never a second independent resolution
   // that could drift from the one the exit decision uses.
   const consoleSha = deps.consoleSha ?? resolveConsoleSha();
-  const staleExit = gateStaleCodeExit({ bootSha: consoleSha, log: deps.log });
-  const routeAssembly = assembleServeRoutes({ ...deps, consoleSha, confirmNonces });
+  const staleExit = gateStaleCodeExit({ bootSha: consoleSha, log: deps.log, beforeExit: analyticsCache.stop });
+  const routeAssembly = assembleServeRoutes({ ...deps, consoleSha, confirmNonces }, analyticsCache.current);
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
     // five paths (`/v1/manual/approve`, `/v1/drain/kick`, `/v1/drain/run`, `/v1/inbox/approve`,
@@ -3289,6 +3568,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     enforceWriteTiers: true,
   });
   server.on("close", prewarm.stop);
+  server.once("listening", analyticsCache.start);
+  server.on("close", analyticsCache.stop);
   return { server, githubAppReady: routeAssembly.githubAppReady };
 }
 

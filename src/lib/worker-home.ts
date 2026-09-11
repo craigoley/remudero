@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -1075,6 +1076,36 @@ export interface AcquireKeychainProvisionLockOpts {
   __readCommittedWaitMs?: () => number;
 }
 
+/** Publish a fully-written lock at `lockPath`, without ever exposing a partial record. A direct
+ * `openSync(lockPath, "wx")` followed by `writeSync` left a window where a concurrent peer could
+ * read the empty file as malformed and reclaim the lock while its holder was still provisioning.
+ * The hard link creates the destination name atomically: a peer sees either no lock or this complete
+ * record, and `EEXIST` means a peer has already published its own lock. */
+function tryPublishKeychainProvisionLock(lockPath: string, info: KeychainProvisionLockInfo): boolean {
+  const stagedPath = `${lockPath}.${process.pid}.${randomUUID()}.stage`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(stagedPath, "wx", 0o600);
+    writeSync(fd, JSON.stringify(info, null, 2));
+    closeSync(fd);
+    fd = undefined;
+    try {
+      linkSync(stagedPath, lockPath);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw e;
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    try {
+      unlinkSync(stagedPath);
+    } catch {
+      // The staging file was never created or has already been cleaned up.
+    }
+  }
+}
+
 /**
  * THE WAIT DEADLINE, resolved from policy through the `??` seam this repo's other policy
  * consumers use (`test/config-reader-seams.test.ts` enforces that shape).
@@ -1135,44 +1166,37 @@ export function acquireKeychainProvisionLock(
   let waitDeadlineAt: number | undefined;
 
   for (;;) {
-    try {
-      const fd = openSync(lockPath, "wx"); // create-or-fail; no TOCTOU gap
-      writeSync(fd, JSON.stringify(info, null, 2));
-      closeSync(fd);
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const result = reclaimStaleLock(lockPath, {
-        parseHolder: parseKeychainProvisionLockInfo,
-        isStale: (held) =>
-          isHolderStale(held, {
-            isPidAlive: isAlive,
-            getProcessStartTime: opts.getProcessStartTime,
-            hostname: opts.hostname,
-            inContainer: opts.inContainer,
-          }),
-      });
-      if (result.outcome === "live") {
-        // A live peer is provisioning THIS store right now — WAIT and re-check rather than proceeding
-        // alongside it. Its own release, or the next pass reclaiming its now-stale lock, is what
-        // ordinarily ends this; the deadline is what ends it when neither ever happens.
-        if (waitDeadlineAt === undefined) waitDeadlineAt = now() + resolveKeychainProvisionLockWaitMs(opts);
-        if (now() >= waitDeadlineAt) {
-          const held = result.holder;
-          throw new WorkerKeychainError(
-            "keychain-provision-lock-timeout",
-            `worker-keychain provisioning lock ${lockPath} is still held after waiting for it: holder pid ` +
-              `${held.pid}${held.host ? ` on host ${held.host}` : " (no host recorded)"}, started ${held.startedAt}. ` +
-              `Refusing to wait longer — this wait is synchronous and blocks the daemon's event loop, so an ` +
-              `unbounded one freezes the process outright. If that holder is genuinely gone, removing ${lockPath} ` +
-              `releases it; if it is on another host, this process is correct never to reclaim it.`,
-          );
-        }
-        sleep(KEYCHAIN_PROVISION_LOCK_POLL_MS);
-        continue;
+    if (tryPublishKeychainProvisionLock(lockPath, info)) break;
+    const result = reclaimStaleLock(lockPath, {
+      parseHolder: parseKeychainProvisionLockInfo,
+      isStale: (held) =>
+        isHolderStale(held, {
+          isPidAlive: isAlive,
+          getProcessStartTime: opts.getProcessStartTime,
+          hostname: opts.hostname,
+          inContainer: opts.inContainer,
+        }),
+    });
+    if (result.outcome === "live") {
+      // A live peer is provisioning THIS store right now — WAIT and re-check rather than proceeding
+      // alongside it. Its own release, or the next pass reclaiming its now-stale lock, is what
+      // ordinarily ends this; the deadline is what ends it when neither ever happens.
+      if (waitDeadlineAt === undefined) waitDeadlineAt = now() + resolveKeychainProvisionLockWaitMs(opts);
+      if (now() >= waitDeadlineAt) {
+        const held = result.holder;
+        throw new WorkerKeychainError(
+          "keychain-provision-lock-timeout",
+          `worker-keychain provisioning lock ${lockPath} is still held after waiting for it: holder pid ` +
+            `${held.pid}${held.host ? ` on host ${held.host}` : " (no host recorded)"}, started ${held.startedAt}. ` +
+            `Refusing to wait longer — this wait is synchronous and blocks the daemon's event loop, so an ` +
+            `unbounded one freezes the process outright. If that holder is genuinely gone, removing ${lockPath} ` +
+            `releases it; if it is on another host, this process is correct never to reclaim it.`,
+        );
       }
-      // "missing" | "reclaimed" | "lost" → loop back and retry the atomic create.
+      sleep(KEYCHAIN_PROVISION_LOCK_POLL_MS);
+      continue;
     }
+    // "missing" | "reclaimed" | "lost" → loop back and retry the atomic publish.
   }
 
   let released = false;

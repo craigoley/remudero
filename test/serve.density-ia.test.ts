@@ -274,7 +274,7 @@ test("one-click drill: a task reachable only via the 'everything else' corpus op
 
       await page.click('#rest-list li[data-task-id="W1-T1"] .task-id');
       await page.waitForFunction(
-        () => document.querySelector('#rest-list li[data-task-id="W1-T1"]')?.getAttribute("aria-expanded") === "true",
+        () => document.querySelector('#rest-list li[data-task-id="W1-T1"] .row-chevron')?.getAttribute("aria-expanded") === "true",
         null,
         { timeout: 5000 },
       );
@@ -346,7 +346,7 @@ test("one-click drill: clicking a dense NOW row opens W1-T158's task card direct
       // ONE click, on the row itself (never the chevron/PR link/etc -- it's the whole row's own affordance).
       await page.click('#now-list li[data-task-id="W1-T1"] .task-id');
       await page.waitForFunction(
-        () => document.querySelector('#now-list li[data-task-id="W1-T1"]')?.getAttribute("aria-expanded") === "true",
+        () => document.querySelector('#now-list li[data-task-id="W1-T1"] .row-chevron')?.getAttribute("aria-expanded") === "true",
         null,
         { timeout: 5000 },
       );
@@ -413,7 +413,7 @@ test("one-click drill: a click on a row in EVERY section (NOW/NEEDS ME/UP NEXT/R
         await page.click(`#${s.list} li[data-task-id="${s.taskId}"] .task-id`);
         await page.waitForFunction(
           (sel) => document.querySelector(sel)?.getAttribute("aria-expanded") === "true",
-          `#${s.list} li[data-task-id="${s.taskId}"]`,
+          `#${s.list} li[data-task-id="${s.taskId}"] .row-chevron`,
           { timeout: 5000 },
         );
         await page.waitForFunction(

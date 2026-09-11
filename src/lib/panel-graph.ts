@@ -945,6 +945,21 @@ export interface InboxDraftingItem {
   spawnedAt: string;
 }
 
+/**
+ * One DECLINED proposal, as GET /v1/inbox renders it (W1-T3408). Carries the decline's own reason
+ * verbatim, so the list says WHY each was refused and a reader can tell a deliberate refusal from
+ * one entered on reasoning that has since been shown wrong.
+ *
+ * IT IS A SEPARATE ARRAY, not folded into `notReady`: a declined proposal is not awaiting anything
+ * and must never read as work in progress. Nothing here is actionable except restore.
+ */
+export interface InboxDeclinedItem {
+  proposalId: string;
+  summary: string;
+  /** The reason the latest `panel.proposal_declined` row recorded, verbatim. */
+  reason: string;
+}
+
 /** One not-ready proposal, as GET /v1/inbox renders it (W1-T2604). `reasons` is the exact {@link
  *  PredicateFailure}[] `classifyProposal` computed, never a bare string, so an operator sees why
  *  without attempting an approve. A separate array from `ready`/`drafting`: presence here implies
@@ -1024,8 +1039,11 @@ function classifyAllProposals(
  * computed the way `rmd inbox` prints them, for the shell's NEEDS ME section. Deferred-with-
  * trigger proposals are never returned — only what is actionable or in-progress is surfaced.
  * Not-ready proposals (W1-T2604) ride along in `notReady` (see {@link InboxNotReadyItem});
- * ratified/retired/declined proposals stay excluded from every array. `rmd approve`/`reframe`/
- * `decline` are wired from the card below, over the same write-token scope every write uses.
+ * Ratified/retired proposals stay excluded from every array. DECLINED ones are returned in their
+ * own `declined` array (W1-T3408): `POST /v1/inbox/restore` shipped with no way to learn its own
+ * argument, because a declined proposal was invisible here — a write route whose parameter cannot
+ * be discovered is a mechanism nobody can reach. `rmd approve`/`reframe`/`decline` are wired from
+ * the card below, over the same write-token scope every write uses.
  */
 export function buildInboxRoute(deps: PanelGraphDeps): Route {
   return {
@@ -1038,6 +1056,7 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
       const ready: InboxReadyItem[] = [];
       const drafting: InboxDraftingItem[] = [];
       const notReady: InboxNotReadyItem[] = [];
+      const declined: InboxDeclinedItem[] = [];
       for (const classification of classifications) {
         const proposal = proposals.find((p) => p.id === classification.proposalId);
         if (!proposal) continue; // unreachable — classifications are 1:1 with proposals
@@ -1050,6 +1069,12 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
           });
         } else if (classification.state === "drafting") {
           drafting.push({ proposalId: proposal.id, summary: proposal.summary, spawnedAt: classification.draftSpawnedAt ?? "" });
+        } else if (classification.state === "declined") {
+          declined.push({
+            proposalId: proposal.id,
+            summary: proposal.summary,
+            reason: classification.declinedReason ?? "declined by an operator",
+          });
         } else if (classification.state === "not_ready") {
           // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
           // never a bare "not_ready" — see InboxNotReadyItem's own doc.
@@ -1068,7 +1093,7 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
           return fresh.length === current.length ? null : fresh;
         });
       }
-      sendJson(res, 200, { ready, drafting, notReady });
+      sendJson(res, 200, { ready, drafting, notReady, declined });
     },
   };
 }
@@ -1216,11 +1241,12 @@ function validateDeclineProposal(body: unknown): { error: string } | DeclineProp
  * POST /v1/inbox/decline — write-scoped. The inbox's third verb (W1-T2604): the only prior way a
  * proposal left the registry was `rmd approve`, so a self-withdrawn or duplicate one had no path
  * out except being approved into a task nobody wants. An operator act, never an inference —
- * `classifyProposal` never reads a proposal's own prose to decide this. A decline is not a
- * delete: the proposal stays in the registry (like `retired`, W1-T2451), and the decline receipt
- * is checked before every other predicate so it can never again render ready/drafting. No plan
- * task, no branch: this never calls {@link RatifyCliGateway}. Valid for any active-registry
- * proposal not already ratified or declined (409 either way, naming which).
+ * `classifyProposal` never reads a proposal's own prose to decide this. A decline is not a delete:
+ * the proposal stays in the registry (like `retired`, W1-T2451), and the receipt is checked before
+ * every other predicate. W1-T3407: it is no longer PERMANENT either — {@link
+ * buildRestoreProposalRoute} clears it, latest wins, so a decline entered on reasoning that later
+ * proves wrong can be taken back. No plan task, no branch: this never calls {@link
+ * RatifyCliGateway}. Valid for any active-registry proposal not already ratified or declined.
  * Why: the P19-shaped silent-drop history this route closes — docs/forensics/panel-graph.md
  */
 export function buildDeclineProposalRoute(deps: PanelGraphDeps): Route {
@@ -1255,6 +1281,43 @@ export function buildDeclineProposalRoute(deps: PanelGraphDeps): Route {
       const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, "panel.proposal_declined", input.proposalId, origin, { reason: input.reason });
       sendJson(res, 200, { ok: true, proposalId: input.proposalId, declined: true });
+    }),
+  };
+}
+
+/** POST /v1/inbox/restore — W1-T3407, the reversal decline never had. Symmetric with it: same
+ *  scope, LOW tier, 404. Refuses only a RATIFIED proposal (its task is already filed) and 409s one
+ *  that is not declined. FALSIFIER: test/a-decline-can-be-taken-back.test.ts. */
+export function buildRestoreProposalRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/inbox/restore",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateDeclineProposal, (input, req, res) => {
+      const { proposals, classifications } = classifyAllProposals(deps);
+      if (!proposals.some((p) => p.id === input.proposalId)) {
+        sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
+        return;
+      }
+      const classification = classifications.find((c) => c.proposalId === input.proposalId);
+      if (classification?.state === "ratified") {
+        sendJson(res, 409, {
+          error: "already_ratified",
+          detail: `${input.proposalId} is already RATIFIED — restoring it cannot un-file the task it already produced`,
+        });
+        return;
+      }
+      if (classification?.state !== "declined") {
+        sendJson(res, 409, {
+          error: "not_declined",
+          detail: `${input.proposalId} is not declined (state: ${classification?.state ?? "unknown"}) — there is nothing to restore`,
+        });
+        return;
+      }
+      const origin = bearerTokenId(req);
+      appendPanelLedger(deps.ledgerPath, "panel.proposal_restored", input.proposalId, origin, { reason: input.reason });
+      sendJson(res, 200, { ok: true, proposalId: input.proposalId, restored: true });
     }),
   };
 }
@@ -1372,6 +1435,7 @@ export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
     buildApproveProposalRoute(deps),
     buildReframeProposalRoute(deps),
     buildDeclineProposalRoute(deps),
+    buildRestoreProposalRoute(deps),
     buildSetDailyCostCeilingRoute(deps),
     buildClearDailyCostCeilingRoute(deps),
   ];

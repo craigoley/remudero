@@ -1,0 +1,45 @@
+- id: W1-T3409
+  title: "the adoption symbol scan counts a doc-comment mention as a caller, so a dead export reads adopted"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/measurement-cadence.ts
+    - test/a-mention-is-not-a-caller.test.ts
+  origin: "operator-session#adoption-precision-2026-09-11"
+  rationale: |
+    #5113 fixed this defect for the SCRIPT shape and deliberately left the SYMBOL shape, which
+    carries it identically. Both scans test a bare identifier against RAW FILE TEXT, so a
+    reference inside a comment scores the export REACHED.
+
+    MEASURED WHILE FIXING THE SCRIPT SHAPE, on the same checkout: `scripts/diff-coverage.mjs`
+    names `scripts/console-live-review.mjs` in a doc comment, and under a bare-basename match
+    that alone marked the script adopted. Narrowing the script probe to a QUOTED PATH SPECIFIER
+    over executable files took the reported set from 11 to 4, and every one of the 4 was
+    confirmed by hand to have no invoker anywhere.
+
+    THE SYMBOL SHAPE IS WORSE, because it cuts both ways. Two open proposals name it directly:
+    `{@link parseJudgeVerdict}` inside a JSDoc block scores that export REACHED in a module
+    measured at ZERO production call sites; and four of W1-T2508's six progressive-disclosure
+    exports read as ADOPTED because one function nothing calls references them — so the fleet's
+    own dark-organ measurement can be satisfied by moving a call INTO the dark.
+
+    THE FIX IS THE ONE ALREADY PROVEN NEXT DOOR: match a real reference, not a mention. Strip
+    comments before scanning, or require the identifier to appear in a call/import position.
+    #5113's own test file carries the precision guards to copy — a data file that lists every
+    name, and a doc comment that names one, must both leave the scan reporting.
+  acceptance:
+    - claim: "an export referenced only inside a comment is still reported as having no caller"
+      proof: "unit test: test/a-mention-is-not-a-caller.test.ts"
+    - claim: "an export referenced from an unreached region does not launder adoption"
+      proof: "unit test: test/a-mention-is-not-a-caller.test.ts"
+    - claim: "a genuinely called export is still reported as adopted, so the scan does not invert"
+      proof: "unit test: test/a-mention-is-not-a-caller.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if the symbol scan already strips comments or requires a call position. Read
+    `scanUnadoptedSymbols` in src/lib/measurement-cadence.ts: if it still tests a word-boundary
+    regex against whole file text, the defect stands.
