@@ -1266,6 +1266,7 @@
     "test/the-mint-blames-the-fleet-for-its-own-caller.test.ts": 1215,
     "test/the-mint-discards-its-only-current-source-when-the-local-half-is-stale.test.ts": 2060,
     "test/the-mint-prevents-an-id-collision-and-nothing-prevents-a-duplicate-surface.test.ts": 1049,
+    "test/the-mount-recommender-re-scans-the-whole-ledger-every-poll.test.ts": 0,
     "test/the-nightly-ratchet-never-runs-on-the-nights-it-is-needed.test.ts": 505,
     "test/the-offline-plan-lint-names-its-omissions.test.ts": 0,
     "test/the-one-concern-arm-never-adopted-the-shared-table.test.ts": 1101,
