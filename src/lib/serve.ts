@@ -219,7 +219,7 @@ export interface ServeDeps {
    * (run-task.ts's `serveCommand`) never has to construct this gateway itself, and a test can
    * still inject a fake by supplying `ratify` explicitly.
    */
-  panelGraph: Omit<PanelGraphDeps, "inboxRoot" | "ratify" | "readPlanSnapshot"> & { ratify?: PanelGraphDeps["ratify"] };
+  panelGraph: Omit<PanelGraphDeps, "inboxRoot" | "ratify"> & { ratify?: PanelGraphDeps["ratify"] };
   /** `<root>/state/ledger.ndjson` — SAME path board.ts tails and every panel route ledgers into. */
   ledgerPath: string;
   /** `gh issue close` gateway shared by every panel-actions write route that needs it. */
@@ -3063,7 +3063,6 @@ function assembleServeRoutes(
     ...deps.panelGraph,
     inboxRoot: deps.fleetControlRoot,
     ratify: deps.panelGraph.ratify ?? ratifyCliGateway(deps.panelGraph.root, join(deps.fleetControlRoot, "state", "logs")),
-    readPlanSnapshot: () => deps.board.plan,
   };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
@@ -3155,7 +3154,7 @@ function assembleServeRoutes(
     // (ledgerPanelAction, panel-actions.ts:134), which is identical across both PanelActionDeps
     // instances built above -- so this route reads no root at all and cannot be misrooted.
     buildDrainFeedbackRoute(fleetControlDeps),
-    ...buildPanelGraphRoutes(panelGraphDeps),
+    ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every
     // running console. `questionsRoot` IS repoRoot (see that field's own doc, above) and

@@ -11,6 +11,7 @@ import {
   buildInboxRoute,
   buildPlanViewRoute,
   type PanelGraphDeps,
+  type PanelGraphReadDeps,
   type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
@@ -80,7 +81,7 @@ function ledgerPathFor(root: string): string {
   return path;
 }
 
-function panelDeps(root: string, planPath: string, readPlanSnapshot: () => Plan, ratify = ratifyGateway()): PanelGraphDeps {
+function panelDeps(root: string, planPath: string, readPlanSnapshot: () => Plan, ratify = ratifyGateway()): PanelGraphReadDeps {
   const github = statusGateway();
   return {
     root,
@@ -187,7 +188,7 @@ const READY_FRAGMENT = `
       proof: "unit test: fixture X -> observable Y"
 `;
 
-test("inbox approval ignores the read snapshot and resolves the target ref", async () => {
+test("inbox approval has no snapshot capability and resolves the target ref", async () => {
   const repo = gitRepo({ seedCommit: false, kind: "serve-plan-snapshot" });
   const root = repo.dir;
   const planPath = join(root, "plan", "tasks.yaml");
@@ -213,9 +214,16 @@ test("inbox approval ignores the read snapshot and resolves the target ref", asy
   repo.git("commit", "--quiet", "-m", "fixture");
   writeFileSync(planPath, "this working-tree plan is deliberately invalid\n");
   const ratify = ratifyGateway();
-  const deps = panelDeps(root, planPath, () => {
-    throw new Error("a write route consulted the read snapshot");
-  }, ratify);
+  const github = statusGateway();
+  const deps: PanelGraphDeps = {
+    root,
+    inboxRoot: root,
+    planPath,
+    ledgerPath: ledgerPathFor(root),
+    github: traceGateway(),
+    statusGithub: github,
+    ratify,
+  };
 
   await withRoutes([buildApproveProposalRoute(deps)], async (baseUrl) => {
     const response = await fetch(`${baseUrl}/v1/inbox/approve`, {

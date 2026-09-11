@@ -101,9 +101,6 @@ export interface PanelGraphDeps {
   /** `plan/tasks.yaml`'s authoritative path. Write routes load it fresh or at-ref; narrow
    *  path-based rendering helpers may also consult it independently. */
   planPath: string;
-  /** W1-T3415: the serve process's existing read snapshot. Only the three polled GET routes
-   *  consult this seam; omission preserves standalone route builders' fresh-load behavior. */
-  readPlanSnapshot?: () => Plan;
   ledgerPath: string;
   /** GitHub PR lookups the trace chain needs (lib/trace.ts's `TraceGithub`), injected for tests. */
   github: TraceGithub;
@@ -127,6 +124,14 @@ export interface PanelGraphDeps {
   /** Injectable `Policy` for the daily-cost-ceiling routes (W1-T364), defaulting to
    *  `loadDefaultPolicy()` — the same seam `account-usage.ts` and run-task.ts already offer. */
   policy?: Policy;
+}
+
+/** W1-T3415's read-only extension. Write-route builders deliberately receive only
+ * {@link PanelGraphDeps}, so no mutating handler can consult a process read snapshot. */
+export interface PanelGraphReadDeps extends PanelGraphDeps {
+  /** The serve process's existing read snapshot. Omission preserves standalone route builders'
+   * fresh-load behavior. */
+  readPlanSnapshot?: () => Plan;
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
@@ -521,7 +526,7 @@ function parseMaxParam(url: URL): { max?: number } | { error: string } {
 }
 
 /** The one read-model boundary shared by the three console routes W1-T3415 owns. */
-function readPanelPlan(deps: PanelGraphDeps): Plan {
+function readPanelPlan(deps: PanelGraphReadDeps): Plan {
   return deps.readPlanSnapshot?.() ?? loadPlan(deps.planPath);
 }
 
@@ -539,7 +544,7 @@ function planRefsFromSnapshot(plan: Plan): Map<string, string[]> {
  * ordered task cards: reads the process snapshot, re-derives merged status via `projectPlan` (the
  * same projection `GET /v1/status` uses), and renders `drain.ts`'s own `buildDrainPreview`.
  */
-export function buildDrainPreviewRoute(deps: PanelGraphDeps): Route {
+export function buildDrainPreviewRoute(deps: PanelGraphReadDeps): Route {
   return {
     method: "GET",
     path: "/v1/drain/preview",
@@ -896,7 +901,7 @@ export function computePlanSectionCounts(
  * buildDrainPreviewRoute}. The caches are created once per route closure, persisting for the
  * `rmd serve` process lifetime — never per-request, or every reading would look first-ever.
  */
-export function buildPlanViewRoute(deps: PanelGraphDeps): Route {
+export function buildPlanViewRoute(deps: PanelGraphReadDeps): Route {
   const progressCache = createPlanProgressCache();
   const sectionCache = createPlanSectionCache();
   return {
@@ -1062,7 +1067,7 @@ function classifyAllProposals(
  * be discovered is a mechanism nobody can reach. `rmd approve`/`reframe`/`decline` are wired from
  * the card below, over the same write-token scope every write uses.
  */
-export function buildInboxRoute(deps: PanelGraphDeps): Route {
+export function buildInboxRoute(deps: PanelGraphReadDeps): Route {
   return {
     method: "GET",
     path: "/v1/inbox",
@@ -1439,16 +1444,17 @@ export function buildClearDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
 }
 
 /** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
-export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
+export function buildPanelGraphRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
+  const readDeps: PanelGraphReadDeps = { ...deps, readPlanSnapshot };
   return [
     buildFeedbackInboxRoute(deps),
     buildSubmitFeedbackRoute(deps),
     buildPreviewFeedbackRoute(deps),
     buildTraceRoute(deps),
     buildProposalDecisionRoute(deps),
-    buildDrainPreviewRoute(deps),
-    buildPlanViewRoute(deps),
-    buildInboxRoute(deps),
+    buildDrainPreviewRoute(readDeps),
+    buildPlanViewRoute(readDeps),
+    buildInboxRoute(readDeps),
     buildApproveProposalRoute(deps),
     buildReframeProposalRoute(deps),
     buildDeclineProposalRoute(deps),
