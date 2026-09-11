@@ -10,6 +10,8 @@ import {
   type Escalation,
   type IssueGateway,
 } from "../src/lib/escalate.js";
+import { buildSweepEffects } from "../src/run-task.js";
+import { DEFAULT_SWEEP_POLICY, renderClarificationQuestion, type OpenPrView } from "../src/lib/sweep.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-head-independent-dedup-")), "ledger.ndjson");
@@ -91,6 +93,49 @@ test("a head-independent producer firing twice at DIFFERENT head shas opens ONE 
   const rows = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(rows.filter((row) => row.step === "escalation.issue_opened").length, 1);
   assert.equal(rows.filter((row) => row.step === "escalation.deduped").length, 1);
+});
+
+test("the production clarification adapter does not re-ask the contradictory question after a push", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-production-head-independent-dedup-"));
+  const path = join(root, "ledger.ndjson");
+  const issues = fakeIssueStore();
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    repoRoot: root,
+    config: { root, claudeBin: "/usr/bin/true" } as never,
+    ledgerPath: path,
+    runId: "SWEEP-1",
+    plan: { tasks: [], byId: new Map() } as never,
+    log: () => {},
+    policy: DEFAULT_SWEEP_POLICY,
+    reviewRunner: undefined,
+    spawnImpl: undefined,
+    pushEmptyCommit: undefined,
+    issuesImpl: issues,
+  });
+  const reason = "review failing with no actionable unmet criteria (contradictory) — escalating";
+  const first: OpenPrView = {
+    prNumber: 4559,
+    prUrl: "https://github.com/craigoley/remudero/pull/4559",
+    taskId: "W1-T3179",
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: "2026-09-11T00:00:00Z",
+    headSha: "3a29c58a",
+    autoMergeArmed: false,
+  };
+
+  effects.escalate(first, reason, renderClarificationQuestion(first, reason));
+  const pushed = { ...first, headSha: "69b6e0a1" };
+  effects.escalate(pushed, reason, renderClarificationQuestion(pushed, reason));
+
+  assert.equal(issues.calls.length, 1, "the exact production adapter opens only the first question");
+  assert.equal(issues.comments.length, 1, "the later head is appended to that open question");
+  assert.match(issues.calls[0].body, /^\*\*Head:\*\* 3a29c58a$/m);
+  assert.match(issues.comments[0].body, /^\*\*Head:\*\* 69b6e0a1$/m);
 });
 
 test("a head-DEPENDENT producer dedups only while the head sha stays the same", () => {
