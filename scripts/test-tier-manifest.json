@@ -1255,6 +1255,7 @@
     "test/the-console-draws-the-graph-it-computes.test.ts": 1612,
     "test/the-console-has-no-time-series-at-all.test.ts": 0,
     "test/the-console-inbox-can-decline-a-proposal.test.ts": 860,
+    "test/the-console-meets-its-stated-a11y-bars.test.ts": 0,
     "test/the-console-reads-like-a-mailbox.test.ts": 1198,
     "test/the-console-request-path-does-not-block.test.ts": 0,
     "test/the-console-serves-its-own-assets.test.ts": 0,

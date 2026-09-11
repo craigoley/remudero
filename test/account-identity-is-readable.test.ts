@@ -212,7 +212,9 @@ test("W1-T2434: identity is returned for every usage-unknown reason EXCEPT unrea
 // already use for this exact template.
 
 function extractClientSlice(startMarker: string, endMarker: string): string {
-  const script = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(renderShellHtml())![1]!;
+  const script = [...renderShellHtml().matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)]
+    .map((match) => match[1]!)
+    .find((candidate) => candidate.includes(startMarker)) ?? "";
   const start = script.indexOf(startMarker);
   const end = script.indexOf(endMarker, start);
   assert.ok(start >= 0 && end > start, `expected to find ${startMarker}…${endMarker} in the rendered shell`);

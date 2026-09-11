@@ -638,8 +638,8 @@ function renderConsoleTimeSeriesSvg(series: ConsoleTimeSeries, windowStartMs: nu
 
 export function renderConsoleTimeSeriesHtml(snapshot: ConsoleTimeSeriesSnapshot): string {
   const header =
-    `<h3>Time series <span class="section-summary" data-time-series-window="${snapshot.windowMs}" data-time-series-bucket="${snapshot.bucketMs}">` +
-    `${escapeHtmlText(snapshot.windowLabel)} window · ${escapeHtmlText(snapshot.bucketLabel)} buckets</span></h3>`;
+    `<h2>Time series <span class="section-summary" data-time-series-window="${snapshot.windowMs}" data-time-series-bucket="${snapshot.bucketMs}">` +
+    `${escapeHtmlText(snapshot.windowLabel)} window · ${escapeHtmlText(snapshot.bucketLabel)} buckets</span></h2>`;
   if (snapshot.status === "unreadable") {
     return (
       `<section id="time-series" class="daemon-health time-series-panel" aria-label="Time series">${header}` +
@@ -1280,7 +1280,7 @@ export function renderShellHtml(
   main { max-width: 56rem; margin: 0 auto; display: flex; flex-direction: column; gap: 0.6rem; }
   h1 { font-size: 1.25rem; margin: 0.5rem 0; }
   h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 0.25rem; }
-  a { color: var(--accent); }
+  a { color: var(--accent); min-height: 24px; display: inline-flex; align-items: center; }
   code, .mono { font-family: var(--font-mono); }
   #top-status { color: var(--text-dim); font-size: 0.875rem; margin: 0; }
   /* W1-T183 round 2: the >=15-rows-above-the-fold bar was passing the SYNTHETIC (1-char-title)
@@ -1303,7 +1303,7 @@ export function renderShellHtml(
   .row {
     display: flex; flex-wrap: nowrap; align-items: center; gap: 0.5rem;
     background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px;
-    padding: 0.22rem 0.5rem; overflow: hidden;
+    min-height: 24px; padding: 0.22rem 0.5rem; overflow: hidden;
   }
   .row > * { flex-shrink: 0; }
   .row:has(form), .row:has(.btn-row), .row:has(.drain-feedback) { flex-wrap: wrap; overflow: visible; align-items: baseline; }
@@ -1379,7 +1379,7 @@ export function renderShellHtml(
   .glance-label { color: var(--text-faint); }
   .glance-value { font-family: var(--font-mono); color: var(--text); font-weight: 600; }
   .time-series-panel { align-items: stretch; }
-  .time-series-panel h3 { flex-basis: 100%; margin: 0; font-size: 0.85rem; }
+  .time-series-panel h2 { flex-basis: 100%; margin: 0; font-size: 0.85rem; }
   .time-series-card { min-width: 12rem; flex: 1 1 12rem; }
   .time-series-head { display: flex; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.2rem; font-size: 0.8rem; }
   .time-series-svg { display: block; width: 100%; height: 2.5rem; overflow: visible; }
@@ -1436,7 +1436,7 @@ export function renderShellHtml(
      ("Do"/"Decide") states the ask outright. */
   .ask-type-badge {
     display: inline-block; margin-right: 0.35em; padding: 0.05rem 0.4rem; border-radius: 999px;
-    font-size: 0.7rem; font-weight: 700; border: 1px solid transparent; vertical-align: middle;
+    font-size: 0.75rem; font-weight: 700; border: 1px solid transparent; vertical-align: middle;
   }
   .ask-type-badge.ask-type-action {
     background: rgba(255, 184, 77, 0.16); color: var(--status-needs-human); border-color: var(--status-needs-human);
@@ -1471,7 +1471,7 @@ export function renderShellHtml(
   .pr-queue-transition { border-top: 1px solid var(--border); padding: 0.45rem 0.65rem; color: var(--text-dim); font-size: 0.82rem; display: grid; gap: 0.2rem; }
   .pr-queue-transition strong { color: var(--text); }
   @media (max-width: 620px) { .pr-queue-toolbar { grid-template-columns: 1fr; } }
-  /* W1-T2497: THE MAILBOX -- inline, same <style> block (no stylesheet of its own). */ .mailbox-heading { font-size: 0.85rem; margin: 0.6rem 0 0.25rem; display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-count:empty { display: none; } .mailbox-unread-count { display: inline-block; min-width: 1.2em; padding: 0 0.4em; border-radius: 999px; text-align: center; font-size: 0.7rem; font-weight: 700; background: var(--status-needs-human); color: #241a02; } .tab-btn .mailbox-unread-count { margin-left: 0.35rem; } .mailbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; } .mailbox-empty { font-size: 0.85rem; opacity: 0.7; margin: 0.25rem 0; } .mailbox-thread { list-style: none; border: 1px solid var(--border, #333); border-radius: 6px; padding: 0.4rem 0.6rem; } .mailbox-thread-unread { border-color: var(--status-needs-human); } .mailbox-thread-head { display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-dot { width: 0.5em; height: 0.5em; border-radius: 999px; background: var(--status-needs-human); display: inline-block; } .mailbox-messages { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; } .mailbox-message { font-size: 0.85rem; } .mailbox-sender { font-weight: 700; margin-right: 0.4em; } .mailbox-reply { display: flex; gap: 0.4em; margin-top: 0.3rem; }
+  /* W1-T2497: THE MAILBOX -- inline, same <style> block (no stylesheet of its own). */ .mailbox-heading { font-size: 0.85rem; margin: 0.6rem 0 0.25rem; display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-count:empty { display: none; } .mailbox-unread-count { display: inline-block; min-width: 1.2em; padding: 0 0.4em; border-radius: 999px; text-align: center; font-size: 0.75rem; font-weight: 700; background: var(--status-needs-human); color: #241a02; } .tab-btn .mailbox-unread-count { margin-left: 0.35rem; } .mailbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; } .mailbox-empty { font-size: 0.85rem; opacity: 0.7; margin: 0.25rem 0; } .mailbox-thread { list-style: none; border: 1px solid var(--border, #333); border-radius: 6px; padding: 0.4rem 0.6rem; } .mailbox-thread-unread { border-color: var(--status-needs-human); } .mailbox-thread-head { display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-dot { width: 0.5em; height: 0.5em; border-radius: 999px; background: var(--status-needs-human); display: inline-block; } .mailbox-messages { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; } .mailbox-message { font-size: 0.85rem; } .mailbox-sender { font-weight: 700; margin-right: 0.4em; } .mailbox-reply { display: flex; gap: 0.4em; margin-top: 0.3rem; }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
@@ -1519,7 +1519,7 @@ export function renderShellHtml(
     display: inline-block; animation: live-pulse 1.2s ease-in-out infinite;
   }
   .live-badge-static {
-    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.03em; color: var(--status-running);
+    font-size: 0.75rem; font-weight: 700; letter-spacing: 0.03em; color: var(--status-running);
     border: 1px solid var(--status-running); border-radius: 4px; padding: 0 0.3em;
   }
   .row.flash { animation: row-flash 1.1s ease; }
@@ -1533,7 +1533,7 @@ export function renderShellHtml(
   }
   button {
     font: inherit; background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 0.4rem 0.75rem; cursor: pointer;
+    border-radius: 6px; min-width: 24px; min-height: 24px; padding: 0.4rem 0.75rem; cursor: pointer;
   }
   button:hover { border-color: var(--accent); }
   button[aria-pressed="true"], button.active { background: var(--accent); color: #04101f; border-color: var(--accent); }
@@ -1555,6 +1555,7 @@ export function renderShellHtml(
   .up-next-run-btn.confirming, #drain-now-btn.confirming { background: var(--accent); color: #04101f; border-color: var(--accent); }
   .up-next-actions { margin-bottom: 0.5rem; }
   #drain-now-btn { font-size: 0.85rem; padding: 0.25rem 0.6rem; }
+  input, select, textarea { min-height: 24px; }
   input[type="text"], input[type="url"] {
     font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 0.3rem 0.5rem; width: 100%; max-width: 24rem;
@@ -1563,7 +1564,7 @@ export function renderShellHtml(
     font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 0.3rem 0.5rem; width: 100%; max-width: 28rem; resize: vertical;
   }
-  label { display: block; font-size: 0.875rem; color: var(--text-dim); margin: 0.25rem 0; }
+  label { display: block; min-height: 24px; font-size: 0.875rem; color: var(--text-dim); margin: 0.25rem 0; }
   /* W1-T183 round 2: this label reuses W1-T156's existing .sr-only class (defined above) -- still
      in the a11y tree (for=/aria-label parity), just not eating a whole line above the fold for a
      control whose placeholder already names it. */
@@ -1579,7 +1580,7 @@ export function renderShellHtml(
   /* W1-T157 FIND layer: faceted filters, sort headers, live counts ─────────────────────────── */
   .find-facets { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; margin: 0.3rem 0; }
   .facet-group { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
-  .facet-group-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); margin-right: 0.15rem; }
+  .facet-group-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); margin-right: 0.15rem; }
   .facet-btn, .sort-header { font-size: 0.8rem; padding: 0.2rem 0.5rem; }
   .facet-count { color: var(--text-faint); font-variant-numeric: tabular-nums; }
   button[aria-pressed="true"] .facet-count { color: inherit; }
@@ -1603,19 +1604,19 @@ export function renderShellHtml(
     display: flex; align-items: center; gap: 0.5rem; overflow-wrap: anywhere;
   }
   .cmdk-item.active, .cmdk-item:hover { background: var(--bg-elevated); }
-  .cmdk-kind { font-size: 0.65rem; font-weight: 700; letter-spacing: 0.03em; color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.3em; }
+  .cmdk-kind { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.03em; color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.3em; }
   .cmdk-empty { padding: 0.6rem; color: var(--text-faint); font-size: 0.875rem; }
   /* W1-T222: the INLINE DETAIL layer. Every task row is itself the expand trigger -- a right-
      edge chevron is the visible affordance (the row LOOKS expandable, not merely IS), flipping
-     direction with the row's own aria-expanded so the toggle state is legible without reading
+     direction with the row detail button's own aria-expanded so the toggle state is legible without reading
      the card beneath it. */
   .row { cursor: pointer; }
   .row button, .row a, .row input, .row label, .row form { cursor: auto; }
   .row-chevron {
-    margin-left: auto; font-size: 0.9rem; color: var(--text-faint);
-    transition: transform 0.15s ease; display: inline-block;
+    margin-left: auto; min-width: 24px; min-height: 24px; padding: 0; font-size: 0.9rem; color: var(--text-faint);
+    transition: transform 0.15s ease; display: inline-flex; align-items: center; justify-content: center;
   }
-  .row[aria-expanded="true"] .row-chevron { transform: rotate(90deg); color: var(--accent); }
+  .row-chevron[aria-expanded="true"] { transform: rotate(90deg); color: var(--accent); }
   @media (prefers-reduced-motion: reduce) {
     .row-chevron { transition: none; }
   }
@@ -1772,7 +1773,7 @@ export function renderShellHtml(
        unreadable ledger union renders the whole list as unreadable -- never a silent zero and
        never a quietly-empty panel. -->
   <section id="self-measurement" class="daemon-health" aria-label="Self-measurement">
-    <h3>Self-measurement <span id="self-measurement-summary" class="section-summary"></span></h3>
+    <h2>Self-measurement <span id="self-measurement-summary" class="section-summary"></span></h2>
     <ol id="self-measurement-list" class="row-list"></ol>
   </section>
   <!-- Rendered SERVER-SIDE from the sha captured at start: a static span, deliberately NOT a
@@ -1875,6 +1876,7 @@ export function renderShellHtml(
 <section id="mailbox-section" class="panel-section" aria-label="Mailbox" data-owner-tab="decisions">
   <h2><span>Mailbox</span></h2>
   <div id="mailbox" class="mailbox" aria-label="Mailbox"></div>
+  <script>document.getElementById("mailbox")?.setAttribute("role", "list");</script>
 </section>
 
 <!-- DECISIONS: the needs-me set alone -- W1-T257's merged-proposal reconciler and the

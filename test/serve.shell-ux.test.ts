@@ -301,30 +301,31 @@ test("W1-T222: Enter and Space toggle a row's inline card, aria-expanded reflect
       await reachSection(page, "now"); // the row this test focuses/toggles lives in "now"
       await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase:"));
       const rowSel = '#now-list li[data-task-id="W1-T3"]';
-      await page.locator(rowSel).focus();
-      assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-task-id")), "W1-T3");
+      const disclosureSel = `${rowSel} .row-chevron`;
+      await page.locator(disclosureSel).focus();
+      assert.equal(await page.evaluate((sel) => document.activeElement === document.querySelector(sel), disclosureSel), true);
 
       // Enter opens it.
       await page.keyboard.press("Enter");
-      await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("aria-expanded") === "true", rowSel);
+      await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("aria-expanded") === "true", disclosureSel);
       assert.equal(
         await page.evaluate((sel) => document.querySelector(sel)!.nextElementSibling?.classList.contains("row-detail"), rowSel),
         true,
       );
       assert.equal(
-        await page.evaluate(() => document.activeElement?.getAttribute("data-task-id")),
-        "W1-T3",
-        "focus must stay on the row, not drop into the freshly-inserted card or the document",
+        await page.evaluate((sel) => document.activeElement === document.querySelector(sel), disclosureSel),
+        true,
+        "focus must stay on the disclosure button, not drop into the freshly-inserted card or the document",
       );
 
       // Space collapses it back.
       await page.keyboard.press(" ");
-      await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("aria-expanded") === "false", rowSel);
+      await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("aria-expanded") === "false", disclosureSel);
       assert.equal(await page.evaluate(() => document.querySelectorAll(".row-detail").length), 0);
       assert.equal(
-        await page.evaluate(() => document.activeElement?.getAttribute("data-task-id")),
-        "W1-T3",
-        "focus must still be on the row after collapsing via the keyboard",
+        await page.evaluate((sel) => document.activeElement === document.querySelector(sel), disclosureSel),
+        true,
+        "focus must still be on the disclosure button after collapsing via the keyboard",
       );
     } finally {
       await page.context().close();
@@ -385,7 +386,7 @@ test("W1-T222: a read-only bookmark's inline card renders NO write affordance (M
         await reachSection(page, "needs-me"); // the row about to be clicked lives in "needs-me"
         await page.click('#needs-me-list li[data-task-id="W1-T9"] .task-id');
         await page.waitForFunction(
-          () => document.querySelector('#needs-me-list li[data-task-id="W1-T9"]')?.getAttribute("aria-expanded") === "true",
+          () => document.querySelector('#needs-me-list li[data-task-id="W1-T9"] .row-chevron')?.getAttribute("aria-expanded") === "true",
         );
         await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").length > 0);
         // TEARDOWN RACE FIX: `return await`, not a bare `return page.evaluate(...)`. Without the
