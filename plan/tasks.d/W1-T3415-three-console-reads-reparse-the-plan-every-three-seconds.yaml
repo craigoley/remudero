@@ -1,0 +1,76 @@
+- id: W1-T3415
+  title: "THREE CONSOLE READS RE-PARSE ALL 1 710 PLAN RECORDS EVERY THREE SECONDS — /v1/drain/preview, /v1/inbox and /v1/plan/view each call loadPlan inside the request handler even though /v1/status already serves the process-owned plan snapshot; the three one-second YAML loads saturate the serve event loop and delay an unrelated 120-second analytics timer"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  origin: "operator-session#daemon-lifeguard-2026-09-11"
+  plan_refs: ["W1-T3192", "W1-T2920", "W1-T3352"]
+  files: [src/lib/panel-graph.ts, src/lib/serve.ts, test/console-read-routes-share-the-serve-plan.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-11 on the Azure fleet host after #5146 merged. The remudero-serve main
+    thread sustained 99-158% CPU while the live ledger appended only two rows in 15 seconds.
+    `serve.analytics_refresh.timeout` fired after 135 528 ms against its 120 000 ms timer, retaining
+    the prior snapshot. `/proc/<pid>/fd` showed no ledger archive left open after cancellation, so
+    the continuing CPU was not a historical analytics scan.
+
+    The console client schedules `refreshAll` every 3 000 ms (`src/lib/console-shell-client.ts`)
+    and that fan-out includes `/v1/drain/preview`, `/v1/inbox` and `/v1/plan/view`. At origin/main
+    1b266bd7, their production resolution chains are:
+
+      GET /v1/drain/preview -> buildDrainPreviewRoute.handler -> loadPlan(deps.planPath)
+      GET /v1/inbox -> buildInboxRoute.handler -> classifyAllProposals -> loadPlan(deps.planPath)
+      GET /v1/plan/view -> buildPlanViewRoute.handler -> loadPlan(deps.planPath)
+
+    An off-host benchmark used a read-only copy of the live 7 806-row ledger and the current
+    1 710-task plan. Three consecutive `loadPlan` calls cost 898 ms, 1 005 ms and 970 ms. The
+    indexed `projectPlan` work immediately after them cost only 43 ms, 41 ms and 26 ms. Three
+    roughly one-second YAML parses scheduled every three seconds account for the observed
+    main-thread saturation without requiring a new theory about GitHub or the ledger.
+
+    W1-T3192 is declaratively merged but its production property is not satisfied. #4722 wraps
+    selected handlers in a Promise race, but each synchronous handler runs before the timer can
+    fire. Its slow-path test awaits a timer and therefore does not falsify a synchronous one-second
+    `loadPlan`. W1-T2920 made task-record lookup constant-time; it explicitly left the one-second
+    whole-plan load in place.
+  design: |
+    Reuse the exact `Plan` object `ServeDeps.board.plan` already gives `/v1/status` for these three
+    read routes. The read fan-out then observes one process-owned plan identity and performs no
+    shard reads. Keep every write or approval path on its current fresh/at-ref loader: a cached
+    read model must never become authority for an irreversible action.
+
+    This is not a generic plan cache. The serve process already owns the snapshot and already
+    exposes its freshness boundary: when checkout code becomes stale, `gateStaleCodeExit` replaces
+    the process after its connected-client and write gates permit exit. Sharing that existing
+    snapshot removes disagreement between `/v1/status` and the three panel reads; it does not add
+    a second invalidation protocol.
+  acceptance:
+    - claim: "the production assembly gives /v1/drain/preview, /v1/inbox and /v1/plan/view the exact Plan object already owned by ServeDeps.board.plan"
+      proof: "unit test: the three polled read routes share ServeDeps.board.plan by object identity"
+    - claim: "the three console read routes can answer when planPath is deliberately unreadable, proving no hidden loadPlan call remains on their request paths"
+      proof: "unit test: the three polled read routes answer with an unreadable planPath"
+    - claim: "POST /v1/inbox/approve still resolves the plan at the target ref and no write route consults the read snapshot"
+      proof: "unit test: inbox approval ignores the read snapshot and resolves the target ref"
+    - claim: "one console refresh over a production-shaped shard population performs zero plan-shard reads after server assembly"
+      proof: "unit test: a production-shaped console refresh performs no plan-shard reads"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if current main already supplies a process-owned plan to all
+    three read routes. Checked at 1b266bd7: each handler reaches `loadPlan` independently.
+
+    Prove the test discriminates by removing the supplied snapshot: the deliberately unreadable
+    `planPath` must make the same three requests fail. A fixture with a valid tiny plan path does
+    not prove disk independence and is not sufficient.
+
+    Do not change the three-second client cadence, hide the work behind a wider timeout, or add a
+    generic TTL cache. None removes synchronous YAML parsing from the event loop. Do not route
+    approval, reframe, decline, restore or another write through the boot snapshot. Their authority
+    and freshness boundaries are separate from a read model.
+  note: |
+    One concern only: process-owned plan reuse for the three polled read routes. The synchronous
+    historical union behind `/v1/self-measurement`, the analytics timeout precision, and any
+    client-poll coalescing remain separate findings and are not implementation scope here.
