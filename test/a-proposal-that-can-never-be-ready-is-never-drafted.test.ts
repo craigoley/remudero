@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   anchorFingerprint,
@@ -13,7 +16,9 @@ import {
   type Proposal,
   type ReadinessContext,
 } from "../src/lib/inbox.js";
+import type { Config } from "../src/lib/config.js";
 import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/plan.js";
+import { buildInboxDraftHook } from "../src/run-task.js";
 
 const BASE_PLAN_YAML = `
 - id: W1-T1
@@ -151,6 +156,36 @@ test("daemon draft selection keeps a proposal draftable when a never-ready fact 
     draftsDueOnDaemon(candidates, {}, {}, 0, readiness).map((p) => p.id),
     ["P-ANCHOR-UNREADABLE", "P-REFERENT-UNREADABLE"],
   );
+});
+
+test("daemon readiness setup fails open and logs the unreadable readiness context", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-draft-readiness-unavailable-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(
+    join(root, "state", "inbox-proposals.json"),
+    JSON.stringify({ proposals: [proposal("P-UNREADABLE-CONTEXT")] }),
+  );
+  mkdirSync(join(root, "state", "ledger.ndjson"));
+
+  const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let drafted: string[] = [];
+  const hook = buildInboxDraftHook(
+    "owner",
+    "repo",
+    { root } as Config,
+    "RUN-READINESS",
+    (step, extra = {}) => logs.push({ step, extra }),
+    async (due) => {
+      drafted = due.map((p) => p.id);
+      return due.map((p) => ({ proposalId: p.id, ok: false as const, error: "ordinary failure" }));
+    },
+  );
+
+  await hook();
+
+  assert.deepEqual(drafted, ["P-UNREADABLE-CONTEXT"], "unreadable daemon readiness must not silently drop the proposal");
+  assert.equal(logs.filter((l) => l.step === "inbox.draft_readiness_unavailable").length, 1);
+  assert.match(String(logs.find((l) => l.step === "inbox.draft_readiness_unavailable")?.extra.error), /EISDIR|illegal operation/);
 });
 
 test("manual inbox force still drafts a named proposal that daemon selection excludes", () => {
