@@ -168,6 +168,26 @@ export {
 };
 export type { FixEvidence, FixMode };
 
+/**
+ * The implementation worker's narrowly-scoped refusal channel. This lives at the dispatch site
+ * because the deterministic consumer is `runReview` below; it is appended to the first prompt
+ * and to the compaction anchor from the same constant, so the contract cannot disappear midway
+ * through a run. The fixed grammar is parsed in lib/review.ts — ordinary prose is not authority.
+ */
+export const IMPLEMENT_REFUSAL_REPORT_CONTRACT = [
+  "",
+  "# REFUSAL REPORTING",
+  "- If evidence at the current HEAD shows that you cannot satisfy a specific acceptance criterion,",
+  "  put this exact block in your final REPORT, with one line for each refused criterion:",
+  "  REFUSED:",
+  "  <criterion index>. [premise-rotted|outside-declared-files|needs-operator-input|proof-unexecutable-at-head|contradicts-another-criterion] <one concrete sentence>",
+  "- Use only a listed class. Do not use this block for a transient tool failure or a guess.",
+  "- A refusal is advisory evidence: it can fail only that criterion and routes to an operator; it",
+  "  never approves work, changes declared scope, or authorizes a retry.",
+  "- If you refuse criterion N, do not state `Criterion N: COMPLETE`, `IMPLEMENTED`, or `SATISFIED`",
+  "  in the PR body. That explicit contradiction fails review.",
+].join("\n");
+
 /*
 Source-text compatibility for legacy tests whose subject is the pre-extraction dispatcher text.
 The live implementations above are imported from "lib/prompt-render" (src/lib/prompt-render.ts).
@@ -496,6 +516,7 @@ import {
   type TaskIdReservationBlock,
   type TaskIdReservationError,
   firstUnreservedAtOrAbove,
+  parseReservationHolderLine,
   gitRemoteRefReserver,
   remoteReservedTaskIds,
   reservationFloorFrom,
@@ -982,12 +1003,14 @@ import {
   narrowNameFilteredArgs,
   execWhitelistedProof,
   defaultProofSpawner,
+  isCriterionRefusal,
   type ProofSpawner,
   type PendingReviewOwnerAssessment,
   type PendingReviewStatusRecord,
   type AutomergeHold,
   type CappedOverride,
   type CriterionVerdict,
+  type CriterionRefusal,
   type ReviewVerdict,
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
@@ -4625,6 +4648,10 @@ async function runReview(args: {
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
   task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
   report: string;
+  /** The implementation worker's complete final report. Kept separate from `report`, which must
+   * remain the PR body for body/diff integrity. `judgeReview` reads this only for the strict,
+   * criterion-indexed `REFUSED:` channel. */
+  implementationReport?: string;
   /**
    * (W1-T1100) True when `report` is the worker's own chat text, substituted after a failed
    * PR-body fetch — see {@link "./lib/review.js".ReviewEvidence.reportIsSubstitute}'s doc for
@@ -4783,7 +4810,7 @@ async function runReview(args: {
   const scopeContext = reviewScopeContext(diff, task.files);
   const criteria = task.acceptance ?? [];
   const decisionDigest = reviewDecisionDigest({
-    headSha, diff, report, body: inputBody, acceptance: criteria, declaredFiles: task.files,
+    headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files,
   });
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest,
@@ -4944,6 +4971,7 @@ async function runReview(args: {
   const computed = judgeReview(criteria, {
     diff,
     report,
+    implementationReport: args.implementationReport,
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
     reportIsSubstitute: args.reportIsSubstitute,
     reportSubstituteCause: args.reportSubstituteCause,
@@ -12270,6 +12298,32 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // deferred) — both layers are non-fatal absences, so this is a pure
     // superset of the project-only injection that shipped before.
     const learningsDir = projectLearningsHome(repoDir); // W1-T2506: follows the TARGET repo, not the plan's checkout
+    // `recordPath` is REUSED, not re-resolved: it was hoisted above the recon spawn (W1-T2632)
+    // so the SAME lookup now feeds both the recon prompt's pointer line and this CONTEXT block —
+    // one `taskRecordPath`/`workerVisibleRecordPath` computation, three consumers, never a second
+    // anchoring rule. It used to be resolved only here, on the degraded arm, "since recon already
+    // relayed all of this" — but recon was never told WHICH TASK it was reconning, only its
+    // `OBSERVED:` section survives `reconObservedToContext`, and that section can be empty. See
+    // that function's doc.
+    // W1-T2241/W1-T2512: exactly one of these four is ever set, mutually exclusive (see the
+    // recon dispatch above) — `reconMasked` short-circuits the WHOLE branch that could set
+    // `reusedReconArtifact`/`reconDegradedSubtype`/`recon`, so it is checked first even though
+    // it was introduced last.
+    const reconContext = reconMasked
+      ? reconMaskedContextNote(taskId, recordPath, task.acceptance ?? [])
+      : reusedReconArtifact
+        ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath)
+        : reconDegradedSubtype
+          ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
+          : reconObservedToContext(recon!, taskId, recordPath);
+    const learningsSelectionText = [
+      task.title,
+      task.rationale ?? "",
+      task.prompt ?? "",
+      ...(task.context ?? []).map((claim) => claim.claim),
+      ...(task.acceptance ?? []).flatMap((criterion) => [criterion.claim, criterion.proof]),
+      reconContext,
+    ];
     // W1-T86 (P12 wipe-test harness): arm B of a wipe-test pair MASKS injection —
     // computeMatchedLearningsForArm("B", ...) returns "" WITHOUT calling any of the
     // load/select/render chain below, so the store is never touched, only the
@@ -12283,6 +12337,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         globalArtifactPath: globalArtifactPath(config),
       },
       taskFiles: task.files,
+      selectionContext: { text: learningsSelectionText },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     });
     // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
@@ -12302,29 +12357,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       matched_ids: learningsResult.selectedIds,
       dropped: learningsResult.droppedIds,
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+      matched_by: learningsResult.matchedBy,
       global_refused_reason: learningsResult.globalRefusedReason,
       masked: !!opts.maskLearnings,
     });
 
     // ── Render + provenance-lint the prompt.
-    // `recordPath` is REUSED, not re-resolved: it was hoisted above the recon spawn (W1-T2632)
-    // so the SAME lookup now feeds both the recon prompt's pointer line and this CONTEXT block —
-    // one `taskRecordPath`/`workerVisibleRecordPath` computation, three consumers, never a second
-    // anchoring rule. It used to be resolved only here, on the degraded arm, "since recon already
-    // relayed all of this" — but recon was never told WHICH TASK it was reconning, only its
-    // `OBSERVED:` section survives `reconObservedToContext`, and that section can be empty. See
-    // that function's doc.
-    // W1-T2241/W1-T2512: exactly one of these four is ever set, mutually exclusive (see the
-    // recon dispatch above) — `reconMasked` short-circuits the WHOLE branch that could set
-    // `reusedReconArtifact`/`reconDegradedSubtype`/`recon`, so it is checked first even though
-    // it was introduced last.
-    const reconContext = reconMasked
-      ? reconMaskedContextNote(taskId, recordPath, task.acceptance ?? [])
-      : reusedReconArtifact
-        ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath)
-        : reconDegradedSubtype
-          ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
-          : reconObservedToContext(recon!, taskId, recordPath);
     // W1-T2761: the `rule_headlines` part — "" (identical to every render before this task)
     // unless `workerRuleHeadlines.enabled` is on AND this isn't a RULES-factor wipe-test arm B.
     // Read from THIS dispatch's own worktree (W1-T501's "the worker's own tree, never the
@@ -12349,9 +12387,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // ONE call yields both the text the worker gets and the parts it was assembled from. The
     // manifest below is ledgered from THESE parts; deriving them a second time is what let the
     // manifest disagree with the prompt (see renderImplementPromptWithParts).
-    const { prompt, parts: implementParts } = renderImplementPromptWithParts(
+    const { prompt: renderedImplementPrompt, parts: implementParts } = renderImplementPromptWithParts(
       task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart,
     );
+    // This is an output-only contract, deliberately outside `# CONTEXT`; the provenance manifest
+    // still hashes the exact prompt sent to the worker below. The companion anchor append keeps a
+    // compaction from deleting the only syntax the deterministic judge is allowed to honour.
+    const prompt = `${renderedImplementPrompt}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -12383,7 +12425,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = renderAnchorBlock(task, runId, ruleHeadlinesPart);
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -13055,6 +13097,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       prUrl,
       task,
       report: reviewReport,
+      implementationReport: fullText(impl),
       reportIsSubstitute: reviewReportIsSubstitute,
       reportSubstituteCause: reviewReportSubstituteCause,
       settingsFile,
@@ -18352,7 +18395,7 @@ export interface ReservationCallerIdentity {
   host: string;
 }
 
-export type ReservationHolder = "self" | "fleet" | "operator" | "unknown";
+export type ReservationHolder = "self" | "fleet" | "operator" | "unknown" | { branch: string; source?: string };
 
 function reservationCallerIdentity(): ReservationCallerIdentity {
   return { pid: process.pid, host: hostname() };
@@ -18365,6 +18408,9 @@ function callerFromReservationAnchor(message: string): ReservationCallerIdentity
 }
 
 export function classifyReservationAnchor(message: string, caller?: ReservationCallerIdentity): ReservationHolder {
+  const parsed = parseReservationHolderLine(message);
+  if (parsed.status === "known") return { branch: parsed.holder.branch, source: parsed.holder.source };
+  if (parsed.status === "unreadable") return "unknown";
   const m = message.trim();
   if (/^rmd-id reservation\b/.test(m)) {
     const holder = callerFromReservationAnchor(m);
@@ -18380,7 +18426,9 @@ export function classifyReservationAnchor(message: string, caller?: ReservationC
  *  taken id must be visible, because silently advancing is what let two collisions go unnoticed. */
 export function describeContestedId(taskId: string, holder: ReservationHolder): string {
   const who =
-    holder === "self"
+    typeof holder === "object"
+      ? `HELD BY ${holder.branch}${holder.source ? ` (${holder.source})` : ""}`
+      : holder === "self"
       ? "HELD BY THIS CALLER (an `rmd-id reservation <pid>@<container>` anchor)"
       : holder === "fleet"
       ? "HELD BY ANOTHER CALLER — the fleet (an `rmd-id reservation <pid>@<container>` anchor)"
@@ -18748,6 +18796,8 @@ export function readReservationHolder(
   if ((fetched.status ?? 1) !== 0) return "unknown";
   const msg = run(["log", "-1", "--format=%s", "FETCH_HEAD"]);
   if ((msg.status ?? 1) !== 0) return "unknown";
+  const body = run(["log", "-1", "--format=%B", "FETCH_HEAD"]);
+  if ((body.status ?? 1) === 0 && body.stdout) return classifyReservationAnchor(body.stdout, caller);
   return classifyReservationAnchor(msg.stdout ?? "", caller);
 }
 
@@ -28071,6 +28121,24 @@ function resolveOpenPrTaskId(pr: RawOpenPr, ledger: Array<Record<string, unknown
   return resolveReviewTaskId(pr.body ?? "", pr.headRefName, isPlanOnlyFilingPr(ledger, pr.url));
 }
 
+/** Recover refusal metadata from a review's structured decision verdict. It is deliberately not
+ * inferred from `reason`: that field is presentation prose, while this read needs a closed class
+ * before the sweep may skip a strike. */
+function refusalByClaimFromDecisionVerdict(value: unknown): Map<string, CriterionRefusal> {
+  const refusals = new Map<string, CriterionRefusal>();
+  if (value === null || typeof value !== "object") return refusals;
+  const criteria = (value as { criteria?: unknown }).criteria;
+  if (!Array.isArray(criteria)) return refusals;
+  for (const entry of criteria) {
+    if (entry === null || typeof entry !== "object") continue;
+    const candidate = entry as { claim?: unknown; met?: unknown; refusal?: unknown };
+    if (candidate.met === false && typeof candidate.claim === "string" && isCriterionRefusal(candidate.refusal)) {
+      refusals.set(candidate.claim, candidate.refusal);
+    }
+  }
+  return refusals;
+}
+
 /**
  * Recover the most recent failing review's unmet criteria for a task from the
  * ledger (`review.posted` / `fix.review` lines carry `unmet_criteria` + `reasons`).
@@ -28081,11 +28149,13 @@ function resolveOpenPrTaskId(pr: RawOpenPr, ledger: Array<Record<string, unknown
 function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string): CriterionVerdict[] {
   let claims: string[] = [];
   let reasons: string[] = [];
+  let refusals = new Map<string, CriterionRefusal>();
   for (const line of lines) {
     if (line.step !== "review.posted" || line.task_id !== taskId) continue;
-    if (line.state === "success") { claims = []; reasons = []; continue; }
+    if (line.state === "success") { claims = []; reasons = []; refusals = new Map(); continue; }
     if (Array.isArray(line.unmet_criteria)) claims = line.unmet_criteria.map(String);
     if (Array.isArray(line.reasons)) reasons = line.reasons.map(String);
+    refusals = refusalByClaimFromDecisionVerdict(line.decision_verdict);
   }
   return claims.map((claim, i) => ({
     claim,
@@ -28093,6 +28163,7 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string):
     met: false,
     reason: reasons[i] ?? "",
     proof_exec: "not_executable" as const,
+    refusal: refusals.get(claim),
   }));
 }
 
@@ -31375,6 +31446,13 @@ export async function routeFix(
     // instead (falls through below), never this branch.
     await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
     return { outcome: "fixed", reason };
+  }
+  if (disposition === "refused-escalate") {
+    // Same transport as the full sweep, but never through dispatchFix: a valid worker refusal is
+    // an operator decision point, not an additional speculative strike.
+    const question = renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []);
+    await deps.escalate(pr, reason, question);
+    return { outcome: "escalated", reason };
   }
   // Strike cap honored: the SAME rule the sweep policy uses to route to escalate
   // (failing review OR blocked_ci — a required check red, W1-T138 broadened this

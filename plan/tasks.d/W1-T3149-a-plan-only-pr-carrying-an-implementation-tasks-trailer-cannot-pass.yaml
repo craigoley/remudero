@@ -1,5 +1,5 @@
 - id: W1-T3149
-  title: "A PLAN-ONLY PR CARRYING AN IMPLEMENTATION TASK'S `Remudero-Task:` TRAILER IS JUDGED AGAINST CRITERIA IT CANNOT SATISFY — the deterministic floor resolves the shard's proofs, none of them can execute against a diff with no source in it, and on merge the trailer would credit the task as BUILT"
+  title: "THE AUTHOR-TIME GATE CAN READ A PR'S BASE/HEAD BUT DOES NOT REFUSE A PLAN-ONLY DIFF THAT CLAIMS AN IMPLEMENTATION TASK — it admits the trailer, then CI and deterministic review discover criteria no plan amendment can satisfy"
   repo: remudero
   depends_on: []
   type: implement
@@ -7,102 +7,76 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 20.00
-  files: [src/lib/review.ts, test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts]
+  files: [scripts/acceptance-author-gate.mjs, test/acceptance-author-gate.test.ts]
   origin: "operator-session#root-cause-pass-2026-09-08"
-  plan_refs: ["W1-T952", "W1-T2297", "W1-T2737", "W1-T3043", "W1-T3101"]
+  plan_refs: ["W1-T952", "W1-T2297", "W1-T3231", "W1-T413", "W1-T3067"]
   status: queued
   attempts: 0
   rationale: |
-    A `Remudero-Task:` trailer does TWO things: it resolves the criteria review judges against, and it
-    credits the task as built on merge. On a plan-only PR that names an IMPLEMENTATION task, both are
-    wrong, and nothing refuses the combination.
+    OBSERVED at origin/main dc970e6e. On 2026-09-08, #4573 changed one
+    `plan/tasks.d/` shard while its body carried `Remudero-Task: W1-T3101`; the deterministic
+    floor then judged W1-T3101's implementation criteria against the plan-only diff. The same
+    shape occurred in #4585, #4586, #4587 and #4588 for W1-T3043. Removing the trailer and
+    supplying the PR's own `## Acceptance` block repaired each PR by hand.
 
-    MEASURED 2026-09-08 — FIVE PRs IN ONE SESSION, all of them plan-only, all refused:
-      - #4573, one file (`plan/tasks.d/W1-T3101-…`), trailer `Remudero-Task: W1-T3101`, refused
-        `FAIL — unmet: a staged skill matching the task class appears in the rendered implement
-        prompt's CONTEXT block (+3 more)`. Those are W1-T3101's IMPLEMENTATION criteria; a one-field
-        plan amendment cannot satisfy any of them.
-      - #4585, #4586, #4587, #4588 — the four `chore(plan): reconcile shards to merged` batches, 30
-        files each, every path under `plan/`, all trailered `Remudero-Task: W1-T3043`, all four
-        refused on W1-T3043's criteria.
-    All five went green the moment the trailer was removed and the body carried its own `## Acceptance`
-    block. That is the repair done BY HAND five times, which is the definition of a missing gate.
+    The original shard said the credit half was also unguarded. That is now false. The merged
+    status path refuses a trailer credit when the changed paths are plan-only
+    (`src/lib/status.ts:2121-2161`), with `test/trailer-credit-plan-only.test.ts` proving both
+    refusal and a source-changing control. W1-T3149 must not duplicate or weaken that landed
+    post-merge guard.
 
-    THE CREDIT HALF IS THE DANGEROUS ONE, AND IT IS SILENT. Review failing is loud. But had any of
-    those five merged with the trailer intact, `findMergedByTrailer` would have credited W1-T3101 /
-    W1-T3043 as BUILT while no implementation exists — the plan would record shipped work that never
-    shipped, and the task would never be dispatched again. The review refusal is what accidentally
-    prevented that; nothing was actually checking it.
-
-    THE DISTINCTION ALREADY EXISTS IN THE CODE, UNUSED FOR THIS. `run-task.ts` computes
-    `planOnlyTask = declaredFiles.every(isInPlanScope)` for scope purposes, and `review.ts` exports
-    `planOnlyDiff` for the reviewer-skip decision. A trailer is legitimate on a plan-only PR when the
-    TASK ITSELF is plan-only (a filing whose `files:` are all under `plan/`); it is structurally
-    impossible when the task declares source files. Nothing joins those two facts.
-
-    WHY THE EXISTING PLAN-ONLY CARVE-OUT DOES NOT COVER IT. `planOnlySkip` only suppresses the
-    SEMANTIC reviewer spawn (`review.reviewer.skipped`, reason `plan-only`). The deterministic floor
-    still runs and still resolves the trailer's shard, so the criteria are judged in full against a
-    diff that contains no code. The carve-out makes the review cheaper, not correct.
-
-    WHY THE AUTHOR-TIME GATE DOES NOT COVER IT EITHER. `acceptanceAuthorTimeCheck` already accepts a
-    `trailerResolves` hook and `scripts/acceptance-author-gate.mjs` already supplies a plan-backed
-    resolver — but that gate receives only the PR BODY and author login. It cannot see the DIFF, so it
-    cannot know the change is plan-only. Any fix that lives there needs the changed-file list threaded
-    in, which is a second decision this task must make explicitly rather than by accident.
+    The earlier author-time boundary remains unprotected. `acceptanceAuthorTimeCheck` accepts any
+    trailer that resolves in the plan (`src/lib/review.ts:4750-4780`). Its CI caller already reads
+    `pull_request.base.sha` and `head.sha`, checks out full history, and runs a local
+    `git diff` to identify introduced shard records (`scripts/acceptance-author-gate.mjs:103-155`,
+    `.github/workflows/acceptance-author-gate.yml:59-64`). It does not use that same local evidence
+    to ask whether this trailer can describe the diff. The result is a green author-time check,
+    followed by an avoidable full CI/review cycle and a generic criterion failure.
   design: |
-    (i) REFUSE, DO NOT SILENTLY RE-RESOLVE. When the diff is plan-only and the trailer names a task
-    whose declared `files:` contain a non-plan path, the PR is refused with a message naming both
-    halves and the remedy: remove the trailer and author the PR's own `## Acceptance` block, or add
-    the implementation. Re-resolving criteria from the body instead would fix the review and LEAVE THE
-    CREDIT BUG — the trailer would still mark the task built on merge — so it is explicitly rejected.
+    (i) ADD ONE AUTHOR-TIME STRUCTURAL REFUSAL. Derive the non-empty changed-path set from the
+    event payload's base/head range with local git; resolve the trailer's declared `files:` from
+    the checked-out plan; and refuse only when every changed path is in plan scope while the
+    trailered task has at least one declared non-plan path. Reuse the repository's plan-scope
+    predicate; do not create a fourth spelling of plan scope.
 
-    (ii) THE PREDICATE JOINS TWO EXISTING FACTS AND MINTS NEITHER. `planOnlyDiff` decides the diff
-    half; the task half is `declaredFiles.every(isInPlanScope)`, the same expression `run-task.ts`
-    already uses for `planOnlyTask`. Export/observe them rather than writing a third copy.
+    (ii) KEEP THE EXISTING ACCEPTANCE PREDICATE AS THE BODY AUTHORITY. This gate is an additional
+    structural check before `acceptanceAuthorTimeCheck`, not a replacement for its parser or its
+    plan resolver. The refusal message names the trailer, the non-plan declared paths, and both
+    remedies: remove the trailer and author this PR's own `## Acceptance` block, or include the
+    implementation changes.
 
-    (iii) A PLAN-ONLY TASK KEEPS ITS TRAILER. A task whose `files:` are entirely under `plan/` is
-    legitimately built by a plan-only diff; that combination must stay PASSING, and is the control the
-    regression needs. Getting this wrong would break every filing-style task at once.
+    (iii) PRESERVE BOTH CONTROLS. A plan-only task may legitimately keep its trailer on a plan-only
+    diff. The same implementation-task trailer may legitimately pass when the diff includes a
+    source path. An unavailable, empty, or malformed local diff result supplies no structural
+    evidence and leaves the existing gate's verdict unchanged; it must not manufacture a refusal
+    on every PR during a checkout failure.
 
-    (iv) THE MESSAGE MUST TEACH THE REMEDY, in the shape this repo's other refusals use
-    (`rule15-precheck`, the entanglement refusal): name the trailer, name the task's non-plan files,
-    and give the two ways out. A refusal a human cannot act on is the failure mode already recorded
-    for the dead-proof floor.
-
-    (v) DECIDE WHERE IT LIVES, AND SAY WHY. The review path has both facts today and is the cheapest
-    correct home. The author-time gate would catch it EARLIER but needs the changed-file list threaded
-    into `evaluateGate`. Pick one, state the reason in the source, and do not implement half of each.
+    (iv) NO NETWORK, NO POST-MERGE CHANGE, NO REVIEW-PATH DUPLICATION. The current workflow's
+    `fetch-depth: 0` and event payload already provide the needed evidence. Do not call GitHub,
+    alter `findMergedByTrailer`/status credit, alter semantic-review spawning, or add a second
+    review-time version of this predicate.
   acceptance:
-    - claim: "a plan-only diff whose trailer names a task declaring non-plan files is refused, and the message names the trailer, the task's source files and both remedies"
-      proof: "unit test: test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts"
-    - claim: "a plan-only diff whose trailer names a task whose files are entirely under plan/ still PASSES, so ordinary filings are unaffected"
-      proof: "unit test: test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts"
-    - claim: "a diff that does contain source keeps its existing behaviour for the same trailer, so the refusal turns on the diff and not on the trailer alone"
-      proof: "unit test: test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts"
-    - claim: "the refusal is reproduced against #4573's real shape — one plan/tasks.d file plus a trailer naming a task with src/ files — and not an invented fixture"
-      proof: "unit test: test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts"
-    - claim: "removing only the new predicate restores the old verdict, proving the regression does not pass on current main"
-      proof: "unit test: test/a-plan-only-diff-cannot-claim-an-implementation-task.test.ts"
+    - claim: "the author-time gate refuses #4573's measured shape: one plan/tasks.d path plus a W1-T3101 trailer, naming that trailer, W1-T3101's non-plan declared files, and both remedies"
+      proof: "unit test: W1-T3149 criterion 1"
+    - claim: "a plan-only diff trailered to a task whose declared files are all in plan scope passes the new structural check"
+      proof: "unit test: W1-T3149 criterion 2"
+    - claim: "a source-changing diff carrying the same implementation-task trailer passes the new structural check"
+      proof: "unit test: W1-T3149 criterion 3"
+    - claim: "missing, empty or unreadable local diff evidence preserves the existing acceptance-author-gate verdict instead of refusing by default"
+      proof: "unit test: W1-T3149 criterion 4"
+    - claim: "removing only the structural predicate makes the #4573-shaped fixture pass, proving current main lacks this earlier refusal"
+      proof: "unit test: W1-T3149 criterion 5 mutation"
   falsifier: |
-    Close without implementation if a plan-only PR trailered to an implementation task is already
-    refused for THIS reason. MEASURED 2026-09-08: five such PRs were refused for the WRONG reason —
-    each reported its task's unmet implementation criteria (`FAIL — unmet: …`), never the structural
-    mismatch — and each passed once the trailer was deleted by hand. A refusal that names the wrong
-    cause is what made the same repair necessary five times in one session.
+    Close without implementation if the author-time gate already combines the payload-derived changed
+    paths with the trailered task's declared files and emits a structural refusal for the #4573
+    shape. Checked at origin/main dc970e6e: `introducedShardTaskIds` is the only base/head diff
+    consumer, and `evaluateGate` passes only `body`, `authorLogin`, `trailerResolves`, and
+    `introducedTaskIds` to `acceptanceAuthorTimeCheck`; no changed-path/task-file predicate exists.
 
-    Close also if `planOnlySkip` already covers it. It does not: that flag suppresses only the
-    semantic reviewer spawn and logs `review.reviewer.skipped` with reason `plan-only`, while the
-    deterministic floor continues to resolve and judge the trailer's shard.
-
-    DO NOT falsify this from `acceptanceAuthorTimeCheck`'s `trailerResolves` hook. That predicate
-    answers "does this id exist in the plan", not "can this diff possibly build it", and the gate
-    around it never receives the changed-file list.
+    The post-merge credit concern is falsified and deliberately removed from this task's work:
+    `planOnlyDiffRefusal` already controls trailer credit in `src/lib/status.ts:2143-2161`.
   note: |
-    ONE CONCERN: a plan-only diff may not claim an implementation task. Not in scope: changing what
-    `planOnlyDiff` counts as plan scope, the semantic reviewer skip, `findMergedByTrailer` itself, or
-    the five PRs already repaired by hand.
-
-    The dangerous half is design (iii). A predicate that is even slightly too broad refuses every
-    ordinary filing — the most common PR shape in this repo — so the plan-only-TASK control must be
-    verified by watching it FAIL against a deliberately over-broad predicate, not merely by passing.
+    AMENDMENT 2026-09-11. The original W1-T3149 scope joined an early structural review failure to
+    a post-merge false-credit risk. The latter landed independently as W1-T413/W1-T3067 behavior,
+    so this shard retains only the unbuilt author-time refusal. This is one concern: reject a
+    plan-only PR that structurally cannot implement the task it claims.

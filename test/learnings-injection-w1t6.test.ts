@@ -31,16 +31,13 @@ test("a rendered prompt for a worker.ts/ledger task now CONTAINS the SDK-envelop
   assert.match(ctx, /EFFORT is NOT in the envelope/i);
 });
 
-test("REGRESSION (the defect): repo-wide (no files) DROPS the SDK fact under the knowledge budget", () => {
-  // This is what W1-T6 did before it carried files: the ledger showed sdk-result-envelope DROPPED.
+test("REGRESSION (the defect): no files means SDK facts are not matched by path", () => {
+  // This is what W1-T6 did before it carried files: the SDK facts were not reliably injected.
   const { selected, dropped } = selectLearnings(corpus, undefined);
   const droppedIds = dropped.map((e) => e.id);
-  // With the whole corpus repo-wide and a 1800-char budget, at least one SDK fact loses the tie —
-  // exactly the failure the files: field fixes. (Belt-and-braces: the fix path selects it above.)
   const selIds = selected.map((e) => e.id);
   assert.ok(
-    droppedIds.includes("sdk-result-fields") || droppedIds.includes("sdk-result-envelope") ||
-      !SDK_FACTS.every((f) => selIds.includes(f)),
-    "repo-wide selection should not reliably keep BOTH SDK facts — that is why files: matters",
+    droppedIds.length === 0 && !SDK_FACTS.every((f) => selIds.includes(f)),
+    "empty-file selection must not inherit SDK facts by path — that is why files: matters",
   );
 });

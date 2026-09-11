@@ -1856,6 +1856,19 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // It is also why this suite is NOT projected into FAST_GATE_STEPS: the census it covers runs as
   // a step on `comment-load-ratchet`, and an ADMITTED member with no npm script of its own cannot
   // be projected (CENSUS_ADMITTED_MEMBERS narrows on `script`).
+  // W1-T3086's shard-lint ratchet. The recognizer matches it on the `src/` text of its two imports
+  // (src/lib/plan.js, src/lib/task-linter.js) plus a real `git ls-files` — but that call is
+  // `git ls-files plan/tasks.d/*.yaml plan/tasks.d/*.yml`, the PLAN shard population, and the
+  // tracked src/ tree it never reads. Same shape as the deploy-scripts-use-mktemp member above,
+  // which walks deploy/*.sh.
+  refusedForPredicate(
+    "test/every-shard-on-main-is-lintable.test.ts",
+    "a",
+    "W1-T3086's shard-lint ratchet. Its `git ls-files` is scoped to `plan/tasks.d/*.yaml` and " +
+      "`plan/tasks.d/*.yml` — the PLAN shard population, never src/*.ts — so it is not a " +
+      "src-population walk. The `src/` strings the recognizer sees are its imports of " +
+      "src/lib/plan.js and src/lib/task-linter.js, the code it drives, not a population it reads",
+  ),
   refusedForPredicate(
     "test/expiring-fixture-census.test.ts",
     "a",

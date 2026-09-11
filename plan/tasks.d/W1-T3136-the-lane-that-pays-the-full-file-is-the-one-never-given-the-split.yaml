@@ -2,7 +2,7 @@
   title: "THE ONLY LANE THAT PAYS FOR CLAUDE.md IN FULL IS THE ONE THE PROGRESSIVE-DISCLOSURE SPLIT WAS NEVER APPLIED TO — interactive sessions load all 43685 bytes at 99.3% of the 44000-byte cap and 495 lines against Anthropic's own \"target under 200\", while the headline/body split built for workers would render the same corpus as a 7377-byte index with bodies read on demand"
   repo: remudero
   depends_on: []
-  type: investigate
+  type: implement
   verify: auto
   principles: {tdd: strict}
   risk: medium
