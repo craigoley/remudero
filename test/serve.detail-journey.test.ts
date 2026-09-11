@@ -235,7 +235,7 @@ test("clicking a task row expands its own card INLINE, directly beneath that row
         const detail = row.nextElementSibling as HTMLElement;
         return {
           isImmediateSibling: detail?.classList.contains("row-detail") ?? false,
-          ariaExpanded: row.getAttribute("aria-expanded"),
+          ariaExpanded: row.querySelector(".row-chevron")?.getAttribute("aria-expanded"),
           body: detail?.textContent ?? "",
           prHref: detail?.querySelector('a[href*="pull/2"]')?.getAttribute("href") ?? null,
           depBtn: detail?.querySelector('.card-dep-link[data-dep-id="W1-T1"]')?.textContent ?? null,
@@ -259,7 +259,7 @@ test("clicking a task row expands its own card INLINE, directly beneath that row
       await page.click('#recent-list .row-detail .card-dep-link[data-dep-id="W1-T1"]');
       await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("root dependency"));
       const after = await page.evaluate(() => ({
-        w1t2Expanded: document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded"),
+        w1t2Expanded: document.querySelector('#recent-list li[data-task-id="W1-T2"] .row-chevron')?.getAttribute("aria-expanded"),
         openCards: document.querySelectorAll(".row-detail").length,
       }));
       assert.equal(after.w1t2Expanded, "false", "expanding a dependency's own card must collapse the previous one");
@@ -350,7 +350,7 @@ test("every task row is itself a one-click expand affordance (a chevron, never a
       // clicking anywhere on the row (never on the PR link itself) opens THAT row's own card inline.
       await page.click('#recent-list li[data-task-id="W1-T2"] .task-id');
       await page.waitForFunction(
-        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "true",
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"] .row-chevron')?.getAttribute("aria-expanded") === "true",
       );
       const detail = await page.evaluate(
         () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')!.nextElementSibling?.className,
@@ -360,7 +360,7 @@ test("every task row is itself a one-click expand affordance (a chevron, never a
       // clicking the SAME row again collapses it.
       await page.click('#recent-list li[data-task-id="W1-T2"] .task-id');
       await page.waitForFunction(
-        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "false",
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"] .row-chevron')?.getAttribute("aria-expanded") === "false",
       );
       const openCards = await page.evaluate(() => document.querySelectorAll(".row-detail").length);
       assert.equal(openCards, 0, "re-clicking an open row must collapse its card");
@@ -379,7 +379,7 @@ test("?task=<id> opens the shell with that row already expanded and scrolled int
     try {
       await reachSection(page, "recent"); // the deep-linked row's own scroll-into-view check needs the section on-screen
       await page.waitForFunction(
-        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "true",
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"] .row-chevron')?.getAttribute("aria-expanded") === "true",
         null,
         { timeout: 5000 },
       );
@@ -392,7 +392,7 @@ test("?task=<id> opens the shell with that row already expanded and scrolled int
 
       await page.click('#recent-list li[data-task-id="W1-T2"] .task-id');
       await page.waitForFunction(
-        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "false",
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"] .row-chevron')?.getAttribute("aria-expanded") === "false",
       );
       const openCards = await page.evaluate(() => document.querySelectorAll(".row-detail").length);
       assert.equal(openCards, 0);
@@ -471,7 +471,7 @@ test("W1-T144: a #task=<id> hash deep-link opens that task's card inline (the di
       await page.waitForFunction(shellBootReady);
       await reachSection(page, "recent");
       await page.waitForFunction(
-        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "true",
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"] .row-chevron')?.getAttribute("aria-expanded") === "true",
         null,
         { timeout: 5000 },
       );
@@ -479,7 +479,7 @@ test("W1-T144: a #task=<id> hash deep-link opens that task's card inline (the di
       // A SECOND digest link tapped while the console is already open re-targets live.
       await page.evaluate(() => { window.location.hash = "#task=W1-T1"; });
       await page.waitForFunction(
-        () => document.querySelector('[data-task-id="W1-T1"]')?.getAttribute("aria-expanded") === "true",
+        () => document.querySelector('[data-task-id="W1-T1"] .row-chevron')?.getAttribute("aria-expanded") === "true",
         null,
         { timeout: 5000 },
       );

@@ -634,8 +634,8 @@ function renderConsoleTimeSeriesSvg(series: ConsoleTimeSeries, windowStartMs: nu
 
 export function renderConsoleTimeSeriesHtml(snapshot: ConsoleTimeSeriesSnapshot): string {
   const header =
-    `<h3>Time series <span class="section-summary" data-time-series-window="${snapshot.windowMs}" data-time-series-bucket="${snapshot.bucketMs}">` +
-    `${escapeHtmlText(snapshot.windowLabel)} window · ${escapeHtmlText(snapshot.bucketLabel)} buckets</span></h3>`;
+    `<h2>Time series <span class="section-summary" data-time-series-window="${snapshot.windowMs}" data-time-series-bucket="${snapshot.bucketMs}">` +
+    `${escapeHtmlText(snapshot.windowLabel)} window · ${escapeHtmlText(snapshot.bucketLabel)} buckets</span></h2>`;
   if (snapshot.status === "unreadable") {
     return (
       `<section id="time-series" class="daemon-health time-series-panel" aria-label="Time series">${header}` +
@@ -1318,7 +1318,7 @@ export function renderShellHtml(
   .glance-label { color: var(--text-faint); }
   .glance-value { font-family: var(--font-mono); color: var(--text); font-weight: 600; }
   .time-series-panel { align-items: stretch; }
-  .time-series-panel h3 { flex-basis: 100%; margin: 0; font-size: 0.85rem; }
+  .time-series-panel h2 { flex-basis: 100%; margin: 0; font-size: 0.85rem; }
   .time-series-card { min-width: 12rem; flex: 1 1 12rem; }
   .time-series-head { display: flex; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.2rem; font-size: 0.8rem; }
   .time-series-svg { display: block; width: 100%; height: 2.5rem; overflow: visible; }

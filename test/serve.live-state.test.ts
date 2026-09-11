@@ -297,7 +297,7 @@ test("W1-T222: a background update to a DIFFERENT row in the same list does not 
       await reachSection(page, "now");
       await page.click('#now-list li[data-key="W1-T1"] .task-id');
       await page.waitForFunction(
-        () => document.querySelector('#now-list li[data-key="W1-T1"]')?.getAttribute("aria-expanded") === "true",
+        () => document.querySelector('#now-list li[data-key="W1-T1"] .row-chevron')?.getAttribute("aria-expanded") === "true",
       );
       await page.waitForFunction(() => (document.querySelector(".row-detail-title")?.textContent ?? "").length > 0);
       await page.evaluate(() => {
@@ -323,7 +323,7 @@ test("W1-T222: a background update to a DIFFERENT row in the same list does not 
       );
 
       const after = await page.evaluate(() => ({
-        expanded: document.querySelector('#now-list li[data-key="W1-T1"]')?.getAttribute("aria-expanded"),
+        expanded: document.querySelector('#now-list li[data-key="W1-T1"] .row-chevron')?.getAttribute("aria-expanded"),
         cardMark: document.querySelector(".row-detail")?.getAttribute("data-test-mark"),
         cardCount: document.querySelectorAll(".row-detail").length,
         focused: document.activeElement?.className,
@@ -918,7 +918,7 @@ test("W1-T336: switching tabs away and back preserves a row's DOM identity, an o
       // Open W1-T1's card, then select text inside its title -- same setup the poll-update DOM-
       // stability tests above use, but the "background event" here is a switch away and back.
       await page.click('#now-list li[data-key="W1-T1"] .task-id');
-      await page.waitForFunction(() => document.querySelector('#now-list li[data-key="W1-T1"]')?.getAttribute("aria-expanded") === "true");
+      await page.waitForFunction(() => document.querySelector('#now-list li[data-key="W1-T1"] .row-chevron')?.getAttribute("aria-expanded") === "true");
       await page.waitForFunction(() => (document.querySelector(".row-detail-title")?.textContent ?? "").length > 0);
       await page.evaluate(() => {
         document.querySelector("#now-list li")!.setAttribute("data-test-mark", "same-node");
@@ -940,7 +940,7 @@ test("W1-T336: switching tabs away and back preserves a row's DOM identity, an o
 
       const after = await page.evaluate(() => ({
         rowMark: document.querySelector("#now-list li")?.getAttribute("data-test-mark"),
-        expanded: document.querySelector('#now-list li[data-key="W1-T1"]')?.getAttribute("aria-expanded"),
+        expanded: document.querySelector('#now-list li[data-key="W1-T1"] .row-chevron')?.getAttribute("aria-expanded"),
         cardMark: document.querySelector(".row-detail")?.getAttribute("data-test-mark"),
         selection: window.getSelection()?.toString(),
         selectionConnected: window.getSelection()?.anchorNode?.isConnected ?? false,

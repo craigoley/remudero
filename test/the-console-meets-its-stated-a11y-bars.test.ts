@@ -114,7 +114,7 @@ function planOf(tasks: Task[]): Plan {
   return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
 }
 
-function fakeGitHub(): GitHub {
+function statusStub(): GitHub {
   return {
     prByRef: () => null,
     findMergedByTrailer: () => null,
@@ -123,7 +123,7 @@ function fakeGitHub(): GitHub {
   };
 }
 
-function fakeTraceGithub(): TraceGithub {
+function traceStub(): TraceGithub {
   return { prView: () => null };
 }
 
@@ -152,10 +152,10 @@ function writePlan(root: string): string {
 function fixtureDeps(root: string): ServeDeps {
   const ledgerPath = ledgerPathFor(root);
   const planPath = writePlan(root);
-  const github = fakeGitHub();
+  const github = statusStub();
   return {
     board: { plan: planOf([task()]), ledgerPath, github },
-    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: { approve() {}, reframe() {} } },
+    panelGraph: { root, planPath, ledgerPath, github: traceStub(), statusGithub: github, ratify: { approve() {}, reframe() {} } },
     ledgerPath,
     issues: fakeIssueCloser(),
     fleetControlRoot: root,
