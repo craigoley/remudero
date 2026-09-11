@@ -1085,10 +1085,15 @@ export function mintAdoptionProposals(
 // invention: `proof` becomes `pattern`, the task's plan record becomes `path`.
 // Why: docs/forensics/measurement-cadence.md#proof-queue-audits-offenders (the measured backlog).
 
-/** The primary key: task id plus criterion index, never a similarity score. A fixed criterion
- *  stops being proposed because {@link proofQueueAudit} simply stops naming it. */
-export function proofDebtProposalId(o: Pick<ProofQueueAuditOffender, "taskId" | "criterionIndex">): string {
-  return `proof-debt:${o.taskId}:${o.criterionIndex}`;
+/** The primary key: THE TASK, never a similarity score and no longer a criterion index (W1-T3385b).
+ *  A fixed task stops being proposed because {@link proofQueueAudit} simply stops naming it.
+ *
+ *  ONE TASK IS ONE ASK. Keying on taskId+criterionIndex minted one operator decision PER CRITERION:
+ *  MEASURED 2026-09-11, 58 open proposals stood for 23 tasks, and W1-T965 alone held SEVEN whose
+ *  drafts proposed different and sometimes contradictory remedies for one record. An operator
+ *  repairing a shard's proofs opens the file once; the queue asked them to decide seven times. */
+export function proofDebtProposalId(o: Pick<ProofQueueAuditOffender, "taskId">): string {
+  return `proof-debt:${o.taskId}`;
 }
 
 /** `W<workstream>-T<ordinal>` parses into its numeric parts — ascending id is filing order.
@@ -1149,25 +1154,38 @@ export function mintProofDebtProposals(
       const additions: Proposal[] = [];
       mintedProposalIds = [];
       excludedOffenders = [];
+      // W1-T3385b — GROUPED BY TASK, in the order already established above, so one record's
+      // criteria arrive as ONE ask carrying every criterion as its own evidence anchor.
+      const byTask = new Map<string, { shardPath: string; rows: ProofQueueAuditOffender[] }>();
       for (const { o, shardPath } of ordered) {
-        const id = proofDebtProposalId(o);
+        const seen = byTask.get(o.taskId);
+        if (seen) seen.rows.push(o);
+        else byTask.set(o.taskId, { shardPath, rows: [o] });
+      }
+      for (const [taskId, { shardPath, rows }] of byTask) {
+        const id = proofDebtProposalId({ taskId });
         if (existingIds.has(id)) continue; // already open — idempotent, never re-drafted
         if (additions.length >= ADOPTION_MINT_CEILING) {
-          excludedOffenders.push(`${o.taskId}:${o.criterionIndex}`); // named, never dropped
+          excludedOffenders.push(taskId); // named, never dropped
           continue;
         }
-        const anchors: EvidenceAnchor[] = [
-          {
-            description: `${o.taskId} criterion ${o.criterionIndex} (${o.cause}) still cannot resolve its own proof`,
-            pattern: o.proof,
-            path: shardPath,
-          },
-        ];
+        // ONE ANCHOR PER CRITERION, not one for the group: the anchor set is what
+        // `classifyProposal` re-greps, so keeping them separate means repairing ONE criterion
+        // drifts the evidence and forces a redraft of the remaining ask, rather than leaving a
+        // stale proposal standing on a proof that has since been fixed.
+        const anchors: EvidenceAnchor[] = rows.map((o) => ({
+          description: `${o.taskId} criterion ${o.criterionIndex} (${o.cause}) still cannot resolve its own proof`,
+          pattern: o.proof,
+          path: shardPath,
+        }));
+        const detail = rows
+          .map((o) => `criterion ${o.criterionIndex} (${o.cause}) — "${o.claim}"`)
+          .join("; ");
         additions.push({
           id,
           summary:
-            `proof-debt: ${o.taskId} criterion ${o.criterionIndex} (${o.cause}) — "${o.claim}" cannot resolve ` +
-            `its proof against the checkout (rmd proof-queue-audit).`,
+            `proof-debt: ${taskId} has ${rows.length} criterion(s) whose proof cannot resolve against the ` +
+            `checkout (rmd proof-queue-audit): ${detail}.`,
           evidenceAnchors: anchors,
         });
         mintedProposalIds.push(id);
