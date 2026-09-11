@@ -48,9 +48,8 @@
  * BEHAVIOUR. It only reads `src/` as text (see {@link walk}) — it never imports `node:child_process`,
  * never shells out to git, and never touches `run-task.ts`. The review-materialization site
  * (the review worktree adapter's `addWorktree`) and the fix rung's `createFixRungWorktree` are
- * recorded here EXACTLY as they behave today; converting either to route through `worktreeAdd`, or
- * giving either a recorded base, is real and separate work that belongs beside W1-T232/W1-T233,
- * not here.
+ * recorded as they behave today; routing either through `worktreeAdd` or giving either a recorded
+ * base is separate work that belongs beside W1-T232/W1-T233, not here.
  *
  * VERIFIED FROM SOURCE, not inherited from a prose note (design note (v)): every row below was
  * derived by re-scanning `src/` for `"worktree", "add"` and `worktreeAdd(` at this task's own SHA,
