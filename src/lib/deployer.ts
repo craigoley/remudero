@@ -33,6 +33,19 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { join } from "node:path";
 import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
+import {
+  DEPLOY_RESTART_PRESSURE_STEP,
+  DEPLOY_RESTART_RATE_CEILING_MS,
+  DEPLOY_RESTART_RATE_LIMITED_STEP,
+  DEPLOY_RESTART_SCORE_THRESHOLD,
+  accumulateDeployRestartPressure,
+  judgeDeployWorth,
+  resetDeployRestartPressure,
+  type DeployRestartPressureState,
+  type DeployWorthChange,
+  type DeployWorthJudge,
+  type RecordedDeployRestartThreshold,
+} from "./deploy-judge.js";
 
 // ── Pure decisions ─────────────────────────────────────────────────────────────
 
@@ -41,6 +54,9 @@ export interface TriggerInputs {
   markerPresent: boolean;
   /** Explicit opt-in to deploy on ANY new main without a per-deploy marker. */
   autoMode: boolean;
+  /** Auto-mode restart pressure, when the deployer has scored the pending mounted-code changes.
+   *  Omitted preserves the pre-accumulator behavior for callers that have not wired the scorer. */
+  autoRestartPressure?: { restart: boolean; reason: string; total: number; threshold: number };
   /** The install's current HEAD sha. */
   installHead: string;
   /** origin/main's sha after a fetch. */
@@ -209,6 +225,18 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   if (i.markerPresent) return { deploy: true, reason: `operator marker present + ${why}` };
   if (i.autoMode && alreadyFailed) {
     return { deploy: false, reason: `auto: origin/main already failed to deploy (${describeFailureKind(i.lastFailedKind)}) — not retried; see state/DEPLOY_FAILED` };
+  }
+  if (i.autoMode && i.autoRestartPressure) {
+    if (i.autoRestartPressure.restart) {
+      return {
+        deploy: true,
+        reason: `auto mode + ${why}; ${i.autoRestartPressure.reason}`,
+      };
+    }
+    return {
+      deploy: false,
+      reason: `${why} but ${i.autoRestartPressure.reason}`,
+    };
   }
   if (i.autoMode) return { deploy: true, reason: `auto mode + ${why}` };
   return { deploy: false, reason: `${why} but no operator marker (human-gated; run rmd deploy)` };
@@ -532,6 +560,19 @@ export interface DeployDeps {
   imageBakedCommitsBehind?: () => number | undefined;
   dirtyFiles: () => string[];
   incomingFiles: (from: string, to: string) => string[];
+  /** Each merged change whose daemon impact can contribute restart pressure. Optional only for
+   *  backwards-compatible tests/callers; realDeployDeps wires it. */
+  pendingChanges?: (from: string, to: string) => DeployWorthChange[];
+  /** Persisted accumulator for scored-but-not-yet-restarted merged changes. */
+  restartPressureState?: () => DeployRestartPressureState;
+  /** Store the accumulator after scoring, and reset it after a completed restart. */
+  setRestartPressureState?: (state: DeployRestartPressureState) => void;
+  /** Optional uplift judge. Omitted means deterministic path scoring only. */
+  restartWorthJudge?: DeployWorthJudge;
+  /** Recorded, tunable threshold with its rationale. */
+  restartScoreThreshold?: () => RecordedDeployRestartThreshold;
+  /** Hard ceiling on restart frequency, distinct from the score threshold. */
+  restartRateCeilingMs?: () => number;
   /** git pull --ff-only / merge --ff-only origin/main. Throws on a non-ff. */
   pullFf: () => void;
   /** git reset --hard <ref> — rollback only (recovery). */
@@ -656,16 +697,83 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   const ceilingMs = opts.idleDeferCeilingMs ?? DEPLOY_IDLE_DEFER_CEILING_MS;
 
   const markerWasPresent = deps.markerPresent();
+  const autoMode = deps.autoMode();
+  const lastFailedHead = deps.lastFailedHead();
+  const runningHead = deps.runningHead();
+  let autoRestartPressure: TriggerInputs["autoRestartPressure"];
+  const mountedStale = !sameCommit(fromHead, origin) || !sameCommit(runningHead, fromHead);
+  const alreadyFailed = lastFailedHead !== undefined && origin === lastFailedHead;
+  if (
+    !markerWasPresent &&
+    autoMode &&
+    !alreadyFailed &&
+    mountedStale &&
+    deps.pendingChanges &&
+    deps.restartPressureState &&
+    deps.setRestartPressureState
+  ) {
+    const pressureNow = deps.now();
+    try {
+      const scoreFrom = runningHead && !sameCommit(runningHead, fromHead) ? runningHead : fromHead;
+      const pressure = accumulateDeployRestartPressure(
+        deps.pendingChanges(scoreFrom, origin),
+        deps.restartPressureState(),
+        {
+          threshold: deps.restartScoreThreshold?.() ?? DEPLOY_RESTART_SCORE_THRESHOLD,
+          nowMs: pressureNow,
+          rateCeilingMs: deps.restartRateCeilingMs?.() ?? DEPLOY_RESTART_RATE_CEILING_MS,
+          scoreChange: (change) => judgeDeployWorth(change, { judge: deps.restartWorthJudge }),
+        },
+      );
+      for (const row of pressure.scoreRows) {
+        const { step: _step, ...data } = row;
+        deps.log(row.step, data);
+      }
+      deps.log(pressure.rateLimited ? DEPLOY_RESTART_RATE_LIMITED_STEP : DEPLOY_RESTART_PRESSURE_STEP, {
+        decision: pressure.decision,
+        reason: pressure.reason,
+        total: pressure.total,
+        threshold: pressure.threshold,
+        threshold_reason: pressure.thresholdReason,
+        scored_changes: pressure.scoreRows.length,
+      });
+      deps.setRestartPressureState(pressure.state);
+      autoRestartPressure = {
+        restart: pressure.wantRestart,
+        reason: pressure.reason,
+        total: pressure.total,
+        threshold: pressure.threshold,
+      };
+    } catch (err) {
+      const reason =
+        `pending deploy changes unreadable (${err instanceof Error ? err.message : String(err)}) — ` +
+        "failing closed to no automatic restart";
+      deps.log(DEPLOY_RESTART_PRESSURE_STEP, {
+        decision: "defer",
+        reason,
+        total: deps.restartPressureState().total,
+        threshold: (deps.restartScoreThreshold?.() ?? DEPLOY_RESTART_SCORE_THRESHOLD).value,
+        judge_failed: true,
+      });
+      autoRestartPressure = {
+        restart: false,
+        reason,
+        total: deps.restartPressureState().total,
+        threshold: (deps.restartScoreThreshold?.() ?? DEPLOY_RESTART_SCORE_THRESHOLD).value,
+      };
+    }
+  }
   const decision = decideDeployTrigger({
     markerPresent: markerWasPresent,
-    autoMode: deps.autoMode(),
+    autoMode,
+    autoRestartPressure,
     installHead: fromHead,
     originMain: origin,
-    lastFailedHead: deps.lastFailedHead(),
+    lastFailedHead,
     lastFailedKind: deps.lastFailedKind?.(),
     daemonAlive: deps.daemonAlive?.(),
     stopPresent: deps.stopPresent?.(),
-    runningHead: deps.runningHead(),
+    runningHead,
     // PRODUCER AND CONSUMER TOGETHER. A field the decision reads and nothing supplies is the
     // #1066 shape this repo has paid for eleven times; `imageBuildSha` omitted yields `undefined`
     // here, which reads UNKNOWN and changes nothing.
@@ -834,6 +942,9 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   if (health.healthy) {
     deps.clearMarker();
     deps.log("deploy.ok", { to: short(toHead), reason: health.reason });
+    deps.setRestartPressureState?.(
+      resetDeployRestartPressure(deps.restartPressureState?.() ?? { total: 0, scoredShas: [] }, deps.now()),
+    );
     // Restart the console ONLY here: the daemon is verified healthy, so no path can still roll
     // this sha back (see restartConsole's doc).
     const con = restartConsole(deps, toHead);
@@ -895,6 +1006,10 @@ export function deployFailedAlertPath(stateRoot: string): string {
 export function deployIdleDeferredSincePath(stateRoot: string): string {
   return join(stateRoot, "state", "DEPLOY_IDLE_DEFERRED_SINCE");
 }
+/** Accumulated daemon-impact score for merged changes not yet picked up by a healthy restart. */
+export function deployRestartPressurePath(stateRoot: string): string {
+  return join(stateRoot, "state", "DEPLOY_RESTART_PRESSURE");
+}
 
 /** `rmd deploy` — request a deploy at the next idle gap. */
 export function requestDeploy(stateRoot: string, reason: string | undefined): void {
@@ -932,6 +1047,28 @@ export interface RealDeployOpts {
    *  a non-zero exit, like execFileSync — callers catch where that is expected (e.g. `pgrep`
    *  with no matches). */
   execFile?: (cmd: string, args: string[]) => string;
+}
+
+function parseDeployRestartPressureState(raw: string): DeployRestartPressureState {
+  const parsed = JSON.parse(raw) as {
+    total?: unknown;
+    scoredShas?: unknown;
+    lastRestartAtMs?: unknown;
+  };
+  const total = typeof parsed.total === "number" && Number.isFinite(parsed.total) && parsed.total > 0
+    ? Math.floor(parsed.total)
+    : 0;
+  const scoredShas = Array.isArray(parsed.scoredShas)
+    ? parsed.scoredShas.filter((sha): sha is string => typeof sha === "string" && sha.length > 0)
+    : [];
+  const lastRestartAtMs = typeof parsed.lastRestartAtMs === "number" && Number.isFinite(parsed.lastRestartAtMs)
+    ? parsed.lastRestartAtMs
+    : undefined;
+  return {
+    total,
+    scoredShas,
+    ...(lastRestartAtMs === undefined ? {} : { lastRestartAtMs }),
+  };
 }
 
 /**
@@ -1113,6 +1250,31 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         .filter(Boolean),
     incomingFiles: (from, to) =>
       git(["diff", "--name-only", `${from}..${to}`]).split("\n").map((l) => l.trim()).filter(Boolean),
+    pendingChanges: (from, to) => {
+      if (sameCommit(from, to)) return [];
+      const shas = git(["rev-list", "--reverse", `${from}..${to}`]).split("\n").map((l) => l.trim()).filter(Boolean);
+      return shas.map((sha) => ({
+        sha,
+        subject: git(["log", "-1", "--format=%s", sha]).trim(),
+        files: git(["diff-tree", "--no-commit-id", "--name-only", "-r", sha])
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean),
+      }));
+    },
+    restartPressureState: () => {
+      try {
+        return parseDeployRestartPressureState(readFileSync(deployRestartPressurePath(o.stateRoot), "utf8"));
+      } catch {
+        /* Missing or corrupt pressure state means no score has been durably observed. */
+        return { total: 0, scoredShas: [] };
+      }
+    },
+    setRestartPressureState: (state) => {
+      writeAtomic(deployRestartPressurePath(o.stateRoot), JSON.stringify(state, null, 2));
+    },
+    restartScoreThreshold: () => DEPLOY_RESTART_SCORE_THRESHOLD,
+    restartRateCeilingMs: () => DEPLOY_RESTART_RATE_CEILING_MS,
     pullFf: () => {
       git(["merge", "--ff-only", "origin/main"]);
     },

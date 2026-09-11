@@ -170,6 +170,7 @@
   "src/lib/daemon-health.ts": 187,
   "src/lib/daemon.ts": 1250,
   "src/lib/dep-review.ts": 250,
+  "src/lib/deploy-judge.ts": 250,
   "src/lib/deployer.ts": 500,
   "src/lib/digest.ts": 326,
   "src/lib/dispatch-claim.ts": 130,
