@@ -304,28 +304,15 @@ export const MIN_RELOCATION_RUN = 5;
  * @param {Array<[number, string]>} R
  * @param {Set<number>} consumed
  */
-/**
- * @param {string} text
- */
 function isCommentOnlyRelocationLine(text) {
   const t = text.trim();
   return t.startsWith('//') || t.startsWith('/*') || t.startsWith('*');
 }
 
-/**
- * A regex literal can begin only where an expression can begin. This is intentionally conservative:
- * ambiguous slashes stay ordinary code unless the preceding token shape strongly says "literal".
- * @param {string} previousSignificant
- */
 function canStartRegexLiteral(previousSignificant) {
   return previousSignificant === '' || /^[([{=:;,!&|?+\-*%^~<>]$/.test(previousSignificant);
 }
 
-/**
- * Strip comments that trail executable code without treating comment markers inside literals as
- * comments. It handles single-line evidence only, matching relocationKey's line-by-line caller.
- * @param {string} text
- */
 function stripTrailingCodeComment(text) {
   let quote = '';
   let escaped = false;
@@ -408,13 +395,11 @@ function stripTrailingCodeComment(text) {
 
 /**
  * The form a line is COMPARED in when hunting for a relocation: `trim()` as always, plus
- * template-literal unescaping (W1-T3189) and trailing-comment stripping (W1-T3230). Code inside a
- * `...` literal carries a backslash before every backtick and `${`; lifting it into a real module
- * strips them, so raw comparison read a move as a rewrite. A required catch-erasure comment is the
- * same kind of presentation-only difference: it can split a moved run around a line whose
- * executable text did not change. Applied to BOTH sides, so a move INTO a literal or into a
- * comment-bearing catch normalises identically. Admits nothing new in principle: a relocation is
- * still a contiguous run of >= MIN_RELOCATION_RUN, consumed once.
+ * template-literal unescaping (W1-T3189) and trailing-comment stripping (W1-T3230). Both are
+ * presentation-only differences that can split a moved run around unchanged executable text.
+ * Applied to BOTH sides, so a move into either representation normalises identically. Admits
+ * nothing new in principle: a relocation is still a contiguous run of >= MIN_RELOCATION_RUN,
+ * consumed once.
  * @param {string} text
  */
 export function relocationKey(text) {
@@ -423,10 +408,6 @@ export function relocationKey(text) {
   return stripTrailingCodeComment(unescaped).trim();
 }
 
-/**
- * @param {Map<number, string>} lines
- * @returns {Array<[number, string]>}
- */
 function relocationEntries(lines) {
   return [...lines.entries()]
     .filter(([, text]) => !isCommentOnlyRelocationLine(text))
