@@ -31,17 +31,34 @@ const SCRIPT = join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs");
 // import rather than a typed one. A dynamic specifier is not statically resolved, so this loads
 // the REAL module with no shadow copy to drift from it.
 const GATE_URL = pathToFileURL(SCRIPT).href;
+type TaskFilesForId = (taskId: string) => readonly string[] | undefined;
+type GateInput = {
+  body: string;
+  authorLogin?: string;
+  trailerResolves?: (taskId: string) => boolean;
+  introducedTaskIds?: string[];
+  changedPaths?: readonly string[];
+  taskFilesForId?: TaskFilesForId;
+};
+type GateVerdict = { ok: boolean; defect?: string; message: string };
 const mod = (await import(GATE_URL)) as {
   EXEMPT_BOT_LOGINS: ReadonlySet<string>;
+  changedPathsAtRange: (input?: {
+    baseSha?: string;
+    headSha?: string;
+    root?: string;
+    git?: (args: string[]) => string;
+  }) => string[] | undefined;
+  planTaskFilesResolver: (root?: string) => TaskFilesForId | undefined;
   readEventPayload: (eventPath: string) => { readable: boolean; body?: string; authorLogin?: string; reason?: string };
-  evaluateGate: (input: { body: string; authorLogin?: string }) => { ok: boolean; defect?: string; message: string };
+  evaluateGate: (input: GateInput) => GateVerdict;
   main: (argv: string[]) => void;
   resolveEventPath: (
     flagValue: string | undefined,
     env?: Record<string, string | undefined>,
   ) => { ok: boolean; eventPath?: string; message?: string };
 };
-const { EXEMPT_BOT_LOGINS, evaluateGate, main, readEventPayload, resolveEventPath } = mod;
+const { EXEMPT_BOT_LOGINS, changedPathsAtRange, evaluateGate, main, planTaskFilesResolver, readEventPayload, resolveEventPath } = mod;
 
 /** Byte-identical in shape to test/acceptance-block-diagnostics.test.ts's own WRAPPED fixture —
  *  a claim long enough that an author wrapped it onto a second line. `parseAcceptanceBlock`
@@ -81,7 +98,148 @@ function runGate(eventPath: string) {
   });
 }
 
+async function structuralPredicateMutant(): Promise<{ evaluateGate: (input: GateInput) => GateVerdict; cleanup: () => void }> {
+  const source = readFileSync(SCRIPT, "utf8");
+  const predicate =
+    "  const structuralRefusal = planOnlyImplementationTrailerRefusal({ body, changedPaths, taskFilesForId });\n" +
+    "  if (structuralRefusal !== undefined) return structuralRefusal;\n";
+  assert.equal(source.split(predicate).length - 1, 1, "the W1-T3149 predicate must have exactly one source location");
+  const imports = [
+    ["./lib/argv.mjs", join(REPO_ROOT, "scripts", "lib", "argv.mjs")],
+    ["../src/lib/review.ts", join(REPO_ROOT, "src", "lib", "review.ts")],
+    ["../src/lib/plan.ts", join(REPO_ROOT, "src", "lib", "plan.ts")],
+    ["../src/lib/plan-scope.ts", join(REPO_ROOT, "src", "lib", "plan-scope.ts")],
+    ["./lib/repo-root.mjs", join(REPO_ROOT, "scripts", "lib", "repo-root.mjs")],
+  ] as const;
+  const rewrittenImports = imports.reduce(
+    (text, [from, absolute]) => text.replace(`from "${from}"`, `from "${pathToFileURL(absolute).href}"`),
+    source.replace(predicate, ""),
+  );
+  const dir = mkdtempSync(join(tmpdir(), "rmd-acceptance-gate-mutant-"));
+  const path = join(dir, "acceptance-author-gate.mjs");
+  writeFileSync(path, rewrittenImports);
+  const mutant = (await import(pathToFileURL(path).href)) as { evaluateGate: (input: GateInput) => GateVerdict };
+  return { evaluateGate: mutant.evaluateGate, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
 // ── The six task acceptance criteria, each its own named `unit test:` proof ────────────────────
+
+const IMPLEMENTATION_TASK = "W1-T3101";
+const IMPLEMENTATION_FILES = [
+  "src/lib/skill-workshop.ts",
+  "src/lib/prompt-render.ts",
+  "src/run-task.ts",
+  "test/a-staged-skill-reaches-the-worker-prompt.test.ts",
+];
+const IMPLEMENTATION_BODY = `This PR changes planning only.\n\nRemudero-Task: ${IMPLEMENTATION_TASK}\n`;
+const implementationTaskFiles: TaskFilesForId = (taskId) => (taskId === IMPLEMENTATION_TASK ? IMPLEMENTATION_FILES : undefined);
+
+test("W1-T3149 criterion 1: a plan-only diff trailered to an implementation task is refused with both remedies", () => {
+  const calls: string[][] = [];
+  const changedPaths = changedPathsAtRange({
+    baseSha: "base",
+    headSha: "head",
+    git(args) {
+      calls.push(args);
+      return "plan/tasks.d/W1-T3149.yaml\0";
+    },
+  });
+  assert.deepEqual(changedPaths, ["plan/tasks.d/W1-T3149.yaml"]);
+  assert.deepEqual(calls, [["diff", "--name-only", "-z", "--no-renames", "base...head"]]);
+  const taskFilesForId = planTaskFilesResolver();
+  if (taskFilesForId === undefined) assert.fail("the checked-out plan must resolve W1-T3101's declared files");
+  assert.deepEqual(taskFilesForId(IMPLEMENTATION_TASK), IMPLEMENTATION_FILES);
+
+  const result = evaluateGate({
+    body: IMPLEMENTATION_BODY,
+    authorLogin: "a-human",
+    trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK,
+    changedPaths,
+    taskFilesForId,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.defect, "plan-only-implementation-trailer");
+  assert.match(result.message, /Remudero-Task: W1-T3101/);
+  for (const path of IMPLEMENTATION_FILES) assert.ok(result.message.includes(path), `refusal names ${path}`);
+  assert.match(result.message, /Remove the trailer/);
+  assert.match(result.message, /## Acceptance/);
+  assert.match(result.message, /include the implementation changes/);
+});
+
+test("W1-T3149 criterion 2: a plan-only task keeps its trailer on a plan-only diff", () => {
+  const planTask = "W1-TPLAN";
+  const result = evaluateGate({
+    body: `Remudero-Task: ${planTask}\n`,
+    authorLogin: "a-human",
+    trailerResolves: (taskId) => taskId === planTask,
+    changedPaths: ["plan/tasks.d/W1-TPLAN.yaml"],
+    taskFilesForId: (taskId) => (taskId === planTask ? ["plan/tasks.d/W1-TPLAN.yaml"] : undefined),
+  });
+  assert.equal(result.ok, true, result.message);
+});
+
+test("W1-T3149 criterion 3: an implementation-task trailer passes when its diff changes source", () => {
+  const result = evaluateGate({
+    body: IMPLEMENTATION_BODY,
+    authorLogin: "a-human",
+    trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK,
+    changedPaths: ["plan/tasks.d/W1-T3149.yaml", "src/lib/skill-workshop.ts"],
+    taskFilesForId: implementationTaskFiles,
+  });
+  assert.equal(result.ok, true, result.message);
+});
+
+test("W1-T3149 criterion 4: missing, empty, or unreadable local diff evidence preserves the existing verdict", () => {
+  const input: GateInput = {
+    body: IMPLEMENTATION_BODY,
+    authorLogin: "a-human",
+    trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK,
+    taskFilesForId: implementationTaskFiles,
+  };
+  const existing = evaluateGate(input);
+  assert.equal(existing.ok, true, existing.message);
+
+  const missing = changedPathsAtRange({ headSha: "head", git: () => "unexpected" });
+  const unreadable = changedPathsAtRange({
+    baseSha: "base",
+    headSha: "head",
+    git: () => {
+      throw new Error("unknown revision");
+    },
+  });
+  assert.equal(missing, undefined);
+  assert.equal(unreadable, undefined);
+  assert.equal(planTaskFilesResolver(join(tmpdir(), "rmd-acceptance-gate-no-plan")), undefined);
+  for (const changedPaths of [missing, [], unreadable]) {
+    assert.deepEqual(evaluateGate({ ...input, changedPaths }), existing);
+  }
+  assert.deepEqual(
+    evaluateGate({
+      ...input,
+      changedPaths: ["plan/tasks.d/W1-T3149.yaml"],
+      taskFilesForId: () => {
+        throw new Error("unreadable plan record");
+      },
+    }),
+    existing,
+  );
+});
+
+test("W1-T3149 criterion 5 mutation: removing only the structural predicate makes the #4573 shape pass", async () => {
+  const mutant = await structuralPredicateMutant();
+  try {
+    const result = mutant.evaluateGate({
+      body: IMPLEMENTATION_BODY,
+      authorLogin: "a-human",
+      trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK,
+      changedPaths: ["plan/tasks.d/W1-T3149.yaml"],
+      taskFilesForId: implementationTaskFiles,
+    });
+    assert.equal(result.ok, true, result.message);
+  } finally {
+    mutant.cleanup();
+  }
+});
 
 test("acceptance gate: a block truncated at a wrapped claim is refused", () => {
   const result = evaluateGate({ body: WRAPPED_BODY, authorLogin: "a-human" });
