@@ -771,12 +771,10 @@ Law 5's signature (W1-T2694): computes <rung>'s live operation hash over its pla
 Inspect a registered skill, its measured effectiveness, or stage a bounded retirement proposal.
 
 ```
-rmd skill list
-rmd skill effectiveness <approved-skill>
-rmd skill lifecycle <approved-skill>
+rmd skill list | rmd skill effectiveness <approved-skill> | rmd skill lifecycle <approved-skill>
 ```
 
-`list` is the §5B skill-registry reader (W1-T44): it resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change. `effectiveness` reads the complete `skills.selection` and terminal-verdict ledger union for an approved skill. `lifecycle` reads that same complete union and, only for a reviewed RETIRE-CANDIDATE that has reached its declared horizon, stages one evidence-fingerprinted retirement proposal. It never edits a skill. The sole materializing path is an explicit `rmd approve` of that proposal, which opens a normal reviewable plan PR deleting exactly `.claude/skills/<name>/SKILL.md`; review and approval re-check that the exact approved, opted-in skill is still present.
+`list` is the §5B skill-registry reader (W1-T44): it resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); `effectiveness` reads the complete skills.selection and terminal-verdict union; `lifecycle` stages only one evidence-fingerprinted retirement proposal for a reviewed, horizon-complete RETIRE-CANDIDATE. It never edits a skill: only `rmd approve` may open the normal reviewable PR that deletes the still-approved, opted-in .claude/skills/<name>/SKILL.md path.
 
 ### `rmd learnings`
 
