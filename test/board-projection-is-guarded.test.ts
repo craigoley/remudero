@@ -25,6 +25,7 @@ function quietModel(overrides: Partial<StatusBoardModel> = {}): StatusBoardModel
       crashLoop: { breached: false, windowBoots: [], windowMs: 900_000, maxBoots: 5 },
     },
     latches: { rows: [] },
+    cadence: { rows: [] },
     lastCycle: { found: false },
     blockers: { rows: [] },
     queueHead: { rows: [], refused: [], refusedTruncated: 0 },
@@ -62,10 +63,11 @@ test("a section whose PROJECTION throws leaves the board rendered in full — ev
     rendered = renderStatusBoardText(poisoned, { colourEnabled: false });
   }, "a throw during projection reached the operator as a broken board");
 
-  // Every one of the ten section rules is present, the poisoned section's own included.
+  // Every one of the eleven section rules is present, the poisoned section's own included.
   for (const header of [
     "── LIVENESS",
     "── LATCHES",
+    "── CADENCE",
     "── LAST CLOSED CYCLE",
     "── BLOCKERS BY CLASS",
     "── QUEUE HEAD",
@@ -101,13 +103,13 @@ test("a section the guard could not project is OMITTED from the footer, never co
   const poisoned = quietModel({ cacheHit: sectionThatThrowsOnProjection({ found: false }) });
   const footer = renderStatusBoardText(poisoned, { colourEnabled: false }).split("\n").at(-1) ?? "";
 
-  // Nine examined, not ten — the denominator counts what was actually read.
-  assert.match(footer, /^_operator-message: 9 of 9 section\(s\) incomplete/);
+  // Ten examined, not eleven — the denominator counts what was actually read.
+  assert.match(footer, /^_operator-message: 10 of 10 section\(s\) incomplete/);
   assert.ok(!footer.includes("cache hit"), "an unprojectable section was reported as incomplete");
-  // CONTROL: the same board with nothing poisoned reads ten.
+  // CONTROL: the same board with nothing poisoned reads eleven.
   assert.match(
     renderStatusBoardText(quietModel(), { colourEnabled: false }).split("\n").at(-1) ?? "",
-    /^_operator-message: 10 of 10 section\(s\) incomplete/,
+    /^_operator-message: 11 of 11 section\(s\) incomplete/,
   );
 });
 
@@ -135,8 +137,8 @@ test("the rendered board is byte-identical for a model where every section proje
   const before = renderStatusBoardText(quietModel(), { colourEnabled: false });
   const after = renderStatusBoardText(quietModel(), { colourEnabled: false });
   assert.equal(before, after);
-  // The guard is invisible on the healthy path: the footer still names all ten sections.
-  assert.match(before.split("\n").at(-1) ?? "", /10 of 10 section\(s\) incomplete/);
+  // The guard is invisible on the healthy path: the footer still names all eleven sections.
+  assert.match(before.split("\n").at(-1) ?? "", /11 of 11 section\(s\) incomplete/);
   assert.ok(before.startsWith("### rmd status — 2026-08-30T12:00:00.000Z"));
 });
 

@@ -55,9 +55,9 @@
     (iv) OUT OF SCOPE. The cap, the learnings budget, the spawn options, and CLAUDE.md's own text.
   acceptance:
     - claim: "the dark state is asserted against the real tree — absent row, false value, empty part"
-      proof: "unit test: test/the-headline-index-is-dark.test.ts"
+      proof: "grep: assert.deepEqual(policy.values.workerRuleHeadlines, { enabled: false }); in test/the-headline-index-is-dark.test.ts"
     - claim: "the part carries every CLAUDE.md rule headline when the row is on, so the two arms differ"
-      proof: "unit test: test/the-headline-index-is-dark.test.ts"
+      proof: "grep: assert.notEqual(part, \"\", \"the enabled arm must differ from the absent-row dark arm\"); in test/the-headline-index-is-dark.test.ts"
   falsifier: |
     CLOSE WITHOUT IMPLEMENTATION IF THE ROW ALREADY EXISTS. Re-run before building:
     `grep -n workerRuleHeadlines plan/policy.yaml`. A hit means another lane wrote the row and this

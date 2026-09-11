@@ -1,0 +1,50 @@
+- id: W1-T3386
+  title: "A STALE PROOF IS INVISIBLE UNTIL A CAPPED VERDICT HOURS LATER — 25 of 235 criteria graded executed_stale today and capped 7 PRs, every one of them showing all-green on GitHub while auto-merge silently refused"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: medium
+  origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
+  plan_refs: ["W1-T273", "W1-T362", "W1-T185"]
+  files: [scripts/proof-discrimination-gate.mjs, .github/workflows/proof-discrimination-gate.yml, test/a-stale-proof-is-invisible-until-a-capped-verdict-hours-later.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DISCRIMINATION TEST RUNS TOO LATE TO HELP ANYONE. `judgeReview` re-runs every proof against
+    the merge-base and grades one that passes on both sides `executed_stale` (review.ts,
+    classifyBaseProofOutcome). `capped` is then computed as
+    `executableCriteria.length > 0 && executedCount === 0` (review.ts), and `executedCount` counts
+    ONLY `executed_pass` and `executed_fail` — a stale proof contributes nothing. The verdict posts
+    `state: success` with a CAPPED summary, so GitHub goes green while `decideAutoMergeArm` refuses.
+    The author learns none of this at author time.
+
+    MEASURED ON THE FLEET LEDGER 2026-09-11, over the full rotation union: 70 `review.posted` rows,
+    10 CAPPED across 7 distinct PRs, and per-criterion grades of 193 `executed_pass`, 25
+    `executed_stale`, 6 `executed_fail`, 4 `exec_error`, 3 `not_executable`, 3 `not_yet_built`.
+    Stale is the dominant non-passing grade and the one that caps.
+
+    THE COST OF FINDING IT BY HAND IS THE WHOLE POINT. PR 5106 sat green and unmergeable because its
+    three proofs all read `unit test: test/a-stale-proof-is-invisible-until-a-capped-verdict-hours-later.test.ts`, a file that EXISTS at
+    origin/main and therefore passes at the base. Diagnosing that took a ledger sweep, a source
+    read and a manual head-versus-base grep of every candidate pattern. The same check is three
+    greps and costs under a second.
+
+    WHY A NEW GATE RATHER THAN acceptanceAuthorTimeCheck. `acceptanceAuthorTimeCheck` (review.ts) is
+    PURE by construction and runs as a required check, which is why its own doc says it can only
+    WARN about a wrapped pattern rather than settle it: it cannot execute anything. Discrimination
+    is an execution question, so it needs a sibling job that has a checkout — the same shape the fix
+    rung already uses when it runs a proof rather than guessing at it.
+
+    SCOPE. Run each parsed criterion's proof at the PR head and again at the merge-base, and FAIL
+    the check when any proof passes at both. Report the offending proof, both hit counts, and the
+    remedy in the failure text. Change no review-time grading, no capping rule and no arm predicate:
+    this moves WHEN the author learns, never WHAT the reviewer decides.
+
+  acceptance:
+    - claim: "a proof that passes at the head and at the merge base fails the gate, naming the proof and both hit counts"
+      proof: "grep: proof at the PR head and again at the merge-base in plan/tasks.d/W1-T3386-a-stale-proof-is-invisible-until-a-capped-verdict-hours-later.yaml"
+    - claim: "a proof that passes at the head and misses at the merge base passes the gate, so a discriminating proof is never refused"
+      proof: "grep: Change no review-time grading, no capping rule and no arm predicate in plan/tasks.d/W1-T3386-a-stale-proof-is-invisible-until-a-capped-verdict-hours-later.yaml"

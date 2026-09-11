@@ -515,6 +515,10 @@ export interface StatusBoardModel {
   generatedAt: string;
   liveness: LivenessSection;
   latches: LatchesSection;
+  /** W1-T3381: `cadenceMarkerRows` judged against `CADENCE_MARKERS` — the judge's own seat on the
+   *  model, so a stale or never-fired rung reaches the rendered board rather than only the pure
+   *  function's return value. */
+  cadence: CadenceSection;
   lastCycle: LastCycleSection;
   blockers: BlockersSection;
   queueHead: QueueHeadSection;
@@ -578,6 +582,10 @@ export interface StatusBoardDeps {
    *  rather than re-derived in lib/ (Rule 16). Omitted falls back to the product default (`true`), never a fabricated
    *  "off". */
   resolveHeadroomEnabled?: () => boolean;
+  /** W1-T3381: `plan/policy.yaml`'s `minIntervalMinutes` for a {@link CadenceMarkerDef.policyKey} — a config read,
+   *  injected like `resolveHeadroomEnabled` rather than re-derived in lib/ (Rule 16). Omitted falls every marker back
+   *  to {@link CADENCE_DEFAULT_INTERVAL_MINUTES}, the conservative (can only under-report) direction. */
+  resolveCadenceIntervalMinutes?: (policyKey: string) => number | undefined;
   /** Max rows QUEUE HEAD and BLOCKERS' blocked-PR class each show; defaults to 5. */
   queueHeadLimit?: number;
   /** W1-T1205: raw `git ls-remote --heads origin 'run-*'` output, parsed by drain.ts's {@link runBranchTaskIds} into
@@ -812,6 +820,13 @@ function markerAgeMs(path: string, json: Record<string, unknown> | null, nowMs: 
   }
 }
 
+/** Read a cadence marker only after the existence check. The board's blocked-PR projection uses
+ * a sentinel root, where every cadence marker is intentionally absent. */
+function cadenceMarkerAgeMs(path: string, nowMs: number): number | undefined {
+  if (!fs.existsSync(path)) return undefined;
+  return markerAgeMs(path, readJsonMarker(path), nowMs);
+}
+
 interface StaticLatchDef {
   name: string;
   path: (root: string) => string;
@@ -915,6 +930,14 @@ export interface CadenceMarkerRow {
   intervalMinutes: number;
   /** What an operator should take from it. */
   consequence: string;
+}
+
+/** W1-T3381: the seat on {@link StatusBoardModel} `cadenceMarkerRows`' judgment reaches — a
+ *  `CadenceMarkerRow[]` had a producer and a proof suite (W1-T3236) and no field to land in, so
+ *  every acceptance proof passed against the pure function directly and none of them could have
+ *  noticed a rung going quiet on the board an operator actually reads. */
+export interface CadenceSection {
+  rows: CadenceMarkerRow[];
 }
 
 /**
@@ -2063,6 +2086,21 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const latchesSection: LatchesSection = { rows, nextAction: undefined };
   latchesSection.nextAction = pickNextAction(LATCHES_NEXT_ACTIONS, latchesSection);
 
+  // ── CADENCE (W1-T3381) ── the judge (`cadenceMarkerRows`) gets its own model seat: a marker's age comes off the
+  // SAME `<root>/state` reads LATCHES already uses (`readJsonMarker`/`markerAgeMs`), and its interval comes off the
+  // injected config seam so this stays PURE over its deps, never a second `plan/policy.yaml` loader in lib/.
+  const resolveCadenceIntervalMinutes = deps.resolveCadenceIntervalMinutes ?? (() => undefined);
+  const cadenceSection: CadenceSection = {
+    rows: cadenceMarkerRows(
+      CADENCE_MARKERS,
+      (def) => {
+        const path = join(root, "state", def.file);
+        return cadenceMarkerAgeMs(path, nowMs);
+      },
+      (def) => (def.policyKey ? resolveCadenceIntervalMinutes(def.policyKey) : undefined),
+    ),
+  };
+
   // ── LAST CYCLE ──
   const lastCycleTsParsed = lastCycleRaw.ts ? Date.parse(lastCycleRaw.ts) : NaN;
   const lastCycle: LastCycleSection = {
@@ -2118,6 +2156,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     generatedAt: new Date(nowMs).toISOString(),
     liveness,
     latches: latchesSection,
+    cadence: cadenceSection,
     lastCycle,
     blockers,
     queueHead,
@@ -2216,6 +2255,21 @@ function renderLatchesBlock(latches: LatchesSection): string[] {
     for (const r of latches.rows) out.push(`${r.name}, ${formatAgeMs(r.ageMs)} — ${r.consequence}`);
   }
   if (latches.nextAction) out.push(`next action: ${latches.nextAction}`);
+  return out;
+}
+
+/** W1-T3381: the RENDERED half of `cadenceMarkerRows`' judgment — every row it returns lands as a line here, `never`
+ *  included (an absent marker is a row, not a skip; see {@link cadenceMarkerRows}'s own doc). */
+function renderCadenceBlock(cadence: CadenceSection): string[] {
+  const out = [sectionRule("CADENCE", SECTION_RULE_WIDTH)];
+  if (!cadence.rows.length) {
+    out.push("no cadence markers tracked");
+  } else {
+    for (const r of cadence.rows) {
+      const age = r.state === "never" ? "never fired" : `${formatAgeMs(r.ageMs)} ago`;
+      out.push(`${r.name}, ${r.state} (${age}) — ${r.consequence}`);
+    }
+  }
   return out;
 }
 
@@ -2562,6 +2616,7 @@ export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEna
   const blocks: { label: string; section: unknown; rendered: string[] }[] = [
     { label: "liveness", section: model.liveness, rendered: renderLivenessBlock(model.liveness, enabled) },
     { label: "latches", section: model.latches, rendered: renderLatchesBlock(model.latches) },
+    { label: "cadence", section: model.cadence, rendered: renderCadenceBlock(model.cadence) },
     { label: "last cycle", section: model.lastCycle, rendered: renderLastCycleBlock(model.lastCycle) },
     { label: "blockers", section: model.blockers, rendered: renderBlockersBlock(model.blockers) },
     { label: "queue head", section: model.queueHead, rendered: renderQueueHeadBlock(model.queueHead, enabled) },

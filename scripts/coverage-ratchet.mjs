@@ -137,17 +137,14 @@ export function evaluateRatchet(actual, baseline, epsilon = 1e-9) {
  * silently becomes a lines gate if branches ever overtake — a surprise waiting. Lines keep their
  * own separate floor (see `evaluateRatchet` above), unchanged and still enforced.
  *
- * ONLY `blocking` FAILS THE BUILD, AND THAT IS THE RULING, NOT A SOFTENING. The tiers are:
- *   >= 90  PASS.
- *   85-90  PASS, and (once tier two ships) inject ONE coverage-improvement task.
- *   < 85   remediation loop — tier three, not built.
- * Both upper tiers PASS, so 85 is the only blocking cut. THAT IS WHAT PUTS THE BOUNDARY CLEAR OF
- * THE NOISE. MEASURED from 16 post-regime CI readings: min 90.12, max 90.26, spread 0.140pt. A cut
- * at 90 would sit 0.120pt above the worst reading — INSIDE one spread, so an unlucky run would
- * block for no reason, recreating today's defect at a new number. At 85 the margin is ~5.1pt,
- * about 37x the spread. Hysteresis was considered and rejected: it would make the tier STATEFUL
- * across stateless CI runs, and moving the blocking cut achieves the same thing with no memory.
- * The 90 line is retained as a REPORTED tier boundary so tier two has its trigger already measured.
+ * NO BAND BLOCKS (W1-T3384, operator ruling 2026-09-11, superseding W1-T466's blocking cut at 85).
+ * The cuts now select a RESPONSE, not a verdict:
+ *   >= 90  PASS, healthy.
+ *   85-90  PASS, and inject ONE coverage-improvement task (tier two, lib/coverage-improvement.ts).
+ *   < 85   PASS, and inject escalating tasks until healthy or returns diminish (tier three).
+ * The two cuts stay exactly where W1-T466 measured them — 16 post-regime CI readings spanned
+ * 90.12-90.26, a 0.140pt spread, so 90 discriminates healthy from owing-work without sitting inside
+ * the noise, and 85 is ~37x that spread below it. What changed is the consequence, not the numbers.
  *
  * @param {{branchesPct:number}} actual
  * @param {{tierPassPct?:number, tierBlockPct?:number}} thresholds
@@ -159,10 +156,11 @@ export function classifyCoverageTier(actual, thresholds = {}) {
   if (pct < block) {
     return {
       tier: 'remediate',
-      blocking: true,
+      // W1-T3384: blocking parks the change AND the debt, and the debt is the part that needs work.
+      blocking: false,
       message:
-        `branches ${pct.toFixed(2)}% is below the ${block}% floor — coverage remediation is required ` +
-        `(tier three: loop targeted tasks until above ${pass}% or returns diminish)`,
+        `branches ${pct.toFixed(2)}% is below ${block}% — PASS, and coverage remediation is owed: ` +
+        `escalating improvement tasks are filed until this is back above ${pass}% or returns diminish`,
     };
   }
   if (pct < pass) {
@@ -277,10 +275,12 @@ function main(argv) {
   // which SUPPRESSED the line-baseline violation: a change dropping lines AND branches was told
   // only about branches, and would fix one, re-push, and discover the other. Collect and print
   // every reason, then exit once.
+  // W1-T3384: no coverage LEVEL blocks now, and this is still not vacuous — `blockers` is fed only by
+  // MEASUREMENT-INTEGRITY failures (a declared floor that cannot be compared, an absent lcov).
   const blockers = [...(tier.blocking ? [tier.message] : []), ...violations];
 
   if (blockers.length > 0) {
-    const headline = 'BLOCKED -- coverage is below a floor:';
+    const headline = 'BLOCKED -- coverage could not be measured honestly:';
     console.error(`coverage-ratchet: ${headline}`);
     for (const b of blockers) console.error(`  - ${b}`);
     emitCiReport('coverage-ratchet', formatCiReport('coverage-ratchet', headline, blockers), { blocked: true });
