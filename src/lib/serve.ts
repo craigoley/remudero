@@ -540,7 +540,8 @@ export function buildConsoleTimeSeries(
   lines: ReadonlyArray<Record<string, unknown>>,
   opts: { nowMs?: number; windowMs?: number; bucketMs?: number } = {},
 ): ConsoleTimeSeriesSnapshot {
-  const nowMs = opts.nowMs ?? Date.now();
+  const clock = fixedClock(opts.nowMs ?? systemClock.now());
+  const nowMs = clock.now();
   const windowMs = opts.windowMs ?? CONSOLE_TIME_SERIES_WINDOW_MS;
   const bucketMs = opts.bucketMs ?? CONSOLE_TIME_SERIES_BUCKET_MS;
   const windowStartMs = nowMs - windowMs;
@@ -558,19 +559,20 @@ export function buildConsoleTimeSeries(
     }
     const points = [...buckets.entries()]
       .sort(([a], [b]) => a - b)
-      .map(([bucketStartMs, value]) => ({ bucketStart: new Date(bucketStartMs).toISOString(), value }));
+      .map(([bucketStartMs, value]) => ({ bucketStart: fixedClock(bucketStartMs).iso(), value }));
     return { id: spec.id, label: spec.label, windowLabel, bucketLabel, points };
   });
-  return { status: "ok", generatedAt: new Date(nowMs).toISOString(), windowMs, bucketMs, windowLabel, bucketLabel, series };
+  return { status: "ok", generatedAt: clock.iso(), windowMs, bucketMs, windowLabel, bucketLabel, series };
 }
 
 export function unreadableConsoleTimeSeries(reason: string, opts: { nowMs?: number; windowMs?: number; bucketMs?: number } = {}): ConsoleTimeSeriesSnapshot {
-  const nowMs = opts.nowMs ?? Date.now();
+  const clock = fixedClock(opts.nowMs ?? systemClock.now());
+  const nowMs = clock.now();
   const windowMs = opts.windowMs ?? CONSOLE_TIME_SERIES_WINDOW_MS;
   const bucketMs = opts.bucketMs ?? CONSOLE_TIME_SERIES_BUCKET_MS;
   return {
     status: "unreadable",
-    generatedAt: new Date(nowMs).toISOString(),
+    generatedAt: clock.iso(),
     windowMs,
     bucketMs,
     windowLabel: timeSeriesDurationLabel(windowMs),

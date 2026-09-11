@@ -15,7 +15,7 @@ function row(ts: string, over: Record<string, unknown>): Record<string, unknown>
   return { ts, ...over };
 }
 
-function renderShellWithLedger(lines: ReadonlyArray<Record<string, unknown>>): string {
+function renderShellWithLines(lines: ReadonlyArray<Record<string, unknown>>): string {
   let body = "";
   const route = buildShellRoute(
     DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS,
@@ -42,7 +42,7 @@ function renderShellWithLedger(lines: ReadonlyArray<Record<string, unknown>>): s
 }
 
 test("console time series: renders bounded inline SVG with no external chart dependency", () => {
-  const html = renderShellWithLedger([
+  const html = renderShellWithLines([
     row("2026-09-08T10:05:00.000Z", { step: "implement.done", cost_usd: 0.25 }),
     row("2026-09-08T10:20:00.000Z", { step: "fix.done", cost_usd: 0.5 }),
     row("2026-09-08T10:35:00.000Z", { step: "github.wake.accepted" }),
