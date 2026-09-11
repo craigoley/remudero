@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import {
   formatHandMintReservationMessage,
   gitRemoteRefReserver,
@@ -401,11 +402,9 @@ test("W1-T3100 (gate copy): an unreadable held id is a conflict, while a missing
 test("W1-T3100 (gate copy): main reports differing and unreadable reservation holders", (t) => {
   const origin = gitRepo({ bare: true, kind: "holder-main-origin" });
   const repo = gitRepo({ cloneFrom: origin.dir, kind: "holder-main-work" });
-  const bin = join(repo.dir, "bin");
-  mkdirSync(bin);
-  writeFileSync(join(bin, "gh"), "#!/usr/bin/env sh\nprintf '[]\\n'\n", { mode: 0o755 });
+  const gh = ghShim([{ when: "api", stdout: "[]\\n" }], { kind: "holder-main" });
   const previousPath = process.env.PATH;
-  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  process.env.PATH = `${gh.dir}:${previousPath ?? ""}`;
   t.after(() => {
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
