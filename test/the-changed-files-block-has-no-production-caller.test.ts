@@ -19,12 +19,9 @@ import {
  * closures — built their bodies without ever passing that field. The emitter was reached only by
  * its own test suite (test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts).
  *
- * This wires the ONLY two `buildPlanPrBody` call sites that exist today (both plan-ratification
- * lanes; the build lane does not author its body through this module at all — out of scope, see
- * the task's own rationale) to pass the SAME path list they already compute for
- * `filingAcceptanceCriteria`'s filing evidence. Nothing is invented: the list handed to
- * `changedFiles` is the identical `filedPaths`/`filedTaskIds` local each closure already builds
- * from what it just wrote to disk (`shardRelPaths`/`allShardRelPaths` + `"MASTER-PLAN.md"`).
+ * W1-T2550 wired the then-only two plan-ratification call sites to pass the SAME path list they
+ * already compute for `filingAcceptanceCriteria`'s filing evidence. W1-T3413 adds a third,
+ * lifecycle-retirement call site; its one safe target path must also reach `changedFiles`.
  */
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -52,24 +49,32 @@ test("W1-T2550: rmd approve's single-proposal openPlanPr passes changedFiles —
   assert.match(region, /changedFiles:\s*filedPaths/, "the field buildPlanPrBody's own doc says every existing caller omits — no longer true here");
 });
 
-test("W1-T2550: rmd approve's BATCH openPlanPr passes changedFiles too — the second (and last) buildPlanPrBody call site", () => {
+test("W1-T2550: rmd approve's BATCH openPlanPr passes changedFiles too — the second plan-ratification call site", () => {
   const region = openPlanPrRegion("openPlanPr(branch, ids) {");
   assert.match(region, /const filedPaths = \[\.\.\.allShardRelPaths, "MASTER-PLAN\.md"\];/);
   assert.match(region, /criteria:\s*filingAcceptanceCriteria\(filedIds,\s*filedPaths\)/);
   assert.match(region, /changedFiles:\s*filedPaths/);
 });
 
-test("W1-T2550: git grep confirms exactly two buildPlanPrBody call sites in src/, and both now pass changedFiles", () => {
-  // Guards the premise itself: if a THIRD call site is ever added, this must be re-examined
-  // rather than silently leaving it unwired the way this task's own rationale measured.
+test("W1-T2550/W1-T3413: all three buildPlanPrBody call sites in src/ pass their exact changed paths", () => {
+  // This exact census forces a deliberate test update for a fourth caller rather than leaving it
+  // unwired. The first two use their derived filing list; the lifecycle lane has one materialized
+  // SKILL.md path and must pass precisely that path.
   const callSites = [...RUN_TASK_SRC.matchAll(/buildPlanPrBody\(\{/g)];
-  assert.equal(callSites.length, 2, "src/run-task.ts must have exactly the two `rmd approve` call sites this task wires");
-  for (const m of callSites) {
+  assert.equal(callSites.length, 3, "src/run-task.ts must have exactly the two plan-ratification and one lifecycle-retirement callers");
+  const changedFileExpressions = callSites.map((m) => {
     const from = m.index!;
     const to = RUN_TASK_SRC.indexOf("});", from);
     const call = RUN_TASK_SRC.slice(from, to);
-    assert.match(call, /changedFiles:\s*filedPaths/, "every buildPlanPrBody call site in run-task.ts must pass changedFiles");
-  }
+    const match = /changedFiles:\s*([^,\n]+)/.exec(call);
+    assert.ok(match, "every buildPlanPrBody call site in run-task.ts must pass changedFiles");
+    return match[1]!.trim();
+  });
+  assert.deepEqual(
+    changedFileExpressions.sort(),
+    ["[materialized.relPath]", "filedPaths", "filedPaths"],
+    "each caller passes its actual written paths — no omitted, invented, or broad replacement list",
+  );
 });
 
 // ══ criterion 1 (functional) — exercising the SAME composition the wired call sites use actually
