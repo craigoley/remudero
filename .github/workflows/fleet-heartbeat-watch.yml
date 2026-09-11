@@ -202,6 +202,13 @@ jobs:
           set -euo pipefail
           threshold_s=$(( STALE_AFTER_MINUTES * 60 ))
           : > heartbeat-report.txt
+          # W1-T3367 — THE PER-BRANCH DELIVERY LEDGER. The loop below already judges every host on
+          # its own ("the verdict is combined only at the end"); this file is what carries that
+          # per-host judgement THROUGH to delivery, which is where the combining used to erase it.
+          # One `<branch>\t<kind>` line per watched host, written even for a FRESH one, because the
+          # delivery step must close a recovered host's issue and cannot infer "recovered" from a
+          # file that only lists the sick.
+          : > heartbeat-state.tsv
           watched=0
           absent=0
           stale=0
@@ -263,17 +270,26 @@ jobs:
             # issue title reads "the machine has stopped reporting", which is WRONG for a fresh
             # beat carrying a stalled deploy cycle, so the per-branch block must say WHICH failure
             # fired rather than leave the reader to infer it from the age line and payload alone.
+            # W1-T3367: `kind` is the same decision as `condition`, in one token, so delivery can
+            # act on it without re-parsing prose. The two are derived TOGETHER here rather than the
+            # kind being re-inferred later, because a second classifier is a second thing to drift.
             if [ "$age_s" -gt "$threshold_s" ]; then
+              kind="BEAT_STALE"
               condition="BEAT STALE — the machine itself has stopped reporting (${age_m}m, threshold ${STALE_AFTER_MINUTES}m)"
             elif daemon_expected "$branch" && is_dispatch_stalled "$dsp_verdict"; then
+              kind="BUILD_STALLED"
               condition="BUILD STALLED — the daemon is alive but has dispatched nothing: ${dsp_verdict}"
             elif daemon_expected "$branch" && is_daemon_stale "$dmn_verdict"; then
+              kind="DAEMON_STALE"
               condition="DAEMON STALE — the beat is fresh but the daemon has stopped polling: ${dmn_verdict}"
             elif is_supervisor_stale "$sup_verdict"; then
+              kind="SUPERVISOR_STALE"
               condition="DEPLOY-SUPERVISOR STALE — the beat is fresh but the deploy cycle has stopped: ${sup_verdict}"
             else
+              kind="FRESH"
               condition="fresh — beat ${age_m}m old, deploy-supervisor ${sup_verdict:-unknown}"
             fi
+            printf '%s\t%s\n' "$branch" "$kind" >> heartbeat-state.tsv
 
             # THE LAST BEAT'S PAYLOAD, NOT JUST ITS AGE. "No beat for 71 minutes" is half an answer;
             # "and the last one said the daemon had not polled in two hours", or "and the last one
@@ -290,7 +306,7 @@ jobs:
               echo "Last beat payload:"
               echo "$payload"
               echo
-            } >> heartbeat-report.txt
+            } | tee -a heartbeat-report.txt > "heartbeat-branch-${branch}.txt"
 
             if [ "$age_s" -gt "$threshold_s" ]; then
               stale=$(( stale + 1 ))
@@ -313,43 +329,92 @@ jobs:
           echo "heartbeat-watch: ${watched} branch(es) watched, ${absent} not installed, ${stale} stale."
           [ "$stale" -eq 0 ] || exit 1
 
-      - name: Open or update a needs-human issue when the beat has stopped
-        if: failure() && github.event_name != 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RUN_WHEN: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          test -s heartbeat-report.txt || echo "(no report captured -- the run failed before it could read the beat branch)" > heartbeat-report.txt
-          node scripts/needs-human-issue.mjs \
-            --source fleet-heartbeat \
-            --title "fleet-heartbeat: the machine has stopped reporting" \
-            --body-file heartbeat-report.txt
-
-      # W1-T3030 — THE CLOSING HALF OF THE DELIVERY ABOVE. Without it a recovered job leaves its
-      # delivery-of-record open forever: the general escalation reconciler only closes issues with
-      # a TASK referent, and a cron job has none, so #3387 sat open across five consecutive passing
-      # nightlies until a human closed it by hand.
+      # ── W1-T3367: ONE DELIVERY OF RECORD PER HOST, NOT PER WORKFLOW ────────────────────────────
       #
-      # ⚠ THIS IS NOT THE "notifier that also fires on success" the step above warns against. It
-      # posts nothing on a green run when there is no open issue for this source — `--resolved` is
-      # a silent no-op in that case, which is every ordinary night. It speaks only on the run that
-      # actually ends an escalation, which is the one green run a reader wants to hear about.
-      - name: Close this job's needs-human issue once it recovers
-        if: success() && github.event_name != 'pull_request'
+      # THE INCIDENT. `needs-human-issue.mjs` dedups on `markerFor(source)` — the source string
+      # ALONE — so `--source fleet-heartbeat` is one issue for every host this job watches, forever.
+      # MEASURED: issue #4825 opened 2026-09-09T14:47 for a stale `heartbeat-mini` and was still
+      # open 36 hours later with 9 comments. During that window the AZURE fleet OOM-crash-looped for
+      # eight hours with zero builds dispatched, and this job judged it correctly on the BUILD
+      # STALLED arm — then delivered it as comment #9 on the mini's thread, under a title that said
+      # "the machine has stopped reporting" when azure's beat was fresh and its BUILD was stalled.
+      # The alarm was already on, so it carried no information, and nobody was told.
+      #
+      # THIS IS THE LOOP'S OWN LESSON, ONE LAYER LATER. The judging loop above says it outright:
+      # "one healthy machine's beat covered another's silence. So every branch is judged on its own
+      # and the verdict is combined only at the end." That combining is what erased the per-host
+      # judgement — the fix there was per-host BRANCHES, and every host still shared one ALARM.
+      #
+      # ALWAYS RUNS, and that is deliberate: keying off `failure()`/`success()` cannot express
+      # "azure recovered, mini is still down", which is the ordinary state of a multi-host fleet.
+      - name: Deliver or resolve one needs-human issue per host
+        if: always() && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_WHEN: ${{ github.event_name }}
         run: |
-          set -euo pipefail
-          node scripts/needs-human-issue.mjs --resolved --source fleet-heartbeat
+          set -uo pipefail
+
+          # FAIL-OPEN TO THE OLD SHAPE, NEVER TO SILENCE. If the judging step died before it could
+          # write a single state line — an unreadable remote, a crash in the fetch — there is no
+          # per-host verdict to deliver, and the one thing this job may never do is say nothing. So
+          # the legacy unscoped delivery still runs in exactly that case.
+          if [ ! -s heartbeat-state.tsv ]; then
+            echo "heartbeat-deliver: no per-host state was written — falling back to the unscoped delivery."
+            test -s heartbeat-report.txt || echo "(no report captured -- the run failed before it could read the beat branch)" > heartbeat-report.txt
+            node scripts/needs-human-issue.mjs \
+              --source fleet-heartbeat \
+              --title "fleet-heartbeat: the watcher could not judge any host" \
+              --body-file heartbeat-report.txt
+            exit 0
+          fi
+
+          # A TITLE THAT NAMES THE HOST AND THE CONDITION. The old single title was wrong for three
+          # of the four arms, and a reader who has to open the body to learn which failure fired is
+          # a reader who stops opening them.
+          title_for() {
+            case "$2" in
+              BEAT_STALE)        echo "fleet-heartbeat ($1): the machine has stopped reporting" ;;
+              BUILD_STALLED)     echo "fleet-heartbeat ($1): the daemon is alive but has dispatched nothing" ;;
+              DAEMON_STALE)      echo "fleet-heartbeat ($1): the beat is fresh but the daemon has stopped polling" ;;
+              SUPERVISOR_STALE)  echo "fleet-heartbeat ($1): the deploy cycle has stopped" ;;
+              *)                 echo "fleet-heartbeat ($1): unhealthy" ;;
+            esac
+          }
+
+          while IFS="$(printf '\t')" read -r branch kind; do
+            [ -n "${branch:-}" ] || continue
+            report="heartbeat-branch-${branch}.txt"
+            if [ "$kind" = "FRESH" ]; then
+              # Closes ONLY this host's record. `decideRecovery` admits marker containment and
+              # nothing else, so a scoped marker can never close another host's escalation.
+              node scripts/needs-human-issue.mjs --resolved --source "fleet-heartbeat:${branch}" \
+                || echo "heartbeat-deliver: could not resolve the record for ${branch}" >&2
+            else
+              test -s "$report" || echo "(no per-branch report captured for ${branch})" > "$report"
+              node scripts/needs-human-issue.mjs \
+                --source "fleet-heartbeat:${branch}" \
+                --title "$(title_for "$branch" "$kind")" \
+                --body-file "$report" \
+                || echo "heartbeat-deliver: could not deliver the record for ${branch}" >&2
+            fi
+          done < heartbeat-state.tsv
+
+          # RETIRE THE UNSCOPED RECORD, ONCE. Issues raised before this change carry
+          # `<!-- needs-human:fleet-heartbeat -->`, which no scoped marker contains, so nothing
+          # would ever close them and #4825 would sit open forever describing a host that now has
+          # its own thread. A no-op when there is none.
+          node scripts/needs-human-issue.mjs --resolved --source fleet-heartbeat \
+            || echo "heartbeat-deliver: could not retire the legacy unscoped record" >&2
 
       - name: Upload the beat report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: heartbeat-report
-          path: heartbeat-report.txt
+          path: |
+            heartbeat-report.txt
+            heartbeat-state.tsv
+            heartbeat-branch-*.txt
           if-no-files-found: ignore

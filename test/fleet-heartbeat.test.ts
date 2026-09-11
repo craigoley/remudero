@@ -35,6 +35,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { runBeat, REAL_SCRIPT, REPO_ROOT, type Beat, type Call } from "./helpers/fleet-heartbeat-harness.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 
 /** `key=value` lookup over a published payload. */
@@ -562,6 +563,11 @@ function watchGitStub(): string {
     "  show)",
     '    ref="${1%%:*}"; ref="${ref#origin/}"',
     '    printf "beat_host=%s\\nrestart_count=1\\n" "$ref"',
+    // W1-T3367: a branch named in STUB_STALLED beats FRESHLY but reports a stalled build — the
+    // exact azure shape (beat fine, dispatch dead) the old single title described wrongly.
+    '    for b in ${STUB_STALLED:-}; do',
+    '      if [ "$b" = "$ref" ]; then printf "dispatch_verdict=STALLED — last build dispatch 6h25m ago\\n"; fi',
+    "    done",
     "    ;;",
     "esac",
     "exit 0",
@@ -574,6 +580,10 @@ interface Watch {
   stdout: string;
   stderr: string;
   report: string;
+  /** W1-T3367: the per-host delivery ledger, `<branch>\t<kind>` per watched host. */
+  state: string;
+  /** W1-T3367: per-branch report bodies, keyed by branch. */
+  branchReports: Record<string, string>;
 }
 
 function runWatch(opts: {
@@ -581,6 +591,8 @@ function runWatch(opts: {
   stub: string;
   staleAfterMinutes?: string;
   daemonExpectedBranches?: string;
+  /** Branches whose beat is fresh but whose `dispatch_verdict` reports a stalled build. */
+  stalledBranches?: string;
   mutate?: [string, string];
 }): Watch {
   const dir = mkdtempSync(join(tmpdir(), "heartbeat-watch-"));
@@ -614,12 +626,21 @@ function runWatch(opts: {
       // `daemon_verdict` at all, keep exercising only the beat-age axis they were written for.
       DAEMON_EXPECTED_BRANCHES: opts.daemonExpectedBranches ?? "",
       STUB_BRANCHES: opts.stub,
+      STUB_STALLED: opts.stalledBranches ?? "",
     },
   });
   const reportPath = join(dir, "heartbeat-report.txt");
   const report = existsSync(reportPath) ? readFileSync(reportPath, "utf8") : "";
+  const statePath = join(dir, "heartbeat-state.tsv");
+  const state = existsSync(statePath) ? readFileSync(statePath, "utf8") : "";
+  const branchReports: Record<string, string> = {};
+  for (const line of state.split("\n").filter(Boolean)) {
+    const branch = line.split("\t")[0];
+    const bp = join(dir, `heartbeat-branch-${branch}.txt`);
+    if (existsSync(bp)) branchReports[branch] = readFileSync(bp, "utf8");
+  }
   rmSync(dir, { recursive: true, force: true });
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", report };
+  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", report, state, branchReports };
 }
 
 test("A DEAD HOST IS FOUND WHILE ANOTHER HOST IS HEALTHY — the exact condition that failed on 2026-08-14", () => {
@@ -847,4 +868,224 @@ test("W1-T3227: an ABSENT daemon line across every form still reads UNKNOWN, nev
   const beat = runBeat({ ledger: ['{"ts":"2026-09-09T09:57:00.000Z","run_id":"x","task_id":"t","step":"pr.opened"}'] });
   assert.match(beat.published, /^daemon_last_step=none$/m, "no daemon line in any form means none, not live");
   assert.match(beat.published, /^daemon_last_age_s=unknown$/m);
+});
+
+// ── W1-T3367: ONE DELIVERY OF RECORD PER HOST ───────────────────────────────────────────────────
+//
+// THE INCIDENT, MEASURED. `needs-human-issue.mjs` dedups on `markerFor(source)` — the source string
+// ALONE — so `--source fleet-heartbeat` was one issue for every host this job watches. Issue #4825
+// opened 2026-09-09T14:47 for a stale `heartbeat-mini` and was still open 36 hours later with 9
+// comments. Inside that window the AZURE fleet OOM-crash-looped for eight hours with zero builds
+// dispatched; this job judged it correctly on the BUILD STALLED arm and then filed it as comment #9
+// on the mini's thread, titled "the machine has stopped reporting" while azure's beat was FRESH.
+//
+// This is the same lesson as every test above it, one layer later: the loop was taught not to let
+// one host's health hide another's silence, and then handed its per-host verdicts to a single alarm.
+
+const HOST_A = "heartbeat-azure";
+const HOST_B = "heartbeat-mini";
+
+test("W1-T3367: every watched host gets its OWN line in the delivery ledger, sick and healthy alike", () => {
+  const r = runWatch({ branches: `${HOST_A} ${HOST_B}`, stub: `${HOST_A}:60 ${HOST_B}:99999` });
+  const rows = r.state.split("\n").filter(Boolean).map((l) => l.split("\t"));
+  // POSITIVE CONTROL: both hosts must appear, or an assertion about "per host" is vacuous.
+  assert.equal(rows.length, 2, `expected one row per host; got ${JSON.stringify(r.state)}`);
+  assert.deepEqual(
+    rows.map(([b, k]) => `${b}=${k}`).sort(),
+    [`${HOST_A}=FRESH`, `${HOST_B}=BEAT_STALE`],
+    "a healthy host must be recorded as FRESH, not merely omitted — delivery closes its record from this line",
+  );
+});
+
+test("W1-T3367: a host whose BEAT is fresh but whose BUILD is stalled is classified BUILD_STALLED, not BEAT_STALE", () => {
+  // The azure shape exactly: the machine reports, the fleet produces nothing.
+  const r = runWatch({
+    branches: HOST_A,
+    stub: `${HOST_A}:60`,
+    daemonExpectedBranches: HOST_A,
+    stalledBranches: HOST_A,
+  });
+  assert.match(r.state, new RegExp(`^${HOST_A}\\tBUILD_STALLED$`, "m"), r.state || "(no state written)");
+  // …and the human-readable condition must say so too, since that is what the title is built from.
+  assert.match(r.branchReports[HOST_A] ?? "", /BUILD STALLED — the daemon is alive but has dispatched nothing/);
+  assert.doesNotMatch(r.branchReports[HOST_A] ?? "", /the machine itself has stopped reporting/);
+});
+
+test("W1-T3367: one host's report never carries another host's condition — the bodies are separate", () => {
+  const r = runWatch({
+    branches: `${HOST_A} ${HOST_B}`,
+    stub: `${HOST_A}:60 ${HOST_B}:99999`,
+    daemonExpectedBranches: HOST_A,
+    stalledBranches: HOST_A,
+  });
+  const a = r.branchReports[HOST_A] ?? "";
+  const b = r.branchReports[HOST_B] ?? "";
+  assert.ok(a.length > 0 && b.length > 0, "both per-branch reports must exist");
+  assert.match(a, /BUILD STALLED/);
+  assert.match(b, /BEAT STALE/);
+  // THE ACTUAL DEFECT: azure's incident must not be reachable only through mini's record.
+  assert.doesNotMatch(a, /BEAT STALE/, "azure's report carries mini's condition — the bodies are still combined");
+  assert.doesNotMatch(b, /BUILD STALLED/, "mini's report carries azure's condition — the bodies are still combined");
+});
+
+test("W1-T3367 (falsifier): drop the per-host ledger write and the delivery has nothing to key on", () => {
+  const r = runWatch({
+    branches: `${HOST_A} ${HOST_B}`,
+    stub: `${HOST_A}:60 ${HOST_B}:99999`,
+    mutate: [`printf '%s\\t%s\\n' "$branch" "$kind" >> heartbeat-state.tsv`, ":"],
+  });
+  assert.equal(r.state, "", "the ledger must be empty once its write is removed — otherwise this proves nothing");
+  // And the aggregate verdict must STILL redden, so the fallback path in delivery is reached rather
+  // than the run going quietly green with no per-host records.
+  assert.notEqual(r.status, 0, "a stale host must still fail the combined verdict");
+});
+
+test("W1-T3367: the combined verdict is UNCHANGED — per-host delivery is additive, not a replacement", () => {
+  // The red run is still a signal, and several other suites assert on it. This change adds a
+  // delivery channel; it must not soften the judgement.
+  const allFresh = runWatch({ branches: `${HOST_A} ${HOST_B}`, stub: `${HOST_A}:60 ${HOST_B}:120` });
+  assert.equal(allFresh.status, 0, allFresh.stderr);
+  const oneStale = runWatch({ branches: `${HOST_A} ${HOST_B}`, stub: `${HOST_A}:60 ${HOST_B}:99999` });
+  assert.notEqual(oneStale.status, 0, "one stale host must still redden the run");
+});
+
+/** The committed DELIVERY step's `run:` body, dedented — the half that turns per-host verdicts into
+ *  per-host issues. Extracted separately from the judging step because it is where the combining
+ *  used to happen, so a test that never runs it cannot prove the combining is gone. */
+function deliverStepScript(): string {
+  const lines = readFileSync(WATCH_WORKFLOW, "utf8").split("\n");
+  const name = "- name: Deliver or resolve one needs-human issue per host";
+  const start = lines.findIndex((l) => l.trim() === name);
+  assert.notEqual(start, -1, `the workflow has no step named "${name}" — rename it here too`);
+  const runAt = lines.findIndex((l, i) => i > start && l.trim() === "run: |");
+  assert.notEqual(runAt, -1, "the delivery step no longer opens a literal `run: |` block");
+  const body: string[] = [];
+  for (let i = runAt + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.trim() === "") {
+      body.push("");
+      continue;
+    }
+    if (!l.startsWith(" ".repeat(10))) break;
+    body.push(l.slice(10));
+  }
+  const script = body.join("\n");
+  // POSITIVE CONTROL ON THE EXTRACTION, same law as watchStepScript above.
+  assert.ok(script.includes("heartbeat-state.tsv"), "the extracted delivery block does not read the per-host ledger");
+  assert.ok(script.includes("needs-human-issue.mjs"), "the extracted delivery block files no issue");
+  return script;
+}
+
+/** Run the real delivery step against a ledger, with a fake `node` that records every argv instead
+ *  of filing anything. Returns one line per `needs-human-issue.mjs` invocation. */
+function runDeliver(stateTsv: string, opts: { branchReports?: Record<string, string> } = {}): {
+  status: number;
+  calls: string[];
+  stdout: string;
+} {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}heartbeat-deliver-`));
+  const binDir = join(dir, "bin");
+  mkdirSync(binDir, { recursive: true });
+  // A `node` that logs its arguments, one invocation per line, and succeeds.
+  writeFileSync(
+    join(binDir, "node"),
+    ['#!/usr/bin/env bash', 'printf "%s\n" "$*" >> "$CALLS_FILE"', "exit 0", ""].join("\n"),
+    { mode: 0o755 },
+  );
+  chmodSync(join(binDir, "node"), 0o755);
+  writeFileSync(join(dir, "heartbeat-state.tsv"), stateTsv);
+  writeFileSync(join(dir, "heartbeat-report.txt"), "combined report\n");
+  for (const [branch, body] of Object.entries(opts.branchReports ?? {})) {
+    writeFileSync(join(dir, `heartbeat-branch-${branch}.txt`), body);
+  }
+  const scriptPath = join(dir, "deliver.sh");
+  writeFileSync(scriptPath, deliverStepScript(), { mode: 0o755 });
+  const callsFile = join(dir, "calls.txt");
+  const r = spawnSync("bash", [scriptPath], {
+    cwd: dir,
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}`, CALLS_FILE: callsFile },
+  });
+  const calls = existsSync(callsFile)
+    ? readFileSync(callsFile, "utf8").split("\n").filter(Boolean)
+    : [];
+  const stdout = r.stdout ?? "";
+  rmSync(dir, { recursive: true, force: true });
+  return { status: r.status ?? -1, calls, stdout };
+}
+
+test("W1-T3367: delivery files ONE issue per host, each keyed to its OWN source — the defect, directly", () => {
+  const { status, calls } = runDeliver(
+    `${HOST_A}\tBUILD_STALLED\n${HOST_B}\tBEAT_STALE\n`,
+    { branchReports: { [HOST_A]: "azure body\n", [HOST_B]: "mini body\n" } },
+  );
+  assert.equal(status, 0);
+  const scoped = calls.filter((c) => c.includes("--source"));
+  // POSITIVE CONTROL: delivery must actually have run.
+  assert.ok(scoped.length >= 2, `expected a delivery per host; got ${JSON.stringify(calls)}`);
+  assert.ok(
+    scoped.some((c) => c.includes(`--source fleet-heartbeat:${HOST_A}`)),
+    `azure got no record of its own: ${JSON.stringify(scoped)}`,
+  );
+  assert.ok(
+    scoped.some((c) => c.includes(`--source fleet-heartbeat:${HOST_B}`)),
+    `mini got no record of its own: ${JSON.stringify(scoped)}`,
+  );
+  // THE BUG: neither host may be delivered under the bare source, which is the single shared channel
+  // that turned an eight-hour azure outage into comment #9 on the mini's 36-hour-old thread.
+  const bare = scoped.filter((c) => /--source fleet-heartbeat(\s|$)/.test(c) && !c.includes("--resolved"));
+  assert.deepEqual(bare, [], `a host was delivered under the SHARED source: ${JSON.stringify(bare)}`);
+});
+
+test("W1-T3367: each host's title names that host AND its own condition", () => {
+  const { calls } = runDeliver(`${HOST_A}\tBUILD_STALLED\n${HOST_B}\tBEAT_STALE\n`, {
+    branchReports: { [HOST_A]: "a\n", [HOST_B]: "b\n" },
+  });
+  const azure = calls.find((c) => c.includes(`fleet-heartbeat:${HOST_A}`)) ?? "";
+  const mini = calls.find((c) => c.includes(`fleet-heartbeat:${HOST_B}`)) ?? "";
+  assert.match(azure, new RegExp(HOST_A), "azure's title must name azure");
+  assert.match(azure, /has dispatched nothing/, "azure's title must name its OWN condition");
+  assert.doesNotMatch(
+    azure,
+    /the machine has stopped reporting/,
+    "azure's beat was FRESH — this is the exact wrong title the single channel used",
+  );
+  assert.match(mini, /the machine has stopped reporting/, "mini's title must name ITS condition");
+});
+
+test("W1-T3367: a RECOVERED host closes only its own record, and a sick sibling keeps its own", () => {
+  const { calls } = runDeliver(`${HOST_A}\tFRESH\n${HOST_B}\tBEAT_STALE\n`, {
+    branchReports: { [HOST_B]: "b\n" },
+  });
+  assert.ok(
+    calls.some((c) => c.includes("--resolved") && c.includes(`fleet-heartbeat:${HOST_A}`)),
+    `a fresh host must have its record closed: ${JSON.stringify(calls)}`,
+  );
+  assert.ok(
+    calls.some((c) => !c.includes("--resolved") && c.includes(`fleet-heartbeat:${HOST_B}`)),
+    "the still-sick sibling must keep being delivered",
+  );
+  assert.equal(
+    calls.some((c) => c.includes("--resolved") && c.includes(`fleet-heartbeat:${HOST_B}`)),
+    false,
+    "a recovering host must never close its sibling's escalation",
+  );
+});
+
+test("W1-T3367: the legacy unscoped record is retired once, so #4825 cannot sit open forever", () => {
+  const { calls } = runDeliver(`${HOST_A}\tFRESH\n`);
+  const legacy = calls.filter((c) => c.includes("--resolved") && /--source fleet-heartbeat(\s|$)/.test(c));
+  assert.equal(legacy.length, 1, `the pre-change marker must be retired exactly once: ${JSON.stringify(calls)}`);
+});
+
+test("W1-T3367 (falsifier): an EMPTY ledger falls back to the unscoped delivery rather than going silent", () => {
+  // The one thing this job may never do is say nothing. If judging died before writing a verdict,
+  // there is no per-host record to file and the old shape must still reach a human.
+  const { status, calls, stdout } = runDeliver("");
+  assert.equal(status, 0);
+  assert.match(stdout, /falling back to the unscoped delivery/);
+  assert.ok(
+    calls.some((c) => c.includes("--source fleet-heartbeat") && c.includes("--title")),
+    `the fallback must still file something: ${JSON.stringify(calls)}`,
+  );
 });
