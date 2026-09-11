@@ -4239,30 +4239,21 @@ export function ciGateFromRollup(
  * gate actually judged lets the miner be pinned to that same commit within one decision, and makes
  * the shared subject OBSERVABLE in whatever that decision reports.
  */
-/** PRIMARY CONTROL (W1-T1266, W1-T3145): a terminal handoff needs enough evidence to distinguish one red gate from
- * another, but a rollup is unbounded. Keep the detail carried from the gate deliberately
- * small; {@link ciGateBlockReason} retains the complete count when it writes the ledger row. */
+/** Bounded CI evidence distinguishes terminal causes; unavailable is distinct from an observed empty set. */
 export const CI_GATE_EVIDENCE_MAX = 8;
 
 export type CiGateOutcome = {
   state: "green" | "red" | "timeout";
   sha?: string;
-  /** Ordered, bounded names of checks red at a red verdict or pending at a timeout. */
   checks?: string[];
-  /** Total distinct relevant checks before {@link CI_GATE_EVIDENCE_MAX} bounded `checks`. */
   checkCount?: number;
 };
 
-/** Stable, bounded evidence for the terminal handoff. A duplicate status/check-run name is
- * one operational cause, so it is counted once even if GitHub's rollup contains both forms. */
 function boundedCiGateChecks(names: Iterable<string>): { checks: string[]; checkCount: number } {
   const all = [...new Set([...names].map((name) => name.trim() || "unknown"))].sort((a, b) => a.localeCompare(b));
   return { checks: all.slice(0, CI_GATE_EVIDENCE_MAX), checkCount: all.length };
 }
 
-/** Format the one historical `ci <state> before review` family without collapsing its new
- * evidence. Undefined is intentionally distinct from an observed empty set: a legacy stub or
- * unreadable seam supplied no names; an empty list means this gate observed none. */
 export function ciGateBlockReason(r: CiGateOutcome | "green" | "red" | "timeout"): string {
   const state = ciGateState(r);
   const base = `ci ${state} before review`;
