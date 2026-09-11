@@ -93,6 +93,81 @@ function cells(): MountHeadroomCell[] {
 
 const currentMount: Mount = { model: "sonnet", effort: "high", maxTurns: 400, contextBudget: 160000 };
 
+// ── the refusal arms: criterion 2 says a refusal must NAME which exclusion applied ─────────────
+//
+// The suite covered the two exclusions an operator sets deliberately (risk:high, architect/judge
+// lanes). These are the four that fire on the SHAPE of the data — an operator-set policy that
+// cannot be sampled, a cell whose arms no longer include the mount actually in use, and a runner-up
+// that cannot be expressed as spawn knobs. Each refusal is the difference between "we chose not to
+// explore" and "we silently explored nothing", so each has to name itself.
+
+function baseInput(over: Record<string, unknown> = {}) {
+  return {
+    cells: cells(),
+    mounts: mounts(),
+    taskType: "implement",
+    risk: "medium",
+    taskClass: "src",
+    currentMount,
+    runId: "run-refusals",
+    enabledProviders: ["claude", "codex"] as const,
+    ...over,
+  };
+}
+
+test("a policy fraction outside (0, 1] is REFUSED as invalid-policy rather than sampled", () => {
+  for (const fraction of [0, 1.5]) {
+    const decision = exploreMount(
+      baseInput({ policy: { ...MOUNT_EXPLORATION_POLICY, fraction }, sampleUnit: 0 }) as never,
+    );
+    assert.equal(decision.kind, "refusal");
+    assert.equal(decision.kind === "refusal" ? decision.reason : "", "invalid-policy");
+    assert.match(decision.kind === "refusal" ? decision.detail : "", /must be > 0 and <= 1/);
+  }
+  // CONTROL: the shipped fraction is inside the range and the same input explores.
+  assert.equal(exploreMount(baseInput({ sampleUnit: 0 }) as never).kind, "explore");
+});
+
+test("a cell with no arm matching the mount in use is REFUSED as on-policy-arm-missing", () => {
+  const decision = exploreMount(
+    baseInput({ currentMount: { ...currentMount, model: "opus" }, sampleUnit: 0 }) as never,
+  );
+  assert.equal(decision.kind, "refusal");
+  assert.equal(decision.kind === "refusal" ? decision.reason : "", "on-policy-arm-missing");
+  assert.match(decision.kind === "refusal" ? decision.detail : "", /implement::medium::src/, "the refusal names the cell");
+});
+
+test("a runner-up that cannot be expressed as spawn knobs is REFUSED as runner-up-unavailable", () => {
+  // Two enabled arms, so the arms-count guard passes; the on-policy arm matches; the only other arm
+  // names a model the tier table does not carry, so expressArm cannot turn it into a spawn.
+  const unexpressible = [
+    {
+      cellKey: "implement::medium::src",
+      type: "implement",
+      risk: "medium",
+      taskClass: "src",
+      arms: [
+        arm("implement::medium::src", "claude", "claude-sonnet-5", "high", 200),
+        arm("implement::medium::src", "claude", "model-not-in-the-tier-table", "high", 25),
+      ],
+      comparisons: [],
+    },
+  ];
+  const decision = exploreMount(baseInput({ cells: unexpressible, sampleUnit: 0 }) as never);
+  assert.equal(decision.kind, "refusal");
+  assert.equal(decision.kind === "refusal" ? decision.reason : "", "runner-up-unavailable");
+  assert.match(decision.kind === "refusal" ? decision.detail : "", /implement::medium::src/);
+});
+
+test("with no sampleUnit supplied the decision is derived from the run's own identity, deterministically", () => {
+  // Every other test pins sampleUnit; nothing exercised the derivation, which is what decides
+  // whether a real dispatch explores at all.
+  const first = exploreMount(baseInput({ runId: "run-A", taskId: "W1-T1" }) as never);
+  const again = exploreMount(baseInput({ runId: "run-A", taskId: "W1-T1" }) as never);
+  assert.deepEqual(first, again, "the same run must always reach the same decision");
+  assert.ok(first.kind === "explore" || first.kind === "refusal");
+});
+
 test("an eligible cell explores only inside the declared bounded fraction and names the runner-up arm in that same cell", () => {
   const decision = exploreMount({
     cells: cells(),
