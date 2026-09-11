@@ -653,8 +653,6 @@ export function decideAlertPoll(i: AlertPollInputs): AlertPollDecision {
 }
 
 export interface DaemonDeps {
-  /** W1-T3412: command-built calibration once per selection cycle. This pure scheduler owns no
-   * ledger reader, so an unavailable calibration returns undefined and preserves old ordering. */
   buildDispatchValueContext?: (plan: Plan, isMerged: MergedSet) => DispatchValueContext | undefined;
   /** W1-T3216 — the ledger's RAW lines, for {@link resolveReleasedIds}: a console KICK for an
    *  operator-released `verify: human` task must be admitted here too, or the release works from

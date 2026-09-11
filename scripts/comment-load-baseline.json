@@ -176,6 +176,7 @@
   "src/lib/dispatch-claim.ts": 130,
   "src/lib/dispatch-governor.ts": 250,
   "src/lib/dispatch-overlap.ts": 150,
+  "src/lib/dispatch-value.ts": 250,
   "src/lib/doctor.ts": 250,
   "src/lib/drain-lock.ts": 40,
   "src/lib/drain.ts": 750,
