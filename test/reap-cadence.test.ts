@@ -26,7 +26,7 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
-import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "../src/run-task.js";
+import { DECLARED_BRANCH_GUARDS, HANDLERS, reapBranchesCommand } from "../src/run-task.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -107,18 +107,20 @@ test("reap-cadence falsifier: a sweepCommand body that DOES call reapBranchesCom
 });
 
 test("reap-cadence: `reap-branches` and `sweep` are dispatched as separate, mutually exclusive CLI verbs (independent processes)", () => {
-  // Each verb gets its own `if (cmd === "...")` block ending in its own `process.exit`, so
-  // invoking one can never run the other's body in the same process — the structural guarantee
-  // behind "a reap failure cannot abort a sweep pass": they never share a call stack.
-  assert.match(
-    runTaskSrc,
-    /if \(cmd === "reap-branches"\) \{\s*process\.exit\(reapBranchesCommand\(rest\)\);\s*\}/,
-    "reap-branches must be its own dispatch branch with its own process.exit",
-  );
-  assert.match(
-    runTaskSrc,
-    /if \(cmd === "sweep"\) \{\s*process\.exit\(await sweepCommand\(rest\)\);\s*\}/,
-    "sweep must be its own dispatch branch with its own process.exit",
+  // W1-T2893: main() no longer picks a verb's body via its own `if (cmd === "...")` block — it
+  // resolves ONE key against src/cli/registry.ts's HANDLERS map (dispatchCommand) and invokes
+  // exactly that entry's handler. Two distinct verbs therefore structurally CANNOT share a call
+  // stack: a Map lookup by exact key returns at most one value, so dispatching "reap-branches"
+  // can never also reach `sweep`'s handler (or vice versa) in the same invocation — the same
+  // guarantee the old separate-`if`-blocks-each-ending-in-`process.exit` shape gave, now enforced
+  // by the dispatch table's own shape rather than by two independent `if` statements happening to
+  // agree.
+  assert.ok(HANDLERS.has("reap-branches"), "reap-branches must have its own HANDLERS entry");
+  assert.ok(HANDLERS.has("sweep"), "sweep must have its own HANDLERS entry");
+  assert.notEqual(
+    HANDLERS.get("reap-branches"),
+    HANDLERS.get("sweep"),
+    "reap-branches and sweep must resolve to DIFFERENT handler functions — a shared handler would let one silently run the other's body",
   );
 });
 

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runTask, lintPlanCommand } from "../src/run-task.js";
+import { runTask, lintPlanCommand, HANDLERS } from "../src/run-task.js";
 import { assertLintClean } from "../src/lib/task-linter.js";
 import { loadPlan } from "../src/lib/plan.js";
 import type { Config } from "../src/lib/config.js";
@@ -348,7 +348,9 @@ test("impl-AK: the pre-dispatch gate passes ONE options object to both lint call
 // ── the CI half is wired too ───────────────────────────────────────────────────
 
 test("rmd lint-plan is wired into the CLI dispatch", () => {
-  assert.match(runTaskSrc, /cmd === "lint-plan"/);
+  // W1-T2893: main() resolves "lint-plan" against src/cli/registry.ts's HANDLERS map
+  // (dispatchCommand) rather than its own `cmd === "lint-plan"` branch.
+  assert.ok(HANDLERS.has("lint-plan"), "HANDLERS must have a 'lint-plan' entry for dispatchCommand to resolve");
   assert.match(runTaskSrc, /lintPlanCommand/);
 });
 

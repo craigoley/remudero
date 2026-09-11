@@ -342,6 +342,7 @@
     "test/claude-model-health-routing.test.ts": 1360,
     "test/cli-plumbing-extraction.test.ts": 4284,
     "test/cli-reference.test.ts": 10702,
+    "test/cli-registry-dispatches.test.ts": 0,
     "test/cli-verbs-mint-the-app-token.test.ts": 1883,
     "test/clock-port.test.ts": 172,
     "test/clock-shift-probe.test.ts": 432,

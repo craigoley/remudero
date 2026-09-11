@@ -36192,31 +36192,20 @@ async function correctCommand(rest: string[]): Promise<number> {
  */
 export const SUMMARY_CHAR_CAP = 100;
 
-interface CommandSpec {
-  /** Exact token matched against argv[2] in main()'s dispatch below. */
-  readonly name: string;
-  /**
-   * Invocation shape ("rmd <name> ..."), no trailing description — what `rmd --help` and
-   * `rmd <cmd> --help` render on the usage line, and what `commandSyntax` returns verbatim for
-   * inline error hints. Stored directly (W1-T2480) instead of recovered at read time from a
-   * combined string by a separator regex: an entry that forgets a separator has nothing to
-   * forget, because this field was never anything but the invocation shape.
-   */
-  readonly syntax: string;
-  /**
-   * One short line (<= SUMMARY_CHAR_CAP characters) printed per command by the top-level
-   * `rmd --help` listing (W1-T2480). A genuinely separate, hand-authored sentence — never a
-   * truncation or a preview of `detail` — so the top-level list stays short without silently
-   * dropping any of the prose `detail` carries in full.
-   */
-  readonly summary: string;
-  /**
-   * Full prose: flag semantics, exit-code tables, PR citations — everything that makes this
-   * registry the trustworthy record it is. Printed in full by `rmd <cmd> --help` and rendered
-   * verbatim into docs/cli-reference.md; never abbreviated or dropped for the top-level listing.
-   */
-  readonly detail: string;
-}
+// CommandSpec MOVED to src/cli/registry.ts (W1-T2893, decomposition step 10) — that file is now
+// the one place a verb's help metadata is DECLARED as a type, alongside CommandHandler,
+// RegisteredCommand, buildRegistry and dispatchCommand, so the registry can carry (and
+// dispatchCommand can resolve) a verb's handler, not just its `--help` text. `COMMANDS` (the
+// literal data array, just below) STAYS here: it is built from `renderFastGateScriptList`, a
+// local function (scripts/rmd-help.mjs also source-scans src/run-task.ts's COMMANDS block
+// directly for the no-SDK-load `rmd --help` path), so only the shared TYPE moved.
+import {
+  type CommandSpec,
+  type CommandHandler,
+  type RegisteredCommand,
+  buildRegistry,
+  dispatchCommand,
+} from "./cli/registry.js";
 
 export type HeavyVerbName = "review" | "dep-review" | "drain" | "daemon";
 
@@ -37117,6 +37106,258 @@ export function installUnhandledRejectionGuard(deps: UnhandledRejectionGuardDeps
   return true;
 }
 
+/**
+ * W1-T2893 — every verb's handler, keyed by the same name its COMMANDS entry (above) carries.
+ * This IS the dispatch table `main()` used to encode as a 300-line flat if-ladder (`if (cmd ===
+ * "x") { process.exit(await xCommand(rest)); }`, repeated once per verb) — moved here verbatim,
+ * one map entry per former `if` branch, `process.exit(EXPR)` rewritten to `return EXPR` because a
+ * handler reports its exit code rather than ending the process itself (that stays main()'s
+ * process-boundary job, via {@link dispatchCommand}). A verb whose old branch also gated on `&&
+ * arg` (a required positional) keeps that exact gate inline — same fallthrough result as before,
+ * `USAGE` printed and exit 2, since a missing `cmd === "x"` match and a present-but-argless "x"
+ * both used to land on the SAME bottom-of-ladder fallback.
+ *
+ * None of these closures runs at module load — building this Map only captures references to
+ * the functions it calls (`runTask`, `reviewCommand`, ...), so it is safe regardless of where in
+ * this file each referenced function is itself declared.
+ */
+const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHandler>([
+  [
+    "note",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await noteCommand(rest);
+    },
+  ],
+  [
+    "wipe-test",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await wipeTestCommand(rest);
+    },
+  ],
+  [
+    "run-task",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      const badArg = unknownArgError("run-task", rest.slice(1), [], ["--allow-stale", "--rerun"]);
+      if (badArg) {
+        console.error(badArg + "\n" + USAGE);
+        return 2;
+      }
+      const result = await runTask(arg, {
+        allowStale: rest.includes("--allow-stale"),
+        rerun: rest.includes("--rerun"),
+      });
+      console.log("\n" + JSON.stringify(result, null, 2));
+      return result.merged ? 0 : 1;
+    },
+  ],
+  [
+    "review",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      await loadHeavyVerb("review");
+      return await reviewCommand(arg, rest.slice(1));
+    },
+  ],
+  ["merge-hold", (rest) => mergeHoldCommand(rest)],
+  [
+    "dep-review",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      await loadHeavyVerb("dep-review");
+      return await depReviewCommand(arg, rest.slice(1));
+    },
+  ],
+  [
+    "receipt",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await receiptCommand(arg, rest.slice(1), { repoRoot, resolveOwnerRepo });
+    },
+  ],
+  [
+    "replay",
+    (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return replayCommand(arg, rest[1], rest.slice(2), { usage: USAGE, commandSyntax: commandSyntax("replay") });
+    },
+  ],
+  ["authority", (rest) => authorityCommand(rest)],
+  ["lint-plan", async (rest) => await lintPlanCommand(rest)],
+  ["plan-reconcile", async (rest) => await planReconcileCommand(rest)],
+  ["proof-queue-audit", async (rest) => await proofQueueAuditCommand(rest)],
+  ["preflight", async (rest) => await preflightCommand(rest)],
+  ["emissions", (rest) => emissionsCommand(rest)],
+  ["check-proof", (rest) => checkProofCommand(rest)],
+  ["reap-branches", (rest) => reapBranchesCommand(rest)],
+  ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
+  ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
+  ["hand-runs", (rest) => handRunsCommand(rest)],
+  ["ci-failures", (rest) => ciFailuresCommand(rest)],
+  ["census-membership", (rest) => censusMembershipCommand(rest)],
+  ["caller-sweep", (rest) => callerSweepCommand(rest)],
+  ["ci-learning", (rest) => ciLearningCommand(rest)],
+  ["rule-efficacy", (rest) => ruleEfficacyCommand(rest)],
+  ["coverage-improve", (rest) => coverageImproveCommand(rest)],
+  ["verdict-calibration", (rest) => verdictCalibrationCommand(rest)],
+  ["autonomy-rate", (rest) => autonomyRateCommand(rest)],
+  ["replay-goldens", async (rest) => await replayGoldensCommand(rest)],
+  ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
+  ["next-task-id", async (rest) => await nextTaskIdCommand(rest)],
+  [
+    "retro",
+    async (rest) => {
+      const encodedAutomatedDecision = process.env[AUTOMATED_RETRO_DECISION_ENV];
+      const automated =
+        encodedAutomatedDecision === undefined ? undefined : decodeAutomatedRetroDecision(encodedAutomatedDecision);
+      return await retroCommand(rest, automated ? { automated } : {});
+    },
+  ],
+  [
+    "drain",
+    async (rest) => {
+      await loadHeavyVerb("drain");
+      return await drainCommand(rest);
+    },
+  ],
+  [
+    "daemon",
+    async (rest) => {
+      await loadHeavyVerb("daemon");
+      return await daemonCommand(rest);
+    },
+  ],
+  ["daemon-plist", async (rest) => await daemonPlistCommand(rest)],
+  ["deploy", async (rest) => await deployCommand(rest)],
+  ["deploy-run", async (rest) => await deployRunCommand(rest)],
+  ["deploy-plist", async (rest) => await deployPlistCommand(rest)],
+  ["install-checkout", async (rest) => await installCheckoutCommand(rest)],
+  ["serve", async (rest) => await serveCommand(rest)],
+  ["relay", async (rest) => await relayConnectCommand(rest)],
+  ["console-url", async (rest) => await consoleUrlCommand(rest, loadConfig())],
+  ["serve-plist", async (rest) => await servePlistCommand(rest)],
+  ["down", async (rest) => await downCommand(rest)],
+  ["up", async (rest) => await upCommand(rest)],
+  ["sync", (rest) => syncCommand(rest)],
+  ["doctor", async (rest) => await doctorCommand(rest, { repoRoot })],
+  ["status", async (rest) => await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
+  ["sweep", async (rest) => await sweepCommand(rest)],
+  [
+    "fix",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await fixCommand(rest);
+    },
+  ],
+  ["stop", async (rest) => await stopCommand(rest)],
+  ["pause", async (rest) => await pauseCommand(rest)],
+  ["resume", async () => await resumeFleetCommand()],
+  ["away", async (rest) => await awayCommand(rest)],
+  [
+    "correct",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await correctCommand(rest);
+    },
+  ],
+  ["escalate", async (rest) => await escalateCommand(rest)],
+  ["notify", async (rest) => await notifyCommand(rest)],
+  ["feedback", async (rest) => await feedbackCommand(rest)],
+  ["triage", async (rest) => await triageCommand(rest)],
+  ["ratify", (rest) => ratifyCommand(rest)],
+  ["digest", async (rest) => await digestCommand(rest)],
+  ["digest-plist", async (rest) => await digestPlistCommand(rest, { usage: USAGE })],
+  ["ops", async (rest) => await opsCommand(rest)],
+  ["alert-fix", async (rest) => await alertFixCommand(rest)],
+  ["issues", async (rest) => await issuesCommand(rest)],
+  ["init", async (rest) => await initCommand(rest)],
+  ["project", async (rest) => await projectCommand(rest)],
+  ["onboard", async (rest) => await onboardCommand(rest)],
+  ["skill", async (rest) => await skillCommand(rest)],
+  ["learnings", (rest) => learningsCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
+  ["bundle", (rest) => bundleCommand(rest)],
+  [
+    "trace",
+    async (rest) =>
+      await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot, resolveOwnerRepo }),
+  ],
+  ["peek", async (rest) => await peekCommand(rest)],
+  ["plan", async (rest) => await planCommand(rest)],
+  ["inbox", async (rest) => await inboxCommand(rest)],
+  [
+    "approve",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await approveCommand(rest);
+    },
+  ],
+  ["verify-human-sweep", async (rest) => await verifyHumanSweepCommand(rest)],
+  ["rule", async (rest) => await ruleCommand(rest)],
+  [
+    "reframe",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await reframeCommand(rest);
+    },
+  ],
+]);
+
+/**
+ * W1-T2893 — `COMMANDS`' help metadata joined with {@link HANDLERS}, built ONCE at module load.
+ * `buildRegistry` throws immediately if the two have drifted apart (a COMMANDS entry with no
+ * handler, or vice versa is simply impossible to express — HANDLERS only has entries someone
+ * wrote), which is what replaces test/help-registry.test.ts's old source-text scan of main()'s
+ * if-ladder: the drift it used to catch by reading text is now a crash the first time `rmd` runs
+ * at all, main() included.
+ */
+const REGISTRY: readonly RegisteredCommand[] = buildRegistry(COMMANDS, HANDLERS);
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 export async function main(
   // W1-T79/W1-T221: the freshness check is injectable so a `callMain` test can drive the
@@ -37147,7 +37388,9 @@ export async function main(
     /* best-effort by contract — never let housekeeping fail the verb the operator asked for */
   }
   const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
-  const arg = rest[0];
+  // W1-T2893: `arg` (== rest[0]) is no longer read here — each HANDLERS entry that needs it
+  // (registry.ts's REGISTRY, built above) derives its own from `rest`, since the old flat
+  // if-ladder this replaced is gone and this was its only remaining reader in main() itself.
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
   // process regardless of which dispatch arm below (if any) ends up matching `cmd`.
   logCliInvocation(cmd, rest);
@@ -37274,318 +37517,13 @@ export async function main(
     }
     if (freshness.status === "synced") return;
   }
-  // W1-T86: checked directly after the (mandatory, every-call) help preamble above -- NOT
-  // in its "natural" alphabetical/registration spot further down, beside fix. A behavioral
-  // test of THIS dispatch branch must call main() itself (the only way to exercise the
-  // literal `if (cmd === "wipe-test" ...)` lines the diff-coverage gate polices), and
-  // main()'s flat if-ladder means EVERY dispatch check main() reaches before finding its
-  // match gets evaluated too. Sitting first (right after the unavoidable help checks) means
-  // that test evaluates no OTHER sibling's dispatch condition at all.
-  if (cmd === "wipe-test" && arg) {
-    process.exit(await wipeTestCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(...) around the runTask call
-  // cannot carry a DA hit without forking the process; the dispatched logic itself — arg
-  // validation (unknownArgError, incl. --rerun), the already-merged refusal (W1-T319), and
-  // every terminal verdict runTask can return — is unit-tested directly, driving REAL runTask()
-  // calls, in test/run-task.test.ts (same irreducible-glue shape as the sibling emissions/
-  // console-url/down/up/status/away dispatch cases just below).
-  if (cmd === "run-task" && arg) {
-    const badArg = unknownArgError("run-task", rest.slice(1), [], ["--allow-stale", "--rerun"]);
-    if (badArg) {
-      console.error(badArg + "\n" + USAGE);
-      process.exit(2);
-    }
-    const result = await runTask(arg, {
-      allowStale: rest.includes("--allow-stale"),
-      rerun: rest.includes("--rerun"),
-    });
-    console.log("\n" + JSON.stringify(result, null, 2));
-    process.exit(result.merged ? 0 : 1);
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
-  if (cmd === "review" && arg) {
-    await loadHeavyVerb("review");
-    process.exit(await reviewCommand(arg, rest.slice(1)));
-  }
-  // diff-cov: process-boundary — main() only translates mergeHoldCommand's tested return into
-  // process.exit; parsing, attribution, append, read-back and idempotent release are unit-tested.
-  if (cmd === "merge-hold") {
-    process.exit(mergeHoldCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
-  if (cmd === "dep-review" && arg) {
-    await loadHeavyVerb("dep-review");
-    process.exit(await depReviewCommand(arg, rest.slice(1)));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await receiptCommand(arg, rest.slice(1))) cannot carry a DA hit without forking the process; receiptCommand's own logic — the unknown-arg refusal, the trailer resolution/refusal, and the buildReceipt print path — is unit-tested in test/receipt.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
-  if (cmd === "receipt" && arg) {
-    process.exit(await receiptCommand(arg, rest.slice(1), { repoRoot, resolveOwnerRepo }));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(replayCommand(arg, rest[1], rest.slice(2))) cannot carry a DA hit without forking the process; replayCommand's own logic — arg validation, the resolved/refused union branches, and the buildReplay print path — is unit-tested in test/ledger-replay.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/receipt/ledger-grep dispatch cases).
-  if (cmd === "replay" && arg) {
-    process.exit(replayCommand(arg, rest[1], rest.slice(2), { usage: USAGE, commandSyntax: commandSyntax("replay") }));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(authorityCommand(rest)) cannot carry a DA hit without forking the process; authorityCommand's own logic — arg validation, the policy/pins/ledger join, the refused-union branch, and the JSON/table render — is unit-tested in test/authority-table.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/receipt/replay dispatch cases).
-  if (cmd === "authority") {
-    process.exit(authorityCommand(rest));
-  }
-  if (cmd === "lint-plan") {
-    process.exit(await lintPlanCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await proofQueueAuditCommand(rest)) cannot carry a DA hit without forking the process; proofQueueAuditCommand's own logic — arg validation, the open+unmerged population derivation, and the report render — is unit-tested in test/proof-queue-audit.test.ts (same irreducible-glue shape as the sibling lint-plan/emissions dispatch cases).
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await planReconcileCommand(rest)) cannot carry a DA hit without forking the process; planReconcileCommand's own logic is unit-tested in test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts (same irreducible-glue shape as the sibling proof-queue-audit dispatch case below).
-  if (cmd === "plan-reconcile") {
-    process.exit(await planReconcileCommand(rest));
-  }
-  if (cmd === "proof-queue-audit") {
-    process.exit(await proofQueueAuditCommand(rest));
-  }
-  if (cmd === "preflight") {
-    process.exit(await preflightCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(emissionsCommand(rest)) cannot carry a DA hit without forking the process; emissionsCommand's own logic — arg validation, the corpus union, the derivation/attribution and the render — is unit-tested in test/emissions.test.ts (same irreducible-glue shape as the sibling console-url/down/up dispatch cases).
-  if (cmd === "emissions") {
-    process.exit(emissionsCommand(rest));
-  }
-  if (cmd === "check-proof") {
-    process.exit(checkProofCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ledgerGrepCommand(rest)) cannot carry a DA hit without forking the process; ledgerGrepCommand's own logic — arg validation, the archive glob, the zero-archive verdict, and the deduplicated match render — is unit-tested in test/ledger-grep.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(reapBranchesCommand(rest)) cannot carry a DA hit without forking the process; reapBranchesCommand's own logic — arg validation, the empty-listing refusal, the classification and the drift exit — is unit-tested in test/branch-reaper-dry-run.test.ts (same irreducible-glue shape as the sibling ledger-grep dispatch case).
-  if (cmd === "reap-branches") {
-    process.exit(reapBranchesCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ledgerGrepCommand(rest, ...)) cannot carry a DA hit without forking the process; ledgerGrepCommand's own logic is unit-tested in test/report-commands.test.ts (same irreducible-glue shape as the hand-runs dispatch case below).
-  if (cmd === "ledger-grep") {
-    process.exit(ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") }));
-  }
-  // diff-cov: process-boundary — main() only translates ledgerCompactCommand's tested return into
-  // process.exit; selection, dry-run, collision refusal, atomic replacement and cleanup are unit-tested.
-  if (cmd === "ledger-compact") {
-    process.exit(ledgerCompactCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(handRunsCommand(rest)) cannot carry a DA hit without forking the process; handRunsCommand's own logic — arg validation, the state-dir resolution, the refused/measured render — is unit-tested in test/hand-run-census.test.ts (same irreducible-glue shape as the sibling ledger-grep dispatch case).
-  if (cmd === "hand-runs") {
-    process.exit(handRunsCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ciFailuresCommand(rest)) cannot carry a DA hit without forking the process; ciFailuresCommand's own logic — arg validation, the --days bound, the window load and every corpus status render — is unit-tested in test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts (same irreducible-glue shape as the sibling rule-efficacy/check-proof/emissions dispatch cases).
-  if (cmd === "ci-failures") {
-    process.exit(ciFailuresCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ciLearningCommand(rest)) cannot carry a DA hit without forking the process; ciLearningCommand's own logic — arg validation, the --days bound, the cadence refusal, the window-load failure and every draft/excluded render — is unit-tested in test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts (same irreducible-glue shape as the sibling ci-failures/rule-efficacy/check-proof dispatch cases).
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(censusMembershipCommand(rest)) cannot carry a DA hit without forking the process; censusMembershipCommand's own logic — arg validation, the --base bound, the unreadable-diff arm, and every render path (joining, none, unmodelled) — is unit-tested in test/the-census-map-names-four-suites-and-no-verb-reads-it.test.ts (same irreducible-glue shape as the sibling ci-learning/ci-failures/rule-efficacy dispatch cases).
-  if (cmd === "census-membership") {
-    process.exit(censusMembershipCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(callerSweepCommand(rest)) cannot carry a DA hit without forking the process; callerSweepCommand's own logic — arg validation, the empty-symbol refusal, and the report/--files render paths — is unit-tested in test/the-caller-sweep-stops-at-one-hop.test.ts (same irreducible-glue shape as the sibling census-membership/ci-learning/ci-failures dispatch cases).
-  if (cmd === "caller-sweep") {
-    process.exit(callerSweepCommand(rest));
-  }
-  if (cmd === "ci-learning") {
-    process.exit(ciLearningCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ruleEfficacyCommand(rest)) cannot carry a DA hit without forking the process; ruleEfficacyCommand's own logic — arg validation, the signature-table walk, the PREVENTING/REPEATING/UNMEASURABLE render, and the escalation write — is unit-tested in test/rule-efficacy.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
-  if (cmd === "rule-efficacy") {
-    process.exit(ruleEfficacyCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(coverageImproveCommand(rest)) cannot carry a DA hit without forking the process; coverageImproveCommand's own logic — arg validation, the lcov read failure, and every injectCoverageImprovementTask action (healthy/blocking/no-debt/skipped-duplicate/filed) — is unit-tested in test/coverage-improvement.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep/rule-efficacy dispatch cases).
-  if (cmd === "coverage-improve") {
-    process.exit(coverageImproveCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(verdictCalibrationCommand(rest)) cannot carry a DA hit without forking the process; verdictCalibrationCommand's own logic — arg validation, the ledger+git join, the per-class render and the UNMEASURABLE listing — is unit-tested in test/verdict-calibration.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep/rule-efficacy dispatch cases).
-  if (cmd === "verdict-calibration") {
-    process.exit(verdictCalibrationCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(autonomyRateCommand(rest)) cannot carry a DA hit without forking the process; autonomyRateCommand's own logic — arg validation, the ledger+git join, the zero-touch classification, the per-class render and the touched-merge listing — is unit-tested in test/autonomy-ratchet.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep/rule-efficacy/verdict-calibration dispatch cases).
-  if (cmd === "autonomy-rate") {
-    process.exit(autonomyRateCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(checkAcceptanceCommand(rest)) cannot carry a DA hit without forking the process; checkAcceptanceCommand's own logic — the usage refusal, the unreadable-file refusal, the truncation report, the missing-header report and the clean pass — is unit-tested in test/acceptance-block-diagnostics.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await replayGoldensCommand(rest)) cannot carry a DA hit without forking the process; replayGoldensCommand's own logic — all three refusals, the zero-golden silence, and the recording happy path — is unit-tested in test/the-golden-suite-has-every-piece-except-a-producer.test.ts (same irreducible-glue shape as the sibling check-acceptance/check-proof dispatch cases).
-  if (cmd === "replay-goldens") {
-    process.exit(await replayGoldensCommand(rest));
-  }
-  if (cmd === "check-acceptance") {
-    process.exit(checkAcceptanceCommand(rest));
-  }
-  if (cmd === "next-task-id") {
-    process.exit(await nextTaskIdCommand(rest));
-  }
-  if (cmd === "retro") {
-    const encodedAutomatedDecision = process.env[AUTOMATED_RETRO_DECISION_ENV];
-    const automated = encodedAutomatedDecision === undefined
-      ? undefined
-      : decodeAutomatedRetroDecision(encodedAutomatedDecision);
-    process.exit(await retroCommand(rest, automated ? { automated } : {}));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
-  if (cmd === "drain") {
-    await loadHeavyVerb("drain");
-    process.exit(await drainCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
-  if (cmd === "daemon") {
-    await loadHeavyVerb("daemon");
-    process.exit(await daemonCommand(rest));
-  }
-  if (cmd === "daemon-plist") {
-    process.exit(await daemonPlistCommand(rest));
-  }
-  if (cmd === "deploy") {
-    process.exit(await deployCommand(rest));
-  }
-  if (cmd === "deploy-run") {
-    process.exit(await deployRunCommand(rest));
-  }
-  if (cmd === "deploy-plist") {
-    process.exit(await deployPlistCommand(rest));
-  }
-  if (cmd === "install-checkout") {
-    process.exit(await installCheckoutCommand(rest));
-  }
-  if (cmd === "serve") {
-    process.exit(await serveCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await relayConnectCommand(rest)) cannot carry a DA hit without forking the process; relayConnectCommand's own logic — the argv refusal, the both-or-nothing relay-config check, the local-target port resolution and the ledgered start/stop around a real outbound dial — is unit-tested in test/relay-connect-command.test.ts (same irreducible-glue shape as the sibling console-url dispatch case directly below).
-  if (cmd === "relay") {
-    process.exit(await relayConnectCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await consoleUrlCommand(rest, loadConfig())) cannot carry a DA hit without forking the process; consoleUrlCommand's own logic — the URL assembly, the --write TTY refusal, and all three failure modes — is unit-tested in test/console-url.test.ts (same irreducible-glue shape as the sibling away/pause/resume dispatch cases).
-  if (cmd === "console-url") {
-    process.exit(await consoleUrlCommand(rest, loadConfig()));
-  }
-  if (cmd === "serve-plist") {
-    process.exit(await servePlistCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await downCommand(rest)) cannot carry a DA hit without forking the process; downCommand's own logic — the wind-down sequencing, the reap-wait, the recoverability report, and every idempotency/refusal branch — is unit-tested in test/rmd-down-up.test.ts (same irreducible-glue shape as the sibling console-url/away dispatch cases).
-  if (cmd === "down") {
-    process.exit(await downCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await upCommand(rest)) cannot carry a DA hit without forking the process; upCommand's own logic — install-freshness-first, the off-main refuse, the idempotent load sequencing, and the resume report — is unit-tested in test/rmd-down-up.test.ts (same irreducible-glue shape as the sibling console-url/away dispatch cases).
-  if (cmd === "up") {
-    process.exit(await upCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(syncCommand(rest)) cannot carry a DA hit without forking the process; syncCommand's own logic (arg validation, exit-code translation) and the git-driving classify/preserve/discard/ff-pull logic it wraps (runOperatorSync) are unit-tested directly in test/operator-sync.test.ts (same irreducible-glue shape as the sibling emissions/ledger-grep dispatch cases).
-  if (cmd === "sync") {
-    process.exit(syncCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await statusCommand(rest)) cannot carry a DA hit without forking the process; statusCommand's own logic (arg validation, the queryService closure, --json vs text) plus the read model it calls (buildStatusBoard/renderStatusBoardText) are unit-tested in test/status-board.test.ts (same irreducible-glue shape as the sibling console-url/away/down/up dispatch cases).
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await doctorCommand(rest)) cannot carry a DA hit without forking the process; doctorCommand's own logic (arg refusal, the reader wiring, the exit-code translation) and every judgement it composes (buildDoctorReport and the pure judge* arms) are unit-tested in test/doctor.test.ts (same irreducible-glue shape as the sibling status/console-url dispatch cases).
-  if (cmd === "doctor") {
-    process.exit(await doctorCommand(rest, { repoRoot }));
-  }
-  if (cmd === "status") {
-    process.exit(await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo }));
-  }
-  if (cmd === "sweep") {
-    process.exit(await sweepCommand(rest));
-  }
-  if (cmd === "fix" && arg) {
-    process.exit(await fixCommand(rest));
-  }
-  if (cmd === "stop") {
-    process.exit(await stopCommand(rest));
-  }
-  if (cmd === "pause") {
-    process.exit(await pauseCommand(rest));
-  }
-  if (cmd === "resume") {
-    process.exit(await resumeFleetCommand());
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await awayCommand(rest)) cannot carry a DA hit without forking the process; awayCommand's own logic is unit-tested in test/away-mode-delivery.test.ts (same irreducible-glue shape as the sibling pause/resume/correct dispatch cases).
-  if (cmd === "away") {
-    process.exit(await awayCommand(rest));
-  }
-  if (cmd === "correct" && arg) {
-    process.exit(await correctCommand(rest));
-  }
-  if (cmd === "escalate") {
-    process.exit(await escalateCommand(rest));
-  }
-  if (cmd === "notify") {
-    process.exit(await notifyCommand(rest));
-  }
-  // diff-cov: process-boundary — main() only translates feedbackCommand's tested return into a process exit; capture, validation, append and notification behavior are unit-tested through feedbackCommand directly.
-  if (cmd === "feedback") {
-    process.exit(await feedbackCommand(rest));
-  }
-  if (cmd === "triage") {
-    process.exit(await triageCommand(rest));
-  }
-  if (cmd === "ratify") {
-    process.exit(ratifyCommand(rest));
-  }
-  if (cmd === "digest") {
-    process.exit(await digestCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await digestPlistCommand(rest, ...)) cannot carry a DA hit without forking the process; digestPlistCommand's own logic is unit-tested in test/report-commands.test.ts (same irreducible-glue shape as the ledger-grep dispatch case above).
-  if (cmd === "digest-plist") {
-    process.exit(await digestPlistCommand(rest, { usage: USAGE }));
-  }
-  if (cmd === "ops") {
-    process.exit(await opsCommand(rest));
-  }
-  if (cmd === "alert-fix") {
-    process.exit(await alertFixCommand(rest));
-  }
-  if (cmd === "issues") {
-    process.exit(await issuesCommand(rest));
-  }
-  if (cmd === "init") {
-    process.exit(await initCommand(rest));
-  }
-  if (cmd === "project") {
-    process.exit(await projectCommand(rest));
-  }
-  if (cmd === "onboard") {
-    process.exit(await onboardCommand(rest));
-  }
-  if (cmd === "skill") {
-    process.exit(await skillCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(learningsCommand(rest)) cannot carry a DA hit without forking the process; learningsCommand's own logic — the export/import subcommand routing, arg validation, the privacy/tripwire refusals, and the pin-verified write — is unit-tested directly in test/learnings-commons.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
-  if (cmd === "learnings") {
-    process.exit(learningsCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo }));
-  }
-  // diff-cov: process-boundary — same irreducible-glue shape as the `learnings` dispatch just
-  // above: bundleCommand's own subcommand routing, arg validation, and the pure-builder call are
-  // unit-tested directly in test/bundle-export.test.ts.
-  if (cmd === "bundle") {
-    process.exit(bundleCommand(rest));
-  }
-  if (cmd === "trace") {
-    process.exit(await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot, resolveOwnerRepo }));
-  }
-  if (cmd === "peek") {
-    process.exit(await peekCommand(rest));
-  }
-  if (cmd === "plan") {
-    process.exit(await planCommand(rest));
-  }
-  if (cmd === "inbox") {
-    process.exit(await inboxCommand(rest));
-  }
-  if (cmd === "approve" && arg) {
-    process.exit(await approveCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await verifyHumanSweepCommand(rest)) cannot carry a DA hit without forking the process; the command's own logic — the unknown-arg refusal, the --dry-run report, the real pass's routing and summary — is unit-tested in test/a-verify-human-shard-is-judged.test.ts through its root/config/route/clock seams (same shape as the sibling inbox/approve/receipt dispatch cases).
-  if (cmd === "verify-human-sweep") {
-    process.exit(await verifyHumanSweepCommand(rest));
-  }
-  if (cmd === "rule") {
-    /* c8 ignore next -- process-boundary dispatch; ruleCommand is exercised directly above. */
-    process.exit(await ruleCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await noteCommand(rest)) cannot carry a DA hit without forking the process; noteCommand's own logic — the usage refusal on a missing id or empty text, the verbatim note write and its ledger step, and the store-failure exit — is unit-tested in test/an-operator-note-reaches-the-docket-from-the-cli.test.ts (same shape as the sibling verify-human-sweep/inbox/approve dispatch cases).
-  if (cmd === "note" && arg) {
-    process.exit(await noteCommand(rest));
-  }
-  if (cmd === "reframe" && arg) {
-    process.exit(await reframeCommand(rest));
-  }
-  console.error(USAGE);
-  process.exit(2);
+  // W1-T2893: every verb's dispatch used to be a flat if-ladder here (one `if (cmd === "x")
+  // { process.exit(await xCommand(rest)); }` per verb, ~300 lines). That ladder is now
+  // src/cli/registry.ts's HANDLERS map (built once, just above) plus dispatchCommand, which
+  // resolves `cmd` against REGISTRY and invokes its handler -- main() keeps only the
+  // process-boundary concerns the task record calls out: the freshness gate above, and the
+  // exit code translation right here.
+  process.exit(await dispatchCommand(cmd, rest, REGISTRY, USAGE));
 }
 
 // diff-cov: process-boundary - direct CLI guard; imported tests cover `main()` and
@@ -37623,6 +37561,11 @@ export { commitsAhead };
 // commandSyntax/commandSpec are the same lookup individual command handlers use for their
 // inline usage hints (fix/escalate/notify/project/correct) — no hand-written duplicate text.
 export { COMMANDS, USAGE, commandHelp, commandSpec, commandSyntax, type CommandSpec };
+// Exported for W1-T2893's help-registry test: HANDLERS is the dispatch table dispatchCommand
+// resolves `cmd` against (built just above main()) — export only, logic unchanged. Replaces the
+// old source-text scan of main()'s flat if-ladder (that ladder no longer exists) with a direct
+// structural check that COMMANDS and HANDLERS name exactly the same set of verbs.
+export { HANDLERS };
 // Exported for W1-T2479's agreement-control test: assertVerbScanAgreesWithRegistry is the caller-
 // side check that the emissions census (lib/emissions.ts's deriveCliVerbs) and this file's own
 // COMMANDS registry name the same verbs — export only, logic lives inline in emissionsCommand.
