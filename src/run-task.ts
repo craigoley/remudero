@@ -27255,6 +27255,8 @@ export async function serveCommand(
       secret: githubEventWakeSecret,
       repository: `${self.owner}/${self.repo}`,
       dedupCapacity: githubEventWakePolicy?.values.githubEventWake.dedupCapacity,
+      semanticCheckMode: githubEventWakePolicy?.values.githubEventWake.semanticCheckMode,
+      aggregateCheckNames: githubEventWakePolicy?.values.githubEventWake.aggregateCheckNames,
     },
   });
 
