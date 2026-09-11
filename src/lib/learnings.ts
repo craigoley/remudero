@@ -10,8 +10,9 @@ import { EXTERNAL_SOURCE_CLASSES, type ExternalSourceClass } from "./untrusted-e
 
 /**
  * Promptsmith: the read side of the compounding thesis (WS-8, W1-T19, W1-T33). It injects the two
- * doctrine lines and the file-matched `learnings/*.yaml` facts into every rendered implement
- * prompt. Matching is deterministic by an entry's `files:` globs, never semantic; a knowledge
+ * doctrine lines and the matched `learnings/*.yaml` facts into every rendered implement
+ * prompt. Matching is deterministic by an entry's `files:` globs and optional declared
+ * `symbols:`/`error_signatures:`, never embedding-based or semantic; a knowledge
  * budget caps the injected chars, so a growing corpus can never become an unbounded context tax;
  * and every injected line carries `[src: learnings#<id>]`, so the prompt still passes the
  * provenance linter (Standing rule 1). The corpus is sharded by subsystem and read through a
@@ -139,8 +140,12 @@ export interface LearningEntry {
    *  `rmd learnings export`. Omitting it means private forever, and {@link selectExportableEntries}
    *  never includes an entry the exporter merely guesses is safe. */
   share?: Share;
-  /** Repo-relative globs; an entry matches a task iff one glob hits a task file. */
+  /** Repo-relative globs; an entry matches a task file when one glob hits it. */
   files: string[];
+  /** Optional whole-token identifiers this fact is about, matched against task/recon text. */
+  symbols?: string[];
+  /** Optional literal refusal/error substrings this fact explains, matched against task/recon text. */
+  errorSignatures?: string[];
   /** The fact itself — one line, the thing a worker inherits. */
   fact: string;
   /** Provenance of the fact (e.g. `PR#8`); recorded lineage, not the injected src. */
@@ -210,6 +215,15 @@ function globToRegExp(glob: string): RegExp {
 function matchCount(entry: LearningEntry, taskFiles: string[]): number {
   const globs = entry.files.map(globToRegExp);
   return taskFiles.filter((f) => globs.some((g) => g.test(f))).length;
+}
+
+function stringList(e: Record<string, unknown>, key: string, id: string, sourceLabel: string): string[] | undefined {
+  const value = e[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.length === 0)) {
+    throw new LearningsError(`learnings '${id}': '${key}' must be a list of non-empty strings (${sourceLabel}).`);
+  }
+  return value as string[];
 }
 
 /**
@@ -314,6 +328,8 @@ function parseLearningsDoc(
     if (!Array.isArray(e.files) || e.files.some((f) => typeof f !== "string")) {
       throw new LearningsError(`learnings '${id}': 'files' must be a list of globs (${sourceLabel}).`);
     }
+    const symbols = stringList(e, "symbols", id, sourceLabel);
+    const errorSignatures = stringList(e, "error_signatures", id, sourceLabel);
     let lifecycle: Lifecycle = "active";
     if (e.lifecycle !== undefined) {
       if (
@@ -397,6 +413,8 @@ function parseLearningsDoc(
       layer,
       share,
       files: e.files as string[],
+      symbols,
+      errorSignatures,
       fact: e.fact,
       src: e.src,
       cited: typeof e.cited === "string" ? e.cited : undefined,
@@ -460,9 +478,9 @@ export function seedProjectLearningsHomeFiles(): Record<string, string> {
   for (const name of PROJECT_LEARNINGS_SHARD_NAMES) {
     files[`${name}.yaml`] = seedShardFileContent(name);
   }
-  const indexFiles: Record<string, { entries: string[]; globs: string[] }> = {};
+  const indexFiles: Record<string, LearningsIndex["files"][string]> = {};
   for (const name of PROJECT_LEARNINGS_SHARD_NAMES) {
-    indexFiles[`${name}.yaml`] = { entries: [], globs: [] };
+    indexFiles[`${name}.yaml`] = { entries: [], globs: [], symbols: [], error_signatures: [] };
   }
   const index: LearningsIndex = { files: indexFiles, bySubsystem: {} };
   files["index.json"] = `${JSON.stringify(index, null, 2)}\n`;
@@ -794,8 +812,9 @@ export function loadLayeredLearnings(homes: LayeredLearningsHomes): LayeredLearn
 export function loadLayeredLearningsForTaskFiles(
   homes: LayeredLearningsHomes,
   taskFiles: string[] | undefined,
+  context?: LearningsSelectionContext,
 ): LayeredLearningsResult {
-  return mergeLayers(loadLearningsForTaskFiles(homes.projectDir, taskFiles), homes);
+  return mergeLayers(loadLearningsForTaskFiles(homes.projectDir, taskFiles, context), homes);
 }
 
 /** Shared merge step behind {@link loadLayeredLearnings}/{@link loadLayeredLearningsForTaskFiles}: append user-overall then verified-global onto an already-loaded project corpus, in PRECEDENCE ORDER. */
@@ -1480,11 +1499,17 @@ export function evaluateLayerBudgetRatchet(entries: LearningEntry[], caps: Layer
   return violations;
 }
 
+/** Text the learning selector can search for declared symbols and error signatures. */
+export interface LearningsSelectionContext {
+  text?: string | readonly string[];
+}
+
 /** A generated lookup index (W1-T33): per shard filename, the entry ids it carries and the union
- *  of `files:` globs those entries use, plus a `subsystem -> shard filename(s)` map. FALSIFIER:
- *  `npm run learnings-index:check` fails on an index that a fresh generate run would not produce. */
+ *  of `files:` globs, `symbols:` and `error_signatures:` those entries use, plus a
+ *  `subsystem -> shard filename(s)` map. FALSIFIER: `npm run learnings-index:check` fails on an
+ *  index that a fresh generate run would not produce. */
 export interface LearningsIndex {
-  files: Record<string, { entries: string[]; globs: string[] }>;
+  files: Record<string, { entries: string[]; globs: string[]; symbols?: string[]; error_signatures?: string[] }>;
   bySubsystem: Record<string, string[]>;
 }
 
@@ -1506,16 +1531,68 @@ export function loadLearningsIndex(path: string): LearningsIndex | null {
   }
 }
 
-/** Pure lookup: which shard filenames in `index` could hold an entry matching `taskFiles`? Empty
- *  or absent `taskFiles` is repo-wide and candidates every shard, since the budget still bounds
- *  the tax. INVARIANT: this never parses or loads a shard's entries; it tests recorded globs. */
-export function candidateShardFiles(index: LearningsIndex, taskFiles: string[] | undefined): string[] {
+function selectionHaystack(context: LearningsSelectionContext | undefined): string {
+  const text = context?.text;
+  if (text === undefined) return "";
+  return typeof text === "string" ? text : text.filter((part) => part.length > 0).join("\n");
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isWordish(c: string | undefined): boolean {
+  return c !== undefined && /[A-Za-z0-9_$]/.test(c);
+}
+
+function symbolPattern(symbol: string): RegExp {
+  const start = isWordish(symbol[0]) ? "(?<![A-Za-z0-9_$])" : "";
+  const end = isWordish(symbol[symbol.length - 1]) ? "(?![A-Za-z0-9_$])" : "";
+  return new RegExp(`${start}${escapeRegExp(symbol)}${end}`);
+}
+
+function symbolHitCount(symbols: readonly string[] | undefined, haystack: string): number {
+  if (!symbols || haystack.length === 0) return 0;
+  return symbols.filter((symbol) => symbolPattern(symbol).test(haystack)).length;
+}
+
+function errorHitCount(signatures: readonly string[] | undefined, haystack: string): number {
+  if (!signatures || haystack.length === 0) return 0;
+  return signatures.filter((signature) => haystack.includes(signature)).length;
+}
+
+export interface LearningMatchCounts {
+  file: number;
+  symbol: number;
+  error: number;
+}
+
+function matchCounts(entry: LearningEntry, taskFiles: string[], haystack: string): LearningMatchCounts {
+  return {
+    file: matchCount(entry, taskFiles),
+    symbol: symbolHitCount(entry.symbols, haystack),
+    error: errorHitCount(entry.errorSignatures, haystack),
+  };
+}
+
+/** Pure lookup: which shard filenames in `index` could hold an entry matching the task? A shard is
+ *  a candidate when the task files hit a recorded glob, or the task/recon text hits a recorded
+ *  symbol or error signature. With no task files, a shard must still have a symbol/error hit; the
+ *  lookup no longer widens an empty file list to the whole corpus. INVARIANT: this never parses or
+ *  loads a shard's entries; it tests recorded index metadata only. */
+export function candidateShardFiles(
+  index: LearningsIndex,
+  taskFiles: string[] | undefined,
+  context?: LearningsSelectionContext,
+): string[] {
   const filenames = Object.keys(index.files).sort();
   const files = taskFiles ?? [];
-  if (files.length === 0) return filenames; // repo-wide: every shard is a candidate
+  const haystack = selectionHaystack(context);
   return filenames.filter((filename) => {
-    const globs = index.files[filename].globs.map(globToRegExp);
-    return files.some((f) => globs.some((g) => g.test(f)));
+    const shard = index.files[filename];
+    const globs = shard.globs.map(globToRegExp);
+    const fileHit = files.some((f) => globs.some((g) => g.test(f)));
+    return fileHit || symbolHitCount(shard.symbols, haystack) > 0 || errorHitCount(shard.error_signatures, haystack) > 0;
   });
 }
 
@@ -1523,10 +1600,14 @@ export function candidateShardFiles(index: LearningsIndex, taskFiles: string[] |
  *  `learnings/index.json` for the lookup. INVARIANT: correctness never depends on the index
  *  existing — a missing one falls back to a full {@link loadLearningsCorpus} scan and loses only
  *  the lookup-versus-scan win. */
-export function loadLearningsForTaskFiles(learningsDir: string, taskFiles: string[] | undefined): LocalLearningEntry[] {
+export function loadLearningsForTaskFiles(
+  learningsDir: string,
+  taskFiles: string[] | undefined,
+  context?: LearningsSelectionContext,
+): LocalLearningEntry[] {
   const index = loadLearningsIndex(join(learningsDir, "index.json"));
   if (!index) return loadLearningsCorpus(learningsDir);
-  const candidates = candidateShardFiles(index, taskFiles);
+  const candidates = candidateShardFiles(index, taskFiles, context);
   const entries: LocalLearningEntry[] = [];
   for (const filename of candidates) {
     entries.push(...loadLearnings(join(learningsDir, filename)));
@@ -1538,23 +1619,28 @@ export function loadLearningsForTaskFiles(learningsDir: string, taskFiles: strin
  * Select the learnings to inject for a task, deterministically.
  * INVARIANT: the lifecycle filter runs FIRST, so a non-active entry leaves candidacy before
  * matching. Excluded, not de-prioritized: no budget pressure or tie-break lets it slip (W1-T33).
- * A candidate is an entry one of whose globs matches a task file; empty or absent `taskFiles` is
- * repo-wide. Ordering, highest first: match count, layer precedence (P32/W1-T145),
- * most-recently-cited, id. Then fill to `budgetChars`; the remainder is `dropped` for logging.
+ * A candidate is an entry whose file globs, symbols, or error signatures match the task. Empty or
+ * absent `taskFiles` is NOT repo-wide: without a path, only a symbol or error hit admits an entry.
+ * Ordering, highest first: error hits, symbol hits, file match count, layer precedence
+ * (P32/W1-T145), most-recently-cited, id. Then fill to `budgetChars`; the remainder is `dropped`
+ * for logging.
  */
 export function selectLearnings<T extends LearningEntry>(
   entries: T[],
   taskFiles: string[] | undefined,
   budgetChars: number = DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-): { selected: T[]; dropped: T[] } {
+  context?: LearningsSelectionContext,
+): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts } {
   const active = entries.filter((e) => e.lifecycle === "active");
   const files = taskFiles ?? [];
-  const repoWide = files.length === 0;
+  const haystack = selectionHaystack(context);
   const ranked = active
-    .map((entry) => ({ entry, count: repoWide ? 0 : matchCount(entry, files) }))
-    .filter((r) => repoWide || r.count > 0)
+    .map((entry) => ({ entry, counts: matchCounts(entry, files, haystack) }))
+    .filter((r) => r.counts.file > 0 || r.counts.symbol > 0 || r.counts.error > 0)
     .sort((a, b) => {
-      if (b.count !== a.count) return b.count - a.count;
+      if (b.counts.error !== a.counts.error) return b.counts.error - a.counts.error;
+      if (b.counts.symbol !== a.counts.symbol) return b.counts.symbol - a.counts.symbol;
+      if (b.counts.file !== a.counts.file) return b.counts.file - a.counts.file;
       const layerDiff = LAYERS.indexOf(entryLayer(a.entry)) - LAYERS.indexOf(entryLayer(b.entry));
       if (layerDiff !== 0) return layerDiff;
       const ac = a.entry.cited ?? "";
@@ -1566,6 +1652,7 @@ export function selectLearnings<T extends LearningEntry>(
 
   const selected: T[] = [];
   const dropped: T[] = [];
+  const matchedBy: LearningMatchCounts = { file: 0, symbol: 0, error: 0 };
   let used = 0;
   for (const entry of ranked) {
     const cost = entryBudgetWeight(entry) + 1; // +1 for the joining "\n"
@@ -1574,9 +1661,13 @@ export function selectLearnings<T extends LearningEntry>(
       continue;
     }
     selected.push(entry);
+    const counts = matchCounts(entry, files, haystack);
+    if (counts.file > 0) matchedBy.file++;
+    if (counts.symbol > 0) matchedBy.symbol++;
+    if (counts.error > 0) matchedBy.error++;
     used += cost;
   }
-  return { selected, dropped };
+  return { selected, dropped, matchedBy };
 }
 
 /** One entry as a provenance-tagged CONTEXT bullet. */

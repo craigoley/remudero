@@ -11,7 +11,7 @@ import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readLedgerLines } from "./status.js";
 import type { Config } from "./config.js";
-import type { LayeredLearningsHomes, LearningsIndex } from "./learnings.js";
+import type { LayeredLearningsHomes, LearningsIndex, LearningsSelectionContext, LearningMatchCounts } from "./learnings.js";
 import type { RunResult } from "./run-result.js";
 import type { ProofExecOutcome } from "./review.js";
 
@@ -85,6 +85,7 @@ export const REAL_LEARNINGS_INJECTION_DEPS: LearningsInjectionDeps = {
 export interface MatchedLearningsInput {
   homes: LayeredLearningsHomes;
   taskFiles: string[] | undefined;
+  selectionContext?: LearningsSelectionContext;
   budgetChars?: number;
 }
 
@@ -94,10 +95,16 @@ export interface MatchedLearningsResult {
   matchedLearnings: string;
   selectedIds: string[];
   droppedIds: string[];
+  matchedBy: LearningMatchCounts;
   globalRefusedReason?: string;
 }
 
-const MASKED_RESULT: MatchedLearningsResult = { matchedLearnings: "", selectedIds: [], droppedIds: [] };
+const MASKED_RESULT: MatchedLearningsResult = {
+  matchedLearnings: "",
+  selectedIds: [],
+  droppedIds: [],
+  matchedBy: { file: 0, symbol: 0, error: 0 },
+};
 
 /** Compute the matched-learnings text for one arm. Arm "B" returns {@link MASKED_RESULT}
  *  without calling `deps` — masking the text, never touching the store. Arm "A" runs the
@@ -109,12 +116,17 @@ export function computeMatchedLearningsForArm(
   deps: LearningsInjectionDeps = REAL_LEARNINGS_INJECTION_DEPS,
 ): MatchedLearningsResult {
   if (arm === "B") return MASKED_RESULT;
-  const { entries, globalRefusedReason } = deps.loadLayeredLearningsForTaskFiles(input.homes, input.taskFiles);
-  const { selected, dropped } = deps.selectLearnings(entries, input.taskFiles, input.budgetChars);
+  const { entries, globalRefusedReason } = deps.loadLayeredLearningsForTaskFiles(
+    input.homes,
+    input.taskFiles,
+    input.selectionContext,
+  );
+  const { selected, dropped, matchedBy } = deps.selectLearnings(entries, input.taskFiles, input.budgetChars, input.selectionContext);
   return {
     matchedLearnings: deps.renderMatchedLearnings(selected),
     selectedIds: selected.map((e) => e.id),
     droppedIds: dropped.map((e) => e.id),
+    matchedBy,
     globalRefusedReason,
   };
 }

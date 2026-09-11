@@ -6,8 +6,9 @@
 // The learnings corpus is split into subsystem shards (learnings/{platform,architecture,ci,
 // testing,failures}.yaml, or any other *.yaml file dropped into learnings/) so a growing corpus
 // never becomes a full SCAN. This script builds the LOOKUP index every shard is checked against:
-// for each shard filename, the entry ids it carries and the union of `files:` globs those entries
-// use, plus a `subsystem -> shard filename(s)` map. src/lib/learnings.ts's
+// for each shard filename, the entry ids it carries and the union of `files:` globs, `symbols:`,
+// and `error_signatures:` those entries use, plus a `subsystem -> shard filename(s)` map.
+// src/lib/learnings.ts's
 // `loadLearningsForTaskFiles` reads the committed learnings/index.json to decide which shard(s) a
 // task could possibly match WITHOUT parsing every shard.
 //
@@ -28,7 +29,8 @@ import { parse as parseYaml } from "yaml";
 const REQUIRED_FIELDS = ["id", "fact", "src"];
 
 /**
- * Parse one shard YAML file into a validated list of {id, subsystem, files, lifecycle} records
+ * Parse one shard YAML file into a validated list of {id, subsystem, files, symbols,
+ * error_signatures, lifecycle} records
  * (only the fields the index needs -- this is intentionally NOT the full LearningEntry schema
  * enforced by src/lib/learnings.ts; that module is the runtime source of truth for shape, this
  * script only needs enough to build a lookup table).
@@ -52,10 +54,21 @@ export function loadShardEntries(path) {
     if (!Array.isArray(entry.files) || entry.files.some((f) => typeof f !== "string")) {
       throw new Error(`generate-learnings-index: ${path} entry "${entry.id}": 'files' must be a list of globs`);
     }
+    if (entry.symbols !== undefined && (!Array.isArray(entry.symbols) || entry.symbols.some((s) => typeof s !== "string"))) {
+      throw new Error(`generate-learnings-index: ${path} entry "${entry.id}": 'symbols' must be a list of strings`);
+    }
+    if (
+      entry.error_signatures !== undefined &&
+      (!Array.isArray(entry.error_signatures) || entry.error_signatures.some((s) => typeof s !== "string"))
+    ) {
+      throw new Error(`generate-learnings-index: ${path} entry "${entry.id}": 'error_signatures' must be a list of strings`);
+    }
     return {
       id: entry.id,
       subsystem: typeof entry.subsystem === "string" ? entry.subsystem : "",
       files: entry.files,
+      symbols: entry.symbols ?? [],
+      error_signatures: entry.error_signatures ?? [],
     };
   });
 }
@@ -76,6 +89,8 @@ export function buildIndex(dir) {
   for (const filename of filenames) {
     const entries = loadShardEntries(join(dir, filename));
     const globSet = new Set();
+    const symbolSet = new Set();
+    const errorSignatureSet = new Set();
     const ids = [];
     for (const entry of entries) {
       if (seen.has(entry.id)) {
@@ -84,13 +99,20 @@ export function buildIndex(dir) {
       seen.add(entry.id);
       ids.push(entry.id);
       for (const g of entry.files) globSet.add(g);
+      for (const s of entry.symbols) symbolSet.add(s);
+      for (const s of entry.error_signatures) errorSignatureSet.add(s);
       if (entry.subsystem) {
         const list = bySubsystem[entry.subsystem] ?? [];
         if (!list.includes(filename)) list.push(filename);
         bySubsystem[entry.subsystem] = list;
       }
     }
-    files[filename] = { entries: ids.sort(), globs: [...globSet].sort() };
+    files[filename] = {
+      entries: ids.sort(),
+      globs: [...globSet].sort(),
+      symbols: [...symbolSet].sort(),
+      error_signatures: [...errorSignatureSet].sort(),
+    };
   }
 
   for (const key of Object.keys(bySubsystem)) bySubsystem[key].sort();
