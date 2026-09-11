@@ -62,6 +62,49 @@ function draftFor(proposalId: string, anchors: EvidenceAnchor[]): DraftedCandida
   };
 }
 
+test("an UNREADABLE readiness fact leaves the proposal draftable — the fail-open arm criterion 2 claims", () => {
+  // Criterion 2 says an undeterminable never-READY status "stays draftable rather than being
+  // silently dropped". readDraftExclusion is the arm that decides it, and nothing reached its
+  // catch: every fixture above supplies readers that answer. A reader that THROWS is the case the
+  // claim is about — an unreadable fact must read as "no exclusion", never as "excluded".
+  const exclusion = draftExclusionForProposal(
+    proposal("P-UNREADABLE"),
+    ctx({
+      isRatified: () => {
+        throw new Error("ledger unreadable");
+      },
+    }),
+  );
+  assert.equal(exclusion, undefined, "an unreadable fact must not exclude the proposal");
+
+  // CONTROL: the same reader answering TRUE does exclude it, so the assertion above is about the
+  // throw and not about this predicate being unreachable.
+  assert.equal(
+    draftExclusionForProposal(proposal("P-RATIFIED-CTRL"), ctx({ isRatified: () => true }))?.predicate,
+    "ratified",
+  );
+});
+
+test("an UNFIRED trigger excludes the proposal and names the trigger predicate", () => {
+  // The trigger arm had no caller either: every fixture proposal above omits `trigger`, so the
+  // branch that reports a not-yet-fired trigger was never entered.
+  const exclusion = draftExclusionForProposal(
+    proposal("P-TRIGGER", { trigger: { fired: false, description: "waiting on the third occurrence" } }),
+    ctx(),
+  );
+  assert.equal(exclusion?.predicate, "trigger");
+  assert.equal(exclusion?.detail, "waiting on the third occurrence", "the detail must carry the trigger's own words");
+
+  // CONTROL: a FIRED trigger is not an exclusion — the branch must discriminate, not always fire.
+  assert.equal(
+    draftExclusionForProposal(
+      proposal("P-TRIGGER-FIRED", { trigger: { fired: true, description: "already fired" } }),
+      ctx(),
+    ),
+    undefined,
+  );
+});
+
 test("daemon draft selection excludes every draft-independent never-ready predicate and names the predicate", () => {
   const goodAnchor: EvidenceAnchor = { description: "good", pattern: "present" };
   const driftedAnchor: EvidenceAnchor = { description: "drifted", pattern: "gone" };
