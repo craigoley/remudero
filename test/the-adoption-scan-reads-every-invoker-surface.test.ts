@@ -1,5 +1,5 @@
 /**
- * test/the-adoption-scan-reads-every-invoker-surface.test.ts — W1-T3379.
+ * test/the-adoption-scan-reads-every-invoker-surface.test.ts — W1-T3383.
  *
  * `scanUnadoptedScripts` asked three surfaces whether a script has an adopter —
  * `.github/workflows`, `package.json`, `src/` — and a script invoked from anywhere else read as
@@ -57,7 +57,7 @@ function unadoptedScripts(dir: string): string[] {
   return result.adoptionReport.findings.filter((f) => f.shape === "script-no-invoker").map((f) => f.definedIn);
 }
 
-test("W1-T3379: a script imported only by a SIBLING SCRIPT has an adopter", () => {
+test("W1-T3383: a script imported only by a SIBLING SCRIPT has an adopter", () => {
   const dir = repo({
     "package.json": "{}",
     "scripts/lib/git.mjs": "export function git() {}\n",
@@ -70,7 +70,7 @@ test("W1-T3379: a script imported only by a SIBLING SCRIPT has an adopter", () =
   }
 });
 
-test("W1-T3379: a script run by a plan/claims.yaml assertion has an adopter", () => {
+test("W1-T3383: a script run by a plan/claims.yaml assertion has an adopter", () => {
   const dir = repo({
     "package.json": "{}",
     "scripts/plan-state-claims.mjs": "// the gate\n",
@@ -83,7 +83,7 @@ test("W1-T3379: a script run by a plan/claims.yaml assertion has an adopter", ()
   }
 });
 
-test("W1-T3379: A DATA FILE LISTING EVERY SCRIPT BY PATH IS NOT AN INVOKER — the scan still reports", () => {
+test("W1-T3383: A DATA FILE LISTING EVERY SCRIPT BY PATH IS NOT AN INVOKER — the scan still reports", () => {
   const dir = repo({
     "package.json": "{}",
     "scripts/orphan.mjs": "// nothing runs this\n",
@@ -99,7 +99,7 @@ test("W1-T3379: A DATA FILE LISTING EVERY SCRIPT BY PATH IS NOT AN INVOKER — t
   }
 });
 
-test("W1-T3379: A DOC-COMMENT MENTION IS NOT AN INVOKER — the scan still reports", () => {
+test("W1-T3383: A DOC-COMMENT MENTION IS NOT AN INVOKER — the scan still reports", () => {
   const dir = repo({
     "package.json": "{}",
     "scripts/orphan.mjs": "// nothing runs this\n",
@@ -115,7 +115,7 @@ test("W1-T3379: A DOC-COMMENT MENTION IS NOT AN INVOKER — the scan still repor
   }
 });
 
-test("W1-T3379: a genuinely unadopted script is STILL reported — the scan did not go vacuous", () => {
+test("W1-T3383: a genuinely unadopted script is STILL reported — the scan did not go vacuous", () => {
   const dir = repo({
     "package.json": "{}",
     "scripts/orphan.mjs": "// nothing runs this\n",
