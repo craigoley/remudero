@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { Config, WorkerProviderId } from "../src/lib/config.js";
 import {
@@ -533,15 +532,4 @@ test("W1-T3095: an EXCLUDED risk short-circuits the sweep read, because that rea
   // above would also be satisfied by a counter that can never increment.
   await resolveMountExplorationDispatch(wiringInput({ risk: "medium" }), deps);
   assert.equal(sweep.state.reads, 1, "an eligible risk must read the sweep");
-});
-
-test("W1-T3095: run-task wires the seam and keeps NO exploration branch of its own", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  assert.match(src, /resolveMountExplorationDispatch\(/, "runTask must call the seamed resolver");
-  // The arms must not be duplicated back into runTask, where nothing can reach them again.
-  assert.doesNotMatch(src, /exploration\.kind === "explore"/, "the explore branch belongs in lib, not in runTask");
-  assert.doesNotMatch(src, /mount\.exploration\.error/, "the failure arm belongs in lib, not in runTask");
-  // and the real data sources stay wired there, since only runTask knows repoRoot.
-  assert.match(src, /mount-headroom-sweep\.mjs/);
-  assert.match(src, /loadMountsTable: \(\) => loadMounts\(mountsPath\(repoRoot\)\)/);
 });

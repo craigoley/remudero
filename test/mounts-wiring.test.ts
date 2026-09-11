@@ -29,6 +29,14 @@ test("the spawn path INVOKES resolveMount — mounts owns the run's knobs (not a
   assert.match(runTaskSrc, /loadMounts\(mountsPath\(repoRoot\)\)/, "the mount is loaded from the committed repo table");
 });
 
+test("W1-T3095: run-task wires mount exploration through the seamed resolver", () => {
+  assert.match(runTaskSrc, /resolveMountExplorationDispatch\(/, "runTask must call the seamed resolver");
+  assert.doesNotMatch(runTaskSrc, /exploration\.kind === "explore"/, "the explore branch belongs in lib, not in runTask");
+  assert.doesNotMatch(runTaskSrc, /mount\.exploration\.error/, "the failure arm belongs in lib, not in runTask");
+  assert.match(runTaskSrc, /mount-headroom-sweep\.mjs/, "runTask owns the real sweep source");
+  assert.match(runTaskSrc, /loadMountsTable: \(\) => loadMounts\(mountsPath\(repoRoot\)\)/, "runTask owns the real mounts source");
+});
+
 test("the literal `maxTurns: 60` is GONE from run-task.ts (the hardcoded implement ceiling)", () => {
   assert.doesNotMatch(runTaskSrc, /maxTurns:\s*60\b/, "the hardcoded maxTurns: 60 must be replaced by the mount");
   // the implement + resume spawns now take max_turns/model/effort FROM the mount.
