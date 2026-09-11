@@ -671,10 +671,8 @@ export interface ConsoleBlockingRequestPathViolation {
 
 export const CONSOLE_READ_ROUTE_BUDGET_MS = 750;
 export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
-/** PRIMARY CONTROL: below this size, legacy full-plan board callers stay byte-identical. */
-export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500;
-/** BACKSTOP: a pathological initial board cannot grow back into a full-plan status payload. */
-export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120;
+export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500; // PRIMARY CONTROL
+export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120; // BACKSTOP
 export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
 const CONSOLE_STALENESS_FIELD = "staleness";
 const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health"]);
