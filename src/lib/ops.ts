@@ -1,11 +1,12 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { ghExec } from "./github-transport.js";
+import { createGhCallPacer, ghExec, paceGhEntry } from "./github-transport.js";
 import { join } from "node:path";
 import { appendLedger } from "./ledger.js";
 import { escalate, splitConcatenatedJsonPages, type Escalation, type IssueGateway } from "./escalate.js";
 import type { LandFeedbackOpts } from "./feedback-landing.js";
-import { readLedgerLines } from "./status.js";
+import { isGhRateLimitError, readLedgerLines } from "./status.js";
 import { captureFeedback, feedbackDir, feedbackEntryPath, setFeedbackStatus, type FeedbackEntry } from "./feedback.js";
+import { isTestRunner } from "./live-write-guard.js";
 
 /**
  * Alert intake v0+v1 (W1-T55 / W1-T56, MASTER-PLAN §5D lane 2, §7B).
@@ -220,6 +221,8 @@ export type CodeScanningAlertsRead =
   | { ok: true; alerts: RawAlert[] }
   | { ok: false; error: string };
 
+const codeScanningReadPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
+
 function codeScanningReadError(error: unknown): string {
   const message = error instanceof Error ? error.message : "code-scanning read failed";
   const stderr =
@@ -231,9 +234,14 @@ function codeScanningReadError(error: unknown): string {
 
 export function readCodeScanningAlerts(owner: string, repo: string): CodeScanningAlertsRead {
   try {
-    const raw = ghExec(
-      ["api", `repos/${owner}/${repo}/code-scanning/alerts`, "--paginate"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    const raw = paceGhEntry(
+      codeScanningReadPacer,
+      isGhRateLimitError,
+      () =>
+        ghExec(
+          ["api", `repos/${owner}/${repo}/code-scanning/alerts`, "--paginate"],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+        ),
     );
     const pages = splitConcatenatedJsonPages(raw).map((chunk) => {
       const parsed = JSON.parse(chunk) as unknown;
