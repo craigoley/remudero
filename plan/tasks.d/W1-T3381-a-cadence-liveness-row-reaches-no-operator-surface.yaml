@@ -1,0 +1,80 @@
+- id: W1-T3381
+  title: "W1-T3236 SHIPPED THE CADENCE LIVENESS JUDGE AND PLUMBED IT INTO NOTHING — `cadenceMarkerRows` and `CADENCE_MARKERS` have zero production call sites, `StatusBoardModel` has no cadence field, and the three acceptance proofs that passed it call the pure function directly, so no criterion could ever have noticed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: medium
+  origin: "operator-session#unwired-status-board-exports-2026-09-11"
+  plan_refs: ["W1-T3236", "W1-T2735", "W1-T3348"]
+  files: [src/lib/status-board.ts, test/a-cadence-liveness-row-reaches-no-operator-surface.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE JUDGE EXISTS, IS TESTED, AND REPORTS TO NO ONE. W1-T3236 merged as #4811
+    ("feat(status-board): judge every cadence marker against its own rung's interval") and built
+    exactly what it promised: `cadenceMarkerRows`, the nine-row `CADENCE_MARKERS` table, and the
+    three-state fresh/stale/never discipline its rationale argued for. MEASURED at f1d0b08d, with
+    `git grep -n -w -F <name> -- src/ scripts/ bin/` excluding the defining file:
+    `cadenceMarkerRows` = 1 hit, and that hit is a COMMENT (`src/lib/doctor.ts:775`, "mirroring
+    `cadenceMarkerRows`' own discipline"); `CADENCE_MARKERS` = 0; `CADENCE_DEFAULT_INTERVAL_MINUTES`
+    = 0; `CADENCE_STALE_INTERVALS` = 0. Inside `src/lib/status-board.ts` itself,
+    `cadenceMarkerRows` and `CADENCE_MARKERS` have zero code references — the two constants are
+    reached only from inside `cadenceMarkerRows`, so all four die together. POSITIVE CONTROL, same
+    query shape: `buildStatusBoard` = 7 code hits, `renderStatusBoardText` = 4, `deriveQueueHead` =
+    4, and `buildDoctorReport(` resolves a real call at `src/lib/report-commands.ts:553`.
+
+    THE STRUCTURAL PROOF, NOT JUST THE COUNT. `StatusBoardModel` declares eleven sections —
+    `liveness`, `latches`, `lastCycle`, `blockers`, `queueHead`, `inbox`, `headroom`, `cacheHit`,
+    `learningsInjection`, `needsMe`, plus `generatedAt` — and NOT ONE of them is a cadence section.
+    There is no field for a `CadenceMarkerRow[]` to occupy, which is why the count is zero rather
+    than merely low: the renderer was never given a seat on the model it was written for. Its own
+    shard's rationale says "WHY THE STATUS BOARD ... This adds a table"; the table was built and
+    the board was not changed.
+
+    THE ACCEPTANCE CRITERIA COULD NOT HAVE CAUGHT IT, AND THAT IS THE TRANSFERABLE PART. All three
+    of W1-T3236's proofs are `unit test:` titles against `cadenceMarkerRows` itself — a marker past
+    its interval is stale, an absent marker is never-fired, a slow rung stays fresh. Every one is
+    true of the pure function and none asserts a row on a rendered board.
+    `test/a-cadence-marker-that-stops-advancing-is-reported.test.ts` references `cadenceMarkerRows`
+    four times and `buildStatusBoard`/`renderStatusBoardText` ZERO times. The suite is green, has
+    always been green, and its greenness is precisely what keeps the gap invisible — the shape
+    `unwired-gate` (W1-T2735) exists to refuse, arrived at through acceptance criteria rather than
+    through a gate file.
+
+    NOTHING ELSE REPORTS MARKER STALENESS. The failure this was built for is a rung that stops
+    firing while the fleet looks healthy, and it has now been observed twice: W1-T3236's own
+    six-day `last-retro.json` silence, and the codeqlQuality rung whose refusal on 2026-09-11
+    stamped `state/last-intake-cadence-codeqlQuality.json` BEFORE its body ran and so consumed its
+    own 24h allowance. `doctor.ts`'s several "cadence" references are DISPATCH cadence, a different
+    measurement. `STATIC_LATCHES` watches operator levers (STOP, PAUSE, DEPLOY_AUTO) and its loop
+    opens `if (!fs.existsSync(path)) continue`, which is right for a latch and exactly wrong for a
+    cadence marker — W1-T3236's rationale already names that trap, and it is still the only
+    marker-age machinery the board actually runs.
+
+    WIRE IT, DO NOT RETIRE IT. Retiring is the cheaper edit and the wrong one: it would delete the
+    only built answer to a failure mode with two observed instances, and leave the board silent on
+    the next one. The work is a plumb, not a mechanism — a cadence section on `StatusBoardModel`,
+    populated in `buildStatusBoard` from the existing `CADENCE_MARKERS` and policy intervals, and
+    rendered by `renderStatusBoardText` beside the sections an operator already reads. It schedules
+    nothing, pages no one, and restarts no rung.
+
+    SCOPE, STATED. The other eight status-board exports that read zero EXTERNAL call sites
+    (`livenessState`, `serviceKind`, `SUPERVISOR_TICK_OVERDUE_MS`, `renderQueueHeadBlock`,
+    `projectBoardSection`, `boardMessageFooter`, `deployFailedConsequence`,
+    `deriveCircuitBrokenBlockers`) are NOT in scope and are NOT dead: each is called from inside
+    `src/lib/status-board.ts` and reaches production through `buildStatusBoard` or
+    `renderStatusBoardText`, and three of them carry an explicit "EXPORTED for test only" comment
+    (lines 1699, 2281, 2529) recording that visibility as deliberate. Counting them as unwired
+    conflates export visibility with reachability. This task is the four-symbol cadence family that
+    is genuinely unreachable, and nothing else.
+
+  acceptance:
+    - claim: "a stale cadence marker appears on the RENDERED status board, not merely in the judge's return value — the assertion runs against the board text, so deleting the plumb reddens it"
+      proof: "unit test: test/a-cadence-liveness-row-reaches-no-operator-surface.test.ts"
+    - claim: "a marker that has never been written reaches the board as never-fired, so an absent marker is not rendered as silence"
+      proof: "unit test: test/a-cadence-liveness-row-reaches-no-operator-surface.test.ts"
+    - claim: "StatusBoardModel carries a cadence section, so the judge has a seat on the model rather than a call site the board never makes"
+      proof: "unit test: test/a-cadence-liveness-row-reaches-no-operator-surface.test.ts"
