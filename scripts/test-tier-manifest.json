@@ -1269,6 +1269,7 @@
     "test/the-heap-pressure-arm-ends-the-pass.test.ts": 0,
     "test/the-hook-spawns-no-test-suite.test.ts": 0,
     "test/the-implement-lane-s-model-lives-on-the-run-not-the-verdict-row.test.ts": 1058,
+    "test/the-interactive-lane-pays-the-whole-file.test.ts": 0,
     "test/the-ledger-archive-is-compacted-never-truncated.test.ts": 0,
     "test/the-local-coverage-gate-passes-vacuously-on-a-diff-it-failed-to-compute.test.ts": 1375,
     "test/the-local-gate-writes-coverage-where-ci-does.test.ts": 5903,
