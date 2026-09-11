@@ -439,6 +439,7 @@
     "test/coverage-merged-artifact.test.ts": 173,
     "test/coverage-never-stalls-the-queue.test.ts": 0,
     "test/coverage-ratchet.test.ts": 1210,
+    "test/coverage-remediation-escalates-in-rounds.test.ts": 0,
     "test/coverage-report-annotation.test.ts": 380,
     "test/coverage-session-blanking.test.ts": 8285,
     "test/crash-loop-signature-recency-bound.test.ts": 0,

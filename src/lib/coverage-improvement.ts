@@ -5,18 +5,17 @@ import { captureFeedback, type CaptureFeedbackOptions, type FeedbackEntry } from
 import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionResult } from "./ledger-grep.js";
 
 /**
- * lib/coverage-improvement.ts — TIER TWO of the absolute-threshold coverage gate (W1-T470).
+ * lib/coverage-improvement.ts — TIERS TWO AND THREE of the absolute-threshold coverage gate
+ * (W1-T470; tier three added by W1-T3384b).
  *
- * TIER ONE (`classifyCoverageTier`, `scripts/coverage-ratchet.mjs`, merged as W1-T466/#1758)
- * classifies a run's branch coverage into three bands: `>= 90` healthy, `85-90` PASS-but-owes-
- * a-task, `< 85` blocks (tier three, a remediation loop, deliberately NOT built yet — see this
- * task's own plan shard for why a saturated `plan/feedback/` queue cannot absorb a repeated-
- * injection loop today). THIS module is the middle tier's whole deliverable: when a run lands
- * in the 85-90 band, it names the `src/` files that own the most uncovered branches and files
- * ONE `plan/feedback/` entry about them — never a shard written directly into `plan/tasks.d/`
- * (no such minter exists anywhere in this codebase; the only programmatic write path into the
- * plan is `captureFeedback`, see `src/lib/feedback.ts`) and never one entry per file (the queue
- * cannot absorb that fan-out — see W1-T470's rationale clause (2)).
+ * TIER ONE (`classifyCoverageTier`, `scripts/coverage-ratchet.mjs`) bands a run's branch coverage:
+ * `>= 90` healthy, `85-90` owes ONE improvement task, `< 85` owes a remediation ROUND. NO BAND
+ * BLOCKS — #5117 retired every coverage floor by operator ruling, so severity decides how much work
+ * is filed, never whether the PR lands. THIS module files that work: it names the `src/` files
+ * owning the most uncovered branches and writes ONE `plan/feedback/` entry — never a shard directly
+ * into `plan/tasks.d/` (the only programmatic write path into the plan is `captureFeedback`) and
+ * never one entry per file (W1-T470 clause (2): the queue cannot absorb that fan-out, which is why
+ * tier three escalates in ROUNDS instead).
  *
  * THRESHOLDS ARE RE-DECLARED HERE, DELIBERATELY, RATHER THAN IMPORTED. `scripts/coverage-
  * ratchet.mjs` already exports `classifyCoverageTier` with the same 85/90 cuts, but that file
@@ -172,6 +171,41 @@ export function rankCoverageDebt(
     .slice(0, limit);
 }
 
+/** W1-T3384b — TIER THREE'S ESCALATION CLOCK. Escalation is in TIME, not width: W1-T470 rejected
+ *  one entry per file (the queue cannot absorb that fan-out), so each further drop of one full band
+ *  opens a new round, which is a new debt signature, so the producer files again. The band is
+ *  DERIVED from `pass - block` — the span already separating healthy from owing-work — not invented.
+ *  FALSIFIER: test/coverage-remediation-escalates-in-rounds.test.ts. */
+export function coverageRemediationRound(branchesPct: number, pass: number, block: number): number {
+  const span = Math.max(1, pass - block);
+  return Math.max(0, Math.floor((block - branchesPct) / span));
+}
+
+/** Tier three's `plan/feedback/` text — the same ranked files, plus the one remedy tier two cannot
+ *  ask for: a branch no test can reach needs a seam, not another test. */
+export function buildCoverageRemediationFeedback(
+  files: readonly FileDebt[],
+  opts: { branchesPct: number; round: number; block: number },
+): string {
+  const fileLines = files.map((f, i) => `${i + 1}. ${f.file} — ${f.uncoveredBranches} uncovered branch(es)`).join("\n");
+  const roundLine =
+    opts.round === 0
+      ? `This is the FIRST remediation round for this debt.`
+      : `This is remediation round ${opts.round + 1}: branch coverage has fallen a further ` +
+        `${opts.round} full band(s) since the first round, and the earlier round(s) did not recover it.`;
+  return (
+    `Branch coverage is BELOW the remediation cut of the absolute coverage gate — ` +
+    `${opts.branchesPct.toFixed(2)}% branches this run, under ${opts.block}%. THE BUILD IS NOT BLOCKED ` +
+    `(operator ruling 2026-09-11: no hard floors; a PR lands and owes work). ${roundLine}\n\n` +
+    `The files below own the most uncovered branches under src/, ranked by uncovered-branch COUNT ` +
+    `(computed fresh from this run's own coverage/lcov.info):\n\n${fileLines}\n\n` +
+    `Add branch-covering tests for these files. WHERE A FILE'S BRANCHES CANNOT BE REACHED FROM A ` +
+    `TEST AT ALL, the work is to make it testable — extract the decision behind a seam, inject the ` +
+    `dependency it reaches for — and not to write a test that asserts nothing in order to touch the ` +
+    `line. Report which files needed that, so the next round can tell real progress from motion.`
+  );
+}
+
 /**
  * A stable fingerprint of WHICH files currently own the debt — sorted (not rank-ordered), so a
  * trivial reordering of two files a single branch apart never looks like a changed debt profile,
@@ -194,7 +228,8 @@ export function buildCoverageImprovementFeedback(files: readonly FileDebt[], opt
   return (
     `Branch coverage is in the pass-with-debt band of the absolute coverage gate — ` +
     `${opts.branchesPct.toFixed(2)}% branches this run (>= ${DEFAULT_TIER_PASS_PCT}% is healthy, ` +
-    `< ${DEFAULT_TIER_BLOCK_PCT}% blocks the build; this band passes but owes ONE improvement task).\n\n` +
+    `< ${DEFAULT_TIER_BLOCK_PCT}% opens a remediation round; NO band blocks the build — operator ruling ` +
+    `2026-09-11. This band passes and owes ONE improvement task).\n\n` +
     `The files below own the most uncovered branches under src/, ranked by uncovered-branch COUNT ` +
     `(never a percentage — computed fresh from this run's own coverage/lcov.info, not carried from ` +
     `any earlier measurement):\n\n${fileLines}\n\n` +
@@ -577,17 +612,28 @@ export type InjectCoverageImprovementResult =
 export const injectCoverageImprovementTask = (deps: InjectCoverageImprovementDeps): InjectCoverageImprovementResult => {
   const records = parseLcovFileRecords(deps.lcovText);
   const branchesPct = aggregateBranchesPct(records);
-  const tier = classifyImprovementTier(branchesPct, { pass: deps.pass, block: deps.block });
-  if (tier !== "improve") {
-    return { action: tier === "healthy" ? "healthy" : "blocking", branchesPct };
+  const pass = deps.pass ?? DEFAULT_TIER_PASS_PCT;
+  const block = deps.block ?? DEFAULT_TIER_BLOCK_PCT;
+  const tier = classifyImprovementTier(branchesPct, { pass, block });
+  // W1-T3384b: `remediate` returned `blocking` and filed NOTHING, which was right while it failed
+  // the build. #5117 retired that floor, so a band that neither blocks nor files left the debt
+  // invisible AND unacted-on.
+  if (tier === "healthy") {
+    return { action: "healthy", branchesPct };
   }
+  const remediating = tier === "remediate";
 
   const files = rankCoverageDebt(records, { limit: deps.limit });
   if (files.length === 0) {
     return { action: "no-debt", branchesPct };
   }
 
-  const signature = coverageDebtSignature(files);
+  // The round rides IN the dedupe key: the same files at a materially worse percentage is a NEW
+  // ask, not a duplicate of the round that already failed to fix it.
+  const round = remediating ? coverageRemediationRound(branchesPct, pass, block) : 0;
+  const signature = remediating
+    ? `${coverageDebtSignature(files)}#remediation-round:${round}`
+    : coverageDebtSignature(files);
   const union = (deps.ledgerUnion ?? resolveLedgerUnion)(deps.stateDir, COVERAGE_IMPROVEMENT_LEDGER_PATTERN);
   // `union.ok === false` (zero archives matched, or a rotation went unread) means the union
   // cannot CONFIRM a prior filing — never that one is CONFIRMED absent. Filing anyway here is a
@@ -601,7 +647,9 @@ export const injectCoverageImprovementTask = (deps: InjectCoverageImprovementDep
 
   const capture = deps.capture ?? captureFeedback;
   const entry = capture(deps.root, {
-    raw: buildCoverageImprovementFeedback(files, { branchesPct }),
+    raw: remediating
+      ? buildCoverageRemediationFeedback(files, { branchesPct, round, block })
+      : buildCoverageImprovementFeedback(files, { branchesPct }),
     origin: "cli",
     land: deps.land,
   });
