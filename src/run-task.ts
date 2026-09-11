@@ -815,7 +815,7 @@ import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, 
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
-import { resolveMountExplorationDispatch } from "./lib/mount-exploration.js";
+import { resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
   judgeRulingRisk,
@@ -11669,10 +11669,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
   });
 
-  // The DECISION and its two failure-tolerant arms live in lib behind `resolveMountExplorationDispatch`
+  // The DECISION and its two failure-tolerant arms live in lib behind `exploreMount`
   // (which never throws); only the two real data sources are wired here. `runId` is clock-derived, so
   // no harness can steer THIS call onto the explore arm — that is exactly why the arms are seamed.
-  const explored = await resolveMountExplorationDispatch(
+  const explored = await exploreMount(
     {
       taskType: task.type,
       risk: task.risk,

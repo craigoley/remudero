@@ -29,8 +29,9 @@ test("the spawn path INVOKES resolveMount — mounts owns the run's knobs (not a
   assert.match(runTaskSrc, /loadMounts\(mountsPath\(repoRoot\)\)/, "the mount is loaded from the committed repo table");
 });
 
-test("W1-T3095: run-task wires mount exploration through the seamed resolver", () => {
-  assert.match(runTaskSrc, /resolveMountExplorationDispatch\(/, "runTask must call the seamed resolver");
+test("W1-T3095: run-task calls the explorer through the seamed resolver", () => {
+  assert.match(runTaskSrc, /resolveMountExplorationDispatch\s+as\s+exploreMount/, "runTask must import the seamed resolver as its exploration call");
+  assert.match(runTaskSrc, /\bexploreMount\(/, "runTask must call the explorer on the dispatch path");
   assert.doesNotMatch(runTaskSrc, /exploration\.kind === "explore"/, "the explore branch belongs in lib, not in runTask");
   assert.doesNotMatch(runTaskSrc, /mount\.exploration\.error/, "the failure arm belongs in lib, not in runTask");
   assert.match(runTaskSrc, /mount-headroom-sweep\.mjs/, "runTask owns the real sweep source");
