@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { GATED_RUNGS, loadDefaultPolicy, loadPolicy, policyPath } from "../src/lib/policy.js";
+import { GATED_RUNGS, loadDefaultPolicy, loadPolicy, policyPath, type Policy } from "../src/lib/policy.js";
 import {
   buildRatificationRow,
   computeOperationHash,
@@ -314,6 +314,19 @@ test("acceptance 3: `rmd ratify` hashes the nested intake row that its daemon ga
     lines.join("\n"),
     new RegExp(computeOperationHash(policy.values.intakeCadence.codeqlQuality, RUNG_CONTRACT_VERSIONS["intakeCadence.codeqlQuality"])),
     "the printed pin must cover the same nested policy block the intake daemon checks",
+  );
+});
+
+test("`rmd ratify` fails closed when a dotted rung's policy parent is not a block", () => {
+  const policy = loadDefaultPolicy();
+  const malformed = {
+    ...policy,
+    values: { ...policy.values, intakeCadence: null },
+  } as unknown as Policy;
+
+  assert.throws(
+    () => ratifyCommand(["intakeCadence.codeqlQuality"], { policy: malformed }),
+    /policy has no block for rung 'intakeCadence\.codeqlQuality'/,
   );
 });
 
