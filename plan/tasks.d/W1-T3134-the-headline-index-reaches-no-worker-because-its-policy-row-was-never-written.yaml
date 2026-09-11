@@ -2,7 +2,7 @@
   title: "THE HEADLINE INDEX IS BUILT, WIRED, TESTED AND DARK — `workerRuleHeadlines` has no row in plan/policy.yaml, so config-schema's absent-row branch returns `{enabled: false}` and `buildRuleHeadlinesPart` returns \"\" on every spawn; a dispatched worker sees ZERO of CLAUDE.md's 56 rules, and the index that would give it all 56 headlines costs 7377 bytes"
   repo: remudero
   depends_on: []
-  type: implement
+  type: investigate
   verify: auto
   principles: {tdd: strict}
   risk: medium
