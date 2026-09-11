@@ -188,8 +188,7 @@ test("enforce mode suppresses successful leaves without a marker, while aggregat
       const leaf = checkRunBody("eslint", "success");
       const leafResponse = await fetch(url, { method: "POST", headers: webhookHeaders(leaf, "leaf"), body: leaf });
       assert.equal(leafResponse.status, 202);
-      assert.deepEqual(await leafResponse.json(), { accepted: false, reason: "successful_leaf" });
-      assert.deepEqual(writes, []);
+      const leafJson = await leafResponse.json();
 
       const aggregate = checkRunBody("ci-gate", "success");
       const aggregateResponse = await fetch(url, {
@@ -230,6 +229,7 @@ test("enforce mode suppresses successful leaves without a marker, while aggregat
       });
       assert.equal(unknownResponse.status, 202);
       assert.deepEqual(await unknownResponse.json(), { accepted: true });
+      assert.deepEqual(leafJson, { accepted: false, reason: "successful_leaf" });
     });
 
     assert.deepEqual(writes.map((record) => record.deliveryId), ["aggregate", "failure", "status", "unknown"]);
