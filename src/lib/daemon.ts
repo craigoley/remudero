@@ -25,6 +25,7 @@ import type {
 import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
+import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
@@ -879,6 +880,13 @@ export interface DaemonDeps {
   /** Build and deliver one digest, returning what got sent — never inside the producer itself. Never
    *  files a task, mints an id or spawns a worker (Law 5). Best-effort (W1-T2277). */
   runDigestCadence?: () => Promise<DigestCadenceRunResult>;
+  /** W1-T3368 — the SELF-HEALING rung: is the ledger archive corpus large enough that a union read
+   *  is heading for the heap? Pure from this module's side; the pressure read and the trigger live in
+   *  `ledger-compaction-rung.ts`. Optional, so a host that never wires it behaves exactly as before. */
+  checkLedgerCompaction?: () => LedgerCompactionDecision;
+  /** Run ONE bounded compaction pass. Never touches the live ledger, never a rotation dependency, and
+   *  best-effort like every cadence above it — a compaction fault must never break a daemon cycle. */
+  runLedgerCompaction?: () => Promise<LedgerCompactionOutcome | undefined>;
   /** W1-T2923: one scheduler over repository-intake rungs. The check is pure from this module's
    *  perspective; run-task.ts owns markers, policy, GitHub, filesystem and worker effects. */
   checkIntakeRungs?: () => readonly IntakeRungDecision[];
@@ -2263,6 +2271,54 @@ export async function runDaemon(
         }
       } else if (digestDecision) {
         log("digest_cadence.skipped", { reason: digestDecision.reason });
+      }
+    }
+
+    // W1-T3368 — THE SELF-HEALING RUNG. Same tick discipline and best-effort contract as the two
+    // cadences above. This one is different in kind: it does not report a condition, it REMOVES one.
+    // The 2026-09-10 outage (66 OOM restarts, eight hours, zero builds) was a 4.0 GB archive corpus
+    // against an 8 GB heap, and the cure had merged six minutes after the first abort with nothing
+    // scheduled to run it. A fire here is one bounded pass — 50 sources merged into 1, every distinct
+    // row preserved — and the trigger is CORPUS PRESSURE, so a healthy host never pays for it.
+    //
+    // THE REASON IS CARRIED FROM THE DECISION THAT PRODUCED THE OUTCOME, never re-derived here: a
+    // ledger row whose outcome came from one gate and whose reason came from another is a defect this
+    // repo has already shipped once and sent a diagnosis the wrong way for hours.
+    if (deps.checkLedgerCompaction) {
+      let compactionDecision: LedgerCompactionDecision | undefined;
+      try {
+        compactionDecision = deps.checkLedgerCompaction();
+      } catch (e) {
+        log("ledger_compaction.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (compactionDecision?.fire) {
+        log("ledger_compaction.fired", { reason: compactionDecision.reason });
+        if (deps.runLedgerCompaction) {
+          try {
+            const outcome = await deps.runLedgerCompaction();
+            if (outcome === undefined) {
+              // A pass that found nothing eligible is a RESULT, not a failure: the corpus is over the
+              // bound but every archive is inside the age floor. Saying so keeps "nothing to merge"
+              // distinguishable from "the run broke", which an absent row would not.
+              log("ledger_compaction.nothing_eligible", { reason: compactionDecision.reason });
+            } else {
+              log("ledger_compaction.ran", {
+                reason: compactionDecision.reason,
+                source_count: outcome.sourceCount,
+                rows_written: outcome.rowsWritten,
+                duplicates_collapsed: outcome.duplicatesCollapsed,
+                archive_name: outcome.archiveName,
+              });
+            }
+          } catch (e) {
+            log("ledger_compaction.run_failed", {
+              reason: compactionDecision.reason,
+              error: String((e as Error)?.message ?? e),
+            });
+          }
+        }
+      } else if (compactionDecision) {
+        log("ledger_compaction.skipped", { reason: compactionDecision.reason });
       }
     }
 
