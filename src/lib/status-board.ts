@@ -820,6 +820,13 @@ function markerAgeMs(path: string, json: Record<string, unknown> | null, nowMs: 
   }
 }
 
+/** Read a cadence marker only after the existence check. The board's blocked-PR projection uses
+ * a sentinel root, where every cadence marker is intentionally absent. */
+function cadenceMarkerAgeMs(path: string, nowMs: number): number | undefined {
+  if (!fs.existsSync(path)) return undefined;
+  return markerAgeMs(path, readJsonMarker(path), nowMs);
+}
+
 interface StaticLatchDef {
   name: string;
   path: (root: string) => string;
@@ -2088,7 +2095,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
       CADENCE_MARKERS,
       (def) => {
         const path = join(root, "state", def.file);
-        return markerAgeMs(path, readJsonMarker(path), nowMs);
+        return cadenceMarkerAgeMs(path, nowMs);
       },
       (def) => (def.policyKey ? resolveCadenceIntervalMinutes(def.policyKey) : undefined),
     ),
