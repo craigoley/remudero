@@ -82,6 +82,8 @@ export interface Proposal {
   source?: BundleProposalSource;
   /** Keep this ratified proposal in the active registry until its source reconciler retires it. */
   retainAfterRatification?: boolean;
+  /** Present only for a structured lifecycle proposal whose materialization is owned by `rmd approve`. */
+  lifecycleAction?: SkillLifecycleAction;
 }
 
 // ── BUNDLE-SOURCED POLICY PROPOSALS (W1-T2702) ────────────────────────────────────────────────
@@ -122,6 +124,15 @@ export interface BundleProposalSource {
   /** The `--pin` the importing operator supplied and verified against the bundle file. */
   pin: string;
   rowHash: string;
+}
+
+/** A structured action for an approved skill's negative lifecycle. Staging this value is still
+ *  read-only with respect to `.claude/skills/`; only `rmd approve` may materialize it. */
+export interface SkillLifecycleAction {
+  kind: "skill-retirement";
+  skillName: string;
+  skillPath: string;
+  evidenceFingerprint: string;
 }
 
 /** Derive a staged policy proposal's id from its row hash — DERIVED, never random, mirroring
@@ -429,6 +440,7 @@ function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal
  *  daemon's draft-independent exclusions; omitting it preserves the manual force. */
 export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: ReadinessContext): Proposal[] {
   return proposals.filter((p) => {
+    if (p.lifecycleAction) return false;
     if (ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;
     const cached = drafts[p.id];
     return !cached || isDraftStale(cached, p.evidenceAnchors);
@@ -649,6 +661,8 @@ export interface InboxClassification {
   draftStale?: boolean;
   /** Present iff state === "ready" — the reasoning rides with the recommendation. */
   draft?: DraftedCandidate;
+  /** Present iff this READY item is a structured lifecycle action rather than a drafted task. */
+  lifecycleAction?: SkillLifecycleAction;
   /** Present iff state === "drafting" — when the in-flight Architect worker for this proposal's draft was spawned
    *  (W1-T193's "never renders nothing during a legitimate multi-minute mid-draft window" bar). */
   draftSpawnedAt?: string;
@@ -900,6 +914,16 @@ export function classifyProposal(
       // ProposalTrigger} names the unfired condition, which is the whole reason.
       reasons: [],
       trigger: proposal.trigger,
+      ...referentUnverified,
+    };
+  }
+
+  if (proposal.lifecycleAction) {
+    return {
+      proposalId: proposal.id,
+      state: "ready",
+      reasons: [],
+      lifecycleAction: proposal.lifecycleAction,
       ...referentUnverified,
     };
   }

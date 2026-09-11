@@ -18,7 +18,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
-import { updateProposalRegistry, type UpdateProposalRegistryOpts } from "./inbox.js";
+import { updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
 import type { Task } from "./plan.js";
 
 /** The fields {@link renderSkillDraft} reads off a mined procedural candidate — see this module's
@@ -658,6 +658,148 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
     `named harm outcomes: ${report.harm_outcomes.join(", ")}`,
     "interpretation: descriptive selection/outcome evidence only; this report does not prove causation or modify a skill.",
   ].join("\n");
+}
+
+export const SKILL_LIFECYCLE_PROPOSAL_PREFIX = "skill-lifecycle:";
+
+export function skillLifecycleProposalId(skillName: string): string {
+  return `${SKILL_LIFECYCLE_PROPOSAL_PREFIX}${skillName}`;
+}
+
+export interface StageSkillLifecycleProposalResult {
+  refused: boolean;
+  staged: boolean;
+  refreshed: boolean;
+  alreadyStaged: boolean;
+  proposalId?: string;
+  evidenceFingerprint?: string;
+  reason?: string;
+}
+
+const sortedOutcomes = (outcomes: Record<string, number>): Record<string, number> =>
+  Object.fromEntries(Object.entries(outcomes).sort(([a], [b]) => a.localeCompare(b)));
+
+function fingerprintCohort(cohort: SkillEffectivenessCohort): SkillEffectivenessCohort {
+  return { ...cohort, outcomes: sortedOutcomes(cohort.outcomes) };
+}
+
+export function skillLifecycleEvidenceFingerprint(report: SkillEffectivenessReport): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      skill_name: report.skill_name,
+      task_type: report.task_type,
+      horizon: report.horizon,
+      status: report.status,
+      basis: report.basis,
+      selected: fingerprintCohort(report.selected),
+      control: fingerprintCohort(report.control),
+      harm_outcomes: [...report.harm_outcomes].sort(),
+    }))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function skillLifecycleRefusal(report: SkillEffectivenessReport, approvedSkillsDir: string): string | undefined {
+  const approved = loadInjectableSkills(approvedSkillsDir).some((skill) => skill.name === report.skill_name);
+  if (!approved) {
+    return `skill '${report.skill_name}' is not approved and opted in under ${approvedSkillsDir}`;
+  }
+  if (report.status === "INSUFFICIENT EVIDENCE") {
+    return (
+      `below horizon: selected terminal_runs=${report.selected.terminal_runs}, ` +
+      `control terminal_runs=${report.control.terminal_runs}, horizon=${report.horizon}`
+    );
+  }
+  if (report.status === "REVIEW-CANDIDATE") {
+    return `REVIEW-CANDIDATE is read-only: ${report.basis} does not authorize a release action`;
+  }
+  return undefined;
+}
+
+function renderSkillLifecycleSummary(report: SkillEffectivenessReport, action: SkillLifecycleAction): string {
+  return [
+    `Retire approved skill '${report.skill_name}' from ${action.skillPath}.`,
+    `Action: remove exactly ${action.skillPath}`,
+    `Evidence fingerprint: ${action.evidenceFingerprint}`,
+    `Status: ${report.status}`,
+    `Basis: ${report.basis}`,
+    `Selected: observed=${report.selected.observed_eligible_runs}; terminal=${report.selected.terminal_runs}; ` +
+      `merged=${report.selected.merged_runs}; harmful=${report.selected.harmful_terminal_runs}; ` +
+      `outcomes=${renderOutcomes(report.selected.outcomes)}`,
+    `Control: observed=${report.control.observed_eligible_runs}; terminal=${report.control.terminal_runs}; ` +
+      `merged=${report.control.merged_runs}; harmful=${report.control.harmful_terminal_runs}; ` +
+      `outcomes=${renderOutcomes(report.control.outcomes)}`,
+    `Approving this proposal opens a reviewed PR that deletes only ${action.skillPath}; staging this proposal deletes nothing.`,
+  ].join("\n");
+}
+
+export function skillLifecycleProposalForReport(
+  report: SkillEffectivenessReport,
+  approvedSkillsDir: string,
+): { ok: true; proposal: Proposal } | { ok: false; reason: string } {
+  const refusal = skillLifecycleRefusal(report, approvedSkillsDir);
+  if (refusal) return { ok: false, reason: refusal };
+  const evidenceFingerprint = skillLifecycleEvidenceFingerprint(report);
+  const action: SkillLifecycleAction = {
+    kind: "skill-retirement",
+    skillName: report.skill_name,
+    skillPath: `.claude/skills/${report.skill_name}/SKILL.md`,
+    evidenceFingerprint,
+  };
+  return {
+    ok: true,
+    proposal: {
+      id: skillLifecycleProposalId(report.skill_name),
+      summary: renderSkillLifecycleSummary(report, action),
+      evidenceAnchors: [],
+      lifecycleAction: action,
+    },
+  };
+}
+
+export function stageSkillLifecycleProposal(
+  registryPath: string,
+  approvedSkillsDir: string,
+  report: SkillEffectivenessReport,
+  opts: UpdateProposalRegistryOpts = {},
+): StageSkillLifecycleProposalResult {
+  const built = skillLifecycleProposalForReport(report, approvedSkillsDir);
+  if (!built.ok) return { refused: true, staged: false, refreshed: false, alreadyStaged: false, reason: built.reason };
+  const proposal = built.proposal;
+  let staged = false;
+  let refreshed = false;
+  let alreadyStaged = false;
+  updateProposalRegistry(
+    registryPath,
+    (current) => {
+      staged = false;
+      refreshed = false;
+      alreadyStaged = false;
+      const idx = current.findIndex((p) => p.id === proposal.id);
+      if (idx === -1) {
+        staged = true;
+        return [...current, proposal];
+      }
+      if (current[idx].lifecycleAction?.evidenceFingerprint === proposal.lifecycleAction?.evidenceFingerprint) {
+        alreadyStaged = true;
+        return null;
+      }
+      refreshed = true;
+      const next = [...current];
+      next[idx] = { ...current[idx], ...proposal };
+      return next;
+    },
+    opts,
+  );
+  return {
+    refused: false,
+    staged,
+    refreshed,
+    alreadyStaged,
+    proposalId: proposal.id,
+    evidenceFingerprint: proposal.lifecycleAction?.evidenceFingerprint,
+    reason: alreadyStaged ? "already staged with identical evidence" : undefined,
+  };
 }
 
 /**
