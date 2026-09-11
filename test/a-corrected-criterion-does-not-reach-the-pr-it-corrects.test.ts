@@ -114,3 +114,13 @@ test("a corrected criterion does not reach the PR it corrects", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("the stale-plan-tree advisory degrades when origin main is unreadable", async () => {
+  const { dir } = gitRepo({ branch: "main", seedCommit: false, kind: "unreadable-origin-main" });
+  try {
+    const { planTreeIsBehindMain } = await import("../src/run-task.js");
+    assert.equal(planTreeIsBehindMain("plan/tasks.d/@0123456789ab", dir), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
