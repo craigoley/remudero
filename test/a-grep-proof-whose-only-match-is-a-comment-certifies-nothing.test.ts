@@ -98,3 +98,9 @@ test("matchedLinesAreAllComments reads grep output lines, not the pattern shape"
     false,
   );
 });
+
+test("grep output without source coordinates falls back to its displayed comment shape", () => {
+  const context = { pattern: "MUTANT", fileText: "export const live = 1;\n" };
+  assert.equal(matchedLinesAreAllComments(["// MUTANT in a line comment"], context), true);
+  assert.equal(matchedLinesAreAllComments(['export const live = "MUTANT";'], context), false);
+});
