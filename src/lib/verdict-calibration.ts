@@ -60,12 +60,30 @@
 // class, the report prints the count and REFUSES the rate — a percentage over a handful of
 // merges is an anecdote wearing a metric.
 //
-// NOT IN SCOPE: changing any verdict; auto-filing tuning tasks (a follow-on composing with
-// W1-T418's inbox machinery once this metric has a baseline); confidence scores the verdicts do
-// not yet log (their own small task once this join proves the read side). This verb is
-// READ-ONLY — it files nothing and proposes nothing.
+// W1-T3082 — DRIFT NOW REACHES THE INBOX. MASTER-PLAN's own "Verdict calibration" section says a
+// periodic job "FILES TUNING TASKS when calibration drifts"; this report was computed four times
+// a day (lib/measurement-cadence.ts) and read by no one. {@link DriftBands} ({@link
+// DEFAULT_DRIFT_BANDS}, mirrored as data in plan/policy.yaml's `verdictCalibration.driftBands`)
+// gives each class a revert-rate and follow-up-fix-rate ceiling; {@link classifyVerdictDrift}
+// judges each of this report's classes against its band — a class below {@link
+// MIN_POPULATION_FLOOR} is NEVER drifted (P48: an anecdote is not a rate), so the floor refusal
+// wins before a ceiling is even consulted. {@link escalateVerdictCalibrationDrift} raises ONE
+// inbox proposal per drifted class through `updateProposalRegistry` (src/lib/inbox.ts, the
+// W1-T240 single-writer helper — the same transport W1-T418's `escalateRepeatingRules`,
+// rule-efficacy.ts, already uses for a repeating rule), keyed on (class, window) so a rerun over
+// the same window never duplicates it. {@link verdictCalibrationDriftLedgerLines} builds the
+// `verdict_calibration.drift` / `verdict_calibration.within_bands` ledger rows (one per class,
+// per fire) so a retro can show the rung fired even on a clean pass — see that function's own
+// doc. THE DIAL STAYS THE OPERATOR'S: this proposes; W1-T437's autonomy ratchet is never moved
+// by this module (design (iv), the task's own record).
+//
+// STILL NOT IN SCOPE: changing any verdict; confidence scores the verdicts do not yet log (their
+// own small task once this join proves the read side). {@link verdictCalibrationReport} itself
+// stays PURE and read-only — every write above is a SEPARATE, explicitly-invoked step a caller
+// (lib/measurement-cadence.ts) opts into, never a side effect of computing the report.
 
 import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionResult } from "./ledger-grep.js";
+import { updateProposalRegistry, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
 
 // ── The verdict side ────────────────────────────────────────────────────────────────────────
 
@@ -396,6 +414,12 @@ export interface ClassOutcome {
    *  floor refusal) is never confused with "spans more than one arm lane" (a lane-purity refusal
    *  — the fleet-wide-vs-per-lane reporting decision itself). */
   rateRefusedReason?: "below-population-floor" | "mixed-lane-population";
+  /** W1-T3082 — the NAMED members behind `total`: every task id whose row was classified into
+   *  this bucket AND had a locatable merge commit, in the order encountered. This is what lets
+   *  {@link escalateVerdictCalibrationDrift}'s proposal text name which merges a drifted rate was
+   *  computed over, rather than a bare percentage (P48: a rate must carry its own denominator's
+   *  membership, not just its size). */
+  taskIds: string[];
 }
 
 export interface UnmeasurableRow {
@@ -460,8 +484,8 @@ export function verdictCalibrationReport(
   const minPopulationFloor = opts.minPopulationFloor ?? MIN_POPULATION_FLOOR;
   const commits = opts.gitReadError ? [] : parseGitEventDump(gitDump);
 
-  const totals = new Map<VerdictClass, { total: number; reverted: number; fixed: number; lanes: Set<string> }>(
-    VERDICT_CLASSES.map((c) => [c, { total: 0, reverted: 0, fixed: 0, lanes: new Set<string>() }]),
+  const totals = new Map<VerdictClass, { total: number; reverted: number; fixed: number; lanes: Set<string>; taskIds: string[] }>(
+    VERDICT_CLASSES.map((c) => [c, { total: 0, reverted: 0, fixed: 0, lanes: new Set<string>(), taskIds: [] }]),
   );
   const unmeasurable: UnmeasurableRow[] = [];
   const unmeasurableByCause: Record<UnmeasurableCause, number> = {
@@ -503,6 +527,7 @@ export function verdictCalibrationReport(
     }
     const bucket = totals.get(row.verdictClass)!;
     bucket.total += 1;
+    bucket.taskIds.push(row.taskId);
     // W1-T2258 — every row is counted regardless of lane (never a second silent drop), but the
     // LANE it came from travels with the bucket so the rate below can refuse to blend lanes.
     bucket.lanes.add(row.lane ?? "review");
@@ -528,6 +553,7 @@ export function verdictCalibrationReport(
       revertRate: refuseRate ? null : b.reverted / b.total,
       followupFixRate: refuseRate ? null : b.fixed / b.total,
       lanes: b.lanes.size === 0 ? "none" : Array.from(b.lanes).sort().join(", "),
+      taskIds: b.taskIds,
       ...(rateRefusedReason ? { rateRefusedReason } : {}),
     };
   });
@@ -535,4 +561,228 @@ export function verdictCalibrationReport(
   const armsClassified = classes.reduce((sum, c) => sum + c.total, 0);
 
   return { policy, minPopulationFloor, classes, unmeasurable, armsSeen: verdictRows.length, armsClassified, unmeasurableByCause };
+}
+
+// ── W1-T3082: drift bands, classification, escalation ──────────────────────────────────────────
+//
+// See the module header's "DRIFT NOW REACHES THE INBOX" paragraph for the design. Everything
+// below is data + pure classification + a single gated write, mirroring lib/rule-efficacy.ts's
+// own report/escalate split exactly (`ruleEfficacyReport` pure, `escalateRepeatingRules` the one
+// write) — this module's `verdictCalibrationReport` stays just as pure; nothing below is called
+// from inside it.
+
+/** One class's revert-rate and follow-up-fix-rate ceilings — a measured rate ABOVE either, WITH a
+ *  population at or above {@link MIN_POPULATION_FLOOR}, is DRIFTED (design (i)). */
+export interface DriftBand {
+  readonly revertRateCeiling: number;
+  readonly followupFixRateCeiling: number;
+}
+
+export type DriftBands = Record<VerdictClass, DriftBand>;
+
+/** THE starting bands (design (i): "bounded, origin: net-new") — mirrored as data in
+ *  plan/policy.yaml's `verdictCalibration.driftBands` rows, moving either is a reviewed plan
+ *  diff, the same "data, not a hidden constant" discipline {@link ATTRIBUTION_POLICY} follows.
+ *  TIGHTEST on `degraded-arm` (zero proofs executed — the class W1-T437's autonomy dial trusts
+ *  least already), LOOSEST on `full-pass` (a clean verdict, the class the dial should trust
+ *  most) — a rising rate on the WEAK class is the one this task exists to surface first (the
+ *  module header's "routing question" paragraph). */
+export const DEFAULT_DRIFT_BANDS: DriftBands = {
+  "full-pass": { revertRateCeiling: 0.2, followupFixRateCeiling: 0.3 },
+  "keyword-floor": { revertRateCeiling: 0.15, followupFixRateCeiling: 0.25 },
+  "degraded-arm": { revertRateCeiling: 0.1, followupFixRateCeiling: 0.2 },
+};
+
+/** Which ceiling(s) a {@link DriftedClass} exceeded — a class can exceed both at once, so this is
+ *  an array, never a single enum that would force a caller to pick one. */
+export type DriftReason = "revert-rate" | "followup-fix-rate";
+
+/** One {@link VerdictClass} whose MEASURED rate exceeded its {@link DriftBand} — never a class
+ *  whose rate was refused (see {@link classifyVerdictDrift}'s own doc: "below the floor is never
+ *  drifted"). Carries everything {@link escalateVerdictCalibrationDrift}'s proposal text needs:
+ *  the rate, the denominator (`total`), and the NAMED members (`taskIds`) — P48's own "a rate
+ *  must carry its membership" clause, restated at the escalation boundary. */
+export interface DriftedClass {
+  verdictClass: VerdictClass;
+  total: number;
+  revertRate: number;
+  followupFixRate: number;
+  band: DriftBand;
+  reasons: readonly DriftReason[];
+  taskIds: readonly string[];
+}
+
+/** Why a class did NOT drift — `"within-bands"` for a genuinely clean measured pass, or the SAME
+ *  {@link ClassOutcome.rateRefusedReason} that already refused its rate (design (i): a refused
+ *  rate is never treated as drifted, whatever it might have read had it cleared the floor). */
+export type WithinBandsReason = "within-bands" | "below-population-floor" | "mixed-lane-population";
+
+export interface WithinBandsClass {
+  verdictClass: VerdictClass;
+  total: number;
+  reason: WithinBandsReason;
+}
+
+export interface VerdictDriftClassification {
+  /** Every class whose measured rate exceeded its band — see {@link DriftedClass}. */
+  drifted: DriftedClass[];
+  /** Every OTHER class, one entry each, always all three minus however many drifted — an empty
+   *  corpus reports every class here as `"below-population-floor"`, never omitted (P48). */
+  withinBands: WithinBandsClass[];
+}
+
+/**
+ * Classify each of `report.classes` as DRIFTED or within bands (design (i)). A class whose rate
+ * was REFUSED — {@link ClassOutcome.revertRate}/{@link ClassOutcome.followupFixRate} is `null`,
+ * whether for `"below-population-floor"` or `"mixed-lane-population"` — is ALWAYS within bands,
+ * carrying that reason: "an anecdote is not a rate" (P48) means a thin class is never judged
+ * against a ceiling it does not yet have enough rows to measure honestly. Pure — no I/O, the same
+ * discipline {@link verdictCalibrationReport} itself follows.
+ */
+export function classifyVerdictDrift(report: VerdictCalibrationReport, bands: DriftBands): VerdictDriftClassification {
+  const drifted: DriftedClass[] = [];
+  const withinBands: WithinBandsClass[] = [];
+  for (const c of report.classes) {
+    if (c.revertRate === null || c.followupFixRate === null) {
+      withinBands.push({ verdictClass: c.verdictClass, total: c.total, reason: c.rateRefusedReason ?? "below-population-floor" });
+      continue;
+    }
+    const band = bands[c.verdictClass];
+    const reasons: DriftReason[] = [];
+    if (c.revertRate > band.revertRateCeiling) reasons.push("revert-rate");
+    if (c.followupFixRate > band.followupFixRateCeiling) reasons.push("followup-fix-rate");
+    if (reasons.length === 0) {
+      withinBands.push({ verdictClass: c.verdictClass, total: c.total, reason: "within-bands" });
+      continue;
+    }
+    drifted.push({
+      verdictClass: c.verdictClass,
+      total: c.total,
+      revertRate: c.revertRate,
+      followupFixRate: c.followupFixRate,
+      band,
+      reasons,
+      taskIds: c.taskIds,
+    });
+  }
+  return { drifted, withinBands };
+}
+
+/** Deterministic from (class, window) — the dedup key {@link escalateVerdictCalibrationDrift}
+ *  checks against the registry's own contents before drafting anything, the same idempotence
+ *  {@link import("./rule-efficacy.js").ruleEfficacyProposalId} gives a repeating rule. `window` is
+ *  caller-supplied (lib/measurement-cadence.ts derives it from the fire date) so the SAME drift
+ *  is not re-raised every six hours, and a later window's still-drifted class raises a fresh,
+ *  distinct proposal rather than silently reusing a stale one (the falsifier's own "PROVE IT
+ *  LOAD-BEARING" clause: remove this key from the dedup and the same fixture run twice in one
+ *  window drafts two proposals instead of one). */
+export function verdictCalibrationDriftProposalId(verdictClass: VerdictClass, window: string): string {
+  return `verdict-calibration:${verdictClass}:${window}`;
+}
+
+function formatPct(rate: number): string {
+  return `${(rate * 100).toFixed(1)}%`;
+}
+
+function driftProposalSummary(d: DriftedClass, window: string): string {
+  const reasonText = d.reasons
+    .map((r) =>
+      r === "revert-rate"
+        ? `revert rate ${formatPct(d.revertRate)} exceeds the ${formatPct(d.band.revertRateCeiling)} ceiling`
+        : `follow-up-fix rate ${formatPct(d.followupFixRate)} exceeds the ${formatPct(d.band.followupFixRateCeiling)} ceiling`,
+    )
+    .join("; ");
+  return (
+    `verdict-calibration drift: "${d.verdictClass}" (window ${window}) — ${reasonText}, over ${d.total} measured ` +
+    `merge(s): ${d.taskIds.join(", ")} (rmd verdict-calibration). Advisory only — W1-T437's autonomy dial is not moved.`
+  );
+}
+
+/**
+ * Draft ONE inbox proposal per DRIFTED class, through {@link updateProposalRegistry} — the W1-T240
+ * single-writer helper, never a hand-rolled JSON write, the SAME transport
+ * {@link import("./rule-efficacy.js").escalateRepeatingRules} already uses for a repeating rule.
+ * IDEMPOTENT by (class, window) — see {@link verdictCalibrationDriftProposalId}. Returns the
+ * proposals ACTUALLY written, or `null` when nothing needed drafting (empty `drifted`, or every
+ * drifted class already carries an open proposal for this window) — the common, already-
+ * consistent case, which (per `updateProposalRegistry`'s own contract) never touches disk.
+ *
+ * PROPOSES ONLY: this never files a task, never re-verdicts anything, and never moves W1-T437's
+ * autonomy dial — the inbox's own tiering and the operator's ratification own this proposal's
+ * fate from here (auto-filing a task from a metric is the laundering shape Law 5 forbids).
+ */
+export function escalateVerdictCalibrationDrift(
+  drifted: readonly DriftedClass[],
+  window: string,
+  registryPath: string,
+  opts?: UpdateProposalRegistryOpts,
+): Proposal[] | null {
+  if (drifted.length === 0) return null;
+
+  return updateProposalRegistry(
+    registryPath,
+    (current) => {
+      const existingIds = new Set(current.map((p) => p.id));
+      const additions: Proposal[] = [];
+      for (const d of drifted) {
+        const id = verdictCalibrationDriftProposalId(d.verdictClass, window);
+        if (existingIds.has(id)) continue; // already open for this (class, window) — idempotent
+        additions.push({ id, summary: driftProposalSummary(d, window), evidenceAnchors: [] });
+      }
+      return additions.length > 0 ? [...current, ...additions] : null;
+    },
+    opts,
+  );
+}
+
+/** One `verdict_calibration.drift` or `verdict_calibration.within_bands` ledger row — design
+ *  (iii): "so the retro can show the rung fired" even on a clean pass, never only on a drifted
+ *  one. Deliberately untyped past `step`/`verdict_class`/`window`/`total` (`[k: string]:
+ *  unknown`) — the caller (lib/measurement-cadence.ts) spreads this straight onto an
+ *  `appendLedger` line, which is itself an open record. */
+export interface VerdictCalibrationLedgerLine {
+  step: "verdict_calibration.drift" | "verdict_calibration.within_bands";
+  verdict_class: VerdictClass;
+  window: string;
+  total: number;
+  [k: string]: unknown;
+}
+
+/**
+ * Build the ledger rows for one classification pass — PURE, no I/O (the caller appends them).
+ * ONE row per class, always: a drifted class gets `verdict_calibration.drift` naming its rate,
+ * denominator and members; every other class gets `verdict_calibration.within_bands` naming why
+ * it did not drift — and when that reason is `"below-population-floor"`, `population_floor`
+ * carries the floor itself, so "too thin to judge" is never confused with "measured and clean"
+ * (acceptance criterion 2: "the ledger says within_bands with the floor named").
+ */
+export function verdictCalibrationDriftLedgerLines(
+  classification: VerdictDriftClassification,
+  window: string,
+  minPopulationFloor: number,
+): VerdictCalibrationLedgerLine[] {
+  const lines: VerdictCalibrationLedgerLine[] = [];
+  for (const d of classification.drifted) {
+    lines.push({
+      step: "verdict_calibration.drift",
+      verdict_class: d.verdictClass,
+      window,
+      total: d.total,
+      revert_rate: d.revertRate,
+      followup_fix_rate: d.followupFixRate,
+      reasons: d.reasons,
+      task_ids: d.taskIds,
+    });
+  }
+  for (const w of classification.withinBands) {
+    lines.push({
+      step: "verdict_calibration.within_bands",
+      verdict_class: w.verdictClass,
+      window,
+      total: w.total,
+      reason: w.reason,
+      ...(w.reason === "below-population-floor" ? { population_floor: minPopulationFloor } : {}),
+    });
+  }
+  return lines;
 }

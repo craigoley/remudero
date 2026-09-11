@@ -3,7 +3,15 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport } from "./rule-efficacy.js";
-import { mineVerdictRows, verdictCalibrationReport } from "./verdict-calibration.js";
+import {
+  mineVerdictRows,
+  verdictCalibrationReport,
+  classifyVerdictDrift,
+  escalateVerdictCalibrationDrift,
+  verdictCalibrationDriftLedgerLines,
+  DEFAULT_DRIFT_BANDS,
+  type DriftBands,
+} from "./verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./autonomy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { resolveLedgerUnion, type LedgerUnionResult } from "./ledger-grep.js";
@@ -71,6 +79,14 @@ import {
  * `escalateRepeatingRules`, gated on `policy.escalate` (default off), always via
  * `updateProposalRegistry`. Every result carries `status: "measured" | "refused"`, never a bare
  * rate.
+ *
+ * W1-T3082: `verdict-calibration` now escalates too, the SAME shape — gated on `opts.escalate`,
+ * always via `updateProposalRegistry`, one proposal per DRIFTED verdict class (see
+ * `verdict-calibration.ts`'s `classifyVerdictDrift`/`escalateVerdictCalibrationDrift`), plus one
+ * `verdict_calibration.drift`/`verdict_calibration.within_bands` ledger row per class per fire
+ * when a caller supplies `opts.writeLedgerLine` (omitted, the pre-existing default, means no
+ * ledger row at all — the same "opt-in, caller supplies it" shape `coverageImprovement` uses
+ * below, so every pre-existing caller of this function stays byte-identical).
  *
  * FALSIFIER: test/measurement-cadence.test.ts and the per-verb suites below. Why:
  * docs/forensics/measurement-cadence.md#module-header.
@@ -218,6 +234,17 @@ export interface VerdictCalibrationCadenceResult extends MeasurementCadenceVerbS
   blockedCiCount?: number;
   blocked_ci_share?: number | null;
   delta_vs_previous?: number | null;
+  /** W1-T3082 — true only when `policy.escalate` was on and at least one drift proposal was
+   *  actually drafted this run. Optional: absent on a fixture/mock built before this task (e.g.
+   *  test/measurement-cadence.test.ts's hand-built `runMeasurementCadence` stub), the same
+   *  optional-field compatibility shape as every other row added to this file after its first
+   *  ship. Same meaning as {@link RuleEfficacyCadenceResult.escalated}. */
+  escalated?: boolean;
+  escalatedProposalIds?: string[];
+  /** Verdict classes {@link import("./verdict-calibration.js").classifyVerdictDrift} judged
+   *  DRIFTED this run, whether or not `escalate` was on (a report-only run still measures drift;
+   *  it just never writes about it) — empty on a clean pass. */
+  driftedClasses?: string[];
 }
 
 export interface AutonomyRateCadenceResult extends MeasurementCadenceVerbStatus {
@@ -1376,6 +1403,27 @@ export interface MeasurementCadenceReportOpts {
   handRunCensus?: Omit<HandRunCensusCadenceOpts, "stateDir">;
   /** W1-T3271's async verify-human cadence result. Optional: omitted skips the row member. */
   verifyHuman?: VerifyHumanCadenceResult;
+  /** W1-T3082 — per-class revert-rate/follow-up-fix-rate ceilings {@link
+   *  import("./verdict-calibration.js").classifyVerdictDrift} judges the report against.
+   *  Optional; production reads `plan/policy.yaml`'s `verdictCalibration.driftBands`, tests and
+   *  every pre-existing caller default to {@link DEFAULT_DRIFT_BANDS}. */
+  driftBands?: DriftBands;
+  /** W1-T3082 — the dedup key's `window` half (see `verdictCalibrationDriftProposalId`), so a
+   *  rerun inside the same window never re-raises the same class's proposal. Optional; defaults
+   *  to `opts.now`'s (or `new Date()`'s) UTC calendar day — the cadence fires 4x/day, so every
+   *  same-day fire shares one window and a NEW day raises a fresh proposal for a still-drifted
+   *  class rather than silently reusing a stale one. */
+  driftWindow?: string;
+  /** Injectable only for tests/determinism; production takes the real clock. Also seeds {@link
+   *  MeasurementCadenceReportOpts.driftWindow}'s default. */
+  now?: Date;
+  /** W1-T3082 — appends ONE ledger row per {@link
+   *  import("./verdict-calibration.js").verdictCalibrationDriftLedgerLines} entry, called only
+   *  when `opts.escalate` is true (the same write-gating every other producer in this file
+   *  follows). Optional and OMITTED BY DEFAULT: every pre-existing caller of this function never
+   *  supplied it, so it never ran before this task and stays a no-op for them now — the same
+   *  "opt-in, caller supplies it" shape `coverageImprovement`'s `writeLedgerLine` already uses. */
+  writeLedgerLine?: (line: Record<string, unknown>) => void;
 }
 
 function finiteMetric(value: unknown): number | null {
@@ -1616,6 +1664,28 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   const vReport = verdictCalibrationReport(rows, gitDump, { gitReadError });
   const anyVerdictMeasurable = vReport.classes.some((c) => c.revertRate !== null);
   const blockedCiShare = blockedCiShareFromLedger(opts.stateDir, ledgerUnion);
+
+  // ── W1-T3082: drift classification + escalation — see verdict-calibration.ts's own doc ───────
+  // Classification is PURE (no I/O) and runs unconditionally so `driftedClasses` always reflects
+  // what this run actually measured; only the WRITES below (the proposal, the ledger rows) are
+  // gated on `opts.escalate`, matching this file's own "the only writes are gated" invariant.
+  const driftBands = opts.driftBands ?? DEFAULT_DRIFT_BANDS;
+  const driftWindow = opts.driftWindow ?? (opts.now ?? new Date()).toISOString().slice(0, 10);
+  const driftClassification = classifyVerdictDrift(vReport, driftBands);
+  let verdictEscalatedProposalIds: string[] = [];
+  if (opts.escalate) {
+    const draftedDrift =
+      driftClassification.drifted.length > 0
+        ? escalateVerdictCalibrationDrift(driftClassification.drifted, driftWindow, registryPath)
+        : null;
+    verdictEscalatedProposalIds = draftedDrift ? draftedDrift.map((p) => p.id) : [];
+    if (opts.writeLedgerLine) {
+      for (const line of verdictCalibrationDriftLedgerLines(driftClassification, driftWindow, vReport.minPopulationFloor)) {
+        opts.writeLedgerLine({ run_id: "MEASUREMENT-CADENCE", ...line });
+      }
+    }
+  }
+
   const verdictCalibration: VerdictCalibrationCadenceResult = {
     status: anyVerdictMeasurable || blockedCiShare.blockedCiShare !== null ? "measured" : "refused",
     refusedReason: anyVerdictMeasurable || blockedCiShare.blockedCiShare !== null
@@ -1629,6 +1699,9 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     totalVerdicts: blockedCiShare.totalVerdicts,
     blockedCiCount: blockedCiShare.blockedCiCount,
     blocked_ci_share: blockedCiShare.blockedCiShare,
+    escalated: verdictEscalatedProposalIds.length > 0,
+    escalatedProposalIds: verdictEscalatedProposalIds,
+    driftedClasses: driftClassification.drifted.map((d) => d.verdictClass),
   };
 
   const merges = gitReadError ? [] : parseTrailerMerges(gitDump);

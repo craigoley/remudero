@@ -958,8 +958,64 @@ measurementCadence:
     # (360m/4-per-day), by DAEMON_DRAFT_BATCH_CAP, and by idempotence: a rule escalates ONCE,
     # keyed by ruleEfficacyProposalId, so this is a one-off cost per repeating rule, not a
     # recurring one. Still never files a task — Law 5.
-    # rule-efficacy's ONE write (a promote-to-instrument proposal); verdict-calibration and
-    # autonomy-rate never consult this field at all.
+    # GATES rule-efficacy's ONE write (a promote-to-instrument proposal) AND, since W1-T3082,
+    # verdict-calibration's own drift escalation (see `verdictCalibration.driftBands` below) —
+    # ONE proposal per verdict class whose measured revert-/follow-up-fix-rate exceeds its band,
+    # keyed by (class, window) so a rerun inside the same window never duplicates it. Same
+    # idempotence, same "never files a task" ceiling as rule-efficacy's write above.
+    # autonomy-rate never consults this field at all.
+
+# W1-T3082: THE VERDICT-CALIBRATION DRIFT BANDS — per `VerdictClass` (src/lib/
+# verdict-calibration.ts), the revert-rate and follow-up-fix-rate ceiling a MEASURED rate (one at
+# or above `MIN_POPULATION_FLOOR` rows — a thin class is never judged, design (i)) must clear
+# before `classifyVerdictDrift` calls it DRIFTED and `measurementCadence.escalate` (immediately
+# above) raises one inbox proposal for it. Mirrored here as DATA, exactly like
+# `armCalibrationBands` above and `verdict-calibration.ts`'s own `ATTRIBUTION_POLICY` — moving a
+# ceiling is a reviewed plan diff, never a source literal.
+#
+# TIGHTEST on `degraded-arm` (zero proofs executed — the class W1-T437's autonomy dial already
+# trusts least), LOOSEST on `full-pass` (a clean verdict) — a rising rate on the WEAK class first
+# is exactly the routing-question failure this task's own rationale names: "if [keyword-floor's]
+# revert rate rises past the full-pass class's and nothing says so, the dial moves on a reading
+# nobody checked." NET-NEW (no prior source literal to lift; the mechanism itself is new): min/max
+# bound each ceiling to a plausible tuning range (5%-50%) — narrow enough that an editor cannot
+# widen a band into meaninglessness (a 90% ceiling never fires), wide enough that ordinary
+# operator tuning as this metric gets its first baseline never needs a bound raised first.
+verdictCalibration:
+  driftBands:
+    full-pass:
+      revertRateCeiling:
+        value: 0.20
+        origin: "net-new"
+        min: 0.05
+        max: 0.5
+      followupFixRateCeiling:
+        value: 0.30
+        origin: "net-new"
+        min: 0.05
+        max: 0.5
+    keyword-floor:
+      revertRateCeiling:
+        value: 0.15
+        origin: "net-new"
+        min: 0.05
+        max: 0.5
+      followupFixRateCeiling:
+        value: 0.25
+        origin: "net-new"
+        min: 0.05
+        max: 0.5
+    degraded-arm:
+      revertRateCeiling:
+        value: 0.10
+        origin: "net-new"
+        min: 0.05
+        max: 0.5
+      followupFixRateCeiling:
+        value: 0.20
+        origin: "net-new"
+        min: 0.05
+        max: 0.5
 
 # W1-T2277: THE DIGEST'S OWN CADENCE ROW — deliberately SEPARATE from `measurementCadence`
 # immediately above, so a short digest interval can never drag rule-efficacy/verdict-
