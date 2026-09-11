@@ -10925,9 +10925,11 @@ export function reportWorkerSourceSizeFollowup(
  *  never an unbounded archive. */
 export const TRANSCRIPT_RETENTION_DEFAULT = 5;
 
-/** Scaled off {@link REPORT_EXCERPT_CAP} (design note ii names it as the size-cap primitive to
- *  scale from) — a full worker transcript spans many turns, not the one closing report that cap
- *  bounds, so this is 10x rather than the identical literal. */
+/** PRIMARY CONTROL (W1-T1266): the ONLY thing bounding how large one archived transcript file can
+ *  grow — nothing upstream of {@link archiveWorkerTranscript} caps `text` first. Scaled off
+ *  {@link REPORT_EXCERPT_CAP} (design note ii names it as the size-cap primitive to scale from) —
+ *  a full worker transcript spans many turns, not the one closing report that cap bounds, so this
+ *  is 10x rather than the identical literal. */
 export const TRANSCRIPT_EXCERPT_CAP = REPORT_EXCERPT_CAP * 10;
 
 export function transcriptsDirFor(root: string, taskId: string): string {
