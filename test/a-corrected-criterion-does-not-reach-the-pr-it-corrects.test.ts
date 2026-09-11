@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import type { Config } from "../src/lib/config-schema.js";
+import type { ReviewRunResult } from "../src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -57,16 +59,30 @@ async function reviewLogs(repoDir: string, headRefOid: string, state: "success" 
       }
     }
     const logs: string[] = [];
+    const verdict: ReviewRunResult = {
+      state,
+      headSha: headRefOid,
+      reviewerOutcome: "test",
+      keywordOnly: false,
+      criteria: [
+        { claim: "criterion", proof: "proof", met: state === "success", reason: "test", proof_exec: "not_executable" },
+      ],
+      testTheater: false,
+      summary: "test verdict",
+      floorDegraded: false,
+      capped: false,
+      planOnly: false,
+    };
     const log = console.log;
     console.log = (...parts: unknown[]) => logs.push(parts.join(" "));
     try {
       await reviewCommand("branch", ["--repo", "o/r"], {
         fetchView: () => ({ headRefOid, headRefName: "branch", body: "Remudero-Task: W1-STALE", url: "https://github.com/o/r/pull/1", number: 1 }),
-        loadConfig: () => ({ root: stateRoot }),
+        loadConfig: () => ({ root: stateRoot } as Config),
         fetchHead: () => {},
-        materialize: () => ({ worktreePath: undefined, failure: { errorClass: "test", message: "skip" } }),
+        materialize: () => ({ worktreePath: undefined, failure: { errorClass: "other", message: "skip" } }),
         postReviewPending: async () => ({ posted: false }),
-        runReview: async () => ({ state, headSha: headRefOid, keywordOnly: false, criteria: [{ met: state === "success" }] }),
+        runReview: async () => verdict,
       });
     } finally {
       console.log = log;
