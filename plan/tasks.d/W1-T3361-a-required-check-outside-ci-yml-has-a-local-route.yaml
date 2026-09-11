@@ -20,8 +20,7 @@
     - claim: "an entry may be declared deliberately unmirrored, and that declaration carries its reason rather than passing silently"
       proof: "unit test: an unmirrored standalone entry without a reason is refused"
   rationale: |
-    MEASURED 2026-09-10. `src/lib/ci-parity.ts:166` states the contract in its own words: "ONE
-    ENTRY PER ci.yml JOB. CI_PARITY_TABLE is data keyed by job name", and `:177` adds the guard —
+    MEASURED 2026-09-10. `src/lib/ci-parity.ts:166` states the contract in its own words: "ONE ENTRY PER ci.yml JOB. CI_PARITY_TABLE is data keyed by job name", and `:177` adds the guard —
     "a job added to ci.yml with no entry would under-cover in silence; ci-parity:drift fails". That
     guard protects ci.yml and nothing else.
     
