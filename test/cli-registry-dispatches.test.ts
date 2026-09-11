@@ -21,6 +21,7 @@ import {
   type CommandHandler,
   type CommandSpec,
 } from "../src/cli/registry.js";
+import { HANDLERS, USAGE as REAL_USAGE, main } from "../src/run-task.js";
 
 const USAGE = "usage:\n  rmd fake-verb   # a synthetic verb this test made up\n";
 
@@ -130,5 +131,91 @@ test("--help output is unchanged: dispatchCommand plays no part in the top-level
     assert.deepEqual(printed, [[USAGE]]);
   } finally {
     console.error = originalError;
+  }
+});
+
+async function captureHandler(handlerName: string, rest: string[]): Promise<{ code: number; printed: unknown[][] }> {
+  const handler = HANDLERS.get(handlerName);
+  assert.ok(handler, `${handlerName} must be registered in the real HANDLERS map`);
+  const originalError = console.error;
+  const printed: unknown[][] = [];
+  console.error = (...args: unknown[]) => printed.push(args);
+  try {
+    return { code: await handler(rest), printed };
+  } finally {
+    console.error = originalError;
+  }
+}
+
+test("real HANDLERS preserve the old required-positional fallthrough for arg-gated verbs", async () => {
+  const requiresArg = [
+    "note",
+    "wipe-test",
+    "run-task",
+    "review",
+    "dep-review",
+    "receipt",
+    "replay",
+    "fix",
+    "correct",
+    "approve",
+    "reframe",
+  ];
+
+  for (const name of requiresArg) {
+    const { code, printed } = await captureHandler(name, []);
+    assert.equal(code, 2, `${name} with no positional arg must return the usage exit code`);
+    assert.deepEqual(printed, [[REAL_USAGE]], `${name} must print the same top-level usage fallback`);
+  }
+});
+
+test("real HANDLERS route malformed args into their command validators before side effects", async () => {
+  const cases: Array<{ name: string; rest: string[]; pattern: RegExp }> = [
+    { name: "note", rest: ["W1-T2893"], pattern: /rmd note: <id> and <text\.\.\.> are both required/ },
+    { name: "run-task", rest: ["W1-T2893", "--bogus"], pattern: /rmd run-task: unexpected argument '--bogus'/ },
+    { name: "receipt", rest: ["1", "--bogus"], pattern: /rmd receipt: unexpected argument '--bogus'/ },
+    { name: "replay", rest: ["2026-09-10"], pattern: /usage: rmd replay/ },
+    { name: "fix", rest: ["not-a-number"], pattern: /not a valid PR number/ },
+    { name: "correct", rest: ["W1-T2893", "--bogus"], pattern: /rmd correct: unexpected argument '--bogus'/ },
+    { name: "approve", rest: ["P1", "--bogus"], pattern: /rmd approve: unexpected argument '--bogus'/ },
+    { name: "reframe", rest: ["P1", "--bogus"], pattern: /rmd reframe: unexpected argument '--bogus'/ },
+  ];
+
+  for (const { name, rest, pattern } of cases) {
+    const { code, printed } = await captureHandler(name, rest);
+    assert.equal(code, 2, `${name} malformed args must return the usage exit code`);
+    assert.match(String(printed[0]?.[0] ?? ""), pattern, `${name} should reject before real side effects`);
+  }
+});
+
+test("main dispatches unknown verbs through dispatchCommand and exits with its code", async (t) => {
+  class ExitCalled extends Error {
+    constructor(public readonly code: number | undefined) {
+      super(`process.exit(${code})`);
+    }
+  }
+
+  const savedArgv = process.argv;
+  const savedToken = process.env.GH_TOKEN;
+  const printed: unknown[][] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => printed.push(args));
+  t.mock.method(process, "exit", ((code?: number): never => {
+    throw new ExitCalled(code);
+  }) as typeof process.exit);
+
+  try {
+    process.env.GH_TOKEN = "already-present";
+    process.argv = ["node", "run-task.js", "not-a-real-verb"];
+    let caught: unknown;
+    await main({ checkFreshness: () => ({ status: "guarded" }) }).catch((err) => {
+      caught = err;
+    });
+    assert.ok(caught instanceof ExitCalled, `main() must exit through dispatchCommand; got ${String(caught)}`);
+    assert.equal(caught.code, UNKNOWN_COMMAND_EXIT_CODE);
+    assert.deepEqual(printed, [[REAL_USAGE]]);
+  } finally {
+    process.argv = savedArgv;
+    if (savedToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = savedToken;
   }
 });

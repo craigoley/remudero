@@ -61,15 +61,16 @@ export interface CommandSpec {
  * stays the caller's process-boundary concern (main()'s own contract per the task record), so a
  * handler is plain, synchronously testable logic all the way down.
  */
-export type CommandHandler = (rest: string[]) => number | Promise<number>;
+export interface CommandHandler {
+  (rest: string[]): number | Promise<number>;
+}
 
-/** A {@link CommandSpec} paired with the handler that runs when it is dispatched. */
+// A CommandSpec paired with the handler that runs when it is dispatched.
 export interface RegisteredCommand extends CommandSpec {
   readonly handler: CommandHandler;
 }
 
-/** The exit code `dispatchCommand` returns for an unrecognized verb — matches the exit code the
- *  flat if-ladder this replaces always fell through to (`console.error(USAGE); process.exit(2)`). */
+// The unrecognized-verb exit code, matching the flat if-ladder's old fallthrough.
 export const UNKNOWN_COMMAND_EXIT_CODE = 2;
 
 /**
