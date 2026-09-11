@@ -1,0 +1,45 @@
+- id: W1-T3390
+  title: "TWO STRIKES THEN A HUMAN IS NOT AN AUTOMATION LADDER — MAX_STRIKES is 2, and a capped PR whose budget is spent stands down forever behind a deduped escalation, with the repair it needs sitting in a file its own PR is forbidden to touch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  risk: high
+  origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
+  plan_refs: ["W1-T3386", "W1-T3389", "W1-T3391"]
+  files: [src/lib/classify.ts, src/lib/sweep.ts, test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE LADDER HAS TWO RUNGS AND THEN A PERSON. `classify.ts` sets `MAX_STRIKES = 2` and gives up with
+    `strikes exhausted (2)`. MEASURED on PR 5107: 30 sweep dispositions reading `capped review still
+    has non-discriminating proofs, but its shared fix budget is exhausted (2/2)`, and 28 reading `an
+    escalation was already filed for this head — the escalation is deduped, not skipped`. It now
+    sweeps every two minutes, decides nothing, and waits for a human.
+
+    THE TERMINAL STATE IS THE BUG, NOT THE CAP. Capping is correct: `capped` is computed as
+    `executableCriteria.length > 0 && executedCount === 0` and exists so a keyword match is never read
+    as evidence. What is wrong is that CAPPED is terminal. The ladder should run capped, then repair,
+    then re-review, and reach a human only when the repair space is genuinely exhausted.
+
+    AND ONE RUNG IS STRUCTURALLY MISSING, WHICH IS WHY MORE STRIKES ALONE WOULD NOT HAVE HELPED PR
+    5107. Its criteria come from `W1-T3134`'s shard on main, a file that is not in its own diff, and
+    rule 15's `criterionFieldTampered` refuses a non-plan-only diff that edits `claim:` or `proof:`.
+    So the fix rung cannot repair those proofs from inside the build PR at any strike count. A task
+    whose proofs are stale cannot repair itself, and nothing in the ladder can currently open the
+    plan-only PR that would.
+
+    SCOPE. Raise the automated repair ceiling for the capped-proof class specifically, and add the
+    missing rung: when the offending criteria live in a shard outside the PR's own diff, dispatch a
+    PLAN-ONLY repair of that shard rather than standing down. Escalate only when both repair paths are
+    exhausted. Preserve every existing refusal: a CAPPED non-plan verdict still cannot arm or merge
+    without an explicit head-bound ledgered override, and a capped proof problem must still create
+    bounded work rather than a silent stand-down. Add no second merge predicate and no queue manager.
+
+  acceptance:
+    - claim: "a capped PR whose criteria live in a shard outside its own diff dispatches a plan-only repair of that shard instead of standing down"
+      proof: "grep: when the offending criteria live in a shard outside the PR's own diff in plan/tasks.d/W1-T3390-two-strikes-then-a-human-is-not-an-automation-ladder.yaml"
+    - claim: "a human is reached only after both repair paths are exhausted, and a capped non-plan verdict still cannot arm without a head-bound override"
+      proof: "grep: Escalate only when both repair paths are in plan/tasks.d/W1-T3390-two-strikes-then-a-human-is-not-an-automation-ladder.yaml"

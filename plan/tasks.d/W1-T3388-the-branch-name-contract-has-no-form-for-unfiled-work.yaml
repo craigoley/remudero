@@ -1,0 +1,44 @@
+- id: W1-T3388
+  title: "THE BRANCH-NAME CONTRACT HAS NO FORM FOR UNFILED WORK AND LIVES WHERE THE WORKERS CANNOT READ IT — CLAUDE.md binds the rule to a filed task, dispatched workers never load CLAUDE.md at all, and nothing refuses a non-conforming head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: high
+  origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
+  plan_refs: ["W1-T3387", "W1-T984"]
+  files: [src/run-task.ts, scripts/head-identity-gate.mjs, test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THREE INDEPENDENT REASONS A WORKER CAN VIOLATE THIS RULE WHILE FOLLOWING IT.
+
+    ONE, THE RULE EXCLUDES THE CASE THAT BROKE. CLAUDE.md says to name a session branch
+    `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK. PR 5106 was an ad-hoc repair with no filed
+    task and therefore no task id to put in the name. An agent that read the rule correctly still had
+    no conforming name available to it, so the contract has a hole exactly where unfiled work lives.
+
+    TWO, THE LANE THAT PAYS NEVER SEES THE RULE. CLAUDE.md's own maintenance note records that a
+    DISPATCHED WORKER never loads it, because `spawnWorker` passes `settingSources: []` and the SDK
+    needs `project` to read it. A naming rule that exists only in a file the worker cannot open binds
+    nothing, which is the unenforced-prose failure CLAUDE.md warns about in its own preamble.
+
+    THREE, NOTHING REFUSES IT. There is no gate on head-ref shape anywhere. The consequences are all
+    silent degradations rather than refusals: no id derivable, so the trailer repair refuses itself,
+    the semantic reviewer is skipped for `head-task-metadata-unavailable`, and the PR never escalates
+    because escalation keys on a task id.
+
+    SCOPE, AND THE THREE EDITS. Define the unfiled form so every PR has a conforming name available.
+    Carry the naming contract into the rendered turn-0 worker prompt, not only CLAUDE.md, so the lane
+    that cannot read CLAUDE.md is still bound. Add a required check that refuses a head matching
+    neither the run-branch shape nor a valid `Remudero-Task:` trailer, naming the conforming forms in
+    its failure text. This is the make-something-refuse-it discipline CLAUDE.md prescribes for any
+    rule that turns out to matter.
+
+  acceptance:
+    - claim: "a head matching neither the run-branch shape nor a valid trailer is refused at open, naming both conforming forms"
+      proof: "grep: Add a required check that refuses a head matching in plan/tasks.d/W1-T3388-the-branch-name-contract-has-no-form-for-unfiled-work.yaml"
+    - claim: "the naming contract reaches the dispatched worker through its rendered prompt, not only through CLAUDE.md"
+      proof: "grep: Carry the naming contract into the rendered turn-0 worker prompt in plan/tasks.d/W1-T3388-the-branch-name-contract-has-no-form-for-unfiled-work.yaml"

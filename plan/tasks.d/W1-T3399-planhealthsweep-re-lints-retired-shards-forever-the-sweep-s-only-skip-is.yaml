@@ -1,0 +1,71 @@
+- id: W1-T3399
+  title: "planHealthSweep RE-LINTS RETIRED SHARDS FOREVER — the sweep's only skip is `isMerged`, so all 31 `retirement:`-carrying shards are re-flagged and re-proposed as corrective tasks every cycle; this is the CENSUS gap the operator named ratifying W1-T3076's (a): 'a retired shard must leave ... the retro's plan-health sweep', measured against a dispatch FILTER (W1-T2474) that already excludes it correctly"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/lib/retro.ts, test/retro.test.ts]
+  origin: "oper#w1-t3076-retirement-ruling-2026-09-09"
+  plan_refs: ["W1-T3076", "W1-T1287", "W1-T3074", "W1-T2474"]
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED AT SOURCE 2026-09-09. `planHealthSweep` (`src/lib/retro.ts:1945-1966`) loops every task
+    and skips it with exactly one predicate:
+      for (const task of tasks) {
+        if (isMerged(task)) continue; // out of scope — already shipped (derived; see doc above)
+        ...
+      }
+    A `retirement:`-carrying task (W1-T1287, shipped) is `status: blocked` and is not, and will
+    never be, `isMerged` — an operator has already ruled it closed. The sweep does not know that: it
+    re-lints the retired shard on every cycle exactly as it would a genuinely stalled one, pushes it
+    into `flags`, and proposes a `CorrectiveTaskProposal` for a task that will never be built. This
+    is the EXACT gap the operator's own ruling names: "the sweep's body has no `retirement` branch,
+    so 31 retired shards are re-linted every cycle and count in every 'how much is open' figure."
+
+    THIS IS A DIFFERENT LAYER FROM THE ALREADY-FIXED ONE. W1-T2474 (shipped) already refuses a
+    retired task at the DISPATCH filter (`isDispatchEligible`, `src/lib/drain.ts`, filtered as
+    `"retired"`) — that exclusion is correct and this task does not touch it. The gap is the
+    RE-LINT CENSUS `planHealthSweep` walks every retro cycle, which is a separate population from
+    the dispatch filter and was never taught the same exclusion. The operator's ruling states this
+    precisely: retirement must leave "not only the dispatch FILTER ... but the CENSUS the selector
+    walks and the re-lint `planHealthSweep` ... performs every cycle."
+  design: |
+    Add one exclusion beside the existing `isMerged` skip, in the same loop, so a retirement-
+    carrying task is out of scope for exactly the same reason a merged one is — it will never
+    receive a corrective PR because no PR will ever be filed against it:
+      for (const task of tasks) {
+        if (isMerged(task)) continue;          // out of scope — already shipped
+        if (task.retirement !== undefined) continue; // out of scope — an operator's closed ruling
+        ...
+      }
+    DO NOT change the `isMerged` skip itself, DO NOT change `CorrectiveTaskProposal`'s shape, and DO
+    NOT touch `renderPlanHealth`'s rendering — the fix is confined to which tasks enter the loop
+    body at all. `lintTask`/`optsFor` are never called for a retired task after this change, which
+    is itself part of the fix: a retirement-carrying shard should not even be RE-GRADED, since the
+    operator has already ruled on its fate independent of what the deterministic linter would say.
+  acceptance:
+    - claim: "a task carrying ANY retirement value (retired, closed, or withdrawn) with an active blocking lint violation produces NO flag and NO corrective-task proposal — locking the exact 31-shard gap the operator measured"
+      proof: "unit test: test/retro.test.ts"
+    - claim: "a non-retired, non-merged task with the SAME violation is still flagged and still proposed — the falsifier proving the exclusion is scoped to retirement, not to violations in general"
+      proof: "unit test: test/retro.test.ts"
+    - claim: "a merged task's existing skip is unchanged — the two exclusions compose without either one masking the other's own regression coverage"
+      proof: "unit test: test/retro.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF `planHealthSweep` already skips retirement-carrying tasks — grep
+    the function body (`src/lib/retro.ts:1945-1966`) for `retirement`. MEASURED 2026-09-09, this
+    session, reading the function directly: zero hits; the only skip present is
+    `if (isMerged(task)) continue;` at line 1953.
+  note: |
+    Filed while routing verify-human:W1-T3076, alongside W1-T3397. Operationalizes the CENSUS half of
+    the operator's "(a) first" ruling; W1-T3397 operationalizes the `unmetDependencies` correctness bug
+    the same ruling discovered along the way. NOT filing (c) closure-rate admission here: the
+    operator's own ruling gates it explicitly — "THEN (c) CLOSURE-RATE ADMISSION, if (a) is not
+    enough" — and W1-T3074 (shipped) supplies the closure-by-class table that decision needs, but
+    the decision itself is deferred pending (a)'s observed effect, which this task and W1-T3397 are
+    that effect. Pure and read-only, matching the function's own doc header ("no I/O and no plan
+    write, so the corrective tasks are PROPOSALS the Architect stage files") — nothing here retires a
+    task or edits the plan; it only stops re-proposing work against tasks already ruled closed.

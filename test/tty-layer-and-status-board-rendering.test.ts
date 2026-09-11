@@ -54,6 +54,7 @@ function baseModel(overrides: Partial<StatusBoardModel> = {}): StatusBoardModel 
       crashLoop: { breached: false, windowBoots: [], windowMs: 900_000, maxBoots: 5 },
     },
     latches: { rows: [] },
+    cadence: { rows: [] },
     lastCycle: { found: false },
     blockers: { rows: [] },
     queueHead: { rows: [], refused: [], refusedTruncated: 0 },
