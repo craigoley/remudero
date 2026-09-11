@@ -2273,6 +2273,8 @@ ratification below.
 
 ### 2026-09-11 — OPERATOR RATIFICATION (W1-T3075)
 
+*Operator-authored, recorded at the operator's instruction on 2026-09-11.*
+
 The operator ratified the prepared **(b) then (c)** ordering. The operative comparator keeps explicit
 `priority` first and `undeclaredScopeLast` second. It then ranks classes by measured
 `mergeRate / costPerMerge` only when the ledger union is complete, W1-T3074's population floor is
