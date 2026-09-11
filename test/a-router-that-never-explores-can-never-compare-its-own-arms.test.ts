@@ -195,6 +195,7 @@ test("an exploration dispatch carries ledger fields that distinguish it from a r
     explored_arm: "codex::gpt-5.5::high",
     on_policy: { provider: "claude", served_model: "claude-sonnet-5", effort: "high", n: 200 },
     explored: { provider: "codex", served_model: "gpt-5.5", effort: "high", n: 25 },
+    sample_unit: 0,
     reason: "bounded-fraction-runner-up",
     policy: MOUNT_EXPLORATION_POLICY,
   });

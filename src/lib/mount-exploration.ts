@@ -48,6 +48,7 @@ export interface MountExplorationDispatch {
   onPolicyArm: MountExplorationArm;
   exploredArm: MountExplorationArm;
   mount: Mount;
+  sampleUnit: number;
   reason: "bounded-fraction-runner-up";
   codexModelPreference?: { capability: string; effort: string; model: string };
 }
@@ -219,6 +220,7 @@ export function exploreMount(input: ExploreMountInput): MountExplorationDecision
     onPolicyArm,
     exploredArm: runnerUp.arm,
     mount: runnerUp.mount,
+    sampleUnit: sample,
     reason: "bounded-fraction-runner-up",
     ...(runnerUp.codexModelPreference ? { codexModelPreference: runnerUp.codexModelPreference } : {}),
   };
@@ -244,6 +246,7 @@ export function mountExplorationLedgerFields(decision: MountExplorationDispatch)
       effort: decision.exploredArm.effort,
       n: decision.exploredArm.n,
     },
+    sample_unit: decision.sampleUnit,
     reason: decision.reason,
     policy: decision.policy,
   };
