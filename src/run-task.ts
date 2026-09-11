@@ -20268,6 +20268,18 @@ function ledgerRungUnratified(ledgerPath: string, rung: string, diff: string): v
  * (exit 2, spawns/writes nothing) for a missing or unrecognised rung — {@link GATED_RUNGS} is the
  * only valid input, read structurally off `policy.ts`'s own schema, never hand-duplicated here.
  */
+function ratificationPolicyBlock(policy: Policy, rung: string): unknown {
+  let current: unknown = policy.values;
+  for (const segment of rung.split(".")) {
+    if (current === null || typeof current !== "object") {
+      throw new Error(`rmd ratify: policy has no block for rung '${rung}'`);
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  if (current === undefined) throw new Error(`rmd ratify: policy has no block for rung '${rung}'`);
+  return current;
+}
+
 export function ratifyCommand(rest: string[], deps: { now?: () => Date; ratifiedBy?: string; policy?: Policy } = {}): number {
   const rung = rest[0];
   const badArg = unknownArgError("ratify", rest.slice(1), [], []);
@@ -20284,7 +20296,7 @@ export function ratifyCommand(rest: string[], deps: { now?: () => Date; ratified
   }
   const contractVersion = RUNG_CONTRACT_VERSIONS[rung];
   const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
-  const policyBlock = (policy.values as unknown as Record<string, unknown>)[rung];
+  const policyBlock = ratificationPolicyBlock(policy, rung);
   const row = buildRatificationRow(rung, policyBlock, contractVersion, deps.ratifiedBy ?? process.env.USER ?? "operator", deps.now?.() ?? new Date());
   console.log(
     `### rmd ratify ${rung} — computed the live operation hash; wrote NOTHING.\n` +
