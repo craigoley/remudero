@@ -71,6 +71,7 @@ import { checkDispatchGovernors, type DispatchGovernorVerdict, type QuietHoursHo
 import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
+import type { DispatchValueContext } from "./dispatch-value.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
@@ -652,6 +653,9 @@ export function decideAlertPoll(i: AlertPollInputs): AlertPollDecision {
 }
 
 export interface DaemonDeps {
+  /** W1-T3412: command-built calibration once per selection cycle. This pure scheduler owns no
+   * ledger reader, so an unavailable calibration returns undefined and preserves old ordering. */
+  buildDispatchValueContext?: (plan: Plan, isMerged: MergedSet) => DispatchValueContext | undefined;
   /** W1-T3216 — the ledger's RAW lines, for {@link resolveReleasedIds}: a console KICK for an
    *  operator-released `verify: human` task must be admitted here too, or the release works from
    *  the drain and is refused from the console. Same seam and same contract as `DrainDeps`'s.
@@ -2760,6 +2764,7 @@ export async function runDaemon(
         ? runBranchTaskIds(deps.readPushedRunBranches())
         : undefined;
       const dispatchOpts: NextRunnableOpts = {
+      dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       isOpenPr: deps.isOpenPr,
       // A parked blocker is excluded before the open-PR check, so the existing idle census names it
       // as `continued-this-pass`. Its descendants remain excluded independently by `unmet-deps`.

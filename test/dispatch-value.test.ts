@@ -1,0 +1,128 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  buildDispatchValueContext,
+  type ClosureCalibrationSnapshot,
+  type DispatchValueCalibration,
+} from "../src/lib/dispatch-value.js";
+import { dispatchOrder, runnableCandidates } from "../src/lib/drain.js";
+import type { Plan, Task } from "../src/lib/plan.js";
+import type { ClassClosure } from "../src/lib/retro-closure.js";
+
+function task(id: string, over: Partial<Task> = {}): Task {
+  return {
+    id,
+    title: id,
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    verify: "auto",
+    risk: "medium",
+    status: "queued",
+    attempts: 0,
+    ...over,
+  };
+}
+
+function closure(taskClass: string, rate: number | "thin", costPerMerge: number | null): ClassClosure {
+  return {
+    taskClass,
+    filed: 5,
+    merged: rate === "thin" ? 1 : 4,
+    open: 1,
+    mergeRate:
+      rate === "thin"
+        ? { kind: "refused", merged: 1, denominator: 2, floor: 5 }
+        : { kind: "rate", value: rate, merged: 4, denominator: 5 },
+    costPerMerge,
+  };
+}
+
+function snapshots(rows: readonly ClassClosure[], prior = rows): ClosureCalibrationSnapshot[] {
+  return [
+    { ts: "2026-09-11T12:00:00.000Z", rows },
+    { ts: "2026-09-10T12:00:00.000Z", rows: prior },
+  ];
+}
+
+function ready(calibration: DispatchValueCalibration) {
+  assert.equal(calibration.kind, "ready", calibration.kind === "refused" ? calibration.reasons.join(",") : "");
+  return calibration.context;
+}
+
+test("W1-T3412 value respects explicit priority", () => {
+  const lowValue = task("W1-T1", { files: ["src/a.ts"] });
+  const highValue = task("W1-T2", { files: ["docs/b.md"] });
+  const context = ready(
+    buildDispatchValueContext(
+      [lowValue, highValue],
+      snapshots([closure("src", 0.2, 2), closure("docs", 0.8, 1)]),
+      new Set([lowValue.id, highValue.id]),
+    ),
+  );
+
+  assert.deepEqual(dispatchOrder([lowValue, highValue], context).map((item) => item.id), [highValue.id, lowValue.id]);
+  const explicitPriority = { ...lowValue, priority: 0 };
+  assert.deepEqual(
+    dispatchOrder([explicitPriority, highValue], context).map((item) => item.id),
+    [explicitPriority.id, highValue.id],
+    "measured value cannot override an explicit operator priority",
+  );
+});
+
+test("W1-T3412 refuses untrusted calibration", () => {
+  const left = task("W1-T1", { files: ["src/a.ts"] });
+  const right = task("W1-T2", { files: ["docs/b.md"] });
+  const fixtures: Array<{ name: string; calibration: DispatchValueCalibration }> = [
+    { name: "incomplete-union", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", 0.2, 1)]), new Set([left.id, right.id]), false) },
+    { name: "missing-prior-snapshot", calibration: buildDispatchValueContext([left, right], [snapshots([closure("src", 0.2, 1)])[0]], new Set([left.id, right.id])) },
+    { name: "thin-class", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", "thin", 1)]), new Set([left.id, right.id])) },
+    { name: "zero-merge-class", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", 0.2, null)]), new Set([left.id, right.id])) },
+    { name: "unstable-value", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", 0.8, 1)], [closure("src", 0.2, 1)]), new Set([left.id, right.id])) },
+  ];
+  for (const fixture of fixtures) {
+    assert.equal(fixture.calibration.kind, "refused", fixture.name);
+    if (fixture.calibration.kind === "refused") assert.ok(fixture.calibration.reasons.some((reason) => reason.includes(fixture.name)));
+    assert.deepEqual(
+      dispatchOrder([right, left]).map((item) => item.id),
+      [left.id, right.id],
+      `${fixture.name} retains historic priority/scope/id order`,
+    );
+  }
+});
+
+test("W1-T3412 fanout breaks unavailable value ties", () => {
+  const parent = task("W1-T20", { files: ["plan/tasks.d/parent.yaml"] });
+  const childA = task("W1-T30", { files: ["plan/tasks.d/child-a.yaml"], depends_on: [parent.id] });
+  const childB = task("W1-T40", { files: ["plan/tasks.d/child-b.yaml"], depends_on: [parent.id] });
+  const peer = task("W1-T1", { files: ["plan/tasks.d/peer.yaml"] });
+  // The complete calibration has a trusted src class but no plan-lint row. Neither compared task
+  // therefore has a value score, so the ratified open-dependent fanout term decides the tie.
+  const context = ready(
+    buildDispatchValueContext(
+      [parent, childA, childB, peer],
+      snapshots([closure("src", 0.8, 1)]),
+      new Set([parent.id, childA.id, childB.id, peer.id]),
+    ),
+  );
+  const plan: Plan = { tasks: [peer, parent, childA, childB], byId: new Map([[peer.id, peer], [parent.id, parent], [childA.id, childA], [childB.id, childB]]) };
+  assert.deepEqual(dispatchOrder([peer, parent], context).map((item) => item.id), [parent.id, peer.id]);
+  assert.equal(runnableCandidates(plan, () => false, 1, { dispatchValueContext: context })[0]?.id, parent.id);
+});
+
+test("W1-T3412 mutation rejects value bypass", () => {
+  const lowValue = task("W1-T1", { files: ["src/a.ts"] });
+  const highValue = task("W1-T2", { files: ["docs/b.md"] });
+  const context = ready(
+    buildDispatchValueContext(
+      [lowValue, highValue],
+      snapshots([closure("src", 0.2, 2), closure("docs", 0.8, 1)]),
+      new Set([lowValue.id, highValue.id]),
+    ),
+  );
+  const ordered = dispatchOrder([lowValue, highValue], context).map((item) => item.id);
+  const bypassed = dispatchOrder([lowValue, highValue]).map((item) => item.id);
+  assert.deepEqual(ordered, [highValue.id, lowValue.id]);
+  assert.deepEqual(bypassed, [lowValue.id, highValue.id]);
+  assert.notDeepEqual(ordered, bypassed, "removing the value context must fail this discriminating assertion");
+});

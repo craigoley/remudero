@@ -22,6 +22,7 @@ import {
 } from "./dispatch-overlap.js";
 import { taskIdFromRunBranch } from "./status.js";
 import type { OpenSiblingBuild, StatusProjection } from "./status.js";
+import { measuredDispatchValue, type DispatchValueContext } from "./dispatch-value.js";
 
 /** A merged predicate — DERIVED FROM GITHUB in the real runner (status.ts). */
 export type MergedSet = (taskId: string) => boolean;
@@ -95,6 +96,9 @@ export function closedUnmergedRunBranchTaskIds(closedPrRows: string): ReadonlySe
 
 /** Optional in-flight-skip controls for {@link nextRunnable} (W1-T80). */
 export interface NextRunnableOpts {
+  /** W1-T3412: already-proved, pure ranking evidence. Omitted means historic priority/scope/id
+   * ordering exactly; neither the selector nor {@link compareDispatch} may read history itself. */
+  dispatchValueContext?: DispatchValueContext;
   /** Returns the open PR number for a task whose latest PR is currently OPEN. */
   isOpenPr?: OpenPrCheck;
 
@@ -223,19 +227,31 @@ export interface NextRunnableOpts {
  *  mtime or enumeration order, and the id tiebreak makes it a TOTAL order. Absent `priority` sorts
  *  last. COST: this discards positional signal; `priority:` (W1-T422) succeeds it. */
 // Why: the shard-starvation defect this replaces and what sorting by id costs — docs/forensics/drain.md.
-export function dispatchOrder(tasks: readonly Task[]): Task[] {
-  return [...tasks].sort(compareDispatch);
+export function dispatchOrder(tasks: readonly Task[], context?: DispatchValueContext): Task[] {
+  return [...tasks].sort((a, b) => compareDispatch(a, b, context));
 }
 
 /** Total order: `priority` ascending first (absent sorts last), then {@link undeclaredScopeLast}
  *  (W1-T476), then {@link idOrdinal}'s workstream-aware order as the deterministic tiebreak. */
-export function compareDispatch(a: Task, b: Task): number {
+export function compareDispatch(a: Task, b: Task, context?: DispatchValueContext): number {
   const pa = a.priority ?? Number.POSITIVE_INFINITY;
   const pb = b.priority ?? Number.POSITIVE_INFINITY;
   if (pa !== pb) return pa - pb;
   const ua = undeclaredScopeLast(a);
   const ub = undeclaredScopeLast(b);
   if (ua !== ub) return ua - ub;
+  // W1-T3412: value is a tie-break only after explicit operator priority and declared scope. A
+  // score missing on either side cannot be treated as zero or as evidence that one class is bad.
+  const va = measuredDispatchValue(a, context);
+  const vb = measuredDispatchValue(b, context);
+  if (va !== undefined && vb !== undefined && va !== vb) return vb - va;
+  // The fanout term is meaningful only when a complete calibration produced a context. An empty
+  // context is the fail-closed fallback: it preserves the former id order byte for byte.
+  if (context) {
+    const fa = context.openDependentFanoutByTaskId.get(a.id) ?? 0;
+    const fb = context.openDependentFanoutByTaskId.get(b.id) ?? 0;
+    if (fa !== fb) return fb - fa;
+  }
   const na = idOrdinal(a.id);
   const nb = idOrdinal(b.id);
   if (na.workstream !== nb.workstream) return na.workstream - nb.workstream;
@@ -277,7 +293,7 @@ function observeOpenSibling(t: Task, opts: NextRunnableOpts): void {
 }
 
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
-  for (const t of dispatchOrder(plan.tasks)) {
+  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
     if (!isDispatchEligible(plan, t, isMerged, opts)) continue;
     // W1-T2397: observe, then dispatch anyway. Placed AFTER eligibility said yes and BEFORE the task
     // is returned unchanged, so it is structurally incapable of changing the answer.
@@ -504,7 +520,7 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
 export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts = {}): Task[] {
   if (limit <= 0) return [];
   const eligible: Task[] = [];
-  for (const t of dispatchOrder(plan.tasks)) {
+  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
     if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
   }
   const collected = packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE);
@@ -879,6 +895,8 @@ export function renderRundown(lines: RundownLine[]): string {
 
 /** Injectable dependencies — the real command wires GitHub/run-task/usage defaults. */
 export interface DrainDeps {
+  /** W1-T3412: command-built calibration once per pass. Undefined is the safe historic order. */
+  buildDispatchValueContext?: (plan: Plan, isMerged: MergedSet) => DispatchValueContext | undefined;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: () => MergedSet;
   /** W1-T3216 — the ledger's RAW lines, for {@link resolveReleasedIds}. A seam, not a file read:
@@ -1134,6 +1152,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     }
 
     const skipOpts: NextRunnableOpts = {
+      dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
       // sites so the single-lane and multi-lane passes cannot answer the same task differently.
       releasedIds,
@@ -1441,6 +1460,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     }
 
     const skipOpts: NextRunnableOpts = {
+      dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
       // sites so the single-lane and multi-lane passes cannot answer the same task differently.
       releasedIds,
