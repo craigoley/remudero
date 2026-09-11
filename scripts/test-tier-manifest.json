@@ -131,6 +131,7 @@
     "test/a-renamed-shard-silently-becomes-a-second-concern.test.ts": 713,
     "test/a-reply-is-understood-before-it-is-acted-on.test.ts": 1287,
     "test/a-report-with-no-reader-is-not-a-report.test.ts": 866,
+    "test/a-reservation-names-its-holder.test.ts": 0,
     "test/a-reservation-seeds-from-the-namespace-it-owns.test.ts": 1544,
     "test/a-restart-is-only-warranted-by-a-material-advance.test.ts": 182,
     "test/a-retired-task-is-not-a-recoverable-blocker.test.ts": 1011,
