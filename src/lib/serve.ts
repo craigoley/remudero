@@ -593,7 +593,7 @@ export function renderRecentRunHistoryHtml(history: ConsoleRunHistory): string {
         .join("")
     : '<li class="empty">no task runs observed in the live ledger</li>';
   return (
-    `<section id="run-history" class="panel-section" aria-label="Recent task run history">` +
+    `<section id="run-history" class="panel-section" aria-label="Recent task run history" data-owner-tab="feed">` +
     `<h2><span>Run history</span><span class="section-summary" id="run-history-summary">newest ${escapeHtml(history.limit)} task runs</span></h2>` +
     `<p id="run-history-window" class="counts">${escapeHtml(windowText)}</p>` +
     `<ol id="run-history-list" class="row-list">${rows}</ol>` +

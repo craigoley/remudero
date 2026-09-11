@@ -2270,6 +2270,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     accepted: "feed",
     recent: "feed",
     rest: "feed",
+    "run-history": "feed",
     more: "feed",
   };
   // The single source of truth for "which tab is active right now" -- read by applyRecapVisibility
