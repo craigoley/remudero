@@ -12,6 +12,7 @@ import {
   resetDeployRestartPressure,
   type DeployRestartPressureState,
   type DeployWorthChange,
+  type DeployWorthJudge,
   type DeployWorthVerdict,
 } from "../src/lib/deploy-judge.js";
 import { runDeployCycle, type DeployDeps, type HealthInputs, type IdleProbe } from "../src/lib/deployer.js";
@@ -59,7 +60,7 @@ function makeDeps(opts: {
   originMain?: string;
   runningHead?: string;
   pendingChanges?: DeployWorthChange[];
-  judge?: (change: DeployWorthChange, base: DeployWorthVerdict) => string | DeployWorthVerdict;
+  judge?: DeployWorthJudge;
   restartPressureState?: DeployRestartPressureState;
   idle?: IdleProbe | IdleProbe[];
   nowMs?: number;

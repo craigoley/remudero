@@ -67,10 +67,15 @@ export interface DeployRestartPressureResult {
   rateLimited: boolean;
 }
 
+export interface DeployWorthJudgeObject {
+  score: number;
+  reason: string;
+}
+
 export type DeployWorthJudge = (
   change: DeployWorthChange,
   base: DeployWorthVerdict,
-) => string | DeployWorthVerdict;
+) => string | DeployWorthJudgeObject;
 
 function cleanTotal(value: number | undefined): number {
   return Number.isFinite(value) && value! > 0 ? Math.floor(value!) : 0;
@@ -158,10 +163,10 @@ export function buildDeployWorthPrompt(change: DeployWorthChange, base: DeployWo
   ].join("\n");
 }
 
-function parseJudgeValue(value: string | DeployWorthVerdict): DeployWorthParseOutcome {
+function parseJudgeValue(value: string | DeployWorthJudgeObject): DeployWorthParseOutcome {
   if (typeof value === "string") return parseDeployWorthResponse(value);
   if (isDeployImpactScore(value.score)) {
-    return { kind: "parsed", verdict: { ...value, source: "judge" } };
+    return { kind: "parsed", verdict: { score: value.score, reason: value.reason, source: "judge" } };
   }
   return {
     kind: "unparseable",
