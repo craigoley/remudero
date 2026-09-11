@@ -17056,7 +17056,7 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
  */
 export function censusMembershipCommand(
   rest: string[],
-  deps: { repoRoot?: string; spawn?: PreflightSpawn; changedPaths?: readonly string[] } = {},
+  deps: { repoRoot?: string; spawn?: PreflightSpawn; changedPaths?: readonly string[]; readFile?: (path: string) => string } = {},
 ): number {
   const badArg = unknownArgError("census-membership", rest, ["--base"], ["--files"]);
   if (badArg) {
@@ -17089,7 +17089,7 @@ export function censusMembershipCommand(
     }
   }
 
-  const report = censusSuiteMembershipFor(changed, root, deps.spawn ?? defaultPreflightSpawn);
+  const report = censusSuiteMembershipFor(changed, root, deps.spawn ?? defaultPreflightSpawn, deps.readFile);
   if (rest.includes("--files")) {
     // W1-T3059 — ONE PREDICATE, NEVER TWO. The pre-push hook that RUNS these suites reads this
     // list; it does not carry its own copy of the table. A second copy is the drift this repo has
@@ -17110,7 +17110,11 @@ export function censusMembershipCommand(
     // STDOUT stays a clean file list a caller can splice; INCOMPLETENESS goes to stderr, so a
     // partial enumeration cannot be mistaken for a complete one. An unmodelled census is a suite
     // this diff may join and this cannot run — the caller must say so rather than imply coverage.
-    for (const unknown of report.unknownCoverage) console.error(`unmodelled: ${unknown}`);
+    const candidates = new Set(report.candidateCoverage.map((c) => c.testFile));
+    for (const candidate of report.candidateCoverage) console.error(`candidate: ${candidate.testFile} walks ${candidate.walks.join(", ")}`);
+    for (const unknown of report.unknownCoverage) {
+      if (!candidates.has(unknown)) console.error(`unmodelled: ${unknown}`);
+    }
     return 0;
   }
   console.log(`rmd census-membership — ${changed.length} changed path(s) against ${base}`);
@@ -17126,8 +17130,16 @@ export function censusMembershipCommand(
   if (report.unknownCoverage.length > 0) {
     // NAMED, never dropped: a suite the model cannot place is the difference between "joins
     // nothing" and "the model does not know".
-    console.log("  UNMODELLED census suite(s), which this cannot place and will not guess:");
-    for (const u of report.unknownCoverage) console.log(`    ? ${u}`);
+    const candidates = new Set(report.candidateCoverage.map((c) => c.testFile));
+    if (report.candidateCoverage.length > 0) {
+      console.log("  CANDIDATE census suite(s), unmodelled but population-walking:");
+      for (const c of report.candidateCoverage) console.log(`    ? ${c.testFile} walks ${c.walks.join(", ")}`);
+    }
+    const unmodelled = report.unknownCoverage.filter((u) => !candidates.has(u));
+    if (unmodelled.length > 0) {
+      console.log("  UNMODELLED census suite(s), which this cannot place and will not guess:");
+      for (const u of unmodelled) console.log(`    ? ${u}`);
+    }
   }
   return 0;
 }
