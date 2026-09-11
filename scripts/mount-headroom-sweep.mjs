@@ -284,6 +284,109 @@ const ARM_DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resum
 const IMPLEMENTATION_DONE_STEPS = new Set(["implement.done", "implement.resumed"]);
 const WINDOW_REASON_CAP = 8;
 const WINDOW_REASON_LENGTH_CAP = 96;
+const ASSIGNMENT_EVENT_STEP = "worker.assignment";
+
+function assignmentFieldsFromEvent(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (value.version !== 1 || value.phase !== "pre-execution" || typeof value.id !== "string" || value.id === "") return undefined;
+  const selected = value.selected;
+  if (!selected || typeof selected !== "object" || Array.isArray(selected)) return undefined;
+  if ((selected.provider !== "claude" && selected.provider !== "codex") ||
+    typeof selected.model !== "string" || selected.model === "" ||
+    typeof selected.effort !== "string" || selected.effort === "") return undefined;
+  return { provider: selected.provider, assignedModel: selected.model, assignedEffort: selected.effort };
+}
+
+function assignmentKeyOf(fields) {
+  return `${fields.provider}::${fields.assignedModel}::${fields.assignedEffort}`;
+}
+
+export function assignmentFieldsByRunId(records) {
+  const assignments = new Map();
+  const doneRowsByRun = new Map();
+  const integrity = {
+    assignmentEvents: 0,
+    validAssignmentEvents: 0,
+    malformedAssignmentEvents: 0,
+    duplicateAssignmentIds: 0,
+    candidateRuns: 0,
+    joinedRuns: 0,
+    missingAssignmentIdRows: 0,
+    missingAssignmentEventRows: 0,
+    terminalProviderMismatches: 0,
+    terminalRoutedModelMismatches: 0,
+    mixedAssignedArms: 0,
+    servedModelConfirmedRows: 0,
+    servedModelUnreportedRows: 0,
+  };
+
+  for (const r of records) {
+    if (!r || typeof r !== "object") continue;
+    if (r.step === ASSIGNMENT_EVENT_STEP) {
+      integrity.assignmentEvents++;
+      const fields = assignmentFieldsFromEvent(r.worker_assignment);
+      const id = r.worker_assignment?.id;
+      if (!fields || typeof id !== "string") {
+        integrity.malformedAssignmentEvents++;
+        continue;
+      }
+      if (assignments.has(id)) {
+        integrity.duplicateAssignmentIds++;
+        continue;
+      }
+      assignments.set(id, fields);
+      integrity.validAssignmentEvents++;
+      continue;
+    }
+    if (typeof r.run_id !== "string" || typeof r.step !== "string" || !ARM_DONE_STEPS.has(r.step)) continue;
+    const rows = doneRowsByRun.get(r.run_id) ?? { implementation: [], recon: [] };
+    (IMPLEMENTATION_DONE_STEPS.has(r.step) ? rows.implementation : rows.recon).push(r);
+    doneRowsByRun.set(r.run_id, rows);
+  }
+
+  const fieldsByRunId = new Map();
+  for (const [runId, grouped] of doneRowsByRun) {
+    const rows = grouped.implementation.length > 0 ? grouped.implementation : grouped.recon;
+    integrity.candidateRuns++;
+    const fields = [];
+    let rejected = false;
+    for (const row of rows) {
+      const id = row.selection_assignment_id;
+      if (typeof id !== "string" || id === "") {
+        integrity.missingAssignmentIdRows++;
+        rejected = true;
+        continue;
+      }
+      const assignment = assignments.get(id);
+      if (!assignment) {
+        integrity.missingAssignmentEventRows++;
+        rejected = true;
+        continue;
+      }
+      if (typeof row.provider === "string" && row.provider !== assignment.provider) {
+        integrity.terminalProviderMismatches++;
+        rejected = true;
+        continue;
+      }
+      if (typeof row.routed_model === "string" && row.routed_model !== assignment.assignedModel) {
+        integrity.terminalRoutedModelMismatches++;
+        rejected = true;
+        continue;
+      }
+      if (typeof row.served_model === "string") integrity.servedModelConfirmedRows++;
+      else integrity.servedModelUnreportedRows++;
+      fields.push(assignment);
+    }
+    if (rejected || fields.length === 0) continue;
+    if (new Set(fields.map(assignmentKeyOf)).size !== 1) {
+      integrity.mixedAssignedArms++;
+      continue;
+    }
+    fieldsByRunId.set(runId, fields[0]);
+    integrity.joinedRuns++;
+  }
+  return { fieldsByRunId, integrity };
+}
 
 /**
  * provider / served_model / effort per run_id, off the raw ledger records. `servedModel` reads
@@ -565,6 +668,23 @@ export function computeArmSweep(runs, armFields, newestTs, windowEvidence = new 
   return cells;
 }
 
+export function computeAssignmentSweep(runs, assignmentFields, newestTs) {
+  const compatibleFields = new Map(
+    [...assignmentFields].map(([runId, fields]) => [runId, {
+      provider: fields.provider,
+      servedModel: fields.assignedModel,
+      effort: fields.assignedEffort,
+    }]),
+  );
+  return computeArmSweep(runs, compatibleFields, newestTs).map((cell) => ({
+    ...cell,
+    arms: cell.arms.map((arm) => {
+      const { servedModel, windowShare, windowEvidence, ...assignmentArm } = arm;
+      return { ...assignmentArm, assignedModel: servedModel };
+    }),
+  }));
+}
+
 /**
  * THE ONE ENTRY POINT: read the union corpus, dedup, reduce into per-run summaries, and build the
  * per-class sweep. Throws on ZERO distinct runs; spawns and writes nothing.
@@ -591,6 +711,7 @@ export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) 
 
   const armFields = armFieldsByRunId(records);
   const windowEvidence = windowEvidenceByRunId(records, armFields);
+  const assignments = assignmentFieldsByRunId(records);
 
   return {
     corpus: {
@@ -610,6 +731,10 @@ export function buildMountHeadroomSweep(stateDir, fsDeps = realMountHeadroomFs) 
     // W1-T2574: (type x risk x class) cells, each carrying its own (provider x served_model x
     // effort) arms and every WITHIN-cell pairwise comparison — see this script's own header.
     cells: computeArmSweep(runs, armFields, newestTs, windowEvidence),
+    assignments: {
+      integrity: assignments.integrity,
+      cells: computeAssignmentSweep(runs, assignments.fieldsByRunId, newestTs),
+    },
   };
 }
 
@@ -790,6 +915,44 @@ export function renderMountHeadroomReport(report) {
         `  compare ${cmp.armKeyA} (n=${cmp.nA}) vs ${cmp.armKeyB} (n=${cmp.nB}): ${cmp.note} ` +
           `(newest row seen: ${cmp.newestTs ?? "(none)"})`,
       );
+    }
+  }
+
+  const assignmentReport = report.assignments;
+  if (assignmentReport) {
+    const integrity = assignmentReport.integrity;
+    lines.push("");
+    lines.push(
+      "router assignments (pre-execution, read-only) — assigned_model is NOT provider-confirmed served_model; this report changes no routing policy",
+    );
+    lines.push(
+      `coverage: events ${integrity.validAssignmentEvents}/${integrity.assignmentEvents} valid; ` +
+        `joined runs ${integrity.joinedRuns}/${integrity.candidateRuns}; missing ids ${integrity.missingAssignmentIdRows}; ` +
+        `missing events ${integrity.missingAssignmentEventRows}; malformed events ${integrity.malformedAssignmentEvents}; ` +
+        `duplicate ids ${integrity.duplicateAssignmentIds}; mixed assigned arms ${integrity.mixedAssignedArms}; ` +
+        `terminal provider mismatches ${integrity.terminalProviderMismatches}; routed-model mismatches ${integrity.terminalRoutedModelMismatches}; ` +
+        `served-model receipts confirmed/unreported ${integrity.servedModelConfirmedRows}/${integrity.servedModelUnreportedRows}`,
+    );
+    for (const cell of assignmentReport.cells) {
+      lines.push(`assignment cell ${cell.cellKey} (type=${cell.type}, risk=${cell.risk}, class=${cell.taskClass}):`);
+      for (const arm of cell.arms) {
+        lines.push(
+          `  assigned arm ${arm.armKey} (provider=${arm.provider}, assigned_model=${arm.assignedModel}, effort=${arm.effort}) — ` +
+            `n=${arm.n} (${arm.settledRuns}/${arm.totalRuns} settled/total) | cost p50/p90/max ($): ` +
+            `${arm.costP50 ?? "-"}/${arm.costP90 ?? "-"}/${arm.costMax ?? "-"} | passing ${arm.outcomes.passing}, ` +
+            `blocked_ci ${arm.outcomes.blockedCi}, re-dispatched ${arm.outcomes.redispatched} | ` +
+            `$/completed task ${arm.costPerCompletedTaskUsd ?? "-"} | newest row seen: ${arm.newestTs ?? "(none)"}`,
+        );
+      }
+      if (cell.arms.length < 2) {
+        lines.push(`  only ${cell.arms.length} assigned arm(s) in this cell — no within-cell comparison is possible`);
+      }
+      for (const cmp of cell.comparisons) {
+        lines.push(
+          `  compare assigned ${cmp.armKeyA} (n=${cmp.nA}) vs ${cmp.armKeyB} (n=${cmp.nB}): ${cmp.note} ` +
+            `(newest row seen: ${cmp.newestTs ?? "(none)"})`,
+        );
+      }
     }
   }
   return lines.join("\n");
