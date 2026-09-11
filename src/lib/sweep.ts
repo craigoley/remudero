@@ -932,6 +932,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         taskId: terminal.taskId,
         runId,
         headSha: terminal.headSha,
+        headDedup: "independent",
         cause: terminal.cause,
         summary: `PR ${prUrl} cannot be repaired from its non-fleet head`,
         detail:
@@ -1412,6 +1413,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           // fix-rung-exhaustion issue named, `escalate()` appends here instead of
           // opening a sibling — the #412/#413-shaped duplicate this task fixes.
           headSha: pr.headSha,
+          ...(reason === "review failing with no actionable unmet criteria (contradictory) — escalating"
+            ? { headDedup: "independent" as const }
+            : {}),
           cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
           summary: `PR ${pr.prUrl} needs a clarification — ${reason}`,
           detail:
