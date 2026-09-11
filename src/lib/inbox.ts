@@ -275,6 +275,39 @@ function deriveLegacyReferent(proposalId: string): string | undefined {
   return /^board-review:(?:stale|escalation):(.+)$/.exec(proposalId)?.[1];
 }
 
+/**
+ * W1-T3385 — THE PLAN TASK A PROPOSAL WAS MINTED AGAINST, read out of its own id.
+ *
+ * `resolveBoardReferent` above retires a proposal whose BOARD item resolved (an escalation issue
+ * that closed). A proposal minted against a PLAN TASK had no analogue, so it stayed READY forever
+ * once that task merged: the producer's population already excludes merged tasks, so nothing
+ * re-mints it and nothing retires it either — it simply outlives its own subject.
+ *
+ * MEASURED 2026-09-11: of 207 ready proposals, 36 named a task the live projection already
+ * credited merged. Every one proposed repairing a proof on finished work, and each one cost an
+ * operator decision to clear by hand.
+ *
+ * ONLY THE TWO ID SHAPES THAT CARRY A TASK ID. `proof-debt:<taskId>:<criterionIndex>` and
+ * `verify-human:<taskId>` name theirs structurally. `followup:`/`adoption:`/`skill-draft:` ids are
+ * keyed on a run, a symbol or a content hash, so there is nothing to read and they are left alone
+ * rather than guessed at.
+ */
+export function deriveTaskReferent(proposalId: string): string | undefined {
+  return /^(?:proof-debt|verify-human):([A-Za-z0-9][A-Za-z0-9-]*?)(?::\d+)?$/.exec(proposalId)?.[1];
+}
+
+/** Whether a task-referent proposal's own task has merged. `undefined` means NO OPINION — the id
+ *  carries no task, or the plan does not hold it — never a false retirement. */
+function taskReferentMerged(proposal: Proposal, ctx: ReadinessContext): string | undefined {
+  const taskId = deriveTaskReferent(proposal.id);
+  if (taskId === undefined) return undefined;
+  const task = ctx.plan.byId.get(taskId);
+  // A task the CURRENT plan does not hold is unreadable, not resolved: a renumbered or
+  // still-unfiled id must never be read as "finished".
+  if (!task) return undefined;
+  return ctx.isMerged(task) ? taskId : undefined;
+}
+
 /** Resolve ONE proposal's referent against the batch read, never issuing its own. A proposal neither source names a
  *  referent for is simply `"live"`: this mechanism does not apply to it. */
 function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | undefined): BoardReferentLookup {
@@ -815,6 +848,21 @@ export function classifyProposal(
         `${proposal.id}'s referent (${referent.referentId}) has resolved — merged, dead, or its ` +
         `escalation handled — so this proposal can never render READY again; it stays in the registry ` +
         `as a record of the finding, never deleted`,
+    };
+  }
+  // W1-T3385: the same terminal override, for a proposal whose referent is a PLAN TASK rather than a
+  // board item. Checked HERE, beside its sibling, so both resolutions read together and neither can
+  // be reached only through the draft rung — these proposals already HAVE drafts.
+  const mergedTaskReferent = taskReferentMerged(proposal, ctx);
+  if (mergedTaskReferent !== undefined) {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason:
+        `${proposal.id}'s task ${mergedTaskReferent} has merged, so this proposal is about finished ` +
+        `work and can never render READY again; it stays in the registry as a record of the finding, ` +
+        `never deleted`,
     };
   }
   const referentUnverified = referent.kind === "unreadable" ? { referentUnverified: true as const } : {};

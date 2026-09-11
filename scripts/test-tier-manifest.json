@@ -115,6 +115,7 @@
     "test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts": 685,
     "test/a-proof-timeout-is-not-a-failed-proof.test.ts": 1263,
     "test/a-proposal-lands-as-its-own-reviewable-record.test.ts": 680,
+    "test/a-proposal-outlives-its-own-task.test.ts": 0,
     "test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts": 0,
     "test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts": 1399,
     "test/a-pull-request-cannot-file-and-credit-the-same-task.test.ts": 0,
