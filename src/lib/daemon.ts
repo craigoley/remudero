@@ -2275,15 +2275,10 @@ export async function runDaemon(
     }
 
     // W1-T3368 — THE SELF-HEALING RUNG. Same tick discipline and best-effort contract as the two
-    // cadences above. This one is different in kind: it does not report a condition, it REMOVES one.
-    // The 2026-09-10 outage (66 OOM restarts, eight hours, zero builds) was a 4.0 GB archive corpus
-    // against an 8 GB heap, and the cure had merged six minutes after the first abort with nothing
-    // scheduled to run it. A fire here is one bounded pass — 50 sources merged into 1, every distinct
-    // row preserved — and the trigger is CORPUS PRESSURE, so a healthy host never pays for it.
+    // cadences above, but different in kind: it REMOVES a condition rather than reporting one. One
+    // bounded pass on CORPUS PRESSURE; the incident and sizing are in `ledger-compaction-rung.ts`.
     //
-    // THE REASON IS CARRIED FROM THE DECISION THAT PRODUCED THE OUTCOME, never re-derived here: a
-    // ledger row whose outcome came from one gate and whose reason came from another is a defect this
-    // repo has already shipped once and sent a diagnosis the wrong way for hours.
+    // THE REASON IS CARRIED FROM THE DECISION THAT PRODUCED THE OUTCOME, never re-derived here.
     if (deps.checkLedgerCompaction) {
       let compactionDecision: LedgerCompactionDecision | undefined;
       try {

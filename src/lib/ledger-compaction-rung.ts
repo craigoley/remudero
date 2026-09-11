@@ -11,7 +11,9 @@
  * collapsed — and the daemon came back.
  *
  * An incident whose cure was already written and merged should never have reached a human at all.
- *
+ */
+
+/**
  * PRESSURE, NOT A TIMER, AND THAT IS THE WHOLE DESIGN. A timer compacts a healthy corpus for
  * nothing and still arrives late on a bad day. This rung fires on the quantity that actually
  * predicts the abort — how many archives a union read must open — so it is SILENT on a small corpus
