@@ -24214,13 +24214,7 @@ function dispatchValueContextForSelection(
   stateDir: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): DispatchValueContext | undefined {
-  let union: ReturnType<typeof readLedgerUnionRecordsSync>;
-  try {
-    union = readLedgerUnionRecordsSync(stateDir, { step: "retro.closure_by_class", refuseIncomplete: true });
-  } catch (error) {
-    log("dispatch.value.refused", { reason: "unreadable-union", error: String(error) });
-    return undefined;
-  }
+  const union = readLedgerUnionRecordsSync(stateDir, { step: "retro.closure_by_class", refuseIncomplete: true });
   if (!union.ok) {
     log("dispatch.value.refused", { reason: "incomplete-union", unread_rotations: union.unread.length });
     return undefined;

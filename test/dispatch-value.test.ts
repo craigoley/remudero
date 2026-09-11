@@ -1,13 +1,20 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import {
   buildDispatchValueContext,
+  type DispatchValueContext,
   type ClosureCalibrationSnapshot,
   type DispatchValueCalibration,
 } from "../src/lib/dispatch-value.js";
-import { dispatchOrder, runnableCandidates } from "../src/lib/drain.js";
+import { appendLedger } from "../src/lib/ledger.js";
+import { dispatchOrder, runnableCandidates, type DrainDeps, type DrainSummary } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { ClassClosure } from "../src/lib/retro-closure.js";
+import type { Config } from "../src/lib/config.js";
+import { drainCommand } from "../src/run-task.js";
 
 function task(id: string, over: Partial<Task> = {}): Task {
   return {
@@ -50,6 +57,72 @@ function ready(calibration: DispatchValueCalibration) {
   return calibration.context;
 }
 
+function ledgerPathForRoot(root: string): string {
+  return join(root, "state", "ledger.ndjson");
+}
+
+function planYaml(...tasks: Task[]): string {
+  return tasks
+    .map((t) => {
+      const files = t.files?.map((file) => `    - ${file}\n`).join("") ?? "";
+      return `- id: ${t.id}
+  title: ${t.title}
+  repo: ${t.repo}
+  type: ${t.type}
+  depends_on: [${t.depends_on.join(", ")}]
+  status: ${t.status}
+${files ? `  files:\n${files}` : ""}`;
+    })
+    .join("");
+}
+
+function closureSnapshotLine(ts: string, rows: readonly unknown[]): Record<string, unknown> {
+  return { ts, run_id: `RETRO-${ts}`, task_id: "RETRO", step: "retro.closure_by_class", lane: "retro", rows };
+}
+
+async function driveDrainDispatchValue(
+  seed: (root: string) => void,
+): Promise<{ context: DispatchValueContext | undefined; ledgerRows: Array<Record<string, unknown>> }> {
+  const root = mkdtempSync(join(tmpdir(), "rmd-dispatch-value-"));
+  const planDir = mkdtempSync(join(tmpdir(), "rmd-dispatch-value-plan-"));
+  const planPath = join(planDir, "tasks.yaml");
+  const srcTask = task("W1-T3412A", { files: ["src/a.ts"] });
+  const docsTask = task("W1-T3412B", { files: ["docs/b.md"] });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writePlan(planPath, planYaml(srcTask, docsTask));
+  seed(root);
+
+  let context: DispatchValueContext | undefined;
+  try {
+    const code = await drainCommand([], {
+      config: { claudeBin: "/bin/true", root } as Config,
+      planPath,
+      skipGitSync: true,
+      githubFactory: () => ({ findMergedByTrailer: () => null }) as never,
+      notifyChannel: { send: () => true } as never,
+      runDrain: async (plan: Plan, deps: DrainDeps): Promise<DrainSummary> => {
+        context = deps.buildDispatchValueContext?.(plan, () => false);
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, resumeCommand: "rmd drain" };
+      },
+    });
+    assert.equal(code, 0, "the injected drain loop returns a clean stop");
+    const ledgerRows = readFileSync(ledgerPathForRoot(root), "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    return { context, ledgerRows };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(planDir, { recursive: true, force: true });
+  }
+}
+
+function writePlan(path: string, body: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, body);
+}
+
 test("W1-T3412 value respects explicit priority", () => {
   const lowValue = task("W1-T1", { files: ["src/a.ts"] });
   const highValue = task("W1-T2", { files: ["docs/b.md"] });
@@ -76,6 +149,7 @@ test("W1-T3412 refuses untrusted calibration", () => {
   const fixtures: Array<{ name: string; calibration: DispatchValueCalibration }> = [
     { name: "incomplete-union", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", 0.2, 1)]), new Set([left.id, right.id]), false) },
     { name: "missing-prior-snapshot", calibration: buildDispatchValueContext([left, right], [snapshots([closure("src", 0.2, 1)])[0]], new Set([left.id, right.id])) },
+    { name: "missing-prior-class", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", 0.2, 1), closure("docs", 0.4, 1)], [closure("src", 0.2, 1)]), new Set([left.id, right.id])) },
     { name: "thin-class", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", "thin", 1)]), new Set([left.id, right.id])) },
     { name: "zero-merge-class", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", 0.2, null)]), new Set([left.id, right.id])) },
     { name: "unstable-value", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", 0.8, 1)], [closure("src", 0.2, 1)]), new Set([left.id, right.id])) },
@@ -125,4 +199,64 @@ test("W1-T3412 mutation rejects value bypass", () => {
   assert.deepEqual(ordered, [highValue.id, lowValue.id]);
   assert.deepEqual(bypassed, [lowValue.id, highValue.id]);
   assert.notDeepEqual(ordered, bypassed, "removing the value context must fail this discriminating assertion");
+});
+
+test("W1-T3412 drainCommand builds calibrated dispatch value from closure ledger snapshots", async () => {
+  const { context, ledgerRows } = await driveDrainDispatchValue((root) => {
+    const ledgerPath = ledgerPathForRoot(root);
+    const rows = [closure("src", 0.2, 2), closure("docs", 0.8, 1)];
+    appendLedger(ledgerPath, closureSnapshotLine("2026-09-10T12:00:00.000Z", rows) as never);
+    appendLedger(ledgerPath, closureSnapshotLine("2026-09-11T12:00:00.000Z", rows) as never);
+  });
+
+  assert.ok(context, "complete stable snapshots produce a dispatch value context");
+  assert.deepEqual([...context.scoreByClass.keys()].sort(), ["docs", "src"]);
+  assert.deepEqual(
+    ledgerRows.find((row) => row.step === "dispatch.value.calibrated")?.classes,
+    ["src", "docs"],
+    "the command layer logs the calibrated classes it handed to drain.ts",
+  );
+});
+
+test("W1-T3412 drainCommand refuses malformed closure snapshots before selection", async () => {
+  const { context, ledgerRows } = await driveDrainDispatchValue((root) => {
+    appendLedger(
+      ledgerPathForRoot(root),
+      closureSnapshotLine("2026-09-11T12:00:00.000Z", [
+        { taskClass: "src", merged: 4, open: 1, costPerMerge: 1, mergeRate: { kind: "rate", value: 0.2, merged: 4 } },
+      ]) as never,
+    );
+  });
+
+  assert.equal(context, undefined);
+  assert.equal(
+    ledgerRows.find((row) => row.step === "dispatch.value.refused")?.reason,
+    "malformed-closure-snapshot",
+  );
+});
+
+test("W1-T3412 drainCommand refuses an incomplete closure ledger union", async () => {
+  const { context, ledgerRows } = await driveDrainDispatchValue((root) => {
+    mkdirSync(join(root, "state", "ledger.2026-09-09T00-00-00-000Z.ndjson"));
+  });
+
+  assert.equal(context, undefined);
+  const refusal = ledgerRows.find((row) => row.step === "dispatch.value.refused");
+  assert.equal(refusal?.reason, "incomplete-union");
+  assert.equal(refusal?.unread_rotations, 1);
+});
+
+test("W1-T3412 drainCommand names valid closure classes that are too thin to calibrate", async () => {
+  const { context, ledgerRows } = await driveDrainDispatchValue((root) => {
+    const ledgerPath = ledgerPathForRoot(root);
+    const rows = [closure("src", "thin", 1)];
+    appendLedger(ledgerPath, closureSnapshotLine("2026-09-10T12:00:00.000Z", rows) as never);
+    appendLedger(ledgerPath, closureSnapshotLine("2026-09-11T12:00:00.000Z", rows) as never);
+  });
+
+  assert.equal(context, undefined);
+  assert.equal(
+    ledgerRows.find((row) => row.step === "dispatch.value.refused")?.reason,
+    "src:thin-class",
+  );
 });
