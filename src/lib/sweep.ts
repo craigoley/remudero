@@ -6157,6 +6157,7 @@ const ZERO_COUNTS = (): Record<Disposition, number> => {
   const counts = {
     mergeable: 0,
     "blocked-fixable": 0,
+    "refused-escalate": 0,
     "dep-review": 0,
     "post-review": 0,
     stale: 0,
@@ -6164,12 +6165,6 @@ const ZERO_COUNTS = (): Record<Disposition, number> => {
     conflicted: 0,
     wait: 0,
   } as Record<Disposition, number>;
-  Object.defineProperty(counts, "refused-escalate", {
-    value: 0,
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  });
   return counts;
 };
 
