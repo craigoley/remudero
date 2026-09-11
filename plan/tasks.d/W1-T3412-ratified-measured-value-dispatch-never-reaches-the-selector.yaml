@@ -1,0 +1,73 @@
+- id: W1-T3412
+  title: "THE RATIFIED MEASURED-VALUE DISPATCH POLICY NEVER REACHES THE SELECTOR — `compareDispatch` still sees only priority, undeclared scope, and id; the W1-T3074 closure table is report-only, so a cheap, high-closure class and a low-value id peer remain indistinguishable to the fleet"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  priority: 20
+  budget_usd: 30.00
+  files: [src/lib/dispatch-value.ts, src/lib/drain.ts, src/lib/daemon.ts, src/run-task.ts, test/dispatch-value.test.ts, test/drain.test.ts]
+  origin: "operator-session#w1-t3075-ratified-2026-09-11"
+  plan_refs: ["W1-T3075", "W1-T3074", "W1-T476", "W1-T12a", "W1-T143", "W1-T147", "W1-T148", "W1-T151", "W1-T160", "W1-T172", "P48"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main baae0218. `dispatchOrder` -> `compareDispatch` (`src/lib/drain.ts`)
+    orders only by explicit priority, `undeclaredScopeLast`, and `idOrdinal`; `runnableCandidates`
+    applies that order before `packDisjointFirst`. `deriveTaskClass` already deterministically maps
+    each task's declared files to `docs`, `plan-lint`, or conservative `src`
+    (`src/lib/task-class.ts`), and W1-T3074's `closureByClass` already reports a population-floored
+    merge rate plus all-run `costPerMerge` (`src/lib/retro-closure.ts`). None of that evidence reaches
+    `compareDispatch`. The historical W1-T12a/W1-T143/W1-T147/W1-T148/W1-T151/W1-T160/W1-T172
+    tasks share daemon or dispatch wiring but do not carry class-calibrated ordering; this task owns
+    only that missing selection term and does not reopen their scheduler, capacity, or eligibility work.
+
+    The operator ratified W1-T3075 on 2026-09-11: after explicit priority and undeclared-scope-last,
+    prefer `mergeRate(class) / costPerMerge(class)`; where equal or absent, prefer open dependency
+    fan-out, then the existing id order. The earlier decision record correctly required a fresh
+    two-cycle stability measurement before activation. The dispatch comparator is pure, so making it
+    scan ledger history would turn every selector call into I/O and make panel/daemon ordering drift.
+  design: |
+    Add a pure dispatch-value reducer in `src/lib/dispatch-value.ts`. It accepts already-read class
+    closure rows, current and prior calibration snapshots, and an injected `deriveTaskClass`; it
+    returns immutable class scores only when the full-union reader proved complete, both snapshots
+    clear W1-T3074's floor, cost-per-merge is non-null and positive, and each score is stable under
+    the stated two-cycle tolerance. It must name every refusal (incomplete union, thin class,
+    zero-merge class, missing prior snapshot, or unstable value). Never read files, GitHub, or the
+    ledger from this pure reducer or from `compareDispatch`.
+
+    Thread that precomputed context through `runnableCandidates` and the daemon's actual selection
+    call. `compareDispatch` applies, in order: explicit `priority`, `undeclaredScopeLast`, measured
+    value descending only when BOTH tasks have a valid score, open dependent fan-out descending when
+    value is equal or unavailable, then the existing workstream-aware id total order. Keep
+    `packDisjointFirst` unchanged. The real command builds the context once per selection cycle from
+    the complete rotated-ledger union; a failed calibration logs the named refusal and supplies an
+    empty context, which is byte-for-byte the former priority/scope/id behavior.
+
+    Do not add a task schema field, alter eligibility, change mount routing, let a value override an
+    explicit priority, or make a panel render an invented score. Every caller that cannot supply
+    proven calibration receives the empty-context fallback.
+  acceptance:
+    - claim: "a complete, stable, population-qualified class calibration orders a higher `mergeRate / costPerMerge` task ahead of an otherwise equal lower-value task, while an explicit priority still wins"
+      proof: "unit test: W1-T3412 value respects explicit priority"
+    - claim: "thin, zero-merge, incomplete-union, missing-prior, and unstable calibrations each name their refusal and retain the existing priority/scope/id result"
+      proof: "unit test: W1-T3412 refuses untrusted calibration"
+    - claim: "equal or unavailable values use the count of open dependents as a descending tie-break before the existing deterministic id order"
+      proof: "unit test: W1-T3412 fanout breaks unavailable value ties"
+    - claim: "the daemon's real runnable-candidate call receives a precomputed value context, while `compareDispatch` and the pure reducer contain no ledger or filesystem reader"
+      proof: "grep: buildDispatchValueContext( in src/run-task.ts"
+    - claim: "removing the value comparison makes the higher-value fixture fall back to id order and fails the mutation assertion"
+      proof: "unit test: W1-T3412 mutation rejects value bypass"
+  falsifier: |
+    Close without implementation if `compareDispatch` already consumes a class value or dependency
+    fan-out. Measured at origin/main baae0218: `src/lib/drain.ts`'s comparator has only priority,
+    undeclared scope, and `idOrdinal`; repository search finds no caller passing class calibration
+    to `dispatchOrder` or `runnableCandidates`.
+  note: |
+    One concern: operationalize the ratified selector policy without making history I/O part of the
+    sort or turning missing evidence into a rate. This task preserves the current comparator as the
+    safe fallback. It does not ratify future policy changes; the 2026-09-11 operator ruling is the
+    sole authority for this ordering term.
