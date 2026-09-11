@@ -531,6 +531,7 @@ import {
   draftAttemptKey,
   draftsDueOnDaemon,
   decideDraftDeferral,
+  declinedReasonInLedger,
   deferralFromOutcomes,
   parseDraftDeferralCache,
   mergeDraftCaches,
@@ -33316,6 +33317,7 @@ export function buildInboxDraftHook(
       const registryPath = join(config.root, "state", "inbox-proposals.json");
       const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
       if (proposals.length === 0) return; // no active proposals — no spend
+      const ledgerPath = ledgerPathFor(config);
 
       const draftsPath = join(config.root, "state", "inbox-drafts.json");
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
@@ -33361,7 +33363,26 @@ export function buildInboxDraftHook(
         }
       }
 
-      const due = draftsDueOnDaemon(proposals, drafts, attempts);
+      let draftReadiness: ReadinessContext | undefined;
+      try {
+        const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+        const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+        const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
+        const ledgerLines = readLedgerLines(ledgerPath);
+        draftReadiness = {
+          plan,
+          isMerged,
+          depsUnobservable,
+          grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
+          openProposalIds: new Set(proposals.map((p) => p.id)),
+          isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
+          isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+        };
+      } catch (e) {
+        log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
+      }
+
+      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftReadiness);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -33371,7 +33392,7 @@ export function buildInboxDraftHook(
       // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
       // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
       // not silence, so the row is written unconditionally.
-      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0);
+      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftReadiness);
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,

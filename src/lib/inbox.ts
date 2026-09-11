@@ -321,11 +321,82 @@ export function isDraftStale(draft: DraftedCandidate, currentAnchors: EvidenceAn
 //
 // `rmd inbox` and the daemon poll rung share this ONE predicate rather than re-deriving it and disagreeing.
 
+export type DraftExclusionPredicate = "ratified" | "declined" | "referent_resolved" | "trigger" | "evidence_anchors" | "no_conflict";
+
+export interface DraftExclusion {
+  predicate: DraftExclusionPredicate;
+  detail: string;
+}
+
+function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclusion | undefined {
+  try {
+    return check();
+  } catch (_err) {
+    // An unreadable pre-draft fact is not proof that drafting is wasted.
+    return undefined;
+  }
+}
+
+/** The draft-independent reason a proposal can never render READY. Unreadable facts return
+ *  `undefined`, so the daemon spends rather than silently dropping uncertain work. */
+export function draftExclusionForProposal(proposal: Proposal, ctx: ReadinessContext): DraftExclusion | undefined {
+  const ratified = readDraftExclusion(() =>
+    ctx.isRatified(proposal.id) ? { predicate: "ratified", detail: `${proposal.id} is already ratified` } : undefined,
+  );
+  if (ratified) return ratified;
+
+  const declined = readDraftExclusion(() => {
+    const reason = ctx.isDeclined?.(proposal.id);
+    return reason !== undefined ? { predicate: "declined", detail: reason } : undefined;
+  });
+  if (declined) return declined;
+
+  const referent = readDraftExclusion(() => {
+    const resolved = resolveBoardReferent(proposal, ctx.boardReferents);
+    return resolved.kind === "resolved"
+      ? { predicate: "referent_resolved", detail: `${proposal.id}'s referent (${resolved.referentId}) has resolved` }
+      : undefined;
+  });
+  if (referent) return referent;
+
+  if (proposal.trigger && !proposal.trigger.fired) {
+    return { predicate: "trigger", detail: proposal.trigger.description };
+  }
+
+  const driftedAnchor = proposal.evidenceAnchors.find((anchor) => {
+    try {
+      return !ctx.grepAnchorTrue(anchor);
+    } catch (_err) {
+      // If the anchor cannot be checked, keep the proposal draftable.
+      return false;
+    }
+  });
+  if (driftedAnchor) {
+    return { predicate: "evidence_anchors", detail: `evidence-drifted: ${driftedAnchor.description}` };
+  }
+
+  const openConflicts = (proposal.conflictsWith ?? []).filter((id) => ctx.openProposalIds.has(id));
+  if (openConflicts.length > 0) {
+    return { predicate: "no_conflict", detail: `conflict: open proposal(s) ${openConflicts.join(", ")}` };
+  }
+
+  return undefined;
+}
+
+function draftSelectionRank(proposal: Proposal, drafts: DraftCache): number {
+  return drafts[proposal.id] ? 0 : 1;
+}
+
+function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal[] {
+  return [...proposals].sort((a, b) => draftSelectionRank(a, drafts) - draftSelectionRank(b, drafts) || a.id.localeCompare(b.id));
+}
+
 /** Every proposal needing a fresh draft. Takes no throttle input by design — this is the unthrottled predicate behind
- *  `rmd inbox`'s manual force, which {@link draftsDueOnDaemon} wraps. */
-export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache): Proposal[] {
+ *  `rmd inbox`'s manual force, which {@link draftsDueOnDaemon} wraps. Supplying a readiness context enables the
+ *  daemon's draft-independent exclusions; omitting it preserves the manual force. */
+export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: ReadinessContext): Proposal[] {
   return proposals.filter((p) => {
-    if (p.trigger && !p.trigger.fired) return false; // never drafted for a dead-consumer proposal
+    if (ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;
     const cached = drafts[p.id];
     return !cached || isDraftStale(cached, p.evidenceAnchors);
   });
@@ -384,8 +455,12 @@ export function draftsDueOnDaemon(
   drafts: DraftCache,
   attempts: DraftAttemptCache,
   cap: number = DAEMON_DRAFT_BATCH_CAP,
+  ctx?: ReadinessContext,
 ): Proposal[] {
-  const due = proposalsNeedingDraft(proposals, drafts).filter((p) => attempts[p.id] !== draftAttemptKey(p));
+  const due = rankDraftSelection(
+    proposalsNeedingDraft(proposals, drafts, ctx).filter((p) => attempts[p.id] !== draftAttemptKey(p)),
+    drafts,
+  );
   return cap > 0 ? due.slice(0, cap) : due;
 }
 
