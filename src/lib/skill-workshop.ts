@@ -47,7 +47,6 @@ const INJECTABLE_SKILL_TASK_TYPES = {
   recon: true,
   implement: true,
   diagnose: true,
-  investigate: true,
   review: true,
   manual: true,
 } as const satisfies Readonly<Record<Task["type"], true>>;
