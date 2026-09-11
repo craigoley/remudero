@@ -19,6 +19,7 @@ import {
   fixStrikeCap,
   globalArtifactPath,
   globalLearningsHome,
+  enabledWorkerProviders,
   loadConfig,
   notifyRecipient,
   providerRoutingOwnsHeadroom,
@@ -835,6 +836,7 @@ import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, 
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
+import { resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
   judgeRulingRisk,
@@ -11726,7 +11728,35 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     soft_threshold_usd: softThresholdUsd,
     mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
   });
-  say(`run ${runId} — target ${owner}/${task.repo} · mount ${mount.model}/${mount.effort} · ${mount.maxTurns} turns (${task.type}×${task.risk}×${taskClass})`);
+
+  // The decision and its failure-tolerant arms live in `exploreMount`, which never throws; only real data sources are wired here.
+  // `runId` is clock-derived, so no harness can steer this call onto explore — the arms are seamed.
+  const explored = await exploreMount(
+    {
+      taskType: task.type,
+      risk: task.risk,
+      taskClass,
+      currentMount: mount,
+      config,
+      runId,
+      taskId,
+      enabledProviders: enabledWorkerProviders(config),
+    },
+    {
+      loadCells: async () => {
+        const scriptUrl = pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href;
+        const sweep = (await import(scriptUrl)) as {
+          buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
+        };
+        return sweep.buildMountHeadroomSweep(join(config.root, "state")).cells;
+      },
+      loadMountsTable: () => loadMounts(mountsPath(repoRoot)),
+      log,
+    },
+  );
+  const implementMount = explored.mount;
+  const implementConfig = explored.config;
+  say(`run ${runId} — target ${owner}/${task.repo} · mount ${implementMount.model}/${implementMount.effort} · ${implementMount.maxTurns} turns (${task.type}×${task.risk}×${taskClass})`);
 
   // W1-T2557: THE RUNAWAY BOUND — sized against THIS task's own class's OBSERVED turn-count
   // history (see `deriveRunawayTurnBound`'s own doc), read ONCE here rather than re-derived on
@@ -12487,12 +12517,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // hardcoded literal. max_turns is the runaway-LOOP guard; dollars (maxBudgetUsd)
           // are the real backstop. Recalibrated in mounts.yaml from OBSERVED runs (W1-T6
           // needed >61 turns — docs/archive/DIAGNOSIS.md), an order of magnitude above expected.
-          model: mount.model,
-          effort: mount.effort,
-          maxTurns: mount.maxTurns,
+          model: implementMount.model,
+          effort: implementMount.effort,
+          maxTurns: implementMount.maxTurns,
           maxBudgetUsd: budgetUsd,
           settingsFile,
-          config,
+          config: implementConfig,
           // W1-T7B: a diagnose-informed attempt gets the SAME task prompt, plus the prior
           // DIAGNOSE worker's report appended verbatim — never paraphrased, never silently
           // re-issued as an identical blind prompt (acceptance #1's "never blind" falsifier).
@@ -12534,7 +12564,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           runId,
           rung: "implement",
           text: workerTranscript(impl),
-          model: mount.model,
+          model: implementMount.model,
           verdict: impl.subtype,
           headSha: implHeadShaForArchive,
         },
@@ -12729,11 +12759,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           permissionMode: "bypassPermissions",
           settingsFile,
           resumeSessionId: impl.sessionId,
-          model: mount.model, // same mount as the initial implement spawn (§9).
-          effort: mount.effort,
-          maxTurns: mount.maxTurns,
+          model: implementMount.model, // same mount as the initial implement spawn (§9).
+          effort: implementMount.effort,
+          maxTurns: implementMount.maxTurns,
           maxBudgetUsd: budgetUsd,
-          config,
+          config: implementConfig,
           prompt:
             `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
             `commit, \`git push origin HEAD\` (no -u), open the PR with \`gh pr create --fill --base main\`, ` +

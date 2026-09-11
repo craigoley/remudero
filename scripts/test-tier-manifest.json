@@ -144,6 +144,7 @@
     "test/a-retro-that-cannot-read-github-declines-in-silence.test.ts": 0,
     "test/a-review-materializes-the-exact-pr-head.test.ts": 2140,
     "test/a-review-runs-each-unique-proof-once.test.ts": 846,
+    "test/a-router-that-never-explores-can-never-compare-its-own-arms.test.ts": 0,
     "test/a-routing-recommendation-is-a-proposal-never-a-live-mutation.test.ts": 1098,
     "test/a-rule-15-refusal-escalates-as-contradictory-though-it-names-its-own-remedy.test.ts": 828,
     "test/a-rule-15-split-is-known-before-the-push.test.ts": 6667,
