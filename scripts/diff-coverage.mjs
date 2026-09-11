@@ -305,18 +305,133 @@ export const MIN_RELOCATION_RUN = 5;
  * @param {Set<number>} consumed
  */
 /**
+ * @param {string} text
+ */
+function isCommentOnlyRelocationLine(text) {
+  const t = text.trim();
+  return t.startsWith('//') || t.startsWith('/*') || t.startsWith('*');
+}
+
+/**
+ * A regex literal can begin only where an expression can begin. This is intentionally conservative:
+ * ambiguous slashes stay ordinary code unless the preceding token shape strongly says "literal".
+ * @param {string} previousSignificant
+ */
+function canStartRegexLiteral(previousSignificant) {
+  return previousSignificant === '' || /^[([{=:;,!&|?+\-*%^~<>]$/.test(previousSignificant);
+}
+
+/**
+ * Strip comments that trail executable code without treating comment markers inside literals as
+ * comments. It handles single-line evidence only, matching relocationKey's line-by-line caller.
+ * @param {string} text
+ */
+function stripTrailingCodeComment(text) {
+  let quote = '';
+  let escaped = false;
+  let inRegex = false;
+  let inRegexClass = false;
+  let previousSignificant = '';
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1] ?? '';
+
+    if (quote !== '') {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === quote) {
+        quote = '';
+        previousSignificant = ch;
+      }
+      continue;
+    }
+
+    if (inRegex) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '[') {
+        inRegexClass = true;
+        continue;
+      }
+      if (ch === ']' && inRegexClass) {
+        inRegexClass = false;
+        continue;
+      }
+      if (ch === '/' && !inRegexClass) {
+        inRegex = false;
+        previousSignificant = ch;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      continue;
+    }
+
+    if (ch === '/' && next === '/') {
+      return text.slice(0, i).trimEnd();
+    }
+
+    if (ch === '/' && next === '*') {
+      const closedAt = text.indexOf('*/', i + 2);
+      if (closedAt === -1 || text.slice(closedAt + 2).trim() === '') {
+        return text.slice(0, i).trimEnd();
+      }
+      i = closedAt + 1;
+      continue;
+    }
+
+    if (ch === '/' && canStartRegexLiteral(previousSignificant)) {
+      inRegex = true;
+      continue;
+    }
+
+    if (!/\s/.test(ch)) previousSignificant = ch;
+  }
+
+  return text;
+}
+
+/**
  * The form a line is COMPARED in when hunting for a relocation: `trim()` as always, plus
- * template-literal unescaping (W1-T3189). Code inside a `...` literal carries a backslash before
- * every backtick and `${`; lifting it into a real module strips them, so raw comparison read a
- * move as a rewrite. The costly part is second-order: an unmatched line SPLITS the run around it,
- * so a few escaped lines disqualified the unescaped ones beside them once either piece fell under
- * {@link MIN_RELOCATION_RUN} -- on #4522, 293 escape-affected lines cost 486 (3229 -> 3715).
- * Applied to BOTH sides, so a move INTO a literal normalises identically. Admits nothing new in
- * principle: a relocation is still a contiguous run of >= MIN_RELOCATION_RUN, consumed once.
+ * template-literal unescaping (W1-T3189) and trailing-comment stripping (W1-T3230). Code inside a
+ * `...` literal carries a backslash before every backtick and `${`; lifting it into a real module
+ * strips them, so raw comparison read a move as a rewrite. A required catch-erasure comment is the
+ * same kind of presentation-only difference: it can split a moved run around a line whose
+ * executable text did not change. Applied to BOTH sides, so a move INTO a literal or into a
+ * comment-bearing catch normalises identically. Admits nothing new in principle: a relocation is
+ * still a contiguous run of >= MIN_RELOCATION_RUN, consumed once.
  * @param {string} text
  */
 export function relocationKey(text) {
-  return text.replace(/\\`/g, "`").replace(/\\\$\{/g, "${").replace(/\\\\/g, "\\").trim();
+  const unescaped = text.replace(/\\`/g, "`").replace(/\\\$\{/g, "${").replace(/\\\\/g, "\\");
+  if (isCommentOnlyRelocationLine(unescaped)) return unescaped.trim();
+  return stripTrailingCodeComment(unescaped).trim();
+}
+
+/**
+ * @param {Map<number, string>} lines
+ * @returns {Array<[number, string]>}
+ */
+function relocationEntries(lines) {
+  return [...lines.entries()]
+    .filter(([, text]) => !isCommentOnlyRelocationLine(text))
+    .map(([n, t]) => [n, relocationKey(t)])
+    .sort((a, b) => a[0] - b[0]);
 }
 
 function bestRunAt(A, i, R, consumed) {
@@ -355,14 +470,14 @@ export function computeRelocatedLines(added, removed, { minRun = MIN_RELOCATION_
     if (e === undefined) {
       const lines = removed.get(file);
       if (!lines) return undefined;
-      e = { R: [...lines.entries()].map(([n, t]) => [n, relocationKey(t)]).sort((a, b) => a[0] - b[0]), consumed: new Set() };
+      e = { R: relocationEntries(lines), consumed: new Set() };
       sources.set(file, e);
     }
     return e;
   };
 
   for (const [file, addedLines] of added) {
-    const A = [...addedLines.entries()].map(([n, t]) => [n, relocationKey(t)]).sort((a, b) => a[0] - b[0]);
+    const A = relocationEntries(addedLines);
     const fileMap = new Map();
     let i = 0;
     while (i < A.length) {
