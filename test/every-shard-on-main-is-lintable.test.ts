@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadPlan } from "../src/lib/plan.js";
 import { lintPlan } from "../src/lib/task-linter.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TASKS_PATH = join(REPO_ROOT, "plan", "tasks.yaml");
@@ -130,7 +131,8 @@ test("W1-T3086: violating shard files cannot grow past the recorded baseline", (
 });
 
 test("W1-T3086: adding a shard with a blocking violation would trip the ratchet", () => {
-  const dir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t3086-"));
+  const repo = gitRepo({ seedCommit: false, kind: "w1-t3086" });
+  const dir = repo.dir;
   try {
     mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
     writeFileSync(join(dir, "plan", "tasks.yaml"), "[]\n", "utf8");
@@ -141,10 +143,7 @@ test("W1-T3086: adding a shard with a blocking violation would trip the ratchet"
     );
     writeFileSync(join(dir, "plan", "tasks.d", "W1-T3086-dirty.yaml"), fixtureTask("W1-T3086-DIRTY", "free prose"), "utf8");
 
-    execFileSync("git", ["init", "-q"], { cwd: dir });
-    execFileSync("git", ["add", "plan/tasks.yaml", "plan/tasks.d/W1-T3086-clean.yaml", "plan/tasks.d/W1-T3086-dirty.yaml"], {
-      cwd: dir,
-    });
+    repo.git("add", "plan/tasks.yaml", "plan/tasks.d/W1-T3086-clean.yaml", "plan/tasks.d/W1-T3086-dirty.yaml");
 
     const report = shardLintReport(dir, join(dir, "plan", "tasks.yaml"));
     const baseline = new Set(["plan/tasks.d/W1-T3086-clean.yaml"]);
