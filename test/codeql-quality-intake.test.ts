@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { ghStubPath, pathWith } from "./helpers/gh-stub.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -40,6 +40,21 @@ function rejectedFeedback(alertId: string): FeedbackEntry {
     status: "rejected",
     proposal_pr: null,
   };
+}
+
+function countedGhFailure(countPath: string, message: string): string {
+  return ghStubPath(
+    [
+      "#!/bin/sh",
+      `count_path=${JSON.stringify(countPath)}`,
+      'count=0',
+      'if [ -f "$count_path" ]; then count=$(cat "$count_path"); fi',
+      'count=$((count + 1))',
+      'printf "%s" "$count" > "$count_path"',
+      `printf '%s\\n' ${JSON.stringify(message)} >&2`,
+      "exit 1",
+    ].join("\n"),
+  );
 }
 
 test("only open CodeQL alerts with both quality tags enter the partition, and every eligible alert has one disposition", () => {
@@ -170,5 +185,73 @@ test("readCodeScanningAlerts preserves the GitHub CLI's compact refusal evidence
     }
   } finally {
     process.env.PATH = saved;
+  }
+});
+
+test("readCodeScanningAlerts retries one rate-limited response and returns the first readable page", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codeql-rate-retry-"));
+  const countPath = join(root, "calls");
+  const bin = ghStubPath(
+    [
+      "#!/bin/sh",
+      `count_path=${JSON.stringify(countPath)}`,
+      'count=0',
+      'if [ -f "$count_path" ]; then count=$(cat "$count_path"); fi',
+      'count=$((count + 1))',
+      'printf "%s" "$count" > "$count_path"',
+      'if [ "$count" -eq 1 ]; then',
+      "  printf '%s\\n' 'HTTP 403: secondary rate limit' >&2",
+      "  exit 1",
+      "fi",
+      "printf '%s\\n' '[]'",
+    ].join("\n"),
+  );
+  const saved = process.env.PATH;
+  process.env.PATH = pathWith(bin);
+  try {
+    const read = readCodeScanningAlerts("o", "r");
+    assert.equal(read.ok, true, "the first readable page ends the bounded retry");
+    assert.equal(readFileSync(countPath, "utf8"), "2", "one rate-limited read is followed by one retry");
+  } finally {
+    process.env.PATH = saved;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("readCodeScanningAlerts stops after the bounded rate-limit attempts", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codeql-rate-exhausted-"));
+  const countPath = join(root, "calls");
+  const bin = countedGhFailure(countPath, "HTTP 403: secondary rate limit");
+  const saved = process.env.PATH;
+  process.env.PATH = pathWith(bin);
+  try {
+    const read = readCodeScanningAlerts("o", "r");
+    assert.equal(read.ok, false, "an exhausted rate limit remains a visible refusal");
+    assert.equal(readFileSync(countPath, "utf8"), "4", "the existing four-attempt cap bounds the reader");
+    if (!read.ok) assert.match(read.error, /secondary rate limit/);
+  } finally {
+    process.env.PATH = saved;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("readCodeScanningAlerts does not retry authentication or not-found refusals", () => {
+  for (const [name, message] of [
+    ["authentication", "HTTP 401: authentication required"],
+    ["not-found", "HTTP 404: Not Found"],
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), `rmd-codeql-${name}-`));
+    const countPath = join(root, "calls");
+    const bin = countedGhFailure(countPath, message);
+    const saved = process.env.PATH;
+    process.env.PATH = pathWith(bin);
+    try {
+      const read = readCodeScanningAlerts("o", "r");
+      assert.equal(read.ok, false, `${name} is a refusal, not a successful empty scan`);
+      assert.equal(readFileSync(countPath, "utf8"), "1", `${name} does not spend a retry`);
+    } finally {
+      process.env.PATH = saved;
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });

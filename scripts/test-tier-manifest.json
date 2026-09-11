@@ -35,6 +35,7 @@
     "test/a-criterion-restated-is-not-a-claim.test.ts": 0,
     "test/a-dead-containers-claim-does-not-outlive-it.test.ts": 0,
     "test/a-deadlock-the-harness-cannot-count.test.ts": 1938,
+    "test/a-declared-budget-is-calibrated-against-observed-runs.test.ts": 0,
     "test/a-declared-file-absent-from-a-diff-is-not-proof-of-drift.test.ts": 1338,
     "test/a-deferred-follow-up-names-no-filed-id.test.ts": 2505,
     "test/a-denied-scope-claim-is-not-a-claim.test.ts": 1022,
