@@ -1,0 +1,86 @@
+- id: W1-T3397
+  title: "unmetDependencies COUNTS A RETIRED DEPENDENCY AS UNMET FOREVER — a task carrying `retirement: retired/closed/withdrawn` can never satisfy `isMerged`, so any dependent is PERMANENTLY UNDISPATCHABLE by construction; W1-T3201 hit exactly this and needed a hand-edited plan PR (#4842) to remove the edge, which the operator recorded as the mechanical finding behind the W1-T3076 (a)-first ruling"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 15.00
+  files: [src/lib/plan.ts, test/plan.test.ts]
+  origin: "oper#w1-t3076-retirement-ruling-2026-09-09"
+  plan_refs: ["W1-T3076", "W1-T1287", "W1-T3201", "W1-T3279"]
+  status: queued
+  attempts: 0
+  rationale: |
+    VERIFIED AT SOURCE 2026-09-09. `unmetDependencies` (`src/lib/plan.ts:698-707`) is exactly:
+      return task.depends_on.filter((dep) => {
+        const d = plan.byId.get(dep);
+        return !d || !isMerged(d);
+      });
+    A task carrying `retirement: retired | closed | withdrawn` (`RETIREMENT_REASONS`, plan.ts:46 —
+    "an operator's closed ruling", "Never auto-written") is `status: blocked` and therefore never a
+    member of `MERGED_STATUSES`. It will never merge BY DEFINITION — an operator has already ruled
+    it will not be built — so any dependent that lists it in `depends_on` fails `assertRunnable`
+    (plan.ts:738-756, which calls this exact function at line 752) forever. There is no future state
+    in which the dependency resolves; the edge is a permanent dead lock.
+
+    THIS IS NOT HYPOTHETICAL. W1-T3166 shipped `status: blocked, retirement: withdrawn` (already
+    satisfied elsewhere) and W1-T3201 originally declared `depends_on: [W1-T3199, W1-T3200,
+    W1-T3166]`. Running the real function against that state, per the operator's own DECISIONS.md
+    entry and W1-T3279's rationale (both 2026-09-09): `unmetDependencies(plan, W1-T3201) =
+    ["W1-T3199", "W1-T3166"]` — W1-T3166 alone made the shard undispatchable regardless of whether
+    W1-T3199 ever merged. The only remedy available was a HAND-WRITTEN plan PR (#4842) removing the
+    edge — a one-off patch for a class-level defect. The operator's own W1-T3076 ruling names this
+    directly: "MEASURED 2026-09-09: W1-T3166 carries `retirement: withdrawn` ... so the withdrawn
+    task silently made W1-T3201 ... permanently undispatchable. Retirement that leaves the file in
+    place is not merely untidy; it holds live work hostage."
+
+    ONE SHARED FUNCTION, FOUR CALL SITES. `unmetDependencies` is the single point of truth consulted
+    by `assertRunnable` (plan.ts:752), the drain's dispatch filter (`src/lib/drain.ts:442`), the
+    inbox's readiness predicate (`src/lib/inbox.ts:688`), and the panel graph's dependency-chain
+    renderer (`src/lib/panel-graph.ts:658`). Fixing it here fixes all four call sites at once,
+    exactly the way the operator's ruling frames this as belonging in the shared predicate rather
+    than in a fifth hand-edited plan PR the next time it recurs.
+  design: |
+    A retirement-carrying dependency is EXCLUDED from the returned unmet-ids list — it is treated as
+    NO LONGER BLOCKING, never as MERGED. This distinction is load-bearing and must not blur:
+      return task.depends_on.filter((dep) => {
+        const d = plan.byId.get(dep);
+        if (!d) return true;               // unchanged: an unknown dep is still unmet
+        if (d.retirement !== undefined) return false;  // an operator's closed ruling never blocks
+        return !isMerged(d);                // unchanged for every non-retired dependency
+      });
+    DO NOT flip `isMerged(d)` to true for a retired dependency and do not add `retired`/`closed`/
+    `withdrawn` to `MERGED_STATUSES` (`plan.ts:35`) — W1-T1287's own ruling is explicit that no
+    retirement may ever be credited as shipped, and that invariant must survive this change
+    untouched. The fix belongs entirely inside `unmetDependencies`'s own filter predicate, so every
+    one of the four call sites above inherits it with zero changes to their own code.
+    A MISSING dependency (`!d`) is UNCHANGED — still unmet. This fix narrows only the
+    already-exists-but-will-never-merge case; it does not touch dangling-reference handling.
+  acceptance:
+    - claim: "a dependency carrying ANY retirement value (retired, closed, or withdrawn) is excluded from unmetDependencies's returned list, reproducing the exact W1-T3166/W1-T3201 fixture"
+      proof: "unit test: test/plan.test.ts"
+    - claim: "a genuinely unmerged, NON-retired dependency is still reported as unmet — the falsifier proving the fix did not silently swallow every unmet dependency"
+      proof: "unit test: test/plan.test.ts"
+    - claim: "assertRunnable no longer throws for a task whose ONLY unmet dependency carries a retirement value, while it still throws when a non-retired dependency remains unmerged"
+      proof: "unit test: test/plan.test.ts"
+    - claim: "a retired dependency is never counted as merged elsewhere — MERGED_STATUSES is unchanged and isMerged(d) is never called with a fabricated true for a retired d"
+      proof: "grep: MERGED_STATUSES in src/lib/plan.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF `unmetDependencies` already excludes retirement-carrying
+    dependencies — grep the function body for `retirement`. MEASURED 2026-09-09, this session,
+    reading `src/lib/plan.ts:698-707` directly: zero hits; the filter reads exactly
+    `!d || !isMerged(d)` with no retirement branch anywhere in the function.
+  note: |
+    Filed while routing verify-human:W1-T3076. The operator's decision entry ("## 2026-09-09 —
+    OPERATOR DECISION: W1-T3076 chosen bound — (a) first, then (c); NOT (b)") already ruled and
+    already found this bug in prose; this task is the build the ruling implies but the ruling itself
+    is not a tasks.yaml entry. NOT a re-opening of W1-T3279 — that task gates a DIFFERENT defect
+    (a branch name that claims a task by its own spelling but not by trailer or shape) and explicitly
+    scopes out touching credit semantics; this task never touches credit, only dependency-gating.
+    band_meaning: blast-radius (not span) — the change is one file, but it alters what the fleet's
+    dispatch filter, inbox readiness predicate and drain will treat as runnable, fleet-wide, on every
+    poll; a wrong direction here (treating a non-retired dependency as satisfied) would be a
+    fail-open safety regression, which is the shape the blast-radius band exists to flag.
