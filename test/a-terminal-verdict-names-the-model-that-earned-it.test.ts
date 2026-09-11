@@ -21,6 +21,7 @@ import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/iso
 import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 import { runModelAttribution, runModelIndex, type LedgerRecord } from "../src/lib/retro.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const FIXTURE_PLAN = [
   "- id: TST-MODELROW",
@@ -73,20 +74,16 @@ const droppedContainmentExec = (token: string): Promise<ProbeExecResult> =>
  *  `followupGitFixture`) — `worktreeAdd`'s own `git fetch`/`git worktree add` and the run's later
  *  `git push origin HEAD` run for real, entirely offline. */
 function gitFixture(root: string): void {
-  const originGit = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}modelrow-origin-`));
-  execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", originGit]);
-  const seed = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}modelrow-seed-`));
-  execFileSync("git", ["clone", "-q", originGit, seed]);
-  execFileSync("git", ["-C", seed, "config", "user.email", "modelrow-test@example.invalid"]);
-  execFileSync("git", ["-C", seed, "config", "user.name", "modelrow-test"]);
-  writeFileSync(join(seed, "README.md"), "seed\n");
-  execFileSync("git", ["-C", seed, "add", "-A"]);
-  execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
-  execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
+  const origin = gitRepo({ bare: true, kind: "modelrow-origin" });
+  const seed = gitRepo({ cloneFrom: origin.dir, kind: "modelrow-seed" });
+  writeFileSync(join(seed.dir, "README.md"), "seed\n");
+  seed.git("add", "-A");
+  seed.git("commit", "-q", "-m", "seed");
+  seed.git("push", "-q", "origin", "main");
 
   const repoDir = join(root, "repos", "remudero");
   mkdirSync(join(root, "repos"), { recursive: true });
-  execFileSync("git", ["clone", "-q", originGit, repoDir]);
+  execFileSync("git", ["clone", "-q", origin.dir, repoDir]);
   execFileSync("git", ["-C", repoDir, "config", "user.email", "modelrow-test@example.invalid"]);
   execFileSync("git", ["-C", repoDir, "config", "user.name", "modelrow-test"]);
 }
