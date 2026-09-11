@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   formatHandMintReservationMessage,
@@ -14,7 +15,9 @@ import {
 } from "../src/lib/task-id-reservation.js";
 import { nextTaskIdCommand } from "../src/run-task.js";
 
-const gate = await import("../scripts/task-id-existence-check.mjs");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, "..");
+const gate = await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-existence-check.mjs")).href);
 
 const NO_OPEN_PRS = (): string[] => [];
 
