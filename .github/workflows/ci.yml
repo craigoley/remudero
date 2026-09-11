@@ -1328,10 +1328,6 @@ jobs:
         run: npm run --silent no-hand-rolled-fetch:check
 
   prompt-surface-gate:
-    # W1-T3077 — prompt/learnings edits change what every worker is told. A diff that touches a
-    # named prompt-rendering function, learnings/*.yaml, or settings/macros.yaml must carry golden
-    # evidence in the same PR, instead of relying on the socially enforced corpus-growth rule.
-    # FALSIFIER: test/a-prompt-surface-edit-carries-its-own-fixture.test.ts.
     name: prompt-surface-gate
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
