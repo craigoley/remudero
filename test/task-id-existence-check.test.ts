@@ -471,12 +471,10 @@ function runCheck(cwd: string, base: string) {
   });
 }
 
-test("W1-T2324: an id the base declares from a DIFFERENT file is REFUSED, naming both sides", () => {
+test("W1-T2324: an id is REFUSED when the base declaration survives beside a different file, naming both sides", () => {
   const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
   try {
-    // The branch is BEHIND: it drops main's shard and adds its own carrying the same id — exactly
-    // #2993's shape. Each id appears ONCE in this tree, so a duplicate-at-head scan sees nothing.
-    rmSync(join(dir, "plan", "tasks.d", "W1-T900-original.yaml"));
+    // A second declaration while the base file remains produces a real post-merge duplicate.
     writeFileSync(join(dir, "plan", "tasks.d", "W1-T900-reissued.yaml"), '- id: W1-T900\n  title: "t"\n');
     const r = runCheck(dir, "main");
     assert.equal(r.status, 1, `expected a refusal, got ${r.status}: ${r.stderr}`);
@@ -529,15 +527,15 @@ test("W1-T2324: an UNREADABLE base REFUSES rather than passing — the false zer
   }
 });
 
-test("W1-T2324 FALSIFIER: a duplicate-at-head scan alone would MISS every real collision", () => {
+test("W1-T2324: moving a sole declaration to a renamed shard is not a collision", () => {
   const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
   try {
     rmSync(join(dir, "plan", "tasks.d", "W1-T900-original.yaml"));
     writeFileSync(join(dir, "plan", "tasks.d", "W1-T900-reissued.yaml"), '- id: W1-T900\n  title: "t"\n');
-    // The head tree declares W1-T900 exactly ONCE. Anything keyed on head multiplicity is blind.
+    // The head tree declares W1-T900 exactly ONCE, and the former base declaration is deleted.
     const declared = readFileSync(join(dir, "plan", "tasks.d", "W1-T900-reissued.yaml"), "utf8");
     assert.equal((declared.match(/^- id: /gm) ?? []).length, 1, "one declaration at head");
-    assert.equal(runCheck(dir, "main").status, 1, "and it is still refused, because the BASE is consulted");
+    assert.equal(runCheck(dir, "main").status, 0, "the deleted base declaration means this is a move, not a re-issue");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -576,13 +574,12 @@ test("W1-T2324 CONTROL: a lettered id is not confused with its unlettered stem �
   }
 });
 
-test("W1-T2324: a genuinely RE-ISSUED lettered id is still refused — the grammar widened, the gate did not soften", () => {
+test("W1-T2324: a second lettered-id declaration is still refused — the grammar widened, the gate did not soften", () => {
   const dir = planRepo({ "W1-T1B-original.yaml": "W1-T1B" });
   try {
-    rmSync(join(dir, "plan", "tasks.d", "W1-T1B-original.yaml"));
     writeFileSync(join(dir, "plan", "tasks.d", "W1-T1B-reissued.yaml"), '- id: W1-T1B\n  title: "t"\n');
     const r = runCheck(dir, "main");
-    assert.equal(r.status, 1, "a re-issued lettered id must be refused like any other");
+    assert.equal(r.status, 1, "a second lettered-id declaration must be refused like any other");
     assert.match(r.stderr, /W1-T1B/);
     assert.match(r.stderr, /W1-T1B-original\.yaml/, "names the base's file");
   } finally {
@@ -590,10 +587,9 @@ test("W1-T2324: a genuinely RE-ISSUED lettered id is still refused — the gramm
   }
 });
 
-test("W1-T2324: an id outside workstream 1 is seen at all — W3-T3 re-issued is refused", () => {
+test("W1-T2324: an id outside workstream 1 is seen at all — a second W3-T3 declaration is refused", () => {
   const dir = planRepo({ "W3-T3-original.yaml": "W3-T3" });
   try {
-    rmSync(join(dir, "plan", "tasks.d", "W3-T3-original.yaml"));
     writeFileSync(join(dir, "plan", "tasks.d", "W3-T3-reissued.yaml"), '- id: W3-T3\n  title: "t"\n');
     const r = runCheck(dir, "main");
     assert.equal(r.status, 1, "W2/W3/W12 ids are declared ids too");
