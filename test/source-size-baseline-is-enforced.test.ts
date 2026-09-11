@@ -103,18 +103,34 @@ test("W1-T3140: the stable required PR check runs the source-size signal, never 
   assert.ok(Object.keys(ci.jobs).length >= 15, `sanity: ci.yml must carry its real job set, saw ${Object.keys(ci.jobs).length}`);
 });
 
-test("W1-T2883: src/lib is forbidden from importing src/cli before the first file lands there", () => {
+test("W1-T2883/W1-T2893: src/lib is forbidden from importing src/cli, now that the first file has landed there", () => {
   const cfg = readFileSync(DEPCRUISE, "utf8");
   const ruleStart = cfg.indexOf('name: "lib-no-spike-or-cli"');
   assert.notEqual(ruleStart, -1);
   const rule = cfg.slice(ruleStart, cfg.indexOf("},", cfg.indexOf("to:", ruleStart)));
   assert.match(rule, /\^src\/cli\//, "the rule's `to:` must cover src/cli/");
   assert.match(rule, /severity: "error"/, "the boundary is an error, not a warning — it has no legacy violations to grandfather");
-  // The directory genuinely does not exist yet; that is the point of pre-declaring the boundary.
+  // W1-T2893 is the run-task.ts decomposition step that lands the FIRST file under src/cli/
+  // (src/cli/registry.ts) — the pre-declared rule above is no longer a pre-declaration, it is a
+  // live boundary. Drive the REAL depcruise gate (same tool/config the shipped tree's cycle
+  // ratchet uses, per test/no-circular-is-an-error.test.ts's pattern) rather than re-deriving its
+  // verdict from a source-text scan: this is the actual enforcement the pre-declaration existed
+  // to set up.
   assert.equal(
     spawnSync("test", ["-d", join(REPO_ROOT, "src", "cli")], { encoding: "utf8" }).status,
-    1,
-    "src/cli/ must NOT exist yet — if it does, this rule stopped being a pre-declaration and the comment is stale",
+    0,
+    "src/cli/ must exist now — W1-T2893 is the task that creates it",
+  );
+  const DEPCRUISE_BIN = join(REPO_ROOT, "node_modules", ".bin", "depcruise");
+  const result = spawnSync(DEPCRUISE_BIN, ["src", "--config", DEPCRUISE], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  assert.equal(
+    result.status,
+    0,
+    `the shipped tree must pass its own lib-no-spike-or-cli gate now that src/cli/ is real:\n${result.stdout}${result.stderr}`,
   );
 });
 
