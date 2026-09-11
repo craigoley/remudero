@@ -119,6 +119,7 @@
     "test/a-prose-reply-reaches-the-fleet-as-an-input.test.ts": 1399,
     "test/a-pull-request-cannot-file-and-credit-the-same-task.test.ts": 0,
     "test/a-rate-limit-refusal-spends-the-crash-restart-budget.test.ts": 769,
+    "test/a-ratification-pr-can-actually-land.test.ts": 0,
     "test/a-recaptured-baseline-still-reads-as-tightening.test.ts": 0,
     "test/a-recon-cannot-propose-its-own-task.test.ts": 1230,
     "test/a-recorded-baseline-that-names-no-statistic-cannot-be-compared.test.ts": 759,
