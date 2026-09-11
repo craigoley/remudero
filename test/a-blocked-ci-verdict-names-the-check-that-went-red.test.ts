@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -19,6 +19,8 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { GitHub } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
+import { gitRepo } from "./helpers/git-repo.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const PR_URL = "https://github.com/acme/remudero/pull/1";
 
@@ -145,53 +147,33 @@ function workerResult(over: Partial<WorkerResult>): WorkerResult {
 }
 
 function writeOfflineGitFixture(root: string): () => void {
-  const origin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}blocked-ci-evidence-origin-`));
-  const seed = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}blocked-ci-evidence-seed-`));
+  const origin = gitRepo({ bare: true, kind: "blocked-ci-evidence-origin" });
+  const seed = gitRepo({ cloneFrom: origin.dir, kind: "blocked-ci-evidence-seed" });
   const repo = join(root, "repos", "remudero");
-  execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", origin]);
-  execFileSync("git", ["clone", "-q", origin, seed]);
-  execFileSync("git", ["-C", seed, "config", "user.email", "test@example.invalid"]);
-  execFileSync("git", ["-C", seed, "config", "user.name", "test"]);
-  writeFileSync(join(seed, "README.md"), "seed\n");
-  execFileSync("git", ["-C", seed, "add", "-A"]);
-  execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
-  execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
+  writeFileSync(join(seed.dir, "README.md"), "seed\n");
+  seed.git("add", "-A");
+  seed.git("commit", "-q", "-m", "seed");
+  seed.git("push", "-q", "origin", "main");
   mkdirSync(join(root, "repos"), { recursive: true });
-  execFileSync("git", ["clone", "-q", origin, repo]);
+  execFileSync("git", ["clone", "-q", origin.dir, repo]);
   execFileSync("git", ["-C", repo, "config", "user.email", "test@example.invalid"]);
   execFileSync("git", ["-C", repo, "config", "user.name", "test"]);
   return () => {
-    rmSync(origin, { recursive: true, force: true });
-    rmSync(seed, { recursive: true, force: true });
+    origin.cleanup();
+    seed.cleanup();
   };
 }
 
-function writeRedGateGh(branch: string): string {
-  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}blocked-ci-evidence-gh-`));
-  const gh = join(bin, "gh");
-  writeFileSync(
-    gh,
+function writeRedGateGh(branch: string) {
+  return ghShim(
     [
-      "#!/bin/bash",
-      "set -e",
-      "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
-      `  if [[ \"$5\" == 'headRefName' ]]; then echo '{\"headRefName\":\"${branch}\"}'; exit 0; fi`,
-      "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
-      "fi",
-      "if [[ \"$1\" == 'api' ]]; then",
-      "  case \"$2\" in",
-      "    */pulls/*) echo '{\"number\":1,\"state\":\"open\",\"merged\":false,\"merged_at\":null,\"head\":{\"sha\":\"deadbeef\"}}'; exit 0 ;;",
-      "    */check-runs*) echo '{\"check_runs\":[{\"name\":\"build\",\"status\":\"completed\",\"conclusion\":\"failure\"},{\"name\":\"unit\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}'; exit 0 ;;",
-      "    */status) echo '{\"statuses\":[]}'; exit 0 ;;",
-      "  esac",
-      "fi",
-      "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
-      "exit 1",
-      "",
-    ].join("\n"),
+      { when: "pr view", stdout: JSON.stringify({ headRefName: branch, body: "" }) },
+      { when: "/pulls/", stdout: JSON.stringify({ number: 1, state: "open", merged: false, merged_at: null, head: { sha: "deadbeef" } }) },
+      { when: "/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "build", status: "completed", conclusion: "failure" }, { name: "unit", status: "completed", conclusion: "failure" }] }) },
+      { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
+    ],
+    { kind: "blocked-ci-evidence" },
   );
-  chmodSync(gh, 0o755);
-  return bin;
 }
 
 const holdingContainmentExec = (token: string): Promise<ProbeExecResult> =>
@@ -207,9 +189,9 @@ test("BEHAVIORAL: runTask writes the enriched blocked_ci reason to its terminal 
   const cleanupGit = writeOfflineGitFixture(root);
   const fixedTime = 1785001000000;
   const branch = `run-T-CI-EVIDENCE-${fixedTime}`;
-  const bin = writeRedGateGh(branch);
+  const gh = writeRedGateGh(branch);
   const previousPath = process.env.PATH;
-  process.env.PATH = `${bin}:${previousPath}`;
+  process.env.PATH = `${gh.dir}:${previousPath}`;
   const dateNow = t.mock.method(Date, "now", () => fixedTime);
   const calls: SpawnWorkerArgs[] = [];
   const spawn: typeof spawnWorker = async (args) => {
@@ -243,7 +225,7 @@ test("BEHAVIORAL: runTask writes the enriched blocked_ci reason to its terminal 
   } finally {
     dateNow.mock.restore();
     process.env.PATH = previousPath;
-    rmSync(bin, { recursive: true, force: true });
+    rmSync(gh.dir, { recursive: true, force: true });
     cleanupGit();
     rmSync(root, { recursive: true, force: true });
   }
