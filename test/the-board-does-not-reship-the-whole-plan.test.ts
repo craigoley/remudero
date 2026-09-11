@@ -4,16 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { computeBoardSnapshot, type BoardDeps } from "../src/lib/board.js";
 import {
+  boundConsoleReadRoute,
   buildServeServer,
   CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES,
+  projectConsoleStatusRoute,
   type ConsoleStatusTaskProjection,
   type ServeDeps,
 } from "../src/lib/serve.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+import type { Route } from "../src/lib/service.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
@@ -134,6 +138,28 @@ async function withServeServer<T>(deps: ServeDeps, fn: (baseUrl: string) => Prom
   }
 }
 
+class CaptureResponse {
+  status = 200;
+  headers: Record<string, string> = {};
+  body = "";
+
+  writeHead(status: number, headers?: Record<string, string>): this {
+    this.status = status;
+    this.headers = { ...this.headers, ...(headers ?? {}) };
+    return this;
+  }
+
+  setHeader(name: string, value: number | string | readonly string[]): this {
+    this.headers[name.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
+    return this;
+  }
+
+  end(chunk?: unknown): this {
+    if (chunk !== undefined) this.body += String(chunk);
+    return this;
+  }
+}
+
 test("the board's /v1/status request ships rendered rows plus aggregates, not the whole large plan", async () => {
   const { deps, boardDeps, renderedIds } = largeBoardFixture();
   const fullSnapshot = computeBoardSnapshot(boardDeps);
@@ -163,4 +189,46 @@ test("the board's /v1/status request ships rendered rows plus aggregates, not th
     assert.ok(Buffer.byteLength(raw, "utf8") < fullBytes / 4, "the board request must fall well below the all-task projection");
     assert.ok(Buffer.byteLength(raw, "utf8") <= CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES, "status response size ratchet");
   });
+});
+
+test("the /v1/status timeout fallback is also projected instead of shipping every task", async () => {
+  const { deps } = largeBoardFixture();
+  const route: Route = {
+    method: "GET",
+    path: "/v1/status",
+    scope: "read",
+    handler: () => new Promise<void>(() => {}),
+  };
+  const bounded = boundConsoleReadRoute(route, deps, 0);
+  const res = new CaptureResponse();
+
+  await bounded.handler({} as IncomingMessage, res as unknown as ServerResponse, { params: {} });
+  const body = JSON.parse(res.body) as { tasks: Array<{ taskId: string }>; taskProjection: ConsoleStatusTaskProjection };
+
+  assert.equal(res.status, 200);
+  assert.equal(body.tasks.length, 0, "no fallback task row renders on the initial board");
+  assert.equal(body.taskProjection.complete, false);
+  assert.equal(body.taskProjection.total, 1550);
+  assert.equal(body.taskProjection.returned, 0);
+  assert.equal(body.taskProjection.omitted, 1550);
+});
+
+test("the /v1/status projection wrapper passes non-json responses through unchanged", async () => {
+  const route: Route = {
+    method: "GET",
+    path: "/v1/status",
+    scope: "read",
+    handler: (_req, res) => {
+      res.writeHead(204, { "content-type": "text/plain" });
+      res.end("not json");
+    },
+  };
+  const projected = projectConsoleStatusRoute(route);
+  const res = new CaptureResponse();
+
+  await projected.handler({} as IncomingMessage, res as unknown as ServerResponse, { params: {} });
+
+  assert.equal(res.status, 204);
+  assert.equal(res.headers["content-type"], "text/plain");
+  assert.equal(res.body, "not json");
 });
