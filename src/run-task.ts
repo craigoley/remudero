@@ -577,6 +577,7 @@ import {
   proposalsNeedingDraft,
   ratifyTelemetry,
   reframeProposal,
+  refusalReason,
   renderInbox,
   renderRatifyTelemetry,
   INBOX_DRAFT_DISALLOWED_TOOLS,
@@ -597,6 +598,7 @@ import {
   type RatifyBatchGateway,
   type RatifyGateway,
   type ReframeResult,
+  type SkillLifecycleAction,
   writeRatificationShards,
 } from "./lib/inbox.js";
 import {
@@ -908,6 +910,7 @@ import {
   renderSkillsPart,
   skillsInjectedEvent,
   stageSkillDrafts,
+  stageSkillLifecycleProposal,
   workerAllowlistFromSettings,
 } from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
@@ -34004,6 +34007,59 @@ function loadProposalsForRatify(
   return { found, unknown };
 }
 
+export function skillLifecycleActionStillApproved(worktreeRoot: string, action: SkillLifecycleAction): boolean {
+  if (action.kind !== "skill-retirement") return false;
+  if (action.skillPath !== `.claude/skills/${action.skillName}/SKILL.md`) return false;
+  return loadInjectableSkills(join(worktreeRoot, ".claude", "skills")).some((skill) => skill.name === action.skillName);
+}
+
+export function applySkillLifecycleRemoval(
+  worktreeRoot: string,
+  action: SkillLifecycleAction,
+  deps: {
+    approved?: (root: string, action: SkillLifecycleAction) => boolean;
+    exists?: (path: string) => boolean;
+    remove?: (path: string) => void;
+  } = {},
+): { ok: true; removedPath: string } | { ok: false; reason: string } {
+  const approved = deps.approved ?? skillLifecycleActionStillApproved;
+  if (!approved(worktreeRoot, action)) {
+    return { ok: false, reason: `${action.skillName} is not an approved opted-in skill at ${action.skillPath}` };
+  }
+  const target = join(worktreeRoot, action.skillPath);
+  if (!(deps.exists ?? existsSync)(target)) {
+    return { ok: false, reason: `missing ${action.skillPath}` };
+  }
+  (deps.remove ?? unlinkSync)(target);
+  return { ok: true, removedPath: action.skillPath };
+}
+
+function skillLifecycleApproveCommitMessage(action: SkillLifecycleAction, proposalId: string): string {
+  return [
+    "chore(skill): retire approved skill via rmd approve",
+    "",
+    `Proposal ${proposalId} carried measured negative lifecycle evidence for ${action.skillName}.`,
+    `Evidence fingerprint: ${action.evidenceFingerprint}`,
+    "",
+    "The operator's one-bit approve initiated this PR; staging the proposal did not alter the",
+    "approved skill tree. This commit removes exactly the approved SKILL.md named by the action.",
+  ].join("\n");
+}
+
+function skillLifecyclePrBody(action: SkillLifecycleAction, proposalId: string): string {
+  return [
+    `Proposal ${proposalId} retires approved skill \`${action.skillName}\`.`,
+    "",
+    "The operator's one-bit approve initiated this PR. The gate still reviews it; nothing",
+    "auto-merges without that review.",
+    "",
+    "## Acceptance",
+    `- Removes exactly \`${action.skillPath}\`.`,
+    `- Evidence fingerprint: \`${action.evidenceFingerprint}\`.`,
+    "- No other approved skill file is changed by this lifecycle action.",
+  ].join("\n");
+}
+
 // ── The verify-human judge's production call site (W1-T3188) ──────────────────────────────────
 //
 // W1-T349 built a complete, tested judge that nothing called for fourteen months. lint-plan
@@ -34739,11 +34795,73 @@ export async function approveCommand(
     },
   };
 
+  const createSkillLifecycleBranch = (action: SkillLifecycleAction): string => {
+    const dir = ensureRepoDir();
+    const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+    if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+    const branch = approveRunBranch(runId);
+    worktreePath = join(worktreesDir(config), branch);
+    worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
+    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    const removed = applySkillLifecycleRemoval(worktreePath, action);
+    if (!removed.ok) throw new Error(`rmd approve: refusing lifecycle action for ${proposalId} — ${removed.reason}`);
+    execFileSync("git", ["-C", worktreePath, "add", "-A", "--", action.skillPath], { stdio: "inherit" });
+    execFileSync("git", ["-C", worktreePath, "commit", "-m", skillLifecycleApproveCommitMessage(action, proposalId)], { stdio: "inherit" });
+    gitPushRunBranch(worktreePath);
+    return branch;
+  };
+
+  const openSkillLifecyclePr = (branch: string, action: SkillLifecycleAction): string => {
+    assertLiveWriteAllowed("gh-pr-create", `opening a skill lifecycle PR against ${owner}/${repo}`);
+    const created = createPlanPrRest(ghJson, owner, repo, {
+      title: "chore(skill): retire approved skill via rmd approve",
+      body: skillLifecyclePrBody(action, proposalId),
+      head: branch,
+      base: "main",
+    });
+    return created.prUrl;
+  };
+
   const duplicateCorpus = filedShardSlugCorpus(repoRoot);
 
   let result: ReturnType<typeof approveProposal>;
   try {
-    result = approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus });
+    if (proposal.lifecycleAction) {
+      if (classification.state !== "ready" || !classification.lifecycleAction) {
+        const refusal = refusalReason(classification);
+        appendLedger(ledgerPath, {
+          run_id: runId,
+          task_id: proposalId,
+          step: "ratify.approve_refused",
+          state: classification.state,
+          reason: refusal,
+        });
+        console.error(`rmd approve: ${refusal}`);
+        return 1;
+      }
+      const branch = createSkillLifecycleBranch(classification.lifecycleAction);
+      const prUrl = openSkillLifecyclePr(branch, classification.lifecycleAction);
+      const prNumber = Number(prUrl.match(/\/pull\/(\d+)/)?.[1]);
+      appendLedger(ledgerPath, {
+        run_id: runId,
+        task_id: proposalId,
+        step: "ratify.approved",
+        pr_url: prUrl,
+        pr_number: Number.isFinite(prNumber) ? prNumber : undefined,
+        branch,
+        lifecycle_action: classification.lifecycleAction.kind,
+      });
+      result = {
+        ok: true,
+        proposalId,
+        branch,
+        prUrl,
+        prNumber: Number.isFinite(prNumber) ? prNumber : undefined,
+        payload: { proposalId, fragmentYaml: "", stampLine: "" },
+      };
+    } else {
+      result = approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus });
+    }
   } catch (e) {
     // W1-T311: createRatificationBranch REFUSED (a degraded mint or a failed reservation) —
     // or any other failure inside either gateway call. approveProposal never reached its own
@@ -36399,12 +36517,13 @@ export async function synthesizeCommand(rest: string[], deps: SynthesizeCommandD
  */
 export async function skillCommand(
   rest: string[],
-  deps: { effectiveness?: typeof skillEffectivenessCommand } = {},
+  deps: { effectiveness?: typeof skillEffectivenessCommand; lifecycle?: typeof skillLifecycleCommand } = {},
 ): Promise<number> {
   const sub = rest[0];
   if (sub === "effectiveness") return (deps.effectiveness ?? skillEffectivenessCommand)(rest.slice(1));
+  if (sub === "lifecycle") return (deps.lifecycle ?? skillLifecycleCommand)(rest.slice(1));
   if (sub !== "list") {
-    console.error(`rmd skill: unknown subcommand '${sub ?? ""}' — usage: rmd skill list | rmd skill effectiveness <approved-skill>\n` + USAGE);
+    console.error(`rmd skill: unknown subcommand '${sub ?? ""}' — usage: rmd skill list | rmd skill effectiveness <approved-skill> | rmd skill lifecycle <approved-skill>\n` + USAGE);
     return 2;
   }
   const badArg = unknownArgError("skill list", rest.slice(1), [], []);
@@ -36472,6 +36591,71 @@ export function skillEffectivenessCommand(
   }
   const report = buildSkillEffectivenessReport(ledgerUnion.rows, skillName);
   (deps.write ?? console.log)(renderSkillEffectivenessReport(report));
+  return 0;
+}
+
+/**
+ * W1-T3413's lifecycle bridge. It measures with the same reducer as `rmd skill effectiveness`,
+ * then stages exactly one structured retirement proposal for qualified negative evidence.
+ */
+export function skillLifecycleCommand(
+  rest: string[],
+  deps: {
+    stateDir?: string;
+    registryPath?: string;
+    approvedSkillsDir?: string;
+    readLedger?: typeof readLedgerUnionRecordsSync;
+    write?: (text: string) => void;
+    error?: (text: string) => void;
+  } = {},
+): number {
+  const skillName = rest[0];
+  if (!skillName || skillName.startsWith("-")) {
+    (deps.error ?? console.error)("rmd skill lifecycle: usage: rmd skill lifecycle <approved-skill>");
+    return 2;
+  }
+  const badArg = unknownArgError("skill lifecycle", rest.slice(1), [], []);
+  if (badArg) {
+    (deps.error ?? console.error)(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = deps.stateDir && deps.registryPath && deps.approvedSkillsDir ? undefined : loadConfig();
+  const stateDir = deps.stateDir ?? dirname(ledgerPathFor(config as Config));
+  let ledgerUnion: ReturnType<typeof readLedgerUnionRecordsSync>;
+  try {
+    ledgerUnion = (deps.readLedger ?? readLedgerUnionRecordsSync)(stateDir, {
+      step: ["skills.selection", "verdict"],
+      refuseIncomplete: true,
+    });
+  } catch (error) {
+    const reason = String(error);
+    (deps.error ?? console.error)(`rmd skill lifecycle: REFUSED unreadable ledger union: ${reason}`);
+    return 1;
+  }
+  if (!ledgerUnion.ok) {
+    (deps.error ?? console.error)(
+      `rmd skill lifecycle: REFUSED incomplete ledger union under ${stateDir}: ` +
+      `${ledgerUnion.unread.length} unread rotation(s)`,
+    );
+    return 1;
+  }
+  const report = buildSkillEffectivenessReport(ledgerUnion.rows, skillName);
+  (deps.write ?? console.log)(renderSkillEffectivenessReport(report));
+  const registryPath = deps.registryPath ?? join((config as Config).root, "state", "inbox-proposals.json");
+  const approvedSkillsDir = deps.approvedSkillsDir ?? join(repoRoot, ".claude", "skills");
+  const staged = stageSkillLifecycleProposal(registryPath, approvedSkillsDir, report);
+  if (staged.refused) {
+    (deps.error ?? console.error)(
+      `rmd skill lifecycle: REFUSED ${staged.reason}; selected terminal_runs=${report.selected.terminal_runs}, ` +
+      `control terminal_runs=${report.control.terminal_runs}`,
+    );
+    return report.status === "REVIEW-CANDIDATE" ? 0 : 1;
+  }
+  const verb = staged.staged ? "staged" : staged.refreshed ? "refreshed" : "already staged";
+  (deps.write ?? console.log)(
+    `rmd skill lifecycle: ${verb} ${staged.proposalId} ` +
+    `(evidence_fingerprint=${staged.evidenceFingerprint})`,
+  );
   return 0;
 }
 
