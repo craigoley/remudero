@@ -29,7 +29,12 @@ export const DEFAULT_BASE_REF = "origin/main";
 /** One row per SCALAR score field this check holds monotonic. `direction: "increase"` is a FLOOR
  *  (a drop is the regression); `direction: "decrease"` is a CEILING (a rise is the regression). */
 export const SCORE_TABLE = [
-  { path: "scripts/coverage-baseline.json", field: "linesPct", direction: "increase" },
+  // W1-T3384 — THE coverage-baseline.json/linesPct ROW IS GONE, NOT MOVED. The operator retired
+  // that floor on 2026-09-11 ("i don't want hard floors on anything, including code coverage"),
+  // so the field no longer exists and this row would hold a value that is not there. Leaving it
+  // would not merely be stale: once the retirement is on main, `evaluateRow` reads origin/main's
+  // absent field and returns `error` for EVERY subsequent pull request. Coverage is governed by
+  // classifyCoverageTier's bands instead, which select a RESPONSE rather than a floor.
   { path: "scripts/mutation-baseline.json", field: "scorePct", direction: "increase" },
   { path: "scripts/cycle-baseline.json", field: "maxCycles", direction: "decrease" },
   { path: "scripts/claude-md-budget-baseline.json", field: "capBytes", direction: "decrease" },
@@ -51,9 +56,9 @@ export function bumpRationaleNamesAPr(rationale) {
 /**
  * Pure verdict for one {@link SCORE_TABLE} row. `oldJson` is `undefined` when the file did not
  * exist at the base ref -- a brand-new baseline has nothing to regress against and always passes.
- * A regression (including retiring the score field entirely) passes only when
- * `newJson.bumpRationale` names a PR/task AND differs from `oldJson.bumpRationale` -- a stale
- * rationale, carried over from an earlier reviewed move, must not cover a fresh one.
+ * A regression passes only when `newJson.bumpRationale` names a PR/task AND differs from
+ * `oldJson.bumpRationale` -- a stale rationale, carried over from an earlier reviewed move, must
+ * not cover a fresh one.
  */
 export function evaluateRow(entry, oldJson, newJson) {
   const { path, field, direction } = entry;
@@ -61,32 +66,10 @@ export function evaluateRow(entry, oldJson, newJson) {
     return { ...entry, status: "new", ok: true, detail: `${path}: new baseline file, nothing at origin/main to compare against` };
   }
   const oldValue = oldJson[field];
+  const newValue = newJson[field];
   if (typeof oldValue !== "number" || !Number.isFinite(oldValue)) {
     return { ...entry, status: "error", ok: false, detail: `${path}: origin/main's "${field}" is not a finite number (${JSON.stringify(oldValue)})` };
   }
-  if (!Object.hasOwn(newJson, field)) {
-    if (bumpRationaleNamesAPr(newJson.bumpRationale) && newJson.bumpRationale !== oldJson.bumpRationale) {
-      return {
-        ...entry,
-        status: "reviewed-bump",
-        ok: true,
-        oldValue,
-        detail: `${path}: ${field} retired from ${oldValue} against origin/main, but a fresh bumpRationale names the review`,
-      };
-    }
-    const kind = direction === "increase" ? "floor" : "ceiling";
-    return {
-      ...entry,
-      status: "regressed",
-      ok: false,
-      oldValue,
-      detail:
-        `${path}: "${field}" was removed against origin/main's ${oldValue} -- the WRONG direction for this ${kind}. ` +
-        `Restore it, or if the retirement is deliberate and reviewed, add a fresh "bumpRationale" string to ${path} naming the PR ` +
-        `(a "#<n>" or "W1-T<n>" reference), the convention scripts/claude-md-budget-baseline.json already follows.`,
-    };
-  }
-  const newValue = newJson[field];
   if (typeof newValue !== "number" || !Number.isFinite(newValue)) {
     return { ...entry, status: "error", ok: false, detail: `${path}: "${field}" is not a finite number (${JSON.stringify(newValue)})` };
   }

@@ -105,25 +105,6 @@ test("evaluateRow: a floor moving DOWN against origin/main with no bumpRationale
   assert.match(verdict.detail, /linesPct moved 95\.62 -> 80/);
 });
 
-test("evaluateRow: retiring a floor against origin/main with no bumpRationale is REFUSED", () => {
-  const verdict = evaluateRow(FLOOR_ENTRY, { linesPct: 95.62 }, {});
-  assert.equal(verdict.status, "regressed");
-  assert.equal(verdict.ok, false);
-  assert.match(verdict.detail, /"linesPct" was removed/);
-  assert.match(verdict.detail, /bumpRationale/);
-});
-
-test("evaluateRow: retiring a floor WITH a fresh, PR-naming bumpRationale is ACCEPTED", () => {
-  const verdict = evaluateRow(
-    FLOOR_ENTRY,
-    { linesPct: 95.62 },
-    { bumpRationale: "Retired linesPct by #5117 / W1-T3380: coverage levels no longer block." },
-  );
-  assert.equal(verdict.status, "reviewed-bump");
-  assert.equal(verdict.ok, true);
-  assert.match(verdict.detail, /linesPct retired from 95\.62/);
-});
-
 test("evaluateRow: a floor moving UP (or unchanged) against origin/main is not a regression", () => {
   assert.equal(evaluateRow(FLOOR_ENTRY, { linesPct: 95.62 }, { linesPct: 96 }).status, "ok");
   assert.equal(evaluateRow(FLOOR_ENTRY, { linesPct: 95.62 }, { linesPct: 95.62 }).status, "ok");
@@ -138,7 +119,6 @@ test("evaluateRow: a non-numeric field at either end is a MEASUREMENT error, nev
 
 test("SCORE_TABLE names only SCALAR score floors/ceilings, never a per-file LEDGER", () => {
   const paths = SCORE_TABLE.map((e) => e.path);
-  assert.ok(paths.includes("scripts/coverage-baseline.json"));
   assert.ok(paths.includes("scripts/mutation-baseline.json"));
   // The per-file ledgers src/lib/review.ts's ENTANGLEMENT_EXEMPT_INSTRUMENTS already names as
   // grading no falsifier — raising one row there records debt on that row alone.
@@ -151,6 +131,15 @@ test("SCORE_TABLE names only SCALAR score floors/ceilings, never a per-file LEDG
   ]) {
     assert.ok(!paths.includes(ledger), `${ledger} is a per-file ledger, not a scalar score`);
   }
+});
+
+test("W1-T3384: the retired coverage lines floor is NOT held monotonic — a row for an absent field would error on every PR", () => {
+  const paths = SCORE_TABLE.map((e) => e.path);
+  assert.ok(
+    !paths.includes("scripts/coverage-baseline.json"),
+    "linesPct was retired by operator ruling; evaluateRow errors when origin/main's field is not finite, " +
+      "so a row for a field that no longer exists reddens every pull request rather than guarding anything",
+  );
 });
 
 // ── wiring: the real CLI, driven as a subprocess against an isolated fixture remote ─────────────
