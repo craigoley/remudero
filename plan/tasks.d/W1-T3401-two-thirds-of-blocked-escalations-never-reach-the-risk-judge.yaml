@@ -1,0 +1,64 @@
+- id: W1-T3401
+  title: "two thirds of BLOCKED escalations never reach the risk judge — the drain's block path calls bare escalate()"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  status: queued
+  attempts: 0
+  files:
+    - src/run-task.ts
+    - test/every-blocked-escalation-is-judged.test.ts
+  origin: "operator-session#escalation-judge-coverage-2026-09-11"
+  rationale: |
+    OPERATOR DIRECTION 2026-09-11: "make sure we use llm as a judge to determine the risk on
+    anything we think about escalating - many times they are non-issues that can be resolved
+    automatically. Use the inbox for anything that requires me and don't stall the pr queue."
+
+    THE JUDGE EXISTS AND WORKS. `escalateWithJudge`/`judgeEscalation` (W1-T349) is demote-only by
+    construction and has run since 2026-09-08. MEASURED from the rotated ledger union:
+    8,090 `escalation.judged` rows, 7,559 deliver and 531 demote — a 6.6% demotion rate.
+
+    BUT IT IS NOT ON THE PATH THAT MATTERS. Measured over the same window, counting DISTINCT
+    task ids rather than rows (an `escalation.issue_opened` row is re-emitted every sweep, so
+    105,106 rows stand for only 361 tasks):
+
+      class BLOCKED   72 tasks escalated   23 judged   49 NEVER JUDGED
+      class MANUAL     1 task              exempt by rule (isEscalationJudgeExempt)
+      class (none)     1 task
+
+    All 49 are `W1-T`-scoped; every `PR-`-scoped escalation IS judged. BLOCKED is NOT an exempt
+    class, so those 49 reached the operator with no risk assessment at all.
+
+    THE CAUSE IS A BARE CALL, NOT A BROKEN JUDGE. Five sites call `escalate(...)` directly rather
+    than `escalateWithJudge(...)`: src/run-task.ts:13471 (auto-merge disarm), :13604 (risk-judge
+    escalated), :15193 and :15253 (dep-review), and :26259 — the daemon's `escalateBlock`
+    callback, which is task-scoped, BLOCKED-class, and fires on every genuine dependency block.
+    That last one is the prime suspect for the 49 given all of them are task-scoped.
+
+    WHY THIS IS CHEAP TO FIX. `escalateBlock` is already declared
+    `(info) => void | Promise<void>` (src/lib/daemon.ts:955) and its one caller already AWAITS it
+    (:1991), so no async refactor is needed — only resolving a judge dependency
+    (`realEscalationJudge({ mounts, cwd, settingsFile })`) at daemon scope, where `repoRoot` is in
+    scope but `settingsFile` is not yet threaded.
+
+    FAIL DIRECTION IS ALREADY SAFE: `escalateWithJudge` fails closed to DELIVER, so a judge that
+    throws, times out or is unreachable leaves today's behaviour exactly as it is.
+  acceptance:
+    - claim: "the daemon's block escalation is judged rather than delivered unconditionally"
+      proof: "unit test: test/every-blocked-escalation-is-judged.test.ts"
+    - claim: "a judge that throws still delivers, so the halt path never loses an escalation"
+      proof: "unit test: test/every-blocked-escalation-is-judged.test.ts"
+    - claim: "every BLOCKED-class escalation site routes through escalateWithJudge, and a census names any that does not"
+      proof: "unit test: test/every-blocked-escalation-is-judged.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if a fresh measurement shows zero unjudged BLOCKED task ids since the judge
+    shipped. Re-derive it the same way: read `escalation.issue_opened` and `escalation.judged`
+    from the ledger UNION (never the live file alone — the retained window is far shorter than the
+    judge's life), count DISTINCT task_ids per class since 2026-09-08, and subtract. If BLOCKED
+    reads 0 unjudged, the path is already covered and this shard is withdrawn.
+  notes: |
+    SCOPE FENCE: this wires an EXISTING judge onto an EXISTING call site. It does not change the
+    judge's prompt, its demote-only polarity, the exempt-class list, or the 6.6% demotion rate.
+    Retuning the judge is separate work and needs its own evidence.

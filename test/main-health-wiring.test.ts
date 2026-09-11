@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   buildMainHealthRung,
   escalationFor,
+  fetchMainPushRunHistory,
   MAIN_HEALTH_TASK_ID,
   type MainHealthRungDeps,
 } from "../src/lib/main-health-rung.js";
@@ -48,6 +49,14 @@ function fixture(overrides: Partial<MainHealthRungDeps> = {}) {
       };
     }
     if (path === `repos/${OWNER}/${REPO}/commits/${sha}/status`) return { statuses: [] };
+    if (path === `repos/${OWNER}/${REPO}/actions/runs?branch=trunk&event=push&status=completed&per_page=100`) {
+      return {
+        workflow_runs: [
+          { head_sha: sha, conclusion, html_url: `https://github.com/${OWNER}/${REPO}/actions/runs/1` },
+          { head_sha: GREEN_SHA, conclusion: "success" },
+        ],
+      };
+    }
     throw new Error(`unrouted gh api path: ${path}`);
   }) as GhApiFetcher;
 
@@ -113,6 +122,38 @@ function mainFailure(overrides: Partial<CiFailure> = {}): CiFailure {
     ...overrides,
   };
 }
+
+test("main push history retains associated pull-request numbers and both GitHub URL shapes", () => {
+  const fetch = ((args: string[]) => {
+    assert.deepEqual(args, [
+      "api",
+      `repos/${OWNER}/${REPO}/actions/runs?branch=trunk&event=push&status=completed&per_page=100`,
+    ]);
+    return {
+      workflow_runs: [
+        {
+          head_sha: RED_SHA,
+          conclusion: "failure",
+          pull_requests: [
+            { number: 5121, html_url: `https://github.com/${OWNER}/${REPO}/pull/5121` },
+            { number: 5122, url: `https://api.github.com/repos/${OWNER}/${REPO}/pulls/5122` },
+          ],
+        },
+      ],
+    };
+  }) as GhApiFetcher;
+
+  assert.deepEqual(fetchMainPushRunHistory(OWNER, REPO, "trunk", fetch), [
+    {
+      headSha: RED_SHA,
+      conclusion: "failure",
+      pullRequests: [
+        { number: 5121, url: `https://github.com/${OWNER}/${REPO}/pull/5121` },
+        { number: 5122, url: `https://api.github.com/repos/${OWNER}/${REPO}/pulls/5122` },
+      ],
+    },
+  ]);
+});
 
 test("malformed GitHub metadata is named and swallowed instead of inventing a branch", async () => {
   const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
