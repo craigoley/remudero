@@ -24,6 +24,7 @@ const MODES: ReadonlyArray<readonly [string, FixEvidence]> = [
 
 test("test/a-fix-rung-carries-the-ratchet-contract-it-was-given.test.ts: W1-T3064 delivers the ratchet contract in every fix mode", () => {
   const contract = ratchetContractLines().join("\n");
+  assert.notEqual(contract, "", "the delivery assertion observes a non-empty ratchet contract");
 
   for (const [mode, evidence] of MODES) {
     const prompt = renderFixPrompt({
