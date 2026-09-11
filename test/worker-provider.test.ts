@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -16,6 +16,7 @@ import {
   clearProviderWindowMeasurements,
   codexCapacityFromRateLimits,
   codexGitWritableRoots,
+  codexPreToolUseProfile,
   parseCodexJsonl,
   readCodexCapacity,
   providerWindowConsumption,
@@ -917,6 +918,74 @@ test("Codex JSONL normalizes a pinned subscription refusal only from terminal er
   assert.equal(proseOnly.usageRefusal, undefined, "agent prose must never classify the account as refused");
 });
 
+test("Codex hook profile fails closed when the validated worker policy has no command floor", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
+  const settingsFile = join(root, "worker.json");
+  try {
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+    assert.throws(() => codexPreToolUseProfile(settingsFile), /must define at least one PreToolUse hook/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** Base sandbox stanza shared by the malformed-hook fixtures below — the shape
+ *  {@link validateWorkerSettingsFile} requires before {@link codexPreToolUseProfile} ever
+ *  inspects `hooks`. */
+const CODEX_HOOK_PROFILE_BASE_SANDBOX = { enabled: true, failIfUnavailable: true };
+
+function writeCodexHookProfileFixture(root: string, preToolUse: unknown): string {
+  const settingsFile = join(root, "worker.json");
+  writeFileSync(
+    settingsFile,
+    JSON.stringify({ sandbox: CODEX_HOOK_PROFILE_BASE_SANDBOX, hooks: { PreToolUse: preToolUse } }),
+  );
+  return settingsFile;
+}
+
+test("Codex hook profile fails closed on a PreToolUse entry with an unreadable matcher", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
+  try {
+    const settingsFile = writeCodexHookProfileFixture(root, [{ matcher: 123, hooks: [] }]);
+    assert.throws(
+      () => codexPreToolUseProfile(settingsFile),
+      /PreToolUse\[0\] has an unreadable matcher or empty hooks list/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex hook profile fails closed on a PreToolUse hook that is not a command hook", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
+  try {
+    const settingsFile = writeCodexHookProfileFixture(root, [
+      { matcher: "Bash", hooks: [{ type: "prompt", command: "" }] },
+    ]);
+    assert.throws(
+      () => codexPreToolUseProfile(settingsFile),
+      /PreToolUse\[0\]\.hooks\[0\] is not a command hook/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex hook profile fails closed on a PreToolUse hook with an invalid timeout", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
+  try {
+    const settingsFile = writeCodexHookProfileFixture(root, [
+      { matcher: "Bash", hooks: [{ type: "command", command: "./deny-floor.sh", timeout: -5 }] },
+    ]);
+    assert.throws(
+      () => codexPreToolUseProfile(settingsFile),
+      /PreToolUse\[0\]\.hooks\[0\] has an invalid timeout/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Codex spawn carries a subscription refusal through the shared ledger seam", async () => {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
@@ -938,6 +1007,7 @@ test("Codex spawn carries a subscription refusal through the shared ledger seam"
       workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd: process.cwd(),
       prompt: "do the task",
+      settingsFile: join(process.cwd(), "settings", "worker.json"),
       containment: {
         spawn: () => ({ process: proc as never, pid: 42_425 }),
         teardown: () => {},
@@ -961,6 +1031,11 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
   let spawnedArgs: string[] = [];
   let spawnedEnv: Record<string, string | undefined> = {};
   const codexCapacityRequests: Array<{ forceRefresh?: boolean; selectedModel?: string }> = [];
+  const assignments: Array<{
+    id: string;
+    phase: string;
+    selected: { provider: string; model: string; effort: string; accountLabel?: string };
+  }> = [];
   const diagnostics: string[] = [];
   t.mock.method(console, "error", (...parts: unknown[]) => diagnostics.push(parts.map(String).join(" ")));
   stdin.on("data", (chunk: Buffer) => {
@@ -1008,8 +1083,10 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
         tieBreaker: 0,
         writeStatus: (_root, input) => writeProviderRoutingStatus(root, input),
       },
+      onSelectionAssignment: (assignment) => assignments.push(assignment),
       containment: {
         spawn: (options) => {
+          assert.equal(assignments.length, 1, "the durable assignment is emitted before the Codex process is created");
           spawnedArgs = options.args;
           spawnedEnv = options.env;
           return { process: proc as never, pid: 42_424 };
@@ -1027,12 +1104,23 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
   assert.equal(result.model, "gpt-5.6-terra");
   assert.deepEqual(spawnedArgs.slice(spawnedArgs.indexOf("--model"), spawnedArgs.indexOf("--model") + 2), ["--model", "gpt-5.6-terra"]);
   assert.ok(spawnedArgs.includes('model_reasoning_effort="high"'));
+  assert.ok(spawnedArgs.includes("--dangerously-bypass-hook-trust"));
+  assert.ok(spawnedArgs.some((arg) => arg.startsWith("hooks.PreToolUse=") && arg.includes("deny-floor.sh")));
   assert.equal(spawnedEnv.SAFE_VALUE, "kept");
   assert.equal(spawnedEnv.OPENAI_API_KEY, undefined);
   assert.equal(spawnedEnv.ANTHROPIC_API_KEY, undefined);
   assert.equal(tornDown, 1);
   assert.match(prompt, /read and follow.*CLAUDE\.md/s);
   assert.equal(workerLedgerFields(result).provider, "codex");
+  assert.equal(assignments[0]?.phase, "pre-execution");
+  assert.deepEqual(assignments[0]?.selected, {
+    provider: "codex",
+    model: "gpt-5.6-terra",
+    effort: "high",
+    accountLabel: "codex-account",
+  });
+  assert.equal(workerLedgerFields(result).selection_assignment_id, assignments[0]?.id);
+  assert.equal(workerLedgerFields(result).served_model, null, "assignment remains distinct from an unreported provider receipt");
   assert.deepEqual(codexCapacityRequests, [
     { requestedModel: undefined, requestedEffort: undefined, reservePercent: 5 },
     { requestedModel: undefined, requestedEffort: undefined, forceRefresh: true, selectedModel: "gpt-5.6-terra" },
@@ -1102,6 +1190,56 @@ test("the unchanged Claude spawn path labels its successful provider", async () 
   assert.equal(result.provider, "claude");
   assert.equal(result.text, "done");
   assert.equal(result.windowConsumption, undefined, "Claude-only installs must perform no attribution reads");
+});
+
+test("a sink that throws on the pre-execution assignment is visible on stderr, never a routing decision, and the terminal row carries no assignment id", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-claude-assignment-write-failed-"));
+  const diagnostics: string[] = [];
+  t.mock.method(console, "error", (...parts: unknown[]) => diagnostics.push(parts.map(String).join(" ")));
+  const result = await spawnWorker({
+    cwd: process.cwd(),
+    permissionMode: "bypassPermissions",
+    settingsFile: join(process.cwd(), "settings", "worker.json"),
+    prompt: "a sink that refuses to accept the assignment",
+    config: { claudeBin: "/unused", root },
+    claudeExecutable: {
+      cache: createClaudeExecutableCache(),
+      deps: {
+        env: { RMD_CLAUDE_BIN: "/fake/claude" },
+        home: root,
+        exists: () => true,
+        which: () => "/fake/claude",
+        canExecute: () => true,
+        locations: [],
+      },
+    },
+    keychain: {
+      platform: "linux",
+      readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "stub", expiresAt: 4_102_444_800_000 } }),
+    },
+    queryFn: (() => (async function* () {
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done despite the sink's own failure",
+        session_id: "claude-session-write-failed",
+        total_cost_usd: 0,
+        num_turns: 1,
+      };
+    })()) as never,
+    onSelectionAssignment: () => {
+      throw new Error("durable sink unavailable");
+    },
+  });
+  assert.equal(result.provider, "claude", "a sink failure never changes the routing decision");
+  assert.equal(result.text, "done despite the sink's own failure", "the spawn itself still completes normally");
+  assert.equal(result.selectionAssignmentId, undefined, "no id to join a terminal row to when the write itself failed");
+  const failure = diagnostics
+    .map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return undefined; } })
+    .find((event) => event?.event === "worker.selection_assignment_write_failed");
+  assert.ok(failure, "the write failure is visible on stderr, never silently swallowed");
+  assert.equal(failure?.reason, "write-failed");
 });
 
 async function spawnMeasuredClaude(
@@ -1237,6 +1375,7 @@ test("Codex worker clock bound tears down the contained process and fails the ru
         workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
         cwd: process.cwd(),
         prompt: "wait forever",
+        settingsFile: join(process.cwd(), "settings", "worker.json"),
         clockBound: { boundMs: 1 },
         containment: {
           spawn: () => ({ process: proc as never, pid: 9_001 }),

@@ -65,14 +65,13 @@ test("W1-T3275: a second read-shaped gh call inside the floor is refused, and th
   });
 });
 
-test("W1-T3275: WRITES are never refused, however close together — the productive path is untouched", () => {
+test("W1-T3275: worker-owned WRITES are never refused, however close together — the productive path is untouched", () => {
   withCache((c) => {
     // A gate that blocked these would be routed around inside a week; this repo has said so about
-    // its own advisory floors. Opening a PR, posting a review and arming a merge back to back is
-    // exactly what a working session does.
+    // its own advisory floors. Opening a PR, posting a review and re-running a check back to back
+    // is exactly what a working session does. Merging is no longer a worker-owned write.
     backdate(c, 0);
     for (const write of [
-      "gh pr merge 4849 --squash --auto",
       "gh pr create --title x --body y",
       "gh api --method POST repos/o/r/pulls -f title=x",
       "gh pr comment 4849 --body hi",

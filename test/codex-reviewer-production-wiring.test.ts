@@ -33,7 +33,10 @@ test("W1-T2946: runReview gives Codex a test-capable disposable review sandbox",
     const ledgerPath = join(root, "ledger.ndjson");
     const workerHome = join(root, "worker-home");
     mkdirSync(workerHome);
-    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    writeFileSync(settingsFile, JSON.stringify({
+      sandbox: { enabled: true, failIfUnavailable: true },
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "bash /bin/true", timeout: 5 }] }] },
+    }), "utf8");
     writeFileSync(
       join(binDir, "gh"),
       `#!/bin/sh
@@ -202,6 +205,7 @@ test("W1-T2946 mutation: omitting the disposable review intent restores read-onl
         workerHome,
         cwd: root,
         prompt: "exercise reviewer argv without its explicit intent",
+        settingsFile: join(process.cwd(), "settings", "worker.json"),
         tools: ["Read", "Grep", "Glob", "Bash"],
         containment: {
           spawn: (options) => {

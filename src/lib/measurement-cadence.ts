@@ -602,12 +602,58 @@ function scanUnadoptedScripts(
   }
   const srcTexts = corpus.filter((f) => f.rel.startsWith("src/")).map((f) => f.text);
 
+  // W1-T3379 — THE TWO INVOKER SURFACES THIS SCAN COULD NOT SEE.
+  //
+  // (a) scripts/ ITSELF. A shared scripts/lib/*.mjs module is imported only by sibling scripts, and
+  //     none of the three surfaces above can see that, so it read as permanently unadopted however
+  //     many callers it had. MEASURED 2026-09-11: scripts/lib/git.mjs had 15 importers,
+  //     scripts/lib/repo-root.mjs 12, scripts/test-duration-reporter.mjs 2 — all three reported.
+  //
+  // (b) plan/claims.yaml. Its rows carry an `assertion:` that RUNS a script on every PR through a
+  //     required check — `node --import tsx scripts/plan-state-claims.mjs` is the live invocation of
+  //     the very script this scan reported as having no adopter.
+  //
+  // A QUOTED PATH SPECIFIER, NOT A BARE BASENAME, and executable files only. Both narrowings are
+  // load-bearing and were measured, not assumed:
+  //   - scripts/comment-load-baseline.json is DATA that lists every script by path; counting it as
+  //     an invoker marked the ENTIRE corpus adopted and left this scan asserting nothing.
+  //   - scripts/diff-coverage.mjs mentions scripts/console-live-review.mjs in a DOC COMMENT; a bare
+  //     basename match reads that prose as an invocation, the same "a mention is not a caller"
+  //     defect the symbol scan carries.
+  // With both narrowings the reported set goes 11 -> 4 on this checkout, and the 4 that remain were
+  // each confirmed to have no invoker at all.
+  const invokerScriptTexts = new Map<string, string>();
+  for (const rel of scriptRels) {
+    if (!/\.(mjs|cjs|js|ts)$/.test(rel)) continue;
+    try {
+      invokerScriptTexts.set(rel, readFileSync(join(checkoutDir, rel), "utf8"));
+    } catch {
+      // Unreadable is "no reference here" — the same direction every other absent surface takes.
+    }
+  }
+  let planClaimsText = "";
+  try {
+    planClaimsText = readFileSync(join(checkoutDir, "plan", "claims.yaml"), "utf8");
+  } catch {
+    // absent claims file — treated as "no reference there", same as any other absent surface
+  }
+
   const findings: AdoptionFinding[] = [];
   for (const rel of scriptRels) {
     if (!/\.(mjs|cjs|js|ts)$/.test(rel)) continue;
     const base = rel.slice(rel.lastIndexOf("/") + 1);
     const re = new RegExp(escapeAdoptionRegExp(base));
-    const invoked = workflowTexts.some((t) => re.test(t)) || re.test(packageJsonText) || srcTexts.some((t) => re.test(t));
+    // A path specifier ending in this basename, inside quotes — an import, a require, or a quoted
+    // command string. `rel !== r` because a script's own text necessarily names itself.
+    const specifier = new RegExp(`["'\`](?:[^"'\`]*/)?${escapeAdoptionRegExp(base)}["'\`]`);
+    const invokedByScript = [...invokerScriptTexts].some(([r, t]) => r !== rel && specifier.test(t));
+    const invokedByClaim = specifier.test(planClaimsText) || re.test(planClaimsText);
+    const invoked =
+      workflowTexts.some((t) => re.test(t)) ||
+      re.test(packageJsonText) ||
+      srcTexts.some((t) => re.test(t)) ||
+      invokedByScript ||
+      invokedByClaim;
     if (!invoked) {
       findings.push({
         shape: "script-no-invoker",

@@ -1,4 +1,11 @@
-import { bodyVsDiffContractLines, IMPLEMENT_ROLE_LINES, outputContractLines, ratchetContractLines, commitMessageContractLines } from "./compaction.js";
+import {
+  bodyVsDiffContractLines,
+  IMPLEMENT_ROLE_LINES,
+  outputContractLines,
+  ratchetContractLines,
+  commitMessageContractLines,
+  WORKER_PR_AUTHORITY_LINES,
+} from "./compaction.js";
 import { GENERATED_LEDGER_CLASSES, isCompanionPath } from "./companion-paths.js";
 import type { RemedyFileForGate } from "./ci-parity.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, neutralizeFenceMarkers } from "./fix-fence.js";
@@ -499,6 +506,7 @@ export function renderFixPrompt(opts: {
     // ever blocking one. Removed from BOTH prompts together (see lib/compaction.ts); the verb
     // itself (`rmd preflight --ci-parity`) is untouched and remains the hand route's own gate.
     `Then: \`git push origin HEAD\` (no -u) — never force-push. Your PR body`,
+    ...WORKER_PR_AUTHORITY_LINES,
     `must substantiate EVERY task acceptance`,
     `criterion, not only the ones fixed here — the review floor judges the body against the`,
     // impl-FV: the SAME literal the implement contract carries, for the same reason

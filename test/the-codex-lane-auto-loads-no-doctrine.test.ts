@@ -57,6 +57,7 @@ async function capturedArgs(): Promise<string[]> {
       workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd: root,
       prompt: "probe",
+      settingsFile: join(process.cwd(), "settings", "worker.json"),
       tools: ["Bash"],
       containment: {
         spawn: (opts) => {

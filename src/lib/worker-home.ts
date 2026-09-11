@@ -116,7 +116,7 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
       "(transcripts, history, settings, skills), falling back to today's wholesale grant only when that " +
       "sibling is absent. OAuth may read under HOME — unverified live, see LEARNINGS.md.",
   },
-  { relPath: ".config/gh", reason: "gh CLI auth token, so a worker can open/merge PRs" },
+  { relPath: ".config/gh", reason: "gh CLI auth token, so a worker can open and update its PR" },
   {
     relPath: playwrightCacheRelPath(),
     reason:

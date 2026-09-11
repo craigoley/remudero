@@ -763,13 +763,15 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // note's own point: a line number is a QUERY over the current tree, and any diff inserting above
   // these witnesses moves them. W1-T2889's deps-object collapse then rewrote run-task.test.ts's
   // fixtures and moved both by FOUR, to :5965/:6026 — the SIXTH re-derivation, and the first where
-  // the mover was a refactor of the tests themselves rather than a line added above them. The
-  // THIRD witness (arm-ordering.test.ts) is untouched by every one of these edits and unmoved,
-  // which is what keeps this case a census over the real tree rather than three moving literals.
+  // the mover was a refactor of the tests themselves rather than a line added above them. PR-5093
+  // then added 75 net lines ahead of both while covering assignment routing telemetry, moving them
+  // to :6040/:6101. The THIRD witness (arm-ordering.test.ts) is untouched by every one of these
+  // edits and unmoved, which is what keeps this case a census over the real tree rather than three
+  // moving literals.
   const expectedKeys = [
     "armIfVerdictPermits:test/arm-ordering.test.ts:63:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:5965:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6026:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6040:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6101:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(

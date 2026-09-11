@@ -86,7 +86,27 @@ if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api\b'; then
   fi
 fi
 
-# 5) operator's machine-specific protected paths (one glob/substring per line).
+# 5) merge or arm a pull request from inside a worker. The worker authors and repairs a PR; the
+#    orchestrator alone owns the merge decision after CI and semantic review. Before this rule,
+#    rule 9 explicitly classified `gh pr merge` as a productive write and let it pass, so a worker
+#    holding the ordinary GH_TOKEN could merge its own green PR without leaving the orchestrator's
+#    automerge receipts. Cover the CLI command and its two common `gh api` equivalents. This stays
+#    a tripwire, not a credential boundary: an indirectly assembled request can evade command-text
+#    matching, exactly as the file header documents.
+if printf '%s' "$cmd" | grep -Eq 'gh([[:space:]]+(-R|--repo)(=|[[:space:]])[^[:space:]]+)*[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+  deny "a worker may author or repair a PR, but only the orchestrator may merge or arm it"
+fi
+if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api([[:space:]]|$)'; then
+  if printf '%s' "$cmd" | grep -Eq '(-X|--method)(=|[[:space:]])PUT([[:space:]]|$)' &&
+     printf '%s' "$cmd" | grep -Eq 'repos/[^[:space:]]+/pulls/[0-9]+/merge([?[:space:]]|$)'; then
+    deny "gh api PUT to a pull-request merge endpoint"
+  fi
+  if printf '%s' "$cmd" | grep -Eq '(mergePullRequest|enablePullRequestAutoMerge)[[:space:]]*\('; then
+    deny "gh api GraphQL mutation that merges or arms a pull request"
+  fi
+fi
+
+# 6) operator's machine-specific protected paths (one glob/substring per line).
 deny_local="${HOME}/.config/remudero/deny.local"
 if [ -f "$deny_local" ]; then
   while IFS= read -r pat || [ -n "$pat" ]; do
@@ -98,7 +118,7 @@ if [ -f "$deny_local" ]; then
   done < "$deny_local"
 fi
 
-# 6) an inline polling loop against `gh` (W1-T1066 — THE NINETY-MINUTE LOCKOUT). A
+# 7) an inline polling loop against `gh` (W1-T1066 — THE NINETY-MINUTE LOCKOUT). A
 #    single command that carries a loop keyword (for/while/until) AND `sleep` AND a
 #    `gh` invocation is the exact shape that exhausted the SECONDARY rate limit (which
 #    counts cadence, not volume) and locked the operator out of his own repo for ~90
@@ -115,7 +135,7 @@ if printf '%s' "$cmd" | grep -Eq '\b(for|while|until)\b'; then
   fi
 fi
 
-# 7) a `git push` whose refspec names the shared cross-host pause namespace (W1-T2262 —
+# 8) a `git push` whose refspec names the shared cross-host pause namespace (W1-T2262 —
 #    `refs/rmd-pause/hold`, `src/lib/fleet-control.ts`). `writeSharedPause`/`clearSharedPause`
 #    push straight to that ref with the SAME `GH_TOKEN` every worker holds, and rule 1 above only
 #    ever looks at `--force`-to-default-branch — no rule named this namespace at all. Matches the
@@ -132,7 +152,7 @@ if printf '%s' "$cmd" | grep -Eq 'git[[:space:]]+push\b'; then
   fi
 fi
 
-# 8) an installing package manager where THIS PROJECT'S `node_modules` is a symlink
+# 9) an installing package manager where THIS PROJECT'S `node_modules` is a symlink
 #    (W1-T2312 — the 2026-08-05/08-11 outages). `linkWorktreeNodeModules` (src/lib/
 #    worker.ts) symlinks every worker worktree's `node_modules` to the canonical
 #    checkout's real tree ON PURPOSE, so the deps are already present via the link.
@@ -153,7 +173,7 @@ if printf '%s' "$cmd" | grep -Eq '\b(npm|pnpm)[[:space:]]+(ci|install|i|add)\b|\
   fi
 fi
 
-# 9) READ-SHAPED `gh` CALLS, TOO CLOSE TOGETHER (W1-T3275 — THE SECONDARY LIMIT COUNTS CADENCE).
+# 10) READ-SHAPED `gh` CALLS, TOO CLOSE TOGETHER (W1-T3275 — THE SECONDARY LIMIT COUNTS CADENCE).
 #    Rule 6 refuses the SHAPE of a poll — loop keyword + wait + `gh`. That is not how the budget
 #    gets burned. MEASURED 2026-09-09: a session tripped the secondary limit TWICE with no loop
 #    anywhere, just separate status reads seconds apart, each legal alone. At the 403,
@@ -161,10 +181,11 @@ fi
 #    RATE, NOT VOLUME. CLAUDE.md has carried "CADENCE IS THE BUDGET, NOT INTENT" since the
 #    ninety-minute lockout; prose did not bind it.
 #
-#    WRITES ARE NEVER REFUSED — creating a PR, posting a review, arming a merge is the productive
-#    path and is self-limiting; a floor blocking it would be routed around inside a week. Only READS
-#    are paced, because a read is what a session repeats while waiting. `gh api rate_limit` and
-#    `gh auth status` are exempt BY NAME: they cost no quota and are how a session learns to stop.
+#    ORDINARY WRITES ARE NEVER PACED — creating or updating a PR is the productive path and is
+#    self-limiting. Rule 5 above still REFUSES the one write workers do not own: merging or arming.
+#    Only READS are paced, because a read is what a session repeats while waiting. `gh api
+#    rate_limit` and `gh auth status` are exempt BY NAME: they cost no quota and are how a session
+#    learns to stop.
 if [ -n "$cmd" ] && invokes_gh "$cmd"; then
   gh_is_write=0
   printf '%s' "$cmd" | grep -Eq '(-X|--method)[[:space:]]+(POST|PATCH|PUT|DELETE)' && gh_is_write=1
