@@ -1410,7 +1410,7 @@ export interface MeasurementCadenceReportOpts {
   driftBands?: DriftBands;
   /** W1-T3082 — the dedup key's `window` half (see `verdictCalibrationDriftProposalId`), so a
    *  rerun inside the same window never re-raises the same class's proposal. Optional; defaults
-   *  to `opts.now`'s (or `new Date()`'s) UTC calendar day — the cadence fires 4x/day, so every
+   *  to `opts.now`'s (or the wall clock's) UTC calendar day — the cadence fires 4x/day, so every
    *  same-day fire shares one window and a NEW day raises a fresh proposal for a still-drifted
    *  class rather than silently reusing a stale one. */
   driftWindow?: string;
