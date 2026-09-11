@@ -221,8 +221,6 @@ export type CodeScanningAlertsRead =
   | { ok: true; alerts: RawAlert[] }
   | { ok: false; error: string };
 
-/** One process-wide pacer for the daily CodeQL reader. It retries only a rate-limited read; a
- * semantic or transport refusal still reaches the existing visible, daily-capped refusal path. */
 const codeScanningReadPacer = createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {});
 
 function codeScanningReadError(error: unknown): string {
