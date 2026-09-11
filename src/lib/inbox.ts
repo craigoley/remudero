@@ -276,7 +276,7 @@ function deriveLegacyReferent(proposalId: string): string | undefined {
 }
 
 /**
- * W1-T3382 — THE PLAN TASK A PROPOSAL WAS MINTED AGAINST, read out of its own id.
+ * W1-T3385 — THE PLAN TASK A PROPOSAL WAS MINTED AGAINST, read out of its own id.
  *
  * `resolveBoardReferent` above retires a proposal whose BOARD item resolved (an escalation issue
  * that closed). A proposal minted against a PLAN TASK had no analogue, so it stayed READY forever
@@ -850,7 +850,7 @@ export function classifyProposal(
         `as a record of the finding, never deleted`,
     };
   }
-  // W1-T3382: the same terminal override, for a proposal whose referent is a PLAN TASK rather than a
+  // W1-T3385: the same terminal override, for a proposal whose referent is a PLAN TASK rather than a
   // board item. Checked HERE, beside its sibling, so both resolutions read together and neither can
   // be reached only through the draft rung — these proposals already HAVE drafts.
   const mergedTaskReferent = taskReferentMerged(proposal, ctx);

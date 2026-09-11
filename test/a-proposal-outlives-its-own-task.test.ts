@@ -1,5 +1,5 @@
 /**
- * test/a-proposal-outlives-its-own-task.test.ts — W1-T3382.
+ * test/a-proposal-outlives-its-own-task.test.ts — W1-T3385.
  *
  * A proposal minted AGAINST A PLAN TASK stayed READY forever once that task merged. The producer's
  * own population already excludes merged tasks (`defaultProofDebtCadenceInput` intersects open with
@@ -47,35 +47,35 @@ function ctxWith(plan: Plan, mergedIds: string[]): ReadinessContext {
 
 const proposal = (id: string): Proposal => ({ id, summary: id, evidenceAnchors: [] }) as Proposal;
 
-test("W1-T3382: a proof-debt proposal whose task has MERGED is retired, not left READY", () => {
+test("W1-T3385: a proof-debt proposal whose task has MERGED is retired, not left READY", () => {
   const c = classifyProposal(proposal("proof-debt:W1-T201:3"), undefined, ctxWith(planOf("W1-T201"), ["W1-T201"]));
   assert.equal(c.state, "retired", "a proposal about finished work must not stay in the operator's queue");
   assert.match(c.retiredReason ?? "", /W1-T201 has merged/);
 });
 
-test("W1-T3382: a verify-human proposal whose shard has MERGED is retired too", () => {
+test("W1-T3385: a verify-human proposal whose shard has MERGED is retired too", () => {
   const c = classifyProposal(proposal("verify-human:W1-T992"), undefined, ctxWith(planOf("W1-T992"), ["W1-T992"]));
   assert.equal(c.state, "retired");
 });
 
-test("W1-T3382: an UNMERGED task's proposal is untouched — the finding is still live", () => {
+test("W1-T3385: an UNMERGED task's proposal is untouched — the finding is still live", () => {
   const c = classifyProposal(proposal("proof-debt:W1-T965:3"), undefined, ctxWith(planOf("W1-T965"), []));
   assert.notEqual(c.state, "retired", "retiring a live finding is the expensive direction");
 });
 
-test("W1-T3382: a task the PLAN DOES NOT HOLD is no opinion, never a retirement", () => {
+test("W1-T3385: a task the PLAN DOES NOT HOLD is no opinion, never a retirement", () => {
   const c = classifyProposal(proposal("proof-debt:W1-T9999:0"), undefined, ctxWith(planOf("W1-T201"), ["W1-T201"]));
   assert.notEqual(c.state, "retired", "a renumbered or unfiled id must not read as finished");
 });
 
-test("W1-T3382: an id carrying NO task reference is untouched, however merged the plan is", () => {
+test("W1-T3385: an id carrying NO task reference is untouched, however merged the plan is", () => {
   for (const id of ["followup:DAEMON-123:2026-09-02T09:17:34.050Z:0", "adoption:symbol-no-caller:x", "skill-draft:abc123"]) {
     const c = classifyProposal(proposal(id), undefined, ctxWith(planOf("W1-T201"), ["W1-T201"]));
     assert.notEqual(c.state, "retired", `${id} names no task and must be left alone`);
   }
 });
 
-test("W1-T3382: the id reader takes only the two shapes that structurally carry a task id", () => {
+test("W1-T3385: the id reader takes only the two shapes that structurally carry a task id", () => {
   assert.equal(deriveTaskReferent("proof-debt:W1-T1015:4"), "W1-T1015");
   assert.equal(deriveTaskReferent("verify-human:W1-T204"), "W1-T204");
   assert.equal(deriveTaskReferent("followup:DAEMON-1788338510177:2026-09-02T09:17:34.050Z:0"), undefined);
