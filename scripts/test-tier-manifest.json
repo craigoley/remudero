@@ -830,6 +830,7 @@
     "test/no-pr-verdict-shape.test.ts": 1708,
     "test/no-raw-nul.test.ts": 341,
     "test/no-shallowing-of-the-canonical-checkout.test.ts": 606,
+    "test/no-surface-says-which-model-ran-a-task.test.ts": 0,
     "test/no-test-aims-a-write-at-procfs.test.ts": 0,
     "test/node-runtime-provenance.test.ts": 1189,
     "test/non-fleet-head-escalation-precision.test.ts": 0,
