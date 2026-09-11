@@ -158,9 +158,66 @@ test("W1-T3341 (3): the superseded rationale survives the change that supersedes
   );
 });
 
-// ── criterion 4: this diff really is instrument-only ─────────────────────────────────────────────
+// ── criterion 4: the scope is instrument-only, asserted so it SURVIVES THE MERGE ────────────────
+//
+// THE FIRST VERSION OF THIS TEST TOOK MAIN RED, and the failure is worth stating plainly because the
+// shape is reusable. It read `git diff <merge-base>...HEAD` to prove "this PR touches no src/ path",
+// with a positive control requiring the diff to carry the baseline — so that the verdict could not be
+// the trivially-true one an empty diff earns. That control was right about PRs and fatal on trunk:
+// once the PR merged, HEAD *is* main, the diff is EMPTY, and the control fired forever. One test,
+// 4013 passing beside it, and every subsequent PR inherited a failing baseline.
+//
+// A TEST MAY NOT ASSERT A PROPERTY OF ITS OWN PULL REQUEST. The pull request is gone the moment it
+// lands; the property has to be stated about something permanent. Here that is the SHARD: W1-T3341
+// declares its `files:`, and "no src/ path among them" is checkable for as long as the shard exists.
+// The diff-time check is kept as well, because the PR-time guarantee is real — but its ABSENCE is
+// now a SKIP with a stated reason, never a failure.
 
-test("W1-T3341 (4): Standing rule 25 reads entangled FALSE on this PR's own diff", () => {
+const SHARD = join(REPO_ROOT, "plan", "tasks.d", "W1-T3341-the-doctrine-cap-tracks-the-index.yaml");
+
+test("W1-T3341 (4): the DECLARED scope carries no src/ path, which is why rule 25 cannot fire on it", () => {
+  // The durable half. Readable on main, on a branch, and in ten years — it asks the plan, not a diff.
+  const shard = readFileSync(SHARD, "utf8");
+  const files = /^\s*files:\s*\[([^\]]*)\]/m.exec(shard)?.[1];
+  assert.ok(files !== undefined, "the shard no longer declares a flow-style files: list");
+  const declared = files
+    .split(",")
+    .map((f) => f.trim())
+    .filter(Boolean);
+  // POSITIVE CONTROL: the list must be the real one, or "no src/ path" is true of an empty array.
+  assert.ok(declared.length >= 3, `expected the declared scope; got ${JSON.stringify(declared)}`);
+  assert.ok(
+    declared.includes("scripts/claude-md-budget-baseline.json"),
+    "the declared scope must name the baseline this task re-derives",
+  );
+  assert.deepEqual(
+    declared.filter((f) => f.startsWith("src/")),
+    [],
+    "a src/ path in this task's scope would ride with an INSTRUMENT_SURFACE path and force an unsuppressible rule 25 failure",
+  );
+});
+
+test("W1-T3341 (4): rule 25 really does fire on the pairing this scope avoids — the rule is load-bearing", () => {
+  // Proves the rule the assertion above leans on, with no diff of our own involved: an instrument
+  // path beside a src/ product path IS entangled, and the same instrument path alone is NOT.
+  const instrumentOnly = detectInstrumentEntanglement(
+    ["scripts/claude-md-budget-baseline.json", "test/the-doctrine-cap-tracks-the-index.test.ts"],
+    "",
+  );
+  assert.equal(instrumentOnly.entangled, false, "an instrument-only scope must read clean");
+
+  const withSrc = detectInstrumentEntanglement(
+    ["scripts/claude-md-budget-baseline.json", "src/lib/learnings.ts"],
+    "",
+  );
+  assert.equal(withSrc.entangled, true, "the detector no longer flags the pairing this task exists to avoid");
+  assert.deepEqual(withSrc.instrumentPaths, ["scripts/claude-md-budget-baseline.json"]);
+  assert.deepEqual(withSrc.srcPaths, ["src/lib/learnings.ts"]);
+});
+
+test("W1-T3341 (4): while a diff EXISTS it is checked too — and an empty one SKIPS rather than failing", () => {
+  // The PR-time guarantee, kept. On main there is no diff against the merge base, and that is the
+  // state the first version of this test treated as a defect.
   const base = execFileSync("git", ["-C", REPO_ROOT, "merge-base", "HEAD", "origin/main"], {
     encoding: "utf8",
   }).trim();
@@ -169,27 +226,21 @@ test("W1-T3341 (4): Standing rule 25 reads entangled FALSE on this PR's own diff
   })
     .split("\n")
     .filter(Boolean);
+
+  if (changed.length === 0) {
+    // MERGED, or running on trunk. Nothing to judge, and saying so is the whole fix.
+    assert.equal(changed.length, 0);
+    return;
+  }
+
   const diff = execFileSync("git", ["-C", REPO_ROOT, "diff", `${base}...HEAD`], {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
   });
-
-  // POSITIVE CONTROL: the diff must actually contain this task's work, or "not entangled" is the
-  // trivially-true verdict an empty diff earns.
-  assert.ok(
-    changed.includes("scripts/claude-md-budget-baseline.json"),
-    `the diff must carry the baseline this task re-derives; saw ${changed.join(", ")}`,
-  );
-
   const verdict = detectInstrumentEntanglement(changed, diff);
   assert.equal(
     verdict.entangled,
     false,
-    `rule 25 entanglement on this PR's own diff: instrument=${verdict.instrumentPaths.join(",")} src=${verdict.srcPaths.join(",")}`,
-  );
-  assert.deepEqual(
-    changed.filter((f) => f.startsWith("src/")),
-    [],
-    "this task must touch no src/ path — that is the entire reason it is a separate PR",
+    `rule 25 entanglement on this branch's diff: instrument=${verdict.instrumentPaths.join(",")} src=${verdict.srcPaths.join(",")}`,
   );
 });
