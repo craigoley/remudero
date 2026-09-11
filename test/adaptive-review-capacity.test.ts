@@ -364,7 +364,7 @@ function reviewablePr(n: number): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-04T00:00:00Z", // expiring-fixture: exempt -- deriveDisposition here reads deps.now, fixed at 2026-09-05T00:00:00Z below, never the wall clock, so this age can't flip
+    lastActivityAt: "2026-09-04T00:00:00Z",
     createdAt: `2026-09-0${n - 4000}T00:00:00Z`,
     headSha: `sha${n}`,
     autoMergeArmed: false,
