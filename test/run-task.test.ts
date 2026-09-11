@@ -131,7 +131,7 @@ import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { feedbackEntryPath, readFeedbackEntry } from "../src/lib/feedback.js";
 import { worktreesDir } from "../src/lib/worker.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
+import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment, spawnWorker } from "../src/lib/worker.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
 import { changedTaskIds } from "../src/lib/task-linter.js";
@@ -1216,6 +1216,81 @@ test("BEHAVIORAL (W1-T268): a real runTask run that transients across every retr
     assert.ok(verdict, "the blocked_transient verdict is ledgered");
     assert.equal(verdict.billing_mode, "subscription", "no ANTHROPIC_API_KEY in childEnvKeys ⇒ subscription");
     assert.equal(verdict.account_label, "acct-transient", "the LAST transient attempt's accountLabel, never guessed");
+  } finally {
+    dateNowSpy.mock.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("run-task's spawn wrapper appends the wrapped spawnWorker's pre-execution worker.assignment event to the run ledger, bound to this run's own runId/taskId", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtask-assignment-root-`));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000011;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const fakeAssignment: WorkerSelectionAssignment = {
+    version: 1,
+    id: "assignment-fixture-1",
+    phase: "pre-execution",
+    requested: { model: "gpt-5.6-terra", effort: "high", maxTurns: null },
+    selected: { provider: "codex", model: "gpt-5.6-terra", effort: "high" },
+    routing: {
+      mode: "multi-provider",
+      policy: { preference: "automatic", reservePercent: 5, provenance: "default" },
+    },
+    candidates: [],
+  };
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    // Simulate exactly what the REAL spawnWorker does before it ever touches a process: publish
+    // the pre-execution assignment through the caller's injected sink (worker.ts's own
+    // `emitWorkerSelectionAssignment`, proved directly in test/worker-provider.test.ts). This
+    // exercises run-task.ts's OWN wrapping closure around that sink, never worker.ts's.
+    args.onSelectionAssignment?.(fakeAssignment);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    return result({ sessionId: "s-implement", text: "REPORT\nno PR opened yet\n" });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+      }),
+    );
+
+    assert.equal(res.verdict, "no_pr");
+    assert.ok(spawnCalls.length >= 1, "at least the recon spawn happened");
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const assignments = ledger.filter((l) => l.step === "worker.assignment");
+    assert.ok(assignments.length >= 1, "the wrapper's onSelectionAssignment must append worker.assignment to the run ledger");
+    assert.equal(assignments[0].worker_assignment.id, "assignment-fixture-1", "the real assignment reaches the ledger, never a reshaped copy");
+    assert.equal(assignments[0].run_id, `T-FOLLOWUP-${FIXED_TS}`, "bound to THIS run's own runId, not inferred from the model or prompt");
+    assert.equal(assignments[0].task_id, "T-FOLLOWUP");
+
+    // The caller's own injected onSelectionAssignment (recon/implement's spawnArgs, when set)
+    // still fires too — the wrapper's ledger append happens FIRST but never instead.
+    assert.equal(assignments.length, spawnCalls.length, "every spawn through the wrapper ledgers its own assignment, once each");
   } finally {
     dateNowSpy.mock.restore();
     rmSync(root, { recursive: true, force: true });

@@ -1120,6 +1120,56 @@ test("the unchanged Claude spawn path labels its successful provider", async () 
   assert.equal(result.windowConsumption, undefined, "Claude-only installs must perform no attribution reads");
 });
 
+test("a sink that throws on the pre-execution assignment is visible on stderr, never a routing decision, and the terminal row carries no assignment id", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-claude-assignment-write-failed-"));
+  const diagnostics: string[] = [];
+  t.mock.method(console, "error", (...parts: unknown[]) => diagnostics.push(parts.map(String).join(" ")));
+  const result = await spawnWorker({
+    cwd: process.cwd(),
+    permissionMode: "bypassPermissions",
+    settingsFile: join(process.cwd(), "settings", "worker.json"),
+    prompt: "a sink that refuses to accept the assignment",
+    config: { claudeBin: "/unused", root },
+    claudeExecutable: {
+      cache: createClaudeExecutableCache(),
+      deps: {
+        env: { RMD_CLAUDE_BIN: "/fake/claude" },
+        home: root,
+        exists: () => true,
+        which: () => "/fake/claude",
+        canExecute: () => true,
+        locations: [],
+      },
+    },
+    keychain: {
+      platform: "linux",
+      readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "stub", expiresAt: 4_102_444_800_000 } }),
+    },
+    queryFn: (() => (async function* () {
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done despite the sink's own failure",
+        session_id: "claude-session-write-failed",
+        total_cost_usd: 0,
+        num_turns: 1,
+      };
+    })()) as never,
+    onSelectionAssignment: () => {
+      throw new Error("durable sink unavailable");
+    },
+  });
+  assert.equal(result.provider, "claude", "a sink failure never changes the routing decision");
+  assert.equal(result.text, "done despite the sink's own failure", "the spawn itself still completes normally");
+  assert.equal(result.selectionAssignmentId, undefined, "no id to join a terminal row to when the write itself failed");
+  const failure = diagnostics
+    .map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return undefined; } })
+    .find((event) => event?.event === "worker.selection_assignment_write_failed");
+  assert.ok(failure, "the write failure is visible on stderr, never silently swallowed");
+  assert.equal(failure?.reason, "write-failed");
+});
+
 async function spawnMeasuredClaude(
   readClaude: (request?: { forceRefresh?: boolean }) => Promise<ProviderCapacity>,
 ) {

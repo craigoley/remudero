@@ -71,7 +71,14 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   parseAndDedupeLedgerLines: (rawLines: string[]) => { records: unknown[]; rawRowsWithRunId: number };
   assignmentFieldsByRunId: (records: unknown[]) => {
     fieldsByRunId: Map<string, { provider: string; assignedModel: string; assignedEffort: string }>;
-    integrity: { mixedAssignedArms: number; missingAssignmentEventRows: number };
+    integrity: {
+      candidateRuns: number;
+      joinedRuns: number;
+      mixedAssignedArms: number;
+      missingAssignmentEventRows: number;
+      terminalProviderMismatches: number;
+      terminalRoutedModelMismatches: number;
+    };
   };
   renderMountHeadroomReport: (report: unknown) => string;
   MountHeadroomSweepError: new (message: string) => Error;
@@ -593,4 +600,48 @@ test("assignment evidence refuses a run whose implementation retries changed ass
   assert.equal(evidence.fieldsByRunId.has("mixed"), false, "a mixed-cost run cannot be credited to either model arm");
   assert.equal(evidence.integrity.mixedAssignedArms, 1);
   assert.equal(evidence.integrity.missingAssignmentEventRows, 0);
+});
+
+test("assignment evidence refuses a done row whose selection_assignment_id names no worker.assignment event at all", () => {
+  // "orphan" points at an assignment id that was never (or no longer) recorded — a rotation
+  // gap, never a fabricated match.
+  const evidence = assignmentFieldsByRunId([
+    { run_id: "orphan", step: "implement.done", selection_assignment_id: "never-recorded", provider: "codex", routed_model: "gpt-5.5", served_model: null },
+  ]);
+  assert.equal(evidence.fieldsByRunId.has("orphan"), false, "a run cannot be credited to an assignment event that does not exist");
+  assert.equal(evidence.integrity.missingAssignmentEventRows, 1);
+  assert.equal(evidence.integrity.candidateRuns, 1);
+  assert.equal(evidence.integrity.joinedRuns, 0);
+});
+
+test("assignment evidence refuses a done row whose OWN reported provider contradicts the assignment it points at", () => {
+  const event = {
+    step: "worker.assignment",
+    worker_assignment: { version: 1, id: "assign-1", phase: "pre-execution", selected: { provider: "codex", model: "gpt-5.6-terra", effort: "high" } },
+  };
+  const evidence = assignmentFieldsByRunId([
+    event,
+    // The row itself claims "claude" ran it — never trusted over the router's own pre-execution
+    // record, and never silently reconciled either.
+    { run_id: "contradicted", step: "implement.done", selection_assignment_id: "assign-1", provider: "claude", routed_model: "gpt-5.6-terra", served_model: null },
+  ]);
+  assert.equal(evidence.fieldsByRunId.has("contradicted"), false, "a provider mismatch between the row and its own assignment must never join");
+  assert.equal(evidence.integrity.terminalProviderMismatches, 1);
+  assert.equal(evidence.integrity.terminalRoutedModelMismatches, 0, "the mismatch is on provider alone, not also counted as a model mismatch");
+});
+
+test("assignment evidence refuses a done row whose OWN reported routed_model contradicts the assignment it points at", () => {
+  const event = {
+    step: "worker.assignment",
+    worker_assignment: { version: 1, id: "assign-2", phase: "pre-execution", selected: { provider: "codex", model: "gpt-5.6-terra", effort: "high" } },
+  };
+  const evidence = assignmentFieldsByRunId([
+    event,
+    // provider agrees, but the row's own routed_model names a DIFFERENT model than the
+    // pre-execution assignment recorded.
+    { run_id: "model-mismatch", step: "implement.done", selection_assignment_id: "assign-2", provider: "codex", routed_model: "gpt-5.5", served_model: null },
+  ]);
+  assert.equal(evidence.fieldsByRunId.has("model-mismatch"), false, "a routed_model mismatch between the row and its own assignment must never join");
+  assert.equal(evidence.integrity.terminalRoutedModelMismatches, 1);
+  assert.equal(evidence.integrity.terminalProviderMismatches, 0, "the mismatch is on model alone, not also counted as a provider mismatch");
 });
