@@ -44,6 +44,10 @@ function runGenerate(source: string, out: string) {
   });
 }
 
+function largeRuleSource(headline = "Generated Headline") {
+  return `# rules\n\n- **${headline}** ${"evidence ".repeat(200)}\n`;
+}
+
 function deferredCodexProcess() {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
@@ -128,9 +132,8 @@ test("W1-T3267: generate-agents-md --check turns a stale headline red and names 
   try {
     const source = join(dir, "CLAUDE.md");
     const out = join(dir, "AGENTS.md");
-    const body = `${"evidence ".repeat(200)}\n`;
-    writeFileSync(source, `# rules\n\n- **Current Headline** ${body}`);
-    writeFileSync(out, renderAgentsMd(`# rules\n\n- **Previous Headline** ${body}`));
+    writeFileSync(source, largeRuleSource("Current Headline"));
+    writeFileSync(out, renderAgentsMd(largeRuleSource("Previous Headline")));
     const result = runCheck(source, out);
     const output = result.stdout + result.stderr;
     assert.notEqual(result.status, 0, output);
@@ -140,6 +143,37 @@ test("W1-T3267: generate-agents-md --check turns a stale headline red and names 
 
     const drift = driftedAgentHeadlines(readFileSync(out, "utf8"), renderAgentsMd(readFileSync(source, "utf8")));
     assert.deepEqual(drift, { missing: ["Current Headline"], unexpected: ["Previous Headline"] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3267: generate-agents-md covers cli write and fail-closed branches", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-agents-md-cli-"));
+  try {
+    const source = join(dir, "CLAUDE.md");
+    const out = join(dir, "AGENTS.md");
+    writeFileSync(source, largeRuleSource());
+
+    const missingOutput = runCheck(source, out);
+    assert.notEqual(missingOutput.status, 0, missingOutput.stderr);
+    assert.match(missingOutput.stderr, /does not exist -- run 'npm run agents-md' to generate it/);
+
+    const generated = runGenerate(source, out);
+    assert.equal(generated.status, 0, generated.stderr);
+    assert.match(generated.stdout, /wrote .*AGENTS\.md/);
+    assert.equal(readFileSync(out, "utf8"), renderAgentsMd(readFileSync(source, "utf8")));
+
+    const missingSource = runGenerate(join(dir, "missing-CLAUDE.md"), join(dir, "missing-AGENTS.md"));
+    assert.notEqual(missingSource.status, 0, missingSource.stderr);
+    assert.match(missingSource.stderr, /missing-CLAUDE\.md is unreadable/);
+
+    const malformed = join(dir, "malformed-CLAUDE.md");
+    writeFileSync(malformed, "# rules\n\n- **Open Headline\n");
+    const renderFailure = runGenerate(malformed, join(dir, "malformed-AGENTS.md"));
+    assert.notEqual(renderFailure.status, 0, renderFailure.stderr);
+    assert.match(renderFailure.stderr, /cannot be rendered/);
+    assert.match(renderFailure.stderr, /never closes it/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
