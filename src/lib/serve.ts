@@ -473,6 +473,188 @@ async function readConsoleInboxDigestsAsync(root: string, limit: number = CONSOL
   }
 }
 
+export const CONSOLE_TIME_SERIES_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const CONSOLE_TIME_SERIES_BUCKET_MS = 15 * 60 * 1000;
+
+export interface ConsoleTimeSeriesPoint {
+  bucketStart: string;
+  value: number;
+}
+
+export interface ConsoleTimeSeries {
+  id: string;
+  label: string;
+  windowLabel: string;
+  bucketLabel: string;
+  points: ConsoleTimeSeriesPoint[];
+}
+
+export interface ConsoleTimeSeriesSnapshot {
+  status: "ok" | "unreadable";
+  generatedAt: string;
+  windowMs: number;
+  bucketMs: number;
+  windowLabel: string;
+  bucketLabel: string;
+  series: ConsoleTimeSeries[];
+  reason?: string;
+}
+
+interface ConsoleTimeSeriesSpec {
+  id: string;
+  label: string;
+  value: (line: Record<string, unknown>) => number | undefined;
+}
+
+const CONSOLE_TIME_SERIES_SPECS: readonly ConsoleTimeSeriesSpec[] = [
+  {
+    id: "spend",
+    label: "spend",
+    value: (line) => (typeof line.cost_usd === "number" ? line.cost_usd : typeof line.total_cost_usd === "number" ? line.total_cost_usd : undefined),
+  },
+  {
+    id: "wake-volume",
+    label: "wake volume",
+    value: (line) => (line.step === "github.wake.accepted" ? 1 : undefined),
+  },
+  {
+    id: "sweep-prs",
+    label: "sweep PRs",
+    value: (line) => (line.step === "sweep.summary" && typeof line.total === "number" ? line.total : undefined),
+  },
+];
+
+function timeSeriesDurationLabel(ms: number): string {
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  if (ms % hour === 0) return `${ms / hour}h`;
+  if (ms % minute === 0) return `${ms / minute}m`;
+  return `${ms}ms`;
+}
+
+function consoleTimeSeriesBucketStart(tsMs: number, windowStartMs: number, bucketMs: number): number {
+  return windowStartMs + Math.floor((tsMs - windowStartMs) / bucketMs) * bucketMs;
+}
+
+export function buildConsoleTimeSeries(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  opts: { nowMs?: number; windowMs?: number; bucketMs?: number } = {},
+): ConsoleTimeSeriesSnapshot {
+  const clock = fixedClock(opts.nowMs ?? systemClock.now());
+  const nowMs = clock.now();
+  const windowMs = opts.windowMs ?? CONSOLE_TIME_SERIES_WINDOW_MS;
+  const bucketMs = opts.bucketMs ?? CONSOLE_TIME_SERIES_BUCKET_MS;
+  const windowStartMs = nowMs - windowMs;
+  const windowLabel = timeSeriesDurationLabel(windowMs);
+  const bucketLabel = timeSeriesDurationLabel(bucketMs);
+  const series = CONSOLE_TIME_SERIES_SPECS.map((spec) => {
+    const buckets = new Map<number, number>();
+    for (const line of lines) {
+      const ts = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
+      if (!Number.isFinite(ts) || ts < windowStartMs || ts > nowMs) continue;
+      const value = spec.value(line);
+      if (value === undefined || !Number.isFinite(value)) continue;
+      const bucketStartMs = consoleTimeSeriesBucketStart(ts, windowStartMs, bucketMs);
+      buckets.set(bucketStartMs, (buckets.get(bucketStartMs) ?? 0) + value);
+    }
+    const points = [...buckets.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([bucketStartMs, value]) => ({ bucketStart: fixedClock(bucketStartMs).iso(), value }));
+    return { id: spec.id, label: spec.label, windowLabel, bucketLabel, points };
+  });
+  return { status: "ok", generatedAt: clock.iso(), windowMs, bucketMs, windowLabel, bucketLabel, series };
+}
+
+export function unreadableConsoleTimeSeries(reason: string, opts: { nowMs?: number; windowMs?: number; bucketMs?: number } = {}): ConsoleTimeSeriesSnapshot {
+  const clock = fixedClock(opts.nowMs ?? systemClock.now());
+  const nowMs = clock.now();
+  const windowMs = opts.windowMs ?? CONSOLE_TIME_SERIES_WINDOW_MS;
+  const bucketMs = opts.bucketMs ?? CONSOLE_TIME_SERIES_BUCKET_MS;
+  return {
+    status: "unreadable",
+    generatedAt: clock.iso(),
+    windowMs,
+    bucketMs,
+    windowLabel: timeSeriesDurationLabel(windowMs),
+    bucketLabel: timeSeriesDurationLabel(bucketMs),
+    series: CONSOLE_TIME_SERIES_SPECS.map((spec) => ({
+      id: spec.id,
+      label: spec.label,
+      windowLabel: timeSeriesDurationLabel(windowMs),
+      bucketLabel: timeSeriesDurationLabel(bucketMs),
+      points: [],
+    })),
+    reason,
+  };
+}
+
+function escapeHtmlText(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeHtmlAttr(text: string): string {
+  return escapeHtmlText(text).replace(/"/g, "&quot;");
+}
+
+function formatSeriesValue(series: ConsoleTimeSeries, value: number): string {
+  if (series.id === "spend") return `$${value.toFixed(3)}`;
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function renderConsoleTimeSeriesSvg(series: ConsoleTimeSeries, windowStartMs: number, windowMs: number): string {
+  const positive = series.points.filter((point) => point.value > 0);
+  if (positive.length === 0) {
+    return `<p class="time-series-absent" data-series-state="absent">ABSENT — no ${escapeHtmlText(series.label)} rows in the stated window; not drawn as zero</p>`;
+  }
+  const width = 160;
+  const height = 40;
+  const pad = 3;
+  const max = Math.max(...positive.map((point) => point.value));
+  const coords = positive
+    .map((point) => {
+      const ts = Date.parse(point.bucketStart);
+      const x = Math.max(pad, Math.min(width - pad, pad + ((ts - windowStartMs) / windowMs) * (width - pad * 2)));
+      const y = Math.max(pad, Math.min(height - pad, height - pad - (point.value / max) * (height - pad * 2)));
+      return { x, y, point };
+    });
+  const polyline = coords.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+  const circles = coords
+    .map(
+      (p) =>
+        `<circle class="time-series-point" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.2" data-bucket="${escapeHtmlAttr(p.point.bucketStart)}" data-value="${escapeHtmlAttr(String(p.point.value))}"></circle>`,
+    )
+    .join("");
+  const maxLabel = formatSeriesValue(series, max);
+  return (
+    `<svg class="time-series-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtmlAttr(series.label)} over ${escapeHtmlAttr(series.windowLabel)} in ${escapeHtmlAttr(series.bucketLabel)} buckets">` +
+    `<title>${escapeHtmlText(series.label)} over ${escapeHtmlText(series.windowLabel)}, ${escapeHtmlText(series.bucketLabel)} buckets, max ${escapeHtmlText(maxLabel)}</title>` +
+    `<polyline class="time-series-line" points="${escapeHtmlAttr(polyline)}"></polyline>${circles}</svg>`
+  );
+}
+
+export function renderConsoleTimeSeriesHtml(snapshot: ConsoleTimeSeriesSnapshot): string {
+  const header =
+    `<h3>Time series <span class="section-summary" data-time-series-window="${snapshot.windowMs}" data-time-series-bucket="${snapshot.bucketMs}">` +
+    `${escapeHtmlText(snapshot.windowLabel)} window · ${escapeHtmlText(snapshot.bucketLabel)} buckets</span></h3>`;
+  if (snapshot.status === "unreadable") {
+    return (
+      `<section id="time-series" class="daemon-health time-series-panel" aria-label="Time series">${header}` +
+      `<p class="time-series-absent" data-series-state="unreadable">ABSENT — time series ledger unreadable: ${escapeHtmlText(snapshot.reason ?? "unknown")}</p></section>`
+    );
+  }
+  const windowStartMs = Date.parse(snapshot.generatedAt) - snapshot.windowMs;
+  const cards = snapshot.series
+    .map(
+      (series) =>
+        `<article class="time-series-card" data-series-id="${escapeHtmlAttr(series.id)}">` +
+        `<div class="time-series-head"><span class="glance-label">${escapeHtmlText(series.label)}</span><span class="glance-value">${escapeHtmlText(series.windowLabel)} / ${escapeHtmlText(series.bucketLabel)}</span></div>` +
+        renderConsoleTimeSeriesSvg(series, windowStartMs, snapshot.windowMs) +
+        `</article>`,
+    )
+    .join("");
+  return `<section id="time-series" class="daemon-health time-series-panel" aria-label="Time series">${header}${cards}</section>`;
+}
+
 export interface ConsoleResponseStaleness {
   stale: boolean;
   ageMs: number | null;
@@ -993,6 +1175,7 @@ export function renderShellHtml(
   // chips above — so every existing caller and test is unaffected and the client script is
   // byte-identical to main.
   consoleCodeHtml: string = `<span class="console-code-current">current</span>`,
+  timeSeriesHtml: string = renderConsoleTimeSeriesHtml(unreadableConsoleTimeSeries("ledger reader unavailable")),
 ): string {
   return `<!doctype html>
 <html lang="en">
@@ -1134,6 +1317,14 @@ export function renderShellHtml(
   .glance-item { display: inline-flex; align-items: baseline; gap: 0.3em; font-size: 0.85rem; }
   .glance-label { color: var(--text-faint); }
   .glance-value { font-family: var(--font-mono); color: var(--text); font-weight: 600; }
+  .time-series-panel { align-items: stretch; }
+  .time-series-panel h3 { flex-basis: 100%; margin: 0; font-size: 0.85rem; }
+  .time-series-card { min-width: 12rem; flex: 1 1 12rem; }
+  .time-series-head { display: flex; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.2rem; font-size: 0.8rem; }
+  .time-series-svg { display: block; width: 100%; height: 2.5rem; overflow: visible; }
+  .time-series-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .time-series-point { fill: var(--status-needs-human); stroke: var(--bg-card); stroke-width: 1; }
+  .time-series-absent { margin: 0.35rem 0 0; color: var(--text-faint); font-size: 0.8rem; }
   /* The ACCOUNT strip's scope note — deliberately quiet and full-width-wrapping: it is a caveat
      ("whole account, not just the fleet"), not a metric, and must never read as one more number. */
   .glance-scope { flex-basis: 100%; }
@@ -1469,6 +1660,7 @@ export function renderShellHtml(
     <span class="glance-item"><span class="glance-label">rate limit</span><span class="glance-value" id="dh-rate-limit">…</span></span>
     ${idleReasonsHtml}
   </section>
+  ${timeSeriesHtml}
   <!-- ACCOUNT strip: WHICH Anthropic account the fleet is spending, and how much of each usage
        window is gone (GET /v1/account-usage; see account-usage.ts's header for why usage comes
        from ~/.claude.json's cachedUsageUtilization and NOT from the daemon.headroom ledger line).
@@ -2242,17 +2434,23 @@ export function buildShellRoute(
     allowQueryToken: true,
     handler: (_req, res) => {
       let panel: string;
+      let timeSeriesHtml: string;
       if (idle.readLedger && idle.ledgerPath) {
         try {
           // Tests and production use the same ledger reader for this server-rendered fragment; an
           // unreadable ledger must render UNKNOWN with the read failure's own reason.
           const lines = idle.readLedger(idle.ledgerPath);
-          panel = renderIdleReasonsHtml(readIdleReasons(lines, idle.now?.() ?? new Date()));
+          const now = idle.now?.() ?? new Date();
+          panel = renderIdleReasonsHtml(readIdleReasons(lines, now));
+          timeSeriesHtml = renderConsoleTimeSeriesHtml(buildConsoleTimeSeries(lines, { nowMs: now.getTime() }));
         } catch (e) {
-          panel = renderIdleReasonsHtml({ kind: "unknown", why: `ledger unreadable: ${String((e as Error)?.message ?? e)}` });
+          const reason = String((e as Error)?.message ?? e);
+          panel = renderIdleReasonsHtml({ kind: "unknown", why: `ledger unreadable: ${reason}` });
+          timeSeriesHtml = renderConsoleTimeSeriesHtml(unreadableConsoleTimeSeries(reason));
         }
       } else {
         panel = renderIdleReasonsHtml({ kind: "unknown", why: "idle reasons refresh off the bounded console data routes" });
+        timeSeriesHtml = renderConsoleTimeSeriesHtml(unreadableConsoleTimeSeries("ledger reader unavailable"));
       }
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       let consoleCodeHtml: string;
@@ -2266,7 +2464,7 @@ export function buildShellRoute(
       } else {
         consoleCodeHtml = renderConsoleCodeStalenessHtml({ bootSha: consoleSha, currentSha: consoleSha });
       }
-      res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha, panel, renderGithubCredentialHtml(credential), consoleCodeHtml));
+      res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha, panel, renderGithubCredentialHtml(credential), consoleCodeHtml, timeSeriesHtml));
     },
   };
 }

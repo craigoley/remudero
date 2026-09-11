@@ -35,6 +35,8 @@ import type { WriteTier } from "./service.js";
  */
 export type EscalationClass = "BLOCKED" | "MANUAL" | "HARD_STOP" | "GRILL";
 
+export type EscalationHeadDedup = "dependent" | "independent";
+
 /**
  * The closed set of routes an EXECUTABLE option may name, each at the same {@link WriteTier}
  * serve.ts's route table already declares for it. INVARIANT: the map is CLOSED, so "no merge route,
@@ -140,6 +142,10 @@ export interface Escalation {
    *  caller keeps today's (taskId, PR) behaviour, because {@link escalate}'s dup search requires
    *  equality here only when BOTH sides carry a value. Why: docs/forensics/escalate.md. */
   headSha?: string;
+  /** OPTIONAL (W1-T3179) — defaults to `dependent`, preserving W1-T195's per-sha dedup. Producers
+   *  whose question cannot be changed by a push set `independent`: the observed sha still renders
+   *  as evidence, but it no longer vetoes an open duplicate match. */
+  headDedup?: EscalationHeadDedup;
   /** The blocked PR's underlying cause, OPTIONAL (W1-T195) — the key's 3rd dimension. A failing
    *  review, red checks and a conflict are different operator asks on the same head sha, so those
    *  must still open separately. See {@link escalationCause}; permissive when absent, like
@@ -779,6 +785,15 @@ function matchesOptionalDimension(wanted: string | undefined, candidate: string 
   return wanted === undefined || candidate === undefined || wanted === candidate;
 }
 
+function titleCarriesSameSummary(e: EscalationDedupKey, title: string | undefined): boolean {
+  return title === `[${e.class}] ${e.taskId}: ${e.summary}`;
+}
+
+function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined, title: string | undefined): boolean {
+  if (e.headDedup === "independent") return titleCarriesSameSummary(e, title);
+  return matchesOptionalDimension(e.headSha, candidate);
+}
+
 /** The SUBSET of an {@link Escalation} that {@link findDuplicateEscalation} reads (W1-T2799), so a
  *  caller merely ASKING "is there already an open issue about this?" need not fabricate options it is
  *  not filing. Its value is that the compiler now proves the fix rung's pre-strike probe and the
@@ -790,6 +805,7 @@ export interface EscalationDedupKey {
   summary: string;
   detail: string;
   headSha?: string;
+  headDedup?: EscalationHeadDedup;
   cause?: EscalationCause;
 }
 
@@ -807,7 +823,8 @@ function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): Ope
       // both sides carry a value and disagree, so a caller setting neither keeps today's dedup while
       // the two rungs that set both get their own issue on a new push or a different cause.
       if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) return false;
-      if (!matchesOptionalDimension(e.headSha, HEAD_SHA_LINE_RE.exec(body)?.[1])) return false;
+      const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
+      if (matchesHeadDimension(e, candidateHead, issue.title) === false) return false;
       if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
       return true;
     }
@@ -894,8 +911,9 @@ function recordUnreadableDedup(e: Escalation, error: unknown, deps: EscalateDeps
  *  extracted so {@link escalateWithJudge} shares it exactly, never a second `listOpen` read. */
 function recordDuplicateEscalation(e: Escalation, dup: OpenIssue, deps: EscalateDeps): string {
   const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
+  const observedHead = e.headDedup === "independent" && e.headSha ? `, observed head ${e.headSha}` : "";
   const observedKey = prRef
-    ? `task ${e.taskId}, PR #${prRef}`
+    ? `task ${e.taskId}, PR #${prRef}${observedHead}`
     : `task ${e.taskId}, class ${e.class}${e.cause ? `, cause ${e.cause}` : ""}`;
   deps.issues.comment?.(
     dup.url,
