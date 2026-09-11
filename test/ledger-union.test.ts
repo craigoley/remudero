@@ -37,6 +37,59 @@ test("openLedgerUnion yields gzip rotation, plain rotation and live rows exactly
   }
 });
 
+test("openLedgerUnion bounds exact replay dedupe per step instead of retaining the corpus", async () => {
+  const dir = tmpStateDir();
+  try {
+    const rare = row("rare", "rare.step", "2026-01-01T00:00:00.000Z");
+    writeFileSync(
+      join(dir, "ledger.2026-01-01T00-00-00-000Z.ndjson"),
+      [
+        rare,
+        row("busy-1", "busy.step", "2026-01-01T00:00:01.000Z"),
+        row("busy-2", "busy.step", "2026-01-01T00:00:02.000Z"),
+        row("busy-3", "busy.step", "2026-01-01T00:00:03.000Z"),
+      ].join("\n") + "\n",
+    );
+    writeFileSync(
+      join(dir, LEDGER_FILENAME),
+      rare + "\n" + row("same-ts-a", "busy.step", "2026-01-01T00:00:04.000Z") + "\n" +
+        row("same-ts-b", "busy.step", "2026-01-01T00:00:04.000Z") + "\n" +
+        row("busy-1", "busy.step", "2026-01-01T00:00:01.000Z") + "\n",
+    );
+
+    const markers: string[] = [];
+    for await (const rec of openLedgerUnion(dir, { dedupeWindowPerStep: 2 })) {
+      markers.push(String(rec.marker));
+    }
+
+    assert.deepEqual(
+      markers,
+      ["rare", "busy-1", "busy-2", "busy-3", "same-ts-a", "same-ts-b", "busy-1"],
+      "other steps cannot evict a retained row, exact replays inside the window collapse, distinct same-ts rows survive, and old keys are evicted",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("openLedgerUnion refuses invalid or contradictory bounded-dedupe options", async () => {
+  const dir = tmpStateDir();
+  try {
+    const collect = async (opts: Parameters<typeof openLedgerUnion>[1]): Promise<void> => {
+      for await (const _row of openLedgerUnion(dir, opts)) {
+        // The option guard runs before the first row; there is intentionally nothing to consume.
+      }
+    };
+    await assert.rejects(() => collect({ dedupeWindowPerStep: 0 }), /must be a positive integer/);
+    await assert.rejects(
+      () => collect({ dedupe: false, dedupeWindowPerStep: 2 }),
+      /dedupe=false and dedupeWindowPerStep are contradictory/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("readLedgerUnionRecords applies sinceTs and step filters on top of the same union reader", async () => {
   const dir = tmpStateDir();
   try {

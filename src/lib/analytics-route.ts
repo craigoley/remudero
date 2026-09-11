@@ -47,29 +47,12 @@
  * once W1-T433's second cell exists — this shard deliberately does not build that consumer.
  */
 
-import { isQueueDispatchRunStart } from "./ledger.js";
+import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
 import { dirname } from "node:path";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
-import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps } from "./ledger-union.js";
-
-/**
- * Read every ledger line across the rotation union (every `ledger.*` rotation ON DISK, in the
- * SAME form {@link ledgerRotationEntries} classifies them, PLUS the live file) under `stateDir`,
- * deduplicated on the full raw line text — see this module's header for why that key and not
- * `ts+task_id`. `fsDeps` mirrors `ledger-grep.ts`'s own injectable surface (reused, not
- * redeclared) so a test drives this against a synthetic state root.
- *
- * Best-effort per file: a rotation that exists and cannot be opened (corrupt `.gz`, unreadable)
- * is silently skipped rather than failing the whole read — this is a live console aggregate, not
- * an audit tool; `rmd ledger-grep` already owns the loud "coverage" verdict for that case.
- */
-export function readAnalyticsLedgerLines(
-  stateDir: string,
-  fsDeps?: LedgerGrepFsDeps,
-): Array<Record<string, unknown>> {
-  return readLedgerUnionRecordsSync(stateDir, { dedupe: true }, fsDeps).rows;
-}
+import { openLedgerUnion } from "./ledger-union.js";
+import { systemClock, type Clock } from "./clock.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -137,139 +120,139 @@ function num(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
-/** Question 1: group `cli.invoked` rows by `verb`. */
-function deriveInvocationCounts(lines: ReadonlyArray<Record<string, unknown>>): {
-  counts: Record<string, number>;
-  measured: boolean;
-} {
-  const counts: Record<string, number> = {};
-  let measured = false;
-  for (const l of lines) {
-    if (l.step !== "cli.invoked") continue;
-    measured = true;
-    const verb = str(l.verb) ?? "(unknown)";
-    counts[verb] = (counts[verb] ?? 0) + 1;
-  }
-  return { counts, measured };
+interface AnalyticsAccumulator {
+  invocationsByVerb: Record<string, number>;
+  invocationsMeasured: boolean;
+  workersByKey: Map<string, WorkerLaneModelBucket>;
+  startsByRun: Map<string, { ts: number; taskId: string }>;
+  verdictsByRun: Map<string, number>;
+  workerDurationsByLane: Map<string, { count: number; totalMs: number }>;
+  workerDurationsMeasured: boolean;
 }
 
-/**
- * Question 2: every worker-telemetry row (one that carries a `model` field — only
- * `workerLedgerFields`, worker.ts, ever spreads that key onto a ledger line) grouped by its
- * `lane` (added by W1-T477; `"unknown"` for a row ledgered before that field existed) and
- * `model`, summing `total_cost_usd` — the field name the writer actually uses, never `cost_usd`
- * (one of the rationale's named field-name traps).
- */
-function deriveWorkersByLaneModel(lines: ReadonlyArray<Record<string, unknown>>): WorkerLaneModelBucket[] {
-  const byKey = new Map<string, WorkerLaneModelBucket>();
-  for (const l of lines) {
-    const model = str(l.model);
-    if (model === undefined) continue;
-    const lane = str(l.lane) ?? "unknown";
+function analyticsAccumulator(): AnalyticsAccumulator {
+  return {
+    invocationsByVerb: {},
+    invocationsMeasured: false,
+    workersByKey: new Map(),
+    startsByRun: new Map(),
+    verdictsByRun: new Map(),
+    workerDurationsByLane: new Map(),
+    workerDurationsMeasured: false,
+  };
+}
+
+/** Fold one logical ledger event into all four analytics questions in one pass. */
+function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string, unknown>): void {
+  if (line.step === "cli.invoked") {
+    acc.invocationsMeasured = true;
+    const verb = str(line.verb) ?? "(unknown)";
+    acc.invocationsByVerb[verb] = (acc.invocationsByVerb[verb] ?? 0) + 1;
+  }
+
+  const model = str(line.model);
+  if (model !== undefined) {
+    const lane = str(line.lane) ?? "unknown";
     const key = `${lane}\0${model}`;
-    const bucket = byKey.get(key) ?? { lane, model, count: 0, totalCostUsd: 0 };
+    const bucket = acc.workersByKey.get(key) ?? { lane, model, count: 0, totalCostUsd: 0 };
     bucket.count += 1;
-    bucket.totalCostUsd += num(l.total_cost_usd) ?? 0;
-    byKey.set(key, bucket);
+    bucket.totalCostUsd += num(line.total_cost_usd) ?? 0;
+    acc.workersByKey.set(key, bucket);
   }
-  return [...byKey.values()];
-}
 
-/**
- * Question 3: for every `run_id` that has a `run.start` line (the runTask lane only — retro/
- * triage/plan/etc. self-ledger their OWN `*.start` step under a DIFFERENT name and are correctly
- * excluded from this join, not silently miscounted), the wall-clock from its EARLIEST `run.start`
- * to its LATEST `verdict` line. A `run_id` with a `run.start` but no `verdict` line at all — a
- * gate-side merge, a run that never reached a terminal (the rationale's named hazards) — is
- * counted in `noTerminalCount`, never dropped.
- */
-function deriveTaskDurations(lines: ReadonlyArray<Record<string, unknown>>): {
-  durations: TaskDurationEntry[];
-  noTerminalCount: number;
-} {
-  const starts = new Map<string, { ts: number; taskId: string }>();
-  const verdicts = new Map<string, number>();
-  for (const l of lines) {
-    // W1-T2383 rank 3: a lane `run.start` has no verdict BY DESIGN (this task deliberately
-    // adds no verdict row for triage/retro), so pairing it here would land every lane run in
-    // `noTerminalCount` below. Queue dispatches only.
-    if (!isQueueDispatchRunStart(l) && l.step !== "verdict") continue;
-    const runId = str(l.run_id);
-    const ts = typeof l.ts === "string" ? Date.parse(l.ts) : NaN;
-    if (runId === undefined || !Number.isFinite(ts)) continue;
-    if (l.step === "run.start") {
-      const existing = starts.get(runId);
-      if (!existing || ts < existing.ts) starts.set(runId, { ts, taskId: str(l.task_id) ?? "" });
-    } else {
-      const existing = verdicts.get(runId);
-      if (existing === undefined || ts > existing) verdicts.set(runId, ts);
+  // W1-T2383 rank 3: only queue-dispatch `run.start` rows participate in this join; lane-specific
+  // `*.start` rows do not become false no-terminal runs.
+  if (isQueueDispatchRunStart(line) || line.step === "verdict") {
+    const runId = str(line.run_id);
+    const ts = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
+    if (runId !== undefined && Number.isFinite(ts)) {
+      if (line.step === "run.start") {
+        const existing = acc.startsByRun.get(runId);
+        if (!existing || ts < existing.ts) acc.startsByRun.set(runId, { ts, taskId: str(line.task_id) ?? "" });
+      } else {
+        const existing = acc.verdictsByRun.get(runId);
+        if (existing === undefined || ts > existing) acc.verdictsByRun.set(runId, ts);
+      }
     }
   }
-  const durations: TaskDurationEntry[] = [];
-  let noTerminalCount = 0;
-  for (const [runId, start] of starts) {
-    const verdictTs = verdicts.get(runId);
+
+  const durationMs = num(line.worker_duration_ms);
+  if (durationMs !== undefined) {
+    acc.workerDurationsMeasured = true;
+    const lane = str(line.lane) ?? "unknown";
+    const bucket = acc.workerDurationsByLane.get(lane) ?? { count: 0, totalMs: 0 };
+    bucket.count += 1;
+    bucket.totalMs += durationMs;
+    acc.workerDurationsByLane.set(lane, bucket);
+  }
+}
+
+function snapshotFromAccumulator(acc: AnalyticsAccumulator, nowIso: string): AnalyticsSnapshot {
+  const taskDurationsMs: TaskDurationEntry[] = [];
+  let noTerminalTaskCount = 0;
+  for (const [runId, start] of acc.startsByRun) {
+    const verdictTs = acc.verdictsByRun.get(runId);
     if (verdictTs === undefined) {
-      noTerminalCount += 1;
+      noTerminalTaskCount += 1;
       continue;
     }
-    durations.push({ runId, taskId: start.taskId, durationMs: Math.max(0, verdictTs - start.ts) });
+    taskDurationsMs.push({ runId, taskId: start.taskId, durationMs: Math.max(0, verdictTs - start.ts) });
   }
-  return { durations, noTerminalCount };
-}
 
-/** Question 4: every line carrying `worker_duration_ms` (W1-T477), grouped by `lane`. */
-function deriveWorkerDurationsByLane(lines: ReadonlyArray<Record<string, unknown>>): {
-  buckets: WorkerDurationLaneBucket[];
-  measured: boolean;
-} {
-  const byLane = new Map<string, { count: number; totalMs: number }>();
-  let measured = false;
-  for (const l of lines) {
-    const durationMs = num(l.worker_duration_ms);
-    if (durationMs === undefined) continue;
-    measured = true;
-    const lane = str(l.lane) ?? "unknown";
-    const cur = byLane.get(lane) ?? { count: 0, totalMs: 0 };
-    cur.count += 1;
-    cur.totalMs += durationMs;
-    byLane.set(lane, cur);
-  }
-  const buckets = [...byLane.entries()].map(([lane, v]) => ({
-    lane,
-    count: v.count,
-    totalDurationMs: v.totalMs,
-    avgDurationMs: v.totalMs / v.count,
-  }));
-  return { buckets, measured };
+  const out: AnalyticsSnapshot = {
+    asOf: nowIso,
+    measures: ANALYTICS_SCOPE_NOTE,
+    invocationsByVerb: acc.invocationsByVerb,
+    workersByLaneModel: [...acc.workersByKey.values()],
+    taskDurationsMs,
+    noTerminalTaskCount,
+    workerDurationsByLane: [...acc.workerDurationsByLane.entries()].map(([lane, value]) => ({
+      lane,
+      count: value.count,
+      totalDurationMs: value.totalMs,
+      avgDurationMs: value.totalMs / value.count,
+    })),
+  };
+  if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
+  if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
+  return out;
 }
 
 /**
  * PURE aggregation — every input passed in, no filesystem/clock of its own (mirrors
  * account-usage.ts's `deriveAccountUsage`), so the whole thing is testable against a captured
- * line set. `nowIso` defaults to the real clock only at the route boundary below.
+ * line set. The real clock is supplied only at the route boundary below.
  */
 export function deriveAnalyticsSnapshot(
   lines: ReadonlyArray<Record<string, unknown>>,
   nowIso: string,
 ): AnalyticsSnapshot {
-  const invocations = deriveInvocationCounts(lines);
-  const workers = deriveWorkersByLaneModel(lines);
-  const { durations, noTerminalCount } = deriveTaskDurations(lines);
-  const workerDurations = deriveWorkerDurationsByLane(lines);
+  const accumulator = analyticsAccumulator();
+  for (const line of lines) accumulateAnalyticsLine(accumulator, line);
+  return snapshotFromAccumulator(accumulator, nowIso);
+}
 
-  const out: AnalyticsSnapshot = {
-    asOf: nowIso,
-    measures: ANALYTICS_SCOPE_NOTE,
-    invocationsByVerb: invocations.counts,
-    workersByLaneModel: workers,
-    taskDurationsMs: durations,
-    noTerminalTaskCount: noTerminalCount,
-    workerDurationsByLane: workerDurations.buckets,
-  };
-  if (!invocations.measured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
-  if (!workerDurations.measured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
-  return out;
+/** Fold an already-deduplicated stream without materialising its input. */
+export async function deriveAnalyticsSnapshotFromStream(
+  lines: AsyncIterable<Record<string, unknown>>,
+  clock: Clock,
+): Promise<AnalyticsSnapshot> {
+  const accumulator = analyticsAccumulator();
+  for await (const line of lines) accumulateAnalyticsLine(accumulator, line);
+  return snapshotFromAccumulator(accumulator, clock.iso());
+}
+
+/**
+ * Stream archive∪live into the aggregate the endpoint actually returns. Exact line replays are
+ * held only for the same per-step window `rotateLedger` can carry into a later rotation; the
+ * million-row corpus itself is never retained. Corrupt files remain best-effort through
+ * `openLedgerUnion`, matching the former reader.
+ */
+export async function deriveAnalyticsSnapshotFromLedger(stateDir: string, clock: Clock): Promise<AnalyticsSnapshot> {
+  return deriveAnalyticsSnapshotFromStream(
+    openLedgerUnion(stateDir, { dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP }),
+    clock,
+  );
 }
 
 /** {@link buildAnalyticsRoute}'s dependencies — every edge injectable, mirroring
@@ -278,9 +261,9 @@ export interface AnalyticsRouteDeps {
   /** `<root>/state/ledger.ndjson` — the SAME ledger every other console reader tails; this
    *  route derives its own state dir from `dirname(ledgerPath)`. */
   ledgerPath: string;
-  /** Injectable — defaults to {@link readAnalyticsLedgerLines} against the real filesystem. */
-  readLines?: (stateDir: string) => Array<Record<string, unknown>>;
-  now?: () => string;
+  /** Injectable aggregate reader; defaults to the bounded streaming union fold. */
+  readSnapshot?: (stateDir: string, clock: Clock) => AnalyticsSnapshot | Promise<AnalyticsSnapshot>;
+  clock?: Clock;
 }
 
 /**
@@ -292,11 +275,11 @@ export function buildAnalyticsRoute(deps: AnalyticsRouteDeps): Route {
     method: "GET",
     path: "/v1/analytics",
     scope: "read",
-    handler: (_req, res) => {
-      const readLines = deps.readLines ?? readAnalyticsLedgerLines;
-      const now = deps.now ?? (() => new Date().toISOString());
+    handler: async (_req, res) => {
+      const readSnapshot = deps.readSnapshot ?? deriveAnalyticsSnapshotFromLedger;
+      const clock = deps.clock ?? systemClock;
       const stateDir = dirname(deps.ledgerPath);
-      sendJson(res, 200, deriveAnalyticsSnapshot(readLines(stateDir), now()));
+      sendJson(res, 200, await readSnapshot(stateDir, clock));
     },
   };
 }
