@@ -526,6 +526,7 @@
     "test/dispatch-order.test.ts": 1051,
     "test/dispatch-overlap.test.ts": 276,
     "test/dispatch-priority.test.ts": 1200,
+    "test/dispatch-value.test.ts": 0,
     "test/dispatch-repo-guard.test.ts": 703,
     "test/dispatch-settled-set.test.ts": 1047,
     "test/docs-awareness-does-not-read-a-ledger-as-a-surface.test.ts": 1120,
