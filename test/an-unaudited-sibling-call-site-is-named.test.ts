@@ -14,12 +14,12 @@ const PARTIAL_SHARED_READER_DIFF = [
   "diff --git a/src/lib/ledger.ts b/src/lib/ledger.ts",
   "+++ b/src/lib/ledger.ts",
   "@@",
-  " function readRetroLedgerNdjson(paths) {",
+  " function readRetroArchive(paths) {",
   "-  return openLedgerUnion(paths);",
   "+  return openLedgerUnion(paths, { days: 30 });",
   " }",
   "@@",
-  " function readMainLedgerNdjson(paths) {",
+  " function readMainArchive(paths) {",
   "   return openLedgerUnion(paths);",
   " }",
 ].join("\n");
@@ -28,12 +28,12 @@ const FULLY_AUDITED_READER_DIFF = [
   "diff --git a/src/lib/ledger.ts b/src/lib/ledger.ts",
   "+++ b/src/lib/ledger.ts",
   "@@",
-  " function readRetroLedgerNdjson(paths) {",
+  " function readRetroArchive(paths) {",
   "-  return openLedgerUnion(paths);",
   "+  return openLedgerUnion(paths, { days: 30 });",
   " }",
   "@@",
-  " function readMainLedgerNdjson(paths) {",
+  " function readMainArchive(paths) {",
   "-  return openLedgerUnion(paths);",
   "+  return openLedgerUnion(paths, { days: 30 });",
   " }",
@@ -100,7 +100,7 @@ test("W1-T3239: an untouched sibling call site is named", () => {
 
   assert.equal(verdict.pass, false);
   assert.match(verdict.reason, /openLedgerUnion\(\)/);
-  assert.match(verdict.reason, /src\/lib\/ledger\.ts::readMainLedgerNdjson/);
+  assert.match(verdict.reason, /src\/lib\/ledger\.ts::readMainArchive/);
   assert.match(verdict.reason, /return openLedgerUnion\(paths\);/);
 });
 
