@@ -671,7 +671,9 @@ export interface ConsoleBlockingRequestPathViolation {
 
 export const CONSOLE_READ_ROUTE_BUDGET_MS = 750;
 export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
+/** PRIMARY CONTROL: below this size, legacy full-plan board callers stay byte-identical. */
 export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500;
+/** BACKSTOP: a pathological initial board cannot grow back into a full-plan status payload. */
 export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120;
 export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
 const CONSOLE_STALENESS_FIELD = "staleness";
@@ -813,14 +815,8 @@ export function projectConsoleStatusRoute(route: Route): Route {
         res.end(buffered.body);
         return;
       }
-      let body: string;
-      try {
-        body = JSON.stringify(projectConsoleStatusResponse(JSON.parse(buffered.body)));
-      } catch {
-        body = buffered.body;
-      }
       res.writeHead(buffered.status, buffered.headers);
-      res.end(body);
+      res.end(JSON.stringify(projectConsoleStatusResponse(JSON.parse(buffered.body))));
     },
   };
 }
