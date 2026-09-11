@@ -459,6 +459,7 @@ import {
   runCiParity,
   runPreflightCoverage,
   runPreflightFast,
+  runTreeAdvisoryLine,
   type RemedyFileForGate,
 } from "./lib/ci-parity.js";
 import {
@@ -20329,11 +20330,14 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     cpuCount: deps.cpuCount ?? osCpus().length,
     ...(pin !== undefined && "sha" in pin ? { baseSha: pin.sha } : {}),
   });
+  const steps = [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])];
+  const treeAdvisory = runTreeAdvisoryLine(runContext, steps);
   console.log(
     (ok
       ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
       : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes") +
-      `\n### ${runContextLine(runContext)}`,
+      `\n### ${runContextLine(runContext)}` +
+      (treeAdvisory ? `\n### ${treeAdvisory}` : ""),
   );
 
   // ── THE RESULT MUST SURVIVE THE CONTAINER THAT PRODUCED IT (see preflightSummaryPath's doc).
@@ -20358,7 +20362,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const injectedSpawn = deps.spawn !== undefined;
   const summaryPath = explicitSummaryFile ?? (injectedSpawn ? undefined : preflightSummaryPath(repoRoot));
   const summary = buildPreflightSummary({
-    steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])],
+    steps,
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAtMs,
     headSha,
