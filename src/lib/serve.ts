@@ -671,6 +671,9 @@ export interface ConsoleBlockingRequestPathViolation {
 
 export const CONSOLE_READ_ROUTE_BUDGET_MS = 750;
 export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
+export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 200;
+export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120;
+export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
 const CONSOLE_STALENESS_FIELD = "staleness";
 const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health"]);
 const BLOCKING_REQUEST_PATH_SYMBOLS = [
@@ -709,6 +712,40 @@ function sendStaleJson(res: import("node:http").ServerResponse, status: number, 
     "x-rmd-cache-age-ms": staleness.ageMs === null ? "unknown" : String(staleness.ageMs),
   });
   res.end(withJsonStaleness(body, staleness));
+}
+
+export interface ConsoleStatusTaskProjection {
+  complete: boolean;
+  total: number;
+  returned: number;
+  omitted: number;
+  limit: number;
+  reason: string;
+}
+
+function taskRendersOnInitialBoard(row: BoardRow): boolean {
+  return row.phase !== undefined || row.needsHuman === true || row.verifyHumanPending === true;
+}
+
+export function projectConsoleStatusResponse(body: unknown): unknown {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const source = body as BoardSnapshot & Record<string, unknown>;
+  if (!Array.isArray(source.tasks)) return body;
+  const total = source.counts && typeof source.counts === "object" && typeof (source.counts as { total?: unknown }).total === "number"
+    ? (source.counts as { total: number }).total
+    : source.tasks.length;
+  const wholePlanFits = source.tasks.length <= CONSOLE_STATUS_FULL_TASK_THRESHOLD;
+  const rendered = wholePlanFits ? source.tasks : source.tasks.filter(taskRendersOnInitialBoard).slice(0, CONSOLE_STATUS_RENDERED_TASK_LIMIT);
+  const omitted = Math.max(0, total - rendered.length);
+  const taskProjection: ConsoleStatusTaskProjection = {
+    complete: omitted === 0,
+    total,
+    returned: rendered.length,
+    omitted,
+    limit: wholePlanFits ? CONSOLE_STATUS_FULL_TASK_THRESHOLD : CONSOLE_STATUS_RENDERED_TASK_LIMIT,
+    reason: omitted === 0 ? "complete" : "bounded-to-initial-board-rows",
+  };
+  return { ...source, tasks: rendered, taskProjection };
 }
 
 function fallbackStatusSnapshot(deps: BoardDeps, nowMs: number, staleness: ConsoleResponseStaleness): BoardSnapshot & { staleness: ConsoleResponseStaleness } {
@@ -750,7 +787,7 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
   const nowMs = systemClock.now();
   switch (path) {
     case "/v1/status":
-      return fallbackStatusSnapshot(deps.board, nowMs, staleness);
+      return projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness));
     case "/v1/recent":
       return { entries: [], staleness };
     case "/v1/inbox":
@@ -760,6 +797,32 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
     default:
       return { staleness };
   }
+}
+
+export function projectConsoleStatusRoute(route: Route): Route {
+  if (route.method !== "GET" || route.path !== "/v1/status") return route;
+  return {
+    ...route,
+    handler: async (req, res, ctx) => {
+      const buffer = new RouteResponseBuffer();
+      await route.handler(req, buffer as unknown as import("node:http").ServerResponse, ctx);
+      const buffered = buffer.buffered(systemClock.now());
+      const contentType = buffered.headers["content-type"] ?? "";
+      if (!/application\/json/i.test(contentType)) {
+        res.writeHead(buffered.status, buffered.headers);
+        res.end(buffered.body);
+        return;
+      }
+      let body: string;
+      try {
+        body = JSON.stringify(projectConsoleStatusResponse(JSON.parse(buffered.body)));
+      } catch {
+        body = buffered.body;
+      }
+      res.writeHead(buffered.status, buffered.headers);
+      res.end(body);
+    },
+  };
 }
 
 interface BufferedRouteResponse {
@@ -3023,7 +3086,7 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
     accountFilePath: resolveAccountFilePath(deps.accountUsage?.accountFilePath),
   };
   const rawRoutes = [
-    buildStatusRoute(deps.board, lastSeen),
+    projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen)),
     buildRecentRoute(deps.board),
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     buildDaemonHealthRoute(daemonHealthDeps),
