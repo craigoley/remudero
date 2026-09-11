@@ -49,9 +49,6 @@ const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
  * the allowlist is that skipping a row is a recorded decision, not an oversight.
  */
 const UNREAD_ROW_ALLOWLIST: Record<string, string> = {
-  investigate:
-    "dormant dispatch lane after #5092 converted the only live investigate records to implement; " +
-    "the type and route remain valid and are covered by test/investigate-task-routing.test.ts.",
   review:
     "pending operator ruling — see impl-BS. `routes.review` has no literal reader and no task " +
     "carries `type: review`, but `review` IS a declared member of Task['type'] (src/lib/plan.ts), " +
