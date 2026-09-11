@@ -140,18 +140,98 @@ export function scanDeclaredPlanIds(cwd, opts = {}) {
 export function resolveReservedIds(remote, cwd) {
   const result = git(["ls-remote", remote, "refs/rmd-id/W1-T*"], { cwd });
   if (result.error || result.status !== 0) {
-    return { reachable: false, ids: new Set() };
+    return { reachable: false, ids: new Set(), holders: new Map() };
   }
   const ids = new Set();
+  const holders = new Map();
   for (const line of result.stdout.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     const tab = trimmed.indexOf("\t");
     const ref = tab === -1 ? "" : trimmed.slice(tab + 1);
     const m = /^refs\/rmd-id\/(W1-T[0-9]+)$/.exec(ref);
-    if (m) ids.add(m[1]);
+    if (!m) continue;
+    ids.add(m[1]);
+    holders.set(m[1], readReservationHolder(remote, cwd, ref));
   }
-  return { reachable: true, ids };
+  return { reachable: true, ids, holders };
+}
+
+function decodeHolderValue(raw) {
+  return decodeURIComponent(raw.replace(/\+/g, "%20"));
+}
+
+export function parseReservationHolderLine(message) {
+  const line = message.split(/\r?\n/).find((l) => l.startsWith("rmd-id holder "));
+  if (!line) return { status: "legacy" };
+  const values = new Map();
+  for (const token of line.slice("rmd-id holder ".length).trim().split(/[ \t]+/)) {
+    if (!token) continue;
+    const eq = token.indexOf("=");
+    if (eq < 1) return { status: "unreadable", reason: `malformed token ${token}` };
+    try {
+      values.set(token.slice(0, eq), decodeHolderValue(token.slice(eq + 1)));
+    } catch {
+      return { status: "unreadable", reason: `malformed value for ${token.slice(0, eq)}` };
+    }
+  }
+  const branch = values.get("branch");
+  if (!branch || branch === "unknown") return { status: "unreadable", reason: "missing branch" };
+  return { status: "known", branch };
+}
+
+function readReservationHolder(remote, cwd, ref) {
+  const fetched = git(["fetch", remote, ref], { cwd });
+  if (fetched.error || fetched.status !== 0) return { status: "unreadable", reason: `could not fetch ${ref}` };
+  const body = git(["log", "-1", "--format=%B", "FETCH_HEAD"], { cwd });
+  if (body.error || body.status !== 0) return { status: "unreadable", reason: `could not read ${ref}` };
+  return parseReservationHolderLine(body.stdout ?? "");
+}
+
+export function shardNoteRecordsReservationHandoff(text, holderBranch, filerBranch) {
+  const clean = (s) => s.trim().replace(/^['"]|['"]$/g, "");
+  for (const raw of text.split(/\r?\n/)) {
+    const m = /reservation hand-?off:\s*(.*?)\s*->\s*(.*?)\s*$/i.exec(raw.trim());
+    if (m && clean(m[1]) === holderBranch && clean(m[2]) === filerBranch) return true;
+  }
+  return false;
+}
+
+function occurrenceFiles(occurrences) {
+  return [...new Set(occurrences.map((o) => o.file))];
+}
+
+function hasRecordedHandoff(cwd, occurrences, holderBranch, filerBranch) {
+  for (const file of occurrenceFiles(occurrences)) {
+    let text;
+    try {
+      text = readFileSync(join(cwd, file), "utf8");
+    } catch {
+      continue;
+    }
+    if (shardNoteRecordsReservationHandoff(text, holderBranch, filerBranch)) return true;
+  }
+  return false;
+}
+
+export function evaluateReservationHolderConflicts(addedIds, occurrencesById, reservation, filerBranch, cwd) {
+  const conflicts = [];
+  if (!reservation.reachable || !filerBranch) return conflicts;
+  for (const id of addedIds) {
+    if (!reservation.ids.has(id)) continue;
+    const holder = reservation.holders?.get(id) ?? { status: "legacy" };
+    if (holder.status === "legacy") continue;
+    const occurrences = occurrencesById.get(id) ?? [];
+    if (holder.status === "unreadable") {
+      conflicts.push({ id, reason: holder.reason, holderBranch: undefined, occurrences });
+      continue;
+    }
+    if (holder.branch === filerBranch) continue;
+    if (hasRecordedHandoff(cwd, occurrences, holder.branch, filerBranch)) continue;
+    conflicts.push({ id, reason: "holder differs", holderBranch: holder.branch, filerBranch, occurrences });
+  }
+  conflicts.sort((a, b) => a.id.localeCompare(b.id));
+  return conflicts;
 }
 
 /** Every plan file that DECLARES each id, keyed by id -- the multiplicity {@link scanDeclaredPlanIds}'s
@@ -577,6 +657,8 @@ export function main(argv) {
   const base = values.base === undefined ? undefined : resolveBaseDeclaredIds(values.base, cwd);
   const collisionVerdict =
     base === undefined ? { refused: false, unreadableBase: false, collisions: [] } : evaluateAddedIdCollisions(occurrencesById, base);
+  const addedAtHead = base === undefined || !base.readable ? { readable: false, ids: [] } : addedIdsAtHead(occurrencesById, base);
+  const ownHeadRef = values["head-ref"] ?? process.env.GITHUB_HEAD_REF ?? currentBranch(cwd);
   if (collisionVerdict.unreadableBase) {
     console.error(
       `task-id-existence: FAILED -- could not read declared plan ids at base "${values.base}". This ` +
@@ -602,6 +684,23 @@ export function main(argv) {
     process.exitCode = 1;
   }
 
+  const holderConflicts = evaluateReservationHolderConflicts(addedAtHead.ids, occurrencesById, reservation, ownHeadRef, cwd);
+  if (holderConflicts.length > 0) {
+    console.error("\ntask-id-existence: FAILED -- the following added id(s) are HELD by a different reservation holder:\n");
+    for (const c of holderConflicts) {
+      const holder = c.holderBranch
+        ? `reserved by ${c.holderBranch}, while this filing is ${c.filerBranch}`
+        : `holder unreadable (${c.reason})`;
+      console.error(`  ${c.id} -- ${holder}`);
+      for (const occ of c.occurrences) console.error(`    ${occ.file}:${occ.line}`);
+    }
+    console.error(
+      "\nRenumber to a fresh reserved id, or record the operator hand-off in the shard note as " +
+        "`reservation hand-off: <holder> -> <filer>`.\n",
+    );
+    process.exitCode = 1;
+  }
+
   // W1-T2324 (Q3, open-vs-open): what resolveBaseDeclaredIds cannot see -- another still-open PR
   // already claiming the id. Runs only when base was readable and this branch adds one.
   const requireOpenPrs = values["require-open-prs"] === true;
@@ -618,13 +717,11 @@ export function main(argv) {
   if (base === undefined || !base.readable) {
     reportUnreadable("no-base", {});
   } else {
-    const added = addedIdsAtHead(occurrencesById, base);
-    if (added.ids.length > 0) {
+    if (addedAtHead.ids.length > 0) {
       const ownerRepo = values.owner && values.repo ? { owner: values.owner, repo: values.repo } : resolveOwnerRepoFromGit(values.remote, cwd);
       if (ownerRepo === undefined) {
         reportUnreadable("owner-repo", { remote: values.remote });
       } else {
-        const ownHeadRef = values["head-ref"] ?? process.env.GITHUB_HEAD_REF ?? currentBranch(cwd);
         const openPrs = fetchOpenPrRows(ownerRepo.owner, ownerRepo.repo, cwd);
         if (!openPrs.reachable) {
           reportUnreadable("open-pr-list", { owner: ownerRepo.owner, repo: ownerRepo.repo });
@@ -650,7 +747,7 @@ export function main(argv) {
             }
             return seen;
           };
-          const openPrCollisions = evaluateOpenPrIdCollisions(added.ids, openPrs.rows, ownHeadRef, confirmDeclares);
+          const openPrCollisions = evaluateOpenPrIdCollisions(addedAtHead.ids, openPrs.rows, ownHeadRef, confirmDeclares);
           if (openPrCollisions.length > 0) {
             console.error("\ntask-id-existence: FAILED -- the following added id(s) are ALREADY CLAIMED by another OPEN PR:\n");
             for (const c of openPrCollisions) {

@@ -356,9 +356,91 @@ export interface RemoteReserveDeps {
   anchor?: () => string;
 }
 
+export interface ReservationHolderLine {
+  branch: string;
+  pid?: number;
+  host?: string;
+  startedAt?: string;
+  source?: string;
+}
+
+export type ParsedReservationHolderLine =
+  | { status: "known"; holder: ReservationHolderLine }
+  | { status: "legacy" }
+  | { status: "unreadable"; reason: string };
+
+function holderValue(v: string): string {
+  return encodeURIComponent(v).replace(/%20/g, "+");
+}
+
+function unholderValue(v: string): string {
+  return decodeURIComponent(v.replace(/\+/g, "%20"));
+}
+
+function currentBranch(run: RemoteReserveDeps["run"]): string {
+  if (process.env.GITHUB_HEAD_REF) return process.env.GITHUB_HEAD_REF;
+  const symbolic = run(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (symbolic.status === 0 && symbolic.stdout.trim()) return symbolic.stdout.trim();
+  const abbrev = run(["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (abbrev.status === 0 && abbrev.stdout.trim() && abbrev.stdout.trim() !== "HEAD") return abbrev.stdout.trim();
+  return "unknown";
+}
+
+export function formatReservationHolderLine(holder: ReservationHolderLine): string {
+  const parts = [`branch=${holderValue(holder.branch)}`];
+  if (holder.pid !== undefined) parts.push(`pid=${holder.pid}`);
+  if (holder.host !== undefined) parts.push(`host=${holderValue(holder.host)}`);
+  if (holder.startedAt !== undefined) parts.push(`started_at=${holderValue(holder.startedAt)}`);
+  if (holder.source !== undefined) parts.push(`source=${holderValue(holder.source)}`);
+  return `rmd-id holder ${parts.join(" ")}`;
+}
+
+export function formatReservationAnchorMessage(holder: ReservationHolderLine): string {
+  const who = holder.pid !== undefined && holder.host ? `${holder.pid}@${holder.host}` : holder.branch;
+  return `rmd-id reservation ${who} ${holder.startedAt ?? new Date().toISOString()}\n\n${formatReservationHolderLine(holder)}`;
+}
+
+export function formatHandMintReservationMessage(taskId: string, holder: ReservationHolderLine): string {
+  return `reserve ${taskId} ${holder.branch}\n\n${formatReservationHolderLine({ ...holder, source: holder.source ?? "hand-mint" })}`;
+}
+
+export function parseReservationHolderLine(message: string): ParsedReservationHolderLine {
+  const line = message.split(/\r?\n/).find((l) => l.startsWith("rmd-id holder "));
+  if (!line) return { status: "legacy" };
+  const values = new Map<string, string>();
+  for (const token of line.slice("rmd-id holder ".length).trim().split(/[ \t]+/)) {
+    if (!token) continue;
+    const eq = token.indexOf("=");
+    if (eq < 1) return { status: "unreadable", reason: `malformed token ${token}` };
+    const key = token.slice(0, eq);
+    const value = token.slice(eq + 1);
+    try {
+      values.set(key, unholderValue(value));
+    } catch {
+      return { status: "unreadable", reason: `malformed value for ${key}` };
+    }
+  }
+  const branch = values.get("branch");
+  if (!branch || branch === "unknown") return { status: "unreadable", reason: "missing branch" };
+  const pidRaw = values.get("pid");
+  const pid = pidRaw === undefined ? undefined : Number(pidRaw);
+  if (pidRaw !== undefined && !Number.isInteger(pid)) return { status: "unreadable", reason: "malformed pid" };
+  return {
+    status: "known",
+    holder: {
+      branch,
+      pid,
+      host: values.get("host"),
+      startedAt: values.get("started_at"),
+      source: values.get("source"),
+    },
+  };
+}
+
 /** The real reserver: an orphan commit over the empty tree, pushed to the id's own ref. `commit-tree`
  *  with NO `-p` is what makes the payload unrelated to every other writer's (see the module-level
- *  note above); the message carries pid+host+time, so an operator can see who holds a stuck reservation and two writers on one host still differ. */
+ *  note above); the message carries pid+host+time plus a parseable holder line, so an operator can
+ *  see which branch or lane owns a stuck reservation. */
 export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver {
   // Cached once per reserver INSTANCE, not per attempt — a block makes N calls, and the push
   // staying the claim means a stale floor only costs attempts, never a wrong id.
@@ -371,7 +453,14 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
     mintAnchor() {
       if (deps.anchor) return deps.anchor();
       const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
-      const msg = `rmd-id reservation ${process.pid}@${hostname()} ${new Date().toISOString()}`;
+      const startedAt = new Date().toISOString();
+      const msg = formatReservationAnchorMessage({
+        branch: currentBranch(deps.run),
+        pid: process.pid,
+        host: hostname(),
+        startedAt,
+        source: "automatic",
+      });
       return deps.run(["commit-tree", tree, "-m", msg]).stdout.trim();
     },
     attempt(taskId, anchor) {
