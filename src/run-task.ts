@@ -4262,7 +4262,7 @@ export function ciGateFromRollup(
  * gate actually judged lets the miner be pinned to that same commit within one decision, and makes
  * the shared subject OBSERVABLE in whatever that decision reports.
  */
-/** PRIMARY CONTROL: bounded CI evidence distinguishes terminal causes; unavailable differs from an observed empty set. */
+/** PRIMARY CONTROL: bounded CI evidence distinguishes terminal causes; unavailable is distinct from an observed empty set. */
 export const CI_GATE_EVIDENCE_MAX = 8;
 
 export type CiGateOutcome = {
