@@ -158,38 +158,53 @@ test("W1-T3341 (3): the superseded rationale survives the change that supersedes
   );
 });
 
-// ── criterion 4: this diff really is instrument-only ─────────────────────────────────────────────
+// ── criterion 4: this change really is instrument-only ───────────────────────────────────────────
 
-test("W1-T3341 (4): Standing rule 25 reads entangled FALSE on this PR's own diff", () => {
-  const base = execFileSync("git", ["-C", REPO_ROOT, "merge-base", "HEAD", "origin/main"], {
-    encoding: "utf8",
-  }).trim();
-  const changed = execFileSync("git", ["-C", REPO_ROOT, "diff", "--name-only", `${base}...HEAD`], {
-    encoding: "utf8",
-  })
-    .split("\n")
-    .filter(Boolean);
-  const diff = execFileSync("git", ["-C", REPO_ROOT, "diff", `${base}...HEAD`], {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-  });
+/**
+ * The commit that last touched the doctrine baseline, and the files it changed.
+ *
+ * WHY NOT `base...HEAD`. That was the right target for exactly one branch and one moment: while
+ * W1-T3341's PR was open. The instant it merged, the same expression started reading whatever the
+ * CURRENT branch changed — so this criterion reddened every other open PR on the board, which is
+ * what a self-check that outlives its own branch always does. The subject was never "the branch I
+ * happen to be on"; it is "the change that re-derived the cap", and that change is a commit, so
+ * the commit is what this reads. The answer is now identical on the author's branch, on main, and
+ * on an unrelated PR, which is the property that was missing.
+ */
+function theCapChange(): { sha: string; changed: string[]; diff: string } {
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", REPO_ROOT, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  const sha = git("log", "-1", "--format=%H", "--", "scripts/claude-md-budget-baseline.json").trim();
+  assert.match(sha, /^[0-9a-f]{40}$/, "no commit in this history touches the doctrine baseline at all");
+  return {
+    sha,
+    changed: git("show", "--name-only", "--format=", sha).split("\n").filter(Boolean),
+    diff: git("show", "--format=", sha),
+  };
+}
 
-  // POSITIVE CONTROL: the diff must actually contain this task's work, or "not entangled" is the
-  // trivially-true verdict an empty diff earns.
+test("W1-T3341 (4): Standing rule 25 reads entangled FALSE on the change that re-derived the cap", () => {
+  const { sha, changed, diff } = theCapChange();
+
+  // CONTROL: a mis-resolved sha, an empty `--format=` render or a `--name-only` that stopped
+  // emitting paths would each hand the assertions below an empty set to pass vacuously — the
+  // exact shape this repo's gates keep being defeated by. Both halves have to be non-trivial.
+  assert.ok(changed.length > 0, `${sha} renders no changed paths — the commit read is broken, not clean`);
+  assert.ok(diff.length > 0, `${sha} renders an empty diff — the commit read is broken, not clean`);
   assert.ok(
     changed.includes("scripts/claude-md-budget-baseline.json"),
-    `the diff must carry the baseline this task re-derives; saw ${changed.join(", ")}`,
+    `${sha} was selected BY that path and does not contain it; git log/show disagree — saw ${changed.join(", ")}`,
   );
 
   const verdict = detectInstrumentEntanglement(changed, diff);
   assert.equal(
     verdict.entangled,
     false,
-    `rule 25 entanglement on this PR's own diff: instrument=${verdict.instrumentPaths.join(",")} src=${verdict.srcPaths.join(",")}`,
+    `rule 25 entanglement on ${sha}: instrument=${verdict.instrumentPaths.join(",")} src=${verdict.srcPaths.join(",")}`,
   );
   assert.deepEqual(
     changed.filter((f) => f.startsWith("src/")),
     [],
-    "this task must touch no src/ path — that is the entire reason it is a separate PR",
+    "this change must touch no src/ path — that is the entire reason it was a separate PR",
   );
 });
