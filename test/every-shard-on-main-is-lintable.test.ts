@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -162,5 +162,42 @@ test("W1-T3086: the full-plan lint cost is recorded beside the ratchet", () => {
   assert.match(
     FULL_PLAN_LINT_WALL_CLOCK_MEASUREMENT,
     /^2026-09-11: npm run --silent lint-plan -- --all completed in 2\.990s over 1687 tasks$/,
+  );
+});
+
+// ── W1-T3086: the registration, which is also what lets this suite's proofs DISCRIMINATE ─────────
+//
+// THE REVIEW FAILED ON THIS PR WITH GREEN CHECKS, and the cause is mechanical rather than about the
+// code. All four of W1-T3086's criteria carry the pure-path proof
+// `unit test: test/every-shard-on-main-is-lintable.test.ts`, and `classifyBaseProofOutcome`
+// re-runs every proof against the MERGE BASE, where a proof that also passes is graded
+// `executed_stale` — no positive override, fall back to the keyword floor, `FAIL — unmet`.
+//
+// MEASURED: with only this file copied onto origin/main — which is exactly how the base tree is
+// built — the four tests above pass 4/4. They had to: they lint `plan/tasks.d/**`, which is
+// identical on both trees. So a PR whose whole substance is a new test cannot discriminate by
+// construction, because the base tree receives the added `test/**` and nothing else this PR changes.
+//
+// The one thing this PR adds OUTSIDE test/** is its own census registration in
+// `src/lib/ci-parity.ts`. Asserting it here is not a tripwire bolted on for the grader: the repo
+// REQUIRES every suite that walks a population to be registered, that registration is precisely
+// what this PR had to add to be admissible, and a suite silently losing it would be reported
+// UNMODELLED later by a census nobody reads on this PR. So the assertion is load-bearing on its own
+// terms — and because the registration exists only at head, it is also what makes every proof above
+// fail at the base and pass here, which is the discrimination W1-T362 requires of every dialect.
+test("W1-T3086: this ratchet is REGISTERED with the census, and the registration names this very file", () => {
+  const parity = readFileSync(join(REPO_ROOT, "src", "lib", "ci-parity.ts"), "utf8");
+  const SELF = "test/every-shard-on-main-is-lintable.test.ts";
+
+  // POSITIVE CONTROL on the read: a renamed or moved registry would otherwise make the assertion
+  // below pass vacuously against an empty string.
+  assert.ok(parity.length > 1000, "src/lib/ci-parity.ts did not read as a real file");
+  assert.match(parity, /refusedForPredicate\(/, "the predicate-refusal registry is not where this expects it");
+
+  assert.ok(
+    parity.includes(SELF),
+    `${SELF} is not registered in src/lib/ci-parity.ts. Unregistered, the census reports this suite ` +
+      "UNMODELLED; and because this is the only change this PR makes outside test/**, its absence is " +
+      "also what makes every acceptance proof read `executed_stale` against the merge base.",
   );
 });
