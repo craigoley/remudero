@@ -36,6 +36,7 @@ function quietModel(overrides: Partial<StatusBoardModel> = {}): StatusBoardModel
       crashLoop: { breached: false, windowBoots: [], windowMs: 900_000, maxBoots: 5 },
     },
     latches: { rows: [] },
+    cadence: { rows: [] },
     lastCycle: { found: false },
     blockers: { rows: [] },
     queueHead: { rows: [], refused: [], refusedTruncated: 0 },
@@ -63,6 +64,9 @@ const BOARD_BEFORE_WIRING = [
   "",
   "── LATCHES ──────────────────────────────────────────────",
   "no active latches",
+  "",
+  "── CADENCE ──────────────────────────────────────────────",
+  "no cadence markers tracked",
   "",
   "── LAST CLOSED CYCLE ────────────────────────────────────",
   "no cycle recorded",
@@ -140,7 +144,7 @@ test("projectBoardSection leaves whatHappened absent for a block that rendered n
 test("every section of a real board reaches the checker — the footer's denominator is the board's own section count, not a subset", () => {
   const rendered = renderStatusBoardText(quietModel(), { colourEnabled: false });
   const footer = rendered.split("\n").at(-1) ?? "";
-  assert.match(footer, /^_operator-message: 10 of 10 section\(s\) incomplete — /);
+  assert.match(footer, /^_operator-message: 11 of 11 section\(s\) incomplete — /);
 });
 
 // ── criterion 2: an incomplete projection marks the row and still renders it ────────────────────
@@ -222,10 +226,11 @@ test("a throwing section cannot take the rest of the board's footer down with it
 test("the wired board is byte-identical to origin/main's board plus the footer — no board message is reworded, reordered or re-spaced by this task", () => {
   const rendered = renderStatusBoardText(quietModel(), { colourEnabled: false });
   const footer = boardMessageFooter(
-    // Same ten labels the renderer projects, in render order.
+    // Same eleven labels the renderer projects, in render order.
     [
       "liveness",
       "latches",
+      "cadence",
       "last cycle",
       "blockers",
       "queue head",
@@ -248,7 +253,7 @@ test("a section that DOES carry a next action drops out of the footer — the pr
   const footer = withAction.split("\n").at(-1) ?? "";
   // Still incomplete (no board section carries a consequence slot yet) but the MISSING SET shrank,
   // which is the discriminating half: whatIsAsked is no longer universally absent.
-  assert.match(footer, /10 of 10 section\(s\) incomplete/);
+  assert.match(footer, /11 of 11 section\(s\) incomplete/);
   assert.match(footer, /missing consequenceOfInaction, whatIsAsked/);
   // ...and the board still renders that section's own text.
   assert.ok(withAction.includes("unblock the three not-ready rows"));
