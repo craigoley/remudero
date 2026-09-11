@@ -1622,7 +1622,8 @@ export function renderShellHtml(
 
 <section id="mailbox-section" class="panel-section" aria-label="Mailbox" data-owner-tab="decisions">
   <h2><span>Mailbox</span></h2>
-  <ul id="mailbox" class="mailbox" aria-label="Mailbox"></ul>
+  <div id="mailbox" class="mailbox" aria-label="Mailbox"></div>
+  <script>document.getElementById("mailbox")?.setAttribute("role", "list");</script>
 </section>
 
 <!-- DECISIONS: the needs-me set alone -- W1-T257's merged-proposal reconciler and the

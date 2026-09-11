@@ -3,11 +3,15 @@ import type { AddressInfo } from "node:net";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before } from "node:test";
+import { after, before, test as nodeTest } from "node:test";
 
 import { AxeBuilder } from "@axe-core/playwright";
+import { Window } from "happy-dom";
 import { chromium, type Browser, type Page } from "playwright";
 
+import { bootConsoleShellClient } from "../src/lib/console-shell-client.js";
+import { resolveFreshness } from "../src/lib/console-freshness.js";
+import { rowChevronHtml } from "../src/lib/console-shell-script.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -24,6 +28,72 @@ const VIEWPORTS = [
 ] as const;
 const MIN_TARGET_PX = 24;
 const MIN_TEXT_PX = 12;
+
+function jsonResponse(body: unknown): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  } as Response;
+}
+
+async function withClientDom(fn: (document: globalThis.Document) => Promise<void> | void): Promise<void> {
+  const window = new Window({ url: `http://127.0.0.1/?token=${READ_TOKEN}` });
+  const document = window.document as unknown as globalThis.Document;
+  document.body.innerHTML = '<main><span id="connection-indicator"></span><ul id="now-list"></ul></main>';
+  const realGetElementById = document.getElementById.bind(document);
+  document.getElementById = ((id: string) => {
+    let el = realGetElementById(id);
+    if (el) return el;
+    el = document.createElement(id.endsWith("-list") || id === "mailbox" ? "ul" : "div");
+    el.id = id;
+    document.querySelector("main")?.append(el);
+    return el;
+  }) as typeof document.getElementById;
+  const original = {
+    window: globalThis.window,
+    document: globalThis.document,
+    localStorage: globalThis.localStorage,
+    sessionStorage: globalThis.sessionStorage,
+    history: globalThis.history,
+    CSS: globalThis.CSS,
+    Option: globalThis.Option,
+    fetch: globalThis.fetch,
+    setInterval: globalThis.setInterval,
+  };
+  try {
+    Object.assign(globalThis, {
+      window,
+      document,
+      localStorage: window.localStorage,
+      sessionStorage: window.sessionStorage,
+      history: window.history,
+      CSS: { escape: (value: unknown) => String(value).replace(/"/g, '\\"') },
+      Option: function OptionStub(text = "", value = "") {
+        const option = document.createElement("option") as HTMLOptionElement;
+        option.textContent = String(text);
+        option.value = String(value);
+        return option;
+      },
+      setInterval: (() => 0) as unknown as typeof setInterval,
+      fetch: ((input: unknown) => {
+        const url = new URL(typeof input === "string" ? input : String(input), "http://127.0.0.1");
+        if (url.pathname === "/v1/status/stream") return new Promise<Response>(() => {});
+        if (url.pathname === "/v1/task") {
+          return Promise.resolve(jsonResponse({ card: { id: "W1-T3184", title: "covered", status: "queued", journey: [] } }));
+        }
+        return Promise.resolve(jsonResponse({ generated_at: "2026-09-08T12:01:00.000Z", tasks: [], entries: [], cards: [], ready: [], drafting: [], rows: [] }));
+      }) as typeof fetch,
+    });
+    bootConsoleShellClient({ default: 1 }, resolveFreshness);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await fn(document);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  } finally {
+    Object.assign(globalThis, original);
+  }
+}
 
 function task(over: Partial<Task> = {}): Task {
   return {
@@ -95,6 +165,32 @@ function fixtureDeps(root: string): ServeDeps {
     pollMs: 50,
   };
 }
+
+nodeTest("live console disclosure state stays on the chevron button, not the list item", async () => {
+  await withClientDom(async (document) => {
+    const list = document.getElementById("now-list");
+    assert.ok(list);
+    const row = document.createElement("li");
+    row.className = "row";
+    row.dataset.key = "task:W1-T3184";
+    row.dataset.taskId = "W1-T3184";
+    row.innerHTML = `<span class="task-id">W1-T3184</span>${rowChevronHtml()}`;
+    list.append(row);
+
+    const button = row.querySelector<HTMLButtonElement>(".row-chevron");
+    assert.ok(button);
+    button.click();
+    assert.equal(button.getAttribute("aria-expanded"), "true");
+    assert.equal(button.getAttribute("aria-controls"), "row-detail-task-W1-T3184");
+    assert.equal(row.hasAttribute("aria-expanded"), false);
+    assert.equal(row.hasAttribute("aria-controls"), false);
+
+    button.click();
+    assert.equal(button.getAttribute("aria-expanded"), "false");
+    assert.equal(button.hasAttribute("aria-controls"), false);
+    assert.equal(row.hasAttribute("aria-expanded"), false);
+  });
+});
 
 function liveShapedTasks(): unknown[] {
   return Array.from({ length: 5 }, (_, i) => ({
