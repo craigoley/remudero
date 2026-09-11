@@ -1508,9 +1508,9 @@ export type CensusVerdict =
       readonly reason: { readonly kind: "predicate"; readonly clause: CensusPredicateClause; readonly detail: string };
     };
 
-/** One test file the recognizer found, carrying its verdict. `job`/`script`/`walks` are
- *  meaningful only for an ADMITTED member — what the census step table and
- *  {@link KNOWN_CENSUS_SUITES} are DERIVED from, never hand-duplicated onto. */
+/** One test file the recognizer found, carrying its verdict. `script` is meaningful only for an
+ *  ADMITTED member — what the census step table is DERIVED from, never hand-duplicated onto.
+ *  `walks` is broader: a cost-refused suite can still name the population a diff joins. */
 export interface CensusPopulationMember {
   readonly testFile: string;
   readonly job: string;
@@ -2226,6 +2226,10 @@ export const KNOWN_CENSUS_SUITES: readonly KnownCensusSuite[] = CENSUS_ADMITTED_
   walks: m.walks ?? [],
 }));
 
+const CENSUS_WALKED_POPULATION_SUITES: readonly KnownCensusSuite[] = CENSUS_POPULATION.flatMap((m) =>
+  m.walks && m.walks.length > 0 ? [{ job: m.job, testFile: m.testFile, walks: m.walks }] : [],
+);
+
 /**
  * THE MEMBERSHIP SET — WIDER THAN {@link KNOWN_CENSUS_SUITES} AND A SEPARATE SYMBOL, because the two
  * answer different questions: "which suites does this path join" reads THIS, "does this suite carry
@@ -2234,7 +2238,7 @@ export const KNOWN_CENSUS_SUITES: readonly KnownCensusSuite[] = CENSUS_ADMITTED_
  * BY NAME by W1-T2809's suite, and by W1-T2523's demanding the exact opposite of anything KNOWN.
  */
 export const CENSUS_MEMBERSHIP_SUITES: readonly KnownCensusSuite[] = [
-  ...KNOWN_CENSUS_SUITES,
+  ...CENSUS_WALKED_POPULATION_SUITES,
   ...REGISTRY_CENSUS_SUITES,
 ];
 
