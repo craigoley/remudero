@@ -11669,9 +11669,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
   });
 
-  // The DECISION and its two failure-tolerant arms live in lib behind `exploreMount`
-  // (which never throws); only the two real data sources are wired here. `runId` is clock-derived, so
-  // no harness can steer THIS call onto the explore arm — that is exactly why the arms are seamed.
+  // The decision and its failure-tolerant arms live in `exploreMount`, which never throws; only real data sources are wired here.
+  // `runId` is clock-derived, so no harness can steer this call onto explore — the arms are seamed.
   const explored = await exploreMount(
     {
       taskType: task.type,
