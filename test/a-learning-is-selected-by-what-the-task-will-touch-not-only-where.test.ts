@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { candidateShardFiles, selectLearnings, type LearningEntry, type LearningsIndex } from "../src/lib/learnings.js";
+import { candidateShardFiles, loadLearnings, selectLearnings, type LearningEntry, type LearningsIndex } from "../src/lib/learnings.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -111,4 +111,62 @@ test("generate-learnings-index emits symbols and error_signatures, and --check f
   });
   assert.notEqual(check.status, 0, check.stdout + check.stderr);
   assert.match(check.stdout + check.stderr, /is STALE/);
+});
+
+test("generate-learnings-index rejects malformed symbols", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}learnings-index-bad-symbols-`));
+  writeFileSync(
+    join(dir, "signals.yaml"),
+    [
+      "- id: bad-symbols",
+      "  subsystem: test",
+      "  files: [src/run-task.ts]",
+      "  symbols: selectLearnings",
+      "  fact: signal fact",
+      "  src: test",
+      "",
+    ].join("\n"),
+  );
+
+  const gen = spawnSync(process.execPath, [SCRIPT, "--dir", dir, "--out", join(dir, "index.json")], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+
+  assert.notEqual(gen.status, 0, gen.stdout + gen.stderr);
+  assert.match(gen.stdout + gen.stderr, /'symbols' must be a list of strings/);
+});
+
+test("generate-learnings-index rejects malformed error_signatures", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}learnings-index-bad-errors-`));
+  writeFileSync(
+    join(dir, "signals.yaml"),
+    [
+      "- id: bad-errors",
+      "  subsystem: test",
+      "  files: [src/run-task.ts]",
+      "  error_signatures: [fatal refusal, 123]",
+      "  fact: signal fact",
+      "  src: test",
+      "",
+    ].join("\n"),
+  );
+
+  const gen = spawnSync(process.execPath, [SCRIPT, "--dir", dir, "--out", join(dir, "index.json")], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+
+  assert.notEqual(gen.status, 0, gen.stdout + gen.stderr);
+  assert.match(gen.stdout + gen.stderr, /'error_signatures' must be a list of strings/);
+});
+
+test("loadLearnings rejects empty symbol and error signature strings", () => {
+  const symbolsPath = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}learnings-empty-symbol-`)), "learnings.yaml");
+  writeFileSync(symbolsPath, "- id: bad-symbol\n  files: [a.ts]\n  symbols: ['']\n  fact: one\n  src: test\n");
+  assert.throws(() => loadLearnings(symbolsPath), /'symbols' must be a list of non-empty strings/);
+
+  const errorsPath = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}learnings-empty-error-`)), "learnings.yaml");
+  writeFileSync(errorsPath, "- id: bad-error\n  files: [a.ts]\n  error_signatures: ['']\n  fact: one\n  src: test\n");
+  assert.throws(() => loadLearnings(errorsPath), /'error_signatures' must be a list of non-empty strings/);
 });
