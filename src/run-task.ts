@@ -11358,15 +11358,12 @@ async function runTask(
     const stopPolling = workerStateSensor.startPolling();
     return rawSpawn({
       ...spawnArgs,
-      // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already
-      // owns its state/error telemetry. The pre-execution routing assignment and terminal worker
-      // row can therefore join without inferring a task from a model or prompt.
+      // Every dispatch-phase worker inherits the run identity at the ONE wrapper that already owns its state/error telemetry, so the
+      // routing assignment and terminal worker row join without inferring a task; an injected observer still runs, but after the ledger.
       runId: spawnArgs.runId ?? runId,
       taskId: spawnArgs.taskId ?? taskId,
       onSelectionAssignment: (assignment) => {
         log("worker.assignment", { worker_assignment: assignment });
-        // Preserve an explicitly injected observer for tests or a future secondary sink, but only
-        // after the append-only run ledger accepted this run's immutable event.
         spawnArgs.onSelectionAssignment?.(assignment);
       },
       onSpawnError:
