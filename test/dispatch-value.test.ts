@@ -57,7 +57,7 @@ function ready(calibration: DispatchValueCalibration) {
   return calibration.context;
 }
 
-function ledgerPathForRoot(root: string): string {
+function statePathForRoot(root: string): string {
   return join(root, "state", "ledger.ndjson");
 }
 
@@ -106,7 +106,7 @@ async function driveDrainDispatchValue(
       },
     });
     assert.equal(code, 0, "the injected drain loop returns a clean stop");
-    const ledgerRows = readFileSync(ledgerPathForRoot(root), "utf8")
+    const ledgerRows = readFileSync(statePathForRoot(root), "utf8")
       .trim()
       .split("\n")
       .filter(Boolean)
@@ -203,7 +203,7 @@ test("W1-T3412 mutation rejects value bypass", () => {
 
 test("W1-T3412 drainCommand builds calibrated dispatch value from closure ledger snapshots", async () => {
   const { context, ledgerRows } = await driveDrainDispatchValue((root) => {
-    const ledgerPath = ledgerPathForRoot(root);
+    const ledgerPath = statePathForRoot(root);
     const rows = [closure("src", 0.2, 2), closure("docs", 0.8, 1)];
     appendLedger(ledgerPath, closureSnapshotLine("2026-09-10T12:00:00.000Z", rows) as never);
     appendLedger(ledgerPath, closureSnapshotLine("2026-09-11T12:00:00.000Z", rows) as never);
@@ -221,7 +221,7 @@ test("W1-T3412 drainCommand builds calibrated dispatch value from closure ledger
 test("W1-T3412 drainCommand refuses malformed closure snapshots before selection", async () => {
   const { context, ledgerRows } = await driveDrainDispatchValue((root) => {
     appendLedger(
-      ledgerPathForRoot(root),
+      statePathForRoot(root),
       closureSnapshotLine("2026-09-11T12:00:00.000Z", [
         { taskClass: "src", merged: 4, open: 1, costPerMerge: 1, mergeRate: { kind: "rate", value: 0.2, merged: 4 } },
       ]) as never,
@@ -248,7 +248,7 @@ test("W1-T3412 drainCommand refuses an incomplete closure ledger union", async (
 
 test("W1-T3412 drainCommand names valid closure classes that are too thin to calibrate", async () => {
   const { context, ledgerRows } = await driveDrainDispatchValue((root) => {
-    const ledgerPath = ledgerPathForRoot(root);
+    const ledgerPath = statePathForRoot(root);
     const rows = [closure("src", "thin", 1)];
     appendLedger(ledgerPath, closureSnapshotLine("2026-09-10T12:00:00.000Z", rows) as never);
     appendLedger(ledgerPath, closureSnapshotLine("2026-09-11T12:00:00.000Z", rows) as never);
