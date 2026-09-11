@@ -25044,6 +25044,9 @@ function memoiseBoardSnapshotByRepo(
 export function buildCiLearningDaemonHooks(deps: {
   config?: Config;
   policy?: Policy;
+  checkoutRoot?: string;
+  fileShards?: typeof fileCiLearningShards;
+  planOrigins?: string[];
   /** W1-T2694: injected ratification pins — same seam shape as `policy` above. Production
    *  passes none and the checked-in (or absent) `plan/ratifications.yaml` governs. */
   ratifications?: Ratifications;
@@ -25077,9 +25080,11 @@ export function buildCiLearningDaemonHooks(deps: {
     },
     runCiLearningCadence: buildCiLearningCadenceRunner({
       root: configFor().root,
-      checkoutRoot: repoRoot,
+      checkoutRoot: deps.checkoutRoot ?? repoRoot,
       loadWindow: (days) => (deps.loadWindow ? deps.loadWindow(days) : loadCiFailureWindow(days)),
       loadLessons: deps.loadLessons,
+      fileShards: deps.fileShards,
+      planOrigins: deps.planOrigins,
       clock: deps.now ? clockFromDateFn(deps.now) : systemClock,
     }),
   };
