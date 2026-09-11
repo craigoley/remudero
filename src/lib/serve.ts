@@ -101,7 +101,13 @@ import {
   type ProviderRoutingPolicyOverrideInput,
 } from "./provider-routing-policy.js";
 import { appendLedger } from "./ledger.js";
-import { buildAnalyticsRoute, type AnalyticsRouteDeps } from "./analytics-route.js";
+import {
+  buildAnalyticsRoute,
+  coldAnalyticsSnapshot,
+  createAnalyticsSnapshotCache,
+  type AnalyticsSnapshot,
+  type AnalyticsSnapshotCacheDeps,
+} from "./analytics-route.js";
 import { renderConsoleShellScript } from "./console-shell-script.js";
 import { consoleShellClientSource } from "./console-shell-client.js";
 import { inboxDigestsPath } from "./digest.js";
@@ -288,13 +294,11 @@ export interface ServeDeps {
     read?: (root: string, deps?: { now?: () => number }) => ProviderRoutingStatus;
   };
   /**
-   * W1-T477: `GET /v1/analytics`'s deps (see analytics-route.ts's header). OPTIONAL and defaults
-   * to a real rotation-union read against the real filesystem, the same "the assembler wires the
-   * real thing, a test injects a fake" split every other optional field here already follows. The
-   * `ledgerPath` half is always the console's own — see {@link accountUsage}'s doc immediately
-   * above for why that is never a caller-supplied override.
+   * W1-T3352: process-owned analytics refresh deps. OPTIONAL and defaults to the real streaming
+   * rotation-union reducer. The state directory and telemetry sink are always the console's own;
+   * callers can inject the reader/clock/timers but cannot point this cache at a second state root.
    */
-  analytics?: Omit<AnalyticsRouteDeps, "ledgerPath">;
+  analytics?: Omit<AnalyticsSnapshotCacheDeps, "stateDir" | "log">;
   /**
    * W1-T371: additive tailnet-identity auth — forwarded verbatim to `createService`'s
    * `identity` option (see service.ts's {@link IdentityAuth} for the two gates it enforces).
@@ -2195,6 +2199,9 @@ export interface StaleCodeExitDeps {
   exit?: (code: number) => void;
   /** One ledger line naming the decision, mirroring {@link ServiceOptions.log}. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** Synchronous cleanup immediately before the process exit. The analytics cache supplies its
+   * stop hook here because `process.exit` does not emit the HTTP server's `close` event. */
+  beforeExit?: () => void;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -2243,6 +2250,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     const currentSha = resolveCurrentSha();
     if (!isConsoleCodeStale(deps.bootSha, currentSha)) return;
     log("serve.stale_code_exit", { bootSha: deps.bootSha, currentSha, clients, inFlightWrites });
+    deps.beforeExit?.();
     exit(0);
   };
   return {
@@ -2960,7 +2968,10 @@ interface ServeRoutesAssembly {
 }
 
 /** Internal route assembly that keeps the first-mint readiness signal beside the routes it protects. */
-function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
+function assembleServeRoutes(
+  deps: ServeDeps,
+  currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot,
+): ServeRoutesAssembly {
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
   // ever re-resolves it. See resolveConsoleSha for why re-reading per request would be worse
@@ -3111,9 +3122,9 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
     // the bot branch instead of dirtying the daemon's checkout.
     ...buildPanelSkillRunRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
-    // W1-T477: the operator's four analytics questions, aggregated over the rotation union — see
-    // analytics-route.ts's module header for the reader discipline and scope.
-    buildAnalyticsRoute({ ...deps.analytics, ledgerPath: deps.ledgerPath }),
+    // W1-T3352: synchronous read of process-owned state. The server assembly owns refresh and
+    // cancellation; this route receives no ledger path or reader capability.
+    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot }),
     buildAuthScopeRoute(),
     // W1-T2409: the in-console write-grant "ask" — see buildConsoleWriteGrantRoute's own doc.
     buildConsoleWriteGrantRoute(deps.tokens),
@@ -3233,13 +3244,18 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // instance ServeDeps.confirmNonces's own doc requires; resolving it independently in each place
   // (each defaulting on its own) would issue nonces into a store the dispatch never consults.
   const confirmNonces = deps.confirmNonces ?? createConfirmNonceStore();
+  const analyticsCache = createAnalyticsSnapshotCache({
+    ...deps.analytics,
+    stateDir: dirname(deps.ledgerPath),
+    log: deps.log,
+  });
   // W1-T2229: resolved ONCE, here, and threaded through to `buildServeRoutes` below (explicitly,
   // via the spread) so `GET /v1/version` and the shell's "console build" chip report the EXACT
   // sha {@link gateStaleCodeExit} is comparing against — never a second independent resolution
   // that could drift from the one the exit decision uses.
   const consoleSha = deps.consoleSha ?? resolveConsoleSha();
-  const staleExit = gateStaleCodeExit({ bootSha: consoleSha, log: deps.log });
-  const routeAssembly = assembleServeRoutes({ ...deps, consoleSha, confirmNonces });
+  const staleExit = gateStaleCodeExit({ bootSha: consoleSha, log: deps.log, beforeExit: analyticsCache.stop });
+  const routeAssembly = assembleServeRoutes({ ...deps, consoleSha, confirmNonces }, analyticsCache.current);
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
     // five paths (`/v1/manual/approve`, `/v1/drain/kick`, `/v1/drain/run`, `/v1/inbox/approve`,
@@ -3293,6 +3309,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     enforceWriteTiers: true,
   });
   server.on("close", prewarm.stop);
+  server.once("listening", analyticsCache.start);
+  server.on("close", analyticsCache.stop);
   return { server, githubAppReady: routeAssembly.githubAppReady };
 }
 
