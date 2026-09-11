@@ -1,0 +1,62 @@
+- id: W1-T3418
+  title: "THE AUTOMATED RETRO POISONS ITS OWN PREPUBLICATION SUITE — runAutomatedRetroSubprocess sets RMD_SELF_SYNC_DONE=1 for the rmd re-exec, then retro-preflight copies that CLI-only guard into all 284 plan-reading test children; tmp-hygiene refuses every file before it runs, a frontier repair session spends against false evidence, and the identical poisoned retry fails again"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: "operator-session#daemon-lifeguard-2026-09-11"
+  plan_refs: ["W1-T2769", "W1-T3069", "W1-T2870"]
+  files: [src/lib/retro-preflight.ts, test/automated-retro-preflight-scrubs-self-sync.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-11 on the Azure fleet host at origin/main d4b7de5f. The automated parent
+    constructs its child environment in `src/lib/retro-subprocess.ts` with
+    `RMD_SELF_SYNC_DONE: "1"`. That guard is correct for the `rmd retro` re-exec: it prevents the
+    CLI freshness gate from moving the checkout beneath a running daemon action.
+
+    The guard has no meaning in the build/test grandchildren. `commandOptions` in
+    `src/lib/retro-preflight.ts` currently returns `env: { ...process.env }` for both dynamic suite
+    enumeration and the plan-reading test invocation. The test invocation imports
+    `test/setup/tmp-hygiene.ts`, whose first action is to refuse whenever RMD_SELF_SYNC_DONE is
+    present. The adjacent general preflight boundary already encodes the intended rule:
+    `defaultPreflightSpawn` and `runBoundedSuite` delete this same variable before starting a
+    build/test child.
+
+    Production ledger evidence falsifies an ordinary plan-test failure. At 17:56:35Z and again at
+    17:59:08Z, `retro.preflight_failed` records `tests_no_summary`, suite_count 284, and stdout
+    beginning `test setup REFUSED: RMD_SELF_SYNC_DONE is set in this environment`. Between those
+    identical failures, the daemon resumed a frontier repair session for 131 508 ms and recorded
+    2 133 567 input tokens. The terminal subprocess row at 21:33:22Z records another occurrence
+    lasting 1 435 989 ms before exit 1. This is deterministic environment contamination, not a
+    flaky suite or an Architect defect.
+  design: |
+    Scrub RMD_SELF_SYNC_DONE at the retro preflight's one child-environment construction boundary,
+    before either suite enumeration or test execution. Preserve every unrelated inherited
+    variable. Keep the guard on the outer automated `rmd retro` process; moving or deleting it in
+    `retro-subprocess.ts` would reopen the self-sync race this task does not own.
+
+    Reuse the established literal-name discipline in `commit-message.ts` and `ci-parity.ts` rather
+    than importing `self-sync.ts` across a dependency boundary. The preflight must still classify
+    and repair genuine deterministic test failures exactly as it does today.
+  acceptance:
+    - claim: "the automated retro keeps RMD_SELF_SYNC_DONE on its outer rmd re-exec, but suite enumeration and plan-reading tests receive environments with only that guard removed; unrelated inherited variables survive and the clean pass never invokes repair"
+      proof: "unit test: test/automated-retro-preflight-scrubs-self-sync.test.ts"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if current main already removes RMD_SELF_SYNC_DONE before both
+    preflight child calls, or if the production failure excerpt names a different environment.
+    Checked at d4b7de5f: `commandOptions` copies `process.env` unchanged, and the production excerpt
+    names this exact variable before every test file.
+
+    Prove the regression test discriminates by deleting the scrub: both captured child environments
+    must contain the guard and the test must fail. Do not weaken `tmp-hygiene`'s refusal, remove the
+    guard from the outer CLI process, skip the prepublication suite, reinterpret `tests_no_summary`
+    as success, or raise a timeout. Those changes conceal or reintroduce the defect rather than
+    repairing the environment boundary.
+  note: |
+    One concern only: the CLI-only self-sync guard crossing into retro prepublication build/test
+    children. Retro corpus cost, suite selection, retry policy, cadence, and publication authority
+    remain unchanged.
