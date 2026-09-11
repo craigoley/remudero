@@ -2686,9 +2686,6 @@ export function buildShellRoute(
           // Tests and production use the same ledger reader for this server-rendered fragment; an
           // unreadable ledger must render UNKNOWN with the read failure's own reason.
           const lines = idle.readLedger(idle.ledgerPath);
-          // MERGE NOTE: two independent features render into this same idle path — main's console
-          // time series and W1-T3158's run history. Both are computed in all three arms; neither
-          // reads the other, so the union is the whole resolution.
           const now = idle.now?.() ?? new Date();
           panel = renderIdleReasonsHtml(readIdleReasons(lines, now));
           timeSeriesHtml = renderConsoleTimeSeriesHtml(buildConsoleTimeSeries(lines, { nowMs: now.getTime() }));
