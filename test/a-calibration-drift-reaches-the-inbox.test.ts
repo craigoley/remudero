@@ -192,6 +192,43 @@ test("a class above its band but below the population floor raises nothing, and 
   }
 });
 
+test("the DRIFT ledger row carries the rate, the denominator and the members — the within_bands rows never do", () => {
+  // The suite already drives verdictCalibrationDriftLedgerLines over a classification with NOTHING
+  // drifted, which exercises only the within_bands arm. The drifted arm — the row an operator
+  // actually reads when a class goes out of band — had no caller at all, which is what
+  // diff-coverage named. One classification with both arms populated covers the pair.
+  const taskIds = Array.from({ length: MIN_POPULATION_FLOOR }, (_, i) => `W1-T${200 + i}`);
+  const report = fixtureReport({
+    "keyword-floor": fixtureClass({
+      verdictClass: "keyword-floor",
+      total: MIN_POPULATION_FLOOR,
+      revertedCount: 3,
+      revertRate: 0.6, // > the band's 0.15 revert ceiling
+      followupFixRate: 0.1,
+      taskIds,
+    }),
+  });
+  const classification = classifyVerdictDrift(report, DEFAULT_DRIFT_BANDS);
+  assert.equal(classification.drifted.length, 1, "control: the fixture must actually drift one class");
+
+  const lines = verdictCalibrationDriftLedgerLines(classification, "2026-09-11", report.minPopulationFloor);
+  const drift = lines.find((l) => l.step === "verdict_calibration.drift");
+  assert.ok(drift, "a drifted class must get its own drift row");
+  assert.equal(drift!.verdict_class, "keyword-floor");
+  assert.equal(drift!.window, "2026-09-11");
+  assert.equal(drift!.total, MIN_POPULATION_FLOOR, "the denominator travels with the row");
+  assert.equal(drift!.revert_rate, 0.6, "the rate that broke the band");
+  assert.equal(drift!.followup_fix_rate, 0.1);
+  assert.deepEqual(drift!.reasons, ["revert-rate"]);
+  assert.deepEqual(drift!.task_ids, taskIds, "the members, so the row is checkable without re-deriving it");
+
+  // ONE ROW PER CLASS, ALWAYS: the two undrifted classes still report, and a drift row must not
+  // carry the floor field that only a below-floor within_bands row earns.
+  assert.equal(lines.length, 3);
+  assert.equal(lines.filter((l) => l.step === "verdict_calibration.within_bands").length, 2);
+  assert.equal(drift!.population_floor, undefined, "the floor belongs to below-floor rows, not drift rows");
+});
+
 test("a genuinely clean measured pass (population at the floor, rate within its band) reports within-bands, not below-population-floor", () => {
   const report = fixtureReport({
     "degraded-arm": fixtureClass({
