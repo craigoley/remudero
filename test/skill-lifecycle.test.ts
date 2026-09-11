@@ -409,6 +409,16 @@ test("W1-T3413 mutation rejects arbitrary removal", () => {
   const skillsDir = join(root, ".claude", "skills");
   const skillPath = approveSkill(skillsDir);
   const otherPath = approveSkill(skillsDir, "other");
+  const missingPath = applySkillLifecycleRemoval(
+    root,
+    {
+      kind: "skill-retirement",
+      skillName: "procedure",
+      skillPath: ".claude/skills/procedure/SKILL.md",
+      evidenceFingerprint: "missing",
+    },
+    { approved: () => true, exists: () => false },
+  );
   const badPath = applySkillLifecycleRemoval(root, {
     kind: "skill-retirement",
     skillName: "procedure",
@@ -422,6 +432,7 @@ test("W1-T3413 mutation rejects arbitrary removal", () => {
     evidenceFingerprint: "bad",
   });
 
+  assert.deepEqual(missingPath, { ok: false, reason: "missing .claude/skills/procedure/SKILL.md" });
   assert.equal(badPath.ok, false);
   assert.equal(badName.ok, false);
   assert.equal(existsSync(skillPath), true);
