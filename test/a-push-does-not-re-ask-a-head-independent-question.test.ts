@@ -93,7 +93,7 @@ test("a head-independent producer firing twice at DIFFERENT head shas opens ONE 
   assert.equal(rows.filter((row) => row.step === "escalation.deduped").length, 1);
 });
 
-test("a head-DEPENDENT producer firing twice at different shas still opens TWO issues", () => {
+test("a head-DEPENDENT producer dedups only while the head sha stays the same", () => {
   const issues = fakeIssueStore();
   const path = ledgerPath();
   const prUrl = "https://github.com/craigoley/remudero/pull/500";
@@ -112,16 +112,25 @@ test("a head-DEPENDENT producer firing twice at different shas still opens TWO i
       taskId: "W1-T195",
       summary: `blocked_review fix rung exhausted (2 strike(s)) - ${prUrl}`,
       detail: "This check result is tied to the exact commit under review.",
-      headSha: "2222222b",
+      headSha: "1111111a",
     }),
     { issues, ledgerPath: path, runId: "RUN-2" },
   );
+  const third = escalate(
+    escalation({
+      taskId: "W1-T195",
+      summary: `blocked_review fix rung exhausted (2 strike(s)) - ${prUrl}`,
+      detail: "This check result is tied to the exact commit under review.",
+      headSha: "2222222b",
+    }),
+    { issues, ledgerPath: path, runId: "RUN-3" },
+  );
 
-  assert.notEqual(second, first, "the default still treats a new head as a new operator question");
+  assert.equal(second, first, "the default still dedups the same head");
+  assert.notEqual(third, first, "the default still treats a new head as a new operator question");
   assert.equal(issues.calls.length, 2);
-  assert.equal(issues.comments.length, 0);
-}
-);
+  assert.equal(issues.comments.length, 1);
+});
 
 test("head-independent mode changes only the dedup key, never the rendered issue evidence", () => {
   const body = renderIssueBody(escalation({ headSha: "abcdef12", headDedup: "independent" }));
