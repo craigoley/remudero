@@ -67,7 +67,7 @@ function writePlan(root: string, plan: Plan): string {
   return planPath;
 }
 
-function fakeTraceGithub(): TraceGithub {
+function traceStub(): TraceGithub {
   return { prView: () => null };
 }
 
@@ -116,7 +116,7 @@ function largeBoardFixture(): { deps: ServeDeps; boardDeps: BoardDeps; renderedI
   const planPath = writePlan(root, plan);
   const deps: ServeDeps = {
     board: boardDeps,
-    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: fakeRatifyGateway() },
+    panelGraph: { root, planPath, ledgerPath, github: traceStub(), statusGithub: github, ratify: fakeRatifyGateway() },
     ledgerPath,
     issues: fakeIssueCloser(),
     fleetControlRoot: root,
