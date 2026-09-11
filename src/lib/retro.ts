@@ -920,23 +920,77 @@ function ownModelOf(r: LedgerRecord): string | undefined {
   return typeof r.model === "string" && r.model.length > 0 ? r.model : undefined;
 }
 
-/** run_id -> the model that implemented it: `implement.done`'s own key first, else `run.start`'s
- *  `mount.model`. The `verdict` row carries neither. Why: docs/forensics/retro.md (P53). */
-export function runModelIndex(records: LedgerRecord[]): Map<string, string> {
-  const fromDone = new Map<string, string>();
-  const fromStart = new Map<string, string>();
-  for (const r of records) {
-    if (typeof r.run_id !== "string") continue;
-    if (r.step === "implement.done") {
-      const m = ownModelOf(r);
-      if (m) fromDone.set(r.run_id, m);
-    } else if (r.step === "run.start") {
-      const mount = r.mount;
-      const m = mount && typeof mount === "object" ? (mount as { model?: unknown }).model : undefined;
-      if (typeof m === "string" && m.length > 0) fromStart.set(r.run_id, m);
+function servedModelOf(r: LedgerRecord): string | undefined {
+  return typeof r.served_model === "string" && r.served_model.length > 0 ? r.served_model : undefined;
+}
+
+/** Where {@link runModelAttribution} sourced a run's model, most-authoritative first: a served
+ *  model beats a resolved one, and a `verdict` row (the terminal, run-owning record) beats
+ *  `implement.done` (rotation-bounded) beats `run.start`'s nested `mount.model` (the mount that
+ *  was RESOLVED before dispatch, never necessarily the one that SERVED — provider routing and
+ *  model-health fallbacks can substitute a different model; W1-T2704, W1-T2572). */
+export const MODEL_ATTRIBUTION_SOURCES = [
+  "verdict.served_model",
+  "verdict.model",
+  "implement.done.served_model",
+  "implement.done.model",
+  "run.start.mount.model",
+] as const;
+export type ModelAttributionSource = (typeof MODEL_ATTRIBUTION_SOURCES)[number];
+
+/** One run's attributed model, plus WHICH of {@link MODEL_ATTRIBUTION_SOURCES} supplied it — so a
+ *  reader can tell "the model that actually served this call" from "the mount that was merely
+ *  resolved for it" instead of only ever seeing the resolved-looking string either way. */
+export interface RunModelAttribution {
+  model: string;
+  source: ModelAttributionSource;
+}
+
+/** run_id -> the model that earned its verdict, in PRIORITY order (highest first):
+ *  `verdict.served_model` > `verdict.model` > `implement.done.served_model` >
+ *  `implement.done.model` > `run.start.mount.model` (W1-T3080). Before this task the `verdict`
+ *  row carried neither key and `implement.done` was shed by rotation before this join ever saw
+ *  it (docs/forensics/retro.md, P53) — both writer-side gaps this task's companion `run-task.ts`/
+ *  `ledger.ts` changes close, so this reader now finds real rows to prefer over the guessed
+ *  fallback. */
+export function runModelAttribution(records: LedgerRecord[]): Map<string, RunModelAttribution> {
+  // Lowest priority first, so a later `.set` for the SAME run_id overwrites an earlier, weaker one
+  // — mirrors the `new Map([...low, ...high])` idiom this function replaces, without allocating
+  // one throwaway Map per source.
+  const bySourceLowToHigh: ModelAttributionSource[] = [...MODEL_ATTRIBUTION_SOURCES].reverse();
+  const result = new Map<string, RunModelAttribution>();
+  const modelForSource = (r: LedgerRecord, source: ModelAttributionSource): string | undefined => {
+    switch (source) {
+      case "verdict.served_model":
+        return r.step === "verdict" ? servedModelOf(r) : undefined;
+      case "verdict.model":
+        return r.step === "verdict" ? ownModelOf(r) : undefined;
+      case "implement.done.served_model":
+        return r.step === "implement.done" ? servedModelOf(r) : undefined;
+      case "implement.done.model":
+        return r.step === "implement.done" ? ownModelOf(r) : undefined;
+      case "run.start.mount.model": {
+        if (r.step !== "run.start") return undefined;
+        const mount = r.mount;
+        const m = mount && typeof mount === "object" ? (mount as { model?: unknown }).model : undefined;
+        return typeof m === "string" && m.length > 0 ? m : undefined;
+      }
+    }
+  };
+  for (const source of bySourceLowToHigh) {
+    for (const r of records) {
+      if (typeof r.run_id !== "string") continue;
+      const model = modelForSource(r, source);
+      if (model) result.set(r.run_id, { model, source });
     }
   }
-  return new Map([...fromStart, ...fromDone]);
+  return result;
+}
+
+/** run_id -> the model that implemented it, projected from {@link runModelAttribution} to the
+ *  plain string shape `architectLaneShare`'s join has always used. */
+export function runModelIndex(records: LedgerRecord[]): Map<string, string> {
+  return new Map([...runModelAttribution(records)].map(([runId, a]) => [runId, a.model]));
 }
 
 function laneSpendOf(lane: string, step: string, rows: LedgerRecord[], byRun: ReadonlyMap<string, string>): LaneSpend {
