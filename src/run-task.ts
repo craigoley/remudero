@@ -132,10 +132,12 @@ import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
-import { isHolderStale, readFileIfExists } from "./lib/fs-race-safe.js";
+import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { renderAnchorBlock } from "./lib/compaction.js";
+import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
+export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
   FIX_MODE_RULES,
   deriveFixMode,
@@ -208,8 +210,6 @@ import { buildProjectInit, parseProjectInitArgs } from "./lib/project-init.js";
 import {
   OnboardError,
   parseOnboardArgs,
-  realOnboardFsDeps,
-  realOnboardGhGateway,
   resolveTargetOwnerRepo,
   runOnboardInventory,
   type OnboardFsDeps,
@@ -217,8 +217,6 @@ import {
 } from "./lib/onboard/inventory.js";
 import {
   parseReconArgs,
-  realReconFsDeps,
-  realReconGhGateway,
   RECON_LENSES,
   RECON_PHASE,
   ReconError,
@@ -236,7 +234,6 @@ import {
 import {
   loadOnboardSessionState,
   parseSessionArgs,
-  realSessionFsDeps,
   runOnboardSession,
   SESSION_PHASE,
   SessionError,
@@ -245,9 +242,6 @@ import {
 } from "./lib/onboard/session.js";
 import {
   parseSynthesizeArgs,
-  realSynthesizeFsDeps,
-  realSynthesizeGhGateway,
-  realSynthesizeGitGateway,
   runOnboardSynthesize,
   SYNTHESIZE_PHASE,
   SynthesizeError,
@@ -309,7 +303,7 @@ import {
 import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
-import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
 import {
   assessInstallForDeploy,
@@ -537,6 +531,7 @@ import {
   draftAttemptKey,
   draftsDueOnDaemon,
   decideDraftDeferral,
+  declinedReasonInLedger,
   deferralFromOutcomes,
   parseDraftDeferralCache,
   mergeDraftCaches,
@@ -1339,6 +1334,7 @@ import {
   activeWorkerCount,
   cacheTokenLedgerFields,
   capStderrExcerpt,
+  REPORT_EXCERPT_CAP,
   STDERR_EXCERPT_CAP,
   noPrReportExcerpt,
   foreignTreeStandDownReason, listRegisteredWorktrees,
@@ -1420,7 +1416,6 @@ import {
   isQuietHours,
   pauseDetail,
   pendingKicks,
-  realSharedPauseGitDeps,
   requestPause,
   requestStop,
   resumeFleet,
@@ -1454,6 +1449,13 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 export { resolveRepoRoot };
+let composedRealGraph: ComposedRealGraph | undefined;
+
+function realDeps(): ComposedRealGraph {
+  composedRealGraph ??= composeRealDeps({ repoRoot });
+  return composedRealGraph;
+}
+
 // `unknownArgError` MOVED to ./lib/cli-args.ts — its sibling `commandSyntax` stays here,
 // anchored to the `commandSpec`/`COMMANDS` registry it reads. Re-exported below for
 // test/run-task.test.ts's existing import. `flagValue` (W1-T2888) joined it for the identical
@@ -8640,20 +8642,29 @@ export async function runFixRung(opts: {
             constraint: opts.constraint,
           };
     const fixMode = deriveFixMode(evidence);
-    const prompt = renderFixPrompt({
-      task: opts.task,
-      round: attempt,
-      branch: opts.branch,
-      evidence,
-      // W1-T2607: the SAME baseline captured above (before this invocation's first strike) that
-      // fixRungScopeStandDownReason's pre-strike gate already exempts — so the worker is told
-      // which of its own branch's out-of-scope paths are inherited, not re-derived a second way.
-      baselineDiffFiles,
-      // W1-T2653: the SAME list just computed above and already passed into
-      // `fixRungScopeStandDownReason` for this round's scope gate — instruction and enforcement
-      // read one shared value, never two independently derived ones.
-      reachableRemedyFiles,
-    });
+    const prompt = [
+      renderFixPrompt({
+        task: opts.task,
+        round: attempt,
+        branch: opts.branch,
+        evidence,
+        // W1-T2607: the SAME baseline captured above (before this invocation's first strike) that
+        // fixRungScopeStandDownReason's pre-strike gate already exempts — so the worker is told
+        // which of its own branch's out-of-scope paths are inherited, not re-derived a second way.
+        baselineDiffFiles,
+        // W1-T2653: the SAME list just computed above and already passed into
+        // `fixRungScopeStandDownReason` for this round's scope gate — instruction and enforcement
+        // read one shared value, never two independently derived ones.
+        reachableRemedyFiles,
+      }),
+      // W1-T3079: POINT, DO NOT INJECT (design note iii) — spliced onto the rendered prompt here
+      // rather than inside `renderFixPrompt` itself (see the "Worker transcript archive" section
+      // above `runTask` for why). Names this task's predecessor transcript path(s), newest
+      // first, EXCLUDING this rung's own run; empty on a task's first fix rung.
+      ...predecessorTranscriptPromptLines(
+        predecessorTranscriptPaths(opts.config.root, opts.taskId, { excludeRunId: opts.runId }),
+      ),
+    ].join("\n");
     // W1-T199: TAG THE STRIKE WITH THE VERDICT REGIME IT WAS SPENT AGAINST. A strike
     // spent when no proof could execute is a strike against KEYWORD NOISE; one spent
     // when the floor actually ran proofs is a strike against EVIDENCE. Untagged
@@ -8845,6 +8856,25 @@ export async function runFixRung(opts: {
       // rather than `undefined` when the spawn configured no cap.
       ...(fixResult.maxTurns === undefined ? {} : { max_turns: fixResult.maxTurns }),
     });
+
+    // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
+    // above `runTask`. Design note (i): "EVERY FIX WORKER EXIT" — keyed on `attempt` (this
+    // round's own 1-based counter, unaffected by whether the round turned out to be a retrigger
+    // or a real strike) so each round's transcript gets its own file rather than overwriting the
+    // previous round's, the way the implement/diagnose archives above deliberately do.
+    archiveWorkerTranscript(
+      {
+        root: opts.config.root,
+        taskId: opts.taskId,
+        runId: opts.runId,
+        rung: `fix-${attempt}`,
+        text: workerTranscript(fixResult),
+        model: opts.mount.model,
+        verdict: fixResult.subtype,
+        headSha: expectedHeadShaForPush,
+      },
+      deps.log,
+    );
 
     // The fix rung's own footer carries the same '## Follow-ups' invitation (renderFixPrompt
     // above); PR provenance included (the fix rung always has one).
@@ -9422,6 +9452,31 @@ export interface WorkerErrorVerdict {
     /** W1-T35 named columns — see {@link cacheTokenLedgerFields}. */
     cache_read_input_tokens: number;
     cache_creation_input_tokens: number;
+  };
+}
+
+/**
+ * `{ model, served_model, routed_model }` for a terminal `verdict` row — the ONE helper every
+ * terminal `verdict` writer in `runTaskBody` spreads (W1-T3080), so the model that actually
+ * SERVED a call — not just the mount RESOLVED for it — reaches the row the class-routing
+ * decision (W1-T167) reads. `routed_model` rides along only when present, the same "absent
+ * when unset" discipline {@link workerLedgerFields} already keeps.
+ *
+ * `r === null` names a PRE-SPAWN refusal (e.g. a containment/isolation preflight failure, or a
+ * worker abandoned before its completion envelope arrived) — no worker outcome exists to read a
+ * model off, so `model`/`served_model` are written `null` explicitly rather than omitted:
+ * absent means "not written"; `null` means "checked, no worker ran" (P48).
+ */
+function terminalVerdictFields(r: WorkerResult | null): {
+  model: string | null;
+  served_model: string | null;
+  routed_model?: string;
+} {
+  if (!r) return { model: null, served_model: null };
+  return {
+    model: r.model,
+    served_model: r.servedModel ?? null,
+    ...(r.routedModel ? { routed_model: r.routedModel } : {}),
   };
 }
 
@@ -10888,6 +10943,198 @@ export function reportWorkerSourceSizeFollowup(
   }
 }
 
+// ── Worker transcript archive (W1-T3079) ────────────────────────────────────────────────────
+// MASTER-PLAN §Self-improvement promises "every worker session transcript is archived per task;
+// fix/diagnose workers may read their predecessors' transcripts before acting" (Gas Town's
+// "seance" pattern, done as plain files). Before this, `workerTranscript` (lib/worker.ts) lived
+// only in memory for the run that produced it — a fix worker's sole window into what a
+// predecessor tried was the CI tail plus the unmet criteria, never the predecessor's own
+// reasoning. This is the ARCHIVE half: one plain markdown file per worker exit, under
+// `<config.root>/state/transcripts/<taskId>/` — `state/` is already the daemon's gitignored
+// exhaust, the same root `reportWorkerSourceSizeFollowup` and the reap rungs above write under.
+// The POINTER half (`predecessorTranscriptPromptLines`, below) is spliced onto the rendered fix/
+// diagnose prompt at each call site rather than added inside `lib/prompt-render.ts` itself — that
+// file is NOT in this task's declared `files:` scope, and editing its pointer-injection logic
+// there would risk the exact scope-guard mismatch recon flagged as a follow-up risk.
+
+/** Newest-N-per-task retention (design note ii): a growth ceiling from the very first write,
+ *  never an unbounded archive. */
+export const TRANSCRIPT_RETENTION_DEFAULT = 5;
+
+/** PRIMARY CONTROL (W1-T1266): the ONLY thing bounding how large one archived transcript file can
+ *  grow — nothing upstream of {@link archiveWorkerTranscript} caps `text` first. Scaled off
+ *  {@link REPORT_EXCERPT_CAP} (design note ii names it as the size-cap primitive to scale from) —
+ *  a full worker transcript spans many turns, not the one closing report that cap bounds, so this
+ *  is 10x rather than the identical literal. */
+export const TRANSCRIPT_EXCERPT_CAP = REPORT_EXCERPT_CAP * 10;
+
+export function transcriptsDirFor(root: string, taskId: string): string {
+  return join(root, "state", "transcripts", taskId);
+}
+
+export function transcriptPathFor(root: string, taskId: string, runId: string, rung: string): string {
+  return join(transcriptsDirFor(root, taskId), `${runId}.${rung}.md`);
+}
+
+/** One archived transcript's identity, read back off disk — never re-derived from a filename
+ *  regex a second way at any call site. */
+export interface ArchivedTranscript {
+  path: string;
+  runId: string;
+  rung: string;
+  mtimeMs: number;
+}
+
+const TRANSCRIPT_FILENAME_RE = /^(.+)\.([^.]+)\.md$/;
+
+/** Every transcript archived for `taskId`, NEWEST FIRST — ranked by the write's own mtime, never
+ *  a parsed-filename guess. Empty (never throws) when the task has no archive yet or the
+ *  directory is unreadable: a predecessor pointer that cannot be read is absence, not a reason to
+ *  fail the dispatch that was about to consult it. */
+export function listArchivedTranscripts(root: string, taskId: string): ArchivedTranscript[] {
+  let names: string[];
+  let dir: string;
+  try {
+    // `transcriptsDirFor` itself joins `root` — folded into this SAME try so a caller whose
+    // `config.root` is missing/malformed (a stub `Config` fixture that never touched a real
+    // filesystem path before this task existed) degrades to "no predecessor" exactly like an
+    // unreadable directory, never a throw a prompt-render call site would have to guard against.
+    dir = transcriptsDirFor(root, taskId);
+    names = readdirSync(dir);
+  } catch {
+    // ENOENT (no archive yet, the common case) or any other unreadable-root/-directory error:
+    // absence, never a throw over a task that has simply never had a worker exit archived for it.
+    return [];
+  }
+  const out: ArchivedTranscript[] = [];
+  for (const name of names) {
+    const match = TRANSCRIPT_FILENAME_RE.exec(name);
+    if (!match) continue;
+    const path = join(dir, name);
+    try {
+      out.push({ path, runId: match[1], rung: match[2], mtimeMs: statSync(path).mtimeMs });
+    } catch {
+      // Removed between readdir and stat (a concurrent write, the prune pass below) — simply
+      // absent from this read, never a throw over a race that resolves itself.
+    }
+  }
+  out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return out;
+}
+
+/** Deletes every archived transcript for `taskId` beyond the newest `keep` (design note ii: "keep
+ *  the newest N per task... never a growth with no ceiling"). Best-effort per file — one unlink
+ *  failure never blocks the rest. Returns the paths actually removed. */
+export function pruneArchivedTranscripts(
+  root: string,
+  taskId: string,
+  keep: number = TRANSCRIPT_RETENTION_DEFAULT,
+): string[] {
+  const stale = listArchivedTranscripts(root, taskId).slice(Math.max(keep, 0));
+  const removed: string[] = [];
+  for (const t of stale) {
+    try {
+      unlinkSync(t.path);
+      removed.push(t.path);
+    } catch {
+      // best-effort — see doc above.
+    }
+  }
+  return removed;
+}
+
+/**
+ * Archive ONE worker's joined transcript (design note i: "at implement.done, diagnose.worker_done
+ * AND EVERY FIX WORKER EXIT"). Atomic write — temp + rename via {@link writeAtomic}, the SAME
+ * primitive the ledger rotation and every other durable state file in this repo already uses
+ * (Standing rule 23) — front-matter first (run id, rung, model, verdict-so-far, head sha), then
+ * the joined transcript capped at {@link TRANSCRIPT_EXCERPT_CAP}. Ledgers exactly one
+ * `transcript.archived` row (design note iv) and prunes this task's archive back to `retention`
+ * (design note ii) in the SAME call — never a separate reap pass a caller could forget to wire.
+ * Best-effort end to end: a write failure degrades to a `transcript.archive_error` ledger row
+ * rather than failing the worker's own run, the same discipline every sibling boot-reap rung in
+ * this file already takes.
+ */
+export function archiveWorkerTranscript(
+  opts: {
+    root: string;
+    taskId: string;
+    runId: string;
+    rung: string;
+    text: string;
+    model?: string;
+    verdict?: string;
+    headSha?: string;
+    retention?: number;
+  },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): { path: string; bytes: number } | undefined {
+  try {
+    const capped = capStderrExcerpt(opts.text ?? "", TRANSCRIPT_EXCERPT_CAP);
+    const frontMatter = [
+      "---",
+      `run_id: ${opts.runId}`,
+      `rung: ${opts.rung}`,
+      `model: ${opts.model ?? "unknown"}`,
+      `verdict: ${opts.verdict ?? "unknown"}`,
+      `head_sha: ${opts.headSha ?? "unknown"}`,
+      "---",
+      "",
+    ].join("\n");
+    const content = `${frontMatter}${capped}\n`;
+    const path = transcriptPathFor(opts.root, opts.taskId, opts.runId, opts.rung);
+    const bytes = Buffer.byteLength(content, "utf8");
+    writeAtomic(path, content, { tmpTag: "transcript" });
+    log("transcript.archived", { task_id: opts.taskId, run_id: opts.runId, rung: opts.rung, path, bytes });
+    pruneArchivedTranscripts(opts.root, opts.taskId, opts.retention ?? TRANSCRIPT_RETENTION_DEFAULT);
+    return { path, bytes };
+  } catch (error) {
+    log("transcript.archive_error", {
+      task_id: opts.taskId,
+      run_id: opts.runId,
+      rung: opts.rung,
+      reason: String((error as Error)?.message ?? error),
+    });
+    return undefined;
+  }
+}
+
+/** The POINTER half (design note iii): the newest predecessor transcript path(s) for `taskId`,
+ *  EXCLUDING `excludeRunId` (this dispatch's own run — never point a worker at itself), newest
+ *  first, capped at `limit`. Retrieval, never injection — the whole-file-injection anti-pattern
+ *  the learnings store already avoids (this task's own design note). */
+export function predecessorTranscriptPaths(
+  root: string,
+  taskId: string,
+  opts: { excludeRunId?: string; limit?: number } = {},
+): string[] {
+  const limit = opts.limit ?? TRANSCRIPT_RETENTION_DEFAULT;
+  return listArchivedTranscripts(root, taskId)
+    .filter((t) => t.runId !== opts.excludeRunId)
+    .slice(0, limit)
+    .map((t) => t.path);
+}
+
+/**
+ * Renders the ONE line design note (iii) asks the fix/diagnose prompt to gain, spliced onto the
+ * already-rendered prompt at its call site (see this section's header doc for why the splice
+ * happens here rather than inside `lib/prompt-render.ts`). Empty — never a line naming nothing —
+ * when `paths` is empty, so a task's FIRST fix/diagnose round costs nothing extra and names no
+ * predecessor (the falsifier this task ships with: remove this call and the positive fixture
+ * must fail while the archive write still passes).
+ */
+export function predecessorTranscriptPromptLines(paths: readonly string[]): string[] {
+  if (paths.length === 0) return [];
+  return [
+    "",
+    "PREDECESSOR TRANSCRIPT(S) (W1-T3079 — the 'seance' pattern): a prior worker on this task " +
+      "left a session transcript at the path(s) below, NEWEST FIRST. Read the newest one before " +
+      "acting — it is the record of what was already tried, including what failed and why; " +
+      "repeating it blind is the second-strike failure this line exists to prevent.",
+    ...paths.map((p) => `- ${p}`),
+  ];
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -11485,7 +11732,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     } catch (e) {
       log("worktree.remove.error", { on: `${stage}.error`, error: String((e as Error)?.message ?? e) });
     }
-    log("verdict", v.ledger);
+    log("verdict", { ...v.ledger, ...terminalVerdictFields(r) });
     say(
       `verdict: ${v.verdict} (${r.subtype}) at ${stage} · ${r.numTurns} turns · notional $${costUsd.toFixed(4)}`,
     );
@@ -11555,6 +11802,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(e.childEnvKeys),
         account_label: e.accountLabel,
+        ...terminalVerdictFields(null),
       });
       say(`verdict: blocked_containment — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_containment" };
@@ -11593,6 +11841,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(e.childEnvKeys),
         account_label: e.accountLabel,
+        ...terminalVerdictFields(null),
       });
       say(`verdict: blocked_isolation — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_isolation" };
@@ -12031,6 +12280,32 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // deferred) — both layers are non-fatal absences, so this is a pure
     // superset of the project-only injection that shipped before.
     const learningsDir = projectLearningsHome(repoDir); // W1-T2506: follows the TARGET repo, not the plan's checkout
+    // `recordPath` is REUSED, not re-resolved: it was hoisted above the recon spawn (W1-T2632)
+    // so the SAME lookup now feeds both the recon prompt's pointer line and this CONTEXT block —
+    // one `taskRecordPath`/`workerVisibleRecordPath` computation, three consumers, never a second
+    // anchoring rule. It used to be resolved only here, on the degraded arm, "since recon already
+    // relayed all of this" — but recon was never told WHICH TASK it was reconning, only its
+    // `OBSERVED:` section survives `reconObservedToContext`, and that section can be empty. See
+    // that function's doc.
+    // W1-T2241/W1-T2512: exactly one of these four is ever set, mutually exclusive (see the
+    // recon dispatch above) — `reconMasked` short-circuits the WHOLE branch that could set
+    // `reusedReconArtifact`/`reconDegradedSubtype`/`recon`, so it is checked first even though
+    // it was introduced last.
+    const reconContext = reconMasked
+      ? reconMaskedContextNote(taskId, recordPath, task.acceptance ?? [])
+      : reusedReconArtifact
+        ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath)
+        : reconDegradedSubtype
+          ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
+          : reconObservedToContext(recon!, taskId, recordPath);
+    const learningsSelectionText = [
+      task.title,
+      task.rationale ?? "",
+      task.prompt ?? "",
+      ...(task.context ?? []).map((claim) => claim.claim),
+      ...(task.acceptance ?? []).flatMap((criterion) => [criterion.claim, criterion.proof]),
+      reconContext,
+    ];
     // W1-T86 (P12 wipe-test harness): arm B of a wipe-test pair MASKS injection —
     // computeMatchedLearningsForArm("B", ...) returns "" WITHOUT calling any of the
     // load/select/render chain below, so the store is never touched, only the
@@ -12044,6 +12319,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         globalArtifactPath: globalArtifactPath(config),
       },
       taskFiles: task.files,
+      selectionContext: { text: learningsSelectionText },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     });
     // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
@@ -12063,29 +12339,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       matched_ids: learningsResult.selectedIds,
       dropped: learningsResult.droppedIds,
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+      matched_by: learningsResult.matchedBy,
       global_refused_reason: learningsResult.globalRefusedReason,
       masked: !!opts.maskLearnings,
     });
 
     // ── Render + provenance-lint the prompt.
-    // `recordPath` is REUSED, not re-resolved: it was hoisted above the recon spawn (W1-T2632)
-    // so the SAME lookup now feeds both the recon prompt's pointer line and this CONTEXT block —
-    // one `taskRecordPath`/`workerVisibleRecordPath` computation, three consumers, never a second
-    // anchoring rule. It used to be resolved only here, on the degraded arm, "since recon already
-    // relayed all of this" — but recon was never told WHICH TASK it was reconning, only its
-    // `OBSERVED:` section survives `reconObservedToContext`, and that section can be empty. See
-    // that function's doc.
-    // W1-T2241/W1-T2512: exactly one of these four is ever set, mutually exclusive (see the
-    // recon dispatch above) — `reconMasked` short-circuits the WHOLE branch that could set
-    // `reusedReconArtifact`/`reconDegradedSubtype`/`recon`, so it is checked first even though
-    // it was introduced last.
-    const reconContext = reconMasked
-      ? reconMaskedContextNote(taskId, recordPath, task.acceptance ?? [])
-      : reusedReconArtifact
-        ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath)
-        : reconDegradedSubtype
-          ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
-          : reconObservedToContext(recon!, taskId, recordPath);
     // W1-T2761: the `rule_headlines` part — "" (identical to every render before this task)
     // unless `workerRuleHeadlines.enabled` is on AND this isn't a RULES-factor wipe-test arm B.
     // Read from THIS dispatch's own worktree (W1-T501's "the worker's own tree, never the
@@ -12200,6 +12459,33 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // W1-T6: every worker call ledgers the standard telemetry shape.
         ...workerLedgerFields(impl),
       });
+      // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
+      // above `runTask`. Best-effort and keyed on `runId` alone (not per-attempt), so a
+      // transient/diagnose-informed retry's own re-dispatch OVERWRITES the same file rather than
+      // multiplying it: `implement.done` is one archive point per run, unlike the fix rung's
+      // per-strike archive below.
+      let implHeadShaForArchive: string | undefined;
+      try {
+        implHeadShaForArchive = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }).trim();
+      } catch {
+        // best-effort — see comment above.
+      }
+      archiveWorkerTranscript(
+        {
+          root: config.root,
+          taskId,
+          runId,
+          rung: "implement",
+          text: workerTranscript(impl),
+          model: mount.model,
+          verdict: impl.subtype,
+          headSha: implHeadShaForArchive,
+        },
+        log,
+      );
       // implementAttemptOutcome reproduces isTransientResult's/workerErrorVerdict's existing
       // invariants byte-for-byte (see its own doc) and THROWS ImplementBudgetBreach on
       // error_max_budget_usd rather than returning failure — dollars are the hard backstop and
@@ -12218,7 +12504,16 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           maxBudgetUsd: budgetUsd,
           settingsFile,
           config,
-          prompt: renderDiagnosePrompt(task, [workerTranscript(impl), impl.stderr].join("\n")),
+          // W1-T3079: POINT, DO NOT INJECT (design note iii) — names this task's predecessor
+          // transcript path(s) from an EARLIER run (never this run's own just-archived
+          // `implement` transcript, excluded by `runId`), newest first. Empty on a task's first
+          // run: the diagnose prompt is byte-identical to before this task in that case.
+          prompt: [
+            renderDiagnosePrompt(task, [workerTranscript(impl), impl.stderr].join("\n")),
+            ...predecessorTranscriptPromptLines(
+              predecessorTranscriptPaths(config.root, taskId, { excludeRunId: runId }),
+            ),
+          ].join("\n"),
         }),
       );
       log("diagnose.worker_done", {
@@ -12229,6 +12524,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // W1-T6: every worker call ledgers the standard telemetry shape.
         ...workerLedgerFields(d),
       });
+      // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
+      // above `runTask`. `runDiagnoseThenRetry` calls `diagnose` at most once per run, so this
+      // never overwrites a sibling round's file the way the implement archive above can.
+      archiveWorkerTranscript(
+        { root: config.root, taskId, runId, rung: "diagnose", text: workerTranscript(d), model: diagnoseMount.model, verdict: d.subtype },
+        log,
+      );
       return { text: workerTranscript(d) };
     };
 
@@ -12274,6 +12576,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
         reason: `repeated transient API error across ${MAX_TRANSIENT_RETRIES} retries — not a task failure`,
+        ...terminalVerdictFields(impl),
       });
       say(`verdict: blocked_transient — repeated transient API error, not a task failure`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_transient" };
@@ -12464,7 +12767,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         } catch (e) {
           log("worktree.remove.error", { on: "already_satisfied", error: String((e as Error)?.message ?? e) });
         }
-        log("verdict", v.ledger);
+        log("verdict", { ...v.ledger, ...terminalVerdictFields(impl) });
         say(`verdict: already_satisfied — credited via ${v.prUrl} · ${impl.numTurns} turns`);
         return { taskId, runId, prUrl: v.prUrl, merged: true, costUsd, verdict: "already_satisfied" };
       }
@@ -12507,7 +12810,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       } catch (e) {
         log("worktree.remove.error", { on: "no_pr", error: String((e as Error)?.message ?? e) });
       }
-      log("verdict", v.ledger);
+      log("verdict", { ...v.ledger, ...terminalVerdictFields(impl) });
       say(`verdict: no_pr — worker completed without opening a PR · ${impl.numTurns} turns`);
       return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
     }
@@ -12667,6 +12970,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
       });
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
@@ -12675,7 +12979,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // checkPrOwnership). Fails closed and named on mismatch; the PR is left untouched.
     const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), costUsd, impl.accountLabel);
     if (ownership) {
-      log("verdict", ownership.ledger);
+      log("verdict", { ...ownership.ledger, ...terminalVerdictFields(impl) });
       say(
         `verdict: pr_attribution_failed — claimed PR ${prUrl} (branch ${ownership.ledger.claimed_branch ?? "unresolved"}) ` +
           `is not this run's own branch (${branch}) — PR left UNTOUCHED`,
@@ -12725,6 +13029,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
       });
       say(`verdict: blocked_ci (ci ${ci}) — PR left OPEN: ${prUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
@@ -12933,6 +13238,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
           account_label: impl.accountLabel,
+          ...terminalVerdictFields(impl),
         });
         say(`verdict: blocked — fix worker spawn abandoned (wall-clock bound): ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -12946,6 +13252,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
           account_label: impl.accountLabel,
+          ...terminalVerdictFields(impl),
         });
         say(`verdict: blocked — fix rung exhausted (${rung.strikes} strike(s)), escalated: ${rung.issueUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -12983,6 +13290,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
           account_label: impl.accountLabel,
+          ...terminalVerdictFields(impl),
         });
         say(`verdict: blocked — ${termination.phrase}: ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -13119,6 +13427,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
       });
       say(`verdict: blocked — ${irreversible ? "diff classified irreversible" : "CAPPED verdict"}, escalated: ${issueUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -13225,6 +13534,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
       });
       say(`verdict: blocked — risk judge escalated: ${riskJudgeResult.escalationUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -13293,6 +13603,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
       });
       say(`verdict: merged · notional cost $${costUsd.toFixed(4)}`);
       return { taskId, runId, prUrl, merged: true, costUsd, verdict: "merged" };
@@ -13310,6 +13621,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       cost_usd: costUsd,
       billing_mode: billingMode(impl.childEnvKeys),
       account_label: impl.accountLabel,
+      ...terminalVerdictFields(impl),
     });
     say(`verdict: ${terminalVerdict} (${outcome.reason}) — PR left OPEN: ${prUrl}`);
     return { taskId, runId, prUrl, merged: false, costUsd, verdict: terminalVerdict };
@@ -13334,6 +13646,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         last_state: evidence.lastState ?? null,
         last_state_ms: evidence.lastStateMs ?? null,
         cost_usd: costUsd,
+        ...terminalVerdictFields(null),
       });
       say(
         `verdict: failed — worker abandoned after ${Math.round(evidence.elapsedMs / 1000)}s of silence ` +
@@ -13646,40 +13959,6 @@ export function buildBaseProofDir(
 // silently would be worse than not reviewing at all.
 // ────────────────────────────────────────────────────────────────────────────
 
-/** Injected git operations for {@link materializeReviewWorktree} — real
- * callers use the module's own `execFileSync` calls; tests fake them so
- * materialization success/failure is a unit fixture, no real git/network
- * involved. */
-export interface ReviewWorktreeDeps {
-  fetch: (repoDir: string, prNumber: number) => void;
-  addWorktree: (repoDir: string, worktreePath: string, revision: string) => void;
-  revParseHead: (worktreePath: string) => string;
-  /** Best-effort teardown of a worktree THIS attempt itself just created, used
-   * only when a LATER step of the SAME attempt fails (W1-T233: a failed
-   * materialization must leave the workspace exactly as it found it, never
-   * strand what step 1 already created). Optional — defaults to the same
-   * {@link worktreeRemove} every other teardown site in this file uses;
-   * tests override it to observe the cleanup call without touching git. */
-  removeWorktree?: (repoDir: string, worktreePath: string) => void;
-}
-
-const realReviewWorktreeDeps: ReviewWorktreeDeps = {
-  // W1-T2751: fetch GitHub's read-only PR input ref without creating a reusable local ref.
-  // The object becomes available by SHA; neither FETCH_HEAD nor origin/<mutable-branch> is
-  // checkout authority for the review.
-  fetch: (repoDir, prNumber) =>
-    execFileSync(
-      "git",
-      ["-C", repoDir, "fetch", "--quiet", "--no-write-fetch-head", "origin", `refs/pull/${prNumber}/head`],
-      { stdio: "pipe" },
-    ),
-  // NO `checkout -B` and no source-branch ref: the REST-supplied SHA is the exact detached input.
-  addWorktree: (repoDir, worktreePath, revision) =>
-    execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", worktreePath, revision], { stdio: "pipe" }),
-  revParseHead: (worktreePath) =>
-    execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { stdio: "pipe" }).toString().trim(),
-};
-
 /** Named CLASS of a materialization failure (W1-T233) — carried alongside the
  * raw message so a pattern is visible across runs (grep the class) without
  * parsing git's prose: `worktree-collision` (another worktree already holds
@@ -13773,7 +14052,7 @@ export function materializeReviewWorktree(
   repoDir: string,
   prNumber: number,
   headSha: string,
-  deps: ReviewWorktreeDeps = realReviewWorktreeDeps,
+  deps: ReviewWorktreeDeps = realDeps().reviewWorktree,
 ): MaterializeReviewWorktreeResult {
   const worktreePath = join(worktreesDir(config), `review-PR${prNumber}-${Date.now()}`);
   const removeWorktree = deps.removeWorktree ?? worktreeRemove;
@@ -14215,7 +14494,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     materialize: materializeReviewWorktree,
     runReview,
     postReviewPending,
-    fetchHead: realReviewWorktreeDeps.fetch,
+    fetchHead: realDeps().reviewWorktree.fetch,
     executionMode: "deterministic" as const,
     ...deps,
   };
@@ -24211,7 +24490,7 @@ async function drainCommand(
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
         // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
         // own doc for why UNREACHABLE reads as held, never as clear.
-        checkPause: () => checkSharedPause(config.root, realSharedPauseGitDeps(repoRoot)),
+        checkPause: () => checkSharedPause(config.root, realDeps().sharedPauseGit),
         openPrCount, // W1-T172: the governor's WIP-ceiling input on the multi-lane path.
         log,
       },
@@ -25687,7 +25966,7 @@ export async function daemonCommand(
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
         // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
         // own doc for why UNREACHABLE reads as held, never as clear.
-        checkPause: () => checkSharedPause(config.root, realSharedPauseGitDeps(repoRoot)),
+        checkPause: () => checkSharedPause(config.root, realDeps().sharedPauseGit),
         // CODE FRESHNESS — THE PRODUCER W1-T126 NEVER GOT. The consumer has read
         // `deps.checkFreshness` since 2026 and this object never supplied it, so the stale
         // self-restart had fired ZERO times in the Azure daemon's 6,838-row ledger. MEASURED
@@ -26033,7 +26312,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     return 0;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  const deps = realDeployDeps({
+  const deps = realDeps().deployFor({
     installPath: assessment.installRoot,
     stateRoot: config.root,
     daemonLabel: DAEMON_LABEL,
@@ -27035,6 +27314,8 @@ export async function serveCommand(
       secret: githubEventWakeSecret,
       repository: `${self.owner}/${self.repo}`,
       dedupCapacity: githubEventWakePolicy?.values.githubEventWake.dedupCapacity,
+      semanticCheckMode: githubEventWakePolicy?.values.githubEventWake.semanticCheckMode,
+      aggregateCheckNames: githubEventWakePolicy?.values.githubEventWake.aggregateCheckNames,
     },
   });
 
@@ -30239,6 +30520,22 @@ export function runFeedbackDocketRung(
   }
 }
 
+export const MOUNT_RECOMMENDER_CADENCE_POLICY = {
+  kind: "daily-ledger-evidence-accrual",
+  intervalMs: 24 * 60 * 60 * 1000,
+} as const;
+
+function mountRecommenderCadenceMarkerPath(root: string): string {
+  return join(root, "state", "last-mount-recommender.json");
+}
+
+function mountRecommenderNextFireMs(marker: ReturnType<typeof readFeedbackDocketMarker>): number | undefined {
+  if (!marker) return undefined;
+  const last = Date.parse(marker.lastFireIso);
+  if (Number.isNaN(last)) return undefined;
+  return last + MOUNT_RECOMMENDER_CADENCE_POLICY.intervalMs;
+}
+
 /**
  * W1-T2575 — the missing RECOMMENDATION leg (MASTER-PLAN §9, WS-8). `scripts/mount-headroom-
  * sweep.mjs` (W1-T2560, extended W1-T2574) already MEASURES: it groups retained ledger runs into
@@ -30266,15 +30563,39 @@ export async function runMountRecommenderRung(
   config: Config,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: { root?: string; env?: NodeJS.ProcessEnv } = {},
+  deps: {
+    root?: string;
+    env?: NodeJS.ProcessEnv;
+    clock?: Clock;
+    buildMountHeadroomSweep?: (stateDir: string) => { cells: MountHeadroomCell[] };
+  } = {},
 ): Promise<{ filed: number; refused: number }> {
   const root = deps.root ?? repoRoot;
   try {
-    const scriptUrl = pathToFileURL(join(root, "scripts", "mount-headroom-sweep.mjs")).href;
-    const { buildMountHeadroomSweep } = (await import(scriptUrl)) as {
-      buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
-    };
+    const now = (deps.clock ?? systemClock).date();
     const stateDir = join(config.root, "state");
+    const markerPath = mountRecommenderCadenceMarkerPath(config.root);
+    const marker = readFeedbackDocketMarker(markerPath);
+    const nextFireMs = mountRecommenderNextFireMs(marker);
+    if (nextFireMs !== undefined && now.getTime() < nextFireMs) {
+      log("mount_recommendation.skipped", {
+        run_id: runId,
+        cadence_kind: MOUNT_RECOMMENDER_CADENCE_POLICY.kind,
+        interval_ms: MOUNT_RECOMMENDER_CADENCE_POLICY.intervalMs,
+        last_fire_iso: marker?.lastFireIso,
+        next_fire_iso: new Date(nextFireMs).toISOString(),
+      });
+      return { filed: 0, refused: 0 };
+    }
+    writeFeedbackDocketMarker(markerPath, { lastFireIso: now.toISOString() });
+
+    let buildMountHeadroomSweep = deps.buildMountHeadroomSweep;
+    if (!buildMountHeadroomSweep) {
+      const scriptUrl = pathToFileURL(join(root, "scripts", "mount-headroom-sweep.mjs")).href;
+      ({ buildMountHeadroomSweep } = (await import(scriptUrl)) as {
+        buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
+      });
+    }
     const sweep = buildMountHeadroomSweep(stateDir);
     const mounts = loadMounts(mountsPath(root));
     // Derive the objective from the SAME sanctioned environment boundary a real worker crosses:
@@ -31486,7 +31807,7 @@ async function stopCommand(rest: string[]): Promise<number> {
 async function pauseCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const reason = flagValue(rest, "--reason");
-  const info = requestPause(config.root, reason, realSharedPauseGitDeps(repoRoot));
+  const info = requestPause(config.root, reason, realDeps().sharedPauseGit);
   const ledgerPath = ledgerPathFor(config);
   appendLedger(ledgerPath, {
     run_id: `FLEET-${Date.now()}`,
@@ -31512,7 +31833,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
  */
 async function resumeFleetCommand(): Promise<number> {
   const config = loadConfig();
-  const result = resumeFleet(config.root, realSharedPauseGitDeps(repoRoot));
+  const result = resumeFleet(config.root, realDeps().sharedPauseGit);
   const ledgerPath = ledgerPathFor(config);
   appendLedger(ledgerPath, {
     run_id: `FLEET-${Date.now()}`,
@@ -33102,6 +33423,7 @@ export function buildInboxDraftHook(
       const registryPath = join(config.root, "state", "inbox-proposals.json");
       const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
       if (proposals.length === 0) return; // no active proposals — no spend
+      const ledgerPath = ledgerPathFor(config);
 
       const draftsPath = join(config.root, "state", "inbox-drafts.json");
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
@@ -33147,7 +33469,26 @@ export function buildInboxDraftHook(
         }
       }
 
-      const due = draftsDueOnDaemon(proposals, drafts, attempts);
+      let draftReadiness: ReadinessContext | undefined;
+      try {
+        const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+        const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+        const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
+        const ledgerLines = readLedgerLines(ledgerPath);
+        draftReadiness = {
+          plan,
+          isMerged,
+          depsUnobservable,
+          grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
+          openProposalIds: new Set(proposals.map((p) => p.id)),
+          isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
+          isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+        };
+      } catch (e) {
+        log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
+      }
+
+      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftReadiness);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -33157,7 +33498,7 @@ export function buildInboxDraftHook(
       // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
       // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
       // not silence, so the row is written unconditionally.
-      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0);
+      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftReadiness);
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
@@ -35486,9 +35827,9 @@ export async function onboardCommand(rest: string[], deps: OnboardCommandDeps = 
   }
 
   const { fs: fsDep, gh: ghDep, resolveOwnerRepo } = {
-    fs: realOnboardFsDeps,
-    gh: realOnboardGhGateway(),
-    resolveOwnerRepo: resolveTargetOwnerRepo,
+    fs: realDeps().onboard.fs,
+    gh: realDeps().onboard.gh,
+    resolveOwnerRepo: realDeps().onboard.resolveOwnerRepo,
     ...deps,
   };
   const parsed = parseOnboardArgs(rest);
@@ -35622,9 +35963,9 @@ export async function reconCommand(rest: string[], deps: ReconCommandDeps = {}):
   const { targetDir, owner: ownerFlag, repo: repoFlag } = parsed.args;
 
   const { fs: fsDep, gh: ghDep, resolveOwnerRepo } = {
-    fs: realReconFsDeps,
-    gh: realReconGhGateway(),
-    resolveOwnerRepo: resolveTargetOwnerRepo,
+    fs: realDeps().recon.fs,
+    gh: realDeps().recon.gh,
+    resolveOwnerRepo: realDeps().onboard.resolveOwnerRepo,
     ...deps,
   };
 
@@ -35717,7 +36058,7 @@ export async function sessionCommand(rest: string[], deps: SessionCommandDeps = 
     return 2;
   }
   const { targetDir } = parsed.args;
-  const fsDep = deps.fs ?? realSessionFsDeps;
+  const fsDep = deps.fs ?? realDeps().session.fs;
   const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY);
 
   console.log(`### rmd onboard ${targetDir} --phase session`);
@@ -35924,9 +36265,9 @@ export async function synthesizeCommand(rest: string[], deps: SynthesizeCommandD
 
   console.log(`### rmd onboard ${targetDir} --phase synthesize`);
 
-  const fsDep = deps.fs ?? realSynthesizeFsDeps;
-  const gitDep = deps.git ?? realSynthesizeGitGateway();
-  const ghDep = deps.gh ?? realSynthesizeGhGateway();
+  const fsDep = deps.fs ?? realDeps().synthesize.fs;
+  const gitDep = deps.git ?? realDeps().synthesize.git;
+  const ghDep = deps.gh ?? realDeps().synthesize.gh;
   const draftDep = deps.draft ?? defaultSynthesizeDraft();
 
   let result;
@@ -36089,8 +36430,8 @@ export function bundleImportCommand(rest: string[], opts: { registryPath?: strin
 
 /**
  * `rmd bundle export <path>` — THE MISSING EXPORT HALF (W1-T2580, extended by W1-T2702): assembles
- * this checkout's doctrine preamble, its BUDGET-SELECTED project learnings corpus (every entry's
- * provenance intact — never filtered to `share: public`, unlike `rmd learnings export`'s §6
+ * this checkout's doctrine preamble, its BUDGET-SELECTED project learnings corpus (legacy `src`
+ * lineage retained but structured `origin` omitted under the V1 canon — never filtered to `share: public`, unlike `rmd learnings export`'s §6
  * commons transport), the committed worker-settings template's ASSERTED values, and (W1-T2702)
  * every operator-ratified `plan/policy.yaml` row as a proposal, into one deterministic,
  * hash-pinned bundle ({@link buildBundle}, src/lib/bundle.ts) written to `<path>`. Refuses (writes
@@ -36248,31 +36589,20 @@ async function correctCommand(rest: string[]): Promise<number> {
  */
 export const SUMMARY_CHAR_CAP = 100;
 
-interface CommandSpec {
-  /** Exact token matched against argv[2] in main()'s dispatch below. */
-  readonly name: string;
-  /**
-   * Invocation shape ("rmd <name> ..."), no trailing description — what `rmd --help` and
-   * `rmd <cmd> --help` render on the usage line, and what `commandSyntax` returns verbatim for
-   * inline error hints. Stored directly (W1-T2480) instead of recovered at read time from a
-   * combined string by a separator regex: an entry that forgets a separator has nothing to
-   * forget, because this field was never anything but the invocation shape.
-   */
-  readonly syntax: string;
-  /**
-   * One short line (<= SUMMARY_CHAR_CAP characters) printed per command by the top-level
-   * `rmd --help` listing (W1-T2480). A genuinely separate, hand-authored sentence — never a
-   * truncation or a preview of `detail` — so the top-level list stays short without silently
-   * dropping any of the prose `detail` carries in full.
-   */
-  readonly summary: string;
-  /**
-   * Full prose: flag semantics, exit-code tables, PR citations — everything that makes this
-   * registry the trustworthy record it is. Printed in full by `rmd <cmd> --help` and rendered
-   * verbatim into docs/cli-reference.md; never abbreviated or dropped for the top-level listing.
-   */
-  readonly detail: string;
-}
+// CommandSpec MOVED to src/cli/registry.ts (W1-T2893, decomposition step 10) — that file is now
+// the one place a verb's help metadata is DECLARED as a type, alongside CommandHandler,
+// RegisteredCommand, buildRegistry and dispatchCommand, so the registry can carry (and
+// dispatchCommand can resolve) a verb's handler, not just its `--help` text. `COMMANDS` (the
+// literal data array, just below) STAYS here: it is built from `renderFastGateScriptList`, a
+// local function (scripts/rmd-help.mjs also source-scans src/run-task.ts's COMMANDS block
+// directly for the no-SDK-load `rmd --help` path), so only the shared TYPE moved.
+import {
+  type CommandSpec,
+  type CommandHandler,
+  type RegisteredCommand,
+  buildRegistry,
+  dispatchCommand,
+} from "./cli/registry.js";
 
 export type HeavyVerbName = "review" | "dep-review" | "drain" | "daemon";
 
@@ -36689,13 +37019,13 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "learnings",
     syntax: "rmd learnings export <out> | rmd learnings import <file> --pin <hash>",
     summary: "The knowledge-commons transport: export/import opted-in learnings, hash-pinned.",
-    detail: "the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks",
+    detail: "the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. Export always emits `learnings-v2`: its hash binds the public projection, which replaces author `src` and Git locators with fixed redaction values. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks. Exact `learnings-v1`/`learnings-v2` select their hash canon; legacy non-prefixed versions remain V1, while any other `learnings-v*` version is refused.",
   },
   {
     name: "bundle",
     syntax: "rmd bundle export <path> | rmd bundle import <file> --pin <hash>",
     summary: "Export/import a hash-pinned bundle: doctrine, learnings, worker-settings, policy proposals.",
-    detail: "the day-one knowledge bundle (W1-T2580, W1-T992's BYO-subscription consumer; W1-T2702 adds operating limits): export assembles the two mandatory doctrine lines, the BUDGET-SELECTED project learnings corpus (DEFAULT_KNOWLEDGE_BUDGET_CHARS, every entry's provenance intact -- never filtered to `share: public`, unlike `rmd learnings export`'s separate §6 commons transport which stays banked and unchanged), the committed worker-settings template's ASSERTED values (sandbox.enabled/failIfUnavailable/autoAllowBashIfSandboxed, sandbox.network.allowedDomains -- never its raw deny-paths), and every operator-ratified `plan/policy.yaml` row (origin: net-new, or a W1-T2694 ratification pin when that exists) as a proposal, into ONE deterministic, hash-pinned bundle. Refuses (writes nothing) on zero selected entries, a leak-grep tripwire hit (naming the entry), a worker-settings template that fails validation, or unparseable policy YAML. `import <file> --pin <hash>` delegates the learnings/doctrine/worker-settings half to the UNCHANGED `rmd learnings import` (W1-T425), then independently pin-checks and stages the policy proposals into the inbox (`stageBundleProposals`, inbox.ts) for `rmd approve` to ratify -- plan/policy.yaml itself is never written by import, on either side, only by a merged plan PR.",
+    detail: "the day-one knowledge bundle (W1-T2580, W1-T992's BYO-subscription consumer; W1-T2702 adds operating limits): export assembles the two mandatory doctrine lines, the BUDGET-SELECTED project learnings corpus (DEFAULT_KNOWLEDGE_BUDGET_CHARS, legacy `src` lineage retained but structured `origin` omitted under the V1 canon -- never filtered to `share: public`, unlike `rmd learnings export`'s separate §6 commons transport which stays banked and unchanged), the committed worker-settings template's ASSERTED values (sandbox.enabled/failIfUnavailable/autoAllowBashIfSandboxed, sandbox.network.allowedDomains -- never its raw deny-paths), and every operator-ratified `plan/policy.yaml` row (origin: net-new, or a W1-T2694 ratification pin when that exists) as a proposal, into ONE deterministic, hash-pinned bundle. Refuses (writes nothing) on zero selected entries, a leak-grep tripwire hit (naming the entry), a worker-settings template that fails validation, or unparseable policy YAML. `import <file> --pin <hash>` delegates the learnings/doctrine/worker-settings half to the UNCHANGED `rmd learnings import` (W1-T425), then independently pin-checks and stages the policy proposals into the inbox (`stageBundleProposals`, inbox.ts) for `rmd approve` to ratify -- plan/policy.yaml itself is never written by import, on either side, only by a merged plan PR.",
   },
   {
     name: "trace",
@@ -37173,6 +37503,266 @@ export function installUnhandledRejectionGuard(deps: UnhandledRejectionGuardDeps
   return true;
 }
 
+/**
+ * W1-T2893 — every verb's handler, keyed by the same name its COMMANDS entry (above) carries.
+ * This IS the dispatch table `main()` used to encode as a 300-line flat if-ladder (`if (cmd ===
+ * "x") { process.exit(await xCommand(rest)); }`, repeated once per verb) — moved here verbatim,
+ * one map entry per former `if` branch, `process.exit(EXPR)` rewritten to `return EXPR` because a
+ * handler reports its exit code rather than ending the process itself (that stays main()'s
+ * process-boundary job, via {@link dispatchCommand}). A verb whose old branch also gated on `&&
+ * arg` (a required positional) keeps that exact gate inline — same fallthrough result as before,
+ * `USAGE` printed and exit 2, since a missing `cmd === "x"` match and a present-but-argless "x"
+ * both used to land on the SAME bottom-of-ladder fallback.
+ *
+ * None of these closures runs at module load — building this Map only captures references to
+ * the functions it calls (`runTask`, `reviewCommand`, ...), so it is safe regardless of where in
+ * this file each referenced function is itself declared.
+ */
+const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHandler>([
+  [
+    "note",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await noteCommand(rest);
+    },
+  ],
+  [
+    "wipe-test",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await wipeTestCommand(rest);
+    },
+  ],
+  [
+    "run-task",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      const badArg = unknownArgError("run-task", rest.slice(1), [], ["--allow-stale", "--rerun"]);
+      if (badArg) {
+        console.error(badArg + "\n" + USAGE);
+        return 2;
+      }
+      /* c8 ignore next 6 -- entering a real task run mutates git/PR state; runTask itself is tested through injectable deps */
+      const result = await runTask(arg, {
+        allowStale: rest.includes("--allow-stale"),
+        rerun: rest.includes("--rerun"),
+      });
+      console.log("\n" + JSON.stringify(result, null, 2));
+      // c8 ignore next
+      return result.merged ? 0 : 1;
+    },
+  ],
+  [
+    "review",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      /* c8 ignore next 2 -- dispatch glue enters GitHub-backed reviewCommand; reviewCommand has injectable tests */
+      await loadHeavyVerb("review");
+      return await reviewCommand(arg, rest.slice(1));
+    },
+  ],
+  ["merge-hold", (rest) => mergeHoldCommand(rest)],
+  [
+    "dep-review",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      /* c8 ignore next 2 -- dispatch glue enters GitHub-backed depReviewCommand; depReviewCommand has injectable tests */
+      await loadHeavyVerb("dep-review");
+      return await depReviewCommand(arg, rest.slice(1));
+    },
+  ],
+  [
+    "receipt",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await receiptCommand(arg, rest.slice(1), { repoRoot, resolveOwnerRepo });
+    },
+  ],
+  [
+    "replay",
+    (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return replayCommand(arg, rest[1], rest.slice(2), { usage: USAGE, commandSyntax: commandSyntax("replay") });
+    },
+  ],
+  ["authority", (rest) => authorityCommand(rest)],
+  ["lint-plan", async (rest) => await lintPlanCommand(rest)],
+  ["plan-reconcile", async (rest) => await planReconcileCommand(rest)],
+  ["proof-queue-audit", async (rest) => await proofQueueAuditCommand(rest)],
+  ["preflight", async (rest) => await preflightCommand(rest)],
+  ["emissions", (rest) => emissionsCommand(rest)],
+  ["check-proof", (rest) => checkProofCommand(rest)],
+  ["reap-branches", (rest) => reapBranchesCommand(rest)],
+  ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
+  ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
+  ["hand-runs", (rest) => handRunsCommand(rest)],
+  ["ci-failures", (rest) => ciFailuresCommand(rest)],
+  ["census-membership", (rest) => censusMembershipCommand(rest)],
+  ["caller-sweep", (rest) => callerSweepCommand(rest)],
+  ["ci-learning", (rest) => ciLearningCommand(rest)],
+  ["rule-efficacy", (rest) => ruleEfficacyCommand(rest)],
+  ["coverage-improve", (rest) => coverageImproveCommand(rest)],
+  ["verdict-calibration", (rest) => verdictCalibrationCommand(rest)],
+  ["autonomy-rate", (rest) => autonomyRateCommand(rest)],
+  ["replay-goldens", async (rest) => await replayGoldensCommand(rest)],
+  ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
+  ["next-task-id", async (rest) => await nextTaskIdCommand(rest)],
+  [
+    "retro",
+    async (rest) => {
+      // c8 ignore next
+      const encodedAutomatedDecision = process.env[AUTOMATED_RETRO_DECISION_ENV];
+      // c8 ignore next
+      const automated = encodedAutomatedDecision === undefined ? undefined : decodeAutomatedRetroDecision(encodedAutomatedDecision);
+      /* node:coverage ignore next -- real retro execution reads ledger/plan state and may spawn; retroCommand has injectable tests */
+      return await retroCommand(rest, automated ? { automated } : {});
+    },
+  ],
+  [
+    "drain",
+    async (rest) => {
+      // c8 ignore next
+      await loadHeavyVerb("drain");
+      // c8 ignore next
+      return await drainCommand(rest);
+    },
+  ],
+  [
+    "daemon",
+    async (rest) => {
+      await loadHeavyVerb("daemon");
+      return await daemonCommand(rest);
+    },
+  ],
+  ["daemon-plist", async (rest) => await daemonPlistCommand(rest)],
+  ["deploy", async (rest) => await deployCommand(rest)],
+  ["deploy-run", async (rest) => await deployRunCommand(rest)],
+  ["deploy-plist", async (rest) => await deployPlistCommand(rest)],
+  ["install-checkout", async (rest) => await installCheckoutCommand(rest)],
+  ["serve", async (rest) => await serveCommand(rest)],
+  ["relay", async (rest) => await relayConnectCommand(rest)],
+  ["console-url", async (rest) => await consoleUrlCommand(rest, loadConfig())],
+  ["serve-plist", async (rest) => await servePlistCommand(rest)],
+  ["down", async (rest) => await downCommand(rest)],
+  ["up", async (rest) => await upCommand(rest)],
+  ["sync", (rest) => syncCommand(rest)],
+  ["doctor", async (rest) => await doctorCommand(rest, { repoRoot })],
+  ["status", async (rest) => await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
+  ["sweep", async (rest) => await sweepCommand(rest)],
+  [
+    "fix",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await fixCommand(rest);
+    },
+  ],
+  ["stop", async (rest) => await stopCommand(rest)],
+  ["pause", async (rest) => await pauseCommand(rest)],
+  ["resume", async () => await resumeFleetCommand()],
+  ["away", async (rest) => await awayCommand(rest)],
+  [
+    "correct",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await correctCommand(rest);
+    },
+  ],
+  ["escalate", async (rest) => await escalateCommand(rest)],
+  ["notify", async (rest) => await notifyCommand(rest)],
+  ["feedback", async (rest) => await feedbackCommand(rest)],
+  ["triage", async (rest) => await triageCommand(rest)],
+  ["ratify", (rest) => ratifyCommand(rest)],
+  ["digest", async (rest) => await digestCommand(rest)],
+  ["digest-plist", async (rest) => await digestPlistCommand(rest, { usage: USAGE })],
+  ["ops", async (rest) => await opsCommand(rest)],
+  ["alert-fix", async (rest) => await alertFixCommand(rest)],
+  ["issues", async (rest) => await issuesCommand(rest)],
+  ["init", async (rest) => await initCommand(rest)],
+  ["project", async (rest) => await projectCommand(rest)],
+  ["onboard", async (rest) => await onboardCommand(rest)],
+  ["skill", async (rest) => await skillCommand(rest)],
+  ["learnings", (rest) => learningsCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
+  ["bundle", (rest) => bundleCommand(rest)],
+  [
+    "trace",
+    async (rest) =>
+      await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot, resolveOwnerRepo }),
+  ],
+  ["peek", async (rest) => await peekCommand(rest)],
+  ["plan", async (rest) => await planCommand(rest)],
+  ["inbox", async (rest) => await inboxCommand(rest)],
+  [
+    "approve",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await approveCommand(rest);
+    },
+  ],
+  ["verify-human-sweep", async (rest) => await verifyHumanSweepCommand(rest)],
+  ["rule", async (rest) => await ruleCommand(rest)],
+  [
+    "reframe",
+    async (rest) => {
+      const arg = rest[0];
+      if (!arg) {
+        console.error(USAGE);
+        return 2;
+      }
+      return await reframeCommand(rest);
+    },
+  ],
+]);
+
+/**
+ * W1-T2893 — `COMMANDS`' help metadata joined with {@link HANDLERS}, built ONCE at module load.
+ * `buildRegistry` throws immediately if the two have drifted apart (a COMMANDS entry with no
+ * handler, or vice versa is simply impossible to express — HANDLERS only has entries someone
+ * wrote), which is what replaces test/help-registry.test.ts's old source-text scan of main()'s
+ * if-ladder: the drift it used to catch by reading text is now a crash the first time `rmd` runs
+ * at all, main() included.
+ */
+const REGISTRY: readonly RegisteredCommand[] = buildRegistry(COMMANDS, HANDLERS);
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 export async function main(
   // W1-T79/W1-T221: the freshness check is injectable so a `callMain` test can drive the
@@ -37203,7 +37793,9 @@ export async function main(
     /* best-effort by contract — never let housekeeping fail the verb the operator asked for */
   }
   const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
-  const arg = rest[0];
+  // W1-T2893: `arg` (== rest[0]) is no longer read here — each HANDLERS entry that needs it
+  // (registry.ts's REGISTRY, built above) derives its own from `rest`, since the old flat
+  // if-ladder this replaced is gone and this was its only remaining reader in main() itself.
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
   // process regardless of which dispatch arm below (if any) ends up matching `cmd`.
   logCliInvocation(cmd, rest);
@@ -37330,318 +37922,14 @@ export async function main(
     }
     if (freshness.status === "synced") return;
   }
-  // W1-T86: checked directly after the (mandatory, every-call) help preamble above -- NOT
-  // in its "natural" alphabetical/registration spot further down, beside fix. A behavioral
-  // test of THIS dispatch branch must call main() itself (the only way to exercise the
-  // literal `if (cmd === "wipe-test" ...)` lines the diff-coverage gate polices), and
-  // main()'s flat if-ladder means EVERY dispatch check main() reaches before finding its
-  // match gets evaluated too. Sitting first (right after the unavoidable help checks) means
-  // that test evaluates no OTHER sibling's dispatch condition at all.
-  if (cmd === "wipe-test" && arg) {
-    process.exit(await wipeTestCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(...) around the runTask call
-  // cannot carry a DA hit without forking the process; the dispatched logic itself — arg
-  // validation (unknownArgError, incl. --rerun), the already-merged refusal (W1-T319), and
-  // every terminal verdict runTask can return — is unit-tested directly, driving REAL runTask()
-  // calls, in test/run-task.test.ts (same irreducible-glue shape as the sibling emissions/
-  // console-url/down/up/status/away dispatch cases just below).
-  if (cmd === "run-task" && arg) {
-    const badArg = unknownArgError("run-task", rest.slice(1), [], ["--allow-stale", "--rerun"]);
-    if (badArg) {
-      console.error(badArg + "\n" + USAGE);
-      process.exit(2);
-    }
-    const result = await runTask(arg, {
-      allowStale: rest.includes("--allow-stale"),
-      rerun: rest.includes("--rerun"),
-    });
-    console.log("\n" + JSON.stringify(result, null, 2));
-    process.exit(result.merged ? 0 : 1);
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
-  if (cmd === "review" && arg) {
-    await loadHeavyVerb("review");
-    process.exit(await reviewCommand(arg, rest.slice(1)));
-  }
-  // diff-cov: process-boundary — main() only translates mergeHoldCommand's tested return into
-  // process.exit; parsing, attribution, append, read-back and idempotent release are unit-tested.
-  if (cmd === "merge-hold") {
-    process.exit(mergeHoldCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
-  if (cmd === "dep-review" && arg) {
-    await loadHeavyVerb("dep-review");
-    process.exit(await depReviewCommand(arg, rest.slice(1)));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await receiptCommand(arg, rest.slice(1))) cannot carry a DA hit without forking the process; receiptCommand's own logic — the unknown-arg refusal, the trailer resolution/refusal, and the buildReceipt print path — is unit-tested in test/receipt.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
-  if (cmd === "receipt" && arg) {
-    process.exit(await receiptCommand(arg, rest.slice(1), { repoRoot, resolveOwnerRepo }));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(replayCommand(arg, rest[1], rest.slice(2))) cannot carry a DA hit without forking the process; replayCommand's own logic — arg validation, the resolved/refused union branches, and the buildReplay print path — is unit-tested in test/ledger-replay.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/receipt/ledger-grep dispatch cases).
-  if (cmd === "replay" && arg) {
-    process.exit(replayCommand(arg, rest[1], rest.slice(2), { usage: USAGE, commandSyntax: commandSyntax("replay") }));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(authorityCommand(rest)) cannot carry a DA hit without forking the process; authorityCommand's own logic — arg validation, the policy/pins/ledger join, the refused-union branch, and the JSON/table render — is unit-tested in test/authority-table.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/receipt/replay dispatch cases).
-  if (cmd === "authority") {
-    process.exit(authorityCommand(rest));
-  }
-  if (cmd === "lint-plan") {
-    process.exit(await lintPlanCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await proofQueueAuditCommand(rest)) cannot carry a DA hit without forking the process; proofQueueAuditCommand's own logic — arg validation, the open+unmerged population derivation, and the report render — is unit-tested in test/proof-queue-audit.test.ts (same irreducible-glue shape as the sibling lint-plan/emissions dispatch cases).
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await planReconcileCommand(rest)) cannot carry a DA hit without forking the process; planReconcileCommand's own logic is unit-tested in test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts (same irreducible-glue shape as the sibling proof-queue-audit dispatch case below).
-  if (cmd === "plan-reconcile") {
-    process.exit(await planReconcileCommand(rest));
-  }
-  if (cmd === "proof-queue-audit") {
-    process.exit(await proofQueueAuditCommand(rest));
-  }
-  if (cmd === "preflight") {
-    process.exit(await preflightCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(emissionsCommand(rest)) cannot carry a DA hit without forking the process; emissionsCommand's own logic — arg validation, the corpus union, the derivation/attribution and the render — is unit-tested in test/emissions.test.ts (same irreducible-glue shape as the sibling console-url/down/up dispatch cases).
-  if (cmd === "emissions") {
-    process.exit(emissionsCommand(rest));
-  }
-  if (cmd === "check-proof") {
-    process.exit(checkProofCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ledgerGrepCommand(rest)) cannot carry a DA hit without forking the process; ledgerGrepCommand's own logic — arg validation, the archive glob, the zero-archive verdict, and the deduplicated match render — is unit-tested in test/ledger-grep.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(reapBranchesCommand(rest)) cannot carry a DA hit without forking the process; reapBranchesCommand's own logic — arg validation, the empty-listing refusal, the classification and the drift exit — is unit-tested in test/branch-reaper-dry-run.test.ts (same irreducible-glue shape as the sibling ledger-grep dispatch case).
-  if (cmd === "reap-branches") {
-    process.exit(reapBranchesCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ledgerGrepCommand(rest, ...)) cannot carry a DA hit without forking the process; ledgerGrepCommand's own logic is unit-tested in test/report-commands.test.ts (same irreducible-glue shape as the hand-runs dispatch case below).
-  if (cmd === "ledger-grep") {
-    process.exit(ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") }));
-  }
-  // diff-cov: process-boundary — main() only translates ledgerCompactCommand's tested return into
-  // process.exit; selection, dry-run, collision refusal, atomic replacement and cleanup are unit-tested.
-  if (cmd === "ledger-compact") {
-    process.exit(ledgerCompactCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(handRunsCommand(rest)) cannot carry a DA hit without forking the process; handRunsCommand's own logic — arg validation, the state-dir resolution, the refused/measured render — is unit-tested in test/hand-run-census.test.ts (same irreducible-glue shape as the sibling ledger-grep dispatch case).
-  if (cmd === "hand-runs") {
-    process.exit(handRunsCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ciFailuresCommand(rest)) cannot carry a DA hit without forking the process; ciFailuresCommand's own logic — arg validation, the --days bound, the window load and every corpus status render — is unit-tested in test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts (same irreducible-glue shape as the sibling rule-efficacy/check-proof/emissions dispatch cases).
-  if (cmd === "ci-failures") {
-    process.exit(ciFailuresCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ciLearningCommand(rest)) cannot carry a DA hit without forking the process; ciLearningCommand's own logic — arg validation, the --days bound, the cadence refusal, the window-load failure and every draft/excluded render — is unit-tested in test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts (same irreducible-glue shape as the sibling ci-failures/rule-efficacy/check-proof dispatch cases).
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(censusMembershipCommand(rest)) cannot carry a DA hit without forking the process; censusMembershipCommand's own logic — arg validation, the --base bound, the unreadable-diff arm, and every render path (joining, none, unmodelled) — is unit-tested in test/the-census-map-names-four-suites-and-no-verb-reads-it.test.ts (same irreducible-glue shape as the sibling ci-learning/ci-failures/rule-efficacy dispatch cases).
-  if (cmd === "census-membership") {
-    process.exit(censusMembershipCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(callerSweepCommand(rest)) cannot carry a DA hit without forking the process; callerSweepCommand's own logic — arg validation, the empty-symbol refusal, and the report/--files render paths — is unit-tested in test/the-caller-sweep-stops-at-one-hop.test.ts (same irreducible-glue shape as the sibling census-membership/ci-learning/ci-failures dispatch cases).
-  if (cmd === "caller-sweep") {
-    process.exit(callerSweepCommand(rest));
-  }
-  if (cmd === "ci-learning") {
-    process.exit(ciLearningCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ruleEfficacyCommand(rest)) cannot carry a DA hit without forking the process; ruleEfficacyCommand's own logic — arg validation, the signature-table walk, the PREVENTING/REPEATING/UNMEASURABLE render, and the escalation write — is unit-tested in test/rule-efficacy.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
-  if (cmd === "rule-efficacy") {
-    process.exit(ruleEfficacyCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(coverageImproveCommand(rest)) cannot carry a DA hit without forking the process; coverageImproveCommand's own logic — arg validation, the lcov read failure, and every injectCoverageImprovementTask action (healthy/blocking/no-debt/skipped-duplicate/filed) — is unit-tested in test/coverage-improvement.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep/rule-efficacy dispatch cases).
-  if (cmd === "coverage-improve") {
-    process.exit(coverageImproveCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(verdictCalibrationCommand(rest)) cannot carry a DA hit without forking the process; verdictCalibrationCommand's own logic — arg validation, the ledger+git join, the per-class render and the UNMEASURABLE listing — is unit-tested in test/verdict-calibration.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep/rule-efficacy dispatch cases).
-  if (cmd === "verdict-calibration") {
-    process.exit(verdictCalibrationCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(autonomyRateCommand(rest)) cannot carry a DA hit without forking the process; autonomyRateCommand's own logic — arg validation, the ledger+git join, the zero-touch classification, the per-class render and the touched-merge listing — is unit-tested in test/autonomy-ratchet.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep/rule-efficacy/verdict-calibration dispatch cases).
-  if (cmd === "autonomy-rate") {
-    process.exit(autonomyRateCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(checkAcceptanceCommand(rest)) cannot carry a DA hit without forking the process; checkAcceptanceCommand's own logic — the usage refusal, the unreadable-file refusal, the truncation report, the missing-header report and the clean pass — is unit-tested in test/acceptance-block-diagnostics.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await replayGoldensCommand(rest)) cannot carry a DA hit without forking the process; replayGoldensCommand's own logic — all three refusals, the zero-golden silence, and the recording happy path — is unit-tested in test/the-golden-suite-has-every-piece-except-a-producer.test.ts (same irreducible-glue shape as the sibling check-acceptance/check-proof dispatch cases).
-  if (cmd === "replay-goldens") {
-    process.exit(await replayGoldensCommand(rest));
-  }
-  if (cmd === "check-acceptance") {
-    process.exit(checkAcceptanceCommand(rest));
-  }
-  if (cmd === "next-task-id") {
-    process.exit(await nextTaskIdCommand(rest));
-  }
-  if (cmd === "retro") {
-    const encodedAutomatedDecision = process.env[AUTOMATED_RETRO_DECISION_ENV];
-    const automated = encodedAutomatedDecision === undefined
-      ? undefined
-      : decodeAutomatedRetroDecision(encodedAutomatedDecision);
-    process.exit(await retroCommand(rest, automated ? { automated } : {}));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
-  if (cmd === "drain") {
-    await loadHeavyVerb("drain");
-    process.exit(await drainCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: the lazy load sits between the verb match and process.exit, so it cannot carry a DA hit without forking; loadHeavyVerb's own arms — which module each verb pulls in, and that review/dep-review deliberately share one — are unit-tested in test/help-does-not-load-the-sdk.test.ts.
-  if (cmd === "daemon") {
-    await loadHeavyVerb("daemon");
-    process.exit(await daemonCommand(rest));
-  }
-  if (cmd === "daemon-plist") {
-    process.exit(await daemonPlistCommand(rest));
-  }
-  if (cmd === "deploy") {
-    process.exit(await deployCommand(rest));
-  }
-  if (cmd === "deploy-run") {
-    process.exit(await deployRunCommand(rest));
-  }
-  if (cmd === "deploy-plist") {
-    process.exit(await deployPlistCommand(rest));
-  }
-  if (cmd === "install-checkout") {
-    process.exit(await installCheckoutCommand(rest));
-  }
-  if (cmd === "serve") {
-    process.exit(await serveCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await relayConnectCommand(rest)) cannot carry a DA hit without forking the process; relayConnectCommand's own logic — the argv refusal, the both-or-nothing relay-config check, the local-target port resolution and the ledgered start/stop around a real outbound dial — is unit-tested in test/relay-connect-command.test.ts (same irreducible-glue shape as the sibling console-url dispatch case directly below).
-  if (cmd === "relay") {
-    process.exit(await relayConnectCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await consoleUrlCommand(rest, loadConfig())) cannot carry a DA hit without forking the process; consoleUrlCommand's own logic — the URL assembly, the --write TTY refusal, and all three failure modes — is unit-tested in test/console-url.test.ts (same irreducible-glue shape as the sibling away/pause/resume dispatch cases).
-  if (cmd === "console-url") {
-    process.exit(await consoleUrlCommand(rest, loadConfig()));
-  }
-  if (cmd === "serve-plist") {
-    process.exit(await servePlistCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await downCommand(rest)) cannot carry a DA hit without forking the process; downCommand's own logic — the wind-down sequencing, the reap-wait, the recoverability report, and every idempotency/refusal branch — is unit-tested in test/rmd-down-up.test.ts (same irreducible-glue shape as the sibling console-url/away dispatch cases).
-  if (cmd === "down") {
-    process.exit(await downCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await upCommand(rest)) cannot carry a DA hit without forking the process; upCommand's own logic — install-freshness-first, the off-main refuse, the idempotent load sequencing, and the resume report — is unit-tested in test/rmd-down-up.test.ts (same irreducible-glue shape as the sibling console-url/away dispatch cases).
-  if (cmd === "up") {
-    process.exit(await upCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(syncCommand(rest)) cannot carry a DA hit without forking the process; syncCommand's own logic (arg validation, exit-code translation) and the git-driving classify/preserve/discard/ff-pull logic it wraps (runOperatorSync) are unit-tested directly in test/operator-sync.test.ts (same irreducible-glue shape as the sibling emissions/ledger-grep dispatch cases).
-  if (cmd === "sync") {
-    process.exit(syncCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await statusCommand(rest)) cannot carry a DA hit without forking the process; statusCommand's own logic (arg validation, the queryService closure, --json vs text) plus the read model it calls (buildStatusBoard/renderStatusBoardText) are unit-tested in test/status-board.test.ts (same irreducible-glue shape as the sibling console-url/away/down/up dispatch cases).
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await doctorCommand(rest)) cannot carry a DA hit without forking the process; doctorCommand's own logic (arg refusal, the reader wiring, the exit-code translation) and every judgement it composes (buildDoctorReport and the pure judge* arms) are unit-tested in test/doctor.test.ts (same irreducible-glue shape as the sibling status/console-url dispatch cases).
-  if (cmd === "doctor") {
-    process.exit(await doctorCommand(rest, { repoRoot }));
-  }
-  if (cmd === "status") {
-    process.exit(await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo }));
-  }
-  if (cmd === "sweep") {
-    process.exit(await sweepCommand(rest));
-  }
-  if (cmd === "fix" && arg) {
-    process.exit(await fixCommand(rest));
-  }
-  if (cmd === "stop") {
-    process.exit(await stopCommand(rest));
-  }
-  if (cmd === "pause") {
-    process.exit(await pauseCommand(rest));
-  }
-  if (cmd === "resume") {
-    process.exit(await resumeFleetCommand());
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await awayCommand(rest)) cannot carry a DA hit without forking the process; awayCommand's own logic is unit-tested in test/away-mode-delivery.test.ts (same irreducible-glue shape as the sibling pause/resume/correct dispatch cases).
-  if (cmd === "away") {
-    process.exit(await awayCommand(rest));
-  }
-  if (cmd === "correct" && arg) {
-    process.exit(await correctCommand(rest));
-  }
-  if (cmd === "escalate") {
-    process.exit(await escalateCommand(rest));
-  }
-  if (cmd === "notify") {
-    process.exit(await notifyCommand(rest));
-  }
-  // diff-cov: process-boundary — main() only translates feedbackCommand's tested return into a process exit; capture, validation, append and notification behavior are unit-tested through feedbackCommand directly.
-  if (cmd === "feedback") {
-    process.exit(await feedbackCommand(rest));
-  }
-  if (cmd === "triage") {
-    process.exit(await triageCommand(rest));
-  }
-  if (cmd === "ratify") {
-    process.exit(ratifyCommand(rest));
-  }
-  if (cmd === "digest") {
-    process.exit(await digestCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await digestPlistCommand(rest, ...)) cannot carry a DA hit without forking the process; digestPlistCommand's own logic is unit-tested in test/report-commands.test.ts (same irreducible-glue shape as the ledger-grep dispatch case above).
-  if (cmd === "digest-plist") {
-    process.exit(await digestPlistCommand(rest, { usage: USAGE }));
-  }
-  if (cmd === "ops") {
-    process.exit(await opsCommand(rest));
-  }
-  if (cmd === "alert-fix") {
-    process.exit(await alertFixCommand(rest));
-  }
-  if (cmd === "issues") {
-    process.exit(await issuesCommand(rest));
-  }
-  if (cmd === "init") {
-    process.exit(await initCommand(rest));
-  }
-  if (cmd === "project") {
-    process.exit(await projectCommand(rest));
-  }
-  if (cmd === "onboard") {
-    process.exit(await onboardCommand(rest));
-  }
-  if (cmd === "skill") {
-    process.exit(await skillCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(learningsCommand(rest)) cannot carry a DA hit without forking the process; learningsCommand's own logic — the export/import subcommand routing, arg validation, the privacy/tripwire refusals, and the pin-verified write — is unit-tested directly in test/learnings-commons.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
-  if (cmd === "learnings") {
-    process.exit(learningsCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo }));
-  }
-  // diff-cov: process-boundary — same irreducible-glue shape as the `learnings` dispatch just
-  // above: bundleCommand's own subcommand routing, arg validation, and the pure-builder call are
-  // unit-tested directly in test/bundle-export.test.ts.
-  if (cmd === "bundle") {
-    process.exit(bundleCommand(rest));
-  }
-  if (cmd === "trace") {
-    process.exit(await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot, resolveOwnerRepo }));
-  }
-  if (cmd === "peek") {
-    process.exit(await peekCommand(rest));
-  }
-  if (cmd === "plan") {
-    process.exit(await planCommand(rest));
-  }
-  if (cmd === "inbox") {
-    process.exit(await inboxCommand(rest));
-  }
-  if (cmd === "approve" && arg) {
-    process.exit(await approveCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await verifyHumanSweepCommand(rest)) cannot carry a DA hit without forking the process; the command's own logic — the unknown-arg refusal, the --dry-run report, the real pass's routing and summary — is unit-tested in test/a-verify-human-shard-is-judged.test.ts through its root/config/route/clock seams (same shape as the sibling inbox/approve/receipt dispatch cases).
-  if (cmd === "verify-human-sweep") {
-    process.exit(await verifyHumanSweepCommand(rest));
-  }
-  if (cmd === "rule") {
-    /* c8 ignore next -- process-boundary dispatch; ruleCommand is exercised directly above. */
-    process.exit(await ruleCommand(rest));
-  }
-  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await noteCommand(rest)) cannot carry a DA hit without forking the process; noteCommand's own logic — the usage refusal on a missing id or empty text, the verbatim note write and its ledger step, and the store-failure exit — is unit-tested in test/an-operator-note-reaches-the-docket-from-the-cli.test.ts (same shape as the sibling verify-human-sweep/inbox/approve dispatch cases).
-  if (cmd === "note" && arg) {
-    process.exit(await noteCommand(rest));
-  }
-  if (cmd === "reframe" && arg) {
-    process.exit(await reframeCommand(rest));
-  }
-  console.error(USAGE);
-  process.exit(2);
+  // W1-T2893: every verb's dispatch used to be a flat if-ladder here (one `if (cmd === "x")
+  // { process.exit(await xCommand(rest)); }` per verb, ~300 lines). That ladder is now
+  // src/cli/registry.ts's HANDLERS map (built once, just above) plus dispatchCommand, which
+  // resolves `cmd` against REGISTRY and invokes its handler -- main() keeps only the
+  // process-boundary concerns the task record calls out: the freshness gate above, and the
+  // exit code translation right here.
+  realDeps();
+  process.exit(await dispatchCommand(cmd, rest, REGISTRY, USAGE));
 }
 
 // diff-cov: process-boundary - direct CLI guard; imported tests cover `main()` and
@@ -37679,6 +37967,11 @@ export { commitsAhead };
 // commandSyntax/commandSpec are the same lookup individual command handlers use for their
 // inline usage hints (fix/escalate/notify/project/correct) — no hand-written duplicate text.
 export { COMMANDS, USAGE, commandHelp, commandSpec, commandSyntax, type CommandSpec };
+// Exported for W1-T2893's help-registry test: HANDLERS is the dispatch table dispatchCommand
+// resolves `cmd` against (built just above main()) — export only, logic unchanged. Replaces the
+// old source-text scan of main()'s flat if-ladder (that ladder no longer exists) with a direct
+// structural check that COMMANDS and HANDLERS name exactly the same set of verbs.
+export { HANDLERS };
 // Exported for W1-T2479's agreement-control test: assertVerbScanAgreesWithRegistry is the caller-
 // side check that the emissions census (lib/emissions.ts's deriveCliVerbs) and this file's own
 // COMMANDS registry name the same verbs — export only, logic lives inline in emissionsCommand.

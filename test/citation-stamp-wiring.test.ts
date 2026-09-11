@@ -211,7 +211,7 @@ test("a superseded entry with real matching evidence (both ledger AND git-log) i
     entry("superseded-me", { lifecycle: "superseded", cited: "2099-01-01" }),
     entry("cited-me", { cited: "2020-01-01" }),
   ];
-  const { selected } = selectLearnings(entries, undefined);
+  const { selected } = selectLearnings(entries, ["x"]);
   assert.deepEqual(
     selected.map((e) => e.id),
     ["cited-me"],
@@ -291,7 +291,7 @@ test("a stamped, oversized corpus still hits the hard budget cap and still repor
   const entries: LearningEntry[] = Array.from({ length: 10 }, (_, i) => entry(`e${i}`, { fact: big }));
   const evidence = new Map<string, CitationStamp>(entries.map((e, i) => [e.id, { cited: `2026-08-${10 + i}`, citedCount: 1 }]));
   const stamped = stampCitations(entries, evidence);
-  const { selected, dropped } = selectLearnings(stamped, undefined, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
+  const { selected, dropped } = selectLearnings(stamped, ["x"], DEFAULT_KNOWLEDGE_BUDGET_CHARS);
   assert.ok(dropped.length > 0, "an oversized stamped corpus must still overflow the hard cap");
   assert.equal(selected.length + dropped.length, entries.length, "stamping must not add or remove entries");
   const usedChars = selected.reduce((sum, e) => sum + e.fact.length + 40, 0);

@@ -5,7 +5,14 @@
 // `mount.model`. Joining the row to its run re-attributes the historical corpus with no writer change.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { architectLaneShare, renderArchitectLaneShare, runModelIndex, UNATTRIBUTED_MODEL, type LedgerRecord } from "../src/lib/retro.js";
+import {
+  architectLaneShare,
+  renderArchitectLaneShare,
+  runModelAttribution,
+  runModelIndex,
+  UNATTRIBUTED_MODEL,
+  type LedgerRecord,
+} from "../src/lib/retro.js";
 
 function records(...rows: Record<string, unknown>[]): LedgerRecord[] {
   return rows.map((r) => r as LedgerRecord);
@@ -34,20 +41,37 @@ const CORPUS = records(
   { run_id: "TRIAGE-9", task_id: "TRIAGE-9", step: "triage.synthesized", ts: "2026-09-02T14:00:00.000Z", cost_usd: 1.0 },
 );
 
-test("runModelIndex prefers the implement.done model over run.start's nested mount.model, and reads neither from a verdict row", () => {
+// W1-T3080: extends the join order to prefer a SERVED model over a merely-RESOLVED one, and a
+// `verdict` row's own keys (now written by run-task.ts's `terminalVerdictFields`) over
+// `implement.done`'s. Priority, highest first: verdict.served_model > verdict.model >
+// implement.done.served_model > implement.done.model > run.start.mount.model.
+test("runModelIndex prefers implement.done.served_model over its own sibling implement.done.model, and run.start.mount.model is the last-resort fallback", () => {
   const idx = runModelIndex(CORPUS);
-  assert.equal(idx.get(IMPLEMENT_DONE_RUN), "sonnet", "implement.done wins over run.start's opus");
-  assert.equal(idx.get(START_ONLY_RUN), "sonnet", "run.start.mount.model is the fallback when implement.done rotated away");
+  assert.equal(
+    idx.get(IMPLEMENT_DONE_RUN),
+    "claude-sonnet-5",
+    "served_model (the model that actually served the call) wins over model (sonnet) and over run.start's opus",
+  );
+  assert.equal(idx.get(START_ONLY_RUN), "sonnet", "run.start.mount.model is the fallback when neither implement.done nor verdict carries a model");
   assert.equal(idx.get(BARE_RUN), undefined, "a run.start with no mount yields nothing — never a guess");
   assert.equal(idx.get("TRIAGE-9"), undefined);
 });
 
-test("a model-less verdict row is attributed through its run, the attribution is counted as via-run, and a bare run stays unattributed", () => {
+test("runModelAttribution reports WHICH source supplied the model, not only the model itself", () => {
+  const attribution = runModelAttribution(CORPUS);
+  assert.deepEqual(attribution.get(IMPLEMENT_DONE_RUN), { model: "claude-sonnet-5", source: "implement.done.served_model" });
+  assert.deepEqual(attribution.get(START_ONLY_RUN), { model: "sonnet", source: "run.start.mount.model" });
+  assert.deepEqual(attribution.get(OWN_KEY_RUN), { model: "haiku", source: "verdict.model" }, "OWN_KEY_RUN's verdict row carries its own model key");
+  assert.equal(attribution.get(BARE_RUN), undefined);
+});
+
+test("a model-less verdict row is attributed through its run — preferring the served model — the attribution is counted as via-run, and a bare run stays unattributed", () => {
   const implement = architectLaneShare(CORPUS).comparisonLanes.find((l) => l.lane === "implement")!;
   assert.equal(implement.rows, 4);
   assert.deepEqual(implement.models, [
+    { model: "claude-sonnet-5", rows: 1, viaRun: 1 },
     { model: "haiku", rows: 1 },
-    { model: "sonnet", rows: 2, viaRun: 2 },
+    { model: "sonnet", rows: 1, viaRun: 1 },
     { model: UNATTRIBUTED_MODEL, rows: 1 },
   ]);
 });
@@ -71,7 +95,8 @@ test("a row that carries its own model key is never overridden by its run, and A
 
 test("the rendered table says how many rows were attributed via the run join and redefines unattributed to include the run's rows", () => {
   const rendered = renderArchitectLaneShare(architectLaneShare(CORPUS));
-  assert.match(rendered, /sonnet×2 \(2 via run join\)/);
+  assert.match(rendered, /claude-sonnet-5×1 \(1 via run join\)/, "IMPLEMENT_DONE_RUN's served model, joined from implement.done");
+  assert.match(rendered, /sonnet×1 \(1 via run join\)/, "START_ONLY_RUN's mount model, joined from run.start");
   assert.match(rendered, /unattributed = no `model` key on the row OR its run's `implement.done`\/`run.start.mount`/);
   assert.match(rendered, /haiku×1(?! \()/, "a row attributed by its own key carries no via-run suffix");
 });

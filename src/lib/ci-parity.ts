@@ -1356,6 +1356,21 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   },
   npmScriptEntry("api-client-drift", "api-client:check"),
   npmScriptEntry("no-hand-rolled-fetch", "no-hand-rolled-fetch:check"),
+  // W1-T3077: the prompt-surface gate, mirrored. Deterministic and offline — it reads a merge-base
+  // diff and refuses a prompt/learnings edit that carries no golden evidence; it never shells the
+  // network or node --test. Written in the EXPLICIT object form rather than through npmScriptEntry
+  // for the same reason the source-size and baseline-monotonic entries below record: Standing rule
+  // 25's introducing-commit carve-out (isIntroducingCiYmlJob, review.ts) keys on an ADDED line
+  // carrying `job: "<name>"` beside the added ci.yml job key, and THIS PR adds both.
+  {
+    job: "prompt-surface-gate",
+    mirrored: true,
+    run: (repoRoot, spawn) => [
+      runStep("prompt-surface-gate", () =>
+        shellOut(spawn, "npm run --silent prompt-surface-gate", "npm", ["run", "--silent", "prompt-surface-gate"], { cwd: repoRoot }),
+      ),
+    ],
+  },
   // W1-T1048: the task-id existence gate is exactly the shared npm-script shape — deterministic,
   // unconditional on every PR, and measured at ~1.1s, so it is mirrored rather than excluded.
   npmScriptEntry("task-id-existence", "task-id-existence:check"),
@@ -1841,6 +1856,19 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // It is also why this suite is NOT projected into FAST_GATE_STEPS: the census it covers runs as
   // a step on `comment-load-ratchet`, and an ADMITTED member with no npm script of its own cannot
   // be projected (CENSUS_ADMITTED_MEMBERS narrows on `script`).
+  // W1-T3086's shard-lint ratchet. The recognizer matches it on the `src/` text of its two imports
+  // (src/lib/plan.js, src/lib/task-linter.js) plus a real `git ls-files` — but that call is
+  // `git ls-files plan/tasks.d/*.yaml plan/tasks.d/*.yml`, the PLAN shard population, and the
+  // tracked src/ tree it never reads. Same shape as the deploy-scripts-use-mktemp member above,
+  // which walks deploy/*.sh.
+  refusedForPredicate(
+    "test/every-shard-on-main-is-lintable.test.ts",
+    "a",
+    "W1-T3086's shard-lint ratchet. Its `git ls-files` is scoped to `plan/tasks.d/*.yaml` and " +
+      "`plan/tasks.d/*.yml` — the PLAN shard population, never src/*.ts — so it is not a " +
+      "src-population walk. The `src/` strings the recognizer sees are its imports of " +
+      "src/lib/plan.js and src/lib/task-linter.js, the code it drives, not a population it reads",
+  ),
   refusedForPredicate(
     "test/expiring-fixture-census.test.ts",
     "a",

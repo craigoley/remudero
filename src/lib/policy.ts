@@ -203,6 +203,8 @@ export interface PolicyValues {
     dedupCapacity: number;
     /** W1-T2741: trailing-edge quiet period for high-fanout check/status deliveries. */
     checkSettleMs: number;
+    semanticCheckMode: "shadow" | "enforce";
+    aggregateCheckNames: string[];
   };
   /** W1-T2579 — the arm gate's operator-ratified band table. `decideAutoMergeArm`
    *  (src/lib/review.ts) consults this only on the already-arming `full-pass`/`keyword-floor`
@@ -332,6 +334,8 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "objectReap.enabled": "net-new",
   "githubEventWake.dedupCapacity": "net-new",
   "githubEventWake.checkSettleMs": "net-new",
+  "githubEventWake.semanticCheckMode": "net-new",
+  "githubEventWake.aggregateCheckNames": "net-new",
   "workerRuleHeadlines.enabled": "net-new",
 };
 
@@ -442,6 +446,48 @@ function booleanField(
   return value;
 }
 
+function githubEventWakeSemanticModeField(
+  raw: unknown,
+  origins: Record<string, PolicyFieldOrigin>,
+): "shadow" | "enforce" {
+  const path = "githubEventWake.semanticCheckMode";
+  if (!isPlainObject(raw)) {
+    throw new PolicyError(`policy.yaml: '${path}' must be a mapping with 'value'/'origin'.`);
+  }
+  const { value, origin } = raw as Record<string, unknown>;
+  if (value !== "shadow" && value !== "enforce") {
+    throw new PolicyError(
+      `policy.yaml: '${path}.value' must be "shadow" or "enforce", got ${JSON.stringify(value)}.`,
+    );
+  }
+  origins[path] = parseOrigin(path, origin);
+  return value;
+}
+
+function githubEventWakeAggregateCheckNamesField(
+  raw: unknown,
+  origins: Record<string, PolicyFieldOrigin>,
+): string[] {
+  const path = "githubEventWake.aggregateCheckNames";
+  if (!isPlainObject(raw)) {
+    throw new PolicyError(`policy.yaml: '${path}' must be a mapping with 'value'/'origin'.`);
+  }
+  const { value, origin } = raw as Record<string, unknown>;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new PolicyError(`policy.yaml: '${path}.value' must be a non-empty string array.`);
+  }
+  const names = value.map((name, i) => {
+    if (typeof name !== "string" || name.length === 0) {
+      throw new PolicyError(
+        `policy.yaml: '${path}.value[${i}]' must be a non-empty string, got ${JSON.stringify(name)}.`,
+      );
+    }
+    return name;
+  });
+  origins[path] = parseOrigin(path, origin);
+  return names;
+}
+
 function validateHeadroomCurve(
   raw: unknown,
   origins: Record<string, PolicyFieldOrigin>,
@@ -541,6 +587,9 @@ export const DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY = 500;
 
 /** See the shared doc above `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`. */
 export const DEFAULT_GITHUB_EVENT_WAKE_CHECK_SETTLE_MS = 10_000;
+
+export const DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_CHECK_MODE = "shadow" as const;
+export const DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES = ["ci-gate", "ci"] as const;
 
 const DEFAULT_INTAKE_CADENCE: Record<IntakeCadenceRung, IntakeCadenceRungPolicy> = {
   ops: { enabled: false, minIntervalMinutes: 1440, maxPerDay: 1 },
@@ -750,6 +799,12 @@ export function validatePolicy(raw: unknown): Policy {
   const githubEventWakeCheckSettleMs = githubEventWakeRaw?.checkSettleMs !== undefined
     ? numberField("githubEventWake.checkSettleMs", githubEventWakeRaw.checkSettleMs, origin, bounds)
     : DEFAULT_GITHUB_EVENT_WAKE_CHECK_SETTLE_MS;
+  const githubEventWakeSemanticCheckMode = githubEventWakeRaw?.semanticCheckMode !== undefined
+    ? githubEventWakeSemanticModeField(githubEventWakeRaw.semanticCheckMode, origin)
+    : DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_CHECK_MODE;
+  const githubEventWakeAggregateCheckNames = githubEventWakeRaw?.aggregateCheckNames !== undefined
+    ? githubEventWakeAggregateCheckNamesField(githubEventWakeRaw.aggregateCheckNames, origin)
+    : [...DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES];
 
   // W1-T2579: optional, absent means `[]` — see validateArmCalibrationBands's own doc for why
   // this row is stricter-at-load/inert-at-consult rather than the triplet shape above.
@@ -807,6 +862,8 @@ export function validatePolicy(raw: unknown): Policy {
       githubEventWake: {
         dedupCapacity: githubEventWakeDedupCapacity,
         checkSettleMs: githubEventWakeCheckSettleMs,
+        semanticCheckMode: githubEventWakeSemanticCheckMode,
+        aggregateCheckNames: githubEventWakeAggregateCheckNames,
       },
       armCalibrationBands,
       workerRuleHeadlines,

@@ -128,7 +128,14 @@ export function countFixtureCopies(root: string): FixtureCopyCounts {
     }
 
     let m: RegExpExecArray | null;
-    const repoRe = builderDeclarationRe("Repo|Checkout|Clone|Worktree|Bare");
+    // `Repo(?!rt)`: MEASURED across 1411 test files, the bare `Repo` alternative counted five
+    // REPORT builders — parseReport, runFixtureReport, runReport, shardLintReport and
+    // workerResultWithReport — none of which builds a repository, and two of which blocked a PR
+    // apiece (#5069, #5071) on an overage they did not cause. The negative lookahead drops exactly
+    // those five and keeps all 42 genuine `Repo`-bearing builders, `Repository` spellings included;
+    // the baseline below falls 70 -> 67 in the same commit so the ratchet tightens rather than
+    // inheriting a looser ceiling.
+    const repoRe = builderDeclarationRe("Repo(?!rt)|Checkout|Clone|Worktree|Bare");
     while ((m = repoRe.exec(text))) repoBuilderNames.add((m[1] ?? m[2])!);
 
     const ghRe = builderDeclarationRe("[Gg]it[Hh]ub");
@@ -174,6 +181,20 @@ test("the REAL test/ population is at or under the recorded baseline, for every 
   const live = countFixtureCopies(REPO_ROOT);
   const baseline = readBaseline();
   assert.deepEqual(violations(live, baseline), [], `fixture-copy census grew past its baseline:\n${JSON.stringify(live, null, 2)}`);
+});
+
+test("repo-builder detection: a Report builder is NOT a repo builder, and Repository still is", () => {
+  const dir = fixtureTree({
+    "a.test.ts": "function shardLintReport(x: string) { return x; }\nconst runReport = (x: string) => x;\n",
+    "b.test.ts": "function buildRepositoryFixture() { return 1; }\nfunction cloneRepo() { return 2; }\n",
+  });
+  try {
+    const live = countFixtureCopies(dir);
+    // The NEGATIVE half is the one that regressed: without the lookahead this reads 4, not 2.
+    assert.equal(live.repoBuilderFunctionNames, 2, "only the two genuine repo builders may count");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the baseline carries EXACTLY the seven declared signatures — no key drift either direction", () => {

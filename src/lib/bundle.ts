@@ -3,11 +3,14 @@ import { isMap, isScalar, LineCounter, parse as parseYaml, parseDocument, string
 import {
   computeArtifactHash,
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+  entryBudgetWeight,
+  entryLayer,
+  LAYERS,
   renderDoctrinePreamble,
   renderMatchedLearnings,
   scrubEntry,
-  selectLearnings,
   type LearningEntry,
+  type V1BundleLearningEntry,
 } from "./learnings.js";
 import { buildPromptManifest, type PromptManifestPart } from "./prompt-manifest.js";
 import { validateWorkerSettings, WorkerSettingsError } from "./settings.js";
@@ -256,6 +259,35 @@ function collectRawPolicyRows(root: unknown, lineCounter: LineCounter): RawPolic
  *  a silent empty export of a policy.yaml that failed to parse. */
 export type ExtractPolicyProposalRowsResult = { ok: true; rows: PolicyProposalRow[] } | { ok: false; reason: string };
 
+function selectBundleEntries(
+  entries: LearningEntry[],
+  budgetChars: number,
+): { selected: LearningEntry[]; dropped: LearningEntry[] } {
+  const ranked = entries
+    .filter((entry) => entry.lifecycle === "active")
+    .sort((a, b) => {
+      const layerDiff = LAYERS.indexOf(entryLayer(a)) - LAYERS.indexOf(entryLayer(b));
+      if (layerDiff !== 0) return layerDiff;
+      const ac = a.cited ?? "";
+      const bc = b.cited ?? "";
+      if (ac !== bc) return bc < ac ? -1 : 1;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+  const selected: LearningEntry[] = [];
+  const dropped: LearningEntry[] = [];
+  let used = 0;
+  for (const entry of ranked) {
+    const cost = entryBudgetWeight(entry) + 1;
+    if (used + cost > budgetChars && selected.length > 0) {
+      dropped.push(entry);
+      continue;
+    }
+    selected.push(entry);
+    used += cost;
+  }
+  return { selected, dropped };
+}
+
 /**
  * Extract the exportable rows from a `plan/policy.yaml` text (W1-T2702, design (i)): every row
  * whose `origin:` is literally `"net-new"`, OR whose dotted path is in `opts.ratifiedPaths` (the
@@ -346,8 +378,8 @@ export interface Bundle {
   version: string;
   /** sha256 hex digest of `entries`, per {@link computeArtifactHash} — the SAME pin `verifyBundlePin` (learnings.ts) checks against an operator-supplied `--pin`. NEVER extended to cover `policy_proposals` — see {@link computePolicyProposalsHash}'s doc for why that section has its own pin instead. */
   hash: string;
-  /** The BUDGET-SELECTED corpus ({@link selectLearnings}), every entry's provenance intact — never the full unbounded corpus. */
-  entries: LearningEntry[];
+  /** The BUDGET-SELECTED corpus ({@link selectLearnings}), with `src` lineage but no structured origin under V1. */
+  entries: V1BundleLearningEntry[];
   /** {@link renderDoctrinePreamble}'s two mandatory doctrine lines, verbatim. */
   doctrine: string;
   /** {@link extractAssertedWorkerSettingsValues}'s narrow, validated projection of the worker-settings template. */
@@ -365,6 +397,13 @@ export interface Bundle {
 export type BuildBundleResult =
   | { ok: true; bundle: Bundle; dropped: LearningEntry[] }
   | { ok: false; reason: string; blockedEntryId?: string };
+
+/** A V1 artifact cannot carry a field its hash canon does not bind. Preserve identity when there is no origin. */
+function projectV1BundleEntry(entry: LearningEntry): V1BundleLearningEntry {
+  if (entry.origin === undefined) return entry as V1BundleLearningEntry;
+  const { origin: _origin, ...withoutOrigin } = entry;
+  return withoutOrigin;
+}
 
 /**
  * Build a day-one knowledge bundle from an already-loaded learnings corpus and a parsed
@@ -391,11 +430,9 @@ export function buildBundle(
   provenance: BundleProvenance,
   opts: { budgetChars?: number; version?: string; policyYamlText?: string; ratifiedPolicyPaths?: ReadonlySet<string> } = {},
 ): BuildBundleResult {
+  const version = opts.version ?? provenance.exportedAt;
   const budgetChars = opts.budgetChars ?? DEFAULT_KNOWLEDGE_BUDGET_CHARS;
-  // Repo-wide (taskFiles undefined): a fresh deployment needs the WHOLE budgeted corpus, not one
-  // task's file-matched slice — the budget still bounds the tax, same as selectLearnings' own
-  // repo-wide convention.
-  const { selected, dropped } = selectLearnings(entries, undefined, budgetChars);
+  const { selected, dropped } = selectBundleEntries(entries, budgetChars);
   if (selected.length === 0) {
     return {
       ok: false,
@@ -437,10 +474,11 @@ export function buildBundle(
     { name: "learnings", value: renderMatchedLearnings(selected) },
     { name: "worker-settings", value: JSON.stringify(workerSettings) },
   ]);
+  const bundledEntries = selected.map(projectV1BundleEntry);
   const bundle: Bundle = {
-    version: opts.version ?? provenance.exportedAt,
-    hash: computeArtifactHash(selected),
-    entries: selected,
+    version,
+    hash: computeArtifactHash(bundledEntries),
+    entries: bundledEntries,
     doctrine,
     workerSettings,
     manifest,

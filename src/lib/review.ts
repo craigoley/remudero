@@ -5490,6 +5490,9 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // (.github/workflows/coverage-session-blanking.yml) — the same shape as the two entries above,
   // and it is REQUIRED, so a change to it changes what CI refuses.
   "^scripts/coverage-session-blanking-check\\.mjs$",
+  // W1-T3077: the prompt-surface gate's rule logic, behind its own pull_request job in ci.yml — the
+  // same shape as the three entries above. It decides which prompt/learnings edits CI refuses.
+  "^scripts/prompt-surface-gate\\.mjs$",
   // W1-T1060: the author-time acceptance gate's rule logic, behind its own unconditional pull_request job
   // (.github/workflows/acceptance-author-gate.yml, already covered by the workflows entry above; this line is the
   // script that job's `run:` step calls).
@@ -5525,6 +5528,11 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   // ── verified non-instrument: content/data a gate validates, not the rule that validates it ──
   "openapi/daemon.yaml":
     "the daemon's API schema (content) — scripts/generate-api-client.mjs is the enforcement logic and is tracked below",
+  "settings/macros.yaml":
+    "the operator's macro table (W1-T2763) — CONTENT scripts/prompt-surface-gate.mjs guards, named " +
+    "at that script's touchedPathSurfaces so an edit to it must carry golden evidence. The gate is " +
+    "the rule and is tracked on INSTRUMENT_SURFACE above; this file is what it measures, the same " +
+    "shape as openapi/daemon.yaml directly above.",
   "plan/claims.yaml": "claim DATA the claims gate validates, not the checker's rule logic",
   "plan/tasks.yaml": "plan/task DATA, not gate logic",
   "plan/plan-index.json": "a generated index artifact, and its :check mode is not wired into any CI workflow",

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { HANDLERS } from "../src/run-task.js";
 
 // Same convention as test/mounts-wiring.test.ts: assert the CLI entrypoint
 // actually calls into the lib (loadSkillRegistry/renderSkillList) rather than
@@ -9,7 +10,10 @@ import { fileURLToPath } from "node:url";
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
 test("`rmd skill` dispatches to skillCommand", () => {
-  assert.match(runTaskSrc, /cmd === "skill"/, "main() must dispatch the 'skill' command");
+  // W1-T2893: main() resolves "skill" against src/cli/registry.ts's HANDLERS map (dispatchCommand)
+  // rather than its own `cmd === "skill"` branch — assert the registry entry exists, and that its
+  // handler body still calls the real skillCommand.
+  assert.ok(HANDLERS.has("skill"), "HANDLERS must have a 'skill' entry for dispatchCommand to resolve");
   assert.match(runTaskSrc, /skillCommand\(rest\)/, "the 'skill' command must call skillCommand");
 });
 

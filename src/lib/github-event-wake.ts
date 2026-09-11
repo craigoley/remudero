@@ -101,9 +101,98 @@ function extractAction(body: unknown): string | undefined {
   return typeof action === "string" ? action : undefined;
 }
 
+function extractCheckRunField(body: unknown, field: "name" | "conclusion"): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const checkRun = (body as Record<string, unknown>).check_run;
+  if (typeof checkRun !== "object" || checkRun === null) return undefined;
+  const value = (checkRun as Record<string, unknown>)[field];
+  return typeof value === "string" ? value : undefined;
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
+}
+
+export type GithubEventWakeSemanticMode = "shadow" | "enforce";
+
+export type GithubCheckWakeClass =
+  | "actionable_failure"
+  | "actionable_aggregate"
+  | "successful_leaf"
+  | "unknown";
+
+export type GithubEventWakeClass = "actionable" | GithubCheckWakeClass;
+
+export interface GithubEventWakeClassification {
+  class: GithubEventWakeClass;
+  actionable: boolean;
+  aggregateName?: string;
+}
+
+export interface GithubEventWakeSemanticPolicy {
+  mode: GithubEventWakeSemanticMode;
+  aggregateCheckNames: readonly string[];
+}
+
+export const DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_MODE: GithubEventWakeSemanticMode = "shadow";
+export const DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES = ["ci-gate", "ci"] as const;
+
+const FAILURE_CHECK_CONCLUSIONS: ReadonlySet<string> = new Set([
+  "action_required",
+  "cancelled",
+  "failure",
+  "startup_failure",
+  "stale",
+  "timed_out",
+]);
+
+const NON_ACTIONABLE_LEAF_CONCLUSIONS: ReadonlySet<string> = new Set(["neutral", "skipped", "success"]);
+
+function normalizeCheckValue(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed.toLowerCase() : undefined;
+}
+
+export function classifyGithubEventWake(
+  event: string,
+  action: string | undefined,
+  body: unknown,
+  aggregateCheckNames: readonly string[],
+): GithubEventWakeClassification {
+  if (event !== "check_run" || action !== "completed") return { class: "actionable", actionable: true };
+
+  const name = extractCheckRunField(body, "name")?.trim();
+  const conclusion = normalizeCheckValue(extractCheckRunField(body, "conclusion"));
+  if (!name || !conclusion) return { class: "unknown", actionable: true };
+  if (aggregateCheckNames.includes(name)) {
+    return { class: "actionable_aggregate", actionable: true, aggregateName: name };
+  }
+  if (FAILURE_CHECK_CONCLUSIONS.has(conclusion)) return { class: "actionable_failure", actionable: true };
+  if (NON_ACTIONABLE_LEAF_CONCLUSIONS.has(conclusion)) return { class: "successful_leaf", actionable: false };
+  return { class: "unknown", actionable: true };
+}
+
+export interface GithubEventWakeSemanticSummary {
+  mode: GithubEventWakeSemanticMode;
+  actionable_failure: number;
+  actionable_aggregate: number;
+  successful_leaf: number;
+  unknown: number;
+  aggregate_names: Record<string, number>;
+}
+
+function createGithubEventWakeSemanticCounts(
+  aggregateCheckNames: readonly string[],
+): GithubEventWakeSemanticSummary {
+  return {
+    mode: DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_MODE,
+    actionable_failure: 0,
+    actionable_aggregate: 0,
+    successful_leaf: 0,
+    unknown: 0,
+    aggregate_names: Object.fromEntries(aggregateCheckNames.map((name) => [name, 0])),
+  };
 }
 
 // ── (iii) DELIVERY DEDUP — bounded, so a redelivery/replay burst cannot regrow it forever ───
@@ -248,6 +337,8 @@ export interface GithubEventWakeOptions {
   secret: string | undefined;
   /** This daemon's own `owner/repo` — another repository's payload is refused, never silently ignored. */
   repository: string;
+  semanticCheckMode?: GithubEventWakeSemanticMode;
+  aggregateCheckNames?: readonly string[];
   /** Where {@link writeSweepWakeMarkerAtomic} persists the coalesced wake; see {@link sweepWakeMarkerPath}. */
   markerPath: string;
   /** Bounded recent-delivery dedup — see {@link createDeliveryDedupStore}. */
@@ -274,6 +365,37 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
   const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_GITHUB_WEBHOOK_MAX_BODY_BYTES;
   const now = opts.now ?? (() => new Date());
   const writeMarker = opts.writeMarker ?? writeSweepWakeMarkerAtomic;
+  const semanticCheckMode = opts.semanticCheckMode ?? DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_MODE;
+  const aggregateCheckNames =
+    opts.aggregateCheckNames ?? DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES;
+  let semanticCounts = createGithubEventWakeSemanticCounts(aggregateCheckNames);
+
+  const recordClassification = (classification: GithubEventWakeClassification) => {
+    semanticCounts.mode = semanticCheckMode;
+    if (classification.class === "actionable_failure") semanticCounts.actionable_failure++;
+    if (classification.class === "actionable_aggregate") {
+      semanticCounts.actionable_aggregate++;
+      if (classification.aggregateName !== undefined) {
+        semanticCounts.aggregate_names[classification.aggregateName] =
+          (semanticCounts.aggregate_names[classification.aggregateName] ?? 0) + 1;
+      }
+    }
+    if (classification.class === "successful_leaf") semanticCounts.successful_leaf++;
+    if (classification.class === "unknown") semanticCounts.unknown++;
+  };
+
+  const flushSemanticSummary = (): GithubEventWakeSemanticSummary | undefined => {
+    const total =
+      semanticCounts.actionable_failure +
+      semanticCounts.actionable_aggregate +
+      semanticCounts.successful_leaf +
+      semanticCounts.unknown;
+    if (total === 0) return undefined;
+    const summary = semanticCounts;
+    semanticCounts = createGithubEventWakeSemanticCounts(aggregateCheckNames);
+    return summary;
+  };
+
   return {
     method: "POST",
     path: "/v1/hooks/github",
@@ -348,6 +470,14 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
         return;
       }
 
+      const classification = classifyGithubEventWake(event, action, body, aggregateCheckNames);
+      recordClassification(classification);
+      if (semanticCheckMode === "enforce" && !classification.actionable) {
+        opts.dedup.record(deliveryId);
+        sendJson(res, 202, { accepted: false, reason: "successful_leaf" });
+        return;
+      }
+
       const record: SweepWakeMarker = {
         deliveryId,
         event,
@@ -357,7 +487,14 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
       };
       writeMarker(opts.markerPath, record);
       opts.dedup.record(deliveryId);
-      log("github.wake.accepted", { delivery_id: deliveryId, event, action, repository });
+      const summary = flushSemanticSummary();
+      log("github.wake.accepted", {
+        delivery_id: deliveryId,
+        event,
+        action,
+        repository,
+        ...(summary ? { semantic_check_summary: summary } : {}),
+      });
       sendJson(res, 202, { accepted: true });
     },
   };
