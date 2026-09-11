@@ -2185,17 +2185,15 @@ set, prefer (d) alone and leave the registry hand-written.
 **Rollback:** delete this entry. No code was written and no registry changed; W1-T2790 returns to
 `status: queued` with its question open.
 
-## 2026-09-08 — RECOMMENDATION (W1-T3075): order the frontier by MEASURED EXPECTED VALUE per class after `priority`, dependency fan-out as the tie-break, gated on W1-T3074's closure table (PREPARED FOR RATIFICATION, NOT YET RULED)
+## 2026-09-08 — RECOMMENDATION (W1-T3075): order the frontier by MEASURED EXPECTED VALUE per class after `priority`, dependency fan-out as the tie-break, gated on W1-T3074's closure table (SUPERSEDED BY OPERATOR RATIFICATION, 2026-09-11)
 
 - **Chosen (RECOMMENDED, auto):** shape (b) — measured expected value per class, with (c) as its
   tie-break. Recorded here as what it is and nothing more: the machine's §4 auto-choose resolution
-  of the DECISION_REQUEST this task raised. W1-T3075 is `verify: human`, so the RULING is the
-  operator's and this entry is not it — see the header's own "NOT YET RULED". Per the
-  decision-authority ruling (fb-1785882211812-bafd8f) an agent may recommend a ruling and may never
-  record one; a ratification, or an override, lands beneath this line as an amendment, the same
-  shape every auto-chosen entry above takes when the operator later rules on it. The provenance
-  genre is stated because the floor requires every new entry to name who authored it (W1-T352);
-  it says nothing about whether the entry binds.
+  of the DECISION_REQUEST this task raised. W1-T3075 is `verify: human`, so this was not the
+  operator ruling. The 2026-09-11 operator ratification below supersedes this recommendation.
+  Per the decision-authority ruling (fb-1785882211812-bafd8f), an agent may recommend a ruling and
+  may never record one. The provenance genre is stated because the floor requires every new entry
+  to name who authored it (W1-T352); it says nothing about whether the entry binds.
 
 **W1-T3075 chosen ordering: (b) MEASURED EXPECTED VALUE, then (c) DEPENDENCY FAN-OUT.** The term is
 `mergeRate(class) / costPerMerge(class)`, computed from the ledger union (`aggregateByClass` in
@@ -2270,8 +2268,40 @@ the frontier every six hours because a class moved from 40% to 60% on three runs
 value, and the floor should rise before the term ships. **Take both measurements from W1-T3074's
 table before building**, which is what the gate is for.
 
-**Rollback:** delete this entry. No code was written, no policy row was added and no shard was
-re-ordered; W1-T3075 returns to `status: queued` with its question open.
+**Historical rollback:** this superseded recommendation has no independent rollback. The operative
+rollback is recorded in the operator ratification below.
+
+## 2026-09-11 — OPERATOR RATIFICATION (W1-T3075): order the dispatch frontier by measured expected value, then dependency fan-out
+
+*Operator-ruled at the operator's instruction in this session: “go with both of those — ratify,
+file, build.” This ruling supersedes the 2026-09-08 automatic recommendation above.*
+
+**CONFIRMATION:** The operator confirms the W1-T3075 chosen ordering: (b) measured expected value,
+then (c) dependency fan-out. Where the ordering term lives is unchanged in kind: its value is
+measured from the ledger, not hand-set per shard. The historical five-of-1,204 priority adoption
+figure remains evidence against option (a); it is not a current population measurement.
+
+**THE RULE:** After explicit `priority` and `undeclaredScopeLast`, order dispatchable tasks by the
+measured expected-value term for their deterministic task class:
+`mergeRate(class) / costPerMerge(class)`. A larger value sorts earlier. When two tasks have equal
+measured value, or either class is unmeasured, order by the number of open plan tasks that depend
+on that task (descending), then retain the existing workstream-aware id order as the total tie-break.
+
+**THE MEASUREMENT BOUNDARY:** This term is allowed only from the complete rotated-ledger union and
+the W1-T3074 closure population floor. A class below the floor, with zero merges, an unreadable
+union, or an unstable two-cycle calibration receives no value term; it remains in the existing
+priority/scope/id order. `compareDispatch` remains pure and must receive a precomputed calibration;
+it must never read history while sorting.
+
+**WHAT THIS DOES NOT CHANGE:** Explicit task `priority:` remains absolute. `packDisjointFirst`,
+merge-crediting, eligibility, risk/mount routing, and the worker's authority are unchanged. This
+is only a selection-order policy.
+
+**IMPLEMENTATION:** W1-T3412 operationalizes this ruling. It must re-measure the two-cycle
+stability and retain the existing order whenever the stated calibration is absent or falsified.
+
+**Rollback:** revert this ratification and W1-T3412. The prior deterministic priority/scope/id
+comparator is preserved as the fallback and needs no data migration.
 
 ## 2026-09-08 — RECOMMENDATION (W1-T3076): give retirement a real effect FIRST, then admit automatic filing per class by closure rate — no global throttle, and the governor reads the corpus, never the commit ratio (PREPARED FOR RATIFICATION, NOT YET RULED)
 
