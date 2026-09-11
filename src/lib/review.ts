@@ -3164,7 +3164,7 @@ export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
 }
 
 const REFUSAL_CLASS_SET = new Set<string>(REFUSAL_REASON_CLASSES);
-const REFUSAL_LINE_RE = new RegExp(
+export const REFUSAL_LINE_RE = new RegExp(
   String.raw`^(?:[-*]\s*)?(?:(?:criterion|criteria)\s*)?#?(\d+)\s*[:.)-]?\s*` +
     String.raw`(${REFUSAL_REASON_CLASSES.join("|")})\b\s*(?::|-|\u2014)\s*(\S[\s\S]*)$`,
   "i",

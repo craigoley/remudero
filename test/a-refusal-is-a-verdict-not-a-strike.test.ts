@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decideAutoMergeArm, judgeReview, type CriterionVerdict } from "../src/lib/review.js";
+import { REFUSAL_LINE_RE, decideAutoMergeArm, judgeReview, type CriterionVerdict } from "../src/lib/review.js";
 import { deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
 
 const CRITERIA = [
@@ -50,6 +50,9 @@ function refusedCriterion(over: Partial<CriterionVerdict> = {}): CriterionVerdic
 }
 
 test("a report carrying a REFUSED block grades that criterion refused, fails the verdict, and cannot arm auto-merge", () => {
+  assert.equal(REFUSAL_LINE_RE.test("1 premise-rotted: upstream guarantee no longer exists"), true);
+  assert.equal(REFUSAL_LINE_RE.test("1 not-a-class: upstream guarantee no longer exists"), false);
+
   const verdict = judgeReview(CRITERIA, {
     diff: FEATURE_DIFF,
     report: "REFUSED: 1 premise-rotted: upstream guarantee no longer exists",
