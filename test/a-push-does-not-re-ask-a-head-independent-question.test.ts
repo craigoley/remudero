@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,6 +10,7 @@ import {
   type Escalation,
   type IssueGateway,
 } from "../src/lib/escalate.js";
+import { buildSweepEffects, renderClarificationQuestion, type OpenPrView } from "../src/lib/sweep.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-head-independent-dedup-")), "ledger.ndjson");
@@ -137,4 +138,111 @@ test("head-independent mode changes only the dedup key, never the rendered issue
 
   assert.match(body, /^\*\*Head:\*\* abcdef12$/m);
   assert.doesNotMatch(body, /headDedup|head-independent|dedup/i);
+});
+
+test("the contradictory clarification producer marks its ask head-independent", async () => {
+  const issues = fakeIssueStore();
+  const root = mkdtempSync(join(tmpdir(), "rmd-head-independent-producer-"));
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    repoRoot: root,
+    config: { claudeBin: "claude", root },
+    ledgerPath: ledgerPath(),
+    runId: "SWEEP-W1-T3179",
+    plan: { tasks: [], byId: new Map() },
+    log: () => {},
+    issuesImpl: issues,
+  });
+  const pr: OpenPrView = {
+    prNumber: 4559,
+    prUrl: "https://github.com/craigoley/remudero/pull/4559",
+    taskId: "W1-T3179",
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    criteriaRecoverable: true,
+    priorStrikes: 2,
+    lastActivityAt: "2026-09-08T12:00:00Z",
+    headSha: "feed3179",
+    autoMergeArmed: false,
+  };
+  const reason = "review failing with no actionable unmet criteria (contradictory) — escalating";
+
+  await effects.escalate(pr, reason, renderClarificationQuestion(pr, reason));
+
+  assert.equal(issues.calls.length, 1);
+  assert.match(issues.calls[0].body, /^\*\*Head:\*\* feed3179$/m);
+
+  const second = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    repoRoot: root,
+    config: { claudeBin: "claude", root },
+    ledgerPath: ledgerPath(),
+    runId: "SWEEP-W1-T3179-2",
+    plan: { tasks: [], byId: new Map() },
+    log: () => {},
+    issuesImpl: issues,
+  });
+  const pushed = { ...pr, headSha: "cafe3179" };
+  await second.escalate(pushed, reason, renderClarificationQuestion(pushed, reason));
+
+  assert.equal(issues.calls.length, 1, "a push cannot open a second copy of the same head-independent ask");
+  assert.equal(issues.comments.length, 1, "the new observed head is appended to the existing issue");
+  assert.match(issues.comments[0].body, /^\*\*Head:\*\* cafe3179$/m);
+});
+
+test("the terminal non-fleet-head producer marks its ask head-independent", async () => {
+  const issues = fakeIssueStore();
+  const root = mkdtempSync(join(tmpdir(), "rmd-head-independent-terminal-"));
+  const path = ledgerPath();
+  writeFileSync(
+    path,
+    JSON.stringify({
+      run_id: "SWEEP-prior",
+      task_id: "SWEEP",
+      step: "sweep.fix.uncreditable_head",
+      pr_number: 4559,
+      head_sha: "bad3179",
+      head: "contributor/manual-fix",
+      synthetic: false,
+      reason: "not_a_run_branch",
+      terminal: true,
+      repair_task_id: "W1-T3179",
+      cause: "review",
+    }) + "\n",
+  );
+  const effects = buildSweepEffects({
+    owner: "craigoley",
+    repo: "remudero",
+    repoRoot: root,
+    config: { claudeBin: "claude", root },
+    ledgerPath: path,
+    runId: "SWEEP-W1-T3179-terminal",
+    plan: { tasks: [], byId: new Map() },
+    log: () => {},
+    issuesImpl: issues,
+    dispatchFixPreflightStandDownImpl: () => undefined,
+  });
+
+  await effects.dispatchFix(
+    {
+      prNumber: 4559,
+      prUrl: "https://github.com/craigoley/remudero/pull/4559",
+      taskId: "W1-T3179",
+      reviewState: "failure",
+      checksState: "green",
+      unmetCriteria: [],
+      priorStrikes: 1,
+      lastActivityAt: "2026-09-08T12:00:00Z",
+      headSha: "bad3179",
+      autoMergeArmed: false,
+    },
+    { unmetCriteria: [] },
+  );
+
+  assert.equal(issues.calls.length, 1);
+  assert.match(issues.calls[0].title, /cannot be repaired from its non-fleet head/);
+  assert.match(issues.calls[0].body, /^\*\*Head:\*\* bad3179$/m);
 });
