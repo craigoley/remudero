@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { GATED_RUNGS, loadDefaultPolicy } from "../src/lib/policy.js";
+import { GATED_RUNGS, loadDefaultPolicy, loadPolicy, policyPath, type Policy } from "../src/lib/policy.js";
 import {
   buildRatificationRow,
   computeOperationHash,
@@ -25,6 +26,8 @@ import {
 import type { Config } from "../src/lib/config.js";
 import type { CloneReapSummary } from "../src/lib/clone-reaper.js";
 import type { WorktreeReapSummary } from "../src/lib/worker.js";
+
+const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 
 /**
  * test/ratification-pin.test.ts — W1-T2694, LAW 5's SIGNATURE.
@@ -286,6 +289,60 @@ test("acceptance 3: `rmd ratify <rung>` prints the row and writes NOTHING", () =
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("acceptance 3: `rmd ratify` hashes the nested intake row that its daemon gate reads", () => {
+  const lines: string[] = [];
+  const origLog = console.log;
+  console.log = (msg?: unknown) => {
+    lines.push(String(msg));
+  };
+  const policy = loadDefaultPolicy();
+  try {
+    assert.equal(
+      ratifyCommand(["intakeCadence.codeqlQuality"], {
+        policy,
+        now: () => new Date("2026-09-11T00:00:00.000Z"),
+        ratifiedBy: "operator",
+      }),
+      0,
+    );
+  } finally {
+    console.log = origLog;
+  }
+  assert.match(
+    lines.join("\n"),
+    new RegExp(computeOperationHash(policy.values.intakeCadence.codeqlQuality, RUNG_CONTRACT_VERSIONS["intakeCadence.codeqlQuality"])),
+    "the printed pin must cover the same nested policy block the intake daemon checks",
+  );
+});
+
+test("`rmd ratify` fails closed when a dotted rung's policy parent is not a block", () => {
+  const policy = loadDefaultPolicy();
+  const malformed = {
+    ...policy,
+    values: { ...policy.values, intakeCadence: null },
+  } as unknown as Policy;
+
+  assert.throws(
+    () => ratifyCommand(["intakeCadence.codeqlQuality"], { policy: malformed }),
+    /policy has no block for rung 'intakeCadence\.codeqlQuality'/,
+  );
+});
+
+test("the shipped CodeQL quality intake policy is daily, enabled, and pinned to its live operation", () => {
+  const policy = loadPolicy(policyPath(REPO_ROOT));
+  const row = policy.values.intakeCadence.codeqlQuality;
+  assert.deepEqual(row, { enabled: true, minIntervalMinutes: 1440, maxPerDay: 1 });
+  assert.deepEqual(
+    ratificationPinCheck(
+      "intakeCadence.codeqlQuality",
+      row,
+      RUNG_CONTRACT_VERSIONS["intakeCadence.codeqlQuality"],
+      loadRatifications(ratificationsPath(REPO_ROOT)),
+    ),
+    { fire: true },
+  );
 });
 
 test("acceptance 3: `rmd ratify` refuses an unrecognised rung, spawning/writing nothing", () => {

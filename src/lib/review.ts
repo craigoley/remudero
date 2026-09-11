@@ -5588,6 +5588,9 @@ export const ENFORCEMENT_DATA: Readonly<Record<string, string>> = {
   "plan/policy.yaml":
     "the fleet's operating constants AS DATA — src/lib/policy.ts's loadPolicy feeds dispatch lanes, " +
     "cost ceilings and cadence governors from it, so an edit changes what the fleet OBEYS",
+  "plan/ratifications.yaml":
+    "the operator-committed operation pins — a matching pin permits a gated rung to fire while a " +
+    "mismatch refuses it, so editing or removing a row changes what the fleet may execute",
   "plan/alert-policy.yaml":
     "the scanner-alert lane's policy AS DATA — its own header states that editing this file alone " +
     "changes what the lane does, with no code change required",
