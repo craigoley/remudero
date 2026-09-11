@@ -1,0 +1,5 @@
+- id: bad-error-signatures-fixture
+  files: [src/a.ts]
+  error_signatures: [ok, 5]
+  fact: fixture fact.
+  src: PR#1

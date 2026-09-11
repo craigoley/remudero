@@ -600,6 +600,20 @@ test("loadLearnings rejects an entry whose 'files' list contains a non-string gl
   assert.throws(() => loadLearnings(path), /'files' must be a list of globs/);
 });
 
+test("loadLearnings rejects an entry whose 'symbols' is not a list of strings", () => {
+  // W1-T3081 made 'symbols' and 'error_signatures' load-bearing for selection, so their shared
+  // validator (stringList) is the arm that decides whether a malformed shard is refused or
+  // silently selected against. Both spellings of malformed are covered: not a list at all, and a
+  // list carrying a non-string.
+  const path = writeCorpus("- id: x\n  files: [a.ts]\n  symbols: not-a-list\n  fact: a fact\n  src: PR#1\n");
+  assert.throws(() => loadLearnings(path), /'symbols' must be a list of non-empty strings/);
+});
+
+test("loadLearnings rejects an entry whose 'error_signatures' list contains a non-string", () => {
+  const path = writeCorpus("- id: x\n  files: [a.ts]\n  error_signatures: [ok, 5]\n  fact: a fact\n  src: PR#1\n");
+  assert.throws(() => loadLearnings(path), /'error_signatures' must be a list of non-empty strings/);
+});
+
 test("loadLearnings rejects malformed YAML (not valid syntax at all)", () => {
   const path = writeCorpus("- id: x\n  files: [a.ts\n  fact: unterminated flow sequence\n");
   assert.throws(() => loadLearnings(path), /is not valid YAML/);
