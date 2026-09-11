@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
+import type { Config, WorkerProviderId } from "../src/lib/config.js";
 import {
   configForMountExploration,
   exploreMount,
   MOUNT_EXPLORATION_POLICY,
   mountExplorationLedgerFields,
+  resolveMountExplorationDispatch,
+  type MountExplorationDispatch,
 } from "../src/lib/mount-exploration.js";
 import type { Mount, Mounts } from "../src/lib/mounts.js";
 import type { MountHeadroomCell } from "../src/lib/mount-recommender.js";
@@ -344,25 +347,28 @@ function exploreDecision() {
   return decision;
 }
 
+/** `workerProviders` is optional on Config, so every assertion below reads it through this. */
+const providers = (c: Config) => c.workerProviders ?? {};
+
 test("W1-T3095: the explored arm REPLACES the enabled provider list, so the sampled arm is the one that runs", () => {
   const decision = exploreDecision();
   const base = {
-    workerProviders: { enabled: ["claude", "codex"], preference: "automatic", codexModel: "gpt-5.4" },
-    somethingElse: "preserved",
+    workerProviders: { enabled: ["claude", "codex"], reservePercent: 12, codexModel: "gpt-5.4" },
+    root: "/preserved",
   } as unknown as Config;
 
   const explored = configForMountExploration(base, decision);
 
   // THE POINT: exactly the explored provider, not the union and not the on-policy one. A config that
   // still admitted "claude" would let the spawn pick it and the experiment would measure nothing.
-  assert.deepEqual(explored.workerProviders.enabled, [decision.exploredArm.provider]);
+  assert.deepEqual(providers(explored).enabled, [decision.exploredArm.provider]);
   assert.equal(decision.exploredArm.provider, "codex", "fixture sanity: this case explores the codex arm");
 
   // Everything else is carried through — this narrows the provider, it does not rebuild the config.
-  assert.equal((explored as unknown as { somethingElse: string }).somethingElse, "preserved");
-  assert.equal(explored.workerProviders.preference, "automatic");
+  assert.equal(explored.root, "/preserved");
+  assert.equal(providers(explored).reservePercent, 12);
   // and the original is not mutated
-  assert.deepEqual(base.workerProviders.enabled, ["claude", "codex"]);
+  assert.deepEqual(providers(base).enabled, ["claude", "codex"]);
 });
 
 test("W1-T3095: a CODEX arm also pins the served model, or codex would serve whatever its default is", () => {
@@ -371,9 +377,9 @@ test("W1-T3095: a CODEX arm also pins the served model, or codex would serve wha
     { workerProviders: { enabled: ["claude"], codexModel: "gpt-5.4" } } as unknown as Config,
     decision,
   );
-  assert.equal(explored.workerProviders.codexModel, decision.exploredArm.servedModel);
+  assert.equal(providers(explored).codexModel, decision.exploredArm.servedModel);
   assert.notEqual(
-    explored.workerProviders.codexModel,
+    providers(explored).codexModel,
     "gpt-5.4",
     "the pre-existing codexModel must be overridden, or the arm key and the served model disagree",
   );
@@ -383,11 +389,150 @@ test("W1-T3095 (control): a NON-codex arm leaves codexModel alone — the pin is
   // Same function, the other branch. Without this the codex assertion above would pass for an
   // implementation that pinned codexModel unconditionally, which would corrupt a claude-arm dispatch.
   const decision = exploreDecision();
-  const claudeArm = { ...decision, exploredArm: { ...decision.exploredArm, provider: "claude", servedModel: "claude-sonnet-5" } };
+  const claudeArm: MountExplorationDispatch = {
+    ...decision,
+    exploredArm: { ...decision.exploredArm, provider: "claude", servedModel: "claude-sonnet-5" },
+  };
   const explored = configForMountExploration(
     { workerProviders: { enabled: ["claude", "codex"], codexModel: "gpt-5.4" } } as unknown as Config,
     claudeArm,
   );
-  assert.deepEqual(explored.workerProviders.enabled, ["claude"]);
-  assert.equal(explored.workerProviders.codexModel, "gpt-5.4", "a claude arm must not rewrite the codex model");
+  assert.deepEqual(providers(explored).enabled, ["claude"]);
+  assert.equal(providers(explored).codexModel, "gpt-5.4", "a claude arm must not rewrite the codex model");
+});
+
+// ── the wiring arms nothing could reach ──────────────────────────────────────────────────────────
+//
+// These two arms were written inline in `runTask` and had ZERO covering tests. That is not an
+// oversight to paper over with a harness: `runId` inside `runTask` is `${taskId}-${Date.now()}` and
+// the sampler hashes it, so steering the real call onto the explore arm means steering the clock.
+// Seaming the cell source and the mounts table is what makes both arms testable at all.
+
+function wiringInput(over: Partial<Parameters<typeof resolveMountExplorationDispatch>[0]> = {}) {
+  return {
+    taskType: "implement",
+    risk: "medium",
+    taskClass: "src",
+    currentMount,
+    config: { workerProviders: { enabled: ["claude", "codex"] }, root: "/state-root" } as unknown as Config,
+    // THE SAMPLER IS KEYED ON runId, and this path does NOT accept an explicit sampleUnit — that is
+    // the whole reason the arm was unreachable. This id is a real `${taskId}-${Date.now()}` value
+    // found by search: it hashes to sampleUnit 0.0452, inside the 0.05 fraction, for this cell's arm
+    // pair. It is a FIXED string, so the test is deterministic; change the fixture's arms and it
+    // reverts to a refusal, which the assertions below will say out loud rather than pass quietly.
+    runId: "W1-T3095-1789117400019",
+    taskId: "W1-T3095",
+    enabledProviders: ["claude", "codex"] as WorkerProviderId[],
+    ...over,
+  };
+}
+
+test("W1-T3095: the EXPLORE arm redirects the spawn AND ledgers that it did — both, or the sample is unattributable", async () => {
+  const logged: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const onPolicy = wiringInput().currentMount;
+  const out = await resolveMountExplorationDispatch(wiringInput(), {
+    loadCells: async () => cells(),
+    loadMountsTable: () => mounts(),
+    log: (step, fields) => logged.push({ step, fields }),
+  });
+
+  // 1. THE SPAWN MOVES. Without this the rung logs an exploration that never happened.
+  assert.deepEqual(out.config.workerProviders?.enabled, ["codex"], "the explored provider must be the only one enabled");
+  assert.notDeepEqual(out.mount, onPolicy, "the explored mount must differ from the on-policy mount");
+
+  // 2. THE LEDGER SAYS SO, on the same call. An unledgered exploration is an unattributable arm in
+  //    the next sweep: the comparison would credit the on-policy arm with the explored arm's result.
+  const row = logged.find((l) => l.step === "mount.exploration");
+  assert.ok(row, `no mount.exploration row was logged; saw ${JSON.stringify(logged.map((l) => l.step))}`);
+  assert.equal(row.fields.run_id, "W1-T3095-1789117400019");
+  assert.equal(row.fields.explored_arm, "codex::gpt-5.5::high", "the row must name the arm that actually ran");
+  assert.equal(logged.filter((l) => l.step === "mount.exploration.error").length, 0, "a clean explore must log no error");
+});
+
+test("W1-T3095: a REFUSAL leaves the on-policy mount and config EXACTLY as they were", async () => {
+  const logged: string[] = [];
+  const input = wiringInput({ risk: "high" }); // excluded by policy
+  const out = await resolveMountExplorationDispatch(input, {
+    loadCells: async () => {
+      throw new Error("the sweep must not even be read for an excluded risk");
+    },
+    loadMountsTable: () => mounts(),
+    log: (step) => logged.push(step),
+  });
+  assert.equal(out.mount, input.currentMount, "a refusal must return the identical on-policy mount");
+  assert.equal(out.config, input.config, "a refusal must return the identical config object, not a copy");
+  assert.deepEqual(logged, [], "a refusal is the normal case and must not write a ledger row");
+});
+
+test("W1-T3095: a FAULTING sweep NEVER takes the dispatch down — it degrades and says why", async () => {
+  const logged: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const input = wiringInput();
+  const out = await resolveMountExplorationDispatch(input, {
+    loadCells: async () => {
+      throw new Error("state/ledger.ndjson: ENOENT");
+    },
+    loadMountsTable: () => mounts(),
+    log: (step, fields) => logged.push({ step, fields }),
+  });
+  // THE WHOLE POINT: exploration is a measurement rung. A rung that can fail a real dispatch is
+  // worse than no rung, so this resolves rather than rejects…
+  assert.equal(out.mount, input.currentMount);
+  assert.equal(out.config, input.config);
+  // …but it is NOT silent. A swallowed fault would read as "exploration is just never eligible",
+  // which is indistinguishable from the rung working correctly and sampling nothing.
+  assert.deepEqual(logged.map((l) => l.step), ["mount.exploration.error"]);
+  assert.match(String(logged[0].fields.reason), /ENOENT/, "the ledgered reason must carry the real fault");
+});
+
+test("W1-T3095: a faulting MOUNTS TABLE degrades the same way — the catch covers the whole rung", async () => {
+  // The second data source. A catch that only covered the sweep would let a mounts parse error
+  // propagate out of runTask, which is the failure mode this arm exists to prevent.
+  const logged: string[] = [];
+  const input = wiringInput();
+  const out = await resolveMountExplorationDispatch(input, {
+    loadCells: async () => cells(),
+    loadMountsTable: () => {
+      throw new Error("mounts.yaml: unexpected token");
+    },
+    log: (step) => logged.push(step),
+  });
+  assert.equal(out.mount, input.currentMount);
+  assert.deepEqual(logged, ["mount.exploration.error"]);
+});
+
+test("W1-T3095: an EXCLUDED risk short-circuits the sweep read, because that read costs a dynamic import", async () => {
+  // Asserted by counting reads, not by timing. The real `loadCells` imports a script off disk and
+  // builds the whole headroom sweep; doing that for a task policy has already excluded is pure waste.
+  let reads = 0;
+  await resolveMountExplorationDispatch(wiringInput({ risk: "high" }), {
+    loadCells: async () => {
+      reads += 1;
+      return cells();
+    },
+    loadMountsTable: () => mounts(),
+    log: () => {},
+  });
+  assert.equal(reads, 0, "a high-risk task must not read the sweep at all");
+
+  // CONTROL: the same harness DOES read for an eligible risk, so the zero above means something.
+  await resolveMountExplorationDispatch(wiringInput({ risk: "medium" }), {
+    loadCells: async () => {
+      reads += 1;
+      return cells();
+    },
+    loadMountsTable: () => mounts(),
+    log: () => {},
+  });
+  assert.equal(reads, 1, "an eligible risk must read the sweep");
+});
+
+test("W1-T3095: run-task wires the seam and keeps NO exploration branch of its own", () => {
+  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  assert.match(src, /resolveMountExplorationDispatch\(/, "runTask must call the seamed resolver");
+  // The arms must not be duplicated back into runTask, where nothing can reach them again.
+  assert.doesNotMatch(src, /exploration\.kind === "explore"/, "the explore branch belongs in lib, not in runTask");
+  assert.doesNotMatch(src, /mount\.exploration\.error/, "the failure arm belongs in lib, not in runTask");
+  // and the real data sources stay wired there, since only runTask knows repoRoot.
+  assert.match(src, /mount-headroom-sweep\.mjs/);
+  assert.match(src, /loadMountsTable: \(\) => loadMounts\(mountsPath\(repoRoot\)\)/);
 });

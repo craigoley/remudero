@@ -815,11 +815,7 @@ import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, 
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
-import {
-  configForMountExploration,
-  exploreMount,
-  mountExplorationLedgerFields,
-} from "./lib/mount-exploration.js";
+import { resolveMountExplorationDispatch } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
   judgeRulingRisk,
@@ -11673,37 +11669,34 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
   });
 
-  let implementMount = mount;
-  let implementConfig = config;
-  try {
-    const explorationCells = task.risk === "high"
-      ? []
-      : (() => {
-          const scriptUrl = pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href;
-          return import(scriptUrl) as Promise<{ buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }>;
-        })();
-    const cells = Array.isArray(explorationCells)
-      ? explorationCells
-      : (await explorationCells).buildMountHeadroomSweep(join(config.root, "state")).cells;
-    const exploration = exploreMount({
-      cells,
-      mounts: loadMounts(mountsPath(repoRoot)),
+  // The DECISION and its two failure-tolerant arms live in lib behind `resolveMountExplorationDispatch`
+  // (which never throws); only the two real data sources are wired here. `runId` is clock-derived, so
+  // no harness can steer THIS call onto the explore arm — that is exactly why the arms are seamed.
+  const explored = await resolveMountExplorationDispatch(
+    {
       taskType: task.type,
       risk: task.risk,
       taskClass,
       currentMount: mount,
+      config,
       runId,
       taskId,
       enabledProviders: enabledWorkerProviders(config),
-    });
-    if (exploration.kind === "explore") {
-      implementMount = exploration.mount;
-      implementConfig = configForMountExploration(config, exploration);
-      log("mount.exploration", { run_id: runId, ...mountExplorationLedgerFields(exploration) });
-    }
-  } catch (error) {
-    log("mount.exploration.error", { reason: String((error as Error)?.message ?? error) });
-  }
+    },
+    {
+      loadCells: async () => {
+        const scriptUrl = pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href;
+        const sweep = (await import(scriptUrl)) as {
+          buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
+        };
+        return sweep.buildMountHeadroomSweep(join(config.root, "state")).cells;
+      },
+      loadMountsTable: () => loadMounts(mountsPath(repoRoot)),
+      log,
+    },
+  );
+  const implementMount = explored.mount;
+  const implementConfig = explored.config;
   say(`run ${runId} — target ${owner}/${task.repo} · mount ${implementMount.model}/${implementMount.effort} · ${implementMount.maxTurns} turns (${task.type}×${task.risk}×${taskClass})`);
 
   // W1-T2557: THE RUNAWAY BOUND — sized against THIS task's own class's OBSERVED turn-count

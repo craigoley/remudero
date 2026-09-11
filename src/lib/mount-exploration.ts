@@ -262,3 +262,74 @@ export function configForMountExploration(config: Config, decision: MountExplora
     },
   };
 }
+
+// ── WIRING: the seam between `runTask` and the decision above ────────────────────────────────────
+//
+// This block used to sit inline in `runTask`, and two of its arms were unreachable from any test.
+// `runId` there is `${taskId}-${Date.now()}`, and the sampler hashes it, so which dispatches explore
+// is a function of the wall clock: a harness CANNOT steer `runTask` onto the explore arm without
+// becoming time-dependent, and a time-dependent test of a 5%-sampled path is a flake generator. The
+// arm that matters most — the one that actually redirects the spawn — was therefore the one nothing
+// could cover, and the catch arm that makes this whole rung non-fatal was never exercised either.
+//
+// Seaming it fixes both: the cell source (a dynamic import of `scripts/mount-headroom-sweep.mjs`)
+// and the mounts table become injectable, so the explore arm and the failure arm are each reachable
+// by passing a fake, while `runTask` keeps the real ones.
+
+export interface MountExplorationWiringDeps {
+  /** The observed per-cell arm population. Injected because the real one is a dynamic import. */
+  loadCells: () => Promise<MountHeadroomCell[]>;
+  loadMountsTable: () => Mounts;
+  log: (step: string, fields: Record<string, unknown>) => void;
+}
+
+export interface MountExplorationWiringInput {
+  taskType: string;
+  risk: string;
+  taskClass: string;
+  currentMount: Mount;
+  config: Config;
+  runId: string;
+  taskId: string;
+  enabledProviders: WorkerProviderId[];
+}
+
+/**
+ * Resolve the mount and config the implement spawn should ride.
+ *
+ * NEVER THROWS. Exploration is an optional measurement rung: if the sweep cannot be read, the
+ * mounts table will not load, or the sampler itself faults, the run proceeds on its ON-POLICY mount
+ * rather than failing. A rung that can take the dispatch down with it is worse than no rung, so the
+ * failure is ledgered (`mount.exploration.error`) and swallowed — silence here would be the real
+ * defect, which is why the catch logs rather than merely returning.
+ */
+export async function resolveMountExplorationDispatch(
+  input: MountExplorationWiringInput,
+  deps: MountExplorationWiringDeps,
+): Promise<{ mount: Mount; config: Config }> {
+  try {
+    // A high-risk task is excluded by policy, so the sweep is not even read — the dynamic import
+    // costs real time and this arm can never explore. `exploreMount` refuses it independently; this
+    // is the cheap short-circuit, not the decision.
+    const cells = input.risk === "high" ? [] : await deps.loadCells();
+    const exploration = exploreMount({
+      cells,
+      mounts: deps.loadMountsTable(),
+      taskType: input.taskType,
+      risk: input.risk,
+      taskClass: input.taskClass,
+      currentMount: input.currentMount,
+      runId: input.runId,
+      taskId: input.taskId,
+      enabledProviders: input.enabledProviders,
+    });
+    if (exploration.kind === "explore") {
+      deps.log("mount.exploration", { run_id: input.runId, ...mountExplorationLedgerFields(exploration) });
+      return { mount: exploration.mount, config: configForMountExploration(input.config, exploration) };
+    }
+    return { mount: input.currentMount, config: input.config };
+  } catch (error) {
+    deps.log("mount.exploration.error", { reason: String((error as Error)?.message ?? error) });
+    return { mount: input.currentMount, config: input.config };
+  }
+}
