@@ -11,7 +11,7 @@ export interface MountExplorationPolicy {
 /**
  * PRIMARY CONTROL: at most this share of eligible implementation dispatches may ride an
  * exploratory arm. Bounded exploration supplies the variation `recommendMounts` needs without
- * silently rewriting `.remudero/mounts.yaml`.
+ * silently rewriting the committed mounts table.
  */
 export const MOUNT_EXPLORATION_POLICY: MountExplorationPolicy = {
   kind: "bounded-fraction",

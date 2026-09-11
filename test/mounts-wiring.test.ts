@@ -32,9 +32,9 @@ test("the spawn path INVOKES resolveMount — mounts owns the run's knobs (not a
 test("the literal `maxTurns: 60` is GONE from run-task.ts (the hardcoded implement ceiling)", () => {
   assert.doesNotMatch(runTaskSrc, /maxTurns:\s*60\b/, "the hardcoded maxTurns: 60 must be replaced by the mount");
   // the implement + resume spawns now take max_turns/model/effort FROM the mount.
-  assert.match(runTaskSrc, /maxTurns:\s*mount\.maxTurns/);
-  assert.match(runTaskSrc, /model:\s*mount\.model/);
-  assert.match(runTaskSrc, /effort:\s*mount\.effort/);
+  assert.match(runTaskSrc, /maxTurns:\s*\w*[Mm]ount\.maxTurns/);
+  assert.match(runTaskSrc, /model:\s*\w*[Mm]ount\.model/);
+  assert.match(runTaskSrc, /effort:\s*\w*[Mm]ount\.effort/);
 });
 
 // ── An implement task resolves its budget FROM the real mounts.yaml table ───
