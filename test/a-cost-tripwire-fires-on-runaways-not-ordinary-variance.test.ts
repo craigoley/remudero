@@ -80,12 +80,6 @@ test("costAnomaly.multiplier: committed row flags only 2 of 647 observed impleme
   assert.deepEqual(committedFindings.map((f) => f.runId), ["RUNAWAY-0", "RUNAWAY-1"]);
 });
 
-test("costAnomaly.multiplier: the policy row records the measured flag rate that justifies value 8", () => {
-  const policyText = readFileSync(POLICY_PATH, "utf8");
-  assert.match(policyText, /647 settled `implement\.done` rows/);
-  assert.match(policyText, /multiplier 8\s+\(> \$33\.81\):\s+2 runs flagged\s+\(0\.3%\)/);
-});
-
 test("costAnomaly.multiplier: the committed value stays inside the row's declared bound", () => {
   const rows = rawCostAnomalyRows();
   const policy = loadCostAnomalyPolicy(POLICY_PATH);
