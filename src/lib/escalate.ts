@@ -785,8 +785,13 @@ function matchesOptionalDimension(wanted: string | undefined, candidate: string 
   return wanted === undefined || candidate === undefined || wanted === candidate;
 }
 
-function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined): boolean {
-  return e.headDedup === "independent" || matchesOptionalDimension(e.headSha, candidate);
+function bodyCarriesSameDetail(e: EscalationDedupKey, body: string): boolean {
+  return body.includes(`\n${e.detail}\n\n## Options`);
+}
+
+function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined, body: string): boolean {
+  if (e.headDedup === "independent") return bodyCarriesSameDetail(e, body);
+  return matchesOptionalDimension(e.headSha, candidate);
 }
 
 /** The SUBSET of an {@link Escalation} that {@link findDuplicateEscalation} reads (W1-T2799), so a
@@ -819,7 +824,7 @@ function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): Ope
       // the two rungs that set both get their own issue on a new push or a different cause.
       if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) return false;
       const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
-      if (matchesHeadDimension(e, candidateHead) === false) return false;
+      if (matchesHeadDimension(e, candidateHead, body) === false) return false;
       if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
       return true;
     }
