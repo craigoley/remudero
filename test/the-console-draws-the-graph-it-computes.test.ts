@@ -150,7 +150,7 @@ function panelGraphDeps(root: string): PanelGraphDeps {
   };
 }
 
-test("W1-T2489: buildPanelGraphRoutes still returns exactly its pre-existing 12 routes plus W1-T2604's later POST /v1/inbox/decline -- W1-T2489 itself added no route, no new computation, no second graph model", () => {
+test("W1-T2489: buildPanelGraphRoutes still returns exactly its pre-existing 12 routes plus the inbox decline/restore writes -- W1-T2489 itself added no route, no new computation, no second graph model", () => {
   const routes = buildPanelGraphRoutes(panelGraphDeps(tmpRoot()));
   const shape = routes.map((r) => `${r.method} ${r.path}`).sort();
   assert.deepEqual(shape, [
@@ -165,6 +165,7 @@ test("W1-T2489: buildPanelGraphRoutes still returns exactly its pre-existing 12 
     "POST /v1/inbox/approve",
     "POST /v1/inbox/decline",
     "POST /v1/inbox/reframe",
+    "POST /v1/inbox/restore",
     "POST /v1/policy/daily-cost-ceiling",
     "POST /v1/policy/daily-cost-ceiling/clear",
   ]);
