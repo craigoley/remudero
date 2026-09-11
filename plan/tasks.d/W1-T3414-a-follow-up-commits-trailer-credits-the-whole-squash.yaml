@@ -1,0 +1,117 @@
+- id: W1-T3414
+  title: "A FOLLOW-UP COMMIT'S `Remudero-Task:` TRAILER CREDITS THE WHOLE SQUASH — 105 merged commits in 14 days credit a task whose declared deliverables they never shipped, 99 of them with an ENTIRELY plan/ diff, and the PR author's own discipline cannot prevent it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 16.00
+  files: [scripts/squash-trailer-gate.mjs, .github/workflows/ci.yml, test/a-plan-only-squash-cannot-credit-an-implementation-task.test.ts]
+  origin: "operator-session#W1-T3134-false-credit-2026-09-11"
+  plan_refs: ["W1-T3149", "W1-T3388", "W1-T205"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED on `origin/main` 2026-09-11, over merged commits from the preceding 14 days. For each
+    commit carrying a `Remudero-Task: <id>` trailer, the audit read that task's shard, took the
+    `files:` entries that are NOT under `plan/`, and asked whether the commit shipped any of them:
+
+      merged commits whose trailer credits a task declaring NON-PLAN files   663
+      of those, commits shipping NONE of those declared files                105   (15.8%)
+        ...whose diff is ENTIRELY under plan/                                 99
+        ...carrying MORE THAN ONE trailer (squash aggregation visible)        12
+      subject types of the 105: chore 97 · fix 6 · test 1 · feat 1
+
+    THE MECHANISM, OBSERVED ON A PR THIS SESSION AUTHORED. PR #5102 was a filing. It was opened with
+    ZERO trailers — deliberately, and verified before push with
+    `git log -1 --format=%B | grep -c '^Remudero-Task:'` reading 0. Another lane then pushed three
+    follow-up commits onto that same branch, each carrying `Remudero-Task: W1-T3378`. GitHub's squash
+    merge CONCATENATES every commit body, so the merged commit `b5ed73d0e` carries the trailer three
+    times and credits W1-T3378 as built. Its net diff is one plan record. One of those follow-up
+    commits says, in its own words, "This leaves PR 5102 with only the W1-T3378 filing as a net diff"
+    — the lane knew the PR shipped no implementation and trailed it anyway.
+
+    THE CASE THAT EXPOSED IT. `5eb6aa33a` (#5126) repointed W1-T3134's proofs — a plan-only change —
+    on a branch named `run-W1-T3134-1789140348000` and carrying `Remudero-Task: W1-T3134`. BOTH credit
+    paths fired. Meanwhile #5107, which carried the actual deliverable
+    (`test/the-headline-index-is-dark.test.ts`), was closed unmerged and that file is ABSENT from
+    main. So the task read as built while the falsifier proving the headline index is dark had never
+    landed. It was recovered by hand this session; the other 104 were not audited individually.
+  rationale: |
+    THE AUTHOR'S DISCIPLINE IS NOT A CONTROL, WHICH IS WHY THIS NEEDS A GATE AND NOT A RULE. The
+    existing convention — a filing PR must not carry the trailer, and must not use a
+    `run-<id>-<epoch>` branch — is stated in CLAUDE.md and was FOLLOWED on #5102, and the credit
+    still landed. Anyone with push access to the branch can inject it afterwards, and the merged
+    commit is composed at squash time from bodies the author never wrote. A convention that the
+    author can obey in full and still violate is not a convention; it is an unenforced wish. This is
+    the failure mode CLAUDE.md's own preamble names: "a rule stated ONLY here can be violated
+    silently and repeatedly".
+
+    WHAT IT COSTS. Credit is how the dispatcher decides a task is done — the doctrine derives "which
+    tasks are merged" from the `Remudero-Task:` trailer on merged PRs, so a falsely credited task
+    leaves the runnable frontier and is never dispatched again. The deliverable is not just delayed,
+    it is silently abandoned, and NOTHING reports it: the shard still reads `status: queued` (which
+    the doctrine already warns is not a completion signal), the PR is green, the plan record exists,
+    and the only observable is a file that was never written. W1-T3134 is the proof that this reaches
+    real work.
+
+    WHY 99/105 BEING PLAN-ONLY IS THE DAMNING FIGURE. These are not borderline partial
+    implementations where credit is arguable. Their entire diff is plan records. There is no reading
+    under which a PR that changes only `plan/` has built a task whose shard declares `src/` and
+    `test/` files, so the population needing judgement is close to zero and a mechanical refusal is
+    available.
+  design: |
+    (i) A GATE, NOT A RULE, AND IT MUST RUN ON THE MERGED SHAPE. The check is: for a PR whose head
+    carries a `Remudero-Task: <id>` trailer in ANY commit, if the shard for <id> declares `files:`
+    outside `plan/` and the PR's DIFF ships none of them, refuse. Run it on the PR (where the diff and
+    the full commit list are both visible), not on main after the fact — after the fact the credit has
+    already landed.
+    (ii) REFUSE THE MIXTURE THE WAY rule15 ALREADY DOES, and reuse its vocabulary rather than
+    inventing a second one. W1-T3149 covers the adjacent author-time case; check `rule15-filing` and
+    `acceptance-author-gate` FIRST and extend the one that already owns this shape if either does —
+    say in the PR body which was checked and why a new script was or was not needed.
+    (iii) THE REFUSAL MUST NAME THE OFFENDING COMMIT, not just the PR. The author frequently did not
+    write it (see the note), so a message that says "your PR carries a trailer" sends the wrong person
+    looking. Name the sha, its subject, and the declared-but-unshipped files.
+    (iv) THE REMEDY MUST BE PERFORMABLE. Two exist and the message should state both: drop the trailer
+    from the offending commit, or ship the declared files. Do NOT offer "rename the branch" as the
+    remedy for a trailer, and do not offer a remedy that requires force-pushing another lane's branch
+    without saying so.
+    (v) WIRE IT INTO THE EXISTING `.github/workflows/ci.yml`, not a new workflow file. Two reasons:
+    every other gate of this kind already lives there (commitlint, leak-grep, prompt-surface-gate), and
+    `^\.github/workflows/` is on the Rule 25 INSTRUMENT_SURFACE — adding a workflow alongside a `src/`
+    product path forces an unsuppressible review failure. This task's `files:` name only `scripts/` and
+    `test/`, so measure `detectInstrumentEntanglement` on the real diff rather than assuming either way.
+    (vi) DO NOT RETRO-CORRECT THE 105 IN THIS TASK. Closing the hole and auditing the damage are
+    different jobs with different risk; this one closes the hole. File the sweep separately if wanted.
+  acceptance:
+    - claim: "a PR whose diff is entirely plan/ is refused when a trailer credits a task declaring non-plan deliverables"
+      proof: "unit test: a plan-only diff cannot credit a task that declares source files"
+    - claim: "a trailer in a FOLLOW-UP commit is caught, not only one in the PR's first commit, because squash concatenates every body"
+      proof: "unit test: a trailer in any commit of the branch is caught"
+    - claim: "a PR that actually ships the declared files still passes, so the gate is not a blanket refusal of trailers"
+      proof: "unit test: a PR shipping its declared files still passes"
+    - claim: "a task whose shard declares only plan/ files is untouched, since a plan-only diff genuinely builds it"
+      proof: "unit test: a plan-only task is not refused by this gate"
+    - claim: "the refusal names the offending commit sha and the declared files it failed to ship"
+      proof: "unit test: the refusal names the offending commit and the unshipped files"
+    - claim: "the gate is reached from a workflow, not only from its own tests"
+      proof: "grep: squash-trailer-gate in .github/workflows/ci.yml"
+  falsifier: |
+    RE-RUN THE AUDIT BEFORE BUILDING AND USE YOUR OWN NUMBERS. The 105/663 is a 14-day window on
+    2026-09-11 and every figure moves. The audit is reproducible: for each merged commit with a
+    `Remudero-Task:` trailer, read that task's shard, take `files:` entries not under `plan/`, and
+    check whether the commit shipped any. If the count has collapsed, find out WHY before closing this
+    — a lane that stopped trailing filings is a behaviour change, not a fix, and it will regress.
+    PROVE THE FOLLOW-UP-COMMIT CASE SPECIFICALLY, because it is the one the author cannot prevent and
+    the one a naive implementation misses. A gate that reads only the head commit's message passes
+    #5102's exact shape. Build the fixture as a branch whose FIRST commit has no trailer and whose
+    SECOND does, and assert the refusal fires.
+    DO NOT FIX THIS BY EDITING CLAUDE.md. The convention already exists and was OBEYED on the PR that
+    still credited falsely. A restatement changes nothing and the preamble says so.
+    DO NOT WEAKEN IT TO A WARNING. A warning on a merged PR is read by nobody; the credit lands
+    regardless, and the task is gone.
+    THE 99 PLAN-ONLY COMMITS ARE THE EASY POPULATION — if the implementation cannot refuse THOSE
+    mechanically, it has not closed the hole this shard is about.
