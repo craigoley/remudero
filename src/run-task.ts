@@ -30451,6 +30451,22 @@ export function runFeedbackDocketRung(
   }
 }
 
+export const MOUNT_RECOMMENDER_CADENCE_POLICY = {
+  kind: "daily-ledger-evidence-accrual",
+  intervalMs: 24 * 60 * 60 * 1000,
+} as const;
+
+function mountRecommenderCadenceMarkerPath(root: string): string {
+  return join(root, "state", "last-mount-recommender.json");
+}
+
+function mountRecommenderNextFireMs(marker: ReturnType<typeof readFeedbackDocketMarker>): number | undefined {
+  if (!marker) return undefined;
+  const last = Date.parse(marker.lastFireIso);
+  if (Number.isNaN(last)) return undefined;
+  return last + MOUNT_RECOMMENDER_CADENCE_POLICY.intervalMs;
+}
+
 /**
  * W1-T2575 — the missing RECOMMENDATION leg (MASTER-PLAN §9, WS-8). `scripts/mount-headroom-
  * sweep.mjs` (W1-T2560, extended W1-T2574) already MEASURES: it groups retained ledger runs into
@@ -30478,15 +30494,39 @@ export async function runMountRecommenderRung(
   config: Config,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: { root?: string; env?: NodeJS.ProcessEnv } = {},
+  deps: {
+    root?: string;
+    env?: NodeJS.ProcessEnv;
+    now?: () => Date;
+    buildMountHeadroomSweep?: (stateDir: string) => { cells: MountHeadroomCell[] };
+  } = {},
 ): Promise<{ filed: number; refused: number }> {
   const root = deps.root ?? repoRoot;
   try {
-    const scriptUrl = pathToFileURL(join(root, "scripts", "mount-headroom-sweep.mjs")).href;
-    const { buildMountHeadroomSweep } = (await import(scriptUrl)) as {
-      buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
-    };
+    const now = deps.now?.() ?? new Date();
     const stateDir = join(config.root, "state");
+    const markerPath = mountRecommenderCadenceMarkerPath(config.root);
+    const marker = readFeedbackDocketMarker(markerPath);
+    const nextFireMs = mountRecommenderNextFireMs(marker);
+    if (nextFireMs !== undefined && now.getTime() < nextFireMs) {
+      log("mount_recommendation.skipped", {
+        run_id: runId,
+        cadence_kind: MOUNT_RECOMMENDER_CADENCE_POLICY.kind,
+        interval_ms: MOUNT_RECOMMENDER_CADENCE_POLICY.intervalMs,
+        last_fire_iso: marker?.lastFireIso,
+        next_fire_iso: new Date(nextFireMs).toISOString(),
+      });
+      return { filed: 0, refused: 0 };
+    }
+    writeFeedbackDocketMarker(markerPath, { lastFireIso: now.toISOString() });
+
+    let buildMountHeadroomSweep = deps.buildMountHeadroomSweep;
+    if (!buildMountHeadroomSweep) {
+      const scriptUrl = pathToFileURL(join(root, "scripts", "mount-headroom-sweep.mjs")).href;
+      ({ buildMountHeadroomSweep } = (await import(scriptUrl)) as {
+        buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
+      });
+    }
     const sweep = buildMountHeadroomSweep(stateDir);
     const mounts = loadMounts(mountsPath(root));
     // Derive the objective from the SAME sanctioned environment boundary a real worker crosses:
