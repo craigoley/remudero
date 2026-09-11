@@ -6,9 +6,8 @@
 // The learnings corpus is split into subsystem shards (learnings/{platform,architecture,ci,
 // testing,failures}.yaml, or any other *.yaml file dropped into learnings/) so a growing corpus
 // never becomes a full SCAN. This script builds the LOOKUP index every shard is checked against:
-// for each shard filename, the entry ids it carries and the union of `files:` globs, `symbols:`,
-// and `error_signatures:` those entries use, plus a `subsystem -> shard filename(s)` map.
-// src/lib/learnings.ts's
+// for each shard filename, the entry ids it carries and the union of `files:`, `symbols:` and
+// `error_signatures:`, plus a `subsystem -> shard filename(s)` map. src/lib/learnings.ts's
 // `loadLearningsForTaskFiles` reads the committed learnings/index.json to decide which shard(s) a
 // task could possibly match WITHOUT parsing every shard.
 //
@@ -29,8 +28,7 @@ import { parse as parseYaml } from "yaml";
 const REQUIRED_FIELDS = ["id", "fact", "src"];
 
 /**
- * Parse one shard YAML file into a validated list of {id, subsystem, files, symbols,
- * error_signatures, lifecycle} records
+ * Parse one shard YAML file into the records needed for the lookup index.
  * (only the fields the index needs -- this is intentionally NOT the full LearningEntry schema
  * enforced by src/lib/learnings.ts; that module is the runtime source of truth for shape, this
  * script only needs enough to build a lookup table).
