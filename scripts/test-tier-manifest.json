@@ -39,6 +39,7 @@
     "test/a-detached-retro-does-not-steal-the-dispatch-ticker.test.ts": 0,
     "test/a-digest-reaches-a-surface-the-operator-reads.test.ts": 0,
     "test/a-disk-reclaim-that-refuses-while-the-fleet-is-up-can-never-be-scheduled.test.ts": 284,
+    "test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts": 0,
     "test/a-draft-failure-names-which-marker-was-missing.test.ts": 0,
     "test/a-draft-nobody-files-is-a-report-nobody-reads.test.ts": 2093,
     "test/a-drafted-skill-is-selectable-for-its-own-task-type.test.ts": 0,

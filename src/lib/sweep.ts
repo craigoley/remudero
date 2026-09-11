@@ -5026,7 +5026,7 @@ export function toQuestionEntry(q: ClarificationQuestion, ts: string): QuestionE
 
 /** One PR's identical-verdict run, as folded off `sweep.disposed` rows already on the ledger —
  *  see {@link repeatDispositionStreaksFromLedger}'s own doc for the fold rules. */
-interface RepeatDispositionRun {
+export interface RepeatDispositionRun {
   headSha: string;
   disposition: string;
   /** Consecutive `sweep.disposed` rows ending at (and including) the last one read. */
@@ -5040,8 +5040,30 @@ interface RepeatDispositionRun {
  *  `(disposition, head_sha)`, NEVER ON THE RENDERED `reason`, which carries a live counter. EVERY
  *  ROW COUNTS REGARDLESS OF `acted` — gating on it would exempt exactly the shapes this bound exists
  *  for. `escalated` carries forward only while THE ROWS IT READS SURVIVE, so post-rotation this
- *  legitimately reports a fresh run (W1-T2382). */
-function repeatDispositionStreaksFromLedger(lines: ReadonlyArray<Record<string, unknown>>): Map<number, RepeatDispositionRun> {
+ *  legitimately reports a fresh run (W1-T2382).
+ *
+ * W1-T3359 — READS THE RECORDED `repeat_streak` INSTEAD OF RE-COUNTING SURVIVING ROWS.
+ *
+ * INVARIANT: retention keeps {@link MAX_RETAINED_LINES_PER_STEP} rows per step, shared across every
+ * PR, so a recount can attribute only a fraction of that window to any one PR — sensitivity falls as
+ * the fleet gets busier, the opposite of what a bound should do. Reading the streak the writing pass
+ * already recorded removes that ceiling: one surviving row states the true count regardless of how
+ * many other PRs' rows share the window. The recount stays as the fallback for rows written before
+ * this field existed, so a mid-migration corpus is not misread as a fresh run. Measured against the
+ * live fleet 2026-09-11: see the PR/task record, not this comment, for the numbers.
+ *
+ * TRAP: `sweep.disposed` IS retained and always has been — do not re-add it to the retention set or
+ * treat rotation as archiving it wholesale, both tried and reverted before this shipped. `escalated`
+ * stays derived from surviving rows only, per W1-T2382's per-rotation re-arm; making it durable here
+ * would silently convert that into once-per-head-forever.
+ *
+ * FALSIFIER: test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts. */
+
+/** EXPORTED FOR ITS FALSIFIER, which is the only honest way to test it: mirroring this fold in
+ *  test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts made every behavioural mutation
+ *  of THIS function survive, because the mirror answered instead. Same precedent as
+ *  {@link renderRepeatEscalationQuestion} below — exported and pinned by a test. */
+export function repeatDispositionStreaksFromLedger(lines: ReadonlyArray<Record<string, unknown>>): Map<number, RepeatDispositionRun> {
   const runs = new Map<number, RepeatDispositionRun>();
   for (const line of lines) {
     if (line.step !== "sweep.disposed") continue;
@@ -5051,10 +5073,18 @@ function repeatDispositionStreaksFromLedger(lines: ReadonlyArray<Record<string, 
     if (prNumber === undefined || headSha === undefined || disposition === undefined) continue;
     const prev = runs.get(prNumber);
     const continuesRun = prev !== undefined && prev.headSha === headSha && prev.disposition === disposition;
+    // The recorded streak is authoritative when present: the pass that wrote it held the same fold
+    // plus its own position in the run, so it can only be better informed than a recount over
+    // whatever rows happen to have survived. A non-positive or non-integer value is not a reading.
+    const recorded =
+      typeof line.repeat_streak === "number" && Number.isInteger(line.repeat_streak) && line.repeat_streak > 0
+        ? line.repeat_streak
+        : undefined;
+    const counted = continuesRun && prev ? prev.streak + 1 : 1;
     runs.set(prNumber, {
       headSha,
       disposition,
-      streak: continuesRun && prev ? prev.streak + 1 : 1,
+      streak: recorded ?? counted,
       escalated: (continuesRun && prev ? prev.escalated : false) || line.repeat_escalated === true,
     });
   }
