@@ -145,6 +145,7 @@
     "test/a-reservation-names-its-holder.test.ts": 0,
     "test/a-reservation-seeds-from-the-namespace-it-owns.test.ts": 1544,
     "test/a-restart-is-only-warranted-by-a-material-advance.test.ts": 182,
+    "test/a-restart-is-worth-its-interruption.test.ts": 0,
     "test/a-retired-task-is-not-a-recoverable-blocker.test.ts": 1011,
     "test/a-retro-that-cannot-publish-escalates-instead-of-retrying.test.ts": 795,
     "test/a-retro-that-cannot-read-github-declines-in-silence.test.ts": 0,
