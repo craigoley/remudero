@@ -818,7 +818,8 @@ function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): Ope
       // both sides carry a value and disagree, so a caller setting neither keeps today's dedup while
       // the two rungs that set both get their own issue on a new push or a different cause.
       if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) return false;
-      if (!matchesHeadDimension(e, HEAD_SHA_LINE_RE.exec(body)?.[1])) return false;
+      const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
+      if (matchesHeadDimension(e, candidateHead) === false) return false;
       if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
       return true;
     }
