@@ -1959,10 +1959,14 @@ function normalizeCensusWalk(raw: string): string | undefined {
   return walk;
 }
 
-function censusWalksFromJoinedSegments(text: string): string[] {
+function censusWalksFromText(text: string): string[] {
   const walks: string[] = [];
   const joinCall = /\bjoin\s*\(([^)]*)\)/g;
   const quoted = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/g;
+  for (const match of text.matchAll(quoted)) {
+    const walk = normalizeCensusWalk(match[2]);
+    if (walk) walks.push(walk);
+  }
   for (let call = joinCall.exec(text); call; call = joinCall.exec(text)) {
     const segments = [...call[1].matchAll(quoted)].map((m) => m[2]);
     for (let i = 0; i < segments.length; i += 1) {
@@ -1979,14 +1983,16 @@ function censusWalksFromJoinedSegments(text: string): string[] {
 }
 
 export function censusCandidateWalks(text: string): string[] {
-  const quoted = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/g;
   const walks = new Set<string>();
-  for (const match of text.matchAll(quoted)) {
-    const walk = normalizeCensusWalk(match[2]);
-    if (walk) walks.add(walk);
+  const idiom = /ls-files|readdirSync|globSync/g;
+  for (let match = idiom.exec(text); match; match = idiom.exec(text)) {
+    const lineStart = text.lastIndexOf("\n", match.index) + 1;
+    const lineEnd = text.indexOf("\n", match.index);
+    const windowEnd = lineEnd === -1 ? text.length : Math.min(text.length, lineEnd + 1);
+    const window = text.slice(lineStart, windowEnd);
+    for (const walk of censusWalksFromText(window)) walks.add(walk);
   }
-  for (const walk of censusWalksFromJoinedSegments(text)) walks.add(walk);
-  if (/src\//.test(text) && ![...walks].some((walk) => walk.startsWith("src/"))) walks.add("src/");
+  if (/(?:src\/|["'`]src["'`])/.test(text) && ![...walks].some((walk) => walk.startsWith("src/"))) walks.add("src/");
   return [...walks].sort();
 }
 
