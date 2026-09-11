@@ -1219,7 +1219,7 @@ export function renderShellHtml(
   .pr-queue-transition { border-top: 1px solid var(--border); padding: 0.45rem 0.65rem; color: var(--text-dim); font-size: 0.82rem; display: grid; gap: 0.2rem; }
   .pr-queue-transition strong { color: var(--text); }
   @media (max-width: 620px) { .pr-queue-toolbar { grid-template-columns: 1fr; } }
-  /* W1-T2497: THE MAILBOX -- inline, same <style> block (no stylesheet of its own). */ .mailbox-heading { font-size: 0.85rem; margin: 0.6rem 0 0.25rem; display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-count:empty { display: none; } .mailbox-unread-count { display: inline-block; min-width: 1.2em; padding: 0 0.4em; border-radius: 999px; text-align: center; font-size: 0.7rem; font-weight: 700; background: var(--status-needs-human); color: #241a02; } .mailbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; } .mailbox-empty { font-size: 0.85rem; opacity: 0.7; margin: 0.25rem 0; } .mailbox-thread { list-style: none; border: 1px solid var(--border, #333); border-radius: 6px; padding: 0.4rem 0.6rem; } .mailbox-thread-unread { border-color: var(--status-needs-human); } .mailbox-thread-head { display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-dot { width: 0.5em; height: 0.5em; border-radius: 999px; background: var(--status-needs-human); display: inline-block; } .mailbox-messages { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; } .mailbox-message { font-size: 0.85rem; } .mailbox-sender { font-weight: 700; margin-right: 0.4em; } .mailbox-reply { display: flex; gap: 0.4em; margin-top: 0.3rem; }
+  /* W1-T2497: THE MAILBOX -- inline, same <style> block (no stylesheet of its own). */ .mailbox-heading { font-size: 0.85rem; margin: 0.6rem 0 0.25rem; display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-count:empty { display: none; } .mailbox-unread-count { display: inline-block; min-width: 1.2em; padding: 0 0.4em; border-radius: 999px; text-align: center; font-size: 0.7rem; font-weight: 700; background: var(--status-needs-human); color: #241a02; } .tab-btn .mailbox-unread-count { margin-left: 0.35rem; } .mailbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; } .mailbox-empty { font-size: 0.85rem; opacity: 0.7; margin: 0.25rem 0; } .mailbox-thread { list-style: none; border: 1px solid var(--border, #333); border-radius: 6px; padding: 0.4rem 0.6rem; } .mailbox-thread-unread { border-color: var(--status-needs-human); } .mailbox-thread-head { display: flex; align-items: center; gap: 0.4em; } .mailbox-unread-dot { width: 0.5em; height: 0.5em; border-radius: 999px; background: var(--status-needs-human); display: inline-block; } .mailbox-messages { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; } .mailbox-message { font-size: 0.85rem; } .mailbox-sender { font-weight: 700; margin-right: 0.4em; } .mailbox-reply { display: flex; gap: 0.4em; margin-top: 0.3rem; }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
@@ -1555,14 +1555,14 @@ export function renderShellHtml(
 <!-- W1-T336: THE TABS ARE NOW AUTHORITATIVE -- third and last shard split out of W1-T314.
      W1-T334 built this bar as a scaffold that governed nothing but its own (still-empty) Plan
      panel; W1-T335 gave every serve suite a shared reachSection helper that tolerates either
-     shape. This shard is what makes the bar real: every one of the nine sections below carries
+     shape. This shard is what makes the bar real: every one of the ten sections below carries
      a \`data-owner-tab\` naming which tab governs it, and the script's own applyActiveTab hides
      every section whose owner isn't the active tab -- never a second copy, never rebuilt, never
      re-fetched. SECTION_TAB_OWNER (this shell's own script, near SECTION_IDS) is the single
      table this markup is a rendering of.
-     DOCUMENT ORDER IS DELIBERATELY UNCHANGED from the pre-tab flat shell (still NOW, NEEDS ME,
+     DOCUMENT ORDER IS DELIBERATELY PRESERVED around the existing task sections (NOW, NEEDS ME,
      ACCEPTED, UP NEXT, RECENT, rest, controls, more -- test/serve.test.ts's own structural check
-     polices this order and is NOT one of this task's own files to edit) -- ownership is
+     polices this order); MAILBOX is now a sibling before NEEDS ME. Ownership is
      expressed by the attribute below, never by re-parenting a section into a per-tab container,
      which is also why NOW and UP NEXT can sit on the SAME tab while NEEDS ME (a DIFFERENT tab)
      still renders between them in the markup.
@@ -1576,7 +1576,7 @@ export function renderShellHtml(
      below is the EXACT node W1-T156 already patches in place -- nothing here moves it, splits
      it, or wraps it in new DOM. -->
 <div id="console-tabs" class="console-tabs" role="tablist" aria-label="Console view">
-  <button type="button" class="tab-btn" id="tab-decisions" role="tab" data-tab="decisions" aria-selected="true">Decisions</button>
+  <button type="button" class="tab-btn" id="tab-decisions" role="tab" data-tab="decisions" aria-selected="true">Decisions<span id="mailbox-unread-count" class="mailbox-unread-count" aria-label="unread mailbox threads"></span></button>
   <button type="button" class="tab-btn" id="tab-queue" role="tab" data-tab="queue" aria-selected="false">Queue</button>
   <button type="button" class="tab-btn" id="tab-now" role="tab" data-tab="now" aria-selected="false">Now</button>
   <button type="button" class="tab-btn" id="tab-plan" role="tab" data-tab="plan" aria-selected="false" aria-controls="tab-plan-panel">Plan</button>
@@ -1619,6 +1619,11 @@ export function renderShellHtml(
   </div>
 </section>
 
+<section id="mailbox-section" class="panel-section" aria-label="Mailbox" data-owner-tab="decisions">
+  <h2><span>Mailbox</span></h2>
+  <div id="mailbox" class="mailbox" aria-label="Mailbox"></div>
+</section>
+
 <!-- DECISIONS: the needs-me set alone -- W1-T257's merged-proposal reconciler and the
      escalation-lifecycle reconciler already run ahead of this render (GET /v1/feedback,
      status.ts's deriveStatus), so an item they have already resolved never reaches
@@ -1637,7 +1642,6 @@ export function renderShellHtml(
          stays VISIBLE) survives exactly: this list is never collapsed, hidden or paginated. -->
     <h3>Awaiting verification <span id="needs-me-backlog-summary" class="section-summary">…</span></h3>
     <ul id="needs-me-backlog-list" class="row-list" aria-label="verify: human backlog, no action required"></ul>
-    <!-- W1-T2497: THE MAILBOX -- same escalations above, as a thread; ADDITIVE, needs-me-list untouched. --><h3 class="mailbox-heading">Mailbox<span id="mailbox-unread-count" class="mailbox-unread-count" aria-label="unread threads"></span></h3><div id="mailbox" class="mailbox" aria-label="Mailbox"></div>
   </div>
 </section>
 

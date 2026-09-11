@@ -422,7 +422,7 @@ test("a fire with a real offender mints exactly one un-approved PROPOSAL and tou
     // is distinct from an approved task id.
     const registry = parseProposalRegistry(readFileSync(registryPath, "utf8"));
     assert.equal(registry.length, 1);
-    assert.equal(registry[0]?.id, "proof-debt:W1-T101:0");
+    assert.equal(registry[0]?.id, "proof-debt:W1-T101", "W1-T3385b: keyed on the TASK, so one record is one ask");
     assert.deepEqual(Object.keys(registry[0] ?? {}).sort(), ["evidenceAnchors", "id", "summary"].sort());
     assert.equal(registry[0]?.evidenceAnchors[0]?.path, join("plan", "tasks.d", "W1-T101-offender.yaml"));
 

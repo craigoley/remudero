@@ -2253,6 +2253,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   // (jumpToTask/focusAndExpandTask, revealSectionOf, applyRecapVisibility, above) can look up a
   // section's owning tab without walking the tree.
   const SECTION_TAB_OWNER = {
+    "mailbox-section": "decisions",
     "needs-me": "decisions",
     "pr-queue": "queue",
     now: "now",

@@ -1,5 +1,8 @@
 /**
- * test/the-adoption-scan-reads-every-invoker-surface.test.ts — W1-T3379.
+ * @source-text-subject: one test below asserts the production citation text for this comment-only
+ * repoint, which is the observable subject of PR #5119.
+ *
+ * test/the-adoption-scan-reads-every-invoker-surface.test.ts — W1-T3383.
  *
  * `scanUnadoptedScripts` asked three surfaces whether a script has an adopter —
  * `.github/workflows`, `package.json`, `src/` — and a script invoked from anywhere else read as
@@ -19,13 +22,16 @@
  * probe is a QUOTED PATH SPECIFIER over EXECUTABLE files only. Measured: reported 11 -> 4.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { runMeasurementCadenceReport } from "../src/lib/measurement-cadence.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function repo(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}adoption-surfaces-`));
@@ -57,7 +63,31 @@ function unadoptedScripts(dir: string): string[] {
   return result.adoptionReport.findings.filter((f) => f.shape === "script-no-invoker").map((f) => f.definedIn);
 }
 
-test("W1-T3379: a script imported only by a SIBLING SCRIPT has an adopter", () => {
+function functionBody(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `${name} must be declared in measurement-cadence.ts`);
+  const next = source.indexOf("\nfunction ", start + 1);
+  return source.slice(start, next === -1 ? source.length : next);
+}
+
+test("W1-T3383: the invoker-surface citation points at the reserved task, not the skill-workshop id", () => {
+  const oldTaskId = "W1-" + "T3379";
+  const newTaskId = "W1-" + "T3383";
+  const source = readFileSync(join(REPO_ROOT, "src", "lib", "measurement-cadence.ts"), "utf8");
+  const scanBody = functionBody(source, "scanUnadoptedScripts");
+
+  assert.match(
+    scanBody,
+    new RegExp(`${newTaskId} — THE TWO INVOKER SURFACES THIS SCAN COULD NOT SEE`),
+    "the adoption invoker-surface note must cite the reserved task id",
+  );
+  assert.ok(
+    !scanBody.includes(`${oldTaskId} — THE TWO INVOKER SURFACES THIS SCAN COULD NOT SEE`),
+    "the invoker-surface note must not cite the unrelated skill-workshop task",
+  );
+});
+
+test("W1-T3383: a script imported only by a SIBLING SCRIPT has an adopter", () => {
   const dir = repo({
     "package.json": "{}",
     "scripts/lib/git.mjs": "export function git() {}\n",
@@ -70,7 +100,7 @@ test("W1-T3379: a script imported only by a SIBLING SCRIPT has an adopter", () =
   }
 });
 
-test("W1-T3379: a script run by a plan/claims.yaml assertion has an adopter", () => {
+test("W1-T3383: a script run by a plan/claims.yaml assertion has an adopter", () => {
   const dir = repo({
     "package.json": "{}",
     "scripts/plan-state-claims.mjs": "// the gate\n",
@@ -83,7 +113,7 @@ test("W1-T3379: a script run by a plan/claims.yaml assertion has an adopter", ()
   }
 });
 
-test("W1-T3379: A DATA FILE LISTING EVERY SCRIPT BY PATH IS NOT AN INVOKER — the scan still reports", () => {
+test("W1-T3383: A DATA FILE LISTING EVERY SCRIPT BY PATH IS NOT AN INVOKER — the scan still reports", () => {
   const dir = repo({
     "package.json": "{}",
     "scripts/orphan.mjs": "// nothing runs this\n",
@@ -99,7 +129,7 @@ test("W1-T3379: A DATA FILE LISTING EVERY SCRIPT BY PATH IS NOT AN INVOKER — t
   }
 });
 
-test("W1-T3379: A DOC-COMMENT MENTION IS NOT AN INVOKER — the scan still reports", () => {
+test("W1-T3383: A DOC-COMMENT MENTION IS NOT AN INVOKER — the scan still reports", () => {
   const dir = repo({
     "package.json": "{}",
     "scripts/orphan.mjs": "// nothing runs this\n",
@@ -115,7 +145,7 @@ test("W1-T3379: A DOC-COMMENT MENTION IS NOT AN INVOKER — the scan still repor
   }
 });
 
-test("W1-T3379: a genuinely unadopted script is STILL reported — the scan did not go vacuous", () => {
+test("W1-T3383: a genuinely unadopted script is STILL reported — the scan did not go vacuous", () => {
   const dir = repo({
     "package.json": "{}",
     "scripts/orphan.mjs": "// nothing runs this\n",

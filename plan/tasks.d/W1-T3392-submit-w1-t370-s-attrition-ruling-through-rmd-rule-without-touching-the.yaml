@@ -1,0 +1,53 @@
+- id: W1-T3392
+  title: "submit W1-T370's attrition ruling through rmd rule without touching the W1-T370 task record"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    W1-T370 is a queued verify:human shard asking for a spend decision on already-merged proof debt:
+    attrition, bulk retirement, or gate-scoping. Its own text already recommends ATTRITION, but at the
+    time it was filed agents were forbidden to record rulings. That rule was superseded on 2026-09-08:
+    W1-T3212 added `rmd rule`, which routes an agent-authored ruling through `judgeRulingRisk` and either
+    records a `plan/decisions.d/<task>-<run>-ruling.md` entry or stages an inbox proposal.
+
+    This task performs only that routed submission and its deterministic test coverage. It deliberately
+    does not edit `plan/tasks.d/W1-T370-merged-proof-debt-spend-ruling.yaml`; mixing that plan-record edit
+    with test/code work at `verify:auto` trips rule15-filing. If the judge records the ruling, W1-T3393 owns
+    the plan-only W1-T370 closure. If the judge escalates, W1-T370 stays queued and the inbox proposal is
+    the progress.
+  design: |
+    Author an `AgentRuling` for W1-T370 with author, title, ruling text, evidence and rollback populated;
+    recommend ATTRITION; cite W1-T370's original 391/136 census and 2026-09-02 440/166 re-measurement,
+    W1-T369's closure of the urgent open half, and the two declined levers (`status:` field and W1-T367
+    design (iii)). Do not set `supersedes`.
+
+    Submit it through `rmd rule --task W1-T370 --author <identity> --title <line> --ruling <text>
+    --evidence <text> --rollback <text>`. Never hand-write `DECISIONS.md` or a decision shard to bypass
+    the judge. Preserve both judge arms: a record arm lands under `plan/decisions.d/`; an escalate arm
+    stages an inbox proposal and lands no ruling file.
+
+    Not in scope: rewriting the 391/440 proofs, reopening the `status:` ruling, changing W1-T367's
+    offline deterministic linter decision, touching W1-T1260/W1-T369, or closing W1-T370's shard.
+  acceptance:
+    - claim: "the W1-T370 AgentRuling fixture is well formed, recommends ATTRITION, carries evidence and rollback, and declares no supersedes entry"
+      proof: "unit test: test/w1-t370-ruling-content.test.ts"
+    - claim: "the W1-T370 ruling routes through both injected judge arms: record lands a plan/decisions.d ruling with evidence and rollback, while escalate stages an inbox proposal and lands nothing"
+      proof: "unit test: test/w1-t370-ruling-content.test.ts"
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: ["W1-T370", "W1-T3212", "W1-T1260", "W1-T369", "W1-T367"]
+  files: [test/w1-t370-ruling-content.test.ts, plan/decisions.d]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high with band_meaning: span is Rule 19 span, not blast radius: one deterministic test file
+    proves the routed behavior and the optional recorded artifact lives under plan/decisions.d. The
+    #588 merits test is satisfied because the invariant is cross-file and unsplittable: the same ruling
+    content must be accepted by the routed record arm and refused into the inbox arm.
+
+    The rule15-filing issue is avoided by not declaring or editing W1-T370's task shard here. That
+    conditional closure is split into W1-T3393.

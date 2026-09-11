@@ -29,6 +29,8 @@ import {
 } from "./operator-message.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
 
+const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
+
 // ── 1. Acceptance-block rendering (the missing counterpart to parseAcceptanceBlock) ─────────
 
 /**
@@ -149,14 +151,47 @@ export function filingAcceptanceCriteria(taskIds: string[], files: string[]): Ac
   if (taskIds.length === 0) {
     throw new Error("filingAcceptanceCriteria: at least one filed task id is required");
   }
-  const idList = taskIds.join("/");
-  const fileList = files.join(", ");
-  return [
-    {
-      claim: `${idList} filed as well-formed plan task shard(s), not (yet) implemented`,
-      proof: `this diff's only files are ${fileList}; commitlint and plan-index-check both pass on the resulting commit`,
-    },
-  ];
+  // W1-T3383b — THE PROOF MUST EXECUTE, OR THE OPERATOR'S ONE-BIT APPROVE CANNOT PRODUCE A
+  // MERGEABLE PR. This function used to emit ONE criterion whose proof was PROSE ("this diff's only
+  // files are …; commitlint and plan-index-check both pass"), which carries no runnable dialect
+  // prefix. `acceptance-author-gate` refuses exactly that with `proof-shape`: the verdict caps at
+  // proof_exec 0/1 and cannot arm. MEASURED 2026-09-11: every open ratification PR on the board was
+  // refused this way — #5122, #5123, #5124, #5125 — so `rmd approve` was structurally incapable of
+  // opening a PR that could land, and each one had to be repaired by hand.
+  //
+  // A `grep:` ON THE FILED SHARD DOES RESOLVE, and the header's old objection does not apply to it.
+  // That objection — "a filing PR cannot cite the filed task's own acceptance criteria, the task
+  // does not exist in the checkout review resolves against" — is about citing the task's OWN
+  // criteria. This cites the shard FILE, which exists on the PR head that review reads.
+  const shardFor = (taskId: string): string | undefined =>
+    files.find(
+      (f) =>
+        f.startsWith(PLAN_TASK_SHARD_PREFIX) &&
+        f.slice(PLAN_TASK_SHARD_PREFIX.length).startsWith(`${taskId}-`),
+    );
+  const criteria: AcceptanceCriterion[] = [];
+  for (const taskId of taskIds) {
+    const shard = shardFor(taskId);
+    if (shard === undefined) continue;
+    criteria.push({
+      claim: `${taskId} is filed as a well-formed plan task shard by this PR, not (yet) implemented`,
+      // `id: <taskId>` rather than the bare id: the id also appears in the FILENAME, and a pattern
+      // that matched the path would pass against a file holding no such record.
+      proof: `grep: id: ${taskId} in ${shard}`,
+    });
+  }
+  // NO SHARD PAIRED WITH ANY ID — a filing shape this function has not seen. Keep the legacy prose
+  // criterion rather than inventing a path: an unexecutable proof caps the verdict, while a WRONG
+  // one would fail it outright, and capping is the direction this repo already takes on ignorance.
+  if (criteria.length === 0) {
+    return [
+      {
+        claim: `${taskIds.join("/")} filed as well-formed plan task shard(s), not (yet) implemented`,
+        proof: `this diff's only files are ${files.join(", ")}; commitlint and plan-index-check both pass on the resulting commit`,
+      },
+    ];
+  }
+  return criteria;
 }
 
 // ── 4. Gate-compliant commit-message assembly (the #387 body fix) ───────────────────────────
