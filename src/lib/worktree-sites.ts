@@ -47,9 +47,10 @@
  * SCOPE FENCE, hard, matching the task's own design note: this module CHANGES NO PROVISIONING
  * BEHAVIOUR. It only reads `src/` as text (see {@link walk}) — it never imports `node:child_process`,
  * never shells out to git, and never touches `run-task.ts`. The review-materialization site
- * (`realReviewWorktreeDeps.addWorktree`) and the fix rung's `createFixRungWorktree` are recorded
- * here EXACTLY as they behave today; converting either to route through `worktreeAdd`, or giving
- * either a recorded base, is real and separate work that belongs beside W1-T232/W1-T233, not here.
+ * (the review worktree adapter's `addWorktree`) and the fix rung's `createFixRungWorktree` are
+ * recorded here EXACTLY as they behave today; converting either to route through `worktreeAdd`, or
+ * giving either a recorded base, is real and separate work that belongs beside W1-T232/W1-T233,
+ * not here.
  *
  * VERIFIED FROM SOURCE, not inherited from a prose note (design note (v)): every row below was
  * derived by re-scanning `src/` for `"worktree", "add"` and `worktreeAdd(` at this task's own SHA,
@@ -151,7 +152,7 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     },
   },
   {
-    file: "src/run-task.ts",
+    file: "src/lib/composition-root.ts",
     site: "addWorktree",
     creates:
       "a throwaway worktree materialized AT A REVIEW'S PR HEAD, detached — `rmd review`'s proof-execution checkout",
@@ -161,7 +162,7 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
         "it materializes at a PR's own head branch, DETACHED, not a fresh branch cut off origin/main — " +
         "'is this behind origin/main' is not this site's question. The freshness check that DOES apply " +
         "(does the checkout match the PR's own head sha) is asserted directly by materializeReviewWorktree, " +
-        "the caller in this same file, which throws loudly on a mismatch rather than posting a review " +
+        "the caller in run-task.ts, which throws loudly on a mismatch rather than posting a review " +
         "against the wrong tree. W1-T232 owns this path's detached-materialization and tip-mismatch guard; " +
         "giving this site a recorded origin/main base is real, separate work that belongs beside that task, " +
         "not folded into this census (see W1-T2622's design note (iv)).",

@@ -187,9 +187,9 @@ test("an exempt row with a BLANK reason FAILS even though its site is present", 
 
 test("the review-materialization site is a NAMED row in the real registry, not an absence", () => {
   const review = WORKTREE_SITE_REGISTRY.find(
-    (r) => r.file === "src/run-task.ts" && r.site === "addWorktree" && r.disposition.kind === "exempt",
+    (r) => r.file === "src/lib/composition-root.ts" && r.site === "addWorktree" && r.disposition.kind === "exempt",
   );
-  assert.ok(review, "realReviewWorktreeDeps.addWorktree must be a named exempt row");
+  assert.ok(review, "review worktree addWorktree must be a named exempt row");
   assert.ok(
     review!.disposition.kind === "exempt" && review!.disposition.because.trim().length > 0,
     "the review site's reason must be non-blank",
@@ -222,8 +222,8 @@ test("the real registry declares EXACTLY the four exempt raw sites — the two t
   // same reason addWorktree above is exempt. The count moves 3 -> 4 deliberately, which is what
   // this pin exists to make someone say out loud.
   assert.deepEqual(exempt, [
+    "src/lib/composition-root.ts::addWorktree",
     "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
-    "src/run-task.ts::addWorktree",
     "src/run-task.ts::buildBaseProofDir",
     "src/run-task.ts::createFixRungWorktree",
   ]);
@@ -295,9 +295,9 @@ test("findRawWorktreeAddSites finds the exact four real sites at their real line
   assert.deepEqual(
     sites.sort(),
     [
+      "src/lib/composition-root.ts::addWorktree",
       "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
       "src/lib/worker.ts::worktreeAdd",
-      "src/run-task.ts::addWorktree",
       "src/run-task.ts::buildBaseProofDir", // R-11: the merge-base worktree the staleness check re-runs proofs in
       "src/run-task.ts::createFixRungWorktree",
     ].sort(),

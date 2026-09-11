@@ -1,0 +1,4 @@
+{
+  "_comment": "Deps interface/type declaration ceiling under src/**/*.ts. Measured by test/deps-interface-census.test.ts; deliberate growth must be reviewed here, while shrinkage can leave the ceiling unchanged until a migration lowers it.",
+  "depsInterfaceCount": 158
+}
