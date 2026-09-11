@@ -9,6 +9,8 @@ import { test } from "node:test";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RUN_TASK_TS = join(REPO_ROOT, "src", "run-task.ts");
 
+// Acceptance proof: unit test: test/a-corrected-criterion-does-not-reach-the-pr-it-corrects.test.ts
+
 const task = (id: string, criterion: string) => [
   `- id: ${id}`,
   "  title: stale criterion",
