@@ -726,6 +726,10 @@ export function loadGlobalArtifact(path: string): GlobalArtifactResult {
   try {
     schema = resolveLearningsSchema(r.version);
   } catch (err) {
+    // DELIBERATE: an unknown `learnings-v*` version is a REFUSAL, not a crash — the resolver's own
+    // message is carried through verbatim (with the path appended) so the caller learns which
+    // version it declared and which file said so. Nothing is erased: this converts a throw into
+    // the same `refused` channel every other validation failure above already uses.
     return refused(`${err instanceof Error ? err.message : String(err)} (${path})`);
   }
   if (typeof r.hash !== "string" || r.hash.length === 0) {
