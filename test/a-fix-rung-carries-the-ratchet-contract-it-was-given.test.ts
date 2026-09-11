@@ -22,7 +22,7 @@ const MODES: ReadonlyArray<readonly [string, FixEvidence]> = [
   ["reviewer-unmet", { review: { unmetCriteria: [UNMET], summary: "unmet criterion" } }],
 ];
 
-test("W1-T3064: every fix mode renders the ratchet contract at the delivery seam", () => {
+test("test/a-fix-rung-carries-the-ratchet-contract-it-was-given.test.ts: W1-T3064 delivers the ratchet contract in every fix mode", () => {
   const contract = ratchetContractLines().join("\n");
 
   for (const [mode, evidence] of MODES) {
