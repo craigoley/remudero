@@ -1602,6 +1602,7 @@ test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), 
     "blocked-ambiguous": 1,
     "dep-review": 0,
     "post-review": 0,
+    "refused-escalate": 0,
     conflicted: 0,
     wait: 0,
   });
