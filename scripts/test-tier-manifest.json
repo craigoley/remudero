@@ -1228,6 +1228,7 @@
     "test/the-deploy-trigger-sees-image-drift.test.ts": 0,
     "test/the-destructive-credit-consumers-are-wired.test.ts": 267,
     "test/the-dispatch-loop-is-never-told-the-window-closed.test.ts": 1155,
+    "test/the-doctrine-cap-tracks-the-index.test.ts": 0,
     "test/the-doctrine-index-points-at-every-body.test.ts": 0,
     "test/the-downgrade-clause-has-a-writer.test.ts": 1317,
     "test/the-draft-cap-is-a-batch-size-not-a-concurrency-limit.test.ts": 831,
