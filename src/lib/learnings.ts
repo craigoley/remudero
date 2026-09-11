@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -70,6 +71,39 @@ export const LAYERS: readonly Layer[] = ["project", "user-overall", "global"];
  */
 export type Share = "public";
 
+/** A source span in an immutable Git object. Never resolve this against a worktree. */
+export interface GitOrigin {
+  kind: "git";
+  path: string;
+  rev: string;
+  startLine: number;
+  endLine: number;
+  lineSha256: string;
+}
+
+/** An author explicitly states that no source span exists for this fact. */
+export interface NoneOrigin {
+  kind: "none";
+  reason: string;
+}
+
+/** The only public reasons a projected origin may expose. */
+export const PUBLIC_REDACTION_REASONS = [
+  "git origin withheld from public export",
+  "provenance withheld",
+] as const;
+
+export type PublicRedactionReason = (typeof PUBLIC_REDACTION_REASONS)[number];
+export const PUBLIC_SOURCE_FREE_REASON = "source-free claim" as const;
+
+/** A source span existed, but its locator is intentionally unavailable to this artifact's reader. */
+export interface RedactedOrigin {
+  kind: "redacted";
+  reason: PublicRedactionReason;
+}
+
+export type AnyOrigin = GitOrigin | NoneOrigin | RedactedOrigin;
+
 /** One durable, provenance-tagged fact, tagged for deterministic matching. */
 export interface LearningEntry {
   /** Stable slug used in the injected citation `[src: learnings#<id>]`. */
@@ -119,7 +153,27 @@ export interface LearningEntry {
    *  yet, which the budget ratchet renders `never-cited`, never zero. {@link selectLearnings} does
    *  not read it; the ratchet's compression ordering does. */
   citedCount?: number;
+  /** Optional, structured provenance. Local authors may use only Git or source-free origins. */
+  origin?: AnyOrigin;
 }
+
+/** An entry read from a local learnings shard or produced by a local writer. */
+export type LocalLearningEntry = Omit<LearningEntry, "origin"> & { origin?: GitOrigin | NoneOrigin };
+
+/** A source-free public origin uses a generated reason, never author prose. */
+export interface PublicNoneOrigin {
+  kind: "none";
+  reason: typeof PUBLIC_SOURCE_FREE_REASON;
+}
+
+/** A public export has no author-controlled source text or Git locator. */
+export type PublicLearningEntry = Omit<LearningEntry, "origin" | "src"> & {
+  src: "withheld from public export";
+  origin?: PublicNoneOrigin | RedactedOrigin;
+};
+
+/** The private day-one bundle stays under the V1 canon and cannot carry unbound origin bytes. */
+export type V1BundleLearningEntry = Omit<LearningEntry, "origin"> & { origin?: never };
 
 export class LearningsError extends Error {
   constructor(message: string) {
@@ -163,7 +217,79 @@ function matchCount(entry: LearningEntry, taskFiles: string[]): number {
  * shared across files for cross-shard duplicate-id detection, or fresh for one file;
  * `sourceLabel` only points error messages at the right file.
  */
-function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>): LearningEntry[] {
+type LearningsParseMode = "local" | "import";
+
+function assertExactOriginKeys(origin: Record<string, unknown>, allowed: readonly string[], id: string, sourceLabel: string): void {
+  const extra = Object.keys(origin).filter((key) => !allowed.includes(key));
+  if (extra.length > 0) {
+    throw new LearningsError(`learnings '${id}': 'origin' has unrecognized key(s) ${extra.join(", ")} (${sourceLabel}).`);
+  }
+}
+
+function parseOrigin(raw: unknown, id: string, sourceLabel: string, mode: LearningsParseMode): AnyOrigin | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new LearningsError(`learnings '${id}': 'origin' must be a mapping (${sourceLabel}).`);
+  }
+  const origin = raw as Record<string, unknown>;
+  if (typeof origin.kind !== "string") {
+    throw new LearningsError(`learnings '${id}': 'origin.kind' must be a string (${sourceLabel}).`);
+  }
+  if (origin.kind === "git") {
+    assertExactOriginKeys(origin, ["kind", "path", "rev", "start_line", "end_line", "line_sha256"], id, sourceLabel);
+    const { path, rev, start_line: startLine, end_line: endLine, line_sha256: lineSha256 } = origin;
+    if (typeof path !== "string" || path.length === 0 || path.startsWith("/") || path.includes("\0") || path.split("/").includes("..")) {
+      throw new LearningsError(`learnings '${id}': 'origin.path' must be a safe repo-relative path (${sourceLabel}).`);
+    }
+    if (typeof rev !== "string" || !/^[0-9a-f]{40}$/.test(rev)) {
+      throw new LearningsError(`learnings '${id}': 'origin.rev' must be a full lowercase 40-hex Git revision (${sourceLabel}).`);
+    }
+    if (
+      typeof startLine !== "number" ||
+      !Number.isInteger(startLine) ||
+      startLine < 1 ||
+      typeof endLine !== "number" ||
+      !Number.isInteger(endLine) ||
+      endLine < startLine
+    ) {
+      throw new LearningsError(`learnings '${id}': 'origin.start_line'/'origin.end_line' must be positive inclusive integers (${sourceLabel}).`);
+    }
+    if (typeof lineSha256 !== "string" || !/^[0-9a-f]{64}$/.test(lineSha256)) {
+      throw new LearningsError(`learnings '${id}': 'origin.line_sha256' must be a lowercase SHA-256 digest (${sourceLabel}).`);
+    }
+    return { kind: "git", path, rev, startLine, endLine, lineSha256 };
+  }
+  if (origin.kind === "none") {
+    assertExactOriginKeys(origin, ["kind", "reason"], id, sourceLabel);
+    if (typeof origin.reason !== "string" || origin.reason.length === 0) {
+      throw new LearningsError(`learnings '${id}': 'origin.reason' must be a non-empty string (${sourceLabel}).`);
+    }
+    if (mode === "import" && origin.reason !== PUBLIC_SOURCE_FREE_REASON) {
+      throw new LearningsError(`learnings '${id}': imported source-free origin must use '${PUBLIC_SOURCE_FREE_REASON}' (${sourceLabel}).`);
+    }
+    return { kind: "none", reason: origin.reason };
+  }
+  if (origin.kind === "redacted") {
+    assertExactOriginKeys(origin, ["kind", "reason"], id, sourceLabel);
+    if (mode === "local") {
+      throw new LearningsError(`learnings '${id}': a redacted origin is import-only (${sourceLabel}).`);
+    }
+    if (typeof origin.reason !== "string" || !PUBLIC_REDACTION_REASONS.includes(origin.reason as PublicRedactionReason)) {
+      throw new LearningsError(`learnings '${id}': 'origin.reason' is not a recognized public redaction reason (${sourceLabel}).`);
+    }
+    return { kind: "redacted", reason: origin.reason as PublicRedactionReason };
+  }
+  throw new LearningsError(`learnings '${id}': unknown 'origin.kind' ${JSON.stringify(origin.kind)} (${sourceLabel}).`);
+}
+
+function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>, mode?: "local"): LocalLearningEntry[];
+function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>, mode: "import"): LearningEntry[];
+function parseLearningsDoc(
+  raw: unknown,
+  sourceLabel: string,
+  seen: Set<string>,
+  mode: LearningsParseMode = "local",
+): LearningEntry[] {
   if (raw === null || raw === undefined) return [];
   if (!Array.isArray(raw)) {
     throw new LearningsError(`learnings must be a YAML list of entries (${sourceLabel}).`);
@@ -257,6 +383,7 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       }
       share = e.share;
     }
+    const origin = parseOrigin(e.origin, id, sourceLabel, mode);
     return {
       id,
       subsystem: typeof e.subsystem === "string" ? e.subsystem : "",
@@ -274,6 +401,7 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       src: e.src,
       cited: typeof e.cited === "string" ? e.cited : undefined,
       citedCount,
+      origin,
     };
   });
 }
@@ -342,7 +470,7 @@ export function seedProjectLearningsHomeFiles(): Record<string, string> {
 }
 
 /** Parse one learnings YAML file. A MISSING file is not an error — returns `[]`. */
-export function loadLearnings(path: string): LearningEntry[] {
+export function loadLearnings(path: string): LocalLearningEntry[] {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
@@ -364,7 +492,7 @@ export function loadLearnings(path: string): LearningEntry[] {
  * INVARIANT: ids are unique across every shard, not only within one. The result is the full
  * corpus; {@link selectLearnings} filters non-active entries out itself.
  */
-export function loadLearningsCorpus(dir: string): LearningEntry[] {
+export function loadLearningsCorpus(dir: string): LocalLearningEntry[] {
   let filenames: string[];
   try {
     filenames = readdirSync(dir)
@@ -374,7 +502,7 @@ export function loadLearningsCorpus(dir: string): LearningEntry[] {
     return []; // no corpus directory yet
   }
   const seen = new Set<string>();
-  const entries: LearningEntry[] = [];
+  const entries: LocalLearningEntry[] = [];
   for (const filename of filenames) {
     const path = join(dir, filename);
     const text = readFileSync(path, "utf8");
@@ -412,11 +540,36 @@ export function buildEntryWeightIndex(entries: LearningEntry[]): Record<string, 
  * `hash`, or {@link loadGlobalArtifact} refuses the artifact as a forgery or a corruption.
  */
 export interface GlobalArtifact {
-  /** Human-facing artifact version (e.g. a date or semver-ish tag); advisory. */
+  /** Schema selector: legacy non-prefixed versions are V1; `learnings-v*` is strict. */
   version: string;
   /** sha256 hex digest of `entries`, per {@link computeArtifactHash}. */
   hash: string;
   entries: LearningEntry[];
+}
+
+export type LearningsSchema = "v1" | "v2";
+
+/** Resolve an artifact's hash canon. A future structured writer must never degrade to V1. */
+export function resolveLearningsSchema(version: string): LearningsSchema {
+  if (version === "learnings-v1") return "v1";
+  if (version === "learnings-v2") return "v2";
+  if (version.startsWith("learnings-v")) {
+    throw new LearningsError(`unsupported learnings artifact version '${version}'`);
+  }
+  return "v1";
+}
+
+function canonicalOrigin(origin: AnyOrigin | undefined): Record<string, unknown> | null {
+  if (!origin) return null;
+  return {
+    kind: origin.kind,
+    path: origin.kind === "git" ? origin.path : null,
+    rev: origin.kind === "git" ? origin.rev : null,
+    startLine: origin.kind === "git" ? origin.startLine : null,
+    endLine: origin.kind === "git" ? origin.endLine : null,
+    lineSha256: origin.kind === "git" ? origin.lineSha256 : null,
+    reason: origin.kind === "git" ? null : origin.reason,
+  };
 }
 
 /**
@@ -424,25 +577,87 @@ export interface GlobalArtifact {
  * INVARIANT: entries sort by `id` first, so order never changes the hash, and `undefined` optionals
  * normalize to `null`, so an omitted field hashes alike whichever path built it.
  */
-export function computeArtifactHash(entries: LearningEntry[]): string {
+export function computeArtifactHash(entries: LearningEntry[], schema: LearningsSchema = "v1"): string {
   const canonical = [...entries]
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    .map((e) => ({
-      id: e.id,
-      subsystem: e.subsystem,
-      lifecycle: e.lifecycle,
-      supersededBy: e.supersededBy ?? null,
-      assertion: e.assertion ?? null,
-      quarantinedReason: e.quarantinedReason ?? null,
-      operatorImpact: e.operatorImpact ?? false,
-      layer: entryLayer(e),
-      share: e.share ?? null,
-      files: e.files,
-      fact: e.fact,
-      src: e.src,
-      cited: e.cited ?? null,
-    }));
+    .map((e) => {
+      const v1 = {
+        id: e.id,
+        subsystem: e.subsystem,
+        lifecycle: e.lifecycle,
+        supersededBy: e.supersededBy ?? null,
+        assertion: e.assertion ?? null,
+        quarantinedReason: e.quarantinedReason ?? null,
+        operatorImpact: e.operatorImpact ?? false,
+        layer: entryLayer(e),
+        share: e.share ?? null,
+        files: e.files,
+        fact: e.fact,
+        src: e.src,
+        cited: e.cited ?? null,
+      };
+      return schema === "v1" ? v1 : { ...v1, origin: canonicalOrigin(e.origin) };
+    });
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+export type OriginAttestationStatus = "match" | "mismatch" | "unresolvable" | "legacy-unattested" | "source-free";
+
+export interface OriginAttestationResult {
+  status: OriginAttestationStatus;
+}
+
+/** Injectable object-store reader. Its argument vector deliberately never invokes a shell. */
+export type GitBlobReader = (repoDir: string, rev: string, path: string) => Buffer;
+
+function defaultGitBlobReader(repoDir: string, rev: string, path: string): Buffer {
+  const output = execFileSync("git", ["-C", repoDir, "cat-file", "blob", `${rev}:${path}`], {
+    encoding: "buffer",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return Buffer.isBuffer(output) ? output : Buffer.from(output);
+}
+
+/**
+ * Verify a Git source span against its immutable blob. This is report-only: callers receive a
+ * status, while YAML, lifecycle, prompt rendering, and artifact hashes remain untouched.
+ */
+export function attestLearningOrigin(
+  entry: LearningEntry,
+  repoDir: string,
+  deps: { readGitBlob?: GitBlobReader } = {},
+): OriginAttestationResult {
+  if (!entry.origin) return { status: "legacy-unattested" };
+  if (entry.origin.kind === "none") return { status: "source-free" };
+  if (entry.origin.kind === "redacted") return { status: "unresolvable" };
+
+  let blob: Buffer;
+  try {
+    blob = (deps.readGitBlob ?? defaultGitBlobReader)(repoDir, entry.origin.rev, entry.origin.path);
+  } catch {
+    return { status: "unresolvable" };
+  }
+
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(blob);
+  } catch {
+    return { status: "unresolvable" };
+  }
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  if (
+    !Number.isInteger(entry.origin.startLine) ||
+    !Number.isInteger(entry.origin.endLine) ||
+    entry.origin.startLine < 1 ||
+    entry.origin.endLine < entry.origin.startLine ||
+    entry.origin.endLine > lines.length
+  ) {
+    return { status: "mismatch" };
+  }
+  const span = `${lines.slice(entry.origin.startLine - 1, entry.origin.endLine).join("\n")}\n`;
+  const actual = createHash("sha256").update(Buffer.from(span, "utf8")).digest("hex");
+  return { status: actual === entry.origin.lineSha256 ? "match" : "mismatch" };
 }
 
 /** The reason prefix {@link loadGlobalArtifact} emits for a missing artifact (W1-T1251). Exported
@@ -507,16 +722,36 @@ export function loadGlobalArtifact(path: string): GlobalArtifactResult {
   if (typeof r.version !== "string" || r.version.length === 0) {
     return refused(`global artifact missing string 'version' (${path})`);
   }
+  let schema: LearningsSchema;
+  try {
+    schema = resolveLearningsSchema(r.version);
+  } catch (err) {
+    // DELIBERATE: an unknown `learnings-v*` version is a REFUSAL, not a crash — the resolver's own
+    // message is carried through verbatim (with the path appended) so the caller learns which
+    // version it declared and which file said so. Nothing is erased: this converts a throw into
+    // the same `refused` channel every other validation failure above already uses.
+    return refused(`${err instanceof Error ? err.message : String(err)} (${path})`);
+  }
   if (typeof r.hash !== "string" || r.hash.length === 0) {
     return refused(`global artifact missing string 'hash' (${path})`);
   }
   let entries: LearningEntry[];
   try {
-    entries = parseLearningsDoc(r.entries, path, new Set());
+    entries = parseLearningsDoc(r.entries, path, new Set(), "import");
   } catch (err) {
     return refused(err instanceof Error ? err.message : String(err));
   }
-  const actualHash = computeArtifactHash(entries);
+  if (schema === "v1") {
+    const withUnboundOrigin = entries.find((entry) => entry.origin !== undefined);
+    if (withUnboundOrigin) {
+      return refused(`global artifact entry '${withUnboundOrigin.id}' carries 'origin' under V1, where that field is unhashed (${path})`);
+    }
+  }
+  const withPrivateGitOrigin = entries.find((entry) => entry.origin?.kind === "git");
+  if (withPrivateGitOrigin) {
+    return refused(`global artifact entry '${withPrivateGitOrigin.id}' carries a raw Git origin, which a public import must not accept (${path})`);
+  }
+  const actualHash = computeArtifactHash(entries, schema);
   if (actualHash !== r.hash) {
     return refused(`global artifact hash mismatch (${path}): pinned ${r.hash}, computed ${actualHash} — refused, not trusted`);
   }
@@ -678,7 +913,7 @@ export function promotionTaint(candidate: PromotionTaintCandidate): PromotionTai
 
 /** Every free-text field of an entry a leaked secret/PII value could hide in. `files` (globs) is excluded — not free text. */
 function scrubbableFields(entry: LearningEntry): (string | undefined)[] {
-  return [entry.fact, entry.src, entry.assertion, entry.quarantinedReason];
+  return [entry.fact, entry.src, entry.assertion, entry.quarantinedReason, entry.origin?.kind === "git" ? undefined : entry.origin?.reason];
 }
 
 /**
@@ -1080,14 +1315,31 @@ export interface ExportProvenance {
  *  {@link loadGlobalArtifact} already parses and hash-verifies, plus a `provenance` block. That
  *  loader ignores unknown top-level keys, so the bundle round-trips through it unchanged. */
 export interface ExportBundle extends GlobalArtifact {
+  entries: PublicLearningEntry[];
   provenance: ExportProvenance;
 }
 
 /** The exportable subset of a corpus (§6, W1-T425). INVARIANT: only ACTIVE entries carrying the
  *  explicit `share: "public"` opt-in are included — a pure filter over the declared field, never a
  *  guess about what looks safe. */
-export function selectExportableEntries(entries: LearningEntry[]): LearningEntry[] {
+export function selectExportableEntries<T extends LearningEntry>(entries: T[]): T[] {
   return entries.filter((e) => e.lifecycle === "active" && e.share === "public");
+}
+
+export const PUBLIC_EXPORT_SRC = "withheld from public export" as const;
+
+/** Convert locally authored provenance into the small, deliberately non-identifying public vocabulary. */
+function projectPublicEntry(entry: LocalLearningEntry): PublicLearningEntry {
+  const { origin: _origin, src: _src, ...rest } = entry;
+  if (!entry.origin) return { ...rest, src: PUBLIC_EXPORT_SRC };
+  if (entry.origin.kind === "none") {
+    return { ...rest, src: PUBLIC_EXPORT_SRC, origin: { kind: "none", reason: PUBLIC_SOURCE_FREE_REASON } };
+  }
+  return {
+    ...rest,
+    src: PUBLIC_EXPORT_SRC,
+    origin: { kind: "redacted", reason: "git origin withheld from public export" },
+  };
 }
 
 /** The outcome of one {@link buildExportBundle} call — a refusal always NAMES why (and, for a tripwire hit, which entry), never a silent empty bundle. */
@@ -1102,10 +1354,13 @@ export type ExportResult =
  * matches {@link scrubEntry}'s patterns (refused by entry id, so a mis-declared one cannot leave).
  */
 export function buildExportBundle(
-  entries: LearningEntry[],
+  entries: LocalLearningEntry[],
   provenance: ExportProvenance,
-  version: string = provenance.exportedAt,
+  version: string = "learnings-v2",
 ): ExportResult {
+  if (version !== "learnings-v2") {
+    return { ok: false, reason: `public learnings export requires version 'learnings-v2', got '${version}'` };
+  }
   const candidates = selectExportableEntries(entries);
   if (candidates.length === 0) {
     return {
@@ -1127,7 +1382,11 @@ export function buildExportBundle(
       };
     }
   }
-  return { ok: true, bundle: { version, hash: computeArtifactHash(candidates), entries: candidates, provenance } };
+  const projected = candidates.map(projectPublicEntry);
+  return {
+    ok: true,
+    bundle: { version: "learnings-v2", hash: computeArtifactHash(projected, "v2"), entries: projected, provenance },
+  };
 }
 
 /** Render an {@link ExportBundle} to YAML — the same shard shape {@link loadGlobalArtifact} parses back, plus the provenance block. */
@@ -1157,6 +1416,14 @@ export function verifyBundlePin(bundleText: string, pin: string): BundlePinResul
     return { ok: false, reason: "bundle must be a mapping with 'version', 'hash', 'entries' — refused, not written" };
   }
   const r = raw as Record<string, unknown>;
+  if (typeof r.version !== "string" || r.version.length === 0) {
+    return { ok: false, reason: "bundle missing string 'version' — refused, not written" };
+  }
+  try {
+    resolveLearningsSchema(r.version);
+  } catch (err) {
+    return { ok: false, reason: `${err instanceof Error ? err.message : String(err)} — refused, not written` };
+  }
   if (typeof r.hash !== "string" || r.hash.length === 0) {
     return { ok: false, reason: "bundle missing string 'hash' — cannot pin, refused, not written" };
   }
@@ -1256,11 +1523,11 @@ export function candidateShardFiles(index: LearningsIndex, taskFiles: string[] |
  *  `learnings/index.json` for the lookup. INVARIANT: correctness never depends on the index
  *  existing — a missing one falls back to a full {@link loadLearningsCorpus} scan and loses only
  *  the lookup-versus-scan win. */
-export function loadLearningsForTaskFiles(learningsDir: string, taskFiles: string[] | undefined): LearningEntry[] {
+export function loadLearningsForTaskFiles(learningsDir: string, taskFiles: string[] | undefined): LocalLearningEntry[] {
   const index = loadLearningsIndex(join(learningsDir, "index.json"));
   if (!index) return loadLearningsCorpus(learningsDir);
   const candidates = candidateShardFiles(index, taskFiles);
-  const entries: LearningEntry[] = [];
+  const entries: LocalLearningEntry[] = [];
   for (const filename of candidates) {
     entries.push(...loadLearnings(join(learningsDir, filename)));
   }
@@ -1275,11 +1542,11 @@ export function loadLearningsForTaskFiles(learningsDir: string, taskFiles: strin
  * repo-wide. Ordering, highest first: match count, layer precedence (P32/W1-T145),
  * most-recently-cited, id. Then fill to `budgetChars`; the remainder is `dropped` for logging.
  */
-export function selectLearnings(
-  entries: LearningEntry[],
+export function selectLearnings<T extends LearningEntry>(
+  entries: T[],
   taskFiles: string[] | undefined,
   budgetChars: number = DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-): { selected: LearningEntry[]; dropped: LearningEntry[] } {
+): { selected: T[]; dropped: T[] } {
   const active = entries.filter((e) => e.lifecycle === "active");
   const files = taskFiles ?? [];
   const repoWide = files.length === 0;
@@ -1297,8 +1564,8 @@ export function selectLearnings(
     })
     .map((r) => r.entry);
 
-  const selected: LearningEntry[] = [];
-  const dropped: LearningEntry[] = [];
+  const selected: T[] = [];
+  const dropped: T[] = [];
   let used = 0;
   for (const entry of ranked) {
     const cost = entryBudgetWeight(entry) + 1; // +1 for the joining "\n"

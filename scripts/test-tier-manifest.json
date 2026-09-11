@@ -711,6 +711,7 @@
     "test/learnings-promotion.test.ts": 293,
     "test/learnings-provenance-gates.test.ts": 1117,
     "test/learnings-ratchet-candidates.test.ts": 513,
+    "test/learnings-v2.test.ts": 0,
     "test/learnings.test.ts": 1040,
     "test/ledger-account-dimension.test.ts": 1066,
     "test/ledger-atomic.test.ts": 2484,

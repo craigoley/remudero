@@ -14,7 +14,7 @@ import {
   selectLearnings,
   verifyBundlePin,
   type ExportProvenance,
-  type LearningEntry,
+  type LocalLearningEntry,
 } from "../src/lib/learnings.js";
 import { learningsCommand, learningsExportCommand, learningsImportCommand } from "../src/run-task.js";
 
@@ -30,7 +30,7 @@ function tmpDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
-function entry(over: Partial<LearningEntry> = {}): LearningEntry {
+function entry(over: Partial<LocalLearningEntry> = {}): LocalLearningEntry {
   return {
     id: "commons-fact",
     subsystem: "knowledge",
