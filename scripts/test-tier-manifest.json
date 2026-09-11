@@ -105,6 +105,7 @@
     "test/a-pr-repair-in-flight-is-invisible-to-the-next-repairer.test.ts": 1486,
     "test/a-printed-remedy-is-never-applied.test.ts": 1407,
     "test/a-prompt-surface-edit-carries-its-own-fixture.test.ts": 0,
+    "test/a-prompt-surface-refusal-names-a-remedy-that-exists.test.ts": 0,
     "test/a-proof-can-name-a-second-runners-suite.test.ts": 0,
     "test/a-proof-cannot-certify-its-own-line.test.ts": 560,
     "test/a-proof-that-cannot-execute-is-refused-at-author-time.test.ts": 685,
