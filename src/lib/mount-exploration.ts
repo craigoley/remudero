@@ -266,7 +266,8 @@ export function configForMountExploration(config: Config, decision: MountExplora
 // ── WIRING: the seam between `runTask` and the decision above ────────────────────────────────────
 //
 // This block used to sit inline in `runTask`, and two of its arms were unreachable from any test.
-// `runId` there is `${taskId}-${Date.now()}`, and the sampler hashes it, so which dispatches explore
+// `runId` there is the task id joined to the spawn's epoch-millis stamp, and the sampler hashes it,
+// so which dispatches explore
 // is a function of the wall clock: a harness CANNOT steer `runTask` onto the explore arm without
 // becoming time-dependent, and a time-dependent test of a 5%-sampled path is a flake generator. The
 // arm that matters most — the one that actually redirects the spawn — was therefore the one nothing
@@ -275,13 +276,6 @@ export function configForMountExploration(config: Config, decision: MountExplora
 // Seaming it fixes both: the cell source (a dynamic import of `scripts/mount-headroom-sweep.mjs`)
 // and the mounts table become injectable, so the explore arm and the failure arm are each reachable
 // by passing a fake, while `runTask` keeps the real ones.
-
-export interface MountExplorationWiringDeps {
-  /** The observed per-cell arm population. Injected because the real one is a dynamic import. */
-  loadCells: () => Promise<MountHeadroomCell[]>;
-  loadMountsTable: () => Mounts;
-  log: (step: string, fields: Record<string, unknown>) => void;
-}
 
 export interface MountExplorationWiringInput {
   taskType: string;
@@ -305,7 +299,19 @@ export interface MountExplorationWiringInput {
  */
 export async function resolveMountExplorationDispatch(
   input: MountExplorationWiringInput,
-  deps: MountExplorationWiringDeps,
+  // DECLARED INLINE, NOT AS A NAMED `*Deps` INTERFACE. `test/deps-interface-census.test.ts` holds a
+  // one-way ratchet on how many named `*Deps` shapes exist under src/, because a NAMED shape is the
+  // one that gets imported, widened and copied into the next rung — which is the proliferation it
+  // exists to stop. These three seams are consumed by exactly one caller and exported to nobody, so
+  // an inline type keeps the injection (the whole reason the arms below are testable) without adding
+  // to that population. Reusing an existing seam was considered first: DaemonDeps, DrainDeps and the
+  // sweep's shapes are each specific to their own rung and carry none of these three.
+  deps: {
+    /** The observed per-cell arm population. Injected because the real one is a dynamic import. */
+    loadCells: () => Promise<MountHeadroomCell[]>;
+    loadMountsTable: () => Mounts;
+    log: (step: string, fields: Record<string, unknown>) => void;
+  },
 ): Promise<{ mount: Mount; config: Config }> {
   try {
     // A high-risk task is excluded by policy, so the sweep is not even read — the dynamic import
