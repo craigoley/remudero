@@ -37,12 +37,19 @@ type GateInput = {
   authorLogin?: string;
   trailerResolves?: (taskId: string) => boolean;
   introducedTaskIds?: string[];
+  trailerCommits?: Array<{ sha: string; subject: string; taskId: string }>;
   changedPaths?: readonly string[];
   taskFilesForId?: TaskFilesForId;
 };
 type GateVerdict = { ok: boolean; defect?: string; message: string };
 const mod = (await import(GATE_URL)) as {
   EXEMPT_BOT_LOGINS: ReadonlySet<string>;
+  commitTaskTrailersAtRange: (input?: {
+    baseSha?: string;
+    headSha?: string;
+    root?: string;
+    git?: (args: string[]) => string;
+  }) => Array<{ sha: string; subject: string; taskId: string }> | undefined;
   changedPathsAtRange: (input?: {
     baseSha?: string;
     headSha?: string;
@@ -58,7 +65,7 @@ const mod = (await import(GATE_URL)) as {
     env?: Record<string, string | undefined>,
   ) => { ok: boolean; eventPath?: string; message?: string };
 };
-const { EXEMPT_BOT_LOGINS, changedPathsAtRange, evaluateGate, main, planTaskFilesResolver, readEventPayload, resolveEventPath } = mod;
+const { EXEMPT_BOT_LOGINS, changedPathsAtRange, commitTaskTrailersAtRange, evaluateGate, main, planTaskFilesResolver, readEventPayload, resolveEventPath } = mod;
 
 /** Byte-identical in shape to test/acceptance-block-diagnostics.test.ts's own WRAPPED fixture —
  *  a claim long enough that an author wrapped it onto a second line. `parseAcceptanceBlock`
@@ -239,6 +246,80 @@ test("W1-T3149 criterion 5 mutation: removing only the structural predicate make
   } finally {
     mutant.cleanup();
   }
+});
+
+test("W1-T3414: a trailer added by a follow-up commit is refused even when the PR body has none", () => {
+  const calls: string[][] = [];
+  const trailers = commitTaskTrailersAtRange({
+    baseSha: "base",
+    headSha: "head",
+    git(args) {
+      calls.push(args);
+      return [
+        "a".repeat(40), "filing task", "filing task\n\nNo trailer here",
+        "b".repeat(40), "chore: follow-up", "chore: follow-up\n\nRemudero-Task: W1-T3101", "",
+      ].join("\0");
+    },
+  });
+  assert.deepEqual(calls, [["log", "-z", "--format=%H%x00%s%x00%B", "base..head"]]);
+  assert.deepEqual(trailers, [{ sha: "b".repeat(40), subject: "chore: follow-up", taskId: IMPLEMENTATION_TASK }]);
+
+  const result = evaluateGate({
+    body: "## Acceptance\n\n- claim: plan filing\n  proof: grep: W1-T3414 in plan/tasks.d/W1-T3414.yaml\n",
+    authorLogin: "a-human",
+    changedPaths: ["plan/tasks.d/W1-T3414.yaml"],
+    taskFilesForId: implementationTaskFiles,
+    trailerCommits: trailers,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.defect, "follow-up-implementation-trailer");
+  assert.match(result.message, new RegExp(`Commit ${"b".repeat(40)}`));
+  assert.match(result.message, /chore: follow-up/);
+  assert.match(result.message, /src\/lib\/skill-workshop\.ts/);
+  assert.match(result.message, /Remove the trailer from that commit/);
+  assert.match(result.message, /include the implementation changes/);
+});
+
+test("W1-T3414: source-changing and plan-only task controls pass, and unreadable commit history preserves the existing verdict", () => {
+  const followup = [{ sha: "c".repeat(40), subject: "chore: follow-up", taskId: IMPLEMENTATION_TASK }];
+  const sourceChanging = evaluateGate({
+    body: IMPLEMENTATION_BODY,
+    authorLogin: "a-human",
+    trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK,
+    changedPaths: ["src/lib/skill-workshop.ts"],
+    taskFilesForId: implementationTaskFiles,
+    trailerCommits: followup,
+  });
+  assert.equal(sourceChanging.ok, true, sourceChanging.message);
+
+  const planOnly = evaluateGate({
+    body: "Remudero-Task: W1-TPLAN\n",
+    authorLogin: "a-human",
+    trailerResolves: (taskId) => taskId === "W1-TPLAN",
+    changedPaths: ["plan/tasks.d/W1-TPLAN.yaml"],
+    taskFilesForId: (taskId) => (taskId === "W1-TPLAN" ? ["plan/tasks.d/W1-TPLAN.yaml"] : undefined),
+    trailerCommits: [{ sha: "d".repeat(40), subject: "chore: filing", taskId: "W1-TPLAN" }],
+  });
+  assert.equal(planOnly.ok, true, planOnly.message);
+
+  const existing = evaluateGate({
+    body: IMPLEMENTATION_BODY,
+    authorLogin: "a-human",
+    trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK,
+    changedPaths: ["src/lib/skill-workshop.ts"],
+    taskFilesForId: implementationTaskFiles,
+  });
+  assert.deepEqual(
+    evaluateGate({
+      body: IMPLEMENTATION_BODY,
+      authorLogin: "a-human",
+      trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK,
+      changedPaths: ["src/lib/skill-workshop.ts"],
+      taskFilesForId: implementationTaskFiles,
+      trailerCommits: commitTaskTrailersAtRange({ baseSha: "base", headSha: "head", git: () => { throw new Error("unknown revision"); } }),
+    }),
+    existing,
+  );
 });
 
 test("acceptance gate: a block truncated at a wrapped claim is refused", () => {
