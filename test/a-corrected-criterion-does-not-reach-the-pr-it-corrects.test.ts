@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -7,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { Config } from "../src/lib/config-schema.js";
 import type { ReviewRunResult } from "../src/run-task.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -27,12 +27,12 @@ const task = (id: string, criterion: string) => [
 ].join("\n");
 
 function gitPlanRepo(): { dir: string; run: (args: string[]) => string; commit: (message: string) => string } {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-stale-plan-tree-"));
-  const run = (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: "pipe" });
-  run(["init", "--quiet", "-b", "main"]);
-  run(["config", "user.email", "test@example.invalid"]);
-  run(["config", "user.name", "Test"]);
-  run(["remote", "add", "origin", "https://github.com/o/r.git"]);
+  // Shared fixture (test/helpers/git-repo.ts, W1-T2903): carries its own committer identity, so
+  // this never needs its own `git config user.*` sites.
+  const repo = gitRepo({ branch: "main", seedCommit: false, kind: "stale-plan-tree" });
+  const { dir } = repo;
+  const run = (args: string[]) => repo.git(...args);
+  repo.addRemote("origin", "https://github.com/o/r.git");
   mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
   mkdirSync(join(dir, ".remudero"), { recursive: true });
   copyFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), join(dir, ".remudero", "mounts.yaml"));
