@@ -40,6 +40,7 @@ import {
   automergeHoldFromLedger,
   cappedOverrideFromLedger,
   decideAutoMergeArm,
+  isCriterionRefusal,
   parseAcceptanceBlock,
   postedArmFactsFromLedger,
   REVIEW_CONTEXT,
@@ -2061,6 +2062,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 export type Disposition =
   | "mergeable"
   | "blocked-fixable"
+  | "refused-escalate"
   | "stale"
   | "blocked-ambiguous"
   | "dep-review"
@@ -3396,6 +3398,17 @@ export function isBlockedCi(pr: OpenPrView): boolean {
   return pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0; // W1-T2504
 }
 
+/** True only when the authoritative unmet set is nonempty and every entry is a syntactically
+ * recovered worker refusal. A missing/malformed `refusal` is never read from its prose `reason`.
+ * This is the gate that prevents an advisory refusal from spending an ordinary fix strike. */
+export function onlyRefusedUnmetCriteria(criteria: readonly CriterionVerdict[]): boolean {
+  return criteria.length > 0 && criteria.every((criterion) => !criterion.met && isCriterionRefusal(criterion.refusal));
+}
+
+function refusedCriterionClasses(criteria: readonly CriterionVerdict[]): string {
+  return [...new Set(criteria.flatMap((criterion) => (isCriterionRefusal(criterion.refusal) ? [criterion.refusal.class] : [])))].join(", ");
+}
+
 /** W1-T2998 — the ratchets whose ordinary remedy is a RECORDED NUMBER, DERIVED from
  *  {@link REGENERABLE_ARTIFACT_GENERATORS} rather than hand-listed beside it. That registry already
  *  answers "can a generator reproduce this artifact", which is precisely the property that makes a
@@ -4206,6 +4219,21 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "dep-review",
     when: (pr) => pr.isDependabot === true,
     reason: (pr) => `dependabot PR — dep-review lane (checks ${pr.checksState}, review ${pr.reviewState})`,
+  },
+  {
+    // W1-T3078 — a worker can DECLINE a criterion under review.ts's closed grammar, but it may
+    // never choose its own remedy or spend another attempt. This must sit above an answered
+    // clarification and the shared strike-cap row: a pre-existing answer or a prior strike cannot
+    // convert a refusal into a speculative patch. Required-CI red still wins via the explicit
+    // guard, because that independent blocker must be repaired before any review verdict matters.
+    disposition: "refused-escalate",
+    when: (pr) =>
+      !isBlockedCi(pr) &&
+      pr.reviewState === "failure" &&
+      onlyRefusedUnmetCriteria(pr.unmetCriteria),
+    reason: (pr) =>
+      `worker refused ${pr.unmetCriteria.length} acceptance criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} ` +
+      `(${refusedCriterionClasses(pr.unmetCriteria)}) — escalating without a fix strike`,
   },
   {
     // W1-T78: an operator's answer RE-ARMS the fix rung, but only within its own strike
@@ -5726,6 +5754,7 @@ const BUDGET_FLOOR_LANE_COST: Partial<Record<Disposition, string>> = {
   // An escalation not raised is strictly better than one raised twice; the PR stays open and is
   // re-derived whole next pass.
   "blocked-ambiguous": "an escalation is deferred; the PR stays open and is re-derived next pass",
+  "refused-escalate": "a worker-refusal escalation is deferred; no fix strike is spent",
   // The hold/terminal outcome is re-read from live state next pass, so nothing is carried.
   "dep-review": "a dependency review is deferred one pass and re-read from live state",
   // Closing a stale PR is the least urgent action the sweep takes.
@@ -5928,6 +5957,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
         closed.add(pr);
         break;
       case "blocked-ambiguous":
+      case "refused-escalate":
         // W1-T514: SHA-KEYED, exactly like `fixed`/`armed` above — a new head
         // must re-earn the attempt rather than being deduped by a stale one.
         escalated.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
@@ -6121,6 +6151,7 @@ export function renderRepairFilingRaw(filing: RepairFilingRecurrence): string {
 const ZERO_COUNTS = (): Record<Disposition, number> => ({
   mergeable: 0,
   "blocked-fixable": 0,
+  "refused-escalate": 0,
   "dep-review": 0,
   "post-review": 0,
   stale: 0,
@@ -6936,7 +6967,7 @@ export async function runSweep(
     // so an unanswered question stays visible, even on a deduped pass. Skipped for an
     // unattributable filing PR, where there is only a stand-down to record.
     const question =
-      disposition === "blocked-ambiguous" && !unattributableFiling
+      (disposition === "blocked-ambiguous" || disposition === "refused-escalate") && !unattributableFiling
         ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? [])
         : undefined;
 
@@ -7019,6 +7050,7 @@ export async function runSweep(
         }
         break;
       case "blocked-ambiguous":
+      case "refused-escalate":
         // W1-T514: sha-keyed, exactly like every sibling arm above — a new head re-earns its own
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
         alreadyDone = prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
@@ -7540,6 +7572,9 @@ export async function runSweep(
             }
             case "stale":
               await deps.close(pr, reason);
+              break;
+            case "refused-escalate":
+              await deps.escalate(pr, reason, question!);
               break;
             case "blocked-ambiguous":
               {
@@ -8360,6 +8395,7 @@ function oldestByKey<T extends { prNumber: number }>(
 const DISPOSITION_RENDER_ORDER: readonly Disposition[] = [
   "mergeable",
   "blocked-fixable",
+  "refused-escalate",
   "conflicted",
   "stale",
   "blocked-ambiguous",

@@ -1,0 +1,136 @@
+- id: W1-T3378
+  title: "A REVIEW WORKTREE IS TORN DOWN ONLY BY AN IN-PROCESS `finally`, SO EVERY SIGKILL STRANDS 466M FOREVER — and this fleet is hard-killed as a matter of routine, on Azure as much as on the operator host"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 14.00
+  files: [src/lib/review-worktree-reclaim.ts, src/lib/daemon.ts, test/a-review-worktree-stranded-by-a-kill-is-swept-later.test.ts]
+  origin: "operator-session#mac-mini-disk-2026-09-11"
+  plan_refs: ["W1-T233", "W1-T175", "W1-T1082", "W1-T3320"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED ON THE MAC MINI (the operator host, NOT the Azure fleet volume) 2026-09-11:
+
+      /System/Volumes/Data                228Gi total, 3.3Gi available   99% FULL
+      doctor's FAIL threshold             max(512MiB, 5% of 228Gi) = 11.4Gi   -> we were 3.5x past FAIL
+      daemon processes on this host       0   (`launchctl list | grep remudero` empty, no `rmd daemon`)
+      mutation-ratchet, same run          FAIL -- "ENOSPC: no space left on device, write"
+      reclaimed by hand                   3.0Gi (`d5084/coverage`) -> 4.8Gi available
+
+    TWO STRANDED REVIEW WORKTREES, 932M, CREATED 2026-09-09 AND STILL PRESENT TWO DAYS LATER:
+    `worktrees/review-PR4790-1788961834591` and `-1788962041710`, 466M each, both registered against
+    the OPERATOR CHECKOUT (which holds 90 worktrees), both detached at 24045cc2d.
+    `git worktree prune --dry-run -v` reports NOTHING — correctly: prune removes a REGISTRATION whose
+    directory is gone, and these directories are present. No mechanism removes a present-but-finished
+    worktree, so prune is not the tool that was missing.
+
+    CORRECTION ON THE RECORD, because the wrong version of this finding is already in a session note:
+    these are NOT git-invisible orphans. A first pass queried `repos/remudero` and found them absent;
+    their `.git` files point at `<operator-checkout>/.git/worktrees/...`. That is the INVERSE of the
+    false finding retracted in #397, and it is why this shard states the registering repo explicitly.
+  rationale: |
+    THE CLEANUP IS CORRECT AND STILL LEAKS, which is why this is a composition defect and not a bug in
+    any one function. `materializeReviewWorktree`'s own docblock (src/run-task.ts, W1-T233) records
+    that 39 `review-PR*` worktrees were found stranded on 2026-07-21, one per failed attempt, and
+    fixes the FAILURE path: "THIS function owns teardown of whatever IT creates." It then says
+    teardown of a SUCCESSFULLY returned path "remains the CALLER's responsibility"
+    (`reviewCommand`'s `withMaterializedWorktree`). Both halves are in-process.
+
+    SO NEITHER HALF RUNS ON SIGKILL. A `finally` is not reached when the process is killed, and this
+    fleet is hard-killed as a matter of routine: launchd KeepAlive restarts, `launchctl kickstart -k`,
+    the operator's own `pkill`, container recycles, and the OOM that took the daemon down on
+    2026-09-10. Every one of those events can strand a worktree that nothing will ever revisit. The
+    2026-07-21 incident was read as a missing-teardown bug and repaired as one; the residue two days
+    ago is the same leak arriving through the door W1-T233 did not close.
+
+    AND THE RUNG BUILT TO NOTICE CANNOT ACT. `judgeDiskHeadroom` grades, `rmd doctor` reports,
+    the console renders `dh-disk-free`, and `onDiskHeadroomBreach` escalates an issue at WARN — its
+    own doc says it "observes and surfaces". Nothing reclaims. This is the identical half-built shape
+    W1-T3320 closed for the ledger corpus, where retention-as-noise-filter and union-read-for-history
+    composed into 4.0Gi of archives and an 8Gi heap, measured and surfaced for weeks with no actor.
+    A measurement whose only consumer is a human is not automation.
+
+    THE HOST WITH THE PROBLEM HAS NO WATCHER AT ALL, which is the part no amount of threshold tuning
+    fixes. `readDiskHeadroom` is wired into the daemon, the daemon runs in a container on Azure, and
+    it measures ITS OWN volume. The Mac mini carries every hand-built worktree and every local
+    coverage run and is monitored by nothing, so the 3.5x-past-FAIL reading above produced no alarm,
+    no ledger row and no issue — it was found by a mutation-ratchet ENOSPC during unrelated work.
+  design: |
+    (0) risk:high IS DELIBERATE AND NOT A SIZING DODGE. Rule 19 refused risk:medium for spanning two
+    concerns (daemon, review-worktree-reclaim), and raising it is the correct answer rather than
+    decomposing: under `band_meaning: blast-radius` a routine that DELETES DIRECTORIES and is invoked
+    from the daemon tick earns the high band on its own, independently of how many files it touches.
+    The daemon-side change is one call; the blast radius is every tick on every host.
+    (i) THE ENTRY POINT IS `sweepStrandedReviewWorktrees`, CALLED FROM THE DAEMON TICK. The name is
+    prescribed because `call-site` requires an acceptance criterion of the form
+    `grep: <symbol>( in <a different src/ file>`, and the criterion below names exactly that pair; a
+    module reached only by its own tests is what that check refuses.
+    SCOPE IS remudero's OWN `review-PR*` WORKTREES AND NOTHING ELSE. The sweep belongs in this
+    repo because this repo's code creates them, names them, and knows where they live
+    (`worktreesDir(config)`, `review-PR<n>-<epochMs>`), and because the leak reaches Azure the same
+    way it reaches the operator host. A sweep runs INSIDE the daemon tick, where a process already
+    exists — it needs no new scheduler on any host.
+    (ii) HOST DISK MAINTENANCE IS EXPLICITLY OUT OF SCOPE, and the repo has already ruled on it.
+    W1-T2507 MOVED "Operating this host" out of CLAUDE.md into docs/operator-guide.md, and its
+    recorded rationale names the categories it moved: rules about the mac-mini host — shared
+    node_modules, launchd, THE WORKTREE-REAPING DIRECTORY — "that a containerised worker can never
+    act on". So no launchd unit, no cron entry, and no general disk janitor in this task. A watcher
+    for the operator host's own disk is an operator-guide change plus a local unit, filed separately
+    if it is wanted; putting it here would re-import the category W1-T2507 deliberately exported.
+    (iii) DO NOT TOUCH `coverage/` OR `rmd-*` TEMP DIRECTORIES. MEASURED: the single largest
+    reclaimable object on the operator host was `d5084/coverage` at 3.0Gi, produced by an
+    INTERACTIVE coverage run nothing in this repo scheduled. That is session hygiene, not a product
+    defect, and a repo rung that deletes an interactive session's build output is a rung that deletes
+    work it cannot see the purpose of.
+    (iv) ELIGIBILITY IS DECIDED PER CANDIDATE, and this clause is what prevents real damage: a
+    `review-PR*` worktree is eligible only if it holds NO commit absent from its remote. No size
+    heuristic — "delete what is big" is how a reaper eats work — and no age heuristic alone, since
+    age cannot distinguish a stranded worktree from a slow live review.
+    (v) A WORKTREE WITH UNPUSHED COMMITS IS NEVER ELIGIBLE, PROVED PER CANDIDATE, NOT ASSUMED.
+    MEASURED THE SAME DAY: `d5084` was THREE unpushed commits ahead while its `coverage/` was the
+    single largest reclaimable object on the disk. A reaper that had taken the worktree instead of
+    the artefact would have destroyed shipped-nowhere work. Check `rev-list <remote>..HEAD`, and treat
+    an unreadable remote as INELIGIBLE — an unanswerable question is never a yes.
+    (vi) RECLAIM DOES NOT REPLACE THE ALARM. Keep `onDiskHeadroomBreach` exactly as it is; a sweep
+    that silently holds a host near its threshold is worse than a loud one, because the growth then
+    never gets diagnosed. This task adds an actor for ONE typed class; it does not make the disk rung
+    self-healing and must not be reported as though it had.
+  acceptance:
+    - claim: "a review worktree stranded with no live owner is reclaimed by a later sweep, with no in-process finally involved"
+      proof: "unit test: a stranded review worktree is swept by a later tick"
+    - claim: "a review worktree holding unpushed commits is refused, and so is one whose remote cannot be read"
+      proof: "unit test: a review worktree with unpushed commits is never eligible"
+    - claim: "the sweep ledgers a reason on every outcome, including the no-op ones, so a silent sweep is distinguishable from an idle one"
+      proof: "unit test: every sweep outcome ledgers its own decision reason"
+    - claim: "a coverage directory and an rmd-temp directory are both left alone, so the sweep is closed to review worktrees"
+      proof: "unit test: the sweep leaves coverage and temp directories alone"
+    - claim: "the new module is reached from the daemon tick, not only from its own tests"
+      proof: "grep: sweepStrandedReviewWorktrees( in src/lib/daemon.ts"
+  falsifier: |
+    RE-COUNT THE STRANDED WORKTREES BEFORE BUILDING. The 932M above is the operator host on
+    2026-09-11 and may have been cleared by hand since. A zero there does NOT retire this shard: the
+    defect is that teardown is `finally`-only, so the count is a sample of recent kills, not the
+    subject. Check Azure too — that host is container-recycled, which is the same hard kill.
+    PROVE THE UNPUSHED-WORK GUARD BY TRYING TO BREAK IT. Build a fixture worktree with a commit absent
+    from its remote and assert the sweep refuses it. Then delete the guard and watch that test go red;
+    a guard whose removal reddens nothing is decoration, and this one stands between an automatic
+    sweep and someone's unshipped work.
+    THE `finally` CLAIM IS THE LOAD-BEARING ONE AND MUST BE TESTED AS A SWEEP, NOT A TEARDOWN. A test
+    that creates a worktree and lets the function clean it up proves W1-T233, which already works. The
+    new behaviour is reclaiming a worktree THIS PROCESS DID NOT CREATE and no `finally` is pending
+    for — stage one on disk with no live owner and sweep it.
+    DO NOT WIDEN SCOPE TO A GENERAL DISK JANITOR. Design (ii) and (iii) rule that out on the record:
+    host disk maintenance was exported to docs/operator-guide.md by W1-T2507, and the largest object
+    measured on the operator host was an interactive session's own coverage output. A PR here that
+    deletes `coverage/` or `rmd-*` directories has substituted a different task for this one.
+    DO NOT "FIX" THIS BY WIDENING `git worktree prune`. Prune is correct:
+    it removes registrations whose directory is gone, and these directories are present. A prune that
+    deleted present worktrees would delete live ones.
+    DO NOT ASSUME A REVIEW WORKTREE'S PR IS MERGED FROM ITS SHA. `24045cc2d` is not an ancestor of
+    `origin/main`, and after a squash merge a PR head never is — so ancestry cannot establish
+    merged-ness. Decide eligibility on unpushed-commit absence, not on merge state.

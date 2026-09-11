@@ -99,7 +99,7 @@ export interface TaskRiskRuling {
   pin: string;
 }
 
-export const TASK_TYPES = ["recon", "implement", "diagnose", "investigate", "review", "manual"] as const;
+export const TASK_TYPES = ["recon", "implement", "diagnose", "review", "manual"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
 export interface Task {

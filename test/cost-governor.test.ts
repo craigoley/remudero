@@ -190,6 +190,7 @@ test("acceptance 1 — over the ceiling (the $206/60-run W1-T1 shape): checkCost
   assert.deepEqual(summary.byDisposition, {
     mergeable: 1,
     "blocked-fixable": 1,
+    "refused-escalate": 0,
     stale: 1,
     "blocked-ambiguous": 1,
     "dep-review": 0,
