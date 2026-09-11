@@ -62,6 +62,13 @@ export interface SkillDraft {
   description: string;
   markdown: string;
   candidateHash: string;
+  /** W1-T3385c — THE PROCEDURE'S OWN IDENTITY, stable as its evidence grows. {@link
+   *  candidateHash} deliberately hashes the RUN SET, so every cadence pass that mines the same
+   *  procedure with one more supporting run produces a different hash and a different proposal. */
+  procedureKey: string;
+  /** How many merged runs backed this draft when it was rendered — carried so a stager can tell a
+   *  better-evidenced draft of the SAME procedure from a weaker one. */
+  supportingRuns: number;
 }
 
 /** Deterministic id for a candidate's draft, over its shape AND its run set — two candidates that
@@ -85,7 +92,10 @@ export function proceduralCandidateHash(candidate: ProceduralCandidateLike): str
 export function renderSkillDraft(candidate: ProceduralCandidateLike): SkillDraft | undefined {
   if (candidate.supportingRuns < 2) return undefined;
   const hash = proceduralCandidateHash(candidate);
-  const name = `${kebabSlug(candidate.shapeKey)}-${hash.slice(0, 8)}`;
+  const procedureKey = procedureKeyFor(candidate);
+  // The NAME follows the procedure too, so the written .claude/skills/<name>/ path is stable as
+  // evidence accrues rather than minting a new directory per cadence pass.
+  const name = `${kebabSlug(candidate.shapeKey)}-${procedureKey.slice(0, 8)}`;
   const description = `A procedure shape proven across ${candidate.supportingRuns} merged ${candidate.taskType} run(s): ${candidate.signals.join(" + ")}.`;
   const appliesTo = injectableSkillTaskType(candidate.taskType);
   const steps = candidate.signals.map((key) => `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`);
@@ -111,7 +121,7 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike): SkillDraft
     "",
     ...evidence,
   ].join("\n");
-  return { name, description, markdown, candidateHash: hash };
+  return { name, description, markdown, candidateHash: hash, procedureKey, supportingRuns: candidate.supportingRuns };
 }
 
 /** Render the drafted skills (markdown) beside `renderProceduralCandidates`'s own output — the
@@ -267,10 +277,24 @@ export function describeWorkerSkillReachability(settingSources: readonly string[
 
 // ── The lane (design clause iii) ────────────────────────────────────────────────────────────
 
-/** Deterministic proposal id for a drafted skill — derived from {@link SkillDraft.candidateHash},
- *  never random, so re-staging the SAME candidate names the SAME proposal. */
-export function skillDraftProposalId(candidateHash: string): string {
-  return `skill-draft:${candidateHash}`;
+/** W1-T3385c — the PROCEDURE's identity: its shape and the task type it applies to, and NOT its
+ *  run set. Hashed so the id stays the same shape as before. */
+export function procedureKeyFor(candidate: Pick<ProceduralCandidateLike, "shapeKey" | "taskType">): string {
+  return createHash("sha256").update(`${candidate.taskType}|${candidate.shapeKey}`).digest("hex").slice(0, 16);
+}
+
+/**
+ * Deterministic proposal id for a drafted skill, keyed on the PROCEDURE (W1-T3385c) rather than on
+ * {@link SkillDraft.candidateHash}.
+ *
+ * The hash keyed the run SET, which is correct for "two candidates sharing a shapeKey must not
+ * collide" — but a procedure's run set GROWS, so every cadence pass minted another proposal for the
+ * same procedure. MEASURED 2026-09-11: all SEVEN open skill-draft proposals staged the same mined
+ * procedure, `implement-clean-single-strike`, at 26/27/78/79/81/82/84 runs — two real procedures
+ * wearing seven operator decisions.
+ */
+export function skillDraftProposalId(procedureKey: string): string {
+  return `skill-draft:${procedureKey}`;
 }
 
 /** One {@link stageSkillDraft} call's outcome. `refused` means the scanner rejected the draft and
@@ -300,7 +324,7 @@ export function stageSkillDraft(
   if (!scan.ok) {
     return { refused: true, staged: false, alreadyStaged: false, reason: `${scan.reason} (offending line: "${scan.offendingLine}")` };
   }
-  const id = skillDraftProposalId(draft.candidateHash);
+  const id = skillDraftProposalId(draft.procedureKey);
   let staged = false;
   let alreadyStaged = false;
   updateProposalRegistry(

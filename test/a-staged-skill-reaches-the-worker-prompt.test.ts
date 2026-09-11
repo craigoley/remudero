@@ -179,7 +179,7 @@ test("renderImplementPrompt is the same render with its parts dropped, never a s
 test("W1-T3101: staging writes a PROPOSAL — approval, not staging, is what makes a skill injectable", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}stage-`));
   const registry = join(dir, "inbox-proposals.json");
-  const draft = { name: "proc", description: "d", markdown: "# proc\n\nbody", candidateHash: "h1" };
+  const draft = { name: "proc", description: "d", markdown: "# proc\n\nbody", candidateHash: "h1", procedureKey: "proc-h1", supportingRuns: 2 };
   const r = stageSkillDraft(registry, draft, workerAllowlistFromSettings(undefined), describeWorkerSkillReachability([]));
   assert.equal(r.refused, false);
   assert.equal(r.staged, true, "the production caller retroCommand now makes this happen");
