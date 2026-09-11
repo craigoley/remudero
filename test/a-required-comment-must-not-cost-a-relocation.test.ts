@@ -59,14 +59,24 @@ test("W1-T3230: a required trailing catch comment does not split a moved relocat
 test("W1-T3230: comment markers inside string, template literal, and regex values are not stripped", () => {
   const protectedLines = [
     'const url = "http://example.test";',
+    'const quoted = "say \\"// still data\\"";',
     "const tpl = `http://example.test`;",
     "const rx = /https?:\\/\\/example\\.test/;",
+    "const rxClass = /[/*]+/;",
     'const marker = "/* still data */";',
   ];
 
   for (const line of protectedLines) {
     assert.equal(relocationKey(line), line);
   }
+});
+
+test("W1-T3230: trailing block comments are ignored without stripping embedded block comments", () => {
+  assert.equal(relocationKey("return fallback; /* required: degrade rather than throw */"), "return fallback;");
+  assert.equal(relocationKey("return fallback; /* required: degrade rather than throw"), "return fallback;");
+
+  const embedded = "const value = choose(/* prefer cached */ fallback);";
+  assert.equal(relocationKey(embedded), embedded);
 });
 
 test("W1-T3230: a comment-only line cannot join two short fragments into a relocation", () => {
