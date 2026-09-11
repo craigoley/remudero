@@ -30500,13 +30500,13 @@ export async function runMountRecommenderRung(
   deps: {
     root?: string;
     env?: NodeJS.ProcessEnv;
-    now?: () => Date;
+    clock?: Clock;
     buildMountHeadroomSweep?: (stateDir: string) => { cells: MountHeadroomCell[] };
   } = {},
 ): Promise<{ filed: number; refused: number }> {
   const root = deps.root ?? repoRoot;
   try {
-    const now = deps.now?.() ?? new Date();
+    const now = (deps.clock ?? systemClock).date();
     const stateDir = join(config.root, "state");
     const markerPath = mountRecommenderCadenceMarkerPath(config.root);
     const marker = readFeedbackDocketMarker(markerPath);

@@ -8,6 +8,7 @@ import {
   MOUNT_RECOMMENDER_CADENCE_POLICY,
   runMountRecommenderRung,
 } from "../src/run-task.js";
+import { fixedClock } from "../src/lib/clock.js";
 import type { Config } from "../src/lib/config.js";
 import type { MountHeadroomCell } from "../src/lib/mount-recommender.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -41,7 +42,7 @@ test("runMountRecommenderRung: the daily marker gates in-interval polls and is w
     assert.deepEqual(
       await runMountRecommenderRung(config, "run-1", log, {
         root: REPO_ROOT,
-        now: () => first,
+        clock: fixedClock(first.getTime()),
         buildMountHeadroomSweep,
       }),
       { filed: 0, refused: 0 },
@@ -53,7 +54,7 @@ test("runMountRecommenderRung: the daily marker gates in-interval polls and is w
     assert.deepEqual(
       await runMountRecommenderRung(config, "run-2", log, {
         root: REPO_ROOT,
-        now: () => insideInterval,
+        clock: fixedClock(insideInterval.getTime()),
         buildMountHeadroomSweep,
       }),
       { filed: 0, refused: 0 },
@@ -72,7 +73,7 @@ test("runMountRecommenderRung: the daily marker gates in-interval polls and is w
 
     await runMountRecommenderRung(config, "run-3", log, {
       root: REPO_ROOT,
-      now: () => new Date("2026-09-09T00:00:00.000Z"),
+      clock: fixedClock(Date.parse("2026-09-09T00:00:00.000Z")),
       buildMountHeadroomSweep,
     });
     assert.equal(calls, 2, "the first poll due after the interval sweeps again");
@@ -99,7 +100,7 @@ test("runMountRecommenderRung: a crash after the pre-work marker costs one skipp
 
     const crashed = await runMountRecommenderRung(config, "run-1", log, {
       root: REPO_ROOT,
-      now: () => now,
+      clock: fixedClock(now.getTime()),
       buildMountHeadroomSweep: () => {
         throw new Error("boom after marker");
       },
@@ -111,7 +112,7 @@ test("runMountRecommenderRung: a crash after the pre-work marker costs one skipp
     let callsAfterCrash = 0;
     await runMountRecommenderRung(config, "run-2", log, {
       root: REPO_ROOT,
-      now: () => new Date(now.getTime() + 60 * 60 * 1000),
+      clock: fixedClock(now.getTime() + 60 * 60 * 1000),
       buildMountHeadroomSweep: () => {
         callsAfterCrash++;
         return { cells: [] };
