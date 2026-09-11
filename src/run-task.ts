@@ -496,6 +496,7 @@ import {
   type TaskIdReservationBlock,
   type TaskIdReservationError,
   firstUnreservedAtOrAbove,
+  parseReservationHolderLine,
   gitRemoteRefReserver,
   remoteReservedTaskIds,
   reservationFloorFrom,
@@ -18373,7 +18374,7 @@ export interface ReservationCallerIdentity {
   host: string;
 }
 
-export type ReservationHolder = "self" | "fleet" | "operator" | "unknown";
+export type ReservationHolder = "self" | "fleet" | "operator" | "unknown" | { branch: string; source?: string };
 
 function reservationCallerIdentity(): ReservationCallerIdentity {
   return { pid: process.pid, host: hostname() };
@@ -18386,6 +18387,9 @@ function callerFromReservationAnchor(message: string): ReservationCallerIdentity
 }
 
 export function classifyReservationAnchor(message: string, caller?: ReservationCallerIdentity): ReservationHolder {
+  const parsed = parseReservationHolderLine(message);
+  if (parsed.status === "known") return { branch: parsed.holder.branch, source: parsed.holder.source };
+  if (parsed.status === "unreadable") return "unknown";
   const m = message.trim();
   if (/^rmd-id reservation\b/.test(m)) {
     const holder = callerFromReservationAnchor(m);
@@ -18401,7 +18405,9 @@ export function classifyReservationAnchor(message: string, caller?: ReservationC
  *  taken id must be visible, because silently advancing is what let two collisions go unnoticed. */
 export function describeContestedId(taskId: string, holder: ReservationHolder): string {
   const who =
-    holder === "self"
+    typeof holder === "object"
+      ? `HELD BY ${holder.branch}${holder.source ? ` (${holder.source})` : ""}`
+      : holder === "self"
       ? "HELD BY THIS CALLER (an `rmd-id reservation <pid>@<container>` anchor)"
       : holder === "fleet"
       ? "HELD BY ANOTHER CALLER — the fleet (an `rmd-id reservation <pid>@<container>` anchor)"
@@ -18769,6 +18775,8 @@ export function readReservationHolder(
   if ((fetched.status ?? 1) !== 0) return "unknown";
   const msg = run(["log", "-1", "--format=%s", "FETCH_HEAD"]);
   if ((msg.status ?? 1) !== 0) return "unknown";
+  const body = run(["log", "-1", "--format=%B", "FETCH_HEAD"]);
+  if ((body.status ?? 1) === 0 && body.stdout) return classifyReservationAnchor(body.stdout, caller);
   return classifyReservationAnchor(msg.stdout ?? "", caller);
 }
 
