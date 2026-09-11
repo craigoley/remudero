@@ -219,7 +219,7 @@ export interface ServeDeps {
    * (run-task.ts's `serveCommand`) never has to construct this gateway itself, and a test can
    * still inject a fake by supplying `ratify` explicitly.
    */
-  panelGraph: Omit<PanelGraphDeps, "inboxRoot" | "ratify"> & { ratify?: PanelGraphDeps["ratify"] };
+  panelGraph: Omit<PanelGraphDeps, "inboxRoot" | "ratify" | "readPlanSnapshot"> & { ratify?: PanelGraphDeps["ratify"] };
   /** `<root>/state/ledger.ndjson` — SAME path board.ts tails and every panel route ledgers into. */
   ledgerPath: string;
   /** `gh issue close` gateway shared by every panel-actions write route that needs it. */
@@ -3063,6 +3063,7 @@ function assembleServeRoutes(
     ...deps.panelGraph,
     inboxRoot: deps.fleetControlRoot,
     ratify: deps.panelGraph.ratify ?? ratifyCliGateway(deps.panelGraph.root, join(deps.fleetControlRoot, "state", "logs")),
+    readPlanSnapshot: () => deps.board.plan,
   };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
