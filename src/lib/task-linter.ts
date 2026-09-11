@@ -18,6 +18,7 @@ import {
   isCompanionPath,
   type CompanionPathClass,
 } from "./companion-paths.js";
+import { deriveTaskClass } from "./task-class.js";
 // Re-exported so every pre-existing importer of task-linter.ts is byte-identical (W1-T2547).
 export { COMPANION_PATH_CLASSES, GENERATED_LEDGER_CLASSES, isCompanionPath, type CompanionPathClass };
 import {
@@ -2205,6 +2206,16 @@ export interface ClassCalibration {
   avgTurns: number;
 }
 
+export interface DeclaredBudgetClassCalibration {
+  medianCostUsd: number;
+  maxCostUsd: number;
+  sampleCount: number;
+  minSamples: number;
+  multiplier: number;
+}
+
+export type DeclaredBudgetCalibrationByClass = Readonly<Record<string, DeclaredBudgetClassCalibration>>;
+
 export function budgetSanityWarning(
   mountMaxTurns: number,
   calibration: ClassCalibration | undefined,
@@ -2217,6 +2228,41 @@ export function budgetSanityWarning(
     message:
       `mount max_turns=${mountMaxTurns} is below the observed class mean ${calibration.avgTurns} turns ` +
       "— consider raising risk or the mount's max_turns",
+  };
+}
+
+function formatUsd(n: number): string {
+  return n.toFixed(2);
+}
+
+export function declaredBudgetSanityWarning(
+  task: Task,
+  calibrationByClass: DeclaredBudgetCalibrationByClass | undefined,
+): LintViolation | undefined {
+  if (task.budget_usd === undefined) return undefined;
+  if (!calibrationByClass) return undefined;
+
+  const taskClass = deriveTaskClass(task);
+  const calibration = calibrationByClass[taskClass];
+  if (!calibration) return undefined;
+  if (calibration.sampleCount < calibration.minSamples) return undefined;
+  if (calibration.medianCostUsd <= 0 || calibration.maxCostUsd <= 0 || calibration.multiplier <= 0) {
+    return undefined;
+  }
+
+  const budget = task.budget_usd;
+  const medianCeiling = calibration.medianCostUsd * calibration.multiplier;
+  if (budget <= calibration.maxCostUsd || budget <= medianCeiling) return undefined;
+
+  return {
+    check: "budget-sanity",
+    severity: "warn",
+    message:
+      `task ${task.id} declares budget_usd=$${formatUsd(budget)} for class ${taskClass}, above ` +
+      `that class's observed distribution: median $${formatUsd(calibration.medianCostUsd)}, ` +
+      `max $${formatUsd(calibration.maxCostUsd)}, n=${calibration.sampleCount}, warning floor ` +
+      `${calibration.multiplier}x median=$${formatUsd(medianCeiling)}. This is advisory only ` +
+      "and does not affect dispatch.",
   };
 }
 
@@ -2845,6 +2891,8 @@ export interface LintOpts {
   mountMaxTurns?: number;
   /** The observed class mean, from a real Calibration row — never hardcoded. */
   calibration?: ClassCalibration;
+  /** Observed per-class dollar spend for budget_usd calibration. Absent means no opinion. */
+  declaredBudgetCalibration?: DeclaredBudgetCalibrationByClass;
   /** Severity for {@link proofDialectViolations}. Default "block", and since impl-AK every call
    *  site takes it: a proof that cannot execute is refused before a worker spawns. */
   proofDialect?: LintSeverity;
@@ -2980,6 +3028,8 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);
   }
+  const declaredBudget = declaredBudgetSanityWarning(task, opts.declaredBudgetCalibration);
+  if (declaredBudget) violations.push(declaredBudget);
   return { ok: violations.every((v) => v.severity !== "block"), violations };
 }
 
