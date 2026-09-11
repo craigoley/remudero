@@ -1767,6 +1767,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "strings the recognizer sees are its own fixture bodies and the paths of the PR (#2639) the positive control is " +
       "anchored to",
   ),
+  refusedForPredicate(
+    "test/an-unmodelled-census-is-named-with-what-it-walks.test.ts",
+    "a",
+    "W1-T3238's own proof file. It fabricates census-shaped fixture text containing both `ls-files` and dir-walk idioms " +
+      "so the membership reporter can prove candidates stay visible, but its real assertions are about that reporter and " +
+      "mocked discovery inputs — it never walks the tracked src/ population and asserts no per-src-file property",
+  ),
   // W1-T2905's own suite. SCOPE NOTE: the shard's `files:` names only the census test and its
   // baseline; this entry is here because `censusPopulationDrift` REFUSES an undisclosed
   // census-shaped file, and that gate cannot be satisfied from inside the two declared paths. The
