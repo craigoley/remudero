@@ -129,15 +129,22 @@ const repairedWindow = () => ({
 test("W1-T2972 THE WIRED HOOK, CALLED FOR REAL: check fires on a fresh root and run advances the marker", async () => {
   const root = tmpRoot();
   try {
+    let filedInto: string | undefined;
     const hooks = buildCiLearningDaemonHooks({
       config: { root } as Config,
       policy: ON,
+      checkoutRoot: root,
+      planOrigins: [],
       now: () => NOW,
       loadWindow: () => repairedWindow() as never,
       loadLessons: () => ({
         status: "measured",
         lessons: [{ findingId: "ci-learning:1:coverage-ratchet", gate: "coverage-ratchet", watermarkPr: 1 }],
       }),
+      fileShards: ((_drafts: unknown, checkoutRoot: string) => {
+        filedInto = checkoutRoot;
+        return { filed: [], skipped: [], refused: [] };
+      }) as never,
     });
     assert.equal(hooks.checkCiLearningCadence().fire, true, "no marker under this fresh root — must fire");
 
@@ -147,6 +154,7 @@ test("W1-T2972 THE WIRED HOOK, CALLED FOR REAL: check fires on a fresh root and 
     const result = await hooks.runCiLearningCadence();
     assert.equal(result.status, "backlog", "the repaired pair is mintable, so the run has a backlog");
     assert.equal(result.draftCount, 1);
+    assert.equal(filedInto, root, "the daemon hook must file into its injected checkout, never the real repository");
     assert.equal(result.lessonRecurrences.status, "observed");
     if (result.lessonRecurrences.status === "observed") {
       assert.equal(result.lessonRecurrences.recurrenceCount, 1, "the already-filed lesson is checked in the same window");
