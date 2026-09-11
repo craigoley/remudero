@@ -155,6 +155,7 @@
     "test/a-starvation-episode-closes-its-own-escalation.test.ts": 1343,
     "test/a-status-flip-is-not-a-task-edit.test.ts": 0,
     "test/a-step-wired-census-gate-is-not-entanglement.test.ts": 0,
+    "test/a-successful-leaf-check-is-not-a-full-sweep.test.ts": 0,
     "test/a-suite-is-not-a-second-concern.test.ts": 1008,
     "test/a-suite-refused-on-cost-still-walks-the-population-your-diff-joins.test.ts": 0,
     "test/a-task-trailer-redirects-review-to-an-unrelated-shard.test.ts": 1612,

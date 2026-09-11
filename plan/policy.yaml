@@ -1468,6 +1468,19 @@ githubEventWake:
     origin: "net-new"
     min: 1000
     max: 60000
+  # W1-T3089 — semantic check-run filtering ships observational first. In shadow mode every
+  # signed, allowlisted delivery keeps the current marker/wake behavior while the route emits
+  # bounded class counts on ordinary accepted rows. A later plan-only policy change may set this
+  # to enforce after a full UTC day proves the aggregate signals are complete.
+  semanticCheckMode:
+    value: shadow
+    origin: "net-new"
+  # W1-T3089 — only these check-run names are aggregate transitions for webhook wake semantics:
+  # ci-gate is the PR governor's required aggregate, and ci is the default-branch health signal.
+  # Successful/neutral/skipped check_run.completed deliveries outside this list are leaf checks.
+  aggregateCheckNames:
+    value: [ci-gate, ci]
+    origin: "net-new"
 
 # W1-T2579 — THE ARM GATE'S OPERATOR-RATIFIED BAND TABLE. `decideAutoMergeArm` (src/lib/
 # review.ts) reads this table AFTER its existing refusals, on the already-arming full-pass/

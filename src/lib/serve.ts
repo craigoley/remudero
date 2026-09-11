@@ -122,6 +122,7 @@ import {
   createPersistentDeliveryDedupStore,
   githubDeliveryDedupPath,
   sweepWakeMarkerPath,
+  type GithubEventWakeSemanticMode,
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
@@ -382,6 +383,8 @@ export interface ServeDeps {
     secret?: string;
     repository: string;
     dedupCapacity?: number;
+    semanticCheckMode?: GithubEventWakeSemanticMode;
+    aggregateCheckNames?: readonly string[];
   };
 }
 
@@ -2963,6 +2966,8 @@ function assembleServeRoutes(deps: ServeDeps): ServeRoutesAssembly {
         githubDeliveryDedupPath(deps.fleetControlRoot),
         deps.githubEventWake?.dedupCapacity ?? DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY,
       ),
+      semanticCheckMode: deps.githubEventWake?.semanticCheckMode,
+      aggregateCheckNames: deps.githubEventWake?.aggregateCheckNames,
       log: deps.log,
     }),
   ];

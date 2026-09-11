@@ -207,15 +207,22 @@ function assertRowsInBounds(node: unknown, path: string): void {
     } else if (typeof value === "boolean") {
       // headroom.enabled / autoTriage.enabled / scratchReap.enabled — a boolean has no range.
     } else if (Array.isArray(value)) {
-      // headroom.curve — each rung's own bounds (limitPct in [0, 100], etc.) are enforced by
-      // validateHeadroomCurve at load; only the shape is re-checked here.
+      // headroom.curve / githubEventWake.aggregateCheckNames — each array's member shape is
+      // enforced by its own loader; only a non-empty, reviewable shape is re-checked here.
       assert.ok(value.length > 0, `${path}.value must be a non-empty array`);
-      for (const rung of value) {
-        assert.ok(
-          isPlainObject(rung) && "maxHoursToReset" in rung && "limitPct" in rung,
-          `${path}.value entries must be {maxHoursToReset, limitPct} mappings`,
-        );
+      if (path === "githubEventWake.aggregateCheckNames") {
+        for (const name of value) assert.equal(typeof name, "string", `${path}.value entries must be strings`);
+      } else {
+        for (const rung of value) {
+          assert.ok(
+            isPlainObject(rung) && "maxHoursToReset" in rung && "limitPct" in rung,
+            `${path}.value entries must be {maxHoursToReset, limitPct} mappings`,
+          );
+        }
       }
+    } else if (typeof value === "string") {
+      // githubEventWake.semanticCheckMode's enum is validated by loadPolicy; here the row walk
+      // only asserts that string-valued policy rows are intentionally shaped as rows.
     } else {
       assert.fail(`${path}.value has unexpected type ${typeof value}`);
     }
@@ -608,6 +615,8 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // constant bounded this persistent set, so its capacity is intentionally net-new policy data.
     "githubEventWake.dedupCapacity",
     "githubEventWake.checkSettleMs",
+    "githubEventWake.semanticCheckMode",
+    "githubEventWake.aggregateCheckNames",
     // R-3: the keychain provisioning lock's wait deadline joins them too. NET-NEW because the wait
     // it bounds had no bound at ALL to lift — no source literal, no constant, nothing:
     // `acquireKeychainProvisionLock` polled forever. See plan/policy.yaml's own row for what the
