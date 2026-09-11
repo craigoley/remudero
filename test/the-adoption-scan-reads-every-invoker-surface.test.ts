@@ -25,9 +25,10 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { runMeasurementCadenceReport } from "../src/lib/measurement-cadence.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 function repo(files: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), "adoption-surfaces-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}adoption-surfaces-`));
   for (const [rel, text] of Object.entries(files)) {
     mkdirSync(dirname(join(dir, rel)), { recursive: true });
     writeFileSync(join(dir, rel), text, "utf8");
