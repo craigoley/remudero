@@ -42,6 +42,7 @@ const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "commitlint",
   "api-client-drift",
   "no-hand-rolled-fetch",
+  "prompt-surface-gate",
   "scan-pr / osv-scan",
   "License Review",
   "leak-grep",
