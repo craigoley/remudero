@@ -275,16 +275,12 @@ test("deriveAnalyticsSnapshotFromStream stamps asOf after the stream has been co
 
 // ── the route itself ─────────────────────────────────────────────────────────────────────────
 
-test("GET /v1/analytics is read-scoped and answers 200 from its real default reader, aggregating the real rotation union", async () => {
-  const dir = tmpStateDir("rmd-analytics-route-");
-  try {
-    const ledgerPath = join(dir, "ledger.ndjson");
-    writeGzArchive(dir, "ledger.2026-07-01T00-00-00-000Z.ndjson.gz", [
-      '{"ts":"2026-07-01T00:00:00.000Z","task_id":"CLI","run_id":"CLI-1","step":"cli.invoked","verb":"status"}',
-    ]);
-    writeLive(dir, ['{"ts":"2026-08-14T00:00:00.000Z","task_id":"CLI","run_id":"CLI-2","step":"cli.invoked","verb":"sweep"}']);
-
-    const route = buildAnalyticsRoute({ ledgerPath, clock: fixedClock(Date.parse("2026-08-14T00:00:00.000Z")) });
+test("GET /v1/analytics is read-scoped and answers 200 from its process-owned snapshot", async () => {
+  const expected = deriveAnalyticsSnapshot(
+    [{ step: "cli.invoked", verb: "status" }, { step: "cli.invoked", verb: "sweep" }],
+    "2026-08-14T00:00:00.000Z",
+  );
+  const route = buildAnalyticsRoute({ currentSnapshot: () => expected });
     assert.equal(route.method, "GET");
     assert.equal(route.path, "/v1/analytics");
     assert.equal(route.scope, "read", "read-scoped: the console's own aggregate, no write surface");
@@ -303,8 +299,5 @@ test("GET /v1/analytics is read-scoped and answers 200 from its real default rea
 
     assert.equal(status, 200);
     const parsed = JSON.parse(body) as AnalyticsSnapshot;
-    assert.deepEqual(parsed.invocationsByVerb, { status: 1, sweep: 1 }, "the route's default reader ran the real rotation union, not just the live file");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+    assert.deepEqual(parsed, expected, "the route returns the already-derived process value without a reader capability");
 });

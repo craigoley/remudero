@@ -698,16 +698,36 @@ export function isRatifiedInLedger(ledgerLines: { step?: unknown; task_id?: unkn
   return ledgerLines.some((l) => l.step === "ratify.approved" && l.task_id === proposalId);
 }
 
-/** W1-T2604: the ledger's answer to "has an operator declined this, and why?". `POST /v1/inbox/decline` appends one
- *  line carrying the reason verbatim; the latest wins. */
+/**
+ * W1-T2604: the ledger's answer to "has an operator declined this, and why?". `POST /v1/inbox/decline`
+ * appends one line carrying the reason verbatim; the latest wins.
+ *
+ * W1-T3407 — AND ITS REVERSAL. A decline used to be IRREVERSIBLE: this read knew only one step, so any
+ * `panel.proposal_declined` row meant declined forever, and a decline entered on reasoning that later
+ * proved WRONG could not be taken back by any means short of editing an append-only ledger. MEASURED
+ * 2026-09-11: 16 proposals were declined on a claim about `proofQueueAudit` that the source refuted,
+ * and the only available remedy was to append a second decline whose REASON said the first was wrong —
+ * leaving them declined.
+ *
+ * THE SHAPE IS `automergeHoldFromLedger`'s, deliberately (lib/review.ts): one pass over the same lines,
+ * the engage row setting state and the release row clearing it, latest wins. Both steps are registered
+ * in `DECISION_RELEVANT_LEDGER_STEPS` for the SAME reason — rotating either half away inverts the
+ * answer, in one direction or the other.
+ */
 export function declinedReasonInLedger(
   ledgerLines: { step?: unknown; task_id?: unknown; reason?: unknown }[],
   proposalId: string,
 ): string | undefined {
   let reason: string | undefined;
   for (const l of ledgerLines) {
-    if (l.step !== "panel.proposal_declined" || l.task_id !== proposalId) continue;
-    reason = typeof l.reason === "string" ? l.reason : "declined by an operator";
+    if (l.task_id !== proposalId) continue;
+    if (l.step === "panel.proposal_declined") {
+      reason = typeof l.reason === "string" ? l.reason : "declined by an operator";
+      continue;
+    }
+    // A restore CLEARS the decline rather than recording a competing one, so a later decline can
+    // refuse the proposal again and the two can alternate as many times as an operator needs.
+    if (l.step === "panel.proposal_restored") reason = undefined;
   }
   return reason;
 }

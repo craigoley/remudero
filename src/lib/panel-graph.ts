@@ -1216,11 +1216,12 @@ function validateDeclineProposal(body: unknown): { error: string } | DeclineProp
  * POST /v1/inbox/decline — write-scoped. The inbox's third verb (W1-T2604): the only prior way a
  * proposal left the registry was `rmd approve`, so a self-withdrawn or duplicate one had no path
  * out except being approved into a task nobody wants. An operator act, never an inference —
- * `classifyProposal` never reads a proposal's own prose to decide this. A decline is not a
- * delete: the proposal stays in the registry (like `retired`, W1-T2451), and the decline receipt
- * is checked before every other predicate so it can never again render ready/drafting. No plan
- * task, no branch: this never calls {@link RatifyCliGateway}. Valid for any active-registry
- * proposal not already ratified or declined (409 either way, naming which).
+ * `classifyProposal` never reads a proposal's own prose to decide this. A decline is not a delete:
+ * the proposal stays in the registry (like `retired`, W1-T2451), and the receipt is checked before
+ * every other predicate. W1-T3407: it is no longer PERMANENT either — {@link
+ * buildRestoreProposalRoute} clears it, latest wins, so a decline entered on reasoning that later
+ * proves wrong can be taken back. No plan task, no branch: this never calls {@link
+ * RatifyCliGateway}. Valid for any active-registry proposal not already ratified or declined.
  * Why: the P19-shaped silent-drop history this route closes — docs/forensics/panel-graph.md
  */
 export function buildDeclineProposalRoute(deps: PanelGraphDeps): Route {
@@ -1255,6 +1256,43 @@ export function buildDeclineProposalRoute(deps: PanelGraphDeps): Route {
       const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, "panel.proposal_declined", input.proposalId, origin, { reason: input.reason });
       sendJson(res, 200, { ok: true, proposalId: input.proposalId, declined: true });
+    }),
+  };
+}
+
+/** POST /v1/inbox/restore — W1-T3407, the reversal decline never had. Symmetric with it: same
+ *  scope, LOW tier, 404. Refuses only a RATIFIED proposal (its task is already filed) and 409s one
+ *  that is not declined. FALSIFIER: test/a-decline-can-be-taken-back.test.ts. */
+export function buildRestoreProposalRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/inbox/restore",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateDeclineProposal, (input, req, res) => {
+      const { proposals, classifications } = classifyAllProposals(deps);
+      if (!proposals.some((p) => p.id === input.proposalId)) {
+        sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
+        return;
+      }
+      const classification = classifications.find((c) => c.proposalId === input.proposalId);
+      if (classification?.state === "ratified") {
+        sendJson(res, 409, {
+          error: "already_ratified",
+          detail: `${input.proposalId} is already RATIFIED — restoring it cannot un-file the task it already produced`,
+        });
+        return;
+      }
+      if (classification?.state !== "declined") {
+        sendJson(res, 409, {
+          error: "not_declined",
+          detail: `${input.proposalId} is not declined (state: ${classification?.state ?? "unknown"}) — there is nothing to restore`,
+        });
+        return;
+      }
+      const origin = bearerTokenId(req);
+      appendPanelLedger(deps.ledgerPath, "panel.proposal_restored", input.proposalId, origin, { reason: input.reason });
+      sendJson(res, 200, { ok: true, proposalId: input.proposalId, restored: true });
     }),
   };
 }
@@ -1372,6 +1410,7 @@ export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
     buildApproveProposalRoute(deps),
     buildReframeProposalRoute(deps),
     buildDeclineProposalRoute(deps),
+    buildRestoreProposalRoute(deps),
     buildSetDailyCostCeilingRoute(deps),
     buildClearDailyCostCeilingRoute(deps),
   ];
