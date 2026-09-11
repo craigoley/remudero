@@ -37245,7 +37245,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       const encodedAutomatedDecision = process.env[AUTOMATED_RETRO_DECISION_ENV];
       // c8 ignore next
       const automated = encodedAutomatedDecision === undefined ? undefined : decodeAutomatedRetroDecision(encodedAutomatedDecision);
-      // c8 ignore next
+      /* node:coverage ignore next -- real retro execution reads ledger/plan state and may spawn; retroCommand has injectable tests */
       return await retroCommand(rest, automated ? { automated } : {});
     },
   ],
@@ -37261,9 +37261,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   [
     "daemon",
     async (rest) => {
-      // c8 ignore next
       await loadHeavyVerb("daemon");
-      // c8 ignore next
       return await daemonCommand(rest);
     },
   ],

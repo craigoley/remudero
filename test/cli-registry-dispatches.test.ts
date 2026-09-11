@@ -13,6 +13,8 @@
 // the arg is missing, byte-identical to today's behavior.
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { test } from "node:test";
 import {
   buildRegistry,
@@ -185,6 +187,55 @@ test("real HANDLERS route malformed args into their command validators before si
     const { code, printed } = await captureHandler(name, rest);
     assert.equal(code, 2, `${name} malformed args must return the usage exit code`);
     assert.match(String(printed[0]?.[0] ?? ""), pattern, `${name} should reject before real side effects`);
+  }
+});
+
+test("real HANDLERS load heavy drain glue before its validator rejects malformed args", async () => {
+  const { code, printed } = await captureHandler("drain", ["--bogus"]);
+  assert.equal(code, 2);
+  assert.match(String(printed[0]?.[0] ?? ""), /rmd drain: unexpected argument '--bogus'/);
+});
+
+test("real HANDLERS load heavy daemon glue before its validator rejects malformed args", async () => {
+  const handler = HANDLERS.get("daemon");
+  assert.ok(handler, "daemon must be registered in the real HANDLERS map");
+  const originalWriteSync = fs.writeSync;
+  const printed: string[] = [];
+  const mutableFs = fs as typeof fs & { writeSync: typeof fs.writeSync };
+  mutableFs.writeSync = ((fd: number, buffer: string | NodeJS.ArrayBufferView, ...args: unknown[]) => {
+    if (fd === 2) {
+      const text =
+        typeof buffer === "string"
+          ? buffer
+          : Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength).toString("utf8");
+      printed.push(text);
+      return text.length;
+    }
+    return (originalWriteSync as unknown as (...xs: unknown[]) => number)(fd, buffer, ...args);
+  }) as typeof fs.writeSync;
+  syncBuiltinESMExports();
+  try {
+    assert.equal(await handler(["--bogus"]), 2);
+    assert.match(printed.join(""), /rmd daemon: unexpected argument '--bogus'/);
+  } finally {
+    mutableFs.writeSync = originalWriteSync;
+    syncBuiltinESMExports();
+    delete process.env.REMUDERO_DAEMON_PROCESS;
+  }
+});
+
+test("real HANDLERS decode the automated retro env before invoking retroCommand", async () => {
+  const handler = HANDLERS.get("retro");
+  assert.ok(handler, "retro must be registered in the real HANDLERS map");
+  const saved = process.env.RMD_AUTOMATED_RETRO_DECISION;
+  process.env.RMD_AUTOMATED_RETRO_DECISION = "not-json";
+  try {
+    await assert.rejects(async () => {
+      await handler(["--dry-run"]);
+    }, /RMD_AUTOMATED_RETRO_DECISION is not valid JSON/);
+  } finally {
+    if (saved === undefined) delete process.env.RMD_AUTOMATED_RETRO_DECISION;
+    else process.env.RMD_AUTOMATED_RETRO_DECISION = saved;
   }
 });
 
