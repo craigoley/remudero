@@ -1,6 +1,7 @@
 {
   "thresholdMs": 5000,
   "files": {
+    "test/automated-retro-preflight-scrubs-self-sync.test.ts": 0,
     "test/a-bare-flagged-worktree-stops-the-whole-fleet.test.ts": 0,
     "test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts": 621,
     "test/a-blocked-ci-verdict-names-the-check-that-went-red.test.ts": 0,
