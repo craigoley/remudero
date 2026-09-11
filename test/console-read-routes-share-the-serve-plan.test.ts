@@ -11,7 +11,6 @@ import {
   buildInboxRoute,
   buildPlanViewRoute,
   type PanelGraphDeps,
-  type PanelGraphReadDeps,
   type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
@@ -81,7 +80,7 @@ function ledgerPathFor(root: string): string {
   return path;
 }
 
-function panelDeps(root: string, planPath: string, readPlanSnapshot: () => Plan, ratify = ratifyGateway()): PanelGraphReadDeps {
+function panelDeps(root: string, planPath: string, ratify = ratifyGateway()): PanelGraphDeps {
   const github = statusGateway();
   return {
     root,
@@ -91,7 +90,6 @@ function panelDeps(root: string, planPath: string, readPlanSnapshot: () => Plan,
     github: traceGateway(),
     statusGithub: github,
     ratify,
-    readPlanSnapshot,
   };
 }
 
@@ -160,8 +158,12 @@ test("the three polled read routes share ServeDeps.board.plan by object identity
 test("the three polled read routes answer with an unreadable planPath", async () => {
   const root = tmpRoot();
   const snapshot = planOf([task("W1-T2")]);
-  const deps = panelDeps(root, join(root, "not-readable", "tasks.yaml"), () => snapshot);
-  const routes = [buildDrainPreviewRoute(deps), buildInboxRoute(deps), buildPlanViewRoute(deps)];
+  const deps = panelDeps(root, join(root, "not-readable", "tasks.yaml"));
+  const routes = [
+    buildDrainPreviewRoute(deps, () => snapshot),
+    buildInboxRoute(deps, () => snapshot),
+    buildPlanViewRoute(deps, () => snapshot),
+  ];
 
   await withRoutes(routes, async (baseUrl) => {
     for (const path of POLLED_PATHS) {
@@ -259,8 +261,9 @@ test("a production-shaped console refresh performs no plan-shard reads", async (
   }) as typeof fs.readFileSync;
   syncBuiltinESMExports();
   try {
-    const deps = panelDeps(root, planPath, () => planOf(tasks));
-    const routes = [buildDrainPreviewRoute(deps), buildInboxRoute(deps), buildPlanViewRoute(deps)];
+    const deps = panelDeps(root, planPath);
+    const snapshot = () => planOf(tasks);
+    const routes = [buildDrainPreviewRoute(deps, snapshot), buildInboxRoute(deps, snapshot), buildPlanViewRoute(deps, snapshot)];
     await withRoutes(routes, async (baseUrl) => {
       for (const path of POLLED_PATHS) {
         const response = await get(baseUrl, path);

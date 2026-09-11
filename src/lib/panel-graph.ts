@@ -126,14 +126,6 @@ export interface PanelGraphDeps {
   policy?: Policy;
 }
 
-/** W1-T3415's read-only extension. Write-route builders deliberately receive only
- * {@link PanelGraphDeps}, so no mutating handler can consult a process read snapshot. */
-export interface PanelGraphReadDeps extends PanelGraphDeps {
-  /** The serve process's existing read snapshot. Omission preserves standalone route builders'
-   * fresh-load behavior. */
-  readPlanSnapshot?: () => Plan;
-}
-
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
 
 /**
@@ -525,9 +517,10 @@ function parseMaxParam(url: URL): { max?: number } | { error: string } {
   return { max: n };
 }
 
-/** The one read-model boundary shared by the three console routes W1-T3415 owns. */
-function readPanelPlan(deps: PanelGraphReadDeps): Plan {
-  return deps.readPlanSnapshot?.() ?? loadPlan(deps.planPath);
+/** The one read-model boundary shared by the three console routes W1-T3415 owns. The snapshot
+ * travels as a separate read-builder capability, never through the write-route dependency bag. */
+function readPanelPlan(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Plan {
+  return readPlanSnapshot?.() ?? loadPlan(deps.planPath);
 }
 
 /** `Task` preserves `plan_refs`, so a process-owned plan needs no second shard traversal. */
@@ -544,7 +537,7 @@ function planRefsFromSnapshot(plan: Plan): Map<string, string[]> {
  * ordered task cards: reads the process snapshot, re-derives merged status via `projectPlan` (the
  * same projection `GET /v1/status` uses), and renders `drain.ts`'s own `buildDrainPreview`.
  */
-export function buildDrainPreviewRoute(deps: PanelGraphReadDeps): Route {
+export function buildDrainPreviewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
     method: "GET",
     path: "/v1/drain/preview",
@@ -558,7 +551,7 @@ export function buildDrainPreviewRoute(deps: PanelGraphReadDeps): Route {
       }
       const opts: DrainOpts = { max: parsedMax.max, until: url.searchParams.get("until") ?? undefined };
 
-      const plan = readPanelPlan(deps);
+      const plan = readPanelPlan(deps, readPlanSnapshot);
       const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
       const isMerged = (id: string) => projection.get(id)?.merged ?? false;
       const cards = buildDrainPreview(plan, isMerged, opts);
@@ -901,7 +894,7 @@ export function computePlanSectionCounts(
  * buildDrainPreviewRoute}. The caches are created once per route closure, persisting for the
  * `rmd serve` process lifetime — never per-request, or every reading would look first-ever.
  */
-export function buildPlanViewRoute(deps: PanelGraphReadDeps): Route {
+export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   const progressCache = createPlanProgressCache();
   const sectionCache = createPlanSectionCache();
   return {
@@ -916,7 +909,7 @@ export function buildPlanViewRoute(deps: PanelGraphReadDeps): Route {
         sendJson(res, 400, { error: "invalid_request", detail: "frontier must be a positive number" });
         return;
       }
-      const plan = readPanelPlan(deps);
+      const plan = readPanelPlan(deps, readPlanSnapshot);
       const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
       const isMerged: MergedSet = (id) => projection.get(id)?.merged ?? false;
       const progress = computePlanProgress(plan, projection, deps.statusGithub, progressCache);
@@ -1067,13 +1060,13 @@ function classifyAllProposals(
  * be discovered is a mechanism nobody can reach. `rmd approve`/`reframe`/`decline` are wired from
  * the card below, over the same write-token scope every write uses.
  */
-export function buildInboxRoute(deps: PanelGraphReadDeps): Route {
+export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
     method: "GET",
     path: "/v1/inbox",
     scope: "read",
     handler: (_req, res) => {
-      const { registryPath, proposals, classifications } = classifyAllProposals(deps, () => readPanelPlan(deps));
+      const { registryPath, proposals, classifications } = classifyAllProposals(deps, () => readPanelPlan(deps, readPlanSnapshot));
 
       const ready: InboxReadyItem[] = [];
       const drafting: InboxDraftingItem[] = [];
@@ -1445,16 +1438,15 @@ export function buildClearDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
 
 /** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
 export function buildPanelGraphRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
-  const readDeps: PanelGraphReadDeps = { ...deps, readPlanSnapshot };
   return [
     buildFeedbackInboxRoute(deps),
     buildSubmitFeedbackRoute(deps),
     buildPreviewFeedbackRoute(deps),
     buildTraceRoute(deps),
     buildProposalDecisionRoute(deps),
-    buildDrainPreviewRoute(readDeps),
-    buildPlanViewRoute(readDeps),
-    buildInboxRoute(readDeps),
+    buildDrainPreviewRoute(deps, readPlanSnapshot),
+    buildPlanViewRoute(deps, readPlanSnapshot),
+    buildInboxRoute(deps, readPlanSnapshot),
     buildApproveProposalRoute(deps),
     buildReframeProposalRoute(deps),
     buildDeclineProposalRoute(deps),
