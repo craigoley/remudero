@@ -1,5 +1,5 @@
 /**
- * test/coverage-never-stalls-the-queue.test.ts — W1-T3380.
+ * test/coverage-never-stalls-the-queue.test.ts — W1-T3384.
  *
  * OPERATOR RULING 2026-09-11: "i don't want hard floors on anything, including code coverage …
  * when it drops below that threshold we fix the pr as much as we can, but then let it through and
@@ -30,14 +30,14 @@ import { classifyCoverageTier, evaluateRatchet } from "../scripts/coverage-ratch
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/coverage-baseline.json"), "utf8")) as Record<string, unknown>;
 
-test("W1-T3380: branches far below the block cut PASS — the deepest band owes work, it does not stall the queue", () => {
+test("W1-T3384: branches far below the block cut PASS — the deepest band owes work, it does not stall the queue", () => {
   const tier = classifyCoverageTier({ branchesPct: 61.4 }, BASELINE);
   assert.equal(tier.tier, "remediate", "the band is still NAMED, so severity is still observable");
   assert.equal(tier.blocking, false, "a PR must land and owe work, never be parked alongside the debt");
   assert.match(tier.message, /escalating improvement tasks/, "the message must say what happens instead of blocking");
 });
 
-test("W1-T3380: every band is non-blocking — no coverage LEVEL fails the build", () => {
+test("W1-T3384: every band is non-blocking — no coverage LEVEL fails the build", () => {
   for (const branchesPct of [99.9, 92, 90, 87.5, 85, 84.9, 40, 0]) {
     assert.equal(
       classifyCoverageTier({ branchesPct }, BASELINE).blocking,
@@ -47,19 +47,19 @@ test("W1-T3380: every band is non-blocking — no coverage LEVEL fails the build
   }
 });
 
-test("W1-T3380: the three bands still DISCRIMINATE, so severity can drive how much work is filed", () => {
+test("W1-T3384: the three bands still DISCRIMINATE, so severity can drive how much work is filed", () => {
   assert.equal(classifyCoverageTier({ branchesPct: 95 }, BASELINE).tier, "healthy");
   assert.equal(classifyCoverageTier({ branchesPct: 87 }, BASELINE).tier, "improve");
   assert.equal(classifyCoverageTier({ branchesPct: 70 }, BASELINE).tier, "remediate");
 });
 
-test("W1-T3380: the shipped baseline declares NO lines floor", () => {
+test("W1-T3384: the shipped baseline declares NO lines floor", () => {
   assert.equal(BASELINE.linesPct, undefined, "a retired floor must be absent, not set to 0 or left stale");
   assert.equal(evaluateRatchet({ linesPct: 12.5, branchesPct: 99 }, BASELINE).length, 0,
     "with no floor recorded, even catastrophic lines coverage is not a ratchet violation");
 });
 
-test("W1-T3380: MEASUREMENT INTEGRITY STILL BLOCKS — a floor that cannot be compared is still refused", () => {
+test("W1-T3384: MEASUREMENT INTEGRITY STILL BLOCKS — a floor that cannot be compared is still refused", () => {
   assert.throws(
     () => evaluateRatchet({ linesPct: 98, branchesPct: 91 }, { linesPct: "95.62" }),
     /must be a number/,

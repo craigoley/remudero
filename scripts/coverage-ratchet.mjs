@@ -137,7 +137,7 @@ export function evaluateRatchet(actual, baseline, epsilon = 1e-9) {
  * silently becomes a lines gate if branches ever overtake — a surprise waiting. Lines keep their
  * own separate floor (see `evaluateRatchet` above), unchanged and still enforced.
  *
- * NO BAND BLOCKS (W1-T3380, operator ruling 2026-09-11, superseding W1-T466's blocking cut at 85).
+ * NO BAND BLOCKS (W1-T3384, operator ruling 2026-09-11, superseding W1-T466's blocking cut at 85).
  * The cuts now select a RESPONSE, not a verdict:
  *   >= 90  PASS, healthy.
  *   85-90  PASS, and inject ONE coverage-improvement task (tier two, lib/coverage-improvement.ts).
@@ -156,7 +156,7 @@ export function classifyCoverageTier(actual, thresholds = {}) {
   if (pct < block) {
     return {
       tier: 'remediate',
-      // W1-T3380: blocking parks the change AND the debt, and the debt is the part that needs work.
+      // W1-T3384: blocking parks the change AND the debt, and the debt is the part that needs work.
       blocking: false,
       message:
         `branches ${pct.toFixed(2)}% is below ${block}% — PASS, and coverage remediation is owed: ` +
@@ -275,7 +275,7 @@ function main(argv) {
   // which SUPPRESSED the line-baseline violation: a change dropping lines AND branches was told
   // only about branches, and would fix one, re-push, and discover the other. Collect and print
   // every reason, then exit once.
-  // W1-T3380: no coverage LEVEL blocks now, and this is still not vacuous — `blockers` is fed only by
+  // W1-T3384: no coverage LEVEL blocks now, and this is still not vacuous — `blockers` is fed only by
   // MEASUREMENT-INTEGRITY failures (a declared floor that cannot be compared, an absent lcov).
   const blockers = [...(tier.blocking ? [tier.message] : []), ...violations];
 

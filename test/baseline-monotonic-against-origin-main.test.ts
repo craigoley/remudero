@@ -133,7 +133,7 @@ test("SCORE_TABLE names only SCALAR score floors/ceilings, never a per-file LEDG
   }
 });
 
-test("W1-T3380: the retired coverage lines floor is NOT held monotonic — a row for an absent field would error on every PR", () => {
+test("W1-T3384: the retired coverage lines floor is NOT held monotonic — a row for an absent field would error on every PR", () => {
   const paths = SCORE_TABLE.map((e) => e.path);
   assert.ok(
     !paths.includes("scripts/coverage-baseline.json"),
