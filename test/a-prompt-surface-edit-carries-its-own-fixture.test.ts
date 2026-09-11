@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { gitRepo } from "./helpers/git-repo.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -46,9 +47,7 @@ function commit(root: string, message: string): void {
 }
 
 function fixtureRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "rmd-prompt-surface-gate-"));
-  git(root, ["init", "-q"]);
-  return root;
+  return gitRepo({ seedCommit: false, kind: "prompt-surface-gate" }).dir;
 }
 
 function withFixture(fn: (root: string) => void): void {
