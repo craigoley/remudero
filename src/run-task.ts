@@ -136,6 +136,8 @@ import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { renderAnchorBlock } from "./lib/compaction.js";
+import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
+export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
   FIX_MODE_RULES,
   deriveFixMode,
@@ -208,8 +210,6 @@ import { buildProjectInit, parseProjectInitArgs } from "./lib/project-init.js";
 import {
   OnboardError,
   parseOnboardArgs,
-  realOnboardFsDeps,
-  realOnboardGhGateway,
   resolveTargetOwnerRepo,
   runOnboardInventory,
   type OnboardFsDeps,
@@ -217,8 +217,6 @@ import {
 } from "./lib/onboard/inventory.js";
 import {
   parseReconArgs,
-  realReconFsDeps,
-  realReconGhGateway,
   RECON_LENSES,
   RECON_PHASE,
   ReconError,
@@ -236,7 +234,6 @@ import {
 import {
   loadOnboardSessionState,
   parseSessionArgs,
-  realSessionFsDeps,
   runOnboardSession,
   SESSION_PHASE,
   SessionError,
@@ -245,9 +242,6 @@ import {
 } from "./lib/onboard/session.js";
 import {
   parseSynthesizeArgs,
-  realSynthesizeFsDeps,
-  realSynthesizeGhGateway,
-  realSynthesizeGitGateway,
   runOnboardSynthesize,
   SYNTHESIZE_PHASE,
   SynthesizeError,
@@ -309,7 +303,7 @@ import {
 import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
-import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
 import {
   assessInstallForDeploy,
@@ -1419,7 +1413,6 @@ import {
   isQuietHours,
   pauseDetail,
   pendingKicks,
-  realSharedPauseGitDeps,
   requestPause,
   requestStop,
   resumeFleet,
@@ -1453,6 +1446,13 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 export { resolveRepoRoot };
+let composedRealGraph: ComposedRealGraph | undefined;
+
+function realDeps(): ComposedRealGraph {
+  composedRealGraph ??= composeRealDeps({ repoRoot });
+  return composedRealGraph;
+}
+
 // `unknownArgError` MOVED to ./lib/cli-args.ts — its sibling `commandSyntax` stays here,
 // anchored to the `commandSpec`/`COMMANDS` registry it reads. Re-exported below for
 // test/run-task.test.ts's existing import. `flagValue` (W1-T2888) joined it for the identical
@@ -13900,40 +13900,6 @@ export function buildBaseProofDir(
 // silently would be worse than not reviewing at all.
 // ────────────────────────────────────────────────────────────────────────────
 
-/** Injected git operations for {@link materializeReviewWorktree} — real
- * callers use the module's own `execFileSync` calls; tests fake them so
- * materialization success/failure is a unit fixture, no real git/network
- * involved. */
-export interface ReviewWorktreeDeps {
-  fetch: (repoDir: string, prNumber: number) => void;
-  addWorktree: (repoDir: string, worktreePath: string, revision: string) => void;
-  revParseHead: (worktreePath: string) => string;
-  /** Best-effort teardown of a worktree THIS attempt itself just created, used
-   * only when a LATER step of the SAME attempt fails (W1-T233: a failed
-   * materialization must leave the workspace exactly as it found it, never
-   * strand what step 1 already created). Optional — defaults to the same
-   * {@link worktreeRemove} every other teardown site in this file uses;
-   * tests override it to observe the cleanup call without touching git. */
-  removeWorktree?: (repoDir: string, worktreePath: string) => void;
-}
-
-const realReviewWorktreeDeps: ReviewWorktreeDeps = {
-  // W1-T2751: fetch GitHub's read-only PR input ref without creating a reusable local ref.
-  // The object becomes available by SHA; neither FETCH_HEAD nor origin/<mutable-branch> is
-  // checkout authority for the review.
-  fetch: (repoDir, prNumber) =>
-    execFileSync(
-      "git",
-      ["-C", repoDir, "fetch", "--quiet", "--no-write-fetch-head", "origin", `refs/pull/${prNumber}/head`],
-      { stdio: "pipe" },
-    ),
-  // NO `checkout -B` and no source-branch ref: the REST-supplied SHA is the exact detached input.
-  addWorktree: (repoDir, worktreePath, revision) =>
-    execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", worktreePath, revision], { stdio: "pipe" }),
-  revParseHead: (worktreePath) =>
-    execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { stdio: "pipe" }).toString().trim(),
-};
-
 /** Named CLASS of a materialization failure (W1-T233) — carried alongside the
  * raw message so a pattern is visible across runs (grep the class) without
  * parsing git's prose: `worktree-collision` (another worktree already holds
@@ -14027,7 +13993,7 @@ export function materializeReviewWorktree(
   repoDir: string,
   prNumber: number,
   headSha: string,
-  deps: ReviewWorktreeDeps = realReviewWorktreeDeps,
+  deps: ReviewWorktreeDeps = realDeps().reviewWorktree,
 ): MaterializeReviewWorktreeResult {
   const worktreePath = join(worktreesDir(config), `review-PR${prNumber}-${Date.now()}`);
   const removeWorktree = deps.removeWorktree ?? worktreeRemove;
@@ -14469,7 +14435,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     materialize: materializeReviewWorktree,
     runReview,
     postReviewPending,
-    fetchHead: realReviewWorktreeDeps.fetch,
+    fetchHead: realDeps().reviewWorktree.fetch,
     executionMode: "deterministic" as const,
     ...deps,
   };
@@ -24465,7 +24431,7 @@ async function drainCommand(
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
         // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
         // own doc for why UNREACHABLE reads as held, never as clear.
-        checkPause: () => checkSharedPause(config.root, realSharedPauseGitDeps(repoRoot)),
+        checkPause: () => checkSharedPause(config.root, realDeps().sharedPauseGit),
         openPrCount, // W1-T172: the governor's WIP-ceiling input on the multi-lane path.
         log,
       },
@@ -25941,7 +25907,7 @@ export async function daemonCommand(
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
         // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
         // own doc for why UNREACHABLE reads as held, never as clear.
-        checkPause: () => checkSharedPause(config.root, realSharedPauseGitDeps(repoRoot)),
+        checkPause: () => checkSharedPause(config.root, realDeps().sharedPauseGit),
         // CODE FRESHNESS — THE PRODUCER W1-T126 NEVER GOT. The consumer has read
         // `deps.checkFreshness` since 2026 and this object never supplied it, so the stale
         // self-restart had fired ZERO times in the Azure daemon's 6,838-row ledger. MEASURED
@@ -26287,7 +26253,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     return 0;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  const deps = realDeployDeps({
+  const deps = realDeps().deployFor({
     installPath: assessment.installRoot,
     stateRoot: config.root,
     daemonLabel: DAEMON_LABEL,
@@ -31694,7 +31660,7 @@ async function stopCommand(rest: string[]): Promise<number> {
 async function pauseCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const reason = flagValue(rest, "--reason");
-  const info = requestPause(config.root, reason, realSharedPauseGitDeps(repoRoot));
+  const info = requestPause(config.root, reason, realDeps().sharedPauseGit);
   const ledgerPath = ledgerPathFor(config);
   appendLedger(ledgerPath, {
     run_id: `FLEET-${Date.now()}`,
@@ -31720,7 +31686,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
  */
 async function resumeFleetCommand(): Promise<number> {
   const config = loadConfig();
-  const result = resumeFleet(config.root, realSharedPauseGitDeps(repoRoot));
+  const result = resumeFleet(config.root, realDeps().sharedPauseGit);
   const ledgerPath = ledgerPathFor(config);
   appendLedger(ledgerPath, {
     run_id: `FLEET-${Date.now()}`,
@@ -35694,9 +35660,9 @@ export async function onboardCommand(rest: string[], deps: OnboardCommandDeps = 
   }
 
   const { fs: fsDep, gh: ghDep, resolveOwnerRepo } = {
-    fs: realOnboardFsDeps,
-    gh: realOnboardGhGateway(),
-    resolveOwnerRepo: resolveTargetOwnerRepo,
+    fs: realDeps().onboard.fs,
+    gh: realDeps().onboard.gh,
+    resolveOwnerRepo: realDeps().onboard.resolveOwnerRepo,
     ...deps,
   };
   const parsed = parseOnboardArgs(rest);
@@ -35830,9 +35796,9 @@ export async function reconCommand(rest: string[], deps: ReconCommandDeps = {}):
   const { targetDir, owner: ownerFlag, repo: repoFlag } = parsed.args;
 
   const { fs: fsDep, gh: ghDep, resolveOwnerRepo } = {
-    fs: realReconFsDeps,
-    gh: realReconGhGateway(),
-    resolveOwnerRepo: resolveTargetOwnerRepo,
+    fs: realDeps().recon.fs,
+    gh: realDeps().recon.gh,
+    resolveOwnerRepo: realDeps().onboard.resolveOwnerRepo,
     ...deps,
   };
 
@@ -35925,7 +35891,7 @@ export async function sessionCommand(rest: string[], deps: SessionCommandDeps = 
     return 2;
   }
   const { targetDir } = parsed.args;
-  const fsDep = deps.fs ?? realSessionFsDeps;
+  const fsDep = deps.fs ?? realDeps().session.fs;
   const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY);
 
   console.log(`### rmd onboard ${targetDir} --phase session`);
@@ -36132,9 +36098,9 @@ export async function synthesizeCommand(rest: string[], deps: SynthesizeCommandD
 
   console.log(`### rmd onboard ${targetDir} --phase synthesize`);
 
-  const fsDep = deps.fs ?? realSynthesizeFsDeps;
-  const gitDep = deps.git ?? realSynthesizeGitGateway();
-  const ghDep = deps.gh ?? realSynthesizeGhGateway();
+  const fsDep = deps.fs ?? realDeps().synthesize.fs;
+  const gitDep = deps.git ?? realDeps().synthesize.git;
+  const ghDep = deps.gh ?? realDeps().synthesize.gh;
   const draftDep = deps.draft ?? defaultSynthesizeDraft();
 
   let result;
@@ -37795,6 +37761,7 @@ export async function main(
   // resolves `cmd` against REGISTRY and invokes its handler -- main() keeps only the
   // process-boundary concerns the task record calls out: the freshness gate above, and the
   // exit code translation right here.
+  realDeps();
   process.exit(await dispatchCommand(cmd, rest, REGISTRY, USAGE));
 }
 
