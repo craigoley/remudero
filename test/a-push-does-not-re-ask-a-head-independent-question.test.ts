@@ -199,19 +199,34 @@ test("the terminal non-fleet-head producer marks its ask head-independent", asyn
   const path = ledgerPath();
   writeFileSync(
     path,
-    JSON.stringify({
-      run_id: "SWEEP-prior",
-      task_id: "SWEEP",
-      step: "sweep.fix.uncreditable_head",
-      pr_number: 4559,
-      head_sha: "bad3179",
-      head: "contributor/manual-fix",
-      synthetic: false,
-      reason: "not_a_run_branch",
-      terminal: true,
-      repair_task_id: "W1-T3179",
-      cause: "review",
-    }) + "\n",
+    [
+      {
+        run_id: "SWEEP-prior",
+        task_id: "SWEEP",
+        step: "sweep.fix.uncreditable_head",
+        pr_number: 4559,
+        head_sha: "bad3179",
+        head: "contributor/manual-fix",
+        synthetic: false,
+        reason: "not_a_run_branch",
+        terminal: true,
+        repair_task_id: "W1-T3179",
+        cause: "review",
+      },
+      {
+        run_id: "SWEEP-prior",
+        task_id: "SWEEP",
+        step: "sweep.fix.uncreditable_head",
+        pr_number: 4559,
+        head_sha: "bad3180",
+        head: "contributor/manual-fix",
+        synthetic: false,
+        reason: "not_a_run_branch",
+        terminal: true,
+        repair_task_id: "W1-T3179",
+        cause: "review",
+      },
+    ].map((row) => JSON.stringify(row)).join("\n") + "\n",
   );
   const effects = buildSweepEffects({
     owner: "craigoley",
@@ -241,8 +256,25 @@ test("the terminal non-fleet-head producer marks its ask head-independent", asyn
     },
     { unmetCriteria: [] },
   );
+  await effects.dispatchFix(
+    {
+      prNumber: 4559,
+      prUrl: "https://github.com/craigoley/remudero/pull/4559",
+      taskId: "W1-T3179",
+      reviewState: "failure",
+      checksState: "green",
+      unmetCriteria: [],
+      priorStrikes: 1,
+      lastActivityAt: "2026-09-08T12:00:00Z",
+      headSha: "bad3180",
+      autoMergeArmed: false,
+    },
+    { unmetCriteria: [] },
+  );
 
-  assert.equal(issues.calls.length, 1);
+  assert.equal(issues.calls.length, 1, "a pushed non-fleet head cannot open a second terminal ask");
+  assert.equal(issues.comments.length, 1, "the newer terminal head appends to the first issue");
   assert.match(issues.calls[0].title, /cannot be repaired from its non-fleet head/);
   assert.match(issues.calls[0].body, /^\*\*Head:\*\* bad3179$/m);
+  assert.match(issues.comments[0].body, /^\*\*Head:\*\* bad3180$/m);
 });

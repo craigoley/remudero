@@ -785,12 +785,12 @@ function matchesOptionalDimension(wanted: string | undefined, candidate: string 
   return wanted === undefined || candidate === undefined || wanted === candidate;
 }
 
-function bodyCarriesSameDetail(e: EscalationDedupKey, body: string): boolean {
-  return body.includes(`\n${e.detail}\n\n## Options`);
+function titleCarriesSameSummary(e: EscalationDedupKey, title: string | undefined): boolean {
+  return title === `[${e.class}] ${e.taskId}: ${e.summary}`;
 }
 
-function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined, body: string): boolean {
-  if (e.headDedup === "independent") return bodyCarriesSameDetail(e, body);
+function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined, title: string | undefined): boolean {
+  if (e.headDedup === "independent") return titleCarriesSameSummary(e, title);
   return matchesOptionalDimension(e.headSha, candidate);
 }
 
@@ -824,7 +824,7 @@ function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): Ope
       // the two rungs that set both get their own issue on a new push or a different cause.
       if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) return false;
       const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
-      if (matchesHeadDimension(e, candidateHead, body) === false) return false;
+      if (matchesHeadDimension(e, candidateHead, issue.title) === false) return false;
       if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
       return true;
     }
