@@ -1271,6 +1271,7 @@
     "test/the-forward-reference-carve-out-is-asymmetric.test.ts": 0,
     "test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts": 1099,
     "test/the-golden-suite-has-every-piece-except-a-producer.test.ts": 1682,
+    "test/the-headline-index-is-dark.test.ts": 0,
     "test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts": 844,
     "test/the-headroom-sweep-cannot-see-the-synthesis-rungs.test.ts": 1172,
     "test/the-heap-pressure-arm-ends-the-pass.test.ts": 0,
