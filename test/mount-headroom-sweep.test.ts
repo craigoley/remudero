@@ -51,12 +51,28 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
       distinctSettledTasks: number;
       costPerCompletedTaskUsd: number | null;
     }>;
+    assignments: {
+      integrity: {
+        validAssignmentEvents: number;
+        joinedRuns: number;
+        servedModelConfirmedRows: number;
+        servedModelUnreportedRows: number;
+      };
+      cells: Array<{
+        cellKey: string;
+        arms: Array<{ provider: string; assignedModel: string; effort: string }>;
+      }>;
+    };
   };
   computeClassSweep: (runs: unknown[]) => unknown[];
   percentile: (values: number[], p: number) => number | null;
   redispatchedRunIds: (runs: Array<{ runId: string; taskId: string; startTs: string }>) => Set<string>;
   readLedgerCorpus: (stateDir: string, fsDeps?: unknown) => unknown;
   parseAndDedupeLedgerLines: (rawLines: string[]) => { records: unknown[]; rawRowsWithRunId: number };
+  assignmentFieldsByRunId: (records: unknown[]) => {
+    fieldsByRunId: Map<string, { provider: string; assignedModel: string; assignedEffort: string }>;
+    integrity: { mixedAssignedArms: number; missingAssignmentEventRows: number };
+  };
   renderMountHeadroomReport: (report: unknown) => string;
   MountHeadroomSweepError: new (message: string) => Error;
   main: (argv: string[]) => void;
@@ -76,6 +92,7 @@ const {
   main,
   readLedgerCorpus,
   parseAndDedupeLedgerLines,
+  assignmentFieldsByRunId,
   realMountHeadroomFs,
 } = mod;
 
@@ -517,4 +534,63 @@ test("parseAndDedupeLedgerLines: a line that is not JSON is skipped, and the val
   // row would satisfy the count above if the fixture had three valid rows and one bad one.
   const allValid = parseAndDedupeLedgerLines([valid, alsoValid]);
   assert.equal(allValid.rawRowsWithRunId, 2, "the same two rows parse identically with the bad line removed");
+});
+
+test("assignment evidence compares router-selected arms within a cell without relabeling them as served models", () => {
+  const dir = tmpDir();
+  const assignment = (runId: string, id: string, model: string, ts: string) => JSON.stringify({
+    ts,
+    run_id: runId,
+    task_id: runId,
+    step: "worker.assignment",
+    worker_assignment: {
+      version: 1,
+      id,
+      phase: "pre-execution",
+      selected: { provider: "codex", model, effort: "high" },
+    },
+  });
+  try {
+    writeLive(dir, [
+      JSON.stringify({ ts: "2026-09-11T00:00:00.000Z", run_id: "A1", task_id: "T1", step: "run.start", type: "implement", risk: "high", task_class: "src" }),
+      assignment("A1", "assignment-terra", "gpt-5.6-terra", "2026-09-11T00:00:01.000Z"),
+      JSON.stringify({ ts: "2026-09-11T00:00:02.000Z", run_id: "A1", task_id: "T1", step: "implement.done", provider: "codex", routed_model: "gpt-5.6-terra", served_model: null, selection_assignment_id: "assignment-terra", num_turns: 10 }),
+      JSON.stringify({ ts: "2026-09-11T00:00:03.000Z", run_id: "A1", task_id: "T1", step: "verdict", verdict: "merged", cost_usd: 1 }),
+      JSON.stringify({ ts: "2026-09-11T01:00:00.000Z", run_id: "A2", task_id: "T2", step: "run.start", type: "implement", risk: "high", task_class: "src" }),
+      assignment("A2", "assignment-55", "gpt-5.5", "2026-09-11T01:00:01.000Z"),
+      JSON.stringify({ ts: "2026-09-11T01:00:02.000Z", run_id: "A2", task_id: "T2", step: "implement.done", provider: "codex", routed_model: "gpt-5.5", served_model: null, selection_assignment_id: "assignment-55", num_turns: 12 }),
+      JSON.stringify({ ts: "2026-09-11T01:00:03.000Z", run_id: "A2", task_id: "T2", step: "verdict", verdict: "merged", cost_usd: 2 }),
+    ]);
+    const report = buildMountHeadroomSweep(dir);
+    assert.equal(report.assignments.integrity.validAssignmentEvents, 2);
+    assert.equal(report.assignments.integrity.joinedRuns, 2);
+    assert.equal(report.assignments.integrity.servedModelConfirmedRows, 0);
+    assert.equal(report.assignments.integrity.servedModelUnreportedRows, 2);
+    const cell = report.assignments.cells.find((entry) => entry.cellKey === "implement::high::src");
+    assert.deepEqual(
+      cell?.arms.map((arm) => `${arm.provider}/${arm.assignedModel}/${arm.effort}`).sort(),
+      ["codex/gpt-5.5/high", "codex/gpt-5.6-terra/high"],
+    );
+    const text = renderMountHeadroomReport(report);
+    assert.match(text, /assigned_model=gpt-5\.6-terra/);
+    assert.match(text, /NOT provider-confirmed served_model/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("assignment evidence refuses a run whose implementation retries changed assigned arm", () => {
+  const event = (id: string, model: string) => ({
+    step: "worker.assignment",
+    worker_assignment: { version: 1, id, phase: "pre-execution", selected: { provider: "codex", model, effort: "high" } },
+  });
+  const evidence = assignmentFieldsByRunId([
+    event("first", "gpt-5.6-terra"),
+    event("second", "gpt-5.5"),
+    { run_id: "mixed", step: "implement.done", selection_assignment_id: "first", provider: "codex", routed_model: "gpt-5.6-terra", served_model: null },
+    { run_id: "mixed", step: "implement.resumed", selection_assignment_id: "second", provider: "codex", routed_model: "gpt-5.5", served_model: null },
+  ]);
+  assert.equal(evidence.fieldsByRunId.has("mixed"), false, "a mixed-cost run cannot be credited to either model arm");
+  assert.equal(evidence.integrity.mixedAssignedArms, 1);
+  assert.equal(evidence.integrity.missingAssignmentEventRows, 0);
 });

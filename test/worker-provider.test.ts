@@ -961,6 +961,11 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
   let spawnedArgs: string[] = [];
   let spawnedEnv: Record<string, string | undefined> = {};
   const codexCapacityRequests: Array<{ forceRefresh?: boolean; selectedModel?: string }> = [];
+  const assignments: Array<{
+    id: string;
+    phase: string;
+    selected: { provider: string; model: string; effort: string; accountLabel?: string };
+  }> = [];
   const diagnostics: string[] = [];
   t.mock.method(console, "error", (...parts: unknown[]) => diagnostics.push(parts.map(String).join(" ")));
   stdin.on("data", (chunk: Buffer) => {
@@ -1008,8 +1013,10 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
         tieBreaker: 0,
         writeStatus: (_root, input) => writeProviderRoutingStatus(root, input),
       },
+      onSelectionAssignment: (assignment) => assignments.push(assignment),
       containment: {
         spawn: (options) => {
+          assert.equal(assignments.length, 1, "the durable assignment is emitted before the Codex process is created");
           spawnedArgs = options.args;
           spawnedEnv = options.env;
           return { process: proc as never, pid: 42_424 };
@@ -1033,6 +1040,15 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
   assert.equal(tornDown, 1);
   assert.match(prompt, /read and follow.*CLAUDE\.md/s);
   assert.equal(workerLedgerFields(result).provider, "codex");
+  assert.equal(assignments[0]?.phase, "pre-execution");
+  assert.deepEqual(assignments[0]?.selected, {
+    provider: "codex",
+    model: "gpt-5.6-terra",
+    effort: "high",
+    accountLabel: "codex-account",
+  });
+  assert.equal(workerLedgerFields(result).selection_assignment_id, assignments[0]?.id);
+  assert.equal(workerLedgerFields(result).served_model, null, "assignment remains distinct from an unreported provider receipt");
   assert.deepEqual(codexCapacityRequests, [
     { requestedModel: undefined, requestedEffort: undefined, reservePercent: 5 },
     { requestedModel: undefined, requestedEffort: undefined, forceRefresh: true, selectedModel: "gpt-5.6-terra" },
