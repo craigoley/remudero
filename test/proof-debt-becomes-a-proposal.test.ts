@@ -235,7 +235,7 @@ test("two fires over an unchanged offender set mint exactly one proposal (idempo
 
 // ── acceptance 5: dedup keys on task id plus criterion index, never a similarity score ──────────
 
-test("dedup is keyed on taskId+criterionIndex — a textually different cause/claim/proof still dedupes, a different criterionIndex does not", () => {
+test("W1-T3385b (supersedes W1-T2477): dedup is keyed on THE TASK — every criterion of one record is ONE ask", () => {
   const root = tmp("rmd-proofdebt-dedup-");
   try {
     const registryPath = join(root, "inbox-proposals.json");
@@ -255,14 +255,27 @@ test("dedup is keyed on taskId+criterionIndex — a textually different cause/cl
     const second = mintProofDebtProposals([rewordedSamePair], resolve, registryPath);
     assert.equal(second.mintedProposalIds.length, 0, "same taskId+criterionIndex must dedupe regardless of prose");
 
-    // A DIFFERENT criterionIndex on the SAME task is a DIFFERENT offender by this key, and must
-    // mint separately.
+    // W1-T3385b: a DIFFERENT criterionIndex on the SAME task is the SAME ask now. Keying on the
+    // pair minted one operator decision per criterion — MEASURED 2026-09-11, 58 open proposals
+    // stood for 23 tasks and W1-T965 alone held seven, whose drafts proposed different and
+    // sometimes contradictory remedies for one record.
     const differentCriterion = offender({ criterionIndex: 3 });
     const third = mintProofDebtProposals([differentCriterion], resolve, registryPath);
-    assert.equal(third.mintedProposalIds.length, 1, "a different criterion index is a different offender by the natural key");
+    assert.equal(third.mintedProposalIds.length, 0, "another criterion on the same task is the same ask");
 
     const registry = readRegistry(registryPath);
-    assert.equal(registry.length, 2, "exactly two distinct (taskId, criterionIndex) pairs ever minted");
+    assert.equal(registry.length, 1, "one task, one proposal");
+
+    // AND THE EVIDENCE IS NOT LOST: every criterion rides as its own anchor.
+    const grouped = mintProofDebtProposals(
+      [offender({ criterionIndex: 0 }), offender({ criterionIndex: 1 }), offender({ criterionIndex: 4 })],
+      resolve,
+      join(root, "second-registry.json"),
+    );
+    assert.equal(grouped.mintedProposalIds.length, 1, "three criteria, one proposal");
+    const second2 = readRegistry(join(root, "second-registry.json"));
+    assert.equal(second2[0].evidenceAnchors.length, 3, "one anchor per criterion — the evidence survives the grouping");
+    assert.match(second2[0].summary, /has 3 criterion\(s\)/, "the ask names how many criteria it carries");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -306,8 +319,9 @@ test("the per-fire ceiling is the SAME ADOPTION_MINT_CEILING (never a second gov
       .sort();
     assert.deepEqual(mintedTaskIds, ["W1-T1", "W1-T2", "W1-T3"]);
 
-    // The excluded set is itself named oldest-filed-first (T4 before T5).
-    assert.deepEqual(result.excludedOffenders, ["W1-T4:0", "W1-T5:0"]);
+    // The excluded set is itself named oldest-filed-first (T4 before T5). W1-T3385b: named by TASK,
+    // since the ceiling now counts tasks rather than criteria.
+    assert.deepEqual(result.excludedOffenders, ["W1-T4", "W1-T5"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
