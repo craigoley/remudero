@@ -2061,6 +2061,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 export type Disposition =
   | "mergeable"
   | "blocked-fixable"
+  | "refused-escalate"
   | "stale"
   | "blocked-ambiguous"
   | "dep-review"
@@ -3734,6 +3735,15 @@ export function namesUnsatisfiableGate(pr: OpenPrView): boolean {
   return pr.unmetCriteria.some((criterion) => UNSATISFIABLE_GATE_MARKER.test(criterion.reason));
 }
 
+export function onlyUnmetCriteriaAreRefused(pr: OpenPrView): boolean {
+  return (
+    pr.reviewState === "failure" &&
+    !isBlockedCi(pr) &&
+    pr.unmetCriteria.length > 0 &&
+    pr.unmetCriteria.every((criterion) => criterion.proof_exec === "refused")
+  );
+}
+
 /** The check whose log tail is one message repeated near-totally, or `undefined`.
  *  `findSiblingDisagreements` is the other half of this discriminator and is DELIBERATELY NOT
  *  CALLED: it needs BOTH poles, and {@link OpenPrView} carries failures only, so the ratio arm
@@ -4269,6 +4279,17 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `checks green, remudero-review reports failure but the ledger has no matching completed ` +
       `review.posted evidence for this exact input — re-running the authoritative reviewer on ` +
       `#${pr.prNumber} to restore authoritative evidence in structured form; one exact-input post refusal stops retries`,
+  },
+  {
+    disposition: "refused-escalate",
+    when: (pr) => onlyUnmetCriteriaAreRefused(pr),
+    reason: (pr) => {
+      const classes = pr.unmetCriteria.map((criterion) => criterion.refusal?.reasonClass ?? "unknown").join(", ");
+      return (
+        `worker refused ${pr.unmetCriteria.length} criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} ` +
+        `(${classes}) — escalating with no fix strike spent`
+      );
+    },
   },
   {
     // W1-T100: the exhaustion check now covers BOTH failure shapes — a failing
@@ -5252,6 +5273,7 @@ function isProofExecOutcome(value: unknown): value is CriterionVerdict["proof_ex
     value === "not_executable" ||
     value === "executed_pass" ||
     value === "executed_fail" ||
+    value === "refused" ||
     value === "exec_error" ||
     value === "base_unreadable" ||
     value === "not_yet_built" ||
@@ -5274,12 +5296,24 @@ function criteriaFromLedgerValue(value: unknown): CriterionVerdict[] | undefined
     ) {
       return undefined;
     }
+    const refusal =
+      criterion.proof_exec === "refused" &&
+      criterion.refusal &&
+      typeof criterion.refusal === "object" &&
+      typeof (criterion.refusal as Record<string, unknown>).reasonClass === "string" &&
+      typeof (criterion.refusal as Record<string, unknown>).detail === "string"
+        ? {
+            reasonClass: (criterion.refusal as Record<string, string>).reasonClass as NonNullable<CriterionVerdict["refusal"]>["reasonClass"],
+            detail: (criterion.refusal as Record<string, string>).detail,
+          }
+        : undefined;
     criteria.push({
       claim: criterion.claim,
       proof: criterion.proof,
       met: criterion.met,
       reason: criterion.reason,
       proof_exec: criterion.proof_exec,
+      ...(refusal ? { refusal } : {}),
     });
   }
   return criteria;
@@ -5928,6 +5962,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
         closed.add(pr);
         break;
       case "blocked-ambiguous":
+      case "refused-escalate":
         // W1-T514: SHA-KEYED, exactly like `fixed`/`armed` above — a new head
         // must re-earn the attempt rather than being deduped by a stale one.
         escalated.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
@@ -6121,6 +6156,7 @@ export function renderRepairFilingRaw(filing: RepairFilingRecurrence): string {
 const ZERO_COUNTS = (): Record<Disposition, number> => ({
   mergeable: 0,
   "blocked-fixable": 0,
+  "refused-escalate": 0,
   "dep-review": 0,
   "post-review": 0,
   stale: 0,
@@ -7019,6 +7055,7 @@ export async function runSweep(
         }
         break;
       case "blocked-ambiguous":
+      case "refused-escalate":
         // W1-T514: sha-keyed, exactly like every sibling arm above — a new head re-earns its own
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
         alreadyDone = prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
@@ -7541,6 +7578,7 @@ export async function runSweep(
             case "stale":
               await deps.close(pr, reason);
               break;
+            case "refused-escalate":
             case "blocked-ambiguous":
               {
                 const dirtyFleetRebase = await applyDirtyFleetRebase(pr);
@@ -8360,6 +8398,7 @@ function oldestByKey<T extends { prNumber: number }>(
 const DISPOSITION_RENDER_ORDER: readonly Disposition[] = [
   "mergeable",
   "blocked-fixable",
+  "refused-escalate",
   "conflicted",
   "stale",
   "blocked-ambiguous",

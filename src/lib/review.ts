@@ -206,12 +206,28 @@ export type ProofSkipReason =
 export type ProofExecOutcome =
   | "executed_pass"
   | "executed_fail"
+  | "refused"
   | "not_executable"
   | "exec_error"
   | "executed_stale"
   | "base_unreadable"
   | "not_yet_built"
   | "stale_self_path";
+
+export const REFUSAL_REASON_CLASSES = [
+  "premise-rotted",
+  "outside-declared-files",
+  "needs-operator-input",
+  "proof-unexecutable-at-head",
+  "contradicts-another-criterion",
+] as const;
+
+export type RefusalReasonClass = (typeof REFUSAL_REASON_CLASSES)[number];
+
+export interface CriterionRefusal {
+  reasonClass: RefusalReasonClass;
+  detail: string;
+}
 
 /** One criterion's verdict against its stated proof. */
 export interface CriterionVerdict {
@@ -231,6 +247,9 @@ export interface CriterionVerdict {
   /** Copied verbatim from {@link AcceptanceCriterion.holdout} (W1-T166). The verdict folds a holdout criterion in like
    *  any other; this flag exists only so {@link visibleCriteria} keeps its text off worker-facing surfaces. */
   holdout?: boolean;
+  /** Structured worker refusal parsed from the report's `REFUSED:` block. A refusal is never a pass: it sets
+   *  `proof_exec: "refused"` and `met: false`, while carrying the fixed class for sweep/operator routing. */
+  refusal?: CriterionRefusal;
 }
 
 /** The two reasons a report can fail to be the PR body, which are NOT the same fact and have different remedies:
@@ -3144,6 +3163,55 @@ export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
   };
 }
 
+const REFUSAL_CLASS_SET = new Set<string>(REFUSAL_REASON_CLASSES);
+const REFUSAL_LINE_RE = new RegExp(
+  String.raw`^(?:[-*]\s*)?(?:(?:criterion|criteria)\s*)?#?(\d+)\s*[:.)-]?\s*` +
+    String.raw`(${REFUSAL_REASON_CLASSES.join("|")})\b\s*(?::|-|\u2014)\s*(\S[\s\S]*)$`,
+  "i",
+);
+
+function parseRefusalLine(line: string): { index: number; refusal: CriterionRefusal } | undefined {
+  const match = line.match(REFUSAL_LINE_RE);
+  if (!match) return undefined;
+  const reasonClass = match[2].toLowerCase();
+  if (!REFUSAL_CLASS_SET.has(reasonClass)) return undefined;
+  return {
+    index: Number(match[1]) - 1,
+    refusal: {
+      reasonClass: reasonClass as RefusalReasonClass,
+      detail: match[3].trim(),
+    },
+  };
+}
+
+export function parseRefusedCriteria(report: string, count: number): (CriterionRefusal | undefined)[] {
+  const refusals: (CriterionRefusal | undefined)[] = new Array(count).fill(undefined);
+  let inBlock = false;
+  for (const raw of report.split(/\r?\n/)) {
+    const line = raw.trim();
+    const header = line.match(/^REFUSED:\s*(.*)$/i);
+    let candidate: string | undefined;
+    if (header) {
+      inBlock = true;
+      candidate = header[1].trim();
+      if (!candidate) continue;
+    } else if (inBlock) {
+      if (!line || /^#{1,6}\s+/.test(line)) {
+        inBlock = false;
+        continue;
+      }
+      candidate = line;
+    } else {
+      continue;
+    }
+
+    const parsed = parseRefusalLine(candidate);
+    if (!parsed || parsed.index < 0 || parsed.index >= count) continue;
+    refusals[parsed.index] = parsed.refusal;
+  }
+  return refusals;
+}
+
 export function judgeReview(
   criteria: AcceptanceCriterion[],
   evidence: ReviewEvidence,
@@ -3181,8 +3249,14 @@ export function judgeReview(
         planOnlyDiff: planOnly,
       }
     : undefined;
-  const verdicts = criteria.map((c, i) =>
-    judgeCriterion(
+  // A refusal is only clean if the same body does not make a false claim about its own diff. This is computed before
+  // criterion grading so the REFUSED block cannot launder a bodyContradictsDiff failure into a no-strike refusal route.
+  const changesetRecognition = evidence.reportIsSubstitute ? undefined : recognizeChangesetClaims(evidence.report, diffFiles);
+  const changesetContradictions = changesetRecognition?.contradictions ?? [];
+  const changesetStaleCountClaims = changesetRecognition?.staleCountClaims ?? [];
+  const refused = parseRefusedCriteria(evidence.report, criteria.length);
+  const verdicts = criteria.map((c, i) => {
+    const verdict = judgeCriterion(
       c,
       reportTokens,
       evidence.semantic?.[i],
@@ -3191,8 +3265,19 @@ export function judgeReview(
       evidence.semanticClauses?.[i],
       evidence.reportSubstituteCause,
       floorKeywords,
-    ),
-  );
+    );
+    const refusal = refused[i];
+    if (!refusal || changesetContradictions.length > 0) return verdict;
+    return {
+      ...verdict,
+      met: false,
+      floorMet: false,
+      proof_exec: "refused" as const,
+      proof_skip: undefined,
+      reason: `worker refused criterion (${refusal.reasonClass}): ${refusal.detail}`,
+      refusal,
+    };
+  });
   const testTheater = detectTestTheater(evidence.diff);
 
   // W1-T58 (Standing rule 15 — RATIFIES P3): see {@link ReviewVerdict.criteriaTampered}'s doc. `!planOnly` is the
@@ -3203,9 +3288,6 @@ export function judgeReview(
   // (ii): a detector comparing the BODY's claims against the diff must REFUSE on a substitute rather than judge one
   // (#2395). W1-T1264: one call produces both the contradictions and the recognition count, withheld together —
   // `undefined`, never `0`/`false` — so "not computed" is never confused with "found nothing".
-  const changesetRecognition = evidence.reportIsSubstitute ? undefined : recognizeChangesetClaims(evidence.report, diffFiles);
-  const changesetContradictions = changesetRecognition?.contradictions ?? [];
-  const changesetStaleCountClaims = changesetRecognition?.staleCountClaims ?? [];
 
   // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s doc. Reuses the SAME `diffFiles`
   // every other structural check above already computed — no new diff walk.

@@ -433,6 +433,13 @@ export function outputContractLines(taskId: string): string[] {
     "  diff satisfies it and NAME the test or grep that proves it. remudero-review executes each",
     "  proof and, when a proof is not executable, judges your body against that proof's own text —",
     "  a body that does not engage each proof is scored UNMET even when the work is correct.",
+    "- If you cannot honestly satisfy a criterion, use a structured refusal instead of claiming it:",
+    "  add a `REFUSED:` block to your REPORT, one line per criterion, formatted as",
+    "  `REFUSED: <criterion-number> <reason-class>: <sentence>`. Reason class must be one of",
+    "  `premise-rotted`, `outside-declared-files`, `needs-operator-input`,",
+    "  `proof-unexecutable-at-head`, or `contradicts-another-criterion`. A refusal is honest input",
+    "  to the judge, not a pass; a fabricated pass or a body claim contradicted by the diff still",
+    "  fails as dishonesty.",
     ...bodyVsDiffContractLines(),
     // W1-T2760: THE PRODUCER THE CITATION MINER WAS MISSING. `mineGitLogCitations` (retro.ts)
     // scans commit history for `learnings#<id>` and finds effectively none, because no prompt

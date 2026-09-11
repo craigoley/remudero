@@ -981,6 +981,7 @@ import {
   reviewLedgerLegibilityFields,
   reviewLedgerReasons,
   resolvePlanCriteriaAtHead,
+  REFUSAL_REASON_CLASSES,
   type PlanCriteriaAtHeadDivergence,
   parseWhitelistedProof,
   resolveNameFilteredCandidates,
@@ -993,6 +994,7 @@ import {
   type AutomergeHold,
   type CappedOverride,
   type CriterionVerdict,
+  type RefusalReasonClass,
   type ReviewVerdict,
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
@@ -5112,6 +5114,9 @@ async function runReview(args: {
   // KEYWORD one (not_executable), and an environment hiccup (exec_error) is never
   // silently indistinguishable from either.
   const proofExec = verdict.criteria.map((c) => c.proof_exec);
+  const unmetProofExec = visibleUnmet.map((c) => c.proof_exec);
+  const refusalReasonClasses = visibleUnmet.map((c) => c.refusal?.reasonClass ?? null);
+  const refusalDetails = visibleUnmet.map((c) => c.refusal?.detail ?? null);
   // The gate TEACHES: the FULL list of unmet criteria goes to the ledger (and the
   // PR comment below) — the status description names only the first (length-capped).
   log("review.posted", {
@@ -5132,6 +5137,11 @@ async function runReview(args: {
     reviewer_outcome: outcome,
     // W1-T65/P15: per-criterion proof_exec, index-aligned to verdict.criteria.
     proof_exec: proofExec,
+    // W1-T3078: unlike proof_exec above, these arrays align to unmet_criteria/reasons, so sweep can
+    // reconstruct a refused criterion without treating the all-criteria proof_exec index as comparable.
+    unmet_proof_exec: unmetProofExec,
+    refusal_reason_classes: refusalReasonClasses,
+    refusal_details: refusalDetails,
     // W1-T72 (W1-T65 follow-up): LOUD legibility — true when execution fell
     // back to the keyword floor on EVERY criterion while at least one proof
     // was WRITTEN to be runnable (house dialect). NO blocking-behavior change:
@@ -27807,22 +27817,68 @@ function resolveOpenPrTaskId(pr: RawOpenPr, ledger: Array<Record<string, unknown
  * re-derives the authoritative verdict when it runs. Proof text is unavailable
  * from the ledger, so it degrades to "" (the fix prompt leans on claim + reason).
  */
+const REVIEW_PROOF_EXEC_OUTCOMES = new Set<CriterionVerdict["proof_exec"]>([
+  "executed_pass",
+  "executed_fail",
+  "refused",
+  "not_executable",
+  "exec_error",
+  "executed_stale",
+  "base_unreadable",
+  "not_yet_built",
+  "stale_self_path",
+]);
+
+function reviewProofExecOutcome(value: unknown): CriterionVerdict["proof_exec"] | undefined {
+  return typeof value === "string" && REVIEW_PROOF_EXEC_OUTCOMES.has(value as CriterionVerdict["proof_exec"])
+    ? (value as CriterionVerdict["proof_exec"])
+    : undefined;
+}
+
+function refusalReasonClassFromLedger(value: unknown): RefusalReasonClass | undefined {
+  return typeof value === "string" && (REFUSAL_REASON_CLASSES as readonly string[]).includes(value)
+    ? (value as RefusalReasonClass)
+    : undefined;
+}
+
 function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string): CriterionVerdict[] {
   let claims: string[] = [];
   let reasons: string[] = [];
+  let proofExec: CriterionVerdict["proof_exec"][] = [];
+  let refusalClasses: unknown[] = [];
+  let refusalDetails: unknown[] = [];
   for (const line of lines) {
     if (line.step !== "review.posted" || line.task_id !== taskId) continue;
-    if (line.state === "success") { claims = []; reasons = []; continue; }
+    if (line.state === "success") {
+      claims = [];
+      reasons = [];
+      proofExec = [];
+      refusalClasses = [];
+      refusalDetails = [];
+      continue;
+    }
     if (Array.isArray(line.unmet_criteria)) claims = line.unmet_criteria.map(String);
     if (Array.isArray(line.reasons)) reasons = line.reasons.map(String);
+    proofExec = Array.isArray(line.unmet_proof_exec)
+      ? line.unmet_proof_exec.map(reviewProofExecOutcome).map((outcome) => outcome ?? "not_executable")
+      : [];
+    refusalClasses = Array.isArray(line.refusal_reason_classes) ? line.refusal_reason_classes : [];
+    refusalDetails = Array.isArray(line.refusal_details) ? line.refusal_details : [];
   }
-  return claims.map((claim, i) => ({
-    claim,
-    proof: "",
-    met: false,
-    reason: reasons[i] ?? "",
-    proof_exec: "not_executable" as const,
-  }));
+  return claims.map((claim, i) => {
+    const outcome = proofExec[i] ?? "not_executable";
+    const reasonClass = outcome === "refused" ? refusalReasonClassFromLedger(refusalClasses[i]) : undefined;
+    const detail = typeof refusalDetails[i] === "string" ? refusalDetails[i] : undefined;
+    const refusal = reasonClass && detail ? { reasonClass, detail } : undefined;
+    return {
+      claim,
+      proof: "",
+      met: false,
+      reason: reasons[i] ?? "",
+      proof_exec: outcome,
+      ...(refusal ? { refusal } : {}),
+    };
+  });
 }
 
 /**
