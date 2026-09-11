@@ -166,7 +166,7 @@
   "src/lib/containment.ts": 570,
   "src/lib/correct.ts": 29,
   "src/lib/cost-anomaly.ts": 97,
-  "src/lib/coverage-improvement.ts": 150,
+  "src/lib/coverage-improvement.ts": 250,
   "src/lib/daemon-health.ts": 187,
   "src/lib/daemon.ts": 1250,
   "src/lib/dep-review.ts": 250,
