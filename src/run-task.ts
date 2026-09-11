@@ -12270,6 +12270,32 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // deferred) — both layers are non-fatal absences, so this is a pure
     // superset of the project-only injection that shipped before.
     const learningsDir = projectLearningsHome(repoDir); // W1-T2506: follows the TARGET repo, not the plan's checkout
+    // `recordPath` is REUSED, not re-resolved: it was hoisted above the recon spawn (W1-T2632)
+    // so the SAME lookup now feeds both the recon prompt's pointer line and this CONTEXT block —
+    // one `taskRecordPath`/`workerVisibleRecordPath` computation, three consumers, never a second
+    // anchoring rule. It used to be resolved only here, on the degraded arm, "since recon already
+    // relayed all of this" — but recon was never told WHICH TASK it was reconning, only its
+    // `OBSERVED:` section survives `reconObservedToContext`, and that section can be empty. See
+    // that function's doc.
+    // W1-T2241/W1-T2512: exactly one of these four is ever set, mutually exclusive (see the
+    // recon dispatch above) — `reconMasked` short-circuits the WHOLE branch that could set
+    // `reusedReconArtifact`/`reconDegradedSubtype`/`recon`, so it is checked first even though
+    // it was introduced last.
+    const reconContext = reconMasked
+      ? reconMaskedContextNote(taskId, recordPath, task.acceptance ?? [])
+      : reusedReconArtifact
+        ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath)
+        : reconDegradedSubtype
+          ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
+          : reconObservedToContext(recon!, taskId, recordPath);
+    const learningsSelectionText = [
+      task.title,
+      task.rationale ?? "",
+      task.prompt ?? "",
+      ...(task.context ?? []).map((claim) => claim.claim),
+      ...(task.acceptance ?? []).flatMap((criterion) => [criterion.claim, criterion.proof]),
+      reconContext,
+    ];
     // W1-T86 (P12 wipe-test harness): arm B of a wipe-test pair MASKS injection —
     // computeMatchedLearningsForArm("B", ...) returns "" WITHOUT calling any of the
     // load/select/render chain below, so the store is never touched, only the
@@ -12283,6 +12309,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         globalArtifactPath: globalArtifactPath(config),
       },
       taskFiles: task.files,
+      selectionContext: { text: learningsSelectionText },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     });
     // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
@@ -12302,29 +12329,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       matched_ids: learningsResult.selectedIds,
       dropped: learningsResult.droppedIds,
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+      matched_by: learningsResult.matchedBy,
       global_refused_reason: learningsResult.globalRefusedReason,
       masked: !!opts.maskLearnings,
     });
 
     // ── Render + provenance-lint the prompt.
-    // `recordPath` is REUSED, not re-resolved: it was hoisted above the recon spawn (W1-T2632)
-    // so the SAME lookup now feeds both the recon prompt's pointer line and this CONTEXT block —
-    // one `taskRecordPath`/`workerVisibleRecordPath` computation, three consumers, never a second
-    // anchoring rule. It used to be resolved only here, on the degraded arm, "since recon already
-    // relayed all of this" — but recon was never told WHICH TASK it was reconning, only its
-    // `OBSERVED:` section survives `reconObservedToContext`, and that section can be empty. See
-    // that function's doc.
-    // W1-T2241/W1-T2512: exactly one of these four is ever set, mutually exclusive (see the
-    // recon dispatch above) — `reconMasked` short-circuits the WHOLE branch that could set
-    // `reusedReconArtifact`/`reconDegradedSubtype`/`recon`, so it is checked first even though
-    // it was introduced last.
-    const reconContext = reconMasked
-      ? reconMaskedContextNote(taskId, recordPath, task.acceptance ?? [])
-      : reusedReconArtifact
-        ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath)
-        : reconDegradedSubtype
-          ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
-          : reconObservedToContext(recon!, taskId, recordPath);
     // W1-T2761: the `rule_headlines` part — "" (identical to every render before this task)
     // unless `workerRuleHeadlines.enabled` is on AND this isn't a RULES-factor wipe-test arm B.
     // Read from THIS dispatch's own worktree (W1-T501's "the worker's own tree, never the

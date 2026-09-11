@@ -67,6 +67,23 @@ test("generate-learnings-index: a duplicate id ACROSS two shard files fails loud
   assert.match(output, /duplicate learnings id 'dup-fixture'/);
 });
 
+test("generate-learnings-index: a shard whose 'symbols' is not a list fails loud rather than indexing it", () => {
+  // The generator validates the same two selection fields lib/learnings.ts does, in its own
+  // process — so its refusal arms need their own reach. A malformed shard that indexed silently
+  // would hand selection a corpus it could never match against.
+  const result = runGenerate(join(FIXTURES, "bad-symbols"), join(tmpdir(), "should-not-be-written.json"));
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /'symbols' must be a list of strings/);
+});
+
+test("generate-learnings-index: a shard whose 'error_signatures' carries a non-string fails loud", () => {
+  const result = runGenerate(join(FIXTURES, "bad-error-signatures"), join(tmpdir(), "should-not-be-written.json"));
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /'error_signatures' must be a list of strings/);
+});
+
 test("generate-learnings-index (no --check) writes an index that a subsequent --check accepts", () => {
   const tmp = mkdtempSync(join(tmpdir(), "learnings-index-roundtrip-"));
   try {

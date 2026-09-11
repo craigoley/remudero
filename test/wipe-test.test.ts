@@ -49,7 +49,7 @@ test("computeMatchedLearningsForArm: arm B NEVER calls the load/select/render ch
     },
     selectLearnings: (...args) => {
       selectCalls++;
-      return { selected: [], dropped: [] };
+      return { selected: [], dropped: [], matchedBy: { file: 0, symbol: 0, error: 0 } };
     },
     renderMatchedLearnings: (...args) => {
       renderCalls++;
@@ -79,7 +79,7 @@ test("computeMatchedLearningsForArm: arm A carries the matched learnings via the
       loadCalls++;
       return { entries: facts };
     },
-    selectLearnings: (entries) => ({ selected: entries, dropped: [] }),
+    selectLearnings: (entries) => ({ selected: entries, dropped: [], matchedBy: { file: entries.length, symbol: 0, error: 0 } }),
     renderMatchedLearnings: (selected) => selected.map((e) => `- ${e.fact}`).join("\n"),
   };
 

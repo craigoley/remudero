@@ -1,0 +1,5 @@
+- id: bad-symbols-fixture
+  files: [src/a.ts]
+  symbols: not-a-list
+  fact: fixture fact.
+  src: PR#1
