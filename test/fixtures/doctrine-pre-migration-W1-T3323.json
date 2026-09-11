@@ -10,82 +10,84 @@
       "bodySha256": "af199dceedf71a621fdaa18299bee727eac289769684c03ca9e936f504fc39eb"
     },
     {
-      "headline": "A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST\n  is not one either — `node --test` given a ghost path returns a green count, silently. `ls` first.",
+      "headline": "A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST\n  is not one either \u2014 `node --test` given a ghost path returns a green count, silently. `ls` first.",
       "bodyBytes": 856,
       "bodySha256": "d0a8e10c3d78e54cf16b2dafef55b356d4aef5c6079cb12f5941b11df106c572"
     },
     {
-      "headline": "THE BLOCK MUST PARSE BEFORE ANY PROOF IN IT CAN RUN — check GITHUB'S STORED BODY with\n  `rmd check-acceptance`, never your local file.",
+      "headline": "THE BLOCK MUST PARSE BEFORE ANY PROOF IN IT CAN RUN \u2014 check GITHUB'S STORED BODY with\n  `rmd check-acceptance`, never your local file.",
       "bodyBytes": 2733,
       "bodySha256": "837d429fa20235653eca95949bc93584333ad8c70806e7f286eca7e6948feae7"
     },
     {
-      "headline": "EVERY proof needs a dialect prefix — `unit test:` or `grep:`. A bare title is PROSE and never\n  executes.",
+      "headline": "EVERY proof needs a dialect prefix \u2014 `unit test:` or `grep:`. A bare title is PROSE and never\n  executes.",
       "bodyBytes": 1513,
       "bodySha256": "ed1189140a83c60481315cc09ae268ce06e9beb10a79fcf2a2e68d4e7dbe22f6"
     },
     {
-      "headline": "A `unit test:` title is matched as a LITERAL substring after escaping — the OPPOSITE of a\n  `grep:` pattern, which is a BASIC REGEX.",
+      "headline": "A `unit test:` title is matched as a LITERAL substring after escaping \u2014 the OPPOSITE of a\n  `grep:` pattern, which is a BASIC REGEX.",
       "bodyBytes": 740,
       "bodySha256": "662fdb5bc23489ba6620a0bfa5b7db08caeebc002ce1888915b361b6903c7600"
     },
     {
-      "headline": "Require a verbatim `grep -rlF -- '<substring>' test/` hit — a passing scoped test run is NOT\n  evidence the proof resolves.",
+      "headline": "Require a verbatim `grep -rlF -- '<substring>' test/` hit \u2014 a passing scoped test run is NOT\n  evidence the proof resolves.",
       "bodyBytes": 321,
       "bodySha256": "884e67e5fa2b85ea83e8effcd508ba167d940d20fb21a600d4826767da2d76fc"
     },
     {
-      "headline": "Verify a `grep:` proof with the executor's REAL invocation — `grep -arn -- '<pattern>' <path>` —\n  never with `grep -F`.",
+      "headline": "Verify a `grep:` proof with the executor's REAL invocation \u2014 `grep -arn -- '<pattern>' <path>` \u2014\n  never with `grep -F`.",
       "bodyBytes": 1186,
       "bodySha256": "d36317e19037eed881a796ffaf8d69b35a0868711d8248748c7e0eb92ce06144"
     },
     {
-      "headline": "A `grep:` proof must match text on ONE PHYSICAL LINE — a YAML block scalar wraps, and the\n  pattern then reads 0 at head with no error.",
+      "headline": "A `grep:` proof must match text on ONE PHYSICAL LINE \u2014 a YAML block scalar wraps, and the\n  pattern then reads 0 at head with no error.",
       "bodyBytes": 388,
       "bodySha256": "4ef0b4bee9cac4a93fef6548870e7129ba04b60273f2dd5620612723cae1f580"
     },
     {
-      "headline": "In a NEW `.ts` file, sandwich type-only `interface`/`type` declarations BETWEEN covered\n  functions — never at the file's head or tail.",
-      "bodyBytes": 351,
-      "bodySha256": "114918b13163fc1b373521f2ce6ef5d024ee55b4a11a55f16b4eb0504d19cda0"
+      "headline": "A new `.ts` file's `DA:<line>,0` on a doc comment or `interface` body is EXEMPT \u2014 never reorder\n  a file to dodge it.",
+      "bodyBytes": 1618,
+      "bodySha256": "fb67c32205c11aedb147603065f28f60615ccc65b2f3e75efa4f44ec5efacbb7",
+      "refrozenAt": "2026-09-11",
+      "refrozenReason": "RENAMED AND REWRITTEN because the gate it described stopped behaving that way. The old form told authors to sandwich type-only declarations between covered functions, citing #777. W1-T171 later added computeTypeOnlyRanges to diff-coverage, which exempts every interface member line by brace context, and isNonExecutableLine already exempted leading doc comments. MEASURED 2026-09-11 on src/lib/ledger-compaction-rung.ts: all five head-placed interface member lines read DA:...,0 in the lcov AND return typeOnly=true from the live function. Obeying the stale form cost a reordering that was reverted in the same branch. This is the one legitimate reason to touch a frozen row: the rule changed, not the migration."
     },
     {
-      "headline": "When every test injects a fake, the seam's DEFAULT implementation and each `catch` arm are\n  unreachable — write one test that really shells out, and one per catch arm.",
+      "headline": "When every test injects a fake, the seam's DEFAULT implementation and each `catch` arm are\n  unreachable \u2014 write one test that really shells out, and one per catch arm.",
       "bodyBytes": 516,
       "bodySha256": "477c44d8ecee72d2952f5a5534894cb17d2012d2f881f7c431450067c898fc79"
     },
     {
-      "headline": "Before trusting `diff-coverage: OK`, prove the lcov INSTRUMENTS the changed files —\n  `grep -c '^SF:<path>$' <lcov>` must be non-zero for every source file in the diff.",
+      "headline": "Before trusting `diff-coverage: OK`, prove the lcov INSTRUMENTS the changed files \u2014\n  `grep -c '^SF:<path>$' <lcov>` must be non-zero for every source file in the diff.",
       "bodyBytes": 364,
       "bodySha256": "dfcb4ad717a047952861df099301e342256e6b068e274aa8f7d07637086e7131"
     },
     {
-      "headline": "Build the lcov and the diff from the SAME tree — commit before measuring — AND NAME THE SHA in\n  what you report.",
+      "headline": "Build the lcov and the diff from the SAME tree \u2014 commit before measuring \u2014 AND NAME THE SHA in\n  what you report.",
       "bodyBytes": 618,
       "bodySha256": "b8310774c40e4c0d6f1f3db0705d4253379e731e29d8080a90a14c2c1b71688c"
     },
     {
-      "headline": "`diff-coverage` flags ADDED lines, so restructuring an untested region inherits its debt at the\n  gate — measure MAIN's coverage of that region before assuming the PR caused it.",
+      "headline": "`diff-coverage` flags ADDED lines, so restructuring an untested region inherits its debt at the\n  gate \u2014 measure MAIN's coverage of that region before assuming the PR caused it.",
       "bodyBytes": 188,
       "bodySha256": "627bbc5ba2ec68c2b37c827bd5fcac050cec8769afa2a87259d0ad3f21aa7054"
     },
     {
-      "headline": "A deps object supplying SOME fakes leaves every other seam on its REAL default — so relaxing a\n  guard can make a previously-dead default FIRE, in a file the diff never touched.",
+      "headline": "A deps object supplying SOME fakes leaves every other seam on its REAL default \u2014 so relaxing a\n  guard can make a previously-dead default FIRE, in a file the diff never touched.",
       "bodyBytes": 428,
       "bodySha256": "94d75005b76f2d3ad6a90eafc36d81cc0c5d77b4e6f18b67f5268e2e8610d417"
     },
     {
-      "headline": "Verify a new falsifier by DELETING the fix and re-running — `# fail N` removed vs `# fail 0`\n  restored is the evidence it is load-bearing.",
+      "headline": "Verify a new falsifier by DELETING the fix and re-running \u2014 `# fail N` removed vs `# fail 0`\n  restored is the evidence it is load-bearing.",
       "bodyBytes": 94,
       "bodySha256": "605246ea8936795197c2b2f90ac72f63505e7b35534046a2dad693c2b56ce654"
     },
     {
-      "headline": "ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another\n  file's identical line number and returns a FALSE `OK`.",
+      "headline": "ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK \u2014 a whole-file replace hits another\n  file's identical line number and returns a FALSE `OK`.",
       "bodyBytes": 395,
       "bodySha256": "4f5c7bcc8722a527ab0e5d4b199b3ce98ede6fa257072d46e0a070fa7503cbaf"
     },
     {
-      "headline": "Derive \"which tasks are merged\" from the `Remudero-Task:` trailer on merged PRs — never from\n  ledger verdict lines.",
+      "headline": "Derive \"which tasks are merged\" from the `Remudero-Task:` trailer on merged PRs \u2014 never from\n  ledger verdict lines.",
       "bodyBytes": 411,
       "bodySha256": "29936114be119f18071d86e851f20111c9a66e9ed4aa28cefc40d188fcbc5739"
     },
@@ -95,12 +97,12 @@
       "bodySha256": "526d706dee10b0d3bba352512339c3b31583e0d4fbf9846aae463c140e264b06"
     },
     {
-      "headline": "THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.",
+      "headline": "THE TWO SCOPE-TIME CHECKS, AS COMMANDS \u2014 RUN BOTH BEFORE BUILDING A FILED TASK.",
       "bodyBytes": 905,
       "bodySha256": "8ca6341f882d10b9717f9e29d135d2f4151b5398b03b23ebdb2e0e33315581bb"
     },
     {
-      "headline": "Sweep the SUBJECT over open PR heads, not only `origin/main` — the id half already does.",
+      "headline": "Sweep the SUBJECT over open PR heads, not only `origin/main` \u2014 the id half already does.",
       "bodyBytes": 551,
       "bodySha256": "17891498af898b8761ce42cff9e8114bbbcf9f39a8eec92bbe64dcf2e6b859ef"
     },
@@ -110,37 +112,37 @@
       "bodySha256": "592eb4bdc20091163ddaa47ccd3c043c316da099941c09827986f927cf39293e"
     },
     {
-      "headline": "Before believing \"task X is next\", confirm the frontier with the repo's own selector —\n  `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names",
+      "headline": "Before believing \"task X is next\", confirm the frontier with the repo's own selector \u2014\n  `runnableCandidates(plan, isMerged, n)` \u2014 not the task a brief or retro names",
       "bodyBytes": 1120,
       "bodySha256": "5d0c32bc4c98b7679b89b87e5716dd629fdab3602ecbe01bffcd0b066c17d28a"
     },
     {
-      "headline": "A contested reservation is never deleted and an unfiled one is never free — the\n  LOSER of a race renumbers.",
+      "headline": "A contested reservation is never deleted and an unfiled one is never free \u2014 the\n  LOSER of a race renumbers.",
       "bodyBytes": 417,
       "bodySha256": "9721b49ce3b56af987ea3db77f452aee691da157da0237177462a7c7161803e5"
     },
     {
-      "headline": "`rule15-filing` refuses a plan record in `files:` only when an OUT-OF-PLAN path rides along —\n  the record ALONE passes at `verify: auto`.",
+      "headline": "`rule15-filing` refuses a plan record in `files:` only when an OUT-OF-PLAN path rides along \u2014\n  the record ALONE passes at `verify: auto`.",
       "bodyBytes": 579,
       "bodySha256": "4e20520cf5aa8131f3b4d0a5783a17476c35ec935dd536a774cf298163a0ab5f"
     },
     {
-      "headline": "A shard's `status:` field is not a completion signal — it stays `queued` on tasks that\n  shipped.",
+      "headline": "A shard's `status:` field is not a completion signal \u2014 it stays `queued` on tasks that\n  shipped.",
       "bodyBytes": 688,
       "bodySha256": "46d1a61c888ea9250ee55b45c631305b88d9bf06e722b440ed5999ce1bfaa22a"
     },
     {
-      "headline": "Decoding rule citations — where each family canonically lives.",
+      "headline": "Decoding rule citations \u2014 where each family canonically lives.",
       "bodyBytes": 997,
       "bodySha256": "45a0794595470c81a900f675f8f96d66bc797c10f285bd6175781b00398ad375"
     },
     {
-      "headline": "Do NOT push a fresh sha to clear a stale-red `ci-gate` — it self-clears.",
+      "headline": "Do NOT push a fresh sha to clear a stale-red `ci-gate` \u2014 it self-clears.",
       "bodyBytes": 494,
       "bodySha256": "ee54bd9504ebfef4e93ee756f7a46465683623e0fb714b3fde3f8cf29280244f"
     },
     {
-      "headline": "CADENCE IS THE BUDGET, NOT INTENT — a sparse check-in is fine, a poll is not. NOW ENFORCED:",
+      "headline": "CADENCE IS THE BUDGET, NOT INTENT \u2014 a sparse check-in is fine, a poll is not. NOW ENFORCED:",
       "bodyBytes": 556,
       "bodySha256": "7fb7163639f5dca7abbc31f60bc4ee1db464af9d6482d7e60b69257d1cc382ba"
     },
@@ -150,7 +152,7 @@
       "bodySha256": "e3fc96ded6b4c077e135538d9041d3ff2c4153d8a508f730299021b8326bf001"
     },
     {
-      "headline": "A CONFLICTING PR registers ZERO check runs. `total: 0` reads as \"still queued\" but means\n  `mergeable_state: dirty` — check mergeability before waiting on CI.",
+      "headline": "A CONFLICTING PR registers ZERO check runs. `total: 0` reads as \"still queued\" but means\n  `mergeable_state: dirty` \u2014 check mergeability before waiting on CI.",
       "bodyBytes": 87,
       "bodySha256": "c5aea1bc9e8ea27a669756840edf1aaae31f973a3a285ff6c6d41af706efd6ac"
     },
@@ -160,12 +162,12 @@
       "bodySha256": "bb1052bebeca943cbd46523b6649e22dc7d57c2fc8eacc6608b81ed836b31fc4"
     },
     {
-      "headline": "A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires\n  nothing.",
+      "headline": "A corrected PR title is observed by a RE-RUN, not only by a new sha \u2014 but `edited` still fires\n  nothing.",
       "bodyBytes": 464,
       "bodySha256": "3080a61b44c941060c3e88ab82bf7f49eaf12c38968adc2a2b76035a4ab5609c"
     },
     {
-      "headline": "A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which\n  half of your diff you are in before you call a merge \"shipped.\"",
+      "headline": "A merge to a BAKED path ships nothing until an operator triggers an image rebuild \u2014 know which\n  half of your diff you are in before you call a merge \"shipped.\"",
       "bodyBytes": 1995,
       "bodySha256": "e32d3c6cbfa326d522903c92a74ef6b026247f7380e4864544d37e5c8f6f72aa"
     },
@@ -190,7 +192,7 @@
       "bodySha256": "669c77f5193631d030c5316e0dbd3ef3b41932593c18f24b715403d5c3ce5f06"
     },
     {
-      "headline": "On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —\n  exclude the wrapper by the RELATIVE path, never the absolute one.",
+      "headline": "On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` \u2014\n  exclude the wrapper by the RELATIVE path, never the absolute one.",
       "bodyBytes": 382,
       "bodySha256": "c2b2305ed0fd093932fbf58cd3100261b55fb42d370a02d11a18d9f989fb882a"
     },
@@ -210,7 +212,7 @@
       "bodySha256": "f66cd038b565e1b70e15363531109cbd5b200c83bbf47ac68ef84c44009dbd05"
     },
     {
-      "headline": "A bound that fires on a HEALTHY condition is this repo's recurring defect — before tuning the\n  number, check the population it is meant to separate has ever been observed.",
+      "headline": "A bound that fires on a HEALTHY condition is this repo's recurring defect \u2014 before tuning the\n  number, check the population it is meant to separate has ever been observed.",
       "bodyBytes": 249,
       "bodySha256": "ac16b8a6e9bb8af9156d8953ec4af0e62b06fd5321e2a6c5ad64cf9f6ef38ba6"
     },
@@ -225,7 +227,7 @@
       "bodySha256": "77ffc083593054192484b201edc45e8b7c803b2d58352b4b3b511009eb4d0a88"
     },
     {
-      "headline": "(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file\n  holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real\n  absence.",
+      "headline": "(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file\n  holding ONE NUL byte is skipped entirely \u2014 no output, exit 1, indistinguishable from real\n  absence.",
       "bodyBytes": 580,
       "bodySha256": "3f12f299af3eed9f85b3e44fa566785e7448b3baa85eab0e1840b08bb597e199"
     },
@@ -240,22 +242,22 @@
       "bodySha256": "ff148ce0b25727b8060dd1ff7ffa164eeb46bee3e811e8b17c1d75249af71d9f"
     },
     {
-      "headline": "(e) A CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS IS THE RIGHT ONE\n  — AND RE-RUNNING THE SAME WAY IS NOT A SECOND OPINION.",
+      "headline": "(e) A CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS IS THE RIGHT ONE\n  \u2014 AND RE-RUNNING THE SAME WAY IS NOT A SECOND OPINION.",
       "bodyBytes": 1000,
       "bodySha256": "62da56fa13e0e76e886babf0458c401b421c666a6be4227a91180bc51b336096"
     },
     {
-      "headline": "(f) THE TWO SIDES OF A COMPARISON MUST COUNT THE SAME UNITS — `ls` COUNTS A DIRECTORY AS ONE\n  ENTRY.",
+      "headline": "(f) THE TWO SIDES OF A COMPARISON MUST COUNT THE SAME UNITS \u2014 `ls` COUNTS A DIRECTORY AS ONE\n  ENTRY.",
       "bodyBytes": 999,
       "bodySha256": "2b1c91bc999595388e1f5fa950c6628ad98004a904f892cc29719c77d101e6ec"
     },
     {
-      "headline": "(g) A CHANGE THAT REMOVES AN ACCESS PATH MUST PROVE THE REPLACEMENT FIRST, FROM A NEW SESSION\n  — AN EXISTING CONNECTION IS NOT EVIDENCE.",
+      "headline": "(g) A CHANGE THAT REMOVES AN ACCESS PATH MUST PROVE THE REPLACEMENT FIRST, FROM A NEW SESSION\n  \u2014 AN EXISTING CONNECTION IS NOT EVIDENCE.",
       "bodyBytes": 425,
       "bodySha256": "85dd9534ee42fb19757af4c047835946e644a96fa179d706cf14dac867a226f5"
     },
     {
-      "headline": "(h) A GATE RUN FROM A CHECKOUT that is BEHIND answers about a file and a threshold that both\n  moved — run it against `origin/main`'s blobs and report the behind-count.",
+      "headline": "(h) A GATE RUN FROM A CHECKOUT that is BEHIND answers about a file and a threshold that both\n  moved \u2014 run it against `origin/main`'s blobs and report the behind-count.",
       "bodyBytes": 574,
       "bodySha256": "ef8440dfb8b9f817323d36844b766f72ba354fcbbdaf438b6766356c09be3af5"
     },
@@ -275,7 +277,7 @@
       "bodySha256": "c54408b28b8e0607828b0107a08157cbd4b2c374951e8773fdd5825cb87b1195"
     },
     {
-      "headline": "Read re-entrancy from `process.env`, not an injected `env` argument — a spawn writes a child's\n  environment and cannot reach a parameter.",
+      "headline": "Read re-entrancy from `process.env`, not an injected `env` argument \u2014 a spawn writes a child's\n  environment and cannot reach a parameter.",
       "bodyBytes": 97,
       "bodySha256": "613ff22dcfeba9c77ea2c90c546b5ca658ccdc40ab324787d5b3aa62d99aeb23"
     },

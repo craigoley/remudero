@@ -57,8 +57,8 @@ carried had gone stale. Each rule cites the PR that earned it.
 
 ## Coverage traps
 
-- **In a NEW `.ts` file, sandwich type-only `interface`/`type` declarations BETWEEN covered
-  functions — never at the file's head or tail.** → doctrine/coverage-traps/in-a-new-file-sandwich-type-only-declarations-between.md
+- **A new `.ts` file's `DA:<line>,0` on a doc comment or `interface` body is EXEMPT — never reorder
+  a file to dodge it.** → doctrine/coverage-traps/in-a-new-file-sandwich-type-only-declarations-between.md
 - **When every test injects a fake, the seam's DEFAULT implementation and each `catch` arm are
   unreachable — write one test that really shells out, and one per catch arm.** → doctrine/coverage-traps/when-every-test-injects-a-fake-the-seam-s-default.md
 - **Before trusting `diff-coverage: OK`, prove the lcov INSTRUMENTS the changed files —
