@@ -77,6 +77,24 @@ const MANY_CALLERS_DIFF = [
   " }",
 ].join("\n");
 
+const SAME_CONTAINER_CALLERS_DIFF = [
+  "diff --git a/src/lib/ledger.ts b/src/lib/ledger.ts",
+  "+++ b/src/lib/ledger.ts",
+  "@@",
+  " function changedReader(paths) {",
+  "-  return openLedgerUnion(paths);",
+  "+  return openLedgerUnion(paths, { days: 30 });",
+  " }",
+  "@@",
+  " function repeatedReader(paths, otherPaths) {",
+  "   return openLedgerUnion(otherPaths) ?? openLedgerUnion(paths);",
+  " }",
+  "@@",
+  " function repeatedReader(paths, otherPaths) {",
+  "   return openLedgerUnion(paths) ?? openLedgerUnion(otherPaths);",
+  " }",
+].join("\n");
+
 test("W1-T3239: an untouched sibling call site is named", () => {
   const verdict = checkCallersAudited(PARTIAL_SHARED_READER_DIFF);
 
@@ -105,4 +123,14 @@ test("W1-T3239: a symbol with many callers prints a bounded list and names the r
   assert.match(verdict.reason, /sameDirThree/);
   assert.doesNotMatch(verdict.reason, /farAway/);
   assert.match(verdict.reason, /1 more not shown/);
+});
+
+test("W1-T3239: sibling callers in the same container sort by call text", () => {
+  const verdict = checkCallersAudited(SAME_CONTAINER_CALLERS_DIFF);
+
+  assert.equal(verdict.pass, false);
+  assert.match(
+    verdict.reason,
+    /openLedgerUnion\(otherPaths\).*openLedgerUnion\(paths\)/,
+  );
 });
