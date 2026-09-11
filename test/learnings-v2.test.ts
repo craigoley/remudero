@@ -22,9 +22,10 @@ import {
   type V1BundleLearningEntry,
 } from "../src/lib/learnings.js";
 import { buildBundle, type BundleProvenance } from "../src/lib/bundle.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 function tmpPath(name: string): string {
-  return join(mkdtempSync(join(tmpdir(), "learnings-v2-")), name);
+  return join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}learnings-v2-`)), name);
 }
 
 function entry(over: Partial<LocalLearningEntry> = {}): LocalLearningEntry {
