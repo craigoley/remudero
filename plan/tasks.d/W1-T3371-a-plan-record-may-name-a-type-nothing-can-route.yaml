@@ -10,7 +10,36 @@
     - src/lib/plan.ts
     - test/a-plan-record-may-name-a-type-nothing-can-route.test.ts
   origin: "operator-session#fleet-down-on-unroutable-task-type-2026-09-11"
-  status: queued
+  status: merged
+  note: |
+
+    RETIRED 2026-09-11 — ALREADY BUILT, BY ANOTHER PR, TWENTY MINUTES AFTER THIS WAS FILED.
+    #5089 shipped the validator this shard specifies while #5095 was still in review. MEASURED at
+    origin/main, by symbol:
+
+      src/lib/plan.ts:102   export const TASK_TYPES = [...] as const   (the single source, design (ii))
+      src/lib/plan.ts        TaskType = (typeof TASK_TYPES)[number]     (the union derived from it)
+      parseTasksFromYaml     throws PlanError naming shard, field and value on a type outside it
+
+    That is acceptance criteria 1 and 2 delivered. Criterion 3 — the committed plan is itself
+    checked — ships as test/a-plan-record-may-name-a-type-nothing-can-route.test.ts, the file this
+    shard's own files: list names, added by #5099.
+
+    AMENDED 2026-09-11, same day: this note first credited criterion 3 to
+    test/investigate-task-routing.test.ts. #5099 DELETED that file. It was #5089's own test and it
+    had gone false — its live-plan case asserted a positive control (at least one investigate
+    record exists) that #5092 had just made unsatisfiable, and its refusal case string-replaced
+    `type: investigate` in a live shard, which #5092 turned into a silent no-op. #5099 replaced it
+    with built fixtures and a discrimination control. The criterion is still covered; the file
+    naming it is not the same one.
+
+    THIS SHARD WAS NEVER DISPATCHED. It is marked merged rather than blocked because the mechanism
+    IS present, not because it is waiting on anything; leaving it queued would spend a worker
+    rebuilding an existing validator.
+
+    ONE THING THIS SHARD ASKED FOR THAT DID NOT SHIP: nothing yet refuses at the DISPATCH boundary,
+    so a MountsError still escapes the drain loop and takes every lane with it rather than skipping
+    one task. The rationale below names it as separate hardening; it remains unbuilt.
   attempts: 0
   acceptance:
     - claim: "loading a plan record whose type is outside the declared union is REFUSED by the loader, naming the shard id, the field and the value it saw"
