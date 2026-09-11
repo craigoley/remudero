@@ -8,6 +8,7 @@ import {
   scrubEntry,
   selectLearnings,
   type LearningEntry,
+  type V1BundleLearningEntry,
 } from "./learnings.js";
 import { buildPromptManifest, type PromptManifestPart } from "./prompt-manifest.js";
 import { validateWorkerSettings, WorkerSettingsError } from "./settings.js";
@@ -346,8 +347,8 @@ export interface Bundle {
   version: string;
   /** sha256 hex digest of `entries`, per {@link computeArtifactHash} — the SAME pin `verifyBundlePin` (learnings.ts) checks against an operator-supplied `--pin`. NEVER extended to cover `policy_proposals` — see {@link computePolicyProposalsHash}'s doc for why that section has its own pin instead. */
   hash: string;
-  /** The BUDGET-SELECTED corpus ({@link selectLearnings}), every entry's provenance intact — never the full unbounded corpus. */
-  entries: LearningEntry[];
+  /** The BUDGET-SELECTED corpus ({@link selectLearnings}), with `src` lineage but no structured origin under V1. */
+  entries: V1BundleLearningEntry[];
   /** {@link renderDoctrinePreamble}'s two mandatory doctrine lines, verbatim. */
   doctrine: string;
   /** {@link extractAssertedWorkerSettingsValues}'s narrow, validated projection of the worker-settings template. */
@@ -365,6 +366,13 @@ export interface Bundle {
 export type BuildBundleResult =
   | { ok: true; bundle: Bundle; dropped: LearningEntry[] }
   | { ok: false; reason: string; blockedEntryId?: string };
+
+/** A V1 artifact cannot carry a field its hash canon does not bind. Preserve identity when there is no origin. */
+function projectV1BundleEntry(entry: LearningEntry): V1BundleLearningEntry {
+  if (entry.origin === undefined) return entry as V1BundleLearningEntry;
+  const { origin: _origin, ...withoutOrigin } = entry;
+  return withoutOrigin;
+}
 
 /**
  * Build a day-one knowledge bundle from an already-loaded learnings corpus and a parsed
@@ -391,6 +399,7 @@ export function buildBundle(
   provenance: BundleProvenance,
   opts: { budgetChars?: number; version?: string; policyYamlText?: string; ratifiedPolicyPaths?: ReadonlySet<string> } = {},
 ): BuildBundleResult {
+  const version = opts.version ?? provenance.exportedAt;
   const budgetChars = opts.budgetChars ?? DEFAULT_KNOWLEDGE_BUDGET_CHARS;
   // Repo-wide (taskFiles undefined): a fresh deployment needs the WHOLE budgeted corpus, not one
   // task's file-matched slice — the budget still bounds the tax, same as selectLearnings' own
@@ -437,10 +446,11 @@ export function buildBundle(
     { name: "learnings", value: renderMatchedLearnings(selected) },
     { name: "worker-settings", value: JSON.stringify(workerSettings) },
   ]);
+  const bundledEntries = selected.map(projectV1BundleEntry);
   const bundle: Bundle = {
-    version: opts.version ?? provenance.exportedAt,
-    hash: computeArtifactHash(selected),
-    entries: selected,
+    version,
+    hash: computeArtifactHash(bundledEntries),
+    entries: bundledEntries,
     doctrine,
     workerSettings,
     manifest,

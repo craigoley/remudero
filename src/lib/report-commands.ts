@@ -1137,7 +1137,9 @@ export function learningsCommand(rest: string[], opts: LearningsCommandOpts = {}
  * `rmd learnings export <out>` — the SENDING side (§6, W1-T425): collects
  * this checkout's ACTIVE, `share: public` project-layer entries, stamps
  * provenance (this repo, HEAD sha, export date), and writes the hash-pinned
- * bundle {@link buildExportBundle} produces to `<out>`. Refuses (writes
+ * `learnings-v2` bundle {@link buildExportBundle} produces to `<out>`. V2
+ * binds its public provenance projection: author `src` and Git locators never
+ * leave the checkout. Refuses (writes
  * nothing) when zero entries opted in, or when a candidate matches the
  * leak-grep tripwire — either refusal is reported via the SAME
  * {@link buildExportBundle} this command is a thin wrapper over, never
