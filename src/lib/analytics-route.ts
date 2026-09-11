@@ -48,7 +48,6 @@
  */
 
 import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
-import { dirname } from "node:path";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
 import { openLedgerUnion } from "./ledger-union.js";
@@ -79,7 +78,8 @@ export interface WorkerDurationLaneBucket {
 
 /** `GET /v1/analytics`'s body — the four questions, one field group each. */
 export interface AnalyticsSnapshot {
-  asOf: string;
+  /** `null` until this process has completed its first ledger-union refresh. */
+  asOf: string | null;
   /** Carried in the payload so the N=1/no-redaction scope note travels with the data — see this
    *  module's header, design note iv. */
   measures: string;
@@ -111,6 +111,13 @@ export const ANALYTICS_SCOPE_NOTE =
 /** The date W1-T477 landed — the constant the two `*UnmeasuredBefore` fields render, since an
  *  UNMEASURED-BEFORE marker without a date is just a word. */
 export const ANALYTICS_COLLECTION_STARTED_AT = "2026-08-14";
+
+/** Refresh cost posture: a scan reaching the safety ceiling occupies at most 12% of one core
+ * when the next scan is not armed until this delay AFTER settlement. */
+export const ANALYTICS_REFRESH_INTERVAL_MS = 15 * 60_000;
+
+/** BACKSTOP: a reduction may not consume a long-lived serve process beyond this point. */
+export const ANALYTICS_REFRESH_TIMEOUT_MS = 120_000;
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;
@@ -236,9 +243,14 @@ export function deriveAnalyticsSnapshot(
 export async function deriveAnalyticsSnapshotFromStream(
   lines: AsyncIterable<Record<string, unknown>>,
   clock: Clock,
+  signal?: AbortSignal,
 ): Promise<AnalyticsSnapshot> {
   const accumulator = analyticsAccumulator();
-  for await (const line of lines) accumulateAnalyticsLine(accumulator, line);
+  for await (const line of lines) {
+    signal?.throwIfAborted();
+    accumulateAnalyticsLine(accumulator, line);
+  }
+  signal?.throwIfAborted();
   return snapshotFromAccumulator(accumulator, clock.iso());
 }
 
@@ -248,38 +260,214 @@ export async function deriveAnalyticsSnapshotFromStream(
  * million-row corpus itself is never retained. Corrupt files remain best-effort through
  * `openLedgerUnion`, matching the former reader.
  */
-export async function deriveAnalyticsSnapshotFromLedger(stateDir: string, clock: Clock): Promise<AnalyticsSnapshot> {
+export async function deriveAnalyticsSnapshotFromLedger(
+  stateDir: string,
+  clock: Clock,
+  signal?: AbortSignal,
+): Promise<AnalyticsSnapshot> {
   return deriveAnalyticsSnapshotFromStream(
-    openLedgerUnion(stateDir, { dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP }),
+    openLedgerUnion(stateDir, { dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP, signal }),
     clock,
+    signal,
   );
 }
 
-/** {@link buildAnalyticsRoute}'s dependencies — every edge injectable, mirroring
- *  `account-usage.ts`'s `AccountUsageDeps` shape. */
-export interface AnalyticsRouteDeps {
-  /** `<root>/state/ledger.ndjson` — the SAME ledger every other console reader tails; this
-   *  route derives its own state dir from `dirname(ledgerPath)`. */
-  ledgerPath: string;
-  /** Injectable aggregate reader; defaults to the bounded streaming union fold. */
-  readSnapshot?: (stateDir: string, clock: Clock) => AnalyticsSnapshot | Promise<AnalyticsSnapshot>;
+/** One unref'ed timeout owned by the analytics cache. A wrapper rather than Node's concrete
+ * Timeout type keeps the scheduler deterministic in tests and gives cancellation one method. */
+export interface AnalyticsTimer {
+  unref(): void;
+  cancel(): void;
+}
+
+export type AnalyticsSnapshotReader = (
+  stateDir: string,
+  clock: Clock,
+  signal: AbortSignal,
+) => AnalyticsSnapshot | Promise<AnalyticsSnapshot>;
+
+export interface AnalyticsSnapshotCacheDeps {
+  stateDir: string;
+  readSnapshot?: AnalyticsSnapshotReader;
   clock?: Clock;
+  refreshIntervalMs?: number;
+  refreshTimeoutMs?: number;
+  schedule?: (callback: () => void, delayMs: number) => AnalyticsTimer;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+/** One process-owned analytics value and its lifecycle. `refresh` is public for deterministic
+ * tests and diagnostics; HTTP handlers receive only `current`, so a request cannot start or join
+ * work by construction. */
+export interface AnalyticsSnapshotCache {
+  current(): AnalyticsSnapshot;
+  refresh(): Promise<void>;
+  start(): void;
+  stop(): void;
+}
+
+function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
+  Object.freeze(value.invocationsByVerb);
+  for (const bucket of value.workersByLaneModel) Object.freeze(bucket);
+  Object.freeze(value.workersByLaneModel);
+  for (const entry of value.taskDurationsMs) Object.freeze(entry);
+  Object.freeze(value.taskDurationsMs);
+  for (const bucket of value.workerDurationsByLane) Object.freeze(bucket);
+  Object.freeze(value.workerDurationsByLane);
+  return Object.freeze(value) as AnalyticsSnapshot;
+}
+
+/** Complete schema before any evidence has been read. `asOf: null` is the critical distinction:
+ * stamping the clock here would claim the empty collections were observed at process start. */
+export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
+  return freezeAnalyticsSnapshot({
+    asOf: null,
+    measures: ANALYTICS_SCOPE_NOTE,
+    invocationsByVerb: {},
+    invocationsUnmeasuredBefore: ANALYTICS_COLLECTION_STARTED_AT,
+    workersByLaneModel: [],
+    taskDurationsMs: [],
+    noTerminalTaskCount: 0,
+    workerDurationsByLane: [],
+    workerDurationsUnmeasuredBefore: ANALYTICS_COLLECTION_STARTED_AT,
+  });
+}
+
+function systemSchedule(callback: () => void, delayMs: number): AnalyticsTimer {
+  const handle = setTimeout(callback, delayMs);
+  return {
+    unref: () => handle.unref(),
+    cancel: () => clearTimeout(handle),
+  };
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Build the specialised analytics cache. Exactly one timer exists at a time: the safety timer
+ * while reading, then the refresh-delay timer after settlement. This is deliberately not a
+ * generic route cache; its AbortController and evidence semantics are analytics-specific. */
+export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): AnalyticsSnapshotCache {
+  const clock = deps.clock ?? systemClock;
+  const readSnapshot = deps.readSnapshot ?? deriveAnalyticsSnapshotFromLedger;
+  const refreshIntervalMs = deps.refreshIntervalMs ?? ANALYTICS_REFRESH_INTERVAL_MS;
+  const refreshTimeoutMs = deps.refreshTimeoutMs ?? ANALYTICS_REFRESH_TIMEOUT_MS;
+  const schedule = deps.schedule ?? systemSchedule;
+  const log = deps.log ?? (() => {});
+  let value = coldAnalyticsSnapshot();
+  let timer: AnalyticsTimer | undefined;
+  let controller: AbortController | undefined;
+  let inFlight: Promise<void> | undefined;
+  let started = false;
+  let stopped = false;
+
+  const cancelTimer = (): void => {
+    timer?.cancel();
+    timer = undefined;
+  };
+
+  const arm = (callback: () => void, delayMs: number): AnalyticsTimer => {
+    const handle = schedule(callback, delayMs);
+    handle.unref();
+    return handle;
+  };
+
+  const scheduleNext = (): void => {
+    if (!started || stopped) return;
+    let handle: AnalyticsTimer;
+    handle = arm(() => {
+      if (timer === handle) timer = undefined;
+      void refresh();
+    }, refreshIntervalMs);
+    timer = handle;
+  };
+
+  const refresh = (): Promise<void> => {
+    if (inFlight) return inFlight;
+    if (stopped) return Promise.resolve();
+    cancelTimer();
+    const refreshController = new AbortController();
+    controller = refreshController;
+    const beganAt = clock.now();
+    let timedOut = false;
+    log("serve.analytics_refresh.started", { retained_as_of: value.asOf, timeout_ms: refreshTimeoutMs });
+
+    const safetyTimer = arm(() => {
+      timedOut = true;
+      const durationMs = Math.max(0, clock.now() - beganAt);
+      log("serve.analytics_refresh.timeout", {
+        duration_ms: durationMs,
+        timeout_ms: refreshTimeoutMs,
+        retained_as_of: value.asOf,
+      });
+      refreshController.abort(new Error(`analytics refresh exceeded ${refreshTimeoutMs}ms`));
+    }, refreshTimeoutMs);
+    timer = safetyTimer;
+
+    let operation!: Promise<void>;
+    operation = Promise.resolve()
+      .then(() => readSnapshot(deps.stateDir, clock, refreshController.signal))
+      .then((next) => {
+        refreshController.signal.throwIfAborted();
+        value = freezeAnalyticsSnapshot(next);
+        log("serve.analytics_refresh.completed", {
+          duration_ms: Math.max(0, clock.now() - beganAt),
+          as_of: value.asOf,
+        });
+      })
+      .catch((error: unknown) => {
+        // Timeout has its own terminal row above. A lifecycle stop is expected cleanup. Every
+        // other failure is explicit and retains the prior snapshot.
+        if (!timedOut && !(stopped && refreshController.signal.aborted)) {
+          log("serve.analytics_refresh.failed", {
+            duration_ms: Math.max(0, clock.now() - beganAt),
+            retained_as_of: value.asOf,
+            error: errorText(error),
+          });
+        }
+      })
+      .finally(() => {
+        if (timer === safetyTimer) {
+          safetyTimer.cancel();
+          timer = undefined;
+        }
+        if (controller === refreshController) controller = undefined;
+        if (inFlight === operation) inFlight = undefined;
+        scheduleNext();
+      });
+    inFlight = operation;
+    return operation;
+  };
+
+  const stop = (): void => {
+    if (stopped) return;
+    stopped = true;
+    started = false;
+    cancelTimer();
+    controller?.abort(new Error("analytics refresh stopped with serve lifecycle"));
+  };
+
+  return {
+    current: () => value,
+    refresh,
+    start: () => {
+      if (started || stopped) return;
+      started = true;
+      void refresh();
+    },
+    stop,
+  };
 }
 
 /**
- * `GET /v1/analytics` — read-scoped (the console's four operator questions are not a secret; see
- * this module's header for the scope rationale), computed FRESH PER REQUEST, no cache.
+ * `GET /v1/analytics` — read-scoped and synchronously served from process-owned state. It cannot
+ * start, join or await a union scan because its inline input exposes only the current value.
  */
-export function buildAnalyticsRoute(deps: AnalyticsRouteDeps): Route {
+export function buildAnalyticsRoute(deps: { currentSnapshot: () => AnalyticsSnapshot }): Route {
   return {
     method: "GET",
     path: "/v1/analytics",
     scope: "read",
-    handler: async (_req, res) => {
-      const readSnapshot = deps.readSnapshot ?? deriveAnalyticsSnapshotFromLedger;
-      const clock = deps.clock ?? systemClock;
-      const stateDir = dirname(deps.ledgerPath);
-      sendJson(res, 200, await readSnapshot(stateDir, clock));
-    },
+    handler: (_req, res) => sendJson(res, 200, deps.currentSnapshot()),
   };
 }

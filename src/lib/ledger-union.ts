@@ -1,6 +1,7 @@
-import { createReadStream, existsSync as nodeExistsSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync } from "node:fs";
+import { createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, readFileSync as nodeReadFileSync, readdirSync as nodeReaddirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
+import { addAbortSignal, type Readable } from "node:stream";
 import { createGunzip, gunzipSync as nodeGunzipSync } from "node:zlib";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { NEVER_ROTATE_FILENAME } from "./log-rotation.js";
@@ -136,6 +137,9 @@ function parseObject(raw: string): Record<string, unknown> | undefined {
 
 export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   dedupe?: boolean;
+  /** Cancels the active source and refuses to open a later rotation. An abort is never swallowed
+   * by the best-effort corrupt-file boundary below. */
+  signal?: AbortSignal;
   /**
    * Bound exact-line replay dedupe to the newest N distinct rows per `step`. This is the streaming
    * counterpart to `rotateLedger` retaining its newest N rows per step: an archived row can only
@@ -146,9 +150,24 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   dedupeWindowPerStep?: number;
 }
 
+/** Stream-opening I/O. The third argument to {@link openLedgerUnion} exists so its cancellation
+ * contract can prove the active readable was destroyed and no later file opened. */
+export interface LedgerUnionStreamIO {
+  readdirSync: (dir: string) => string[];
+  existsSync: (path: string) => boolean;
+  createReadStream: (path: string) => Readable;
+}
+
+const realLedgerUnionStreamIO: LedgerUnionStreamIO = {
+  readdirSync: (dir) => nodeReaddirSync(dir),
+  existsSync: (path) => nodeExistsSync(path),
+  createReadStream: (path) => nodeCreateReadStream(path),
+};
+
 export async function* openLedgerUnion(
   stateDir: string,
   opts: OpenLedgerUnionOptions = {},
+  io: LedgerUnionStreamIO = realLedgerUnionStreamIO,
 ): AsyncGenerator<Record<string, unknown>> {
   if (
     opts.dedupeWindowPerStep !== undefined &&
@@ -159,7 +178,7 @@ export async function* openLedgerUnion(
   if (opts.dedupe === false && opts.dedupeWindowPerStep !== undefined) {
     throw new TypeError("openLedgerUnion: dedupe=false and dedupeWindowPerStep are contradictory");
   }
-  const { rotations } = listedLedgerFiles(stateDir, realLedgerFs);
+  const { rotations } = listedLedgerFiles(stateDir, io);
   const livePath = ledgerLivePath(stateDir);
   const entries = [...rotations, { path: livePath, form: "plain" as const }];
   const seen = new Set<string>();
@@ -185,12 +204,20 @@ export async function* openLedgerUnion(
   };
 
   for (const entry of entries) {
-    if (entry.path === livePath && !nodeExistsSync(entry.path)) continue;
+    opts.signal?.throwIfAborted();
+    if (entry.path === livePath && !io.existsSync(entry.path)) continue;
     if (rotationBeforeWindow(entry, minimumTs)) continue;
-    const input = entry.form === "gzip" ? createReadStream(entry.path).pipe(createGunzip()) : createReadStream(entry.path);
+    const source = io.createReadStream(entry.path);
+    const gunzip = entry.form === "gzip" ? createGunzip() : undefined;
+    const input = gunzip ? source.pipe(gunzip) : source;
+    if (opts.signal) {
+      addAbortSignal(opts.signal, source);
+      if (gunzip) addAbortSignal(opts.signal, gunzip);
+    }
     const rl = createInterface({ input, crlfDelay: Infinity });
     try {
       for await (const raw of rl) {
+        opts.signal?.throwIfAborted();
         const line = String(raw).trim();
         if (!line) continue;
         if (opts.dedupe !== false && opts.dedupeWindowPerStep === undefined) {
@@ -209,9 +236,18 @@ export async function* openLedgerUnion(
         if (replayedInsideWindow(step, line)) continue;
         yield parsed;
       }
-    } catch {
+    } catch (error) {
+      if (opts.signal?.aborted) throw opts.signal.reason ?? error;
       // deliberate: an unreadable file costs that file, not the whole best-effort stream.
       // Console-style readers are best effort; audit-style refusal is handled by resolveLedgerUnion.
+    } finally {
+      // Explicit ownership rather than relying only on async-iterator return semantics: timeout,
+      // server close and stale-code exit all need the active descriptor/gunzip/readline released
+      // before this generator can settle and before another rotation can open.
+      rl.close();
+      input.destroy();
+      gunzip?.destroy();
+      source.destroy();
     }
   }
 }
