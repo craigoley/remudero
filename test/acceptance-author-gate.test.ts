@@ -302,6 +302,17 @@ test("W1-T3414: source-changing and plan-only task controls pass, and unreadable
   });
   assert.equal(planOnly.ok, true, planOnly.message);
 
+  const unreadableTaskDeclaration = evaluateGate({
+    body: "## Acceptance\n\n- claim: plan filing\n  proof: grep: W1-T3414 in plan/tasks.d/W1-T3414.yaml\n",
+    authorLogin: "a-human",
+    changedPaths: ["plan/tasks.d/W1-T3414.yaml"],
+    taskFilesForId: () => {
+      throw new Error("plan unreadable");
+    },
+    trailerCommits: followup,
+  });
+  assert.equal(unreadableTaskDeclaration.ok, true, unreadableTaskDeclaration.message);
+
   const existing = evaluateGate({
     body: IMPLEMENTATION_BODY,
     authorLogin: "a-human",
