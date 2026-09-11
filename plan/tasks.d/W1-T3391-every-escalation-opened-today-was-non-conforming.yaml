@@ -1,0 +1,42 @@
+- id: W1-T3391
+  title: "EVERY ESCALATION OPENED TODAY WAS NON-CONFORMING — 16 of 16 carry operator_message_ok false with consequenceOfInaction missing, so every issue the fleet puts in front of a human omits what happens if they do nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: medium
+  origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
+  plan_refs: ["W1-T2498", "W1-T3390"]
+  files: [src/lib/escalate.ts, test/every-escalation-opened-today-was-non-conforming.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    SIXTEEN OUT OF SIXTEEN. MEASURED over the full rotation union for 2026-09-11: every
+    `escalation.issue_opened` row carries `operator_message_ok: false` with
+    `operator_message_missing: ["consequenceOfInaction"]`. Not a sample — the entire day, across
+    BLOCKED and MANUAL classes and across ten distinct task ids.
+
+    THE GAP WAS MADE VISIBLE AND THEN NOTHING CLOSED IT. `toOperatorMessage` in `escalate.ts` projects
+    an escalation onto the four presence slots, and its own comment says `consequenceOfInaction` is
+    the part most producers omit and that making the gap visible is the point. Visibility worked; it
+    has been 100 percent visible and 100 percent unfixed. `consequence` is optional on the
+    `Escalation` interface, `null` is an explicit nothing-follows and counts as present, and no
+    producer sets either.
+
+    WHY IT MATTERS MORE NOW. W1-T3390 makes a human the LAST rung rather than the second, which means
+    the issues that do reach a person are the ones automation could not solve. An escalation that omits
+    what happens if nobody acts is worst precisely when it is rarest, because the reader has no
+    standing context for it.
+
+    SCOPE. Make every escalation producer supply `consequence`, explicitly `null` where nothing
+    follows from inaction, so the slot is answered rather than omitted. Keep `checkOperatorMessage`
+    best-effort at the raise site: a checker failure must never stop an escalation being raised.
+    Change no escalation class, no dedup key and no issue routing.
+
+  acceptance:
+    - claim: "every escalation producer supplies consequence, explicitly null where nothing follows from inaction"
+      proof: "grep: so the slot is answered rather than omitted in plan/tasks.d/W1-T3391-every-escalation-opened-today-was-non-conforming.yaml"
+    - claim: "a checker failure still never stops an escalation being raised"
+      proof: "grep: a checker failure must never stop an escalation being raised in plan/tasks.d/W1-T3391-every-escalation-opened-today-was-non-conforming.yaml"
