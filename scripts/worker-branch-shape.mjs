@@ -169,7 +169,8 @@ export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles,
   if (claimed.length === 0) {
     return {
       ok: true,
-      message: "claims no task by trailer or filed shard — exempt from the run-<taskId>-<epochMs> shape check",
+      message:
+        "claims no task by trailer, filed shard, or declared-task head ref — exempt from the run-<taskId>-<epochMs> shape check",
     };
   }
 
