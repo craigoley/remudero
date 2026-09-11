@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -16,6 +16,7 @@ import {
   clearProviderWindowMeasurements,
   codexCapacityFromRateLimits,
   codexGitWritableRoots,
+  codexPreToolUseProfile,
   parseCodexJsonl,
   readCodexCapacity,
   providerWindowConsumption,
@@ -917,6 +918,74 @@ test("Codex JSONL normalizes a pinned subscription refusal only from terminal er
   assert.equal(proseOnly.usageRefusal, undefined, "agent prose must never classify the account as refused");
 });
 
+test("Codex hook profile fails closed when the validated worker policy has no command floor", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
+  const settingsFile = join(root, "worker.json");
+  try {
+    writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+    assert.throws(() => codexPreToolUseProfile(settingsFile), /must define at least one PreToolUse hook/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** Base sandbox stanza shared by the malformed-hook fixtures below — the shape
+ *  {@link validateWorkerSettingsFile} requires before {@link codexPreToolUseProfile} ever
+ *  inspects `hooks`. */
+const CODEX_HOOK_PROFILE_BASE_SANDBOX = { enabled: true, failIfUnavailable: true };
+
+function writeCodexHookProfileFixture(root: string, preToolUse: unknown): string {
+  const settingsFile = join(root, "worker.json");
+  writeFileSync(
+    settingsFile,
+    JSON.stringify({ sandbox: CODEX_HOOK_PROFILE_BASE_SANDBOX, hooks: { PreToolUse: preToolUse } }),
+  );
+  return settingsFile;
+}
+
+test("Codex hook profile fails closed on a PreToolUse entry with an unreadable matcher", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
+  try {
+    const settingsFile = writeCodexHookProfileFixture(root, [{ matcher: 123, hooks: [] }]);
+    assert.throws(
+      () => codexPreToolUseProfile(settingsFile),
+      /PreToolUse\[0\] has an unreadable matcher or empty hooks list/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex hook profile fails closed on a PreToolUse hook that is not a command hook", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
+  try {
+    const settingsFile = writeCodexHookProfileFixture(root, [
+      { matcher: "Bash", hooks: [{ type: "prompt", command: "" }] },
+    ]);
+    assert.throws(
+      () => codexPreToolUseProfile(settingsFile),
+      /PreToolUse\[0\]\.hooks\[0\] is not a command hook/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex hook profile fails closed on a PreToolUse hook with an invalid timeout", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
+  try {
+    const settingsFile = writeCodexHookProfileFixture(root, [
+      { matcher: "Bash", hooks: [{ type: "command", command: "./deny-floor.sh", timeout: -5 }] },
+    ]);
+    assert.throws(
+      () => codexPreToolUseProfile(settingsFile),
+      /PreToolUse\[0\]\.hooks\[0\] has an invalid timeout/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Codex spawn carries a subscription refusal through the shared ledger seam", async () => {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
@@ -938,6 +1007,7 @@ test("Codex spawn carries a subscription refusal through the shared ledger seam"
       workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd: process.cwd(),
       prompt: "do the task",
+      settingsFile: join(process.cwd(), "settings", "worker.json"),
       containment: {
         spawn: () => ({ process: proc as never, pid: 42_425 }),
         teardown: () => {},
@@ -1034,6 +1104,8 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
   assert.equal(result.model, "gpt-5.6-terra");
   assert.deepEqual(spawnedArgs.slice(spawnedArgs.indexOf("--model"), spawnedArgs.indexOf("--model") + 2), ["--model", "gpt-5.6-terra"]);
   assert.ok(spawnedArgs.includes('model_reasoning_effort="high"'));
+  assert.ok(spawnedArgs.includes("--dangerously-bypass-hook-trust"));
+  assert.ok(spawnedArgs.some((arg) => arg.startsWith("hooks.PreToolUse=") && arg.includes("deny-floor.sh")));
   assert.equal(spawnedEnv.SAFE_VALUE, "kept");
   assert.equal(spawnedEnv.OPENAI_API_KEY, undefined);
   assert.equal(spawnedEnv.ANTHROPIC_API_KEY, undefined);
@@ -1303,6 +1375,7 @@ test("Codex worker clock bound tears down the contained process and fails the ru
         workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
         cwd: process.cwd(),
         prompt: "wait forever",
+        settingsFile: join(process.cwd(), "settings", "worker.json"),
         clockBound: { boundMs: 1 },
         containment: {
           spawn: () => ({ process: proc as never, pid: 9_001 }),

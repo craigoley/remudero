@@ -209,6 +209,7 @@ test("one authenticated Codex observation explains every model outcome and pins 
       workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd: process.cwd(),
       prompt: "prove the broker boundary",
+      settingsFile: join(process.cwd(), "settings", "worker.json"),
       tools: ["Bash"],
       containment: {
         spawn: (args) => { execArgs = args.args; return { process: proc as never, pid: 27_110 }; },

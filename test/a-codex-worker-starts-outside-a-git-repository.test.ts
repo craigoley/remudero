@@ -49,6 +49,7 @@ async function capturedArgs(root: string, cwd: string, resumeSessionId?: string)
       workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd,
       prompt: "probe",
+      settingsFile: join(process.cwd(), "settings", "worker.json"),
       // The isolation probe is Bash-only and carries no write tool; `readOnly` in
       // `codexExecArgs` is derived from exactly this list, so the fixture supplies it rather
       // than letting an absent list silently select `workspace-write`.
@@ -82,6 +83,9 @@ test("W1-T2754: a Codex worker is launched with --skip-git-repo-check so a non-r
       fresh.includes("--skip-git-repo-check"),
       `a fresh Codex spawn must waive the trusted-directory gate; argv was ${JSON.stringify(fresh)}`,
     );
+    assert.ok(fresh.includes("--dangerously-bypass-hook-trust"), "the vetted worker hook cannot wait for interactive trust");
+    assert.deepEqual(fresh.slice(fresh.indexOf("--enable"), fresh.indexOf("--enable") + 2), ["--enable", "hooks"]);
+    assert.ok(fresh.some((arg) => arg.startsWith("hooks.PreToolUse=") && arg.includes("deny-floor.sh")));
 
     // `shared` feeds the resume argv too, so a resumed worker in the same cwd is covered by the
     // same single flag rather than by a second, drift-prone copy.
@@ -91,6 +95,8 @@ test("W1-T2754: a Codex worker is launched with --skip-git-repo-check so a non-r
       resumed.includes("--skip-git-repo-check"),
       `a resumed Codex spawn must waive it as well; argv was ${JSON.stringify(resumed)}`,
     );
+    assert.ok(resumed.some((arg) => arg.startsWith("hooks.PreToolUse=") && arg.includes("deny-floor.sh")),
+      "resumed Codex runs keep the same floor as fresh runs");
 
     // THE FLAG WAIVES THE TRUST PROMPT, NEVER THE SANDBOX. If this ever regresses into a broader
     // permission grant the containment guarantee is gone, so the sandbox bound is asserted on the

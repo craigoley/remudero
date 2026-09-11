@@ -38,6 +38,7 @@ async function captureSpawn(
       workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd,
       prompt: "review this change",
+      settingsFile: join(process.cwd(), "settings", "worker.json"),
       tools,
       resumeSessionId,
       containment: {
