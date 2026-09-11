@@ -55,6 +55,12 @@ const {
 //
 // Finding that took a person reading two files and noticing they disagreed. This suite is the gate
 // that reads them instead.
+//
+// @source-text-subject -- this suite's SUBJECT genuinely IS source text. It drives
+// `retentionSetFrom`, the census's own parser of `export const DECISION_RELEVANT_LEDGER_STEPS` in
+// src/lib/ledger.ts. Importing that constant instead would assert the RUNTIME value, and the whole
+// defect this gate exists to catch is that the DECLARED list and the union-read steps disagree in
+// the source — so the text is the thing under test, not a stand-in for behaviour.
 
 const RETENTION = (): Map<string, Set<string>> => {
   const src = readFileSync(join(REPO_ROOT, "src", "lib", "ledger.ts"), "utf8");
