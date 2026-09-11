@@ -30462,9 +30462,7 @@ function mountRecommenderCadenceMarkerPath(root: string): string {
 
 function mountRecommenderNextFireMs(marker: ReturnType<typeof readFeedbackDocketMarker>): number | undefined {
   if (!marker) return undefined;
-  const last = Date.parse(marker.lastFireIso);
-  if (Number.isNaN(last)) return undefined;
-  return last + MOUNT_RECOMMENDER_CADENCE_POLICY.intervalMs;
+  return Date.parse(marker.lastFireIso) + MOUNT_RECOMMENDER_CADENCE_POLICY.intervalMs;
 }
 
 /**

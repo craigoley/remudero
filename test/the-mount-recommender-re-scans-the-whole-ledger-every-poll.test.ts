@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -120,6 +120,46 @@ test("runMountRecommenderRung: a crash after the pre-work marker costs one skipp
     assert.equal(callsAfterCrash, 0, "the next in-window poll skips instead of re-sweeping after the crash");
     assert.ok(existsSync(join(root, "state", "last-mount-recommender.json")));
     assert.ok(events.some((event) => event.step === "mount_recommendation.skipped"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runMountRecommenderRung: the default sweep import path is covered by the same marker gate", async () => {
+  const root = tmp("rmd-mount-cadence-default-import-");
+  try {
+    mkdirSync(join(root, ".remudero"), { recursive: true });
+    mkdirSync(join(root, "scripts"), { recursive: true });
+    writeFileSync(join(root, ".remudero", "mounts.yaml"), readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8"));
+    writeFileSync(
+      join(root, "scripts", "mount-headroom-sweep.mjs"),
+      [
+        'import { writeFileSync } from "node:fs";',
+        'import { join } from "node:path";',
+        "export function buildMountHeadroomSweep(stateDir) {",
+        '  writeFileSync(join(stateDir, "default-import-hit.txt"), stateDir);',
+        "  return { cells: [] };",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const config = { claudeBin: "/bin/true", root, overflow: "none" } as Config;
+    const events: Array<{ step: string; extra: Record<string, unknown> | undefined }> = [];
+    const log = (step: string, extra?: Record<string, unknown>) => events.push({ step, extra });
+
+    assert.deepEqual(
+      await runMountRecommenderRung(config, "run-default-import", log, {
+        root,
+        now: () => new Date("2026-09-10T00:00:00.000Z"),
+      }),
+      { filed: 0, refused: 0 },
+    );
+
+    assert.equal(readFileSync(join(root, "state", "default-import-hit.txt"), "utf8"), join(root, "state"));
+    const swept = events.find((event) => event.step === "mount_recommendation.swept");
+    assert.equal(swept?.extra?.run_id, "run-default-import");
+    assert.equal(swept?.extra?.cells, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
