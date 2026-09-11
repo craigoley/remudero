@@ -54,6 +54,7 @@ const OBSERVED_NOT_LOGGED_IN_TEXT = "Not logged in · Please run /login";
 const ROOT_MARKDOWN_ALLOWLIST = new Set([
   "README.md",
   "CLAUDE.md",
+  "AGENTS.md",
   "MASTER-PLAN.md",
   "DECISIONS.md",
   "LEARNINGS.md",

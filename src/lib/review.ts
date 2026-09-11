@@ -5682,6 +5682,9 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // INSTRUMENT_SURFACE_EXCLUSIONS already draws for openapi/daemon.yaml against
   // scripts/generate-api-client.mjs, which is tracked here for exactly this reason.
   "^scripts/generate-ledger-steps\\.mjs$",
+  // W1-T3267: the compact Codex project-document generator's `--check` mode can refuse a PR
+  // when AGENTS.md drifts from CLAUDE.md, so it is enforcement logic rather than generated content.
+  "^scripts/generate-agents-md\\.mjs$",
 ];
 
 const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
