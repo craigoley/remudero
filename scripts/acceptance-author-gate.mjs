@@ -46,6 +46,7 @@ import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import {
   acceptanceAuthorTimeCheck,
+  extractTaskTrailerId,
   explainGrepProofRefusal,
   explainUnitTestProofRefusal,
   filingSelfCreditCheck,
@@ -53,6 +54,8 @@ import {
   parseWhitelistedProof,
   wrappedGrepPattern,
 } from "../src/lib/review.ts";
+import { loadPlan } from "../src/lib/plan.ts";
+import { isInPlanScope } from "../src/lib/plan-scope.ts";
 import { execFileSync } from "node:child_process";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
 
@@ -159,6 +162,25 @@ export function introducedShardTaskIds({ baseSha, headSha, root = REPO_ROOT, git
   return ids;
 }
 
+/**
+ * Every changed path in the pull request's merge-base range, or `undefined` when local git cannot
+ * supply that evidence. An empty set is also non-evidence: it must not manufacture a refusal.
+ * @param {{ baseSha?: string, headSha?: string, root?: string, git?: (args: string[]) => string }} opts
+ * @returns {string[] | undefined}
+ */
+export function changedPathsAtRange({ baseSha, headSha, root = REPO_ROOT, git } = {}) {
+  if (!baseSha || !headSha) return undefined;
+  const run =
+    git ??
+    ((args) => execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }));
+  try {
+    const output = run(["diff", "--name-only", "-z", "--no-renames", `${baseSha}...${headSha}`]);
+    return [...new Set(String(output).split("\0").filter(Boolean))];
+  } catch {
+    return undefined;
+  }
+}
+
 export { REPO_ROOT };
 
 /**
@@ -204,17 +226,60 @@ export function planTrailerResolver(root = REPO_ROOT) {
 }
 
 /**
- * The gate's own verdict: the bot exemption first, then `acceptanceAuthorTimeCheck` (no
- * `expectedTaskId` — this job has no PR-to-task binding of its own, the same general-case call
- * shape `rmd check-acceptance` itself uses), then the stricter author-time proof-shape refusal.
+ * Read declared task files from the checked-out plan. Unlike the trailer resolver's deliberately
+ * permissive line scan, this needs the plan schema's authoritative `files:` array; a bad plan
+ * supplies no structural evidence and therefore no additional refusal.
+ * @param {string} root
+ * @returns {((taskId: string) => readonly string[] | undefined) | undefined}
+ */
+export function planTaskFilesResolver(root = REPO_ROOT) {
+  try {
+    const plan = loadPlan(join(root, "plan", "tasks.yaml"));
+    return (taskId) => plan.byId.get(taskId)?.files;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * W1-T3149's additional author-time refusal. It applies only when the local range proves this is
+ * a plan-only diff and the trailered task itself declares implementation paths.
+ * @param {{ body: string, changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined }} input
+ */
+export function planOnlyImplementationTrailerRefusal({ body, changedPaths, taskFilesForId }) {
+  if (changedPaths === undefined || changedPaths.length === 0 || taskFilesForId === undefined) return undefined;
+  const taskId = extractTaskTrailerId(body);
+  if (taskId === undefined || !changedPaths.every(isInPlanScope)) return undefined;
+  let declaredFiles;
+  try {
+    declaredFiles = taskFilesForId(taskId);
+  } catch {
+    return undefined;
+  }
+  const nonPlanFiles = Array.isArray(declaredFiles) ? declaredFiles.filter((path) => !isInPlanScope(path)) : [];
+  if (nonPlanFiles.length === 0) return undefined;
+  return {
+    ok: false,
+    defect: "plan-only-implementation-trailer",
+    message:
+      `Remudero-Task: ${taskId} resolves to non-plan file(s): ${nonPlanFiles.join(", ")}. ` +
+      `This pull request changes only plan-scope path(s), so it cannot implement ${taskId}. ` +
+      "Remove the trailer and author this PR's own ## Acceptance block, or include the implementation changes.",
+  };
+}
+
+/**
+ * The gate's own verdict: the bot exemption first, then the two structural refusals, then
+ * `acceptanceAuthorTimeCheck` (no `expectedTaskId` — this job has no PR-to-task binding of its
+ * own, the same general-case call shape `rmd check-acceptance` itself uses), then proof shape.
  *
  * W1-T2297's OTHER HALF. The predicate has taken an optional `trailerResolves` since #2934; this
  * caller is what supplies it, so a `Remudero-Task:` trailer naming an id the plan does not declare
  * stops buying an exemption. `trailerResolves` OMITTED — which is what a caller with an unreadable
  * plan passes — leaves the verdict byte for byte what it was before this wiring.
- * @param {{ body: string, authorLogin?: string, trailerResolves?: (taskId: string) => boolean }} input
+ * @param {{ body: string, authorLogin?: string, trailerResolves?: (taskId: string) => boolean, introducedTaskIds?: string[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined }} input
  */
-export function evaluateGate({ body, authorLogin, trailerResolves, introducedTaskIds = [] }) {
+export function evaluateGate({ body, authorLogin, trailerResolves, introducedTaskIds = [], changedPaths, taskFilesForId }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
@@ -226,6 +291,8 @@ export function evaluateGate({ body, authorLogin, trailerResolves, introducedTas
   // value), so ordering it second would leave it unreachable on exactly the bodies it is for.
   const selfCredit = filingSelfCreditCheck(body, introducedTaskIds);
   if (!selfCredit.ok) return { ok: false, defect: "files-and-credits-the-same-task", message: selfCredit.message };
+  const structuralRefusal = planOnlyImplementationTrailerRefusal({ body, changedPaths, taskFilesForId });
+  if (structuralRefusal !== undefined) return structuralRefusal;
   const result = acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
   return result.ok ? authorTimeProofShapeRefusal(body, result) : result;
 }
@@ -307,6 +374,8 @@ export function main(argv) {
     authorLogin: payload.authorLogin,
     trailerResolves: planTrailerResolver(),
     introducedTaskIds: introducedShardTaskIds({ baseSha: payload.baseSha, headSha: payload.headSha }),
+    changedPaths: changedPathsAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
+    taskFilesForId: planTaskFilesResolver(),
   });
   if (!result.ok) {
     console.error(`acceptance-author-gate: REFUSED (${result.defect}) — ${result.message}`);
