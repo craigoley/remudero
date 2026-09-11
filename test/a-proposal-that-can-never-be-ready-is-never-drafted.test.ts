@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   anchorFingerprint,
@@ -13,7 +16,9 @@ import {
   type Proposal,
   type ReadinessContext,
 } from "../src/lib/inbox.js";
+import type { Config } from "../src/lib/config.js";
 import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/plan.js";
+import { buildInboxDraftHook } from "../src/run-task.js";
 
 const BASE_PLAN_YAML = `
 - id: W1-T1
@@ -62,6 +67,49 @@ function draftFor(proposalId: string, anchors: EvidenceAnchor[]): DraftedCandida
   };
 }
 
+test("an UNREADABLE readiness fact leaves the proposal draftable — the fail-open arm criterion 2 claims", () => {
+  // Criterion 2 says an undeterminable never-READY status "stays draftable rather than being
+  // silently dropped". readDraftExclusion is the arm that decides it, and nothing reached its
+  // catch: every fixture above supplies readers that answer. A reader that THROWS is the case the
+  // claim is about — an unreadable fact must read as "no exclusion", never as "excluded".
+  const exclusion = draftExclusionForProposal(
+    proposal("P-UNREADABLE"),
+    ctx({
+      isRatified: () => {
+        throw new Error("ledger unreadable");
+      },
+    }),
+  );
+  assert.equal(exclusion, undefined, "an unreadable fact must not exclude the proposal");
+
+  // CONTROL: the same reader answering TRUE does exclude it, so the assertion above is about the
+  // throw and not about this predicate being unreachable.
+  assert.equal(
+    draftExclusionForProposal(proposal("P-RATIFIED-CTRL"), ctx({ isRatified: () => true }))?.predicate,
+    "ratified",
+  );
+});
+
+test("an UNFIRED trigger excludes the proposal and names the trigger predicate", () => {
+  // The trigger arm had no caller either: every fixture proposal above omits `trigger`, so the
+  // branch that reports a not-yet-fired trigger was never entered.
+  const exclusion = draftExclusionForProposal(
+    proposal("P-TRIGGER", { trigger: { fired: false, description: "waiting on the third occurrence" } }),
+    ctx(),
+  );
+  assert.equal(exclusion?.predicate, "trigger");
+  assert.equal(exclusion?.detail, "waiting on the third occurrence", "the detail must carry the trigger's own words");
+
+  // CONTROL: a FIRED trigger is not an exclusion — the branch must discriminate, not always fire.
+  assert.equal(
+    draftExclusionForProposal(
+      proposal("P-TRIGGER-FIRED", { trigger: { fired: true, description: "already fired" } }),
+      ctx(),
+    ),
+    undefined,
+  );
+});
+
 test("daemon draft selection excludes every draft-independent never-ready predicate and names the predicate", () => {
   const goodAnchor: EvidenceAnchor = { description: "good", pattern: "present" };
   const driftedAnchor: EvidenceAnchor = { description: "drifted", pattern: "gone" };
@@ -69,6 +117,7 @@ test("daemon draft selection excludes every draft-independent never-ready predic
     proposal("P-RATIFIED"),
     proposal("P-DECLINED"),
     proposal("P-RETIRED", { originatingItemId: "pr-1" }),
+    proposal("P-TRIGGER", { trigger: { description: "wait for operator", fired: false } }),
     proposal("P-DRIFTED", { evidenceAnchors: [driftedAnchor] }),
     proposal("P-CONFLICT", { conflictsWith: ["P-OTHER"] }),
     proposal("P-DRAFTABLE", { evidenceAnchors: [goodAnchor] }),
@@ -83,7 +132,7 @@ test("daemon draft selection excludes every draft-independent never-ready predic
 
   assert.deepEqual(
     candidates.slice(0, -1).map((p) => draftExclusionForProposal(p, readiness)?.predicate),
-    ["ratified", "declined", "referent_resolved", "evidence_anchors", "no_conflict"],
+    ["ratified", "declined", "referent_resolved", "trigger", "evidence_anchors", "no_conflict"],
   );
   assert.deepEqual(
     draftsDueOnDaemon(candidates, {}, {}, 0, readiness).map((p) => p.id),
@@ -94,10 +143,14 @@ test("daemon draft selection excludes every draft-independent never-ready predic
 test("daemon draft selection keeps a proposal draftable when a never-ready fact is unreadable", () => {
   const uncertainAnchor: EvidenceAnchor = { description: "uncertain", pattern: "maybe" };
   const candidates: Proposal[] = [
+    proposal("P-RATIFICATION-UNREADABLE"),
     proposal("P-REFERENT-UNREADABLE", { originatingItemId: "pr-404" }),
     proposal("P-ANCHOR-UNREADABLE", { evidenceAnchors: [uncertainAnchor] }),
   ];
   const readiness = ctx({
+    isRatified: () => {
+      throw new Error("ledger unavailable");
+    },
     boardReferents: { kind: "unreadable" },
     grepAnchorTrue: () => {
       throw new Error("git grep unavailable");
@@ -106,8 +159,44 @@ test("daemon draft selection keeps a proposal draftable when a never-ready fact 
 
   assert.deepEqual(
     draftsDueOnDaemon(candidates, {}, {}, 0, readiness).map((p) => p.id),
-    ["P-ANCHOR-UNREADABLE", "P-REFERENT-UNREADABLE"],
+    ["P-ANCHOR-UNREADABLE", "P-RATIFICATION-UNREADABLE", "P-REFERENT-UNREADABLE"],
   );
+});
+
+test("daemon draft hook logs readiness-unavailable and falls back to drafting when pre-draft facts cannot be read", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-inbox-readiness-unavailable-"));
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "inbox-proposals.json"),
+    JSON.stringify({ proposals: [proposal("P-FALLBACK")] }),
+  );
+  mkdirSync(join(stateDir, "ledger.ndjson"));
+
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const hook = buildInboxDraftHook(
+    "owner",
+    "repo",
+    { root } as Config,
+    "RUN-READINESS",
+    (step, extra) => logs.push({ step, extra }),
+    async (due) =>
+      due.map((p) => ({
+        proposalId: p.id,
+        ok: true as const,
+        candidate: { proposalId: p.id, fragmentYaml: BASE_PLAN_YAML, stampLine: "stamp", anchorFingerprint: "" },
+      })),
+  );
+
+  await hook();
+
+  assert.deepEqual(
+    logs.map((l) => l.step),
+    ["inbox.draft_readiness_unavailable", "inbox.draft_batch"],
+  );
+  assert.match(String(logs[0]?.extra?.error), /EISDIR/);
+  const drafts = JSON.parse(readFileSync(join(stateDir, "inbox-drafts.json"), "utf8")) as Record<string, unknown>;
+  assert.ok(drafts["P-FALLBACK"], "fallback mode must still draft when readiness facts are unreadable");
 });
 
 test("manual inbox force still drafts a named proposal that daemon selection excludes", () => {
