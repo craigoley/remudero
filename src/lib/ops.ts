@@ -220,11 +220,20 @@ export type CodeScanningAlertsRead =
   | { ok: true; alerts: RawAlert[] }
   | { ok: false; error: string };
 
+function codeScanningReadError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "code-scanning read failed";
+  const stderr =
+    error !== null && typeof error === "object" && "stderr" in error
+      ? String((error as { stderr?: unknown }).stderr ?? "").replace(/\s+/g, " ").trim()
+      : "";
+  return stderr ? `${message}: ${stderr}` : message;
+}
+
 export function readCodeScanningAlerts(owner: string, repo: string): CodeScanningAlertsRead {
   try {
     const raw = ghExec(
       ["api", `repos/${owner}/${repo}/code-scanning/alerts`, "--paginate"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
     const pages = splitConcatenatedJsonPages(raw).map((chunk) => {
       const parsed = JSON.parse(chunk) as unknown;
@@ -233,7 +242,7 @@ export function readCodeScanningAlerts(owner: string, repo: string): CodeScannin
     });
     return { ok: true, alerts: pages.flat().map(normalizeCodeScanningAlert) };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "code-scanning read failed" };
+    return { ok: false, error: codeScanningReadError(error) };
   }
 }
 
