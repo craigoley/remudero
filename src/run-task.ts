@@ -132,7 +132,7 @@ import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./lib/provider-routing-status.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
-import { isHolderStale, readFileIfExists } from "./lib/fs-race-safe.js";
+import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { renderAnchorBlock } from "./lib/compaction.js";
@@ -1337,6 +1337,7 @@ import {
   activeWorkerCount,
   cacheTokenLedgerFields,
   capStderrExcerpt,
+  REPORT_EXCERPT_CAP,
   STDERR_EXCERPT_CAP,
   noPrReportExcerpt,
   foreignTreeStandDownReason, listRegisteredWorktrees,
@@ -8630,20 +8631,29 @@ export async function runFixRung(opts: {
             constraint: opts.constraint,
           };
     const fixMode = deriveFixMode(evidence);
-    const prompt = renderFixPrompt({
-      task: opts.task,
-      round: attempt,
-      branch: opts.branch,
-      evidence,
-      // W1-T2607: the SAME baseline captured above (before this invocation's first strike) that
-      // fixRungScopeStandDownReason's pre-strike gate already exempts — so the worker is told
-      // which of its own branch's out-of-scope paths are inherited, not re-derived a second way.
-      baselineDiffFiles,
-      // W1-T2653: the SAME list just computed above and already passed into
-      // `fixRungScopeStandDownReason` for this round's scope gate — instruction and enforcement
-      // read one shared value, never two independently derived ones.
-      reachableRemedyFiles,
-    });
+    const prompt = [
+      renderFixPrompt({
+        task: opts.task,
+        round: attempt,
+        branch: opts.branch,
+        evidence,
+        // W1-T2607: the SAME baseline captured above (before this invocation's first strike) that
+        // fixRungScopeStandDownReason's pre-strike gate already exempts — so the worker is told
+        // which of its own branch's out-of-scope paths are inherited, not re-derived a second way.
+        baselineDiffFiles,
+        // W1-T2653: the SAME list just computed above and already passed into
+        // `fixRungScopeStandDownReason` for this round's scope gate — instruction and enforcement
+        // read one shared value, never two independently derived ones.
+        reachableRemedyFiles,
+      }),
+      // W1-T3079: POINT, DO NOT INJECT (design note iii) — spliced onto the rendered prompt here
+      // rather than inside `renderFixPrompt` itself (see the "Worker transcript archive" section
+      // above `runTask` for why). Names this task's predecessor transcript path(s), newest
+      // first, EXCLUDING this rung's own run; empty on a task's first fix rung.
+      ...predecessorTranscriptPromptLines(
+        predecessorTranscriptPaths(opts.config.root, opts.taskId, { excludeRunId: opts.runId }),
+      ),
+    ].join("\n");
     // W1-T199: TAG THE STRIKE WITH THE VERDICT REGIME IT WAS SPENT AGAINST. A strike
     // spent when no proof could execute is a strike against KEYWORD NOISE; one spent
     // when the floor actually ran proofs is a strike against EVIDENCE. Untagged
@@ -8835,6 +8845,25 @@ export async function runFixRung(opts: {
       // rather than `undefined` when the spawn configured no cap.
       ...(fixResult.maxTurns === undefined ? {} : { max_turns: fixResult.maxTurns }),
     });
+
+    // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
+    // above `runTask`. Design note (i): "EVERY FIX WORKER EXIT" — keyed on `attempt` (this
+    // round's own 1-based counter, unaffected by whether the round turned out to be a retrigger
+    // or a real strike) so each round's transcript gets its own file rather than overwriting the
+    // previous round's, the way the implement/diagnose archives above deliberately do.
+    archiveWorkerTranscript(
+      {
+        root: opts.config.root,
+        taskId: opts.taskId,
+        runId: opts.runId,
+        rung: `fix-${attempt}`,
+        text: workerTranscript(fixResult),
+        model: opts.mount.model,
+        verdict: fixResult.subtype,
+        headSha: expectedHeadShaForPush,
+      },
+      deps.log,
+    );
 
     // The fix rung's own footer carries the same '## Follow-ups' invitation (renderFixPrompt
     // above); PR provenance included (the fix rung always has one).
@@ -10878,6 +10907,198 @@ export function reportWorkerSourceSizeFollowup(
   }
 }
 
+// ── Worker transcript archive (W1-T3079) ────────────────────────────────────────────────────
+// MASTER-PLAN §Self-improvement promises "every worker session transcript is archived per task;
+// fix/diagnose workers may read their predecessors' transcripts before acting" (Gas Town's
+// "seance" pattern, done as plain files). Before this, `workerTranscript` (lib/worker.ts) lived
+// only in memory for the run that produced it — a fix worker's sole window into what a
+// predecessor tried was the CI tail plus the unmet criteria, never the predecessor's own
+// reasoning. This is the ARCHIVE half: one plain markdown file per worker exit, under
+// `<config.root>/state/transcripts/<taskId>/` — `state/` is already the daemon's gitignored
+// exhaust, the same root `reportWorkerSourceSizeFollowup` and the reap rungs above write under.
+// The POINTER half (`predecessorTranscriptPromptLines`, below) is spliced onto the rendered fix/
+// diagnose prompt at each call site rather than added inside `lib/prompt-render.ts` itself — that
+// file is NOT in this task's declared `files:` scope, and editing its pointer-injection logic
+// there would risk the exact scope-guard mismatch recon flagged as a follow-up risk.
+
+/** Newest-N-per-task retention (design note ii): a growth ceiling from the very first write,
+ *  never an unbounded archive. */
+export const TRANSCRIPT_RETENTION_DEFAULT = 5;
+
+/** PRIMARY CONTROL (W1-T1266): the ONLY thing bounding how large one archived transcript file can
+ *  grow — nothing upstream of {@link archiveWorkerTranscript} caps `text` first. Scaled off
+ *  {@link REPORT_EXCERPT_CAP} (design note ii names it as the size-cap primitive to scale from) —
+ *  a full worker transcript spans many turns, not the one closing report that cap bounds, so this
+ *  is 10x rather than the identical literal. */
+export const TRANSCRIPT_EXCERPT_CAP = REPORT_EXCERPT_CAP * 10;
+
+export function transcriptsDirFor(root: string, taskId: string): string {
+  return join(root, "state", "transcripts", taskId);
+}
+
+export function transcriptPathFor(root: string, taskId: string, runId: string, rung: string): string {
+  return join(transcriptsDirFor(root, taskId), `${runId}.${rung}.md`);
+}
+
+/** One archived transcript's identity, read back off disk — never re-derived from a filename
+ *  regex a second way at any call site. */
+export interface ArchivedTranscript {
+  path: string;
+  runId: string;
+  rung: string;
+  mtimeMs: number;
+}
+
+const TRANSCRIPT_FILENAME_RE = /^(.+)\.([^.]+)\.md$/;
+
+/** Every transcript archived for `taskId`, NEWEST FIRST — ranked by the write's own mtime, never
+ *  a parsed-filename guess. Empty (never throws) when the task has no archive yet or the
+ *  directory is unreadable: a predecessor pointer that cannot be read is absence, not a reason to
+ *  fail the dispatch that was about to consult it. */
+export function listArchivedTranscripts(root: string, taskId: string): ArchivedTranscript[] {
+  let names: string[];
+  let dir: string;
+  try {
+    // `transcriptsDirFor` itself joins `root` — folded into this SAME try so a caller whose
+    // `config.root` is missing/malformed (a stub `Config` fixture that never touched a real
+    // filesystem path before this task existed) degrades to "no predecessor" exactly like an
+    // unreadable directory, never a throw a prompt-render call site would have to guard against.
+    dir = transcriptsDirFor(root, taskId);
+    names = readdirSync(dir);
+  } catch {
+    // ENOENT (no archive yet, the common case) or any other unreadable-root/-directory error:
+    // absence, never a throw over a task that has simply never had a worker exit archived for it.
+    return [];
+  }
+  const out: ArchivedTranscript[] = [];
+  for (const name of names) {
+    const match = TRANSCRIPT_FILENAME_RE.exec(name);
+    if (!match) continue;
+    const path = join(dir, name);
+    try {
+      out.push({ path, runId: match[1], rung: match[2], mtimeMs: statSync(path).mtimeMs });
+    } catch {
+      // Removed between readdir and stat (a concurrent write, the prune pass below) — simply
+      // absent from this read, never a throw over a race that resolves itself.
+    }
+  }
+  out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return out;
+}
+
+/** Deletes every archived transcript for `taskId` beyond the newest `keep` (design note ii: "keep
+ *  the newest N per task... never a growth with no ceiling"). Best-effort per file — one unlink
+ *  failure never blocks the rest. Returns the paths actually removed. */
+export function pruneArchivedTranscripts(
+  root: string,
+  taskId: string,
+  keep: number = TRANSCRIPT_RETENTION_DEFAULT,
+): string[] {
+  const stale = listArchivedTranscripts(root, taskId).slice(Math.max(keep, 0));
+  const removed: string[] = [];
+  for (const t of stale) {
+    try {
+      unlinkSync(t.path);
+      removed.push(t.path);
+    } catch {
+      // best-effort — see doc above.
+    }
+  }
+  return removed;
+}
+
+/**
+ * Archive ONE worker's joined transcript (design note i: "at implement.done, diagnose.worker_done
+ * AND EVERY FIX WORKER EXIT"). Atomic write — temp + rename via {@link writeAtomic}, the SAME
+ * primitive the ledger rotation and every other durable state file in this repo already uses
+ * (Standing rule 23) — front-matter first (run id, rung, model, verdict-so-far, head sha), then
+ * the joined transcript capped at {@link TRANSCRIPT_EXCERPT_CAP}. Ledgers exactly one
+ * `transcript.archived` row (design note iv) and prunes this task's archive back to `retention`
+ * (design note ii) in the SAME call — never a separate reap pass a caller could forget to wire.
+ * Best-effort end to end: a write failure degrades to a `transcript.archive_error` ledger row
+ * rather than failing the worker's own run, the same discipline every sibling boot-reap rung in
+ * this file already takes.
+ */
+export function archiveWorkerTranscript(
+  opts: {
+    root: string;
+    taskId: string;
+    runId: string;
+    rung: string;
+    text: string;
+    model?: string;
+    verdict?: string;
+    headSha?: string;
+    retention?: number;
+  },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): { path: string; bytes: number } | undefined {
+  try {
+    const capped = capStderrExcerpt(opts.text ?? "", TRANSCRIPT_EXCERPT_CAP);
+    const frontMatter = [
+      "---",
+      `run_id: ${opts.runId}`,
+      `rung: ${opts.rung}`,
+      `model: ${opts.model ?? "unknown"}`,
+      `verdict: ${opts.verdict ?? "unknown"}`,
+      `head_sha: ${opts.headSha ?? "unknown"}`,
+      "---",
+      "",
+    ].join("\n");
+    const content = `${frontMatter}${capped}\n`;
+    const path = transcriptPathFor(opts.root, opts.taskId, opts.runId, opts.rung);
+    const bytes = Buffer.byteLength(content, "utf8");
+    writeAtomic(path, content, { tmpTag: "transcript" });
+    log("transcript.archived", { task_id: opts.taskId, run_id: opts.runId, rung: opts.rung, path, bytes });
+    pruneArchivedTranscripts(opts.root, opts.taskId, opts.retention ?? TRANSCRIPT_RETENTION_DEFAULT);
+    return { path, bytes };
+  } catch (error) {
+    log("transcript.archive_error", {
+      task_id: opts.taskId,
+      run_id: opts.runId,
+      rung: opts.rung,
+      reason: String((error as Error)?.message ?? error),
+    });
+    return undefined;
+  }
+}
+
+/** The POINTER half (design note iii): the newest predecessor transcript path(s) for `taskId`,
+ *  EXCLUDING `excludeRunId` (this dispatch's own run — never point a worker at itself), newest
+ *  first, capped at `limit`. Retrieval, never injection — the whole-file-injection anti-pattern
+ *  the learnings store already avoids (this task's own design note). */
+export function predecessorTranscriptPaths(
+  root: string,
+  taskId: string,
+  opts: { excludeRunId?: string; limit?: number } = {},
+): string[] {
+  const limit = opts.limit ?? TRANSCRIPT_RETENTION_DEFAULT;
+  return listArchivedTranscripts(root, taskId)
+    .filter((t) => t.runId !== opts.excludeRunId)
+    .slice(0, limit)
+    .map((t) => t.path);
+}
+
+/**
+ * Renders the ONE line design note (iii) asks the fix/diagnose prompt to gain, spliced onto the
+ * already-rendered prompt at its call site (see this section's header doc for why the splice
+ * happens here rather than inside `lib/prompt-render.ts`). Empty — never a line naming nothing —
+ * when `paths` is empty, so a task's FIRST fix/diagnose round costs nothing extra and names no
+ * predecessor (the falsifier this task ships with: remove this call and the positive fixture
+ * must fail while the archive write still passes).
+ */
+export function predecessorTranscriptPromptLines(paths: readonly string[]): string[] {
+  if (paths.length === 0) return [];
+  return [
+    "",
+    "PREDECESSOR TRANSCRIPT(S) (W1-T3079 — the 'seance' pattern): a prior worker on this task " +
+      "left a session transcript at the path(s) below, NEWEST FIRST. Read the newest one before " +
+      "acting — it is the record of what was already tried, including what failed and why; " +
+      "repeating it blind is the second-strike failure this line exists to prevent.",
+    ...paths.map((p) => `- ${p}`),
+  ];
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -12190,6 +12411,33 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // W1-T6: every worker call ledgers the standard telemetry shape.
         ...workerLedgerFields(impl),
       });
+      // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
+      // above `runTask`. Best-effort and keyed on `runId` alone (not per-attempt), so a
+      // transient/diagnose-informed retry's own re-dispatch OVERWRITES the same file rather than
+      // multiplying it: `implement.done` is one archive point per run, unlike the fix rung's
+      // per-strike archive below.
+      let implHeadShaForArchive: string | undefined;
+      try {
+        implHeadShaForArchive = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }).trim();
+      } catch {
+        // best-effort — see comment above.
+      }
+      archiveWorkerTranscript(
+        {
+          root: config.root,
+          taskId,
+          runId,
+          rung: "implement",
+          text: workerTranscript(impl),
+          model: mount.model,
+          verdict: impl.subtype,
+          headSha: implHeadShaForArchive,
+        },
+        log,
+      );
       // implementAttemptOutcome reproduces isTransientResult's/workerErrorVerdict's existing
       // invariants byte-for-byte (see its own doc) and THROWS ImplementBudgetBreach on
       // error_max_budget_usd rather than returning failure — dollars are the hard backstop and
@@ -12208,7 +12456,16 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           maxBudgetUsd: budgetUsd,
           settingsFile,
           config,
-          prompt: renderDiagnosePrompt(task, [workerTranscript(impl), impl.stderr].join("\n")),
+          // W1-T3079: POINT, DO NOT INJECT (design note iii) — names this task's predecessor
+          // transcript path(s) from an EARLIER run (never this run's own just-archived
+          // `implement` transcript, excluded by `runId`), newest first. Empty on a task's first
+          // run: the diagnose prompt is byte-identical to before this task in that case.
+          prompt: [
+            renderDiagnosePrompt(task, [workerTranscript(impl), impl.stderr].join("\n")),
+            ...predecessorTranscriptPromptLines(
+              predecessorTranscriptPaths(config.root, taskId, { excludeRunId: runId }),
+            ),
+          ].join("\n"),
         }),
       );
       log("diagnose.worker_done", {
@@ -12219,6 +12476,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // W1-T6: every worker call ledgers the standard telemetry shape.
         ...workerLedgerFields(d),
       });
+      // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
+      // above `runTask`. `runDiagnoseThenRetry` calls `diagnose` at most once per run, so this
+      // never overwrites a sibling round's file the way the implement archive above can.
+      archiveWorkerTranscript(
+        { root: config.root, taskId, runId, rung: "diagnose", text: workerTranscript(d), model: diagnoseMount.model, verdict: d.subtype },
+        log,
+      );
       return { text: workerTranscript(d) };
     };
 
