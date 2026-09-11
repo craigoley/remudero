@@ -945,6 +945,21 @@ export interface InboxDraftingItem {
   spawnedAt: string;
 }
 
+/**
+ * One DECLINED proposal, as GET /v1/inbox renders it (W1-T3408). Carries the decline's own reason
+ * verbatim, so the list says WHY each was refused and a reader can tell a deliberate refusal from
+ * one entered on reasoning that has since been shown wrong.
+ *
+ * IT IS A SEPARATE ARRAY, not folded into `notReady`: a declined proposal is not awaiting anything
+ * and must never read as work in progress. Nothing here is actionable except restore.
+ */
+export interface InboxDeclinedItem {
+  proposalId: string;
+  summary: string;
+  /** The reason the latest `panel.proposal_declined` row recorded, verbatim. */
+  reason: string;
+}
+
 /** One not-ready proposal, as GET /v1/inbox renders it (W1-T2604). `reasons` is the exact {@link
  *  PredicateFailure}[] `classifyProposal` computed, never a bare string, so an operator sees why
  *  without attempting an approve. A separate array from `ready`/`drafting`: presence here implies
@@ -1024,8 +1039,11 @@ function classifyAllProposals(
  * computed the way `rmd inbox` prints them, for the shell's NEEDS ME section. Deferred-with-
  * trigger proposals are never returned — only what is actionable or in-progress is surfaced.
  * Not-ready proposals (W1-T2604) ride along in `notReady` (see {@link InboxNotReadyItem});
- * ratified/retired/declined proposals stay excluded from every array. `rmd approve`/`reframe`/
- * `decline` are wired from the card below, over the same write-token scope every write uses.
+ * Ratified/retired proposals stay excluded from every array. DECLINED ones are returned in their
+ * own `declined` array (W1-T3408): `POST /v1/inbox/restore` shipped with no way to learn its own
+ * argument, because a declined proposal was invisible here — a write route whose parameter cannot
+ * be discovered is a mechanism nobody can reach. `rmd approve`/`reframe`/`decline` are wired from
+ * the card below, over the same write-token scope every write uses.
  */
 export function buildInboxRoute(deps: PanelGraphDeps): Route {
   return {
@@ -1038,6 +1056,7 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
       const ready: InboxReadyItem[] = [];
       const drafting: InboxDraftingItem[] = [];
       const notReady: InboxNotReadyItem[] = [];
+      const declined: InboxDeclinedItem[] = [];
       for (const classification of classifications) {
         const proposal = proposals.find((p) => p.id === classification.proposalId);
         if (!proposal) continue; // unreachable — classifications are 1:1 with proposals
@@ -1050,6 +1069,12 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
           });
         } else if (classification.state === "drafting") {
           drafting.push({ proposalId: proposal.id, summary: proposal.summary, spawnedAt: classification.draftSpawnedAt ?? "" });
+        } else if (classification.state === "declined") {
+          declined.push({
+            proposalId: proposal.id,
+            summary: proposal.summary,
+            reason: classification.declinedReason ?? "declined by an operator",
+          });
         } else if (classification.state === "not_ready") {
           // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
           // never a bare "not_ready" — see InboxNotReadyItem's own doc.
@@ -1068,7 +1093,7 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
           return fresh.length === current.length ? null : fresh;
         });
       }
-      sendJson(res, 200, { ready, drafting, notReady });
+      sendJson(res, 200, { ready, drafting, notReady, declined });
     },
   };
 }
