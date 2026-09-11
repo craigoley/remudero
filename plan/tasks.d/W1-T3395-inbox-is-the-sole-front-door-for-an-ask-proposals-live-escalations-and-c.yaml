@@ -1,0 +1,48 @@
+- id: W1-T3395
+  title: "INBOX is the sole front door for an ask — proposals, live escalations, and clarification questions render as ONE classified feed with ONE resolution vocabulary; NEEDS ME is DISSOLVED (ratifies W1-T3186 ii)"
+  repo: remudero
+  depends_on: [W1-T3394, W1-T153, W1-T193, W1-T111]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    Ratifies W1-T3186 clause (ii). With W1-T3394's classifier in place, this task removes the NEEDS ME section
+    W1-T153 specified and replaces it with INBOX: the ONLY place an ASK-classified item renders. Every ASK
+    source — inbox proposals (view/approve/reframe, W1-T111/T193), live escalations needing a decision, and
+    unanswered clarification questions (W1-T78) — shares ONE row template and ONE action vocabulary, so the
+    operator never has to learn a second set of verbs to resolve the same kind of decision depending on which
+    section happened to render it.
+    THIS SECTION OWNS ONLY ASKS. A drain-rundown outcome line, or an escalation whose decision is already
+    answered, must never appear here — that is CHANGE MANAGEMENT's remit (W1-T3396), and W1-T3394's classifier is
+    the single source of truth deciding which section an item belongs to.
+  design: |
+    Replace W1-T153's NEEDS ME section spec with INBOX: render every item W1-T3394 classifies ASK, sourced from
+    inbox proposals (state + drafted task ids per W1-T193), live escalations, and unanswered W1-T78 questions.
+    ONE shared row template dispatching on item TYPE for its action set (approve/reframe for a proposal,
+    view-issue/answer for an escalation or question) — never a second per-section vocabulary. NEEDS ME as a
+    named section/heading is REMOVED from the rendered shell entirely. Auto-expand-when-non-empty (the
+    W1-T223 behavior) carries over to INBOX. VERIFY the current W1-T153 shell section markup and W1-T193's
+    proposal-card render before editing (distrust this note).
+  acceptance:
+    - claim: "the rendered shell contains NO section named NEEDS ME — it is dissolved, not renamed"
+      proof: "unit test: test/serve.inbox-unification.test.ts"
+    - claim: "every ASK-classified item (a W1-T3394 classifyAskRecordItem() result of ASK) renders inside the INBOX section, regardless of its source (proposal, escalation, question)"
+      proof: "unit test: test/serve.inbox-unification.test.ts"
+    - claim: "INBOX renders NO RECORD-classified item — a W1-T3394 classifyAskRecordItem() result of RECORD never appears in INBOX (the cross-section falsifier)"
+      proof: "unit test: test/serve.inbox-unification.test.ts"
+    - claim: "all three ask types share ONE action vocabulary — the row template dispatches on item type, never on section"
+      proof: "unit test: test/serve.inbox-unification.test.ts"
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: ["§7B", "§7"]
+  files: [src/lib/serve.ts, test/serve.inbox-unification.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    Ratifies W1-T3186 clause (ii). Depends on W1-T3394 for classification and on W1-T193/W1-T111 for the
+    proposal-card affordances this section reuses verbatim rather than re-specifying. Sibling of W1-T3396, which
+    takes the RECORD side of the same classifier.
+    risk:high with band_meaning:span is Rule 19 sizing: dissolving NEEDS ME and rendering every ASK through
+    INBOX is one cross-file shell invariant, unsatisfiable by testing only the source or only the fixture.
