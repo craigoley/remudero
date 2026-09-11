@@ -63,6 +63,9 @@ export interface ReviewDecisionDigestInput {
   headSha: string;
   diff: string;
   report: string;
+  /** The full implement report is material only when supplied: preserving omission keeps legacy
+   * digest identities stable, while a current worker refusal cannot replay a prior clean verdict. */
+  implementationReport?: string;
   body?: string;
   acceptance: readonly AcceptanceCriterion[];
   declaredFiles?: readonly string[];
@@ -85,6 +88,7 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     headSha: input.headSha,
     diff: input.diff,
     report: input.report,
+    ...(input.implementationReport !== undefined ? { implementationReport: input.implementationReport } : {}),
     body: input.body ?? null,
     acceptance,
     declaredFiles: input.declaredFiles ?? [],
@@ -213,6 +217,81 @@ export type ProofExecOutcome =
   | "not_yet_built"
   | "stale_self_path";
 
+/** The closed vocabulary an implementation worker may use to decline one acceptance criterion.
+ * The judge recognises only this exact structure; free prose containing "refused" is never a
+ * decision input. */
+export const REFUSAL_REASON_CLASSES = [
+  "premise-rotted",
+  "outside-declared-files",
+  "needs-operator-input",
+  "proof-unexecutable-at-head",
+  "contradicts-another-criterion",
+] as const;
+
+export type CriterionRefusalClass = (typeof REFUSAL_REASON_CLASSES)[number];
+
+/** A worker's bounded, criterion-indexed advisory refusal. It can only make that criterion fail. */
+export interface CriterionRefusal {
+  class: CriterionRefusalClass;
+  detail: string;
+}
+
+export function isCriterionRefusal(value: unknown): value is CriterionRefusal {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Partial<CriterionRefusal>;
+  return (
+    typeof candidate.detail === "string" &&
+    candidate.detail.trim().length > 0 &&
+    candidate.detail.length <= 280 &&
+    typeof candidate.class === "string" &&
+    (REFUSAL_REASON_CLASSES as readonly string[]).includes(candidate.class)
+  );
+}
+
+/**
+ * Parse the implement report's one explicit refusal block. A malformed, duplicate, or out-of-range
+ * line is ignored rather than guessed into a decision. The body grammar is intentionally smaller
+ * than Markdown: `REFUSED:` followed by `<criterion index>. [<closed class>] <one line detail>`.
+ */
+export function parseCriterionRefusals(report: string, criterionCount: number): Array<CriterionRefusal | undefined> {
+  const refusals: Array<CriterionRefusal | undefined> = Array.from({ length: criterionCount });
+  const lines = report.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^\s*REFUSED:\s*$/.test(line));
+  if (start === -1) return refusals;
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "" || /^\s*#{1,6}\s/.test(line) || /^\s*[A-Z][A-Z _-]+:\s*$/.test(line)) break;
+    const match = /^\s*(\d+)\.\s*\[([a-z-]+)\]\s+(\S(?:.*\S)?)\s*$/.exec(line);
+    if (!match) continue;
+    const index = Number(match[1]) - 1;
+    const refusal = { class: match[2], detail: match[3] };
+    if (index < 0 || index >= criterionCount || refusals[index] !== undefined || !isCriterionRefusal(refusal)) continue;
+    refusals[index] = refusal;
+  }
+  return refusals;
+}
+
+/** A deterministic contradiction: the PR body explicitly declares a worker-refused criterion complete. */
+export interface RefusalContradiction {
+  criterionIndex: number;
+  refusalClass: CriterionRefusalClass;
+}
+
+function refusalContradictionsInReport(
+  report: string,
+  refusals: readonly (CriterionRefusal | undefined)[],
+): RefusalContradiction[] {
+  const contradictions: RefusalContradiction[] = [];
+  const claimedComplete = /(?:^|\n)\s*(?:[-*]\s*)?criterion\s+(\d+)\s*:\s*(?:complete|implemented|satisfied)\b/gim;
+  for (const match of report.matchAll(claimedComplete)) {
+    const criterionIndex = Number(match[1]) - 1;
+    const refusal = refusals[criterionIndex];
+    if (!refusal || contradictions.some((entry) => entry.criterionIndex === criterionIndex)) continue;
+    contradictions.push({ criterionIndex, refusalClass: refusal.class });
+  }
+  return contradictions;
+}
+
 /** One criterion's verdict against its stated proof. */
 export interface CriterionVerdict {
   claim: string;
@@ -231,6 +310,8 @@ export interface CriterionVerdict {
   /** Copied verbatim from {@link AcceptanceCriterion.holdout} (W1-T166). The verdict folds a holdout criterion in like
    *  any other; this flag exists only so {@link visibleCriteria} keeps its text off worker-facing surfaces. */
   holdout?: boolean;
+  /** The worker's explicit refusal, if this criterion was declined under the closed grammar above. */
+  refusal?: CriterionRefusal;
 }
 
 /** The two reasons a report can fail to be the PR body, which are NOT the same fact and have different remedies:
@@ -250,6 +331,10 @@ export interface ReviewEvidence {
   diff: string;
   /** The implement worker's REPORT text (where proofs are pasted). */
   report: string;
+  /** The implementation worker's full report. Kept distinct from the PR body: body integrity
+   * remains authoritative for prose/diff checks while this optional channel supplies only the
+   * strict `REFUSED:` grammar. */
+  implementationReport?: string;
   /** True when `report` is NOT the PR body (W1-T1100): `runTaskBody` (run-task.js) substitutes the worker's own chat
    *  text after a failed body read, so an outage degrades to judging the narrative rather than stalling the review.
    *  TRAP: unmarked, a substitute failed two OPPOSITE ways on #2395 — {@link bodyContradictsDiff} manufactured a
@@ -385,6 +470,9 @@ export interface ReviewVerdict {
    *  (W1-T1264 design (iv)) — see {@link ChangesetClaimRecognition.fenceUnbalancedAtEof} for why that silently starves
    *  `changesetClaimsRecognised`. Legibility only; `undefined`, not `false`, when withheld. */
   changesetFenceUnbalancedAtEof?: boolean;
+  /** Explicit body assertions that contradict a criterion the worker refused. Non-empty forces
+   * failure and is deliberately syntax-bound, never an LLM interpretation of ordinary prose. */
+  refusalContradictions?: RefusalContradiction[];
   /** True when the diff changes at least one {@link INSTRUMENT_SURFACE} path AND at least one `src/` PRODUCT path
    *  (`test/` excluded, {@link isProductPath}) in the SAME PR — Standing rule 25 (W1-T297). ADVISORY: folds into
    *  NEITHER `state` NOR `floorState`, and rides on every review row as `instrument_entangled`. See
@@ -1952,6 +2040,9 @@ export function judgeCriterion(
    * so coverage was 1.0 by construction and every resolved-shard criterion read `met` against any body, an empty one
    * included (recon-2026-09-05 R-15). */
   floorKeywords: "proof" | "claim" = "proof",
+  /** A syntactically valid implementation-worker refusal. It is advisory evidence with one
+   * deterministic consequence: the worker may make its own criterion fail, never pass. */
+  refusal?: CriterionRefusal,
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
 
@@ -1965,6 +2056,18 @@ export function judgeCriterion(
       reason: `satisfied by ${criterion.satisfied_by} (prior merge)`,
       proof_exec: "not_executable",
       holdout: !!criterion.holdout,
+    };
+  }
+
+  if (refusal) {
+    return {
+      ...base,
+      met: false,
+      floorMet: false,
+      reason: `worker refused [${refusal.class}]: ${refusal.detail}`,
+      proof_exec: "not_executable",
+      holdout: !!criterion.holdout,
+      refusal,
     };
   }
 
@@ -3149,6 +3252,7 @@ export function judgeReview(
   evidence: ReviewEvidence,
 ): ReviewVerdict {
   const reportTokens = new Set(tokenize(evidence.report));
+  const criterionRefusals = parseCriterionRefusals(evidence.implementationReport ?? "", criteria.length);
   // W1-T205/W1-T427/W1-T2472: compute plan-only before grading so W1-T2713 can choose which of the criterion's texts
   // supplies the floor's keywords. The predicate and inputs are unchanged; this is only a move.
   const diffFiles = changedFiles(walkDiff(evidence.diff));
@@ -3191,6 +3295,7 @@ export function judgeReview(
       evidence.semanticClauses?.[i],
       evidence.reportSubstituteCause,
       floorKeywords,
+      criterionRefusals[i],
     ),
   );
   const testTheater = detectTestTheater(evidence.diff);
@@ -3206,6 +3311,12 @@ export function judgeReview(
   const changesetRecognition = evidence.reportIsSubstitute ? undefined : recognizeChangesetClaims(evidence.report, diffFiles);
   const changesetContradictions = changesetRecognition?.contradictions ?? [];
   const changesetStaleCountClaims = changesetRecognition?.staleCountClaims ?? [];
+  // A substitute is the worker transcript itself, never an independently-authored PR body, so it
+  // cannot honestly contradict that same worker's refusal. The grammar below is a narrow,
+  // deterministic declaration, not natural-language inference.
+  const refusalContradictions = evidence.reportIsSubstitute
+    ? []
+    : refusalContradictionsInReport(evidence.report, criterionRefusals);
 
   // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s doc. Reuses the SAME `diffFiles`
   // every other structural check above already computed — no new diff walk.
@@ -3245,6 +3356,7 @@ export function judgeReview(
     testTheater ||
     criteriaTampered ||
     changesetContradictions.length > 0 ||
+    refusalContradictions.length > 0 ||
     unprovenancedDecisionsEntries.length > 0
       ? "failure"
       : "success";
@@ -3267,6 +3379,7 @@ export function judgeReview(
     testTheater ||
     criteriaTampered ||
     changesetContradictions.length > 0 ||
+    refusalContradictions.length > 0 ||
     unprovenancedDecisionsEntries.length > 0
       ? "failure"
       : "success";
@@ -3331,6 +3444,7 @@ export function judgeReview(
           changesetContradictions,
           instrumentEntangled ? instrumentEntanglement : undefined,
           unprovenancedDecisionsEntries,
+          refusalContradictions,
         );
 
   return {
@@ -3350,6 +3464,7 @@ export function judgeReview(
     criteriaTampered,
     changesetContradictions,
     changesetStaleCountClaims,
+    refusalContradictions,
     changesetClaimsRecognised: changesetRecognition?.recognisedCount,
     changesetFenceUnbalancedAtEof: changesetRecognition?.fenceUnbalancedAtEof,
     instrumentEntangled,
@@ -4264,6 +4379,7 @@ export function failSummary(
   changesetContradictions: ChangesetClaimContradiction[] = [],
   instrumentEntanglement?: { instrumentPaths: string[]; srcPaths: string[] },
   unprovenancedDecisionsEntries: string[] = [],
+  refusalContradictions: RefusalContradiction[] = [],
 ): string {
   if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
   if (criteriaTampered) {
@@ -4272,6 +4388,14 @@ export function failSummary(
     // branch says the ONE actionable thing that fits, the PR SHAPE to change; the full two-part remedy rides
     // `checkSatisfiedByGuard`'s uncapped advisory `reason`. MEASURED: 133 characters. Five suites pin `Standing rule 15`.
     return `${FAIL_PREFIX}Standing rule 15: a criterion was added/edited beside non-plan files — file the shard in its own plan-only PR`;
+  }
+  if (refusalContradictions.length > 0) {
+    const first = refusalContradictions[0];
+    const more = refusalContradictions.length > 1 ? ` (+${refusalContradictions.length - 1} more)` : "";
+    return (
+      `${FAIL_PREFIX}body claims criterion ${first.criterionIndex + 1} complete after worker refused it ` +
+      `[${first.refusalClass}]${more}`
+    );
   }
   if (changesetContradictions.length > 0) {
     const first = changesetContradictions[0];

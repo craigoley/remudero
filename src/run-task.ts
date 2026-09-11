@@ -168,6 +168,26 @@ export {
 };
 export type { FixEvidence, FixMode };
 
+/**
+ * The implementation worker's narrowly-scoped refusal channel. This lives at the dispatch site
+ * because the deterministic consumer is `runReview` below; it is appended to the first prompt
+ * and to the compaction anchor from the same constant, so the contract cannot disappear midway
+ * through a run. The fixed grammar is parsed in lib/review.ts — ordinary prose is not authority.
+ */
+export const IMPLEMENT_REFUSAL_REPORT_CONTRACT = [
+  "",
+  "# REFUSAL REPORTING",
+  "- If evidence at the current HEAD shows that you cannot satisfy a specific acceptance criterion,",
+  "  put this exact block in your final REPORT, with one line for each refused criterion:",
+  "  REFUSED:",
+  "  <criterion index>. [premise-rotted|outside-declared-files|needs-operator-input|proof-unexecutable-at-head|contradicts-another-criterion] <one concrete sentence>",
+  "- Use only a listed class. Do not use this block for a transient tool failure or a guess.",
+  "- A refusal is advisory evidence: it can fail only that criterion and routes to an operator; it",
+  "  never approves work, changes declared scope, or authorizes a retry.",
+  "- If you refuse criterion N, do not state `Criterion N: COMPLETE`, `IMPLEMENTED`, or `SATISFIED`",
+  "  in the PR body. That explicit contradiction fails review.",
+].join("\n");
+
 /*
 Source-text compatibility for legacy tests whose subject is the pre-extraction dispatcher text.
 The live implementations above are imported from "lib/prompt-render" (src/lib/prompt-render.ts).
@@ -983,12 +1003,14 @@ import {
   narrowNameFilteredArgs,
   execWhitelistedProof,
   defaultProofSpawner,
+  isCriterionRefusal,
   type ProofSpawner,
   type PendingReviewOwnerAssessment,
   type PendingReviewStatusRecord,
   type AutomergeHold,
   type CappedOverride,
   type CriterionVerdict,
+  type CriterionRefusal,
   type ReviewVerdict,
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
@@ -4626,6 +4648,10 @@ async function runReview(args: {
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
   task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
   report: string;
+  /** The implementation worker's complete final report. Kept separate from `report`, which must
+   * remain the PR body for body/diff integrity. `judgeReview` reads this only for the strict,
+   * criterion-indexed `REFUSED:` channel. */
+  implementationReport?: string;
   /**
    * (W1-T1100) True when `report` is the worker's own chat text, substituted after a failed
    * PR-body fetch — see {@link "./lib/review.js".ReviewEvidence.reportIsSubstitute}'s doc for
@@ -4784,7 +4810,7 @@ async function runReview(args: {
   const scopeContext = reviewScopeContext(diff, task.files);
   const criteria = task.acceptance ?? [];
   const decisionDigest = reviewDecisionDigest({
-    headSha, diff, report, body: inputBody, acceptance: criteria, declaredFiles: task.files,
+    headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files,
   });
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest,
@@ -4945,6 +4971,7 @@ async function runReview(args: {
   const computed = judgeReview(criteria, {
     diff,
     report,
+    implementationReport: args.implementationReport,
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
     reportIsSubstitute: args.reportIsSubstitute,
     reportSubstituteCause: args.reportSubstituteCause,
@@ -12360,9 +12387,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // ONE call yields both the text the worker gets and the parts it was assembled from. The
     // manifest below is ledgered from THESE parts; deriving them a second time is what let the
     // manifest disagree with the prompt (see renderImplementPromptWithParts).
-    const { prompt, parts: implementParts } = renderImplementPromptWithParts(
+    const { prompt: renderedImplementPrompt, parts: implementParts } = renderImplementPromptWithParts(
       task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart,
     );
+    // This is an output-only contract, deliberately outside `# CONTEXT`; the provenance manifest
+    // still hashes the exact prompt sent to the worker below. The companion anchor append keeps a
+    // compaction from deleting the only syntax the deterministic judge is allowed to honour.
+    const prompt = `${renderedImplementPrompt}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -12394,7 +12425,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = renderAnchorBlock(task, runId, ruleHeadlinesPart);
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -13066,6 +13097,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       prUrl,
       task,
       report: reviewReport,
+      implementationReport: fullText(impl),
       reportIsSubstitute: reviewReportIsSubstitute,
       reportSubstituteCause: reviewReportSubstituteCause,
       settingsFile,
@@ -28089,6 +28121,24 @@ function resolveOpenPrTaskId(pr: RawOpenPr, ledger: Array<Record<string, unknown
   return resolveReviewTaskId(pr.body ?? "", pr.headRefName, isPlanOnlyFilingPr(ledger, pr.url));
 }
 
+/** Recover refusal metadata from a review's structured decision verdict. It is deliberately not
+ * inferred from `reason`: that field is presentation prose, while this read needs a closed class
+ * before the sweep may skip a strike. */
+function refusalByClaimFromDecisionVerdict(value: unknown): Map<string, CriterionRefusal> {
+  const refusals = new Map<string, CriterionRefusal>();
+  if (value === null || typeof value !== "object") return refusals;
+  const criteria = (value as { criteria?: unknown }).criteria;
+  if (!Array.isArray(criteria)) return refusals;
+  for (const entry of criteria) {
+    if (entry === null || typeof entry !== "object") continue;
+    const candidate = entry as { claim?: unknown; met?: unknown; refusal?: unknown };
+    if (candidate.met === false && typeof candidate.claim === "string" && isCriterionRefusal(candidate.refusal)) {
+      refusals.set(candidate.claim, candidate.refusal);
+    }
+  }
+  return refusals;
+}
+
 /**
  * Recover the most recent failing review's unmet criteria for a task from the
  * ledger (`review.posted` / `fix.review` lines carry `unmet_criteria` + `reasons`).
@@ -28099,11 +28149,13 @@ function resolveOpenPrTaskId(pr: RawOpenPr, ledger: Array<Record<string, unknown
 function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string): CriterionVerdict[] {
   let claims: string[] = [];
   let reasons: string[] = [];
+  let refusals = new Map<string, CriterionRefusal>();
   for (const line of lines) {
     if (line.step !== "review.posted" || line.task_id !== taskId) continue;
-    if (line.state === "success") { claims = []; reasons = []; continue; }
+    if (line.state === "success") { claims = []; reasons = []; refusals = new Map(); continue; }
     if (Array.isArray(line.unmet_criteria)) claims = line.unmet_criteria.map(String);
     if (Array.isArray(line.reasons)) reasons = line.reasons.map(String);
+    refusals = refusalByClaimFromDecisionVerdict(line.decision_verdict);
   }
   return claims.map((claim, i) => ({
     claim,
@@ -28111,6 +28163,7 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string):
     met: false,
     reason: reasons[i] ?? "",
     proof_exec: "not_executable" as const,
+    refusal: refusals.get(claim),
   }));
 }
 
@@ -31393,6 +31446,13 @@ export async function routeFix(
     // instead (falls through below), never this branch.
     await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
     return { outcome: "fixed", reason };
+  }
+  if (disposition === "refused-escalate") {
+    // Same transport as the full sweep, but never through dispatchFix: a valid worker refusal is
+    // an operator decision point, not an additional speculative strike.
+    const question = renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []);
+    await deps.escalate(pr, reason, question);
+    return { outcome: "escalated", reason };
   }
   // Strike cap honored: the SAME rule the sweep policy uses to route to escalate
   // (failing review OR blocked_ci — a required check red, W1-T138 broadened this
