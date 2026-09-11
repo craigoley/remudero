@@ -993,7 +993,7 @@ digestCadence:
     max: 24
 
 # W1-T2923: repository intake rungs. Each member has its OWN two-bound cadence so a short interval
-# on one intake verb cannot drag the others. All ship OFF: these rungs poll GitHub, write feedback,
+# on one intake verb cannot drag the others. Each starts OFF: these rungs poll GitHub, write feedback,
 # draft proposals or may dispatch workers, so an operator enables each repository's intake path
 # deliberately instead of inheriting a read-only cadence's safe-on posture.
 intakeCadence:
@@ -1041,7 +1041,7 @@ intakeCadence:
       max: 24
   codeqlQuality:
     enabled:
-      value: false
+      value: true
       origin: "net-new"
     minIntervalMinutes:
       value: 1440

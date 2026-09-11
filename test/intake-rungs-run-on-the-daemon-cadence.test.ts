@@ -32,6 +32,7 @@ function policyWithIssues(enabled: boolean): Policy {
       intakeCadence: {
         ...shipped.values.intakeCadence,
         issues: { enabled, minIntervalMinutes: 60, maxPerDay: 4 },
+        codeqlQuality: { ...shipped.values.intakeCadence.codeqlQuality, enabled: false },
       },
     },
   };
@@ -72,6 +73,7 @@ test("one daemon tick polls issues when enabled, and the next tick inside the in
       config: { root: disabled.root, claudeBin: "/bin/true" },
       clock: fixedClock(NOW.getTime()),
       policy: policyWithIssues(false),
+      ratifications: new Map(),
       loadManagedRepos: () => [{ owner: "acme", repo: "app" }],
       pollIssues: async () => {
         disabledPolls++;
@@ -92,6 +94,7 @@ test("one daemon tick polls issues when enabled, and the next tick inside the in
       config: { root: enabled.root, claudeBin: "/bin/true" },
       clock: fixedClock(NOW.getTime()),
       policy: policyWithIssues(true),
+      ratifications: new Map(),
       loadManagedRepos: () => [{ owner: "acme", repo: "app" }],
       pollIssues: async (managed, deps) => {
         polls++;
