@@ -1,0 +1,41 @@
+- id: W1-T3396
+  title: "CHANGE MANAGEMENT is its own area — PR/task lifecycle outcomes render as a distinct section, never duplicating an item INBOX already renders as an ask (ratifies W1-T3186 iii)"
+  repo: remudero
+  depends_on: [W1-T3394, W1-T141, W1-T153]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    Ratifies W1-T3186 clause (iii). CHANGE MANAGEMENT is the record of what happened to a change — merged,
+    blocked-with-reason, escalated-as-status — carrying the W1-T141 post-drain rundown and its
+    good/wrong/needs-follow-up operator-feedback hook. It renders every item W1-T3394 classifies RECORD. This is
+    the section a blocked-task escalation moves INTO once its decision has been answered (or once it never
+    needed one — a pure status report), so the operator's work-list (INBOX) never carries a stale or
+    already-resolved item just because it also has lifecycle history worth keeping.
+  design: |
+    A new named section (CHANGE MANAGEMENT) in the shell, positioned alongside INBOX per W1-T153's ordering
+    convention, rendering RECORD-classified items: drain-rundown outcome lines (merged/blocked/escalated,
+    with the W1-T141 one-tap verdict) and RECORD-classified escalations (decision already answered, or the
+    referent has resolved per the W1-T162 terminal-state discipline). VERIFY the DrainSummary/rundown render
+    (W1-T141), the W1-T153 section-ordering convention, and W1-T3394's RECORD predicate from source before
+    building.
+  acceptance:
+    - claim: "the drain-rundown's merged/blocked/escalated outcome lines (W1-T141) render inside CHANGE MANAGEMENT, with the good/wrong/needs-follow-up feedback hook intact"
+      proof: "unit test: test/serve.change-management.test.ts"
+    - claim: "a RECORD-classified escalation (decision already answered) renders in CHANGE MANAGEMENT, not INBOX — the cross-section falsifier"
+      proof: "unit test: test/serve.change-management.test.ts"
+    - claim: "CHANGE MANAGEMENT renders NO ASK-classified item — an item W1-T3394 classifies ASK never appears here, preventing the double-render the proposal names"
+      proof: "unit test: test/serve.change-management.test.ts"
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: ["§7B", "§7"]
+  files: [src/lib/serve.ts, test/serve.change-management.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    Ratifies W1-T3186 clause (iii). Sibling of W1-T3395 — together they exhaust W1-T3394's classifier output
+    (every item is ASK -> INBOX or RECORD -> CHANGE MANAGEMENT, never both, never neither).
+    risk:high with band_meaning:span is Rule 19 sizing: CHANGE MANAGEMENT's RECORD section and its absence
+    from INBOX are one cross-section invariant, not two independently satisfiable edits.
