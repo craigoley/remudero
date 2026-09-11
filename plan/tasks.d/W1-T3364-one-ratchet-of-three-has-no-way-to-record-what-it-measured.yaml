@@ -1,0 +1,47 @@
+- id: W1-T3364
+  title: "ONE RATCHET OF THREE HAS NO WAY TO RECORD WHAT IT MEASURED — comment-load and source-size each ship a `-signal`/`-ratchet` pair, the clock-signature census ships neither, so its baseline is edited by hand or not at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  files:
+    - scripts/clock-signature-ratchet.mjs
+    - test/the-clock-census-records-its-own-baseline.test.ts
+  origin: "sweep-forensics#2026-09-10-queue-day"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "the clock-signature baseline has a generator that writes the row it measured, like its two sibling ratchets"
+      proof: "unit test: the generator writes a measured row into the clock-signature baseline"
+    - claim: "a read-only mode reports a pending change and leaves the baseline byte-identical"
+      proof: "unit test: the no-record mode leaves the clock-signature baseline byte-identical"
+    - claim: "a run that cannot measure refuses rather than reporting a clean baseline"
+      proof: "unit test: an unreadable tree exits non-zero instead of recording"
+  rationale: |
+    MEASURED 2026-09-10. `package.json` ships `comment-load-ratchet`/`comment-load-signal` and
+    `source-size-ratchet`/`source-size-signal`. There is no clock-signature equivalent, and no
+    script writes `scripts/clock-signature-baseline.json`.
+    
+    THE OPERATOR CONSEQUENCE IS THE POINT. On the same day, a comment-load overage was mechanical —
+    the tool printed "Run `npm run comment-load-ratchet` to record them" and that was the whole
+    repair. Two clock-signature overages on #5025 and #5029 were not: with no generator, the row was
+    hand-edited JSON, and the decision was deferred to the operator twice before anything moved.
+    
+    `test/instrument-isolation.test.ts:278-280` already classifies this baseline as a LEDGER/FLOOR
+    instrument "where raising a row records debt and cannot make a failing falsifier pass" — so
+    recording is a sanctioned outcome that simply has no tool.
+  design: |
+    (i) COPY THE SIBLING, DO NOT INVENT A THIRD SHAPE. Same flags, same exit codes, same
+    "cannot measure must never report OK" rule the comment-load ratchet's own header states.
+    
+    (ii) MEASURE, NEVER ROUND UP. The row written is the count the census measured. A generator that
+    pads a ceiling turns a debt record into headroom nobody decided to grant.
+    
+    (iii) NO POLICY CHANGE. This adds no refusal and moves no threshold; it gives an existing refusal
+    the recording verb its siblings already have.
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if any shipped script writes `scripts/clock-signature-baseline.json`
+    today. THE REFUSAL CASE IS LOAD-BEARING: point the generator at an unreadable tree and it must exit
+    non-zero rather than record, or it can silently bless a measurement it never took.

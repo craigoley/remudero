@@ -1,0 +1,60 @@
+- id: W1-T3361
+  title: "THE LOCAL GATE MIRRORS ONE WORKFLOW AND FOURTEEN OTHERS HAVE NO LOCAL ROUTE AT ALL — `rmd preflight --ci-parity` is one-entry-per-`ci.yml`-job with a drift guard that only protects `ci.yml`, so every required-adjacent check living in its own workflow file is discoverable only by opening a PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  files:
+    - src/lib/ci-parity.ts
+    - test/a-required-check-outside-ci-yml-has-a-local-route.test.ts
+  origin: "sweep-forensics#2026-09-10-queue-day"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "the parity surface enumerates PR-triggering workflows beyond ci.yml, so a check living in its own file is not invisible to the local gate"
+      proof: "unit test: a workflow that runs on pull_request and is absent from the parity table is named"
+    - claim: "the drift guard that already refuses an unmirrored ci.yml job refuses an unmirrored standalone workflow the same way"
+      proof: "unit test: a standalone PR workflow with no parity entry fails the drift step"
+    - claim: "an entry may be declared deliberately unmirrored, and that declaration carries its reason rather than passing silently"
+      proof: "unit test: an unmirrored standalone entry without a reason is refused"
+  rationale: |
+    MEASURED 2026-09-10. `src/lib/ci-parity.ts:166` states the contract in its own words: "ONE
+    ENTRY PER ci.yml JOB. CI_PARITY_TABLE is data keyed by job name", and `:177` adds the guard —
+    "a job added to ci.yml with no entry would under-cover in silence; ci-parity:drift fails". That
+    guard protects ci.yml and nothing else.
+    
+    FOURTEEN workflows other than ci.yml run on `pull_request` today: acceptance-author-gate,
+    ci-gate, clock-sweep, codeql, coverage-session-blanking, dependency-review, docs-index-check,
+    fleet-heartbeat-watch, main-plan-guard, osv-scanner-pr, probe-path-filter, recovery-drill,
+    semgrep, unwired-gate. None has a local route, and no drift check notices.
+    
+    THE COST, MEASURED IN ONE DAY. Roughly thirteen PR repairs on 2026-09-10 were defects the author
+    could only learn about from CI. `acceptance-author-gate` alone refused #5025, #5026, #5028,
+    #5033 and #5039. Every one cost a push, a wait, and a second push.
+    
+    DOCTRINE ALREADY SAYS TO RUN THE GATE. `doctrine/before-you-push/run-the-shipped-local-gate-before-your-first-push-not.md`
+    tells an author to run `rmd preflight --ci-parity` first, and it is well written. The day's
+    count is what instructions alone are worth when the gate they name cannot see the failure.
+  design: |
+    (i) WIDEN THE SURFACE, KEEP THE SHAPE. The parity table stays data. Add the PR-triggering
+    workflows outside ci.yml as entries of the same shape, each either mirrored with CI's own argv or
+    explicitly `mirrored: false` with a reason — the existing rule that an unmirrored entry must
+    record why is what keeps this honest.
+    
+    (ii) THE DRIFT GUARD IS THE POINT. Extend the existing drift step so a PR-triggering workflow with
+    no entry fails it, exactly as an unmirrored ci.yml job does today. Without this the table goes
+    stale the first time someone adds a workflow.
+    
+    (iii) COST IS A FIRST-CLASS CONSTRAINT. Do NOT mirror the expensive scanners (codeql, semgrep,
+    osv-scanner) into the default local run — an oversized presubmit gets routed around within a week.
+    Mirror the cheap deterministic ones and let the rest be declared unmirrored with that reason.
+    
+    (iv) NO NEW GATE. This task adds no CI job and changes no refusal. It makes what CI already
+    refuses reachable before a PR exists.
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if `rmd preflight --ci-parity` already runs, or already refuses to
+    be silent about, a check defined outside `.github/workflows/ci.yml`. Drive the real command; a
+    table entry that is never executed is not a route. THE DRIFT TEST MUST BITE: delete one standalone
+    entry and the drift step must fail, or the guard is decorative.
