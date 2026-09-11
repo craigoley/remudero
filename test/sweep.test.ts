@@ -2143,6 +2143,7 @@ test("renderSweepSummary is a single legible line", () => {
     byDisposition: {
       mergeable: 1,
       "blocked-fixable": 1,
+      "refused-escalate": 0,
       stale: 1,
       "blocked-ambiguous": 1,
       "dep-review": 0,
@@ -2164,6 +2165,7 @@ test("renderSweepSummary calls out failed actions distinctly (W1-T99)", () => {
     byDisposition: {
       mergeable: 1,
       "blocked-fixable": 0,
+      "refused-escalate": 0,
       stale: 0,
       "blocked-ambiguous": 1,
       "dep-review": 0,
@@ -4687,6 +4689,7 @@ test("W1-T3027: the summary names every disposition, so the counts sum to the op
       {
         mergeable: 0,
         "blocked-fixable": 2,
+        "refused-escalate": 0,
         conflicted: 0,
         stale: 0,
         "blocked-ambiguous": 0,
@@ -4712,6 +4715,7 @@ test("W1-T3027: a residual is called out rather than left for the reader to subt
       {
         mergeable: 0,
         "blocked-fixable": 2,
+        "refused-escalate": 0,
         conflicted: 0,
         stale: 0,
         "blocked-ambiguous": 0,
@@ -4731,6 +4735,7 @@ test("W1-T3027: every Disposition the union declares appears in the rendered lin
   const all: Disposition[] = [
     "mergeable",
     "blocked-fixable",
+    "refused-escalate",
     "stale",
     "blocked-ambiguous",
     "dep-review",
