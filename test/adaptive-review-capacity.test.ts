@@ -31,6 +31,8 @@ import {
 import { activeWorkerCount, withWorkerOccupancy } from "../src/lib/worker.js";
 import { buildSweepEffects } from "../src/run-task.js";
 
+const REVIEW_NOW_MS = Date.parse("2026-09-05T00:00:00Z");
+
 const POLICY: ReviewCapacityPolicy = {
   hostWorkerBudget: 4,
   workerMemoryReserveMib: 1536,
@@ -364,7 +366,7 @@ function reviewablePr(n: number): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-04T00:00:00Z",
+    lastActivityAt: new Date(REVIEW_NOW_MS - 60_000).toISOString(),
     createdAt: `2026-09-0${n - 4000}T00:00:00Z`,
     headSha: `sha${n}`,
     autoMergeArmed: false,
@@ -379,7 +381,7 @@ function sweepDeps(postReview: NonNullable<SweepDeps["postReview"]>): SweepDeps 
     escalate: () => {},
     ledgerPath: join(mkdtempSync(join(tmpdir(), "rmd-adaptive-review-")), "ledger.ndjson"),
     runId: "ADAPTIVE-REVIEW",
-    now: () => Date.parse("2026-09-05T00:00:00Z"),
+    now: () => REVIEW_NOW_MS,
     postReview,
     selectAdaptiveReviewWidth: ({ queueDepth }) => {
       assert.equal(queueDepth, 3);
