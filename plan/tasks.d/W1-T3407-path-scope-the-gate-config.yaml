@@ -1,4 +1,4 @@
-- id: W1-T3402
+- id: W1-T3407
   title: "path-scope the gate config so the fleet cannot edit the gates that judge it, without a human on every merge"
   repo: remudero
   depends_on: []

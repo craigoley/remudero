@@ -1,4 +1,4 @@
-- id: W1-T3404
+- id: W1-T3409
   title: "the adoption symbol scan counts a doc-comment mention as a caller, so a dead export reads adopted"
   repo: remudero
   depends_on: []
