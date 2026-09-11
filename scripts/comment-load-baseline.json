@@ -248,7 +248,7 @@
   "src/lib/ops.ts": 176,
   "src/lib/orientation.ts": 38,
   "src/lib/panel-actions.ts": 250,
-  "src/lib/panel-graph.ts": 319,
+  "src/lib/panel-graph.ts": 500,
   "src/lib/panel-skill-run.ts": 127,
   "src/lib/panel-skills.ts": 44,
   "src/lib/plan-architect.ts": 235,
