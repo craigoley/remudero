@@ -973,13 +973,108 @@ function dialectGrepMatchedSourceText(line: string): string {
   return (m ? m[1] : line).trim();
 }
 
+function dialectGrepMatchedLineNumber(line: string): number | undefined {
+  const m = line.match(/^(?:.*?:)?(\d+):/);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  return Number.isSafeInteger(n) && n > 0 ? n : undefined;
+}
+
 function dialectGrepMatchedLineIsComment(line: string): boolean {
   const text = dialectGrepMatchedSourceText(line);
   return text.startsWith("//") || text.startsWith("/*") || text.startsWith("*");
 }
 
-export function matchedLinesAreAllComments(matchedLines: readonly string[]): boolean {
-  return matchedLines.length > 0 && matchedLines.every(dialectGrepMatchedLineIsComment);
+interface MatchedLineCommentContext {
+  pattern: string;
+  fileText: string;
+}
+
+function commentMaskByLine(fileText: string): boolean[][] {
+  const lines = fileText.split("\n").map((line) => line.replace(/\r$/, ""));
+  const masks: boolean[][] = [];
+  let block = false;
+  let quote: '"' | "'" | "`" | undefined;
+  let escaped = false;
+  for (const line of lines) {
+    const mask = Array.from({ length: line.length }, () => false);
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i];
+      const next = line[i + 1];
+      if (block) {
+        mask[i] = true;
+        if (ch === "*" && next === "/") {
+          mask[i + 1] = true;
+          i += 1;
+          block = false;
+        }
+        continue;
+      }
+      if (quote !== undefined) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === "\\") {
+          escaped = true;
+        } else if (ch === quote) {
+          quote = undefined;
+        }
+        continue;
+      }
+      if (ch === "/" && next === "/") {
+        for (let j = i; j < line.length; j += 1) mask[j] = true;
+        break;
+      }
+      if (ch === "/" && next === "*") {
+        mask[i] = true;
+        mask[i + 1] = true;
+        i += 1;
+        block = true;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    }
+    masks.push(mask);
+  }
+  return masks;
+}
+
+function allLiteralOccurrencesAreComments(line: string, mask: readonly boolean[], pattern: string): boolean | undefined {
+  if (!pattern) return undefined;
+  let found = false;
+  for (let index = line.indexOf(pattern); index >= 0; index = line.indexOf(pattern, index + 1)) {
+    found = true;
+    for (let i = index; i < index + pattern.length; i += 1) {
+      if (mask[i] !== true) return false;
+    }
+  }
+  return found ? true : undefined;
+}
+
+export function matchedLinesAreAllComments(
+  matchedLines: readonly string[],
+  context?: MatchedLineCommentContext,
+): boolean {
+  if (matchedLines.length === 0) return false;
+  if (context !== undefined) {
+    const sourceLines = context.fileText.split("\n").map((line) => line.replace(/\r$/, ""));
+    const masks = commentMaskByLine(context.fileText);
+    return matchedLines.every((line) => {
+      const lineNumber = dialectGrepMatchedLineNumber(line);
+      if (lineNumber === undefined) return dialectGrepMatchedLineIsComment(line);
+      const sourceLine = sourceLines[lineNumber - 1];
+      const mask = masks[lineNumber - 1];
+      if (sourceLine === undefined || mask === undefined) return dialectGrepMatchedLineIsComment(line);
+      return allLiteralOccurrencesAreComments(sourceLine, mask, context.pattern) ?? dialectGrepMatchedLineIsComment(line);
+    });
+  }
+  return matchedLines.every(dialectGrepMatchedLineIsComment);
+}
+
+function matchedLineCommentContext(w: WhitelistedProof, cwd: string): MatchedLineCommentContext | undefined {
+  const path = dialectGrepTargetPath(w);
+  if (path === undefined) return undefined;
+  const fullPath = join(cwd, path);
+  return existsSync(fullPath) ? { pattern: w.args[2]!, fileText: readFileSync(fullPath, "utf8") } : undefined;
 }
 
 /** Compile a `unit test:` dialect body — either a literal test-file path (reusing the exact-file
@@ -2201,7 +2296,10 @@ export function judgeCriterion(
         try {
           const outcome = exec(whitelisted, execCtx.cwd);
           if (outcome === "pass") {
-            if (whitelisted.kind === "grep" && matchedLinesAreAllComments(whitelisted.matchedLines ?? [])) {
+            if (
+              whitelisted.kind === "grep" &&
+              matchedLinesAreAllComments(whitelisted.matchedLines ?? [], matchedLineCommentContext(whitelisted, execCtx.cwd))
+            ) {
               proofExec = "executed_stale";
               reason =
                 `${reason} — NOTE: proof PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label}) ` +

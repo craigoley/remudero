@@ -28,11 +28,11 @@ test("comment-only grep matches withdraw the pass override", () => {
   withFixtureCheckout(
     {
       "src/lib/comment-only.ts": [
-        "// Compatibility target mentions MUTANT here.",
+        "export const live = 1; // Compatibility target mentions MUTANT here.",
         "/*",
-        " * MUTANT appears again inside a block comment.",
+        "  MUTANT appears again inside a block comment.",
         " */",
-        "export const live = 1;",
+        "export const other = 1;",
         "",
       ].join("\n"),
     },
@@ -58,7 +58,7 @@ test("a non-comment grep match keeps the current pass behavior", () => {
     {
       "src/lib/mixed.ts": [
         "// MUTANT also appears in a comment.",
-        'export const live = "MUTANT";',
+        'export const live = "this is not a // MUTANT comment";',
         "",
       ].join("\n"),
     },
@@ -76,18 +76,25 @@ test("a non-comment grep match keeps the current pass behavior", () => {
 });
 
 test("matchedLinesAreAllComments reads grep output lines, not the pattern shape", () => {
+  const fileText = [
+    "export const live = 1; // MUTANT in an inline comment",
+    "/*",
+    "  MUTANT in an unadorned block comment line",
+    " */",
+    'export const stringValue = "this is not a // MUTANT comment";',
+  ].join("\n");
   assert.equal(
     matchedLinesAreAllComments([
-      "src/lib/comment-only.ts:1:// MUTANT in a line comment",
-      "src/lib/comment-only.ts:3: * MUTANT in a block comment",
-    ]),
+      "src/lib/comment-only.ts:1:export const live = 1; // MUTANT in an inline comment",
+      "src/lib/comment-only.ts:3:  MUTANT in an unadorned block comment line",
+    ], { pattern: "MUTANT", fileText }),
     true,
   );
   assert.equal(
     matchedLinesAreAllComments([
       "src/lib/mixed.ts:1:// MUTANT in a comment",
-      'src/lib/mixed.ts:2:export const live = "MUTANT";',
-    ]),
+      'src/lib/mixed.ts:5:export const stringValue = "this is not a // MUTANT comment";',
+    ], { pattern: "MUTANT", fileText }),
     false,
   );
 });
