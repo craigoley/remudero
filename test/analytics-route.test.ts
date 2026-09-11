@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { spawnSync } from "node:child_process";
+import { gzipSync } from "node:zlib";
 import { test } from "node:test";
 import type { ServerResponse } from "node:http";
 import {
@@ -10,9 +11,12 @@ import {
   ANALYTICS_SCOPE_NOTE,
   buildAnalyticsRoute,
   deriveAnalyticsSnapshot,
-  readAnalyticsLedgerLines,
+  deriveAnalyticsSnapshotFromLedger,
+  deriveAnalyticsSnapshotFromStream,
   type AnalyticsSnapshot,
 } from "../src/lib/analytics-route.js";
+import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
+import { clockFromIsoFn, fixedClock } from "../src/lib/clock.js";
 
 function tmpStateDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -30,13 +34,9 @@ function writeLive(stateDir: string, lines: string[]): void {
   writeFileSync(join(stateDir, "ledger.ndjson"), lines.join("\n") + "\n");
 }
 
-function sortedTaskIds(lines: Array<Record<string, unknown>>): string[] {
-  return lines.map((l) => String(l.task_id)).sort();
-}
-
 // ── falsifier (v), direction 1: the rotation union must equal the single-file aggregate ───────
 
-test("readAnalyticsLedgerLines: rows split across the live file and TWO rotation archives (one gzip, one plain) aggregate IDENTICALLY to the same rows collapsed into one file", () => {
+test("streamed analytics: rows split across the live file and TWO rotation archives aggregate identically to one file", async () => {
   const split = tmpStateDir("rmd-analytics-split-");
   const single = tmpStateDir("rmd-analytics-single-");
   try {
@@ -54,26 +54,11 @@ test("readAnalyticsLedgerLines: rows split across the live file and TWO rotation
       '{"ts":"2026-08-01T00:00:00.000Z","task_id":"W1-T3","run_id":"R3","step":"run.start"}',
     ]);
 
-    const splitLines = readAnalyticsLedgerLines(split);
-    const singleLines = readAnalyticsLedgerLines(single);
-    assert.equal(splitLines.length, 3, "one row per archive plus the live row");
-    assert.deepEqual(
-      sortedTaskIds(splitLines),
-      sortedTaskIds(singleLines),
-      "the union read must reach every row a single-file read of the identical rows would",
-    );
-
-    // A LIVE-ONLY reader (never lists rotations at all) FAILS this falsifier: it reaches only the
-    // one row that lives in the live file, proving the union read above is doing real work, not
-    // trivially equal because the archives were empty.
-    const liveOnlyFsDeps = {
-      readdirSync: () => [] as string[],
-      existsSync: (p: string) => existsSync(p),
-      readFileSync: (p: string) => readFileSync(p),
-      gunzipSync: (b: Buffer) => gunzipSync(b),
-    };
-    const liveOnlyLines = readAnalyticsLedgerLines(split, liveOnlyFsDeps);
-    assert.equal(liveOnlyLines.length, 1, "a live-only reader must undercount — this is the rotation hazard made structural");
+    const clock = fixedClock(Date.parse("2026-08-01T01:00:00.000Z"));
+    const splitSnapshot = await deriveAnalyticsSnapshotFromLedger(split, clock);
+    const singleSnapshot = await deriveAnalyticsSnapshotFromLedger(single, clock);
+    assert.equal(splitSnapshot.noTerminalTaskCount, 3, "one run.start from each of gzip, plain, and live is reached");
+    assert.deepEqual(splitSnapshot, singleSnapshot, "the union reaches every row the equivalent single-file corpus reaches");
   } finally {
     rmSync(split, { recursive: true, force: true });
     rmSync(single, { recursive: true, force: true });
@@ -82,56 +67,54 @@ test("readAnalyticsLedgerLines: rows split across the live file and TWO rotation
 
 // ── falsifier (v), direction 2: dedupe is on the FULL LINE, never ts+task_id ───────────────────
 
-test("readAnalyticsLedgerLines: two DAEMON rows sharing one ts (but a different step) plus one distinct row count THREE, not two", () => {
+test("streamed analytics: distinct same-ts rows survive while a byte-identical archive replay collapses", async () => {
   const dir = tmpStateDir("rmd-analytics-dedupe-");
   try {
     // Two rows that are genuinely DIFFERENT events (different `step`) but share the SAME ts and
     // the SAME pseudo task_id — the rejected key this task's rationale names ("ts+task_id
     // collapsed simultaneous DAEMON rows") would wrongly treat these as ONE row.
+    const status = '{"ts":"2026-08-01T00:00:00.000Z","task_id":"CLI","run_id":"CLI-1","step":"cli.invoked","verb":"status"}';
     writeLive(dir, [
-      '{"ts":"2026-08-01T00:00:00.000Z","task_id":"DAEMON","run_id":"DAEMON-1","step":"daemon.target"}',
-      '{"ts":"2026-08-01T00:00:00.000Z","task_id":"DAEMON","run_id":"DAEMON-1","step":"daemon.tree_dirty"}',
-      '{"ts":"2026-08-01T00:00:05.000Z","task_id":"DAEMON","run_id":"DAEMON-1","step":"daemon.install_freshness"}',
+      status,
+      '{"ts":"2026-08-01T00:00:00.000Z","task_id":"CLI","run_id":"CLI-2","step":"cli.invoked","verb":"sweep"}',
+      '{"ts":"2026-08-01T00:00:05.000Z","task_id":"CLI","run_id":"CLI-3","step":"cli.invoked","verb":"doctor"}',
     ]);
-    const lines = readAnalyticsLedgerLines(dir);
-    assert.equal(lines.length, 3, "full-line dedupe: three DISTINCT lines survive, even though two share ts+task_id");
-
-    // Demonstrate the rejected key really would have undercounted, on these exact rows.
-    const naiveKeyed = new Map<string, unknown>();
-    for (const l of lines) naiveKeyed.set(`${l.ts}:${l.task_id}`, l);
-    assert.equal(naiveKeyed.size, 2, "ts+task_id collapses the two simultaneous-but-different rows — the collapsed-deferral hazard");
 
     // And a genuine BYTE-IDENTICAL repeat (the real union-overlap case: the same physical line
     // observed once in an archive and once in the live file) must still collapse to one, not grow
     // the count to four.
     writeGzArchive(dir, "ledger.2026-07-01T00-00-00-000Z.ndjson.gz", [
-      '{"ts":"2026-08-01T00:00:00.000Z","task_id":"DAEMON","run_id":"DAEMON-1","step":"daemon.target"}',
+      status,
     ]);
-    const withOverlap = readAnalyticsLedgerLines(dir);
-    assert.equal(withOverlap.length, 3, "a byte-identical repeat of an already-seen line must not grow the count");
+    const snapshot = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-08-01T01:00:00.000Z")));
+    assert.deepEqual(
+      snapshot.invocationsByVerb,
+      { status: 1, sweep: 1, doctor: 1 },
+      "same-ts distinct invocations survive and the byte-identical status replay counts once",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("readAnalyticsLedgerLines: a state dir with ZERO rotations is not a refusal — a fresh instance's live file still reads", () => {
+test("streamed analytics: a state dir with ZERO rotations is not a refusal", async () => {
   const dir = tmpStateDir("rmd-analytics-fresh-instance-");
   try {
     writeLive(dir, ['{"ts":"2026-08-14T00:00:00.000Z","task_id":"CLI","run_id":"CLI-1","step":"cli.invoked","verb":"status"}']);
-    const lines = readAnalyticsLedgerLines(dir);
-    assert.equal(lines.length, 1, "unlike resolveLedgerUnion (ledger-grep.ts), zero archives must not empty out a real live-file read");
+    const snapshot = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-08-14T01:00:00.000Z")));
+    assert.deepEqual(snapshot.invocationsByVerb, { status: 1 }, "a fresh instance's live row is still measured");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("readAnalyticsLedgerLines: a corrupt archive is skipped, best-effort, never a crash and never a refusal", () => {
+test("streamed analytics: a corrupt archive is skipped, best-effort, never a crash", async () => {
   const dir = tmpStateDir("rmd-analytics-corrupt-");
   try {
     writeFileSync(join(dir, "ledger.2026-07-01T00-00-00-000Z.ndjson.gz"), "not actually gzip");
-    writeLive(dir, ['{"ts":"2026-08-01T00:00:00.000Z","task_id":"W1-T1","run_id":"R1","step":"run.start"}']);
-    const lines = readAnalyticsLedgerLines(dir);
-    assert.equal(lines.length, 1, "the live row still reads even though the corrupt archive could not be opened");
+    writeLive(dir, ['{"ts":"2026-08-01T00:00:00.000Z","task_id":"CLI","run_id":"CLI-1","step":"cli.invoked","verb":"status"}']);
+    const snapshot = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse("2026-08-01T01:00:00.000Z")));
+    assert.deepEqual(snapshot.invocationsByVerb, { status: 1 }, "the live row still reads even though the corrupt archive could not be opened");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -233,9 +216,66 @@ test("deriveAnalyticsSnapshot: the scope note and asOf always ride the payload",
   assert.equal(snap.asOf, "2026-08-14T00:00:00.000Z");
 });
 
+test("deriveAnalyticsSnapshotFromLedger streams a replaying rotation union to the identical snapshot", async () => {
+  const dir = tmpStateDir("rmd-analytics-stream-");
+  const now = "2026-08-14T03:00:00.000Z";
+  try {
+    const invoked = '{"ts":"2026-08-14T00:00:00.000Z","task_id":"CLI","run_id":"CLI-1","step":"cli.invoked","verb":"status"}';
+    const started = '{"ts":"2026-08-14T00:01:00.000Z","task_id":"W1-T1","run_id":"R1","step":"run.start"}';
+    const verdict = '{"ts":"2026-08-14T00:03:00.000Z","task_id":"W1-T1","run_id":"R1","step":"verdict","lane":"run-task","model":"sonnet","total_cost_usd":1.5,"worker_duration_ms":2000}';
+    writeGzArchive(dir, "ledger.2026-08-14T00-05-00-000Z.ndjson.gz", [invoked, started, verdict]);
+    writeLive(dir, [invoked, verdict]);
+
+    const materialized = readLedgerUnionRecordsSync(dir, { dedupe: true }).rows;
+    const expected = deriveAnalyticsSnapshot(materialized, now);
+    const actual = await deriveAnalyticsSnapshotFromLedger(dir, fixedClock(Date.parse(now)));
+
+    assert.deepEqual(actual, expected, "streaming changes retention, not any of the four analytics answers");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("deriveAnalyticsSnapshotFromStream does not retain a response-irrelevant corpus", () => {
+  const script = `
+    import { deriveAnalyticsSnapshotFromStream } from "./src/lib/analytics-route.js";
+    import { fixedClock } from "./src/lib/clock.js";
+    async function* rows() {
+      for (let i = 0; i < 20000; i += 1) {
+        yield { step: "irrelevant", payload: Buffer.alloc(8192, i % 251).toString("hex") + i };
+      }
+      yield { step: "cli.invoked", verb: "status" };
+    }
+    const snapshot = await deriveAnalyticsSnapshotFromStream(rows(), fixedClock(Date.parse("2026-08-14T03:00:00.000Z")));
+    if (snapshot.invocationsByVerb.status !== 1) process.exit(2);
+  `;
+  const run = spawnSync(
+    process.execPath,
+    ["--max-old-space-size=192", "--import", "tsx", "--input-type=module", "--eval", script],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 30_000 },
+  );
+  assert.equal(
+    run.status,
+    0,
+    `a 313 MiB logical input must fit a 192 MiB heap when it is folded rather than retained\n${run.stderr}`,
+  );
+});
+
+test("deriveAnalyticsSnapshotFromStream stamps asOf after the stream has been consumed", async () => {
+  let phase = "before";
+  async function* rows(): AsyncGenerator<Record<string, unknown>> {
+    yield { step: "cli.invoked", verb: "status" };
+    phase = "after";
+  }
+
+  const snapshot = await deriveAnalyticsSnapshotFromStream(rows(), clockFromIsoFn(() => phase));
+
+  assert.equal(snapshot.asOf, "after", "streaming preserves the old route's post-read asOf boundary");
+});
+
 // ── the route itself ─────────────────────────────────────────────────────────────────────────
 
-test("GET /v1/analytics is read-scoped and answers 200 from its real default reader, aggregating the real rotation union", () => {
+test("GET /v1/analytics is read-scoped and answers 200 from its real default reader, aggregating the real rotation union", async () => {
   const dir = tmpStateDir("rmd-analytics-route-");
   try {
     const ledgerPath = join(dir, "ledger.ndjson");
@@ -244,7 +284,7 @@ test("GET /v1/analytics is read-scoped and answers 200 from its real default rea
     ]);
     writeLive(dir, ['{"ts":"2026-08-14T00:00:00.000Z","task_id":"CLI","run_id":"CLI-2","step":"cli.invoked","verb":"sweep"}']);
 
-    const route = buildAnalyticsRoute({ ledgerPath, now: () => "2026-08-14T00:00:00.000Z" });
+    const route = buildAnalyticsRoute({ ledgerPath, clock: fixedClock(Date.parse("2026-08-14T00:00:00.000Z")) });
     assert.equal(route.method, "GET");
     assert.equal(route.path, "/v1/analytics");
     assert.equal(route.scope, "read", "read-scoped: the console's own aggregate, no write surface");
@@ -259,7 +299,7 @@ test("GET /v1/analytics is read-scoped and answers 200 from its real default rea
         body = chunk;
       },
     } as unknown as ServerResponse;
-    route.handler({} as never, res, { params: {} });
+    await route.handler({} as never, res, { params: {} });
 
     assert.equal(status, 200);
     const parsed = JSON.parse(body) as AnalyticsSnapshot;

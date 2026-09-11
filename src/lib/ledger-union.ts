@@ -136,17 +136,53 @@ function parseObject(raw: string): Record<string, unknown> | undefined {
 
 export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   dedupe?: boolean;
+  /**
+   * Bound exact-line replay dedupe to the newest N distinct rows per `step`. This is the streaming
+   * counterpart to `rotateLedger` retaining its newest N rows per step: an archived row can only
+   * reappear in a later rotation while it remains inside that producer-side window. Callers must
+   * pass the producer's exact retention width; this is not a general replacement for whole-corpus
+   * dedupe over an arbitrary collection of files.
+   */
+  dedupeWindowPerStep?: number;
 }
 
 export async function* openLedgerUnion(
   stateDir: string,
   opts: OpenLedgerUnionOptions = {},
 ): AsyncGenerator<Record<string, unknown>> {
+  if (
+    opts.dedupeWindowPerStep !== undefined &&
+    (!Number.isInteger(opts.dedupeWindowPerStep) || opts.dedupeWindowPerStep < 1)
+  ) {
+    throw new TypeError(`openLedgerUnion: dedupeWindowPerStep must be a positive integer, got ${String(opts.dedupeWindowPerStep)}`);
+  }
+  if (opts.dedupe === false && opts.dedupeWindowPerStep !== undefined) {
+    throw new TypeError("openLedgerUnion: dedupe=false and dedupeWindowPerStep are contradictory");
+  }
   const { rotations } = listedLedgerFiles(stateDir, realLedgerFs);
   const livePath = ledgerLivePath(stateDir);
   const entries = [...rotations, { path: livePath, form: "plain" as const }];
   const seen = new Set<string>();
+  const recentByStep = new Map<string, { order: string[]; next: number; seen: Set<string> }>();
   const minimumTs = sinceMs(opts);
+
+  const replayedInsideWindow = (step: string, line: string): boolean => {
+    const limit = opts.dedupeWindowPerStep;
+    if (limit === undefined) return false;
+    const recent = recentByStep.get(step) ?? { order: [], next: 0, seen: new Set<string>() };
+    if (recent.seen.has(line)) return true;
+    recent.seen.add(line);
+    if (recent.order.length < limit) {
+      recent.order.push(line);
+    } else {
+      const evicted = recent.order[recent.next];
+      if (evicted !== undefined) recent.seen.delete(evicted);
+      recent.order[recent.next] = line;
+      recent.next = (recent.next + 1) % limit;
+    }
+    recentByStep.set(step, recent);
+    return false;
+  };
 
   for (const entry of entries) {
     if (entry.path === livePath && !nodeExistsSync(entry.path)) continue;
@@ -157,7 +193,7 @@ export async function* openLedgerUnion(
       for await (const raw of rl) {
         const line = String(raw).trim();
         if (!line) continue;
-        if (opts.dedupe !== false) {
+        if (opts.dedupe !== false && opts.dedupeWindowPerStep === undefined) {
           if (seen.has(line)) continue;
           seen.add(line);
         }
@@ -168,7 +204,10 @@ export async function* openLedgerUnion(
           // deliberate: a torn ledger line is dropped without aborting the stream.
           continue;
         }
-        if (parsed !== undefined && recordMatchesFilters(parsed, opts, minimumTs)) yield parsed;
+        if (parsed === undefined || !recordMatchesFilters(parsed, opts, minimumTs)) continue;
+        const step = typeof parsed.step === "string" ? parsed.step : "";
+        if (replayedInsideWindow(step, line)) continue;
+        yield parsed;
       }
     } catch {
       // deliberate: an unreadable file costs that file, not the whole best-effort stream.
