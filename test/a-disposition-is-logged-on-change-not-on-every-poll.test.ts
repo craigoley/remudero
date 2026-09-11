@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { DECISION_RELEVANT_LEDGER_STEPS, MAX_RETAINED_LINES_PER_STEP } from "../src/lib/ledger.js";
-import { DEFAULT_SWEEP_POLICY, repeatDispositionStreaksFromLedger } from "../src/lib/sweep.js";
+import {
+  DEFAULT_SWEEP_POLICY,
+  repeatDispositionStreaksFromLedger,
+  runSweep,
+  type OpenPrView,
+  type SweepDeps,
+} from "../src/lib/sweep.js";
+import { readLedgerLines } from "../src/lib/status.js";
 
 // ── W1-T3359: the repeat-disposition bound could not reach its own threshold ─────────────────────
 //
@@ -38,14 +46,15 @@ import { DEFAULT_SWEEP_POLICY, repeatDispositionStreaksFromLedger } from "../src
 // count, which removes the 200/N ceiling entirely — no retention change is needed or made.
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SWEEP_SRC = readFileSync(join(REPO_ROOT, "src", "lib", "sweep.ts"), "utf8");
 
-/** The REAL fold, driven directly. An earlier draft of this suite MIRRORED it — the function was
- *  module-private — and the mirror made every behavioural mutation of the committed fold survive:
- *  MEASURED, "escalated becomes durable" and "a head change no longer resets the run" both passed a
- *  full run against a deliberately broken fold. A test that models the code under test is testing
- *  itself. The fold is exported for exactly this, the same precedent `renderRepeatEscalationQuestion`
- *  already sets in that module. */
+/** The REAL fold, driven directly — never a mirror. An earlier draft of this suite MIRRORED it
+ *  (the function was module-private then) and the mirror made every behavioural mutation of the
+ *  committed fold survive: MEASURED, "escalated becomes durable" and "a head change no longer
+ *  resets the run" both passed a full run against a deliberately broken fold. A test that models
+ *  the code under test is testing itself. The fold is exported for exactly this, the same
+ *  precedent `renderRepeatEscalationQuestion` already sets in that module — every assertion below
+ *  therefore exercises the committed implementation directly, with no separate source-shape check
+ *  needed to keep it honest. */
 const foldStreaks = (lines: Array<Record<string, unknown>>): Map<number, { streak: number; escalated: boolean }> =>
   repeatDispositionStreaksFromLedger(lines);
 
@@ -139,6 +148,12 @@ test("W1-T3359: the step is RETAINED, so a rotation leaves a row carrying the co
   );
 });
 
+// @source-text-subject: the next test's SUBJECT genuinely is ledger.ts's own text, not its runtime
+// behaviour — `DECISION_RELEVANT_LEDGER_STEPS` is a `Set`, so a literal listed twice in the array
+// that builds it and a literal listed once are BEHAVIOURALLY IDENTICAL (`.has(...)` reads true
+// either way); only counting the source literal can see the duplicate a first draft of this change
+// introduced. See docs/comment-standard.md / test/source-text-assertion-census.test.ts for why this
+// declaration, not a baseline bump, is the reviewable move.
 test("W1-T3359: the retention set is UNTOUCHED — the entry was already there and must not be doubled", () => {
   // A first draft of this change added `sweep.disposed` to DECISION_RELEVANT_LEDGER_STEPS a SECOND
   // time, on a rationale that rotation archived it wholesale. Both were wrong. This pins the
@@ -164,17 +179,46 @@ test("W1-T3359: the RECOUNT's ceiling is what the bound could not see past, and 
   assert.ok(foldStreaks([row({ repeat_streak: bound })]).get(4522)!.streak >= bound);
 });
 
-// ── the mirror above is pinned to the committed fold ─────────────────────────────────────────────
+// ── the emitter really writes the field this fold now depends on ────────────────────────────────
 
-test("W1-T3359: the committed fold really reads the recorded streak and really keeps the fallback", () => {
-  // This suite models the fold rather than importing it (it is module-private), so these assertions
-  // are what stop the model from drifting into a test of itself.
-  const fold = /function repeatDispositionStreaksFromLedger[\s\S]{0,2000}?\n}/.exec(SWEEP_SRC)?.[0] ?? "";
-  assert.ok(fold.length > 0, "the fold is not in the shape this test can read");
-  assert.match(fold, /line\.repeat_streak/, "the committed fold does not read the recorded streak");
-  assert.match(fold, /Number\.isInteger\(line\.repeat_streak\)/, "it must refuse a non-integer as not-a-reading");
-  assert.match(fold, /recorded \?\? counted/, "the recount fallback is gone — a legacy corpus would read 1");
-  assert.match(fold, /escalated:/, "the escalated derivation must still be present");
-  // The emitter must still write the field this now depends on.
-  assert.match(SWEEP_SRC, /repeat_streak: repeat\.streak/, "the emitter no longer records the streak it is read by");
+/** Minimal `SweepDeps`, local to this suite: only the required members, wired to a throwaway
+ *  ledger file. `arm`/`close`/`dispatchFix`/`escalate` are never invoked by the mergeable-PR path
+ *  exercised below, so each is a bare no-op. */
+function minimalSweepDeps(): SweepDeps {
+  return {
+    arm: () => {},
+    close: () => {},
+    dispatchFix: () => {},
+    escalate: () => {},
+    ledgerPath: join(mkdtempSync(join(tmpdir(), "rmd-w1-t3359-")), "ledger.ndjson"),
+    runId: "SWEEP-1",
+  };
+}
+
+function mergeablePr(headSha: string): OpenPrView {
+  return {
+    prNumber: 4522,
+    prUrl: "url/4522",
+    taskId: "W1-A",
+    reviewState: "success",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: "2026-07-16T12:00:00Z",
+    headSha,
+    autoMergeArmed: false,
+  };
+}
+
+test("W1-T3359: the REAL emitter writes `repeat_streak`, end to end through runSweep — not a mirror", async () => {
+  // Drives the actual dispose path three times on an unchanged head, then reads the row it wrote —
+  // no regex over sweep.ts stands in for the emitter here, and no fold internals are inspected.
+  const deps = minimalSweepDeps();
+  const target = mergeablePr("bbbb222");
+  await runSweep([target], deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([target], deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([target], deps, DEFAULT_SWEEP_POLICY);
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 3, "one row per pass");
+  assert.equal(disposed[2].repeat_streak, 3, "the third pass's own row must carry the streak the fold now reads");
 });
