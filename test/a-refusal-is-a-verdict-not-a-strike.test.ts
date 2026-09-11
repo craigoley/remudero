@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildOpenPrViews, IMPLEMENT_REFUSAL_REPORT_CONTRACT } from "../src/run-task.js";
+import { buildOpenPrViews, IMPLEMENT_REFUSAL_REPORT_CONTRACT, routeFix, type FixDeps } from "../src/run-task.js";
 import {
   decideAutoMergeArm,
   judgeReview,
@@ -107,6 +107,40 @@ test("only structured refusals route to escalation without dispatching a fix str
   assert.match(escalations[0], /premise-rotted/);
   assert.equal(summary.actions[0].disposition, "refused-escalate");
   assert.equal(summary.actions[0].acted, true);
+});
+
+test("rmd fix routes a refusal to escalation too — the SAME branch, from the other caller", async () => {
+  // The sweep path above is covered; `routeFix` is the OTHER caller (the `rmd fix <pr>` bootstrap)
+  // and its refused-escalate branch had none. The contract that matters is the negative half: a
+  // valid worker refusal is an operator decision point, so it must reach `escalate` WITHOUT
+  // spending a strike through dispatchFix.
+  let dispatched = 0;
+  const escalations: Array<{ reason: string; question: string }> = [];
+  const deps: FixDeps = {
+    dispatchFix: () => { dispatched += 1; },
+    escalate: (_pr, reason, question) => { escalations.push({ reason, question: question.question }); },
+  };
+
+  const result = await routeFix("OPEN", refusalPr(), deps, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(result.outcome, "escalated");
+  assert.equal(dispatched, 0, "a refusal must never enter the strike-spending fix rung");
+  assert.equal(escalations.length, 1, "and it must raise exactly one operator decision point");
+  assert.match(escalations[0].reason, /premise-rotted/, "the refusal class travels with the escalation");
+  assert.ok(escalations[0].question.length > 0, "the clarification question is rendered, not empty");
+
+  // CONTROL, in the other direction: the same PR with an ORDINARY unmet criterion is not a
+  // refusal, so it takes the strike-spending branch — otherwise this test would pass on a
+  // routeFix that escalated everything.
+  let ordinaryDispatched = 0;
+  const ordinary = await routeFix(
+    "OPEN",
+    refusalPr({ unmetCriteria: [{ claim: "an ordinary unmet claim", proof: "unit test: test/x.test.ts", met: false, reason: "not proven", proof_exec: "not_executable" }] }),
+    { dispatchFix: () => { ordinaryDispatched += 1; }, escalate: () => { throw new Error("must not escalate"); } },
+    DEFAULT_SWEEP_POLICY,
+  );
+  assert.equal(ordinary.outcome, "fixed");
+  assert.equal(ordinaryDispatched, 1);
 });
 
 test("a red required check still takes precedence over a refusal", () => {
