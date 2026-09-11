@@ -18,15 +18,19 @@ function shellScript(html: string): string {
   return match[1]!;
 }
 
-async function fetchShellHtml(ledger: LedgerRecord[]): Promise<string> {
+async function fetchShellHtml(ledgerOrRead: LedgerRecord[] | (() => LedgerRecord[]) | undefined): Promise<string> {
+  const idle =
+    ledgerOrRead === undefined
+      ? {}
+      : {
+          ledgerPath: "/tmp/rmd-test-ledger.ndjson",
+          readLedger: typeof ledgerOrRead === "function" ? ledgerOrRead : () => ledgerOrRead,
+          now: () => new Date("2026-09-11T00:00:00.000Z"),
+        };
   const route = buildShellRoute(
     {},
     "abc123",
-    {
-      ledgerPath: "/tmp/rmd-test-ledger.ndjson",
-      readLedger: () => ledger,
-      now: () => new Date("2026-09-11T00:00:00.000Z"),
-    },
+    idle,
     { armed: false },
     () => "abc123",
   );
@@ -180,4 +184,25 @@ test("W1-T3158: the console run-history section lists recent task runs in time o
   assert.match(html, /model <span class="mono">opus<\/span> <span class="counts">\(row\)<\/span>/);
   assert.doesNotMatch(html, /TRIAGE-3158/, "the shell does not report non-implement lane run.start rows as task runs");
   assert.doesNotThrow(() => new Function(shellScript(html)), "the rendered client script must still parse");
+});
+
+test("W1-T3158: the console run-history section names an unreadable ledger instead of going blank", async () => {
+  const html = await fetchShellHtml(() => {
+    throw new Error("fixture ledger boom");
+  });
+
+  assert.match(html, /Recent task run history/);
+  assert.match(html, /unreadable/);
+  assert.match(html, /ledger unreadable: fixture ledger boom/);
+  assert.match(html, /model <span class="mono">unattributed<\/span> <span class="counts">\(unattributed\)<\/span>/);
+  assert.doesNotThrow(() => new Function(shellScript(html)), "the fallback shell script must still parse");
+});
+
+test("W1-T3158: the console run-history section renders an explicit empty window when ledger reads are unavailable", async () => {
+  const html = await fetchShellHtml(undefined);
+
+  assert.match(html, /Recent task run history/);
+  assert.match(html, /no task runs observed in the live ledger/);
+  assert.match(html, /bounded to newest 10 task runs from 0 live ledger rows/);
+  assert.doesNotThrow(() => new Function(shellScript(html)), "the empty-window shell script must still parse");
 });
