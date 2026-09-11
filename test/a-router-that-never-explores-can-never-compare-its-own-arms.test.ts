@@ -314,3 +314,80 @@ test("exploration returns a per-dispatch perturbation without mutating mounts or
     codexModel: "gpt-5.5",
   });
 });
+
+// ── the explored arm has to reach the WORKER, or exploration samples nothing ──────────────────────
+//
+// `configForMountExploration` was imported by this suite and never called, so `diff-coverage` reported
+// its declaration and body as added-and-uncovered. That is not a tidiness gap: this function is the
+// ONLY thing that makes an explored arm actually run. `exploreMount` decides which arm to sample and
+// `mountExplorationLedgerFields` records that it did — but if the spawn still goes out on the
+// on-policy provider, every ledgered "exploration" measures the arm it was already using, and the
+// bounded-fraction experiment silently compares a thing to itself. The tests below drive the real
+// function on a real decision.
+
+/** A real `explore` decision — the codex-arm case this suite already proves `exploreMount` produces. */
+function exploreDecision() {
+  const decision = exploreMount({
+    cells: cells(),
+    mounts: mounts(),
+    taskType: "implement",
+    risk: "medium",
+    taskClass: "src",
+    currentMount,
+    runId: "run-explores",
+    taskId: "W1-T3095",
+    enabledProviders: ["claude", "codex"],
+    sampleUnit: MOUNT_EXPLORATION_POLICY.fraction / 2,
+  });
+  assert.equal(decision.kind, "explore", "the fixture must yield an explore decision for these tests to mean anything");
+  if (decision.kind !== "explore") throw new Error("unreachable");
+  return decision;
+}
+
+test("W1-T3095: the explored arm REPLACES the enabled provider list, so the sampled arm is the one that runs", () => {
+  const decision = exploreDecision();
+  const base = {
+    workerProviders: { enabled: ["claude", "codex"], preference: "automatic", codexModel: "gpt-5.4" },
+    somethingElse: "preserved",
+  } as unknown as Config;
+
+  const explored = configForMountExploration(base, decision);
+
+  // THE POINT: exactly the explored provider, not the union and not the on-policy one. A config that
+  // still admitted "claude" would let the spawn pick it and the experiment would measure nothing.
+  assert.deepEqual(explored.workerProviders.enabled, [decision.exploredArm.provider]);
+  assert.equal(decision.exploredArm.provider, "codex", "fixture sanity: this case explores the codex arm");
+
+  // Everything else is carried through — this narrows the provider, it does not rebuild the config.
+  assert.equal((explored as unknown as { somethingElse: string }).somethingElse, "preserved");
+  assert.equal(explored.workerProviders.preference, "automatic");
+  // and the original is not mutated
+  assert.deepEqual(base.workerProviders.enabled, ["claude", "codex"]);
+});
+
+test("W1-T3095: a CODEX arm also pins the served model, or codex would serve whatever its default is", () => {
+  const decision = exploreDecision();
+  const explored = configForMountExploration(
+    { workerProviders: { enabled: ["claude"], codexModel: "gpt-5.4" } } as unknown as Config,
+    decision,
+  );
+  assert.equal(explored.workerProviders.codexModel, decision.exploredArm.servedModel);
+  assert.notEqual(
+    explored.workerProviders.codexModel,
+    "gpt-5.4",
+    "the pre-existing codexModel must be overridden, or the arm key and the served model disagree",
+  );
+});
+
+test("W1-T3095 (control): a NON-codex arm leaves codexModel alone — the pin is conditional, not blanket", () => {
+  // Same function, the other branch. Without this the codex assertion above would pass for an
+  // implementation that pinned codexModel unconditionally, which would corrupt a claude-arm dispatch.
+  const decision = exploreDecision();
+  const claudeArm = { ...decision, exploredArm: { ...decision.exploredArm, provider: "claude", servedModel: "claude-sonnet-5" } };
+  const explored = configForMountExploration(
+    { workerProviders: { enabled: ["claude", "codex"], codexModel: "gpt-5.4" } } as unknown as Config,
+    claudeArm,
+  );
+  assert.deepEqual(explored.workerProviders.enabled, ["claude"]);
+  assert.equal(explored.workerProviders.codexModel, "gpt-5.4", "a claude arm must not rewrite the codex model");
+});
