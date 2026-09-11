@@ -126,6 +126,7 @@
   "scripts/worker-branch-shape.mjs": 250,
   "scripts/workflow-guard-mutation-baseline.json": 0,
   "scripts/workflow-guard-mutation-ratchet.mjs": 107,
+  "src/cli/registry.ts": 250,
   "src/lib/account-usage.ts": 180,
   "src/lib/alert-lane.ts": 137,
   "src/lib/analytics-route.ts": 118,
