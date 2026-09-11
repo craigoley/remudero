@@ -419,8 +419,7 @@ export interface ConsoleInboxDigests {
 
 /** PRIMARY CONTROL: the mailbox's daily-digest render window. */
 export const CONSOLE_INBOX_DIGEST_LIMIT = 10;
-/** PRIMARY CONTROL: the run-history panel's render window. */
-export const CONSOLE_RUN_HISTORY_LIMIT = 10;
+export const CONSOLE_RUN_HISTORY_LIMIT = 10; // PRIMARY CONTROL: run-history render window.
 
 export type ConsoleRunHistoryProvenance = "row" | "implement.done" | "run.start.mount" | "unattributed";
 
