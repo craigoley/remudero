@@ -323,12 +323,6 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
-  // W1-T3080: the ONE row that carries the model that actually SERVED the implement call
-  // (`served_model`/`routed_model`, via `workerLedgerFields`) rather than the mount `run.start`
-  // resolved before dispatch. `retro.ts`'s `runModelIndex` reads it back to attribute a
-  // model-less `verdict` row; rotated away, the served model is gone from the corpus the
-  // class-routing decision (W1-T167) reads, falling back to a resolved-not-served guess.
-  "implement.done",
   "pr.opened",
   // W1-T2594: provider-diverse reviewer routing resolves this row by exact task + PR + head.
   // Rotating it away would make an unchanged head route differently after maintenance.
@@ -585,6 +579,18 @@ function isHealthOrDeployStep(step: string): boolean {
 export const HEALTH_STEP_RETENTION_WINDOW_MS = 15 * 60 * 1000;
 
 /**
+ * Rows retained for per-model attribution, not daemon decisions. W1-T3080 needs `implement.done`
+ * to survive rotation because it carries `served_model`/`routed_model` from `workerLedgerFields`;
+ * `verdict` remains the terminal decision row, so `implement.done` deliberately stays outside
+ * {@link DECISION_RELEVANT_LEDGER_STEPS}.
+ */
+export const MODEL_ATTRIBUTION_LEDGER_STEPS: ReadonlySet<string> = new Set(["implement.done"]);
+
+function isModelAttributionStep(step: string): boolean {
+  return MODEL_ATTRIBUTION_LEDGER_STEPS.has(step);
+}
+
+/**
  * RENDER-RELEVANT, not decision-relevant: consulted by the console to render OPERATOR-VISIBLE
  * HISTORY, never to make a daemon-side decision. They get a recency-bounded category of their own
  * because a step added to the decision core is retained FOREVER. Each entry names its consumer, and
@@ -624,6 +630,9 @@ export const RENDER_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // exact name: doctor.ts's `judgeSweepLiveness` derives two faults from the PAIR.
   "sweep.pass",
   "sweep.summary",
+  // W1-T3080: union-retention-census parses the historic retention-set exports; the actual
+  // rotator treats this through MODEL_ATTRIBUTION_LEDGER_STEPS below (no render recency window).
+  "implement.done",
 ]);
 
 /** True for any step in {@link RENDER_RELEVANT_LEDGER_STEPS}. */
@@ -873,9 +882,9 @@ export interface LedgerRotationResult {
   archivePath?: string;
   /** Lines relocated to the archive because they were neither decision-relevant nor parseable. */
   archivedLineCount?: number;
-  /** Lines retained live — the ones matching {@link DECISION_RELEVANT_LEDGER_STEPS}, plus any
-   *  health/render-relevant line still inside its own retention window (see
-   *  {@link HEALTH_STEP_RETENTION_WINDOW_MS}/{@link RENDER_STEP_RETENTION_WINDOW_MS}), plus
+  /** Lines retained live — the ones matching {@link DECISION_RELEVANT_LEDGER_STEPS}, any
+   *  model-attribution line, any health/render-relevant line still inside its own retention window
+   *  (see {@link HEALTH_STEP_RETENTION_WINDOW_MS}/{@link RENDER_STEP_RETENTION_WINDOW_MS}), plus
    *  anything appended after the snapshot (see doc below). */
   retainedLineCount?: number;
 }
@@ -1071,14 +1080,15 @@ function rotateLedgerLocked(
     .filter((raw) => raw.trim() !== "")
     .map(parseLedgerLine);
 
-  // ── PASS 1: classify — decision, health and render-relevant candidates against pure noise.
-  // Render membership (W1-T275) keeps daemon.headroom and the kick rows out of the archive here,
-  // so PASS 2's window can bound them instead. ─────────────────────────────────────────────────
+  // ── PASS 1: classify — decision, model-attribution, health and render-relevant candidates
+  // against pure noise. Render membership (W1-T275) keeps daemon.headroom and the kick rows out of
+  // the archive here, so PASS 2's window can bound them instead. ───────────────────────────────
   let candidates: ParsedLedgerLine[] = [];
   for (const parsed of originalOrder) {
     if (
       parsed.step &&
       (DECISION_RELEVANT_LEDGER_STEPS.has(parsed.step) ||
+        isModelAttributionStep(parsed.step) ||
         isHealthOrDeployStep(parsed.step) ||
         isRenderRelevantStep(parsed.step))
     ) {
@@ -1093,6 +1103,7 @@ function rotateLedgerLocked(
   // boot spam bloating the core. A line with no parseable `ts` is kept, never guessed away. ────
   candidates = candidates.filter((p) => {
     if (!p.step) return true;
+    if (isModelAttributionStep(p.step)) return true;
     const isHealth = isHealthOrDeployStep(p.step);
     const isRender = isRenderRelevantStep(p.step);
     if (!isHealth && !isRender) return true;
@@ -1130,9 +1141,10 @@ function rotateLedgerLocked(
   }
   candidates = [...nonSweepCandidates, ...dedupedSweep];
 
-  // ── PASS 4: per-step count cap — bounds every OTHER decision-relevant step to the newest
-  // MAX_RETAINED_LINES_PER_STEP lines, because the set is otherwise unbounded. sweep.disposed and
-  // the health, deploy and render steps carry their own bound and are excluded here. ───────────
+  // ── PASS 4: per-step count cap — bounds every OTHER decision/model-attribution step to the
+  // newest MAX_RETAINED_LINES_PER_STEP lines, because those sets are otherwise unbounded.
+  // sweep.disposed and the health, deploy and render steps carry their own bound and are excluded
+  // here. ─────────────────────────────────────────────────────────────────────────────────────
   const byStep = new Map<string, ParsedLedgerLine[]>();
   for (const p of candidates) {
     const key = p.step ?? "";
@@ -1145,7 +1157,7 @@ function rotateLedgerLocked(
     if (
       step === "sweep.disposed" ||
       isHealthOrDeployStep(step) ||
-      isRenderRelevantStep(step) ||
+      (!isModelAttributionStep(step) && isRenderRelevantStep(step)) ||
       group.length <= MAX_RETAINED_LINES_PER_STEP
     ) {
       capped.push(...group);

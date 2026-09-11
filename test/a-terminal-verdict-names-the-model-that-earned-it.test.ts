@@ -1,11 +1,11 @@
 // W1-T3080: before this task all 23 `log("verdict", ...)` sites in run-task.ts omitted `model`
 // entirely, and the one row that DID carry the model that actually SERVED a call
-// (`implement.done`, via `workerLedgerFields`) was in neither ledger-rotation retention set — so
-// per-model cost/merge-rate stayed unmeasurable for the class-routing decision W1-T167 exists to
-// make. This file proves both halves BEHAVIORALLY (a real `runTask` run, no network, no real
-// Claude/gh spawn — the same injected-preflight technique test/containment-wiring.test.ts and
-// test/run-task.test.ts's followup-harvest suite already use) plus the retro reader's priority
-// order over the now-populated `verdict`/`implement.done` rows.
+// (`implement.done`, via `workerLedgerFields`) did not survive rotation — so per-model
+// cost/merge-rate stayed unmeasurable for the class-routing decision W1-T167 exists to make. This
+// file proves both halves BEHAVIORALLY (a real `runTask` run, no network, no real Claude/gh spawn
+// — the same injected-preflight technique test/containment-wiring.test.ts and test/run-task.test.ts's
+// followup-harvest suite already use) plus the retro reader's priority order over the now-populated
+// `verdict`/`implement.done` rows.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -18,7 +18,7 @@ import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
+import { MODEL_ATTRIBUTION_LEDGER_STEPS, rotateLedger } from "../src/lib/ledger.js";
 import { runModelAttribution, runModelIndex, type LedgerRecord } from "../src/lib/retro.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -212,12 +212,50 @@ test("BEHAVIORAL: a real implement run's no_pr verdict carries the SERVED model,
     assert.equal(verdictLine!.routed_model, "claude-haiku-4-5", "a routing decision, when one fired, is carried too");
 
     // Criterion 2: implement.done (the row `workerLedgerFields` already populated with the same
-    // served_model) is registered for rotation survival — grep proof lives in src/lib/ledger.ts,
-    // this asserts the registration is real, not merely present in a comment.
-    assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has("implement.done"), "implement.done must survive rotation (W1-T3080)");
+    // served_model) is registered for model-attribution retention — grep proof lives in
+    // src/lib/ledger.ts, this asserts the registration is real, not merely present in a comment.
+    assert.ok(MODEL_ATTRIBUTION_LEDGER_STEPS.has("implement.done"), "implement.done must survive rotation (W1-T3080)");
     const implementDoneLine = ledger.find((l) => l.step === "implement.done");
     assert.ok(implementDoneLine, "implement.done was ledgered for this run");
     assert.equal(implementDoneLine!.served_model, "claude-haiku-4-5-20251001");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BEHAVIORAL: implement.done survives ledger rotation as model-attribution evidence", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}modelrow-rotate-`));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const rows = [
+    {
+      ts: "2026-09-11T00:00:00.000Z",
+      step: "telemetry.noise",
+      payload: "x".repeat(2000),
+    },
+    {
+      ts: "2026-09-10T23:00:01.000Z",
+      step: "implement.done",
+      run_id: "W1-T9006-1788000000005",
+      task_id: "W1-T9006",
+      model: "sonnet",
+      served_model: "claude-sonnet-4-5-20260911",
+    },
+  ];
+
+  try {
+    writeFileSync(ledgerPath, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const result = rotateLedger(ledgerPath, {
+      ceilingBytes: 500,
+      now: () => new Date("2026-09-11T00:05:00.000Z"),
+    });
+    assert.equal(result.rotated, true);
+
+    const live = readFileSync(ledgerPath, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.equal(live.some((line) => line.step === "telemetry.noise"), false);
+    assert.equal(live.some((line) => line.step === "implement.done"), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
