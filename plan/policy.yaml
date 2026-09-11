@@ -1390,21 +1390,18 @@ costAnomaly:
   # (iii) MEDIAN, NOT MEAN, AND THAT IS LOAD-BEARING — the mean is dragged by the very outlier
   # being detected. This row is the multiplier a run's own cost must clear over its class's
   # MEDIAN before it counts as an outlier rather than ordinary class variance.
-  # MEASURED BASIS (net-new — no source literal to lift, so this leans on the two nearest
-  # measured cost-variance data points this SAME file already carries): `autoTriage.maxPerDay`'s
-  # own comment records one class's WORST-BUT-LEGITIMATE run at 2.04x its class median (n=27,
-  # $0.27–$2.00, median $0.98) — ordinary variance this sentinel must NOT trip on (design ii:
-  # "a sentinel that cries wolf ... trains the operator to skim the queue"). `dailyCostCeilingUsd`
-  # immediately above records the other end: the day its governor first fired, $152.28 observed
-  # against a normal day's ~$15 — roughly 10x, the INCIDENT signature. 3x sits with daylight
-  # above the 2.04x ordinary-variance ceiling and well below the ~10x incident signature — close
-  # enough to this task's own named fixture (the W1-T7 arc, $9.32 across strikes to a blocked
-  # verdict) to have caught it against any class whose median sits under ~$3.11, without
-  # inventing a number this fleet has not yet ledgered enough class-scoped runs to measure
-  # directly (design ii's own diagnosis: the per-class contrast has been under-sampled for ten
-  # cycles, "one `src` row, every time").
+  # MEASURED BASIS (W1-T3147, 2026-09-08, over 647 settled `implement.done` rows
+  # with a positive cost, median $4.23): the placeholder 3x row now flags ordinary
+  # variance, not runaways:
+  #   multiplier 3  (> $12.68): 33 runs flagged (5.1%)
+  #   multiplier 8  (> $33.81): 2 runs flagged (0.3%)
+  # The committed max is still 8, so 8x is the closest in-bound threshold to the
+  # ~10x incident signature this block already names, and it drops the sentinel
+  # from 33 everyday-variance flags to the two observed runaway-cost runs without
+  # silently widening the row's reviewed bound. `minSamples` below is unchanged:
+  # the thin-class rule is a separate control with its own measured basis.
   multiplier:
-    value: 3
+    value: 8
     origin: "net-new"
     min: 2
     max: 8
