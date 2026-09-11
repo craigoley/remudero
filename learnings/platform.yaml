@@ -45,7 +45,11 @@
 #                      entry in this file (all written before this field existed) is unaffected.
 #                      See src/lib/learnings.ts's LAYERS doc for the user-overall/global homes and
 #                      the (deferred) promotion path between them.
-#   files:             repo-relative globs; entry injects iff one glob hits a task file
+#   files:             repo-relative globs; entry injects when one glob hits a task file
+#   symbols:           optional identifiers this fact is about; whole-token hits in task/recon text
+#                      can select and rank the entry even when no path overlaps.
+#   error_signatures:  optional literal substrings of a refusal/error text this fact explains; hits
+#                      in task/recon text rank ahead of symbol and file-only matches.
 #   fact:              one line — the thing a worker inherits
 #   src:               provenance of the fact (recorded lineage)
 #   cited:             optional ISO date last cited (recent entries win a budget tie)
