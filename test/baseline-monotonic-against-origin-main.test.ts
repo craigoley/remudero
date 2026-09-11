@@ -119,7 +119,6 @@ test("evaluateRow: a non-numeric field at either end is a MEASUREMENT error, nev
 
 test("SCORE_TABLE names only SCALAR score floors/ceilings, never a per-file LEDGER", () => {
   const paths = SCORE_TABLE.map((e) => e.path);
-  assert.ok(paths.includes("scripts/coverage-baseline.json"));
   assert.ok(paths.includes("scripts/mutation-baseline.json"));
   // The per-file ledgers src/lib/review.ts's ENTANGLEMENT_EXEMPT_INSTRUMENTS already names as
   // grading no falsifier — raising one row there records debt on that row alone.
@@ -132,6 +131,15 @@ test("SCORE_TABLE names only SCALAR score floors/ceilings, never a per-file LEDG
   ]) {
     assert.ok(!paths.includes(ledger), `${ledger} is a per-file ledger, not a scalar score`);
   }
+});
+
+test("W1-T3380: the retired coverage lines floor is NOT held monotonic — a row for an absent field would error on every PR", () => {
+  const paths = SCORE_TABLE.map((e) => e.path);
+  assert.ok(
+    !paths.includes("scripts/coverage-baseline.json"),
+    "linesPct was retired by operator ruling; evaluateRow errors when origin/main's field is not finite, " +
+      "so a row for a field that no longer exists reddens every pull request rather than guarding anything",
+  );
 });
 
 // ── wiring: the real CLI, driven as a subprocess against an isolated fixture remote ─────────────
