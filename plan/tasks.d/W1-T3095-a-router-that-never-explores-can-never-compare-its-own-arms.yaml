@@ -91,7 +91,36 @@
     - claim: "exploration proposes a perturbation and never mutates the mounts table itself"
       proof: "unit test: test/a-router-that-never-explores-can-never-compare-its-own-arms.test.ts"
     - claim: "the dispatch path actually consults the explorer, so the new module is reached by production code and not only by its own tests"
-      proof: "grep: exploreMount( in src/run-task.ts"
+      proof: "grep: resolveMountExplorationDispatch( in src/run-task.ts"
+  amendments: |
+    2026-09-11, OPERATOR AMENDMENT TO CRITERION 5's PROOF ONLY — the claim is UNCHANGED.
+    Was `grep: exploreMount( in src/run-task.ts`; now `grep: resolveMountExplorationDispatch( in
+    src/run-task.ts`.
+
+    WHY. `diff-coverage` blocked the build on four added lines in `src/run-task.ts` — the arm that
+    redirects the spawn onto the explored mount, and the catch arm that keeps this rung from failing a
+    real dispatch. Both were UNREACHABLE, not merely untested: `runId` inside `runTask` is the task id
+    joined to the spawn's epoch stamp, the sampler hashes it, so steering the real call onto the
+    explore arm means steering the clock, and a time-dependent test of a 5%-sampled path is a flake
+    generator. The fix seamed the decision into `resolveMountExplorationDispatch` in
+    `src/lib/mount-exploration.ts`, leaving `runTask` holding only the two real data sources (the
+    dynamic import of scripts/mount-headroom-sweep.mjs and `loadMounts(mountsPath(repoRoot))`).
+
+    THE CLAIM'S INTENT IS UNTOUCHED AND STILL PROVED. The criterion asks that production code reach
+    the new module rather than only its tests. It still does — one named call deeper. What broke was
+    the PROOF, which pinned WHICH FILE holds the `exploreMount(` call rather than the reachability the
+    claim names; the refactor moved that call one level down and the grep went to zero at head,
+    landing `executed_fail` and FAILING a PR whose 44 checks were green.
+
+    THIS IS AN OPERATOR AMENDMENT BECAUSE IT HAD TO BE. Standing rule 15
+    (`criterionFieldTampered`) refuses a PR that edits its own criteria, correctly — a worker that can
+    rewrite its own proof can pass anything. So the repoint lands here, on its own branch, ahead of
+    the build, in the shape of the prior amendments (chore/amend-W1-T3232, -T3239, -T3245).
+
+    THE NEW PROOF IS NOT WEAKER. It is the same form the `call-site` linter check itself demands
+    (`grep: <symbol>( in <a different src/ file>`), it discriminates — the symbol exists nowhere at
+    the merge base — and the explorer's own behaviour stays covered by criteria 1-4.
+
   falsifier: |
     CLOSE THIS TASK if the recommender has ever filed anything: `zgrep` the ledger union for
     `mount_recommendation.swept` and read `filed`. MEASURED 2026-09-08: 959 rows, `filed: 0` on
