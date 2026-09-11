@@ -355,6 +355,17 @@ test("production buildSweepEffects wires the runtime controller at the real swee
   assert.ok(logs.some((entry) => entry.step === "review.capacity"));
 });
 
+/** An activity stamp that is ALWAYS recent, whenever the suite happens to run.
+ *
+ *  A fixed date compared against a real `Date.now()` is a time bomb: it goes red at a clock
+ *  boundary with no diff involved, and the PR that happens to be open then looks like the cause.
+ *  Two unrelated PRs failed on this stamp before it was fixed. Same shape, and the same remedy, as
+ *  {@link "./stale-ci-gate-wiring.test.ts"}'s own `recentActivityIso`.
+ */
+function recentActivityIso(): string {
+  return new Date(Date.now() - 60 * 60 * 1000).toISOString();
+}
+
 function reviewablePr(n: number): OpenPrView {
   return {
     prNumber: n,
@@ -364,7 +375,7 @@ function reviewablePr(n: number): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-04T00:00:00Z",
+    lastActivityAt: recentActivityIso(),
     createdAt: `2026-09-0${n - 4000}T00:00:00Z`,
     headSha: `sha${n}`,
     autoMergeArmed: false,
