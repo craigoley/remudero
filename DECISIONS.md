@@ -2592,31 +2592,3 @@ reviewable implementation.
 
 **Rollback:** revert this entry. Gate behaviour is unchanged; W1-T3318 returns to queued and its
 dependent conversions lose this settled policy reference.
-
-## 2026-09-11 — OPERATOR RATIFICATION (W1-T3075): order the dispatch frontier by measured expected value, then dependency fan-out
-
-*Operator-ruled at the operator's instruction in this session: “go with both of those — ratify,
-file, build.” This is a ruling, not the prior auto recommendation.*
-
-**THE RULE:** After explicit `priority` and `undeclaredScopeLast`, order dispatchable tasks by the
-measured expected-value term for their deterministic task class:
-`mergeRate(class) / costPerMerge(class)`. A larger value sorts earlier. When two tasks have equal
-measured value, or either class is unmeasured, order by the number of open plan tasks that depend
-on that task (descending), then retain the existing workstream-aware id order as the total
-tiebreak.
-
-**THE MEASUREMENT BOUNDARY:** This term is allowed only from the complete rotated-ledger union and
-the W1-T3074 closure population floor. A class below the floor, with zero merges, an unreadable
-union, or an unstable two-cycle calibration receives no value term; it remains in the existing
-priority/scope/id order. `compareDispatch` remains pure and must receive a precomputed calibration;
-it must never read history while sorting.
-
-**WHAT THIS DOES NOT CHANGE:** Explicit task `priority:` remains absolute. `packDisjointFirst`,
-merge-crediting, eligibility, risk/mount routing, and the worker's authority are unchanged. This
-is only a selection-order policy.
-
-**IMPLEMENTATION:** W1-T3412 operationalizes this ruling. It must re-measure the two-cycle
-stability and retain the existing order whenever the stated calibration is absent or falsified.
-
-**Rollback:** revert W1-T3412. The prior deterministic priority/scope/id comparator is preserved
-as the fallback and needs no data migration.
