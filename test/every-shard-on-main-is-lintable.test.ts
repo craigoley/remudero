@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadPlan } from "../src/lib/plan.js";
 import { lintPlan } from "../src/lib/task-linter.js";
+import { CENSUS_POPULATION } from "../src/lib/ci-parity.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -186,18 +187,22 @@ test("W1-T3086: the full-plan lint cost is recorded beside the ratchet", () => {
 // terms — and because the registration exists only at head, it is also what makes every proof above
 // fail at the base and pass here, which is the discrimination W1-T362 requires of every dialect.
 test("W1-T3086: this ratchet is REGISTERED with the census, and the registration names this very file", () => {
-  const parity = readFileSync(join(REPO_ROOT, "src", "lib", "ci-parity.ts"), "utf8");
+  // READ AS DATA, NOT AS TEXT (W1-T2905): importing the registry asserts the REGISTRATION rather
+  // than the spelling of a file that happens to contain the path, so a moved entry, a renamed
+  // helper or a commented-out line all still fail here. The claim is unchanged; the evidence is
+  // the registry itself.
   const SELF = "test/every-shard-on-main-is-lintable.test.ts";
 
-  // POSITIVE CONTROL on the read: a renamed or moved registry would otherwise make the assertion
-  // below pass vacuously against an empty string.
-  assert.ok(parity.length > 1000, "src/lib/ci-parity.ts did not read as a real file");
-  assert.match(parity, /refusedForPredicate\(/, "the predicate-refusal registry is not where this expects it");
+  // POSITIVE CONTROL: the registry must be a real population, or membership below is vacuous.
+  assert.ok(CENSUS_POPULATION.length > 20, "the census population did not load as a real registry");
 
+  const entry = CENSUS_POPULATION.find((m) => m.testFile === SELF);
   assert.ok(
-    parity.includes(SELF),
-    `${SELF} is not registered in src/lib/ci-parity.ts. Unregistered, the census reports this suite ` +
-      "UNMODELLED; and because this is the only change this PR makes outside test/**, its absence is " +
-      "also what makes every acceptance proof read `executed_stale` against the merge base.",
+    entry,
+    SELF +
+      " is not registered in CENSUS_POPULATION. Unregistered, the census reports this suite" +
+      " UNMODELLED; and because this is the only change this PR makes outside test/**, its absence" +
+      " is also what makes every acceptance proof read executed_stale against the merge base.",
   );
+  assert.equal(entry?.verdict.status, "REFUSED", "this ratchet walks plan/, not src/ — it is predicate-refused");
 });
