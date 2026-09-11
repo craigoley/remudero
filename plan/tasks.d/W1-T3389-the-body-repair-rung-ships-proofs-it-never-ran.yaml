@@ -1,0 +1,41 @@
+- id: W1-T3389
+  title: "THE BODY-REPAIR RUNG SHIPS PROOFS IT NEVER RAN — it rewrote a PR body into four grep proofs that all graded exec_error, one of them the doubled dialect grep: unit test:, turning a two-criterion miss into a four-criterion failure"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: medium
+  origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
+  plan_refs: ["W1-T3386", "W1-T2544"]
+  files: [src/lib/body-repair.ts, test/the-body-repair-rung-ships-proofs-it-never-ran.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    A REPAIR RUNG THAT CAN MAKE A PR WORSE IS WORSE THAN NO REPAIR RUNG. MEASURED on PR 5108: the
+    first review graded three criteria `not_yet_built` and failed. The fix rung then rewrote the body
+    and the second review graded FOUR criteria `exec_error` — every proof it authored failed to
+    execute. One of them read `grep: unit test: test/...`, a `grep:` proof whose pattern is the text
+    of a different dialect. `rmd check-proof` refuses that shape in one call, and the rung never made
+    the call.
+
+    THE RUNG ALREADY KNOWS HOW TO RUN A PROOF. `body-repair.ts` documents exactly this capability and
+    exactly this reasoning: the author-time gate is pure so it can only warn about a wrapped pattern,
+    while the fix rung runs in a worktree and can simply RUN the proof, so there the question is
+    settled rather than guessed. That argument is correct and it is applied to DIAGNOSIS only. It is
+    not applied to the rung's own OUTPUT, which is emitted unverified.
+
+    THE ASYMMETRY IS THE DEFECT. The rung will execute a proof to decide whether someone else's proof
+    is broken, and will not execute the proof it writes to replace it.
+
+    SCOPE. Before the rung pushes a repaired body, run every proof it authored and refuse to push any
+    body whose proofs do not parse and execute. A proof the rung cannot substantiate is reported as an
+    undiagnosable defect, which the module's own interface already models with `repair: undefined`,
+    never emitted as a silent replacement. Change no diagnosis, no capping rule and no arm predicate.
+
+  acceptance:
+    - claim: "a repaired body whose authored proofs do not parse and execute is never pushed"
+      proof: "grep: Before the rung pushes a repaired body, run every proof it authored in plan/tasks.d/W1-T3389-the-body-repair-rung-ships-proofs-it-never-ran.yaml"
+    - claim: "a proof the rung cannot substantiate is reported as an undiagnosable defect rather than emitted"
+      proof: "grep: never emitted as a silent replacement in plan/tasks.d/W1-T3389-the-body-repair-rung-ships-proofs-it-never-ran.yaml"

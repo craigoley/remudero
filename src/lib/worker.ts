@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -183,6 +183,10 @@ export interface WorkerResult {
   model: string;
   /** Concrete provider model selected after health/capability routing. */
   routedModel?: string;
+  /** Opaque join key for the immutable, pre-execution routing assignment. A terminal worker row
+   * carries this only after its assignment event was emitted; the ID does NOT imply that a provider
+   * reported serving the selected model. */
+  selectionAssignmentId?: string;
   /** Health of the originally preferred Claude candidate when Claude was considered. */
   modelHealthState?: ClaudeModelHealthState;
   /** Whether the health decision used a live/fresh read, bounded stale evidence, or no evidence. */
@@ -255,6 +259,57 @@ export interface WorkerResult {
  * "unset", never a guessed value. */
 export const DEFAULT_MODEL_LABEL = "default";
 export const DEFAULT_EFFORT_LABEL = "default";
+
+/**
+ * The routing decision recorded immediately before a worker call. This is an assignment record,
+ * not a provider receipt: {@link WorkerResult.servedModel} remains the only field that may say
+ * what a provider actually reported serving. The bounded capacity snapshot makes a later policy
+ * proposal reproducible without retaining a prompt, credential, reset-credit id, or raw account
+ * response.
+ */
+export interface WorkerSelectionAssignment {
+  version: 1;
+  id: string;
+  phase: "pre-execution";
+  requested: {
+    model: string;
+    effort: string;
+    maxTurns: number | null;
+  };
+  selected: {
+    provider: "claude" | "codex";
+    model: string;
+    effort: string;
+    accountLabel?: string;
+  };
+  routing: {
+    mode: "claude-only" | "multi-provider";
+    policy: {
+      preference: "automatic" | "claude" | "codex";
+      reservePercent: number;
+      provenance: "default" | "overridden";
+    };
+    tightestRemainingPercent?: number;
+    allocationSharePercent?: number;
+    preferenceBypass?: { provider: "claude" | "codex"; reason: string };
+  };
+  candidates: Array<{
+    provider: "claude" | "codex";
+    readable: boolean;
+    model?: string;
+    effort?: string;
+    windows: Array<{ name: string; usedPercent: number; resetsAt?: number | string }>;
+    modelDecision?: {
+      requestedCapability: CodexModelTier;
+      requestedEffort: string;
+      mappedCandidates: string[];
+      selectedModel?: string;
+      selectedEffort?: string;
+      preferenceBypass?: string;
+      capabilityFallbackReason?: string;
+    };
+  }>;
+}
 
 /** The DEFAULT billing mode. Absent the opt-in overflow valve, `buildWorkerEnv` strips every `ANTHROPIC_*` var before a worker
  * spawns (W1-T1), so the run is metered against the subscription. With the valve engaged (W1-T258) the mode is DERIVED per
@@ -333,6 +388,7 @@ export function workerLedgerFields(r: WorkerResult): {
   routed_model?: string;
   model_health_state?: ClaudeModelHealthState;
   model_health_source?: ClaudeModelHealthSource;
+  selection_assignment_id?: string;
   served_model: string | null;
   served_model_reason?: string;
   effort: string;
@@ -385,6 +441,7 @@ export function workerLedgerFields(r: WorkerResult): {
     ...(r.routedModel ? { routed_model: r.routedModel } : {}),
     ...(r.modelHealthState ? { model_health_state: r.modelHealthState } : {}),
     ...(r.modelHealthSource ? { model_health_source: r.modelHealthSource } : {}),
+    ...(r.selectionAssignmentId ? { selection_assignment_id: r.selectionAssignmentId } : {}),
     // Always present: `null` is the honest value for "unreportable", never an omitted key that reads as forgotten. See {@link
     // WorkerResult.servedModel} for the contract (W1-T2572).
     served_model: r.servedModel ?? null,
@@ -860,6 +917,10 @@ export interface SpawnWorkerArgs {
    * gets process-group containment, but a survivor cannot be re-attributed if teardown itself never ran (W1-T117). */
   runId?: string;
   taskId?: string;
+  /** Synchronous, durable sink for the pre-execution provider/model assignment. The worker
+   * catches a sink failure and does not start attributing terminal rows to an event it could not
+   * write; routing and billing behavior stay unchanged when telemetry is unavailable. */
+  onSelectionAssignment?: (assignment: WorkerSelectionAssignment) => void;
   /** Injectable seam: override the process-group spawn and teardown. Omitted means the real
    * `spawnDetachedGroup`/`teardownProcessGroup`, so containment wiring stays provable without a real `claude` binary
    * (W1-T117). */
@@ -909,6 +970,105 @@ export interface SpawnWorkerArgs {
    *  once. Set, `CLAUDE_CODE_OAUTH_TOKEN` is replaced by a sentinel and a loopback base URL, and
    *  (with `credentialHelperSocketPath`) `args.cwd`'s local git config points at the socket helper. */
   secretBoundary?: SecretBoundaryHandles;
+}
+
+function selectionCandidateSnapshot(capacity: ProviderCapacity): WorkerSelectionAssignment["candidates"][number] {
+  const decision = capacity.modelDecision;
+  return {
+    provider: capacity.provider,
+    readable: capacity.readable,
+    ...(capacity.model ? { model: capacity.model } : {}),
+    ...(capacity.effort ? { effort: capacity.effort } : {}),
+    windows: capacity.windows.slice(0, 8).map((window) => ({
+      name: window.name,
+      usedPercent: window.usedPercent,
+      ...(window.resetsAt !== undefined ? { resetsAt: window.resetsAt } : {}),
+    })),
+    ...(decision
+      ? {
+          modelDecision: {
+            requestedCapability: decision.requestedCapability,
+            requestedEffort: decision.requestedEffort,
+            mappedCandidates: decision.mappedCandidates.slice(0, 12),
+            ...(decision.selectedModel ? { selectedModel: decision.selectedModel } : {}),
+            ...(decision.selectedEffort ? { selectedEffort: decision.selectedEffort } : {}),
+            ...(decision.preferenceBypass ? { preferenceBypass: decision.preferenceBypass } : {}),
+            ...(decision.capabilityFallbackReason ? { capabilityFallbackReason: decision.capabilityFallbackReason } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+/** Build the bounded decision record before a provider call. It records what the router assigned,
+ * never what a provider later claims to have served. */
+export function workerSelectionAssignment(
+  args: SpawnWorkerArgs,
+  input: {
+    provider: "claude" | "codex";
+    model: string | undefined;
+    effort: string | undefined;
+    capacity?: ProviderCapacity;
+    capacities?: ProviderCapacity[];
+    mode: "claude-only" | "multi-provider";
+    policy: {
+      preference: "automatic" | "claude" | "codex";
+      reservePercent: number;
+      provenance: "default" | "overridden";
+    };
+    selection?: ProviderSelection;
+    preferenceBypass?: { provider: "claude" | "codex"; reason: string };
+  },
+): WorkerSelectionAssignment {
+  const selected = input.capacity;
+  return {
+    version: 1,
+    id: randomUUID(),
+    phase: "pre-execution",
+    requested: {
+      model: args.model ?? DEFAULT_MODEL_LABEL,
+      effort: args.effort ?? DEFAULT_EFFORT_LABEL,
+      maxTurns: args.maxTurns ?? null,
+    },
+    selected: {
+      provider: input.provider,
+      model: input.model ?? selected?.model ?? args.model ?? DEFAULT_MODEL_LABEL,
+      effort: input.effort ?? selected?.effort ?? args.effort ?? DEFAULT_EFFORT_LABEL,
+      ...(selected?.accountLabel ? { accountLabel: selected.accountLabel } : {}),
+    },
+    routing: {
+      mode: input.mode,
+      policy: {
+        preference: input.policy.preference,
+        reservePercent: input.policy.reservePercent,
+        provenance: input.policy.provenance,
+      },
+      ...(input.selection ? { tightestRemainingPercent: input.selection.tightestRemainingPercent } : {}),
+      ...(input.selection?.allocationSharePercent !== undefined
+        ? { allocationSharePercent: input.selection.allocationSharePercent }
+        : {}),
+      ...(input.preferenceBypass ? { preferenceBypass: input.preferenceBypass } : {}),
+    },
+    candidates: (input.capacities ?? (selected ? [selected] : [])).slice(0, 8).map(selectionCandidateSnapshot),
+  };
+}
+
+/** Emit the assignment to the caller's durable ledger sink. A sink failure is visible but never
+ * changes a routing decision or causes a terminal row to pretend it has a matching event. */
+function emitWorkerSelectionAssignment(
+  args: SpawnWorkerArgs,
+  input: Parameters<typeof workerSelectionAssignment>[1],
+): string | undefined {
+  const assignment = workerSelectionAssignment(args, input);
+  console.error(JSON.stringify({ event: "worker.selection.assigned", assignment }));
+  if (!args.onSelectionAssignment) return undefined;
+  try {
+    args.onSelectionAssignment(assignment);
+    return assignment.id;
+  } catch {
+    console.error(JSON.stringify({ event: "worker.selection_assignment_write_failed", reason: "write-failed" }));
+    return undefined;
+  }
 }
 
 let providerTieBreaker = 0;
@@ -1256,6 +1416,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }));
   }
   let routedClaudeSelection: ProviderSelection | undefined;
+  let routedClaudeCapacities: ProviderCapacity[] | undefined;
+  let routedClaudePreferenceBypass: { provider: "claude" | "codex"; reason: string } | undefined;
   if (providers.length === 1 && providers[0] === "claude" && claudeHealthRoute && !claudeHealthRoute.eligible) {
     const capacity = unavailableClaudeCapacity(claudeHealthRoute);
     try {
@@ -1381,6 +1543,20 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
+      // The ledger sink runs before any Codex worker home is materialized or capacity is charged.
+      // It records the router's assignment, not an unsupported claim about what the provider will
+      // report serving after the call.
+      const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
+        provider: "codex",
+        model: selection.capacity.model,
+        effort: selection.capacity.effort,
+        capacity: selection.capacity,
+        capacities,
+        mode: "multi-provider",
+        policy: routingPolicy,
+        selection,
+        preferenceBypass,
+      });
       let measurement: ProviderWindowMeasurement | undefined;
       try {
         // MATERIALIZE the redirected home before the spawn, through the SAME function the Claude path calls, which writes the
@@ -1390,6 +1566,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
         const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
         result.routedModel = selection.capacity.model ?? result.model;
+        result.selectionAssignmentId = selectionAssignmentId;
         if (args.model) result.model = args.model;
         if (claudeHealthRoute) {
           result.modelHealthState = claudeHealthRoute.state;
@@ -1440,6 +1617,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       }
     }
     routedClaudeSelection = selection;
+    routedClaudeCapacities = capacities;
+    routedClaudePreferenceBypass = preferenceBypass;
   }
   // PREFLIGHT: resolve the real binary FRESH before any worker-home or keychain work. Throws ClaudeToolchainBlockedError,
   // never a raw ENOENT, naming every searched path and carrying `reasonClass: "blocked_toolchain"` so daemon.ts can classify
@@ -1623,6 +1802,20 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     const measurement = routedClaudeSelection
       ? await beginSelectedCapacityMeasurement(args, config, routedClaudeSelection, capabilities)
       : undefined;
+    // This is deliberately below the live-spawn guard and all Claude preflight, directly before
+    // the SDK call. Claude-only routing keeps its historical no-extra-capacity-read behavior, so
+    // its candidate list is honestly empty rather than fabricated from a probe that never ran.
+    const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
+      provider: "claude",
+      model: routedClaudeModel,
+      effort: routedClaudeSelection?.capacity.effort ?? args.effort,
+      capacity: routedClaudeSelection?.capacity,
+      capacities: routedClaudeCapacities,
+      mode: routedClaudeSelection ? "multi-provider" : "claude-only",
+      policy: routingPolicy,
+      selection: routedClaudeSelection,
+      preferenceBypass: routedClaudePreferenceBypass,
+    });
 
     try {
       const result = await withWorkerGroupTeardown(
@@ -1658,6 +1851,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       );
       result.provider = "claude";
       result.routedModel = routedClaudeModel;
+      result.selectionAssignmentId = selectionAssignmentId;
       if (claudeHealthRoute) {
         result.modelHealthState = claudeHealthRoute.state;
         result.modelHealthSource = claudeHealthRoute.source;

@@ -353,6 +353,14 @@ export const IMPLEMENT_ROLE_LINES: readonly string[] = [
   "accurate the report.",
 ];
 
+/** Shared authority boundary for both PR-authoring worker prompts. The command hook enforces the
+ * ordinary CLI paths; this line keeps a compliant worker from attempting an operation it cannot
+ * own and receiving an avoidable refusal at the end of an otherwise successful run. */
+export const WORKER_PR_AUTHORITY_LINES: readonly string[] = [
+  "- You may create or update the PR, but NEVER merge it or arm auto-merge. The orchestrator owns",
+  "  that decision after CI and semantic review; stop after reporting the PR URL.",
+];
+
 export function outputContractLines(taskId: string): string[] {
   return [
     "# OUTPUT CONTRACT",
@@ -421,6 +429,7 @@ export function outputContractLines(taskId: string): string[] {
     "  is normal, and `gh pr create --fill` derives a multi-commit PR's title from the BRANCH",
     "  NAME, which is not a conventional subject. Pass it yourself, e.g. `gh pr create --title",
     "  \"type(scope): subject\" --fill --base main`.",
+    ...WORKER_PR_AUTHORITY_LINES,
     ...commitMessageContractLines(),
     `- Include this exact trailer as the LAST line of the PR body: Remudero-Task: ${taskId}`,
     // W1-T81/T82 class (PRs #677/#683): a correct, fully-tested PR still FAILED review because

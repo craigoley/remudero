@@ -67,6 +67,7 @@ test("W1-T2750: overlapping fresh and resumed Codex workers get distinct private
         workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
         cwd: process.cwd(),
         prompt: "exercise the private temp root",
+        settingsFile: join(process.cwd(), "settings", "worker.json"),
         resumeSessionId,
         env: suppliedEnv,
         containment: {
@@ -130,6 +131,7 @@ test("W1-T2750: provider-error and synchronous-spawn paths both reap only their 
       workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
       cwd: process.cwd(),
       prompt: "return a provider error",
+      settingsFile: join(process.cwd(), "settings", "worker.json"),
       env: { TMPDIR: sharedTmp },
       containment: {
         spawn: (options) => {
@@ -155,6 +157,7 @@ test("W1-T2750: provider-error and synchronous-spawn paths both reap only their 
         workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
         cwd: process.cwd(),
         prompt: "fail synchronously",
+        settingsFile: join(process.cwd(), "settings", "worker.json"),
         env: { TMPDIR: sharedTmp },
         containment: {
           spawn: (options) => {
@@ -185,6 +188,7 @@ test("W1-T2750: a clock timeout keeps the private TMPDIR through teardown and re
         workerHome: mkdtempSync(join(tmpdir(), "rmd-codex-home-")),
         cwd: process.cwd(),
         prompt: "wait forever",
+        settingsFile: join(process.cwd(), "settings", "worker.json"),
         env: { TMPDIR: join(root, "ignored-caller-tmp") },
         clockBound: { boundMs: 1 },
         containment: {

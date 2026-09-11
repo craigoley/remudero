@@ -98,6 +98,34 @@ test("deny-floor: does NOT collaterally block ordinary, unrelated gh usage", () 
   assert.equal(diff.status, 0);
 });
 
+test("deny-floor: refuses every ordinary worker route that merges or arms a pull request", () => {
+  const commands = [
+    "gh pr merge 42 --squash",
+    "gh pr merge https://github.com/o/r/pull/42 --auto --squash",
+    "gh --repo o/r pr merge 42 --squash",
+    "gh -R=o/r pr merge 42 --auto --squash",
+    "gh api -X PUT repos/o/r/pulls/42/merge -f merge_method=squash",
+    "gh api repos/o/r/pulls/42/merge --method=PUT -f merge_method=squash",
+    `gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: "PR_x"}) { pullRequest { merged } } }'`,
+    `gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: "PR_x"}) { pullRequest { autoMergeRequest { enabledAt } } }'`,
+  ];
+  for (const command of commands) {
+    const { status, stderr } = runDenyFloor(command);
+    assert.equal(status, 2, `expected refusal for: ${command}`);
+    assert.match(stderr, /only the orchestrator|merge endpoint|GraphQL mutation/i);
+  }
+});
+
+test("deny-floor: still permits the PR writes a worker owns", () => {
+  for (const command of [
+    "gh pr create --title 'fix(test): repair' --fill --base main",
+    "gh pr edit 42 --body-file /tmp/body.md",
+    "gh api -X PATCH repos/o/r/pulls/42 -f body='updated'",
+  ]) {
+    assert.equal(runDenyFloor(command).status, 0, `expected worker-owned write to remain allowed: ${command}`);
+  }
+});
+
 test("deny-floor: pre-existing rules still hold (regression) — force-push to main is still blocked", () => {
   const { status, stderr } = runDenyFloor("git push --force origin main");
   assert.equal(status, 2);

@@ -81,11 +81,11 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
     "- Rule headline [src: plan#W1-T2508]",
   );
 
-  assert.equal(sha256(fix), "6dfd1cbac80a4f9820ac2c6aa6ba06f0ac9df0662fdd05ed98c5a8a26de200e6");
+  assert.equal(sha256(fix), "03e8002e6a838f5ec6adc3269815a208262f74d0493dd9acc54fcf0492552dda");
   assert.equal(sha256(prerequisite), "5c52a37d141fdb3048e692885a6c8b3ae1f9481dd0f4c2f845cde736bcffa239");
   assert.equal(sha256(recon), "57c4b24a5e00c32427a27e09ff85a8744fbeced6b2585bec723f763e0f2622bb");
   assert.equal(sha256(diagnose), "cc1209eecea9ef35572af1a184d1a90850f2ee6eed0139082b9f54ec2edb41bc");
-  assert.equal(sha256(implement), "6e1c7cd2b17da74bacbb6a010fbfe51a60f076fd4803d86389c026783e49b1a6");
+  assert.equal(sha256(implement), "95e6d80b5168ff4c5efe4f538c54ef77800d919aa8bc94e20510960a4ac8590e");
 });
 
 test("prompt renderers: run-task keeps compatibility re-exports of the lib templates", () => {
