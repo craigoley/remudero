@@ -709,6 +709,7 @@ import {
   type LedgerCorpusEntry,
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
+import { readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
@@ -899,10 +900,12 @@ import {
 } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import {
+  buildSkillEffectivenessReport,
   describeWorkerSkillReachability,
   loadInjectableSkills,
+  observeSkillSelection,
+  renderSkillEffectivenessReport,
   renderSkillsPart,
-  selectSkillsForTask,
   skillsInjectedEvent,
   stageSkillDrafts,
   workerAllowlistFromSettings,
@@ -12445,12 +12448,16 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
     // matchedLearnings already spends. Empty for every task until an operator approves a skill that
     // declares `applies-to:`, so today this changes no prompt by a single byte.
-    const injectableSkills = selectSkillsForTask(
+    const skillSelection = observeSkillSelection(
       loadInjectableSkills(join(repoRoot, ".claude", "skills")),
       task.type,
       DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     );
+    const injectableSkills = skillSelection.selected;
     const skillsPart = renderSkillsPart(injectableSkills);
+    // W1-T3379: unlike skills.injected this is emitted even at zero selection, preserving the
+    // denominator and budget omission needed for the read-only implement-path effectiveness report.
+    log("skills.selection", skillSelection.observation);
     // Same shape as learnings.injected above, and same status: analytics, never a decision input.
     const skillsEvent = skillsInjectedEvent(injectableSkills, task.type, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
     if (skillsEvent) log("skills.injected", skillsEvent);
@@ -36380,19 +36387,23 @@ export async function synthesizeCommand(rest: string[], deps: SynthesizeCommandD
 }
 
 /**
- * `rmd skill list` — the §5B skill-registry reader (W1-T44). Setup, Plan,
+ * `rmd skill list|effectiveness` — the §5B skill-registry reader (W1-T44). Setup, Plan,
  * Feedback/triage, Retro, Review, Refactor, and Design Review are ALL the same
  * ground->research->grill-or-produce primitive, differing only by a
  * declarative profile; this prints every `.remudero/skills/<name>.yaml`
  * resolved, so a skill added by CONFIG ALONE (no source change) shows up here
- * with zero code touched. `skill` is the only subcommand today — `list` — kept
- * as an explicit subcommand (not bare `rmd skill`) so a future write verb
- * (e.g. an `add`/`run`) has room without a breaking reshape.
+ * with zero code touched. `skill` keeps explicit subcommands (not bare `rmd skill`) so a future
+ * write verb (e.g. an `add`/`run`) has room without a breaking reshape. `effectiveness` is deliberately
+ * read-only and implement-only for W1-T3379's first procedure-class pilot.
  */
-async function skillCommand(rest: string[]): Promise<number> {
+export async function skillCommand(
+  rest: string[],
+  deps: { effectiveness?: typeof skillEffectivenessCommand } = {},
+): Promise<number> {
   const sub = rest[0];
+  if (sub === "effectiveness") return (deps.effectiveness ?? skillEffectivenessCommand)(rest.slice(1));
   if (sub !== "list") {
-    console.error(`rmd skill: unknown subcommand '${sub ?? ""}' — usage: rmd skill list\n` + USAGE);
+    console.error(`rmd skill: unknown subcommand '${sub ?? ""}' — usage: rmd skill list | rmd skill effectiveness <approved-skill>\n` + USAGE);
     return 2;
   }
   const badArg = unknownArgError("skill list", rest.slice(1), [], []);
@@ -36412,6 +36423,54 @@ async function skillCommand(rest: string[]): Promise<number> {
 
   console.log(`### rmd skill list — ${skills.length} registered (.remudero/skills/)`);
   console.log(renderSkillList(skills));
+  return 0;
+}
+
+/**
+ * W1-T3379's evidence reader.  It reads the full rotated-ledger union, refuses an incomplete
+ * corpus rather than silently turning missing history into a lifecycle recommendation, and makes
+ * no writes—not even an analytics row—while reporting.
+ */
+export function skillEffectivenessCommand(
+  rest: string[],
+  deps: {
+    stateDir?: string;
+    readLedger?: typeof readLedgerUnionRecordsSync;
+    write?: (text: string) => void;
+    error?: (text: string) => void;
+  } = {},
+): number {
+  const skillName = rest[0];
+  if (!skillName || skillName.startsWith("-")) {
+    (deps.error ?? console.error)("rmd skill effectiveness: usage: rmd skill effectiveness <approved-skill>");
+    return 2;
+  }
+  const badArg = unknownArgError("skill effectiveness", rest.slice(1), [], []);
+  if (badArg) {
+    (deps.error ?? console.error)(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const stateDir = deps.stateDir ?? dirname(ledgerPathFor(loadConfig()));
+  let ledgerUnion: ReturnType<typeof readLedgerUnionRecordsSync>;
+  try {
+    ledgerUnion = (deps.readLedger ?? readLedgerUnionRecordsSync)(stateDir, {
+      step: ["skills.selection", "verdict"],
+      refuseIncomplete: true,
+    });
+  } catch (error) {
+    const reason = String(error);
+    (deps.error ?? console.error)(`rmd skill effectiveness: REFUSED unreadable ledger union: ${reason}`);
+    return 1;
+  }
+  if (!ledgerUnion.ok) {
+    (deps.error ?? console.error)(
+      `rmd skill effectiveness: REFUSED incomplete ledger union under ${stateDir}: ` +
+      `${ledgerUnion.unread.length} unread rotation(s)`,
+    );
+    return 1;
+  }
+  const report = buildSkillEffectivenessReport(ledgerUnion.rows, skillName);
+  (deps.write ?? console.log)(renderSkillEffectivenessReport(report));
   return 0;
 }
 
