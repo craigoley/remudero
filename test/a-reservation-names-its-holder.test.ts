@@ -175,3 +175,95 @@ test("W1-T3100: an anchor with no holder line is UNKNOWN and exempt", () => {
   assert.deepEqual(conflicts, []);
   assert.equal(taskIdReservationRef("W1-T9100"), "refs/rmd-id/W1-T9100");
 });
+
+// ── W1-T3100: the GATE's own copy of the holder parser ───────────────────────────────────────────
+//
+// `parseReservationHolderLine` exists TWICE: once in src/lib/task-id-reservation.ts, which the tests
+// above drive, and once in scripts/task-id-existence-check.mjs, because that gate runs on a node with
+// no tsx and cannot import the TypeScript one. Only the `legacy` arm of the script's copy was ever
+// exercised, so `diff-coverage` reported lines 160-180 of it as added-and-uncovered — a second
+// implementation of a refusal rule, shipping untested. These drive every arm of THAT copy through
+// `gate.*`, never the src/ twin, so a divergence between the two shows up here instead of in
+// production.
+
+test("W1-T3100 (gate copy): a well-formed holder line yields the branch, percent- and plus-decoded", () => {
+  const known = gate.parseReservationHolderLine(
+    "rmd-id reservation 123@host\n\nrmd-id holder branch=run-W1-T9100-1789%2F0001+beta host=h pid=7",
+  );
+  // `+` is a space and %2F is a slash: the anchor encodes both, so a parser that handled only one
+  // would hand a caller a branch name that does not exist.
+  assert.deepEqual(known, { status: "known", branch: "run-W1-T9100-1789/0001 beta" });
+});
+
+test("W1-T3100 (gate copy): a token with no `=` is UNREADABLE and names the token", () => {
+  const v = gate.parseReservationHolderLine("rmd-id holder branch=run-x notanassignment");
+  assert.equal(v.status, "unreadable");
+  assert.match(String(v.reason), /malformed token notanassignment/);
+});
+
+test("W1-T3100 (gate copy): a token whose `=` is FIRST is malformed — an empty key is not a key", () => {
+  const v = gate.parseReservationHolderLine("rmd-id holder =novalue");
+  assert.equal(v.status, "unreadable");
+  assert.match(String(v.reason), /malformed token =novalue/);
+});
+
+test("W1-T3100 (gate copy): an undecodable value is UNREADABLE and names the key, not the value", () => {
+  // `%zz` is not valid percent-encoding; decodeURIComponent throws and the catch must name the key
+  // so an operator can see WHICH field of the anchor is corrupt.
+  const v = gate.parseReservationHolderLine("rmd-id holder branch=%zz");
+  assert.equal(v.status, "unreadable");
+  assert.match(String(v.reason), /malformed value for branch/);
+});
+
+test("W1-T3100 (gate copy): a holder line with no branch, or a literal `unknown`, is UNREADABLE", () => {
+  const missing = gate.parseReservationHolderLine("rmd-id holder host=h pid=7");
+  assert.equal(missing.status, "unreadable");
+  assert.match(String(missing.reason), /missing branch/);
+
+  // `unknown` is what the minter writes when it cannot resolve a branch; treating it as a real name
+  // would make every such anchor look like a held branch called "unknown".
+  const unknown = gate.parseReservationHolderLine("rmd-id holder branch=unknown host=h");
+  assert.equal(unknown.status, "unreadable");
+  assert.match(String(unknown.reason), /missing branch/);
+});
+
+test("W1-T3100 (gate copy): the holder line is found anywhere in the message, and blank tokens are skipped", () => {
+  const v = gate.parseReservationHolderLine(
+    ["subject line", "", "some other trailer: x", "rmd-id holder   branch=run-W1-T9100-1   host=h  ", ""].join("\n"),
+  );
+  assert.deepEqual(v, { status: "known", branch: "run-W1-T9100-1" });
+});
+
+test("W1-T3100 (gate copy): the two copies never disagree on READABILITY or on WHICH branch holds", () => {
+  // The two are NOT interchangeable and must not be asserted as such: the src/ copy returns a rich
+  // `holder` ({branch, host, pid, source, startedAt}) and the gate's returns `{branch}`, because the
+  // gate needs only the branch. A first draft of this test compared the whole object and "failed",
+  // which would have been a false alarm about a divergence that does not exist.
+  //
+  // What they MUST agree on is the decision: whether an anchor is legacy / unreadable / known, and
+  // when known, which branch holds it. That is the half a drift would break silently, since both
+  // copies gate the same refusal.
+  const branchOf = (v: { status: string; branch?: string; holder?: { branch?: string } }): string | undefined =>
+    v.branch ?? v.holder?.branch;
+
+  const cases = [
+    "reserve W1-T9100 host-pid-time",
+    "rmd-id holder branch=run-W1-T9100-1 host=h pid=7",
+    "rmd-id holder branch=run-W1-T9100-1789%2F0001+beta host=h pid=7",
+    "rmd-id holder host=h pid=7",
+    "rmd-id holder branch=unknown",
+    "rmd-id holder bad",
+    "rmd-id holder =novalue",
+  ];
+  // POSITIVE CONTROL: the cases must actually reach more than one status, or "they agree" is a
+  // statement about one arm repeated seven times.
+  const statuses = new Set(cases.map((m) => gate.parseReservationHolderLine(m).status));
+  assert.ok(statuses.size >= 3, `expected legacy/unreadable/known among the cases; got ${[...statuses].join(",")}`);
+
+  for (const message of cases) {
+    const a = gate.parseReservationHolderLine(message);
+    const b = parseReservationHolderLine(message) as { status: string; holder?: { branch?: string } };
+    assert.equal(a.status, b.status, `status disagrees on: ${message}`);
+    assert.equal(branchOf(a), branchOf(b), `holding branch disagrees on: ${message}`);
+  }
+});
