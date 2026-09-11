@@ -29,6 +29,8 @@ import {
 } from "./operator-message.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
 
+const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
+
 // ── 1. Acceptance-block rendering (the missing counterpart to parseAcceptanceBlock) ─────────
 
 /**
@@ -162,7 +164,11 @@ export function filingAcceptanceCriteria(taskIds: string[], files: string[]): Ac
   // does not exist in the checkout review resolves against" — is about citing the task's OWN
   // criteria. This cites the shard FILE, which exists on the PR head that review reads.
   const shardFor = (taskId: string): string | undefined =>
-    files.find((f) => f.startsWith("plan/tasks.d/") && f.slice("plan/tasks.d/".length).startsWith(`${taskId}-`));
+    files.find(
+      (f) =>
+        f.startsWith(PLAN_TASK_SHARD_PREFIX) &&
+        f.slice(PLAN_TASK_SHARD_PREFIX.length).startsWith(`${taskId}-`),
+    );
   const criteria: AcceptanceCriterion[] = [];
   for (const taskId of taskIds) {
     const shard = shardFor(taskId);
