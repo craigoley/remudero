@@ -5546,11 +5546,122 @@ function callArgCount(line: string, name: string): number | null {
   return null; // unterminated call on this line — cannot judge arity
 }
 
+const CALLER_AUDIT_MAX_SITES = 5;
+
+const NON_CALL_IDENTIFIERS = new Set([
+  "catch",
+  "for",
+  "function",
+  "if",
+  "new",
+  "switch",
+  "while",
+]);
+
+interface UntouchedSiblingCallSite {
+  symbol: string;
+  file: string;
+  container: string | undefined;
+  text: string;
+}
+
+function pathDirectory(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
+}
+
+function callSiteProximity(file: string, changedFiles: ReadonlySet<string>): number {
+  if (changedFiles.has(file)) return 0;
+  const dir = pathDirectory(file);
+  for (const changed of changedFiles) {
+    if (pathDirectory(changed) === dir) return 1;
+  }
+  return 2;
+}
+
+function calledNames(line: string): string[] {
+  if (parseDef(line)) return [];
+  const names: string[] = [];
+  for (const m of line.matchAll(/(?<![\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const name = m[1];
+    if (!NON_CALL_IDENTIFIERS.has(name)) names.push(name);
+  }
+  return names;
+}
+
+function changedSymbols(lines: readonly DiffLine[]): Map<string, Set<string>> {
+  const symbols = new Map<string, Set<string>>();
+  const add = (name: string, file: string) => {
+    const files = symbols.get(name) ?? new Set<string>();
+    files.add(file);
+    symbols.set(name, files);
+  };
+  for (const l of lines) {
+    if (l.kind !== "add" && l.kind !== "del") continue;
+    const d = parseDef(l.text);
+    if (d) add(d.name, l.file);
+    for (const name of calledNames(l.text)) add(name, l.file);
+  }
+  return symbols;
+}
+
+function untouchedSiblingCallSites(lines: readonly DiffLine[]): UntouchedSiblingCallSite[] {
+  const symbols = changedSymbols(lines);
+  const containers = new Map<string, string>();
+  const sites: UntouchedSiblingCallSite[] = [];
+  const seen = new Set<string>();
+  for (const l of lines) {
+    const d = parseDef(l.text);
+    if (d) {
+      containers.set(l.file, d.name);
+      continue;
+    }
+    if (l.kind !== "ctx") continue;
+    for (const name of calledNames(l.text)) {
+      const changed = symbols.get(name);
+      if (!changed || callArgCount(l.text, name) === null) continue;
+      const container = containers.get(l.file);
+      const key = `${name}\0${l.file}\0${container ?? ""}\0${l.text.trim()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      sites.push({ symbol: name, file: l.file, container, text: l.text.trim() });
+    }
+  }
+  return sites.sort((a, b) => {
+    const aChanged = symbols.get(a.symbol) ?? new Set<string>();
+    const bChanged = symbols.get(b.symbol) ?? new Set<string>();
+    return (
+      callSiteProximity(a.file, aChanged) - callSiteProximity(b.file, bChanged) ||
+      a.file.localeCompare(b.file) ||
+      (a.container ?? "").localeCompare(b.container ?? "") ||
+      a.text.localeCompare(b.text)
+    );
+  });
+}
+
+function formatUntouchedSiblingCallSites(sites: readonly UntouchedSiblingCallSite[]): string {
+  const shown = sites.slice(0, CALLER_AUDIT_MAX_SITES);
+  const list = shown
+    .map((s) => `${s.symbol}() at ${s.file}${s.container ? `::${s.container}` : ""}: ${s.text}`)
+    .join("; ");
+  const omitted = sites.length - shown.length;
+  return omitted > 0 ? `${list}; ${omitted} more not shown` : list;
+}
+
 /** ALL CALLERS AUDITED: when a function's definition GAINS a parameter in the diff, every call site must be updated
  * too. A call left on an UNCHANGED (context) line with the old (too-few) arity is an orphaned sibling — partial-fix
- * drift. */
+ * drift. W1-T3239 broadens the same advisory from signature drift to semantic drift: any symbol changed by this diff
+ * whose untouched sibling call sites still appear in context is named, bounded, and left advisory-only. */
 export function checkCallersAudited(diff: string): RubricItemResult {
   const lines = walkDiff(diff);
+  const siblingSites = untouchedSiblingCallSites(lines);
+  if (siblingSites.length > 0) {
+    return {
+      key: "callers-audited",
+      pass: false,
+      reason: `partial-fix drift: untouched sibling call site(s) for changed symbol(s): ${formatUntouchedSiblingCallSites(siblingSites)}`,
+    };
+  }
   const removedDefs = new Map<string, number>();
   const addedDefs = new Map<string, number>();
   for (const l of lines) {
@@ -5580,7 +5691,7 @@ export function checkCallersAudited(diff: string): RubricItemResult {
   return {
     key: "callers-audited",
     pass: true,
-    reason: gained.length ? "every call site updated to the new signature" : "no signature change to audit",
+    reason: gained.length ? "every call site updated to the new signature" : "no untouched sibling call sites to audit",
   };
 }
 
