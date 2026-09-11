@@ -64,6 +64,16 @@ test("a declared budget inside the observed class range produces no finding", ()
   assert.equal(res.violations.some((v) => v.check === "budget-sanity"), false);
 });
 
+test("a malformed calibration row produces no declared-budget finding", () => {
+  const malformed: DeclaredBudgetCalibrationByClass = {
+    src: { ...calibration.src, medianCostUsd: 0 },
+  };
+
+  const res = lintTask(task(), { declaredBudgetCalibration: malformed });
+
+  assert.equal(res.violations.some((v) => v.check === "budget-sanity"), false);
+});
+
 test("declared budgets are compared against their own class only", () => {
   const byClass: DeclaredBudgetCalibrationByClass = {
     docs: { medianCostUsd: 1, maxCostUsd: 2, sampleCount: 80, minSamples: 20, multiplier: 3 },
