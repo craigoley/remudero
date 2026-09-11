@@ -681,33 +681,33 @@ test("console tab bar: exactly five tabs (Decisions, Queue, Now, Plan, Feed), pi
       // reached after the change"), but each is visible on EXACTLY the one tab that owns it.
       const isVisible = (id: string) => page.$eval(id, (el) => (el as HTMLElement).offsetParent !== null);
       const inDocument = (id: string) => page.$eval(id, (el) => document.body.contains(el));
-      const ALL_SECTIONS = ["#needs-me", "#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"];
+      const ALL_SECTIONS = ["#needs-me", "#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#run-history", "#more"];
       for (const sel of ALL_SECTIONS) assert.equal(await inDocument(sel), true, `${sel} missing from the document`);
 
       // Decisions is the default active tab -- only its own section (needs-me) is visible.
       await page.click("#tab-decisions");
       assert.equal(await isVisible("#needs-me"), true);
-      for (const sel of ["#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"]) {
+      for (const sel of ["#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#run-history", "#more"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Decisions is active`);
       }
 
       // Queue owns the whole live open-PR cockpit and no task/firehose section.
       await page.click("#tab-queue");
       assert.equal(await isVisible("#pr-queue"), true);
-      for (const sel of ["#needs-me", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"]) {
+      for (const sel of ["#needs-me", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#run-history", "#more"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Queue is active`);
       }
 
       // Now owns now/up-next/controls.
       await page.click("#tab-now");
       for (const sel of ["#now", "#up-next", "#controls"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Now tab`);
-      for (const sel of ["#needs-me", "#pr-queue", "#accepted", "#recent", "#rest", "#more"]) {
+      for (const sel of ["#needs-me", "#pr-queue", "#accepted", "#recent", "#rest", "#run-history", "#more"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Now is active`);
       }
 
-      // Feed owns accepted/recent/rest/more (recap is content-gated separately, not asserted here).
+      // Feed owns accepted/recent/rest/run-history/more (recap is content-gated separately, not asserted here).
       await page.click("#tab-feed");
-      for (const sel of ["#accepted", "#recent", "#rest", "#more"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Feed tab`);
+      for (const sel of ["#accepted", "#recent", "#rest", "#run-history", "#more"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Feed tab`);
       for (const sel of ["#needs-me", "#pr-queue", "#now", "#up-next", "#controls"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Feed is active`);
       }
