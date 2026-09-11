@@ -427,6 +427,25 @@ function wiringInput(over: Partial<Parameters<typeof resolveMountExplorationDisp
   };
 }
 
+/**
+ * A `loadCells` that COUNTS rather than throws.
+ *
+ * The obvious way to assert "this source was never read" is a fake whose body throws — but that body
+ * is then an added line no test ever enters, which `diff-coverage` flags, correctly: a never-executed
+ * line is a never-verified line, even in a test. A shared counter reads zero just as loudly and the
+ * body is exercised by the cases that DO read.
+ */
+function countingCells() {
+  const state = { reads: 0 };
+  return {
+    state,
+    loadCells: async () => {
+      state.reads += 1;
+      return cells();
+    },
+  };
+}
+
 test("W1-T3095: the EXPLORE arm redirects the spawn AND ledgers that it did — both, or the sample is unattributable", async () => {
   const logged: Array<{ step: string; fields: Record<string, unknown> }> = [];
   const onPolicy = wiringInput().currentMount;
@@ -452,16 +471,16 @@ test("W1-T3095: the EXPLORE arm redirects the spawn AND ledgers that it did — 
 test("W1-T3095: a REFUSAL leaves the on-policy mount and config EXACTLY as they were", async () => {
   const logged: string[] = [];
   const input = wiringInput({ risk: "high" }); // excluded by policy
+  const sweep = countingCells();
   const out = await resolveMountExplorationDispatch(input, {
-    loadCells: async () => {
-      throw new Error("the sweep must not even be read for an excluded risk");
-    },
+    loadCells: sweep.loadCells,
     loadMountsTable: () => mounts(),
     log: (step) => logged.push(step),
   });
   assert.equal(out.mount, input.currentMount, "a refusal must return the identical on-policy mount");
   assert.equal(out.config, input.config, "a refusal must return the identical config object, not a copy");
   assert.deepEqual(logged, [], "a refusal is the normal case and must not write a ledger row");
+  assert.equal(sweep.state.reads, 0, "an excluded risk must not read the sweep at all");
 });
 
 test("W1-T3095: a FAULTING sweep NEVER takes the dispatch down — it degrades and says why", async () => {
@@ -503,27 +522,17 @@ test("W1-T3095: a faulting MOUNTS TABLE degrades the same way — the catch cove
 test("W1-T3095: an EXCLUDED risk short-circuits the sweep read, because that read costs a dynamic import", async () => {
   // Asserted by counting reads, not by timing. The real `loadCells` imports a script off disk and
   // builds the whole headroom sweep; doing that for a task policy has already excluded is pure waste.
-  let reads = 0;
-  await resolveMountExplorationDispatch(wiringInput({ risk: "high" }), {
-    loadCells: async () => {
-      reads += 1;
-      return cells();
-    },
-    loadMountsTable: () => mounts(),
-    log: () => {},
-  });
-  assert.equal(reads, 0, "a high-risk task must not read the sweep at all");
+  // ONE counter across BOTH calls, so the zero and the one are the same instrument reading twice.
+  const sweep = countingCells();
+  const deps = { loadCells: sweep.loadCells, loadMountsTable: () => mounts(), log: () => {} };
 
-  // CONTROL: the same harness DOES read for an eligible risk, so the zero above means something.
-  await resolveMountExplorationDispatch(wiringInput({ risk: "medium" }), {
-    loadCells: async () => {
-      reads += 1;
-      return cells();
-    },
-    loadMountsTable: () => mounts(),
-    log: () => {},
-  });
-  assert.equal(reads, 1, "an eligible risk must read the sweep");
+  await resolveMountExplorationDispatch(wiringInput({ risk: "high" }), deps);
+  assert.equal(sweep.state.reads, 0, "a high-risk task must not read the sweep at all");
+
+  // CONTROL: the same counter, the same fake, an eligible risk — it reads. Without this the zero
+  // above would also be satisfied by a counter that can never increment.
+  await resolveMountExplorationDispatch(wiringInput({ risk: "medium" }), deps);
+  assert.equal(sweep.state.reads, 1, "an eligible risk must read the sweep");
 });
 
 test("W1-T3095: run-task wires the seam and keeps NO exploration branch of its own", () => {
