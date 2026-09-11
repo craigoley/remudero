@@ -1,0 +1,82 @@
+- id: W1-T3379
+  title: "THE SKILL WORKSHOP CAN DRAFT, SCAN, APPROVE AND INJECT A PROCEDURE BUT CANNOT SHOW WHETHER IT IS EVER SELECTED OR HELPS — `skills.injected` is analytics with no outcome consumer, so an approved prompt addition can persist on assumption alone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  priority: 60
+  budget_usd: 30.00
+  files: [src/lib/skill-workshop.ts, src/run-task.ts, test/skill-workshop.test.ts, test/a-staged-skill-reaches-the-worker-prompt.test.ts]
+  origin: "operator-request#skill-workshop-lifecycle-2026-09-11"
+  plan_refs: ["W1-T2766", "W1-T3101", "W1-T2959"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main dc970e6e. The workshop already requires at least two supporting merged
+    runs before `renderSkillDraft` returns a procedure (`src/lib/skill-workshop.ts:76-110`), scans
+    and stages a draft without releasing it (`:276-327`), and reads only an operator-approved
+    `.claude/skills/<name>/SKILL.md` with an explicit `applies-to:` opt-in (`:359-393`). Selection
+    is deterministic, task-type scoped, and bounded by the existing knowledge budget (`:396-421`);
+    the implement path logs selected names as `skills.injected` (`src/run-task.ts:12347-12358`).
+
+    The same source calls that event analytics-only and says no decision reads it
+    (`src/lib/skill-workshop.ts:431-448`). The current approved tree contains only the generated
+    `grfp` and `tddr` macro skills, neither of which has `applies-to:`, so no custom procedure is
+    currently injectable. The workshop tests pass, but they are component tests: they do not answer
+    whether a future approved procedure is selected in production, improves a comparable run, or
+    harms one. A self-improving release loop would be unsafe here; an evidence-only lifecycle is
+    the missing next step.
+  design: |
+    (i) PRESERVE THE EXISTING RELEASE BOUNDARY. A candidate still needs the existing two-merged-run
+    floor, scan, inbox proposal and operator approval. This task must not auto-approve, modify,
+    remove, or widen any skill; an effectiveness result is a report for an operator decision.
+
+    (ii) RECORD A DENOMINATOR AS WELL AS A SELECTION. Add one structured, run-correlated selection
+    observation at prompt assembly for every eligible worker run: task type, approved eligible
+    names, selected names, budget omission, and an explicit zero-selection shape. Keep the existing
+    `skills.injected` event for compatibility. Do not infer a zero from the old event's absence.
+
+    (iii) PROVIDE ONE DETERMINISTIC, READ-ONLY EFFECTIVENESS REPORT. Join a skill's selection rows
+    to terminal run outcomes using the existing run/ledger identity. Before any result is interpreted,
+    require a predeclared comparison horizon of ten selected eligible runs and ten unselected
+    eligible controls of the same task type, collected after approval. Report counts and outcomes
+    separately; never label correlation as proof of causation.
+
+    (iv) MAKE THE STOP RULE EXPLICIT. Before the horizon is met, report INSUFFICIENT EVIDENCE. At
+    the horizon, report RETIRE-CANDIDATE when selection is zero, outcomes are not better than the
+    comparable control, or a named harm signal occurs; otherwise report REVIEW-CANDIDATE. Neither
+    label changes a skill or a worker prompt. A human decides whether to retain, revise, or retire
+    the approved procedure in a separate plan PR.
+
+    (v) KEEP THE PILOT SMALL. Cover one approved procedure class and the existing implement-task
+    path first. Do not add automatic prompt synthesis, automatic script generation, model-scored
+    efficacy, budget expansion, or a fleet-wide rollout. The falsifier is a report that cannot
+    distinguish selection, non-selection, and terminal outcome from ledger evidence alone.
+  acceptance:
+    - claim: "every eligible worker run records a run-correlated skill-selection observation, including a zero-selection and budget-omission shape, while the existing skills.injected event remains compatible"
+      proof: "unit test: W1-T3379 criterion 1"
+    - claim: "the effectiveness report joins one approved skill's selection rows to terminal outcomes and prints selected and same-task-type control counts separately"
+      proof: "unit test: W1-T3379 criterion 2"
+    - claim: "fewer than ten selected eligible runs or fewer than ten controls reports INSUFFICIENT EVIDENCE and makes no lifecycle decision"
+      proof: "unit test: W1-T3379 criterion 3"
+    - claim: "at the predeclared horizon, zero selection, no improvement against controls, and a harm signal each produce RETIRE-CANDIDATE; a favorable comparison produces REVIEW-CANDIDATE"
+      proof: "unit test: W1-T3379 criterion 4"
+    - claim: "the reporter is read-only: a result never approves, edits, removes, or injects a skill, and the existing operator-approval plus applies-to boundaries stay intact"
+      proof: "unit test: W1-T3379 criterion 5"
+    - claim: "removing the selection/outcome join makes a fixture with identical injection names but opposite terminal outcomes indistinguishable, proving the report needs both evidence surfaces"
+      proof: "unit test: W1-T3379 criterion 6 mutation"
+  falsifier: |
+    Close without implementation if current main already has a production consumer of `skills.injected`
+    that joins it to terminal run outcomes, reports an explicit selected/control horizon, and can
+    recommend retirement without modifying skills. Checked at origin/main dc970e6e:
+    `skillsInjectedEvent` is documented analytics-only, and repository search found no consumer
+    outside its producer, prompt assembly, and unit tests. The passing 51-test workshop suite is
+    not a production-outcome measurement.
+  note: |
+    ONE CONCERN: make an approved workshop procedure observable and reviewable after release. This
+    task intentionally does not turn the workshop into an autonomous skill/script author. `verify:
+    human` is deliberate: prompt-scoped behavior is a high-blast-radius pilot, and the first report
+    must be reviewed before any retention or retirement action.

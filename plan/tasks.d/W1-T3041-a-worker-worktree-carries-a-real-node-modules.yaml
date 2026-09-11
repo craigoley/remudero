@@ -2,7 +2,7 @@
   title: "SIX LIVE WORKER WORKTREES CARRY A REAL 442 MiB `node_modules` INSTEAD OF THE SYMLINK THE DESIGN GUARANTEES — `linkWorktreeNodeModules`'s own header calls a symlink an INVARIANT and names the 2026-07-29 incident an install here caused, yet MEASURED 2026-09-07 six of seven live worktrees hold full copies (different inodes, 285 entries, no `.rmd-install-hash`), so rule 8 of hooks/deny-floor.sh — which fires only when `node_modules` is a SYMLINK — is not reaching whatever performs them"
   repo: remudero
   depends_on: []
-  type: investigate
+  type: implement
   verify: human
   principles: {tdd: strict}
   risk: high

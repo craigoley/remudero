@@ -2,7 +2,7 @@
   title: "EVERY REPO-OWNED SKILL IS INVISIBLE TO EVERY WORKER — `.claude/skills/` ships two skills and `describeWorkerSkillReachability` already returns reachable:false for the exact `settingSources` value `spawnWorker` passes, so the runtime's own progressive-disclosure primitive (name and description always loaded, body only on activation) is the one mechanism this fleet has and cannot use"
   repo: remudero
   depends_on: []
-  type: investigate
+  type: implement
   verify: auto
   principles: {tdd: strict}
   risk: medium

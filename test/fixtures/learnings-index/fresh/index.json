@@ -9,7 +9,9 @@
         "src/a.ts",
         "src/a2.ts",
         "src/shared.ts"
-      ]
+      ],
+      "symbols": [],
+      "error_signatures": []
     },
     "b.yaml": {
       "entries": [
@@ -18,7 +20,9 @@
       "globs": [
         ".github/**",
         "src/shared.ts"
-      ]
+      ],
+      "symbols": [],
+      "error_signatures": []
     }
   },
   "bySubsystem": {
