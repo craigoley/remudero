@@ -165,6 +165,15 @@ test("W1-T3360: a step hidden inside a regex ALTERNATION is found — the blind 
   assert.doesNotMatch(out, /CONTRADICTION.*run\.start/);
 });
 
+test("W1-T3360: a malformed \"step\": marker (no quoted value follows) is skipped, not mistaken for a step", () => {
+  // A marker not immediately followed by an opening quote (after any backslash-escaping) is not a
+  // step literal at all -- e.g. `"step":` inside prose, or a non-string value. The scanner must
+  // resume searching AFTER the malformed marker rather than stopping or misreading it, so a real
+  // step later in the same text is still found.
+  const steps = stepsInPatternText('"step":123 "step":"trailing.real"');
+  assert.deepEqual(steps, ["trailing.real"]);
+});
+
 test("W1-T3360: a RUNTIME-BUILT pattern is refused as a blind spot rather than passing as 'not step-keyed'", () => {
   const { code, out } = runOnFixture("resolveLedgerUnion(dir, buildPatternAtRuntime(x));\n");
   assert.equal(code, 1, out);

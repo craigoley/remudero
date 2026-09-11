@@ -334,4 +334,6 @@ export function main(argv = [], deps = {}) {
 }
 
 // diff-cov: process-boundary — the CLI entry only translates main()'s tested return into an exit code.
-if (process.argv[1] && process.argv[1].endsWith("union-retention-census.mjs")) process.exit(main(process.argv.slice(2)));
+if (process.argv[1] && process.argv[1].endsWith("union-retention-census.mjs")) {
+  process.exit(main(process.argv.slice(2)));
+}
