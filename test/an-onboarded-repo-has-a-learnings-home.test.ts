@@ -187,7 +187,9 @@ test("acceptance 4: loadLearningsIndex parses the seeded index.json, and it is a
   const index = loadLearningsIndex(join(learningsDir, "index.json"));
   assert.ok(index, "the seeded index.json must parse");
   assert.deepEqual(Object.keys(index!.files).sort(), PROJECT_LEARNINGS_SHARD_NAMES.map((n) => `${n}.yaml`).sort());
-  for (const shard of Object.values(index!.files)) assert.deepEqual(shard, { entries: [], globs: [] });
+  for (const shard of Object.values(index!.files)) {
+    assert.deepEqual(shard, { entries: [], globs: [], symbols: [], error_signatures: [] });
+  }
   assert.deepEqual(index!.bySubsystem, {});
 
   // The SAME check `npm run learnings-index:check` runs against this repo's own committed

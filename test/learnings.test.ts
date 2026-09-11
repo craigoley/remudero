@@ -96,9 +96,9 @@ test("a .github task gets the CI learning and NOT the containment ones", () => {
   assert.deepEqual(ids, ["skipped-check-deadlock"]);
 });
 
-test("no task files → repo-wide: every entry is a candidate", () => {
+test("no task files with no symbol/error text → no matched entries", () => {
   const { selected } = selectLearnings(CORPUS, undefined);
-  assert.equal(selected.length, CORPUS.length);
+  assert.equal(selected.length, 0);
 });
 
 test("a non-matching file set injects zero matched entries", () => {
@@ -514,15 +514,15 @@ test("SUPERSESSION over the REAL shipped corpus: a task touching src/lib/env.ts 
   assert.ok(!ids.includes("zdotdir-alone-isolates-shells"), "env.ts NEVER inherits the superseded learning");
 });
 
-test("candidateShardFiles: repo-wide (no taskFiles) candidates every shard in the index", () => {
+test("candidateShardFiles: no taskFiles candidates only shards with a symbol/error hit", () => {
   const index = {
     files: {
-      "a.yaml": { entries: ["x"], globs: ["src/a.ts"] },
-      "b.yaml": { entries: ["y"], globs: ["src/b.ts"] },
+      "a.yaml": { entries: ["x"], globs: ["src/a.ts"], symbols: [], error_signatures: [] },
+      "b.yaml": { entries: ["y"], globs: ["src/b.ts"], symbols: ["selectLearnings"], error_signatures: [] },
     },
     bySubsystem: {},
   };
-  assert.deepEqual(candidateShardFiles(index, undefined), ["a.yaml", "b.yaml"]);
+  assert.deepEqual(candidateShardFiles(index, undefined, { text: "selectLearnings" }), ["b.yaml"]);
 });
 
 test("candidateShardFiles: a task file matching only b.yaml's globs candidates b.yaml alone (a LOOKUP, not a scan)", () => {
@@ -611,13 +611,13 @@ test("loadLearningsCorpus rejects malformed YAML in one shard, naming that shard
   assert.throws(() => loadLearningsCorpus(dir), /is not valid YAML/);
 });
 
-test("candidateShardFiles: an explicit empty taskFiles array is treated the same as repo-wide (every shard candidates)", () => {
+test("candidateShardFiles: an explicit empty taskFiles array still requires a symbol/error hit", () => {
   const index = {
     files: {
-      "a.yaml": { entries: ["x"], globs: ["src/a.ts"] },
-      "b.yaml": { entries: ["y"], globs: ["src/b.ts"] },
+      "a.yaml": { entries: ["x"], globs: ["src/a.ts"], symbols: [], error_signatures: ["fatal refusal"] },
+      "b.yaml": { entries: ["y"], globs: ["src/b.ts"], symbols: [], error_signatures: [] },
     },
     bySubsystem: {},
   };
-  assert.deepEqual(candidateShardFiles(index, []), ["a.yaml", "b.yaml"]);
+  assert.deepEqual(candidateShardFiles(index, [], { text: "fatal refusal" }), ["a.yaml"]);
 });

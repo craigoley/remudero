@@ -67,7 +67,9 @@
         "src/run-task.ts",
         "test/catch-erasure-ratchet.test.ts",
         "test/run-task.test.ts"
-      ]
+      ],
+      "symbols": [],
+      "error_signatures": []
     },
     "ci.yaml": {
       "entries": [
@@ -92,7 +94,9 @@
         "src/lib/status.ts",
         "src/lib/sweep.ts",
         "src/run-task.ts"
-      ]
+      ],
+      "symbols": [],
+      "error_signatures": []
     },
     "failures.yaml": {
       "entries": [
@@ -125,7 +129,9 @@
         "src/lib/sweep.ts",
         "src/run-task.ts",
         "test"
-      ]
+      ],
+      "symbols": [],
+      "error_signatures": []
     },
     "platform.yaml": {
       "entries": [
@@ -166,7 +172,9 @@
         "src/lib/worker-provider.ts",
         "src/lib/worker.ts",
         "src/run-task.ts"
-      ]
+      ],
+      "symbols": [],
+      "error_signatures": []
     },
     "testing.yaml": {
       "entries": [
@@ -192,7 +200,9 @@
         "src/lib/self-sync.ts",
         "src/lib/task-linter.ts",
         "test"
-      ]
+      ],
+      "symbols": [],
+      "error_signatures": []
     }
   },
   "bySubsystem": {
