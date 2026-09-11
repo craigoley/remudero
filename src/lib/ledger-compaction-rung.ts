@@ -146,6 +146,11 @@ export function readLedgerCorpusPressure(
   try {
     names = deps.readdir(stateDir);
   } catch {
+    // DELIBERATE, AND THE ZERO IS THE POINT: an unreadable state dir means the corpus cannot be
+    // MEASURED, not that it is small. Reporting zero keeps the rung SILENT rather than firing a
+    // compaction pass against a directory it cannot even list — the trigger is pressure it has
+    // observed, never pressure it has assumed. A caller that needs "healthy" must ask for a
+    // successful read, not for a low number.
     return { archiveCount: 0, archiveBytes: 0 };
   }
   // The rotation forms are BOTH shapes, plain and gzip — a glob naming one answers from the other
