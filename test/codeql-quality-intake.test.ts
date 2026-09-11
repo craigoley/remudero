@@ -156,3 +156,19 @@ test("readCodeScanningAlerts returns normalized alerts from every paginated resp
     process.env.PATH = saved;
   }
 });
+
+test("readCodeScanningAlerts preserves the GitHub CLI's compact refusal evidence", () => {
+  const bin = ghStubPath(`#!/bin/sh\nprintf '%s\\n' 'HTTP 403: secondary rate limit' >&2\nexit 1\n`);
+  const saved = process.env.PATH;
+  process.env.PATH = pathWith(bin);
+  try {
+    const read = readCodeScanningAlerts("o", "r");
+    assert.equal(read.ok, false, "a failed gh command must refuse rather than become an empty alert list");
+    if (!read.ok) {
+      assert.match(read.error, /Command failed: gh api repos\/o\/r\/code-scanning\/alerts --paginate/);
+      assert.match(read.error, /HTTP 403: secondary rate limit/, "the ledger can distinguish a rate limit from a bare command failure");
+    }
+  } finally {
+    process.env.PATH = saved;
+  }
+});
