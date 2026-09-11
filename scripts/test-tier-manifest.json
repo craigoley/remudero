@@ -3,6 +3,7 @@
   "files": {
     "test/a-bare-flagged-worktree-stops-the-whole-fleet.test.ts": 0,
     "test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts": 621,
+    "test/a-blocked-ci-verdict-names-the-check-that-went-red.test.ts": 0,
     "test/a-blocked-task-must-name-its-disposition.test.ts": 3261,
     "test/a-bound-that-stops-waiting-does-not-stop-the-work.test.ts": 1907,
     "test/a-broken-body-is-repairable-not-ambiguous.test.ts": 1676,

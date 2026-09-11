@@ -4264,7 +4264,32 @@ export function ciGateFromRollup(
  * gate actually judged lets the miner be pinned to that same commit within one decision, and makes
  * the shared subject OBSERVABLE in whatever that decision reports.
  */
-export type CiGateOutcome = { state: "green" | "red" | "timeout"; sha?: string };
+/** PRIMARY CONTROL: bounded CI evidence distinguishes terminal causes; unavailable is distinct from an observed empty set. */
+export const CI_GATE_EVIDENCE_MAX = 8;
+
+export type CiGateOutcome = {
+  state: "green" | "red" | "timeout";
+  sha?: string;
+  checks?: string[];
+  checkCount?: number;
+};
+
+function boundedCiGateChecks(names: Iterable<string>): { checks: string[]; checkCount: number } {
+  const all = [...new Set([...names].map((name) => name.trim() || "unknown"))].sort((a, b) => a.localeCompare(b));
+  return { checks: all.slice(0, CI_GATE_EVIDENCE_MAX), checkCount: all.length };
+}
+
+export function ciGateBlockReason(r: CiGateOutcome | "green" | "red" | "timeout"): string {
+  const state = ciGateState(r);
+  const base = `ci ${state} before review`;
+  if (typeof r === "string" || r.checks === undefined) return `${base}; relevant checks unavailable`;
+  const checkCount = Math.max(r.checkCount ?? r.checks.length, r.checks.length);
+  const kind = state === "timeout" ? "pending" : "red";
+  if (checkCount === 0) return `${base}; ${kind} checks: none (0 total)`;
+  const shown = r.checks.join(", ");
+  const truncated = checkCount > r.checks.length ? `; first ${r.checks.length} shown` : "";
+  return `${base}; ${kind} checks: ${shown} (${checkCount} total${truncated})`;
+}
 
 /** W1-T2804: normalize a {@link CiGateOutcome} or a bare verdict (what a caller-supplied
  *  `waitForCiGreen` stub returns) to the verdict. */
@@ -4450,7 +4475,14 @@ async function waitForCiGreen(
     const state = ciGateFromRollup(roll);
     // W1-T2804: the sha this iteration RESOLVED and judged rides out with the verdict. It is the
     // already-resolved head, never a second read — a second read is a second chance to skew.
-    if (state === "red") return { state: "red", sha };
+    if (state === "red") {
+      const red = boundedCiGateChecks(
+        dedupeRollupByLatestAttempt((roll ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX))
+          .filter((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")))
+          .map((c) => c.name ?? c.context ?? "unknown"),
+      );
+      return { state: "red", sha, ...red };
+    }
     if (state === "green") return { state: "green", sha };
     readings.push(roll);
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
@@ -4464,7 +4496,7 @@ async function waitForCiGreen(
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
     if (stall.stalled) {
       log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW, sha });
-      return { state: "timeout", sha };
+      return { state: "timeout", sha, ...boundedCiGateChecks(stall.pending) };
     }
     // W1-T463: `await` a TIMER, never `execFileSync("sleep", …)`. The cadence is byte-identical —
     // `everySec` seconds between polls, unchanged — but the thread is now RELEASED for the whole
@@ -13071,19 +13103,21 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // lives here, before arming. A ci that never greens is blocked_ci (no review
     // over unproven code); a review=failure is blocked_review (the required check
     // is red and GitHub will not merge). Pending is never treated as pass.
-    const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
-    if (ci !== "green") {
+    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    const ciState = ciGateState(ci);
+    if (ciState !== "green") {
+      const reason = ciGateBlockReason(ci);
       say("fallback: pushing branch already done; ci not green — skipping review, leaving PR open");
       log("verdict", {
         verdict: "blocked_ci",
         pr_url: prUrl,
-        reason: `ci ${ci} before review`,
+        reason,
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
         ...terminalVerdictFields(impl),
       });
-      say(`verdict: blocked_ci (ci ${ci}) — PR left OPEN: ${prUrl}`);
+      say(`verdict: blocked_ci (${reason}) — PR left OPEN: ${prUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
     }
     // THE REVIEW MUST JUDGE THE PR BODY, NOT THE WORKER'S CHAT TEXT (recon-GK).
