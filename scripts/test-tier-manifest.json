@@ -1279,6 +1279,7 @@
     "test/the-ledger-archive-is-compacted-never-truncated.test.ts": 0,
     "test/the-local-coverage-gate-passes-vacuously-on-a-diff-it-failed-to-compute.test.ts": 1375,
     "test/the-local-gate-writes-coverage-where-ci-does.test.ts": 5903,
+    "test/the-mailbox-is-its-own-section.test.ts": 0,
     "test/the-manual-reap-was-costed-against-a-population-that-tripled.test.ts": 252,
     "test/the-mint-blames-the-fleet-for-its-own-caller.test.ts": 1215,
     "test/the-mint-discards-its-only-current-source-when-the-local-half-is-stale.test.ts": 2060,
