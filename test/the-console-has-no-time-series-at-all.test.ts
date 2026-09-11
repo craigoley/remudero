@@ -41,6 +41,30 @@ function renderShellWithLedger(lines: ReadonlyArray<Record<string, unknown>>): s
   return body;
 }
 
+function renderShellWithIdle(
+  idle: Parameters<typeof buildShellRoute>[2],
+): string {
+  let body = "";
+  const route = buildShellRoute(
+    DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS,
+    "1234567890abcdef",
+    idle,
+    { armed: false },
+    () => "1234567890abcdef",
+  );
+  const res = {
+    writeHead() {
+      return this;
+    },
+    end(chunk?: unknown) {
+      body += chunk === undefined ? "" : String(chunk);
+      return this;
+    },
+  };
+  route.handler({} as never, res as never, { params: {} });
+  return body;
+}
+
 test("console time series: renders bounded inline SVG with no external chart dependency", () => {
   const html = renderShellWithLedger([
     row("2026-09-08T10:05:00.000Z", { step: "implement.done", cost_usd: 0.25 }),
@@ -74,6 +98,24 @@ test("console time series: empty and unreadable series render as absent, never a
   const unreadable = renderConsoleTimeSeriesHtml(unreadableConsoleTimeSeries("EACCES", { nowMs: NOW_MS }));
   assert.match(unreadable, /ABSENT — time series ledger unreadable: EACCES/);
   assert.doesNotMatch(unreadable, /<polyline/);
+});
+
+test("console time series: shell fallback arms render absent instead of a zero line", () => {
+  const unreadable = renderShellWithIdle({
+    ledgerPath: "fixture-ledger.ndjson",
+    readLedger: () => {
+      throw new Error("EACCES");
+    },
+    now: () => new Date(NOW_MS),
+  });
+  assert.match(unreadable, /ledger unreadable: EACCES/);
+  assert.match(unreadable, /ABSENT — time series ledger unreadable: EACCES/);
+  assert.doesNotMatch(unreadable, /<polyline/);
+
+  const unavailable = renderShellWithIdle({});
+  assert.match(unavailable, /idle reasons refresh off the bounded console data routes/);
+  assert.match(unavailable, /ABSENT — time series ledger unreadable: ledger reader unavailable/);
+  assert.doesNotMatch(unavailable, /<polyline/);
 });
 
 test("console time series: 15m buckets keep a repeating sub-hourly event visible", () => {
