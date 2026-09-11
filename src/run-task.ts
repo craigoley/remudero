@@ -9445,6 +9445,31 @@ export interface WorkerErrorVerdict {
 }
 
 /**
+ * `{ model, served_model, routed_model }` for a terminal `verdict` row — the ONE helper every
+ * terminal `verdict` writer in `runTaskBody` spreads (W1-T3080), so the model that actually
+ * SERVED a call — not just the mount RESOLVED for it — reaches the row the class-routing
+ * decision (W1-T167) reads. `routed_model` rides along only when present, the same "absent
+ * when unset" discipline {@link workerLedgerFields} already keeps.
+ *
+ * `r === null` names a PRE-SPAWN refusal (e.g. a containment/isolation preflight failure, or a
+ * worker abandoned before its completion envelope arrived) — no worker outcome exists to read a
+ * model off, so `model`/`served_model` are written `null` explicitly rather than omitted:
+ * absent means "not written"; `null` means "checked, no worker ran" (P48).
+ */
+function terminalVerdictFields(r: WorkerResult | null): {
+  model: string | null;
+  served_model: string | null;
+  routed_model?: string;
+} {
+  if (!r) return { model: null, served_model: null };
+  return {
+    model: r.model,
+    served_model: r.servedModel ?? null,
+    ...(r.routedModel ? { routed_model: r.routedModel } : {}),
+  };
+}
+
+/**
  * Pure mapping from a worker's ERROR envelope to a terminal verdict. Returns
  * null when the result is NOT an error (the caller proceeds normally).
  *
@@ -11696,7 +11721,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     } catch (e) {
       log("worktree.remove.error", { on: `${stage}.error`, error: String((e as Error)?.message ?? e) });
     }
-    log("verdict", v.ledger);
+    log("verdict", { ...v.ledger, ...terminalVerdictFields(r) });
     say(
       `verdict: ${v.verdict} (${r.subtype}) at ${stage} · ${r.numTurns} turns · notional $${costUsd.toFixed(4)}`,
     );
@@ -11766,6 +11791,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(e.childEnvKeys),
         account_label: e.accountLabel,
+        ...terminalVerdictFields(null),
       });
       say(`verdict: blocked_containment — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_containment" };
@@ -11804,6 +11830,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(e.childEnvKeys),
         account_label: e.accountLabel,
+        ...terminalVerdictFields(null),
       });
       say(`verdict: blocked_isolation — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_isolation" };
@@ -12528,6 +12555,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
         reason: `repeated transient API error across ${MAX_TRANSIENT_RETRIES} retries — not a task failure`,
+        ...terminalVerdictFields(impl),
       });
       say(`verdict: blocked_transient — repeated transient API error, not a task failure`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_transient" };
@@ -12718,7 +12746,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         } catch (e) {
           log("worktree.remove.error", { on: "already_satisfied", error: String((e as Error)?.message ?? e) });
         }
-        log("verdict", v.ledger);
+        log("verdict", { ...v.ledger, ...terminalVerdictFields(impl) });
         say(`verdict: already_satisfied — credited via ${v.prUrl} · ${impl.numTurns} turns`);
         return { taskId, runId, prUrl: v.prUrl, merged: true, costUsd, verdict: "already_satisfied" };
       }
@@ -12761,7 +12789,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       } catch (e) {
         log("worktree.remove.error", { on: "no_pr", error: String((e as Error)?.message ?? e) });
       }
-      log("verdict", v.ledger);
+      log("verdict", { ...v.ledger, ...terminalVerdictFields(impl) });
       say(`verdict: no_pr — worker completed without opening a PR · ${impl.numTurns} turns`);
       return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
     }
@@ -12921,6 +12949,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
       });
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
@@ -12929,7 +12958,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // checkPrOwnership). Fails closed and named on mismatch; the PR is left untouched.
     const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), costUsd, impl.accountLabel);
     if (ownership) {
-      log("verdict", ownership.ledger);
+      log("verdict", { ...ownership.ledger, ...terminalVerdictFields(impl) });
       say(
         `verdict: pr_attribution_failed — claimed PR ${prUrl} (branch ${ownership.ledger.claimed_branch ?? "unresolved"}) ` +
           `is not this run's own branch (${branch}) — PR left UNTOUCHED`,
@@ -12979,6 +13008,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
       });
       say(`verdict: blocked_ci (ci ${ci}) — PR left OPEN: ${prUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
@@ -13187,6 +13217,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
           account_label: impl.accountLabel,
+          ...terminalVerdictFields(impl),
         });
         say(`verdict: blocked — fix worker spawn abandoned (wall-clock bound): ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -13200,6 +13231,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
           account_label: impl.accountLabel,
+          ...terminalVerdictFields(impl),
         });
         say(`verdict: blocked — fix rung exhausted (${rung.strikes} strike(s)), escalated: ${rung.issueUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -13237,6 +13269,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
           account_label: impl.accountLabel,
+          ...terminalVerdictFields(impl),
         });
         say(`verdict: blocked — ${termination.phrase}: ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -13373,6 +13406,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
       });
       say(`verdict: blocked — ${irreversible ? "diff classified irreversible" : "CAPPED verdict"}, escalated: ${issueUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -13479,6 +13513,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
       });
       say(`verdict: blocked — risk judge escalated: ${riskJudgeResult.escalationUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -13547,6 +13582,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
       });
       say(`verdict: merged · notional cost $${costUsd.toFixed(4)}`);
       return { taskId, runId, prUrl, merged: true, costUsd, verdict: "merged" };
@@ -13564,6 +13600,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       cost_usd: costUsd,
       billing_mode: billingMode(impl.childEnvKeys),
       account_label: impl.accountLabel,
+      ...terminalVerdictFields(impl),
     });
     say(`verdict: ${terminalVerdict} (${outcome.reason}) — PR left OPEN: ${prUrl}`);
     return { taskId, runId, prUrl, merged: false, costUsd, verdict: terminalVerdict };
@@ -13588,6 +13625,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         last_state: evidence.lastState ?? null,
         last_state_ms: evidence.lastStateMs ?? null,
         cost_usd: costUsd,
+        ...terminalVerdictFields(null),
       });
       say(
         `verdict: failed — worker abandoned after ${Math.round(evidence.elapsedMs / 1000)}s of silence ` +

@@ -323,6 +323,12 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
+  // W1-T3080: the ONE row that carries the model that actually SERVED the implement call
+  // (`served_model`/`routed_model`, via `workerLedgerFields`) rather than the mount `run.start`
+  // resolved before dispatch. `retro.ts`'s `runModelIndex` reads it back to attribute a
+  // model-less `verdict` row; rotated away, the served model is gone from the corpus the
+  // class-routing decision (W1-T167) reads, falling back to a resolved-not-served guess.
+  "implement.done",
   "pr.opened",
   // W1-T2594: provider-diverse reviewer routing resolves this row by exact task + PR + head.
   // Rotating it away would make an unchanged head route differently after maintenance.

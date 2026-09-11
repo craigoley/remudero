@@ -158,6 +158,7 @@
     "test/a-suite-refused-on-cost-still-walks-the-population-your-diff-joins.test.ts": 0,
     "test/a-task-trailer-redirects-review-to-an-unrelated-shard.test.ts": 1612,
     "test/a-tasks-throw-is-not-the-daemons-crash.test.ts": 0,
+    "test/a-terminal-verdict-names-the-model-that-earned-it.test.ts": 0,
     "test/a-test-outside-strykers-command-is-invisible.test.ts": 484,
     "test/a-test-that-writes-the-tracked-tree-is-observed-by-every-other-worker.test.ts": 638,
     "test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts": 0,
