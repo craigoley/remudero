@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -233,6 +234,105 @@ test("learnings-v2: a local source-free reason is scrubbed before promotion or e
   );
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.reason, /generic-credential-assignment/);
+});
+
+test("learnings-v2: parseOrigin rejects every malformed 'git' origin shape one field at a time", () => {
+  const write = (origin: unknown) => {
+    const path = tmpPath("git-origin.yaml");
+    writeFileSync(path, JSON.stringify([{ ...entry(), origin }]));
+    return path;
+  };
+  const gitWire = (over: Record<string, unknown> = {}) => ({
+    kind: "git",
+    path: gitOrigin.path,
+    rev: gitOrigin.rev,
+    start_line: gitOrigin.startLine,
+    end_line: gitOrigin.endLine,
+    line_sha256: gitOrigin.lineSha256,
+    ...over,
+  });
+  assert.throws(() => loadLearnings(write("not-a-mapping")), /'origin' must be a mapping/);
+  assert.throws(() => loadLearnings(write({ kind: 7 })), /'origin\.kind' must be a string/);
+  assert.throws(
+    () => loadLearnings(write(gitWire({ path: "../escape" }))),
+    /'origin\.path' must be a safe repo-relative path/,
+  );
+  assert.throws(() => loadLearnings(write(gitWire({ rev: "not-hex" }))), /'origin\.rev' must be a full lowercase 40-hex/);
+  assert.throws(
+    () => loadLearnings(write(gitWire({ end_line: 0 }))),
+    /'origin\.start_line'\/'origin\.end_line' must be positive inclusive integers/,
+  );
+  assert.throws(
+    () => loadLearnings(write(gitWire({ line_sha256: "not-a-digest" }))),
+    /'origin\.line_sha256' must be a lowercase SHA-256 digest/,
+  );
+});
+
+test("learnings-v2: a source-free ('none') origin validates its keys, reason, and import-mode pin", () => {
+  const withNone = (origin: unknown) => {
+    const path = tmpPath("none-origin.yaml");
+    writeFileSync(path, JSON.stringify([{ ...entry(), origin }]));
+    return path;
+  };
+  assert.throws(
+    () => loadLearnings(withNone({ kind: "none", reason: "fine", extra: true })),
+    /'origin' has unrecognized key\(s\) extra/,
+  );
+  assert.throws(() => loadLearnings(withNone({ kind: "none", reason: "" })), /'origin\.reason' must be a non-empty string/);
+
+  const local = withNone({ kind: "none", reason: "an author-only explanation" });
+  const [loaded] = loadLearnings(local);
+  assert.deepEqual(loaded?.origin, { kind: "none", reason: "an author-only explanation" });
+
+  const importPath = tmpPath("none-import.yaml");
+  const wrongReasonEntry = { ...entry(), origin: { kind: "none", reason: "an author-only explanation" } };
+  writeFileSync(
+    importPath,
+    JSON.stringify({ version: "learnings-v2", hash: computeArtifactHash([wrongReasonEntry as LocalLearningEntry], "v2"), entries: [wrongReasonEntry] }),
+  );
+  const badImport = loadGlobalArtifact(importPath);
+  assert.equal(badImport.ok, false);
+  if (!badImport.ok) assert.match(badImport.reason, /imported source-free origin must use/);
+});
+
+test("learnings-v2: an imported 'redacted' origin rejects a reason outside the public allowlist", () => {
+  const wireEntry = { ...entry(), origin: { kind: "redacted", reason: "not-a-recognized-reason" } };
+  const path = tmpPath("bad-redaction.yaml");
+  writeFileSync(
+    path,
+    JSON.stringify({ version: "learnings-v2", hash: computeArtifactHash([wireEntry as LocalLearningEntry], "v2"), entries: [wireEntry] }),
+  );
+  const loaded = loadGlobalArtifact(path);
+  assert.equal(loaded.ok, false);
+  if (!loaded.ok) assert.match(loaded.reason, /'origin\.reason' is not a recognized public redaction reason/);
+});
+
+test("learnings-v2: loadGlobalArtifact turns an unsupported schema version into a refusal, not a crash", () => {
+  const path = tmpPath("unsupported-version.yaml");
+  writeFileSync(path, JSON.stringify({ version: "learnings-v3", hash: "irrelevant", entries: [] }));
+  const loaded = loadGlobalArtifact(path);
+  assert.equal(loaded.ok, false);
+  if (!loaded.ok) {
+    assert.equal(loaded.kind, "refused");
+    assert.match(loaded.reason, /unsupported learnings artifact version 'learnings-v3'/);
+  }
+});
+
+test("learnings-v2: verifyBundlePin refuses a bundle with no 'version' field before ever hashing", () => {
+  const result = verifyBundlePin(JSON.stringify({ hash: "pin", entries: [] }), "pin");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /bundle missing string 'version'/);
+});
+
+test("learnings-v2: attestLearningOrigin's default blob reader shells out to the real repo's Git object store", () => {
+  const repoDir = process.cwd();
+  const rev = execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const blob = execFileSync("git", ["-C", repoDir, "cat-file", "blob", `${rev}:package.json`], { encoding: "buffer" });
+  const firstLine = blob.toString("utf8").split("\n")[0];
+  const span = `${firstLine}\n`;
+  const lineSha256 = createHash("sha256").update(Buffer.from(span, "utf8")).digest("hex");
+  const source = entry({ origin: { kind: "git", path: "package.json", rev, startLine: 1, endLine: 1, lineSha256 } });
+  assert.equal(attestLearningOrigin(source, repoDir).status, "match");
 });
 
 if (false) {
