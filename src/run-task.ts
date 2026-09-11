@@ -4239,7 +4239,7 @@ export function ciGateFromRollup(
  * gate actually judged lets the miner be pinned to that same commit within one decision, and makes
  * the shared subject OBSERVABLE in whatever that decision reports.
  */
-/** W1-T3145: a terminal handoff needs enough evidence to distinguish one red gate from
+/** PRIMARY CONTROL (W1-T1266, W1-T3145): a terminal handoff needs enough evidence to distinguish one red gate from
  * another, but a rollup is unbounded. Keep the detail carried from the gate deliberately
  * small; {@link ciGateBlockReason} retains the complete count when it writes the ledger row. */
 export const CI_GATE_EVIDENCE_MAX = 8;
