@@ -114,8 +114,6 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-// ── (ii) SEMANTIC CHECK-RUN CLASSIFICATION — shadow first, enforce later ──────────────────
-
 export type GithubEventWakeSemanticMode = "shadow" | "enforce";
 
 export type GithubCheckWakeClass =
@@ -156,8 +154,6 @@ function normalizeCheckValue(value: string | undefined): string | undefined {
   return trimmed && trimmed.length > 0 ? trimmed.toLowerCase() : undefined;
 }
 
-/** Pure classifier for the webhook reducer: unknown check payloads wake, successful leaves may be
- *  suppressed only when policy later changes from shadow to enforce. */
 export function classifyGithubEventWake(
   event: string,
   action: string | undefined,
@@ -341,9 +337,7 @@ export interface GithubEventWakeOptions {
   secret: string | undefined;
   /** This daemon's own `owner/repo` — another repository's payload is refused, never silently ignored. */
   repository: string;
-  /** Whether successful non-aggregate check runs are only observed or actively suppressed. */
   semanticCheckMode?: GithubEventWakeSemanticMode;
-  /** Check-run names that represent an aggregate transition the PR/main governors consume. */
   aggregateCheckNames?: readonly string[];
   /** Where {@link writeSweepWakeMarkerAtomic} persists the coalesced wake; see {@link sweepWakeMarkerPath}. */
   markerPath: string;
