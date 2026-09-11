@@ -1,0 +1,49 @@
+- id: W1-T3366
+  title: "TWO COVERAGE DIRECTIVES LOOK ALIKE AND ONLY ONE IS READ — a `c8 ignore` comment beside a line diff-coverage flagged is inert, and nothing says so, so the waiver that looks applied does nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  files:
+    - scripts/diff-coverage.mjs
+    - test/an-inert-coverage-waiver-is-named.test.ts
+  origin: "sweep-forensics#2026-09-10-queue-day"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "a c8-style waiver on a line this gate reports is named as inert rather than ignored in silence"
+      proof: "unit test: a c8 ignore beside a reported line is named as not honoured"
+    - claim: "the message names the directive this gate does honour, so the remedy is reachable from the refusal"
+      proof: "unit test: the inert-waiver message names the diff-cov directive"
+    - claim: "a correctly written diff-cov directive is unaffected, so the check adds no new refusal"
+      proof: "unit test: a honoured diff-cov directive still waives its region"
+  rationale: |
+    MEASURED 2026-09-10 on #5029. `src/run-task.ts` carries `/* c8 ignore next -- process-boundary
+    dispatch */` on two CLI arms, so that pragma reads as the house idiom. diff-coverage does not read
+    it: `scripts/diff-coverage.mjs:544` matches only
+    `/^\s*\/\/\s*diff-cov:\s*([a-z][a-z-]*)\b(.*)$/`.
+    
+    A REPAIR WAS AUTHORED ON THAT MISREADING. Copying the sibling pragma onto the flagged arm would
+    have waived nothing; the branch owner's own commit `831d25491` — "waive the note dispatch with the
+    directive diff-coverage honours" — was replacing exactly that mistake.
+    
+    THE GATE ALREADY REFUSES AN UNKNOWN DIRECTIVE. `diff-coverage.mjs` names the words that exist when
+    an author writes `// diff-cov: something-else`, citing #4865, which "stalled on the neighbouring
+    version of that: told the directive it used was wrong, and no right one". A c8 waiver is the same
+    failure one step earlier: no directive was recognised at all, so nothing was said.
+  design: |
+    (i) NAME IT WHERE IT IS ALREADY LOOKING. The gate has the reported line and the file text; a
+    c8-style waiver adjacent to a reported line is detectable with the same scan.
+    
+    (ii) REPORT, DO NOT REFUSE. This adds no new failure class. The line was already reported; this
+    only explains why the waiver beside it did nothing.
+    
+    (iii) REUSE THE EXISTING VOCABULARY. The unknown-directive message already lists the words that
+    exist. Say the same thing here rather than writing a second, driftable sentence.
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if diff-coverage already mentions an inert c8 waiver when it reports
+    a line. THE NO-NEW-REFUSAL FALSIFIER: a correctly written `// diff-cov: process-boundary`
+    directive must still waive its region untouched, so a change that disturbs honoured directives
+    goes red.

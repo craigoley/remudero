@@ -1,0 +1,51 @@
+- id: W1-T3363
+  title: "A REPAIR READS ONE JOB'S LOG AND CANNOT SEE THAT A LATER RUN SUPERSEDED IT — the same head can carry a failed and a passed attempt of one check, and the failure-reading path takes the first it finds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  files:
+    - src/lib/sweep.ts
+    - test/a-superseded-check-attempt-is-not-a-live-failure.test.ts
+  origin: "sweep-forensics#2026-09-10-queue-day"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "a check with a later successful attempt on the same head is not reported as a live failure"
+      proof: "unit test: a check whose latest attempt passed is absent from the actionable failures"
+    - claim: "the attempt that is reported is the latest for that check name, not the first encountered"
+      proof: "unit test: the reported attempt is the most recent for its check name"
+    - claim: "a check whose only attempt failed is still reported, so the narrowing does not blind the repair path"
+      proof: "unit test: a single failed attempt with no later run is still actionable"
+  rationale: |
+    MEASURED 2026-09-10, twice in one hour.
+    
+    #5039: the head carried TWO `acceptance-author-gate` runs — 23:37:42 success, then 23:38:08
+    failure on a body edit that raced the first run. The failing log was read as live and investigated;
+    the body it judged no longer existed.
+    
+    #5029: a failing diff-coverage log was read as live while the branch owner had already pushed
+    `831d25491`, the correct fix. A repair was authored against a failure that was already handled and
+    nearly pushed on top of concurrent work.
+    
+    THE PRECEDENT IS IN THE REPO. W1-T2804 fixed exactly this class for the merge gate —
+    "ciGateFromRollup applies neither dedupeRollupByLatestAttempt nor the required-context filter" —
+    and `dedupeRollupByLatestAttempt` exists. The discipline was never applied where failures are read
+    FOR REPAIR.
+  design: |
+    (i) REUSE, DO NOT REINVENT. `dedupeRollupByLatestAttempt` already answers "which attempt counts".
+    The failure-reading path should compose with it rather than grow a second rule that can disagree.
+    
+    (ii) NARROW, NEVER BLIND. A check whose only attempt failed must stay actionable. The third
+    criterion exists so that a fix which simply drops failures cannot pass.
+    
+    (iii) SAY SO WHEN IT HAPPENS. A superseded failure that is skipped should leave a row naming the
+    attempt it stood down for, so an operator reading the ledger can tell "not acted on" from
+    "acted on and resolved".
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if the failure-reading path already dedupes by latest attempt —
+    construct a head with a failed attempt followed by a passing one and drive the real reader. THE
+    BLINDING FALSIFIER: a single failed attempt with no later run must still be reported, so a change
+    that filters too aggressively goes red.

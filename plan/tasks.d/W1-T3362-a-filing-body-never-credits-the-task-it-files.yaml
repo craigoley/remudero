@@ -1,0 +1,48 @@
+- id: W1-T3362
+  title: "THE FILING EMITTER WRITES A BODY THE FILING GATE REFUSES — `files-and-credits-the-same-task` was repaired by hand nine times in one day, always the same way, because the shipped refusal has no counterpart in the producer"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  files:
+    - src/lib/plan-pr-emitter.ts
+    - test/a-filing-body-never-credits-the-task-it-files.test.ts
+  origin: "sweep-forensics#2026-09-10-queue-day"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "a body emitted for a filing PR never credits a task that same PR contributes the record for"
+      proof: "unit test: a filing body for a newly added shard carries no trailer crediting that shard"
+    - claim: "the emitted body is accepted by the shipped author-time gate rather than merely looking well formed"
+      proof: "unit test: the emitted filing body passes the acceptance author-time gate"
+    - claim: "an implementing PR that does not contribute its own record still credits it, so the fix does not strip legitimate credit"
+      proof: "unit test: an implementing body keeps its trailer when the diff adds no shard for that task"
+  rationale: |
+    MEASURED 2026-09-10: nine filing PRs were refused `files-and-credits-the-same-task` and repaired
+    by hand with one identical edit — #5011, #5015, #5016, #5019, #5021 among them. The repair script
+    was generic because the defect always was.
+    
+    W1-T1004 SHIPPED THE REFUSAL, NOT THE PRODUCER. That task ("A PLAN-ONLY FILING PR CAN CREDIT THE
+    TASK IT JUST FILED AS IMPLEMENTED") is merged, which is why the gate fires correctly. Nothing
+    changed what writes the body, so the gate is a permanent tax rather than a one-time correction.
+    
+    THE MACHINERY ALREADY EXISTS. `src/lib/plan-pr-emitter.ts` exports `filingAcceptanceCriteria`,
+    `renderAcceptanceBlock`, `bodyNeedsAcceptanceRepair` and `ensureJudgeableBody`, and
+    `run-task.ts:34203` already calls `filingAcceptanceCriteria(ids, filedPaths)`. The acceptance
+    block is not the defect; the self-credit beside it is.
+  design: |
+    (i) THE PREDICATE IS ALREADY EXPRESSIBLE. A filing PR knows the ids it files and the paths it
+    contributes — `run-task.ts:34203` passes both. A trailer crediting an id whose record this same
+    diff adds is the refusal condition; emit no such trailer.
+    
+    (ii) REPAIR AT THE PRODUCER, NOT THE CONSUMER. Do not weaken the gate and do not add a
+    post-hoc repair pass. The gate is correct; the body should arrive correct.
+    
+    (iii) DO NOT TOUCH THE IMPLEMENTING PATH. A PR that implements a task it did not file must keep
+    crediting it. The falsifier below is what holds that line.
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if a filing body emitted today already omits the self-credit — drive
+    the real emitter, not a description of it. THE SECOND TEST IS THE ONE THAT MATTERS: an implementing
+    body must still carry its trailer, so a fix that strips every trailer fails.

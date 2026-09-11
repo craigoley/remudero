@@ -1,0 +1,47 @@
+- id: W1-T3365
+  title: "A REVIEW THAT STOOD DOWN FOR A CLAIM IN FLIGHT REPORTS \"no PR-head checkout\" — the synthetic held verdict borrows a flag whose rendered text names a different cause entirely, and the PR is told to fix something that is not wrong"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  files:
+    - src/run-task.ts
+    - test/a-held-review-names-the-claim-it-stood-down-for.test.ts
+  origin: "sweep-forensics#2026-09-10-queue-day"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "a review that stood down for an in-flight decision says so, rather than reporting an absent PR-head checkout"
+      proof: "unit test: a held verdict's description names the in-flight decision"
+    - claim: "a verdict that genuinely had no PR-head checkout still says exactly that"
+      proof: "unit test: a materialization failure still reports the absent checkout"
+    - claim: "the distinction survives onto the ledger, so the two causes can be counted apart"
+      proof: "unit test: the two causes carry different ledger reasons"
+  rationale: |
+    MEASURED 2026-09-10. `src/run-task.ts:4794` returns a synthetic verdict when
+    `claimReviewDecision` answers `in_flight`: `capped: true, keywordOnly: true`, summary
+    "identical review decision is already in flight". `src/run-task.ts:14341` then renders any
+    `keywordOnly` verdict as "KEYWORD-ONLY: no proof was executed (no PR-head checkout)".
+    
+    THE TEXT IS FALSE FOR THIS CAUSE. Driving `materializeReviewWorktree` directly on #4992's head
+    produced a worktree whose tip matched the PR head exactly, with `failure: undefined` — the
+    checkout was fine. Instrumenting the run showed `runReview` and `judgeReview` were never reached.
+    
+    THE COST. #4992 and #5004 sat unmergeable for hours behind claims orphaned by a heap abort, and the
+    message sent the investigation to the materialization path, which was healthy. The same text
+    misdirected a second look at #5030 later the same day.
+  design: |
+    (i) THE HELD VERDICT ALREADY KNOWS. It carries `decisionDisposition: "in_flight"`. Render from
+    the cause, not from a flag that two causes share.
+    
+    (ii) DO NOT WIDEN THE FLAG'S MEANING. `keywordOnly` still means what it means for a real
+    keyword-only verdict; the second criterion holds that line.
+    
+    (iii) COUNTABLE, NOT ONLY READABLE. The ledger must distinguish them, or "how often do we stand
+    down" stays unanswerable.
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if a held verdict today already names the in-flight decision in its
+    posted description — drive the real path with a claim held, do not read the constant. THE
+    REGRESSION FALSIFIER: a genuine materialization failure must still report the absent checkout.
