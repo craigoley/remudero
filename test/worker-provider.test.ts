@@ -929,6 +929,63 @@ test("Codex hook profile fails closed when the validated worker policy has no co
   }
 });
 
+/** Base sandbox stanza shared by the malformed-hook fixtures below — the shape
+ *  {@link validateWorkerSettingsFile} requires before {@link codexPreToolUseProfile} ever
+ *  inspects `hooks`. */
+const CODEX_HOOK_PROFILE_BASE_SANDBOX = { enabled: true, failIfUnavailable: true };
+
+function writeCodexHookProfileFixture(root: string, preToolUse: unknown): string {
+  const settingsFile = join(root, "worker.json");
+  writeFileSync(
+    settingsFile,
+    JSON.stringify({ sandbox: CODEX_HOOK_PROFILE_BASE_SANDBOX, hooks: { PreToolUse: preToolUse } }),
+  );
+  return settingsFile;
+}
+
+test("Codex hook profile fails closed on a PreToolUse entry with an unreadable matcher", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
+  try {
+    const settingsFile = writeCodexHookProfileFixture(root, [{ matcher: 123, hooks: [] }]);
+    assert.throws(
+      () => codexPreToolUseProfile(settingsFile),
+      /PreToolUse\[0\] has an unreadable matcher or empty hooks list/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex hook profile fails closed on a PreToolUse hook that is not a command hook", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
+  try {
+    const settingsFile = writeCodexHookProfileFixture(root, [
+      { matcher: "Bash", hooks: [{ type: "prompt", command: "" }] },
+    ]);
+    assert.throws(
+      () => codexPreToolUseProfile(settingsFile),
+      /PreToolUse\[0\]\.hooks\[0\] is not a command hook/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex hook profile fails closed on a PreToolUse hook with an invalid timeout", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-hook-profile-"));
+  try {
+    const settingsFile = writeCodexHookProfileFixture(root, [
+      { matcher: "Bash", hooks: [{ type: "command", command: "./deny-floor.sh", timeout: -5 }] },
+    ]);
+    assert.throws(
+      () => codexPreToolUseProfile(settingsFile),
+      /PreToolUse\[0\]\.hooks\[0\] has an invalid timeout/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Codex spawn carries a subscription refusal through the shared ledger seam", async () => {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
