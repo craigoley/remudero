@@ -6153,17 +6153,35 @@ export function renderRepairFilingRaw(filing: RepairFilingRecurrence): string {
   ].join("\n");
 }
 
-const ZERO_COUNTS = (): Record<Disposition, number> => ({
-  mergeable: 0,
-  "blocked-fixable": 0,
-  "refused-escalate": 0,
-  "dep-review": 0,
-  "post-review": 0,
-  stale: 0,
-  "blocked-ambiguous": 0,
-  conflicted: 0,
-  wait: 0,
-});
+const ZERO_COUNTS = (): Record<Disposition, number> => {
+  const counts = {
+    mergeable: 0,
+    "blocked-fixable": 0,
+    "dep-review": 0,
+    "post-review": 0,
+    stale: 0,
+    "blocked-ambiguous": 0,
+    conflicted: 0,
+    wait: 0,
+  } as Record<Disposition, number>;
+  Object.defineProperty(counts, "refused-escalate", {
+    value: 0,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return counts;
+};
+
+function incrementDispositionCount(counts: Record<Disposition, number>, disposition: Disposition): void {
+  const next = (counts[disposition] ?? 0) + 1;
+  Object.defineProperty(counts, disposition, {
+    value: next,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+}
 
 /** W1-T513 — THE CROSS-CALL REVIEW-KEY MUTEX. The claim set used to be declared FRESH INSIDE every
  *  `runSweep` call, so it arbitrated only between PRs in that ONE call. MODULE-SCOPED so every
@@ -6930,7 +6948,7 @@ export async function runSweep(
         reason = "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
       }
     }
-    byDisposition[disposition]++;
+    incrementDispositionCount(byDisposition, disposition);
 
     // W1-T2345 — computed for EVERY disposition, never only blocked-ambiguous, and BEFORE the
     // per-disposition dedup below: this bounds the DERIVATION itself, orthogonal to whatever
@@ -8410,10 +8428,10 @@ const DISPOSITION_RENDER_ORDER: readonly Disposition[] = [
 /** One-line human render of a sweep summary, for both callers' console output. */
 export function renderSweepSummary(s: SweepSummary): string {
   const b = s.byDisposition;
-  const counts = DISPOSITION_RENDER_ORDER.map((d) => `${d} ${b[d]}`).join(" · ");
+  const counts = DISPOSITION_RENDER_ORDER.map((d) => `${d} ${b[d] ?? 0}`).join(" · ");
   // The buckets now cover every disposition, so anything left over is a counting defect rather than
   // a rendering choice — say so instead of letting the reader do the subtraction and wonder.
-  const summed = DISPOSITION_RENDER_ORDER.reduce((n, d) => n + b[d], 0);
+  const summed = DISPOSITION_RENDER_ORDER.reduce((n, d) => n + (b[d] ?? 0), 0);
   const residual = s.total - summed;
   return (
     `sweep: ${s.total} open PR(s) · ${s.actionsTaken} action(s) taken · ${counts}` +
