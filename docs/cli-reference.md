@@ -81,7 +81,7 @@ usage:
   rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # Durable-inbox async capture: write a plan/feedback/<id>.yaml entry.
   rmd triage <feedback-id>   # The Architect intake worker: ground, research, then report, grill or propose.
   rmd ratify <rung>   # Print a gated rung's live operation-hash row for the operator to commit; writes nothing.
-  rmd skill list   # List the skill registry: every .remudero/skills/<name>.yaml entry.
+  rmd skill list | rmd skill effectiveness <approved-skill> | rmd skill lifecycle <approved-skill>   # Inspect a registered skill, its measured effectiveness, or stage a bounded retirement proposal.
   rmd learnings export <out> | rmd learnings import <file> --pin <hash>   # The knowledge-commons transport: export/import opted-in learnings, hash-pinned.
   rmd bundle export <path> | rmd bundle import <file> --pin <hash>   # Export/import a hash-pinned bundle: doctrine, learnings, worker-settings, policy proposals.
   rmd trace <id>   # Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
@@ -768,13 +768,15 @@ Law 5's signature (W1-T2694): computes <rung>'s live operation hash over its pla
 
 ### `rmd skill`
 
-List the skill registry: every .remudero/skills/<name>.yaml entry.
+Inspect a registered skill, its measured effectiveness, or stage a bounded retirement proposal.
 
 ```
 rmd skill list
+rmd skill effectiveness <approved-skill>
+rmd skill lifecycle <approved-skill>
 ```
 
-§5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change
+`list` is the §5B skill-registry reader (W1-T44): it resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change. `effectiveness` reads the complete `skills.selection` and terminal-verdict ledger union for an approved skill. `lifecycle` reads that same complete union and, only for a reviewed RETIRE-CANDIDATE that has reached its declared horizon, stages one evidence-fingerprinted retirement proposal. It never edits a skill. The sole materializing path is an explicit `rmd approve` of that proposal, which opens a normal reviewable plan PR deleting exactly `.claude/skills/<name>/SKILL.md`; review and approval re-check that the exact approved, opted-in skill is still present.
 
 ### `rmd learnings`
 

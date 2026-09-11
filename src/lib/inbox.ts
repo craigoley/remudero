@@ -82,6 +82,38 @@ export interface Proposal {
   source?: BundleProposalSource;
   /** Keep this ratified proposal in the active registry until its source reconciler retires it. */
   retainAfterRatification?: boolean;
+  /** W1-T3413: a narrowly-scoped, evidence-fingerprinted request to retire one approved,
+   * opted-in worker skill. Its only materialization path is `rmd approve`; it is never inferred
+   * from free-text `summary`. */
+  skillLifecycle?: SkillLifecycleRetirement;
+}
+
+/** Structured evidence for the negative skill lifecycle. It carries no generated replacement
+ * text and can name only an exact approved `SKILL.md` removal. */
+export interface SkillLifecycleRetirement {
+  kind: "retire";
+  skillName: string;
+  evidenceFingerprint: string;
+  basis: string;
+  horizon: number;
+  selected: Record<string, unknown>;
+  control: Record<string, unknown>;
+}
+
+/** The only repository-relative target a structured lifecycle proposal may remove. */
+export function skillLifecycleSkillPath(skillName: string): string | undefined {
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(skillName)
+    ? `.claude/skills/${skillName}/SKILL.md`
+    : undefined;
+}
+
+/** Structural guard at the approval boundary. A summary string is never an authority to delete. */
+export function isSkillLifecycleRetirement(proposal: Proposal): proposal is Proposal & { skillLifecycle: SkillLifecycleRetirement } {
+  const lifecycle = proposal.skillLifecycle;
+  return lifecycle?.kind === "retire" &&
+    typeof lifecycle.evidenceFingerprint === "string" && lifecycle.evidenceFingerprint.length > 0 &&
+    typeof lifecycle.basis === "string" && typeof lifecycle.horizon === "number" &&
+    skillLifecycleSkillPath(lifecycle.skillName) !== undefined;
 }
 
 // ── BUNDLE-SOURCED POLICY PROPOSALS (W1-T2702) ────────────────────────────────────────────────
@@ -2136,6 +2168,34 @@ export function ratificationShardFiles(
 export interface ShardWriteFs {
   mkdirSync: (dir: string, opts: { recursive: true }) => unknown;
   writeFileSync: (path: string, data: string, enc: "utf8") => void;
+}
+
+/** Filesystem seam for the lifecycle's one precise deletion. */
+export interface SkillLifecycleWriteFs {
+  existsSync: (path: string) => boolean;
+  unlinkSync: (path: string) => void;
+}
+
+/**
+ * Delete only the exact approved-skill target carried by a structured retirement proposal. This
+ * is the approval materializer's narrow write primitive: a staged proposal cannot reach it, a
+ * prose summary cannot manufacture a path, and a missing target refuses before any deletion.
+ */
+export function writeSkillLifecycleRetirement(
+  worktreePath: string,
+  proposal: Proposal,
+  fs: SkillLifecycleWriteFs,
+  joinPath: (...parts: string[]) => string,
+): string {
+  if (!isSkillLifecycleRetirement(proposal)) {
+    throw new Error(`rmd approve: ${proposal.id} is not a structured skill lifecycle retirement`);
+  }
+  const relPath = skillLifecycleSkillPath(proposal.skillLifecycle.skillName);
+  if (!relPath) throw new Error(`rmd approve: ${proposal.id} names an unsafe skill path`);
+  const target = joinPath(worktreePath, relPath);
+  if (!fs.existsSync(target)) throw new Error(`rmd approve: refusing to retire absent approved skill '${proposal.skillLifecycle.skillName}'`);
+  fs.unlinkSync(target);
+  return relPath;
 }
 
 /** Compose {@link ratificationShardFiles} and WRITE them under `worktreePath`. THROWS on a refusal rather than

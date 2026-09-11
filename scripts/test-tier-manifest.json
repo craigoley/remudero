@@ -1166,6 +1166,7 @@
     "test/skill-grounding-sources-resolve.test.ts": 460,
     "test/skill-run-route-registered.test.ts": 1858,
     "test/skill-wiring.test.ts": 185,
+    "test/skill-lifecycle.test.ts": 0,
     "test/skill-workshop.test.ts": 737,
     "test/skill.test.ts": 1225,
     "test/skills-panel-registered.test.ts": 1472,

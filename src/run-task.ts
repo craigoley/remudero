@@ -566,6 +566,8 @@ import {
   inboxDraftPrompt,
   isDraftStale,
   isRatifiedInLedger,
+  isSkillLifecycleRetirement,
+  loadProposalRegistry,
   materializeDraftTaskIds,
   parseDraftAttemptCache,
   parseDraftCache,
@@ -597,6 +599,7 @@ import {
   type RatifyBatchGateway,
   type RatifyGateway,
   type ReframeResult,
+  writeSkillLifecycleRetirement,
   writeRatificationShards,
 } from "./lib/inbox.js";
 import {
@@ -670,6 +673,7 @@ import {
 import { regenerateOrientation } from "./lib/orientation.js";
 import {
   buildPlanPrBody,
+  buildPlanPrCommitMessage,
   bodyNeedsAcceptanceRepair,
   createPlanPrRest,
   ensureJudgeableBody,
@@ -906,6 +910,7 @@ import {
   observeSkillSelection,
   renderSkillEffectivenessReport,
   renderSkillsPart,
+  stageSkillLifecycleRetirement,
   skillsInjectedEvent,
   stageSkillDrafts,
   workerAllowlistFromSettings,
@@ -33518,7 +33523,7 @@ export function buildInboxDraftHook(
   return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
-      const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
+      const proposals: Proposal[] = loadProposalRegistry(registryPath).filter((proposal) => !isSkillLifecycleRetirement(proposal));
       if (proposals.length === 0) return; // no active proposals — no spend
       const ledgerPath = ledgerPathFor(config);
 
@@ -33832,7 +33837,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
   const { owner, repo } = resolveOwnerRepo();
 
   const registryPath = join(config.root, "state", "inbox-proposals.json");
-  const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
+  const proposals: Proposal[] = loadProposalRegistry(registryPath);
   if (proposals.length === 0) {
     console.log(renderInbox([]));
     return 0;
@@ -33844,7 +33849,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
   // UNTHROTTLED (see this command's doc) — `rmd inbox` is the manual FORCE, so it always
   // attempts every proposal `proposalsNeedingDraft` names, never consulting the daemon-only
   // DraftAttemptCache.
-  const needsDraft = proposalsNeedingDraft(proposals, drafts);
+  const needsDraft = proposalsNeedingDraft(proposals.filter((proposal) => !isSkillLifecycleRetirement(proposal)), drafts);
 
   const runId = `INBOX-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "inbox", step, lane: "inbox", ...extra });
@@ -33928,7 +33933,7 @@ function loadProposalForRatify(
   config: Config,
 ): { proposal: Proposal | undefined; proposals: Proposal[]; drafts: DraftCache; draftsPath: string; classification?: InboxClassification } {
   const registryPath = join(config.root, "state", "inbox-proposals.json");
-  const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
+  const proposals: Proposal[] = loadProposalRegistry(registryPath);
   const proposal = proposals.find((p) => p.id === proposalId);
 
   const draftsPath = join(config.root, "state", "inbox-drafts.json");
@@ -33975,7 +33980,7 @@ function loadProposalsForRatify(
   config: Config,
 ): { found: { id: string; proposal: Proposal; classification: InboxClassification }[]; unknown: string[] } {
   const registryPath = join(config.root, "state", "inbox-proposals.json");
-  const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
+  const proposals: Proposal[] = loadProposalRegistry(registryPath);
   const draftsPath = join(config.root, "state", "inbox-drafts.json");
   const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
 
@@ -34447,6 +34452,180 @@ export function readLedgerRawLines(path: string): readonly string[] {
   }
 }
 
+/**
+ * The approval-only skill lifecycle boundary. A caller must hand this a structured retirement
+ * proposal and a worktree whose current tree still exposes that exact skill as approved and
+ * opted in. It delegates the only unlink to inbox.ts's path-constrained materializer.
+ */
+export function materializeApprovedSkillLifecycleRetirement(
+  proposal: Proposal,
+  worktreePath: string,
+  deps: {
+    loadApprovedSkills?: typeof loadInjectableSkills;
+    writeRetirement?: typeof writeSkillLifecycleRetirement;
+    existsSync?: typeof existsSync;
+    unlinkSync?: typeof unlinkSync;
+    joinPath?: typeof join;
+  } = {},
+): { ok: true; relPath: string } | { ok: false; reason: string } {
+  if (!isSkillLifecycleRetirement(proposal)) {
+    return { ok: false, reason: `${proposal.id} is not a structured skill lifecycle retirement` };
+  }
+  const joinPath = deps.joinPath ?? join;
+  const approved = (deps.loadApprovedSkills ?? loadInjectableSkills)(joinPath(worktreePath, ".claude", "skills"));
+  if (!approved.some((skill) => skill.name === proposal.skillLifecycle.skillName)) {
+    return { ok: false, reason: `'${proposal.skillLifecycle.skillName}' is no longer an approved, opted-in skill in this worktree` };
+  }
+  try {
+    const relPath = (deps.writeRetirement ?? writeSkillLifecycleRetirement)(
+      worktreePath,
+      proposal,
+      { existsSync: deps.existsSync ?? existsSync, unlinkSync: deps.unlinkSync ?? unlinkSync },
+      joinPath,
+    );
+    return { ok: true, relPath };
+  } catch (caught) {
+    return { ok: false, reason: String((caught as Error)?.message ?? caught) };
+  }
+}
+
+/**
+ * The real `rmd approve` path for a structured lifecycle retirement. It deliberately reuses the
+ * ordinary approved-worktree, CI, review, and auto-merge-arm sequence; the only different
+ * materialization is the one constrained `SKILL.md` deletion above.
+ */
+async function approveSkillLifecycleRetirement(
+  proposal: Proposal & { skillLifecycle: NonNullable<Proposal["skillLifecycle"]> },
+  config: Config,
+  ledgerPath: string,
+  registryPath: string,
+  owner: string,
+  repo: string,
+): Promise<number> {
+  const runId = `APPROVE-${proposal.id}-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: proposal.id, step, lane: "approve", ...extra });
+  if (isRatifiedInLedger(readLedgerLines(ledgerPath), proposal.id)) {
+    console.error(`rmd approve: ${proposal.id} is already ratified — no second retirement PR opened`);
+    return 1;
+  }
+
+  let repoDir: string | undefined;
+  let worktreePath: string | undefined;
+  const ensureRepoDir = (): string => {
+    repoDir = repoDir ?? join(config.root, "repos", repo);
+    if (!existsSync(repoDir)) {
+      mkdirSync(dirname(repoDir), { recursive: true });
+      ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+    }
+    return repoDir;
+  };
+  const removeWorktree = () => {
+    if (repoDir && worktreePath) worktreeRemove(repoDir, worktreePath);
+  };
+
+  try {
+    const dir = ensureRepoDir();
+    const branch = approveRunBranch(runId);
+    worktreePath = join(worktreesDir(config), branch);
+    worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
+    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    const materialized = materializeApprovedSkillLifecycleRetirement(proposal, worktreePath);
+    if (!materialized.ok) throw new Error(`rmd approve: refusing skill lifecycle retirement — ${materialized.reason}`);
+    log("approve.skill_retirement_materialized", {
+      proposal_id: proposal.id,
+      skill_name: proposal.skillLifecycle.skillName,
+      path: materialized.relPath,
+      evidence_fingerprint: proposal.skillLifecycle.evidenceFingerprint,
+    });
+    execFileSync("git", ["-C", worktreePath, "add", "-A", "--", materialized.relPath], { stdio: "inherit" });
+    execFileSync(
+      "git",
+      [
+        "-C",
+        worktreePath,
+        "commit",
+        "-m",
+        buildPlanPrCommitMessage({
+          scope: "skills",
+          subject: `ratify retirement of ${proposal.skillLifecycle.skillName}`,
+          extraBody:
+            `The operator approved ${proposal.id} from evidence ${proposal.skillLifecycle.evidenceFingerprint}. ` +
+            `This removes exactly ${materialized.relPath}; it does not revise or replace a skill.`,
+        }),
+      ],
+      { stdio: "inherit" },
+    );
+    gitPushRunBranch(worktreePath);
+    const body = buildPlanPrBody({
+      intro:
+        `Operator ratification of ${proposal.id}'s RETIRE-CANDIDATE evidence ` +
+        `(${proposal.skillLifecycle.evidenceFingerprint}).`,
+      criteria: [
+        {
+          claim: `the approved skill '${proposal.skillLifecycle.skillName}' is removed precisely`,
+          proof: `git diff --exit-code origin/main...HEAD -- ${materialized.relPath}`,
+        },
+      ],
+      changedFiles: [materialized.relPath],
+    });
+    assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
+    const created = createPlanPrRest(ghJson, owner, repo, {
+      title: `chore(skills): retire ${proposal.skillLifecycle.skillName} via rmd approve`,
+      body,
+      head: branch,
+      base: "main",
+    });
+    appendLedger(ledgerPath, {
+      run_id: runId,
+      task_id: proposal.id,
+      step: "ratify.approved",
+      pr_url: created.prUrl,
+      branch,
+      skill_lifecycle: "retire",
+      evidence_fingerprint: proposal.skillLifecycle.evidenceFingerprint,
+    });
+    updateProposalRegistry(registryPath, (current) => {
+      const next = current.filter((candidate) => candidate.id !== proposal.id);
+      return next.length === current.length ? null : next;
+    });
+    log("pr.opened", { pr_url: created.prUrl, branch, skill_lifecycle: "retire" });
+    console.log(`rmd approve: ${proposal.id} — retirement PR opened: ${created.prUrl}`);
+
+    const ci = ciGateState(await waitForCiGreen(created.prUrl, (step, extra) => log(step, extra)));
+    if (ci !== "green") {
+      console.log(`ci ${ci} — PR left OPEN: ${created.prUrl}`);
+      removeWorktree();
+      return 1;
+    }
+    const prNum = created.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? created.prUrl;
+    const reviewCode = await reviewCommand(prNum);
+    let armHeadSha: string | undefined;
+    try {
+      armHeadSha = readHeadShaRest(created.prUrl);
+    } catch {
+      /* best-effort */
+    }
+    const armOutcome = armAndLogOutcome(created.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
+    removeWorktree();
+    console.log(
+      `rmd approve: ${proposal.id} gated — ${armReportPhrase(armOutcome)} ` +
+      `(review ${reviewCode === 0 ? "success" : "failure"}): ${created.prUrl}`,
+    );
+    return reviewCode;
+  } catch (caught) {
+    log("approve.error", { error: String((caught as Error)?.message ?? caught) });
+    try {
+      removeWorktree();
+    } catch {
+      /* best-effort */
+    }
+    throw caught;
+  } finally {
+    if (worktreePath) removeRunLock(worktreePath);
+  }
+}
+
 export async function approveCommand(
   rest: string[],
   // W1-T3351 appended `root`/`clock`/`log` LAST, all optional: the `--note` chain needs a store
@@ -34456,6 +34635,7 @@ export async function approveCommand(
     config?: Config;
     gateway?: RatifyGateway;
     batchGateway?: RatifyBatchGateway;
+    approveLifecycleRetirement?: typeof approveSkillLifecycleRetirement;
     overlap?: OverlapWarningDeps;
     root?: string;
     clock?: Clock;
@@ -34507,6 +34687,21 @@ export async function approveCommand(
   const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = resolveOwnerRepo();
+
+  // W1-T3413: lifecycle retirement is deliberately an `rmd approve` sub-path, not a second
+  // release verb. It bypasses generic draft classification because its structured proposal has no
+  // plan-task fragment; its own materializer still follows the same reviewed PR gate below.
+  const lifecycleProposal = loadProposalRegistry(registryPath).find((candidate) => candidate.id === proposalId);
+  if (lifecycleProposal && isSkillLifecycleRetirement(lifecycleProposal)) {
+    return (deps.approveLifecycleRetirement ?? approveSkillLifecycleRetirement)(
+      lifecycleProposal,
+      config,
+      ledgerPath,
+      registryPath,
+      owner,
+      repo,
+    );
+  }
 
   const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
   if (!proposal || !classification) {
@@ -36388,7 +36583,7 @@ export async function synthesizeCommand(rest: string[], deps: SynthesizeCommandD
 }
 
 /**
- * `rmd skill list|effectiveness` — the §5B skill-registry reader (W1-T44). Setup, Plan,
+ * `rmd skill list|effectiveness|lifecycle` — the §5B skill-registry reader (W1-T44). Setup, Plan,
  * Feedback/triage, Retro, Review, Refactor, and Design Review are ALL the same
  * ground->research->grill-or-produce primitive, differing only by a
  * declarative profile; this prints every `.remudero/skills/<name>.yaml`
@@ -36399,12 +36594,13 @@ export async function synthesizeCommand(rest: string[], deps: SynthesizeCommandD
  */
 export async function skillCommand(
   rest: string[],
-  deps: { effectiveness?: typeof skillEffectivenessCommand } = {},
+  deps: { effectiveness?: typeof skillEffectivenessCommand; lifecycle?: typeof skillLifecycleCommand } = {},
 ): Promise<number> {
   const sub = rest[0];
   if (sub === "effectiveness") return (deps.effectiveness ?? skillEffectivenessCommand)(rest.slice(1));
+  if (sub === "lifecycle") return (deps.lifecycle ?? skillLifecycleCommand)(rest.slice(1));
   if (sub !== "list") {
-    console.error(`rmd skill: unknown subcommand '${sub ?? ""}' — usage: rmd skill list | rmd skill effectiveness <approved-skill>\n` + USAGE);
+    console.error(`rmd skill: unknown subcommand '${sub ?? ""}' — usage: rmd skill list | rmd skill effectiveness <approved-skill> | rmd skill lifecycle <approved-skill>\n` + USAGE);
     return 2;
   }
   const badArg = unknownArgError("skill list", rest.slice(1), [], []);
@@ -36472,6 +36668,94 @@ export function skillEffectivenessCommand(
   }
   const report = buildSkillEffectivenessReport(ledgerUnion.rows, skillName);
   (deps.write ?? console.log)(renderSkillEffectivenessReport(report));
+  return 0;
+}
+
+/**
+ * W1-T3413's bridge from the descriptive effectiveness pilot to one operator-ratified retirement
+ * proposal. It shares the pilot's complete-union read and reducer; no untrusted report, absent
+ * skill, or favorable comparison can write the inbox or approved skill tree.
+ */
+export function skillLifecycleCommand(
+  rest: string[],
+  deps: {
+    stateDir?: string;
+    registryPath?: string;
+    approvedSkillsDir?: string;
+    readLedger?: typeof readLedgerUnionRecordsSync;
+    loadApprovedSkills?: typeof loadInjectableSkills;
+    stageRetirement?: typeof stageSkillLifecycleRetirement;
+    write?: (text: string) => void;
+    error?: (text: string) => void;
+  } = {},
+): number {
+  const skillName = rest[0];
+  const write = deps.write ?? console.log;
+  const error = deps.error ?? console.error;
+  if (!skillName || skillName.startsWith("-")) {
+    error("rmd skill lifecycle: usage: rmd skill lifecycle <approved-skill>");
+    return 2;
+  }
+  const badArg = unknownArgError("skill lifecycle", rest.slice(1), [], []);
+  if (badArg) {
+    error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = deps.stateDir === undefined || deps.registryPath === undefined ? loadConfig() : undefined;
+  const stateDir = deps.stateDir ?? dirname(ledgerPathFor(config as Config));
+  let ledgerUnion: ReturnType<typeof readLedgerUnionRecordsSync>;
+  try {
+    ledgerUnion = (deps.readLedger ?? readLedgerUnionRecordsSync)(stateDir, {
+      step: ["skills.selection", "verdict"],
+      refuseIncomplete: true,
+    });
+  } catch (caught) {
+    // The injected CLI error writer records the unreadable-union distinction for this refusal.
+    error(`rmd skill lifecycle: REFUSED unreadable ledger union: ${String(caught)}`);
+    return 1;
+  }
+  if (!ledgerUnion.ok) {
+    error(
+      `rmd skill lifecycle: REFUSED incomplete ledger union under ${stateDir}: ` +
+      `${ledgerUnion.unread.length} unread rotation(s)`,
+    );
+    return 1;
+  }
+  const approved = (deps.loadApprovedSkills ?? loadInjectableSkills)(deps.approvedSkillsDir ?? join(repoRoot, ".claude", "skills"));
+  const approvedSkill = approved.find((skill) => skill.name === skillName);
+  if (!approvedSkill) {
+    error(`rmd skill lifecycle: REFUSED '${skillName}' is absent from the approved, opted-in .claude/skills tree`);
+    return 1;
+  }
+  const report = buildSkillEffectivenessReport(ledgerUnion.rows, skillName);
+  write(renderSkillEffectivenessReport(report));
+  if (report.status === "INSUFFICIENT EVIDENCE") {
+    error(
+      `rmd skill lifecycle: REFUSED below horizon — selected terminal=${report.selected.terminal_runs}/${report.horizon}; ` +
+      `control terminal=${report.control.terminal_runs}/${report.horizon}`,
+    );
+    return 1;
+  }
+  if (report.status === "REVIEW-CANDIDATE") {
+    write("lifecycle: REVIEW-CANDIDATE stays read-only; no proposal staged.");
+    return 0;
+  }
+  const registryPath = deps.registryPath ?? join((config as Config).root, "state", "inbox-proposals.json");
+  let staged;
+  try {
+    staged = (deps.stageRetirement ?? stageSkillLifecycleRetirement)(registryPath, approvedSkill, report);
+  } catch (caught) {
+    error(`rmd skill lifecycle: REFUSED proposal registry write failed: ${String(caught)}`);
+    return 1;
+  }
+  if (staged.refused) {
+    error(`rmd skill lifecycle: REFUSED ${staged.reason ?? "retirement proposal was not staged"}`);
+    return 1;
+  }
+  write(
+    `lifecycle: ${staged.staged ? "staged" : staged.refreshed ? "refreshed" : "already staged"} ` +
+    `skill-lifecycle:${skillName}; only rmd approve may materialize the exact SKILL.md removal.`,
+  );
   return 0;
 }
 
@@ -37160,9 +37444,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "skill",
-    syntax: "rmd skill list",
-    summary: "List the skill registry: every .remudero/skills/<name>.yaml entry.",
-    detail: "§5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change",
+    syntax: "rmd skill list | rmd skill effectiveness <approved-skill> | rmd skill lifecycle <approved-skill>",
+    summary: "Inspect a registered skill, its measured effectiveness, or stage a bounded retirement proposal.",
+    detail: "`list` is the §5B skill-registry reader (W1-T44): it resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); `effectiveness` reads the complete skills.selection and terminal-verdict union; `lifecycle` stages only one evidence-fingerprinted retirement proposal for a reviewed, horizon-complete RETIRE-CANDIDATE. It never edits a skill: only `rmd approve` may open the normal reviewable PR that deletes the still-approved, opted-in .claude/skills/<name>/SKILL.md path.",
   },
   {
     name: "learnings",

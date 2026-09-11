@@ -660,6 +660,108 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
   ].join("\n");
 }
 
+/** One approved skill has one lifecycle question, even as its evidence improves. */
+export function skillLifecycleProposalId(skillName: string): string {
+  return `skill-lifecycle:${skillName}`;
+}
+
+function cohortFingerprint(cohort: SkillEffectivenessCohort): Record<string, unknown> {
+  return {
+    observed_eligible_runs: cohort.observed_eligible_runs,
+    terminal_runs: cohort.terminal_runs,
+    merged_runs: cohort.merged_runs,
+    harmful_terminal_runs: cohort.harmful_terminal_runs,
+    outcomes: Object.fromEntries(Object.entries(cohort.outcomes).sort(([a], [b]) => a.localeCompare(b))),
+  };
+}
+
+/** Content address for the exact report an operator is being asked to ratify. */
+export function skillLifecycleEvidenceFingerprint(report: SkillEffectivenessReport): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      skill_name: report.skill_name,
+      task_type: report.task_type,
+      horizon: report.horizon,
+      status: report.status,
+      basis: report.basis,
+      selected: cohortFingerprint(report.selected),
+      control: cohortFingerprint(report.control),
+      harm_outcomes: [...report.harm_outcomes],
+    }))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+export interface StageSkillLifecycleResult {
+  refused: boolean;
+  staged: boolean;
+  refreshed: boolean;
+  alreadyStaged: boolean;
+  reason?: string;
+}
+
+/**
+ * Stage the negative evidence path only. The caller supplies an already-loaded, opted-in skill;
+ * this function never reads or writes its `.claude/skills` file. A newer report replaces the
+ * evidence on the same proposal id, rather than minting a second operator decision.
+ */
+export function stageSkillLifecycleRetirement(
+  registryPath: string,
+  approvedSkill: InjectableSkill,
+  report: SkillEffectivenessReport,
+  opts: UpdateProposalRegistryOpts = {},
+): StageSkillLifecycleResult {
+  if (report.status !== "RETIRE-CANDIDATE") {
+    return { refused: true, staged: false, refreshed: false, alreadyStaged: false, reason: `status:${report.status} is not retireable` };
+  }
+  if (approvedSkill.name !== report.skill_name) {
+    return { refused: true, staged: false, refreshed: false, alreadyStaged: false, reason: "approved skill identity does not match report" };
+  }
+  const id = skillLifecycleProposalId(approvedSkill.name);
+  const evidenceFingerprint = skillLifecycleEvidenceFingerprint(report);
+  const lifecycle = {
+    kind: "retire" as const,
+    skillName: approvedSkill.name,
+    evidenceFingerprint,
+    basis: report.basis,
+    horizon: report.horizon,
+    selected: cohortFingerprint(report.selected),
+    control: cohortFingerprint(report.control),
+  };
+  const summary =
+    `RETIRE-CANDIDATE for approved skill '${approvedSkill.name}' (basis: ${report.basis}; ` +
+    `evidence: ${evidenceFingerprint}). Approving this proposal removes exactly ` +
+    `'.claude/skills/${approvedSkill.name}/SKILL.md' in a reviewed PR; it does not revise or replace a skill.`;
+  let staged = false;
+  let refreshed = false;
+  let alreadyStaged = false;
+  let reason: string | undefined;
+  updateProposalRegistry(
+    registryPath,
+    (current) => {
+      const existing = current.find((proposal) => proposal.id === id);
+      if (existing?.skillLifecycle?.evidenceFingerprint === evidenceFingerprint) {
+        alreadyStaged = true;
+        return null;
+      }
+      if (existing && !existing.skillLifecycle) {
+        reason = "proposal id is occupied by a non-lifecycle record";
+        return null;
+      }
+      const proposal = { id, summary, evidenceAnchors: [], skillLifecycle: lifecycle };
+      if (existing) {
+        refreshed = true;
+        return current.map((candidate) => candidate.id === id ? proposal : candidate);
+      }
+      staged = true;
+      return [...current, proposal];
+    },
+    opts,
+  );
+  const refused = reason !== undefined;
+  return { refused, staged, refreshed, alreadyStaged, reason };
+}
+
 /**
  * Stage every draft the retro gathered, BEST-EFFORT: a throw on one draft must never fail the
  * retro, whose report is the thing the operator actually came for. Extracted as a seam for the
