@@ -17111,7 +17111,12 @@ export function censusMembershipCommand(
     // partial enumeration cannot be mistaken for a complete one. An unmodelled census is a suite
     // this diff may join and this cannot run — the caller must say so rather than imply coverage.
     const candidates = new Set(report.candidateCoverage.map((c) => c.testFile));
-    for (const candidate of report.candidateCoverage) console.error(`candidate: ${candidate.testFile} walks ${candidate.walks.join(", ")}`);
+    for (const candidate of report.candidateCoverage) {
+      // Preserve the established incompleteness sentinel for callers while adding the new
+      // population-walk evidence on its own line.
+      console.error(`unmodelled: ${candidate.testFile}`);
+      console.error(`candidate: ${candidate.testFile} walks ${candidate.walks.join(", ")}`);
+    }
     for (const unknown of report.unknownCoverage) {
       if (!candidates.has(unknown)) console.error(`unmodelled: ${unknown}`);
     }
