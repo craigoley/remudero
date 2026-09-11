@@ -34034,7 +34034,7 @@ export function applySkillLifecycleRemoval(
   return { ok: true, removedPath: action.skillPath };
 }
 
-function skillLifecycleApproveCommitMessage(action: SkillLifecycleAction, proposalId: string): string {
+export function skillLifecycleApproveCommitMessage(action: SkillLifecycleAction, proposalId: string): string {
   return [
     "chore(skill): retire approved skill via rmd approve",
     "",
@@ -34046,7 +34046,7 @@ function skillLifecycleApproveCommitMessage(action: SkillLifecycleAction, propos
   ].join("\n");
 }
 
-function skillLifecyclePrBody(action: SkillLifecycleAction, proposalId: string): string {
+export function skillLifecyclePrBody(action: SkillLifecycleAction, proposalId: string): string {
   return [
     `Proposal ${proposalId} retires approved skill \`${action.skillName}\`.`,
     "",

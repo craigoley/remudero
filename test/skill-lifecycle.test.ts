@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { loadProposalRegistry, classifyProposal, proposalsNeedingDraft, type Proposal } from "../src/lib/inbox.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
   buildSkillEffectivenessReport,
   skillLifecycleProposalId,
@@ -11,10 +14,30 @@ import {
   type SkillEffectivenessReport,
 } from "../src/lib/skill-workshop.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { applySkillLifecycleRemoval, skillLifecycleCommand } from "../src/run-task.js";
+import {
+  applySkillLifecycleRemoval,
+  approveCommand,
+  skillLifecycleApproveCommitMessage,
+  skillLifecycleCommand,
+  skillLifecyclePrBody,
+} from "../src/run-task.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, "..");
+const GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@t",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@t",
+};
 
 function tmpDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));
+}
+
+function git(dir: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GIT_ENV });
 }
 
 function approveSkill(skillsDir: string, name = "procedure"): string {
@@ -69,6 +92,55 @@ function union(records: Record<string, unknown>[], over: Record<string, unknown>
   };
 }
 
+function makeLifecycleOrigin(): string {
+  const bare = tmpDir("skill-lifecycle-origin-");
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
+  const seed = tmpDir("skill-lifecycle-seed-");
+  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
+  mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(
+    join(seed, "plan", "tasks.yaml"),
+    [
+      "- id: W1-T4",
+      "  title: seed task",
+      "  repo: remudero",
+      "  depends_on: []",
+      "  type: implement",
+      "  verify: auto",
+      "  status: queued",
+      "  attempts: 0",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER PLAN\n\nfixture\n", "utf8");
+  approveSkill(join(seed, ".claude", "skills"));
+  git(seed, "add", "-A");
+  git(seed, "commit", "--quiet", "-m", "chore: seed lifecycle fixture");
+  git(seed, "remote", "add", "origin", bare);
+  git(seed, "push", "--quiet", "origin", "main");
+  rmSync(seed, { recursive: true, force: true });
+  return bare;
+}
+
+function writeLifecycleGhShim(dir: string): void {
+  writeFileSync(
+    join(dir, "gh"),
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      '  *"POST"*"pulls"*)',
+      '    echo \'{"html_url":"https://github.com/craigoley/remudero/pull/73413","number":73413}\'',
+      "    ;;",
+      '  *"headRefName"*) echo \'{"headRefName":"main"}\' ;;',
+      '  *) echo "[]" ;;',
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
+
 test("W1-T3413 refuses untrusted lifecycle input", () => {
   const root = tmpDir("skill-lifecycle-refuse-");
   const skillsDir = join(root, "skills");
@@ -103,6 +175,34 @@ test("W1-T3413 refuses untrusted lifecycle input", () => {
   assert.match(errors.pop() ?? "", /below horizon/);
   assert.equal(loadProposalRegistry(registryPath).length, 0);
   assert.equal(readFileSync(skillPath, "utf8").includes("Do the thing."), true);
+});
+
+test("W1-T3413 lifecycle CLI usage and unreadable-ledger arms write no proposal", () => {
+  const root = tmpDir("skill-lifecycle-cli-refuse-");
+  const skillsDir = join(root, "skills");
+  const registryPath = join(root, "inbox-proposals.json");
+  approveSkill(skillsDir);
+  const errors: string[] = [];
+  const deps = {
+    stateDir: "/state",
+    registryPath,
+    approvedSkillsDir: skillsDir,
+    write: () => {},
+    error: (line: string) => errors.push(line),
+    readLedger: (() => {
+      throw new Error("no ledger access");
+    }) as any,
+  };
+
+  assert.equal(skillLifecycleCommand([], deps), 2);
+  assert.match(errors.pop() ?? "", /usage: rmd skill lifecycle/);
+  assert.equal(skillLifecycleCommand(["--flag"], deps), 2);
+  assert.match(errors.pop() ?? "", /usage: rmd skill lifecycle/);
+  assert.equal(skillLifecycleCommand(["procedure", "extra"], deps), 2);
+  assert.match(errors.pop() ?? "", /unexpected argument/);
+  assert.equal(skillLifecycleCommand(["procedure"], deps), 1);
+  assert.match(errors.pop() ?? "", /REFUSED unreadable ledger union: Error: no ledger access/);
+  assert.equal(loadProposalRegistry(registryPath).length, 0);
 });
 
 test("W1-T3413 stages one retire proposal", () => {
@@ -189,6 +289,130 @@ test("W1-T3413 approve owns precise removal", () => {
   assert.deepEqual(removed, { ok: true, removedPath: ".claude/skills/procedure/SKILL.md" });
   assert.equal(existsSync(skillPath), false);
   assert.equal(existsSync(keepPath), true);
+});
+
+test("W1-T3413 approve renders lifecycle commit and PR text from the staged action", () => {
+  const action = {
+    kind: "skill-retirement" as const,
+    skillName: "procedure",
+    skillPath: ".claude/skills/procedure/SKILL.md",
+    evidenceFingerprint: "fp-123",
+  };
+
+  assert.match(skillLifecycleApproveCommitMessage(action, "skill-lifecycle:procedure"), /retire approved skill via rmd approve/);
+  assert.match(skillLifecycleApproveCommitMessage(action, "skill-lifecycle:procedure"), /Evidence fingerprint: fp-123/);
+  const body = skillLifecyclePrBody(action, "skill-lifecycle:procedure");
+  assert.match(body, /## Acceptance/);
+  assert.match(body, /Removes exactly `.claude\/skills\/procedure\/SKILL.md`/);
+  assert.match(body, /Evidence fingerprint: `fp-123`/);
+});
+
+test("W1-T3413 approve refuses a lifecycle proposal that is no longer ready before touching git", async () => {
+  const root = tmpDir("skill-lifecycle-approve-refuse-");
+  mkdirSync(join(root, "state"), { recursive: true });
+  const proposal = {
+    id: "skill-lifecycle:procedure",
+    summary: "retire procedure",
+    evidenceAnchors: [],
+    trigger: { kind: "ci-red" as const, pr: 1, fired: false },
+    lifecycleAction: {
+      kind: "skill-retirement" as const,
+      skillName: "procedure",
+      skillPath: ".claude/skills/procedure/SKILL.md",
+      evidenceFingerprint: "fp-refused",
+    },
+  };
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [proposal] }, null, 2), "utf8");
+
+  const code = await approveCommand(["skill-lifecycle:procedure"], { config: { claudeBin: "/usr/bin/true", root } as never });
+
+  assert.equal(code, 1);
+  const lines = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(
+    lines.map((line) => line.step),
+    ["ratify.approve_refused"],
+  );
+  assert.equal(lines[0].state, "deferred_with_trigger");
+});
+
+test("W1-T3413 approve opens a reviewed lifecycle PR that deletes only the approved skill", async () => {
+  const bare = makeLifecycleOrigin();
+  const root = tmpDir("skill-lifecycle-approve-command-");
+  const shimDir = tmpDir("skill-lifecycle-gh-");
+  const savedPath = process.env.PATH;
+  try {
+    writeLifecycleGhShim(shimDir);
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], {
+      encoding: "utf8",
+    }).trim();
+    const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];
+    const repoDir = join(root, "repos", repoName);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
+    git(repoDir, "config", "user.name", "remudero-test");
+    git(repoDir, "config", "user.email", "test@remudero.invalid");
+
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(
+      join(root, "state", "inbox-proposals.json"),
+      JSON.stringify(
+        {
+          proposals: [
+            {
+              id: "skill-lifecycle:procedure",
+              summary: "retire procedure",
+              evidenceAnchors: [],
+              lifecycleAction: {
+                kind: "skill-retirement",
+                skillName: "procedure",
+                skillPath: ".claude/skills/procedure/SKILL.md",
+                evidenceFingerprint: "fp-approved",
+              },
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const code = await withLiveWritesAllowed(() =>
+      approveCommand(["skill-lifecycle:procedure"], { config: { claudeBin: "/usr/bin/true", root } as never }),
+    );
+
+    assert.equal(code, 1, "the ownership guard stops the offline fixture after the lifecycle PR is opened");
+    const refs = execFileSync("git", ["-C", bare, "for-each-ref", "--format=%(refname:short)", "refs/heads/run-*"], {
+      encoding: "utf8",
+    })
+      .split("\n")
+      .filter(Boolean);
+    assert.equal(refs.length, 1, `expected one lifecycle approve branch, got ${JSON.stringify(refs)}`);
+    assert.throws(
+      () => execFileSync("git", ["-C", bare, "show", `${refs[0]}:.claude/skills/procedure/SKILL.md`], { encoding: "utf8" }),
+      /does not exist/,
+    );
+    const commit = execFileSync("git", ["-C", bare, "log", "-1", "--format=%B", refs[0]], { encoding: "utf8" });
+    assert.match(commit, /Evidence fingerprint: fp-approved/);
+
+    const lines = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.ok(lines.some((line) => line.step === "ratify.approved" && line.lifecycle_action === "skill-retirement"));
+    assert.ok(lines.some((line) => line.verdict === "pr_attribution_failed"));
+    assert.deepEqual(loadProposalRegistry(join(root, "state", "inbox-proposals.json")), []);
+  } finally {
+    process.env.PATH = savedPath;
+    rmSync(bare, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+    rmSync(shimDir, { recursive: true, force: true });
+  }
 });
 
 test("W1-T3413 review stays read only", () => {
