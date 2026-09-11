@@ -1356,6 +1356,21 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   },
   npmScriptEntry("api-client-drift", "api-client:check"),
   npmScriptEntry("no-hand-rolled-fetch", "no-hand-rolled-fetch:check"),
+  // W1-T3077: the prompt-surface gate, mirrored. Deterministic and offline — it reads a merge-base
+  // diff and refuses a prompt/learnings edit that carries no golden evidence; it never shells the
+  // network or node --test. Written in the EXPLICIT object form rather than through npmScriptEntry
+  // for the same reason the source-size and baseline-monotonic entries below record: Standing rule
+  // 25's introducing-commit carve-out (isIntroducingCiYmlJob, review.ts) keys on an ADDED line
+  // carrying `job: "<name>"` beside the added ci.yml job key, and THIS PR adds both.
+  {
+    job: "prompt-surface-gate",
+    mirrored: true,
+    run: (repoRoot, spawn) => [
+      runStep("prompt-surface-gate", () =>
+        shellOut(spawn, "npm run --silent prompt-surface-gate", "npm", ["run", "--silent", "prompt-surface-gate"], { cwd: repoRoot }),
+      ),
+    ],
+  },
   // W1-T1048: the task-id existence gate is exactly the shared npm-script shape — deterministic,
   // unconditional on every PR, and measured at ~1.1s, so it is mirrored rather than excluded.
   npmScriptEntry("task-id-existence", "task-id-existence:check"),

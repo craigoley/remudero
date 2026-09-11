@@ -67,6 +67,7 @@ jobs:
         "commitlint",
         "api-client-drift",
         "no-hand-rolled-fetch",
+        "prompt-surface-gate",
         "scan-pr / osv-scan",
         "License Review",
         "leak-grep",
