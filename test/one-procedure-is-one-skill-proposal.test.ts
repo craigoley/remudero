@@ -15,9 +15,6 @@
  * per cadence pass.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -83,10 +80,5 @@ test("W1-T3385c: the draft carries its supporting-run count, so a stager can com
 });
 
 test("W1-T3385c: a single-run candidate is still refused outright — the floor is untouched", () => {
-  const dir = mkdtempSync(join(tmpdir(), "one-procedure-"));
-  try {
-    assert.equal(renderSkillDraft(candidate({ supportingRuns: 1 })), undefined);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  assert.equal(renderSkillDraft(candidate({ supportingRuns: 1 })), undefined);
 });
