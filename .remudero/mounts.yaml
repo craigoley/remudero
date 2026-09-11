@@ -219,15 +219,27 @@ judge:
   context_budget: 150000
 
 # ── max_turns is a RUNAWAY CLIFF, not a work limit (§9 tripwire re-base) ────────
-# Every mount's max_turns is a FLAT 400 — a tripwire set WAY above any real run,
-# whose only job is to kill a genuinely runaway loop. It is NOT a sizing knob:
-# task SIZING is enforced PRE-DISPATCH by the W1-T20c task linter (an over-scoped
-# task is decomposed before it ever spawns, never trimmed by a low turn cap). The
-# same bug as maxTurns=60 (PR #8, budget_usd re-base): a cap set NEAR expected work
-# is a work limit masquerading as a safety limit. Concretely, run
-# W1-T54b-1784149952116 (implement×medium) walled at 81/80 turns mid-LIVE-campaign
-# — AFTER its minor proof had already merged #80 through the required gate — because
-# live campaigns burn turns on POLLING the gate, work a cap must never kill.
+# The implement/reviewer/fix/diagnose worker lanes stay at a FLAT 400 — a tripwire
+# set WAY above any real run, whose only job is to kill a genuinely runaway loop.
+# It is NOT a sizing knob: task SIZING is enforced PRE-DISPATCH by the W1-T20c task
+# linter (an over-scoped task is decomposed before it ever spawns, never trimmed by
+# a low turn cap). The same bug as maxTurns=60 (PR #8, budget_usd re-base): a cap
+# set NEAR expected work is a work limit masquerading as a safety limit.
+# Concretely, run W1-T54b-1784149952116 (implement×medium) walled at 81/80 turns
+# mid-LIVE-campaign — AFTER its minor proof had already merged #80 through the
+# required gate — because live campaigns burn turns on POLLING the gate, work a cap
+# must never kill.
+#
+# IMPLEMENT IS ALREADY A CLIFF. MEASURED 2026-09-08 over 668 retained
+# `implement.done` rows: p50 72, p90 135, p95 156, p99 228, max 380. ZERO runs
+# reached 390 or 400. The 400 cap is 5.6x median and 1.75x p99, so it stays put.
+#
+# RECON WAS THE EXCEPTION. MEASURED 2026-09-08 over 680 retained `recon.done`
+# rows: p50 6, p90 10, p95 13, p99 21, max 26. The old 20 cap sat BELOW p99, ten
+# runs reached or exceeded it, and the only fleet-ledgered `error_max_turns` wall
+# was a recon run at 21 turns that exhausted its bounded retry and left implement
+# with NO recon context. Recon therefore uses 40: 1.90x p99, 14 turns above the
+# observed max, and still only one tenth of the implement cliff.
 # P7-consistent: nothing here is raised to mask over-scoping; the sizer is the linter.
 
 # ── Worker routing table: task_type → risk band → class → mount ────────────────
@@ -240,15 +252,15 @@ judge:
 routes:
   recon:
     low:
-      src:       { model: sonnet, effort: medium, max_turns: 20,   context_budget: 60000 }
-      docs:      { model: sonnet, effort: medium, max_turns: 20,   context_budget: 40000 }
-      plan-lint: { model: sonnet, effort: medium, max_turns: 20,   context_budget: 40000 }
+      src:       { model: sonnet, effort: medium, max_turns: 40,   context_budget: 60000 }
+      docs:      { model: sonnet, effort: medium, max_turns: 40,   context_budget: 40000 }
+      plan-lint: { model: sonnet, effort: medium, max_turns: 40,   context_budget: 40000 }
     medium:
-      src:       { model: sonnet, effort: medium, max_turns: 20,   context_budget: 90000 }
-      docs:      { model: sonnet, effort: medium, max_turns: 20,   context_budget: 60000 }
-      plan-lint: { model: sonnet, effort: medium, max_turns: 20,   context_budget: 60000 }
+      src:       { model: sonnet, effort: medium, max_turns: 40,   context_budget: 90000 }
+      docs:      { model: sonnet, effort: medium, max_turns: 40,   context_budget: 60000 }
+      plan-lint: { model: sonnet, effort: medium, max_turns: 40,   context_budget: 60000 }
     high:
-      src:       { model: sonnet, effort: high,   max_turns: 20,   context_budget: 120000 }
+      src:       { model: sonnet, effort: high,   max_turns: 40,   context_budget: 120000 }
   implement:
     low:
       src:       { model: sonnet, effort: medium, max_turns: 400, context_budget: 120000 }
