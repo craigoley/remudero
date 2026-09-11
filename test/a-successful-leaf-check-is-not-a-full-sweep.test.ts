@@ -292,6 +292,24 @@ test("policy rejects bad semantic check rows and ships shadow with ci-gate and c
   assertPolicyError(() => validatePolicy(nonStringName), /aggregateCheckNames\.value\[1\].*non-empty string/);
 });
 
+test("policy rejects a semantic-check row that is not a value/origin mapping at all, not just a bad value", () => {
+  // The sibling test above mutates each row's `.value`, which reaches the VALUE arms and leaves the
+  // SHAPE arms — the `!isPlainObject(raw)` throws — with no caller. A hand-edited policy.yaml that
+  // writes the scalar directly ("semanticCheckMode: shadow") is the likelier mistake of the two,
+  // and it must be refused by name rather than read as an empty mapping.
+  const scalarMode = shippedPolicyRaw();
+  (scalarMode.githubEventWake as Record<string, unknown>).semanticCheckMode = "shadow";
+  assertPolicyError(() => validatePolicy(scalarMode), /'githubEventWake\.semanticCheckMode'.*mapping with 'value'\/'origin'/);
+
+  const scalarNames = shippedPolicyRaw();
+  (scalarNames.githubEventWake as Record<string, unknown>).aggregateCheckNames = ["ci-gate", "ci"];
+  assertPolicyError(() => validatePolicy(scalarNames), /'githubEventWake\.aggregateCheckNames'.*mapping with 'value'\/'origin'/);
+
+  // CONTROL: the shipped policy IS a proper mapping and still loads, so the two refusals above are
+  // about the shape and not about this field being unloadable.
+  assert.equal(loadPolicy(policyPath(REPO_ROOT)).values.githubEventWake.semanticCheckMode, "shadow");
+});
+
 test("production Serve threads committed semantic mode and aggregate names without moving the secret boundary or adding a GitHub client", () => {
   const serveSource = readFileSync(new URL("../src/lib/serve.ts", import.meta.url), "utf8");
   const runTaskSource = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
