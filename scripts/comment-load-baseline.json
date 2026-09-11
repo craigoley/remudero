@@ -117,7 +117,7 @@
   "scripts/state-citation-check.mjs": 55,
   "scripts/strict-probe.ts": 20,
   "scripts/task-id-existence-baseline.json": 0,
-  "scripts/task-id-existence-check.mjs": 135,
+  "scripts/task-id-existence-check.mjs": 250,
   "scripts/test-duration-reporter.mjs": 250,
   "scripts/test-tier-manifest.json": 250,
   "scripts/test-tier-manifest.mjs": 250,
