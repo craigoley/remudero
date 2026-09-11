@@ -105,6 +105,25 @@ test("evaluateRow: a floor moving DOWN against origin/main with no bumpRationale
   assert.match(verdict.detail, /linesPct moved 95\.62 -> 80/);
 });
 
+test("evaluateRow: retiring a floor against origin/main with no bumpRationale is REFUSED", () => {
+  const verdict = evaluateRow(FLOOR_ENTRY, { linesPct: 95.62 }, {});
+  assert.equal(verdict.status, "regressed");
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.detail, /"linesPct" was removed/);
+  assert.match(verdict.detail, /bumpRationale/);
+});
+
+test("evaluateRow: retiring a floor WITH a fresh, PR-naming bumpRationale is ACCEPTED", () => {
+  const verdict = evaluateRow(
+    FLOOR_ENTRY,
+    { linesPct: 95.62 },
+    { bumpRationale: "Retired linesPct by #5117 / W1-T3380: coverage levels no longer block." },
+  );
+  assert.equal(verdict.status, "reviewed-bump");
+  assert.equal(verdict.ok, true);
+  assert.match(verdict.detail, /linesPct retired from 95\.62/);
+});
+
 test("evaluateRow: a floor moving UP (or unchanged) against origin/main is not a regression", () => {
   assert.equal(evaluateRow(FLOOR_ENTRY, { linesPct: 95.62 }, { linesPct: 96 }).status, "ok");
   assert.equal(evaluateRow(FLOOR_ENTRY, { linesPct: 95.62 }, { linesPct: 95.62 }).status, "ok");
