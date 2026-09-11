@@ -5042,38 +5042,23 @@ export interface RepeatDispositionRun {
  *  for. `escalated` carries forward only while THE ROWS IT READS SURVIVE, so post-rotation this
  *  legitimately reports a fresh run (W1-T2382).
  *
- * W1-T3359 — IT NOW READS THE STREAK THE WRITING PASS RECORDED, RATHER THAN RE-COUNTING ROWS, AND
- * THAT IS A REPAIR, NOT AN OPTIMISATION.
+ * W1-T3359 — READS THE RECORDED `repeat_streak` INSTEAD OF RE-COUNTING SURVIVING ROWS.
  *
- * The emitter has always put `repeat_streak` on every row, and its own comment says why: "so the
- * next pass's fold never has to guess it back out of row order". This fold guessed anyway. The cost
- * of guessing is that the count lives in the NUMBER OF SURVIVING ROWS, and that number has a ceiling
- * this bound cannot see past. `sweep.disposed` IS retained and always has been — a first draft of
- * this change wrongly added it to the set a SECOND time and claimed rotation archived it wholesale;
- * both were corrected before shipping, and the retention set is untouched here. But retention keeps
- * {@link MAX_RETAINED_LINES_PER_STEP} = 200 newest rows PER STEP, shared across every PR, so a
- * recount can only ever attribute about 200/N rows to any one of N live PRs.
+ * INVARIANT: retention keeps {@link MAX_RETAINED_LINES_PER_STEP} rows per step, shared across every
+ * PR, so a recount can attribute only a fraction of that window to any one PR — sensitivity falls as
+ * the fleet gets busier, the opposite of what a bound should do. Reading the streak the writing pass
+ * already recorded removes that ceiling: one surviving row states the true count regardless of how
+ * many other PRs' rows share the window. The recount stays as the fallback for rows written before
+ * this field existed, so a mid-migration corpus is not misread as a fresh run. Measured against the
+ * live fleet 2026-09-11: see the PR/task record, not this comment, for the numbers.
  *
- * MEASURED on the live fleet 2026-09-11, which is what makes this a repair:
- *   repeatDispositionBound                                      50
- *   retained rows for this step, across ALL PRs                200
- *   => live PRs above which a recount can never reach it         4
- *   max rows for one (pr, disposition) in the live file          12
- *   sweep.disposed share of the live file                        41% (3,225 of 7,774 lines)
- * With more than four PRs sharing that window a recount systematically UNDER-reads, and the fleet
- * routinely carries ten or more. The bound HAS fired — 53 rows carry `repeat_escalated: true` — but
- * its sensitivity falls as the fleet gets busier, and nothing reported the decay. A bound whose
- * sensitivity is inversely proportional to how much work the fleet is doing is this repo's recurring
- * defect read backwards.
+ * TRAP: `sweep.disposed` IS retained and always has been — do not re-add it to the retention set or
+ * treat rotation as archiving it wholesale, both tried and reverted before this shipped. `escalated`
+ * stays derived from surviving rows only, per W1-T2382's per-rotation re-arm; making it durable here
+ * would silently convert that into once-per-head-forever.
  *
- * READING THE RECORDED VALUE REMOVES THE CEILING: one surviving row states the true streak, so the
- * horizon no longer depends on how many rows of this step survived beside how many other PRs. The
- * recount remains as the fallback for rows written before this field could be trusted — a corpus
- * mid-migration must not read as a fresh run.
- *
- * `escalated` IS DELIBERATELY UNCHANGED and still derives from surviving rows only: W1-T2382 made
- * re-arming per rotation window the intended behaviour ("ONCE PER HEAD PER ROTATION WINDOW"), and
- * making the escalation durable here would silently convert that into once-per-head-forever. */
+ * FALSIFIER: test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts. */
+
 /** EXPORTED FOR ITS FALSIFIER, which is the only honest way to test it: mirroring this fold in
  *  test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts made every behavioural mutation
  *  of THIS function survive, because the mirror answered instead. Same precedent as
