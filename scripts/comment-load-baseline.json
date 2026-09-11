@@ -214,6 +214,7 @@
   "src/lib/launchd.ts": 148,
   "src/lib/learnings.ts": 500,
   "src/lib/ledger-compact.ts": 250,
+  "src/lib/ledger-compaction-rung.ts": 250,
   "src/lib/ledger-grep.ts": 202,
   "src/lib/ledger-path.ts": 250,
   "src/lib/ledger-replay.ts": 86,
