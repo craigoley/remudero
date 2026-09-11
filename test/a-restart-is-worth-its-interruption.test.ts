@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,7 +7,10 @@ import {
   DEPLOY_RESTART_SCORE_STEP,
   DEPLOY_RESTART_SCORE_THRESHOLD,
   accumulateDeployRestartPressure,
+  buildDeployWorthPrompt,
+  deterministicDeployWorth,
   judgeDeployWorth,
+  parseDeployWorthResponse,
   replayDeployRestartFrequency,
   resetDeployRestartPressure,
   type DeployRestartPressureState,
@@ -15,7 +18,14 @@ import {
   type DeployWorthJudge,
   type DeployWorthVerdict,
 } from "../src/lib/deploy-judge.js";
-import { runDeployCycle, type DeployDeps, type HealthInputs, type IdleProbe } from "../src/lib/deployer.js";
+import {
+  deployRestartPressurePath,
+  realDeployDeps,
+  runDeployCycle,
+  type DeployDeps,
+  type HealthInputs,
+  type IdleProbe,
+} from "../src/lib/deployer.js";
 import { rotateLedger } from "../src/lib/ledger.js";
 
 const idle: IdleProbe = { workers: 0, inflightLocks: 0, worktreeLocks: 0 };
@@ -141,6 +151,14 @@ test("plan-only changes score exactly zero and never reach the judge", () => {
   assert.equal(out.wantRestart, false);
 });
 
+test("changes outside plan, src and scripts score a deterministic zero without a judge", () => {
+  const out = deterministicDeployWorth(change("docs", ["docs/operator-guide.md"], "docs: explain deploys"));
+
+  assert.equal(out.score, 0);
+  assert.equal(out.source, "deterministic");
+  assert.match(out.reason, /no plan, src or scripts/);
+});
+
 test("scores accumulate: sub-threshold changes defer, and the crossing change wants one restart", () => {
   const scoreOne = (c: DeployWorthChange): DeployWorthVerdict => ({ score: 1, reason: c.sha, source: "deterministic" });
   const first = pressure([change("s1", ["src/a.ts"]), change("s2", ["scripts/a.mjs"])], undefined, { threshold: 3, scoreChange: scoreOne });
@@ -169,6 +187,23 @@ test("a completed restart resets the accumulated pressure", () => {
   assert.ok(r.calls.includes("kickstart"));
 });
 
+test("judge responses parse the recorded score dialect, and the prompt names the scored change", () => {
+  const parsed = parseDeployWorthResponse(
+    "DEPLOY_IMPACT_SCORE: 9\nDEPLOY_IMPACT_REASON: changes a decision path",
+  );
+  assert.equal(parsed.kind, "parsed");
+  if (parsed.kind !== "parsed") assert.fail("expected a parsed verdict");
+  assert.equal(parsed.verdict.score, 9);
+  assert.equal(parsed.verdict.reason, "changes a decision path");
+
+  const base = deterministicDeployWorth(change("runtime", ["src/deploy.ts"]));
+  const prompt = buildDeployWorthPrompt(change("runtime", ["src/deploy.ts"], "fix(deploy): tune score"), base);
+  assert.match(prompt, /SHA: runtime/);
+  assert.match(prompt, /SUBJECT: fix\(deploy\): tune score/);
+  assert.match(prompt, /FILES: src\/deploy\.ts/);
+  assert.match(prompt, /DEPLOY_IMPACT_SCORE: <1\|3\|9\|18>/);
+});
+
 test("the judge may raise a runtime score but may never lower it, and plan-only still bypasses it", () => {
   let calls = 0;
   const lower = judgeDeployWorth(change("s1", ["src/a.ts"]), {
@@ -188,6 +223,17 @@ test("the judge may raise a runtime score but may never lower it, and plan-only 
   });
   assert.equal(plan.score, 0);
   assert.equal(calls, 1, "only the runtime change reached the judge");
+});
+
+test("a judge object outside the recorded scale fails closed to the deterministic floor", () => {
+  const out = judgeDeployWorth(change("bad-judge", ["src/a.ts"]), {
+    judge: () => ({ score: 2, reason: "between rungs" }),
+  });
+
+  assert.equal(out.score, 1);
+  assert.equal(out.source, "fail-closed");
+  assert.equal(out.judgeFailed, true);
+  assert.match(out.reason, /outside the recorded deploy-impact scale/);
 });
 
 test("an uplift equal to the threshold makes one change justify a restart by itself", () => {
@@ -212,6 +258,76 @@ test("the recorded threshold is tunable: the same sequence restarts less when ra
   assert.equal(replayDeployRestartFrequency(sequence, 18).restarts, 2);
   assert.equal(replayDeployRestartFrequency(sequence, 12).restarts, 3);
   assert.equal(replayDeployRestartFrequency(sequence, 9).restarts, 4);
+});
+
+test("realDeployDeps persists and sanitizes the restart-pressure accumulator", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-deploy-pressure-state-"));
+  const installPath = join(dir, "install");
+  const stateRoot = join(dir, "root");
+  mkdirSync(installPath);
+  mkdirSync(join(stateRoot, "state"), { recursive: true });
+  const ledgerPath = join(dir, "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  try {
+    const deps = realDeployDeps({
+      installPath,
+      stateRoot,
+      daemonLabel: "com.remudero.daemon",
+      serveLabel: "com.remudero.serve",
+      servePort: 3000,
+      uid: 501,
+      ledgerPath,
+      execFile: () => "",
+    });
+
+    assert.deepEqual(deps.restartPressureState?.(), { total: 0, scoredShas: [] });
+
+    writeFileSync(
+      deployRestartPressurePath(stateRoot),
+      JSON.stringify({ total: 4.8, scoredShas: ["a", "", 7, "b"], lastRestartAtMs: 1234 }),
+    );
+    assert.deepEqual(deps.restartPressureState?.(), { total: 4, scoredShas: ["a", "b"], lastRestartAtMs: 1234 });
+
+    writeFileSync(deployRestartPressurePath(stateRoot), "{not-json");
+    assert.deepEqual(deps.restartPressureState?.(), { total: 0, scoredShas: [] });
+
+    deps.setRestartPressureState?.({ total: 9, scoredShas: ["c"], lastRestartAtMs: 2000 });
+    assert.deepEqual(JSON.parse(readFileSync(deployRestartPressurePath(stateRoot), "utf8")), {
+      total: 9,
+      scoredShas: ["c"],
+      lastRestartAtMs: 2000,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("realDeployDeps derives pending changes from git history through the injected runner", () => {
+  const calls: string[][] = [];
+  const deps = realDeployDeps({
+    installPath: "/install",
+    stateRoot: "/state-root",
+    daemonLabel: "com.remudero.daemon",
+    serveLabel: "com.remudero.serve",
+    servePort: 3000,
+    uid: 501,
+    ledgerPath: "/ledger.ndjson",
+    execFile: (cmd, args) => {
+      calls.push([cmd, ...args]);
+      const gitArgs = args.slice(2);
+      if (gitArgs[0] === "rev-list") return "a1\nb2\n";
+      if (gitArgs[0] === "log") return gitArgs[3] === "a1" ? "feat: first\n" : "fix: second\n";
+      if (gitArgs[0] === "diff-tree") return gitArgs.at(-1) === "a1" ? "src/a.ts\n\n" : "docs/b.md\nscripts/b.mjs\n";
+      return "";
+    },
+  });
+
+  assert.deepEqual(deps.pendingChanges?.("abcdef1", "abcdef1"), []);
+  assert.deepEqual(deps.pendingChanges?.("old", "new"), [
+    { sha: "a1", subject: "feat: first", files: ["src/a.ts"] },
+    { sha: "b2", subject: "fix: second", files: ["docs/b.md", "scripts/b.mjs"] },
+  ]);
+  assert.ok(calls.some((c) => c.join(" ") === "git -C /install rev-list --reverse old..new"));
 });
 
 test("a restart-worthy score cannot bypass the idle gate", () => {
@@ -252,6 +368,28 @@ test("throwing and unparseable judge verdicts fail closed at the deployer call s
     assert.match(out.reason, /below threshold/);
     assert.ok(!r.calls.includes("pullFf"));
   }
+});
+
+test("an unreadable pending-change list fails closed to no automatic restart and is ledgered", () => {
+  const r = makeDeps({
+    autoMode: true,
+    installHead: "old",
+    originMain: "new",
+    restartPressureState: { total: 5, scoredShas: ["seen"] },
+  });
+  r.deps.pendingChanges = () => {
+    throw new Error("rev-list failed");
+  };
+
+  const out = runDeployCycle(r.deps);
+
+  assert.equal(out.deployed, false);
+  assert.match(out.reason, /pending deploy changes unreadable/);
+  assert.ok(!r.calls.includes("pullFf"));
+  const pressureRow = r.logs.find((l) => l.step === "deploy.restart_pressure");
+  assert.equal(pressureRow?.data?.decision, "defer");
+  assert.equal(pressureRow?.data?.total, 5);
+  assert.equal(pressureRow?.data?.judge_failed, true);
 });
 
 test("the restart-rate ceiling holds even when the judge says every change is urgent, and it is ledgered", () => {
