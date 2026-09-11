@@ -602,7 +602,7 @@ function scanUnadoptedScripts(
   }
   const srcTexts = corpus.filter((f) => f.rel.startsWith("src/")).map((f) => f.text);
 
-  // W1-T3379 — THE TWO INVOKER SURFACES THIS SCAN COULD NOT SEE.
+  // W1-T3383 — THE TWO INVOKER SURFACES THIS SCAN COULD NOT SEE.
   //
   // (a) scripts/ ITSELF. A shared scripts/lib/*.mjs module is imported only by sibling scripts, and
   //     none of the three surfaces above can see that, so it read as permanently unadopted however
