@@ -236,7 +236,7 @@ judge:
 # `src` row is the UNCHANGED pre-W1-T167 default (the same numbers, same
 # behavior for any task classified `src`); `docs`/`plan-lint` rows are NEW,
 # cheaper mounts added only at low/medium risk for `recon`/`implement` — the
-# two original types that touched a task's declared `files` (W1-T167).
+# two types that actually touch a task's declared `files` (W1-T167).
 routes:
   recon:
     low:
@@ -261,16 +261,6 @@ routes:
     high:
       src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 200000 }
   diagnose:
-    low:
-      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
-    medium:
-      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 150000 }
-    high:
-      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 180000 }
-  # Investigation tasks still run through the standard recon -> implementation -> gates path;
-  # this row governs that evidence-first implementation run. It matches diagnose because both
-  # task types start from an unresolved cause and need the higher-effort evidence mount.
-  investigate:
     low:
       src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
     medium:
