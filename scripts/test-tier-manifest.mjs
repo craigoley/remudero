@@ -32,6 +32,12 @@ export const DEFAULT_MANIFEST_RELATIVE_PATH = "scripts/test-tier-manifest.json";
  *  ordinary file stays fast and only genuinely long-running files move tiers. */
 export const DEFAULT_SLOW_THRESHOLD_MS = 5000;
 
+/** A materially different observation is worth naming before it is applied to the next proposal.
+ * Two is intentionally a factor, not an absolute-ms tolerance: the ledger ranges from sub-ms
+ * fixtures to multi-minute browser suites, and the same absolute delta would be noise in one
+ * direction and a planning defect in the other. */
+export const DURATION_STALENESS_FACTOR = 2;
+
 /** Every `test/**\/*.test.ts` file, found by a plain recursive `readdirSync` walk — no
  *  subprocess, no glob dependency — returned as `root`-relative POSIX paths, sorted for a
  *  deterministic report. Mirrors scripts/source-size-ratchet.mjs's `listSourceFiles` shape. A
@@ -283,6 +289,35 @@ export function readDurationEvidence(paths, knownTestFiles) {
   return { measured, warnings };
 }
 
+/**
+ * Report measured evidence that materially disagrees with the recorded planning cost.
+ *
+ * A recorded zero is W1-T2904's explicit unmeasured placeholder, not a claim that the file is
+ * free, so it is UNKNOWN and deliberately has no ratio. An absent observation is likewise
+ * unknown: only a file that actually arrived in `measured` is compared or merged. The proposal
+ * writer consequently preserves its old entry rather than manufacturing a zero-cost estimate.
+ * @param {{ files: Record<string, number> }} manifest
+ * @param {Record<string, number>} measured
+ * @param {number} factor
+ */
+export function durationStalenessWarnings(manifest, measured, factor = DURATION_STALENESS_FACTOR) {
+  if (!Number.isFinite(factor) || factor <= 1) throw new RangeError("duration staleness factor must be greater than 1");
+  const warnings = [];
+  for (const file of Object.keys(measured).sort()) {
+    const recorded = manifest.files[file];
+    const observed = measured[file];
+    if (!Number.isFinite(recorded) || recorded <= 0 || !Number.isFinite(observed) || observed < 0) continue;
+    const low = Math.min(recorded, observed);
+    const ratio = low === 0 ? Infinity : Math.max(recorded, observed) / low;
+    if (ratio <= factor) continue;
+    const ratioText = Number.isFinite(ratio) ? `${ratio.toFixed(2)}x` : "infinity";
+    warnings.push(
+      `stale duration for ${file}: recorded ${recorded}ms, observed ${observed}ms (${ratioText}; threshold ${factor}x)`,
+    );
+  }
+  return warnings;
+}
+
 /** Writes `manifest` to `path` as stable, sorted-key JSON — a deterministic diff on every
  *  recording pass, never a hash-order-dependent one. */
 export function writeManifest(path, manifest) {
@@ -346,6 +381,9 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     }
     const { measured, warnings } = readDurationEvidence(evidencePaths, testFiles);
     for (const warning of warnings) console.error(`test-tier-manifest: warning: ${warning}`);
+    for (const warning of durationStalenessWarnings(manifest, measured)) {
+      console.error(`test-tier-manifest: warning: ${warning}`);
+    }
     writeManifest(resolve(root, output), mergeDurations(manifest, measured));
     console.log(
       `test-tier-manifest: wrote ${Object.keys(measured).length} measured file(s) to ${output}; ` +

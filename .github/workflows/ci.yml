@@ -327,7 +327,7 @@ jobs:
   flake-retry-aggregate:
     name: flake-retry-aggregate
     runs-on: ubuntu-latest
-    needs: [ci]
+    needs: [ci, test-slow]
     if: ${{ always() }}
     timeout-minutes: 10
     steps:
@@ -341,11 +341,11 @@ jobs:
         with:
           pattern: flake-retry-shard-*
           path: flake-retry-shards
-      - name: Download every shard's structured duration evidence (best-effort)
+      - name: Download every duration evidence artifact (best-effort)
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: test-duration-shard-*
+          pattern: test-duration-*
           path: test-duration-shards
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         continue-on-error: true
@@ -518,7 +518,17 @@ jobs:
             echo "- W1-T3207: skipped duplicate slow-tier execution on SOURCE; coverage-ratchet owns the single instrumented full-suite run." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          RMD_TEST_DURATION_OUTPUT="${RUNNER_TEMP}/test-duration/slow.json"
+          export RMD_TEST_DURATION_OUTPUT
           npm run --silent test:slow -- --base "origin/${GITHUB_BASE_REF}"
+      - name: Upload slow-tier duration evidence (structured Node test events, W1-T3302)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-duration-slow
+          path: ${{ runner.temp }}/test-duration
+          retention-days: 1
+          if-no-files-found: ignore
 
   commitlint:
     # W1-T31 (MASTER-PLAN §6A), relocated by W1-T129 — the Conventional Commits gate. This repo
