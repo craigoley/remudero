@@ -1266,6 +1266,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       try {
         return parseDeployRestartPressureState(readFileSync(deployRestartPressurePath(o.stateRoot), "utf8"));
       } catch {
+        /* Missing or corrupt pressure state means no score has been durably observed. */
         return { total: 0, scoredShas: [] };
       }
     },

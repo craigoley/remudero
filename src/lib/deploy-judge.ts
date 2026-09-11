@@ -8,6 +8,7 @@ export interface RecordedDeployRestartThreshold {
   reason: string;
 }
 
+/** PRIMARY CONTROL: the tunable score total that normally decides when stale code is worth taking. */
 export const DEPLOY_RESTART_SCORE_THRESHOLD: RecordedDeployRestartThreshold = {
   value: 18,
   reason:
@@ -15,10 +16,12 @@ export const DEPLOY_RESTART_SCORE_THRESHOLD: RecordedDeployRestartThreshold = {
     "scorer's cadence once rare judge uplifts are ledgered and measurable.",
 };
 
+/** BACKSTOP: even urgent scores cannot restart the fleet more often than this. */
 export const DEPLOY_RESTART_RATE_CEILING_MS = 60 * 60_000;
 
 export const DEPLOY_RESTART_SCORE_STEP = "deploy.restart_score";
 export const DEPLOY_RESTART_PRESSURE_STEP = "deploy.restart_pressure";
+/** BACKSTOP ledger signal for the rate ceiling refusing a score-triggered restart. */
 export const DEPLOY_RESTART_RATE_LIMITED_STEP = "deploy.restart_rate_limited";
 
 export interface DeployWorthChange {
