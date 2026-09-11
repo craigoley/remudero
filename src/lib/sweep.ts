@@ -3155,6 +3155,7 @@ export interface MainHealthObservation {
   readonly enrichmentFailures?: readonly string[];
 }
 
+/** PRIMARY CONTROL: maximum failing test titles named in one MAIN-HEALTH escalation. */
 export const MAIN_HEALTH_FAILING_TEST_TITLE_CAP = 3;
 
 export interface MainHealthPullRequestRef {
