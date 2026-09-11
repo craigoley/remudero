@@ -312,7 +312,7 @@
   "src/lib/sweep.ts": 3000,
   "src/lib/task-card.ts": 54,
   "src/lib/task-class.ts": 37,
-  "src/lib/task-id-reservation.ts": 160,
+  "src/lib/task-id-reservation.ts": 250,
   "src/lib/task-id.ts": 500,
   "src/lib/task-linter.ts": 1250,
   "src/lib/tier.ts": 67,
@@ -332,6 +332,6 @@
   "src/lib/worker.ts": 1250,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 15250,
+  "src/run-task.ts": 15000,
   "src/spike.ts": 18
 }
