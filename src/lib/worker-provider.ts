@@ -147,6 +147,18 @@ export interface CodexModelDecision {
   selectedEffort?: string;
   preferredModel?: string;
   preferenceBypass?: CodexModelPreferenceBypassReason;
+  /** The Claude model this Codex request was routed FOR, e.g. `"claude-opus-5"` — carried here (rather than left to the
+   *  caller to re-thread) so a spawn served under {@link capabilityFallbackReason} is attributable to the exact lane that
+   *  silently downgraded (W1-T3097). */
+  requestedModel?: string;
+  /**
+   * Present ONLY when `.remudero/mounts.yaml`'s capability table could not be loaded at all — see
+   * {@link resolveCodexCapability}. A capability table that loaded fine and simply has no row for `requestedModel` is a
+   * DIFFERENT, documented event (the "balanced" default) and leaves this field absent. Distinguishing the two means an arm
+   * built from `served_model` is no longer poisoned by an artefact of a failed file read that looks like a policy decision
+   * (W1-T3097).
+   */
+  capabilityFallbackReason?: CodexCapabilityFallbackReason;
 }
 
 export interface ProviderSelection {
@@ -536,6 +548,33 @@ export function codexCapabilityForRequestedModel(
   return isCodexModelTier(capability) ? capability : "balanced";
 }
 
+/** Why {@link resolveCodexCapability} fell back to "balanced" for this request. Exactly one member today: the two OTHER
+ *  ways a request can land on "balanced" — a genuinely unmapped model, or `requestedModel` itself being absent — are the
+ *  documented default and carry no reason at all (W1-T3097). */
+export type CodexCapabilityFallbackReason = "capability-table-unavailable";
+
+/** Resolved Codex capability tier, paired with WHY a fallback was taken when one was. */
+export interface CodexCapabilityResolution {
+  tier: CodexModelTier;
+  fallbackReason?: CodexCapabilityFallbackReason;
+}
+
+/**
+ * THE SEAM `codexCapabilityForRequestedModel` collapses (W1-T3097): an UNREADABLE capability table
+ * (`capabilities === undefined`, `.remudero/mounts.yaml` failed to load anywhere it was searched) and a genuinely UNMAPPED
+ * model both resolve to the tier "balanced" there, indistinguishably. This wraps the same lookup and adds the ONE bit that
+ * tells them apart — `fallbackReason` is present only for the former — while leaving `codexCapabilityForRequestedModel`
+ * itself untouched (existing callers that only need the tier keep working byte-for-byte). Both cases still return a usable
+ * capability; this never throws and never blocks dispatch (design point (ii), fail-soft stays fail-soft).
+ */
+export function resolveCodexCapability(
+  capabilities: CapabilityLadder | undefined,
+  requestedModel: string | undefined,
+): CodexCapabilityResolution {
+  const tier = codexCapabilityForRequestedModel(capabilities, requestedModel);
+  return capabilities === undefined ? { tier, fallbackReason: "capability-table-unavailable" } : { tier };
+}
+
 /**
  * Resolve the ordered Codex candidate models for a (capability, effort) pair — the table lookup
  * that replaces the old tier function's dropped-effort selection (W1-T2573, rationale point 2).
@@ -638,7 +677,7 @@ export function selectCodexModel(
     if (visible.length === 100) break;
   }
   const forced = config.workerProviders?.codexModel;
-  const tier = codexCapabilityForRequestedModel(capabilities, requestedModel);
+  const { tier, fallbackReason: capabilityFallbackReason } = resolveCodexCapability(capabilities, requestedModel);
   const preferred = forced
     ? [forced]
     : [...(config.workerProviders?.codexModels?.[tier] ?? codexCandidatesForCapability(capabilities, tier, requestedEffort))];
@@ -705,8 +744,10 @@ export function selectCodexModel(
     requestedEffort: requestedEffortLabel,
     mappedCandidates,
     options,
+    ...(requestedModel ? { requestedModel } : {}),
     ...(scopedPreference ? { preferredModel: scopedPreference.model } : {}),
     ...(preferenceBypass ? { preferenceBypass } : {}),
+    ...(capabilityFallbackReason ? { capabilityFallbackReason } : {}),
   };
   if (!selected) {
     // Preserve W1-T2573's fail-closed attribution contract: when mapped models are visible but

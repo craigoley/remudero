@@ -106,6 +106,7 @@ import {
   readCodexCapacity,
   spawnCodexWorker,
   type CodexCapacityDeps,
+  type CodexModelTier,
   type ProviderCapacity,
   ProviderCapacityBlockedError,
   type ProviderSelection,
@@ -232,6 +233,22 @@ export interface WorkerResult {
    * Present only on the opt-in multi-provider path; the default Claude-only path performs no extra capacity reads and omits
    * this field byte-for-byte. */
   windowConsumption?: ProviderWindowConsumption;
+  /**
+   * W1-T3097: present ONLY when this Codex spawn was served under the documented capability-table-unavailable fallback —
+   * `.remudero/mounts.yaml`'s capability data could not be loaded from ANY searched location, so
+   * `codexCapabilityForRequestedModel` (worker-provider.ts) collapsed the requested Claude model to the degenerate
+   * "balanced" default rather than a real table row. Absent on every spawn served by the table (including a genuinely
+   * unmapped model, which resolves to the SAME "balanced" default but is a documented, intended outcome, not this one) —
+   * the "absent on the healthy path" discipline `lostGrants`/`credentialHelperUnwired` already keep. The worker still
+   * spawns; this is the report, not a block (design point (ii)).
+   */
+  codexCapabilityFallback?: {
+    reason: "capability-table-unavailable";
+    requestedModel?: string;
+    capabilityUsed: CodexModelTier;
+    candidates: string[];
+    searchedPaths: string[];
+  };
 }
 
 /** `model`/`effort` label logged when a call rides no explicit mount override (e.g. recon, the advisory reviewer) — an honest
@@ -341,6 +358,13 @@ export function workerLedgerFields(r: WorkerResult): {
     resets_at?: number | string;
     reason?: string;
   };
+  codex_capability_fallback?: {
+    reason: "capability-table-unavailable";
+    requested_model?: string;
+    capability_used: CodexModelTier;
+    candidates: string[];
+    searched_paths: string[];
+  };
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
@@ -409,6 +433,19 @@ export function workerLedgerFields(r: WorkerResult): {
             ...(r.windowConsumption.windowName ? { window: r.windowConsumption.windowName } : {}),
             ...(r.windowConsumption.resetsAt !== undefined ? { resets_at: r.windowConsumption.resetsAt } : {}),
             ...(r.windowConsumption.reason ? { reason: r.windowConsumption.reason } : {}),
+          },
+        }
+      : {}),
+    // Absent on every spawn served by the table — present only under the missing-table fallback, so THIS is the field that
+    // makes a fallback-served arm distinguishable from a table-served one after the fact (W1-T3097 design point (iv)).
+    ...(r.codexCapabilityFallback
+      ? {
+          codex_capability_fallback: {
+            reason: r.codexCapabilityFallback.reason,
+            ...(r.codexCapabilityFallback.requestedModel ? { requested_model: r.codexCapabilityFallback.requestedModel } : {}),
+            capability_used: r.codexCapabilityFallback.capabilityUsed,
+            candidates: r.codexCapabilityFallback.candidates,
+            searched_paths: r.codexCapabilityFallback.searchedPaths,
           },
         }
       : {}),
@@ -996,11 +1033,18 @@ export async function readClaudeProviderCapacity(
  * not the repository root, so resolving from it silently misses `.remudero/mounts.yaml`. Task workers use their checkout
  * `cwd`; early isolation probes run before that worktree exists, so they fall back to the module's installed repository root.
  * Neither path guesses from the state root. */
-function resolveWorkerCapabilities(cwd: string): CapabilityLadder | undefined {
+/** Every `.remudero/mounts.yaml` location {@link resolveWorkerCapabilities} tries, in order — the single source both that
+ *  function and the W1-T3097 fallback report read, so "where the table was looked for" can never drift out of sync with
+ *  where it actually was. */
+function capabilityTableSearchPaths(cwd: string): string[] {
   const installRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-  for (const root of new Set([cwd, installRoot])) {
+  return [...new Set([cwd, installRoot])].map((root) => mountsPath(root));
+}
+
+function resolveWorkerCapabilities(cwd: string): CapabilityLadder | undefined {
+  for (const path of capabilityTableSearchPaths(cwd)) {
     try {
-      return loadMounts(mountsPath(root)).capabilities;
+      return loadMounts(path).capabilities;
     } catch {
       // Try the next repository-owned location; a missing/malformed table remains fail-soft.
     }
@@ -1353,6 +1397,38 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         }
         result.accountLabel = selection.capacity.accountLabel;
         result.windowConsumption = await finishSelectedCapacityMeasurement(args, config, selection, measurement, capabilities);
+        // W1-T3097: a spawn actually SERVED under the missing-table fallback gets a ledger row naming the requested model,
+        // the capability used and the candidate list taken — the same "never silent" discipline `mount.class_fallback`
+        // already applies to an unmatched task class — and a field on the RESULT itself, so the arm it lands in is
+        // attributable after the fact rather than indistinguishable from a table-served spawn (design points (iii)/(iv)).
+        // Fires only for the spawn that actually ran on it, never merely because capabilities were unreadable somewhere.
+        const capabilityFallbackReason = selection.capacity.modelDecision?.capabilityFallbackReason;
+        if (capabilityFallbackReason) {
+          const decision = selection.capacity.modelDecision!;
+          // TRAP: the Codex capacity read below (`readCodexCapacity` -> `resolveCapabilityLadder`, worker-provider.ts)
+          // resolves the ladder it actually routes on INDEPENDENTLY of this function's own `capabilities` local — it takes
+          // the injected value only when `args.model && capabilities` both held, and otherwise tries `config.root` itself.
+          // The fallback firing therefore means `config.root`'s table was searched too, not only `args.cwd`/the install
+          // root, so it belongs in "where the table was looked for" alongside them.
+          const searchedPaths = [...new Set([...capabilityTableSearchPaths(args.cwd), mountsPath(config.root)])];
+          result.codexCapabilityFallback = {
+            reason: capabilityFallbackReason,
+            ...(decision.requestedModel ? { requestedModel: decision.requestedModel } : {}),
+            capabilityUsed: decision.requestedCapability,
+            candidates: decision.mappedCandidates,
+            searchedPaths,
+          };
+          console.error(
+            JSON.stringify({
+              event: "worker.codex_capability_fallback",
+              reason: capabilityFallbackReason,
+              requested_model: decision.requestedModel ?? null,
+              capability_used: decision.requestedCapability,
+              candidates: decision.mappedCandidates,
+              searched_paths: searchedPaths,
+            }),
+          );
+        }
         return result;
       } catch (error) {
         if (measurement) abandonProviderWindowMeasurement(measurement);
