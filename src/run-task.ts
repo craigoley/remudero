@@ -14586,6 +14586,29 @@ export function resolvePlanCriteriaForReview(
   }
 }
 
+/**
+ * Whether the `plan/tasks.d` tree that supplied `source` predates the one on `origin/main`.
+ *
+ * `resolvePlanCriteriaAtHead` already computed and printed this tree identity as part of its
+ * read provenance. Reuse that value instead of asking git for a second identity for the PR head:
+ * the only new git read is main's current tree.
+ */
+export function planTreeIsBehindMain(source: string, repoDir: string): boolean {
+  const planTreeSha = /(?:^|\s)plan\/tasks\.d\/@([0-9a-f]{12,40})(?:\s|$)/.exec(source)?.[1];
+  if (!planTreeSha) return false;
+
+  try {
+    const mainPlanTreeSha = execFileSync("git", ["-C", repoDir, "rev-parse", "origin/main:plan/tasks.d"], {
+      encoding: "utf8",
+      stdio: "pipe",
+    }).trim();
+    return !mainPlanTreeSha.startsWith(planTreeSha);
+  } catch {
+    // The advisory must not turn an otherwise reviewable PR into a failure when main is unreadable.
+    return false;
+  }
+}
+
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
   const {
     fetchView,
@@ -14872,6 +14895,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
       (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
+
+  if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(source, repoRoot)) {
+    console.log(
+      "NOTE: the criteria came from a plan tree older than origin/main; merge origin/main into the branch " +
+        "before treating this unmet verdict as a diff defect",
+    );
+  }
 
   // W1-T185 (Gap 1, criterion 2), raised by W1-T229: the operator override —
   // a LEDGERED, attributable decision to arm a capped verdict anyway.

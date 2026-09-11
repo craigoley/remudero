@@ -27,6 +27,7 @@
     "test/a-codex-reviewer-scratch-directory-is-not-a-repository.test.ts": 320,
     "test/a-codex-worker-starts-outside-a-git-repository.test.ts": 313,
     "test/a-codex-worker-uses-a-private-temporary-root.test.ts": 341,
+    "test/a-corrected-criterion-does-not-reach-the-pr-it-corrects.test.ts": 0,
     "test/a-corrected-title-reaches-the-worker.test.ts": 3205,
     "test/a-cost-tripwire-fires-on-runaways-not-ordinary-variance.test.ts": 0,
     "test/a-count-assertion-names-its-members.test.ts": 520,
