@@ -1,0 +1,46 @@
+- id: W1-T3406
+  title: "the daemon container's on-failure max=5 retires the whole fleet silently after five bad ticks"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  status: queued
+  attempts: 0
+  files:
+    - test/a-restart-budget-that-runs-out-says-so.test.ts
+  origin: "operator-session#silent-fleet-retirement-2026-09-11"
+  rationale: |
+    The `remudero-daemon` container runs under Docker's restart policy `on-failure` with
+    `MaximumRetryCount=5`. When the daemon exits non-zero five times, Docker stops restarting it
+    and the fleet is DOWN — with no escalation, no issue, and no ledger row, because the process
+    that would write one is the one that is not running.
+
+    OBSERVED 2026-09-11. A plan shard carrying `type: investigate` reached `resolveMount`, which
+    throws `MountsError` for a type with no route (src/lib/mounts.ts:528). The throw escaped the
+    drain loop, the daemon exited 1, and the restart budget was spent: RestartCount 5 of 5. The
+    fleet was down until an operator noticed by hand and started it. The board looked ordinary
+    the whole time — open PRs, no new escalation, simply nothing moving.
+
+    THE ASYMMETRY THAT MAKES THIS WORTH FIXING. A crash loop is loud by construction — something
+    is trying. Exhausting the budget is SILENT by construction: the retries stop, and silence is
+    indistinguishable from a healthy idle fleet. The one signal that survives is external to the
+    process, which is where the detector has to live.
+
+    NOT A REQUEST TO RAISE THE LIMIT. Unbounded restarts would hide the crash instead, which is
+    the same defect wearing the opposite sign. What is missing is a reading of the restart budget
+    itself — `docker inspect`'s RestartCount against MaximumRetryCount — surfaced somewhere an
+    operator already looks, plus an escalation from a process the daemon does not own.
+  acceptance:
+    - claim: "an exhausted restart budget is reported to a surface that survives the daemon being down"
+      proof: "unit test: test/a-restart-budget-that-runs-out-says-so.test.ts"
+    - claim: "a healthy idle fleet is distinguishable from an exhausted one, so the signal is not merely noise"
+      proof: "unit test: test/a-restart-budget-that-runs-out-says-so.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if a reader for the restart budget already exists. Search for a consumer of
+    `RestartCount` or `MaximumRetryCount`; if one already surfaces an exhausted budget off-host,
+    the gap is closed and this shard is withdrawn.
+  notes: |
+    The operator has ruled that the com.remudero.daemon LaunchAgent was intentionally moved to
+    Azure and is NOT loaded locally — an unloaded local daemon is never a defect and must not be
+    reported as one. This task is about the CONTAINER's restart budget, not that LaunchAgent.

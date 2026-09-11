@@ -1,0 +1,45 @@
+- id: W1-T3403
+  title: "the census RUNAWAY bound fires on a healthy condition — it tightens as the machine gets faster"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  files:
+    - test/the-census-admission-set-is-derived-not-enumerated.test.ts
+  origin: "operator-session#healthy-condition-bound-2026-09-11"
+  rationale: |
+    CLAUDE.md names this repo's recurring defect as "a bound that fires on a HEALTHY condition"
+    and cites three instances (W1-T312, W1-T380/#1392, W1-T382/#1401). This is a fourth, and it
+    is the bound `bound-kind-declared` exists to police.
+
+    THE BOUND. `runPreflightFast` refuses a census entry as RUNAWAY when it takes more than 4x
+    THIS RUN'S OWN CHEAPEST census entry, floored at 1000ms. That relative form was deliberate
+    (W1-T2545 made it relative so a growing corpus cannot outgrow a fixed ceiling) and the
+    intent is right. The consequence is not: the bound TIGHTENS as the fastest entry gets
+    faster, so a healthy, idle, fast machine produces a STRICTER limit than a loaded one.
+
+    MEASURED 2026-09-11 on PR #5087, same tree, same commit:
+      under load  — negative-reachability-census 4296ms vs a 4000ms bound  -> REFUSED
+      under load  — the roster projection run 5034ms vs a 4776ms bound     -> REFUSED
+      idle        — the identical suite, same tree                          -> 20/20 PASS
+      origin/main — the identical suite                                     -> PASS
+    Both refusals said "its own result would have PASSed", which is the tell: the work was fine
+    and only the clock disagreed.
+
+    WHY THIS IS WORTH FIXING RATHER THAN RETUNING. Raising the multiplier trades one arbitrary
+    number for another and re-creates the defect at a new value. The bound needs a term that does
+    not move with machine speed — a floor on the ABSOLUTE spread, a minimum sample, or a
+    comparison against a recorded distribution rather than against one run's own minimum.
+  acceptance:
+    - claim: "a census entry that would PASS on its own result is never refused as RUNAWAY because a sibling ran fast"
+      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+    - claim: "a genuinely runaway entry is still refused, so the guard is not merely deleted"
+      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+  falsifier: |
+    CLOSE THIS TASK if the bound no longer derives from this run's own minimum. Read
+    `runPreflightFast`'s RUNAWAY arm: if the refusal threshold is computed from anything that
+    moves with machine speed (a multiple of the fastest entry in the same run), the defect
+    stands. If it compares against a recorded distribution or an absolute spread, it is fixed.
