@@ -99,13 +99,16 @@ export interface TaskRiskRuling {
   pin: string;
 }
 
+export const TASK_TYPES = ["recon", "implement", "diagnose", "review", "manual"] as const;
+export type TaskType = (typeof TASK_TYPES)[number];
+
 export interface Task {
   id: string;
   title: string;
   repo: string;
   depends_on: string[];
   plan_refs?: string[];
-  type: "recon" | "implement" | "diagnose" | "review" | "manual";
+  type: TaskType;
   verify: "auto" | "human";
   /** Risk band (second mount-routing axis, §9): resolves the run's mount via `resolveMount(type,
    *  risk)`. Absent ⇒ {@link DEFAULT_RISK}. Schema/CI/telemetry-touching tasks run `high`. */
@@ -372,13 +375,17 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
     if (bandMeaning !== undefined && !BAND_MEANINGS.includes(bandMeaning)) {
       throw new PlanError(`task ${id}: invalid band_meaning '${String(bandMeaning)}' (must be ${BAND_MEANINGS.join("|")})`);
     }
+    const type = req(e.type as string, "type", id);
+    if (!TASK_TYPES.includes(type as TaskType)) {
+      throw new PlanError(`task ${id}: invalid type '${type}' (must be ${TASK_TYPES.join("|")})`);
+    }
     const task: Task = {
       id,
       title: req(e.title as string, "title", id),
       repo: req(e.repo as string, "repo", id),
       depends_on: Array.isArray(e.depends_on) ? (e.depends_on as string[]) : [],
       plan_refs: Array.isArray(e.plan_refs) ? (e.plan_refs as string[]) : undefined,
-      type: req(e.type as Task["type"], "type", id),
+      type: type as TaskType,
       verify: (e.verify as Task["verify"]) ?? "auto",
       risk,
       band_meaning: bandMeaning,

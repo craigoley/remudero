@@ -2,7 +2,7 @@
   title: "TWO RISK-JUDGE PREDICATES ARE EXPORTED, TESTED AND CALLED BY NOTHING — `declaredFilesAbsentFromChange` and `isTestOnlyCompletionOfExistingBehaviour` each appear exactly once outside their own tests, at their own definition, so the declared-versus-actual signal the judge acts on is an LLM inference over two rendered lists while the pure functions written to compute it sit inert"
   repo: remudero
   depends_on: []
-  type: investigate
+  type: implement
   verify: human
   principles: {tdd: strict}
   risk: medium

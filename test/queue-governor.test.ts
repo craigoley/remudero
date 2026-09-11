@@ -138,6 +138,7 @@ test("acceptance 1 — at the limit: checkQueueGovernor defers, a dispatch_defer
   assert.deepEqual(summary.byDisposition, {
     mergeable: 1,
     "blocked-fixable": 1,
+    "refused-escalate": 0,
     stale: 1,
     "blocked-ambiguous": 1,
     "dep-review": 0,

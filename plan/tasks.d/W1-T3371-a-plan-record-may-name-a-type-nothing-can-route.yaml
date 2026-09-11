@@ -1,0 +1,64 @@
+- id: W1-T3371
+  title: "A PLAN RECORD MAY DECLARE A TASK TYPE THE DISPATCHER CANNOT ROUTE, AND THE FAILURE IS A DEAD FLEET — `plan.ts`'s `req()` checks a field is PRESENT, never that its value is in the `recon | implement | diagnose | review | manual` union, so five shards carrying `type: investigate` reached dispatch and `resolveMount` threw out of the drain loop until Docker's restart budget was spent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  files:
+    - src/lib/plan.ts
+    - test/a-plan-record-may-name-a-type-nothing-can-route.test.ts
+  origin: "operator-session#fleet-down-on-unroutable-task-type-2026-09-11"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "loading a plan record whose type is outside the declared union is REFUSED by the loader, naming the shard id, the field and the value it saw"
+      proof: "unit test: test/a-plan-record-may-name-a-type-nothing-can-route.test.ts"
+    - claim: "every type IN the union still loads, so the refusal discriminates rather than rejecting everything"
+      proof: "unit test: test/a-plan-record-may-name-a-type-nothing-can-route.test.ts"
+    - claim: "the live committed plan passes the new validation, so the rule is enforceable on this tree rather than aspirational"
+      proof: "unit test: test/a-plan-record-may-name-a-type-nothing-can-route.test.ts"
+  rationale: |
+    MEASURED 2026-09-11. `remudero-daemon` exited 1 with `no route for task_type 'investigate'
+    (have: recon, implement, diagnose, review, reviewer, fix, manual)` and burned its restart
+    budget — `RestartCount` 5 against `on-failure max=5` — so Docker stopped restarting it and the
+    fleet stayed down until an operator intervened.
+
+    THE VALUE WAS NEVER CHECKED. `src/lib/plan.ts:108` declares the union
+    `recon | implement | diagnose | review | manual`, but `req()` (`plan.ts:225`) only throws on
+    `undefined`/`null`: a present-but-invalid value passes. Five shards filed 2026-09-07 and 09-08
+    carried `type: investigate` — W1-T3041, W1-T3056, W1-T3134, W1-T3136, W1-T3137 — through
+    `lint-plan` and every review, and detonated at `resolveMount` (`src/lib/mounts.ts:528`), which
+    is the furthest point from the shard that caused it.
+
+    THIS IS W1-T2908 ONE FIELD OVER. That task fixed exactly this shape for `acceptance:` — a type
+    assertion YAML has no obligation to honour, failing "by accident, in whichever verb happened to
+    touch the record first, with a message naming no shard, no criterion and no field." `type:` was
+    left on the same footing and produced a worse blast radius: not a thrown TypeError in one verb,
+    but a crash in the dispatch loop that takes every lane with it.
+
+    WHY THE BLAST RADIUS IS NOT THIS TASK'S SUBJECT. A second, genuinely separate hardening is
+    available — catching `MountsError` per task so one unroutable shard is SKIPPED rather than
+    fatal, the way `resolveMountForClass`'s recon path is already fail-soft by construction
+    (`run-task.ts:10836`). It is deliberately not folded in here: with the loader refusing, a shard
+    like this never lands, and a shard spanning both concerns is what Rule 19 sizing exists to
+    refuse. File it separately if the defence-in-depth is wanted.
+  design: |
+    (i) VALIDATE WHERE THE RECORD IS BUILT, not at every consumer. `loadPlan`'s per-entry loop
+    already calls `req` for `id`, `title`, `repo` and `type`; add an enumerated check beside it so
+    the refusal names the shard, the field and the value — the three facts the crash message lacked.
+
+    (ii) THE UNION IS THE SINGLE SOURCE. Derive the permitted set from one exported constant that
+    the `Task["type"]` union is itself built from, so a new type cannot be added to the type and
+    forgotten in the validator — that divergence is the defect wearing a fix's clothes.
+
+    (iii) THE LIVE PLAN IS PART OF THE FALSIFIER. A validator that only ever sees fixtures proves
+    nothing about the tree it ships with; assert the committed plan loads clean, which is what
+    would have caught these five on the day they were filed.
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if `loadPlan` already refuses a type outside the union — drive it,
+    do not read it: construct a record with `type: investigate` and assert the loader throws naming
+    the shard. MEASURED at this head it does not; the five shards above loaded clean for four days.
+    THE DISCRIMINATION MUST BITE BOTH WAYS: delete the new check and the refusal test must go red,
+    and every in-union type must still load, or the validator is refusing on something else.
