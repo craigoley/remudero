@@ -89,11 +89,11 @@
     refuses the mixture, so a src/ edit here makes the PR unmergeable by construction.
   acceptance:
     - claim: "the census excludes comment text, proved on a fixture whose ONLY clock token sits in a docblock and which therefore scores zero"
-      proof: "unit test: a clock token that appears only in a doc comment scores zero"
+      proof: "unit test: a clock token in a doc comment scores zero"
     - claim: "a clock token inside a string or template literal is still counted as CODE, so the comment strip is not a hole a real call site can hide in"
-      proof: "unit test: a clock token in a template literal is still CODE, and a trailing comment on the same line is not"
+      proof: "unit test: a clock token in a template literal is still code"
     - claim: "the three prose-only rows are corrected to zero in the same change, so the fix tightens the ratchet rather than loosening it"
-      proof: "unit test: every row the comment strip corrects is lowered in the committed baseline, and the three prose-only rows read zero"
+      proof: "unit test: the prose-only baseline rows read zero"
   falsifier: |
     RE-MEASURE BEFORE BUILDING — the note's figures are from 2026-09-11 on dad5531b6 and every one
     of them moves as src/ changes. Re-run the split (the census's own three regexes, partitioned by
