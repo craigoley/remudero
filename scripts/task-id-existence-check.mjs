@@ -137,7 +137,7 @@ export function scanDeclaredPlanIds(cwd, opts = {}) {
 /** Every id holding a `refs/rmd-id/W1-T*` reservation ref on `remote`, via `git ls-remote` (a
  *  READ). `reachable: false` means the read failed -- treat as a STATED UNKNOWN, never "nothing
  *  reserved". `remote` may be a local/bare path, for offline fixture tests. */
-export function resolveReservedIds(remote, cwd) {
+export function resolveReservedIds(remote, cwd, opts = {}) {
   const result = git(["ls-remote", remote, "refs/rmd-id/W1-T*"], { cwd });
   if (result.error || result.status !== 0) {
     return { reachable: false, ids: new Set(), holders: new Map() };
@@ -152,7 +152,7 @@ export function resolveReservedIds(remote, cwd) {
     const m = /^refs\/rmd-id\/(W1-T[0-9]+)$/.exec(ref);
     if (!m) continue;
     ids.add(m[1]);
-    holders.set(m[1], readReservationHolder(remote, cwd, ref));
+    if (opts.readHoldersFor?.has(m[1])) holders.set(m[1], readReservationHolder(remote, cwd, ref));
   }
   return { reachable: true, ids, holders };
 }
@@ -684,7 +684,9 @@ export function main(argv) {
     process.exitCode = 1;
   }
 
-  const holderConflicts = evaluateReservationHolderConflicts(addedAtHead.ids, occurrencesById, reservation, ownHeadRef, cwd);
+  const holderReservation =
+    addedAtHead.ids.length === 0 ? reservation : resolveReservedIds(values.remote, cwd, { readHoldersFor: new Set(addedAtHead.ids) });
+  const holderConflicts = evaluateReservationHolderConflicts(addedAtHead.ids, occurrencesById, holderReservation, ownHeadRef, cwd);
   if (holderConflicts.length > 0) {
     console.error("\ntask-id-existence: FAILED -- the following added id(s) are HELD by a different reservation holder:\n");
     for (const c of holderConflicts) {
