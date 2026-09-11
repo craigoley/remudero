@@ -3,10 +3,12 @@ import { isMap, isScalar, LineCounter, parse as parseYaml, parseDocument, string
 import {
   computeArtifactHash,
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+  entryBudgetWeight,
+  entryLayer,
+  LAYERS,
   renderDoctrinePreamble,
   renderMatchedLearnings,
   scrubEntry,
-  selectLearnings,
   type LearningEntry,
   type V1BundleLearningEntry,
 } from "./learnings.js";
@@ -257,6 +259,35 @@ function collectRawPolicyRows(root: unknown, lineCounter: LineCounter): RawPolic
  *  a silent empty export of a policy.yaml that failed to parse. */
 export type ExtractPolicyProposalRowsResult = { ok: true; rows: PolicyProposalRow[] } | { ok: false; reason: string };
 
+function selectBundleEntries(
+  entries: LearningEntry[],
+  budgetChars: number,
+): { selected: LearningEntry[]; dropped: LearningEntry[] } {
+  const ranked = entries
+    .filter((entry) => entry.lifecycle === "active")
+    .sort((a, b) => {
+      const layerDiff = LAYERS.indexOf(entryLayer(a)) - LAYERS.indexOf(entryLayer(b));
+      if (layerDiff !== 0) return layerDiff;
+      const ac = a.cited ?? "";
+      const bc = b.cited ?? "";
+      if (ac !== bc) return bc < ac ? -1 : 1;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+  const selected: LearningEntry[] = [];
+  const dropped: LearningEntry[] = [];
+  let used = 0;
+  for (const entry of ranked) {
+    const cost = entryBudgetWeight(entry) + 1;
+    if (used + cost > budgetChars && selected.length > 0) {
+      dropped.push(entry);
+      continue;
+    }
+    selected.push(entry);
+    used += cost;
+  }
+  return { selected, dropped };
+}
+
 /**
  * Extract the exportable rows from a `plan/policy.yaml` text (W1-T2702, design (i)): every row
  * whose `origin:` is literally `"net-new"`, OR whose dotted path is in `opts.ratifiedPaths` (the
@@ -401,10 +432,7 @@ export function buildBundle(
 ): BuildBundleResult {
   const version = opts.version ?? provenance.exportedAt;
   const budgetChars = opts.budgetChars ?? DEFAULT_KNOWLEDGE_BUDGET_CHARS;
-  // Repo-wide (taskFiles undefined): a fresh deployment needs the WHOLE budgeted corpus, not one
-  // task's file-matched slice — the budget still bounds the tax, same as selectLearnings' own
-  // repo-wide convention.
-  const { selected, dropped } = selectLearnings(entries, undefined, budgetChars);
+  const { selected, dropped } = selectBundleEntries(entries, budgetChars);
   if (selected.length === 0) {
     return {
       ok: false,

@@ -56,7 +56,7 @@ export function parseUnifiedDiff(diffText) {
   for (const line of diffText.split("\n")) {
     const fileMatch = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
     if (fileMatch) {
-      current = { oldPath: fileMatch[1], newPath: fileMatch[2], hunks: [] };
+      current = { oldPath: fileMatch[1], newPath: fileMatch[2], hunks: [], changedLines: [] };
       files.push(current);
       continue;
     }
@@ -74,13 +74,51 @@ export function parseUnifiedDiff(diffText) {
       continue;
     }
     const hunkMatch = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
-    if (!hunkMatch) continue;
-    current.hunks.push({
-      oldRange: parseRange(hunkMatch[1], hunkMatch[2]),
-      newRange: parseRange(hunkMatch[3], hunkMatch[4]),
-    });
+    if (hunkMatch) {
+      current.hunks.push({
+        oldRange: parseRange(hunkMatch[1], hunkMatch[2]),
+        newRange: parseRange(hunkMatch[3], hunkMatch[4]),
+      });
+      continue;
+    }
+    // W1-T3086-adjacent (2026-09-11): the TEXT of every changed line, both directions. Ranges alone
+    // cannot tell a data edit from a comment edit, and that distinction is what stops this gate
+    // demanding a golden verdict for a schema comment nobody injects.
+    // No `+++`/`---` guard is needed: the two header branches above consume them and `continue`, so
+    // by here a leading +/- can only be content. A guard placed here was UNREACHABLE — its mutation
+    // killed nothing, which is how it was found.
+    if (/^[+-]/.test(line)) {
+      current.changedLines.push(line);
+    }
   }
   return files;
+}
+
+/** YAML comment/blank furniture — a changed line that cannot alter one injected byte. */
+function isYamlNonContentLine(line) {
+  const body = line.slice(1).trim();
+  return body === "" || body.startsWith("#");
+}
+
+/**
+ * True when a YAML prompt surface's change touches NOTHING a prompt renders.
+ *
+ * WHY THIS EXISTS. `learnings/*.yaml` is a prompt surface because its ENTRIES are injected. Its
+ * comment header is not: it documents the schema for whoever edits the file, and
+ * `renderDoctrinePreamble`/`renderMatchedLearnings` render entries, never comments. Before this,
+ * editing that header refused the PR and demanded a golden verdict for a prompt that had not moved —
+ * MEASURED on #5064, whose only `learnings/platform.yaml` change was four comment lines describing
+ * the new `symbols:`/`error_signatures:` fields.
+ *
+ * BOTH DIRECTIONS MUST BE FURNITURE. A removed data line beside an added comment is a real change,
+ * so a diff is exempt only when every line it touches, added and removed, is blank or a comment.
+ */
+export function isCommentOnlyYamlChange(file) {
+  const path = file.newPath === "/dev/null" ? file.oldPath : file.newPath;
+  if (!/\.ya?ml$/.test(path)) return false;
+  const lines = file.changedLines ?? [];
+  if (lines.length === 0) return false; // nothing observed is not evidence of nothing changed
+  return lines.every(isYamlNonContentLine);
 }
 
 export function functionRanges(path, text) {
@@ -191,7 +229,11 @@ function touchedSymbolSurfaces(root, base, head, file) {
 
 function touchedPathSurfaces(file) {
   const path = file.newPath === "/dev/null" ? file.oldPath : file.newPath;
-  return LEARNINGS_SHARD_RE.test(path) || path === "settings/macros.yaml" ? [path] : [];
+  const isSurface = LEARNINGS_SHARD_RE.test(path) || path === "settings/macros.yaml";
+  if (!isSurface) return [];
+  // A schema-comment edit renders nothing different; see isCommentOnlyYamlChange for the measurement.
+  if (isCommentOnlyYamlChange(file)) return [];
+  return [path];
 }
 
 function changedPaths(files) {
@@ -227,6 +269,38 @@ function evidenceFor(root, head, files, surfaces) {
   return symbolSurfaces.every((symbol) => covered.has(symbol)) ? testPaths : [];
 }
 
+/**
+ * The remedy this gate can actually accept, per surface kind — because the old single sentence
+ * offered one that cannot work.
+ *
+ * MEASURED on #5064: the surface was `learnings/platform.yaml`, a PATH with no `:symbol`, so
+ * `evidenceFor`'s `symbolSurfaces.length !== surfaces.length` guard returns `[]` BEFORE any test file
+ * is considered. That PR touched seven test files and was refused by a message telling it to touch a
+ * test file. A gate that names an impossible remedy is worse than one that names none: the author
+ * does the work, stays refused, and distrusts the gate.
+ */
+export function refusalMessage(surfaces) {
+  const symbolSurfaces = surfaces.filter((surface) => /^.+:[^:]+$/.test(surface));
+  const pathSurfaces = surfaces.filter((surface) => !/^.+:[^:]+$/.test(surface));
+  const parts = [`prompt-surface-gate: REFUSED — prompt surface touched without evidence: ${surfaces.join(", ")}.`];
+  if (pathSurfaces.length > 0) {
+    parts.push(
+      `For the PATH surface(s) ${pathSurfaces.join(", ")} the ONLY admissible evidence is a golden ` +
+        "verdict under test/fixtures/golden-verdicts/** — a test/** file cannot satisfy a path surface, " +
+        "because evidence is matched on a changed prompt FUNCTION's symbol and a path carries none. " +
+        "If the edit changes no injected content, a comment-only YAML change is already exempt; a data " +
+        "change needs the golden verdict.",
+    );
+  }
+  if (symbolSurfaces.length > 0) {
+    parts.push(
+      `For the SYMBOL surface(s) ${symbolSurfaces.join(", ")} either a golden verdict under ` +
+        "test/fixtures/golden-verdicts/** or a test/** file naming each changed function satisfies it.",
+    );
+  }
+  return parts.join(" ");
+}
+
 export function evaluatePromptSurfaceDiff(diffText, { root = REPO_ROOT, base = "origin/main", head = "HEAD" } = {}) {
   const files = parseUnifiedDiff(diffText);
   const surfaces = [
@@ -243,10 +317,7 @@ export function evaluatePromptSurfaceDiff(diffText, { root = REPO_ROOT, base = "
     ok: false,
     surfaces,
     evidence,
-    message:
-      `prompt-surface-gate: REFUSED — prompt surface touched without golden evidence: ${surfaces.join(", ")}. ` +
-      "Satisfy it by adding/updating test/fixtures/golden-verdicts/**, or by touching a test/** " +
-      "file that renders each changed prompt function.",
+    message: refusalMessage(surfaces),
   };
 }
 
