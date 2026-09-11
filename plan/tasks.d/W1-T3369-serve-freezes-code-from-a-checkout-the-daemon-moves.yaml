@@ -1,0 +1,93 @@
+- id: W1-T3369
+  title: "THE OPERATOR CONSOLE SERVED A DELETED TASK BRANCH FOR ELEVEN HOURS — `rmd serve` freezes its code at boot from the SAME checkout the daemon moves 38 times in 40 reflog entries, so which code the console runs is decided by whichever branch the daemon happened to occupy at serve's boot instant"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 18.00
+  files: [src/lib/serve.ts, deploy/serve-container.sh, test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts]
+  origin: "operator-session#azure-console-2026-09-11"
+  plan_refs: ["W1-T255", "W1-T152", "W1-T2924"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED ON THE LIVE AZURE HOST 2026-09-11T00:1xZ:
+
+      serve container started        2026-09-10T12:40:57Z  (11h05m before the measurement)
+      branch serve loaded            prereq-W1-T2924-console-parity-audit-1789043900000
+      that branch on origin          ABSENT — `git ls-remote --heads origin 'prereq-W1-T2924*'` is empty
+      shared checkout HEAD           82af91cc2, DETACHED, 3 commits behind origin/main
+      checkouts in last 40 reflog    38
+      serve mount                    /home/craigoleyagent/rmd-state2 -> /home/node/Remudero
+      daemon mount                   /home/craigoleyagent/rmd-state2 -> /home/node/Remudero   (THE SAME ONE)
+
+    So for eleven hours the operator console rendered code that exists NOWHERE UPSTREAM, and the
+    only signal was one `offMainNotice` WARNING line in a container log nobody tails.
+
+    THIS IS NOT AN OPERATIONAL SLIP AND MUST NOT BE FILED AS ONE. `rmd serve` loads through tsx
+    ONCE at boot, so its code identity is frozen at that instant; the checkout it freezes from is
+    mutated continuously by the daemon, which checks out task branches to build and verify them.
+    Those two facts compose into: THE CONSOLE'S CODE IS WHICHEVER BRANCH THE DAEMON HAPPENED TO BE
+    ON WHEN SERVE BOOTED. Nothing decided it. Restarting serve fixes it until the next restart
+    coincides with a task branch, which is a coin flip weighted by how much the fleet is building.
+
+    MITIGATED BY HAND, NOT FIXED: `docker restart remudero-serve` at 2026-09-11T00:1xZ reloaded
+    `1209072d6 (main)` with no warning, because the container entrypoint re-syncs the checkout to
+    main on boot. The console is correct right now and the mechanism is unchanged.
+  rationale: |
+    W1-T255 SETTLED THE POSTURE AND THIS TASK MUST NOT REOPEN IT. `offMainNotice` WARNS and keeps
+    serving, deliberately: its own comment records why — "a service never exit-1s on tree state,
+    which is what crash-looped the daemon after #707". That reasoning is correct and a refusal would
+    trade an eleven-hour wrong-code window for a console outage. So the fix is NOT a refusal; it is
+    removing the condition the warning exists to report.
+
+    THE CONDITION IS SHARED MUTABLE STATE, and the repo already knows the shape. `lanes/` exists
+    precisely so a build does not disturb the primary checkout, and the daemon uses it — yet the
+    reflog shows the primary checkout being moved 38 times in 40 entries anyway, between task
+    branches (`run-W1-T3351-1789072196000`) and bare main shas. A reader cannot tell from the
+    checkout alone which of those moves are legitimate.
+
+    WHY THE WARNING COULD NOT SAVE IT. `offMainNotice` fires ONCE, at boot, into a container log.
+    Eleven hours later the only place that fact lived was `docker logs remudero-serve | grep
+    WARNING`. The console it describes renders a header with freshness fields (W1-T262) and says
+    nothing about its own code identity — the one thing it is uniquely placed to report.
+  design: |
+    (i) THE CONSOLE MUST NOT TAKE ITS CODE FROM A CHECKOUT ANOTHER PROCESS MOVES. A dedicated,
+    pinned worktree for serve is the smallest structural fix and needs no new posture: the daemon
+    keeps its checkout, serve gets one it owns, and the composition that produced this disappears.
+    Measure the cost first — a second worktree is disk and one more `node_modules` resolution — and
+    say plainly if it is cheaper to have the entrypoint pin serve's checkout instead.
+    (ii) THE HEADER MUST CARRY SERVE'S OWN CODE IDENTITY. A console that reports the fleet's
+    freshness while concealing its own is the exact asymmetry W1-T262 built the header to close. The
+    sha and branch serve is RUNNING (not the checkout's current HEAD — they differ, which is the
+    whole defect) belong beside the freshness fields, and a non-main identity must be visible in the
+    UI, not only in a boot log.
+    (iii) A BOOT-TIME-ONLY NOTICE IS NOT A REPORT. Whatever surfaces this must be readable at any
+    moment, not only in the first second of a process that then runs for eleven hours.
+    (iv) DO NOT ADD A REFUSAL. W1-T255's reasoning stands and #707 is the receipt.
+  acceptance:
+    - claim: "serve's running code identity is resolved from what it LOADED, not from the checkout's current HEAD, and the two are proved to differ"
+      proof: "unit test: test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts"
+    - claim: "a console whose loaded code is not main says so in a surface readable at any time, not only in a boot-time log line"
+      proof: "unit test: test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts"
+    - claim: "serve no longer takes its code from a checkout another process mutates, proved by moving that checkout under a running serve and seeing its identity unchanged"
+      proof: "unit test: test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts"
+    - claim: "the W1-T255 posture is preserved — an off-main console still SERVES rather than refusing to bind"
+      proof: "unit test: test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts"
+  falsifier: |
+    REPRODUCE BEFORE FIXING, and the repro is two commands on the fleet host:
+    `docker inspect remudero-serve -f '{{range .Mounts}}{{.Source}}{{println}}{{end}}'` against the
+    same for `remudero-daemon` (they must name the same source), and
+    `git -C <checkout> reflog | head -40 | grep -c checkout` (it read 38). If the mounts have since
+    diverged or the churn is gone, this shard is stale and must be re-measured before it is built.
+    DO NOT FIX THIS WITH A REFUSAL. W1-T255 decided that and #707 is why; a task that makes serve
+    exit on tree state has traded an eleven-hour wrong-code window for an outage.
+    DO NOT CALL A RESTART THE FIX. `docker restart remudero-serve` already corrected the live
+    console on 2026-09-11 and changed nothing: the next restart that coincides with a task branch
+    reproduces it exactly.
+    PROVE (iii) WITH A READ TAKEN LATE. A test that checks the identity surface immediately after
+    boot cannot distinguish a boot-time notice from a live one, which is the distinction that
+    matters here — the warning that failed fired correctly, once, eleven hours earlier.
