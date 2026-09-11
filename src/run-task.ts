@@ -33277,6 +33277,7 @@ export function buildInboxDraftHook(
       const registryPath = join(config.root, "state", "inbox-proposals.json");
       const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
       if (proposals.length === 0) return; // no active proposals — no spend
+      const ledgerPath = ledgerPathFor(config);
 
       const draftsPath = join(config.root, "state", "inbox-drafts.json");
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
