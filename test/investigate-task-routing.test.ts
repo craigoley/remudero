@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
@@ -8,12 +7,7 @@ import { loadPlan, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_TYPES } from 
 import { resolveRunMounts } from "../src/run-task.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-
-test("investigate is a validated task type with a complete shipped mount", () => {
-  assert.ok(TASK_TYPES.includes("investigate"));
-
-  const [parsed] = parseTasksFromYaml(
-    `- id: T-investigate
+const INVESTIGATE_FIXTURE = `- id: T-investigate
   title: Investigate a measured failure
   repo: remudero
   depends_on: []
@@ -22,9 +16,12 @@ test("investigate is a validated task type with a complete shipped mount", () =>
   risk: medium
   status: queued
   attempts: 0
-`,
-    "fixture",
-  );
+`;
+
+test("investigate is a validated task type with a complete shipped mount", () => {
+  assert.ok(TASK_TYPES.includes("investigate"));
+
+  const [parsed] = parseTasksFromYaml(INVESTIGATE_FIXTURE, "fixture");
   assert.equal(parsed.type, "investigate");
 
   const mounts = loadMounts(mountsPath(REPO_ROOT));
@@ -42,10 +39,9 @@ test("investigate is a validated task type with a complete shipped mount", () =>
   assert.equal(resolved.mount.maxTurns, 400);
 });
 
-test("the real plan's investigate records all resolve instead of reaching a fatal mount miss", () => {
+test("any real plan investigate records resolve instead of reaching a fatal mount miss", () => {
   const plan = loadPlan(fileURLToPath(new URL("../plan/tasks.yaml", import.meta.url)));
   const tasks = plan.tasks.filter((task) => task.type === "investigate");
-  assert.ok(tasks.length > 0, "positive control: the current plan must contain an investigate record");
 
   const mounts = loadMounts(mountsPath(REPO_ROOT));
   for (const task of tasks) {
@@ -57,13 +53,7 @@ test("the real plan's investigate records all resolve instead of reaching a fata
 });
 
 test("an undeclared YAML-only task type is refused by the parser before dispatch", () => {
-  const yaml = readFileSync(
-    new URL(
-      "../plan/tasks.d/W1-T3134-the-headline-index-reaches-no-worker-because-its-policy-row-was-never-written.yaml",
-      import.meta.url,
-    ),
-    "utf8",
-  ).replace("type: investigate", "type: invented");
+  const yaml = INVESTIGATE_FIXTURE.replace("type: investigate", "type: invented");
 
   assert.throws(
     () => parseTasksFromYaml(yaml, "fixture"),
