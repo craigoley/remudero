@@ -180,10 +180,10 @@ export function parseReservationHolderLine(message) {
   return { status: "known", branch };
 }
 
-function readReservationHolder(remote, cwd, ref) {
-  const fetched = git(["fetch", remote, ref], { cwd });
+export function readReservationHolder(remote, cwd, ref, runGit = git) {
+  const fetched = runGit(["fetch", remote, ref], { cwd });
   if (fetched.error || fetched.status !== 0) return { status: "unreadable", reason: `could not fetch ${ref}` };
-  const body = git(["log", "-1", "--format=%B", "FETCH_HEAD"], { cwd });
+  const body = runGit(["log", "-1", "--format=%B", "FETCH_HEAD"], { cwd });
   if (body.error || body.status !== 0) return { status: "unreadable", reason: `could not read ${ref}` };
   return parseReservationHolderLine(body.stdout ?? "");
 }
