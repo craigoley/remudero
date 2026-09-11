@@ -95,6 +95,15 @@ test("a class whose revert rate exceeds its band, at the population floor, drift
   assert.equal(classification.drifted[0].verdictClass, "keyword-floor");
   assert.deepEqual(classification.drifted[0].reasons, ["revert-rate"]);
   assert.equal(classification.withinBands.length, 2, "the other two classes are not drifted");
+  const ledgerLines = verdictCalibrationDriftLedgerLines(classification, "2026-09-11", report.minPopulationFloor);
+  const keywordFloorLine = ledgerLines.find((l) => l.verdict_class === "keyword-floor");
+  assert.ok(keywordFloorLine, "the ledger must carry a row for the drifted class");
+  assert.equal(keywordFloorLine!.step, "verdict_calibration.drift");
+  assert.equal(keywordFloorLine!.total, MIN_POPULATION_FLOOR);
+  assert.equal(keywordFloorLine!.revert_rate, 0.6);
+  assert.equal(keywordFloorLine!.followup_fix_rate, 0.1);
+  assert.deepEqual(keywordFloorLine!.reasons, ["revert-rate"]);
+  assert.deepEqual(keywordFloorLine!.task_ids, taskIds);
 
   const dir = tmpStateDir("calibration-drift");
   const registryPath = join(dir, "inbox-proposals.json");
