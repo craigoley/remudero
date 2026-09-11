@@ -1,5 +1,5 @@
 - id: W1-T3352
-  title: "THE FLEET DAEMON HAS BEEN OOM CRASH-LOOPING SINCE 13:22Z AND NOTHING NAMES WHY — a full-union ledger read is unbounded, the union reached 4.0 GB across 954 rotations, and the 8 GB heap now dies ~3 minutes into every boot, so no build has dispatched in 7 hours"
+  title: "THE ANALYTICS ROUTE RE-SCANS THE ENTIRE LEDGER UNION FOR EVERY GET AND THE REQUEST CEILING DOES NOT CANCEL THAT WORK — one disconnected request kept remudero-serve near one core and above 1.5 GiB until stale-code exit, so the route needs one process-owned, cancellable snapshot instead of request-owned scans"
   repo: remudero
   depends_on: []
   type: implement
@@ -7,161 +7,117 @@
   principles: {tdd: strict}
   risk: high
   band_meaning: blast-radius
-  budget_usd: 20.00
-  files: [src/lib/ledger-union.ts, src/lib/daemon.ts, test/a-union-read-is-bounded-before-it-is-parsed.test.ts]
-  origin: "operator-session#fleet-oom-2026-09-10"
-  plan_refs: ["W1-T3319", "W1-T3011", "W1-T503"]
+  budget_usd: 35.00
+  files: [src/lib/analytics-route.ts, src/lib/ledger-union.ts, src/lib/serve.ts, test/an-analytics-request-returns-under-its-own-ceiling.test.ts]
+  origin: "operator-session#analytics-route-host-validation-2026-09-11"
+  plan_refs: ["W1-T477", "W1-T2484", "W1-T2562"]
   status: queued
   attempts: 0
-  note: |
-    MEASURED ON THE LIVE FLEET HOST 2026-09-10T21:00-21:30Z, not inferred:
-
-      docker restarts          66 (and climbing ~10/hour)
-      exit                     134 (SIGABRT — V8 OOM), entrypoint sleeps 120s per cycle
-      heap ceiling             --max-old-space-size=8192, container Memory=0 (uncapped), host 32 GB / 29 GB free
-      first OOM                2026-09-10T13:22:36Z
-      last build dispatch      2026-09-10T14:04:28Z  (nothing since)
-      OOM per hour since       2,7,7,11,10,9,9,10
-
-    IT IS A SPIKE, NOT A LEAK, AND THAT IS THE WHOLE DIAGNOSIS. RSS sampled through one boot:
-    441 MB at 00:50, 406 MB at 01:35, 743 MB at 02:20, **4122 MB at 03:05**, dead before 03:50 —
-    3.4 GB in 45 seconds. A leak accumulates across a long-lived process; this is ONE allocation.
-    The V8 report agrees: `Mark-Compact (reduce) 8189.0 (8205.6) -> 8189.0 (8206.1) MB` — the heap
-    is full of live, reachable objects, so GC cannot reduce it.
-
-    AND IT HAPPENS IN A SILENT WINDOW. In the 21:18:59 boot the last log line before the crash is a
-    `gh read cadence` advisory at 21:20:49 and the OOM lands at 21:22:15 — 86 seconds with NO step
-    logged, immediately after `### rmd daemon — SELF-HOSTING: draining` and `reclaimStaleLock`.
-    Whatever allocates 3.4 GB reports nothing at all, which is why the heartbeat can only say
-    `dispatch_verdict=STALLED ... block_reason=none`.
-
-    AMENDED 2026-09-10T23:40Z, AFTER THE OUTAGE WAS CLEARED BY COMPACTION. Two measurements move
-    this task's direction, and neither was available when it was filed.
-
-    FIRST: `grep` ALREADY ANSWERS THIS QUESTION IN FIVE SECONDS. Same corpus, same pattern, on the
-    same host:
-
-      zgrep -ahE 'pr_attribution_failed|uncreditable' …  wall 5.40s   maxRSS 9,600 kB   -> 667 rows
-      full corpus scan (zcat | wc -l)                    wall 4.98s   maxRSS 2,132 kB   -> 3,615,737 lines
-      the daemon, same question                          ~16 min      up to 8 GB        -> SIGABRT
-
-    About 180x the wall clock and 850x the memory for an identical answer. The in-process reader is
-    not doing something grep cannot; it is doing grep's job in JavaScript while retaining every line
-    it passes in a dedupe `Set<string>` alongside the parsed `rows[]`.
-
-    SECOND: A FIX FOR THIS ALREADY SHIPPED AND DID NOT HOLD. `78d34a1b0 fix(ledger-union): scan the
-    corpus, do not split it (#5017)` merged 19:59:12Z carrying its own measured table (four callers,
-    ~13.7 GB against an 8 GB cap). The daemon OOMed at 20:58:19Z, 21:07:01Z and 21:22:15Z on a
-    checkout that HAD it. Scanning removed the per-file whole-string-plus-split; the `seen` Set and
-    `rows[]` that accumulate the whole RESULT set were untouched, and for a reader with no narrow
-    filter that is the entire corpus. A second bound on the same seam is the shape that just failed.
   rationale: |
-    THE INPUT CROSSED A THRESHOLD; NO COMMIT DID. Measured on the fleet's state dir:
+    THIS REPLACES THE ORIGINAL DAEMON-OOM SCOPE. The fleet outage named by the old title ended after
+    compaction, and its hot-path union scan was removed by the merged projection work. PR #5057 then
+    made `/v1/analytics` stream the rotation union rather than materialise it, which fixed the
+    in-process `rows[]` allocation. Fleet delivery proved that retention was not the remaining
+    problem: ownership and cancellation were.
 
-      plain rotations            2
-      gzip rotations           954
-      plain + live bytes        12,520,548
-      gz EXPANDED bytes      4,001,941,605   (~4.0 GB)
+    MEASURED ON THE LIVE AZURE HOST 2026-09-11. One authenticated GET timed out at the client after
+    60 seconds. The server-side scan continued after disconnect, held about one core, grew from
+    1.61 GiB to 2.07 GiB RSS, and was still running when stale-code exit ended the process about
+    117 seconds after the request began. A later serve generation exited normally after 1,177
+    seconds and restarted; three minutes into the replacement generation the Node process was again
+    at 1.51 GiB RSS and about one core. No request log exists, so that second generation is supporting
+    pressure evidence, NOT proof that analytics caused it.
 
-    `resolveLedgerUnion` (`src/lib/ledger-union.ts`) globs every `ledger.*.ndjson[.gz]` rotation plus
-    the live file. At 4.0 GB of NDJSON, any caller that materialises the union — as text, as lines,
-    or as parsed rows — cannot fit an 8 GB heap once JS object overhead is applied. Rotations accrue
-    at 145-190/day (09-07: 190, 09-08: 180, 09-09: 145, 09-10: 186), so the corpus grew INTO the
-    ceiling on 2026-09-10 with no code change to blame. That is why commit correlation is a dead
-    end: the nearest merge, `23451cfc2 fix(sweep): rebase dirty fleet branches` at 13:21:20Z, lands
-    76 seconds before the first OOM and is a NEAR-PERFECT DECOY — its lane fires 1 time in 6 hours
-    of logs, and that one hit is a substring match on an unrelated review line. It was checked and
-    cleared; do not re-derive it.
+    THE SOURCE EXPLAINS THE FIRST MEASUREMENT. `buildAnalyticsRoute` invokes
+    `deriveAnalyticsSnapshotFromLedger` inside each GET. `buildServeRoutes` deliberately leaves
+    `/v1/analytics` outside the generic bounded-read cache. The HTTP ceiling races the response but
+    has no AbortSignal, so losing the race neither stops `openLedgerUnion` nor closes its current
+    read/gunzip/readline chain. Multiple clients can therefore start overlapping full-history scans.
 
-    CLAUDE.md ALREADY WARNS ABOUT THIS CORPUS FROM THE OTHER DIRECTION — "the archives are NOT
-    cumulative snapshots ... most history exists ONLY in older archives", written to stop a reader
-    UNDER-counting. Nobody priced the same corpus for a reader that takes ALL of it. The rule that
-    made the union authoritative is the rule that made it unbounded.
-
-    THE MITIGATION SHIPPED SIX MINUTES AFTER THE OUTAGE BEGAN AND NOTHING RUNS IT.
-    `db5d5f0ba feat(ledger): expose bounded archive compaction (#4950)` merged 13:28:45Z; the first
-    OOM was 13:22:36Z. `rmd ledger-compact` is documented "operator-only ... never runs from
-    rotateLedger or a daemon cadence". DRY RUN on the live host: 613 rotations eligible at
-    `--older-than 2`, and one bounded 50-source pass writes 392,957 rows while collapsing 216,012
-    DUPLICATES — 35% of that window is redundant. The corpus that killed the daemon is a third
-    duplicate rows nobody collapses.
+    CURRENT CORPUS CONTROL: 515 rotation files and 288,128,676 compressed bytes plus the live file.
+    The isolated streaming reducer has completed in about 17 seconds on this compacted corpus, so a
+    successful scan is viable as background work. The harmful shape is tying that scan to request
+    count and letting abandoned work survive, not the aggregate itself.
   design: |
-    (0) AMENDED, AND THIS IS NOW THE LEAD: ANSWER THE QUESTION WITHOUT THE SCAN — BUT DO KEEP
-    ANSWERING IT. The hot-path question is "has this PR head ever been recorded permanently
-    uncreditable". MEASURED against the pattern the CODE actually greps
-    (`sweep.fix.uncreditable_head` / `_escalated`, not the wider one an earlier draft of this note
-    used): 324 distinct rows out of 1,001,632 — a 0.032% yield — naming 49 distinct head shas, and
-    the set is APPEND-ONLY. That is a projection, not a query:
-    about 100 kB of state answering in milliseconds, maintained where the row is written. This repo
-    already keeps a dozen such files in `state/*.json`, so the pattern needs no invention. The
-    property the union protects is real and survives intact — `rotateLedger` keeps only 200 newest
-    rows per step, so a marker written weeks ago exists ONLY in an archive, and forgetting it
-    re-enables the dispatch loop the sweep's own comment names. We need the ANSWER, not the scan.
-    (0b) AND THE GUARD IS NOT OPTIONAL — THIS IS THE MEASUREMENT THAT PROVES IT, AND IT SURPRISED
-    THE READING THAT PRODUCED THIS AMENDMENT. Of those 324 rows, the number present in the LIVE
-    ledger right now is ZERO. All 324 are in archives. `rotateLedger` keeps 200 newest per step, so
-    whether any survive in the live file is an accident of when rotation last ran — and tonight it
-    is none of them, including a row written at 22:03:34Z, ninety minutes before the measurement.
-    A reader restricted to the live file would have found NOTHING and re-enabled the loop for all
-    49 heads. So "drop the union and read the live file" is not on the table; the projection is
-    REQUIRED precisely because the live file cannot be trusted to hold this population at all.
-    (0a) AND IF A SCAN IS UNAVOIDABLE, SHELL OUT RATHER THAN RE-IMPLEMENT. `zgrep` does it in 5.40s
-    and 9.6 MB, measured above. An in-process scan that must beat that is a cost this task should
-    justify explicitly rather than inherit.
-    (i) BOUND THE READ AT THE UNION SEAM AS A BACKSTOP, NOT AS THE FIX — #5017 already bounded this
-    seam once and the daemon still died. NOT AT EACH CALLER. `resolveLedgerUnion` is the one place
-    that knows how many bytes it is about to hand over; every caller downstream sees only rows.
-    A byte/row ceiling there fails LOUD and NAMED ("union is N bytes over the M-byte ceiling; run
-    `rmd ledger-compact`") rather than as SIGABRT with no step logged. `ledger-compact` already
-    proves the ceiling shape is acceptable: it declares `LEDGER_COMPACT_MAX_SOURCES = 50` as its
-    "PRIMARY CONTROL: bounds the exact-row Set and gzip inputs held by one invocation".
-    (ii) STREAM WHERE THE ANSWER IS A REDUCTION. Most union readers count, filter or take a newest-N;
-    none of them needs every row resident at once. A streaming read makes the ceiling in (i) a
-    backstop rather than a refusal for the common case.
-    (iii) A CRASH THIS LOUD MUST NOT READ AS SILENCE ON THE ONE SURFACE AN OPERATOR CHECKS. The
-    heartbeat published `daemon_verdict=live` throughout, because it samples a daemon that really is
-    alive — for three minutes at a time. `dispatch_verdict=STALLED ... block_reason=none` was the
-    only hint, and "none" is exactly wrong. The beat must carry the container restart count, or a
-    crash-loop is invisible to every off-host reader.
-    (iv) COMPACTION NEEDS A CADENCE, OR (i) JUST MOVES THE OUTAGE. Operator-only was the right call
-    for a NEW primitive; it is the wrong steady state for a corpus growing 145-190 rotations a day.
-    Whether that cadence lives in the daemon or a scheduled rung is this task's call, but a bounded
-    ceiling with no collector reaches the ceiling and stops the fleet just as surely.
+    (i) ONE PROCESS-OWNED SNAPSHOT. Add a specialised analytics cache, not another generic route
+    cache. It owns exactly one immutable `AnalyticsSnapshot`, one in-flight refresh promise, one
+    timer and one AbortController. `GET /v1/analytics` reads the current snapshot synchronously and
+    NEVER starts, joins or awaits a union scan. Two simultaneous refresh requests collapse to the
+    same promise.
+
+    (ii) AN HONEST COLD VALUE. Change `AnalyticsSnapshot.asOf` to `string | null`. Before the first
+    successful refresh, return the complete existing schema with empty collections, zero counts and
+    `asOf: null`. Do not invent `staleAsOf`, and do not stamp the current time onto evidence that was
+    never read. Repository search found no checked-in consumer of this route, so there is no local
+    client migration to hide; the nullable field is the explicit API change.
+
+    (iii) REFRESH AFTER COMPLETION, NEVER BY INTERVAL OVERLAP. Start the first refresh after the
+    server begins listening. After a refresh settles, arm an unref'ed 15-minute timeout for the next
+    one. Fifteen minutes is a COST POSTURE, not a freshness claim: even a refresh that reaches the
+    120-second safety ceiling can occupy at most about 12% of one core in steady state. Make the
+    delay injectable so tests use no wall clock. A failure or timeout retains the last successful
+    snapshot; cold stays cold.
+
+    (iv) CANCELLATION REACHES THE FILE DESCRIPTOR. Thread an optional AbortSignal through
+    `deriveAnalyticsSnapshotFromLedger`, `deriveAnalyticsSnapshotFromStream` and `openLedgerUnion`.
+    Under the repository's pinned Node 22.22.3, attach the signal to the active readable stream and
+    close/destroy the readline, gunzip and file stream in `finally`. An abort is re-thrown rather than
+    swallowed by the corrupt-archive best-effort catch, and no later rotation is opened. Ordinary
+    corrupt archives remain best-effort exactly as today.
+
+    (v) ONE 120-SECOND SAFETY CEILING. The cache aborts a refresh that has not settled at 120
+    seconds, records a named timeout and retains the prior snapshot. This is not a success SLA; it is
+    the point after which an analytics reduction may no longer consume a long-lived serve process.
+
+    (vi) SHUTDOWN OWNS CLEANUP. `server.close` stops the timer and aborts the refresh. The stale-code
+    exit path invokes the same stop hook before `process.exit`, because a direct process exit does
+    not emit the server's close event. The timer is unref'ed and the cache never holds serve open.
+
+    (vii) TELEMETRY IS OBSERVATION ONLY. Record refresh start, completion, failure and timeout with
+    duration and retained-snapshot `asOf`. No queue, review, merge, worker or health decision may
+    consume this state. Do not compact, delete archives, add a new projection, or spawn a child
+    process in this task. If post-merge RSS still exceeds the host's measured headroom with
+    single-flight and cancellation proved, process isolation is a separate task with new evidence.
   acceptance:
-    - claim: "a union read whose corpus exceeds the ceiling refuses by name and tells the operator which command collapses it, instead of aborting the process"
-      proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
-    - claim: "a corpus UNDER the ceiling still returns every distinct row, so the bound is not a silent truncation"
-      proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
-    - claim: "the reader that only counts or filters never holds the whole union resident, proved by a corpus larger than the ceiling succeeding through the streaming path"
-      proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
-    - claim: "an off-host reader can tell a crash-looping daemon from a healthy one — the beat carries the restart count, and a live-verdict beat with a climbing count is not reported as healthy"
-      proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
-    - claim: "the hot-path question is answered from a projection rather than a corpus scan, and the projection agrees with a full scan of the same corpus row for row"
-      proof: "unit test: test/a-union-read-is-bounded-before-it-is-parsed.test.ts"
+    - claim: "W1-T3352 criterion 1: a GET returns the cold or last successful snapshot without starting, joining or awaiting a ledger scan"
+      proof: "unit test: analytics request returns from cache while refresh is blocked"
+    - claim: "W1-T3352 criterion 2: cold state has the complete analytics schema and `asOf: null`, while a failed or timed-out refresh retains the last successful snapshot"
+      proof: "unit test: cold and failed refreshes never manufacture analytics evidence"
+    - claim: "W1-T3352 criterion 3: concurrent refresh requests are single-flight and the next refresh is scheduled only after the current one settles"
+      proof: "unit test: analytics refresh is single-flight and schedules only after settlement"
+    - claim: "W1-T3352 criterion 4: timeout, server close and stale-code exit each abort the active union read, close its resources and prevent the next rotation from opening"
+      proof: "unit test: every analytics lifecycle exit aborts the active union source"
+    - claim: "W1-T3352 criterion 5: a corrupt archive is still skipped best-effort, but an AbortSignal is never collapsed into that corrupt-archive path"
+      proof: "unit test: abort is not a corrupt archive and corrupt archives remain best effort"
   falsifier: |
-    REPRODUCE BEFORE FIXING, AND THE REPRO IS CHEAP: on the fleet host,
-    `zcat state/ledger.*.ndjson.gz | wc -c` must still read in the billions. If an operator has since
-    run `rmd ledger-compact` the corpus may be back under the ceiling and the daemon healthy — the
-    DEFECT survives that (the bound is still absent) but the OUTAGE does not, and the shard must say
-    which it is fixing.
-    DO NOT "FIX" THIS BY RAISING --max-old-space-size. The host has 29 GB free so it would buy
-    days, and the corpus grows 145-190 rotations/day: that is the ceiling-raise this repo has
-    already measured as buying under two days on a different gate. A bound that moves is not a bound.
-    DO NOT BLAME A COMMIT. `23451cfc2` sits 76 seconds before the first OOM and is a decoy; its lane
-    fires once in six hours. The onset is a data threshold. A fix that reverts a commit fixes nothing
-    and the loop resumes the next day.
-    DO NOT SHIP A SECOND BOUND ON THE SEAM #5017 ALREADY BOUNDED. That fix landed at 19:59:12Z and
-    the daemon OOMed three more times on a checkout carrying it. A patch whose evidence is "the scan
-    now holds less" must ALSO show the `seen` Set and `rows[]` accumulation cannot reach the heap
-    cap on the live corpus, or it is the same fix again.
-    MEASURE ANY IN-PROCESS READER AGAINST `zgrep`: 5.40s / 9.6 MB over the same corpus. A reader
-    that cannot get within an order of magnitude of that has not earned being in-process.
-    DO NOT "SIMPLIFY" THIS BY READING THE LIVE LEDGER. MEASURED 2026-09-11: 0 of the 324 terminal
-    rows are in the live file. Dropping the archive side silently re-enables the dispatch loop for
-    49 heads and the tests would stay green, because a fixture with no rotations reads the live file
-    by design. Any patch that narrows the corpus must prove, on a corpus WITH rotations, that the
-    marker set it returns is unchanged.
-    PROVE THE STREAMING CLAIM WITH A CORPUS LARGER THAN THE CEILING. A streaming test over a corpus
-    that would have fit anyway proves nothing — it must be a corpus the resident path would refuse.
-    DO NOT DELETE ARCHIVES TO SHRINK THE CORPUS. `rotateLedger` keeps only 200 newest rows per step,
-    so most history exists ONLY in older archives; compaction MERGES and is safe, deletion is not.
+    CLOSE THIS TASK if the route already returns from process-owned state without starting or joining
+    a scan. It does not at origin/main `5eb6aa33`: `buildAnalyticsRoute` calls the real ledger reader
+    from the GET handler, and `/v1/analytics` is outside `CACHED_BOUNDED_READ_PATHS`.
+
+    DELETE THE CACHE READ in the test and restore request-owned `readSnapshot`; the request test must
+    remain unresolved behind the injected blocked reader. Remove the single-flight latch; two
+    refresh calls must produce two reader calls. Stamp cold `asOf` with the clock; the cold-schema
+    assertion must fail. Swallow an abort in `openLedgerUnion`; the multi-rotation fixture must prove
+    a second source opens and fail.
+
+    DO NOT ACCEPT `Promise.race` AS CANCELLATION. The production symptom is work continuing after the
+    response bound. Acceptance requires the AbortSignal to reach an active source and the next
+    rotation to remain unopened.
+
+    DO NOT USE `setInterval`. A refresh slower than its cadence would overlap by construction. The
+    next timer may be armed only in the settled path, and it must be unref'ed.
+
+    DO NOT CALL `/v1/analytics` DURING HOST VALIDATION. The background refresh must produce its own
+    start and terminal evidence. Post-merge proof is one successful refresh with request latency
+    remaining bounded, or one named 120-second abort with serve still responsive and RSS returning
+    toward its pre-refresh level. Local tests prove the lifecycle; only the fleet proves the cost.
+  note: |
+    The filename deliberately remains unchanged. W1-T3352 is already on main, and renaming its shard
+    would re-issue the id. The old OOM evidence is superseded, not denied: it established why a
+    materialised union is unsafe. This revision records the residual defect observed after #5057
+    removed that allocation.
+
+    Node behavior was checked against the pinned v22.22.3 API: readable async-iterator early exit
+    destroys the stream; readline async iteration closes on break/throw/return; `stream.addAbortSignal`
+    destroys a stream on abort. The implementation still owns explicit cleanup because the current
+    per-file catch would otherwise erase the abort and continue to the next archive.

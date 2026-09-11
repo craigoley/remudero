@@ -379,7 +379,7 @@ function runCli(lcov: string, baseline: string) {
   return { status: r.status, stdout: r.stdout.toString(), stderr: r.stderr.toString() };
 }
 
-test("W1-T466 absolute thresholds: the three tiers classify by BRANCH percentage, and only the sub-85 tier blocks", () => {
+test("W1-T3384 (supersedes W1-T466): the three tiers still classify by BRANCH percentage, and NO tier blocks", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-covtier-"));
   try {
     const baseline = writeBaseline(dir, "b.json", {
@@ -404,17 +404,25 @@ test("W1-T466 absolute thresholds: the three tiers classify by BRANCH percentage
     assert.match(improve.stdout, /tier=improve/);
     assert.match(improve.stdout, /coverage-improvement task is owed/);
 
+    // W1-T3384 — OPERATOR RULING 2026-09-11 supersedes W1-T466's blocking cut. The deepest band
+    // is still NAMED (severity drives how much work is filed) but it no longer stalls the queue:
+    // "fix the pr as much as we can, but then let it through and kick out a priority follow up task".
     const remediate = runCli(lcovAtBranchPct(dir, "remediate.lcov", 80), baseline);
-    assert.equal(remediate.status, 1, remediate.stdout + remediate.stderr);
+    assert.equal(
+      remediate.status,
+      0,
+      "the sub-85 band PASSES and owes escalating work -- parking the PR parks the debt with it:\n" +
+        remediate.stdout +
+        remediate.stderr,
+    );
     assert.match(remediate.stdout, /tier=remediate/);
-    assert.match(remediate.stderr, /BLOCKED/);
-    assert.match(remediate.stderr, /branches 80\.00% is below the 85% floor/);
+    assert.match(remediate.stdout, /escalating improvement tasks/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("W1-T466 absolute thresholds: the cuts are INCLUSIVE at the boundary -- exactly 85.00% passes and exactly 90.00% is healthy, so a run landing on the number is never blocked by rounding", () => {
+test("W1-T3384 (supersedes W1-T466): the cuts still DISCRIMINATE at the boundary -- 85.00% reads improve, 84.99% reads remediate -- and neither blocks", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-covedge-"));
   try {
     const baseline = writeBaseline(dir, "b.json", {
@@ -428,8 +436,8 @@ test("W1-T466 absolute thresholds: the cuts are INCLUSIVE at the boundary -- exa
     assert.match(onBlockCut.stdout, /tier=improve/);
 
     const justUnder = runCli(lcovAtBranchPct(dir, "under85.lcov", 84.99), baseline);
-    assert.equal(justUnder.status, 1, justUnder.stdout + justUnder.stderr);
-    assert.match(justUnder.stdout, /tier=remediate/);
+    assert.equal(justUnder.status, 0, justUnder.stdout + justUnder.stderr);
+    assert.match(justUnder.stdout, /tier=remediate/, "the BAND still changes at the cut, only the consequence changed");
 
     const onPassCut = runCli(lcovAtBranchPct(dir, "at90.lcov", 90), baseline);
     assert.equal(onPassCut.status, 0, onPassCut.stdout + onPassCut.stderr);
@@ -460,7 +468,7 @@ test("W1-T466 absolute thresholds: main's real reading (branches 90.27%) PASSES,
   }
 });
 
-test("W1-T466 absolute thresholds: a line-coverage regression STILL blocks -- replacing the branch floor did not silently delete the line gate, and both reasons are reported together rather than one pre-empting the other", () => {
+test("W1-T3384 (supersedes W1-T466): a baseline that DECLARES a lines floor still enforces it, and the branch tier still reports beside it", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-covboth-"));
   try {
     const baseline = writeBaseline(dir, "b.json", {
@@ -485,18 +493,22 @@ test("W1-T466 absolute thresholds: a line-coverage regression STILL blocks -- re
       baseline,
     );
     assert.equal(both.status, 1, both.stdout + both.stderr);
-    assert.match(both.stderr, /branches 80\.00% is below the 85% floor/);
+    assert.match(
+      both.stdout,
+      /tier=remediate/,
+      "the branch band is still reported even though it no longer blocks (W1-T3384)",
+    );
     assert.match(
       both.stderr,
       /lines coverage 70\.00% < baseline 95\.00%/,
-      "the branch tier must not suppress the line violation -- both reasons report in one run",
+      "a baseline that DECLARES a floor still enforces it -- this task retired the SHIPPED floor, not the mechanism",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("W1-T466 absolute thresholds: the SHIPPED scripts/coverage-baseline.json carries both tier cuts, no longer carries a branchesPct delta floor, and RETAINS its linesPct floor", async () => {
+test("W1-T3384 (supersedes W1-T466): the SHIPPED scripts/coverage-baseline.json carries both tier cuts and declares NO floor of either kind", async () => {
   const shipped = JSON.parse(
     await readFile(join(REPO_ROOT, "scripts", "coverage-baseline.json"), "utf8"),
   );
@@ -509,8 +521,9 @@ test("W1-T466 absolute thresholds: the SHIPPED scripts/coverage-baseline.json ca
       "ratio moves with the DENOMINATOR, which is how main fell below its own floor",
   );
   assert.equal(
-    typeof shipped.linesPct,
-    "number",
-    "the line floor must survive -- this task replaced the BRANCH gate, it did not remove coverage gating",
+    Object.hasOwn(shipped, "linesPct"),
+    false,
+    "OPERATOR RULING 2026-09-11: no hard floors, including coverage. The 95.62 floor sat ~2.70pt " +
+      "under a real ~98.32-98.37% and could not fail, so it guarded nothing while still being a floor",
   );
 });

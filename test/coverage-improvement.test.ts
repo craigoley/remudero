@@ -197,7 +197,7 @@ test("injectCoverageImprovementTask: healthy tier (>=90%) is a no-op — capture
   assert.equal(captureCalls, 0);
 });
 
-test("injectCoverageImprovementTask: remediate tier (<85%) is a no-op here — tier three is a separate, unbuilt remediation loop", () => {
+test("W1-T3384b (supersedes W1-T470): remediate tier (<85%) now FILES — the band lands and owes work, so it must not file nothing", () => {
   let captureCalls = 0;
   const result = injectCoverageImprovementTask({
     root: "/root",
@@ -210,9 +210,16 @@ test("injectCoverageImprovementTask: remediate tier (<85%) is a no-op here — t
       return fakeEntry("fb-1", "x");
     },
     ledgerUnion: () => ({ stateDir: "/state", archiveFiles: [], archiveCount: 1, liveFileRead: true, unread: [], ok: true, matches: [] }),
+    // The fixture's stateDir is a fake path; this band used to return before any write, and now
+    // that it FILES, the ledger append is injected rather than allowed to touch the real fs.
+    writeLedgerLine: () => {},
   });
-  assert.equal(result.action, "blocking");
-  assert.equal(captureCalls, 0);
+  // W1-T3384b: #5117 retired every coverage floor, so this band no longer blocks. A band that
+  // neither blocks nor files would leave the debt invisible AND unacted-on — the worst of both.
+  assert.equal(result.action, "filed");
+  assert.equal(captureCalls, 1, "the remediation round must reach plan/feedback/");
+  if (result.action !== "filed") throw new Error("unreachable");
+  assert.match(result.signature, /#remediation-round:\d+$/, "the round rides in the dedupe key so a further drop refiles");
 });
 
 test("injectCoverageImprovementTask: improve tier with no src/-owned uncovered branch is a no-op ('no-debt')", () => {
@@ -416,17 +423,18 @@ test("coverageImproveCommand: improve-band lcov -> exit 0, writes ONE plan/feedb
 // OWN switch arms and its state-dir fallback are not reachable through it. Testing the library and
 // calling the CLI covered is the exact gap that shipped.
 
-test("coverageImproveCommand: a below-block-tier lcov reports the remediation band and files nothing", () => {
+test("W1-T3384b (supersedes W1-T470): a below-block-tier lcov FILES a remediation round through the real verb", () => {
   const root = tmp("rmd-coverage-improve-blocking-");
   const stateDir = tmp("rmd-coverage-improve-blocking-state-");
   const lcovPath = join(root, "lcov.info");
-  // 80/100 branches = 80% — under DEFAULT_TIER_BLOCK_PCT (85), so tier `remediate`, which the
-  // verb reports as `blocking` and deliberately leaves to tier three's own loop.
+  // 80/100 branches = 80% — under DEFAULT_TIER_BLOCK_PCT (85), so tier `remediate`. Since #5117
+  // retired the floor this band no longer blocks, so it must FILE rather than leave the debt to a
+  // loop that was never built.
   writeFileSync(lcovPath, fixtureLcov([{ file: "src/a.ts", brf: 100, brh: 80 }]));
 
   const code = coverageImproveCommand(["--lcov", lcovPath], { root, stateDir, ledgerPath: join(stateDir, "ledger.ndjson"), runId: "blocking-run" });
-  assert.equal(code, 0, "the block tier is not this verb's job, but it is not an ERROR either");
-  assert.ok(!existsSync(join(root, "plan", "feedback")), "a below-block run must file nothing");
+  assert.equal(code, 0, "a remediation round is owed work, never an error exit");
+  assert.ok(existsSync(join(root, "plan", "feedback")), "a below-block run must file a remediation round");
 });
 
 test("coverageImproveCommand: in-band coverage whose debt lives entirely OUTSIDE src/ reports no-debt", () => {

@@ -1,0 +1,66 @@
+- id: W1-T3394
+  title: "ASK vs RECORD classification — one deterministic predicate routes every escalation/proposal/question/drain-outcome item to exactly ONE destination, killing the double-render (ratifies W1-T3186 i)"
+  repo: remudero
+  depends_on: [W1-T110, W1-T77, W1-T78, W1-T141]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    Ratifies W1-T3186's design ruling. The unbuilt NEEDS ME section (defined in W1-T153, elaborated by
+    W1-T182/W1-T193/W1-T223) was specified to fold FOUR unrelated sources into one banner: inbox proposals
+    (W1-T110/T111 — READY/DRAFTING/NOT-READY/DEFERRED-WITH-TRIGGER), needs-human escalations (W1-T8/T77's
+    BLOCKED-AMBIGUOUS disposition), clarification questions (W1-T78's decidable-question rung), and the
+    post-drain rundown's merged/blocked/escalated outcome lines (W1-T141, its own action vocabulary:
+    good/wrong/needs-follow-up). That is the EIGHT row kinds across four concerns the proposal names — and
+    because W1-T141's rundown and W1-T8/T77's escalation both fire on the SAME blocked-task event with
+    DIFFERENT resolution verbs (view-issue/mark-handled vs good/wrong/needs-follow-up), the same real
+    escalation was specified to render TWICE, exactly as the proposal states.
+    THE FIX IS A ROUTING PREDICATE, NOT A RENDERING TWEAK. Building INBOX (W1-T3395) and CHANGE MANAGEMENT
+    (W1-T3396) directly against these four sources without a shared classifier would just move the duplication
+    — each renderer would independently decide "is this mine?" and could both say yes. One classifier,
+    consulted by both renderers, makes single-destination routing a property of the DATA rather than of two
+    independently-written templates agreeing by convention.
+  design: |
+    A pure function classifyAskRecordItem(item) -> ASK | RECORD over the four source shapes: an inbox
+    proposal in state READY/NOT-READY/DEFERRED-WITH-TRIGGER (a decision is pending) -> ASK; DRAFTING or
+    already-consumed (ratified/reframed-and-redrafting) -> RECORD. An escalation issue whose referent still
+    needs a human DECISION (BLOCKED-AMBIGUOUS, unanswered W1-T78 question) -> ASK; once answered or the
+    referent has resolved (W1-T162-class terminal state) -> RECORD. A drain-rundown outcome line
+    (merged/blocked/escalated) is ALWAYS RECORD — it reports what happened to a change, it never itself asks
+    a question, even when the same task also carries an open escalation. THE FALSIFIER THIS ENCODES: a task
+    with an open BLOCKED-AMBIGUOUS escalation AND a rundown line for the same event yields exactly one ASK
+    (the escalation) and exactly one RECORD (the rundown line) — never an ASK from both, never a RECORD from
+    both. Total and exhaustive: every one of the four source shapes maps to exactly one class, with no
+    residual "unclassified" bucket. Wire the classifier through the existing console data path in
+    src/lib/serve.ts so the new module has a production caller before W1-T3395/W1-T3396 expand the renderers.
+    VERIFY the exact proposal-state enum (inbox.ts), the escalation-issue shape (escalate.ts), the W1-T78
+    question contract, and the DrainSummary/rundown shape (W1-T141 / panel-actions.ts) from source before
+    coding.
+  acceptance:
+    - claim: "an inbox proposal in READY/NOT-READY/DEFERRED-WITH-TRIGGER classifies ASK; the same proposal once DRAFTING or already consumed (ratified/reframed) classifies RECORD"
+      proof: "unit test: test/ask-classification.test.ts"
+    - claim: "an escalation whose referent still needs a decision classifies ASK; once the decision is answered or the referent has resolved, the same escalation classifies RECORD"
+      proof: "unit test: test/ask-classification.test.ts"
+    - claim: "a drain-rundown outcome line (merged/blocked/escalated) ALWAYS classifies RECORD, even when the same task has an open ASK-classified escalation — the double-render falsifier"
+      proof: "unit test: test/ask-classification.test.ts"
+    - claim: "the classifier is total — every one of the four source shapes (proposal, escalation, question, rundown line) maps to exactly ASK or RECORD, with no unclassified residual"
+      proof: "unit test: test/ask-classification.test.ts"
+    - claim: "the classifier has a production call site in the console path, so the new module is reached by src code and not only by its own tests"
+      proof: "grep: classifyAskRecordItem( in src/lib/serve.ts"
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: ["§7B", "§7"]
+  files: [src/lib/ask-classification.ts, src/lib/serve.ts, test/ask-classification.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    Ratifies W1-T3186 clause (i) — the mechanical backbone that makes NEEDS ME's dissolution enforceable
+    rather than a rename. Supersedes the mixed-rendering approach W1-T182 specified (unbuilt, queued): that
+    task rendered escalation+proposal rows together under one NEEDS ME banner with per-type affordances but
+    never separated ASK from RECORD against the drain-rundown's independent vocabulary, which is exactly how
+    the same escalation could double-render. W1-T3395/W1-T3396 consume this classifier; once they ship, W1-T182's
+    NEEDS ME-specific criteria should be marked retired in a follow-up plan PR (out of scope here).
+    risk:high with band_meaning:span is Rule 19 sizing: the classifier module, its serve.ts caller, and its
+    falsifier are one cross-file invariant, because the classifier alone would ship dark.

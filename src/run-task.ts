@@ -10626,8 +10626,16 @@ export function reconArtifactToContext(artifact: ReconArtifact, taskId: string, 
  * `reconMount.maxTurns`: recon is read-only and must stay bounded regardless of which class routed
  * it, and `maxBudgetUsd` remains the real backstop (WS-0 knob a).
  *
- * WHY 20 AND NOT 8. Measured over every `recon.done` row for 2026-08-03, the day the queue
- * emptied — 18 recons, split by the model the recon row routed:
+ * WHY 40 AND NOT 20. The 20-turn cap fixed the original 8-turn wall, but later fleet-scale
+ * measurement showed it was still sized like work, not a runaway cliff. MEASURED 2026-09-08 over
+ * 680 retained `recon.done` rows: p50 6, p90 10, p95 13, p99 21, max 26; 10 runs reached or
+ * exceeded the old 20-turn cap. The only fleet-ledgered `error_max_turns` wall was a recon run at
+ * 21 turns that exhausted the bounded retry and left implement to proceed with no recon context.
+ * 40 is 1.90x the observed p99 and clears the observed max by 14 turns, while staying one tenth
+ * of the implement rows' 400-turn runaway cliff.
+ *
+ * BEFORE THAT, WHY 20 AND NOT 8. Measured over every `recon.done` row for 2026-08-03, the day the
+ * queue emptied — 18 recons, split by the model the recon row routed:
  *
  *   haiku  : 9 `error_max_turns` / 1 success   (failures 9×9;  success 17)
  *   sonnet : 2 `error_max_turns` / 6 success   (failures 9, 9; successes 5, 6, 7, 8, 8, 8)
@@ -10642,16 +10650,9 @@ export function reconArtifactToContext(artifact: ReconArtifact, taskId: string, 
  * headroom spent. W1-T299 (this task's own companion fix, filed off this exact measurement)
  * changed that: a recon error now gets one bounded retry, and a SECOND error degrades — the run
  * still reaches implement with an explicit absent-context note — rather than ending the dispatch.
- * The turn cap itself (this constant) is unchanged; only recon's failure no longer costs the
  * task a dispatch it can never get back.
- *
- * 20 clears the highest observed completion (17) with margin while staying far below the implement
- * rows' 400. Recorded honestly: that 17-turn success happened under a cap of 8, so the SDK's
- * `maxTurns` and the envelope's `num_turns` do not count the same unit. 20 is calibrated against
- * the observed counter, NOT against a derivation of the cap's own semantics — W1-T303 is filed to
- * establish what each side actually counts, and until it lands this number is empirical.
  */
-export const RECON_MAX_TURNS = 20;
+export const RECON_MAX_TURNS = 40;
 
 /** Shared default `readFile` for a rule-source read ({@link retrieveRuleBodyOnDemand} and
  *  {@link buildRuleHeadlinesPart} below both default to this ONE function, never a
