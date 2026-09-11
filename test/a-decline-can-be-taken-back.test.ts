@@ -52,11 +52,11 @@ function readLedgerLines(path: string): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
-function fakeGithub(): TraceGithub {
+function traceGateway(): TraceGithub {
   return { prView: () => null };
 }
 
-function fakeStatusGithub(): GitHub {
+function statusGateway(): GitHub {
   return { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
 }
 
@@ -77,8 +77,8 @@ function depsFor(root: string, planPath: string): PanelGraphDeps {
     inboxRoot: root,
     planPath,
     ledgerPath: ledgerPathFor(root),
-    github: fakeGithub(),
-    statusGithub: fakeStatusGithub(),
+    github: traceGateway(),
+    statusGithub: statusGateway(),
     ratify: fakeRatifyGateway(),
   };
 }
