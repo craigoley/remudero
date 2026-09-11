@@ -1,0 +1,35 @@
+- id: W1-T3393
+  title: "plan-only closure of W1-T370 after the attrition ruling is recorded"
+  repo: remudero
+  depends_on: [W1-T3392]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  rationale: |
+    This is the plan-only half split out of the failed bundled draft. W1-T370's own shard may be closed
+    only if W1-T3392's live `rmd rule` run records the attrition ruling. If W1-T3392 escalates instead, this
+    task should be left untouched or retired as not applicable; closing W1-T370 after an escalation would
+    contradict the routed outcome.
+  design: |
+    If the ruling landed, edit only `plan/tasks.d/W1-T370-merged-proof-debt-spend-ruling.yaml` in the
+    existing withdrawal shape used by W1-T229, W1-T202, W1-T369 and W1-T1260: set the terminal closure
+    fields, preserve W1-T370's existing acceptance block byte-identically, and add a note naming the
+    landed `plan/decisions.d/` ruling path and preserving the ruling text.
+
+    If the ruling escalated, make no edit to W1-T370. The inbox proposal is then the correct terminal
+    product of W1-T3392.
+  acceptance:
+    - claim: "when the W1-T370 attrition ruling has landed, the W1-T370 shard is closed in the withdrawal shape without rewriting its existing acceptance proof lines"
+      proof: "grep: retirement: closed in plan/tasks.d/W1-T370-merged-proof-debt-spend-ruling.yaml"
+    - claim: "the closed W1-T370 shard points readers at the landed plan/decisions.d ruling record"
+      proof: "grep: plan/decisions.d/W1-T370- in plan/tasks.d/W1-T370-merged-proof-debt-spend-ruling.yaml"
+  risk: low
+  origin: architect
+  plan_refs: ["W1-T370", "W1-T3212", "W1-T369", "W1-T1260"]
+  files: [plan/tasks.d/W1-T370-merged-proof-debt-spend-ruling.yaml]
+  status: queued
+  attempts: 0
+  note: |
+    verify:human is deliberate because this task is conditional on the live judge arm from W1-T3392.
+    The files list is plan-only, so the rule15-filing mixed-diff refusal no longer applies.
