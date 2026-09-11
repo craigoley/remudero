@@ -79,7 +79,6 @@ export const ACKNOWLEDGED = new Map([
       "retained, which is what makes this one look accidental. Small enough that a retention entry is " +
       "the likely fix, but it must be priced against the 4 MiB rotation ceiling rather than assumed.",
   ],
-  ["implement.done", "W1-T3352 — union=738 rows, live=0. Same call site as recon.done."],
   ["implement.resumed", "W1-T3352 — union=6 rows, live=0. Same call site as recon.done."],
   [
     "fix.exhausted",

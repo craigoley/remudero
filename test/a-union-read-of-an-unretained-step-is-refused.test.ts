@@ -233,7 +233,12 @@ test("W1-T3360: a tree with NO union call site at all refuses instead of passing
 // ── the acknowledgements are evidence, not decoration ───────────────────────────────────────────
 
 test("W1-T3360: every acknowledgement names a task and carries measured evidence, not just a promise", () => {
-  assert.ok(ACKNOWLEDGED.size >= 11, `expected the measured contradiction set; got ${ACKNOWLEDGED.size}`);
+  // FLOOR MOVES WITH THE POPULATION, and only downward for a recorded reason. It was 11 until
+  // W1-T3080 made implement.done retained through rotation, which retired that contradiction —
+  // the sibling test above REFUSES an acknowledgement that covers nothing, so deleting the entry
+  // was mandatory and this control had to follow it rather than block it. Still a real control:
+  // it is an emptiness guard, not a census of its own, and a set that collapsed would fail here.
+  assert.ok(ACKNOWLEDGED.size >= 10, `expected the measured contradiction set; got ${ACKNOWLEDGED.size}`);
   for (const [step, reason] of ACKNOWLEDGED) {
     assert.match(reason, /W1-T\d+/, `${step}: an acknowledgement must name the task that will fix it`);
     assert.match(reason, /union=|MB|rows/, `${step}: an acknowledgement must carry a measured figure`);
