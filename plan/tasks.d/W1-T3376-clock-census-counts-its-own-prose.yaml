@@ -1,0 +1,110 @@
+- id: W1-T3376
+  title: "THE CLOCK-SIGNATURE CENSUS COUNTS ITS OWN DOCUMENTATION — three files carry a debt row made ENTIRELY of prose saying they have no debt, and for them the remedy the refusal names cannot be performed at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  band_meaning: blast-radius
+  budget_usd: 6.00
+  files: [test/clock-signature-census.test.ts, scripts/clock-signature-baseline.json]
+  origin: "operator-session#W1-T3095-coverage-2026-09-11"
+  plan_refs: ["W1-T2897", "W1-T1128", "W1-T171"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED 2026-09-11 on origin/main (dad5531b6) by re-running the census's own three regexes
+    (`LEGACY_CLOCK_SHAPE`, `DATE_NOW`, `NEW_DATE`) over `src/**/*.ts`, splitting each match by
+    whether its line is comment furniture (first non-space chars `//`, `*`, or `/*`):
+
+      clock tokens in CODE            379
+      clock tokens in COMMENT LINES    28   (6.9% of the 407 counted)
+      files whose row is inflated      17
+
+    THREE OF THOSE FILES HAVE A ROW THAT IS ENTIRELY PROSE — zero code occurrences:
+
+      src/lib/ledger-replay.ts    row {dateNow: 1, newDate: 1}   code occurrences: 0
+      src/lib/trace.ts            row {dateNow: 2}               code occurrences: 0
+      src/lib/hand-run-census.ts  row {dateNow: 1}               code occurrences: 0
+
+    READ WHAT IS ACTUALLY BEING COUNTED IN THE FIRST ONE. `src/lib/ledger-replay.ts:12` is the
+    docblock sentence `PURE, LIKE buildReceipt. Same window + rows in, byte-identical narration out
+    -- no ``Date.now()``,` and line 15 is `every writer stamps ``ts`` via ``new Date().toISOString()```.
+    The census is charging the file two units of clock debt for the sentence that asserts it has
+    none. `src/lib/hand-run-census.ts:83` is the same shape: `rows' own ``ts``, never ``Date.now()``)`.
+    `src/lib/trace.ts:93,101` document the `runId` convention in backticked prose.
+
+    HOW IT SURFACED: the census refused a PR on W1-T3095 with
+    `src/lib/mount-exploration.ts: dateNow 1 > baseline 0`. The file's only occurrence was a comment
+    explaining why a runId is clock-derived. The comment was rephrased to get past it, which is the
+    wrong repair and is why this shard exists rather than a one-line workaround.
+  rationale: |
+    THE REFUSAL NAMES A REMEDY THAT CANNOT BE PERFORMED, which is a strictly worse failure than no
+    guidance: "migrate the file onto src/lib/clock.ts's Clock port and lower its row". For the three
+    files above there is nothing to migrate — the row is documentation. An author who follows the
+    instruction reads the file, finds no clock call, and either deletes correct prose or edits the
+    baseline, and the second is the path that silently retires the ratchet. This is the same defect
+    class as the prompt-surface gate's impossible remedy fixed in #5086; it is listed here so the
+    two are recognised as one pattern and not re-derived a third time.
+
+    THE REPO HAS ALREADY SOLVED THIS EXACT PROBLEM ONCE, which is why no new mechanism is needed.
+    `diff-coverage` faced the identical artefact — a new file's leading doc comment gets
+    `DA:<line>,0` records — and answers it with `isNonExecutableLine`, whose own doc says the gate
+    "would false-block every file that opens with a doc comment" otherwise. W1-T171 extended the
+    same idea to type-only bodies via `computeTypeOnlyRanges`. A source-text census that cannot tell
+    prose from code is the pre-W1-T171 state of that gate.
+
+    WHY THIS IS NOT COSMETIC. A ratchet whose rows are partly fiction cannot be driven to zero, so
+    the population it governs can never be declared clean, and 28 units of permanent unpayable debt
+    is exactly the headroom a real regression can hide inside: a file at `dateNow 3` where 2 are
+    prose accepts one new real call site without moving its row.
+  design: |
+    (i) STRIP COMMENTS BEFORE SCANNING, in the census itself, not by editing prose. Both line
+    (`//`) and block (`/* */`) comments, and it must handle the cases a naive strip gets wrong: a
+    `//` or `/*` inside a string or template literal is CODE, and a regex literal can contain either.
+    Reuse or extend what already exists rather than writing a third scanner — check
+    `isNonExecutableLine`/`computeTypeOnlyRanges` in scripts/diff-coverage.mjs first and say in the
+    PR body why it was or was not reusable.
+    (ii) LOWER EVERY ROW THE STRIP CORRECTS, in the same change. A fix that leaves the inflated
+    baseline in place has converted a wrong number into a loose one. The three prose-only rows above
+    go to zero and must be absent or zeroed, not deleted-and-forgotten.
+    (iii) THE TWO TEST TITLES IN `acceptance:` ARE PRESCRIBED VERBATIM, because a whole-file
+    `unit test: test/clock-signature-census.test.ts` proof CANNOT discriminate here: that file
+    already exists and passes at the merge base, so `classifyBaseProofOutcome` grades it
+    `executed_stale` and every criterion silently drops to the keyword floor. A NAME-FILTERED
+    proof does discriminate — the title exists in no file at base, so it resolves to zero
+    candidates there and passes only at head. Use those exact strings as the test titles, with no
+    regex metacharacters: the title is matched as an escaped LITERAL substring.
+    CRITERION 3 IS A TITLED TEST FOR A SECOND REASON, and the obvious `grep:` on the baseline was
+    WRITTEN AND REJECTED: scripts/clock-signature-baseline.json is pretty-printed, so
+    `"src/lib/ledger-replay.ts": {` and `"dateNow": 0` sit on DIFFERENT PHYSICAL LINES and no
+    single-line BRE can bind the path to its value. The same-line fallback `"dateNow": 0` is not
+    file-specific and already matches dozens of rows at the merge base, so it discriminates
+    nothing. Assert the rows by PARSING the baseline in the test instead.
+    (iv) THE REFUSAL MESSAGE MUST STAY TRUE AFTER THE FIX. Once prose is excluded, "migrate onto
+    the Clock port" is performable for every row it can still name.
+    (v) SCOPE IS THE CENSUS. Do NOT migrate any file onto the Clock port in this task, and do not
+    touch src/. The baseline is an instrument path and src/ is a product path: Standing rule 25
+    refuses the mixture, so a src/ edit here makes the PR unmergeable by construction.
+  acceptance:
+    - claim: "the census excludes comment text, proved on a fixture whose ONLY clock token sits in a docblock and which therefore scores zero"
+      proof: "unit test: a clock token that appears only in a doc comment scores zero"
+    - claim: "a clock token inside a string or template literal is still counted as CODE, so the comment strip is not a hole a real call site can hide in"
+      proof: "unit test: a clock token in a template literal is still CODE, and a trailing comment on the same line is not"
+    - claim: "the three prose-only rows are corrected to zero in the same change, so the fix tightens the ratchet rather than loosening it"
+      proof: "unit test: every row the comment strip corrects is lowered in the committed baseline, and the three prose-only rows read zero"
+  falsifier: |
+    RE-MEASURE BEFORE BUILDING — the note's figures are from 2026-09-11 on dad5531b6 and every one
+    of them moves as src/ changes. Re-run the split (the census's own three regexes, partitioned by
+    comment-furniture lines) and use YOUR numbers. If the three prose-only rows have since been
+    corrected by another PR, this shard is already satisfied and must be closed, not rebuilt.
+    PROVE THE FIX IS LOAD-BEARING BY DELETING IT: with the comment strip removed, the new fixture
+    test must go red. A test that passes either way has asserted nothing.
+    THE STRING/TEMPLATE CASE IS THE ONE THAT MATTERS MOST and a naive line-based strip fails it.
+    Write that fixture FIRST: a line holding both a real `Date.now()` inside a template literal and
+    a trailing `// Date.now()` comment must score exactly 1, never 0 and never 2. A comment strip
+    that swallows real call sites has replaced an inflated ratchet with a blind one, which is the
+    worse of the two failures.
+    DO NOT FIX THIS BY REWORDING COMMENTS. Eleven of the seventeen inflated files document clock
+    behaviour deliberately and correctly; the prose is right and the counter is wrong.
