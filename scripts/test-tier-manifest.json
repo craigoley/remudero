@@ -1086,6 +1086,7 @@
     "test/risk-override-record.test.ts": 1688,
     "test/risk-score.test.ts": 1326,
     "test/rmd-down-up.test.ts": 1195,
+    "test/root-level-markdown-census.test.ts": 0,
     "test/rotation-compresses-what-the-reader-already-decompresses.test.ts": 351,
     "test/route-registration.test.ts": 1866,
     "test/route-scope-matrix.test.ts": 2229,
