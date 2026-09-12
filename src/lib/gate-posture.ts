@@ -178,10 +178,12 @@ export async function decideGatePosture(input: GatePostureInput, deps: GatePostu
       log: deps.log,
     });
   } catch (err) {
+    const reason = `risk judge unavailable (${err instanceof Error ? err.message : String(err)}) — restoring current gate behaviour`;
+    deps.log?.("gate_posture.judge_unavailable", { gate: finding.gate, reason });
     return logDecision(
       deps,
       finding,
-      fallbackDecision(finding, `risk judge unavailable (${err instanceof Error ? err.message : String(err)}) — restoring current gate behaviour`),
+      fallbackDecision(finding, reason),
     );
   }
 
