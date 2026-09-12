@@ -874,7 +874,7 @@ function resolveCapabilityLadder(config: Config, deps: CodexCapacityDeps): Capab
 interface CodexRuntimeReading {
   rateLimits: unknown;
   models: CodexModelInfo[];
-  /** Present only when one timed-out exchange was replaced by a fresh successful retry. */
+  /** Present only when a stalled primary exchange was replaced by a fresh successful hedge. */
   retryDetail?: string;
 }
 
@@ -893,6 +893,7 @@ const codexCapacityCache = new Map<string, { at: number; value: CodexRuntimeRead
 const codexCapacityFailureCache = new Map<string, { at: number; value: ProviderCapacity }>();
 const codexCapacityInFlight = new Map<string, Promise<CodexRuntimeResult>>();
 const CODEX_CAPACITY_FAILURE_BACKOFF_MAX_MS = 10_000;
+const CODEX_CAPACITY_HEDGE_DELAY_MS = 6_000;
 
 export function clearCodexCapacityCache(): void {
   codexCapacityCache.clear();
@@ -934,7 +935,10 @@ function codexControlEnv(config: Config): NodeJS.ProcessEnv {
 async function readCodexRuntime(
   config: Config,
   bin: string,
-  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs">,
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & {
+    signal?: AbortSignal;
+    onHedgeEligibility?: (eligible: boolean) => void;
+  },
 ): Promise<CodexRuntimeResult> {
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
   const timeoutMs = deps.timeoutMs ?? 10_000;
@@ -960,9 +964,11 @@ async function readCodexRuntime(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      deps.signal?.removeEventListener("abort", onAbort);
       child.kill("SIGKILL");
       resolve(result);
     };
+    const onAbort = () => finish(codexRuntimeFailure("app-server hedge cancelled"));
     const unfinishedPhases = (): string[] => {
       if (!initialized) return ["initialize"];
       const pending: string[] = [];
@@ -978,6 +984,11 @@ async function readCodexRuntime(
         malformedStdoutLines > 0 ? "terminal" : "timeout",
       ));
     }, timeoutMs);
+    if (deps.signal?.aborted) {
+      onAbort();
+      return;
+    }
+    deps.signal?.addEventListener("abort", onAbort, { once: true });
     child.on("error", (error) => finish(codexRuntimeFailure(`app-server error: ${error.message}`)));
     child.on("exit", (code) => {
       if (!settled) finish(codexRuntimeFailure(`app-server exited ${code}: ${stderr.slice(-240)}`));
@@ -998,6 +1009,7 @@ async function readCodexRuntime(
         } catch (error) {
           // Non-protocol stdout is skipped; missing RPC responses still fail closed at the timeout.
           malformedStdoutLines += 1;
+          deps.onHedgeEligibility?.(false);
           continue;
         }
         if (message.id === 1) {
@@ -1035,26 +1047,94 @@ async function readCodexRuntime(
   });
 }
 
-/** Retry only the production-observed transient: a clean protocol exchange that reached its bound. */
-async function readCodexRuntimeWithTimeoutRetry(
+function codexCapacityHedgeDelay(timeoutMs: number): number {
+  return Math.min(CODEX_CAPACITY_HEDGE_DELAY_MS, Math.max(1, Math.floor(timeoutMs * 0.6)));
+}
+
+/**
+ * Recover the observed clean app-server stall without waiting through two serial timeout bounds.
+ * The hedge is inside the raw exchange, so ordinary single-flight callers still share one attempt
+ * pair and a successful result is always freshly read from the winning child.
+ */
+async function readCodexRuntimeWithTimeoutHedge(
   config: Config,
   bin: string,
   deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs">,
 ): Promise<CodexRuntimeResult> {
-  const first = await readCodexRuntime(config, bin, deps);
-  if (!("provider" in first) || first.failureKind !== "timeout") return first;
+  const primaryAbort = new AbortController();
+  let primaryHedgeEligible = true;
+  const primary = readCodexRuntime(config, bin, {
+    ...deps,
+    signal: primaryAbort.signal,
+    onHedgeEligibility: (eligible) => { primaryHedgeEligible = eligible; },
+  });
+  const timeoutMs = deps.timeoutMs ?? 10_000;
 
-  const second = await readCodexRuntime(config, bin, deps);
-  if (!("provider" in second)) {
-    return {
-      ...second,
-      retryDetail: `app-server recovered on timeout retry; attempt 1: ${first.detail ?? "timed out"}`,
+  return new Promise<CodexRuntimeResult>((resolve) => {
+    let settled = false;
+    let hedgeStarted = false;
+    let primaryResult: CodexRuntimeResult | undefined;
+    let hedgeResult: CodexRuntimeResult | undefined;
+    let hedgeAbort: AbortController | undefined;
+    let hedgeTimer: NodeJS.Timeout | undefined;
+
+    const finish = (result: CodexRuntimeResult) => {
+      if (settled) return;
+      settled = true;
+      if (hedgeTimer) clearTimeout(hedgeTimer);
+      resolve(result);
     };
-  }
-  return {
-    ...second,
-    detail: `app-server capacity read failed after timeout retry; attempt 1: ${first.detail ?? "timed out"}; attempt 2: ${second.detail ?? "failed"}`,
-  };
+    const failures = (): CodexRuntimeFailure => {
+      const primaryFailure = primaryResult as CodexRuntimeFailure;
+      const hedgeFailure = hedgeResult as CodexRuntimeFailure;
+      return {
+        ...hedgeFailure,
+        detail:
+          `app-server capacity read failed after hedge; primary: ${primaryFailure.detail ?? "failed"}; ` +
+          `hedge: ${hedgeFailure.detail ?? "failed"}`,
+      };
+    };
+    const maybeFinishFailure = () => {
+      if (!primaryResult) return;
+      if (!hedgeStarted) {
+        finish(primaryResult);
+        return;
+      }
+      if (hedgeResult) finish(failures());
+    };
+    const observePrimary = (result: CodexRuntimeResult) => {
+      primaryResult = result;
+      if (!("provider" in result)) {
+        hedgeAbort?.abort();
+        finish(result);
+        return;
+      }
+      maybeFinishFailure();
+    };
+    const observeHedge = (result: CodexRuntimeResult) => {
+      hedgeResult = result;
+      if (!("provider" in result)) {
+        const primaryDetail = primaryResult && "provider" in primaryResult
+          ? primaryResult.detail ?? "failed"
+          : "still pending";
+        primaryAbort.abort();
+        finish({
+          ...result,
+          retryDetail: `app-server recovered by hedge after ${codexCapacityHedgeDelay(timeoutMs)}ms; primary: ${primaryDetail}`,
+        });
+        return;
+      }
+      maybeFinishFailure();
+    };
+
+    primary.then(observePrimary);
+    hedgeTimer = setTimeout(() => {
+      if (settled || primaryResult || !primaryHedgeEligible) return;
+      hedgeStarted = true;
+      hedgeAbort = new AbortController();
+      readCodexRuntime(config, bin, { ...deps, signal: hedgeAbort.signal }).then(observeHedge);
+    }, codexCapacityHedgeDelay(timeoutMs));
+  });
 }
 
 function selectCodexRuntime(
@@ -1116,11 +1196,11 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     if (active) {
       exchange = active;
     } else {
-      exchange = readCodexRuntimeWithTimeoutRetry(config, bin, deps);
+      exchange = readCodexRuntimeWithTimeoutHedge(config, bin, deps);
       codexCapacityInFlight.set(cacheKey, exchange);
     }
   } else {
-    exchange = readCodexRuntimeWithTimeoutRetry(config, bin, deps);
+    exchange = readCodexRuntimeWithTimeoutHedge(config, bin, deps);
   }
 
   let value: CodexRuntimeResult;
