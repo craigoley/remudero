@@ -71,6 +71,9 @@ export interface CreditedTaskDeclaration {
  * - `plan-only` — the shard declares only `plan/` paths, so a plan-only diff genuinely builds it.
  * - `undeterminable` — the check could not answer. NEVER treated as missing.
  *
+ */
+
+/**
  * A TUPLE RATHER THAN A BARE UNION, for a measured reason: `diff-coverage`'s type-only exemption
  * (`computeTypeOnlyRanges`) carves out `interface` and object-`type` members BY BRACE CONTEXT, and a
  * string union has no braces — so each `| "member"` line took a `DA:<line>,0` the gate would not
