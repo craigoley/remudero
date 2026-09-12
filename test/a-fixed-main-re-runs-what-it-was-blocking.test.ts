@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
+import { gitRepo } from "./helpers/git-repo.js";
 import {
   LOCAL_MERGE_CHECK_ROUTES,
   localMergeRouteContractErrors,
@@ -173,35 +172,38 @@ test("W1-T3422: an unregistered or failing local route never mints a new head", 
 test("W1-T3422: the check route is declared against ci.yml and executes in a real isolated merge", () => {
   const repoRoot = join(process.cwd());
   assert.deepEqual(localMergeRouteContractErrors(readFileSync(join(repoRoot, ".github", "workflows", "ci.yml"), "utf8")), []);
-  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t3422-"));
-  const remote = join(root, "remote.git");
-  const source = join(root, "source");
-  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
+  const remote = gitRepo({ bare: true, kind: "stale-red-origin" });
+  const source = gitRepo({ cloneFrom: remote.dir, kind: "stale-red-source" });
+  const savedGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
+  const savedSystemConfig = process.env.GIT_CONFIG_SYSTEM;
   try {
-    execFileSync("git", ["init", "--bare", "--initial-branch", "main", remote], { stdio: "ignore" });
-    execFileSync("git", ["clone", remote, source], { stdio: "ignore" });
-    git(source, "config", "user.email", "test@example.invalid");
-    git(source, "config", "user.name", "test");
-    writeFileSync(join(source, "package.json"), JSON.stringify({ private: true, scripts: { "comment-load-signal": "node -e \"process.exit(0)\"" } }));
-    writeFileSync(join(source, "README.md"), "base\n");
-    git(source, "add", ".");
-    git(source, "commit", "-m", "seed");
-    git(source, "push", "origin", "main");
-    git(source, "checkout", "-b", "pr-head");
-    writeFileSync(join(source, "pr.txt"), "head\n");
-    git(source, "add", ".");
-    git(source, "commit", "-m", "head");
-    const head = git(source, "rev-parse", "HEAD");
-    git(source, "push", "origin", "HEAD:refs/pull/1/head");
-    git(source, "checkout", "main");
-    writeFileSync(join(source, "README.md"), "main repair\n");
-    git(source, "add", ".");
-    git(source, "commit", "-m", "main repair");
-    const main = git(source, "rev-parse", "HEAD");
-    git(source, "push", "origin", "main");
-    const result = runIsolatedLocalMergeRoute(source, { prNumber: 1, headSha: head, mainSha: main, route: LOCAL_MERGE_CHECK_ROUTES[0]! });
+    writeFileSync(join(source.dir, "package.json"), JSON.stringify({ private: true, scripts: { "comment-load-signal": "node -e \"process.exit(0)\"" } }));
+    writeFileSync(join(source.dir, "README.md"), "base\n");
+    source.git("add", ".");
+    source.git("commit", "-m", "seed");
+    source.git("push", "origin", "main");
+    source.git("checkout", "-b", "pr-head");
+    writeFileSync(join(source.dir, "pr.txt"), "head\n");
+    source.git("add", ".");
+    source.git("commit", "-m", "head");
+    const head = source.git("rev-parse", "HEAD");
+    source.git("push", "origin", "HEAD:refs/pull/1/head");
+    source.git("checkout", "main");
+    writeFileSync(join(source.dir, "README.md"), "main repair\n");
+    source.git("add", ".");
+    source.git("commit", "-m", "main repair");
+    const main = source.git("rev-parse", "HEAD");
+    source.git("push", "origin", "main");
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+    process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+    const result = runIsolatedLocalMergeRoute(source.dir, { prNumber: 1, headSha: head, mainSha: main, route: LOCAL_MERGE_CHECK_ROUTES[0]! });
     assert.equal(result.outcome, "passed", result.detail);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    if (savedGlobalConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = savedGlobalConfig;
+    if (savedSystemConfig === undefined) delete process.env.GIT_CONFIG_SYSTEM;
+    else process.env.GIT_CONFIG_SYSTEM = savedSystemConfig;
+    source.cleanup();
+    remote.cleanup();
   }
 });

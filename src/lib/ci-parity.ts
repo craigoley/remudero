@@ -79,6 +79,12 @@ export interface IsolatedMergeRouteResult {
 
 const LOCAL_MERGE_GIT_TIMEOUT_MS = 60_000;
 const SHA40 = /^[0-9a-f]{40}$/i;
+const LOCAL_MERGE_COMMITTER_ARGS = [
+  "-c",
+  "user.name=Remudero isolated check",
+  "-c",
+  "user.email=isolated-check@remudero.invalid",
+] as const;
 
 function localMergeSpawn(
   command: string,
@@ -139,7 +145,7 @@ export function runIsolatedLocalMergeRoute(
     }
     const checkout = localMergeSpawn("git", ["-C", sandbox, "checkout", "--detach", headRef]);
     if (checkout.status !== 0) return { outcome: "source-unreadable", detail: `could not checkout PR head: ${localMergeFailureDetail(checkout)}` };
-    const merge = localMergeSpawn("git", ["-C", sandbox, "merge", "--no-commit", "--no-ff", mainRef]);
+    const merge = localMergeSpawn("git", ["-C", sandbox, ...LOCAL_MERGE_COMMITTER_ARGS, "merge", "--no-commit", "--no-ff", mainRef]);
     if (merge.status !== 0) return { outcome: "merge-failed", detail: localMergeFailureDetail(merge) };
     const sourceModules = join(repoRoot, "node_modules");
     const sandboxModules = join(sandbox, "node_modules");
