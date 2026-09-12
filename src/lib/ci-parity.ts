@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -27,6 +27,12 @@ const BOUNDED_SUITE_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
 const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
 const TSX_LOADER_PATH = require.resolve("tsx");
 const WORKER_CONTAINMENT_URL = new URL("./worker-containment.ts", import.meta.url).href;
+export const CI_COVERAGE_SHARD_COUNT = 4;
+
+export function coverageShardConcurrency(cpuCount: number = availableParallelism()): number {
+  const finite = Number.isFinite(cpuCount) ? Math.floor(cpuCount) : 1;
+  return Math.max(1, Math.min(CI_COVERAGE_SHARD_COUNT, finite));
+}
 
 /** The isolated supervisor for {@link runBoundedSuite}. It imports the established detached-group
  * spawn and negative-pgid SIGKILL helpers instead of copying either mechanism into ci-parity. The
@@ -599,13 +605,227 @@ function changedFilesListPath(repoRoot: string, spawn: PreflightSpawn): string {
   return path;
 }
 
-/** The full-suite-with-coverage leaf — ONE instrumented, source-mapped `node --test` run,
- *  `test/**` excluded from the ratio. INVARIANT: shared by BOTH callers (coverage-ratchet and
- *  {@link runPreflightCoverage}), so the one expensive invocation cannot drift the way a
- *  hand-copied argv does. Retried as ci.yml retries (W1-T255).
+/** The full-suite-with-coverage leaf — CI's four instrumented, source-mapped `node --test`
+ *  shards, `test/**` excluded from the ratio, merged into one lcov. INVARIANT: shared by BOTH
+ *  callers (coverage-ratchet and {@link runPreflightCoverage}), so the expensive invocation cannot
+ *  drift the way a hand-copied argv does.
  *  Why: docs/forensics/ci-parity.md. */
 export function coverageScratchDir(repoRoot: string): string {
   return join(repoRoot, "coverage", "tmp");
+}
+
+function coverageShardRoot(repoRoot: string): string {
+  return join(repoRoot, "coverage", "raw-shards");
+}
+
+function coverageShardRawDir(repoRoot: string, shard: number): string {
+  return join(coverageShardRoot(repoRoot), `shard-${shard}`, "raw");
+}
+
+function coverageShardLcovPath(repoRoot: string, shard: number): string {
+  return join(coverageShardRoot(repoRoot), `shard-${shard}`, "lcov.info");
+}
+
+function coverageShardArgs(repoRoot: string, shard: number): string[] {
+  return [
+    join(repoRoot, "scripts", "test-with-retry.mjs"),
+    process.execPath,
+    "--enable-source-maps",
+    "--experimental-test-coverage",
+    "--test-coverage-exclude=test/**",
+    "--test-reporter=spec",
+    "--test-reporter-destination=stdout",
+    "--test-reporter=lcov",
+    `--test-reporter-destination=${coverageShardLcovPath(repoRoot, shard)}`,
+    "--test",
+    `--test-shard=${shard}/${CI_COVERAGE_SHARD_COUNT}`,
+    "--import",
+    "tsx",
+    "--import",
+    TMP_HYGIENE_IMPORT,
+    "test/**/*.test.ts",
+  ];
+}
+
+function coverageRawDirHasArtifact(rawDir: string): boolean {
+  try {
+    return readdirSync(rawDir).some((name) => name.startsWith("coverage-") && name.endsWith(".json"));
+  } catch {
+    return false;
+  }
+}
+
+function coverageOutputHasTestSummary(output: string): boolean {
+  return /^# tests\s+\d+/m.test(output);
+}
+
+function coverageMergeArgs(repoRoot: string, lcovPath: string): string[] {
+  return [
+    "--expose-internals",
+    join(repoRoot, "scripts", "coverage-merge-ratchet.mjs"),
+    "--output",
+    lcovPath,
+    ...Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => coverageShardRawDir(repoRoot, i + 1)),
+  ];
+}
+
+function coverageShardRunnerProgram(workerContainmentUrl: string): string {
+  return [
+    'import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";',
+    `import { killProcessGroup, spawnDetachedGroup } from ${JSON.stringify(workerContainmentUrl)};`,
+    "const config = JSON.parse(process.argv[1]);",
+    "const hasArtifact = (dir) => {",
+    "  try { return readdirSync(dir).some((name) => name.startsWith('coverage-') && name.endsWith('.json')); }",
+    "  catch { return false; }",
+    "};",
+    "const hasSummary = (text) => /^# tests\\s+\\d+/m.test(text);",
+    "async function runOne(shard) {",
+    "  mkdirSync(shard.rawDir, { recursive: true });",
+    "  let output = '';",
+    "  let timedOut = false;",
+    "  return await new Promise((resolve) => {",
+    "    const child = spawnDetachedGroup(",
+    "      { command: config.node, args: shard.args, cwd: config.repoRoot, env: { ...process.env, TMPDIR: config.scratchDir, NODE_V8_COVERAGE: shard.rawDir } },",
+    "      (chunk) => { const text = String(chunk); output += text; process.stderr.write(text); },",
+    "    );",
+    "    child.process.stdout.on('data', (chunk) => { const text = String(chunk); output += text; process.stdout.write(text); });",
+    "    const timer = setTimeout(() => {",
+    "      timedOut = true;",
+    "      process.stderr.write(`coverage-ratchet: shard ${shard.index}/${config.shardCount} exceeded ${config.timeoutMs}ms; killing its process group with SIGKILL.\\n`);",
+    "      killProcessGroup(child.pid);",
+    "    }, config.timeoutMs);",
+    "    child.process.once('error', (error) => { clearTimeout(timer); resolve({ shard, status: null, error: error.message, output, timedOut }); });",
+    "    child.process.once('close', (code, signal) => { clearTimeout(timer); resolve({ shard, status: typeof code === 'number' ? code : 1, signal, output, timedOut }); });",
+    "  });",
+    "}",
+    "async function runPool() {",
+    "  const results = [];",
+    "  let next = 0;",
+    "  async function worker() {",
+    "    while (next < config.shards.length) {",
+    "      const shard = config.shards[next++];",
+    "      results.push(await runOne(shard));",
+    "    }",
+    "  }",
+    "  await Promise.all(Array.from({ length: config.concurrency }, worker));",
+    "  return results.sort((a, b) => a.shard.index - b.shard.index);",
+    "}",
+    "function fail(message) { console.error(message); process.exitCode = 1; }",
+    "const results = await runPool();",
+    "for (const r of results) {",
+    "  if (r.timedOut) { fail(`coverage-ratchet: shard ${r.shard.index}/${config.shardCount} timed out; the suite's failure set is UNVERIFIED.`); }",
+    "  else if (r.error) { fail(`coverage-ratchet: shard ${r.shard.index}/${config.shardCount} spawn failed: ${r.error}`); }",
+    "  else if (r.status !== 0) { fail(`coverage-ratchet: shard ${r.shard.index}/${config.shardCount} exited ${r.status}; failing before coverage gates.`); }",
+    "  if (!hasSummary(r.output)) { fail(`coverage-ratchet: shard ${r.shard.index}/${config.shardCount} produced no # tests summary; refusing to fold an unverified shard into the coverage total.`); }",
+    "  if (!hasArtifact(r.shard.rawDir)) { fail(`coverage-ratchet: expected raw V8 coverage for shard ${r.shard.index}; refusing a partial merge.`); }",
+    "}",
+    "if (process.exitCode) process.exit();",
+    "const merge = spawnDetachedGroup({ command: config.node, args: config.mergeArgs, cwd: config.repoRoot, env: process.env }, (chunk) => process.stderr.write(String(chunk)));",
+    "merge.process.stdout.on('data', (chunk) => process.stdout.write(String(chunk)));",
+    "const mergeStatus = await new Promise((resolve) => {",
+    "  merge.process.once('error', (error) => { process.stderr.write(`coverage-ratchet: coverage merge failed to spawn: ${error.message}\\n`); resolve(1); });",
+    "  merge.process.once('close', (code) => resolve(typeof code === 'number' ? code : 1));",
+    "});",
+    "process.exitCode = mergeStatus;",
+  ].join("\n");
+}
+
+function runCoverageShardsBounded(repoRoot: string, lcovPath: string, timeoutMs: number): CiParityLeafResult {
+  const shardRoot = coverageShardRoot(repoRoot);
+  try {
+    rmSync(shardRoot, { recursive: true, force: true });
+    mkdirSync(shardRoot, { recursive: true });
+  } catch {
+    // The helper below reports any concrete artifact failure; this setup is best-effort for tests.
+  }
+  const concurrency = coverageShardConcurrency();
+  const config = {
+    repoRoot,
+    node: process.execPath,
+    shardCount: CI_COVERAGE_SHARD_COUNT,
+    concurrency,
+    timeoutMs,
+    scratchDir: coverageScratchDir(repoRoot),
+    mergeArgs: coverageMergeArgs(repoRoot, lcovPath),
+    shards: Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => {
+      const shard = i + 1;
+      return { index: shard, rawDir: coverageShardRawDir(repoRoot, shard), args: coverageShardArgs(repoRoot, shard) };
+    }),
+  };
+  const res = spawnSync(
+    process.execPath,
+    ["--import", TSX_LOADER_PATH, "--input-type=module", "--eval", coverageShardRunnerProgram(WORKER_CONTAINMENT_URL), JSON.stringify(config)],
+    {
+      cwd: repoRoot,
+      env: { ...process.env, TMPDIR: coverageScratchDir(repoRoot) },
+      encoding: "utf8",
+      maxBuffer: BOUNDED_SUITE_SPAWN_MAX_BUFFER,
+    },
+  );
+  const spawnFailed = spawnFailureDetail("coverage-ratchet:test-with-coverage shards", {
+    status: res.status,
+    error: res.error?.message,
+    signal: res.signal ?? undefined,
+  });
+  if (spawnFailed) return { ok: false, detail: spawnFailed };
+  const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+  if (res.status === 0) {
+    return {
+      ok: true,
+      detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s), concurrency ${concurrency}); merged coverage/lcov.info`,
+    };
+  }
+  return { ok: false, detail: `FAIL — coverage-ratchet:test-with-coverage shards\n${output.trim()}` };
+}
+
+function testWithCoverageShardsViaSpawn(repoRoot: string, spawn: PreflightSpawn, lcovPath: string): CiParityLeafResult {
+  const outputs = new Map<number, string>();
+  for (let shard = 1; shard <= CI_COVERAGE_SHARD_COUNT; shard += 1) {
+    const rawDir = coverageShardRawDir(repoRoot, shard);
+    mkdirSync(rawDir, { recursive: true });
+    const label = `coverage-ratchet:test-with-coverage shard ${shard}/${CI_COVERAGE_SHARD_COUNT}`;
+    const res = spawn(process.execPath, coverageShardArgs(repoRoot, shard), {
+      cwd: repoRoot,
+      stream: true,
+      env: { TMPDIR: coverageScratchDir(repoRoot), NODE_V8_COVERAGE: rawDir },
+    });
+    const spawnFailed = spawnFailureDetail(label, res);
+    if (spawnFailed) return { ok: false, detail: spawnFailed };
+    const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+    outputs.set(shard, output);
+    if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}` };
+  }
+  const seamProducedShardEvidence =
+    [...outputs.values()].some((output) => output.trim() !== "") ||
+    Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => coverageShardRawDir(repoRoot, i + 1)).some(coverageRawDirHasArtifact);
+  if (seamProducedShardEvidence) {
+    for (let shard = 1; shard <= CI_COVERAGE_SHARD_COUNT; shard += 1) {
+      if (!coverageOutputHasTestSummary(outputs.get(shard) ?? "")) {
+        return {
+          ok: false,
+          detail: `FAIL — coverage-ratchet: shard ${shard}/${CI_COVERAGE_SHARD_COUNT} produced no # tests summary; refusing to fold an unverified shard into the coverage total.`,
+        };
+      }
+      if (!coverageRawDirHasArtifact(coverageShardRawDir(repoRoot, shard))) {
+        return {
+          ok: false,
+          detail: `FAIL — coverage-ratchet: expected raw V8 coverage for shard ${shard}; refusing a partial merge.`,
+        };
+      }
+    }
+  }
+  const merge = shellOut(
+    spawn,
+    "coverage-merge-ratchet.mjs --output coverage/lcov.info (4 coverage shards)",
+    process.execPath,
+    coverageMergeArgs(repoRoot, lcovPath),
+    { cwd: repoRoot },
+  );
+  if (!merge.ok) return merge;
+  return {
+    ok: true,
+    detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s), concurrency ${coverageShardConcurrency()}); merged coverage/lcov.info`,
+  };
 }
 
 function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath: string): CiParityLeafResult {
@@ -617,50 +837,8 @@ function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath:
   } catch {
     // best-effort — an injected spawn may point repoRoot at a fixture needing no coverage/ directory.
   }
-  return boundedSuiteLeaf(
-    spawn,
-    "coverage-ratchet:test-with-coverage (test/**/*.test.ts)",
-    process.execPath,
-    [
-      join(repoRoot, "scripts", "test-with-retry.mjs"),
-      process.execPath,
-      "--enable-source-maps",
-      "--experimental-test-coverage",
-      "--test-coverage-exclude=test/**",
-      "--test-reporter=spec",
-      "--test-reporter-destination=stdout",
-      "--test-reporter=lcov",
-      `--test-reporter-destination=${lcovPath}`,
-      "--test",
-      "--import",
-      "tsx",
-      "--import",
-      TMP_HYGIENE_IMPORT,
-      "test/**/*.test.ts",
-    ],
-    // `stream: true` — the multi-minute step. This one already asks for
-    // `--test-reporter=spec --test-reporter-destination=stdout` EXPLICITLY, so it has been
-    // writing per-file progress lines the whole time and a non-streamed call would buffer every
-    // one of them. Nothing reads this step's stdout as data: the lcov it produces goes to
-    // `lcovPath` on disk, which every caller's later steps read from there.
-    // KEEP THE RUNNER'S OWN COVERAGE SCRATCH INSIDE THE REPO. `--experimental-test-coverage` makes
-    // the test runner allocate `mkdtemp(join(tmpdir(), "node-coverage-"))` for its children and
-    // remove it only on a NORMAL exit, so every killed run leaks one. Measured on this host: 6.0G
-    // in a single leaked directory, and enough of them filled a 29G root to 100% — which then
-    // corrupted a later gate that died on ENOSPC with no `# tests` summary while reporting four
-    // failures that were artefacts of the full disk rather than of any diff.
-    //
-    // ⚠ `NODE_V8_COVERAGE` DOES NOT MOVE IT, and that is worth stating because it is the obvious
-    // guess and it is wrong: MEASURED, with the variable set to a repo path the runner STILL wrote
-    // under `/tmp` and never created the named directory — it overrides the variable for the
-    // children it spawns. `TMPDIR` is the lever that actually relocates it (same probe, control on
-    // both sides: without it 1 directory under /tmp and 0 under the target; with it, 0 and 1).
-    //
-    // Pointed at `coverage/` — already gitignored, already this step's artefact directory — a leak
-    // lands somewhere bounded, visible and owned by the repo instead of on the host's root
-    // filesystem, and `coverageScratchDir` clears it before each run so leaks cannot accumulate.
-    { cwd: repoRoot, stream: true, env: { TMPDIR: coverageScratchDir(repoRoot) } },
-  );
+  if (spawn !== defaultPreflightSpawn) return testWithCoverageShardsViaSpawn(repoRoot, spawn, lcovPath);
+  return runCoverageShardsBounded(repoRoot, lcovPath, LOCAL_FULL_SUITE_TIMEOUT_MS);
 }
 
 /** The shared shape for a job whose CI step is exactly an npm script — no re-derived argv to drift. */
@@ -1287,6 +1465,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       const lcovPath = join(repoRoot, "coverage", "lcov.info");
       const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
       const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath));
+      if (!test.ok) return [refresh, test];
       const ratchet = runStep("coverage-ratchet:ratchet", () =>
         shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
           cwd: repoRoot,
