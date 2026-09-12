@@ -46,7 +46,7 @@ function fixablePr(prNumber: number): OpenPrView {
     ],
     reviewSummary: "one criterion unmet",
     priorStrikes: 0,
-    lastActivityAt: "2026-09-05T19:00:00Z",
+    lastActivityAt: "2026-09-05T19:00:00Z", // expiring-fixture: exempt -- this suite pins deps.now, so the wall clock cannot move the disposition
     headSha: `fix-${prNumber}`,
     autoMergeArmed: false,
   };
@@ -61,7 +61,7 @@ function reviewablePr(prNumber: number): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-05T18:00:00Z",
+    lastActivityAt: "2026-09-05T18:00:00Z", // expiring-fixture: exempt -- this suite pins deps.now, so the wall clock cannot move the disposition
     headSha: `review-${prNumber}`,
     autoMergeArmed: false,
   };
