@@ -1049,6 +1049,7 @@
     "test/rest-merge-fallback.test.ts": 1154,
     "test/rest-merge-unsettled-retry.test.ts": 1328,
     "test/rest-rollup-started-at.test.ts": 865,
+    "test/retired-task-open-pr-disposition.test.ts": 0,
     "test/retirement-reaches-its-reader.test.ts": 7893,
     "test/retro-acceptance-block-shape.test.ts": 1212,
     "test/retro-acceptance-repair.test.ts": 1350,
