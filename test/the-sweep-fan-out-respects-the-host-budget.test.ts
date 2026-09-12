@@ -23,6 +23,7 @@ import {
 import { activeWorkerCount, withWorkerOccupancy } from "../src/lib/worker.js";
 
 const NOW = Date.parse("2026-09-05T20:00:00Z");
+// Activity fixtures derive from NOW below so the live wall clock cannot age them.
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-t2931-")), "ledger.ndjson");
