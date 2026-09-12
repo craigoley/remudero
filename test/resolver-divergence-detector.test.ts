@@ -126,7 +126,7 @@ test("a trailer that resolves nothing (unloadable plan) is DISTINGUISHABLE from 
   // fixtures (its divergence shape is unchanged), while `reviewCommand`'s live wiring reads the
   // plan at the PR's own head sha instead of the container's checked-out tree.
   const runTaskSrc = readSrc("run-task.ts");
-  const ifTaskIdBlock = /if\s*\(taskId\)\s*{\s*const resolved = resolvePlanCriteriaAtHead\(body, repoRoot, /;
+  const ifTaskIdBlock = /if\s*\(taskId\)\s*{\s*const resolved = resolvePlanCriteriaAtHead\(body, [A-Za-z][A-Za-z0-9]*, /;
   assert.match(runTaskSrc, ifTaskIdBlock, "resolvePlanCriteriaAtHead must be gated on a resolved taskId, never called for an untrailered body");
 });
 
