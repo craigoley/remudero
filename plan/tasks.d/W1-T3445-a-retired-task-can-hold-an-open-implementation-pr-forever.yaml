@@ -80,4 +80,8 @@
     `src/lib/sweep.ts`, and the current W1-T3331 shard. Reject any patch whose trigger is prose,
     `status: blocked`, a plan-only diff inferred from absence, or a task id without a readable
     retirement record.
-  note: "Reservation W1-T3445 was atomically claimed on origin before filing. This is the queue-reconciliation successor to the observed #5202 close, not a rewrite of W1-T3331 or W1-T3422."
+  note: |
+    Reservation W1-T3445 was atomically claimed on origin before filing. This is the
+    queue-reconciliation successor to the observed #5202 close, not a rewrite of W1-T3331 or
+    W1-T3422.
+    reservation hand-off: main -> plan/W1-T3445-close-retired-task-prs
