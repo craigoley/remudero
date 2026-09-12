@@ -163,6 +163,18 @@ test("a throwing check is a row, not a crash — the rung can never take the dae
   assert.match(String(rows[0].extra?.error), /plan unreadable/);
 });
 
+test("a throwing audit is a row, not a crash — the tick keeps the decision reason", async () => {
+  const rows = await creditRows({
+    checkCreditTruth: () => FIRES,
+    runCreditTruthAudit: async () => {
+      throw new Error("credit projection unreadable");
+    },
+  });
+  assert.deepEqual(rows.map((r) => r.step), ["credit_truth.fired", "credit_truth.run_failed"]);
+  assert.equal(rows[1].extra?.reason, FIRES.reason);
+  assert.match(String(rows[1].extra?.error), /credit projection unreadable/);
+});
+
 test("an undeterminable audit is its own row, never silence or a false clean", async () => {
   const rows = await creditRows({
     checkCreditTruth: () => FIRES,
