@@ -654,6 +654,8 @@ export interface BuildSweepEffectsDeps {
   runNpmScriptImpl?: SweepRuntimeFn;
   commitGeneratorOutputImpl?: SweepRuntimeFn;
   readPackageScriptsImpl?: SweepRuntimeFn;
+  proveFixedMainBlockerImpl?: SweepRuntimeFn;
+  refireFixedMainPrImpl?: SweepRuntimeFn;
   dispatchFixCatchOutcomeImpl?: typeof dispatchFixCatchOutcome;
   worktreeRemoveImpl?: typeof worktreeRemove;
   fixBranchClaimKeyImpl?: SweepRuntimeFn;
@@ -819,6 +821,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readCiGateRollup"
   | "reaggregateCiGate"
   | "readMainTip"
+  | "proveFixedMainBlocker"
+  | "refireFixedMainPr"
   | "releaseBaseCausedStandDown"
   | "rebaseDirtyFleetBranch"
   | "selectAdaptiveReviewWidth"
@@ -880,6 +884,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     runNpmScriptImpl: runNpmScriptViaSpawn = requiredSweepRuntime("runNpmScriptImpl"),
     commitGeneratorOutputImpl: commitGeneratorOutputViaGit = requiredSweepRuntime("commitGeneratorOutputImpl"),
     readPackageScriptsImpl: readPackageScriptsFor = requiredSweepRuntime("readPackageScriptsImpl"),
+    proveFixedMainBlockerImpl,
+    refireFixedMainPrImpl,
     dispatchFixCatchOutcomeImpl: dispatchFixCatchOutcomeForBuild = dispatchFixCatchOutcome,
     worktreeRemoveImpl: worktreeRemoveForBuild = worktreeRemove,
     fixBranchClaimKeyImpl: fixBranchClaimKey = requiredSweepRuntime("fixBranchClaimKeyImpl"),
@@ -1361,6 +1367,42 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           error: String((e as Error)?.message ?? e),
         });
       }
+    },
+
+    proveFixedMainBlocker: async (pr, decision) =>
+      proveFixedMainBlockerImpl
+        ? await proveFixedMainBlockerImpl(pr, decision)
+        : proveFixedMainBlockerViaLocalMerge(
+            repoDir,
+            join(worktreesDir(config), `fixed-main-refire-${pr.prNumber}-${nowMsImpl()}`),
+            pr,
+            decision,
+            {
+              runScript: runNpmScriptViaSpawn,
+              readPackageScripts: readPackageScriptsFor,
+              worktreeRemoveImpl: worktreeRemoveForBuild,
+            },
+          ),
+
+    refireFixedMainPr: async (pr, decision, proof) => {
+      if (refireFixedMainPrImpl) return await refireFixedMainPrImpl(pr, decision, proof);
+      ghRunImpl("gh", [
+        "pr",
+        "close",
+        pr.prUrl,
+        "--comment",
+        `Temporarily closed by rmd sweep to refire checks after main ${decision.mainTipSha} fixed ${decision.checkNames.join(", ")}.`,
+      ]);
+      ghRunImpl("gh", ["pr", "reopen", pr.prUrl]);
+      log("sweep.fixed_main_refire.dispatched", {
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        main_tip_sha: decision.mainTipSha,
+        stale_failure_completed_at: decision.staleFailureCompletedAt,
+        check_names: decision.checkNames,
+        local_gate_exit: proof.localGateExit,
+      });
+      return true;
     },
 
     // W1-T78 — the CLARIFICATION-QUESTION rung's real wiring: `question` is
@@ -2017,8 +2059,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // byte-identical to omitting this dep — see `SweepDeps.readMainTip`'s own doc.
     readMainTip: async () => {
       try {
-        const commit = (await readJsonImpl(["api", `repos/${owner}/${repo}/commits/main`])) as { sha?: string };
-        return typeof commit?.sha === "string" ? commit.sha : undefined;
+        const commit = (await readJsonImpl(["api", `repos/${owner}/${repo}/commits/main`])) as {
+          sha?: string;
+          commit?: { committer?: { date?: string } };
+        };
+        if (typeof commit?.sha !== "string") return undefined;
+        const committedAt = commit.commit?.committer?.date;
+        return typeof committedAt === "string" ? { sha: commit.sha, committedAt } : commit.sha;
       } catch (error) {
         void error;
         // Best-effort main-tip read: unreadable and absent both leave this optional dep omitted.
@@ -2109,6 +2156,8 @@ export interface CiFailure {
    *  Never asserted without positive evidence: merely unknown fails toward "assume it is the PR's
    *  own", never inventing an exoneration the read cannot support. */
   outsidePrRange?: boolean;
+  /** When GitHub says this failing attempt completed. Used only for fixed-main refire staleness. */
+  completedAt?: string;
   /** WHY {@link logTail} is empty, when it is (W1-T2291, which split one empty tail into named
    *  causes). Present ONLY when the tail is empty and a cause was observed, absent whenever a tail
    *  was captured — so `logUnavailable !== undefined` never fires on a real tail. */
@@ -2826,6 +2875,8 @@ export interface OpenPrView {
    *  head, distinct from a genuine failure ({@link ciFailures} names both). Never makes
    *  `checksState` anything but "red" — see {@link CancelledRequiredCheck}. */
   cancelledRequiredChecks?: CancelledRequiredCheck[];
+  /** Required check names with a queued/in-progress latest attempt; a close/reopen would cancel it. */
+  inFlightCheckNames?: readonly string[];
   /** W1-T2504/W1-T2599 — concluded red children from ci-gate's checked-in REQUIRED contract. */
   redRequiredChecks?: string[];
   /** W1-T2340 — this head's own workflow runs, the raw input {@link stalledRunReason} reads.
@@ -4060,6 +4111,175 @@ export async function selectStaleBaseRelease(
     }
   }
   return undefined;
+}
+
+export interface MainTipObservation {
+  sha: string;
+  committedAt?: string;
+}
+
+export function mainTipObservation(value: string | MainTipObservation | undefined): MainTipObservation | undefined {
+  if (typeof value === "string") return { sha: value };
+  if (value && typeof value.sha === "string") return value;
+  return undefined;
+}
+
+export type FixedMainRefireDecision =
+  | { refire: false; reason: string; key?: string; mainTipSha?: string; mainTipCommittedAt?: string; staleFailureCompletedAt?: string; checkNames?: readonly string[] }
+  | { refire: true; reason: string; key: string; mainTipSha: string; mainTipCommittedAt: string; staleFailureCompletedAt: string; checkNames: readonly string[] };
+
+export type FixedMainBlockerProof =
+  | { passed: false; reason: string; localGateExit?: number }
+  | { passed: true; reason: string; localGateExit: number };
+
+export const FIXED_MAIN_REFIRE_STEP = "sweep.fixed_main_refire";
+
+export function fixedMainRefireKey(prNumber: number, mainTipSha: string): string {
+  return `${prNumber}@${mainTipSha}`;
+}
+
+export function fixedMainRefireKeysFromLedger(lines: readonly Record<string, unknown>[]): Set<string> {
+  const out = new Set<string>();
+  for (const line of lines) {
+    if (
+      line.step === FIXED_MAIN_REFIRE_STEP &&
+      typeof line.pr_number === "number" &&
+      typeof line.main_tip_sha === "string"
+    ) {
+      out.add(fixedMainRefireKey(line.pr_number, line.main_tip_sha));
+    }
+  }
+  return out;
+}
+
+export function fixedMainRefireDecision(
+  pr: Pick<OpenPrView, "checksState" | "ciFailures" | "inFlightCheckNames" | "prNumber">,
+  mainTip: MainTipObservation | undefined,
+  priorKeys: ReadonlySet<string>,
+): FixedMainRefireDecision {
+  if (pr.checksState !== "red") return { refire: false, reason: "required checks are not red" };
+  const failures = pr.ciFailures ?? [];
+  if (failures.length === 0) return { refire: false, reason: "no failing check evidence was observed" };
+  if ((pr.inFlightCheckNames?.length ?? 0) > 0) {
+    return {
+      refire: false,
+      reason: `check run(s) already in flight: ${pr.inFlightCheckNames!.join(", ")}`,
+    };
+  }
+  if (mainTip === undefined) return { refire: false, reason: "main tip was unreadable" };
+  if (mainTip.committedAt === undefined) return { refire: false, reason: "main tip commit time was unreadable" };
+  const mainAt = Date.parse(mainTip.committedAt);
+  if (Number.isNaN(mainAt)) return { refire: false, reason: "main tip commit time was unparseable" };
+
+  let newestFailureMs = Number.NEGATIVE_INFINITY;
+  let newestFailureAt: string | undefined;
+  const checkNames: string[] = [];
+  for (const failure of failures) {
+    if (!checkNames.includes(failure.name)) checkNames.push(failure.name);
+    if (failure.completedAt === undefined) continue;
+    const completed = Date.parse(failure.completedAt);
+    if (!Number.isNaN(completed) && completed > newestFailureMs) {
+      newestFailureMs = completed;
+      newestFailureAt = failure.completedAt;
+    }
+  }
+  if (newestFailureAt === undefined) return { refire: false, reason: "newest failing check completion time was unreadable" };
+  if (newestFailureMs >= mainAt) {
+    return {
+      refire: false,
+      reason: `newest failing check completed at ${newestFailureAt}, not before main ${mainTip.sha}`,
+    };
+  }
+  const key = fixedMainRefireKey(pr.prNumber, mainTip.sha);
+  if (priorKeys.has(key)) {
+    return {
+      refire: false,
+      reason: `already refired PR #${pr.prNumber} against main ${mainTip.sha}`,
+      key,
+      mainTipSha: mainTip.sha,
+      mainTipCommittedAt: mainTip.committedAt,
+      staleFailureCompletedAt: newestFailureAt,
+      checkNames,
+    };
+  }
+  return {
+    refire: true,
+    reason: `newest failure completed at ${newestFailureAt}, before main ${mainTip.sha} landed at ${mainTip.committedAt}`,
+    key,
+    mainTipSha: mainTip.sha,
+    mainTipCommittedAt: mainTip.committedAt,
+    staleFailureCompletedAt: newestFailureAt,
+    checkNames,
+  };
+}
+
+export function proveFixedMainBlockerViaLocalMerge(
+  repoDir: string,
+  worktreePath: string,
+  pr: Pick<OpenPrView, "prNumber" | "headRefName" | "headSha">,
+  decision: FixedMainRefireDecision,
+  deps: {
+    git?: DirtyFleetRebaseGit;
+    runScript: (script: string, cwd: string) => { status: number; stdout: string; stderr: string };
+    readPackageScripts: (worktreePath: string) => Readonly<Record<string, string>>;
+    worktreeRemoveImpl?: typeof worktreeRemove;
+  },
+): FixedMainBlockerProof {
+  if (!decision.refire || !decision.checkNames || decision.checkNames.length === 0) {
+    return { passed: false, reason: "fixed-main refire decision did not name any failing check" };
+  }
+  if (!pr.headRefName) return { passed: false, reason: `PR #${pr.prNumber} has no head branch to fetch` };
+  const git = deps.git ?? defaultDirtyFleetRebaseGit;
+  const remove = deps.worktreeRemoveImpl ?? worktreeRemove;
+  const run = (cwd: string, args: readonly string[]): string => git("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: "pipe" });
+  let worktreeCreated = false;
+  try {
+    mkdirSync(dirname(worktreePath), { recursive: true });
+    run(repoDir, [
+      "fetch",
+      "--no-tags",
+      "--quiet",
+      "origin",
+      "+refs/heads/main:refs/remotes/origin/main",
+      `+refs/heads/${pr.headRefName}:refs/remotes/origin/${pr.headRefName}`,
+    ]);
+    const observedHead = run(repoDir, ["rev-parse", `refs/remotes/origin/${pr.headRefName}`]).trim();
+    if (observedHead !== pr.headSha) {
+      return {
+        passed: false,
+        reason: `origin/${pr.headRefName} moved from ${pr.headSha} to ${observedHead} before fixed-main proof`,
+      };
+    }
+    run(repoDir, ["worktree", "add", "--detach", worktreePath, pr.headSha]);
+    worktreeCreated = true;
+    try {
+      run(worktreePath, ["merge", "--no-commit", "--no-ff", "origin/main"]);
+    } catch (error) {
+      return { passed: false, reason: `local merge with main failed: ${capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP)}` };
+    }
+    const scripts = deps.readPackageScripts(worktreePath);
+    for (const checkName of decision.checkNames) {
+      if (!Object.hasOwn(scripts, checkName)) {
+        return { passed: false, reason: `package.json has no script named ${checkName}` };
+      }
+      const result = deps.runScript(checkName, worktreePath);
+      if (result.status !== 0) {
+        const detail = capStderrExcerpt([result.stderr, result.stdout].filter(Boolean).join("\n"), STDERR_EXCERPT_CAP);
+        return { passed: false, reason: `${checkName} still fails on the local merge with main: ${detail}`, localGateExit: result.status };
+      }
+    }
+    return { passed: true, reason: "every stale failing gate passed on the local merge with main", localGateExit: 0 };
+  } catch (error) {
+    return { passed: false, reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP) };
+  } finally {
+    if (worktreeCreated) {
+      try {
+        remove(repoDir, worktreePath);
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  }
 }
 
 /**
@@ -5777,7 +5997,18 @@ export interface SweepDeps {
    *  per-PR walk; this module never calls gh or git, so the read is the caller's. Feeds
    *  {@link selectBaseCausedRelease}'s "main has moved" condition — never the `behind` GitHub
    *  reports, since a base-caused PR is red by construction. Omitted, the lane never fires. */
-  readMainTip?: () => string | undefined | Promise<string | undefined>;
+  readMainTip?: () => string | MainTipObservation | undefined | Promise<string | MainTipObservation | undefined>;
+  /** W1-T3331 — prove a stale red PR's failing gate now passes on an actual local merge with main. */
+  proveFixedMainBlocker?: (
+    pr: OpenPrView,
+    decision: FixedMainRefireDecision & { refire: true },
+  ) => FixedMainBlockerProof | Promise<FixedMainBlockerProof>;
+  /** W1-T3331 — emit a fresh pull_request event by closing and reopening the PR, never rerun-failed-jobs. */
+  refireFixedMainPr?: (
+    pr: OpenPrView,
+    decision: FixedMainRefireDecision & { refire: true },
+    proof: FixedMainBlockerProof & { passed: true },
+  ) => boolean | void | Promise<boolean | void>;
   /** W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
    *  AT-MOST-ONCE shape the update-branch dep uses. THE LEAF IS THE ONE THAT EXISTS, never a second
    *  outward path. Omitted, the target still stands down with the ordinary sentence; a THROW is
@@ -6701,12 +6932,14 @@ export async function runSweep(
   // W1-T1275 (design iv) — the SAME fresh-every-pass, ledger-only bound as `requeuedCheckKeys`
   // immediately above. See `reaggregatedCiGateKeysFromLedger`'s own doc.
   const reaggregatedCiGateKeys = reaggregatedCiGateKeysFromLedger(ledgerLines);
+  const fixedMainRefireKeys = fixedMainRefireKeysFromLedger(ledgerLines);
   // W1-T2345 — the SAME fresh-every-pass, ledger-only fold as `requeuedCheckKeys`/
   // `reaggregatedCiGateKeys` above. See `repeatDispositionStreaksFromLedger`'s own doc.
   const priorRepeatRuns = repeatDispositionStreaksFromLedger(ledgerLines);
   // W1-T2620 — ONE read per pass, never per PR; this module still never calls gh or git directly.
   // Omitted, the base-caused branch below is BYTE-IDENTICAL to before this task existed.
-  const mainTipSha = deps.readMainTip ? await deps.readMainTip() : undefined;
+  const mainTip = mainTipObservation(deps.readMainTip ? await deps.readMainTip() : undefined);
+  const mainTipSha = mainTip?.sha;
   // W1-T2620 — AT MOST ONE base-caused PR selected for release THIS pass, oldest activity first,
   // computed ONCE before the walk — the same single-winner shape `selectUpdateBranchTarget` uses.
   const baseCausedReleaseTarget =
@@ -7401,6 +7634,45 @@ export async function runSweep(
                 acted = false;
                 standDownReason = missingTrailerRepair.standDownReason;
                 break;
+              }
+              const fixedMainDecision = fixedMainRefireDecision(pr, mainTip, fixedMainRefireKeys);
+              if (
+                fixedMainDecision.refire &&
+                deps.proveFixedMainBlocker &&
+                deps.refireFixedMainPr
+              ) {
+                const proof = await deps.proveFixedMainBlocker(pr, fixedMainDecision);
+                if (proof.passed) {
+                  appendLine(deps.ledgerPath, {
+                    run_id: deps.runId,
+                    task_id: pr.taskId ?? "SWEEP",
+                    step: FIXED_MAIN_REFIRE_STEP,
+                    pr_number: pr.prNumber,
+                    pr_url: pr.prUrl,
+                    head_sha: pr.headSha,
+                    main_tip_sha: fixedMainDecision.mainTipSha,
+                    main_tip_committed_at: fixedMainDecision.mainTipCommittedAt,
+                    stale_failure_completed_at: fixedMainDecision.staleFailureCompletedAt,
+                    check_names: fixedMainDecision.checkNames,
+                    local_gate_exit: proof.localGateExit,
+                  });
+                  fixedMainRefireKeys.add(fixedMainDecision.key);
+                  await deps.refireFixedMainPr(pr, fixedMainDecision, proof);
+                  acted = false;
+                  standDownReason =
+                    `fixed-main refire: ${fixedMainDecision.reason}; local merge proof passed ` +
+                    `(${proof.reason}); close/reopen event emitted once for main ${fixedMainDecision.mainTipSha}`;
+                  break;
+                }
+                log("sweep.fixed_main_refire.declined", {
+                  pr_number: pr.prNumber,
+                  head_sha: pr.headSha,
+                  main_tip_sha: fixedMainDecision.mainTipSha,
+                  stale_failure_completed_at: fixedMainDecision.staleFailureCompletedAt,
+                  check_names: fixedMainDecision.checkNames,
+                  reason: proof.reason,
+                  local_gate_exit: proof.localGateExit,
+                });
               }
               // W1-T527 — CLASSIFY BEFORE SELECTING, because the strike is spent at dispatch and
               // cannot be refunded. `classifyRedCause` is a pure fold over evidence already in
