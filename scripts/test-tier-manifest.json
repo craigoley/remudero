@@ -157,6 +157,7 @@
     "test/a-reply-is-understood-before-it-is-acted-on.test.ts": 1287,
     "test/a-repo-skill-no-worker-can-reach.test.ts": 0,
     "test/a-report-with-no-reader-is-not-a-report.test.ts": 866,
+    "test/a-required-check-outside-ci-yml-has-a-local-route.test.ts": 0,
     "test/a-required-comment-must-not-cost-a-relocation.test.ts": 0,
     "test/a-reservation-names-its-holder.test.ts": 0,
     "test/a-reservation-says-whether-anything-still-holds-it.test.ts": 0,
