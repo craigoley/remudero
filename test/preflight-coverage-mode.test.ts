@@ -225,7 +225,12 @@ test("runPreflightCoverage: the suite run itself failing (e.g. a real test failu
   const { spawn, calls } = recordingSpawn({
     [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
-    "test-with-retry.mjs": { status: 1, stderr: "1 test failed" },
+    // W1-T3299: the coverage suite no longer routes through test-with-retry.mjs. CI's own
+    // coverage-shard job says so outright — "`scripts/test-with-retry.mjs` is GONE from this
+    // invocation and STAYS in the `ci` job" — and this local run exists to MIRROR that job, so
+    // keying the stub on the retry wrapper pinned a mechanism CI had already removed. The shard
+    // invocation is what fails now; the short-circuit it must produce is unchanged.
+    "--test-shard=1/4": { status: 1, stderr: "1 test failed" },
   });
   const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
 

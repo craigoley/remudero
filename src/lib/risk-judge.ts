@@ -28,6 +28,14 @@ import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.j
 // ── The verdict contract ────────────────────────────────────────────────
 
 export type RiskJudgeVerdictLabel = "low" | "high";
+export type RiskJudgeGateConsequence = "LAND" | "REPAIR" | "LAND+DEBT" | "STOP";
+
+export const RISK_JUDGE_GATE_CONSEQUENCES: readonly RiskJudgeGateConsequence[] = [
+  "LAND",
+  "REPAIR",
+  "LAND+DEBT",
+  "STOP",
+];
 
 /** What the judge returns for one candidate change — the reusable shape acceptance
  *  criterion 6 names verbatim: `{verdict, reasons, confidence}`. */
@@ -37,6 +45,8 @@ export interface RiskJudgeVerdict {
   reasons: string[];
   /** 0..1, the judge's OWN self-reported confidence. Ledgered verbatim (round ii). */
   confidence: number;
+  /** Optional gate-posture consequence. Absent for ordinary change-risk judgments. */
+  gateConsequence?: RiskJudgeGateConsequence;
 }
 
 // ── What the judge is shown — the candidate CHANGE, never task.risk ──────
@@ -207,6 +217,26 @@ function renderChangeViewLines(changeView: RiskJudgeChangeView | undefined): str
   return lines;
 }
 
+function riskJudgeGateConsequenceLines(input: RiskJudgeInput): string[] {
+  if (!("gate_finding" in input.gatesState)) return [];
+  return [
+    ``,
+    `DETERMINISTIC GATE FINDING: the GATES STATE includes a gate_finding object.`,
+    `Treat that finding as TRUE. Do not decide whether it happened, whether the`,
+    `predicate is well-written, or whether the diff can talk it away. Judge only`,
+    `the consequence the automation should take from that already-established fact.`,
+    ``,
+    `Choose exactly one gate consequence:`,
+    `  LAND      — the finding is immaterial; proceed and ledger the reason`,
+    `  REPAIR    — the remedy is computable; apply it and land`,
+    `  LAND+DEBT — land only after filing a bounded follow-up for the deferred work`,
+    `  STOP      — unrecoverable only: secrets, destructive migration, or broken recovery path`,
+    ``,
+    `STOP is not the consequence for ordinary incompleteness. If the finding is`,
+    `recoverable but real, prefer REPAIR or LAND+DEBT.`,
+  ];
+}
+
 /** Render the risk judge's prompt: candidate change, gates state, plan context — never
  *  the static `risk:` field. */
 /**
@@ -307,6 +337,7 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
     `the change drifts from the plan or established practice, or the ACTUAL CHANGE`,
     `shape looks unusual, classify HIGH exactly as you would otherwise — regardless`,
     `of how the description reads.`,
+    ...riskJudgeGateConsequenceLines(input),
     ``,
     `CANDIDATE CHANGE: ${input.change.description}`,
     `FILES TOUCHED (declared): ${filesLine}`,
@@ -325,6 +356,7 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
     `each of these lines, and nothing else on the line:`,
     `  RISK_VERDICT: <low|high>`,
     `  RISK_CONFIDENCE: <0.0-1.0>`,
+    ...("gate_finding" in input.gatesState ? [`  RISK_GATE_CONSEQUENCE: <LAND|REPAIR|LAND+DEBT|STOP>`] : []),
     `and one or more lines naming the OBSERVED basis for your verdict — observed IN`,
     `THE TEXT ABOVE, never an inferred symptom of code you have not read (the`,
     `W1-T186 emitter discipline, applied to this judge's own evidentiary limits):`,
@@ -333,6 +365,7 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
 }
 
 const VALID_VERDICTS = new Set<RiskJudgeVerdictLabel>(["low", "high"]);
+const VALID_GATE_CONSEQUENCES = new Set<RiskJudgeGateConsequence>(RISK_JUDGE_GATE_CONSEQUENCES);
 
 /** The third state (W1-T2212), as a TYPE, not a policy: an unparseable response carries no
  *  `verdict`/`confidence`/`reasons` at all, so callers narrow on `.kind`, never on a boolean
@@ -347,9 +380,15 @@ export type RiskJudgeParseOutcome =
 export function parseRiskJudgeResponse(text: string): RiskJudgeParseOutcome {
   const verdictMatch = text.match(/RISK_VERDICT:\s*(\w+)/i);
   const confMatch = text.match(/RISK_CONFIDENCE:\s*([\d.]+)/i);
+  const gateConsequenceMatch = text.match(/RISK_GATE_CONSEQUENCE:\s*([A-Z+_-]+)/i);
 
   const verdict = verdictMatch?.[1]?.toLowerCase() as RiskJudgeVerdictLabel | undefined;
   if (!verdict || !VALID_VERDICTS.has(verdict)) {
+    return { kind: "unparseable", raw: text };
+  }
+
+  const gateConsequence = gateConsequenceMatch?.[1]?.toUpperCase() as RiskJudgeGateConsequence | undefined;
+  if (gateConsequence !== undefined && !VALID_GATE_CONSEQUENCES.has(gateConsequence)) {
     return { kind: "unparseable", raw: text };
   }
 
@@ -359,7 +398,13 @@ export function parseRiskJudgeResponse(text: string): RiskJudgeParseOutcome {
 
   const reasons = [...text.matchAll(/RISK_REASON:\s*(.+)/gi)].map((m) => m[1].trim());
 
-  return { kind: "parsed", verdict: { verdict, confidence, reasons } };
+  return {
+    kind: "parsed",
+    verdict:
+      gateConsequence === undefined
+        ? { verdict, confidence, reasons }
+        : { verdict, confidence, reasons, gateConsequence },
+  };
 }
 
 /** Fail-closed default for {@link parseRiskJudgeVerdict}'s old one-shot contract — kept
@@ -612,6 +657,7 @@ export async function runRiskJudge(
     verdict: verdict.verdict,
     reasons: verdict.reasons,
     confidence: verdict.confidence,
+    ...(verdict.gateConsequence === undefined ? {} : { gate_consequence: verdict.gateConsequence }),
     action: action.kind,
     reason: action.reason,
     ...(spent === undefined

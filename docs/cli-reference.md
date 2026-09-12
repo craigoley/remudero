@@ -23,7 +23,7 @@ usage:
   rmd plan-reconcile [--plan <path>] [--write]   # Flip status: queued to merged on shards the credit projection reports merged.
   rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
   rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
-  rmd next-task-id [--plan <path>] [--offline] [--reserve]   # Print (or --reserve atomically claim) the next free W1-T<n> task id.
+  rmd next-task-id [--plan <path>] [--offline] [--reserve] [--audit] [--audit-age-days <days>]   # Print (or --reserve atomically claim) the next free W1-T<n> task id.
   rmd emissions [--days N]   # Which CLI verbs wrote no ledger line in the window -- dead-capability detection.
   rmd receipt <pr> [--repo <name>]   # Print a deterministic in-toto-style run receipt from ledger ground truth.
   rmd replay <since> <until> [--task <id>] [--step <prefix>]   # Narrate a ledger window in plain text: what the fleet decided, in order.
@@ -86,6 +86,7 @@ usage:
   rmd bundle export <path> | rmd bundle import <file> --pin <hash>   # Export/import a hash-pinned bundle: doctrine, learnings, worker-settings, policy proposals.
   rmd trace <id>   # Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
   rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
+  rmd pr-owner <pr-number>   # Report whether the local ledger shows a fix lane owning one PR.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
@@ -191,10 +192,10 @@ W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and l
 Print (or --reserve atomically claim) the next free W1-T<n> task id.
 
 ```
-rmd next-task-id [--plan <path>] [--offline] [--reserve]
+rmd next-task-id [--plan <path>] [--offline] [--reserve] [--audit] [--audit-age-days <days>]
 ```
 
-print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.
+print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.
 
 ### `rmd emissions`
 
@@ -815,6 +816,16 @@ rmd peek <runId> [--lines <n>] [--follow]
 ```
 
 W1-T945: READ-ONLY tail of one run's output — the last <n> lines (default 50, never more than the 500-line ring ceiling) of its retained state/runs/<runId>.tail (W1-T942), printed with a LIVE/FINISHED verdict from the SAME liveInflightRuns pid-checked read every other liveness decision in this fleet uses — never a second definition of 'in flight'. Works identically on a FINISHED run's retained tail, the surviving half of fb-1784821673624-321a4b (its final-message half already shipped as report_excerpt, #1584). An unknown run id or an absent tail prints a NAMED reason and still exits 0 — never silent empty output. --follow re-polls and reprints on change, stopping on its own the moment the run is no longer live — it never hangs on an already-finished run. READ-ONLY BY CONSTRUCTION: no flag here writes to, signals, resumes or kills the run — there is no steering surface in v1.
+
+### `rmd pr-owner`
+
+Report whether the local ledger shows a fix lane owning one PR.
+
+```
+rmd pr-owner <pr-number>
+```
+
+W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. READ-ONLY: this verb writes, claims and releases nothing.
 
 ### `rmd plan`
 

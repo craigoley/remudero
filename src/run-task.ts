@@ -2087,6 +2087,242 @@ export async function peekCommand(
   return 0;
 }
 
+type PrOwnerVerdictName = "OWNED" | "FREE" | "UNKNOWN";
+
+interface PrOwnerEvidenceRow {
+  ts?: string;
+  taskId?: string;
+  runId?: string;
+  headSha?: string;
+}
+
+interface PrOwnerFixEvidence extends PrOwnerEvidenceRow {
+  strike?: number;
+  strikeCap?: number;
+  mode?: string;
+}
+
+interface PrOwnerSweepEvidence extends PrOwnerEvidenceRow {
+  disposition?: string;
+  reason?: string;
+  acted?: boolean;
+}
+
+interface PrOwnerVerdict {
+  verdict: PrOwnerVerdictName;
+  prNumber: number;
+  corpusNewestTs?: string;
+  reason: string;
+  archiveCount: number;
+  compressedArchiveCount: number;
+  liveFileRead: boolean;
+  filesRead: number;
+  fix?: PrOwnerFixEvidence;
+  sweep?: PrOwnerSweepEvidence;
+}
+
+interface PrOwnerLedgerRead {
+  rows: Array<Record<string, unknown>>;
+  archiveFiles: string[];
+  liveFileRead: boolean;
+  ok: boolean;
+  unread: string[];
+  filesRead: number;
+}
+
+function prNumberFromLedgerRow(row: Record<string, unknown>): number | undefined {
+  if (typeof row.pr_number === "number" && Number.isInteger(row.pr_number) && row.pr_number > 0) return row.pr_number;
+  if (typeof row.pr_url !== "string") return undefined;
+  const m = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(row.pr_url);
+  return m ? Number(m[1]) : undefined;
+}
+
+function parsePrOwnerNumber(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const n = raw.startsWith("#") ? Number(raw.slice(1)) : Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+function ledgerRowTime(row: Record<string, unknown>): number {
+  return typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+}
+
+function newestLedgerRow(rows: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> | undefined {
+  let newest: Record<string, unknown> | undefined;
+  let newestMs = Number.NEGATIVE_INFINITY;
+  for (const row of rows) {
+    const ms = ledgerRowTime(row);
+    if (!Number.isFinite(ms)) continue;
+    if (ms >= newestMs) {
+      newest = row;
+      newestMs = ms;
+    }
+  }
+  return newest;
+}
+
+function stringField(row: Record<string, unknown>, key: string): string | undefined {
+  return typeof row[key] === "string" ? row[key] : undefined;
+}
+
+function numberField(row: Record<string, unknown>, key: string): number | undefined {
+  return typeof row[key] === "number" ? row[key] : undefined;
+}
+
+function rowEvidence(row: Record<string, unknown>): PrOwnerEvidenceRow {
+  return {
+    ts: stringField(row, "ts"),
+    taskId: stringField(row, "task_id"),
+    runId: stringField(row, "run_id"),
+    headSha: stringField(row, "head_sha"),
+  };
+}
+
+function summarizeFixRow(row: Record<string, unknown>): PrOwnerFixEvidence {
+  return {
+    ...rowEvidence(row),
+    strike: numberField(row, "strike"),
+    strikeCap: numberField(row, "strike_cap"),
+    mode: stringField(row, "mode"),
+  };
+}
+
+function summarizeSweepRow(row: Record<string, unknown>): PrOwnerSweepEvidence {
+  return {
+    ...rowEvidence(row),
+    disposition: stringField(row, "disposition"),
+    reason: stringField(row, "reason"),
+    acted: typeof row.acted === "boolean" ? row.acted : undefined,
+  };
+}
+
+function activeSweepRow(row: Record<string, unknown>): boolean {
+  if (row.step !== "sweep.disposed") return false;
+  if (row.disposition === "wait") return true;
+  if ((row.disposition === "blocked-fixable" || row.disposition === "conflicted") && row.acted === true) {
+    return row.spent !== false;
+  }
+  return false;
+}
+
+export function derivePrOwnerVerdict(prNumber: number, corpus: PrOwnerLedgerRead): PrOwnerVerdict {
+  const compressedArchiveCount = corpus.archiveFiles.filter((p) => p.endsWith(".ndjson.gz")).length;
+  const corpusNewestTs = stringField(newestLedgerRow(corpus.rows) ?? {}, "ts");
+  const base = {
+    prNumber,
+    corpusNewestTs,
+    archiveCount: corpus.archiveFiles.length,
+    compressedArchiveCount,
+    liveFileRead: corpus.liveFileRead,
+    filesRead: corpus.filesRead,
+  };
+
+  if (!corpus.ok) {
+    return {
+      ...base,
+      verdict: "UNKNOWN",
+      reason: corpus.unread.length > 0
+        ? `ledger union incomplete: ${corpus.unread.length} unread rotation(s)`
+        : "ledger union unavailable or has no rotations",
+    };
+  }
+  if (compressedArchiveCount === 0) {
+    return { ...base, verdict: "UNKNOWN", reason: "no compressed ledger rotation opened" };
+  }
+
+  const sweepRows = corpus.rows.filter((row) => row.step === "sweep.disposed" && prNumberFromLedgerRow(row) === prNumber);
+  const taskIds = new Set(sweepRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v && v !== "SWEEP"));
+  const headShas = new Set(sweepRows.map((row) => stringField(row, "head_sha")).filter((v): v is string => !!v));
+  const fixRows = corpus.rows.filter((row) => {
+    if (row.step !== "fix.dispatch") return false;
+    if (prNumberFromLedgerRow(row) === prNumber) return true;
+    const taskId = stringField(row, "task_id");
+    if (!taskId || !taskIds.has(taskId)) return false;
+    const headSha = stringField(row, "head_sha");
+    return headSha === undefined || headShas.size === 0 || headShas.has(headSha);
+  });
+  const latestFix = newestLedgerRow(fixRows);
+  const latestSweep = newestLedgerRow(sweepRows);
+
+  if (latestFix !== undefined || (latestSweep !== undefined && activeSweepRow(latestSweep))) {
+    return {
+      ...base,
+      verdict: "OWNED",
+      reason: latestFix !== undefined ? "fix.dispatch found for this pull request" : "active sweep disposition found for this pull request",
+      ...(latestFix !== undefined ? { fix: summarizeFixRow(latestFix) } : {}),
+      ...(latestSweep !== undefined ? { sweep: summarizeSweepRow(latestSweep) } : {}),
+    };
+  }
+
+  return {
+    ...base,
+    verdict: "FREE",
+    reason: "no fix.dispatch row or active sweep disposition found for this pull request",
+    ...(latestSweep !== undefined ? { sweep: summarizeSweepRow(latestSweep) } : {}),
+  };
+}
+
+function renderPrOwnerVerdict(v: PrOwnerVerdict): string {
+  const lines = [
+    `rmd pr-owner #${v.prNumber} — ${v.verdict}`,
+    `  reason: ${v.reason}`,
+    `  corpus_newest_ts: ${v.corpusNewestTs ?? "unknown"}`,
+    `  corpus: files_read=${v.filesRead}, archives=${v.archiveCount}, compressed_archives=${v.compressedArchiveCount}, live=${v.liveFileRead ? "yes" : "no"}`,
+  ];
+  if (v.fix) {
+    const strike = v.fix.strike !== undefined && v.fix.strikeCap !== undefined ? `${v.fix.strike}/${v.fix.strikeCap}` : "unknown";
+    lines.push(
+      `  fix.dispatch: ts=${v.fix.ts ?? "unknown"}, task=${v.fix.taskId ?? "unknown"}, run=${v.fix.runId ?? "unknown"}, ` +
+        `strike=${strike}, mode=${v.fix.mode ?? "unknown"}, head=${v.fix.headSha ?? "unknown"}`,
+    );
+  }
+  if (v.sweep) {
+    lines.push(
+      `  sweep.disposed: ts=${v.sweep.ts ?? "unknown"}, task=${v.sweep.taskId ?? "unknown"}, run=${v.sweep.runId ?? "unknown"}, ` +
+        `disposition=${v.sweep.disposition ?? "unknown"}, acted=${v.sweep.acted === undefined ? "unknown" : String(v.sweep.acted)}, ` +
+        `head=${v.sweep.headSha ?? "unknown"}, reason=${JSON.stringify(v.sweep.reason ?? "")}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+export function prOwnerCommand(
+  rest: string[],
+  deps: {
+    stateDir?: string;
+    readLedger?: (stateDir: string) => PrOwnerLedgerRead;
+    write?: (text: string) => void;
+    error?: (text: string) => void;
+  } = {},
+): number {
+  const badArg = unknownArgError("pr-owner", rest.slice(1), [], []);
+  if (badArg) {
+    (deps.error ?? console.error)(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const prNumber = parsePrOwnerNumber(rest[0]);
+  if (prNumber === undefined) {
+    (deps.error ?? console.error)(`rmd pr-owner: <pr-number> is required — usage: ${commandSyntax("pr-owner")}\n` + USAGE);
+    return 2;
+  }
+  const stateDir = deps.stateDir ?? (deps.readLedger ? "" : dirname(ledgerPathFor(loadConfig())));
+  let corpus: PrOwnerLedgerRead;
+  try {
+    corpus = (deps.readLedger ?? ((dir) => readLedgerUnionRecordsSync(dir, { requireArchives: true, refuseIncomplete: true })))(stateDir);
+  } catch (error) {
+    corpus = {
+      rows: [],
+      archiveFiles: [],
+      liveFileRead: false,
+      ok: false,
+      unread: [String((error as Error)?.message ?? error)],
+      filesRead: 0,
+    };
+  }
+  (deps.write ?? console.log)(renderPrOwnerVerdict(derivePrOwnerVerdict(prNumber, corpus)));
+  return 0;
+}
+
 /** Strips a global `--repo-root <path>` pair off argv before per-command flag
  *  validation — so a command whose own allow-list doesn't mention `--repo-root`
  *  (nearly all of them) never rejects it as an unexpected argument. */
@@ -18732,6 +18968,228 @@ export interface NextTaskIdReserveDeps {
    *  test injects a deterministic one so `--reserve`'s mechanics are provable without depending
    *  on whatever `gh` happens to see (or whether `gh` is reachable at all) at test time. */
   openPrTexts?: () => string[];
+  auditNowMs?: () => number;
+  auditHistoryIds?: () => number[];
+}
+
+const RESERVATION_AUDIT_DEFAULT_AGE_DAYS = 14;
+const RESERVATION_AUDIT_MS_PER_DAY = 24 * 60 * 60 * 1_000;
+export const RESERVATION_AUDIT_ISO_RE = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z\b/;
+export const RUN_BRANCH_TASK_REF_RE = /^refs\/heads\/run-(W1-T[0-9]+)-/;
+
+export interface ReservationAuditRef {
+  taskId: string;
+  id: number;
+  ref: string;
+  sha: string;
+  anchor: string;
+}
+
+export type ReservationAuditStatus = "HELD" | "CANDIDATE" | "UNKNOWN";
+
+export interface ReservationAuditRow {
+  taskId: string;
+  status: ReservationAuditStatus;
+  reasons: string[];
+  anchor: string;
+  ageDays: number | null;
+}
+
+export interface ReservationAuditReport {
+  thresholdDays: number;
+  rows: ReservationAuditRow[];
+  degraded: string[];
+}
+
+type ReservationAuditRefsRead =
+  | { status: "ok"; refs: ReservationAuditRef[] }
+  | { status: "unknown"; reason: string };
+
+type ReservationAuditBranchesRead =
+  | { status: "ok"; branches: Map<string, string[]> }
+  | { status: "unknown"; reason: string };
+
+function reservationAuditAgeDays(rest: string[]): number | null {
+  const raw = flagValue(rest, "--audit-age-days");
+  if (raw === undefined) return RESERVATION_AUDIT_DEFAULT_AGE_DAYS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function reservationAnchorAgeMs(anchor: string, nowMs: number): number | null {
+  const m = RESERVATION_AUDIT_ISO_RE.exec(anchor);
+  if (!m) return null;
+  const t = Date.parse(m[0]);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, nowMs - t);
+}
+
+function idsFromOpenPrTrailers(texts: readonly string[]): Set<string> {
+  const ids = new Set<string>();
+  for (const text of texts) {
+    for (const m of text.matchAll(/^Remudero-Task:\s*(W1-T[0-9]+)\s*$/gm)) ids.add(m[1]);
+  }
+  return ids;
+}
+
+function parseReservationAuditRefs(out: string): ReservationAuditRef[] {
+  const refs: ReservationAuditRef[] = [];
+  for (const raw of out.split("\n")) {
+    const line = raw.trimEnd();
+    if (!line) continue;
+    const parts = line.split(/[ \t]+/);
+    const sha = parts[0] ?? "";
+    const ref = parts[1] ?? "";
+    const m = /^refs\/rmd-id\/W1-T([0-9]+)$/.exec(ref);
+    if (!m) continue;
+    const id = Number(m[1]);
+    if (!isAllocatableTaskId(id)) continue;
+    refs.push({ taskId: `W1-T${id}`, id, ref, sha, anchor: "" });
+  }
+  return refs.sort((a, b) => a.id - b.id);
+}
+
+function readReservationAuditRefs(run: (args: string[]) => { status: number; stdout: string; stderr: string }): ReservationAuditRefsRead {
+  let res: { status: number; stdout: string; stderr: string };
+  try {
+    res = run(["ls-remote", "origin", "refs/rmd-id/*"]);
+  } catch (err) {
+    return { status: "unknown", reason: `reservation ref read threw: ${String(err)}` };
+  }
+  if (res.status !== 0) return { status: "unknown", reason: `reservation ref read exited ${res.status}: ${res.stderr}` };
+  return { status: "ok", refs: parseReservationAuditRefs(res.stdout ?? "") };
+}
+
+function readReservationAuditAnchor(
+  ref: string,
+  run: (args: string[]) => { status: number; stdout: string; stderr: string },
+): string {
+  const fetched = run(["fetch", "origin", ref]);
+  if (fetched.status !== 0) return "<unreadable>";
+  const body = run(["log", "-1", "--format=%B", "FETCH_HEAD"]);
+  if (body.status === 0 && body.stdout.trim()) return body.stdout.trim();
+  const subject = run(["log", "-1", "--format=%s", "FETCH_HEAD"]);
+  return subject.status === 0 && subject.stdout.trim() ? subject.stdout.trim() : "<unreadable>";
+}
+
+function openRunBranchesByTaskId(run: (args: string[]) => { status: number; stdout: string; stderr: string }): ReservationAuditBranchesRead {
+  let res: { status: number; stdout: string; stderr: string };
+  try {
+    res = run(["ls-remote", "--heads", "origin", "run-*"]);
+  } catch (err) {
+    return { status: "unknown", reason: `open run branch read threw: ${String(err)}` };
+  }
+  if (res.status !== 0) return { status: "unknown", reason: `open run branch read exited ${res.status}: ${res.stderr}` };
+  const byId = new Map<string, string[]>();
+  for (const raw of (res.stdout ?? "").split("\n")) {
+    const ref = raw.trimEnd().split(/[ \t]+/)[1] ?? "";
+    const m = RUN_BRANCH_TASK_REF_RE.exec(ref);
+    if (!m) continue;
+    const branch = ref.slice("refs/heads/".length);
+    byId.set(m[1], [...(byId.get(m[1]) ?? []), branch]);
+  }
+  return { status: "ok", branches: byId };
+}
+
+export function classifyReservationAuditRows(opts: {
+  reservations: readonly ReservationAuditRef[];
+  declaredIds: ReadonlySet<string>;
+  historicalIds: ReadonlySet<string>;
+  openRunBranchesById: ReadonlyMap<string, readonly string[]> | "unknown";
+  openPrTrailerIds: ReadonlySet<string> | "unknown";
+  thresholdDays: number;
+  nowMs: number;
+}): ReservationAuditRow[] {
+  const thresholdMs = opts.thresholdDays * RESERVATION_AUDIT_MS_PER_DAY;
+  return opts.reservations.map((r) => {
+    const reasons: string[] = [];
+    if (opts.declaredIds.has(r.taskId)) reasons.push("declared shard");
+    else if (opts.historicalIds.has(r.taskId)) reasons.push("historical shard");
+    if (opts.openRunBranchesById !== "unknown") {
+      for (const branch of opts.openRunBranchesById.get(r.taskId) ?? []) reasons.push(`open run branch ${branch}`);
+    }
+    if (opts.openPrTrailerIds !== "unknown" && opts.openPrTrailerIds.has(r.taskId)) reasons.push("open PR trailer");
+    const ageMs = reservationAnchorAgeMs(r.anchor, opts.nowMs);
+    const ageDays = ageMs === null ? null : ageMs / RESERVATION_AUDIT_MS_PER_DAY;
+    if (reasons.length > 0) return { taskId: r.taskId, status: "HELD", reasons, anchor: r.anchor, ageDays };
+    if (opts.openRunBranchesById === "unknown") {
+      return { taskId: r.taskId, status: "UNKNOWN", reasons: ["open run branch read failed"], anchor: r.anchor, ageDays };
+    }
+    if (opts.openPrTrailerIds === "unknown") {
+      return { taskId: r.taskId, status: "UNKNOWN", reasons: ["open PR read failed"], anchor: r.anchor, ageDays };
+    }
+    if (ageMs === null) return { taskId: r.taskId, status: "UNKNOWN", reasons: ["anchor age unreadable"], anchor: r.anchor, ageDays };
+    if (ageMs < thresholdMs) return { taskId: r.taskId, status: "HELD", reasons: ["younger than threshold"], anchor: r.anchor, ageDays };
+    return { taskId: r.taskId, status: "CANDIDATE", reasons: ["no holding evidence older than threshold"], anchor: r.anchor, ageDays };
+  });
+}
+
+function reservationAuditPlanIds(planPath: string): Set<string> {
+  return new Set(loadPlan(planPath).tasks.map((t) => t.id));
+}
+
+export function reservationAuditHistoryIds(planPath: string, gitRunner?: (args: string[]) => string): Set<string> {
+  const planRelPath = relative(repoRoot, dirname(planPath));
+  if (isAbsolute(planRelPath) || planRelPath.startsWith("..")) return new Set();
+  const history = taskIdsEverFiled(repoRoot, planRelPath === "" ? "." : planRelPath, gitRunner);
+  return new Set(history.ids.filter(isAllocatableTaskId).map((n) => `W1-T${n}`));
+}
+
+export function renderReservationAuditReport(report: ReservationAuditReport): string {
+  const held = report.rows.filter((r) => r.status === "HELD").length;
+  const candidate = report.rows.filter((r) => r.status === "CANDIDATE").length;
+  const unknown = report.rows.filter((r) => r.status === "UNKNOWN").length;
+  const lines = [
+    `reservation audit: ${report.rows.length} reservation(s); HELD ${held}; CANDIDATE ${candidate}; UNKNOWN ${unknown}`,
+    `age threshold: ${report.thresholdDays} day(s)`,
+  ];
+  for (const d of report.degraded) lines.push(`DEGRADED: ${d}`);
+  for (const row of report.rows) {
+    const age = row.ageDays === null ? "unknown" : `${row.ageDays.toFixed(1)}d`;
+    lines.push(`${row.taskId} ${row.status} ${row.reasons.join("; ")}; age=${age}; anchor=${JSON.stringify(row.anchor)}`);
+  }
+  return lines.join("\n");
+}
+
+function buildReservationAuditReport(opts: {
+  planPath: string;
+  offline: boolean;
+  thresholdDays: number;
+  self: { owner: string; repo: string };
+  deps: NextTaskIdReserveDeps;
+}): ReservationAuditReport | "unreadable-reservations" {
+  const run = gitRunAdapter(opts.deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
+  const refs = readReservationAuditRefs(run);
+  if (refs.status === "unknown") return "unreadable-reservations";
+  const reservations = refs.refs.map((r) => ({ ...r, anchor: readReservationAuditAnchor(r.ref, run) }));
+  const declaredIds = reservationAuditPlanIds(opts.planPath);
+  const historicalIds = new Set(opts.deps.auditHistoryIds ? opts.deps.auditHistoryIds().map((n) => `W1-T${n}`) : [...reservationAuditHistoryIds(opts.planPath)]);
+  const branches = openRunBranchesByTaskId(run);
+  let openPrTrailerIds: Set<string> | "unknown" = "unknown";
+  const degraded: string[] = [];
+  if (opts.offline) {
+    degraded.push("--offline: open PRs were not read");
+  } else {
+    try {
+      openPrTrailerIds = idsFromOpenPrTrailers((opts.deps.openPrTexts ?? (() => openPrMintTexts(opts.self.owner, opts.self.repo)))());
+    } catch (err) {
+      degraded.push(`open PR read failed: ${String(err)}`);
+    }
+  }
+  if (branches.status === "unknown") degraded.push(branches.reason);
+  return {
+    thresholdDays: opts.thresholdDays,
+    degraded,
+    rows: classifyReservationAuditRows({
+      reservations,
+      declaredIds,
+      historicalIds,
+      openRunBranchesById: branches.status === "ok" ? branches.branches : "unknown",
+      openPrTrailerIds,
+      thresholdDays: opts.thresholdDays,
+      nowMs: opts.deps.auditNowMs?.() ?? Date.now(),
+    }),
+  };
 }
 
 function mintForReservationAttempt(mint: MintedTaskIdWithHistory, heldId: number, heldTaskId: string): MintedTaskIdWithHistory {
@@ -18775,9 +19233,14 @@ export async function nextTaskIdCommand(
   overlapDeps: OverlapWarningDeps = {},
   deps: NextTaskIdReserveDeps = {},
 ): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files"], ["--offline", "--reserve"]);
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days"], ["--offline", "--reserve", "--audit"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const auditAgeDays = reservationAuditAgeDays(rest);
+  if (auditAgeDays === null) {
+    console.error("### rmd next-task-id: --audit-age-days must be a non-negative number\n" + USAGE);
     return 2;
   }
   const contradiction = validateReserveArgs(rest);
@@ -18785,9 +19248,22 @@ export async function nextTaskIdCommand(
     console.error(contradiction + "\n" + USAGE);
     return 2;
   }
+  if (rest.includes("--audit") && rest.includes("--reserve")) {
+    console.error("### rmd next-task-id: --audit and --reserve are contradictory — the audit is read-only\n" + USAGE);
+    return 2;
+  }
   const planPath = flagValue(rest, "--plan") ?? join(repoRoot, "plan", "tasks.yaml");
   const offline = rest.includes("--offline");
   const self = resolveOwnerRepo();
+  if (rest.includes("--audit")) {
+    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps });
+    if (report === "unreadable-reservations") {
+      console.error("### rmd next-task-id --audit: cannot read origin refs/rmd-id/*");
+      return 2;
+    }
+    console.log(renderReservationAuditReport(report));
+    return 0;
+  }
   let mint: MintedTaskIdWithHistory;
   try {
     mint = mintNextTaskIdWithHistory({
@@ -37131,9 +37607,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "next-task-id",
-    syntax: "rmd next-task-id [--plan <path>] [--offline] [--reserve]",
+    syntax: "rmd next-task-id [--plan <path>] [--offline] [--reserve] [--audit] [--audit-age-days <days>]",
     summary: "Print (or --reserve atomically claim) the next free W1-T<n> task id.",
-    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.",
+    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.",
   },
   {
     name: "emissions",
@@ -37491,6 +37967,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd peek <runId> [--lines <n>] [--follow]",
     summary: "Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.",
     detail: "W1-T945: READ-ONLY tail of one run's output — the last <n> lines (default 50, never more than the 500-line ring ceiling) of its retained state/runs/<runId>.tail (W1-T942), printed with a LIVE/FINISHED verdict from the SAME liveInflightRuns pid-checked read every other liveness decision in this fleet uses — never a second definition of 'in flight'. Works identically on a FINISHED run's retained tail, the surviving half of fb-1784821673624-321a4b (its final-message half already shipped as report_excerpt, #1584). An unknown run id or an absent tail prints a NAMED reason and still exits 0 — never silent empty output. --follow re-polls and reprints on change, stopping on its own the moment the run is no longer live — it never hangs on an already-finished run. READ-ONLY BY CONSTRUCTION: no flag here writes to, signals, resumes or kills the run — there is no steering surface in v1.",
+  },
+  {
+    name: "pr-owner",
+    syntax: "rmd pr-owner <pr-number>",
+    summary: "Report whether the local ledger shows a fix lane owning one PR.",
+    detail: "W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. READ-ONLY: this verb writes, claims and releases nothing.",
   },
   {
     name: "plan",
@@ -37863,11 +38345,19 @@ function logCliInvocation(cmd: string | undefined, argv: string[]): void {
  *                   regardless, by never letting the guard reach a child it spawns. Both are
  *                   required — the exemption fixes the documented invocation; the spawn scrub
  *                   fixes what an operator's own shell might still carry for unrelated reasons.
+ * `pr-owner` (W1-T3281): a READ of the local ledger answering "does a fix lane own this PR". It
+ *                   is the same shape as `status` — a diagnostic that reports state and writes
+ *                   nothing: no ledger line, no git operation, no PR. Refusing it on a diverged
+ *                   checkout is self-defeating for the same reason it is for `doctor`: the moment
+ *                   an operator most needs to ask who owns a PR is while standing on a branch the
+ *                   gate would refuse, and the answer it returns cannot be affected by the
+ *                   staleness the gate is guarding, because the ledger it reads is host-local and
+ *                   not a checkout artifact at all.
  * `sweep`/`inbox` stay OUT even though their `--dry-run` forms are read-only: exempting the verb
  * name would also exempt their real (non-dry-run) dispatch. `run-task`/`drain`/`triage`/`fix`/
  * `approve`/`review`/`lint-plan` are untouched and keep falling to the gate's `else` branch.
  */
-const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight"]);
+const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight", "pr-owner"]);
 
 /**
  * A PROMISE REJECTION THAT ESCAPED EVERY HANDLER — the fourth named halt, alongside
@@ -38178,6 +38668,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot, resolveOwnerRepo }),
   ],
   ["peek", async (rest) => await peekCommand(rest)],
+  ["pr-owner", (rest) => prOwnerCommand(rest)],
   ["plan", async (rest) => await planCommand(rest)],
   ["inbox", async (rest) => await inboxCommand(rest)],
   [

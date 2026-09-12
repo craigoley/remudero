@@ -139,7 +139,7 @@ test("IN-PROCESS: the streaming branch itself runs here, returning a real status
   assert.equal(res.stdout, "", "and its output is NOT captured — it went straight to the terminal");
 });
 
-test("WIRING: the two multi-minute steps opt into streaming and the data-parsing git calls do not", () => {
+test("W1-T3299 (supersedes the two-step shape): the full suite streams, the coverage shards are CAPTURED and verified, and data-parsing git calls stream never", () => {
   // Proves the flag is actually SET where it matters. Without this, every assertion above could
   // hold on a seam nobody uses.
   const calls: { file: string; args: string[]; opts?: { cwd?: string; input?: string; stream?: boolean } }[] = [];
@@ -153,9 +153,29 @@ test("WIRING: the two multi-minute steps opt into streaming and the data-parsing
   assert.ok(suite, "the ci job must still shell `npm run test:ci`");
   assert.equal(suite!.opts?.stream, true, "the full-suite step must stream — it is the hour of silence");
 
-  const coverage = calls.find((c) => c.args.some((a) => a.endsWith("test-with-retry.mjs")) && c.args.includes("--experimental-test-coverage"));
-  assert.ok(coverage, "the coverage-ratchet job must still run the suite under coverage");
-  assert.equal(coverage!.opts?.stream, true, "the coverage suite step must stream too — it is equally long");
+  // W1-T3299 — THE COVERAGE LEAF IS FOUR SHARDS NOW, MIRRORING CI, AND IT CAPTURES ON PURPOSE.
+  // CI's coverage-shard job states the retry removal outright ("`scripts/test-with-retry.mjs` is
+  // GONE from this invocation and STAYS in the `ci` job"), so this local leaf dropped it too —
+  // that IS the parity this suite exists to hold, not a regression against it.
+  //
+  // AND IT MUST NOT STREAM. Each shard's stdout is READ, to refuse folding a shard that produced
+  // no `# tests` summary into the coverage total — the same guard the CI job applies. A streamed
+  // call returns empty stdout (see the sibling test above), so streaming here would silently
+  // disarm that refusal. Capture is the correct trade, and the cost — a shard runs without live
+  // progress — is named here rather than left for the next reader to rediscover.
+  const shards = calls.filter((c) => c.args.includes("--experimental-test-coverage") && c.args.some((a) => a.startsWith("--test-shard=")));
+  assert.equal(shards.length, 4, "the coverage leaf must still run the suite under coverage, as CI's four shards");
+  for (const shard of shards) {
+    assert.notEqual(
+      shard.opts?.stream,
+      true,
+      "a coverage shard's stdout is parsed for its `# tests` summary — streaming it would disarm that refusal",
+    );
+  }
+  assert.ok(
+    !calls.some((c) => c.args.some((a) => a.endsWith("test-with-retry.mjs")) && c.args.includes("--experimental-test-coverage")),
+    "the coverage leaf must NOT retry — CI's own shard removed test-with-retry, and this run mirrors it",
+  );
 
   // The other direction: anything whose stdout is READ must stay captured.
   const gitCalls = calls.filter((c) => c.file === "git");
