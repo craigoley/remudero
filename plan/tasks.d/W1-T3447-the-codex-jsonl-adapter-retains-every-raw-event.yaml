@@ -59,11 +59,11 @@
     oversized record or unterminated line is named and reaped rather than accumulated.
   acceptance:
     - claim: "a Codex JSONL stream split at arbitrary Buffer boundaries produces the same thread id, final agent message, turn count, usage and terminal-error classification as the existing complete-string parser"
-      proof: "unit test: W1-T3447 criterion 1"
+      proof: "unit test: test/codex-worker-jsonl-stream-is-bounded.test.ts"
     - claim: "a multi-megabyte ignored tool event below the fixed record ceiling cannot grow retained adapter bytes beyond that ceiling, while the following valid terminal agent message and usage still produce a correct worker result"
-      proof: "unit test: W1-T3447 criterion 2"
+      proof: "unit test: test/codex-worker-jsonl-stream-is-bounded.test.ts"
     - claim: "an over-ceiling incomplete record or retained transcript is terminated with a named non-success outcome and the contained worker group is reaped; it never becomes a silent partial success"
-      proof: "unit test: W1-T3447 criterion 3"
+      proof: "unit test: test/codex-worker-jsonl-stream-is-bounded.test.ts"
     - claim: "the focused Codex JSONL streaming test is registered in the tier manifest"
       proof: "grep: codex-worker-jsonl-stream-is-bounded\\.test\\.ts in scripts/test-tier-manifest.json"
   falsifier: |
