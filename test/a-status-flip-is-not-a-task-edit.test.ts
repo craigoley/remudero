@@ -143,7 +143,7 @@ async function runLintPlanBase(): Promise<{ exitCode: number; stdout: string }> 
   const origWarn = console.warn;
   console.log = (m: string) => logs.push(String(m));
   console.error = (m: string) => logs.push(String(m));
-  console.warn = () => {};
+  console.warn = (m: string) => logs.push(String(m));
   try {
     const exitCode = await lintPlanCommand(["--plan", FIXTURE_PLAN, "--base", "HEAD"], {
       offline: true,
@@ -156,6 +156,24 @@ async function runLintPlanBase(): Promise<{ exitCode: number; stdout: string }> 
     console.warn = origWarn;
   }
 }
+
+test("an explicit --plan outside the injected checkout root is refused by name", async () => {
+  const logs: string[] = [];
+  const origError = console.error;
+  console.error = (m: string) => logs.push(String(m));
+  try {
+    const exitCode = await lintPlanCommand(["--plan", join(REPO_ROOT, "plan", "tasks.yaml")], {
+      offline: true,
+      repoRoot: FIXTURE_CHECKOUT.root,
+    });
+    const out = logs.join("\n");
+    assert.equal(exitCode, 2, `outside-root plan must be a usage refusal; saw:\n${out}`);
+    assert.match(out, /resolves OUTSIDE the repo root/);
+    assert.match(out, new RegExp(FIXTURE_CHECKOUT.root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    console.error = origError;
+  }
+});
 
 function editShard(fileName: string, mutate: (original: string) => string): { restore: () => void; edited: string } {
   const path = join(FIXTURE_DIR, fileName);
@@ -203,6 +221,26 @@ test("scenario B: a status flip ALONGSIDE a real field edit is linted in full an
     assert.doesNotMatch(stdout, /status-flip-only/, "a real edit must earn no carve at all — the whole point of design point (ii)");
     assert.match(stdout, /STATUS-FLIP-B: 1 violation/, "the shard's own (newly introduced) proof-dialect violation must surface");
     assert.equal(exitCode, 1, "a genuinely changed task that fails lint must still fail the run");
+  } finally {
+    restore();
+  }
+});
+
+test("a grep proof in an injected checkout reads the proof target from that checkout", async () => {
+  const targetRel = "test/fixtures/live-plan-writers/status-flip/grep-case-target.md";
+  writeFileSync(join(FIXTURE_CHECKOUT.root, targetRel), "Widget Registry Becomes Authoritative here.\n", "utf8");
+  const { restore } = editShard("STATUS-FLIP-B-flip-plus-edit.yaml", (t) =>
+    t.replace(
+      '      proof: "unit test: test/a-status-flip-is-not-a-task-edit.test.ts"',
+      `      proof: "grep: widget registry becomes authoritative in ${targetRel}"`,
+    ),
+  );
+  try {
+    const { exitCode, stdout } = await runLintPlanBase();
+    assert.match(stdout, /1 task\(s\) checked \(1 new\/changed vs HEAD\)/);
+    assert.match(stdout, /\[proof-grep-unmatchable\]/, `the grep target should be read from the injected checkout; saw:\n${stdout}`);
+    assert.match(stdout, /DIFFERENT CAPITALISATION/);
+    assert.equal(exitCode, 0, "proof-grep-unmatchable is warn-only");
   } finally {
     restore();
   }

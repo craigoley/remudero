@@ -20,6 +20,7 @@
  *        useless as one that marks nothing.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -125,6 +126,28 @@ test("a design-only edit to a real shard raises the --base checked count from 0 
     );
   } finally {
     fixture.cleanup();
+  }
+});
+
+test("a source diff with no plan diff still computes base-side source existence", async () => {
+  const changed = execFileSync("git", ["-C", REPO_ROOT, "diff", "--name-only", "origin/main...HEAD"], { encoding: "utf8" })
+    .split("\n")
+    .filter(Boolean);
+  assert.ok(changed.includes("src/run-task.ts"), "control: this PR must still carry the source diff that drives the base-side source lookup");
+
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origError = console.error;
+  console.log = (m: string) => logs.push(String(m));
+  console.error = (m: string) => logs.push(String(m));
+  try {
+    const exitCode = await lintPlanCommand(["--base", "origin/main"], { offline: true });
+    const out = logs.join("\n");
+    assert.equal(exitCode, 0, `a source-only diff must not create a plan lint failure; saw:\n${out}`);
+    assert.match(out, /0 task\(s\) checked \(0 new\/changed vs origin\/main\)/);
+  } finally {
+    console.log = origLog;
+    console.error = origError;
   }
 });
 
