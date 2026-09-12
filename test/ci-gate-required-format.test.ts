@@ -49,6 +49,7 @@ const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "assertion-discrimination",
   "task-id-existence",
   "acceptance-author-gate",
+  "proof-discrimination",
   "unwired-gate",
   "comment-load-ratchet",
   "source-size",

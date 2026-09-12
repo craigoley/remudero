@@ -1877,6 +1877,12 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     reason: "path-filter sentinel with no repository assertion beyond GitHub selecting the workflow for its fixture path",
   },
   {
+    workflow: "proof-discrimination-gate.yml",
+    job: "proof-discrimination",
+    mirrored: false,
+    reason: "requires GitHub's pull_request event payload for the PR body and pinned base/head SHAs; a local pre-push checkout cannot supply that review identity honestly",
+  },
+  {
     workflow: "recovery-drill.yml",
     job: "recovery-drill",
     mirrored: false,
