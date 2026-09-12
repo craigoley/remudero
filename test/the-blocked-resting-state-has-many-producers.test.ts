@@ -10,8 +10,10 @@ import {
   censusGatePostures,
   currentGatePostureReport,
   deriveGateSurfaces,
+  loadGatePostureTree,
   renderGatePostureReport,
   type GatePostureDeclaration,
+  type GatePostureFs,
   type GatePostureTree,
 } from "../src/lib/gate-posture.js";
 
@@ -22,6 +24,8 @@ const declaration = (posture: GatePostureDeclaration["posture"], complies = true
   complies,
   reason: `${posture} fixture reason`,
 });
+
+const errno = (code: string, message = code): NodeJS.ErrnoException => Object.assign(new Error(message), { code });
 
 test("a newly planted refusal surface joins the census from the tree and fails by name when undeclared", () => {
   const tree: GatePostureTree = {
@@ -109,6 +113,52 @@ test("the census is report-only and does not mutate the tree it inspects", () =>
   renderGatePostureReport(censusGatePostures(deriveGateSurfaces(tree), { "hook:hooks/pre-commit": declaration("REPAIR") }));
 
   assert.deepEqual(tree, before);
+});
+
+test("the checked-in tree loader ignores roots and directories that disappear during the scan", () => {
+  const fs: GatePostureFs = {
+    statSync(path) {
+      if (path.endsWith("/hooks")) return { isDirectory: () => true, isFile: () => false };
+      throw errno("ENOENT");
+    },
+    readdirSync() {
+      throw errno("ENOENT");
+    },
+    readFileSync() {
+      throw new Error("unexpected read");
+    },
+  };
+
+  assert.deepEqual(loadGatePostureTree("/repo", fs), {});
+});
+
+test("the checked-in tree loader propagates non-missing scan failures", () => {
+  const unreadableStat: GatePostureFs = {
+    statSync() {
+      throw errno("EACCES", "stat blocked");
+    },
+    readdirSync() {
+      throw new Error("unexpected read directory");
+    },
+    readFileSync() {
+      throw new Error("unexpected read");
+    },
+  };
+  assert.throws(() => loadGatePostureTree("/repo", unreadableStat), /stat blocked/);
+
+  const unreadableDirectory: GatePostureFs = {
+    statSync(path) {
+      if (path.endsWith("/hooks")) return { isDirectory: () => true, isFile: () => false };
+      throw errno("ENOENT");
+    },
+    readdirSync() {
+      throw errno("EACCES", "scan blocked");
+    },
+    readFileSync() {
+      throw new Error("unexpected read");
+    },
+  };
+  assert.throws(() => loadGatePostureTree("/repo", unreadableDirectory), /scan blocked/);
 });
 
 test("the checked-in tree has a declared posture for every derived refusal, state, and task-stop surface", () => {

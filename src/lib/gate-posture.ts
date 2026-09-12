@@ -235,10 +235,17 @@ export interface GatePostureCensus {
 
 export type GatePostureTree = Readonly<Record<string, string>>;
 
+export interface GatePostureFs {
+  readdirSync(path: string, options: { withFileTypes: true }): { name: string; isDirectory(): boolean; isFile(): boolean }[];
+  readFileSync(path: string, encoding: BufferEncoding): string;
+  statSync(path: string): { isDirectory(): boolean; isFile(): boolean };
+}
+
 const HOOK_PREFIX = "hooks/";
 export const SCRIPT_RE = /^scripts\/[^/]+-(?:check|ratchet)\.mjs$/;
 export const NON_ZERO_RE = /\bexit\s+[1-9]\b|process\.exit(?:Code\s*=\s*[1-9]|\(\s*[1-9])|throw new Error\b|\bdeny\(/;
 export const REFUSAL_LANGUAGE_RE = /\b(blocked|blocks|refus(?:e|es|ed|ing)|ratchet|gate|violation|failed|failure)\b/i;
+const DEFAULT_GATE_POSTURE_FS: GatePostureFs = { readdirSync, readFileSync, statSync };
 
 function uniqById(surfaces: GateSurface[]): GateSurface[] {
   const seen = new Set<string>();
@@ -249,10 +256,6 @@ function uniqById(surfaces: GateSurface[]): GateSurface[] {
     out.push(surface);
   }
   return out.sort((a, b) => a.id.localeCompare(b.id));
-}
-
-function fileName(path: string): string {
-  return path.slice(path.lastIndexOf("/") + 1);
 }
 
 function hookHasRefusal(text: string): boolean {
@@ -409,10 +412,10 @@ export function renderGatePostureReport(census: GatePostureCensus): string {
   return lines.join("\n");
 }
 
-function walkFiles(root: string, dir: string, out: Record<string, string>): void {
+function walkFiles(root: string, dir: string, out: Record<string, string>, fs: GatePostureFs): void {
   let entries;
   try {
-    entries = readdirSync(join(root, dir), { withFileTypes: true });
+    entries = fs.readdirSync(join(root, dir), { withFileTypes: true });
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return;
@@ -423,14 +426,14 @@ function walkFiles(root: string, dir: string, out: Record<string, string>): void
     const full = join(root, rel);
     if (entry.isDirectory()) {
       if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "coverage") continue;
-      walkFiles(root, rel, out);
+      walkFiles(root, rel, out, fs);
     } else if (entry.isFile()) {
-      out[rel.split(sep).join("/")] = readFileSync(full, "utf8");
+      out[rel.split(sep).join("/")] = fs.readFileSync(full, "utf8");
     }
   }
 }
 
-export function loadGatePostureTree(root: string): GatePostureTree {
+export function loadGatePostureTree(root: string, fs: GatePostureFs = DEFAULT_GATE_POSTURE_FS): GatePostureTree {
   const out: Record<string, string> = {};
   for (const path of [
     "hooks",
@@ -442,9 +445,9 @@ export function loadGatePostureTree(root: string): GatePostureTree {
   ]) {
     const full = join(root, path);
     try {
-      const stats = statSync(full);
-      if (stats.isDirectory()) walkFiles(root, path, out);
-      if (stats.isFile()) out[relative(root, full).split(sep).join("/")] = readFileSync(full, "utf8");
+      const stats = fs.statSync(full);
+      if (stats.isDirectory()) walkFiles(root, path, out, fs);
+      if (stats.isFile()) out[relative(root, full).split(sep).join("/")] = fs.readFileSync(full, "utf8");
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") throw error;
