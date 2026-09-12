@@ -4,11 +4,13 @@
   depends_on: []
   type: implement
   verify: auto
-  risk: medium
+  risk: high
+  band_meaning: span
   status: queued
   attempts: 0
   files:
     - src/lib/measurement-cadence.ts
+    - scripts/test-tier-manifest.json
     - test/a-mention-is-not-a-caller.test.ts
   origin: "operator-session#adoption-precision-2026-09-11"
   rationale: |
@@ -34,12 +36,19 @@
     name, and a doc comment that names one, must both leave the scan reporting.
   acceptance:
     - claim: "an export referenced only inside a comment is still reported as having no caller"
-      proof: "unit test: test/a-mention-is-not-a-caller.test.ts"
+      proof: "unit test: W1-T3409: an export named only in JSDoc remains a no-caller finding"
     - claim: "an export referenced from an unreached region does not launder adoption"
-      proof: "unit test: test/a-mention-is-not-a-caller.test.ts"
+      proof: "unit test: W1-T3409: a call from an unreachable module remains a no-caller finding"
     - claim: "a genuinely called export is still reported as adopted, so the scan does not invert"
-      proof: "unit test: test/a-mention-is-not-a-caller.test.ts"
+      proof: "unit test: W1-T3409: a reachable imported call clears the no-caller finding"
   falsifier: |
     CLOSE THIS TASK if the symbol scan already strips comments or requires a call position. Read
     `scanUnadoptedSymbols` in src/lib/measurement-cadence.ts: if it still tests a word-boundary
     regex against whole file text, the defect stands.
+  note: |
+    SCOPE AMENDMENT 2026-09-12. This task creates
+    `test/a-mention-is-not-a-caller.test.ts`; the mandatory test-tier completeness gate refuses a
+    new test absent from `scripts/test-tier-manifest.json`. Observed before source submission:
+    `npm run test:tier:check -- --base origin/main` named exactly that test. The registry is
+    therefore required delivery metadata, not adjacent cleanup; omitting it guarantees a red
+    source PR before the adoption behavior is evaluated.
