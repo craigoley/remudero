@@ -227,7 +227,7 @@ test("W1-T3435 criterion 3: two bounded hedged exchanges fail closed and enter t
     }, () => { kills += 1; }) as never;
   };
   const cfg = config("/tmp/codex-singleflight-double-timeout");
-  const deps = { timeoutMs: 5, capabilities: CAPABILITIES, spawn, now: () => 1_000 };
+  const deps = { timeoutMs: 25, capabilities: CAPABILITIES, spawn, now: () => 1_000 };
 
   const failed = await readCodexCapacity(cfg, deps);
   assert.equal(failed.readable, false);
