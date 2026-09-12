@@ -66,6 +66,7 @@ test("W1-T3328: drafted lessons name the measured action without re-ranking caus
 
 test("W1-T3328: product repairs classify as build, and absent dominance stays unclear", () => {
   assert.equal(classifyCiLearningAction([{ file: "src/lib/feature.ts", prs: 3 }]), "build");
+  assert.equal(classifyCiLearningAction([{ file: "src/lib/citation-anchor.ts", prs: 3 }]), "build");
   assert.equal(classifyCiLearningAction([{ file: "docs/runbook.md", prs: 3 }]), "docs");
   assert.equal(classifyCiLearningAction([{ file: "scripts/coverage-ratchet.mjs", prs: 3 }]), "gate");
   assert.equal(classifyCiLearningAction([]), "unclear");

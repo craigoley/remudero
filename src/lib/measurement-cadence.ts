@@ -2218,7 +2218,7 @@ function ciLearningActionForRepairFile(file: string): Exclude<CiLearningAction, 
     file === "bin" ||
     file.startsWith("bin/") ||
     file.startsWith(".github/workflows/") ||
-    /(^|\/)(ci|gate|ratchet)[^/]*\.(?:cjs|js|mjs|ts)$/.test(file)
+    /(^|\/)(?:ci[-.]|[^/]*gate|[^/]*ratchet)[^/]*\.(?:cjs|js|mjs|ts)$/.test(file)
   ) {
     return "gate";
   }
