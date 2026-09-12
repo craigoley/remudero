@@ -59,8 +59,8 @@ test("a ci.yml job plus its ci-gate registration and BOTH registry entries is no
 
 test("the raw evidence is never edited, and the exempt list is not consulted", () => {
   const v = verdict(registrationDiff());
-  assert.deepEqual(v.instrumentPaths.slice().sort(), [GATE, CI].sort(), "instrument evidence stays whole");
-  assert.deepEqual(v.srcPaths.slice().sort(), [PARITY, REVIEW].sort(), "src evidence stays whole");
+  assert.deepEqual(v.instrumentPaths.slice().sort(), [GATE, CI, REVIEW].sort(), "instrument evidence stays whole");
+  assert.deepEqual(v.srcPaths.slice().sort(), [PARITY].sort(), "src evidence stays whole");
   for (const p of [CI, GATE, PARITY, REVIEW]) {
     assert.equal(ENTANGLEMENT_EXEMPT_INSTRUMENTS.has(p), false, `${p} must not be exempted by path`);
   }

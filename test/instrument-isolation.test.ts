@@ -137,7 +137,7 @@ test("W1-T297 criterion 6: INSTRUMENT_SURFACE is ONE exported constant covering 
   assert.match("scripts/coverage-baseline.json", combined);
   assert.match("scripts/mutation-relevant-paths.json", combined);
   assert.match("stryker.conf.json", combined);
-  assert.doesNotMatch("src/lib/review.ts", combined, "src/ modules are not instrument paths (out of scope, (a))");
+  assert.match("src/lib/review.ts", combined, "the reviewer is the PR judge and belongs on the instrument surface");
   // Not a second hand-maintained copy: USER_VISIBLE_SURFACE_RE's own source
   // spreads this constant rather than re-listing the instrument entries.
   assert.match(reviewSrc, /\.\.\.INSTRUMENT_SURFACE/, "USER_VISIBLE_SURFACE_RE must be DERIVED FROM INSTRUMENT_SURFACE");

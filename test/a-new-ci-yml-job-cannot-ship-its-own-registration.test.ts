@@ -133,11 +133,11 @@ test("W1-T2738: an added `on:` TRIGGER is not a job — the same two-space shape
   assert.equal(verdict(diff).entangled, true, "a trigger addition beside src code stays entangled");
 });
 
-test("W1-T2738: the path-only reading is unchanged — a caller that cannot supply the diff still fails closed", () => {
+test("W1-T2738/W1-T3329: the path-only ci.yml registration shape no longer treats ci-parity as product", () => {
   const files = [CI_YML, "scripts/unwired-gate-check.mjs", PARITY];
   assert.equal(
     detectInstrumentEntanglement(files).entangled,
-    true,
-    "without the patch there is no way to tell a new job from an edited one, so the stricter reading stands",
+    false,
+    "the registration table names which gates run; it is not product code beside the workflow",
   );
 });

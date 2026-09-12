@@ -5751,11 +5751,13 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * USER_VISIBLE_SURFACE_RE}'s instrument arm and {@link detectInstrumentEntanglement} are both DERIVED FROM THIS, so
  * the two cannot drift into a second hand-maintained copy. Membership: `.github/workflows/`, every
  * `scripts/*-ratchet.mjs`, `scripts/diff-coverage.mjs`, every `scripts/*-baseline.json`,
- * `scripts/mutation-relevant-paths.json`, and `stryker.conf.json`. STAYS the SOLE BLOCKING authority: a wrong or
- * incomplete derivation must never itself refuse a PR. THIS LIST IS HAND-ENUMERATED and goes stale — W1-T402 shipped
- * missing eleven gate-rule files — so {@link INSTRUMENT_SURFACE_EXCLUSIONS} plus
+ * `scripts/mutation-relevant-paths.json`, `stryker.conf.json`, and `src/lib/review.ts` because the reviewer is the
+ * PR judge itself. STAYS the SOLE BLOCKING authority: a wrong or incomplete derivation must never itself refuse a PR.
+ * THIS LIST IS HAND-ENUMERATED and goes stale — W1-T402 shipped missing eleven gate-rule files — so
+ * {@link INSTRUMENT_SURFACE_EXCLUSIONS} plus
  * test/instrument-surface-completeness.test.ts derive candidates from the live tree on every run. */
 export const INSTRUMENT_SURFACE: readonly string[] = [
+  "^src/lib/review\\.ts$",
   "^\\.github/workflows/",
   "^scripts/[^/]*-ratchet\\.mjs$",
   "^scripts/diff-coverage\\.mjs$",
@@ -6572,19 +6574,35 @@ export function detectInstrumentEntanglement(
   diffFiles: string[],
   diff?: string,
 ): { entangled: boolean; instrumentPaths: string[]; srcPaths: string[] } {
-  const instrumentPaths = diffFiles.filter(
-    (f) => INSTRUMENT_SURFACE_RE.test(f) && !ENTANGLEMENT_EXEMPT_INSTRUMENTS.has(f),
+  const surfacePaths = diffFiles.filter((f) => INSTRUMENT_SURFACE_RE.test(f));
+  const nonSrcSurfacePaths = surfacePaths.filter((f) => !isProductPath(f));
+  const nonWorkflowSurfacePaths = nonSrcSurfacePaths.filter(
+    (f) => f !== CI_WORKFLOW_PATH && f !== CI_GATE_WORKFLOW_PATH,
+  );
+  const ordinarySrcPaths = diffFiles.filter(
+    (f) => isProductPath(f) && !INSTRUMENT_SURFACE_RE.test(f) && (diff === undefined || srcChangeIsExecutable(diff, f)),
+  );
+  const srcSurfaceAsProduct = new Set(
+    ordinarySrcPaths.length === 0 && nonWorkflowSurfacePaths.length > 0 ? surfacePaths.filter(isProductPath) : [],
+  );
+  const instrumentPaths = surfacePaths.filter(
+    (f) => !srcSurfaceAsProduct.has(f) && !ENTANGLEMENT_EXEMPT_INSTRUMENTS.has(f),
   );
   // A PATH ON THE INSTRUMENT SURFACE IS NOT PRODUCT CODE, EVEN WHEN IT LIVES UNDER `src/`. `isProductPath` is
   // unconditionally `src/` and not `test/`, so before this line a `src/` file named by {@link INSTRUMENT_SURFACE}
   // landed in BOTH arrays and `entangled` was true on that one file plus a workflow, which made the exemption
   // INEXPRESSIBLE. MEASURED on #1863's real file list with a candidate path added: still `entangled: true`. IT
-  // PRESERVES THE RULE'S REASON RATHER THAN MUTING IT, since a file that IS the instrument has no product falsifiers
-  // of its own; `src/lib/review.ts` is not on the surface and stays product. INERT AT THIS SHA. AND THE `src/` HALF
-  // MUST CARRY EXECUTABLE CONTENT when `diff` is supplied; omitting `diff` keeps the path-only reading.
+  // PRESERVES THE RULE'S REASON RATHER THAN MUTING IT, since a file that IS the instrument has no product falsifiers of
+  // its own. The one exception is a diff whose ONLY executable `src/` half is itself on the surface while a non-src
+  // instrument is present: there the non-src instrument is the thing being judged, and the `src/` file remains the
+  // product it measures. AND THE `src/` HALF MUST CARRY EXECUTABLE CONTENT when `diff` is supplied; omitting `diff`
+  // keeps the path-only reading.
   // // Why: #2884 was split by hand over one appended sentence; a later lane DUPLICATED a helper rather than register a path — the rule had begun shaping code to avoid itself.
   const srcPaths = diffFiles.filter(
-    (f) => isProductPath(f) && !INSTRUMENT_SURFACE_RE.test(f) && (diff === undefined || srcChangeIsExecutable(diff, f)),
+    (f) =>
+      isProductPath(f) &&
+      (!INSTRUMENT_SURFACE_RE.test(f) || srcSurfaceAsProduct.has(f)) &&
+      (diff === undefined || srcChangeIsExecutable(diff, f)),
   );
   // W1-T2521: subtract a newly introduced census gate (script + its own first registration, both new in THIS diff)
   // from the ENTANGLEMENT VERDICT only; `instrumentPaths`/`srcPaths` stay the raw, unedited evidence.
@@ -6621,9 +6639,19 @@ export function detectInstrumentEntanglement(
   // 2026-09-10: #4851 read `entangled=false` from a lane without the declaration and `true` from its
   // own rebased branch, on byte-identical file lists. The reviewer uses the PR's tree, so the second
   // reading is the one that decides — and it was the wrong one.
-  const registrationInstruments = instrumentPaths.filter((f) => !introducedGates.includes(f));
+  const confinedRegistryInstruments =
+    diff === undefined ? [] : instrumentPaths.filter((f) => changeIsConfinedToRegistry(diff, f));
+  const registrationInstruments = instrumentPaths.filter(
+    (f) => !introducedGates.includes(f) && !confinedRegistryInstruments.includes(f),
+  );
   const registration = diff === undefined ? { instruments: [], srcs: [] } : mandatoryRegistrationPaths(diff, registrationInstruments, srcPaths);
-  const subtracted = new Set([...introducedGates, ...harmlessInstruments, ...registration.instruments]);
+  const registrationFired = registration.instruments.length > 0 || registration.srcs.length > 0;
+  const subtracted = new Set([
+    ...introducedGates,
+    ...harmlessInstruments,
+    ...registration.instruments,
+    ...(registrationFired ? confinedRegistryInstruments : []),
+  ]);
   const effectiveInstrumentPaths = subtracted.size === 0 ? instrumentPaths : instrumentPaths.filter((f) => !subtracted.has(f));
   const subtractedSrc = new Set(registration.srcs);
   // W1-T3272 — THE SRC-SIDE STRIP IS GONE, AND THE INSTRUMENT HALF DECIDES. W1-T2521 also subtracted
@@ -6644,7 +6672,13 @@ export function detectInstrumentEntanglement(
   // never escapes this function (it has exactly one reader, the conjunct below). A guard that made
   // it unreachable would read as behaviour worth preserving and is not. MEASURED both ways across
   // the 23 suites that reference this detector: identical results.
-  const effectiveSrcPaths = srcPaths.filter((f) => !subtractedSrc.has(f));
+  const pathOnlyRegistrySrcs =
+    diff === undefined &&
+    instrumentPaths.length > 0 &&
+    instrumentPaths.every((f) => f === CI_WORKFLOW_PATH || f === CI_GATE_WORKFLOW_PATH)
+      ? [CENSUS_REGISTRATION_PATH]
+      : [];
+  const effectiveSrcPaths = srcPaths.filter((f) => !subtractedSrc.has(f) && !pathOnlyRegistrySrcs.includes(f));
   return {
     entangled: effectiveInstrumentPaths.length > 0 && effectiveSrcPaths.length > 0,
     instrumentPaths,
