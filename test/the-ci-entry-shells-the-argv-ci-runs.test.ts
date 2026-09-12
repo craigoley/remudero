@@ -113,3 +113,51 @@ test("ci entry passes the resolved pinned base sha to every tier-manifest shard,
     assert.equal(call.args.includes("origin/main"), false);
   }
 });
+
+// ── W1-T3298: the two fallback arms the classified path leans on. Both are REACHED ONLY through the
+// injected `spawn` seam, and neither had a test — diff-coverage named src/lib/ci-parity.ts:686-691
+// and :709 as added-and-uncovered. A fallback nobody exercises is a fallback nobody knows works, and
+// these two are what stand between a broken git/diff-class read and a silently narrowed test run.
+
+test("W1-T3298: a FAILING `git diff` falls back to the full suite and names the exit code, never a narrowed run", () => {
+  const { spawn } = recordingSpawn({
+    "diff --name-only": { status: 128, stderr: "fatal: bad revision" },
+  });
+  const steps = ciEntry().run!(REPO_ROOT, spawn);
+  const ciTest = steps.find((s) => s.name === "ci:test");
+  assert.ok(ciTest, "expected a named ci:test step");
+  assert.match(
+    ciTest.detail ?? "",
+    /could not compute changed files/,
+    "an unreadable diff must SAY so — a narrowed suite chosen on an unread diff is the dangerous direction",
+  );
+  assert.match(ciTest.detail ?? "", /128/, "the exit code is the evidence, and must survive into the reason");
+  assert.match(ciTest.detail ?? "", /bad revision/, "git's own stderr is carried, never swallowed");
+});
+
+test("W1-T3298: a THROWING diff-class spawn falls back to the full suite rather than crashing the parity run", () => {
+  // A REAL throw, not a returned `error` field: the catch arm is a DIFFERENT line from the
+  // spawnFailureDetail arm below it, and a stub that merely reports failure never reaches it.
+  const base = recordingSpawn().spawn;
+  const spawn: PreflightSpawn = (file, args, opts) => {
+    if (args.some((a) => a.endsWith("diff-class.mjs"))) throw new Error("spawn ENOENT");
+    return base(file, args, opts);
+  };
+  const steps = ciEntry().run!(REPO_ROOT, spawn);
+  const ciTest = steps.find((s) => s.name === "ci:test");
+  assert.ok(ciTest, "expected a named ci:test step");
+  assert.match(
+    ciTest.detail ?? "",
+    /diff class unavailable/,
+    "an unavailable classifier must degrade to the FULL suite, never to a classification it could not compute",
+  );
+});
+
+test("W1-T3298: a diff-class spawn that REPORTS failure without throwing takes the sibling arm, and both say why", () => {
+  const { spawn } = recordingSpawn({
+    "diff-class.mjs --changed-files": { status: null, error: "spawn EACCES" },
+  });
+  const steps = ciEntry().run!(REPO_ROOT, spawn);
+  const ciTest = steps.find((s) => s.name === "ci:test");
+  assert.match(ciTest?.detail ?? "", /diff class unavailable/, "the reported-failure arm degrades the same way the throw does");
+});
