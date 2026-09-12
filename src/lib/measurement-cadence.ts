@@ -2134,7 +2134,7 @@ export interface CiLearningFiringReport {
   excludedCount: number;
   unreadableCount: number;
   filedTaskIds: readonly string[];
-  topCauses: readonly { gate: string; prs: number }[];
+  topCauses: readonly { gate: string; prs: number; action?: CiLearningAction }[];
 }
 
 /** Keyed on the firing INSTANT, never a counter: a counter renumbers on restart and would re-stage
@@ -2164,7 +2164,7 @@ export function stageCiLearningReport(
   const id = ciLearningReportProposalId(report.firedAt);
   const causes =
     report.topCauses.length > 0
-      ? report.topCauses.map((c) => `${c.gate} (${c.prs} PRs)`).join(", ")
+      ? report.topCauses.map((c) => `${c.gate} (${c.prs} PRs${c.action ? `, ${c.action}` : ""})`).join(", ")
       : "(no cause reached the ceiling)";
   const filed = report.filedTaskIds.length > 0 ? report.filedTaskIds.join(", ") : "none";
   return updateProposalRegistry(
@@ -2208,6 +2208,28 @@ export function ciLearningShardId(finding: Pick<CiFailurePair, "pr" | "gate">): 
  *  interactive sessions and change nothing about the fleet's own PRs. */
 export const CI_LEARNING_REMEDY_SURFACE = "learnings/*.yaml";
 
+export type CiLearningAction = "gate" | "docs" | "build" | "unclear";
+
+function ciLearningActionForRepairFile(file: string): Exclude<CiLearningAction, "unclear"> {
+  if (file === "docs" || file.startsWith("docs/")) return "docs";
+  if (
+    file === "scripts" ||
+    file.startsWith("scripts/") ||
+    file === "bin" ||
+    file.startsWith("bin/") ||
+    file.startsWith(".github/workflows/") ||
+    /(^|\/)(ci|gate|ratchet)[^/]*\.(?:cjs|js|mjs|ts)$/.test(file)
+  ) {
+    return "gate";
+  }
+  return "build";
+}
+
+export function classifyCiLearningAction(dominantRepairFiles: readonly { file: string; prs: number }[]): CiLearningAction {
+  const dominant = dominantRepairFiles[0];
+  return dominant ? ciLearningActionForRepairFile(dominant.file) : "unclear";
+}
+
 /** One drafted shard, MARKED and PARKED. Not a `Task`: this rung mints no plan id, so a draft
  *  carries the finding's own key and cannot be mistaken for a filed record. */
 export interface CiLearningShardDraft {
@@ -2227,6 +2249,8 @@ export interface CiLearningShardDraft {
    *  when the repairs share no file more than once — an honest "no single subject" rather than a
    *  manufactured one. */
   dominantRepairFiles: { file: string; prs: number }[];
+  /** What an operator should do with the measured lesson. Derived from repair paths, never gate names. */
+  action?: CiLearningAction;
   /** LAW 5: the author class rides the record. */
   author_class: "machine";
   /** So `isDispatchEligible` refuses it and it PARKS for an operator. */
@@ -2333,6 +2357,7 @@ export function mintCiLearningShards(
       b[1] !== a[1] ? b[1] - a[1] : a[0].localeCompare(b[0]),
     );
     const dominant = rankedFiles.filter(([, n]) => n > 1).slice(0, CI_LEARNING_DOMINANT_FILE_COUNT);
+    const dominantRepairFiles = dominant.map(([file, prs]) => ({ file, prs }));
     drafts.push({
       findingId: c.firstId,
       title:
@@ -2349,7 +2374,8 @@ export function mintCiLearningShards(
       // again and again is what this gate is really about; a file touched once is noise, so a
       // single hit never qualifies. Empty when the repairs share nothing, which is itself the
       // honest answer: this cluster has no single subject and a reader should not be handed one.
-      dominantRepairFiles: dominant.map(([file, prs]) => ({ file, prs })),
+      dominantRepairFiles,
+      action: classifyCiLearningAction(dominantRepairFiles),
       author_class: "machine",
       verify: "human",
       remedySurface: CI_LEARNING_REMEDY_SURFACE,
@@ -2435,7 +2461,7 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string)
     "  acceptance:",
     `    - claim: ${q(`the lane that trips the ${draft.gate} gate is reached by a matched learnings entry rather than prose no dispatched worker reads`)}`,
     `      proof: ${q(`grep: ${draft.findingId} in ${CI_LEARNING_LESSONS_FILE}`)}`,
-    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Remedy surface: ${draft.remedySurface}. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
+    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
     "",
   ].join("\n");
 }
