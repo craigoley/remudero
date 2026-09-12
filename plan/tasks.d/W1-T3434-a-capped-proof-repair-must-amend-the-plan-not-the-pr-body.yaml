@@ -1,0 +1,100 @@
+- id: W1-T3434
+  title: "A CAPPED-PROOF REPAIR TARGETS THE WRONG AUTHORITATIVE ARTIFACT — a trailered implementation PR resolves its criteria from the plan at its own head, while the proof-discrimination worker is told to edit the PR body; a body write cannot change the verdict and a worker lacking GitHub write access makes the queue appear stuck"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 60.00
+  files:
+    - src/lib/proof-amendment.ts
+    - src/lib/prompt-render.ts
+    - src/run-task.ts
+    - test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts
+  origin: "operator-session#repair-the-stuck-capped-pr-2026-09-12"
+  note: "reservation hand-off: codex/plan-w1-t3335-proof-repair -> codex/w1-t3434-parent-verified-proof-amendment"
+  plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T176", "W1-T3306", "W1-T273", "W1-T3063", "W1-T3213", "W1-T3335"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-12 ON #5154. Its W1-T3213 review was CAPPED because all three `unit test:`
+    proofs passed at the implementation head and merge base. The proof-discrimination rung was
+    reachable and its worker correctly identified that the proof needed repair, but the prompt said
+    "Repair the PR BODY's Acceptance block only." #5154 carries `Remudero-Task: W1-T3213`, so
+    `resolvePlanCriteriaAtHead` reads W1-T3213's `acceptance` from the implementation PR head and
+    ignores the body block. The worker's reported GitHub body-write permission failure was real but
+    not the root cause: a successful write would still have repaired the non-authoritative document.
+
+    The safe manual recovery was a separate plan-only #5231, changing only W1-T3213's three
+    `proof:` fields. It passed deterministic filing gates, merged normally, then #5154 was
+    guardedly updated to main, reviewed with three executed proofs and auto-merged. The recovery
+    exposed a separate false-credit defect: `fix(plan)` was classified as an implementation merge;
+    #5237 corrected that on main before the analogous #5209 repair was filed.
+
+    This is not authorization to give fix workers broad GitHub write access. Standing Rule 15
+    correctly forbids an implementation worker from editing the task criteria that judge its own
+    work. The actor that owns a criterion amendment must be distinct from the implementation
+    worker and must prove that the amendment is a real head-versus-base discriminator before it
+    opens a plan PR.
+
+    DUPLICATE-SURFACE RULING. W1-T77/W1-T78 own general sweep classification, W1-T100 owns CI-log
+    repair, W1-T150 owns credit backfill, W1-T168 owns false-block exhaustion, and W1-T176 owns an
+    absent-check remedy. None creates a proof-only plan amendment from a capped review, verifies a
+    worker proposal at both commits, or re-drives the implementation after that amendment merges.
+    Their shared sweep/run-task wiring is real but not duplicate work; this task owns that missing
+    transaction and must compose through their existing boundaries.
+  design: |
+    Add a parent-owned capped-proof-amendment effect inside the existing `runFixRung`
+    proof-discrimination route. It applies ONLY to an OPEN, non-plan-only PR with a `Remudero-Task` whose current
+    review is success+CAPPED, has no unmet criteria, and supplies structured `executed_stale` or
+    `not_executable` proof evidence bound to the exact head SHA.
+
+    The existing low-privilege worker may propose a typed replacement set; it receives no GitHub
+    body, branch, PR-create or task-edit capability. The parent validates every proposed entry:
+    the claim is byte-identical, the old proof is one of the current structured stale proofs, the
+    replacement parses under the reviewer's own proof grammar, it passes at the implementation
+    head and does not pass at its merge base, and it names evidence in the implementation diff
+    rather than the plan shard that declares it. Any unreadable head/base, malformed proposal,
+    duplicate claim, changed claim, non-discriminating replacement or moved implementation head is
+    an explicit refusal with no write.
+
+    Once validated, the parent materializes an isolated plan worktree and writes only replacement
+    `proof:` scalars in the named task shard. It commits `fix(plan): ...`, uses the existing
+    plan-PR emitter and REST creator, emits no `Remudero-Task` trailer, and records a durable
+    idempotency key over task id, implementation PR number, head SHA and the old-proof digest.
+    A duplicate key resumes/probes the existing amendment PR; it never opens a second filing.
+
+    After that plan PR merges, the parent re-reads the original PR state and uses the existing
+    expected-head guarded update-branch operation. It never posts a success, arms auto-merge or
+    merges the implementation itself: ordinary CI, semantic review and the existing arm path own
+    those decisions on the new head. A concurrent implementation push or a closed PR is a
+    no-op/refusal, never a retry against stale inputs.
+
+    Do not change the CAPPED arm refusal, Rule 15, the semantic reviewer, or plan-only PR
+    treatment. Do not repair a taskless PR here: its body is authoritative and remains on the
+    existing body-repair path.
+  acceptance:
+    - claim: "a trailered capped implementation PR with a validated replacement produces one plan-only `fix(plan)` amendment that changes proof scalars only, never its body or implementation branch"
+      proof: "grep: a validated trailered capped PR creates one proof-only plan amendment in test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts"
+    - claim: "the parent refuses a replacement that changes a claim, fails to parse, passes at the merge base, targets the plan shard itself, or is based on an unreadable or moved implementation head"
+      proof: "grep: an invalid or non-discriminating replacement opens no amendment in test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts"
+    - claim: "a duplicate task/pr/head/old-proof-digest resumes the existing amendment filing and cannot create a second one"
+      proof: "grep: a duplicate proof-amendment identity resumes instead of creating another PR in test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts"
+    - claim: "after a merged amendment, only a same-head guarded branch update is requested; the existing CI, review and arm paths retain sole authority to merge the implementation"
+      proof: "grep: a merged amendment requests only an expected-head branch update in test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts"
+    - claim: "the live sweep effect calls the proof-amendment parent rather than granting the worker any direct task or PR write authority"
+      proof: "grep: requestProofAmendment( in src/run-task.ts"
+  falsifier: |
+    CLOSE UNBUILT if a trailered PR's review already resolves its criteria from the PR body, or if
+    an existing parent-owned effect already creates a plan-only proof amendment with all five
+    validations above. #5154 falsifies the first limb: changing its body did not alter the
+    W1-T3213 plan criteria at its head. The existing proof-discrimination path falsifies the
+    second: it reaches a worker prompt but has no plan-PR creation, idempotency key, candidate
+    proof execution, or guarded post-merge branch update.
+
+    Reject any implementation that gives the worker direct GitHub write authority, edits the
+    implementation task shard on the implementation branch, changes a claim while repairing a
+    proof, treats a head/base read failure as a passing proof, creates a second amendment after a
+    duplicate observation, or directly arms or merges a CAPPED implementation PR.
