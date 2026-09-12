@@ -10,6 +10,9 @@
  * completion signal. Credit derives from the trailer, so the task has left the runnable frontier
  * permanently. Nothing in the fleet would ever notice.
  *
+ */
+
+/**
  * IT IS A CHANNEL, NOT AN INCIDENT. Over 14 days of merged commits, 105 of 663 commits carrying a
  * `Remudero-Task:` trailer shipped NONE of the declared non-plan files for the task they credited,
  * and 99 of those 105 had a diff consisting entirely of `plan/` records. A second live case (#5107)
