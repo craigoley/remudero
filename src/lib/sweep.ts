@@ -625,8 +625,7 @@ export interface BuildSweepEffectsDeps {
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
   readJsonImpl?: (args: string[]) => Promise<unknown>;
-  /** Shared daemon REST pacer. The exact stale-red workflow read joins it rather than adding an
-   * unpaced burst; CLI/test callers omit it and retain the transport's existing immediate mode. */
+  /** Shared pacer; omitted for the existing immediate CLI/test mode. */
   pacer?: GhCallPacer;
   /** W1-T3283 — the body write the trailer-repair effect performs. Injectable for the SAME reason
    *  `deps.updatePrBody` already is at this file's two other body-write sites: the effect is a thin
