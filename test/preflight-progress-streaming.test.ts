@@ -145,6 +145,13 @@ test("W1-T3299 (supersedes the two-step shape): the full suite streams, the cove
   const calls: { file: string; args: string[]; opts?: { cwd?: string; input?: string; stream?: boolean } }[] = [];
   const spawn: PreflightSpawn = (file, args, opts) => {
     calls.push({ file, args, opts });
+    if (file === "git" && args[0] === "rev-parse") {
+      return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
+    }
+    if (file === process.execPath && args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
+      const shard = args[args.indexOf("--shard") + 1]?.match(/^(\d+)\/4$/)?.[1];
+      return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
+    }
     return { status: 0, stdout: "", stderr: "" };
   };
   runCiParity(REPO_ROOT, { spawn });
@@ -163,7 +170,7 @@ test("W1-T3299 (supersedes the two-step shape): the full suite streams, the cove
   // call returns empty stdout (see the sibling test above), so streaming here would silently
   // disarm that refusal. Capture is the correct trade, and the cost — a shard runs without live
   // progress — is named here rather than left for the next reader to rediscover.
-  const shards = calls.filter((c) => c.args.includes("--experimental-test-coverage") && c.args.some((a) => a.startsWith("--test-shard=")));
+  const shards = calls.filter((c) => c.args.includes("--experimental-test-coverage") && c.args.some((a) => /^test\/coverage-shard-\d+\.test\.ts$/.test(a)));
   assert.equal(shards.length, 4, "the coverage leaf must still run the suite under coverage, as CI's four shards");
   for (const shard of shards) {
     assert.notEqual(

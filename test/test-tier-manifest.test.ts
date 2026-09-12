@@ -427,6 +427,34 @@ test("--run fast --shard runs only its duration-balanced shard", () => {
   assert.ok(!capturedArgs.includes("test/d.test.ts"));
 });
 
+test("--select-all emits one duration-balanced whole-suite shard without spawning the test runner", () => {
+  const root = newFixtureRoot();
+  for (const file of ["a.test.ts", "b.test.ts", "c.test.ts", "d.test.ts"]) writeFixtureTestFile(root, file);
+  writeFixtureManifest(root, {
+    thresholdMs: 5000,
+    files: {
+      "test/a.test.ts": 900,
+      "test/b.test.ts": 800,
+      "test/c.test.ts": 200,
+      "test/d.test.ts": 100,
+    },
+  });
+  const result = runCli(["--select-all", "--shard", "2/2"], root);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trim().split("\n"), ["test/b.test.ts", "test/c.test.ts"]);
+  assert.match(result.stderr, /coverage shard summary/);
+});
+
+test("--select-all refuses an unfilled coverage matrix instead of silently emitting an empty shard", () => {
+  const root = newFixtureRoot();
+  writeFixtureTestFile(root, "only.test.ts");
+  writeFixtureManifest(root, { thresholdMs: 5000, files: { "test/only.test.ts": 100 } });
+  const result = runCli(["--select-all", "--shard", "1/2"], root);
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /cannot fill 2 shards/);
+});
+
 test("--run adds a second event reporter only when a duration output is requested", () => {
   const root = newFixtureRoot();
   writeFixtureTestFile(root, "a.test.ts");

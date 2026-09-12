@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -16,16 +17,33 @@ interface Call {
   opts?: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv };
 }
 
-function shardNumber(args: readonly string[]): number | undefined {
-  const shard = args.find((a) => a.startsWith("--test-shard="));
-  if (!shard) return undefined;
-  return Number(shard.match(/^--test-shard=(\d+)\/4$/)?.[1]);
+function selectorShardNumber(args: readonly string[]): number | undefined {
+  if (!args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) || !args.includes("--select-all")) return undefined;
+  const shard = args[args.indexOf("--shard") + 1];
+  const match = shard?.match(/^(\d+)\/4$/);
+  return match ? Number(match[1]) : undefined;
 }
 
-function coverageSpawn(options: { missingArtifactShard?: number; missingSummaryShard?: number } = {}) {
+function shardNumber(args: readonly string[]): number | undefined {
+  const selected = args.find((arg) => /^test\/coverage-shard-\d+\.test\.ts$/.test(arg));
+  const match = selected?.match(/^test\/coverage-shard-(\d+)\.test\.ts$/);
+  return match ? Number(match[1]) : undefined;
+}
+
+function coverageFixtureRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), "coverage-entry-parity-"));
+  const workflowDirectory = join(root, ".github", "workflows");
+  mkdirSync(workflowDirectory, { recursive: true });
+  copyFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), join(workflowDirectory, "ci.yml"));
+  return root;
+}
+
+function coverageSpawn(repoRoot: string, options: { missingArtifactShard?: number; missingSummaryShard?: number } = {}) {
   const calls: Call[] = [];
   const spawn: PreflightSpawn = (file, args, opts) => {
     calls.push({ file, args, opts });
+    const selectorShard = selectorShardNumber(args);
+    if (selectorShard !== undefined) return { status: 0, stdout: `test/coverage-shard-${selectorShard}.test.ts\n`, stderr: "" };
     const shard = shardNumber(args);
     if (shard !== undefined) {
       const rawDir = opts?.env?.NODE_V8_COVERAGE;
@@ -59,24 +77,33 @@ function coverageSpawn(options: { missingArtifactShard?: number; missingSummaryS
       // `[ ! -s coverage/lcov.info ]` check with "no lcov produced" — a green suite and a red job,
       // with no failing test to point at. The merge here is stubbed and never creates that file,
       // so there was nothing to clean up in the first place.
-      rmSync(join(REPO_ROOT, "coverage", "raw-shards"), { recursive: true, force: true });
+      rmSync(join(repoRoot, "coverage", "raw-shards"), { recursive: true, force: true });
     },
   };
 }
 
 test("coverage entry runs CI's four shard selectors, then merges the shard raw coverage into the lcov consumed by both gates", () => {
-  const { calls, spawn, cleanup } = coverageSpawn();
+  const fixtureRoot = coverageFixtureRoot();
+  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot);
   try {
-    const result = runCiParity(REPO_ROOT, { spawn });
+    const result = runCiParity(fixtureRoot, { spawn });
 
-    const shardCalls = calls.filter((c) => shardNumber(c.args) !== undefined);
+    const selectorCalls = calls.filter((c) => selectorShardNumber(c.args) !== undefined);
     assert.deepEqual(
-      shardCalls.map((c) => c.args.find((a) => a.startsWith("--test-shard="))).sort(),
-      ["--test-shard=1/4", "--test-shard=2/4", "--test-shard=3/4", "--test-shard=4/4"],
+      selectorCalls.map((c) => c.args[c.args.indexOf("--shard") + 1]).sort(),
+      ["1/4", "2/4", "3/4", "4/4"],
     );
+    const shardCalls = calls.filter((c) => shardNumber(c.args) !== undefined);
+    assert.deepEqual(shardCalls.map((c) => c.args.find((a) => a.startsWith("test/coverage-shard-"))).sort(), [
+      "test/coverage-shard-1.test.ts",
+      "test/coverage-shard-2.test.ts",
+      "test/coverage-shard-3.test.ts",
+      "test/coverage-shard-4.test.ts",
+    ]);
     for (const call of shardCalls) {
       assert.equal(call.file, process.execPath, "each coverage shard shells node directly, as ci.yml does");
       assert.equal(call.args.includes(join(REPO_ROOT, "scripts", "test-with-retry.mjs")), false, "coverage shards do not use ci's retry wrapper");
+      assert.equal(call.args.some((arg) => arg.startsWith("--test-shard=")), false, "coverage shards receive duration-balanced file lists, not Node's opaque shard assignment");
       assert.ok(call.opts?.env?.NODE_V8_COVERAGE?.includes("coverage/raw-shards/shard-"), "each shard writes raw coverage to its own artifact directory");
     }
 
@@ -84,7 +111,7 @@ test("coverage entry runs CI's four shard selectors, then merges the shard raw c
     assert.ok(mergeIndex >= 0, "the coverage entry must invoke the existing merge script");
     const merge = calls[mergeIndex]!;
     assert.equal(merge.args[0], "--expose-internals");
-    assert.deepEqual(merge.args.slice(2, 4), ["--output", join(REPO_ROOT, "coverage", "lcov.info")]);
+    assert.deepEqual(merge.args.slice(2, 4), ["--output", join(fixtureRoot, "coverage", "lcov.info")]);
     assert.equal(merge.args.slice(4).length, CI_COVERAGE_SHARD_COUNT, "all four raw shard directories must be merge inputs");
 
     const ratchetIndex = calls.findIndex((c) => c.args.some((a) => a.endsWith("coverage-ratchet.mjs")));
@@ -94,13 +121,15 @@ test("coverage entry runs CI's four shard selectors, then merges the shard raw c
     assert.ok(result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")?.ok);
   } finally {
     cleanup();
+    rmSync(fixtureRoot, { recursive: true, force: true });
   }
 });
 
 test("coverage entry refuses a partial shard artifact set before merge or coverage gates can report a number", () => {
-  const { calls, spawn, cleanup } = coverageSpawn({ missingArtifactShard: 3 });
+  const fixtureRoot = coverageFixtureRoot();
+  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { missingArtifactShard: 3 });
   try {
-    const result = runCiParity(REPO_ROOT, { spawn });
+    const result = runCiParity(fixtureRoot, { spawn });
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
 
     assert.equal(coverage.ok, false);
@@ -110,13 +139,15 @@ test("coverage entry refuses a partial shard artifact set before merge or covera
     assert.equal(calls.some((c) => c.args.some((a) => a.endsWith("diff-coverage.mjs"))), false);
   } finally {
     cleanup();
+    rmSync(fixtureRoot, { recursive: true, force: true });
   }
 });
 
 test("coverage entry refuses a shard with no # tests summary as unverified", () => {
-  const { calls, spawn, cleanup } = coverageSpawn({ missingSummaryShard: 2 });
+  const fixtureRoot = coverageFixtureRoot();
+  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { missingSummaryShard: 2 });
   try {
-    const result = runCiParity(REPO_ROOT, { spawn });
+    const result = runCiParity(fixtureRoot, { spawn });
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
 
     assert.equal(coverage.ok, false);
@@ -124,6 +155,7 @@ test("coverage entry refuses a shard with no # tests summary as unverified", () 
     assert.equal(calls.some((c) => c.args.some((a) => a.endsWith("coverage-merge-ratchet.mjs"))), false);
   } finally {
     cleanup();
+    rmSync(fixtureRoot, { recursive: true, force: true });
   }
 });
 

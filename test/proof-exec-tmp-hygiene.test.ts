@@ -103,6 +103,10 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
     if (file === "git" && args[0] === "rev-parse") {
       return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
     }
+    if (file === process.execPath && args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
+      const shard = args[args.indexOf("--shard") + 1]?.match(/^(\d+)\/4$/)?.[1];
+      return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
+    }
     return { status: 0, stdout: "", stderr: "" };
   };
   return { spawn, calls };
