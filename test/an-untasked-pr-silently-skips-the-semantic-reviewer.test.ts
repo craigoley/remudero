@@ -30,11 +30,22 @@ test("W1-T3387: an untasked PR receives the conservative semantic-review default
       postReviewPending: async () => ({ posted: true }),
       materialize: () => ({
         worktreePath: undefined,
-        failure: { errorClass: "test", message: "untasked semantic-review fixture" },
+        failure: { errorClass: "other", message: "untasked semantic-review fixture" },
       }),
       runReview: async (args: Parameters<typeof runReview>[0]) => {
         captured = args;
-        return { state: "success", headSha: HEAD, reviewerOutcome: "not_attempted", criteria: [] } as Awaited<ReturnType<typeof runReview>>;
+        return {
+          state: "success",
+          headSha: HEAD,
+          reviewerOutcome: "not_attempted",
+          criteria: [],
+          testTheater: false,
+          summary: "untasked semantic-review fixture",
+          floorDegraded: false,
+          capped: false,
+          keywordOnly: false,
+          planOnly: false,
+        } satisfies Awaited<ReturnType<typeof runReview>>;
       },
     });
 
