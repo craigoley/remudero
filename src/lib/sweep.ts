@@ -2045,8 +2045,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // decision runFixRung already uses. This is deliberately not exposed through Serve.
     readRedBaseRefreshFacts: (pr) => redBaseRefreshFactsFromRest(owner, repo, pr.prNumber),
 
-    // W1-T3422 — this call is reachable only after `selectStaleRedRelease` admitted the cheap
-    // completion-time candidate. It shares the daemon's REST pacer and has no retry/wait loop.
+    // W1-T3422 — reached only after `selectStaleRedRelease` admits the cheap candidate; it shares the daemon REST pacer and has no retry/wait loop.
     readStaleRedWorkflowRuns: (pr) =>
       paceGhEntry(pacer, isGhRateLimitError, () => fetchWorkflowRunObservationsForBuild(owner, repo, pr.headSha, ghJson)),
 
