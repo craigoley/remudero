@@ -627,6 +627,7 @@ export interface BuildSweepEffectsDeps {
   readJsonImpl?: (args: string[]) => Promise<unknown>;
   /** Shared pacer; omitted for the existing immediate CLI/test mode. */
   pacer?: GhCallPacer;
+  fetchWorkflowRunObservationsImpl?: typeof fetchWorkflowRunObservations;
   /** W1-T3283 — the body write the trailer-repair effect performs. Injectable for the SAME reason
    *  `deps.updatePrBody` already is at this file's two other body-write sites: the effect is a thin
    *  wrapper around one network call, so without a seam the only way to cover it is to make a real
@@ -879,6 +880,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     disarmImpl = disarmAutoMerge,
     readJsonImpl = ghJsonAsync,
     pacer,
+    fetchWorkflowRunObservationsImpl: fetchWorkflowRunObservationsForBuild = fetchWorkflowRunObservations,
     registeredWorktreeOwnerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["registeredWorktreeOwnerImpl"]>>("registeredWorktreeOwnerImpl"),
     reviewCommandImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reviewCommandImpl"]>>("reviewCommandImpl"),
     registeredOwnerRecovery = {
@@ -2046,7 +2048,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T3422 — this call is reachable only after `selectStaleRedRelease` admitted the cheap
     // completion-time candidate. It shares the daemon's REST pacer and has no retry/wait loop.
     readStaleRedWorkflowRuns: (pr) =>
-      paceGhEntry(pacer, isGhRateLimitError, () => fetchWorkflowRunObservations(owner, repo, pr.headSha, ghJson)),
+      paceGhEntry(pacer, isGhRateLimitError, () => fetchWorkflowRunObservationsForBuild(owner, repo, pr.headSha, ghJson)),
 
     runStaleRedLocalRoute: (target) =>
       runIsolatedLocalMergeRoute(repoRoot, {

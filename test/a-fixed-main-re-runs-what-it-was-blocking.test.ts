@@ -169,7 +169,7 @@ test("W1-T3422: an unregistered or failing local route never mints a new head", 
   assert.ok(failed.appended.some((line) => line.step === "sweep.stale_red_redrive.local_route" && line.outcome === "route-failed"));
 });
 
-test("W1-T3422: the check route is declared against ci.yml and executes in a real isolated merge", () => {
+test("W1-T3422: the production builder reads, proves, and redrives through the declared isolated route", async () => {
   const repoRoot = join(process.cwd());
   assert.deepEqual(localMergeRouteContractErrors(readFileSync(join(repoRoot, ".github", "workflows", "ci.yml"), "utf8")), []);
   const remote = gitRepo({ bare: true, kind: "stale-red-origin" });
@@ -233,6 +233,60 @@ test("W1-T3422: the check route is declared against ci.yml and executes in a rea
     assert.equal(routeFailed.outcome, "route-failed");
     const result = runIsolatedLocalMergeRoute(source.dir, { prNumber: 1, headSha: head, mainSha: main, route: LOCAL_MERGE_CHECK_ROUTES[0]! });
     assert.equal(result.outcome, "passed", result.detail);
+
+    const workflowReads: Array<{ owner: string; repo: string; headSha: string }> = [];
+    const pushes: Array<{ repoDir: string; branch: string; headSha: string; message: string }> = [];
+    const paceEvents: string[] = [];
+    const effects = buildSweepEffects({
+      owner: "acme",
+      repo: "remudero",
+      repoRoot: source.dir,
+      localRepoName: "remudero",
+      config: { root: source.dir } as never,
+      ledgerPath: "/dev/null/w1-t3422-builder.ndjson",
+      runId: "W1-T3422-builder",
+      plan: { tasks: [], byId: new Map() } as never,
+      log: () => {},
+      readJsonImpl: async () => ({ sha: main, commit: { committer: { date: "2026-09-12T10:00:00.000Z" } } }),
+      pacer: {
+        wait: () => paceEvents.push("wait"),
+        recordResult: (rateLimited) => paceEvents.push(`result:${rateLimited}`),
+      },
+      fetchWorkflowRunObservationsImpl: (readOwner, readRepo, readHeadSha) => {
+        workflowReads.push({ owner: readOwner, repo: readRepo, headSha: readHeadSha });
+        return [];
+      },
+      pushEmptyCommit: (repoDir, branch, headSha, message) => {
+        pushes.push({ repoDir, branch, headSha, message });
+        return "d".repeat(40);
+      },
+    });
+    assert.deepEqual(await effects.readMainRepair!(), { sha: main, committedAt: "2026-09-12T10:00:00.000Z" });
+    assert.equal(await effects.readMainTip!(), main, "the compatible SHA reader reuses the same main observation");
+    assert.deepEqual(effects.readStaleRedWorkflowRuns!(redPr({ headSha: head })), []);
+    assert.deepEqual(workflowReads, [{ owner: "acme", repo: "remudero", headSha: head }]);
+    assert.deepEqual(paceEvents, ["wait", "result:false"]);
+    const target = {
+      pr: redPr({ prNumber: 1, headSha: head, headRefName: "pr-head" }),
+      failure: failure(),
+      main: { sha: main, committedAt: "2026-09-12T10:00:00.000Z" },
+      route: LOCAL_MERGE_CHECK_ROUTES[0]!,
+    };
+    const builtRoute = await effects.runStaleRedLocalRoute!(target);
+    assert.equal(builtRoute.outcome, "passed", builtRoute.detail);
+    assert.equal(await effects.releaseStaleRed!(target), "d".repeat(40));
+    assert.equal(pushes.length, 1);
+    assert.deepEqual({
+      repoDir: source.dir,
+      branch: "pr-head",
+      headSha: head,
+    }, {
+      repoDir: pushes[0]!.repoDir,
+      branch: pushes[0]!.branch,
+      headSha: pushes[0]!.headSha,
+    }, "the redrive must retain the observed branch and head");
+    assert.match(pushes[0]!.message, /#1/);
+    assert.match(pushes[0]!.message, /comment-load-ratchet/);
   } finally {
     if (savedGlobalConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
     else process.env.GIT_CONFIG_GLOBAL = savedGlobalConfig;
