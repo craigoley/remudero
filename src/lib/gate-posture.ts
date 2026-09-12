@@ -236,9 +236,9 @@ export interface GatePostureCensus {
 export type GatePostureTree = Readonly<Record<string, string>>;
 
 const HOOK_PREFIX = "hooks/";
-const SCRIPT_RE = /^scripts\/[^/]+-(?:check|ratchet)\.mjs$/;
-const NON_ZERO_RE = /\bexit\s+[1-9]\b|process\.exit(?:Code\s*=\s*[1-9]|\(\s*[1-9])|throw new Error\b|\bdeny\(/;
-const REFUSAL_LANGUAGE_RE = /\b(blocked|blocks|refus(?:e|es|ed|ing)|ratchet|gate|violation|failed|failure)\b/i;
+export const SCRIPT_RE = /^scripts\/[^/]+-(?:check|ratchet)\.mjs$/;
+export const NON_ZERO_RE = /\bexit\s+[1-9]\b|process\.exit(?:Code\s*=\s*[1-9]|\(\s*[1-9])|throw new Error\b|\bdeny\(/;
+export const REFUSAL_LANGUAGE_RE = /\b(blocked|blocks|refus(?:e|es|ed|ing)|ratchet|gate|violation|failed|failure)\b/i;
 
 function uniqById(surfaces: GateSurface[]): GateSurface[] {
   const seen = new Set<string>();

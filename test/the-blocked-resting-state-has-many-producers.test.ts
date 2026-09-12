@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 
 import {
   GATE_POSTURE_DECLARATIONS,
+  NON_ZERO_RE,
+  REFUSAL_LANGUAGE_RE,
+  SCRIPT_RE,
   censusGatePostures,
   currentGatePostureReport,
   deriveGateSurfaces,
@@ -46,6 +49,15 @@ test("a usage-only non-zero script is not counted as a refusal gate", () => {
   });
 
   assert.deepEqual(surfaces, []);
+});
+
+test("the refusal-surface regexes reject unrelated text and accept their gate-shaped inputs", () => {
+  assert.equal(SCRIPT_RE.test("scripts/future-ratchet.mjs"), true);
+  assert.equal(SCRIPT_RE.test("scripts/future.mjs"), false);
+  assert.equal(NON_ZERO_RE.test("process.exit(1)"), true);
+  assert.equal(NON_ZERO_RE.test("console.log('ok')"), false);
+  assert.equal(REFUSAL_LANGUAGE_RE.test("future gate blocked"), true);
+  assert.equal(REFUSAL_LANGUAGE_RE.test("Usage: future <path>"), false);
 });
 
 test("the report names each surface with posture and compliance, never only an aggregate count", () => {
