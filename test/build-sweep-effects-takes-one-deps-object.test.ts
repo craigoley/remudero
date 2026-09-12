@@ -30,6 +30,8 @@ const EFFECT_KEYS = [
   "readCiGateRollup",
   "reaggregateCiGate",
   "readMainTip",
+  "proveFixedMainBlocker",
+  "refireFixedMainPr",
   "releaseBaseCausedStandDown",
   "selectAdaptiveReviewWidth",
   // W1-T3283: the sweep's trailer-repair effect. The assertion sorts both sides, so this entry's
