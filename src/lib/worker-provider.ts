@@ -1338,10 +1338,10 @@ export function codexGitWritableRoots(cwd: string, configRoot: string): string[]
 export const CODEX_PROJECT_DOC_MAX_BYTES = 65536;
 
 /**
- * The nudge every Codex worker prompt opens with (W1-T3135). It names only instruction files this
- * checkout actually contains — it used to name AGENTS.md, which has never existed here — and it
- * stays even though `project_doc_fallback_filenames` now auto-loads CLAUDE.md, because a worker
- * that is told what it was given reads it as doctrine rather than as background.
+ * The nudge every Codex worker prompt opens with (W1-T3135/W1-T3267). It names the maintained
+ * source rather than the generated index, and it stays even though `project_doc_fallback_filenames`
+ * now prefers AGENTS.md and falls back to CLAUDE.md, because a worker that is told what it was
+ * given reads it as doctrine rather than as background.
  */
 export const CODEX_DOCTRINE_PRELUDE =
   "Before acting, read and follow the repository instruction files present in the checkout, starting with CLAUDE.md — this repository's standing instructions, which are also loaded as your project doc.\n\n";
@@ -1460,17 +1460,13 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     //
     "-c", 'shell_environment_policy.inherit="core"',
     "-c", 'shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","ANTHROPIC_API_KEY"]',
-    // W1-T3135 — THE CODEX LANE'S ONLY ROUTE TO REPOSITORY DOCTRINE, AND BOTH FLAGS OR NEITHER.
-    // Codex's project-doc reader loads AGENTS.md, which this repo does not have and will not grow;
-    // the fallback points that same reader at CLAUDE.md, so there is one source of truth and
-    // nothing that can drift. MEASURED 2026-09-09 on codex-cli 0.152.0 under `--sandbox
-    // workspace-write`, prompted "Do not read or open any files" so the answer proves
-    // AUTO-INJECTION: without the fallback a CLAUDE.md canary reads back "UNKNOWN"; with it, the
-    // canary. The cap is not optional — alone the fallback would load CLAUDE.md (43685 bytes,
-    // ratchet cap 44000) against Codex's 32768 default and cut a quarter of the doctrine at a byte
-    // offset, mid-rule, with no signal. Falsifiers for both live in
-    // test/the-codex-lane-auto-loads-no-doctrine.test.ts.
-    "-c", 'project_doc_fallback_filenames=["CLAUDE.md"]',
+    // W1-T3135/W1-T3267 — THE CODEX LANE'S PROJECT-DOC ROUTE, AND BOTH FLAGS OR NEITHER.
+    // The generated AGENTS.md is the preferred, compact index; CLAUDE.md stays in the same list as
+    // the maintained fallback for a checkout that lacks the generated file. The cap is unchanged:
+    // without it, a fallback to CLAUDE.md can still truncate at Codex's smaller default. Falsifiers
+    // for the cap and fallback live in test/the-codex-lane-auto-loads-no-doctrine.test.ts and
+    // test/a-dispatched-codex-worker-loads-the-whole-file.test.ts.
+    "-c", 'project_doc_fallback_filenames=["AGENTS.md","CLAUDE.md"]',
     "-c", `project_doc_max_bytes=${CODEX_PROJECT_DOC_MAX_BYTES}`,
   ];
   // W1-T2748 narrows W1-T2754's trust bypass to the two call-site properties that make it safe:
