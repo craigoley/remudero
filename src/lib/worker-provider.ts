@@ -932,7 +932,7 @@ function codexControlEnv(config: Config): NodeJS.ProcessEnv {
 }
 
 /** One raw Codex control-plane exchange. It applies no caller model or provider policy. */
-async function readCodexRuntime(
+export async function readCodexRuntime(
   config: Config,
   bin: string,
   deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & {

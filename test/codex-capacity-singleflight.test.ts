@@ -5,6 +5,7 @@ import { test } from "node:test";
 import {
   clearCodexCapacityCache,
   readCodexCapacity,
+  readCodexRuntime,
 } from "../src/lib/worker-provider.js";
 import type { Config } from "../src/lib/config.js";
 import type { CapabilityLadder } from "../src/lib/mounts.js";
@@ -240,6 +241,25 @@ test("W1-T3435 criterion 4: ordinary callers share one hedged exchange while for
   assert.equal(balanced.readable, true);
   assert.equal(spawns, 3, "one ordinary primary, one independent force refresh, and one shared hedge");
   assert.equal(kills, 3);
+});
+
+test("a pre-aborted Codex app-server exchange is cancelled and reaped before RPC writes", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let kills = 0;
+  let requests = 0;
+
+  const result = await readCodexRuntime(config("/tmp/codex-pre-aborted-exchange"), "/bin/sh", {
+    timeoutMs: 20,
+    signal: controller.signal,
+    spawn: () => fakeAppServer(() => { requests += 1; }, () => { kills += 1; }) as never,
+  });
+
+  assert.ok("provider" in result);
+  assert.equal(result.readable, false);
+  assert.match(result.detail ?? "", /app-server hedge cancelled/);
+  assert.equal(kills, 1, "the child must be killed exactly once even when the signal starts aborted");
+  assert.equal(requests, 0, "the exchange must not write initialize after accepting cancellation");
 });
 
 test("malformed app-server stdout fails closed without spending the transient timeout retry", async () => {
