@@ -57,13 +57,13 @@
     it in as a fix.
   acceptance:
     - claim: "W1-T3335 criterion 1: the daemon ledgers its heap against the limit on its own tick, before V8 can abort"
-      proof: "unit test: test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
+      proof: "grep: W1-T3335 criterion 1: the daemon ledgers heap pressure against V8's limit on its own tick in test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
     - claim: "W1-T3335 criterion 2: past a high-water mark it stops accepting new work, drains what is in flight, and exits deliberately"
-      proof: "unit test: test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
+      proof: "grep: W1-T3335 criterion 2: once pressure is observed, no new work is accepted after the in-flight task drains in test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
     - claim: "W1-T3335 criterion 3: a daemon comfortably inside its limit ledgers nothing and refuses no work"
-      proof: "unit test: test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
+      proof: "grep: W1-T3335 criterion 3: a daemon comfortably inside its limit ledgers no heap pressure and refuses no work in test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
     - claim: "W1-T3335 criterion 4: a stopped fleet is detectable from outside the process, by a stale ledger against its own cadence"
-      proof: "unit test: test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
+      proof: "grep: W1-T3335 criterion 4: a stopped fleet is visible from outside the process by stale ledger cadence in test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts"
   falsifier: |
     CLOSE IF THE HALT ALREADY REPORTS ITSELF: after an abort, grep the ledger for any row written
     between the last tick and the exit. MEASURED 2026-09-10: none — the only trace of five restarts
