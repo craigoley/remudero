@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -16,6 +16,7 @@ import { checkReviewerCodeFreshness, SELF_SYNC_GUARD_ENV } from "../src/lib/self
 import { reviewCommand, runFixRung, runReview, runTask, type ReviewRunResult } from "../src/run-task.js";
 import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 // @source-text-subject — this test's subject is the complete production terminal-review call-site
 // set. A behavioral seam can prove one path, but not that all three paths install the same guard.
@@ -234,25 +235,18 @@ test("W1-T3337: an immaterial advance still publishes and makes the reviewer's l
 
 test("W1-T3337: a throwing just-in-time reader is converted to an unreadable refusal before the review status can post", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-stale-review-run-"));
-  const bin = mkdtempSync(join(tmpdir(), "rmd-stale-review-gh-"));
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  const gh = ghShim(
+    [
+      { when: "api repos/", stdout: JSON.stringify({ number: 1, html_url: "https://github.com/acme/remudero/pull/1", updated_at: "t", body: "", head: { ref: "fixture", sha: head }, state: "open" }) },
+      { when: "pr diff", stdout: "diff --git a/README.md b/README.md" },
+      { when: "pr view", stdout: JSON.stringify({ state: "OPEN" }) },
+    ],
+    { kind: "stale-review-run" },
+  );
   const priorPath = process.env.PATH;
   try {
-    writeFileSync(
-      join(bin, "gh"),
-      [
-        "#!/bin/sh",
-        "case \"$1 $2\" in",
-        `  \"api repos/\"*) echo '{\"number\":1,\"html_url\":\"https://github.com/acme/remudero/pull/1\",\"updated_at\":\"t\",\"body\":\"\",\"head\":{\"ref\":\"fixture\",\"sha\":\"${head}\"},\"state\":\"open\"}' ;;`,
-        "  \"pr diff\"*) echo 'diff --git a/README.md b/README.md' ;;",
-        "  \"pr view\"*) echo '{\"state\":\"OPEN\"}' ;;",
-        "  *) echo '{}' ;;",
-        "esac",
-        "",
-      ].join("\n"),
-    );
-    chmodSync(join(bin, "gh"), 0o755);
-    process.env.PATH = `${bin}:${priorPath}`;
+    process.env.PATH = `${gh.dir}:${priorPath}`;
     const steps: string[] = [];
     const verdict = await runReview({
       owner: "acme",
@@ -284,7 +278,7 @@ test("W1-T3337: a throwing just-in-time reader is converted to an unreadable ref
     if (priorPath === undefined) delete process.env.PATH;
     else process.env.PATH = priorPath;
     rmSync(root, { recursive: true, force: true });
-    rmSync(bin, { recursive: true, force: true });
+    rmSync(gh.dir, { recursive: true, force: true });
   }
 });
 
@@ -366,11 +360,20 @@ test("W1-T3337: the implementation run records a blocked verdict when its inject
   const root = mkdtempSync(join(tmpdir(), "rmd-stale-review-run-task-"));
   const origin = gitRepo({ bare: true, kind: "stale-review-run-origin" });
   const seed = gitRepo({ cloneFrom: origin.dir, kind: "stale-review-run-seed" });
-  const bin = mkdtempSync(join(tmpdir(), "rmd-stale-review-run-gh-"));
   const planPath = join(root, "tasks.yaml");
   const repoDir = join(root, "repos", "remudero");
   const fixedNow = 1_785_000_000_000;
   const branch = `run-W1-T3337-${fixedNow}`;
+  const gh = ghShim(
+    [
+      { when: "--json headRefName", stdout: JSON.stringify({ headRefName: branch }) },
+      { when: "--json body", stdout: JSON.stringify({ body: "" }) },
+      { when: "api repos/acme/remudero/pulls/", stdout: JSON.stringify({ number: 3337, state: "open", merged: false, merged_at: null, head: { sha: "deadbeef" } }) },
+      { when: "/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "success" }] }) },
+      { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
+    ],
+    { kind: "stale-review-run-task" },
+  );
   const priorPath = process.env.PATH;
   const dateNowSpy = t.mock.method(Date, "now", () => fixedNow);
   try {
@@ -397,29 +400,7 @@ test("W1-T3337: the implementation run records a blocked verdict when its inject
         "",
       ].join("\n"),
     );
-    writeFileSync(
-      join(bin, "gh"),
-      [
-        "#!/bin/bash",
-        "set -e",
-        "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
-        `  if [[ \"$5\" == 'headRefName' ]]; then echo '{\"headRefName\":\"${branch}\"}'; exit 0; fi`,
-        "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
-        "fi",
-        "if [[ \"$1\" == 'api' ]]; then",
-        "  case \"$2\" in",
-        "    */pulls/*) echo '{\"number\":3337,\"state\":\"open\",\"merged\":false,\"merged_at\":null,\"head\":{\"sha\":\"deadbeef\"}}'; exit 0 ;;",
-        "    */check-runs*) echo '{\"check_runs\":[{\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"success\"}]}'; exit 0 ;;",
-        "    */status) echo '{\"statuses\":[]}'; exit 0 ;;",
-        "  esac",
-        "fi",
-        "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
-        "exit 0",
-        "",
-      ].join("\n"),
-    );
-    chmodSync(join(bin, "gh"), 0o755);
-    process.env.PATH = `${bin}:${priorPath}`;
+    process.env.PATH = `${gh.dir}:${priorPath}`;
 
     const github: GitHub = {
       prByRef: () => null,
@@ -461,7 +442,7 @@ test("W1-T3337: the implementation run records a blocked verdict when its inject
     origin.cleanup();
     seed.cleanup();
     rmSync(root, { recursive: true, force: true });
-    rmSync(bin, { recursive: true, force: true });
+    rmSync(gh.dir, { recursive: true, force: true });
   }
 });
 
