@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { CI_COVERAGE_SHARD_COUNT, coverageShardConcurrency, runCiParity } from "../src/lib/ci-parity.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -31,7 +32,7 @@ function shardNumber(args: readonly string[]): number | undefined {
 }
 
 function coverageFixtureRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "coverage-entry-parity-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}coverage-entry-parity-`));
   const workflowDirectory = join(root, ".github", "workflows");
   mkdirSync(workflowDirectory, { recursive: true });
   copyFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), join(workflowDirectory, "ci.yml"));
