@@ -48,6 +48,22 @@ test("the base passed to check-proof is the PR fork point, not the event's curre
   assert.deepEqual(result, { ok: true, mergeBase: "fork-point" });
 });
 
+test("the merge-base resolver's default git path returns the real fork point", () => {
+  const result = gate.resolveMergeBase("HEAD", "HEAD", { root: ROOT });
+  assert.equal(result.ok, true, result.message);
+  assert.match(result.mergeBase!, /^[0-9a-f]{40}$/);
+});
+
+test("the merge-base resolver reports git failures with their stderr detail", () => {
+  const result = gate.resolveMergeBase("base-tip", "head", {
+    git(args) {
+      assert.deepEqual(args, ["merge-base", "base-tip", "head"]);
+      return { status: 1, stdout: "", stderr: "fatal: no merge base\n" };
+    },
+  });
+  assert.deepEqual(result, { ok: false, message: "could not resolve the PR merge base: fatal: no merge base" });
+});
+
 test("the gate uses the reviewer's body fallback when a PR has no task trailer", () => {
   const body = `## Acceptance\n\n- claim: behavior exists\n  proof: ${STALE}\n`;
   const resolved = gate.criteriaForReview(body, "HEAD", { root: ROOT });
@@ -95,6 +111,40 @@ test("the process-level gate passes a discriminating proof and refuses an unread
   const unreadable = logs();
   assert.equal(gate.main(["--event-path", "event.json"], { ...common, runProof: () => ({ status: null, stdout: "", error: "spawn failed" }), log: unreadable.log }), 1);
   assert.match(unreadable.err.join("\n"), /could not run/);
+});
+
+test("the process-level gate refuses missing and unreadable event payloads before proof execution", () => {
+  const previous = process.env.GITHUB_EVENT_PATH;
+  delete process.env.GITHUB_EVENT_PATH;
+  try {
+    const missing = logs();
+    assert.equal(gate.main([], { log: missing.log }), 1);
+    assert.match(missing.err.join("\n"), /no event payload path/);
+  } finally {
+    if (previous === undefined) delete process.env.GITHUB_EVENT_PATH;
+    else process.env.GITHUB_EVENT_PATH = previous;
+  }
+
+  const unreadable = logs();
+  assert.equal(
+    gate.main(["--event-path", "event.json"], {
+      readPayload: () => ({ readable: false, reason: "ENOENT" }),
+      log: unreadable.log,
+    }),
+    1,
+  );
+  assert.match(unreadable.err.join("\n"), /unreadable event payload: ENOENT/);
+});
+
+test("the process-level gate refuses when the PR merge base cannot be resolved", () => {
+  const sink = logs();
+  const code = gate.main(["--event-path", "event.json"], {
+    readPayload: () => ({ readable: true, body: "body", baseSha: "base-tip", headSha: "head" }),
+    mergeBase: () => ({ ok: false, message: "could not resolve the PR merge base: fatal" }),
+    log: sink.log,
+  });
+  assert.equal(code, 1);
+  assert.match(sink.err.join("\n"), /could not resolve the PR merge base: fatal/);
 });
 
 test("the workflow evaluates the PR head on body edits and ci-gate aggregates the named check", async () => {
