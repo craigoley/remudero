@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
@@ -28,6 +28,136 @@ const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
 const TSX_LOADER_PATH = require.resolve("tsx");
 const WORKER_CONTAINMENT_URL = new URL("./worker-containment.ts", import.meta.url).href;
 export const CI_COVERAGE_SHARD_COUNT = 4;
+
+/** A local route is deliberately narrower than CI parity: it is permission to re-drive one stale
+ * verdict, not permission to run an arbitrary check name copied from GitHub. */
+export interface LocalMergeCheckRoute {
+  checkName: string;
+  command: string;
+  args: readonly string[];
+  timeoutMs: number;
+}
+
+/** W1-T3422's complete allow-list. Every name must remain a real `ci.yml` job; the contract test
+ * below its exported validator catches a renamed/removed job before this can silently broaden. */
+export const LOCAL_MERGE_CHECK_ROUTES: readonly LocalMergeCheckRoute[] = [
+  {
+    checkName: "comment-load-ratchet",
+    command: "npm",
+    args: ["run", "--silent", "comment-load-signal"],
+    timeoutMs: 60_000,
+  },
+];
+
+/** Returns a route only when the observed required-check name is declared exactly. */
+export function localMergeRouteForCheck(checkName: string): LocalMergeCheckRoute | undefined {
+  return LOCAL_MERGE_CHECK_ROUTES.find((route) => route.checkName === checkName);
+}
+
+/** The CI definition is the authority for route names. This is intentionally a verifier rather
+ * than a fallback: an unrecognised check has no executable local route. */
+export function localMergeRouteContractErrors(ciYamlText: string): string[] {
+  const ciJobs = new Set(parseCiJobNames(ciYamlText));
+  return LOCAL_MERGE_CHECK_ROUTES.filter((route) => !ciJobs.has(route.checkName)).map(
+    (route) => `local merge route ${route.checkName} is not a ci.yml job`,
+  );
+}
+
+export type IsolatedMergeRouteOutcome =
+  | "passed"
+  | "invalid-input"
+  | "source-unreadable"
+  | "head-moved"
+  | "main-moved"
+  | "merge-failed"
+  | "route-failed";
+
+export interface IsolatedMergeRouteResult {
+  outcome: IsolatedMergeRouteOutcome;
+  detail: string;
+}
+
+const LOCAL_MERGE_GIT_TIMEOUT_MS = 60_000;
+const SHA40 = /^[0-9a-f]{40}$/i;
+const LOCAL_MERGE_COMMITTER_ARGS = [
+  "-c",
+  "user.name=Remudero isolated check",
+  "-c",
+  "user.email=isolated-check@remudero.invalid",
+] as const;
+
+function localMergeSpawn(
+  command: string,
+  args: readonly string[],
+  cwd?: string,
+  timeout: number = LOCAL_MERGE_GIT_TIMEOUT_MS,
+) {
+  return spawnSync(command, [...args], {
+    cwd,
+    encoding: "utf8",
+    timeout,
+    maxBuffer: BOUNDED_SUITE_SPAWN_MAX_BUFFER,
+  });
+}
+
+function localMergeFailureDetail(result: ReturnType<typeof localMergeSpawn>): string {
+  const text = `${result.stderr ?? ""}\n${result.stdout ?? ""}`.trim();
+  return (text || result.error?.message || `exit ${String(result.status)}`).slice(-1_024);
+}
+
+/**
+ * Materialise the observed PR head in a throwaway clone, prove both refs still equal the snapshot,
+ * merge the observed main tip without committing, then run ONE declared bounded command. The clone
+ * (rather than a worktree under `repoRoot`) keeps temporary refs, merge state, and cleanup away from
+ * the daemon's shared checkout. Every non-pass result declines the redrive.
+ */
+export function runIsolatedLocalMergeRoute(
+  repoRoot: string,
+  input: { prNumber: number; headSha: string; mainSha: string; route: LocalMergeCheckRoute },
+): IsolatedMergeRouteResult {
+  if (!Number.isSafeInteger(input.prNumber) || input.prNumber <= 0 || !SHA40.test(input.headSha) || !SHA40.test(input.mainSha)) {
+    return { outcome: "invalid-input", detail: "PR number or observed SHA was malformed" };
+  }
+  const sandbox = mkdtempSync(join(tmpdir(), "rmd-stale-red-merge-"));
+  const headRef = "rmd-stale-red-head";
+  const mainRef = "rmd-stale-red-main";
+  try {
+    const origin = localMergeSpawn("git", ["-C", repoRoot, "remote", "get-url", "origin"]);
+    const originUrl = String(origin.stdout ?? "").trim();
+    if (origin.status !== 0 || originUrl === "") {
+      return { outcome: "source-unreadable", detail: `could not read source origin: ${localMergeFailureDetail(origin)}` };
+    }
+    const clone = localMergeSpawn("git", ["clone", "--no-checkout", "--shared", repoRoot, sandbox]);
+    if (clone.status !== 0) return { outcome: "source-unreadable", detail: `could not create isolated clone: ${localMergeFailureDetail(clone)}` };
+    const setOrigin = localMergeSpawn("git", ["-C", sandbox, "remote", "set-url", "origin", originUrl]);
+    if (setOrigin.status !== 0) return { outcome: "source-unreadable", detail: `could not set isolated origin: ${localMergeFailureDetail(setOrigin)}` };
+    const fetchHead = localMergeSpawn("git", ["-C", sandbox, "fetch", "--no-tags", "origin", `refs/pull/${input.prNumber}/head:refs/heads/${headRef}`]);
+    if (fetchHead.status !== 0) return { outcome: "source-unreadable", detail: `could not fetch PR head: ${localMergeFailureDetail(fetchHead)}` };
+    const fetchMain = localMergeSpawn("git", ["-C", sandbox, "fetch", "--no-tags", "origin", `refs/heads/main:refs/heads/${mainRef}`]);
+    if (fetchMain.status !== 0) return { outcome: "source-unreadable", detail: `could not fetch main: ${localMergeFailureDetail(fetchMain)}` };
+    const observedHead = localMergeSpawn("git", ["-C", sandbox, "rev-parse", headRef]);
+    if (observedHead.status !== 0 || String(observedHead.stdout ?? "").trim() !== input.headSha) {
+      return { outcome: "head-moved", detail: "PR head changed after the sweep snapshot" };
+    }
+    const observedMain = localMergeSpawn("git", ["-C", sandbox, "rev-parse", mainRef]);
+    if (observedMain.status !== 0 || String(observedMain.stdout ?? "").trim() !== input.mainSha) {
+      return { outcome: "main-moved", detail: "main changed after the sweep snapshot" };
+    }
+    const checkout = localMergeSpawn("git", ["-C", sandbox, "checkout", "--detach", headRef]);
+    if (checkout.status !== 0) return { outcome: "source-unreadable", detail: `could not checkout PR head: ${localMergeFailureDetail(checkout)}` };
+    const merge = localMergeSpawn("git", ["-C", sandbox, ...LOCAL_MERGE_COMMITTER_ARGS, "merge", "--no-commit", "--no-ff", mainRef]);
+    if (merge.status !== 0) return { outcome: "merge-failed", detail: localMergeFailureDetail(merge) };
+    const sourceModules = join(repoRoot, "node_modules");
+    const sandboxModules = join(sandbox, "node_modules");
+    if (existsSync(sourceModules) && !existsSync(sandboxModules)) symlinkSync(sourceModules, sandboxModules, "dir");
+    const route = localMergeSpawn(input.route.command, input.route.args, sandbox, input.route.timeoutMs);
+    return route.status === 0
+      ? { outcome: "passed", detail: `${input.route.command} ${input.route.args.join(" ")} passed on the isolated merge` }
+      : { outcome: "route-failed", detail: localMergeFailureDetail(route) };
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
 
 export function coverageShardConcurrency(cpuCount: number = availableParallelism()): number {
   const finite = Number.isFinite(cpuCount) ? Math.floor(cpuCount) : 1;
