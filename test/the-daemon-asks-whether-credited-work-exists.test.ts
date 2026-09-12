@@ -24,13 +24,11 @@ async function creditRows(deps: Partial<DaemonDeps>): Promise<Array<{ step: stri
     let dispatches = 0;
     await runDaemon(loadPlan(f), {
       refreshMerged: () => () => true,
-      // A counter, not a throwing body: a fake that throws to prove it is never called is itself an
-      // added line no test enters, which `diff-coverage` flags — correctly. The assertion below reads
-      // the count instead.
-      runOne: async () => {
-        dispatches += 1;
-        return undefined as never;
-      },
+      // ONE LINE on purpose. A fake that is never called still contributes its BODY as added lines
+      // that no test enters, which `diff-coverage` flags — correctly, and a throwing body or a counter
+      // body are both flagged the same way. A single-expression arrow is covered by the object
+      // literal's own evaluation, and `dispatches` below still proves it was never entered.
+      runOne: async () => ((dispatches += 1), undefined as never),
       checkStop: () => {
         stopChecks += 1;
         return stopChecks > 1 ? "bound" : undefined;
@@ -92,9 +90,7 @@ test("a CLEAN audit is logged, so 'nothing broken' is distinguishable from 'neve
     checkCreditTruth: () => FIRES,
     runCreditTruthAudit: async () =>
       audit({ findings: [], unshipped: [], counts: { shipped: 825, "credit-elsewhere": 0, unshipped: 0, "plan-only": 0, undeterminable: 0, checked: 825 } }),
-    onBrokenCredit: () => {
-      deliveries += 1;
-    },
+    onBrokenCredit: () => void (deliveries += 1),
   });
   assert.equal(deliveries, 0, "nothing actionable must reach the deliverer at all");
   assert.deepEqual(rows.map((r) => r.step), ["credit_truth.fired", "credit_truth.ran", "credit_truth.clean"]);
