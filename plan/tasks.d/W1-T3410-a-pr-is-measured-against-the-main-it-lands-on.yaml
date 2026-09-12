@@ -26,10 +26,11 @@
     THE NARROWER RESIDUAL IS REAL BUT IS NOT THIS TASK'S CLAIM. `comment-load-ratchet` is guarded
     by `github.event_name == 'pull_request'`; it was `skipped` on each of the ten completed
     post-merge CI runs and absent with the cancelled runs. Thus none of the twelve sampled merges
-    received that particular ratchet on resulting main. This finding needs a separately scoped
-    successor that inventories base-sensitive PR-only gates and prices a targeted replay before
-    any workflow is widened. Do not add `strict:true`, and do not blindly run every PR-only job on
-    a main push.
+    received that particular ratchet on resulting main. THIS RESIDUAL ALREADY HAS THE NARROWER
+    OWNER W1-T3422, merged as #5221 (5c2e5d8b): it admits a stale red only after terminal-time,
+    live-run, and declared isolated-local-merge evidence, then mints one new PR head so GitHub
+    recomputes the current check set. Its shipped test routes `comment-load-ratchet` through that
+    bounded path. Do not add `strict:true`, and do not blindly run every PR-only job on a main push.
 
     ORIGINAL RATIONALE, PRESERVED VERBATIM:
     Branch protection on main is `strict: false`, so a PR may merge on checks that were green
