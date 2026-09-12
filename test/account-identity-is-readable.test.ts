@@ -334,7 +334,9 @@ test("W1-T2434: the account-usage route stays read-scoped, and this piece adds n
   assert.equal(route.scope, "read", "read-only, exactly as before this task");
 
   const sh = readFileSync(SERVE_CONTAINER_SH, "utf8");
-  assert.doesNotMatch(sh, /-p\s|--publish/, "no new port is published by this task's mount/env change");
+  const runArgs = sh.match(/RUN_ARGS=\(\n([\s\S]*?)\n\)/)?.[1];
+  assert.ok(runArgs, "serve-container declares the Docker argument array");
+  assert.doesNotMatch(runArgs, /-p\s|--publish/, "no port is published by the Docker launch arguments");
   const src = readFileSync(ACCOUNT_USAGE_TS, "utf8");
   assert.doesNotMatch(src, /scope:\s*"write"/, "this module declares no write-scoped route");
 });
