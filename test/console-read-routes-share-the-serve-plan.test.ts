@@ -190,7 +190,7 @@ const READY_FRAGMENT = `
       proof: "unit test: fixture X -> observable Y"
 `;
 
-test("inbox approval has no snapshot capability and resolves the target ref", async () => {
+test("inbox approval ignores the read snapshot and resolves the target ref", async () => {
   const repo = gitRepo({ seedCommit: false, kind: "serve-plan-snapshot" });
   const root = repo.dir;
   const planPath = join(root, "plan", "tasks.yaml");
