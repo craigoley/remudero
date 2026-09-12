@@ -7,6 +7,7 @@ import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import type { Clock } from "./clock.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
+import { RmdError } from "./errors.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { withTempDir } from "./tmp.js";
@@ -1268,11 +1269,11 @@ type CodexJsonlLimitCode =
   | "codex_jsonl_transcript_too_large"
   | "codex_jsonl_errors_too_large";
 
-export class CodexJsonlStreamLimitError extends Error {
+export class CodexJsonlStreamLimitError extends RmdError {
   readonly code: CodexJsonlLimitCode;
 
   constructor(code: CodexJsonlLimitCode, detail: string) {
-    super(`${code}: ${detail}`);
+    super("worker", 1, `${code}: ${detail}`, { code });
     this.name = "CodexJsonlStreamLimitError";
     this.code = code;
   }

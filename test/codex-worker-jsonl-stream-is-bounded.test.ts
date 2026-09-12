@@ -8,10 +8,12 @@ import { test } from "node:test";
 import {
   CODEX_JSONL_RECORD_MAX_BYTES,
   CODEX_JSONL_TRANSCRIPT_MAX_BYTES,
+  CodexJsonlStreamLimitError,
   CodexJsonlStreamDecoder,
   parseCodexJsonl,
   spawnCodexWorker,
 } from "../src/lib/worker-provider.js";
+import { isRmdError } from "../src/lib/errors.js";
 
 function jsonl(events: unknown[]): string {
   return `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
@@ -59,6 +61,14 @@ function runCodexWorkerWithStdout(chunks: Array<Buffer | string>) {
   );
   return { promise, teardownCalls: () => teardownCalls };
 }
+
+test("W1-T3447: a bounded Codex JSONL refusal carries the worker error envelope", () => {
+  const error = new CodexJsonlStreamLimitError("codex_jsonl_record_too_large", "fixture overflow");
+  assert.ok(isRmdError(error));
+  assert.equal(error.kind, "worker");
+  assert.equal(error.exitCode, 1);
+  assert.deepEqual(error.details, { code: "codex_jsonl_record_too_large" });
+});
 
 test("W1-T3447 criterion 1: Codex JSONL split at arbitrary Buffer boundaries matches the complete parser", () => {
   const raw = jsonl([
