@@ -643,16 +643,15 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
       - name: Determine this diff's fast-lane class (W1-T2428 — a PLAN_ONLY/DOCS_ONLY diff cannot move source coverage)
         # INVARIANT: the class comes from the real predicate — scripts/diff-class.mjs imports
-        # `isInPlanScope` from src/lib/plan-architect.ts. Two of the repo's three scope predicates
+        # `isInPlanScope` from src/lib/plan-scope.ts. Two of the repo's three scope predicates
         # already disagree; a bash reimplementation here would be a fourth (W1-T2428, Q1). It fails
         # closed twice over: the script resolves an unreadable, empty or malformed input to SOURCE,
-        # and this step clamps stdout to the three known tokens, so even a `node`/`tsx` that cannot
-        # start leaves CLASS=SOURCE. On a push, changed-files.txt is left empty and the script's own
-        # empty-list rule resolves it to SOURCE.
+        # and this step clamps stdout to the three known tokens, so even a bare Node invocation that
+        # cannot start leaves CLASS=SOURCE. `plan-scope.ts` is a dependency-free leaf and Node 22.22.3
+        # strips its type annotations, so this runs before npm ci. On a push, changed-files.txt is left
+        # empty and the script's own empty-list rule resolves it to SOURCE.
         # TRAP: step-level bash, never a YAML `if:` — the class is READ by the bash guards below.
         id: classify
         run: |
@@ -661,7 +660,7 @@ jobs:
           else
             : > changed-files.txt
           fi
-          CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
           case "$CLASS" in
             PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
             *) CLASS="SOURCE" ;;
@@ -669,6 +668,14 @@ jobs:
           cat diff-class.log || true
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           echo "W1-T2428 fast-lane: this diff classifies as ${CLASS}."
+      - name: Install (clean, from lockfile)
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping npm ci; coverage collection will emit the required skipped artifact."
+            exit 0
+          fi
+          npm ci
       - name: Determine Playwright's pinned browser version (cache key input)
         id: playwright-version
         run: |
@@ -684,9 +691,16 @@ jobs:
       - name: Install Playwright's Chromium (same requirement as the ci job — W1-T153's shell a11y/responsive tests launch a real headless browser; this job runs the same test/**/*.test.ts glob under coverage, so it needs it too)
         # The same step as the `ci` job's above, and the same measurement behind dropping
         # `--with-deps`. Fixing one copy and not the other left the second free to take the board
-        # down alone — it did, PR #2150 five minutes after PR #2148. This `run:` line must stay
-        # byte-identical to the `ci` job's, which test/workflow-playwright-install.test.ts asserts.
-        run: npx playwright install chromium
+        # down alone — it did, PR #2150 five minutes after PR #2148. For SOURCE, the command stays
+        # byte-identical to the `ci` job's; the class guard makes this required matrix child a no-op
+        # before Playwright is available for PLAN_ONLY/DOCS_ONLY diffs.
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Playwright Chromium; coverage collection will emit the required skipped artifact."
+            exit 0
+          fi
+          npx playwright install chromium
       - name: Test with coverage (spec output to the CI log, lcov to a file — src/** only, test/** excluded from the ratio)
         # W1-T220 defect 1: a `spec` reporter to stdout runs alongside the `lcov` reporter pair.
         # With `--test-reporter=lcov` alone, a failing run's CI log carried zero test output — just
