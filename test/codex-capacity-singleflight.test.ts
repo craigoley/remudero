@@ -5,6 +5,7 @@ import { test } from "node:test";
 import {
   clearCodexCapacityCache,
   readCodexCapacity,
+  readCodexRuntime,
 } from "../src/lib/worker-provider.js";
 import type { Config } from "../src/lib/config.js";
 import type { CapabilityLadder } from "../src/lib/mounts.js";
@@ -109,7 +110,7 @@ test("three concurrent ordinary cold reads share one app-server while preserving
   );
 });
 
-test("a transient app-server timeout is retried once inside the shared raw exchange", async () => {
+test("W1-T3435 criterion 1: a stalled primary is recovered by one fresh hedge and each child is reaped once", async () => {
   clearCodexCapacityCache();
   let spawns = 0;
   let kills = 0;
@@ -125,9 +126,9 @@ test("a transient app-server timeout is retried once inside the shared raw excha
   const cfg = config("/tmp/codex-singleflight-timeout-retry");
 
   const [economy, balanced, frontier] = await Promise.all([
-    readCodexCapacity(cfg, { timeoutMs: 5, requestedModel: "haiku", requestedEffort: "low", capabilities: CAPABILITIES, spawn }),
-    readCodexCapacity(cfg, { timeoutMs: 5, requestedModel: "sonnet", requestedEffort: "medium", capabilities: CAPABILITIES, spawn }),
-    readCodexCapacity(cfg, { timeoutMs: 5, requestedModel: "opus", requestedEffort: "high", capabilities: CAPABILITIES, spawn }),
+    readCodexCapacity(cfg, { timeoutMs: 20, requestedModel: "haiku", requestedEffort: "low", capabilities: CAPABILITIES, spawn }),
+    readCodexCapacity(cfg, { timeoutMs: 20, requestedModel: "sonnet", requestedEffort: "medium", capabilities: CAPABILITIES, spawn }),
+    readCodexCapacity(cfg, { timeoutMs: 20, requestedModel: "opus", requestedEffort: "high", capabilities: CAPABILITIES, spawn }),
   ]);
 
   assert.equal(spawns, 2, "all ordinary callers must share one first attempt and one retry");
@@ -141,11 +142,47 @@ test("a transient app-server timeout is retried once inside the shared raw excha
     ],
   );
   for (const reading of [economy, balanced, frontier]) {
-    assert.match(reading.detail ?? "", /recovered on timeout retry.*attempt 1.*account\/rateLimits\/read, model\/list/);
+    assert.match(reading.detail ?? "", /recovered by hedge after 12ms; primary: still pending/);
   }
 });
 
-test("two app-server timeouts fail closed once and enter the existing failure backoff", async () => {
+test("W1-T3435 criterion 2: a prompt success or terminal failure starts no hedge", async () => {
+  clearCodexCapacityCache();
+  let successSpawns = 0;
+  let successKills = 0;
+  const successful = await readCodexCapacity(config("/tmp/codex-hedge-prompt-success"), {
+    timeoutMs: 20,
+    capabilities: CAPABILITIES,
+    spawn: () => {
+      successSpawns += 1;
+      return successfulServer(() => { successKills += 1; }) as never;
+    },
+  });
+  assert.equal(successful.readable, true);
+  assert.equal(successSpawns, 1);
+  assert.equal(successKills, 1);
+
+  clearCodexCapacityCache();
+  let terminalSpawns = 0;
+  let terminalKills = 0;
+  const terminal = await readCodexCapacity(config("/tmp/codex-hedge-terminal-no-fanout"), {
+    timeoutMs: 20,
+    capabilities: CAPABILITIES,
+    spawn: () => {
+      terminalSpawns += 1;
+      return fakeAppServer((request, { stdout }) => {
+        if (request.id === 1) stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
+        if (request.id === 2) stdout.write(`${JSON.stringify({ id: 2, error: { message: "rate refused" } })}\n`);
+      }, () => { terminalKills += 1; }) as never;
+    },
+  });
+  assert.equal(terminal.readable, false);
+  assert.match(terminal.detail ?? "", /rate refused/);
+  assert.equal(terminalSpawns, 1);
+  assert.equal(terminalKills, 1);
+});
+
+test("W1-T3435 criterion 3: two bounded hedged exchanges fail closed and enter the existing failure backoff", async () => {
   clearCodexCapacityCache();
   let spawns = 0;
   let kills = 0;
@@ -161,14 +198,68 @@ test("two app-server timeouts fail closed once and enter the existing failure ba
   const failed = await readCodexCapacity(cfg, deps);
   assert.equal(failed.readable, false);
   assert.deepEqual(failed.windows, []);
-  assert.match(failed.detail ?? "", /attempt 1.*timed out.*attempt 2.*timed out/s);
-  assert.equal(spawns, 2, "the failed fresh read spends exactly one timeout retry before backing off");
+  assert.match(failed.detail ?? "", /primary: .*timed out.*hedge: .*timed out/s);
+  assert.equal(spawns, 2, "the failed fresh read spends its one bounded hedge before backing off");
   assert.equal(kills, 2);
 
   const backedOff = await readCodexCapacity(cfg, deps);
   assert.equal(backedOff.readable, false);
   assert.match(backedOff.detail ?? "", /failure backoff/);
   assert.equal(spawns, 2, "failure backoff must not admit a third child");
+});
+
+test("W1-T3435 criterion 4: ordinary callers share one hedged exchange while forceRefresh stays independent", async () => {
+  clearCodexCapacityCache();
+  let spawns = 0;
+  let kills = 0;
+  const spawn = () => {
+    spawns += 1;
+    if (spawns === 1) {
+      return fakeAppServer((request, { stdout }) => {
+        if (request.id === 1) stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
+      }, () => { kills += 1; }) as never;
+    }
+    return successfulServer(() => { kills += 1; }) as never;
+  };
+  const cfg = config("/tmp/codex-hedge-singleflight-force-refresh");
+  const ordinary = Promise.all([
+    readCodexCapacity(cfg, { timeoutMs: 20, requestedModel: "haiku", requestedEffort: "low", capabilities: CAPABILITIES, spawn }),
+    readCodexCapacity(cfg, { timeoutMs: 20, requestedModel: "sonnet", requestedEffort: "medium", capabilities: CAPABILITIES, spawn }),
+  ]);
+  const boundary = await readCodexCapacity(cfg, {
+    timeoutMs: 20,
+    forceRefresh: true,
+    requestedModel: "opus",
+    requestedEffort: "high",
+    capabilities: CAPABILITIES,
+    spawn,
+  });
+  const [economy, balanced] = await ordinary;
+
+  assert.equal(boundary.readable, true);
+  assert.equal(economy.readable, true);
+  assert.equal(balanced.readable, true);
+  assert.equal(spawns, 3, "one ordinary primary, one independent force refresh, and one shared hedge");
+  assert.equal(kills, 3);
+});
+
+test("a pre-aborted Codex app-server exchange is cancelled and reaped before RPC writes", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let kills = 0;
+  let requests = 0;
+
+  const result = await readCodexRuntime(config("/tmp/codex-pre-aborted-exchange"), "/bin/sh", {
+    timeoutMs: 20,
+    signal: controller.signal,
+    spawn: () => fakeAppServer(() => { requests += 1; }, () => { kills += 1; }) as never,
+  });
+
+  assert.ok("provider" in result);
+  assert.equal(result.readable, false);
+  assert.match(result.detail ?? "", /app-server hedge cancelled/);
+  assert.equal(kills, 1, "the child must be killed exactly once even when the signal starts aborted");
+  assert.equal(requests, 0, "the exchange must not write initialize after accepting cancellation");
 });
 
 test("malformed app-server stdout fails closed without spending the transient timeout retry", async () => {
