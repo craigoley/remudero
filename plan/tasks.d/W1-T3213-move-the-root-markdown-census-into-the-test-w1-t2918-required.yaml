@@ -34,11 +34,11 @@
     weaken the allowlist, baseline the offender, or change production code.
   acceptance:
     - claim: "the dedicated root-level markdown census test owns both the synthetic offender control and the live repository-root walk"
-      proof: "unit test: test/root-level-markdown-census.test.ts"
+      proof: "grep: W1-T2918: the root markdown census names an unallowlisted snapshot in test/root-level-markdown-census.test.ts"
     - claim: "DIAGNOSIS.md and FINDINGS.md remain asserted absent from the root in the dedicated suite"
-      proof: "unit test: test/root-level-markdown-census.test.ts"
+      proof: "grep: W1-T2918: every root-level markdown file is intentionally allowlisted in test/root-level-markdown-census.test.ts"
     - claim: "deleting the allowlist refusal makes the synthetic offender test fail, so the new suite is load-bearing rather than a file-name shell"
-      proof: "unit test: test/root-level-markdown-census.test.ts"
+      proof: "grep: W1-T2918: DIAGNOSIS.md and FINDINGS.md are archived away from the repo root in test/root-level-markdown-census.test.ts"
   falsifier: |
     Close without implementation if `test/root-level-markdown-census.test.ts` exists on current
     main and independently fails for an unallowlisted synthetic root markdown file. Checked before
