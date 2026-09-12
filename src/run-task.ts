@@ -14847,7 +14847,7 @@ export function resolveReviewSubjectCheckout(args: {
   return { ok: true, repoDir, explicitTarget: true };
 }
 
-function reviewSubjectFallbackAllowed(deps: ReviewCommandDeps): boolean {
+export function reviewSubjectFallbackAllowed(deps: ReviewCommandDeps): boolean {
   if (deps.enforceReviewSubjectCheckout === true) return false;
   return (
     deps.fetchView !== undefined ||
