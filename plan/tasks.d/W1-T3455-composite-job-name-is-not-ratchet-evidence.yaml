@@ -1,0 +1,79 @@
+- id: W1-T3455
+  title: "RECORDABLE-RATCHET ADMISSION TRUSTS A COMPOSITE JOB NAME, NOT ITS FAILING STEP — a passing comment-load signal beside an expiring-fixture census failure is falsely advertised as an automatic baseline repair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 24.00
+  files: [src/lib/sweep.ts, test/sweep.test.ts, test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts]
+  origin: "operator-session#follow-up-reconciliation-2026-09-12"
+  plan_refs: ["W1-T196", "W1-T2998", "W1-T3015", "W1-T3289"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on PRs #5285, #5286, and #5289 on 2026-09-12. Their required check named
+    `comment-load-ratchet` failed, so `recordableRatchetRepairFor` in src/lib/sweep.ts classified
+    every red check as a recordable baseline repair and the disposition claimed
+    `npm run comment-load-ratchet` was the deterministic remedy. The real Actions job log for
+    #5285 proves the opposite: the `Comment-load ratchet` step printed `OK`, then the following
+    `Expiring-fixture census` step failed on a hardcoded date in
+    test/the-sweep-fan-out-respects-the-host-budget.test.ts. That direct fixture repair is already
+    owned by PR #5283; recording scripts/comment-load-baseline.json cannot fix it.
+
+    SOURCE CONFIRMED at origin/main a5abfd0eef7182748a1cbc8947df765395f1309e.
+    .github/workflows/ci.yml:1434-1474 deliberately puts both steps in one job. The real CI reader
+    returns one CiFailure per failed Actions job (src/run-task.ts:28631-28715), with the job name
+    plus its captured log tail. But recordableRatchetRepairFor (src/lib/sweep.ts:3695-3710) derives
+    its answer only from redRequiredChecks and CiFailure.name; it never reads CiFailure.logTail.
+    The disabled policy therefore emits a false operator/worker explanation today, and enabling
+    recordableRatchetRepairEnabled later would make an unattended generator attempt from the same
+    insufficient evidence.
+
+    W1-T2998 established the all-or-nothing admission shape; it did not prove that one job name
+    denotes one failing step. W1-T3289 only made the already-disabled policy value reachable. Neither
+    owns the missing evidence predicate.
+
+    W1-T196 is the live overlapping sweep surface reported by lint-plan, but it is not this task:
+    its queued work decides whether a PR without a resolvable task id stands down or escalates.
+    It neither reads CiFailure.logTail nor decides an unattended generator admission. This task must
+    retain the shared file because the existing admission predicate is there; it must not fold
+    attribution policy into CI-evidence classification.
+  design: |
+    Keep the artifact registry as the authority for which generated paths are even candidates, but
+    make recordable-ratchet admission evidence-backed: each proposed generator must be supported by
+    a bounded, exact diagnostic owned by that generator in the corresponding CiFailure.logTail.
+    A job label alone, a generic `TO FIX`, a retained remedy from another step, an empty/unreadable
+    tail, or a marker for a different generator is not proof. The detector must be explicit per
+    admitted generator; do not infer from arbitrary package scripts or parse natural-language step
+    names. Missing proof declines to the ordinary ci-log worker path already carrying the real tail.
+
+    Preserve the all-or-nothing rule: a mixed red set or one failure without its own evidence
+    declines every deterministic repair. A direct, generator-owned recordable diagnostic remains
+    admissible, so this is not a blanket disable. Keep recordableRatchetRepairEnabled false, do not
+    wire repairRecordableRatchet, change no workflow topology, generator script, registry entry,
+    worker prompt, review policy, or merge policy. This task corrects the admission predicate only.
+  acceptance:
+    - claim: "a comment-load-ratchet job whose comment-load step passed while its expiring-fixture census step failed does not classify as a recordable comment-load repair"
+      proof: "unit test: composite comment-load job declines ratchet admission"
+    - claim: "a generator-owned, exact recordable diagnostic still admits its matching generator"
+      proof: "unit test: proven ratchet diagnostic remains admissible"
+    - claim: "empty, unreadable, mismatched, generic, or retained-from-another-step log evidence declines rather than authorising any generator"
+      proof: "unit test: insufficient ratchet evidence fails closed"
+    - claim: "one unproved failure in a mixed red set preserves all-or-nothing decline and the ordinary ci-log fix path"
+      proof: "unit test: mixed evidence reaches ordinary fix rung"
+    - claim: "the shipped policy remains disabled while the new evidence predicate is enforced"
+      proof: "unit test: W1-T3455 preserves disabled policy while requiring ratchet evidence"
+  falsifier: |
+    Replay #5285's captured job evidence: `comment-load-ratchet: OK` followed by the
+    expiring-fixture-census BLOCKED diagnostic. If recordableRatchetRepairFor already returns
+    undefined for that one CiFailure, close without implementation. At filing it returns
+    ["comment-load-ratchet"] solely from the job name, so the falsifier does not fire.
+
+    Mutation: remove the generator-owned evidence check; the composite-job assertion must fail.
+    Replace the diagnostic with the matching direct gate diagnostic; the positive admission assertion
+    must pass. Make one member of a mixed set unproved; any deterministic repair assertion must fail.
+  note: |
+    Reservation W1-T3455 was atomically held by the fleet allocator on origin before this filing.
+    reservation hand-off: remudero-fleet -> plan/W1-T3455-log-proven-ratchet-admission
