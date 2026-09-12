@@ -126,6 +126,11 @@ export function classifyCreditTruth(
     try {
       there = exists(path);
     } catch {
+      // The reason, stated at the site: an unreadable tree is NOT evidence of a missing file, so the
+      // whole task reports `undeterminable` and no finding is manufactured from an I/O fault. Missing
+      // is deliberately emptied rather than partially filled — a half-scanned list would read as a
+      // measurement. (`catch-erasure-ratchet` recognises a house vocabulary key — ok/kind/status/
+      // reason/… — and `verdict:` is not in it, so this comment is the route that names the reason.)
       return { taskId: task.taskId, verdict: "undeterminable", declared, missing: [], creditedBy: task.creditedBy };
     }
     if (!there) missing.push(path);
