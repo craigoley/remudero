@@ -1,16 +1,38 @@
 - id: W1-T3410
-  title: "strict:false plus a ratchet that lowers a ceiling on main lands drift nothing re-measures"
+  title: "RETIRED 2026-09-12 (completed read-only diagnosis) — strict:false does not mean nothing re-measures: main-push CI reran on 10 of 12 sampled merges; PR-only ratchets remain a narrower residual"
   repo: remudero
   depends_on: []
   type: diagnose
   verify: auto
   risk: medium
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   files:
     - test/a-pr-is-measured-against-the-main-it-lands-on.test.ts
   origin: "operator-session#cross-pr-collision-2026-09-11"
   rationale: |
+    RETIRED 2026-09-12 AFTER THE REQUESTED READ-ONLY DIAGNOSIS. The broad premise is falsified,
+    not implemented: `main` remains `strict:false`, but `.github/workflows/ci.yml` has a
+    `push: branches: [main]` trigger and current source says its `ci` job runs on main pushes.
+
+    CURRENT MEASUREMENT AT origin/main c86b8f2f. For the twelve most recently merged PRs (#5257,
+    #5251, #5249, #5242, #5241, #5237, #5234, #5231, #5221, #5217, #5215, and #5207), the resulting
+    main merge commit carried a successful `ci` check in 10 cases. Two did not carry a `ci` check;
+    their corresponding push CI runs were cancelled, and this diagnosis did not establish why. It
+    is therefore false that a merged PR is never remeasured on the main it lands on, and no code
+    should be built against that premise.
+
+    THE NARROWER RESIDUAL IS REAL BUT IS NOT THIS TASK'S CLAIM. `comment-load-ratchet` is guarded
+    by `github.event_name == 'pull_request'`; it was `skipped` on each of the ten completed
+    post-merge CI runs and absent with the cancelled runs. Thus none of the twelve sampled merges
+    received that particular ratchet on resulting main. THIS RESIDUAL ALREADY HAS THE NARROWER
+    OWNER W1-T3422, merged as #5221 (5c2e5d8b): it admits a stale red only after terminal-time,
+    live-run, and declared isolated-local-merge evidence, then mints one new PR head so GitHub
+    recomputes the current check set. Its shipped test routes `comment-load-ratchet` through that
+    bounded path. Do not add `strict:true`, and do not blindly run every PR-only job on a main push.
+
+    ORIGINAL RATIONALE, PRESERVED VERBATIM:
     Branch protection on main is `strict: false`, so a PR may merge on checks that were green
     against an OLDER main and nothing re-measures it against the main it actually lands on.
     Combined with ratchets that can LOWER a ceiling, that lands drift no gate ever sees.
@@ -41,6 +63,12 @@
     - claim: "the recommendation prices at least one option cheaper than strict:true, with the cost of each stated"
       proof: "unit test: test/a-pr-is-measured-against-the-main-it-lands-on.test.ts"
   falsifier: |
+    SATISFIED BY THE CURRENT DIAGNOSIS: main is not `strict:true`, but it already has a
+    post-merge CI rung. The command below answers only the strictness half; the workflow trigger
+    and check-run sample above falsify the former "nothing re-measures" premise. The preserved
+    original falsifier follows for archaeology.
+
     CLOSE THIS TASK if main is already `strict: true`, or if a post-merge re-measure rung already
     exists. Read `gh api repos/craigoley/remudero/branches/main/protection --jq
     .required_status_checks.strict`; if it reads true, the window this task measures is closed.
+  note: "Retirement record, not a task implementation: the read-only diagnosis at c86b8f2f found a partial main-push remeasure plus a narrower PR-only ratchet gap."
