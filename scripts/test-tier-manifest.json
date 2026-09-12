@@ -247,6 +247,7 @@
     "test/an-event-wake-must-not-discard-an-admitted-batch.test.ts": 914,
     "test/an-import-sweep-sees-every-import-form.test.ts": 252,
     "test/an-inherited-red-is-not-the-authors.test.ts": 256,
+    "test/an-injected-clock-stamp-is-exempt-and-stays-exempt.test.ts": 0,
     "test/an-instrument-change-that-only-tightens-is-not-entanglement.test.ts": 0,
     "test/an-onboarded-repo-has-a-learnings-home.test.ts": 1500,
     "test/an-open-pr-does-not-rot-while-it-waits.test.ts": 0,
