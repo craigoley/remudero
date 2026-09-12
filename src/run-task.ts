@@ -1254,6 +1254,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readCiGateRollup"
   | "reaggregateCiGate"
   | "readMainTip"
+  | "readMainRepair"
+  | "readStaleRedWorkflowRuns"
+  | "runStaleRedLocalRoute"
+  | "releaseStaleRed"
   | "releaseBaseCausedStandDown"
   | "selectAdaptiveReviewWidth"
   | "repairMissingTaskTrailer"
@@ -28191,6 +28195,9 @@ interface RollupCheck {
   /** When this attempt started — see {@link RollupCheckEntry.startedAt} (lib/sweep.ts), which this
    *  type is structurally assignable to. Feeds {@link dedupeRollupByLatestAttempt} (W1-T457). */
   startedAt?: string;
+  /** Terminal completion time from the REST-composed rollup. `fetchCiFailures` preserves it
+   * only for the newest deduped failure; it never guesses from the start time (W1-T3422). */
+  completedAt?: string;
 }
 
 interface RawOpenPr {
@@ -28651,6 +28658,7 @@ export function fetchCiFailures(
       name,
       logTail,
       conclusion: (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase(),
+      ...(c.completedAt ? { completedAt: c.completedAt } : {}),
       ...(jobId ? { jobId } : {}),
       ...(logUnavailable === undefined ? {} : { logUnavailable }),
       ...(tailSource ? { tailSource } : {}),
@@ -31677,6 +31685,7 @@ export function buildSweepHook(
         plan: plan,
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
+        pacer,
       });
       // W1-T528: same in-flight lock directory every other dispatch-path reader consults —
       // see `sweepCommand`'s own comment on this exact line for the full rationale.
