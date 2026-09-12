@@ -8,6 +8,8 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { postReviewStatusGuarded, type PrLifecycleState } from "../src/lib/review.js";
 import { checkReviewerCodeFreshness, SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 
+// @source-text-subject — this test's subject is the complete production terminal-review call-site
+// set. A behavioral seam can prove one path, but not that all three paths install the same guard.
 const OLD = "a".repeat(40);
 const MAIN = "b".repeat(40);
 const OPEN: PrLifecycleState = { merged: false, closed: false };
@@ -47,6 +49,20 @@ test("W1-T3337: the CLI self-reexec guard never suppresses the reviewer code pro
   });
   assert.equal(result.status, "stale");
   assert.deepEqual(calls, ["fetch --quiet origin", "rev-parse HEAD", "rev-parse origin/main", `diff --name-only ${OLD}..${MAIN}`]);
+});
+
+test("W1-T3337: an unreadable guarded diff withholds the terminal verdict", () => {
+  const result = checkReviewerCodeFreshness("/unused", { [SELF_SYNC_GUARD_ENV]: "1" }, {
+    checkServiceFreshness: () => ({ status: "guarded" }),
+    git: (args) => {
+      if (args[0] === "fetch") return "";
+      if (args.join(" ") === "rev-parse HEAD") return OLD;
+      if (args.join(" ") === "rev-parse origin/main") return MAIN;
+      throw new Error("diff unavailable");
+    },
+  });
+  assert.equal(result.status, "unreadable");
+  assert.match(result.reason, /could not inspect reviewer code advance: Error: diff unavailable/);
 });
 
 function postOpts(ledgerPath: string, reviewerCodeFreshness: ReturnType<typeof materialStale>) {

@@ -543,10 +543,10 @@ function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFr
       .map((line) => line.trim())
       .filter(Boolean);
   } catch (error) {
-    diffUnreadable = error instanceof Error ? error.message : String(error);
+    return { status: "unreadable", reason: `could not inspect reviewer code advance: ${String(error)}` };
   }
   if (advanceIsMaterial(changedPaths)) {
-    return { status: "stale", codeSha, originMainSha, changedPaths, diffUnreadable };
+    return { status: "stale", codeSha, originMainSha, changedPaths };
   }
   return { status: "fresh", codeSha, originMainSha, advance: "immaterial" };
 }
