@@ -4160,10 +4160,11 @@ export function fixedMainRefireDecision(
   if (pr.checksState !== "red") return { refire: false, reason: "required checks are not red" };
   const failures = pr.ciFailures ?? [];
   if (failures.length === 0) return { refire: false, reason: "no failing check evidence was observed" };
-  if ((pr.inFlightCheckNames?.length ?? 0) > 0) {
+  const inFlightCheckNames = pr.inFlightCheckNames ?? [];
+  if (inFlightCheckNames.length > 0) {
     return {
       refire: false,
-      reason: `check run(s) already in flight: ${pr.inFlightCheckNames!.join(", ")}`,
+      reason: `check run(s) already in flight: ${inFlightCheckNames.join(", ")}`,
     };
   }
   if (mainTip === undefined) return { refire: false, reason: "main tip was unreadable" };
@@ -7643,6 +7644,7 @@ export async function runSweep(
               ) {
                 const proof = await deps.proveFixedMainBlocker(pr, fixedMainDecision);
                 if (proof.passed) {
+                  await deps.refireFixedMainPr(pr, fixedMainDecision, proof);
                   appendLine(deps.ledgerPath, {
                     run_id: deps.runId,
                     task_id: pr.taskId ?? "SWEEP",
@@ -7657,7 +7659,6 @@ export async function runSweep(
                     local_gate_exit: proof.localGateExit,
                   });
                   fixedMainRefireKeys.add(fixedMainDecision.key);
-                  await deps.refireFixedMainPr(pr, fixedMainDecision, proof);
                   acted = false;
                   standDownReason =
                     `fixed-main refire: ${fixedMainDecision.reason}; local merge proof passed ` +
