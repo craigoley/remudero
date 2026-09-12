@@ -19560,11 +19560,11 @@ export function duplicateCorpusOpts(
  *  whole judgment surface — moving it swung the recon's count 47 → 156 → 167
  *  (docs/research/recon-open-failing-composition.md) — which is why the printed summary names the rule
  *  and not just the counts. Includes both the current conventional-commit filing subjects
- *  (`chore(plan)`/`chore(triage)`/`chore(feedback)`/`docs(plan)`) AND the older bare `plan:`/
+ *  (`chore(plan)`/`fix(plan)`/`chore(triage)`/`chore(feedback)`/`docs(plan)`) AND the older bare `plan:`/
  *  `docs:`/`chore:` convention this repo used before them (W1-T1078) — without the bare forms,
  *  filing commits predating the scoped convention read as implementation evidence. */
 export const LINT_FILING_SUBJECT_RE =
-  /^(chore\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/i;
+  /^(?:chore\(plan\)|fix\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/i;
 
 /** Splits lint-plan's failing tasks by MERGE EVIDENCE in a `git log` dump (`%s%x00%b%x01`
  *  format): a task "has a merged implementation" when any non-filing commit carries its id as a
@@ -20631,7 +20631,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         `${formatLintResidueIds(without)})`;
       evidenceRuleLine =
         `\n  failing-split evidence: a Remudero-Task trailer or commit-subject citation on ${ref}, ` +
-        `with chore(plan)/chore(triage)/chore(feedback)/docs(plan)/plan:/docs:/chore: filing ` +
+        `with chore(plan)/fix(plan)/chore(triage)/chore(feedback)/docs(plan)/plan:/docs:/chore: filing ` +
         `subjects excluded — a filing cites a task; it does not implement it` +
         (without.length > 0 ? LINT_RESIDUE_CAVEAT_LINE : "");
     } catch (e) {

@@ -253,7 +253,7 @@ function riskJudgeGateConsequenceLines(input: RiskJudgeInput): string[] {
  * compared without creating the cycle. `lint-plan`'s failing-split already treats this exact
  * vocabulary as "a filing cites a task; it does not implement it".
  */
-export const PLAN_DECLARING_SUBJECT_RE = /^(?:chore\((?:plan|triage|feedback)\)|docs\(plan\)|plan:|docs:|chore:)/;
+export const PLAN_DECLARING_SUBJECT_RE = /^(?:chore\(plan\)|fix\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/;
 
 /**
  * W1-T2371 — is this change a plan-only AMENDMENT: a filing-shaped subject over a diff that touches

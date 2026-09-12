@@ -124,6 +124,7 @@ test("W1-T1214: the refusal names both satisfying routes", () => {
 
 test("credit surface gate: isFilingShapedSubject reuses LINT_FILING_SUBJECT_RE verbatim", () => {
   assert.equal(isFilingShapedSubject("chore(plan): regenerate plan/plan-index.json"), true);
+  assert.equal(isFilingShapedSubject("fix(plan): correct an acceptance proof"), true);
   assert.equal(isFilingShapedSubject("chore(triage): triage feedback#42"), true);
   assert.equal(isFilingShapedSubject("chore(feedback): capture recon note"), true);
   assert.equal(isFilingShapedSubject("docs(plan): renumber shard"), true);
