@@ -29,7 +29,7 @@ const { censusExpiringFixtures, EXEMPT_MARKER } = (await import(CENSUS_URL)) as 
 //
 // The exemption marker is the census's own documented remedy for precisely this. These tests make it
 // load-bearing rather than decorative: the marker must be what suppresses the report (not the stamp's
-// age), and the two real stamps must keep carrying it.
+// age), and the two real stamps must keep carrying it while they remain inline literals.
 
 const THRESHOLD_DAYS = 14;
 const NOW = Date.parse("2026-09-12T00:00:00Z");
