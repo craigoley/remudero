@@ -511,6 +511,7 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "ci:no-hand-rolled-fetch": repair(true, "raw network callsites move to the transport seam"),
   "ci:prompt-surface-gate": repair(true, "prompt surface drift names the prompt or baseline to repair"),
   "ci:source-size": repair(true, "source-size is a review signal; measurement failures are computable"),
+  "ci:squash-trailer-gate": repair(true, "branch-local task trailers are removed or rewritten before squash credit"),
   "ci:task-id-existence": repair(true, "task id drift names the duplicate or missing shard"),
   "ci:test-slow": repair(true, "slow-tier failures are ordinary computable test/source repairs"),
 
