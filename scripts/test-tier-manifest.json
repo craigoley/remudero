@@ -189,6 +189,7 @@
     "test/a-staged-skill-reaches-the-worker-prompt.test.ts": 0,
     "test/a-stale-gate-cannot-publish-a-verdict.test.ts": 250,
     "test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts": 0,
+    "test/a-stale-proof-is-invisible-until-a-capped-verdict-hours-later.test.ts": 0,
     "test/a-starvation-episode-closes-its-own-escalation.test.ts": 1343,
     "test/a-status-flip-is-not-a-task-edit.test.ts": 0,
     "test/a-step-wired-census-gate-is-not-entanglement.test.ts": 0,

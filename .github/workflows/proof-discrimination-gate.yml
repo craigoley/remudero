@@ -1,0 +1,31 @@
+name: Proof discrimination
+
+# The PR body can change without a new commit.  `edited` is therefore required: otherwise a
+# body-only proof repair would leave this check's prior result attached to the old body.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  proof-discrimination:
+    name: proof-discrimination
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # GitHub's default pull_request checkout is the synthetic merge commit.  The reviewer judges
+      # the head, so pin this checkout to the event's head SHA and retain history for merge-base.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Reject non-discriminating acceptance proofs
+        run: node --import tsx scripts/proof-discrimination-gate.mjs
