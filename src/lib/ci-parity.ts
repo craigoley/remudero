@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
+import { ciControlPlaneParity } from "./ci-control-plane.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
@@ -299,7 +300,7 @@ interface CiParityLeafResult {
 }
 
 /** One ci.yml job's parity entry. A `mirrored: false` entry MUST carry a `reason` — that is what records it. */
-interface CiParityEntry {
+export interface CiParityEntry {
   job: string;
   mirrored: boolean;
   reason?: string;
@@ -1636,15 +1637,15 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
   const spawn = deps.spawn ?? defaultPreflightSpawn;
   const ciYamlText = deps.ciYamlText ?? readFileSync(join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
   const ciJobs = parseCiJobNames(ciYamlText);
-  const tableJobs = new Set(CI_PARITY_TABLE.map((e) => e.job));
-  const missing = ciJobs.filter((j) => !tableJobs.has(j));
+  // W1-T3423: this is the production consumer of the static predicate used before push.
+  const parity = ciControlPlaneParity(ciJobs, CI_PARITY_TABLE);
   const driftStep: CiParityStepResult = {
     name: "ci-parity:drift",
-    ok: missing.length === 0,
+    ok: parity.ok,
     detail:
-      missing.length === 0
+      parity.ok
         ? `ci-parity:drift: PASS — every ci.yml job (${ciJobs.length}) has a parity entry (mirrored or excluded-with-reason)`
-        : `ci-parity:drift: FAIL — ci.yml job(s) with no parity entry: ${missing.join(", ")}`,
+        : `ci-parity:drift: FAIL — ${parity.problems.join("; ")}`,
   };
 
   const jobSteps = CI_PARITY_TABLE.flatMap((entry): CiParityStepResult[] => {

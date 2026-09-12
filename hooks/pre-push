@@ -89,6 +89,21 @@ else
   echo "pre-push: scripts/rule25-precheck.mjs absent — skipped, NOT passed" >&2
 fi
 
+# W1-T3423 — a CI control-plane edit can be mechanically incomplete while its only existing
+# detectors run after the push. This static route reads only the local merge-base diff and tracked
+# control-plane inputs; status 2 is an unreadable local fact, not permission to strand the fleet.
+if [ -f scripts/ci-control-plane-precheck.mjs ]; then
+  node --import tsx scripts/ci-control-plane-precheck.mjs
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "pre-push: ci-control-plane-precheck could not read the diff — not blocking on an unreadable check" >&2
+  elif [ "$rc" -ne 0 ]; then
+    fail=1
+  fi
+else
+  echo "pre-push: scripts/ci-control-plane-precheck.mjs absent — skipped, NOT passed" >&2
+fi
+
 # W1-T3205: BEGIN test-tier admission
 # Refuse before push, but never mutate the duration ledger from a gate. The check already names
 # `--seed`, whose zero-duration placeholder is the repository's established unmeasured state.
