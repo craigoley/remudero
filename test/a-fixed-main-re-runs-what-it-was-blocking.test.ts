@@ -38,7 +38,7 @@ function redPr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "red",
     unmetCriteria: [],
     priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap,
-    lastActivityAt: "2026-09-01T09:00:00.000Z",
+    lastActivityAt: "2026-09-01T09:00:00.000Z", // expiring-fixture: exempt -- this test pins NOW and asserts a stale-window decision, never the wall clock; suite passes with the fixture aged past the live threshold
     headSha: HEAD,
     headRefName: "run-W1-T3422-1",
     autoMergeArmed: false,
