@@ -1,7 +1,6 @@
 {
   "thresholdMs": 5000,
   "files": {
-    "test/automated-retro-preflight-scrubs-self-sync.test.ts": 0,
     "test/a-bare-flagged-worktree-stops-the-whole-fleet.test.ts": 0,
     "test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts": 621,
     "test/a-blocked-ci-verdict-names-the-check-that-went-red.test.ts": 0,
@@ -156,6 +155,7 @@
     "test/a-report-with-no-reader-is-not-a-report.test.ts": 866,
     "test/a-required-comment-must-not-cost-a-relocation.test.ts": 0,
     "test/a-reservation-names-its-holder.test.ts": 0,
+    "test/a-reservation-says-whether-anything-still-holds-it.test.ts": 0,
     "test/a-reservation-seeds-from-the-namespace-it-owns.test.ts": 1544,
     "test/a-restart-is-only-warranted-by-a-material-advance.test.ts": 182,
     "test/a-restart-is-worth-its-interruption.test.ts": 0,
@@ -280,6 +280,7 @@
     "test/auto-triage-policy-seam.test.ts": 949,
     "test/auto-triage-rung.test.ts": 1541,
     "test/auto-triage-wiring.test.ts": 20766,
+    "test/automated-retro-preflight-scrubs-self-sync.test.ts": 0,
     "test/automerge-hold.test.ts": 1941,
     "test/autonomy-ratchet.test.ts": 3921,
     "test/awareness-surface-ratchet.test.ts": 1073,

@@ -18732,6 +18732,222 @@ export interface NextTaskIdReserveDeps {
    *  test injects a deterministic one so `--reserve`'s mechanics are provable without depending
    *  on whatever `gh` happens to see (or whether `gh` is reachable at all) at test time. */
   openPrTexts?: () => string[];
+  auditNowMs?: () => number;
+  auditHistoryIds?: () => number[];
+}
+
+const RESERVATION_AUDIT_DEFAULT_AGE_DAYS = 14;
+const RESERVATION_AUDIT_MS_PER_DAY = 24 * 60 * 60 * 1_000;
+const RESERVATION_AUDIT_ISO_RE = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z\b/;
+const RUN_BRANCH_TASK_REF_RE = /^refs\/heads\/run-(W1-T[0-9]+)-/;
+
+export interface ReservationAuditRef {
+  taskId: string;
+  id: number;
+  ref: string;
+  sha: string;
+  anchor: string;
+}
+
+export type ReservationAuditStatus = "HELD" | "CANDIDATE" | "UNKNOWN";
+
+export interface ReservationAuditRow {
+  taskId: string;
+  status: ReservationAuditStatus;
+  reasons: string[];
+  anchor: string;
+  ageDays: number | null;
+}
+
+export interface ReservationAuditReport {
+  thresholdDays: number;
+  rows: ReservationAuditRow[];
+  degraded: string[];
+}
+
+function reservationAuditAgeDays(rest: string[]): number | null {
+  const raw = flagValue(rest, "--audit-age-days");
+  if (raw === undefined) return RESERVATION_AUDIT_DEFAULT_AGE_DAYS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function reservationAnchorAgeMs(anchor: string, nowMs: number): number | null {
+  const m = RESERVATION_AUDIT_ISO_RE.exec(anchor);
+  if (!m) return null;
+  const t = Date.parse(m[0]);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, nowMs - t);
+}
+
+function idsFromOpenPrTrailers(texts: readonly string[]): Set<string> {
+  const ids = new Set<string>();
+  for (const text of texts) {
+    for (const m of text.matchAll(/^Remudero-Task:\s*(W1-T[0-9]+)\s*$/gm)) ids.add(m[1]);
+  }
+  return ids;
+}
+
+function parseReservationAuditRefs(out: string): ReservationAuditRef[] {
+  const refs: ReservationAuditRef[] = [];
+  for (const raw of out.split("\n")) {
+    const line = raw.trimEnd();
+    if (!line) continue;
+    const parts = line.split(/[ \t]+/);
+    const sha = parts[0] ?? "";
+    const ref = parts[1] ?? "";
+    const m = /^refs\/rmd-id\/W1-T([0-9]+)$/.exec(ref);
+    if (!m) continue;
+    const id = Number(m[1]);
+    if (!isAllocatableTaskId(id)) continue;
+    refs.push({ taskId: `W1-T${id}`, id, ref, sha, anchor: "" });
+  }
+  return refs.sort((a, b) => a.id - b.id);
+}
+
+function readReservationAuditRefs(run: (args: string[]) => { status: number; stdout: string; stderr: string }): ReservationAuditRef[] | "unknown" {
+  let res: { status: number; stdout: string; stderr: string };
+  try {
+    res = run(["ls-remote", "origin", "refs/rmd-id/*"]);
+  } catch (err) {
+    void err;
+    return "unknown";
+  }
+  if (res.status !== 0) return "unknown";
+  return parseReservationAuditRefs(res.stdout ?? "");
+}
+
+function readReservationAuditAnchor(
+  ref: string,
+  run: (args: string[]) => { status: number; stdout: string; stderr: string },
+): string {
+  const fetched = run(["fetch", "origin", ref]);
+  if (fetched.status !== 0) return "<unreadable>";
+  const body = run(["log", "-1", "--format=%B", "FETCH_HEAD"]);
+  if (body.status === 0 && body.stdout.trim()) return body.stdout.trim();
+  const subject = run(["log", "-1", "--format=%s", "FETCH_HEAD"]);
+  return subject.status === 0 && subject.stdout.trim() ? subject.stdout.trim() : "<unreadable>";
+}
+
+function openRunBranchesByTaskId(run: (args: string[]) => { status: number; stdout: string; stderr: string }): Map<string, string[]> | "unknown" {
+  let res: { status: number; stdout: string; stderr: string };
+  try {
+    res = run(["ls-remote", "--heads", "origin", "run-*"]);
+  } catch (err) {
+    void err;
+    return "unknown";
+  }
+  if (res.status !== 0) return "unknown";
+  const byId = new Map<string, string[]>();
+  for (const raw of (res.stdout ?? "").split("\n")) {
+    const ref = raw.trimEnd().split(/[ \t]+/)[1] ?? "";
+    const m = RUN_BRANCH_TASK_REF_RE.exec(ref);
+    if (!m) continue;
+    const branch = ref.slice("refs/heads/".length);
+    byId.set(m[1], [...(byId.get(m[1]) ?? []), branch]);
+  }
+  return byId;
+}
+
+export function classifyReservationAuditRows(opts: {
+  reservations: readonly ReservationAuditRef[];
+  declaredIds: ReadonlySet<string>;
+  historicalIds: ReadonlySet<string>;
+  openRunBranchesById: ReadonlyMap<string, readonly string[]> | "unknown";
+  openPrTrailerIds: ReadonlySet<string> | "unknown";
+  thresholdDays: number;
+  nowMs: number;
+}): ReservationAuditRow[] {
+  const thresholdMs = opts.thresholdDays * RESERVATION_AUDIT_MS_PER_DAY;
+  return opts.reservations.map((r) => {
+    const reasons: string[] = [];
+    if (opts.declaredIds.has(r.taskId)) reasons.push("declared shard");
+    else if (opts.historicalIds.has(r.taskId)) reasons.push("historical shard");
+    if (opts.openRunBranchesById !== "unknown") {
+      for (const branch of opts.openRunBranchesById.get(r.taskId) ?? []) reasons.push(`open run branch ${branch}`);
+    }
+    if (opts.openPrTrailerIds !== "unknown" && opts.openPrTrailerIds.has(r.taskId)) reasons.push("open PR trailer");
+    const ageMs = reservationAnchorAgeMs(r.anchor, opts.nowMs);
+    const ageDays = ageMs === null ? null : ageMs / RESERVATION_AUDIT_MS_PER_DAY;
+    if (reasons.length > 0) return { taskId: r.taskId, status: "HELD", reasons, anchor: r.anchor, ageDays };
+    if (opts.openRunBranchesById === "unknown") {
+      return { taskId: r.taskId, status: "UNKNOWN", reasons: ["open run branch read failed"], anchor: r.anchor, ageDays };
+    }
+    if (opts.openPrTrailerIds === "unknown") {
+      return { taskId: r.taskId, status: "UNKNOWN", reasons: ["open PR read failed"], anchor: r.anchor, ageDays };
+    }
+    if (ageMs === null) return { taskId: r.taskId, status: "UNKNOWN", reasons: ["anchor age unreadable"], anchor: r.anchor, ageDays };
+    if (ageMs < thresholdMs) return { taskId: r.taskId, status: "HELD", reasons: ["younger than threshold"], anchor: r.anchor, ageDays };
+    return { taskId: r.taskId, status: "CANDIDATE", reasons: ["no holding evidence older than threshold"], anchor: r.anchor, ageDays };
+  });
+}
+
+function reservationAuditPlanIds(planPath: string): Set<string> {
+  return new Set(loadPlan(planPath).tasks.map((t) => t.id));
+}
+
+function reservationAuditHistoryIds(planPath: string, gitRunner?: (args: string[]) => string): Set<string> {
+  const planRelPath = relative(repoRoot, dirname(planPath));
+  if (isAbsolute(planRelPath) || planRelPath.startsWith("..")) return new Set();
+  const history = taskIdsEverFiled(repoRoot, planRelPath === "" ? "." : planRelPath, gitRunner);
+  return new Set(history.ids.filter(isAllocatableTaskId).map((n) => `W1-T${n}`));
+}
+
+export function renderReservationAuditReport(report: ReservationAuditReport): string {
+  const held = report.rows.filter((r) => r.status === "HELD").length;
+  const candidate = report.rows.filter((r) => r.status === "CANDIDATE").length;
+  const unknown = report.rows.filter((r) => r.status === "UNKNOWN").length;
+  const lines = [
+    `reservation audit: ${report.rows.length} reservation(s); HELD ${held}; CANDIDATE ${candidate}; UNKNOWN ${unknown}`,
+    `age threshold: ${report.thresholdDays} day(s)`,
+  ];
+  for (const d of report.degraded) lines.push(`DEGRADED: ${d}`);
+  for (const row of report.rows) {
+    const age = row.ageDays === null ? "unknown" : `${row.ageDays.toFixed(1)}d`;
+    lines.push(`${row.taskId} ${row.status} ${row.reasons.join("; ")}; age=${age}; anchor=${JSON.stringify(row.anchor)}`);
+  }
+  return lines.join("\n");
+}
+
+function buildReservationAuditReport(opts: {
+  planPath: string;
+  offline: boolean;
+  thresholdDays: number;
+  self: { owner: string; repo: string };
+  deps: NextTaskIdReserveDeps;
+}): ReservationAuditReport | "unreadable-reservations" {
+  const run = gitRunAdapter(opts.deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
+  const refs = readReservationAuditRefs(run);
+  if (refs === "unknown") return "unreadable-reservations";
+  const reservations = refs.map((r) => ({ ...r, anchor: readReservationAuditAnchor(r.ref, run) }));
+  const declaredIds = reservationAuditPlanIds(opts.planPath);
+  const historicalIds = new Set(opts.deps.auditHistoryIds ? opts.deps.auditHistoryIds().map((n) => `W1-T${n}`) : [...reservationAuditHistoryIds(opts.planPath)]);
+  const branches = openRunBranchesByTaskId(run);
+  let openPrTrailerIds: Set<string> | "unknown" = "unknown";
+  const degraded: string[] = [];
+  if (opts.offline) {
+    degraded.push("--offline: open PRs were not read");
+  } else {
+    try {
+      openPrTrailerIds = idsFromOpenPrTrailers((opts.deps.openPrTexts ?? (() => openPrMintTexts(opts.self.owner, opts.self.repo)))());
+    } catch (err) {
+      degraded.push(`open PR read failed: ${String(err)}`);
+    }
+  }
+  if (branches === "unknown") degraded.push("open run branch read failed");
+  return {
+    thresholdDays: opts.thresholdDays,
+    degraded,
+    rows: classifyReservationAuditRows({
+      reservations,
+      declaredIds,
+      historicalIds,
+      openRunBranchesById: branches,
+      openPrTrailerIds,
+      thresholdDays: opts.thresholdDays,
+      nowMs: opts.deps.auditNowMs?.() ?? Date.now(),
+    }),
+  };
 }
 
 function mintForReservationAttempt(mint: MintedTaskIdWithHistory, heldId: number, heldTaskId: string): MintedTaskIdWithHistory {
@@ -18775,9 +18991,14 @@ export async function nextTaskIdCommand(
   overlapDeps: OverlapWarningDeps = {},
   deps: NextTaskIdReserveDeps = {},
 ): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files"], ["--offline", "--reserve"]);
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days"], ["--offline", "--reserve", "--audit"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const auditAgeDays = reservationAuditAgeDays(rest);
+  if (auditAgeDays === null) {
+    console.error("### rmd next-task-id: --audit-age-days must be a non-negative number\n" + USAGE);
     return 2;
   }
   const contradiction = validateReserveArgs(rest);
@@ -18785,9 +19006,22 @@ export async function nextTaskIdCommand(
     console.error(contradiction + "\n" + USAGE);
     return 2;
   }
+  if (rest.includes("--audit") && rest.includes("--reserve")) {
+    console.error("### rmd next-task-id: --audit and --reserve are contradictory — the audit is read-only\n" + USAGE);
+    return 2;
+  }
   const planPath = flagValue(rest, "--plan") ?? join(repoRoot, "plan", "tasks.yaml");
   const offline = rest.includes("--offline");
   const self = resolveOwnerRepo();
+  if (rest.includes("--audit")) {
+    const report = buildReservationAuditReport({ planPath, offline, thresholdDays: auditAgeDays, self, deps });
+    if (report === "unreadable-reservations") {
+      console.error("### rmd next-task-id --audit: cannot read origin refs/rmd-id/*");
+      return 2;
+    }
+    console.log(renderReservationAuditReport(report));
+    return 0;
+  }
   let mint: MintedTaskIdWithHistory;
   try {
     mint = mintNextTaskIdWithHistory({
@@ -37131,9 +37365,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "next-task-id",
-    syntax: "rmd next-task-id [--plan <path>] [--offline] [--reserve]",
+    syntax: "rmd next-task-id [--plan <path>] [--offline] [--reserve] [--audit] [--audit-age-days <days>]",
     summary: "Print (or --reserve atomically claim) the next free W1-T<n> task id.",
-    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.",
+    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.",
   },
   {
     name: "emissions",
