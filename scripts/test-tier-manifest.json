@@ -134,6 +134,7 @@
     "test/a-push-does-not-re-ask-a-head-independent-question.test.ts": 0,
     "test/a-rate-limit-refusal-spends-the-crash-restart-budget.test.ts": 769,
     "test/a-ratification-pr-can-actually-land.test.ts": 0,
+    "test/a-rebase-that-could-not-start-is-not-a-conflict.test.ts": 0,
     "test/a-recaptured-baseline-still-reads-as-tightening.test.ts": 0,
     "test/a-recon-cannot-propose-its-own-task.test.ts": 1230,
     "test/a-recon-turn-cap-sized-under-p99-is-a-work-limit.test.ts": 0,

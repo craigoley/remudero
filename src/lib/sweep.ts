@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -703,6 +703,23 @@ type DirtyFleetRebaseGit = (
   opts?: { cwd?: string; stdio?: "pipe" | "ignore"; encoding?: BufferEncoding },
 ) => string;
 
+function dirtyFleetRebaseStoppedOnConflict(
+  worktreePath: string,
+  run: (cwd: string, args: readonly string[]) => string,
+): boolean {
+  try {
+    const rebaseStateExists = ["rebase-merge", "rebase-apply"].some((stateDir) => {
+      const statePath = run(worktreePath, ["rev-parse", "--git-path", stateDir]).trim();
+      return statePath.length > 0 && existsSync(statePath);
+    });
+    if (!rebaseStateExists) return false;
+    return run(worktreePath, ["ls-files", "-u"]).trim().length > 0;
+  } catch (_inspectionError) {
+    // If the rebase failure also makes git's state unreadable, keep the legacy conflict path.
+    return true;
+  }
+}
+
 function defaultDirtyFleetRebaseGit(
   file: string,
   args: readonly string[],
@@ -752,6 +769,9 @@ export function rebaseDirtyFleetBranchViaGit(
     try {
       run(worktreePath, ["rebase", "origin/main"]);
     } catch (error) {
+      const reason = capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP);
+      const stoppedOnConflict = dirtyFleetRebaseStoppedOnConflict(worktreePath, run);
+      if (!stoppedOnConflict) return { outcome: "error", reason };
       try {
         run(worktreePath, ["rebase", "--abort"]);
       } catch {
@@ -759,7 +779,7 @@ export function rebaseDirtyFleetBranchViaGit(
       }
       return {
         outcome: "conflict",
-        reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP),
+        reason,
       };
     }
     const newHeadSha = run(worktreePath, ["rev-parse", "HEAD"]).trim();
