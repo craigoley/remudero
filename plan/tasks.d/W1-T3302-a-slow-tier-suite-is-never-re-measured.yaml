@@ -10,6 +10,7 @@
   budget_usd: 16.00
   files:
     - scripts/test-tier-manifest.mjs
+    - scripts/test-tier-manifest.json
     - test/a-slow-tier-suite-is-never-re-measured.test.ts
     - .github/workflows/ci.yml
   origin: "operator-session#ci-parity-cost-2026-09-09"
@@ -93,17 +94,28 @@
     DO NOT let evidence auto-apply to the manifest. The proposal boundary is deliberate and predates
     this task.
   note: |
+    CURRENT RE-MEASUREMENT 2026-09-11 SUPERSEDES THE HISTORICAL 19x FIGURE. On the fresh
+    implementation checkout, `test/serve-command-boot.test.ts` completed 5 passed in 5163ms
+    against a 9042ms manifest entry, and the second slow-tier positive control
+    `test/acceptance-block-diagnostics.test.ts` completed 16 passed in 2847ms against 5036ms.
+    Neither sample is beyond the stated 2x staleness-reporting threshold. The historical 172866ms
+    run is not a current performance claim. Before this change, the directly observed defect was
+    the absent slow-tier feedback loop: `test-slow` had no duration output or artifact, and the
+    proposal merger downloaded only `test-duration-shard-*`. This task prevents a future drift from
+    becoming invisible; it does not claim to remedy a current 17-minute imbalance.
+
     SCOPE AMENDMENT 2026-09-10. The required slow-tier measurement is produced only by the
-    `test-slow` workflow job. That job presently exports no `RMD_TEST_DURATION_OUTPUT` and uploads
-    no duration artifact, while the two existing evidence paths are both in `.github/workflows/ci.yml`.
-    The workflow is therefore required implementation scope, not adjacent CI cleanup.
+    `test-slow` workflow job. Before this change, that job exported no `RMD_TEST_DURATION_OUTPUT`
+    and uploaded no duration artifact, while the two existing evidence paths were both in
+    `.github/workflows/ci.yml`. The workflow is therefore required implementation scope, not
+    adjacent CI cleanup.
 
     Rule 25 CHECKED: `scripts/test-tier-manifest.mjs` is NOT on INSTRUMENT_SURFACE — the surface
     names `scripts/*-ratchet.mjs`, `diff-coverage.mjs`, `diff-class.mjs`, `*-baseline.json` and the
-    named check scripts. `scripts/test-tier-manifest.json` IS matched by the baseline pattern, which
-    is why this task declares the SCRIPT and its own test and NOT the manifest data file: recording
-    a measurement into a baseline in the same diff that changes how measurements are taken is the
-    entanglement Rule 25 refuses.
+    named check scripts. `scripts/test-tier-manifest.json` is explicitly classified as ledger DATA
+    in `INSTRUMENT_SURFACE_EXCLUSIONS`, not instrument logic. W1-T3311's current pre-commit hook
+    must add a 0 (unmeasured) row for this task's new test file, and `test:tier:check` refuses the
+    PR without it. It is therefore declared required scope; this changes no existing duration row.
     WHAT THIS TASK IS NOT. The suite found here PASSES. This is not a bug report about
     `serve-command-boot.test.ts`, and fixing that file would close nothing: the next file to cross
     5000ms freezes the same way.

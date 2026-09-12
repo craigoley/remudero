@@ -299,6 +299,15 @@ export function resolveBaseDeclaredIds(baseRef, cwd) {
   return { readable: true, byId };
 }
 
+/** Plan files the change deletes relative to `baseRef`. `--no-renames` deliberately treats a
+ * rename as its delete-plus-add shape: this check needs no similarity score, only the fact that a
+ * base declaration no longer survives at HEAD. */
+export function resolveDeletedPlanFiles(baseRef, cwd) {
+  const result = git(["diff", "--no-renames", "--name-only", "--diff-filter=D", baseRef, "--", "plan/tasks.yaml", "plan/tasks.d/"], { cwd });
+  if (result.error || result.status !== 0) return { readable: false, files: new Set() };
+  return { readable: true, files: new Set(result.stdout.split("\n").filter(Boolean)) };
+}
+
 /** owner/repo, parsed from `remote`'s url at `cwd`, mirroring src/lib/repo-location.ts. Duplicated,
  *  not imported: a plain `.mjs` outside tsconfig's build. `undefined` on an unparsable/unreadable
  *  url -- never guessed, which would send the open-PR read below to the wrong repo. */
@@ -353,14 +362,15 @@ function mentionedIds(text) {
 /** Ids THIS branch ADDS relative to `base`, for the open-vs-open check's claim set -- a file
  *  unchanged from `base` is a carried-along shard, not an add. `base.readable === false` propagates
  *  as `{ readable: false, ids: [] }` rather than guessing an empty set. */
-export function addedIdsAtHead(occurrencesById, base) {
+export function addedIdsAtHead(occurrencesById, base, deletedFiles = new Set()) {
   if (!base.readable) return { readable: false, ids: [] };
   const ids = [];
   for (const [id, occurrences] of occurrencesById) {
     const headFiles = [...new Set(occurrences.map((o) => o.file))];
     const baseFiles = base.byId.get(id);
     const newFiles = baseFiles ? headFiles.filter((f) => !baseFiles.has(f)) : headFiles;
-    if (newFiles.length > 0) ids.push(id);
+    const baseDeclarationSurvives = baseFiles?.size > 0 && [...baseFiles].some((file) => !deletedFiles.has(file));
+    if (newFiles.length > 0 && (!baseFiles || baseDeclarationSurvives)) ids.push(id);
   }
   return { readable: true, ids };
 }
@@ -500,15 +510,17 @@ export function evaluateOpenPrIdCollisions(addedIds, openPrRows, ownHeadRef, con
  * is a SET DIFFERENCE, never a per-file scan: citing an existing id must stay silent.
  * Why: a per-file scan reported 232 false collisions. docs/forensics/task-id-existence-check.md#evaluateaddedidcollisions.
  */
-export function evaluateAddedIdCollisions(occurrencesById, base) {
+export function evaluateAddedIdCollisions(occurrencesById, base, deletedFiles = new Set()) {
   if (!base.readable) return { refused: true, unreadableBase: true, collisions: [] };
   const collisions = [];
   for (const [id, occurrences] of occurrencesById) {
     const headFiles = [...new Set(occurrences.map((o) => o.file))];
-    // Two files in this tree, or a file the base doesn't have it in while the base has it
-    // elsewhere (a behind-main branch, where each id appears once locally).
+    // Two files in this tree always collide. A sole new file re-issues only if a base declaring
+    // file still exists after this change; when every base file was deleted, the id moved without
+    // leaving a duplicate for git to merge.
     const baseFiles = base.byId.get(id);
-    const reissued = baseFiles ? headFiles.filter((f) => !baseFiles.has(f)) : [];
+    const baseDeclarationSurvives = baseFiles?.size > 0 && [...baseFiles].some((file) => !deletedFiles.has(file));
+    const reissued = baseDeclarationSurvives ? headFiles.filter((f) => !baseFiles.has(f)) : [];
     if (headFiles.length < 2 && reissued.length === 0) continue;
     collisions.push({ id, headFiles, baseFiles: baseFiles ? [...baseFiles] : [], occurrences });
   }
@@ -655,9 +667,14 @@ export function main(argv) {
   }
   // Resolved once and reused below by the open-vs-open half, which needs the same base read.
   const base = values.base === undefined ? undefined : resolveBaseDeclaredIds(values.base, cwd);
+  const deletedPlanFiles = values.base === undefined ? undefined : resolveDeletedPlanFiles(values.base, cwd);
+  const collisionBase = base && deletedPlanFiles?.readable ? base : { readable: false, byId: new Map() };
   const collisionVerdict =
-    base === undefined ? { refused: false, unreadableBase: false, collisions: [] } : evaluateAddedIdCollisions(occurrencesById, base);
-  const addedAtHead = base === undefined || !base.readable ? { readable: false, ids: [] } : addedIdsAtHead(occurrencesById, base);
+    base === undefined ? { refused: false, unreadableBase: false, collisions: [] } : evaluateAddedIdCollisions(occurrencesById, collisionBase, deletedPlanFiles.files);
+  const addedAtHead =
+    base === undefined || !base.readable || !deletedPlanFiles?.readable
+      ? { readable: false, ids: [] }
+      : addedIdsAtHead(occurrencesById, base, deletedPlanFiles.files);
   const ownHeadRef = values["head-ref"] ?? process.env.GITHUB_HEAD_REF ?? currentBranch(cwd);
   if (collisionVerdict.unreadableBase) {
     console.error(

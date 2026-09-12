@@ -459,6 +459,7 @@ import {
   runCiParity,
   runPreflightCoverage,
   runPreflightFast,
+  runTreeAdvisoryLine,
   type RemedyFileForGate,
 } from "./lib/ci-parity.js";
 import {
@@ -577,6 +578,7 @@ import {
   proposalsNeedingDraft,
   ratifyTelemetry,
   reframeProposal,
+  refusalReason,
   renderInbox,
   renderRatifyTelemetry,
   INBOX_DRAFT_DISALLOWED_TOOLS,
@@ -597,6 +599,7 @@ import {
   type RatifyBatchGateway,
   type RatifyGateway,
   type ReframeResult,
+  type SkillLifecycleAction,
   writeRatificationShards,
 } from "./lib/inbox.js";
 import {
@@ -886,7 +889,12 @@ import { reapGitObjects } from "./lib/object-reaper.js";
  *  rather than authorising something the operator never read. */
 export const OBJECT_REAP_CONTRACT_VERSION = "1";
 import { deriveTaskClass } from "./lib/task-class.js";
-import { guardZeroStreakRecord } from "./lib/retro-closure.js";
+import { guardZeroStreakRecord, type ClassClosure } from "./lib/retro-closure.js";
+import {
+  buildDispatchValueContext,
+  type ClosureCalibrationSnapshot,
+  type DispatchValueContext,
+} from "./lib/dispatch-value.js";
 import {
   boundRiskJudgeChangeView,
   realRiskJudge,
@@ -908,6 +916,7 @@ import {
   renderSkillsPart,
   skillsInjectedEvent,
   stageSkillDrafts,
+  stageSkillLifecycleProposal,
   workerAllowlistFromSettings,
 } from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
@@ -14581,6 +14590,29 @@ export function resolvePlanCriteriaForReview(
   }
 }
 
+/**
+ * Whether the `plan/tasks.d` tree that supplied `source` predates the one on `origin/main`.
+ *
+ * `resolvePlanCriteriaAtHead` already computed and printed this tree identity as part of its
+ * read provenance. Reuse that value instead of asking git for a second identity for the PR head:
+ * the only new git read is main's current tree.
+ */
+export function planTreeIsBehindMain(source: string, repoDir: string): boolean {
+  const planTreeSha = /(?:^|\s)plan\/tasks\.d\/@([0-9a-f]{12,40})(?:\s|$)/.exec(source)?.[1];
+  if (!planTreeSha) return false;
+
+  try {
+    const mainPlanTreeSha = execFileSync("git", ["-C", repoDir, "rev-parse", "origin/main:plan/tasks.d"], {
+      encoding: "utf8",
+      stdio: "pipe",
+    }).trim();
+    return !mainPlanTreeSha.startsWith(planTreeSha);
+  } catch {
+    // The advisory must not turn an otherwise reviewable PR into a failure when main is unreadable.
+    return false;
+  }
+}
+
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
   const {
     fetchView,
@@ -14867,6 +14899,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
       (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
+
+  if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(source, repoRoot)) {
+    console.log(
+      "NOTE: the criteria came from a plan tree older than origin/main; merge origin/main into the branch " +
+        "before treating this unmet verdict as a diff defect",
+    );
+  }
 
   // W1-T185 (Gap 1, criterion 2), raised by W1-T229: the operator override —
   // a LEDGERED, attributable decision to arm a capped verdict anyway.
@@ -17056,7 +17095,7 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
  */
 export function censusMembershipCommand(
   rest: string[],
-  deps: { repoRoot?: string; spawn?: PreflightSpawn; changedPaths?: readonly string[] } = {},
+  deps: { repoRoot?: string; spawn?: PreflightSpawn; changedPaths?: readonly string[]; readFile?: (path: string) => string } = {},
 ): number {
   const badArg = unknownArgError("census-membership", rest, ["--base"], ["--files"]);
   if (badArg) {
@@ -17089,7 +17128,7 @@ export function censusMembershipCommand(
     }
   }
 
-  const report = censusSuiteMembershipFor(changed, root, deps.spawn ?? defaultPreflightSpawn);
+  const report = censusSuiteMembershipFor(changed, root, deps.spawn ?? defaultPreflightSpawn, deps.readFile);
   if (rest.includes("--files")) {
     // W1-T3059 — ONE PREDICATE, NEVER TWO. The pre-push hook that RUNS these suites reads this
     // list; it does not carry its own copy of the table. A second copy is the drift this repo has
@@ -17110,7 +17149,16 @@ export function censusMembershipCommand(
     // STDOUT stays a clean file list a caller can splice; INCOMPLETENESS goes to stderr, so a
     // partial enumeration cannot be mistaken for a complete one. An unmodelled census is a suite
     // this diff may join and this cannot run — the caller must say so rather than imply coverage.
-    for (const unknown of report.unknownCoverage) console.error(`unmodelled: ${unknown}`);
+    const candidates = new Set(report.candidateCoverage.map((c) => c.testFile));
+    for (const candidate of report.candidateCoverage) {
+      // Preserve the established incompleteness sentinel for callers while adding the new
+      // population-walk evidence on its own line.
+      console.error(`unmodelled: ${candidate.testFile}`);
+      console.error(`candidate: ${candidate.testFile} walks ${candidate.walks.join(", ")}`);
+    }
+    for (const unknown of report.unknownCoverage) {
+      if (!candidates.has(unknown)) console.error(`unmodelled: ${unknown}`);
+    }
     return 0;
   }
   console.log(`rmd census-membership — ${changed.length} changed path(s) against ${base}`);
@@ -17126,8 +17174,16 @@ export function censusMembershipCommand(
   if (report.unknownCoverage.length > 0) {
     // NAMED, never dropped: a suite the model cannot place is the difference between "joins
     // nothing" and "the model does not know".
-    console.log("  UNMODELLED census suite(s), which this cannot place and will not guess:");
-    for (const u of report.unknownCoverage) console.log(`    ? ${u}`);
+    const candidates = new Set(report.candidateCoverage.map((c) => c.testFile));
+    if (report.candidateCoverage.length > 0) {
+      console.log("  CANDIDATE census suite(s), unmodelled but population-walking:");
+      for (const c of report.candidateCoverage) console.log(`    ? ${c.testFile} walks ${c.walks.join(", ")}`);
+    }
+    const unmodelled = report.unknownCoverage.filter((u) => !candidates.has(u));
+    if (unmodelled.length > 0) {
+      console.log("  UNMODELLED census suite(s), which this cannot place and will not guess:");
+      for (const u of unmodelled) console.log(`    ? ${u}`);
+    }
   }
   return 0;
 }
@@ -20291,11 +20347,14 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     cpuCount: deps.cpuCount ?? osCpus().length,
     ...(pin !== undefined && "sha" in pin ? { baseSha: pin.sha } : {}),
   });
+  const steps = [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])];
+  const treeAdvisory = runTreeAdvisoryLine(runContext, steps);
   console.log(
     (ok
       ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
       : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes") +
-      `\n### ${runContextLine(runContext)}`,
+      `\n### ${runContextLine(runContext)}` +
+      (treeAdvisory ? `\n### ${treeAdvisory}` : ""),
   );
 
   // ── THE RESULT MUST SURVIVE THE CONTAINER THAT PRODUCED IT (see preflightSummaryPath's doc).
@@ -20320,7 +20379,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const injectedSpawn = deps.spawn !== undefined;
   const summaryPath = explicitSummaryFile ?? (injectedSpawn ? undefined : preflightSummaryPath(repoRoot));
   const summary = buildPreflightSummary({
-    steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])],
+    steps,
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAtMs,
     headSha,
@@ -24184,6 +24243,62 @@ export function openSiblingObservation(
   };
 }
 
+function isClosureCalibrationRow(value: unknown): value is ClassClosure {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  if (typeof row.taskClass !== "string") return false;
+  if (typeof row.merged !== "number" || typeof row.open !== "number") return false;
+  if (row.costPerMerge !== null && typeof row.costPerMerge !== "number") return false;
+  const rate = row.mergeRate;
+  if (!rate || typeof rate !== "object") return false;
+  const rateRecord = rate as Record<string, unknown>;
+  return rateRecord.kind === "rate"
+    ? typeof rateRecord.value === "number" && typeof rateRecord.merged === "number" && typeof rateRecord.denominator === "number"
+    : rateRecord.kind === "refused" && typeof rateRecord.merged === "number" && typeof rateRecord.denominator === "number" && typeof rateRecord.floor === "number";
+}
+
+/**
+ * Build one selection cycle's pure value context from the complete rotated ledger union. The
+ * selector itself gets no reader: a torn corpus, malformed closure row, or missing prior cycle is
+ * named here and becomes the exact former priority/scope/id order.
+ */
+function dispatchValueContextForSelection(
+  plan: Plan,
+  isMerged: MergedSet,
+  stateDir: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): DispatchValueContext | undefined {
+  const union = readLedgerUnionRecordsSync(stateDir, { step: "retro.closure_by_class", refuseIncomplete: true });
+  if (!union.ok) {
+    log("dispatch.value.refused", { reason: "incomplete-union", unread_rotations: union.unread.length });
+    return undefined;
+  }
+
+  const snapshots: ClosureCalibrationSnapshot[] = [];
+  for (const record of union.rows) {
+    const ts = record.ts;
+    const rows = record.rows;
+    if (typeof ts !== "string" || Number.isNaN(Date.parse(ts)) || !Array.isArray(rows) || !rows.every(isClosureCalibrationRow)) {
+      log("dispatch.value.refused", { reason: "malformed-closure-snapshot" });
+      return undefined;
+    }
+    snapshots.push({ ts, rows });
+  }
+  const calibrated = buildDispatchValueContext(
+    plan.tasks,
+    snapshots,
+    new Set(plan.tasks.filter((task) => !isMerged(task.id)).map((task) => task.id)),
+    union.ok,
+  );
+  if (calibrated.kind === "refused") {
+    log("dispatch.value.refused", { reason: calibrated.reasons.join(",") });
+    return undefined;
+  }
+  if (calibrated.refusals.length > 0) log("dispatch.value.class_refused", { reasons: calibrated.refusals });
+  log("dispatch.value.calibrated", { classes: [...calibrated.context.scoreByClass.keys()] });
+  return calibrated.context;
+}
+
 async function drainCommand(
   rest: string[],
   deps: {
@@ -24526,6 +24641,10 @@ async function drainCommand(
       plan,
       {
         refreshMerged,
+        // W1-T3412: the full-union read stays in this command layer and runs once for each
+        // selection pass. `drain.ts` receives only this immutable context and remains pure.
+        buildDispatchValueContext: (dispatchPlan, merged) =>
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER. `resolveReleasedIds` (drain.ts) turns these lines into the
@@ -25944,6 +26063,10 @@ export async function daemonCommand(
       plan,
       {
         refreshMerged,
+        // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
+        // drain. A refused calibration returns undefined, preserving historic ordering.
+        buildDispatchValueContext: (dispatchPlan, merged) =>
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
@@ -34004,6 +34127,59 @@ function loadProposalsForRatify(
   return { found, unknown };
 }
 
+export function skillLifecycleActionStillApproved(worktreeRoot: string, action: SkillLifecycleAction): boolean {
+  if (action.kind !== "skill-retirement") return false;
+  if (action.skillPath !== `.claude/skills/${action.skillName}/SKILL.md`) return false;
+  return loadInjectableSkills(join(worktreeRoot, ".claude", "skills")).some((skill) => skill.name === action.skillName);
+}
+
+export function applySkillLifecycleRemoval(
+  worktreeRoot: string,
+  action: SkillLifecycleAction,
+  deps: {
+    approved?: (root: string, action: SkillLifecycleAction) => boolean;
+    exists?: (path: string) => boolean;
+    remove?: (path: string) => void;
+  } = {},
+): { ok: true; removedPath: string } | { ok: false; reason: string } {
+  const approved = deps.approved ?? skillLifecycleActionStillApproved;
+  if (!approved(worktreeRoot, action)) {
+    return { ok: false, reason: `${action.skillName} is not an approved opted-in skill at ${action.skillPath}` };
+  }
+  const target = join(worktreeRoot, action.skillPath);
+  if (!(deps.exists ?? existsSync)(target)) {
+    return { ok: false, reason: `missing ${action.skillPath}` };
+  }
+  (deps.remove ?? unlinkSync)(target);
+  return { ok: true, removedPath: action.skillPath };
+}
+
+export function skillLifecycleApproveCommitMessage(action: SkillLifecycleAction, proposalId: string): string {
+  return [
+    "chore(skill): retire approved skill via rmd approve",
+    "",
+    `Proposal ${proposalId} carried measured negative lifecycle evidence for ${action.skillName}.`,
+    `Evidence fingerprint: ${action.evidenceFingerprint}`,
+    "",
+    "The operator's one-bit approve initiated this PR; staging the proposal did not alter the",
+    "approved skill tree. This commit removes exactly the approved SKILL.md named by the action.",
+  ].join("\n");
+}
+
+export function skillLifecyclePrBody(action: SkillLifecycleAction, proposalId: string): string {
+  return [
+    `Proposal ${proposalId} retires approved skill \`${action.skillName}\`.`,
+    "",
+    "The operator's one-bit approve initiated this PR. The gate still reviews it; nothing",
+    "auto-merges without that review.",
+    "",
+    "## Acceptance",
+    `- Removes exactly \`${action.skillPath}\`.`,
+    `- Evidence fingerprint: \`${action.evidenceFingerprint}\`.`,
+    "- No other approved skill file is changed by this lifecycle action.",
+  ].join("\n");
+}
+
 // ── The verify-human judge's production call site (W1-T3188) ──────────────────────────────────
 //
 // W1-T349 built a complete, tested judge that nothing called for fourteen months. lint-plan
@@ -34739,11 +34915,73 @@ export async function approveCommand(
     },
   };
 
+  const createSkillLifecycleBranch = (action: SkillLifecycleAction): string => {
+    const dir = ensureRepoDir();
+    const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+    if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+    const branch = approveRunBranch(runId);
+    worktreePath = join(worktreesDir(config), branch);
+    worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
+    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    const removed = applySkillLifecycleRemoval(worktreePath, action);
+    if (!removed.ok) throw new Error(`rmd approve: refusing lifecycle action for ${proposalId} — ${removed.reason}`);
+    execFileSync("git", ["-C", worktreePath, "add", "-A", "--", action.skillPath], { stdio: "inherit" });
+    execFileSync("git", ["-C", worktreePath, "commit", "-m", skillLifecycleApproveCommitMessage(action, proposalId)], { stdio: "inherit" });
+    gitPushRunBranch(worktreePath);
+    return branch;
+  };
+
+  const openSkillLifecyclePr = (branch: string, action: SkillLifecycleAction): string => {
+    assertLiveWriteAllowed("gh-pr-create", `opening a skill lifecycle PR against ${owner}/${repo}`);
+    const created = createPlanPrRest(ghJson, owner, repo, {
+      title: "chore(skill): retire approved skill via rmd approve",
+      body: skillLifecyclePrBody(action, proposalId),
+      head: branch,
+      base: "main",
+    });
+    return created.prUrl;
+  };
+
   const duplicateCorpus = filedShardSlugCorpus(repoRoot);
 
   let result: ReturnType<typeof approveProposal>;
   try {
-    result = approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus });
+    if (proposal.lifecycleAction) {
+      if (classification.state !== "ready" || !classification.lifecycleAction) {
+        const refusal = refusalReason(classification);
+        appendLedger(ledgerPath, {
+          run_id: runId,
+          task_id: proposalId,
+          step: "ratify.approve_refused",
+          state: classification.state,
+          reason: refusal,
+        });
+        console.error(`rmd approve: ${refusal}`);
+        return 1;
+      }
+      const branch = createSkillLifecycleBranch(classification.lifecycleAction);
+      const prUrl = openSkillLifecyclePr(branch, classification.lifecycleAction);
+      const prNumber = Number(prUrl.match(/\/pull\/(\d+)/)?.[1]);
+      appendLedger(ledgerPath, {
+        run_id: runId,
+        task_id: proposalId,
+        step: "ratify.approved",
+        pr_url: prUrl,
+        pr_number: Number.isFinite(prNumber) ? prNumber : undefined,
+        branch,
+        lifecycle_action: classification.lifecycleAction.kind,
+      });
+      result = {
+        ok: true,
+        proposalId,
+        branch,
+        prUrl,
+        prNumber: Number.isFinite(prNumber) ? prNumber : undefined,
+        payload: { proposalId, fragmentYaml: "", stampLine: "" },
+      };
+    } else {
+      result = approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus });
+    }
   } catch (e) {
     // W1-T311: createRatificationBranch REFUSED (a degraded mint or a failed reservation) —
     // or any other failure inside either gateway call. approveProposal never reached its own
@@ -36399,12 +36637,13 @@ export async function synthesizeCommand(rest: string[], deps: SynthesizeCommandD
  */
 export async function skillCommand(
   rest: string[],
-  deps: { effectiveness?: typeof skillEffectivenessCommand } = {},
+  deps: { effectiveness?: typeof skillEffectivenessCommand; lifecycle?: typeof skillLifecycleCommand } = {},
 ): Promise<number> {
   const sub = rest[0];
   if (sub === "effectiveness") return (deps.effectiveness ?? skillEffectivenessCommand)(rest.slice(1));
+  if (sub === "lifecycle") return (deps.lifecycle ?? skillLifecycleCommand)(rest.slice(1));
   if (sub !== "list") {
-    console.error(`rmd skill: unknown subcommand '${sub ?? ""}' — usage: rmd skill list | rmd skill effectiveness <approved-skill>\n` + USAGE);
+    console.error(`rmd skill: unknown subcommand '${sub ?? ""}' — usage: rmd skill list | rmd skill effectiveness <approved-skill> | rmd skill lifecycle <approved-skill>\n` + USAGE);
     return 2;
   }
   const badArg = unknownArgError("skill list", rest.slice(1), [], []);
@@ -36472,6 +36711,71 @@ export function skillEffectivenessCommand(
   }
   const report = buildSkillEffectivenessReport(ledgerUnion.rows, skillName);
   (deps.write ?? console.log)(renderSkillEffectivenessReport(report));
+  return 0;
+}
+
+/**
+ * W1-T3413's lifecycle bridge. It measures with the same reducer as `rmd skill effectiveness`,
+ * then stages exactly one structured retirement proposal for qualified negative evidence.
+ */
+export function skillLifecycleCommand(
+  rest: string[],
+  deps: {
+    stateDir?: string;
+    registryPath?: string;
+    approvedSkillsDir?: string;
+    readLedger?: typeof readLedgerUnionRecordsSync;
+    write?: (text: string) => void;
+    error?: (text: string) => void;
+  } = {},
+): number {
+  const skillName = rest[0];
+  if (!skillName || skillName.startsWith("-")) {
+    (deps.error ?? console.error)("rmd skill lifecycle: usage: rmd skill lifecycle <approved-skill>");
+    return 2;
+  }
+  const badArg = unknownArgError("skill lifecycle", rest.slice(1), [], []);
+  if (badArg) {
+    (deps.error ?? console.error)(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = deps.stateDir && deps.registryPath && deps.approvedSkillsDir ? undefined : loadConfig();
+  const stateDir = deps.stateDir ?? dirname(ledgerPathFor(config as Config));
+  let ledgerUnion: ReturnType<typeof readLedgerUnionRecordsSync>;
+  try {
+    ledgerUnion = (deps.readLedger ?? readLedgerUnionRecordsSync)(stateDir, {
+      step: ["skills.selection", "verdict"],
+      refuseIncomplete: true,
+    });
+  } catch (error) {
+    const reason = String(error);
+    (deps.error ?? console.error)(`rmd skill lifecycle: REFUSED unreadable ledger union: ${reason}`);
+    return 1;
+  }
+  if (!ledgerUnion.ok) {
+    (deps.error ?? console.error)(
+      `rmd skill lifecycle: REFUSED incomplete ledger union under ${stateDir}: ` +
+      `${ledgerUnion.unread.length} unread rotation(s)`,
+    );
+    return 1;
+  }
+  const report = buildSkillEffectivenessReport(ledgerUnion.rows, skillName);
+  (deps.write ?? console.log)(renderSkillEffectivenessReport(report));
+  const registryPath = deps.registryPath ?? join((config as Config).root, "state", "inbox-proposals.json");
+  const approvedSkillsDir = deps.approvedSkillsDir ?? join(repoRoot, ".claude", "skills");
+  const staged = stageSkillLifecycleProposal(registryPath, approvedSkillsDir, report);
+  if (staged.refused) {
+    (deps.error ?? console.error)(
+      `rmd skill lifecycle: REFUSED ${staged.reason}; selected terminal_runs=${report.selected.terminal_runs}, ` +
+      `control terminal_runs=${report.control.terminal_runs}`,
+    );
+    return report.status === "REVIEW-CANDIDATE" ? 0 : 1;
+  }
+  const verb = staged.staged ? "staged" : staged.refreshed ? "refreshed" : "already staged";
+  (deps.write ?? console.log)(
+    `rmd skill lifecycle: ${verb} ${staged.proposalId} ` +
+    `(evidence_fingerprint=${staged.evidenceFingerprint})`,
+  );
   return 0;
 }
 

@@ -61,6 +61,7 @@ export const RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS = 60 * 60 * 1000;
 const BOUND_FAILURE_CLASSES = new Set(["process_timeout", "output_limit_exceeded", "process_spawn_failed"]);
 const MAX_FAILING_TESTS = 20;
 const MAX_FAILING_TEST_NAME_BYTES = 300;
+const SELF_SYNC_GUARD_ENV = "RMD_SELF_SYNC_DONE";
 
 export interface RetroPrepublishCommandResult {
   status: number | null;
@@ -338,13 +339,15 @@ function exitClass(result: RetroPrepublishCommandResult, ordinaryFailure: string
 }
 
 function commandOptions(worktreePath: string): Parameters<RetroPrepublishRunner>[2] {
+  const env = { ...process.env };
+  delete env[SELF_SYNC_GUARD_ENV];
   return {
     cwd: worktreePath,
     encoding: "utf8",
     maxBuffer: RETRO_PREFLIGHT_MAX_BUFFER_BYTES,
     timeout: RETRO_PREFLIGHT_STALL_MS,
     totalBackstopMs: RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS,
-    env: { ...process.env },
+    env,
   };
 }
 

@@ -237,7 +237,7 @@ test("W1-T2809: an unreadable hit is still KEPT, tagged with the gated idiom —
   const found = discoverCensusCandidates("/fake/repo", listSpawn(["test/unreadable.test.ts"]), () => {
     throw new Error("ENOENT");
   });
-  assert.deepEqual(found, [{ testFile: "test/unreadable.test.ts", idiom: "ls-files" }]);
+  assert.deepEqual(found, [{ testFile: "test/unreadable.test.ts", idiom: "ls-files", walks: ["src/"] }]);
 });
 
 test("W1-T2809: a hit that mentions neither src/ nor an idiom token is still filtered out", () => {
@@ -248,12 +248,12 @@ test("W1-T2809: a hit that mentions neither src/ nor an idiom token is still fil
   };
   const found = discoverCensusCandidates("/fake/repo", listSpawn(Object.keys(files)), (p) => files[p] ?? "");
   assert.deepEqual(found, [
-    { testFile: "test/walks-src.test.ts", idiom: "dir-walk" },
-    { testFile: "test/uses-ls-files.test.ts", idiom: "ls-files" },
+    { testFile: "test/walks-src.test.ts", idiom: "dir-walk", walks: ["src/lib"] },
+    { testFile: "test/uses-ls-files.test.ts", idiom: "ls-files", walks: ["src/*.ts"] },
   ]);
 });
 
 test("W1-T2809: ls-files takes precedence for a file carrying both tokens, so the gated projection is unchanged", () => {
   const found = discoverCensusCandidates("/fake/repo", listSpawn(["test/both.test.ts"]), () => 'ls-files src/ and readdirSync("src/lib")');
-  assert.deepEqual(found, [{ testFile: "test/both.test.ts", idiom: "ls-files" }]);
+  assert.deepEqual(found, [{ testFile: "test/both.test.ts", idiom: "ls-files", walks: ["src/lib"] }]);
 });

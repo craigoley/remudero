@@ -1142,6 +1142,79 @@ test("GET /v1/inbox: a proposal already ratified (ledger carries ratify.approved
   });
 });
 
+test("W1-T3408: a DECLINED proposal is returned in its own `declined` array with the decline's reason — POST /v1/inbox/restore shipped with no way to learn its own argument", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(
+    join(root, "state", "inbox-proposals.json"),
+    JSON.stringify({ proposals: [{ id: "P-DECLINED", summary: "refused on reasoning that turned out wrong", evidenceAnchors: [] }] }),
+  );
+  appendLedger(ledgerPathFor(root), {
+    run_id: "PANEL-1",
+    task_id: "P-DECLINED",
+    step: "panel.proposal_declined",
+    reason: "declined because the audit looked defective",
+  });
+
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await get(base, "/v1/inbox", READ_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ready: Array<{ proposalId: string }>;
+      drafting: Array<{ proposalId: string }>;
+      notReady: Array<{ proposalId: string }>;
+      declined: Array<{ proposalId: string; reason: string }>;
+    };
+    assert.deepEqual(
+      body.declined.map((d) => d.proposalId),
+      ["P-DECLINED"],
+      "a declined proposal must be discoverable, or restore has no reachable argument",
+    );
+    assert.match(body.declined[0].reason, /audit looked defective/, "the list must say WHY each was refused");
+    for (const arr of [body.ready, body.drafting, body.notReady]) {
+      assert.ok(!arr.some((x) => x.proposalId === "P-DECLINED"), "a declined proposal is not awaiting anything and must not read as work in progress");
+    }
+  });
+});
+
+test("W1-T3408: a RESTORED proposal LEAVES the declined array, so the list reflects the reversal rather than a growing archive", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(
+    join(root, "state", "inbox-proposals.json"),
+    JSON.stringify({ proposals: [{ id: "P-BACK", summary: "taken back", evidenceAnchors: [] }] }),
+  );
+  appendLedger(ledgerPathFor(root), { run_id: "PANEL-1", task_id: "P-BACK", step: "panel.proposal_declined", reason: "wrong call" });
+  appendLedger(ledgerPathFor(root), { run_id: "PANEL-2", task_id: "P-BACK", step: "panel.proposal_restored", reason: "the source refuted it" });
+
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await get(base, "/v1/inbox", READ_TOKEN);
+    const body = (await res.json()) as { declined: Array<{ proposalId: string }> };
+    assert.deepEqual(body.declined, [], "a restored proposal is no longer declined and must not linger in the list");
+  });
+});
+
+test("W1-T3408: a RATIFIED proposal still appears in NO array — surfacing declines did not widen what the inbox returns", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(
+    join(root, "state", "inbox-proposals.json"),
+    JSON.stringify({ proposals: [{ id: "P-RAT", summary: "already filed", evidenceAnchors: [] }] }),
+  );
+  appendLedger(ledgerPathFor(root), { run_id: "APPROVE-1", task_id: "P-RAT", step: "ratify.approved", pr_url: "https://x/pull/1", branch: "b" });
+
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await get(base, "/v1/inbox", READ_TOKEN);
+    const body = (await res.json()) as Record<string, Array<{ proposalId: string }>>;
+    for (const key of ["ready", "drafting", "notReady", "declined"]) {
+      assert.ok(!(body[key] ?? []).some((x) => x.proposalId === "P-RAT"), `P-RAT must not appear in ${key}`);
+    }
+  });
+});
+
 test("GET /v1/inbox: a P19-shaped drifted registry entry is CORRECTED on disk, not merely worked around in the response — one request heals state/inbox-proposals.json so any OTHER consumer of that file also sees the ratified proposal gone (acceptance 1: DETECTED and corrected, not trusted)", async () => {
   const root = tmpRoot();
   const planPath = emptyPlanPath(root);

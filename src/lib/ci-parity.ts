@@ -889,6 +889,30 @@ export function runContextLine(ctx: RunContext): string {
   return `context: sha=${ctx.headSha}${base}, ${behind}, ${fetched}, ${load}`;
 }
 
+const MERGE_BASE_RELATIVE_STEP_NAMES = new Set([
+  "coverage-ratchet:diff-coverage",
+  "comment-load-ratchet",
+  "source-size",
+  "coverage-mode:diff-coverage",
+]);
+
+/** The steps whose verdicts are relative to the merge base, filtered to THIS run's own entries. */
+export function mergeBaseRelativeStepNames(steps: readonly CiParityStepResult[]): string[] {
+  return [...new Set(steps.map((s) => s.name).filter((name) => MERGE_BASE_RELATIVE_STEP_NAMES.has(name)))].sort();
+}
+
+/** Advisory only: a stale or unreadable checkout is reported beside the affected entries, never refused. */
+export function runTreeAdvisoryLine(ctx: RunContext, steps: readonly CiParityStepResult[]): string | undefined {
+  const names = mergeBaseRelativeStepNames(steps);
+  if (names.length === 0) return undefined;
+  if (ctx.behindCount === 0) return undefined;
+  const distance =
+    ctx.behindCount === undefined
+      ? `behind=UNKNOWN (${ctx.behindUnknownReason ?? "unreadable"})`
+      : `behind=${ctx.behindCount}`;
+  return `tree advisory: ${distance}; merge-base-relative entries in this run: ${names.join(", ")}`;
+}
+
 function fmtLoad(v: number | undefined): string {
   return v === undefined ? "?" : v.toFixed(2);
 }
@@ -1767,6 +1791,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "strings the recognizer sees are its own fixture bodies and the paths of the PR (#2639) the positive control is " +
       "anchored to",
   ),
+  refusedForPredicate(
+    "test/an-unmodelled-census-is-named-with-what-it-walks.test.ts",
+    "a",
+    "W1-T3238's own proof file. It fabricates census-shaped fixture text containing both `ls-files` and dir-walk idioms " +
+      "so the membership reporter can prove candidates stay visible, but its real assertions are about that reporter and " +
+      "mocked discovery inputs — it never walks the tracked src/ population and asserts no per-src-file property",
+  ),
   // W1-T2905's own suite. SCOPE NOTE: the shard's `files:` names only the census test and its
   // baseline; this entry is here because `censusPopulationDrift` REFUSES an undisclosed
   // census-shaped file, and that gate cannot be satisfied from inside the two declared paths. The
@@ -1945,6 +1976,55 @@ export type CensusEnumerationIdiom = "ls-files" | "dir-walk";
 export interface CensusCandidate {
   readonly testFile: string;
   readonly idiom: CensusEnumerationIdiom;
+  readonly walks: readonly string[];
+}
+
+function normalizeCensusWalk(raw: string): string | undefined {
+  const normalized = raw.trim().replaceAll("\\", "/").replace(/\/+/g, "/");
+  const match = /(?:^|\/)(src|test|scripts)(?:\/[^"'`,)\]} ]*)?|(?:^|\/)(plan\/tasks\.d)(?:\/[^"'`,)\]} ]*)?/.exec(
+    normalized,
+  );
+  if (!match) return undefined;
+  const walk = match[0].replace(/^\//, "");
+  if (walk === "src" || walk === "test" || walk === "scripts" || walk === "plan/tasks.d") return `${walk}/`;
+  return walk;
+}
+
+function censusWalksFromText(text: string): string[] {
+  const walks: string[] = [];
+  const joinCall = /\bjoin\s*\(([^)]*)\)/g;
+  const quoted = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/g;
+  for (const match of text.matchAll(quoted)) {
+    const walk = normalizeCensusWalk(match[2]);
+    if (walk) walks.push(walk);
+  }
+  for (let call = joinCall.exec(text); call; call = joinCall.exec(text)) {
+    const segments = [...call[1].matchAll(quoted)].map((m) => m[2]);
+    for (let i = 0; i < segments.length; i += 1) {
+      const segment = segments[i];
+      if (segment === "src" || segment === "test" || segment === "scripts") {
+        walks.push(normalizeCensusWalk([segment, ...segments.slice(i + 1)].join("/")) ?? `${segment}/`);
+      }
+      if (segment === "plan" && segments[i + 1] === "tasks.d") {
+        walks.push(normalizeCensusWalk(segments.slice(i, i + 2).join("/")) ?? "plan/tasks.d/");
+      }
+    }
+  }
+  return walks;
+}
+
+export function censusCandidateWalks(text: string): string[] {
+  const walks = new Set<string>();
+  const idiom = /ls-files|readdirSync|globSync/g;
+  for (let match = idiom.exec(text); match; match = idiom.exec(text)) {
+    const lineStart = text.lastIndexOf("\n", match.index) + 1;
+    const lineEnd = text.indexOf("\n", match.index);
+    const windowEnd = lineEnd === -1 ? text.length : Math.min(text.length, lineEnd + 1);
+    const window = text.slice(lineStart, windowEnd);
+    for (const walk of censusWalksFromText(window)) walks.add(walk);
+  }
+  if (/(?:src\/|["'`]src["'`])/.test(text) && ![...walks].some((walk) => walk.startsWith("src/"))) walks.add("src/");
+  return [...walks].sort();
 }
 
 /**
@@ -1992,7 +2072,7 @@ export const CENSUS_DISCOVERY_PROBE_ARGV: readonly string[] = [
 
 /** THE RECOGNIZER (W1-T2523's own, extracted so the drift guard reuses it rather than growing a
  *  second copy — ONE CENSUS PREDICATE, NEVER TWO; widened by W1-T2809). Every `test/*.test.ts`
- *  mentioning `ls-files`, `readdirSync` or `globSync` that also filters on `src/` is a candidate;
+ *  mentioning `ls-files`, `readdirSync` or `globSync` that also names a walked corpus is a candidate;
  *  an unreadable hit is KEPT. */
 export function discoverCensusCandidates(
   repoRoot: string,
@@ -2008,11 +2088,18 @@ export function discoverCensusCandidates(
       text = readFile(testFile);
     } catch {
       // unreadable: kept in, not ruled out, and tagged with the gated idiom — pre-W1-T2809 behaviour exactly.
-      out.push({ testFile, idiom: "ls-files" });
+      out.push({ testFile, idiom: "ls-files", walks: ["src/"] });
       continue;
     }
-    if (!/src\//.test(text)) continue;
-    out.push({ testFile, idiom: /ls-files/.test(text) ? "ls-files" : "dir-walk" });
+    const idiom: CensusEnumerationIdiom | undefined = /ls-files/.test(text)
+      ? "ls-files"
+      : /readdirSync|globSync/.test(text)
+        ? "dir-walk"
+        : undefined;
+    if (!idiom) continue;
+    const walks = censusCandidateWalks(text);
+    if (walks.length === 0) continue;
+    out.push({ testFile, idiom, walks });
   }
   return out;
 }
@@ -2027,7 +2114,7 @@ function discoverSrcFilteredLsFilesCallers(
   readFile: (path: string) => string,
 ): string[] {
   return discoverCensusCandidates(repoRoot, spawn, readFile)
-    .filter((c) => c.idiom === "ls-files")
+    .filter((c) => c.idiom === "ls-files" && c.walks.some((walk) => walk.startsWith("src/") || walk === "src/"))
     .map((c) => c.testFile);
 }
 
@@ -2282,21 +2369,28 @@ export interface CensusMembershipEntry {
 export interface CensusMembershipReport {
   readonly entries: readonly CensusMembershipEntry[];
   readonly unknownCoverage: readonly string[];
+  readonly candidateCoverage: readonly CensusCandidate[];
 }
 
 /** PURE core: membership by prefix match against {@link CENSUS_MEMBERSHIP_SUITES}. No git, filesystem or spawn. */
 export function censusSuiteMembership(
   changedPaths: readonly string[],
   srcFilteredCallers: readonly string[],
+  candidates: readonly CensusCandidate[] = [],
 ): CensusMembershipReport {
   // TWO QUESTIONS, TWO SETS (W1-T2969) — see CENSUS_MEMBERSHIP_SUITES for why they cannot be one.
   const knownTestFiles = new Set(KNOWN_CENSUS_SUITES.map((s) => s.testFile));
+  const modelledTestFiles = new Set(CENSUS_MEMBERSHIP_SUITES.map((s) => s.testFile));
   const unknownCoverage = [...new Set(srcFilteredCallers.filter((f) => !knownTestFiles.has(f)))].sort();
+  const candidateCoverage = candidates
+    .filter((c) => !modelledTestFiles.has(c.testFile))
+    .filter((c, index, all) => all.findIndex((other) => other.testFile === c.testFile) === index)
+    .sort((a, b) => a.testFile.localeCompare(b.testFile));
   const entries = changedPaths.map((path) => ({
     path,
     suites: CENSUS_MEMBERSHIP_SUITES.filter((s) => s.walks.some((prefix) => path.startsWith(prefix))).map((s) => s.job),
   }));
-  return { entries, unknownCoverage };
+  return { entries, unknownCoverage, candidateCoverage };
 }
 
 /** The impure edge: runs the probe through the injected {@link PreflightSpawn}, reads each hit's
@@ -2312,8 +2406,9 @@ export function censusSuiteMembershipFor(
   // W1-T2809 — THE WIDENED SET, not the `ls-files` projection. This report's contract is that a
   // suite it cannot place is NAMED rather than omitted, so the honest input is every candidate
   // either idiom finds.
-  const srcFilteredCallers = discoverCensusCandidates(repoRoot, spawn, readFile).map((c) => c.testFile);
-  return censusSuiteMembership(changedPaths, srcFilteredCallers);
+  const candidates = discoverCensusCandidates(repoRoot, spawn, readFile);
+  const srcFilteredCallers = candidates.map((c) => c.testFile);
+  return censusSuiteMembership(changedPaths, srcFilteredCallers, candidates);
 }
 
 // ── W1-T3215: THE CALLER SWEEP MUST WALK PAST ONE HOP ──────────────────────────────────────────

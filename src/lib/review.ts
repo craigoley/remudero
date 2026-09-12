@@ -672,6 +672,9 @@ export interface WhitelistedProof {
    *  always compiles to the fixed `["-arn", "--", pattern, path]` argv — BRE, author-unselectable — while the legacy
    *  shape passes an author's own flags, `-E` among them, through unexamined. `args` alone cannot tell them apart. */
   authorSelectedArgv?: boolean;
+  /** The default executor's actual `grep -arn` match lines for a passing house-dialect `grep:` proof, after any
+   *  reviewer-owned filtering. Injected executors may omit it, keeping their pass/fail contract unchanged. */
+  matchedLines?: string[];
   /** A checkout-local runner whose path must be resolved against the checkout being proved, never
    * the reviewer's own working directory. Node itself is the reviewer process's runtime and so
    * needs no entry here; Vitest is a pinned dependency the checkout must actually contain. */
@@ -955,13 +958,123 @@ function dialectGrepSelfLineFilteringApplies(path: string): boolean {
  *  `"pass"` (design (ii)). No new metacharacter, no change to the compiled argv or to
  *  `proof-grep-safety` (task-linter.ts, untouched by this file): this only re-classifies the
  *  matcher's own already-clean exit-0 output. */
-function dialectGrepOutcomeExcludingSelfLine(pattern: string, path: string, stdout: string): "pass" | "fail" {
+function dialectGrepOutputLines(stdout: string): string[] {
+  return stdout.split("\n").filter((line) => line.trim().length > 0);
+}
+
+function dialectGrepMatchedLinesExcludingSelfLine(pattern: string, path: string, stdout: string): string[] {
   const selfLine = dialectGrepSelfLineRe(pattern, path);
-  const genuine = stdout
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .filter((line) => !selfLine.test(line.replace(/^\d+:/, "")));
-  return genuine.length > 0 ? "pass" : "fail";
+  return dialectGrepOutputLines(stdout).filter((line) => !selfLine.test(line.replace(/^\d+:/, "")));
+}
+
+/** A passing `grep -arn` line's source text, with grep's `<path>:<line>:` prefix removed when present. */
+function dialectGrepMatchedSourceText(line: string): string {
+  const m = line.match(/^(?:.*?:)?\d+:(.*)$/);
+  return (m ? m[1] : line).trim();
+}
+
+function dialectGrepMatchedLineNumber(line: string): number | undefined {
+  const m = line.match(/^(?:.*?:)?(\d+):/);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  return Number.isSafeInteger(n) && n > 0 ? n : undefined;
+}
+
+function dialectGrepMatchedLineIsComment(line: string): boolean {
+  const text = dialectGrepMatchedSourceText(line);
+  return text.startsWith("//") || text.startsWith("/*") || text.startsWith("*");
+}
+
+interface MatchedLineCommentContext {
+  pattern: string;
+  fileText: string;
+}
+
+function commentMaskByLine(fileText: string): boolean[][] {
+  const lines = fileText.split("\n").map((line) => line.replace(/\r$/, ""));
+  const masks: boolean[][] = [];
+  let block = false;
+  let quote: '"' | "'" | "`" | undefined;
+  let escaped = false;
+  for (const line of lines) {
+    const mask = Array.from({ length: line.length }, () => false);
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i];
+      const next = line[i + 1];
+      if (block) {
+        mask[i] = true;
+        if (ch === "*" && next === "/") {
+          mask[i + 1] = true;
+          i += 1;
+          block = false;
+        }
+        continue;
+      }
+      if (quote !== undefined) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === "\\") {
+          escaped = true;
+        } else if (ch === quote) {
+          quote = undefined;
+        }
+        continue;
+      }
+      if (ch === "/" && next === "/") {
+        for (let j = i; j < line.length; j += 1) mask[j] = true;
+        break;
+      }
+      if (ch === "/" && next === "*") {
+        mask[i] = true;
+        mask[i + 1] = true;
+        i += 1;
+        block = true;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    }
+    masks.push(mask);
+  }
+  return masks;
+}
+
+function allLiteralOccurrencesAreComments(line: string, mask: readonly boolean[], pattern: string): boolean | undefined {
+  if (!pattern) return undefined;
+  let found = false;
+  for (let index = line.indexOf(pattern); index >= 0; index = line.indexOf(pattern, index + 1)) {
+    found = true;
+    for (let i = index; i < index + pattern.length; i += 1) {
+      if (mask[i] !== true) return false;
+    }
+  }
+  return found ? true : undefined;
+}
+
+export function matchedLinesAreAllComments(
+  matchedLines: readonly string[],
+  context?: MatchedLineCommentContext,
+): boolean {
+  if (matchedLines.length === 0) return false;
+  if (context !== undefined) {
+    const sourceLines = context.fileText.split("\n").map((line) => line.replace(/\r$/, ""));
+    const masks = commentMaskByLine(context.fileText);
+    return matchedLines.every((line) => {
+      const lineNumber = dialectGrepMatchedLineNumber(line);
+      if (lineNumber === undefined) return dialectGrepMatchedLineIsComment(line);
+      const sourceLine = sourceLines[lineNumber - 1];
+      const mask = masks[lineNumber - 1];
+      if (sourceLine === undefined || mask === undefined) return dialectGrepMatchedLineIsComment(line);
+      return allLiteralOccurrencesAreComments(sourceLine, mask, context.pattern) ?? dialectGrepMatchedLineIsComment(line);
+    });
+  }
+  return matchedLines.every(dialectGrepMatchedLineIsComment);
+}
+
+function matchedLineCommentContext(w: WhitelistedProof, cwd: string): MatchedLineCommentContext | undefined {
+  const path = dialectGrepTargetPath(w);
+  if (path === undefined) return undefined;
+  const fullPath = join(cwd, path);
+  return existsSync(fullPath) ? { pattern: w.args[2]!, fileText: readFileSync(fullPath, "utf8") } : undefined;
 }
 
 /** Compile a `unit test:` dialect body — either a literal test-file path (reusing the exact-file
@@ -1695,13 +1808,17 @@ export function execWhitelistedProof(
     const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
     if (whitelisted.nameFiltered) return nameFilteredOutcome(stdout);
     // W1-T3208: a dialect grep's own compiled pattern/path names the exact self-declaration text to
-    // exclude — see dialectGrepOutcomeExcludingSelfLine. `dialectGrepTargetPath` returning a path
+    // exclude. `dialectGrepTargetPath` returning a path
     // confirms both the dialect shape (not the legacy fenced, author-selected argv) AND that
     // `args[2]` is the compiled pattern, so the two are read together rather than re-deriving one
     // shape check twice.
     const dialectPath = dialectGrepTargetPath(whitelisted);
     if (whitelisted.kind === "grep" && dialectPath !== undefined && dialectGrepSelfLineFilteringApplies(dialectPath)) {
-      return dialectGrepOutcomeExcludingSelfLine(whitelisted.args[2]!, dialectPath, stdout);
+      whitelisted.matchedLines = dialectGrepMatchedLinesExcludingSelfLine(whitelisted.args[2]!, dialectPath, stdout);
+      return whitelisted.matchedLines.length > 0 ? "pass" : "fail";
+    }
+    if (whitelisted.kind === "grep" && dialectPath !== undefined) {
+      whitelisted.matchedLines = dialectGrepOutputLines(stdout);
     }
     return "pass";
   } catch (e) {
@@ -2179,64 +2296,75 @@ export function judgeCriterion(
         try {
           const outcome = exec(whitelisted, execCtx.cwd);
           if (outcome === "pass") {
-            // W1-T273 (grep) / W1-T362 (extended to `unit test:`): re-run the SAME whitelisted check against the PR's
-            // merge-base — one execution answers both "is this stale" and, if not, why not.
-            const baseOutcome =
-              execCtx.baseCwd !== undefined
-                ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles)
-                : undefined;
-            if (baseOutcome === "base_unreadable") {
-              // The base tree exists and siblings were checked against it, but THIS proof's base blob never arrived,
-              // so its head-side pass proves nothing about discrimination (W1-T460). Withdraw the positive override
-              // and fall back to the keyword floor verbatim, as `executed_stale` degrades. NOT a failure: we did not
-              // learn the proof is bad, we learned we never asked.
-              proofExec = "base_unreadable";
-              reason =
-                `${reason} — NOTE: proof PASSED on the PR head ` +
-                `(${whitelisted.kind}: ${whitelisted.label}) but its base blob could not be read, so the ` +
-                `merge-base staleness check never ran for THIS proof (the base tree itself exists and ` +
-                `other proofs were checked against it); positive override withdrawn, keyword floor applied`;
-            } else if (baseOutcome === "stale" && staleProofIsSelfPath(whitelisted, execCtx.forwardReferenceFiles)) {
-              // (W1-T1071) The stale match is not an ordinary non-discriminating grep: its target is a plan-shard path
-              // and this diff's own task declares a REAL path besides it, so the task has an implementing diff. A
-              // self-path grep only ever discriminated by proving the shard's own filing text was present —
-              // permanently true at the merge-base now — so the ordinary degrade would let a report that never
-              // engages the built behaviour through on keyword coverage of the OLD plan prose.
-              proofExec = "stale_self_path";
-              met = false;
-              reason =
-                `proof unmet: REFUSED — proof (${whitelisted.kind}: ${whitelisted.label}) is a filing-time ` +
-                `self-path proof (it greps this diff's own plan shard, which now also matches at the PR's ` +
-                `merge-base) — it discriminated the PR that FILED the task and cannot discriminate the PR ` +
-                `that BUILDS it; rewrite this proof to name the behaviour this diff builds, not the plan ` +
-                `text that filed it`;
-            } else if (baseOutcome === "stale") {
-              // The same check also passes on the MERGE-BASE, so its exit 0 here discriminates nothing — see {@link
-              // classifyBaseProofOutcome}. `met`/`reason` are LEFT UNTOUCHED and the keyword floor stands verbatim:
-              // the positive override is withdrawn, never converted into a failure.
+            if (
+              whitelisted.kind === "grep" &&
+              matchedLinesAreAllComments(whitelisted.matchedLines ?? [], matchedLineCommentContext(whitelisted, execCtx.cwd))
+            ) {
               proofExec = "executed_stale";
               reason =
-                `${reason} — NOTE: proof also matches the PR's merge-base ` +
-                `(${whitelisted.kind}: ${whitelisted.label}); non-discriminating, ` +
+                `${reason} — NOTE: proof PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label}) ` +
+                `but every executor-returned matching line is a comment; non-discriminating, ` +
                 `positive override withdrawn, keyword floor applied`;
             } else {
-              proofExec = "executed_pass";
-              met = true;
-              reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
-              // W1-T362: record the base-run outcome on the verdict for a `unit test:` proof specifically (grep's
-              // reason text stays byte-identical to its shipped W1-T273 shape).
-              if (whitelisted.kind === "test" && baseOutcome === "discriminates") {
-                reason +=
-                  ` — NOTE: also re-run against the PR's merge-base and did NOT pass there ` +
-                  `(absent, no-match, or a genuine failure); the proof discriminates, executed_pass stands`;
-              } else if (whitelisted.kind === "test" && baseOutcome === "base_unknown") {
-                reason +=
-                  ` — NOTE: re-run against the PR's merge-base for staleness could not complete ` +
-                  `(base_unknown, an environment gap: ` +
-                  (execCtx.baseIsCheckout === true
-                    ? `the base run itself could not execute`
-                    : `no merge-base checkout could be materialised, and a unit test cannot be re-run against blobs`) +
-                  `); executed_pass stands, downgrade withheld — no discrimination was measured`;
+              // W1-T273 (grep) / W1-T362 (extended to `unit test:`): re-run the SAME whitelisted check against the PR's
+              // merge-base — one execution answers both "is this stale" and, if not, why not.
+              const baseOutcome =
+                execCtx.baseCwd !== undefined
+                  ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles)
+                  : undefined;
+              if (baseOutcome === "base_unreadable") {
+                // The base tree exists and siblings were checked against it, but THIS proof's base blob never arrived,
+                // so its head-side pass proves nothing about discrimination (W1-T460). Withdraw the positive override
+                // and fall back to the keyword floor verbatim, as `executed_stale` degrades. NOT a failure: we did not
+                // learn the proof is bad, we learned we never asked.
+                proofExec = "base_unreadable";
+                reason =
+                  `${reason} — NOTE: proof PASSED on the PR head ` +
+                  `(${whitelisted.kind}: ${whitelisted.label}) but its base blob could not be read, so the ` +
+                  `merge-base staleness check never ran for THIS proof (the base tree itself exists and ` +
+                  `other proofs were checked against it); positive override withdrawn, keyword floor applied`;
+              } else if (baseOutcome === "stale" && staleProofIsSelfPath(whitelisted, execCtx.forwardReferenceFiles)) {
+                // (W1-T1071) The stale match is not an ordinary non-discriminating grep: its target is a plan-shard
+                // path and this diff's own task declares a REAL path besides it, so the task has an implementing
+                // diff. A self-path grep only ever discriminated by proving the shard's own filing text was present —
+                // permanently true at the merge-base now — so the ordinary degrade would let a report that never
+                // engages the built behaviour through on keyword coverage of the OLD plan prose.
+                proofExec = "stale_self_path";
+                met = false;
+                reason =
+                  `proof unmet: REFUSED — proof (${whitelisted.kind}: ${whitelisted.label}) is a filing-time ` +
+                  `self-path proof (it greps this diff's own plan shard, which now also matches at the PR's ` +
+                  `merge-base) — it discriminated the PR that FILED the task and cannot discriminate the PR ` +
+                  `that BUILDS it; rewrite this proof to name the behaviour this diff builds, not the plan ` +
+                  `text that filed it`;
+              } else if (baseOutcome === "stale") {
+                // The same check also passes on the MERGE-BASE, so its exit 0 here discriminates nothing — see
+                // {@link classifyBaseProofOutcome}. `met`/`reason` are LEFT UNTOUCHED and the keyword floor stands
+                // verbatim: the positive override is withdrawn, never converted into a failure.
+                proofExec = "executed_stale";
+                reason =
+                  `${reason} — NOTE: proof also matches the PR's merge-base ` +
+                  `(${whitelisted.kind}: ${whitelisted.label}); non-discriminating, ` +
+                  `positive override withdrawn, keyword floor applied`;
+              } else {
+                proofExec = "executed_pass";
+                met = true;
+                reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
+                // W1-T362: record the base-run outcome on the verdict for a `unit test:` proof specifically (grep's
+                // reason text stays byte-identical to its shipped W1-T273 shape).
+                if (whitelisted.kind === "test" && baseOutcome === "discriminates") {
+                  reason +=
+                    ` — NOTE: also re-run against the PR's merge-base and did NOT pass there ` +
+                    `(absent, no-match, or a genuine failure); the proof discriminates, executed_pass stands`;
+                } else if (whitelisted.kind === "test" && baseOutcome === "base_unknown") {
+                  reason +=
+                    ` — NOTE: re-run against the PR's merge-base for staleness could not complete ` +
+                    `(base_unknown, an environment gap: ` +
+                    (execCtx.baseIsCheckout === true
+                      ? `the base run itself could not execute`
+                      : `no merge-base checkout could be materialised, and a unit test cannot be re-run against blobs`) +
+                    `); executed_pass stands, downgrade withheld — no discrimination was measured`;
+                }
               }
             }
           } else if (outcome === "no-match") {
@@ -5418,11 +5546,122 @@ function callArgCount(line: string, name: string): number | null {
   return null; // unterminated call on this line — cannot judge arity
 }
 
+const CALLER_AUDIT_MAX_SITES = 5;
+
+const NON_CALL_IDENTIFIERS = new Set([
+  "catch",
+  "for",
+  "function",
+  "if",
+  "new",
+  "switch",
+  "while",
+]);
+
+interface UntouchedSiblingCallSite {
+  symbol: string;
+  file: string;
+  container: string | undefined;
+  text: string;
+}
+
+function pathDirectory(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
+}
+
+function callSiteProximity(file: string, changedFiles: ReadonlySet<string>): number {
+  if (changedFiles.has(file)) return 0;
+  const dir = pathDirectory(file);
+  for (const changed of changedFiles) {
+    if (pathDirectory(changed) === dir) return 1;
+  }
+  return 2;
+}
+
+function calledNames(line: string): string[] {
+  if (parseDef(line)) return [];
+  const names: string[] = [];
+  for (const m of line.matchAll(/(?<![\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const name = m[1];
+    if (!NON_CALL_IDENTIFIERS.has(name)) names.push(name);
+  }
+  return names;
+}
+
+function changedSymbols(lines: readonly DiffLine[]): Map<string, Set<string>> {
+  const symbols = new Map<string, Set<string>>();
+  const add = (name: string, file: string) => {
+    const files = symbols.get(name) ?? new Set<string>();
+    files.add(file);
+    symbols.set(name, files);
+  };
+  for (const l of lines) {
+    if (l.kind !== "add" && l.kind !== "del") continue;
+    const d = parseDef(l.text);
+    if (d) add(d.name, l.file);
+    for (const name of calledNames(l.text)) add(name, l.file);
+  }
+  return symbols;
+}
+
+function untouchedSiblingCallSites(lines: readonly DiffLine[]): UntouchedSiblingCallSite[] {
+  const symbols = changedSymbols(lines);
+  const containers = new Map<string, string>();
+  const sites: UntouchedSiblingCallSite[] = [];
+  const seen = new Set<string>();
+  for (const l of lines) {
+    const d = parseDef(l.text);
+    if (d) {
+      containers.set(l.file, d.name);
+      continue;
+    }
+    if (l.kind !== "ctx") continue;
+    for (const name of calledNames(l.text)) {
+      const changed = symbols.get(name);
+      if (!changed || callArgCount(l.text, name) === null) continue;
+      const container = containers.get(l.file);
+      const key = `${name}\0${l.file}\0${container ?? ""}\0${l.text.trim()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      sites.push({ symbol: name, file: l.file, container, text: l.text.trim() });
+    }
+  }
+  return sites.sort((a, b) => {
+    const aChanged = symbols.get(a.symbol) ?? new Set<string>();
+    const bChanged = symbols.get(b.symbol) ?? new Set<string>();
+    return (
+      callSiteProximity(a.file, aChanged) - callSiteProximity(b.file, bChanged) ||
+      a.file.localeCompare(b.file) ||
+      (a.container ?? "").localeCompare(b.container ?? "") ||
+      a.text.localeCompare(b.text)
+    );
+  });
+}
+
+function formatUntouchedSiblingCallSites(sites: readonly UntouchedSiblingCallSite[]): string {
+  const shown = sites.slice(0, CALLER_AUDIT_MAX_SITES);
+  const list = shown
+    .map((s) => `${s.symbol}() at ${s.file}${s.container ? `::${s.container}` : ""}: ${s.text}`)
+    .join("; ");
+  const omitted = sites.length - shown.length;
+  return omitted > 0 ? `${list}; ${omitted} more not shown` : list;
+}
+
 /** ALL CALLERS AUDITED: when a function's definition GAINS a parameter in the diff, every call site must be updated
  * too. A call left on an UNCHANGED (context) line with the old (too-few) arity is an orphaned sibling — partial-fix
- * drift. */
+ * drift. W1-T3239 broadens the same advisory from signature drift to semantic drift: any symbol changed by this diff
+ * whose untouched sibling call sites still appear in context is named, bounded, and left advisory-only. */
 export function checkCallersAudited(diff: string): RubricItemResult {
   const lines = walkDiff(diff);
+  const siblingSites = untouchedSiblingCallSites(lines);
+  if (siblingSites.length > 0) {
+    return {
+      key: "callers-audited",
+      pass: false,
+      reason: `partial-fix drift: untouched sibling call site(s) for changed symbol(s): ${formatUntouchedSiblingCallSites(siblingSites)}`,
+    };
+  }
   const removedDefs = new Map<string, number>();
   const addedDefs = new Map<string, number>();
   for (const l of lines) {
@@ -5452,7 +5691,7 @@ export function checkCallersAudited(diff: string): RubricItemResult {
   return {
     key: "callers-audited",
     pass: true,
-    reason: gained.length ? "every call site updated to the new signature" : "no signature change to audit",
+    reason: gained.length ? "every call site updated to the new signature" : "no untouched sibling call sites to audit",
   };
 }
 
@@ -5554,6 +5793,9 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // INSTRUMENT_SURFACE_EXCLUSIONS already draws for openapi/daemon.yaml against
   // scripts/generate-api-client.mjs, which is tracked here for exactly this reason.
   "^scripts/generate-ledger-steps\\.mjs$",
+  // W1-T3267: the compact Codex project-document generator's `--check` mode can refuse a PR
+  // when AGENTS.md drifts from CLAUDE.md, so it is enforcement logic rather than generated content.
+  "^scripts/generate-agents-md\\.mjs$",
 ];
 
 const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));

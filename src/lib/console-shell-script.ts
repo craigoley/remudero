@@ -324,7 +324,7 @@ export function mailboxMarkResolved(resolvedIds: readonly string[] | undefined, 
 // String building only. Anything that reads or writes the document stayed in the template.
 
 export function rowChevronHtml(): string {
-  return '<span class="row-chevron" aria-hidden="true">›</span>';
+  return '<button type="button" class="row-chevron" aria-label="Show details" aria-expanded="false">›</button>';
 }
 
 export function rowDetailSkeletonHtml(): string {

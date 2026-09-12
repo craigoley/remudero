@@ -301,30 +301,31 @@ test("W1-T222: Enter and Space toggle a row's inline card, aria-expanded reflect
       await reachSection(page, "now"); // the row this test focuses/toggles lives in "now"
       await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase:"));
       const rowSel = '#now-list li[data-task-id="W1-T3"]';
-      await page.locator(rowSel).focus();
-      assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-task-id")), "W1-T3");
+      const disclosureSel = `${rowSel} .row-chevron`;
+      await page.locator(disclosureSel).focus();
+      assert.equal(await page.evaluate((sel) => document.activeElement === document.querySelector(sel), disclosureSel), true);
 
       // Enter opens it.
       await page.keyboard.press("Enter");
-      await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("aria-expanded") === "true", rowSel);
+      await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("aria-expanded") === "true", disclosureSel);
       assert.equal(
         await page.evaluate((sel) => document.querySelector(sel)!.nextElementSibling?.classList.contains("row-detail"), rowSel),
         true,
       );
       assert.equal(
-        await page.evaluate(() => document.activeElement?.getAttribute("data-task-id")),
-        "W1-T3",
-        "focus must stay on the row, not drop into the freshly-inserted card or the document",
+        await page.evaluate((sel) => document.activeElement === document.querySelector(sel), disclosureSel),
+        true,
+        "focus must stay on the disclosure button, not drop into the freshly-inserted card or the document",
       );
 
       // Space collapses it back.
       await page.keyboard.press(" ");
-      await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("aria-expanded") === "false", rowSel);
+      await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("aria-expanded") === "false", disclosureSel);
       assert.equal(await page.evaluate(() => document.querySelectorAll(".row-detail").length), 0);
       assert.equal(
-        await page.evaluate(() => document.activeElement?.getAttribute("data-task-id")),
-        "W1-T3",
-        "focus must still be on the row after collapsing via the keyboard",
+        await page.evaluate((sel) => document.activeElement === document.querySelector(sel), disclosureSel),
+        true,
+        "focus must still be on the disclosure button after collapsing via the keyboard",
       );
     } finally {
       await page.context().close();
@@ -385,7 +386,7 @@ test("W1-T222: a read-only bookmark's inline card renders NO write affordance (M
         await reachSection(page, "needs-me"); // the row about to be clicked lives in "needs-me"
         await page.click('#needs-me-list li[data-task-id="W1-T9"] .task-id');
         await page.waitForFunction(
-          () => document.querySelector('#needs-me-list li[data-task-id="W1-T9"]')?.getAttribute("aria-expanded") === "true",
+          () => document.querySelector('#needs-me-list li[data-task-id="W1-T9"] .row-chevron')?.getAttribute("aria-expanded") === "true",
         );
         await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").length > 0);
         // TEARDOWN RACE FIX: `return await`, not a bare `return page.evaluate(...)`. Without the
@@ -680,33 +681,33 @@ test("console tab bar: exactly five tabs (Decisions, Queue, Now, Plan, Feed), pi
       // reached after the change"), but each is visible on EXACTLY the one tab that owns it.
       const isVisible = (id: string) => page.$eval(id, (el) => (el as HTMLElement).offsetParent !== null);
       const inDocument = (id: string) => page.$eval(id, (el) => document.body.contains(el));
-      const ALL_SECTIONS = ["#needs-me", "#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"];
+      const ALL_SECTIONS = ["#needs-me", "#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#run-history", "#more"];
       for (const sel of ALL_SECTIONS) assert.equal(await inDocument(sel), true, `${sel} missing from the document`);
 
       // Decisions is the default active tab -- only its own section (needs-me) is visible.
       await page.click("#tab-decisions");
       assert.equal(await isVisible("#needs-me"), true);
-      for (const sel of ["#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"]) {
+      for (const sel of ["#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#run-history", "#more"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Decisions is active`);
       }
 
       // Queue owns the whole live open-PR cockpit and no task/firehose section.
       await page.click("#tab-queue");
       assert.equal(await isVisible("#pr-queue"), true);
-      for (const sel of ["#needs-me", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"]) {
+      for (const sel of ["#needs-me", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#run-history", "#more"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Queue is active`);
       }
 
       // Now owns now/up-next/controls.
       await page.click("#tab-now");
       for (const sel of ["#now", "#up-next", "#controls"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Now tab`);
-      for (const sel of ["#needs-me", "#pr-queue", "#accepted", "#recent", "#rest", "#more"]) {
+      for (const sel of ["#needs-me", "#pr-queue", "#accepted", "#recent", "#rest", "#run-history", "#more"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Now is active`);
       }
 
-      // Feed owns accepted/recent/rest/more (recap is content-gated separately, not asserted here).
+      // Feed owns accepted/recent/rest/run-history/more (recap is content-gated separately, not asserted here).
       await page.click("#tab-feed");
-      for (const sel of ["#accepted", "#recent", "#rest", "#more"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Feed tab`);
+      for (const sel of ["#accepted", "#recent", "#rest", "#run-history", "#more"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Feed tab`);
       for (const sel of ["#needs-me", "#pr-queue", "#now", "#up-next", "#controls"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Feed is active`);
       }

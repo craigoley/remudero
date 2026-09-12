@@ -9,6 +9,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ROOT_MARKDOWN_ALLOWLIST = new Set([
   "README.md",
   "CLAUDE.md",
+  "AGENTS.md",
   "MASTER-PLAN.md",
   "DECISIONS.md",
   "LEARNINGS.md",

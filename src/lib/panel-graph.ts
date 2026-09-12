@@ -98,8 +98,8 @@ import {
 export interface PanelGraphDeps {
   /** Repo root — where plan/feedback/ lives. */
   root: string;
-  /** `plan/tasks.yaml`'s path, reloaded fresh on every request — never cached, so a task a
-   *  proposal PR just merged is visible on the next read (mirrors `rmd trace`'s own CLI path). */
+  /** `plan/tasks.yaml`'s authoritative path. Write routes load it fresh or at-ref; narrow
+   *  path-based rendering helpers may also consult it independently. */
   planPath: string;
   ledgerPath: string;
   /** GitHub PR lookups the trace chain needs (lib/trace.ts's `TraceGithub`), injected for tests. */
@@ -517,12 +517,27 @@ function parseMaxParam(url: URL): { max?: number } | { error: string } {
   return { max: n };
 }
 
+/** The one read-model boundary shared by the three console routes W1-T3415 owns. The snapshot
+ * travels as a separate read-builder capability, never through the write-route dependency bag. */
+function readPanelPlan(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Plan {
+  return readPlanSnapshot?.() ?? loadPlan(deps.planPath);
+}
+
+/** `Task` preserves `plan_refs`, so a process-owned plan needs no second shard traversal. */
+function planRefsFromSnapshot(plan: Plan): Map<string, string[]> {
+  const refs = new Map<string, string[]>();
+  for (const task of plan.tasks) {
+    if (task.plan_refs) refs.set(task.id, task.plan_refs);
+  }
+  return refs;
+}
+
 /**
  * GET /v1/drain/preview[?max=<n>][&until=<id>] — read-scoped. The would-drain queue (W1-T140) as
- * ordered task cards: reloads the plan fresh, re-derives merged status via `projectPlan` (the
+ * ordered task cards: reads the process snapshot, re-derives merged status via `projectPlan` (the
  * same projection `GET /v1/status` uses), and renders `drain.ts`'s own `buildDrainPreview`.
  */
-export function buildDrainPreviewRoute(deps: PanelGraphDeps): Route {
+export function buildDrainPreviewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
     method: "GET",
     path: "/v1/drain/preview",
@@ -536,7 +551,7 @@ export function buildDrainPreviewRoute(deps: PanelGraphDeps): Route {
       }
       const opts: DrainOpts = { max: parsedMax.max, until: url.searchParams.get("until") ?? undefined };
 
-      const plan = loadPlan(deps.planPath);
+      const plan = readPanelPlan(deps, readPlanSnapshot);
       const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
       const isMerged = (id: string) => projection.get(id)?.merged ?? false;
       const cards = buildDrainPreview(plan, isMerged, opts);
@@ -875,11 +890,11 @@ export function computePlanSectionCounts(
 
 /**
  * GET /v1/plan/view[?frontier=<n>] — read-scoped. The Plan tab's one fetch: `progress`, `sections`
- * (W1-T376), and `frontier`, off one fresh plan load and one `projectPlan()` call, like {@link
+ * (W1-T376), and `frontier`, off one process snapshot and one `projectPlan()` call, like {@link
  * buildDrainPreviewRoute}. The caches are created once per route closure, persisting for the
  * `rmd serve` process lifetime — never per-request, or every reading would look first-ever.
  */
-export function buildPlanViewRoute(deps: PanelGraphDeps): Route {
+export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   const progressCache = createPlanProgressCache();
   const sectionCache = createPlanSectionCache();
   return {
@@ -894,11 +909,11 @@ export function buildPlanViewRoute(deps: PanelGraphDeps): Route {
         sendJson(res, 400, { error: "invalid_request", detail: "frontier must be a positive number" });
         return;
       }
-      const plan = loadPlan(deps.planPath);
+      const plan = readPanelPlan(deps, readPlanSnapshot);
       const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
       const isMerged: MergedSet = (id) => projection.get(id)?.merged ?? false;
       const progress = computePlanProgress(plan, projection, deps.statusGithub, progressCache);
-      const planRefs = readPlanRefs(deps.planPath);
+      const planRefs = planRefsFromSnapshot(plan);
       const planIndex = loadPlanIndex(join(dirname(deps.planPath), "plan-index.json"));
       const sections = computePlanSectionCounts(plan, projection, planRefs, planIndex, progress.unknown, sectionCache);
       const ledgerLines = readLedgerLines(deps.ledgerPath);
@@ -943,6 +958,21 @@ export interface InboxDraftingItem {
   proposalId: string;
   summary: string;
   spawnedAt: string;
+}
+
+/**
+ * One DECLINED proposal, as GET /v1/inbox renders it (W1-T3408). Carries the decline's own reason
+ * verbatim, so the list says WHY each was refused and a reader can tell a deliberate refusal from
+ * one entered on reasoning that has since been shown wrong.
+ *
+ * IT IS A SEPARATE ARRAY, not folded into `notReady`: a declined proposal is not awaiting anything
+ * and must never read as work in progress. Nothing here is actionable except restore.
+ */
+export interface InboxDeclinedItem {
+  proposalId: string;
+  summary: string;
+  /** The reason the latest `panel.proposal_declined` row recorded, verbatim. */
+  reason: string;
 }
 
 /** One not-ready proposal, as GET /v1/inbox renders it (W1-T2604). `reasons` is the exact {@link
@@ -1024,20 +1054,24 @@ function classifyAllProposals(
  * computed the way `rmd inbox` prints them, for the shell's NEEDS ME section. Deferred-with-
  * trigger proposals are never returned — only what is actionable or in-progress is surfaced.
  * Not-ready proposals (W1-T2604) ride along in `notReady` (see {@link InboxNotReadyItem});
- * ratified/retired/declined proposals stay excluded from every array. `rmd approve`/`reframe`/
- * `decline` are wired from the card below, over the same write-token scope every write uses.
+ * Ratified/retired proposals stay excluded from every array. DECLINED ones are returned in their
+ * own `declined` array (W1-T3408): `POST /v1/inbox/restore` shipped with no way to learn its own
+ * argument, because a declined proposal was invisible here — a write route whose parameter cannot
+ * be discovered is a mechanism nobody can reach. `rmd approve`/`reframe`/`decline` are wired from
+ * the card below, over the same write-token scope every write uses.
  */
-export function buildInboxRoute(deps: PanelGraphDeps): Route {
+export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
     method: "GET",
     path: "/v1/inbox",
     scope: "read",
     handler: (_req, res) => {
-      const { registryPath, proposals, classifications } = classifyAllProposals(deps);
+      const { registryPath, proposals, classifications } = classifyAllProposals(deps, () => readPanelPlan(deps, readPlanSnapshot));
 
       const ready: InboxReadyItem[] = [];
       const drafting: InboxDraftingItem[] = [];
       const notReady: InboxNotReadyItem[] = [];
+      const declined: InboxDeclinedItem[] = [];
       for (const classification of classifications) {
         const proposal = proposals.find((p) => p.id === classification.proposalId);
         if (!proposal) continue; // unreachable — classifications are 1:1 with proposals
@@ -1050,6 +1084,12 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
           });
         } else if (classification.state === "drafting") {
           drafting.push({ proposalId: proposal.id, summary: proposal.summary, spawnedAt: classification.draftSpawnedAt ?? "" });
+        } else if (classification.state === "declined") {
+          declined.push({
+            proposalId: proposal.id,
+            summary: proposal.summary,
+            reason: classification.declinedReason ?? "declined by an operator",
+          });
         } else if (classification.state === "not_ready") {
           // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
           // never a bare "not_ready" — see InboxNotReadyItem's own doc.
@@ -1068,7 +1108,7 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
           return fresh.length === current.length ? null : fresh;
         });
       }
-      sendJson(res, 200, { ready, drafting, notReady });
+      sendJson(res, 200, { ready, drafting, notReady, declined });
     },
   };
 }
@@ -1396,17 +1436,23 @@ export function buildClearDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
   };
 }
 
-/** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
-export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
+/** Routes that can only read the process-owned plan snapshot. No write route accepts that capability. */
+export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
   return [
     buildFeedbackInboxRoute(deps),
+    buildTraceRoute(deps),
+    buildDrainPreviewRoute(deps, readPlanSnapshot),
+    buildPlanViewRoute(deps, readPlanSnapshot),
+    buildInboxRoute(deps, readPlanSnapshot),
+  ];
+}
+
+/** Write factories take only durable dependencies, so a process read snapshot cannot reach a mutation. */
+export function buildPanelWriteRoutes(deps: PanelGraphDeps): Route[] {
+  return [
     buildSubmitFeedbackRoute(deps),
     buildPreviewFeedbackRoute(deps),
-    buildTraceRoute(deps),
     buildProposalDecisionRoute(deps),
-    buildDrainPreviewRoute(deps),
-    buildPlanViewRoute(deps),
-    buildInboxRoute(deps),
     buildApproveProposalRoute(deps),
     buildReframeProposalRoute(deps),
     buildDeclineProposalRoute(deps),
@@ -1414,4 +1460,9 @@ export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
     buildSetDailyCostCeilingRoute(deps),
     buildClearDailyCostCeilingRoute(deps),
   ];
+}
+
+/** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
+export function buildPanelGraphRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
+  return [...buildPanelReadRoutes(deps, readPlanSnapshot), ...buildPanelWriteRoutes(deps)];
 }
