@@ -6072,6 +6072,7 @@ interface PriorActions {
    *  matching row is undated. Unlike {@link reviewRefused}, this is a bounded retry clock, not a
    *  semantic or lifecycle decision about the PR (W1-T2753). */
   reviewRetryableThrows: Map<string, number | undefined>;
+  reviewFreshnessRefusals: Map<string, number | undefined>;
   /** Exact-input keys where the thrown post-review attempt hit GitHub's permanent PR diff ceiling.
    *  The remedy is a new head with a smaller diff, so this is a terminal marker for the current
    *  key, not another entry in the timed retry bucket. */
@@ -6230,6 +6231,28 @@ function retryableReviewThrowBackoffReason(
   );
 }
 
+function isRetryableReviewerCodeFreshnessRefusal(line: Record<string, unknown>): boolean {
+  return line.reviewer_code_freshness === "stale" || line.reviewer_code_freshness === "unreadable";
+}
+
+function reviewerCodeFreshnessBackoffReason(
+  freshnessRefusals: ReadonlyMap<string, number | undefined>,
+  reviewKey: string,
+  policy: SweepPolicy,
+  now: number,
+): string | undefined {
+  if (!freshnessRefusals.has(reviewKey)) return undefined;
+  const attemptedAt = freshnessRefusals.get(reviewKey);
+  if (attemptedAt === undefined) return undefined;
+  const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
+  if (ageMinutes >= policy.pendingCeilingMinutes) return undefined;
+  return (
+    `the last reviewer-code freshness refusal for ${reviewKey} was ${Math.floor(ageMinutes)}m ago — ` +
+    `freshness recovery backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
+    `this is a bounded reviewer-source freshness refusal, not a durable review verdict`
+  );
+}
+
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
   const armed = new Set<string>();
   const fixed = new Set<string>();
@@ -6239,6 +6262,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const reviewDelivered = new Set<string>();
   const reviewRefused = new Set<string>();
   const reviewRetryableThrows = new Map<string, number | undefined>();
+  const reviewFreshnessRefusals = new Map<string, number | undefined>();
   const reviewDiffCeilingRefused = new Set<string>();
   const reviewRetryableThrowCounts = new Map<string, number>();
   const riskRefused = new Map<string, string | undefined>();
@@ -6267,6 +6291,13 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
           if (!reviewRetryableThrows.has(key)) reviewRetryableThrows.set(key, undefined);
           if (!Number.isNaN(parsed) && (existing === undefined || parsed > existing)) {
             reviewRetryableThrows.set(key, parsed);
+          }
+        } else if (isRetryableReviewerCodeFreshnessRefusal(line)) {
+          const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+          const existing = reviewFreshnessRefusals.get(key);
+          if (!reviewFreshnessRefusals.has(key)) reviewFreshnessRefusals.set(key, undefined);
+          if (!Number.isNaN(parsed) && (existing === undefined || parsed > existing)) {
+            reviewFreshnessRefusals.set(key, parsed);
           }
         } else if (!isReopenedClosedLifecycleRefusal(line.reason)) {
           // W1-T1213: the "PR is already closed" refusal is excluded here, never added to
@@ -6357,6 +6388,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
     reviewDelivered,
     reviewRefused,
     reviewRetryableThrows,
+    reviewFreshnessRefusals,
     reviewDiffCeilingRefused,
     reviewRetryableThrowCounts,
     riskRefused,
@@ -7045,7 +7077,9 @@ export async function runSweep(
       const fresh = priorActionsFromLedger(readLedger(deps.ledgerPath));
       const delivered = fresh.reviewDelivered.has(reviewKey);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
-      const retryBackoff = retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now);
+      const retryBackoff =
+        retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
+        reviewerCodeFreshnessBackoffReason(fresh.reviewFreshnessRefusals, reviewKey, policy, now);
       if (delivered || durableRefusal || retryBackoff !== undefined) {
         claimedReviewKeys.delete(reviewKey);
         return {
@@ -7476,7 +7510,9 @@ export async function runSweep(
         const reviewKey = reviewOutcomeKeyForPr(pr);
         const reviewDelivered = prior.reviewDelivered.has(reviewKey);
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
-        const retryBackoff = retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now);
+        const retryBackoff =
+          retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now) ??
+          reviewerCodeFreshnessBackoffReason(prior.reviewFreshnessRefusals, reviewKey, policy, now);
         alreadyDone = reviewDelivered || reviewDurablyRefused || retryBackoff !== undefined;
         // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT OTHERWISE LOOK IDENTICAL: this
         // dedup firing, `deps.postReview` never being wired, the light-pass admission being lost to
