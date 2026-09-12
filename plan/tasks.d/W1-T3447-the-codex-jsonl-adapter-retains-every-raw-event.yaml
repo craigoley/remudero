@@ -1,4 +1,4 @@
-- id: W1-T3446
+- id: W1-T3447
   title: "THE CODEX WORKER ADAPTER RETAINS EVERY RAW JSONL EVENT UNTIL EXIT — three live Codex repair workers grew the daemon from 1.01 GiB to 1.55 GiB RSS in five minutes, and `stdoutChunks.join(\"\")` retains ignored tool-output events before parsing, so the adapter must decode incrementally and bound every retained diagnostic field"
   repo: remudero
   depends_on: []
@@ -59,11 +59,11 @@
     is named and reaped rather than accumulated.
   acceptance:
     - claim: "a Codex JSONL stream split at arbitrary Buffer boundaries produces the same thread id, final agent message, turn count, usage and terminal-error classification as the existing complete-string parser"
-      proof: "unit test: W1-T3446 criterion 1"
+      proof: "unit test: W1-T3447 criterion 1"
     - claim: "a multi-megabyte ignored tool event does not scale retained adapter bytes, while the following valid terminal agent message and usage still produce a correct worker result"
-      proof: "unit test: W1-T3446 criterion 2"
+      proof: "unit test: W1-T3447 criterion 2"
     - claim: "an over-ceiling incomplete record or retained transcript is terminated with a named non-success outcome and the contained worker group is reaped; it never becomes a silent partial success"
-      proof: "unit test: W1-T3446 criterion 3"
+      proof: "unit test: W1-T3447 criterion 3"
     - claim: "the focused Codex JSONL streaming test is registered in the tier manifest"
       proof: "grep: codex-worker-jsonl-stream-is-bounded\\.test\\.ts in scripts/test-tier-manifest.json"
   falsifier: |
@@ -79,6 +79,6 @@
     `parseCodexJsonl` on a finished string is insufficient because it never exercises the live
     retention path.
   note: |
-    Reservation W1-T3446 was atomically claimed on origin before filing. This is one allocation
+    Reservation W1-T3447 was atomically claimed on origin before filing. This is one allocation
     boundary, not a reframe of W1-T3335 or W1-T3352. The plan status remains a filing state; merge
     credit, not `status:`, determines whether the dispatcher may consider a task complete.
