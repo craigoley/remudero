@@ -5,11 +5,13 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
   budget_usd: 16.00
   files:
     - scripts/expiring-fixture-census.mjs
     - test/expiring-fixture-census.test.ts
+    - test/daemon-freshness.test.ts
+    - test/review-engine-revision-rearm.test.ts
   origin: "operator-session#4970-conflict-resolution-2026-09-10"
   plan_refs: ["W1-T3272"]
   status: queued
