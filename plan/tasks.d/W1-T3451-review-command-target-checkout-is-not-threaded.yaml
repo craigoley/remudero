@@ -1,0 +1,85 @@
+- id: W1-T3451
+  title: "rmd review resolves --repo for GitHub but still judges the controller checkout — a private target PR therefore receives its criteria, worktree, and semantic-review metadata from public Remudero"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  priority: 0
+  budget_usd: 80.00
+  files: [src/run-task.ts, test/review-command-target-repository.test.ts]
+  origin: "operator-session#private-portal-rmd-review-2026-09-12"
+  plan_refs: ["W1-T1062", "W1-T2462", "W1-T2868"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PRIVATE PORTAL PR #8 at 04d634087e2fe755c3b3fb8ee488289fab46c862. Its
+    source CI and aggregate gate passed, but `remudero-review` failed after the semantic lane
+    logged `head-task-metadata-unavailable`, then `review.resolver_divergence`: it tried to read
+    `plan/tasks.yaml` at the portal PR head from the public Remudero checkout. The target repository
+    was already present as the managed portal clone, so this is neither a GitHub-read outage nor an
+    absent target checkout.
+
+    SOURCE RE-DERIVED AT a5abfd0eef7182748a1cbc8947df765395f1309e. `reviewCommand` correctly
+    resolves `{ owner, repo }` through `resolveReviewTarget`, and uses them for the PR REST view
+    and status posts. But the command still passes module-global `repoRoot` to `fetchHead`,
+    `resolvePlanCriteriaAtHead`, `materializeReviewWorktree`, and both
+    `withMaterializedWorktree` cleanup scopes. For an explicit target, those calls fetch and
+    materialize the controller repository at a SHA that only exists in the target repository. The
+    criteria fallback then disguises the input mismatch as a normal weak-proof verdict.
+
+    W1-T1062 is not this task: it established owner-qualified dispatch routing and deliberately
+    kept instance-owned `.remudero` policy on the controller checkout. W1-T2868 is not this task:
+    it supplies a disposable semantic-review snapshot after a correct review worktree exists.
+    This task owns only the missing target-checkout selection at the review-command boundary.
+
+  design: |
+    Derive one review subject checkout immediately after `loadConfig`: the controller `repoRoot`
+    for the default self target, or the already-managed target clone for an explicit `--repo`.
+    Validate that explicit clone before any plan read, fetch, worktree add, or proof execution. Its
+    Git origin must identify the resolved target; an absent, non-repository, or mismatched clone is
+    a named review-subject failure, not permission to fall back to the controller checkout.
+
+    Thread that single checkout through the target-data operations only: fetch the PR head, resolve
+    plan criteria and task metadata at that head, materialize the head worktree, build the base
+    proof tree, and tear down both worktrees. The deterministic and semantic reviewers must receive
+    the resulting target worktree. Instance-owned policy and credentials stay on the controller:
+    mounts, worker settings, ledger, provider routing, and GitHub status transport continue to use
+    the controller configuration and must never read target `.remudero` content.
+
+    Preserve the existing self-review behaviour byte-for-byte in effect. Do not broaden target
+    discovery, clone a repository on this read path, introduce a second `--repo` parser, weaken a
+    failed review to a body-only pass, or change review finality. A target-subject failure posts an
+    explicit failed `remudero-review` status with its named reason and creates no worktree in the
+    controller repository.
+
+  acceptance:
+    - claim: "an explicit --repo review fetches the target PR head, resolves its task shard and metadata at that head, and materializes the target repository rather than the controller checkout"
+      proof: "unit test: target review uses only the target checkout"
+    - claim: "the review's head and merge-base proof worktrees are created and removed under the selected target repository, while the controller checkout remains unchanged"
+      proof: "unit test: target proof worktrees use and clean only the target checkout"
+    - claim: "the default self review remains pinned to the controller checkout, preserving current self-repository behaviour"
+      proof: "unit test: self review retains the controller checkout"
+    - claim: "a missing, non-repository, or origin-mismatched explicit target clone fails closed with a named review-subject reason and never reads, fetches, or materializes the controller checkout as a substitute"
+      proof: "unit test: invalid explicit target refuses before controller access"
+    - claim: "target review data selection does not load target .remudero policy; controller-owned mounts, worker settings, ledger, and status transport retain their current sources"
+      proof: "unit test: target policy stays controller-owned"
+
+  falsifier: |
+    Build a controller fixture and a managed target fixture with deliberately different task ids,
+    criteria, and commit objects. Drive `reviewCommand` with `--repo` for the target. If the
+    captured criteria or materializer root can still be supplied by the controller fixture, or an
+    invalid target can cause a controller fetch/worktree call, this diagnosis is false and the task
+    must not close. Delete the target-subject selection at the production call site and require the
+    focused test to fail, then restore it and require the focused test to pass.
+
+  note: |
+    `rmd next-task-id --reserve` on the Azure controller held W1-T3451 at
+    refs/rmd-id/W1-T3451 on origin after one attempt. `priority: 0` is deliberate: this is an
+    active private-portal merge blocker, not general backlog work. This task is high risk by span: one command
+    coordinates Git reads, worktree lifecycle, proof execution, and an external status; the narrow
+    files list is intentional. The portal remains unable to satisfy the same semantic-review
+    process as public Remudero until this task is implemented, deployed to the controller image,
+    and replayed against PR #8.
