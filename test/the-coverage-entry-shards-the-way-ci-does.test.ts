@@ -53,8 +53,13 @@ function coverageSpawn(options: { missingArtifactShard?: number; missingSummaryS
     calls,
     spawn,
     cleanup: () => {
+      // ONLY this suite's own artifact tree. `coverage/lcov.info` is deliberately NOT removed:
+      // when this test runs inside CI's coverage-shard job, that path is the file the shard's own
+      // `--test-reporter-destination` is writing, and deleting it made the job fail its
+      // `[ ! -s coverage/lcov.info ]` check with "no lcov produced" — a green suite and a red job,
+      // with no failing test to point at. The merge here is stubbed and never creates that file,
+      // so there was nothing to clean up in the first place.
       rmSync(join(REPO_ROOT, "coverage", "raw-shards"), { recursive: true, force: true });
-      rmSync(join(REPO_ROOT, "coverage", "lcov.info"), { force: true });
     },
   };
 }
