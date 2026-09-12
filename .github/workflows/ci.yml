@@ -29,6 +29,7 @@ on:
     branches: [main]
 
 permissions:
+  actions: read
   contents: read
 
 # R-50: a force-push mid-run left the superseded PR run competing for the same CI-minute budget as
@@ -408,6 +409,52 @@ jobs:
           GH_REPO_SLUG: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          print_unfinished_test_from_logs() {
+            if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GH_REPO_SLUG:-}" ]; then
+              echo "  Last started unfinished test: unavailable (workflow run id is not present)."
+              return 0
+            fi
+            LOG_FILE="$(mktemp)"
+            if ! gh run view "$GITHUB_RUN_ID" --repo "$GH_REPO_SLUG" --log > "$LOG_FILE" 2>/dev/null; then
+              echo "  Last started unfinished test: unavailable (could not read workflow logs)."
+              return 0
+            fi
+            node - "$LOG_FILE" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const text = readFileSync(process.argv[2], "utf8");
+          const active = new Map();
+          let order = 0;
+          for (const raw of text.split(/\r?\n/)) {
+            const parts = raw.split("\t");
+            const job = parts.length >= 3 ? parts[0] : "workflow log";
+            let line = parts.length >= 3 ? parts.slice(2).join("\t") : raw;
+            line = line.replace(/^\d{4}-\d\d-\d\dT\S+\s+/, "");
+            const started = line.match(/^\s*# Subtest: (.+?)\s*$/);
+            if (started) {
+              active.set(job, { job, name: started[1], order: ++order });
+              continue;
+            }
+            const finished = line.match(/^\s*(?:ok|not ok) \d+(?: - (.*?))?\s*$/);
+            if (!finished) continue;
+            const name = finished[1];
+            if (!name) {
+              active.delete(job);
+              continue;
+            }
+            for (const [key, value] of active.entries()) {
+              if (value.name === name) active.delete(key);
+            }
+          }
+          const newest = [...active.values()].sort((a, b) => b.order - a.order)[0];
+          if (newest) {
+            console.log(`  Last started unfinished test: ${newest.name} (${newest.job}).`);
+          } else {
+            console.log("  Last started unfinished test: unavailable (no started-without-finished TAP test found).");
+          }
+          NODE
+            rm -f "$LOG_FILE"
+          }
+
           case "$SHARD_RESULT" in
             success)
             echo "ci: all four test shards succeeded."
@@ -438,10 +485,10 @@ jobs:
               fi
               echo "::error::ci: SHARD HANG — the matrix was cancelled while the PR head"
               echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
-              echo "  timeout-minutes ceiling. THE TEST TESTS DID NOT RUN — this is NOT a failure of this"
+              echo "  timeout-minutes ceiling. THE TESTS DID NOT RUN — this is NOT a failure of this"
               echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
-              echo "  evidence of a test failure. Open the shard log and find the test that started and"
-              echo "  never finished."
+              echo "  evidence of a test failure."
+              print_unfinished_test_from_logs
               exit 1
               ;;
             skipped)
@@ -763,6 +810,7 @@ jobs:
           set +e
           NODE_V8_COVERAGE=coverage/raw node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=tap --test-reporter-destination=stderr \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
             --test --test-shard=${{ matrix.shard }}/4 --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
           TEST_EXIT=$?
@@ -827,6 +875,52 @@ jobs:
           GH_REPO_SLUG: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          print_unfinished_test_from_logs() {
+            if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GH_REPO_SLUG:-}" ]; then
+              echo "  Last started unfinished test: unavailable (workflow run id is not present)."
+              return 0
+            fi
+            LOG_FILE="$(mktemp)"
+            if ! gh run view "$GITHUB_RUN_ID" --repo "$GH_REPO_SLUG" --log > "$LOG_FILE" 2>/dev/null; then
+              echo "  Last started unfinished test: unavailable (could not read workflow logs)."
+              return 0
+            fi
+            node - "$LOG_FILE" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const text = readFileSync(process.argv[2], "utf8");
+          const active = new Map();
+          let order = 0;
+          for (const raw of text.split(/\r?\n/)) {
+            const parts = raw.split("\t");
+            const job = parts.length >= 3 ? parts[0] : "workflow log";
+            let line = parts.length >= 3 ? parts.slice(2).join("\t") : raw;
+            line = line.replace(/^\d{4}-\d\d-\d\dT\S+\s+/, "");
+            const started = line.match(/^\s*# Subtest: (.+?)\s*$/);
+            if (started) {
+              active.set(job, { job, name: started[1], order: ++order });
+              continue;
+            }
+            const finished = line.match(/^\s*(?:ok|not ok) \d+(?: - (.*?))?\s*$/);
+            if (!finished) continue;
+            const name = finished[1];
+            if (!name) {
+              active.delete(job);
+              continue;
+            }
+            for (const [key, value] of active.entries()) {
+              if (value.name === name) active.delete(key);
+            }
+          }
+          const newest = [...active.values()].sort((a, b) => b.order - a.order)[0];
+          if (newest) {
+            console.log(`  Last started unfinished test: ${newest.name} (${newest.job}).`);
+          } else {
+            console.log("  Last started unfinished test: unavailable (no started-without-finished TAP test found).");
+          }
+          NODE
+            rm -f "$LOG_FILE"
+          }
+
           case "$SHARD_RESULT" in
             success)
             :
@@ -860,8 +954,8 @@ jobs:
               echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
               echo "  timeout-minutes ceiling. THE COVERAGE TESTS DID NOT RUN — this is NOT a failure of this"
               echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
-              echo "  evidence of a test failure. Open the shard log and find the test that started and"
-              echo "  never finished."
+              echo "  evidence of a test failure."
+              print_unfinished_test_from_logs
               exit 1
               ;;
             skipped)
