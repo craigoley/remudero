@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
-const CI_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+const CI_YML = readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8");
 
 type Step = { name?: string; id?: string; run?: string; uses?: string };
 type Job = { steps?: Step[]; needs?: string[] | string; if?: string };
@@ -40,7 +40,7 @@ function tmpRoot(): string {
 function stubbedBin(root: string): string {
   const bin = join(root, "bin");
   mkdirSync(bin);
-  for (const name of ["node", "npm"]) {
+  for (const name of ["node", "npm", "npx"]) {
     writeFileSync(join(bin, name), `#!/bin/sh\necho "$0 $*" >> "${root}/calls.log"\nexit 99\n`);
     spawnSync("chmod", ["+x", join(bin, name)]);
   }
@@ -167,6 +167,23 @@ test("W1-T3207: W1-T2428 fast-lane still skips coverage work for plan/docs diffs
   assert.equal(merge.status, 0, merge.stderr + merge.stdout);
   assert.equal(merge.calls, "", "docs-only coverage consumption must exit before merging or gating coverage");
   assert.match(merge.stdout, /W1-T2428 fast-lane: class=DOCS_ONLY/);
+});
+
+test("W1-T2428: SOURCE reaches both coverage setup commands rather than silently skipping them", () => {
+  // The PLAN_ONLY/DOCS_ONLY case above proves the fast lane can stand down. These are the other
+  // side of each new guard: if either condition becomes unconditional, its stub is never called
+  // and this test fails before a source PR can certify itself without its setup.
+  const install = runBash(runnable("coverage-ratchet", "Install (clean, from lockfile)"));
+  assert.equal(install.status, 99, install.stderr + install.stdout);
+  assert.match(install.calls, /\/npm ci/, "a SOURCE diff must invoke npm ci");
+
+  const chromium = runBash(runnable("coverage-ratchet", "Install Playwright's Chromium"));
+  assert.equal(chromium.status, 99, chromium.stderr + chromium.stdout);
+  assert.match(chromium.calls, /\/npx playwright install chromium/, "a SOURCE diff must invoke Playwright's Chromium install");
+
+  const coverage = runBash(runnable("coverage-ratchet", "Test with coverage"));
+  assert.notEqual(coverage.status, 0, coverage.stderr + coverage.stdout);
+  assert.match(coverage.calls, /\/node --enable-source-maps --experimental-test-coverage/, "a SOURCE diff must invoke the coverage test runner");
 });
 
 test("W1-T3207: the workflow names the lost second-harness signal", () => {
