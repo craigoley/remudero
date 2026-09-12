@@ -1176,6 +1176,13 @@ export function hostCausedSuiteRedsStep(facts: HostFacts): CiParityLeafResult {
 export const CI_PARITY_TABLE: CiParityEntry[] = [
   { job: "ci-required", mirrored: false, reason: "GitHub-only stable-name aggregator; the ci entry below runs the equivalent complete test surface locally" },
   {
+    job: "squash-trailer-gate",
+    mirrored: false,
+    reason:
+      "W1-T3414 — reads GitHub's pull_request event payload and the branch's base/head range to find trailers in every branch commit; " +
+      "rmd preflight has neither PR event payload nor a trustworthy PR head/base identity before push, so a local invocation would refuse for missing evidence rather than mirror CI",
+  },
+  {
     job: "ci",
     mirrored: true,
     run: (repoRoot, spawn) => [
