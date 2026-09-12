@@ -1,0 +1,83 @@
+- id: W1-T3445
+  title: "A RETIRED TASK CAN HOLD AN OPEN IMPLEMENTATION PR FOREVER — the plan has a structured operator retirement field, but buildOpenPrViews discards it before DISPOSITION_RULES reaches conflict handling, so #5202 (W1-T3331) escalated blocked-ambiguous until an operator closed the branch even though its replacement W1-T3422 had already merged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 15.00
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/retired-task-open-pr-disposition.test.ts
+    - scripts/test-tier-manifest.json
+  origin: "operator-session#rmd-must-resolve-retired-prs-2026-09-12"
+  plan_refs: ["W1-T1287", "W1-T2794", "W1-T3331", "W1-T3422"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main c94456b9 on 2026-09-12, then rechecked after main advanced to
+    4b36d5f0. Task retirement is an explicit parsed field: `RETIREMENT_REASONS` in
+    `src/lib/plan.ts` admits only `retired`, `closed`, or `withdrawn`; its own contract says the
+    field is an operator-only ruling, never inferred from prose. W1-T3331 currently carries
+    `status: blocked` and `retirement: retired` with a record that W1-T3422 replaces its incomplete
+    stale-red-check path. W1-T3422 merged as #5221 (`5c2e5d8b`), while the old W1-T3331 PR #5202
+    remained open, green and merge-conflicted until this session closed it as superseded.
+
+    THE DROP IS IN THE PR PROJECTION, NOT IN CONFLICT ADMISSION. `buildOpenPrViews` reads
+    `taskRecord = mainPlan?.byId.get(taskId)`, already projects `taskExistsOnMain` and
+    `taskDeclaredFiles`, but does not project `taskRecord.retirement`. The conflict rows therefore
+    receive no terminal task-state evidence and correctly fall through to `blocked-ambiguous` for a
+    hand-written conflict. The current merged-task cleanup row proves the intended queue shape:
+    `OpenPrView.taskMergedBy` is populated only from a bounded, ownership-asserted projection and a
+    preceding `stale` disposition closes the leftover PR. Retirement needs the analogous, smaller
+    read from the already-loaded local main plan; it must not manufacture a result from YAML status,
+    title text, or task prose.
+
+    THIS IS A FLEET-WIDE CLOSE AUTHORITY. A wrong predicate closes an open pull request; therefore
+    the task is high/blast-radius despite four files. The safe condition is stricter than a task id:
+    a readable current plan must resolve the exact trailer task, that record must carry one legal
+    retirement value, and the existing filing classifier must positively report `not-plan-only`.
+    Missing task, unreadable plan, unknown/missing retirement, and an emitter- or GitHub-proven
+    plan filing all preserve the previous disposition.
+  design: |
+    Add an optional `taskRetirement` field to `OpenPrView`, typed from the existing
+    `RetirementReason` vocabulary. `buildOpenPrViews` assigns it directly from the already-loaded
+    `taskRecord?.retirement`; its single-PR `routeFix` producer assigns `undefined`, because this
+    task changes autonomous sweep reconciliation rather than giving a manual fix command a new
+    destructive path. Keep both assignments explicit so the producer-completeness census remains
+    meaningful.
+
+    Add one `stale` disposition before every conflict, review, repair, and arm row. It matches only
+    when `taskId` is present, `taskRetirement` is present, `isPlanFiling === false`, and
+    `planFilingSource === "not-plan-only"`. Its reason names both the task id and retirement value.
+    It reuses the existing idempotent close effect and `sweep.disposed`/closed-set dedupe; it adds no
+    GitHub read, queue manager, ledger schema, or second plan parser. It must not treat retirement as
+    merged, change `MERGED_STATUSES`, infer retirement from prose/status/title, close a plan filing,
+    or alter ordinary conflict admission.
+
+    Add a focused test with a conflict-shaped green reviewed PR to reproduce #5202: each legal
+    retirement value reaches the stale/close disposition before conflict handling; an undefined
+    value, a no-task PR, an unreadable-plan projection, and either kind of proven plan filing do not.
+    Exercise `buildOpenPrViews` with its injected main-plan reader so the real current-plan
+    projection is tested rather than only a hand-built view. Register only the new test at duration
+    zero in the test-tier manifest.
+  acceptance:
+    - claim: "a green, reviewed, merge-conflicted implementation PR whose exact trailer resolves in a readable current plan to each legal retirement value is disposed stale before conflict handling, with a reason naming its task and retirement value"
+      proof: "unit test: W1-T3445 criterion 1"
+    - claim: "missing task/retirement, an unreadable-plan projection, and emitter- or GitHub-proven plan filings preserve their non-retirement disposition; retirement is never credited as merged"
+      proof: "unit test: W1-T3445 criterion 2"
+    - claim: "the live full-sweep producer assigns taskRetirement from taskRecord.retirement and the single-PR producer assigns it explicitly, so the OpenPrView producer-completeness audit remains green"
+      proof: "unit test: W1-T3445 criterion 3"
+    - claim: "the focused retired-task disposition test is registered in the tier manifest"
+      proof: "grep: retired-task-open-pr-disposition\\.test\\.ts in scripts/test-tier-manifest.json"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if the full-sweep OpenPrView already carries task retirement and a
+    pre-conflict disposition closes a retired implementation PR, or if #5202's W1-T3331 task lacks
+    a structured retirement field at current main. Recheck `src/lib/plan.ts`, `src/run-task.ts`,
+    `src/lib/sweep.ts`, and the current W1-T3331 shard. Reject any patch whose trigger is prose,
+    `status: blocked`, a plan-only diff inferred from absence, or a task id without a readable
+    retirement record.
+  note: "Reservation W1-T3445 was atomically claimed on origin before filing. This is the queue-reconciliation successor to the observed #5202 close, not a rewrite of W1-T3331 or W1-T3422."
