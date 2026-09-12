@@ -460,7 +460,12 @@ test("W1-T460 (5): the call site spreads BOTH of buildBaseProofDir's facts onto 
   const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   assert.match(
     src,
-    /const baseProof = worktreePath \? buildBaseProofDir\(criteria, worktreePath\) : undefined/,
+    /buildBaseProof:\s*buildBaseProofDir/,
+    "reviewCommand's injectable base-proof seam must retain buildBaseProofDir as its production default",
+  );
+  assert.match(
+    src,
+    /const baseProof = worktreePath \? buildBaseProof\(criteria, worktreePath\) : undefined/,
     "reviewCommand must build the base facts from its materialised head worktree",
   );
   // (R-11) The spread became three NAMED fields — the builder's result now also drives teardown
