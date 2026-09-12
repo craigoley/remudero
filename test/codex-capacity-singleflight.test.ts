@@ -146,6 +146,39 @@ test("W1-T3435 criterion 1: a stalled primary is recovered by one fresh hedge an
   }
 });
 
+test("a stalled primary whose setup consumes the hedge interval still starts the fresh hedge", async () => {
+  clearCodexCapacityCache();
+  let spawns = 0;
+  let kills = 0;
+  const delayWord = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  const spawn = () => {
+    spawns += 1;
+    if (spawns === 1) {
+      return fakeAppServer((request, { stdout }) => {
+        if (request.id === 1) {
+          // The primary timeout is already armed when this synchronous setup delay runs. Before
+          // the hedge was anchored at primary start, the overdue primary timer won before a hedge
+          // could be registered under coverage instrumentation.
+          Atomics.wait(delayWord, 0, 0, 8);
+          stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
+        }
+      }, () => { kills += 1; }) as never;
+    }
+    return successfulServer(() => { kills += 1; }) as never;
+  };
+
+  const result = await readCodexCapacity(config("/tmp/codex-hedge-setup-delay"), {
+    timeoutMs: 5,
+    capabilities: CAPABILITIES,
+    spawn,
+  });
+
+  assert.equal(result.readable, true);
+  assert.equal(spawns, 2, "the overdue primary must still receive exactly one fresh hedge");
+  assert.equal(kills, 2, "the stalled primary and winning hedge are each reaped once");
+  assert.match(result.detail ?? "", /recovered by hedge after 3ms; primary: still pending/);
+});
+
 test("W1-T3435 criterion 2: a prompt success or terminal failure starts no hedge", async () => {
   clearCodexCapacityCache();
   let successSpawns = 0;

@@ -1061,6 +1061,15 @@ async function readCodexRuntimeWithTimeoutHedge(
   bin: string,
   deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs">,
 ): Promise<CodexRuntimeResult> {
+  const timeoutMs = deps.timeoutMs ?? 10_000;
+  const hedgeDelayMs = codexCapacityHedgeDelay(timeoutMs);
+  // The primary installs its timeout while it constructs the app-server exchange. Schedule the
+  // hedge from before that setup, not after it returns: synchronous setup work (notably coverage
+  // instrumentation) must not consume the hedge's entire head start and let the primary timeout
+  // settle first.
+  // This duration is local scheduler elapsed time, not a wall-clock event. Use a monotonic clock
+  // so a clock correction cannot postpone the hedge.
+  const primaryStartedAt = performance.now();
   const primaryAbort = new AbortController();
   let primaryHedgeEligible = true;
   const primary = readCodexRuntime(config, bin, {
@@ -1068,7 +1077,6 @@ async function readCodexRuntimeWithTimeoutHedge(
     signal: primaryAbort.signal,
     onHedgeEligibility: (eligible) => { primaryHedgeEligible = eligible; },
   });
-  const timeoutMs = deps.timeoutMs ?? 10_000;
 
   return new Promise<CodexRuntimeResult>((resolve) => {
     let settled = false;
@@ -1127,13 +1135,22 @@ async function readCodexRuntimeWithTimeoutHedge(
       maybeFinishFailure();
     };
 
-    primary.then(observePrimary);
-    hedgeTimer = setTimeout(() => {
+    const startHedge = () => {
       if (settled || primaryResult || !primaryHedgeEligible) return;
       hedgeStarted = true;
       hedgeAbort = new AbortController();
       readCodexRuntime(config, bin, { ...deps, signal: hedgeAbort.signal }).then(observeHedge);
-    }, codexCapacityHedgeDelay(timeoutMs));
+    };
+
+    primary.then(observePrimary);
+    const remainingHedgeDelayMs = hedgeDelayMs - (performance.now() - primaryStartedAt);
+    if (remainingHedgeDelayMs <= 0) {
+      // Let an already-settled primary publish its result first; otherwise start the hedge before
+      // the overdue primary timeout gets a timer turn.
+      queueMicrotask(startHedge);
+    } else {
+      hedgeTimer = setTimeout(startHedge, remainingHedgeDelayMs);
+    }
   });
 }
 
