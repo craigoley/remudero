@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
+import { ciControlPlaneParity } from "./ci-control-plane.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
@@ -1961,12 +1962,14 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
   const ciJobs = parseCiJobNames(ciYamlText);
   const standaloneJobs = deps.workflowTexts ? parsePullRequestWorkflowJobs(deps.workflowTexts) : readPullRequestWorkflowJobs(repoRoot);
   const standaloneTable = deps.prWorkflowParityTable ?? PR_WORKFLOW_PARITY_TABLE;
-  const ciTableJobs = new Set(CI_PARITY_TABLE.map((e) => e.job));
+  // W1-T3423: the CI-workflow half uses the same exact-cardinality predicate as the pre-push
+  // checker. The standalone-workflow half remains separate because its table keys include the
+  // workflow filename, preventing equal job names in different workflows from aliasing.
+  const parity = ciControlPlaneParity(ciJobs, CI_PARITY_TABLE);
   const standaloneTableJobs = new Set(
     standaloneTable.filter((e) => e.workflow !== undefined).map((e) => workflowJobKey(e.workflow!, e.job)),
   );
-  const missing = [
-    ...ciJobs.filter((job) => !ciTableJobs.has(job)).map((job) => `.github/workflows/ci.yml:${job}`),
+  const standaloneProblems = [
     ...standaloneJobs
       .filter(({ workflow, job }) => !standaloneTableJobs.has(workflowJobKey(workflow, job)))
       .map(({ workflow, job }) => `.github/workflows/${workflow}:${job}`),
@@ -1978,13 +1981,14 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
       })
       .map((entry) => `.github/workflows/${entry.workflow ?? "(missing workflow)"}:${entry.job} (excluded without reason)`),
   ];
+  const problems = [...parity.problems, ...standaloneProblems];
   const driftStep: CiParityStepResult = {
     name: "ci-parity:drift",
-    ok: missing.length === 0,
+    ok: problems.length === 0,
     detail:
-      missing.length === 0
+      problems.length === 0
         ? `ci-parity:drift: PASS — every pull-request workflow job (${ciJobs.length + standaloneJobs.length}) has a parity entry (mirrored or excluded-with-reason)`
-        : `ci-parity:drift: FAIL — pull-request workflow job(s) missing a parity entry or exclusion reason: ${missing.join(", ")}`,
+        : `ci-parity:drift: FAIL — ${problems.join("; ")}`,
   };
 
   const jobSteps = [...CI_PARITY_TABLE, ...standaloneTable].flatMap((entry): CiParityStepResult[] => {

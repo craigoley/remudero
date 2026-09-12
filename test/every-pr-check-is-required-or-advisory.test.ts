@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import {
+  derivePrCheckCandidates,
+  findPrCheckRegistryGaps,
+  loadCiGateLists as loadSharedCiGateLists,
+  loadWorkflowDocuments,
+  type WorkflowDoc,
+} from "../src/lib/ci-control-plane.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── R-51 (docs/audits/recon-2026-09-05.md): "every deterministic PR check can block a merge" ──
@@ -35,149 +42,10 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
-const WORKFLOWS_DIR = join(REPO_ROOT, ".github", "workflows");
-const CI_GATE_PATH = join(WORKFLOWS_DIR, "ci-gate.yml");
-
-type CiJob = {
-  name?: string;
-  uses?: string;
-  strategy?: { matrix?: Record<string, unknown> };
-};
-type WorkflowDoc = { on?: unknown; jobs?: Record<string, CiJob> };
-
-/**
- * A `uses:` (reusable-workflow-call) job's REAL check-run name is decided by the CALLED
- * workflow's own job name(s), which live in a different repository entirely and cannot be
- * derived from anything in this tree. The only such job that fires on `pull_request` today is
- * osv-scanner-pr.yml's `scan-pr`, whose registered name — "scan-pr / osv-scan" — is verified
- * against a live PR's check-runs API response (test/scanner-gate-config.test.ts's own header
- * makes the same observation). A future `uses:` job with no entry here is reported as a gap
- * rather than silently assumed away — see `deriveCandidates`'s `uses:` branch below.
- */
-const EXTERNAL_REUSABLE_WORKFLOW_NAMES: Readonly<Record<string, readonly string[]>> = {
-  "osv-scanner-pr.yml#scan-pr": ["scan-pr / osv-scan"],
-};
-
-/** True when a workflow's parsed `on:` block can fire on a `pull_request` event, in any of the
- *  three shapes GitHub Actions accepts (bare string, array of event names, or a mapping keyed by
- *  event name — the one every workflow in this repo actually uses). */
-function firesOnPullRequest(on: unknown): boolean {
-  if (typeof on === "string") return on === "pull_request";
-  if (Array.isArray(on)) return on.includes("pull_request");
-  if (on && typeof on === "object") return "pull_request" in (on as Record<string, unknown>);
-  return false;
-}
-
-function substitute(name: string, key: string, value: unknown): string {
-  assert.ok(
-    typeof value === "string" || typeof value === "number",
-    `expandMatrixNames: matrix key '${key}' has a non-scalar value (got ${JSON.stringify(value)}) — ` +
-      "this matrix shape is not one this census can expand; teach it explicitly rather than guessing",
-  );
-  return name.replace(new RegExp(`\\$\\{\\{\\s*matrix\\.${key}\\s*\\}\\}`, "g"), String(value));
-}
-
-/** Substitutes every `${{ matrix.<key> }}` placeholder in `template` for each combination
- *  `matrix` describes. Two shapes are supported, both real in this repo today: a flat
- *  `key: [scalar, ...]` entry (cross product across every such key — ci.yml's `shard: [1,2,3,4]`)
- *  and GitHub's `include:` form (an array of objects, one full combination per element —
- *  codeql.yml's `include: [{language: ..., build-mode: ...}, ...]`). Throws rather than guessing
- *  at anything else (`exclude`, a mix of `include` with flat keys, `fromJSON`, a non-array value):
- *  a candidate this function silently mis-names is worse than a loud test-setup failure naming
- *  the job that needs teaching. */
-function expandMatrixNames(template: string, matrix: Record<string, unknown>): string[] {
-  const keys = Object.keys(matrix);
-  if (keys.length === 1 && keys[0] === "include") {
-    const combos = matrix.include;
-    assert.ok(Array.isArray(combos), `expandMatrixNames: matrix.include is not an array (got ${JSON.stringify(combos)})`);
-    return (combos as unknown[]).map((combo) => {
-      assert.ok(combo && typeof combo === "object" && !Array.isArray(combo), `expandMatrixNames: matrix.include entry is not an object (got ${JSON.stringify(combo)})`);
-      let name = template;
-      for (const [k, v] of Object.entries(combo as Record<string, unknown>)) name = substitute(name, k, v);
-      return name;
-    });
-  }
-  assert.ok(
-    !keys.includes("include") && !keys.includes("exclude"),
-    `expandMatrixNames: matrix mixes 'include'/'exclude' with other keys (${keys.join(", ")}) — ` +
-      "this matrix shape is not one this census can expand; teach it explicitly rather than guessing",
-  );
-  let names = [template];
-  for (const [key, values] of Object.entries(matrix)) {
-    assert.ok(
-      Array.isArray(values),
-      `expandMatrixNames: matrix.${key} is not an array (got ${JSON.stringify(values)}) — ` +
-        "this matrix shape is not one this census can expand; teach it explicitly rather than guessing",
-    );
-    names = names.flatMap((n) => (values as unknown[]).map((v) => substitute(n, key, v)));
-  }
-  return names;
-}
-
-/**
- * Every check-run name candidate `relPath`'s workflow registers on a `pull_request` event — the
- * SAME two things ci-gate.yml itself must reconcile a job against (REQUIRED or ADVISORY), derived
- * mechanically from the parsed doc rather than from anyone's memory of what's in the file. A job
- * whose name cannot be resolved (an unrecognized `uses:` caller, or a name left with an
- * unsubstituted `${{ ... }}` after matrix expansion) is reported as its own gap-shaped candidate
- * (`<relPath>#<jobId> (…)`) rather than thrown away, so it still shows up in `findGaps` output
- * instead of vanishing from the census.
- */
-function deriveCandidates(relPath: string, doc: WorkflowDoc): string[] {
-  if (!firesOnPullRequest(doc.on)) return [];
-  const jobs = doc.jobs ?? {};
-  const candidates: string[] = [];
-  for (const [jobId, job] of Object.entries(jobs)) {
-    if (job.uses) {
-      const key = `${relPath}#${jobId}`;
-      const known = EXTERNAL_REUSABLE_WORKFLOW_NAMES[key];
-      if (known) {
-        candidates.push(...known);
-      } else {
-        candidates.push(`${key} (unrecognized reusable-workflow caller — add its real check-run name(s) to EXTERNAL_REUSABLE_WORKFLOW_NAMES)`);
-      }
-      continue;
-    }
-    const template = job.name ?? jobId;
-    const matrix = job.strategy?.matrix;
-    const names = matrix ? expandMatrixNames(template, matrix) : [template];
-    for (const n of names) {
-      if (n.includes("${{")) {
-        candidates.push(`${relPath}#${jobId} (unresolved template after matrix expansion: ${JSON.stringify(n)})`);
-      } else {
-        candidates.push(n);
-      }
-    }
-  }
-  return candidates;
-}
-
-/** A candidate is a gap unless REQUIRED, ADVISORY or IGNORE already accounts for it — IGNORE
- *  (ci-gate.yml's own self-exclusion list) is "explained" in exactly the same sense ADVISORY is:
- *  a deliberate, named exclusion, not a silent one. */
-function findGaps(candidates: string[], required: Set<string>, advisory: Set<string>, ignore: Set<string>): string[] {
-  return [...new Set(candidates)].filter((c) => !required.has(c) && !advisory.has(c) && !ignore.has(c));
-}
-
-async function loadCiGateLists(): Promise<{ required: Set<string>; advisory: Set<string>; ignore: Set<string> }> {
-  const raw = readFileSync(CI_GATE_PATH, "utf8");
-  const doc = parseYaml(raw) as { jobs: Record<string, { env?: Record<string, string> }> };
-  const env = doc.jobs["ci-gate"]!.env!;
-  assert.ok(env.REQUIRED, "ci-gate.yml's ci-gate job must declare env.REQUIRED");
-  assert.ok(env.ADVISORY, "ci-gate.yml's ci-gate job must declare env.ADVISORY — the sibling list this census checks against");
-  assert.ok(env.IGNORE, "ci-gate.yml's ci-gate job must declare env.IGNORE");
-  return {
-    required: new Set(JSON.parse(env.REQUIRED) as string[]),
-    advisory: new Set(JSON.parse(env.ADVISORY) as string[]),
-    ignore: new Set(JSON.parse(env.IGNORE) as string[]),
-  };
-}
-
-function loadRealWorkflows(): Array<{ relPath: string; doc: WorkflowDoc }> {
-  return readdirSync(WORKFLOWS_DIR)
-    .filter((f) => /\.ya?ml$/.test(f))
-    .map((f) => ({ relPath: f, doc: parseYaml(readFileSync(join(WORKFLOWS_DIR, f), "utf8")) as WorkflowDoc }));
-}
+const deriveCandidates = derivePrCheckCandidates;
+const findGaps = findPrCheckRegistryGaps;
+const loadCiGateLists = () => loadSharedCiGateLists(REPO_ROOT);
+const loadRealWorkflows = () => loadWorkflowDocuments(REPO_ROOT);
 
 // ── the mechanism, proven against fabricated input (never the real tree) ───────────────────────
 

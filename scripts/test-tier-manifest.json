@@ -371,6 +371,7 @@
     "test/check-wait-running-is-motion.test.ts": 1817,
     "test/checkout-writers.test.ts": 1392,
     "test/ci-cache-concurrency-and-job-timeouts.test.ts": 646,
+    "test/ci-control-plane-precheck-refuses-before-push.test.ts": 0,
     "test/ci-failure-annotations.test.ts": 1867,
     "test/ci-gate-dedupe.test.ts": 3592,
     "test/ci-gate-reads-a-superseded-attempt.test.ts": 1174,
