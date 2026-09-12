@@ -38105,6 +38105,14 @@ function logCliInvocation(cmd: string | undefined, argv: string[]): void {
  *                   regardless, by never letting the guard reach a child it spawns. Both are
  *                   required — the exemption fixes the documented invocation; the spawn scrub
  *                   fixes what an operator's own shell might still carry for unrelated reasons.
+ * `pr-owner` (W1-T3281): a READ of the local ledger answering "does a fix lane own this PR". It
+ *                   is the same shape as `status` — a diagnostic that reports state and writes
+ *                   nothing: no ledger line, no git operation, no PR. Refusing it on a diverged
+ *                   checkout is self-defeating for the same reason it is for `doctor`: the moment
+ *                   an operator most needs to ask who owns a PR is while standing on a branch the
+ *                   gate would refuse, and the answer it returns cannot be affected by the
+ *                   staleness the gate is guarding, because the ledger it reads is host-local and
+ *                   not a checkout artifact at all.
  * `sweep`/`inbox` stay OUT even though their `--dry-run` forms are read-only: exempting the verb
  * name would also exempt their real (non-dry-run) dispatch. `run-task`/`drain`/`triage`/`fix`/
  * `approve`/`review`/`lint-plan` are untouched and keep falling to the gate's `else` branch.
