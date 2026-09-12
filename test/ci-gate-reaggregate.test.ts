@@ -99,6 +99,37 @@ cat "${stateDir}/fixture_\${idx}"
   await writeFile(join(dir, "gh"), body, { mode: 0o755 });
 }
 
+/** A deterministic clock makes the real bounded loops testable without sleeping minutes. */
+async function writeFakeClock(dir: string, stateDir: string): Promise<void> {
+  const clockPath = join(stateDir, "clock_seconds");
+  await writeFile(clockPath, "0\n");
+  await writeFile(
+    join(dir, "date"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$#" -eq 1 ] && [ "$1" = "+%s" ]; then
+  cat "${clockPath}"
+else
+  exec /bin/date "$@"
+fi
+`,
+    { mode: 0o755 },
+  );
+  await writeFile(
+    join(dir, "sleep"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+seconds="\${1:-0}"
+case "\${seconds}" in
+  *[!0-9]*|'') exec /bin/sleep "$@" ;;
+esac
+now="$(cat "${clockPath}")"
+echo $((now + seconds)) > "${clockPath}"
+`,
+    { mode: 0o755 },
+  );
+}
+
 async function runAggregateScript(
   script: string,
   required: string[],
@@ -109,13 +140,16 @@ async function runAggregateScript(
     gracePollIntervalSeconds?: number;
     timeoutMs?: number;
     waitCapSeconds?: number;
+    waitFastWindowSeconds?: number;
     waitPollIntervalSeconds?: number;
+    waitSlowPollIntervalSeconds?: number;
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), "ci-gate-reaggregate-bin-"));
   const stateDir = await mkdtemp(join(tmpdir(), "ci-gate-reaggregate-state-"));
   try {
     await writeSequencedFakeGh(dir, stateDir, sequence);
+    await writeFakeClock(dir, stateDir);
     const result = spawnSync("bash", ["-c", script], {
       env: {
         ...process.env,
@@ -128,7 +162,9 @@ async function runAggregateScript(
         GRACE_WINDOW_SECONDS: String(opts.graceWindowSeconds ?? 5),
         GRACE_POLL_INTERVAL_SECONDS: String(opts.gracePollIntervalSeconds ?? 1),
         WAIT_CAP_SECONDS: String(opts.waitCapSeconds ?? 2400),
+        WAIT_FAST_WINDOW_SECONDS: String(opts.waitFastWindowSeconds ?? 300),
         WAIT_POLL_INTERVAL_SECONDS: String(opts.waitPollIntervalSeconds ?? 15),
+        WAIT_SLOW_POLL_INTERVAL_SECONDS: String(opts.waitSlowPollIntervalSeconds ?? 60),
       },
       encoding: "utf8",
       timeout: opts.timeoutMs ?? 20_000,
@@ -341,6 +377,46 @@ test("ci-gate-reaggregate (W1-T312): the wait cap is sized from a measured distr
     /\$\(\(\s*\$\(date \+%s\)\s*\+\s*900\s*\)\)/,
     "expected the literal 900s hard-coded deadline to be gone, replaced by the WAIT_CAP_SECONDS env var",
   );
+});
+
+test("ci-gate: adaptive wait and grace cadences cap check-runs reads without shortening either failure window", async () => {
+  const raw = await readFile(CI_GATE_PATH, "utf8");
+  const doc = parseYaml(raw) as { jobs: Record<string, any> };
+  const env = doc.jobs["ci-gate"].env as Record<string, string>;
+  const waitCap = Number(env.WAIT_CAP_SECONDS);
+  const fastWindow = Number(env.WAIT_FAST_WINDOW_SECONDS);
+  const fastPoll = Number(env.WAIT_POLL_INTERVAL_SECONDS);
+  const slowPoll = Number(env.WAIT_SLOW_POLL_INTERVAL_SECONDS);
+  const graceWindow = Number(env.GRACE_WINDOW_SECONDS);
+  const gracePoll = Number(env.GRACE_POLL_INTERVAL_SECONDS);
+  assert.ok(fastWindow > 0 && fastWindow < waitCap, "the fast observation window must be a proper prefix of the unchanged wait cap");
+  assert.ok(slowPoll > fastPoll, "the long-tail wait cadence must actually reduce reads");
+  assert.ok(gracePoll > 0 && gracePoll <= graceWindow, "the grace cadence must still observe inside its unchanged window");
+
+  const adaptiveWaitReads = 1 + Math.ceil(fastWindow / fastPoll) + Math.ceil((waitCap - fastWindow) / slowPoll);
+  const fixedWaitReads = 1 + Math.ceil(waitCap / fastPoll);
+  const adaptiveGraceReads = Math.ceil(graceWindow / gracePoll);
+  const fixedGraceReads = Math.ceil(graceWindow / 20);
+  assert.equal(adaptiveWaitReads, 56, "the shipped wait cap should use no more than 56 check-runs reads");
+  assert.equal(adaptiveGraceReads, 10, "the shipped grace window should use no more than 10 check-runs reads");
+  assert.ok(adaptiveWaitReads + adaptiveGraceReads < fixedWaitReads + fixedGraceReads, "the adaptive cadence must reduce the maximum API reads while retaining both windows");
+});
+
+test("ci-gate: after the fast window, the real wait loop uses the slow cadence and reaches the same timeout verdict", async () => {
+  const script = await loadAggregateScript();
+  const pending: CheckRun[] = [{ name: "ci", status: "in_progress", conclusion: null, started_at: "2026-09-12T17:58:20Z" }];
+  const { result, callCount } = await runAggregateScript(
+    script,
+    ["ci"],
+    [],
+    Array.from({ length: 80 }, () => pending),
+    { waitCapSeconds: 120, waitFastWindowSeconds: 4, waitPollIntervalSeconds: 2, waitSlowPollIntervalSeconds: 10 },
+  );
+  const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  assert.notEqual(result.status, 0, out);
+  assert.match(out, /TIMED OUT waiting for required check\(s\) to complete/);
+  assert.equal(callCount, 15, "four fast-window reads then minute-scale cadence must bound the long-tail polling work");
+  assert.ok(callCount < 1 + Math.ceil(120 / 2), "the same 120-second failure window would have needed 61 fixed-cadence reads");
 });
 
 test("ci-gate-reaggregate (W1-T312): a required check that never completes within the wait cap is reported as a TIMEOUT, distinctly from a genuine check FAILURE, and names a new sha as the remedy", async () => {
