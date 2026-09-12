@@ -715,6 +715,7 @@ function dirtyFleetRebaseStoppedOnConflict(
     if (!rebaseStateExists) return false;
     return run(worktreePath, ["ls-files", "-u"]).trim().length > 0;
   } catch (_inspectionError) {
+    // If the rebase failure also makes git's state unreadable, keep the legacy conflict path.
     return true;
   }
 }
