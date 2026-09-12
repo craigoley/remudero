@@ -3,6 +3,7 @@ import { constants as fsConstants, accessSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
+import type { Clock } from "./clock.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
@@ -1059,8 +1060,15 @@ function codexCapacityHedgeDelay(timeoutMs: number): number {
 async function readCodexRuntimeWithTimeoutHedge(
   config: Config,
   bin: string,
-  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs">,
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now"> },
 ): Promise<CodexRuntimeResult> {
+  const timeoutMs = deps.timeoutMs ?? 10_000;
+  const hedgeDelayMs = codexCapacityHedgeDelay(timeoutMs);
+  // The primary installs its timeout while it constructs the app-server exchange. Schedule the
+  // hedge from before that setup, not after it returns: synchronous setup work (notably coverage
+  // instrumentation) must not consume the hedge's entire head start and let the primary timeout
+  // settle first.
+  const primaryStartedAt = deps.clock.now();
   const primaryAbort = new AbortController();
   let primaryHedgeEligible = true;
   const primary = readCodexRuntime(config, bin, {
@@ -1068,7 +1076,6 @@ async function readCodexRuntimeWithTimeoutHedge(
     signal: primaryAbort.signal,
     onHedgeEligibility: (eligible) => { primaryHedgeEligible = eligible; },
   });
-  const timeoutMs = deps.timeoutMs ?? 10_000;
 
   return new Promise<CodexRuntimeResult>((resolve) => {
     let settled = false;
@@ -1127,13 +1134,22 @@ async function readCodexRuntimeWithTimeoutHedge(
       maybeFinishFailure();
     };
 
-    primary.then(observePrimary);
-    hedgeTimer = setTimeout(() => {
+    const startHedge = () => {
       if (settled || primaryResult || !primaryHedgeEligible) return;
       hedgeStarted = true;
       hedgeAbort = new AbortController();
       readCodexRuntime(config, bin, { ...deps, signal: hedgeAbort.signal }).then(observeHedge);
-    }, codexCapacityHedgeDelay(timeoutMs));
+    };
+
+    primary.then(observePrimary);
+    const remainingHedgeDelayMs = hedgeDelayMs - (deps.clock.now() - primaryStartedAt);
+    if (remainingHedgeDelayMs <= 0) {
+      // Let an already-settled primary publish its result first; otherwise start the hedge before
+      // the overdue primary timeout gets a timer turn.
+      queueMicrotask(startHedge);
+    } else {
+      hedgeTimer = setTimeout(startHedge, remainingHedgeDelayMs);
+    }
   });
 }
 
@@ -1196,11 +1212,11 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     if (active) {
       exchange = active;
     } else {
-      exchange = readCodexRuntimeWithTimeoutHedge(config, bin, deps);
+      exchange = readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, clock: { now } });
       codexCapacityInFlight.set(cacheKey, exchange);
     }
   } else {
-    exchange = readCodexRuntimeWithTimeoutHedge(config, bin, deps);
+    exchange = readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, clock: { now } });
   }
 
   let value: CodexRuntimeResult;
