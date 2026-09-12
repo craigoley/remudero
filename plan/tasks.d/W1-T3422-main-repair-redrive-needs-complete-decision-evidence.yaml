@@ -1,0 +1,110 @@
+- id: W1-T3422
+  title: "A MAIN REPAIR CANNOT SAFELY RELEASE STALE RED PRs — the sweep drops check completion time, reads live workflow state only for pending heads, and has no bounded check-to-local-merge route, so W1-T3331 cannot distinguish an inherited failure from a still-running or still-broken PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 35.00
+  files:
+    - src/lib/open-prs-rest.ts
+    - src/run-task.ts
+    - src/lib/ci-parity.ts
+    - src/lib/sweep.ts
+    - test/a-fixed-main-re-runs-what-it-was-blocking.test.ts
+  origin: "operator-session#board-wide-red-2026-09-10"
+  note: "reservation hand-off: main -> codex/queue-evidence-reconciliation"
+  plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T176", "W1-T3331", "W1-T2620", "W1-T3309", "W1-T1127"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3331 recorded a real incident: after main fixed the expiring-fixture census, nine PRs
+    stayed red on the old merged tree until a human created new events. Its safety controls were
+    correct, but the filed source scope cannot observe the facts they require.
+
+    OBSERVED at main on 2026-09-11. `RestCheckRun` in `src/lib/open-prs-rest.ts` carries
+    `started_at` but not `completed_at`, and `rollupFromRest` maps only `startedAt`. The sweep can
+    therefore see when a failed attempt began, not whether it completed before main's repair. A
+    start-time substitute is unsound: a check that began before the repair but completed after it is
+    not a stale verdict.
+
+    OBSERVED at the real gateway. `buildOpenPrViews` hydrates `workflowRuns` only for rows whose
+    aggregate `checksState` is `pending`. A candidate here is red by construction, so it receives
+    no run-state observation. Reopening or minting a new head while any run is queued or in progress
+    cancels that run under the PR concurrency group; W1-T3331 recorded the resulting cancelled
+    coverage shards. The absence of that read must mean stand down, never "no run exists."
+
+    OBSERVED at the action boundary. `buildSweepEffects.readMainTip` reads the main commit once but
+    retains only its SHA. `CI_PARITY_TABLE` has local commands for some jobs, but no check-name
+    contract that says which failing required check can be executed against a temporary merge. A
+    daemon must not guess from a log tail or run a whole unbounded suite for every red PR.
+
+    The existing W1-T2620 redrive is not this mechanism. It releases one cohort-wide, base-caused
+    failure when main advances; it does not prove a particular stale failing check is gone on a
+    local merge, and it has no per-check completion-time or in-flight control.
+
+    This is not a second general sweep, review, fix-rung, or credit-projection task. W1-T77,
+    W1-T78, W1-T100, W1-T150, W1-T168, and W1-T176 own those broad lanes; this narrow addition
+    starts only after a terminal required-check failure, a newer main repair, and a declared local
+    route establish that releasing this one PR is safe.
+  design: |
+    (i) PRESERVE DECISION EVIDENCE END TO END. Extend the REST rollup shape with a terminal
+    completion timestamp for check runs (and the corresponding terminal timestamp for status
+    contexts when GitHub provides one), then carry the newest deduped failing attempt's timestamp
+    into `OpenPrView`. Read main's SHA and commit time in the existing once-per-pass main read.
+    Missing, malformed, or incomparable timestamps make a PR ineligible; they never become an
+    estimate.
+
+    (ii) READ LIVE RUN STATE ONLY AFTER A CHEAP, STALE CANDIDATE PREFILTER, AND CAP IT. A red PR
+    enters the additional workflow-run read only when its observed failed completion predates the
+    observed main repair candidate. The per-pass population is bounded and paced through the
+    existing GitHub transport. Any queued or in-progress run, an unreadable response, or a head
+    that changed after the snapshot stands the PR down. This is a queue-maintenance lane, not a
+    polling loop; it makes one bounded read in the sweep already scheduled by the daemon.
+
+    (iii) REQUIRE A DECLARED LOCAL-MERGE ROUTE. Add an explicit mapping from eligible required
+    check names to bounded repository-local commands and test it against the CI definitions. For a
+    selected oldest candidate only, create an isolated temporary merge of its observed head with
+    the observed main tip, run that exact route, and re-drive only when it passes. A check with no
+    declared route, an unmergeable head, a command error, or a still-failing local result remains
+    red and is ledgered as a stand-down. Never infer a command from check text, and never rerun the
+    old GitHub job payload.
+
+    (iv) USE THE EXISTING NEW-HEAD LEAF, ONCE. The accepted candidate mints a fresh branch event
+    through the existing lease-protected empty-commit push. Deduplicate successful releases by
+    `(pr number, observed head SHA, observed main SHA, failed check)` in the ledger before the
+    outward action. Select at most one candidate per pass, oldest first. Record the old failure
+    completion timestamp, main SHA/time, local route/result, and new head so an operator can tell
+    a safe release from a declined one without re-reading GitHub.
+
+    (v) DO NOT WIDEN THE COHORT REDRIVE. W1-T2620 keeps its current base-caused release behaviour.
+    This task is the exact, evidence-backed route for a PR whose own last result is stale; neither
+    lane may cause the other to push a second event in the same pass.
+  acceptance:
+    - claim: "a PR is eligible only when its newest deduped required-check failure completed before the observed main repair, and missing or malformed timestamps decline rather than guess"
+      proof: "unit test: W1-T3422: only a terminal failure completed before main is a stale-red candidate"
+    - claim: "a stale-looking red PR with any queued or in-progress workflow run, an unreadable run-state read, or a changed head is never re-driven"
+      proof: "unit test: W1-T3422: a live or unreadable workflow run stands a stale-red candidate down"
+    - claim: "a candidate whose declared required-check route still fails on an isolated merge is left alone, while a passing route re-drives exactly once for the same PR head, main tip, and check"
+      proof: "unit test: W1-T3422: a passing isolated merge route redrives one candidate once"
+    - claim: "only an explicitly registered bounded local route may run; an unknown check name, merge failure, command failure, or missing route causes a ledgered stand-down and no new branch event"
+      proof: "unit test: W1-T3422: an unregistered or failing local route never mints a new head"
+    - claim: "the live gateway bounds and paces candidate run-state reads, and W1-T2620's cohort-wide redrive neither duplicates nor is weakened by this lane"
+      proof: "unit test: W1-T3422: stale-red reads are bounded and coexist with cohort redrive"
+  falsifier: |
+    CLOSE AS ALREADY SATISFIED if the live view already carries the newest failed completion time,
+    red candidates already receive workflow-run state, and a check-name-to-local-merge route is
+    declared and used before any redrive. Check the producer and action path, not a task title or
+    a ledger intention.
+
+    The essential negative controls are mandatory. A failure that started before main but completed
+    after it must not release; a red PR with an in-flight run must not be interrupted; and a local
+    merge that still fails must mint no new event. Removing any one of those controls must make its
+    corresponding fixture fail. A timestamp-only or replay-based rerun is rejected: both shapes
+    caused fresh false reds in the recorded incident.
+
+    Do not add an unbounded per-PR GitHub read, wait, retry loop, or whole-suite local run. A daemon
+    that burns API budget or worker capacity while trying to clean the queue recreates the outage in
+    another layer.

@@ -12,7 +12,8 @@
     - test/a-fixed-main-re-runs-what-it-was-blocking.test.ts
   origin: "operator-session#board-wide-red-2026-09-10"
   plan_refs: ["W1-T3309", "W1-T1127", "W1-T2999"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     MEASURED 2026-09-10, end to end, and this is a recording of one real incident rather than a
@@ -89,6 +90,14 @@
     the rung cancels the very run that would have cleared the PR, which is not a hypothetical: it is
     what an operator doing this by hand did to three PRs on 2026-09-10.
   note: |
+    RETIRED 2026-09-11 — the mechanism remains needed, but this record cannot satisfy its own
+    controls in its declared scope. The live REST model retains `started_at`, not a failed check's
+    `completed_at`; the gateway hydrates workflow runs only for pending PRs, while this rung must
+    reject a red PR with a queued or in-progress run; and no bounded check-name-to-local-merge
+    command exists. Inferring completion from start or reopening without the in-flight control would
+    reproduce the false-red and cancellation incidents this task records. W1-T3422 replaces this
+    incomplete scope with the complete, bounded decision path.
+
     Rule 25 CHECKED: `src/lib/sweep.ts` is ordinary src, not an instrument surface.
     SCOPE, STATED SO IT IS NOT QUIETLY WIDENED: this re-runs PRs blocked by a defect main has since
     fixed. It does not decide whether a failure is "real", does not rebase, does not merge, and

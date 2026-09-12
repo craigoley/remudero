@@ -113,7 +113,7 @@
     keep a better worker check from becoming either another shared-Git corruption path or another
     source of GitHub-rate-limit pressure.
   note: |
-    reservation hand-off: main -> codex/ci-control-plane-precheck
+    reservation hand-off: main -> codex/w1-t3423-control-plane-plan
 
     The task deliberately has `risk: high`: `hooks/pre-push` is installed into every worker
     worktree, while the source module, CI parity table, and two test families are coupled by one

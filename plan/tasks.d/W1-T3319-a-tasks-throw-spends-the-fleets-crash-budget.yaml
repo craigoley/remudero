@@ -11,9 +11,15 @@
   files: [src/lib/daemon.ts, test/a-tasks-throw-is-not-the-daemons-crash.test.ts]
   origin: "operator-session#gate-posture-2026-09-10"
   plan_refs: ["W1-T3310", "W1-T2537", "W1-T2546", "W1-T490", "W1-T3318"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
+    RECONCILED 2026-09-11. Commit 042acb32 (`fix(daemon): one task's failure is not the daemon's
+    crash (W1-T3319) (#4952)`) is on main. The named focused test passes all five controls: task
+    command failures route to 76, environmental precedence remains 77, and unprefixed or in-process
+    failures still consume the crash budget. The former `queued` state would have duplicated a
+    merged daemon hardening.
+
     BAND. `risk: high` / `band_meaning: blast-radius`: the diff is one predicate in one function; the
     reach is whether the fleet keeps running. Priced on reach, not size.
 
