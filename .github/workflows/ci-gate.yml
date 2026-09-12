@@ -135,7 +135,7 @@ jobs:
       # knobs above, so tests can shrink it.
       # Why: the full n=10 sample is in docs/forensics/ci-gate-yml.md (W1-T312).
       WAIT_CAP_SECONDS: "2400"
-      # One recent successful ci-gate run (34709784197, 2026-09-12) emitted 74 wait-loop reads
+      # One recent successful ci-gate run (34709784197, 2026-09-12) emitted 73 wait-loop reads
       # before its siblings completed. Preserve the 15s observation cadence while checks are
       # first registering, then move to 60s: later reads only observe remote state and cannot
       # make a required check complete sooner. At the 2400s cap this is at most 56 wait reads
