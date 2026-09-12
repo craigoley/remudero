@@ -150,7 +150,7 @@ test("a stalled primary whose setup consumes the hedge interval still starts the
   clearCodexCapacityCache();
   let spawns = 0;
   let kills = 0;
-  const delayWord = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  let now = 1_000;
   const spawn = () => {
     spawns += 1;
     if (spawns === 1) {
@@ -159,7 +159,7 @@ test("a stalled primary whose setup consumes the hedge interval still starts the
           // The primary timeout is already armed when this synchronous setup delay runs. Before
           // the hedge was anchored at primary start, the overdue primary timer won before a hedge
           // could be registered under coverage instrumentation.
-          Atomics.wait(delayWord, 0, 0, 8);
+          now += 8;
           stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
         }
       }, () => { kills += 1; }) as never;
@@ -170,6 +170,7 @@ test("a stalled primary whose setup consumes the hedge interval still starts the
   const result = await readCodexCapacity(config("/tmp/codex-hedge-setup-delay"), {
     timeoutMs: 5,
     capabilities: CAPABILITIES,
+    now: () => now,
     spawn,
   });
 
