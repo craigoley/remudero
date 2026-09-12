@@ -201,3 +201,120 @@ test("reservation audit degrades the shipped CLI report to UNKNOWN when open PR 
   assert.match(text, /DEGRADED: open PR read failed: Error: REST budget exhausted/);
   assert.match(text, /W1-T401 UNKNOWN open PR read failed/);
 });
+
+// ── W1-T3300: the arms diff-coverage named. Every one is a DEGRADED or REFUSED path — the places
+// this audit either declines to answer or answers "unknown" rather than guessing. An audit that
+// guesses is worse than one that refuses, so these are the arms most worth pinning.
+
+function auditDeps(over: Record<string, unknown> = {}) {
+  return {
+    runGit: (args: string[]) => {
+      if (args[0] === "ls-remote" && args[2] === "refs/rmd-id/*") {
+        return { status: 0, stdout: `0000000000000000000000000000000000000301\trefs/rmd-id/W1-T301\n`, stderr: "" };
+      }
+      if (args[0] === "fetch") return { status: 0, stdout: "", stderr: "" };
+      if (args[0] === "log") return { status: 0, stdout: `rmd-id reservation 9@host ${OLD}\n`, stderr: "" };
+      if (args[0] === "ls-remote" && args[1] === "--heads") return { status: 0, stdout: "", stderr: "" };
+      return { status: 1, stdout: "", stderr: `unexpected ${args.join(" ")}` };
+    },
+    openPrTexts: () => [] as string[],
+    auditHistoryIds: () => [] as number[],
+    auditNowMs: () => NOW,
+    ...over,
+  };
+}
+
+async function runAudit(args: string[], deps: Record<string, unknown>, planPath: string) {
+  const cap = captureConsole();
+  try {
+    const code = await nextTaskIdCommand(["--audit", "--plan", planPath, ...args], {}, deps as never);
+    return { code, out: cap.out.join("\n"), err: cap.err.join("\n") };
+  } finally {
+    cap.restore();
+  }
+}
+
+test("W1-T3300: an open PR's Remudero-Task trailer counts as holding evidence", async () => {
+  const planPath = planFixture();
+  const r = await runAudit([], auditDeps({ openPrTexts: () => ["chore: x\n\nRemudero-Task: W1-T301\n"] }), planPath);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /W1-T301 HELD/, "a trailer in an open PR is exactly the evidence this audit exists to find");
+});
+
+test("W1-T3300: a THROWING reservation-ref read reports unknown, never an empty reservation set", async () => {
+  const planPath = planFixture();
+  const deps = auditDeps({
+    runGit: (args: string[]) => {
+      if (args[0] === "ls-remote" && args[2] === "refs/rmd-id/*") throw new Error("network down");
+      return { status: 0, stdout: "", stderr: "" };
+    },
+  });
+  const r = await runAudit([], deps, planPath);
+  assert.equal(r.code, 2, "an unreadable reservation namespace must refuse, not report zero reservations");
+  assert.match(r.err, /cannot read origin refs\/rmd-id/);
+});
+
+test("W1-T3300: a THROWING run-branch read leaves every row UNKNOWN rather than CANDIDATE", async () => {
+  const planPath = planFixture();
+  const deps = auditDeps({
+    runGit: (args: string[]) => {
+      if (args[0] === "ls-remote" && args[1] === "--heads") throw new Error("network down");
+      if (args[0] === "ls-remote" && args[2] === "refs/rmd-id/*") {
+        return { status: 0, stdout: `0000000000000000000000000000000000000301\trefs/rmd-id/W1-T301\n`, stderr: "" };
+      }
+      if (args[0] === "fetch") return { status: 0, stdout: "", stderr: "" };
+      if (args[0] === "log") return { status: 0, stdout: `rmd-id reservation 9@host ${OLD}\n`, stderr: "" };
+      return { status: 1, stdout: "", stderr: "unexpected" };
+    },
+  });
+  const r = await runAudit([], deps, planPath);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /W1-T301 UNKNOWN/, "a failed branch read must never be read as 'no branch holds it'");
+  assert.match(r.out, /open run branch read failed/);
+});
+
+test("W1-T3300: --offline SAYS the open-PR read was skipped, so an unread source is never silence", async () => {
+  const planPath = planFixture();
+  const r = await runAudit(["--offline"], auditDeps(), planPath);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /--offline: open PRs were not read/, "a degraded input has to be named in the report itself");
+});
+
+test("W1-T3300: --audit-age-days REFUSES a non-numeric or negative threshold rather than defaulting", async () => {
+  const planPath = planFixture();
+  for (const bad of ["not-a-number", "-3"]) {
+    const cap = captureConsole();
+    let code: number;
+    try {
+      code = await nextTaskIdCommand(["--audit", "--plan", planPath, "--audit-age-days", bad], {}, auditDeps() as never);
+    } finally {
+      cap.restore();
+    }
+    assert.equal(code, 2, `${bad} must refuse`);
+    assert.match(cap.err.join("\n"), /must be a non-negative number/);
+  }
+});
+
+test("W1-T3300: --audit and --reserve are refused together — the audit is read-only and reserve writes", async () => {
+  const planPath = planFixture();
+  const cap = captureConsole();
+  let code: number;
+  try {
+    code = await nextTaskIdCommand(["--audit", "--reserve", "--plan", planPath], {}, auditDeps() as never);
+  } finally {
+    cap.restore();
+  }
+  assert.equal(code, 2);
+  assert.match(cap.err.join("\n"), /contradictory/, "a read-only report must never silently become a write");
+});
+
+test("W1-T3300: --reserve and --offline stay contradictory, the pre-existing refusal this verb already had", async () => {
+  const cap = captureConsole();
+  let code: number;
+  try {
+    code = await nextTaskIdCommand(["--reserve", "--offline"], {}, auditDeps() as never);
+  } finally {
+    cap.restore();
+  }
+  assert.equal(code, 2, "the audit flags must not have weakened the reserve/offline refusal beside them");
+});
