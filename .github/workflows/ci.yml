@@ -43,6 +43,24 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  squash-trailer-gate:
+    name: squash-trailer-gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Refuse trailer credit added by any branch commit
+        run: node --import tsx scripts/acceptance-author-gate.mjs
+
   ci:
     name: ci-shard (${{ matrix.shard }}/4)
     # W1-T1033: no `if:` here — this matrix and its aggregator run on both triggers above.

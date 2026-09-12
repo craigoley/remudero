@@ -219,12 +219,17 @@ test("a workflow shipped beside genuine product code still entangles", () => {
   assert.deepEqual(r.srcPaths, ["src/lib/dispatch-overlap.ts"], "and the product path is named");
 });
 
-test("the reviewer's own module is never treated as an instrument", () => {
-  // `src/lib/review.ts` is NOT on the surface, so it must still count as product — otherwise the
-  // reviewer would be exempt from the rule it enforces.
-  const r = detectInstrumentEntanglement([WORKFLOW, "src/lib/review.ts"]);
-  assert.equal(r.entangled, true, "review.ts is product code and must stay subject to Rule 25");
-  assert.ok(r.srcPaths.includes("src/lib/review.ts"));
+test("the reviewer's own module is treated as an instrument, not product", () => {
+  // `src/lib/review.ts` is the PR judge, so it belongs to the surface. It is still subject to
+  // Rule 25 when real product code rides beside it.
+  const instrumentOnly = detectInstrumentEntanglement([WORKFLOW, "src/lib/review.ts"]);
+  assert.equal(instrumentOnly.entangled, false, "workflow plus reviewer is instrument-only");
+  assert.ok(instrumentOnly.instrumentPaths.includes("src/lib/review.ts"));
+  assert.equal(instrumentOnly.srcPaths.includes("src/lib/review.ts"), false);
+
+  const withProduct = detectInstrumentEntanglement(["src/lib/review.ts", "src/lib/dispatch-overlap.ts"]);
+  assert.equal(withProduct.entangled, true, "review.ts beside real product code still trips Rule 25");
+  assert.deepEqual(withProduct.srcPaths, ["src/lib/dispatch-overlap.ts"]);
 });
 
 test("a surface path under src is subtracted from the product set", () => {

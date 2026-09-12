@@ -3353,7 +3353,7 @@ function assembleServeRoutes(
     // (ledgerPanelAction, panel-actions.ts:134), which is identical across both PanelActionDeps
     // instances built above -- so this route reads no root at all and cannot be misrooted.
     buildDrainFeedbackRoute(fleetControlDeps),
-    ...buildPanelGraphRoutes(panelGraphDeps),
+    ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every
     // running console. `questionsRoot` IS repoRoot (see that field's own doc, above) and

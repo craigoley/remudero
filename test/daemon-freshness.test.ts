@@ -80,7 +80,7 @@ function blockedPr(): OpenPrView {
       { claim: "finish the repair", proof: "unit test: x", met: false, reason: "not done", proof_exec: "executed_fail" },
     ],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-05T04:00:00Z",
+    lastActivityAt: "2026-09-05T04:00:00Z", // expiring-fixture: exempt -- judged only at detachedFixSweepDeps' pinned now (04:40Z, +40m), never the wall clock; suite passes at +400d
     headSha: "detached-fix-head",
     autoMergeArmed: false,
   };
