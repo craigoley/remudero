@@ -1,0 +1,77 @@
+- id: W1-T3454
+  title: "the daemon supports a Vercel-recognized Git author but normal recycle drops it — the entrypoint accepts RMD_GIT_AUTHOR_*, while the runtime contract never carries those names into the replacement container"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  priority: 0
+  budget_usd: 55.00
+  files: [deploy/runtime-env-vars.sh, deploy/recycle-container.sh, deploy/host-update.sh, test/recycle-container.test.ts]
+  origin: "operator-session#private-portal-vercel-preview-identity-2026-09-12"
+  plan_refs: ["W1-T1010", "W1-T1069"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON PRIVATE PORTAL PR #8 at 04d634087e2fe755c3b3fb8ee488289fab46c862. Vercel blocked
+    the preview before a build: `remudero-worker@users.noreply.github.com` could not be matched to
+    a GitHub account. The portal source checks were green, so this is deployment attribution, not
+    an application build failure. Vercel's Pro-team collaboration policy requires a private-repo
+    commit author to resolve to a project-team member.
+
+    SOURCE RE-DERIVED AT a5abfd0eef7182748a1cbc8947df765395f1309e. `deploy/entrypoint.sh`
+    already configures `RMD_GIT_AUTHOR_NAME` and `RMD_GIT_AUTHOR_EMAIL` when supplied; its unit
+    test proves that override. But the canonical daemon runtime list and both isolated-script
+    fallback lists omit both names. `recycle-container.sh` therefore cannot capture an operator's
+    initial override from its shell when the old container lacks it, cannot pass it into `docker
+    run`, and every future recycle starts the default unmatchable worker identity again.
+
+    The current direct Azure container confirms the defect: `/home/node/.gitconfig` contains the
+    default worker email and the target clone has no local override. An ephemeral `docker exec`
+    edit would disappear on the normal recycle path, bypass the graceful process, and would not
+    satisfy the requested automation standard.
+
+  design: |
+    Add the two existing entrypoint override names to the single declared daemon runtime contract,
+    its two intentionally isolated fallback arrays, and host-update's printed daemon invocation.
+    Preserve the name-list-only discipline: no author value belongs in source, a ledger, or output.
+    A normal recycle must first carry a non-empty author name or email from the invoking shell when
+    the old container has no value, then prefer a non-empty value already carried by the live
+    container over a conflicting shell value on later recycles. It must pass the selected values
+    only as Docker environment arguments, exactly like other declared runtime variables.
+
+    Do not change `deploy/entrypoint.sh`'s default identity or its existing override semantics,
+    add any credential, weaken the recycle's drain/pause/image/mount proofs, or write author data
+    to the bind-mounted state. The operational commissioning step after this task ships uses the
+    normal graceful recycle script with the operator's already-Vercel-recognized Git email; a
+    subsequent agent-authored portal commit must obtain a Vercel preview before its PR can merge.
+
+  acceptance:
+    - claim: "the canonical runtime name list, both isolated-script fallback lists, and host-update's printed daemon invocation declare exactly the Git author override names alongside the existing runtime contract"
+      proof: "unit test: Git author names stay declared across every recycle surface"
+    - claim: "a first normal recycle carries Git author overrides supplied only by the invoking shell into the replacement container when the old container lacks them"
+      proof: "unit test: a first recycle seeds Git author overrides from the shell"
+    - claim: "a later recycle preserves a live Git author override and refuses to replace it with a conflicting shell value"
+      proof: "unit test: a live Git author override outranks the shell on recycle"
+    - claim: "the recycle records only the declared author variable names, never their values, while retaining all existing graceful pause, drain, image, and mount checks"
+      proof: "unit test: Git author override values never reach recycle output"
+
+  falsifier: |
+    Drive the real recycle script with a stubbed old container that lacks both author variables and
+    a shell carrying distinct fixture values. If the captured Docker run arguments omit either
+    value, this diagnosis is false. Then make the old container carry different non-empty values;
+    if a conflicting shell value wins, the preservation claim is false. Delete either author name
+    from the production declaration and require the consistency or propagation test to fail, then
+    restore it and require the focused suite to pass.
+
+  note: |
+    `rmd next-task-id --reserve` on the Azure controller held W1-T3454 at
+    refs/rmd-id/W1-T3454 on origin after one attempt. The initial W1-T3452 reservation is retained
+    as an immutable detached-holder audit record, so the corrected branch-bound reservation uses
+    W1-T3454. `priority: 0` is deliberate: this blocks
+    the active portal PR's Vercel preview rather than representing general hardening. This task is high risk by blast radius: the
+    graceful recycler replaces the production daemon on every supported host. It does not alter
+    browser authentication, daemon GitHub/App credentials, or Vercel secrets; it makes a
+    non-secret commit attribution choice durable across the script that already owns replacement.
