@@ -22,7 +22,7 @@ import { appendLedger } from "./ledger.js";
 import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
-import { DEFAULT_RISK, type AcceptanceCriterion, type Plan, type TaskRisk } from "./plan.js";
+import { DEFAULT_RISK, RETIREMENT_REASONS, type AcceptanceCriterion, type Plan, type RetirementReason, type TaskRisk } from "./plan.js";
 import {
   defaultCreditStorePath,
   hasCreditBackfillReceipt,
@@ -2778,6 +2778,7 @@ export interface OpenPrView {
   prUrl: string;
   /** The task this PR credits (its `Remudero-Task:` trailer), if resolved. */
   taskId?: string;
+  taskRetirement?: RetirementReason;
   /** Rolled-up remudero-review state on the head. */
   reviewState: "success" | "failure" | "pending" | "none";
   /** Rolled-up required-checks state on the head. */
@@ -2886,6 +2887,7 @@ export interface OpenPrView {
    *  POSITIVE signal from the emitter's own output — never inferred from the absent trailer, which
    *  would swallow a broken one. No producer sets it yet, so every unattributable PR escalates. */
   isPlanFiling?: boolean;
+  planFilingSource?: "emitter-ledger" | "github-files" | "unreadable" | "not-plan-only";
   /** The failing review's one-line summary (context for fix/escalate). */
   reviewSummary?: string;
   /** Failing required-check name and log-tail evidence — the W1-T94 ci-log fix mode's input
@@ -4538,6 +4540,17 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "stale",
     when: (pr) => pr.taskMergedBy != null,
     reason: (pr) => `task ${pr.taskId ?? "(unknown)"} already merged by #${pr.taskMergedBy} — closing the leftover implementation PR`,
+  },
+  {
+    disposition: "stale",
+    when: (pr) =>
+      pr.taskId !== undefined &&
+      pr.taskRetirement !== undefined &&
+      RETIREMENT_REASONS.includes(pr.taskRetirement) &&
+      pr.isPlanFiling === false &&
+      pr.planFilingSource === "not-plan-only",
+    reason: (pr) =>
+      `task ${pr.taskId ?? "(unknown)"} is explicitly ${pr.taskRetirement ?? "unclassified"} in the current main plan — closing the leftover implementation PR`,
   },
   {
     // W1-T932 — LETS THIS ROW YIELD, NEVER DISABLES IT: a guard that works for ordinary duplicate

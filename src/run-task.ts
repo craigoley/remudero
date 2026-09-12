@@ -29476,6 +29476,7 @@ export function buildOpenPrViews(
       // A plain key whose value is a call is what the census recognises.
       isPlanFiling: planFiling.isPlanFiling,
       planFilingSource: planFiling.source,
+      taskRetirement: taskRecord?.retirement,
       // W1-T923: a SIBLING read, off the SAME `review.posted` ledger line `unmetCriteria` above
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
@@ -32314,6 +32315,8 @@ export async function fixCommand(
     // and never runs that pass, so this stays `undefined` — which the field's own doc defines as
     // UNKNOWN, leaving every disposition it feeds untouched.
     taskMergedBy: undefined,
+    taskRetirement: undefined,
+    planFilingSource: undefined,
     lastActivityAt: raw.updatedAt,
     // W1-T1201: same age-clamp projection as buildOpenPrViews above — see RawOpenPr.createdAt's
     // doc for why this is `undefined` in the real gateway today.
