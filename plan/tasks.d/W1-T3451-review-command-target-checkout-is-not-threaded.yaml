@@ -80,6 +80,8 @@
     refs/rmd-id/W1-T3451 on origin after one attempt. `priority: 0` is deliberate: this is an
     active private-portal merge blocker, not general backlog work. This task is high risk by span: one command
     coordinates Git reads, worktree lifecycle, proof execution, and an external status; the narrow
-    files list is intentional. The portal remains unable to satisfy the same semantic-review
+    files list is intentional. The reservation holder metadata was refreshed after the initial
+    automatic anchor recorded `branch=unknown`, so the held id names this filing branch rather than
+    an unreadable holder. The portal remains unable to satisfy the same semantic-review
     process as public Remudero until this task is implemented, deployed to the controller image,
     and replayed against PR #8.
