@@ -33,6 +33,8 @@ function coverageSpawn(options: { missingArtifactShard?: number; missingSummaryS
       if (shard !== options.missingArtifactShard) {
         mkdirSync(rawDir, { recursive: true });
         writeFileSync(join(rawDir, `coverage-${shard}-0000000000000-0.json`), "{}\n");
+      } else {
+        rmSync(rawDir, { recursive: true, force: true });
       }
       const stdout = shard === options.missingSummaryShard ? "ok 1 - shard without totals\n" : "# tests 1\n# pass 1\n# fail 0\n";
       return { status: 0, stdout, stderr: "" };
@@ -68,7 +70,8 @@ test("coverage entry runs CI's four shard selectors, then merges the shard raw c
       ["--test-shard=1/4", "--test-shard=2/4", "--test-shard=3/4", "--test-shard=4/4"],
     );
     for (const call of shardCalls) {
-      assert.equal(call.opts?.stream, true, "each coverage shard stays a streamed long-running suite");
+      assert.equal(call.file, process.execPath, "each coverage shard shells node directly, as ci.yml does");
+      assert.equal(call.args.includes(join(REPO_ROOT, "scripts", "test-with-retry.mjs")), false, "coverage shards do not use ci's retry wrapper");
       assert.ok(call.opts?.env?.NODE_V8_COVERAGE?.includes("coverage/raw-shards/shard-"), "each shard writes raw coverage to its own artifact directory");
     }
 
