@@ -1,0 +1,54 @@
+- id: W1-T3444
+  title: "The changed-task source-only regression probe must not depend on its hosting PR's diff"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  band_meaning: blast-radius
+  budget_usd: 6.00
+  files:
+    - test/changed-tasks-raw-text.test.ts
+  origin: "operator-session#main-ci-red-changed-tasks-fixture-2026-09-12"
+  plan_refs: ["W1-T428", "W1-T515"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON GITHUB ACTIONS AND REPRODUCED FROM A FRESH origin/main CLONE ON 2026-09-12.
+    Main commit 348b3ee9's required ci-shard (3/4) failed at
+    test/changed-tasks-raw-text.test.ts:136: its control asserted that
+    `git diff --name-only origin/main...HEAD` contained src/run-task.ts. That assertion was
+    introduced by b3f561aa (#5219), where the hosting PR happened to carry that source diff.
+    It necessarily becomes false on main and on any plan-only PR, so the test red-blocks the
+    fleet despite exercising no product behavior.
+
+    The direct falsifier was run in a clean clone at 348b3ee9: the focused file passed 8/9 and
+    failed only this control with `control: this PR must still carry the source diff`. This is a
+    deterministic fixture defect, not a flaky CI host or a changed lint-plan result.
+  design: |
+    Make the source-only probe self-contained, as the preceding W1-T515 fixture probe already is.
+    Create an isolated checkout, append a synthetic marker only to its copy of src/run-task.ts,
+    assert that `git diff --name-only HEAD` contains exactly that source file, then run
+    lintPlanCommand against that fixture with --base HEAD. Preserve the assertion that no plan
+    task is checked. Do not change src/lib/task-linter.ts, src/run-task.ts, plan files, CI
+    configuration, or any production behavior.
+
+    This task record and the test repair intentionally travel in the same emergency PR: current
+    main cannot merge a plan-only predecessor while this test itself keeps the required main gate
+    red. The combined diff remains one concern and gives task-id-existence the concrete record it
+    must verify before this hotfix is accepted.
+  acceptance:
+    - claim: "the source-only base-side lookup is proven from an isolated checkout with exactly one synthetic source diff and no plan diff"
+      proof: "grep: W1-T3444 criterion 1 in test/changed-tasks-raw-text.test.ts"
+    - claim: "the proof no longer relies on origin/main...HEAD or on a property of its hosting PR"
+      proof: "grep: raw-text source-only regression probe in test/changed-tasks-raw-text.test.ts"
+    - claim: "the changed-task source-only probe continues to prove zero plan tasks are checked"
+      proof: "grep: W1-T3444 source-only fixture preserves zero-plan scope in test/changed-tasks-raw-text.test.ts"
+  falsifier: |
+    Do not build if the current main test already creates its own source-only diff, or if a fresh
+    origin/main clone passes the focused suite without a hosting-PR diff. Both are false: the
+    test reads origin/main...HEAD directly and a clean clone fails only its hosting-diff control.
+    Reject any patch that alters lint-plan or production source rather than the defective test
+    fixture.
+  note: "W1-T3444 was atomically reserved at refs/rmd-id/W1-T3444 before this emergency filing."
