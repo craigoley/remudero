@@ -181,6 +181,42 @@ export function changedPathsAtRange({ baseSha, headSha, root = REPO_ROOT, git } 
   }
 }
 
+/** A task trailer found in one commit reachable from a pull request head. */
+export function commitTaskTrailersAtRange({ baseSha, headSha, root = REPO_ROOT, git } = {}) {
+  if (!baseSha || !headSha) return undefined;
+  const run =
+    git ??
+    ((args) => execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }));
+  let output;
+  try {
+    // Commit messages cannot contain NUL, so this is a structural record format rather than a
+    // line-oriented parse of third-party text. `-z` supplies the record separator; without it,
+    // git inserts a newline between formatted commits and shifts the next record's sha into the
+    // preceding body field. `%B` deliberately sees trailers on FOLLOW-UP commits, not only the
+    // pull request body or its tip commit (W1-T3414).
+    // Two dots deliberately select only commits reachable from the PR head and not its base.
+    // Triple-dot would also scan base-only commits after a branch fell behind main, turning an
+    // unrelated main trailer into a refusal on this PR.
+    output = run(["log", "-z", "--format=%H%x00%s%x00%B", `${baseSha}..${headSha}`]);
+  } catch {
+    return undefined;
+  }
+  const fields = String(output).split("\0");
+  const trailers = [];
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    const [sha, subject, body] = fields.slice(index, index + 3);
+    if (!sha) continue;
+    const seen = new Set();
+    for (const match of body.matchAll(/^Remudero-Task:[ \t]*([A-Za-z0-9-]+)[ \t]*$/gm)) {
+      const taskId = match[1];
+      if (seen.has(taskId)) continue;
+      seen.add(taskId);
+      trailers.push({ sha, subject, taskId });
+    }
+  }
+  return trailers;
+}
+
 export { REPO_ROOT };
 
 /**
@@ -269,6 +305,37 @@ export function planOnlyImplementationTrailerRefusal({ body, changedPaths, taskF
 }
 
 /**
+ * W1-T3414 — a branch commit can add a trailer after the PR author deliberately opened a
+ * plan-only filing without one. Squash merge preserves commit bodies, so inspect every reachable
+ * branch commit before accepting the PR. This is deliberately an extension of the existing
+ * author-time gate, not a second workflow or a post-merge best-effort report.
+ * @param {{ trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined }} input
+ */
+export function followupCommitImplementationTrailerRefusal({ trailerCommits, changedPaths, taskFilesForId }) {
+  if (trailerCommits === undefined || changedPaths === undefined || changedPaths.length === 0 || taskFilesForId === undefined) return undefined;
+  if (!changedPaths.every(isInPlanScope)) return undefined;
+  for (const trailer of trailerCommits) {
+    let declaredFiles;
+    try {
+      declaredFiles = taskFilesForId(trailer.taskId);
+    } catch {
+      continue;
+    }
+    const nonPlanFiles = Array.isArray(declaredFiles) ? declaredFiles.filter((path) => !isInPlanScope(path)) : [];
+    if (nonPlanFiles.length === 0) continue;
+    return {
+      ok: false,
+      defect: "follow-up-implementation-trailer",
+      message:
+        `Commit ${trailer.sha} (${trailer.subject}) carries Remudero-Task: ${trailer.taskId}, but this pull request ` +
+        `changes only plan-scope path(s) and does not ship its non-plan file(s): ${nonPlanFiles.join(", ")}. ` +
+        "Remove the trailer from that commit or include the implementation changes.",
+    };
+  }
+  return undefined;
+}
+
+/**
  * The gate's own verdict: the bot exemption first, then the two structural refusals, then
  * `acceptanceAuthorTimeCheck` (no `expectedTaskId` — this job has no PR-to-task binding of its
  * own, the same general-case call shape `rmd check-acceptance` itself uses), then proof shape.
@@ -277,9 +344,9 @@ export function planOnlyImplementationTrailerRefusal({ body, changedPaths, taskF
  * caller is what supplies it, so a `Remudero-Task:` trailer naming an id the plan does not declare
  * stops buying an exemption. `trailerResolves` OMITTED — which is what a caller with an unreadable
  * plan passes — leaves the verdict byte for byte what it was before this wiring.
- * @param {{ body: string, authorLogin?: string, trailerResolves?: (taskId: string) => boolean, introducedTaskIds?: string[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined }} input
+ * @param {{ body: string, authorLogin?: string, trailerResolves?: (taskId: string) => boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined }} input
  */
-export function evaluateGate({ body, authorLogin, trailerResolves, introducedTaskIds = [], changedPaths, taskFilesForId }) {
+export function evaluateGate({ body, authorLogin, trailerResolves, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
@@ -293,6 +360,8 @@ export function evaluateGate({ body, authorLogin, trailerResolves, introducedTas
   if (!selfCredit.ok) return { ok: false, defect: "files-and-credits-the-same-task", message: selfCredit.message };
   const structuralRefusal = planOnlyImplementationTrailerRefusal({ body, changedPaths, taskFilesForId });
   if (structuralRefusal !== undefined) return structuralRefusal;
+  const followupRefusal = followupCommitImplementationTrailerRefusal({ trailerCommits, changedPaths, taskFilesForId });
+  if (followupRefusal !== undefined) return followupRefusal;
   const result = acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
   return result.ok ? authorTimeProofShapeRefusal(body, result) : result;
 }
@@ -374,6 +443,7 @@ export function main(argv) {
     authorLogin: payload.authorLogin,
     trailerResolves: planTrailerResolver(),
     introducedTaskIds: introducedShardTaskIds({ baseSha: payload.baseSha, headSha: payload.headSha }),
+    trailerCommits: commitTaskTrailersAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
     changedPaths: changedPathsAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
     taskFilesForId: planTaskFilesResolver(),
   });
