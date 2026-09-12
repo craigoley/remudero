@@ -1418,7 +1418,13 @@ import {
 } from "./lib/worker-home.js";
 import { FIX_WORKER_TOOLS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
-import { checkCliFreshness, checkServiceFreshness, daemonFreshnessFromService } from "./lib/self-sync.js";
+import {
+  checkCliFreshness,
+  checkReviewerCodeFreshness,
+  checkServiceFreshness,
+  daemonFreshnessFromService,
+  type ReviewerCodeFreshness,
+} from "./lib/self-sync.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
   acquireInflightLock,
@@ -4917,6 +4923,7 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
 export type ReviewRunResult = ReviewVerdict & {
   headSha: string;
   reviewerOutcome: string;
+  codeFreshnessWithheld?: string;
   reviewDecisionDigest?: string;
   decisionDisposition?: "computed" | "replayed" | "in_flight" | "conflict";
   evaluatorProvenance?: ReviewEvaluatorProvenance;
@@ -5051,6 +5058,10 @@ async function runReview(args: {
    * predates this task needs no update.
    */
   openTaskIds?: ReadonlySet<string>;
+  /** Freshly observes the module graph that will publish this run's terminal verdict. Production
+   * call sites supply it immediately before posting; test-only direct calls retain their existing
+   * isolated status-poster contract. */
+  reviewerCodeFreshness?: () => ReviewerCodeFreshness;
 }): Promise<ReviewRunResult> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const headSha = readHeadShaRest(prUrl);
@@ -5362,6 +5373,12 @@ async function runReview(args: {
   // overwrite an executed-evidence verdict with a weaker one, or write
   // against an already-merged/closed PR. See lib/review.ts's W1-T228 block
   // comment for the full design.
+  let reviewerCodeFreshness: ReviewerCodeFreshness | undefined;
+  try {
+    reviewerCodeFreshness = args.reviewerCodeFreshness?.();
+  } catch (error) {
+    reviewerCodeFreshness = { status: "unreadable", reason: `could not assess reviewer code freshness: ${String(error)}` };
+  }
   const posted = await postReviewStatusGuarded({
     owner,
     repo,
@@ -5377,6 +5394,7 @@ async function runReview(args: {
     reviewDecisionDigest: decisionDigest,
     reviewEngineRevision: REVIEW_ENGINE_REVISION,
     evaluatorProvenance,
+    reviewerCodeFreshness,
     fetchLifecycle: () => fetchPrLifecycle(prUrl),
   });
   if (posted.conflict) {
@@ -5403,7 +5421,17 @@ async function runReview(args: {
       `remudero-review: post REFUSED for ${headSha.slice(0, 7)} (verdict computed: ${verdict.state}) — ` +
         `${posted.reason} (W1-T228 — see the review.post_refused ledger line)`,
     );
-    return { ...verdict, headSha, reviewerOutcome: outcome, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+    return {
+      ...verdict,
+      headSha,
+      reviewerOutcome: outcome,
+      ...(reviewerCodeFreshness !== undefined && reviewerCodeFreshness.status !== "fresh"
+        ? { codeFreshnessWithheld: posted.reason ?? "reviewer code freshness withheld the terminal verdict" }
+        : {}),
+      reviewDecisionDigest: decisionDigest,
+      decisionDisposition,
+      evaluatorProvenance,
+    };
   }
   const unmet = verdict.criteria.filter((c) => !c.met);
   // W1-T166: holdout criteria are reviewer-visible but WORKER-hidden. `verdict.state`
@@ -5436,6 +5464,7 @@ async function runReview(args: {
     review_decision_digest: decisionDigest,
     decision_verdict: verdict,
     evaluator_provenance: evaluatorProvenance,
+    ...(reviewerCodeFreshness !== undefined ? { reviewer_code_provenance: reviewerCodeFreshness } : {}),
     test_theater: verdict.testTheater,
     unmet_criteria: unmetClaims,
     reasons,
@@ -7598,6 +7627,9 @@ export async function runFixRung(opts: {
   /** W1-T322: threaded straight through to every re-review this rung runs — see runReview's own
    *  `openTaskIds` doc. Optional; absent behaves exactly as every pre-W1-T322 caller already does. */
   openTaskIds?: ReadonlySet<string>;
+  /** Re-read immediately before each fix-rung terminal verdict; never reuse a boot-time code
+   * observation after the worker has spent time changing or waiting on the PR. */
+  reviewerCodeFreshness?: () => ReviewerCodeFreshness;
   /**
    * W1-T78: an operator's answer to a clarification question, if this is a
    * RE-DISPATCH — carried verbatim on EVERY strike's prompt as an added
@@ -9441,10 +9473,15 @@ export async function runFixRung(opts: {
       account: deps.account,
       reviewerMount: opts.reviewBase.reviewerMount,
       headCheckoutDir: opts.reviewBase.headCheckoutDir,
+      reviewerCodeFreshness: opts.reviewerCodeFreshness,
       ledgerPath: deps.ledgerPath,
       runId: opts.runId,
       openTaskIds: opts.openTaskIds,
     });
+    if (review.codeFreshnessWithheld) {
+      deps.log("fix.stood_down", { site: "rung.reviewer_code_freshness", strikes, reason: review.codeFreshnessWithheld });
+      return { outcome: "stood_down", review, strikes, retriggers, reason: review.codeFreshnessWithheld, standDownReason: review.codeFreshnessWithheld };
+    }
     // W1-T100: a real review verdict now exists for THIS head — the CURRENT
     // strike stays review-mode from here. W1-T138: this can still flip back
     // to true on a LATER strike if ITS push regresses CI again (see above).
@@ -13437,10 +13474,25 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // that follows never mutates it). NEVER the operator's working checkout —
       // the deterministic floor observes THIS run's repo state, not report prose.
       headCheckoutDir: worktreePath,
+      reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
       ledgerPath,
       runId,
       openTaskIds,
     });
+
+    if (review.codeFreshnessWithheld) {
+      log("verdict", {
+        verdict: "blocked",
+        pr_url: prUrl,
+        reason: review.codeFreshnessWithheld,
+        cost_usd: costUsd,
+        billing_mode: billingMode(impl.childEnvKeys),
+        account_label: impl.accountLabel,
+        ...terminalVerdictFields(impl),
+      });
+      say(`verdict: blocked — reviewer code freshness withheld the review verdict: ${prUrl}`);
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+    }
 
     // ── THE blocked_review FIX RUNG (W1-T76, absorbs P21; §3's fixing state).
     // A failing review used to be TERMINAL here — the PR sat OPEN, the reviewer's
@@ -13467,6 +13519,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         initialReview: review,
         reviewBase: { owner, repo: task.repo, headCheckoutDir: worktreePath, reviewerMount },
         openTaskIds,
+        reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
         deps: {
           spawn,
           waitForCiGreen,
@@ -15110,6 +15163,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
           // the documented fallback (criterion 5) — never silent.
           headCheckoutDir: worktreePath,
+          reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
           // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)
           // can see each one reach the evidence: the dir, the per-proof unreadable set (W1-T460), and
           // whether the dir is a checkout a `unit test:` proof may honestly be re-run in (R-11).
@@ -15129,12 +15183,14 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   );
 
   console.log(
-    `\nremudero-review=${verdict.state} posted to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
+    `\nremudero-review=${verdict.state} ${verdict.codeFreshnessWithheld ? "WITHHELD" : "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
+      (verdict.codeFreshnessWithheld ? ` — ${verdict.codeFreshnessWithheld}` : "") +
       (verdict.keywordOnly ? " — KEYWORD-ONLY: no proof was executed (no PR-head checkout)" : "") +
       // W1-T1085: the same three-way fact the status itself renders — a plan-only PR is not a
       // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
       (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
+  if (verdict.codeFreshnessWithheld) return 2;
 
   if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(source, repoRoot)) {
     console.log(
