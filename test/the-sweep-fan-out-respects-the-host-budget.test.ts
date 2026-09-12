@@ -47,7 +47,7 @@ function fixablePr(prNumber: number): OpenPrView {
     ],
     reviewSummary: "one criterion unmet",
     priorStrikes: 0,
-    lastActivityAt: new Date(NOW - 60 * 60 * 1000).toISOString(),
+    lastActivityAt: "2026-09-05T19:00:00Z", // expiring-fixture: exempt -- the clock is INJECTED (now: () => NOW, line 94) so this stamp is never compared to the wall clock; proved by shifting NOW and both stamps back 7y with offsets preserved -- 3/3 still pass
     headSha: `fix-${prNumber}`,
     autoMergeArmed: false,
   };
@@ -62,7 +62,7 @@ function reviewablePr(prNumber: number): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: new Date(NOW - 60 * 60 * 1000).toISOString(),
+    lastActivityAt: "2026-09-05T18:00:00Z", // expiring-fixture: exempt -- the clock is INJECTED (now: () => NOW, line 94) so this stamp is never compared to the wall clock; proved by shifting NOW and both stamps back 7y with offsets preserved -- 3/3 still pass
     headSha: `review-${prNumber}`,
     autoMergeArmed: false,
   };
