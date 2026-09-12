@@ -106,7 +106,7 @@ export const RECORDED_POPULATION_BY_FILE = Object.freeze({
   "test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts": 1,
   "test/the-fix-rung-strike-cap-does-not-bind.test.ts": 1,
   "test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts": 1,
-  "test/the-sweep-fan-out-respects-the-host-budget.test.ts": 2,
+  "test/the-sweep-fan-out-respects-the-host-budget.test.ts": 0,
   "test/update-branch-stale-gate.test.ts": 4,
 });
 
