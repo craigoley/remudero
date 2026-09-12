@@ -11,9 +11,14 @@
   files: [src/lib/git-push.ts, src/lib/daemon.ts, test/a-gate-refusal-is-not-a-crash.test.ts]
   origin: "operator-session#daemon-health-2026-09-10"
   plan_refs: ["W1-T2537", "W1-T2546", "W1-T490", "W1-T3205", "W1-T3311"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
+    RECONCILED 2026-09-11. Commit 703114f9 (`fix(daemon): a pre-push gate refusal is blocked,
+    not a crash (#4922)`) is on main. The named focused test passes all nine assertions. W1-T3319
+    subsequently generalised the exit classification; that later scope does not make this shipped
+    prerequisite dispatchable again.
+
     BAND. `risk: high` with `band_meaning: blast-radius` — the two are not the same axis and this is
     the case that shows why. The DIFF is one classifier and one exit-code mapping, a few lines; the
     BLAST RADIUS is whether the fleet keeps running at all, because this function decides what docker
