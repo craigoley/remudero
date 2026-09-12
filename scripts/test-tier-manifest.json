@@ -1280,6 +1280,7 @@
     "test/the-console-serves-its-own-assets.test.ts": 0,
     "test/the-contract-covers-its-own-console.test.ts": 0,
     "test/the-cost-anomaly-sentinel-re-reports-the-same-finding-forever.test.ts": 1047,
+    "test/the-coverage-entry-shards-the-way-ci-does.test.ts": 0,
     "test/the-daemon-lane-can-cut-more-than-one-worktree.test.ts": 3048,
     "test/the-daemon-leaves-before-v8-throws-it-out.test.ts": 0,
     "test/the-daily-rung-only-fires-when-a-human-types-it.test.ts": 5965,
