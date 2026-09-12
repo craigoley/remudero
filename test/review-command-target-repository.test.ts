@@ -7,7 +7,15 @@ import { test } from "node:test";
 
 import type { Config } from "../src/lib/config.js";
 import { postReviewStatusGuarded } from "../src/lib/review.js";
-import { buildBaseProofDir, reviewCommand, runReview, type BaseProofDir, type ReviewRunResult } from "../src/run-task.js";
+import {
+  buildBaseProofDir,
+  resolveReviewSubjectCheckout,
+  reviewCommand,
+  reviewSubjectFallbackAllowed,
+  runReview,
+  type BaseProofDir,
+  type ReviewRunResult,
+} from "../src/run-task.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const CONTROLLER_HEAD = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -89,7 +97,10 @@ test("target review uses only the target checkout", async () => {
       enforceReviewSubjectCheckout: true,
       fetchView: () => restPull("Remudero-Task: W1-TARGET", target.head),
       loadConfig: () => ({ root }) as Config,
-      fetchHead: (repoDir) => calls.fetchHead.push(repoDir),
+      fetchHead: (repoDir) => {
+        calls.fetchHead.push(repoDir);
+        throw new Error("best-effort fetch is retried by materialization");
+      },
       postReviewPending: async () => ({ posted: true }) as never,
       materialize: (_config, repoDir) => {
         calls.materialize.push(repoDir);
@@ -108,6 +119,57 @@ test("target review uses only the target checkout", async () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("target checkout resolver names local validation failures", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-review-target-resolver-"));
+  try {
+    const base = {
+      config: { root } as Config,
+      rest: ["--repo", "acme/portal"],
+      self: { owner: "acme", repo: "remudero" },
+      target: { owner: "acme", repo: "portal" },
+      controllerRepoRoot: REPO_ROOT,
+    };
+
+    const missing = resolveReviewSubjectCheckout({ ...base, exists: () => true });
+    assert.equal(missing.ok, false);
+    if (!missing.ok) assert.equal(missing.reason, "review-subject-missing");
+
+    mkdirSync(join(root, "repos", "portal"), { recursive: true });
+    const notGit = resolveReviewSubjectCheckout({
+      ...base,
+      exists: () => true,
+      isDirectory: () => true,
+      git: () => "false",
+    });
+    assert.equal(notGit.ok, false);
+    if (!notGit.ok) assert.equal(notGit.reason, "review-subject-not-git");
+
+    const noOrigin = resolveReviewSubjectCheckout({
+      ...base,
+      exists: () => true,
+      isDirectory: () => true,
+      git: (_repoDir, argv) => {
+        if (argv[0] === "rev-parse") return "true";
+        throw new Error("origin unavailable");
+      },
+    });
+    assert.equal(noOrigin.ok, false);
+    if (!noOrigin.ok) assert.equal(noOrigin.reason, "review-subject-origin-mismatch");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("injected review fixtures may retain the historical controller fallback", () => {
+  assert.equal(reviewSubjectFallbackAllowed({ enforceReviewSubjectCheckout: true, fetchView: () => ({}) }), false);
+  assert.equal(reviewSubjectFallbackAllowed({}), false);
+  assert.equal(reviewSubjectFallbackAllowed({ fetchView: () => ({}) }), true);
+  assert.equal(reviewSubjectFallbackAllowed({ fetchHead: () => {} }), true);
+  assert.equal(reviewSubjectFallbackAllowed({ materialize: (() => undefined) as never }), true);
+  assert.equal(reviewSubjectFallbackAllowed({ runReview: (async () => verdict(CONTROLLER_HEAD)) as never }), true);
+  assert.equal(reviewSubjectFallbackAllowed({ postReviewPending: async () => ({ posted: true }) as never }), true);
 });
 
 test("target proof worktrees use and clean only the target checkout", async () => {
