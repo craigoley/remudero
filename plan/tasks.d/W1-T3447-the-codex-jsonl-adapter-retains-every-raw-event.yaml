@@ -42,25 +42,25 @@
     Tool/command payloads are consumed and released immediately; no full raw transcript and no
     `stdoutChunks.join("")` remains.
 
-    Put explicit byte ceilings on the only carry and semantic text that can survive between chunks:
-    an unterminated record, each retained error, and the complete retained agent-message transcript.
-    A ceiling breach must terminate the contained worker and return a named error outcome; it must
-    never silently drop a marker then return a successful worker result. Preserve the final-message
-    and terminal-error semantics for all streams under those ceilings, including a line split across
-    multiple chunks. Continue to cap persisted excerpts at their existing boundary; do not weaken
-    worker isolation, alter provider selection, increase the daemon heap, reduce worker lanes, or
-    change the sweep/fix wall-clock policies.
+    Put explicit byte ceilings on the current JSONL record/carry, each retained error, and the
+    complete retained agent-message transcript. A tool event below the fixed record ceiling may
+    be parsed and discarded; an over-ceiling record must terminate the contained worker and return
+    a named error outcome. The ceiling must never silently drop a marker then return a successful
+    worker result. Preserve the final-message and terminal-error semantics for all streams under
+    those ceilings, including a line split across multiple chunks. Continue to cap persisted
+    excerpts at their existing boundary; do not weaken worker isolation, alter provider selection,
+    increase the daemon heap, reduce worker lanes, or change the sweep/fix wall-clock policies.
 
     Keep `parseCodexJsonl` as the pure complete-string compatibility reader only if its tests and
     non-live callers still need it; production `spawnCodexWorker` must use the incremental path.
     The new test owns an injectable contained process and feeds a multi-megabyte ignored tool event
-    plus a valid terminal event. It proves retained decoder bytes remain at the stated fixed ceiling
-    while the final worker envelope remains correct. It also proves an oversized unterminated line
-    is named and reaped rather than accumulated.
+    below the fixed record ceiling plus a valid terminal event. It proves retained decoder bytes are
+    bounded by that ceiling while the final worker envelope remains correct. It also proves an
+    oversized record or unterminated line is named and reaped rather than accumulated.
   acceptance:
     - claim: "a Codex JSONL stream split at arbitrary Buffer boundaries produces the same thread id, final agent message, turn count, usage and terminal-error classification as the existing complete-string parser"
       proof: "unit test: W1-T3447 criterion 1"
-    - claim: "a multi-megabyte ignored tool event does not scale retained adapter bytes, while the following valid terminal agent message and usage still produce a correct worker result"
+    - claim: "a multi-megabyte ignored tool event below the fixed record ceiling cannot grow retained adapter bytes beyond that ceiling, while the following valid terminal agent message and usage still produce a correct worker result"
       proof: "unit test: W1-T3447 criterion 2"
     - claim: "an over-ceiling incomplete record or retained transcript is terminated with a named non-success outcome and the contained worker group is reaped; it never becomes a silent partial success"
       proof: "unit test: W1-T3447 criterion 3"
@@ -73,8 +73,8 @@
     `parseCodexJsonl(stdoutChunks.join(""))` is directly reachable from the live spawn path.
 
     Delete the incremental decoder or restore the raw accumulator: the large ignored-event case
-    must expose retained bytes proportional to the fixture and fail. Mutate the over-ceiling arm to
-    discard data then return success: the named non-success assertion must fail. Remove the
+    must expose an uncapped retained byte count and fail. Mutate the over-ceiling arm to discard
+    data then return success: the named non-success assertion must fail. Remove the
     chunk-boundary handling: the split-line compatibility case must fail. A test that only calls
     `parseCodexJsonl` on a finished string is insufficient because it never exercises the live
     retention path.
