@@ -130,24 +130,25 @@ test("a design-only edit to a real shard raises the --base checked count from 0 
 });
 
 test("a source diff with no plan diff still computes base-side source existence", async () => {
-  const changed = execFileSync("git", ["-C", REPO_ROOT, "diff", "--name-only", "origin/main...HEAD"], { encoding: "utf8" })
-    .split("\n")
-    .filter(Boolean);
-  assert.ok(changed.includes("src/run-task.ts"), "control: this PR must still carry the source diff that drives the base-side source lookup");
-
-  const logs: string[] = [];
-  const origLog = console.log;
-  const origError = console.error;
-  console.log = (m: string) => logs.push(String(m));
-  console.error = (m: string) => logs.push(String(m));
+  const fixture = isolatedCheckout(REPO_ROOT);
   try {
-    const exitCode = await lintPlanCommand(["--base", "origin/main"], { offline: true });
-    const out = logs.join("\n");
-    assert.equal(exitCode, 0, `a source-only diff must not create a plan lint failure; saw:\n${out}`);
-    assert.match(out, /0 task\(s\) checked \(0 new\/changed vs origin\/main\)/);
+    const source = join(fixture.root, "src", "run-task.ts");
+    const original = readFileSync(source, "utf8");
+    writeFileSync(source, `${original}\n// raw-text source-only regression probe\n`, "utf8");
+    const changed = execFileSync("git", ["-C", fixture.root, "diff", "--name-only", "HEAD"], { encoding: "utf8" })
+      .split("\n")
+      .filter(Boolean);
+    assert.deepEqual(changed, ["src/run-task.ts"], "control: the fixture must contain one source diff and no plan diff");
+
+    const result = await runLintPlanBase(undefined, fixture.root);
+    assert.equal(result.exitCode, 0, `a source-only diff must not create a plan lint failure; saw:\n${result.stdout}`);
+    assert.match(
+      result.stdout,
+      /0 task\(s\) checked \(0 new\/changed vs HEAD\)/,
+      "source-only fixture preserves zero-plan scope",
+    );
   } finally {
-    console.log = origLog;
-    console.error = origError;
+    fixture.cleanup();
   }
 });
 
