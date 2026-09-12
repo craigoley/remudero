@@ -86,6 +86,7 @@ usage:
   rmd bundle export <path> | rmd bundle import <file> --pin <hash>   # Export/import a hash-pinned bundle: doctrine, learnings, worker-settings, policy proposals.
   rmd trace <id>   # Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
   rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
+  rmd pr-owner <pr-number>   # Report whether the local ledger shows a fix lane owning one PR.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
@@ -815,6 +816,16 @@ rmd peek <runId> [--lines <n>] [--follow]
 ```
 
 W1-T945: READ-ONLY tail of one run's output — the last <n> lines (default 50, never more than the 500-line ring ceiling) of its retained state/runs/<runId>.tail (W1-T942), printed with a LIVE/FINISHED verdict from the SAME liveInflightRuns pid-checked read every other liveness decision in this fleet uses — never a second definition of 'in flight'. Works identically on a FINISHED run's retained tail, the surviving half of fb-1784821673624-321a4b (its final-message half already shipped as report_excerpt, #1584). An unknown run id or an absent tail prints a NAMED reason and still exits 0 — never silent empty output. --follow re-polls and reprints on change, stopping on its own the moment the run is no longer live — it never hangs on an already-finished run. READ-ONLY BY CONSTRUCTION: no flag here writes to, signals, resumes or kills the run — there is no steering surface in v1.
+
+### `rmd pr-owner`
+
+Report whether the local ledger shows a fix lane owning one PR.
+
+```
+rmd pr-owner <pr-number>
+```
+
+W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. READ-ONLY: this verb writes, claims and releases nothing.
 
 ### `rmd plan`
 

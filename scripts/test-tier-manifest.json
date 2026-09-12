@@ -114,6 +114,7 @@
     "test/a-plan-only-filing-cannot-earn-a-merge-credit.test.ts": 1361,
     "test/a-plan-only-filing-passes-on-naming-coincidence-not-evidence.test.ts": 707,
     "test/a-plan-record-may-name-a-type-nothing-can-route.test.ts": 0,
+    "test/a-pr-names-the-lane-that-owns-it.test.ts": 0,
     "test/a-pr-opens-with-a-judgeable-body.test.ts": 1988,
     "test/a-pr-repair-in-flight-is-invisible-to-the-next-repairer.test.ts": 1486,
     "test/a-printed-remedy-is-never-applied.test.ts": 1407,
