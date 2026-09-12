@@ -1,0 +1,78 @@
+- id: W1-T3442
+  title: "THE APPROVED SKILL TREE HAS ZERO OPTED-IN PROCEDURES — `.claude/skills/` holds only human `disable-model-invocation` macros while `loadInjectableSkills` already injects approved `applies-to` procedures; add one bounded proof-preflight implement skill, not an ungoverned script generator"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 12.00
+  files:
+    - .claude/skills/proof-preflight/SKILL.md
+    - test/a-proof-preflight-skill-is-selectable-and-bounded.test.ts
+    - scripts/test-tier-manifest.json
+  origin: "operator-session#automation-self-improvement-skill-pilot-2026-09-12"
+  plan_refs: ["W1-T3101", "W1-T3379", "W1-T3413"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED AT origin/main c86b8f2f ON 2026-09-12. The approved tree contains exactly two
+    `SKILL.md` files: `tddr` and `grfp`. Both declare `disable-model-invocation: true`; neither
+    declares `applies-to:`. `loadInjectableSkills` in `src/lib/skill-workshop.ts` intentionally
+    excludes them, and `run-task.ts` calls that loader before assembling every worker prompt.
+    The fleet therefore records an explicit zero-selection observation today without altering a
+    prompt.
+
+    THE DELIVERY PATH ALREADY EXISTS. W1-T3101's current implementation loads only approved,
+    opted-in procedures, selects matching task classes under the existing knowledge budget, renders
+    selected procedures into the implement prompt, and writes a compatible `skills.selection` row.
+    The same source preserves the SDK-isolated worker's inability to discover project skills
+    natively; prompt injection is the deliberate independent path, not a reason to widen worker
+    setting sources.
+
+    A GENERIC SCRIPT GENERATOR IS NOT READY. Current source and tests contain `SkillDraft` and its
+    operator-approved staging path, but no `ScriptDraft`, generic script workshop, generated-script
+    registry, or evidence-backed execution/approval boundary. Inventing one would combine
+    unreviewed executable artifacts with self-improvement before the fleet has observed a single
+    approved procedural skill. This task starts with a static, reviewed procedure instead.
+
+    EFFECTIVENESS IS NOT YET A CAUSAL CLAIM. W1-T3379's report requires ten terminal selected
+    runs and ten same-class controls. A compact skill that always fits may yield selection telemetry
+    but no controls, so the expected report remains INSUFFICIENT EVIDENCE. Do not treat installation
+    or a selected row as improved task outcomes.
+  design: |
+    Add exactly one static, operator-reviewed `.claude/skills/proof-preflight/SKILL.md` with
+    `applies-to: implement`. Its procedure must direct an implement worker to read the task's
+    acceptance proof before editing; run the exact reachable proof first when that is safe; state
+    the declared file scope before editing; implement only that scope; rerun the exact proof and
+    the test-tier check; and report OBSERVED versus NOT OBSERVED evidence. It must expressly forbid
+    generating, downloading, or executing a script; self-approval; deployment; and scope expansion.
+
+    Add a repository-tree test that loads the actual approved skill tree, proves this procedure is
+    selected for `implement` and absent for a different task class, renders its complete bounded
+    text, and asserts every required pre-edit, scoped verification, and prohibition. The test must
+    also prove the generated human macros remain excluded by construction. Seed only its new
+    duration-zero entry in the test-tier manifest; do not rewrite other timing rows.
+
+    THIS IS A PILOT, NOT AN EXECUTION ENGINE. Do not modify `WORKER_SETTING_SOURCES`, the skill
+    draft lifecycle, automatic approval, prompt budgets, selection ordering, effectiveness
+    thresholds, or any daemon policy. Do not add a generic script authoring, execution, or registry
+    feature. Existing selection telemetry is sufficient to observe reachability; a later task needs
+    a separately justified control design before any effectiveness conclusion.
+  acceptance:
+    - claim: "the actual approved proof-preflight procedure is selected and rendered for an implement task but not a different task class; its complete rendered text requires pre-edit proof, declared-scope implementation, exact re-verification, and test-tier checking; it expressly prohibits generated or executed scripts, self-approval, deployment, and scope expansion; and the generated human macros remain non-injectable"
+      proof: "unit test: test/a-proof-preflight-skill-is-selectable-and-bounded.test.ts"
+    - claim: "the new proof-preflight test has a duration-zero manifest entry"
+      proof: "grep: a-proof-preflight-skill-is-selectable-and-bounded\\.test\\.ts in scripts/test-tier-manifest.json"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if the approved tree already contains an `applies-to: implement`
+    proof-preflight procedure with the same boundaries, if `loadInjectableSkills` no longer feeds
+    the worker prompt, or if a reviewed `ScriptDraft` plus execution and operator-approval boundary
+    already exists. Re-run:
+    `find .claude/skills -name SKILL.md -print -exec grep -Hn 'applies-to:\|proof-preflight' {} \\;`
+    and
+    `rg -n 'loadInjectableSkills|ScriptDraft|script.*draft|draft.*script' src test`.
+    Reject an implementation that treats `skills.selection` as outcome evidence or that broadens
+    the static procedure into an executable self-improvement system.
+  note: "reservation W1-T3442 held on origin before filing; high/span declares the procedure, its behavioral test, and mandatory test-tier ledger update."

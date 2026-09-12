@@ -16,22 +16,25 @@
  *   (i)  the pure comparator, `statusFlipOnlyTaskIds`, over synthetic corpora — every control the
  *        task's own design and falsifier name, with no git or filesystem involved.
  *   (ii) the REAL `--base HEAD` path through `lintPlanCommand`, over a committed fixture plan
- *        (test/fixtures/live-plan-writers/status-flip/) — each scenario transiently edits its own
- *        shard on disk and restores it in a `finally`, the same technique (i) and (ii) already
- *        use in test/changed-tasks-raw-text.test.ts.
+ *        (test/fixtures/live-plan-writers/status-flip/) in a disposable checkout, so a concurrent
+ *        suite never observes a fixture's temporary mutation.
  */
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 import { statusFlipOnlyTaskIds, STATUS_LINE_RE } from "../src/lib/task-linter.js";
 import { lintPlanCommand } from "../src/run-task.js";
+import { isolatedCheckout } from "./helpers/isolated-checkout.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const FIXTURE_PLAN = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "status-flip", "tasks.yaml");
-const FIXTURE_DIR = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "status-flip", "tasks.d");
+const FIXTURE_CHECKOUT = isolatedCheckout(REPO_ROOT);
+const FIXTURE_PLAN = join(FIXTURE_CHECKOUT.root, "test", "fixtures", "live-plan-writers", "status-flip", "tasks.yaml");
+const FIXTURE_DIR = join(FIXTURE_CHECKOUT.root, "test", "fixtures", "live-plan-writers", "status-flip", "tasks.d");
+
+after(() => FIXTURE_CHECKOUT.cleanup());
 
 function shard(id: string, status: string, extraLine = ""): string {
   const lines = [`- id: ${id}`, `  title: "t ${id}"`, "  repo: remudero", "  type: implement", `  status: ${status}`];
@@ -140,9 +143,12 @@ async function runLintPlanBase(): Promise<{ exitCode: number; stdout: string }> 
   const origWarn = console.warn;
   console.log = (m: string) => logs.push(String(m));
   console.error = (m: string) => logs.push(String(m));
-  console.warn = () => {};
+  console.warn = (m: string) => logs.push(String(m));
   try {
-    const exitCode = await lintPlanCommand(["--plan", FIXTURE_PLAN, "--base", "HEAD"]);
+    const exitCode = await lintPlanCommand(["--plan", FIXTURE_PLAN, "--base", "HEAD"], {
+      offline: true,
+      repoRoot: FIXTURE_CHECKOUT.root,
+    });
     return { exitCode, stdout: logs.join("\n") };
   } finally {
     console.log = origLog;
@@ -150,6 +156,24 @@ async function runLintPlanBase(): Promise<{ exitCode: number; stdout: string }> 
     console.warn = origWarn;
   }
 }
+
+test("an explicit --plan outside the injected checkout root is refused by name", async () => {
+  const logs: string[] = [];
+  const origError = console.error;
+  console.error = (m: string) => logs.push(String(m));
+  try {
+    const exitCode = await lintPlanCommand(["--plan", join(REPO_ROOT, "plan", "tasks.yaml")], {
+      offline: true,
+      repoRoot: FIXTURE_CHECKOUT.root,
+    });
+    const out = logs.join("\n");
+    assert.equal(exitCode, 2, `outside-root plan must be a usage refusal; saw:\n${out}`);
+    assert.match(out, /resolves OUTSIDE the repo root/);
+    assert.match(out, new RegExp(FIXTURE_CHECKOUT.root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    console.error = origError;
+  }
+});
 
 function editShard(fileName: string, mutate: (original: string) => string): { restore: () => void; edited: string } {
   const path = join(FIXTURE_DIR, fileName);
@@ -202,6 +226,26 @@ test("scenario B: a status flip ALONGSIDE a real field edit is linted in full an
   }
 });
 
+test("a grep proof in an injected checkout reads the proof target from that checkout", async () => {
+  const targetRel = "test/fixtures/live-plan-writers/status-flip/grep-case-target.md";
+  writeFileSync(join(FIXTURE_CHECKOUT.root, targetRel), "Widget Registry Becomes Authoritative here.\n", "utf8");
+  const { restore } = editShard("STATUS-FLIP-B-flip-plus-edit.yaml", (t) =>
+    t.replace(
+      '      proof: "unit test: test/a-status-flip-is-not-a-task-edit.test.ts"',
+      `      proof: "grep: widget registry becomes authoritative in ${targetRel}"`,
+    ),
+  );
+  try {
+    const { exitCode, stdout } = await runLintPlanBase();
+    assert.match(stdout, /1 task\(s\) checked \(1 new\/changed vs HEAD\)/);
+    assert.match(stdout, /\[proof-grep-unmatchable\]/, `the grep target should be read from the injected checkout; saw:\n${stdout}`);
+    assert.match(stdout, /DIFFERENT CAPITALISATION/);
+    assert.equal(exitCode, 0, "proof-grep-unmatchable is warn-only");
+  } finally {
+    restore();
+  }
+});
+
 test("scenario C (falsifier's second control): a flip to a still-OPEN status is linted in full and fails on its own violation", async () => {
   const { restore } = editShard("STATUS-FLIP-C-open-flip.yaml", (t) => t.replace(/^  status: queued$/m, "  status: recon"));
   try {
@@ -222,7 +266,10 @@ test("scenario D: `lint-plan` with no --base is untouched by any of this (design
   console.log = (m: string) => logs.push(String(m));
   console.error = (m: string) => logs.push(String(m));
   try {
-    const exitCode = await lintPlanCommand(["--plan", FIXTURE_PLAN]);
+    const exitCode = await lintPlanCommand(["--plan", FIXTURE_PLAN], {
+      offline: true,
+      repoRoot: FIXTURE_CHECKOUT.root,
+    });
     // Whole-plan mode scopes by open status, not by any base diff — STATUS-FLIP-A/B/C are all
     // `status: queued` (open) in the committed fixture and are checked exactly as before.
     assert.ok(exitCode === 0 || exitCode === 1, `must reach a real verdict, got ${exitCode}`);
