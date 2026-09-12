@@ -196,7 +196,7 @@ test("W1-T3331 criterion 3: the same PR is not refired twice against the same ma
 
 test("W1-T3331 in-flight control: a PR with a queued or running check is left untouched", () => {
   const decision = fixedMainRefireDecision(
-    pr({ inFlightCheckNames: ["comment-load-ratchet"] }),
+    { ...pr(), inFlightCheckNames: ["comment-load-ratchet"] },
     MAIN,
     new Set(),
   );
@@ -230,6 +230,7 @@ test("W1-T3331 proof helper: local merge runs every named stale gate and cleans 
   const { calls, git } = fakeGit();
   const scriptsRead: string[] = [];
   const scriptsRun: Array<{ script: string; cwd: string }> = [];
+  const added: Array<{ repoDir: string; worktreePath: string; branch: string; base?: string }> = [];
   const removed: string[] = [];
   const proof = proveFixedMainBlockerViaLocalMerge(
     "/repo",
@@ -238,6 +239,9 @@ test("W1-T3331 proof helper: local merge runs every named stale gate and cleans 
     FIXED_MAIN_DECISION,
     {
       git,
+      worktreeAddImpl: (repoDir, worktreePath, branch, base) => {
+        added.push({ repoDir, worktreePath, branch, base });
+      },
       readPackageScripts: (worktreePath) => {
         scriptsRead.push(worktreePath);
         return { "comment-load-ratchet": "node scripts/comment-load-ratchet.mjs" };
@@ -255,7 +259,13 @@ test("W1-T3331 proof helper: local merge runs every named stale gate and cleans 
     reason: "every stale failing gate passed on the local merge with main",
     localGateExit: 0,
   });
-  assert.deepEqual(calls.map((argv) => argv[2]), ["fetch", "rev-parse", "worktree", "merge"]);
+  assert.deepEqual(calls.map((argv) => argv[2]), ["fetch", "rev-parse", "merge", "branch"]);
+  assert.deepEqual(added, [{
+    repoDir: "/repo",
+    worktreePath: "/tmp/fixed-main-refire-4938",
+    branch: "fixed-main-refire-4938",
+    base: "head-4938",
+  }]);
   assert.deepEqual(scriptsRead, ["/tmp/fixed-main-refire-4938"]);
   assert.deepEqual(scriptsRun, [{ script: "comment-load-ratchet", cwd: "/tmp/fixed-main-refire-4938" }]);
   assert.deepEqual(removed, ["/tmp/fixed-main-refire-4938"]);
@@ -285,6 +295,7 @@ test("W1-T3331 proof helper: unsafe or still-red local proofs decline with named
 
   const mergeFailed = proveFixedMainBlockerViaLocalMerge("/repo", "/tmp/wt", pr(), FIXED_MAIN_DECISION, {
     git: fakeGit({ throwOn: "merge" }).git,
+    worktreeAddImpl: () => {},
     readPackageScripts: () => ({}),
     runScript: () => ({ status: 0, stdout: "", stderr: "" }),
     worktreeRemoveImpl: () => {},
@@ -293,6 +304,7 @@ test("W1-T3331 proof helper: unsafe or still-red local proofs decline with named
 
   const missingScript = proveFixedMainBlockerViaLocalMerge("/repo", "/tmp/wt", pr(), FIXED_MAIN_DECISION, {
     git: fakeGit().git,
+    worktreeAddImpl: () => {},
     readPackageScripts: () => ({}),
     runScript: () => ({ status: 0, stdout: "", stderr: "" }),
     worktreeRemoveImpl: () => {},
@@ -301,6 +313,7 @@ test("W1-T3331 proof helper: unsafe or still-red local proofs decline with named
 
   const stillFails = proveFixedMainBlockerViaLocalMerge("/repo", "/tmp/wt", pr(), FIXED_MAIN_DECISION, {
     git: fakeGit().git,
+    worktreeAddImpl: () => {},
     readPackageScripts: () => ({ "comment-load-ratchet": "node scripts/comment-load-ratchet.mjs" }),
     runScript: () => ({ status: 1, stdout: "fixture expired", stderr: "blocked" }),
     worktreeRemoveImpl: () => {
@@ -326,6 +339,7 @@ test("W1-T3331 effect wiring: default proof, refire, and main-tip readers carry 
   try {
     const effects = buildSweepEffects(baseDeps(root, {
       fixedMainProofGitImpl: git,
+      fixedMainProofWorktreeAddImpl: () => {},
       readPackageScriptsImpl: () => ({ "comment-load-ratchet": "node scripts/comment-load-ratchet.mjs" }),
       runNpmScriptImpl: (script, cwd) => ({ status: 0, stdout: `${script} in ${cwd}`, stderr: "" }),
       worktreeRemoveImpl: () => {},

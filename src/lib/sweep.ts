@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   armAutoMergeDetailed,
@@ -56,6 +56,7 @@ import {
   renderWorkerSettings,
   spawnWorker,
   STDERR_EXCERPT_CAP,
+  worktreeAdd,
   worktreeRemove,
   worktreesDir,
   type QuestionEntry,
@@ -657,6 +658,7 @@ export interface BuildSweepEffectsDeps {
   proveFixedMainBlockerImpl?: SweepRuntimeFn;
   refireFixedMainPrImpl?: SweepRuntimeFn;
   fixedMainProofGitImpl?: DirtyFleetRebaseGit;
+  fixedMainProofWorktreeAddImpl?: typeof worktreeAdd;
   dispatchFixCatchOutcomeImpl?: typeof dispatchFixCatchOutcome;
   worktreeRemoveImpl?: typeof worktreeRemove;
   fixBranchClaimKeyImpl?: SweepRuntimeFn;
@@ -888,6 +890,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     proveFixedMainBlockerImpl,
     refireFixedMainPrImpl,
     fixedMainProofGitImpl,
+    fixedMainProofWorktreeAddImpl,
     dispatchFixCatchOutcomeImpl: dispatchFixCatchOutcomeForBuild = dispatchFixCatchOutcome,
     worktreeRemoveImpl: worktreeRemoveForBuild = worktreeRemove,
     fixBranchClaimKeyImpl: fixBranchClaimKey = requiredSweepRuntime("fixBranchClaimKeyImpl"),
@@ -1381,6 +1384,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             decision,
             {
               git: fixedMainProofGitImpl,
+              worktreeAddImpl: fixedMainProofWorktreeAddImpl,
               runScript: runNpmScriptViaSpawn,
               readPackageScripts: readPackageScriptsFor,
               worktreeRemoveImpl: worktreeRemoveForBuild,
@@ -2878,8 +2882,6 @@ export interface OpenPrView {
    *  head, distinct from a genuine failure ({@link ciFailures} names both). Never makes
    *  `checksState` anything but "red" — see {@link CancelledRequiredCheck}. */
   cancelledRequiredChecks?: CancelledRequiredCheck[];
-  /** Required check names with a queued/in-progress latest attempt; a close/reopen would cancel it. */
-  inFlightCheckNames?: readonly string[];
   /** W1-T2504/W1-T2599 — concluded red children from ci-gate's checked-in REQUIRED contract. */
   redRequiredChecks?: string[];
   /** W1-T2340 — this head's own workflow runs, the raw input {@link stalledRunReason} reads.
@@ -4156,7 +4158,7 @@ export function fixedMainRefireKeysFromLedger(lines: readonly Record<string, unk
 }
 
 export function fixedMainRefireDecision(
-  pr: Pick<OpenPrView, "checksState" | "ciFailures" | "inFlightCheckNames" | "prNumber">,
+  pr: Pick<OpenPrView, "checksState" | "ciFailures" | "prNumber"> & { inFlightCheckNames?: readonly string[] },
   mainTip: MainTipObservation | undefined,
   priorKeys: ReadonlySet<string>,
 ): FixedMainRefireDecision {
@@ -4224,6 +4226,7 @@ export function proveFixedMainBlockerViaLocalMerge(
   decision: FixedMainRefireDecision,
   deps: {
     git?: DirtyFleetRebaseGit;
+    worktreeAddImpl?: typeof worktreeAdd;
     runScript: (script: string, cwd: string) => { status: number; stdout: string; stderr: string };
     readPackageScripts: (worktreePath: string) => Readonly<Record<string, string>>;
     worktreeRemoveImpl?: typeof worktreeRemove;
@@ -4234,9 +4237,12 @@ export function proveFixedMainBlockerViaLocalMerge(
   }
   if (!pr.headRefName) return { passed: false, reason: `PR #${pr.prNumber} has no head branch to fetch` };
   const git = deps.git ?? defaultDirtyFleetRebaseGit;
+  const addWorktree = deps.worktreeAddImpl ?? worktreeAdd;
   const remove = deps.worktreeRemoveImpl ?? worktreeRemove;
   const run = (cwd: string, args: readonly string[]): string => git("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: "pipe" });
-  let worktreeCreated = false;
+  const proofBranch = basename(worktreePath);
+  let worktreeMayExist = false;
+  let branchMayExist = false;
   try {
     mkdirSync(dirname(worktreePath), { recursive: true });
     run(repoDir, [
@@ -4254,8 +4260,12 @@ export function proveFixedMainBlockerViaLocalMerge(
         reason: `origin/${pr.headRefName} moved from ${pr.headSha} to ${observedHead} before fixed-main proof`,
       };
     }
-    run(repoDir, ["worktree", "add", "--detach", worktreePath, pr.headSha]);
-    worktreeCreated = true;
+    worktreeMayExist = true;
+    branchMayExist = true;
+    addWorktree(repoDir, worktreePath, proofBranch, pr.headSha, {
+      readRemoteHead: () => pr.headSha,
+      warn: () => {},
+    });
     try {
       run(worktreePath, ["merge", "--no-commit", "--no-ff", "origin/main"]);
     } catch (error) {
@@ -4276,9 +4286,16 @@ export function proveFixedMainBlockerViaLocalMerge(
   } catch (error) {
     return { passed: false, reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP) };
   } finally {
-    if (worktreeCreated) {
+    if (worktreeMayExist) {
       try {
         remove(repoDir, worktreePath);
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+    if (branchMayExist) {
+      try {
+        run(repoDir, ["branch", "-D", proofBranch]);
       } catch {
         /* best-effort cleanup */
       }
