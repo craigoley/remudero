@@ -105,6 +105,20 @@ jobs:
   assert.deepEqual(deriveCandidates("fake.yml", doc), ["Analyze (javascript-typescript)", "Analyze (actions)"]);
 });
 
+test("deriveCandidates: a non-scalar matrix value refuses rather than stringifying an ambiguous check name", () => {
+  const doc = parseYaml(`
+on:
+  pull_request:
+jobs:
+  shard-job:
+    name: shard (\${{ matrix.n }})
+    strategy:
+      matrix:
+        n: [[1, 2]]
+`) as WorkflowDoc;
+  assert.throws(() => deriveCandidates("fake.yml", doc), /matrix key 'n' has a non-scalar value/);
+});
+
 test("deriveCandidates: an unrecognized `uses:` reusable-workflow caller is reported as its own named gap, never silently assumed", () => {
   const doc = parseYaml(`
 on:
