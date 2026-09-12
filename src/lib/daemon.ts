@@ -26,6 +26,8 @@ import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
+import { creditTruthEscalations } from "./credit-truth-rung.js";
+import type { CreditTruthAudit, CreditTruthDecision, CreditTruthFinding } from "./credit-truth-rung.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
@@ -885,6 +887,13 @@ export interface DaemonDeps {
   /** W1-T3368 — the SELF-HEALING rung: is the ledger archive corpus large enough that a union read
    *  is heading for the heap? Pure from this module's side; the pressure read and the trigger live in
    *  `ledger-compaction-rung.ts`. Optional, so a host that never wires it behaves exactly as before. */
+  /** The credit-truth cadence: decide, audit, deliver. Injected so all three are testable without a
+   *  repo, a plan or GitHub. The audit returns healthy counts too (a clean sweep is a result, not an
+   *  absent row), and delivery is separate so a delivery fault cannot lose the measurement. Contract
+   *  and sizing: `credit-truth-rung.ts`. */
+  checkCreditTruth?: () => CreditTruthDecision;
+  runCreditTruthAudit?: () => Promise<CreditTruthAudit | undefined>;
+  onBrokenCredit?: (findings: readonly CreditTruthFinding[]) => void | Promise<void>;
   checkLedgerCompaction?: () => LedgerCompactionDecision;
   /** Run ONE bounded compaction pass. Never touches the live ledger, never a rotation dependency, and
    *  best-effort like every cadence above it — a compaction fault must never break a daemon cycle. */
@@ -2322,6 +2331,65 @@ export async function runDaemon(
         }
       } else if (compactionDecision) {
         log("ledger_compaction.skipped", { reason: compactionDecision.reason });
+      }
+    }
+
+    // CREDIT TRUTH: does what the fleet recorded as done actually exist? The measured loss, the
+    // verdict taxonomy and the escalation bound are all in `credit-truth-rung.ts`; this is only the
+    // cadence. Same tick discipline as above — the decision's reason travels into every row, a check
+    // fault is a row and never a throw, and a CLEAN audit is logged so silence cannot pass for it.
+    if (deps.checkCreditTruth) {
+      let creditDecision: CreditTruthDecision | undefined;
+      try {
+        creditDecision = deps.checkCreditTruth();
+      } catch (e) {
+        log("credit_truth.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (creditDecision?.fire) {
+        log("credit_truth.fired", { reason: creditDecision.reason });
+        if (deps.runCreditTruthAudit) {
+          try {
+            const audit = await deps.runCreditTruthAudit();
+            if (audit === undefined) {
+              log("credit_truth.undeterminable", { reason: creditDecision.reason });
+            } else {
+              log("credit_truth.ran", {
+                reason: creditDecision.reason,
+                checked: audit.counts.checked,
+                shipped: audit.counts.shipped,
+                unshipped: audit.counts.unshipped,
+                credit_elsewhere: audit.counts["credit-elsewhere"],
+                undeterminable: audit.counts.undeterminable,
+              });
+              const actionable = creditTruthEscalations(audit);
+              if (actionable.length === 0) {
+                log("credit_truth.clean", { reason: creditDecision.reason, checked: audit.counts.checked });
+              } else if (deps.onBrokenCredit) {
+                // Its own try: a delivery fault must not discard the audit that found the finding.
+                try {
+                  await deps.onBrokenCredit(actionable);
+                  log("credit_truth.escalated", {
+                    reason: creditDecision.reason,
+                    delivered: actionable.length,
+                    of_unshipped: audit.counts.unshipped,
+                    task_ids: actionable.map((f) => f.taskId),
+                  });
+                } catch (e) {
+                  log("credit_truth.escalation_failed", {
+                    reason: creditDecision.reason,
+                    pending: actionable.length,
+                    task_ids: actionable.map((f) => f.taskId),
+                    error: String((e as Error)?.message ?? e),
+                  });
+                }
+              }
+            }
+          } catch (e) {
+            log("credit_truth.run_failed", { reason: creditDecision.reason, error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else if (creditDecision) {
+        log("credit_truth.skipped", { reason: creditDecision.reason });
       }
     }
 
