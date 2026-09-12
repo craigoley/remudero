@@ -1,4 +1,4 @@
-- id: W1-T3452
+- id: W1-T3454
   title: "the daemon supports a Vercel-recognized Git author but normal recycle drops it — the entrypoint accepts RMD_GIT_AUTHOR_*, while the runtime contract never carries those names into the replacement container"
   repo: remudero
   depends_on: []
@@ -67,8 +67,10 @@
     restore it and require the focused suite to pass.
 
   note: |
-    `rmd next-task-id --reserve` on the Azure controller held W1-T3452 at
-    refs/rmd-id/W1-T3452 on origin after one attempt. `priority: 0` is deliberate: this blocks
+    `rmd next-task-id --reserve` on the Azure controller held W1-T3454 at
+    refs/rmd-id/W1-T3454 on origin after one attempt. The initial W1-T3452 reservation is retained
+    as an immutable detached-holder audit record, so the corrected branch-bound reservation uses
+    W1-T3454. `priority: 0` is deliberate: this blocks
     the active portal PR's Vercel preview rather than representing general hardening. This task is high risk by blast radius: the
     graceful recycler replaces the production daemon on every supported host. It does not alter
     browser authentication, daemon GitHub/App credentials, or Vercel secrets; it makes a
