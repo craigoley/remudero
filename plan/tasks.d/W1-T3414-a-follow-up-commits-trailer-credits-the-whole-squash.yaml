@@ -8,7 +8,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 16.00
-  files: [scripts/acceptance-author-gate.mjs, test/acceptance-author-gate.test.ts]
+  files: [scripts/squash-trailer-gate.mjs, .github/workflows/ci.yml, test/a-plan-only-squash-cannot-credit-an-implementation-task.test.ts]
   origin: "operator-session#W1-T3134-false-credit-2026-09-11"
   plan_refs: ["W1-T3149", "W1-T3388", "W1-T205"]
   status: queued
@@ -68,10 +68,10 @@
     outside `plan/` and the PR's DIFF ships none of them, refuse. Run it on the PR (where the diff and
     the full commit list are both visible), not on main after the fact — after the fact the credit has
     already landed.
-    (ii) EXTEND THE EXISTING AUTHOR-TIME GATE, which already owns the PR event payload, full-history
-    checkout and plan-only implementation-trailer refusal. W1-T3149 closes the PR-body case; this
-    task adds the later branch-commit case. Do not create a second workflow or a new script: both
-    would parse the same PR range with different failure semantics.
+    (ii) REFUSE THE MIXTURE THE WAY rule15 ALREADY DOES, and reuse its vocabulary rather than
+    inventing a second one. W1-T3149 covers the adjacent author-time case; check `rule15-filing` and
+    `acceptance-author-gate` FIRST and extend the one that already owns this shape if either does —
+    say in the PR body which was checked and why a new script was or was not needed.
     (iii) THE REFUSAL MUST NAME THE OFFENDING COMMIT, not just the PR. The author frequently did not
     write it (see the note), so a message that says "your PR carries a trailer" sends the wrong person
     looking. Name the sha, its subject, and the declared-but-unshipped files.
@@ -79,10 +79,11 @@
     from the offending commit, or ship the declared files. Do NOT offer "rename the branch" as the
     remedy for a trailer, and do not offer a remedy that requires force-pushing another lane's branch
     without saying so.
-    (v) REUSE THE EXISTING ACCEPTANCE-AUTHOR-GATE WORKFLOW. Its `pull_request` event carries the
-    base/head shas and its checkout already has `fetch-depth: 0`, so the gate can read every branch
-    commit locally with no GitHub API call. This task changes only the existing script and its test;
-    it introduces no workflow, no network call and no second parser.
+    (v) WIRE IT INTO THE EXISTING `.github/workflows/ci.yml`, not a new workflow file. Two reasons:
+    every other gate of this kind already lives there (commitlint, leak-grep, prompt-surface-gate), and
+    `^\.github/workflows/` is on the Rule 25 INSTRUMENT_SURFACE — adding a workflow alongside a `src/`
+    product path forces an unsuppressible review failure. This task's `files:` name only `scripts/` and
+    `test/`, so measure `detectInstrumentEntanglement` on the real diff rather than assuming either way.
     (vi) DO NOT RETRO-CORRECT THE 105 IN THIS TASK. Closing the hole and auditing the damage are
     different jobs with different risk; this one closes the hole. File the sweep separately if wanted.
   acceptance:
@@ -96,8 +97,8 @@
       proof: "unit test: a plan-only task is not refused by this gate"
     - claim: "the refusal names the offending commit sha and the declared files it failed to ship"
       proof: "unit test: the refusal names the offending commit and the unshipped files"
-    - claim: "the existing workflow reaches the follow-up-commit check through its author-time gate"
-      proof: "unit test: W1-T3414 follow-up commit criterion"
+    - claim: "the gate is reached from a workflow, not only from its own tests"
+      proof: "grep: squash-trailer-gate in .github/workflows/ci.yml"
   falsifier: |
     RE-RUN THE AUDIT BEFORE BUILDING AND USE YOUR OWN NUMBERS. The 105/663 is a 14-day window on
     2026-09-11 and every figure moves. The audit is reproducible: for each merged commit with a
