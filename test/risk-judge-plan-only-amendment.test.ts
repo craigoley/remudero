@@ -95,6 +95,7 @@ test("W1-T2371: PLAN_DECLARING_SUBJECT_RE matches a filing subject and does NOT 
   // the same assertions but hides both arms from a static scan, so the ratchet reads the surface as
   // fixture-less and is RIGHT to: nothing in the file shows where the pattern stops.
   assert.equal(PLAN_DECLARING_SUBJECT_RE.test("chore(plan): amend W1-T2318"), true);
+  assert.equal(PLAN_DECLARING_SUBJECT_RE.test("fix(plan): correct an acceptance proof"), true);
   assert.equal(PLAN_DECLARING_SUBJECT_RE.test("chore(triage): file a finding"), true);
   assert.equal(PLAN_DECLARING_SUBJECT_RE.test("chore(feedback): record a ruling"), true);
   assert.equal(PLAN_DECLARING_SUBJECT_RE.test("docs(plan): restate a rule"), true);
@@ -102,7 +103,8 @@ test("W1-T2371: PLAN_DECLARING_SUBJECT_RE matches a filing subject and does NOT 
   assert.equal(PLAN_DECLARING_SUBJECT_RE.test("docs: a doc change"), true);
   // The negative arm: an IMPLEMENTATION subject must never buy the narrowing, however plan-ish.
   assert.equal(PLAN_DECLARING_SUBJECT_RE.test("feat(plan): build the plan reconciler"), false, "feat is not a filing");
-  assert.equal(PLAN_DECLARING_SUBJECT_RE.test("fix(plan): repair a shard loader"), false, "fix is not a filing");
+  assert.equal(PLAN_DECLARING_SUBJECT_RE.test("fix(runtime): repair a shard loader"), false, "a non-filing fix is not a filing");
+  assert.equal(PLAN_DECLARING_SUBJECT_RE.test("fix(triage): repair the triage worker"), false, "only the observed fix(plan) amendment form is filing-shaped");
   assert.equal(PLAN_DECLARING_SUBJECT_RE.test("chore(deps): bump a package"), false);
   assert.equal(PLAN_DECLARING_SUBJECT_RE.test("refactor: move a module"), false);
   assert.equal(PLAN_DECLARING_SUBJECT_RE.test(" chore(plan): leading space"), false, "anchored at the start");

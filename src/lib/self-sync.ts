@@ -506,3 +506,79 @@ export function daemonFreshnessFromService(svc: ServiceFreshness): DaemonFreshne
   if (!advanceIsMaterial(svc.behind.changedPaths)) return { stale: false };
   return { stale: true, oldSha: svc.behind.oldSha, newSha: svc.behind.newSha };
 }
+
+export type ReviewerCodeFreshness =
+  | { status: "fresh"; codeSha: string; originMainSha: string; advance: "none" | "immaterial" }
+  | { status: "stale"; codeSha: string; originMainSha: string; changedPaths?: string[]; diffUnreadable?: string }
+  | { status: "unreadable"; reason: string };
+
+export interface ReviewerCodeFreshnessOptions {
+  checkServiceFreshness?: typeof checkServiceFreshness;
+  resolveHeadSha?: () => string;
+  git?: GitRunner;
+}
+
+function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFreshnessOptions): ReviewerCodeFreshness {
+  const git =
+    deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", stdio: "pipe" }));
+  try {
+    git(["fetch", "--quiet", "origin"]);
+  } catch (error) {
+    return { status: "unreadable", reason: `git fetch origin failed in ${repoDir}: ${String(error)}` };
+  }
+  let codeSha: string;
+  let originMainSha: string;
+  try {
+    codeSha = git(["rev-parse", "HEAD"]).trim();
+    originMainSha = git(["rev-parse", "origin/main"]).trim();
+  } catch (error) {
+    return { status: "unreadable", reason: `could not resolve HEAD/origin/main in ${repoDir}: ${String(error)}` };
+  }
+  if (codeSha === originMainSha) return { status: "fresh", codeSha, originMainSha, advance: "none" };
+  let changedPaths: string[] | undefined;
+  let diffUnreadable: string | undefined;
+  try {
+    changedPaths = git(["diff", "--name-only", `${codeSha}..${originMainSha}`])
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch (error) {
+    return { status: "unreadable", reason: `could not inspect reviewer code advance: ${String(error)}` };
+  }
+  if (advanceIsMaterial(changedPaths)) {
+    return { status: "stale", codeSha, originMainSha, changedPaths };
+  }
+  return { status: "fresh", codeSha, originMainSha, advance: "immaterial" };
+}
+
+export function checkReviewerCodeFreshness(
+  repoDir: string,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  deps: ReviewerCodeFreshnessOptions = {},
+): ReviewerCodeFreshness {
+  const service = (deps.checkServiceFreshness ?? checkServiceFreshness)(repoDir, env);
+  if (service.status === "degraded") return { status: "unreadable", reason: service.reason };
+  if (service.status === "guarded" && isCiEnv(env)) {
+    return { status: "unreadable", reason: "reviewer code freshness is guarded; no loaded-code provenance is available" };
+  }
+  if (service.status === "guarded") return checkGuardedReviewerCodeFreshness(repoDir, deps);
+
+  if (service.behind) {
+    const { oldSha, newSha, changedPaths, diffUnreadable } = service.behind;
+    if (advanceIsMaterial(changedPaths)) {
+      return { status: "stale", codeSha: oldSha, originMainSha: newSha, changedPaths, diffUnreadable };
+    }
+    return { status: "fresh", codeSha: oldSha, originMainSha: newSha, advance: "immaterial" };
+  }
+
+  const resolveHeadSha =
+    deps.resolveHeadSha ??
+    (() => execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], { encoding: "utf8", stdio: "pipe" }).trim());
+  try {
+    const codeSha = resolveHeadSha().trim();
+    if (codeSha.length === 0) return { status: "unreadable", reason: "could not resolve the reviewer code sha" };
+    return { status: "fresh", codeSha, originMainSha: codeSha, advance: "none" };
+  } catch (error) {
+    return { status: "unreadable", reason: `could not resolve the reviewer code sha: ${String(error)}` };
+  }
+}

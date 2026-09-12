@@ -7755,6 +7755,10 @@ export interface PostReviewStatusGuardedOpts {
   reviewDecisionDigest?: string;
   reviewEngineRevision?: string;
   evaluatorProvenance?: ReviewEvaluatorProvenance;
+  /** A just-in-time reading of the module graph producing this terminal verdict. When supplied,
+   * material stale or unprovable code withholds the verdict; an allowed verdict names this SHA in
+   * its commit-status description. Pending is progress, not a verdict, and remains publishable. */
+  reviewerCodeFreshness?: ReviewerCodeFreshness;
   /** Fresh lifecycle read for THIS attempt — real callers pass `() => fetchPrLifecycle(prUrl)`,
    * tests inject a fake. Called INSIDE the lock, never before (see the module doc above). */
   fetchLifecycle: () => PrLifecycleState;
@@ -7770,6 +7774,11 @@ export interface PostReviewStatusGuardedOpts {
   lockOpts?: AcquireReviewStatusLockOpts;
 }
 
+type ReviewerCodeFreshness =
+  | { status: "fresh"; codeSha: string; originMainSha: string; advance: "none" | "immaterial" }
+  | { status: "stale"; codeSha: string; originMainSha: string; changedPaths?: string[]; diffUnreadable?: string }
+  | { status: "unreadable"; reason: string };
+
 export interface PostReviewStatusGuardedResult {
   posted: boolean;
   conflict?: boolean;
@@ -7778,6 +7787,26 @@ export interface PostReviewStatusGuardedResult {
   /** Present only when `posted` is false — either {@link decideReviewStatusPost} refused the write (see
    * `review.post_refused`), or the post itself failed after retries or as a permanent error (`review.post_failed`). */
   reason?: string;
+}
+
+/** The status description is the GitHub-visible verdict, so provenance must survive its hard cap. */
+export function reviewDescriptionWithCodeProvenance(description: string | undefined, codeSha: string): string {
+  const suffix = ` [review code ${codeSha.slice(0, 12)}]`;
+  return `${(description ?? "remudero-review verdict").slice(0, 140 - suffix.length)}${suffix}`;
+}
+
+function reviewerCodePublicationRefusal(
+  state: PostableReviewState,
+  freshness: ReviewerCodeFreshness | undefined,
+): string | undefined {
+  if (state === "pending" || freshness === undefined || freshness.status === "fresh") return undefined;
+  if (freshness.status === "stale") {
+    return (
+      `reviewer code ${freshness.codeSha.slice(0, 12)} is materially behind origin/main ` +
+      `${freshness.originMainSha.slice(0, 12)}; withholding a terminal verdict`
+    );
+  }
+  return `reviewer code freshness is unprovable; withholding a terminal verdict: ${freshness.reason}`;
 }
 
 /** THE single call path for posting `remudero-review` from here on (W1-T228). Acquires the per-task lock, reads the
@@ -7790,6 +7819,35 @@ export async function postReviewStatusGuarded(
   opts: PostReviewStatusGuardedOpts,
 ): Promise<PostReviewStatusGuardedResult> {
   const post = opts.post ?? postReviewStatus;
+  const freshnessRefusal = reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness);
+  if (freshnessRefusal !== undefined) {
+    const freshness = opts.reviewerCodeFreshness!;
+    appendLedger(opts.ledgerPath, {
+      run_id: opts.runId,
+      task_id: opts.taskId,
+      step: "review.post_refused",
+      head_sha: opts.sha,
+      attempted_state: opts.state,
+      evidence: opts.evidence,
+      reason: freshnessRefusal,
+      reviewer_code_freshness: freshness.status,
+      ...(freshness.status === "unreadable"
+        ? { reviewer_code_reason: freshness.reason }
+        : {
+            reviewer_code_sha: freshness.codeSha,
+            origin_main_sha: freshness.originMainSha,
+            ...(freshness.status === "stale" ? { changed_paths: freshness.changedPaths, diff_unreadable: freshness.diffUnreadable } : {}),
+          }),
+      ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
+      ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+      ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
+    });
+    return { posted: false, reason: freshnessRefusal };
+  }
+  const statusDescription =
+    opts.state !== "pending" && opts.reviewerCodeFreshness?.status === "fresh"
+      ? reviewDescriptionWithCodeProvenance(opts.description, opts.reviewerCodeFreshness.codeSha)
+      : opts.description;
   const lockDir = join(dirname(opts.ledgerPath), "review-status-locks");
   const lockPath = join(lockDir, `${opts.taskId}.lock`);
   const handle = await acquireReviewStatusLock(lockPath, opts.lockOpts);
@@ -7819,7 +7877,19 @@ export async function postReviewStatusGuarded(
         attempted_evaluator: opts.evaluatorProvenance ?? null,
       });
       try {
-        await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: "failure", description: "remudero-review: conflicting verdicts for identical decision input — operator adjudication required" });
+        await post({
+          owner: opts.owner,
+          repo: opts.repo,
+          sha: opts.sha,
+          state: "failure",
+          description:
+            opts.reviewerCodeFreshness?.status === "fresh"
+              ? reviewDescriptionWithCodeProvenance(
+                  "remudero-review: conflicting verdicts for identical decision input — operator adjudication required",
+                  opts.reviewerCodeFreshness.codeSha,
+                )
+              : "remudero-review: conflicting verdicts for identical decision input — operator adjudication required",
+        });
         return { posted: true, conflict: true, effectiveState: "failure", reason };
       } catch (error) {
         appendLedger(opts.ledgerPath, {
@@ -7856,7 +7926,7 @@ export async function postReviewStatusGuarded(
       return { posted: false, reason: decision.reason };
     }
     try {
-      await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: opts.description });
+      await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: statusDescription });
     } catch (e) {
       // W1-T135 exhaustion path: ledger-and-continue, never crash the run.
       const message = e instanceof Error ? e.message : String(e);
@@ -7867,7 +7937,7 @@ export async function postReviewStatusGuarded(
         head_sha: opts.sha,
         attempted_state: opts.state,
         evidence: opts.evidence,
-        description: opts.description,
+        description: statusDescription,
         error: message,
         ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
         ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),

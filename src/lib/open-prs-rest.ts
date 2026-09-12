@@ -101,6 +101,9 @@ interface RestCheckRun {
   /** W1-T2300 — ISO8601 start of this attempt, on every entry a live response carries. Mirrored to
    *  {@link RestRollupEntry.startedAt} by {@link rollupFromRest}. */
   started_at?: string | null;
+  /** A terminal check run's completion time. Kept distinct from `started_at`: a run that began
+   * before a main repair and completed after it is not stale evidence (W1-T3422). */
+  completed_at?: string | null;
 }
 
 /** One commit status as REST reports it. */
@@ -112,6 +115,9 @@ interface RestStatus {
   /** W1-T2300 — ISO8601 creation time. A status context carries no `started_at`, so this is the key
    *  {@link RestRollupEntry.startedAt} is mapped from, as in the real `gh` gateway. */
   created_at?: string | null;
+  /** GitHub supplies this only on status contexts. A terminal status's update, not its creation,
+   * is the comparable completion time when it is present (W1-T3422). */
+  updated_at?: string | null;
 }
 
 /** One composed rollup entry — GraphQL's `statusCheckRollup` union member, structurally. Not declared
@@ -131,6 +137,9 @@ export interface RestRollupEntry {
    *  `dedupeRollupByLatestAttempt` sorts on it and `staleCiGateTransition` needs it to fire — an entry
    *  carrying none sorted as though every REST attempt shared one array-order tie. */
   startedAt?: string;
+  /** Terminal completion time, when GitHub supplied one. Absence stays absent: consumers that
+   * need to prove a verdict predates a main repair must decline rather than substitute a start. */
+  completedAt?: string;
 }
 
 /** Uppercase a REST enum the way GraphQL reports it, preserving absent as absent. Invariant: this is
@@ -159,6 +168,7 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
     if (conclusion !== undefined) e.conclusion = conclusion;
     if (c.details_url) e.detailsUrl = c.details_url;
     if (c.started_at) e.startedAt = c.started_at;
+    if (c.completed_at) e.completedAt = c.completed_at;
     return e;
   });
   const fromStatuses = statuses.map((s) => {
@@ -170,6 +180,7 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
     if (s.target_url) e.targetUrl = s.target_url;
     // A status context has no `started_at`; `created_at` is what the real `gh` gateway maps this from.
     if (s.created_at) e.startedAt = s.created_at;
+    if (s.updated_at) e.completedAt = s.updated_at;
     return e;
   });
   return [...fromRuns, ...fromStatuses];

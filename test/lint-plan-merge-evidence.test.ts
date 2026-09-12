@@ -55,20 +55,22 @@ test("classifier: an implementing-subject citation is merge evidence, case-insen
   assert.deepEqual(withImpl, ["W1-T52"]);
 });
 
-test("classifier: chore(plan)-family filing subjects are NOT evidence — a filing cites, it does not implement", () => {
+test("classifier: plan-amendment filing subjects are NOT evidence — a filing cites, it does not implement", () => {
   // The same id cited only by filings must land in `without`; this is the classifier's one
   // judgment boundary and the reason the printed line names the rule.
   const dump = dumpOf(
     ["chore(plan): file W1-T310 — the next thing", ""],
+    ["fix(plan): correct W1-T310's acceptance proof", ""],
     ["chore(triage): feedback about W1-T310", ""],
     ["chore(feedback): W1-T310 noted", ""],
     ["docs(plan): reflow around W1-T310", ""],
   );
   const { without } = classifyFailingMergeEvidence(["W1-T310"], dump);
   assert.deepEqual(without, ["W1-T310"]);
-  for (const s of ["chore(plan): x", "chore(triage): x", "chore(feedback): x", "docs(plan): x"])
+  for (const s of ["chore(plan): x", "fix(plan): x", "chore(triage): x", "chore(feedback): x", "docs(plan): x"])
     assert.ok(LINT_FILING_SUBJECT_RE.test(s), `${s} must classify as a filing subject`);
   assert.ok(!LINT_FILING_SUBJECT_RE.test("fix(plan-adjacent): x"), "an implementing subject must not");
+  assert.ok(!LINT_FILING_SUBJECT_RE.test("fix(triage): repair the triage worker"), "only the observed fix(plan) amendment form is excluded");
 });
 
 test("W1-T1078: an older bare filing subject does not credit a task", () => {

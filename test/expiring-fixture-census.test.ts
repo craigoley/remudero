@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // its script this way. A dynamic specifier is not statically resolved, so this loads the REAL
 // module with no shadow copy that could drift from it.
 const SCRIPT = joinPath(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "expiring-fixture-census.mjs");
-const { AGED_FIELDS, EXEMPT_MARKER, MARGIN_DAYS, assertFieldsStillAged, censusExpiringFixtures, formatReport, main } =
+const { AGED_FIELDS, EXEMPT_MARKER, MARGIN_DAYS, assertFieldsStillAged, censusExpiringFixtures, formatReport, main, refusePopulationDrop } =
   (await import(pathToFileURL(SCRIPT).href)) as {
     AGED_FIELDS: ReadonlyArray<{ field: string; threshold: string; source: string; evidence: string[] }>;
     EXEMPT_MARKER: string;
@@ -24,10 +24,15 @@ const { AGED_FIELDS, EXEMPT_MARKER, MARGIN_DAYS, assertFieldsStillAged, censusEx
       marginDays?: number;
     }) => {
       population: number;
+      populationByFile: Record<string, number>;
       reported: Array<{ file: string; line: number; daysLeft: number; expiresAt: number }>;
       exempt: unknown[];
       alreadyExpired: unknown[];
     };
+    refusePopulationDrop: (
+      currentByFile: Record<string, number>,
+      recordedByFile?: Record<string, number>,
+    ) => Array<{ file: string; current: number; recorded: number; missing: number }>;
     formatReport: (r: unknown, marginDays?: number) => string;
     main: (o?: {
       execFile?: (cmd: string, args: string[], opts: { encoding: "utf8" }) => string;
@@ -35,6 +40,7 @@ const { AGED_FIELDS, EXEMPT_MARKER, MARGIN_DAYS, assertFieldsStillAged, censusEx
       now?: () => number;
       log?: (message: string) => void;
       assertAged?: () => void;
+      recordedPopulationByFile?: Record<string, number>;
     }) => number;
   };
 
@@ -150,6 +156,7 @@ test("W1-T3272: main reads the real test-file population and sweep staleDays pol
     now: () => NOW,
     log: (message) => output.push(message),
     assertAged: () => undefined,
+    recordedPopulationByFile: { "test/a.test.ts": 1 },
   });
 
   assert.equal(code, 0, "fresh fixtures should let the CLI pass");
@@ -193,4 +200,65 @@ test("W1-T3272: a report NAMES the already-expired population, which is state ra
   assert.match(report, /none crossing within/, "no crossing stamp still reads as OK");
   assert.match(report, /2 stamp\(s\) are already past their threshold/, "and the settled ones are counted, never dropped");
   assert.match(report, /state, not a transition/, "with the reason a reader needs to not treat them as failures");
+});
+
+test("W1-T3334: moving a fixture date behind a helper drops it from the population and is refused", () => {
+  const hidden = `
+const HIDDEN_LAST_ACTIVITY_AT = "${at(-40 * DAY)}";
+const fixture = { lastActivityAt: hiddenLastActivityAt() };
+function hiddenLastActivityAt() {
+  return HIDDEN_LAST_ACTIVITY_AT;
+}
+`;
+  const r = censusExpiringFixtures(tree({ "test/hidden.test.ts": hidden }));
+  const populationDrop = refusePopulationDrop(r.populationByFile, { "test/hidden.test.ts": 1 });
+
+  assert.equal(r.population, 0, "helper indirection is invisible to this census by design");
+  assert.deepEqual(populationDrop, [{ file: "test/hidden.test.ts", current: 0, recorded: 1, missing: 1 }]);
+
+  const report = formatReport({ ...r, populationDrop });
+  assert.match(report, /BLOCKED -- 1 file\(s\) dropped below the recorded fixture population/);
+  assert.match(report, /test\/hidden\.test\.ts: measured 0 stamp\(s\), recorded 1/);
+});
+
+test("W1-T3334: a genuinely deleted fixture is refused with the file name and recorded remedy", () => {
+  const r = censusExpiringFixtures(tree({}));
+  const populationDrop = refusePopulationDrop(r.populationByFile, { "test/deleted.test.ts": 1 });
+  const report = formatReport({ ...r, populationDrop });
+
+  assert.equal(populationDrop.length, 1);
+  assert.match(report, /test\/deleted\.test\.ts/);
+  assert.match(report, /lower RECORDED_POPULATION_BY_FILE in scripts\/expiring-fixture-census\.mjs/);
+  assert.match(report, /same reviewed change/, "a real deletion must get a clear recorded-decrease remedy");
+});
+
+test("W1-T3334: unchanged and growing fixture populations still pass the population ratchet", () => {
+  const unchanged = censusExpiringFixtures(tree({ "test/a.test.ts": `lastActivityAt: "${at(-40 * DAY)}",` }));
+  assert.deepEqual(refusePopulationDrop(unchanged.populationByFile, { "test/a.test.ts": 1 }), []);
+
+  const grown = censusExpiringFixtures(
+    tree({
+      "test/a.test.ts": `
+lastActivityAt: "${at(-40 * DAY)}",
+lastActivityAt: "${at(-1 * DAY)}",
+`,
+    }),
+  );
+  assert.deepEqual(refusePopulationDrop(grown.populationByFile, { "test/a.test.ts": 1 }), []);
+  assert.match(formatReport({ ...grown, populationDrop: [] }), /OK -- 2 fixture stamp\(s\) measured/);
+});
+
+test("W1-T3334: main exits nonzero when the measured population falls below the recorded ledger", () => {
+  const output: string[] = [];
+  const code = main({
+    execFile: (cmd) => (cmd === "git" ? "test/a.test.ts\n" : JSON.stringify({ staleDays: THRESHOLD })),
+    readFile: () => `const movedBehindHelper = "${at(-40 * DAY)}";\nlastActivityAt: helper(),\n`,
+    now: () => NOW,
+    log: (message) => output.push(message),
+    assertAged: () => undefined,
+    recordedPopulationByFile: { "test/a.test.ts": 1 },
+  });
+
+  assert.equal(code, 1);
+  assert.match(output.join("\n"), /dropped below the recorded fixture population/);
 });

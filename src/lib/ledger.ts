@@ -441,6 +441,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // "everything filtered"; it is emitted only on change, so rotation would drop a long idle's cause.
   "daemon.idle_reasons",
   "sweep.post_fix_redriven",
+  "sweep.stale_red_redrive.released",
   // W1-T970: sweep.ts's `priorActionsFromLedger` builds a sha-keyed `riskRefused` set off this
   // step; losing it re-arms a head a risk judge explicitly refused.
   "risk_judge.escalated",
