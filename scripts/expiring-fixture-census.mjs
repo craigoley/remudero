@@ -59,6 +59,57 @@ export const AGED_FIELDS = [
   },
 ];
 
+/** The population ratchet: each file's measured fixture count as captured on W1-T3334.
+ *
+ * This is intentionally a per-file ledger, not a parser for helper indirection. If a literal moves
+ * behind a helper, the scanner's measured count drops and this ledger names the file that left.
+ * If a fixture is genuinely deleted, lower this one reviewed line for that file in the same change.
+ */
+export const RECORDED_POPULATION_BY_FILE = Object.freeze({
+  "test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts": 1,
+  "test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts": 1,
+  "test/a-permanent-diff-refusal-is-not-retried-forever.test.ts": 1,
+  "test/a-push-does-not-re-ask-a-head-independent-question.test.ts": 3,
+  "test/a-refusal-is-a-verdict-not-a-strike.test.ts": 1,
+  "test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts": 1,
+  "test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts": 1,
+  "test/an-open-pr-does-not-rot-while-it-waits.test.ts": 2,
+  "test/arm-failure-classification.test.ts": 1,
+  "test/board.test.ts": 4,
+  "test/cancelled-check-arm-can-see-it.test.ts": 1,
+  "test/ci-log-unavailable-is-named.test.ts": 1,
+  "test/console-shell-coverage-is-vacuous.test.ts": 3,
+  "test/cost-anomaly.test.ts": 1,
+  "test/daemon-freshness.test.ts": 1,
+  "test/daemon.test.ts": 2,
+  "test/entanglement-split-sweep-reachability.test.ts": 1,
+  "test/failed-ci-infrastructure-requeue.test.ts": 1,
+  "test/filing-forward-reference.test.ts": 1,
+  "test/fix-mode-gate-failures.test.ts": 1,
+  "test/open-prs-rest.test.ts": 1,
+  "test/operator-verdict-steering.test.ts": 1,
+  "test/plan-filing-admission-bound.test.ts": 4,
+  "test/post-review-refusal-rearm.test.ts": 1,
+  "test/push-ci-on-main.test.ts": 1,
+  "test/review-admission-key-is-not-self-defeating.test.ts": 14,
+  "test/review-body-edit-reoffer.test.ts": 2,
+  "test/review-claim-timing.test.ts": 1,
+  "test/review-engine-revision-rearm.test.ts": 1,
+  "test/review-lane-budget.test.ts": 1,
+  "test/review-orphan-wiring.test.ts": 4,
+  "test/stale-base-release-before-exhaustion.test.ts": 3,
+  "test/stale-gate-discriminator-wiring.test.ts": 1,
+  "test/sweep-conflicted-disposition.test.ts": 1,
+  "test/sweep-review-admission.test.ts": 9,
+  "test/sweep.test.ts": 8,
+  "test/terminal-run-pins-a-job-non-terminal.test.ts": 1,
+  "test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts": 1,
+  "test/the-fix-rung-strike-cap-does-not-bind.test.ts": 1,
+  "test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts": 1,
+  "test/the-sweep-fan-out-respects-the-host-budget.test.ts": 2,
+  "test/update-branch-stale-gate.test.ts": 4,
+});
+
 /** Refuse to run if a table row no longer describes the source. A census that has quietly stopped
  *  covering its population answers with a confident zero, which is worse than not existing. */
 export function assertFieldsStillAged(readFile = (p) => readFileSync(p, "utf8")) {
@@ -85,6 +136,7 @@ export function censusExpiringFixtures({ files, readFile, now, thresholdDays, ma
   const reported = [];
   const exempt = [];
   const alreadyExpired = [];
+  const populationByFile = {};
   let population = 0;
 
   for (const file of files) {
@@ -95,6 +147,7 @@ export function censusExpiringFixtures({ files, readFile, now, thresholdDays, ma
         const m = new RegExp(`${row.field}\\s*:\\s*"(\\d{4}-\\d{2}-\\d{2}T[^"]*)"`).exec(line);
         if (!m) continue;
         population += 1;
+        populationByFile[file] = (populationByFile[file] ?? 0) + 1;
 
         const stamp = Date.parse(m[1]);
         if (Number.isNaN(stamp)) continue;
@@ -119,7 +172,17 @@ export function censusExpiringFixtures({ files, readFile, now, thresholdDays, ma
       }
     }
   }
-  return { population, reported, exempt, alreadyExpired };
+  return { population, populationByFile, reported, exempt, alreadyExpired };
+}
+
+/** Refuse any file whose measured fixture population fell below the recorded ledger. */
+export function refusePopulationDrop(currentByFile, recordedByFile = RECORDED_POPULATION_BY_FILE) {
+  const drops = [];
+  for (const [file, recorded] of Object.entries(recordedByFile)) {
+    const current = currentByFile[file] ?? 0;
+    if (current < recorded) drops.push({ file, current, recorded, missing: recorded - current });
+  }
+  return drops.sort((a, b) => a.file.localeCompare(b.file));
 }
 
 /** ISO day for a report line — the DATE IT GOES RED is the whole point of the output. */
@@ -127,9 +190,18 @@ export function expiryDay(expiresAt) {
   return new Date(expiresAt).toISOString().slice(0, 10);
 }
 
-export function formatReport({ population, reported, exempt, alreadyExpired = [] }, marginDays = MARGIN_DAYS) {
+export function formatReport({ population, reported, exempt, alreadyExpired = [], populationDrop = [] }, marginDays = MARGIN_DAYS) {
   const out = [];
+  if (populationDrop.length > 0) {
+    out.push(`expiring-fixture-census: BLOCKED -- ${populationDrop.length} file(s) dropped below the recorded fixture population:`);
+    for (const drop of populationDrop) {
+      out.push(`  - ${drop.file}: measured ${drop.current} stamp(s), recorded ${drop.recorded} (${drop.missing} missing)`);
+    }
+    out.push(`  TO FIX: if the fixture was genuinely deleted, lower RECORDED_POPULATION_BY_FILE in scripts/expiring-fixture-census.mjs in the same reviewed change.`);
+    out.push(`  Otherwise, put the date literal back where the census can see it; helper indirection hides the fixture from this gate.`);
+  }
   if (reported.length > 0) {
+    if (out.length > 0) out.push("");
     out.push(`expiring-fixture-census: BLOCKED -- ${reported.length} fixture(s) CROSS their threshold within ${marginDays} day(s):`);
     for (const r of [...reported].sort((a, b) => a.daysLeft - b.daysLeft)) {
       out.push(`  - ${r.file}:${r.line}  ${r.field}="${r.stamp}" vs ${r.threshold}  --  goes red ${expiryDay(r.expiresAt)} (${r.daysLeft.toFixed(1)}d)`);
@@ -137,7 +209,8 @@ export function formatReport({ population, reported, exempt, alreadyExpired = []
     out.push(`  TO FIX: stamp the fixture from the clock (see test/stale-ci-gate-wiring.test.ts), or, if it must`);
     out.push(`  stay fixed, age it past the threshold, re-run, and if nothing fails say so: ${EXEMPT_MARKER} -- <why>.`);
     out.push(`  Moving the constant forward only re-arms the same bomb on a later date.`);
-  } else {
+  }
+  if (populationDrop.length === 0 && reported.length === 0) {
     out.push(`expiring-fixture-census: OK -- ${population} fixture stamp(s) measured, none crossing within ${marginDays} day(s).`);
   }
   if (alreadyExpired.length > 0) {
@@ -156,6 +229,7 @@ export function main({
   now = () => Date.now(),
   log = (message) => console.log(message),
   assertAged = assertFieldsStillAged,
+  recordedPopulationByFile = RECORDED_POPULATION_BY_FILE,
 } = {}) {
   assertAged();
   const files = execFile("git", ["ls-files", "test/*.test.ts"], { encoding: "utf8" }).split("\n").filter(Boolean);
@@ -167,8 +241,9 @@ export function main({
     now: now(),
     thresholdDays: policy.staleDays,
   });
-  log(formatReport(result));
-  return result.reported.length > 0 ? 1 : 0;
+  const populationDrop = refusePopulationDrop(result.populationByFile, recordedPopulationByFile);
+  log(formatReport({ ...result, populationDrop }));
+  return result.reported.length > 0 || populationDrop.length > 0 ? 1 : 0;
 }
 
 if (process.argv[1] && process.argv[1].endsWith("expiring-fixture-census.mjs")) process.exit(main());
