@@ -656,6 +656,7 @@ export interface BuildSweepEffectsDeps {
   readPackageScriptsImpl?: SweepRuntimeFn;
   proveFixedMainBlockerImpl?: SweepRuntimeFn;
   refireFixedMainPrImpl?: SweepRuntimeFn;
+  fixedMainProofGitImpl?: DirtyFleetRebaseGit;
   dispatchFixCatchOutcomeImpl?: typeof dispatchFixCatchOutcome;
   worktreeRemoveImpl?: typeof worktreeRemove;
   fixBranchClaimKeyImpl?: SweepRuntimeFn;
@@ -886,6 +887,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readPackageScriptsImpl: readPackageScriptsFor = requiredSweepRuntime("readPackageScriptsImpl"),
     proveFixedMainBlockerImpl,
     refireFixedMainPrImpl,
+    fixedMainProofGitImpl,
     dispatchFixCatchOutcomeImpl: dispatchFixCatchOutcomeForBuild = dispatchFixCatchOutcome,
     worktreeRemoveImpl: worktreeRemoveForBuild = worktreeRemove,
     fixBranchClaimKeyImpl: fixBranchClaimKey = requiredSweepRuntime("fixBranchClaimKeyImpl"),
@@ -1378,6 +1380,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             pr,
             decision,
             {
+              git: fixedMainProofGitImpl,
               runScript: runNpmScriptViaSpawn,
               readPackageScripts: readPackageScriptsFor,
               worktreeRemoveImpl: worktreeRemoveForBuild,
