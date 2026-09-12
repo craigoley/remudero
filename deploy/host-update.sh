@@ -65,7 +65,7 @@ set -euo pipefail
 # own fallback, deploy/runtime-env-vars.sh's real array, and the `-e` names actually printed below
 # never disagree, so neither the fallback nor the static passthrough block below can go stale
 # unnoticed.
-RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH NODE_OPTIONS)
+RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS)
 RUNTIME_ENV_VARS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/runtime-env-vars.sh" || true
 if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; then
   # shellcheck source=./runtime-env-vars.sh
@@ -332,14 +332,15 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
   # capabilities and no device access. See deploy/Dockerfile's REQ 9 comment for the full doctrine.
   # THIS ONLY CHANGES THE PRINTED TEXT: the operator re-runs \`docker run\` by hand to apply it.
   #
-  # RMD_FRESHNESS_RESTART_MAX AND THE THREE GH_APP_* VARIABLES (W1-T1069). All four are declared in
-  # deploy/runtime-env-vars.sh alongside GH_TOKEN and RMD_RESTART_THROTTLE_S above — this printed
-  # invocation carries a passthrough for EVERY declared name now, not just the two that existed when
-  # this block was first written. GH_APP_ID, GH_APP_INSTALLATION_ID and GH_APP_PRIVATE_KEY_PATH
-  # configure src/lib/github-app.ts's installation-token refresh; leaving any one of them unset is
-  # not an error — startInstallationTokenRefresh treats an unconfigured host as deliberately
-  # byte-identical to one that never had the feature (see that file) — but a printed command that
-  # silently omitted them handed an operator a recipe for the exact silent-drop outage this closes.
+  # RMD_FRESHNESS_RESTART_MAX, THE THREE GH_APP_* VARIABLES, AND RMD_GIT_AUTHOR_* (W1-T1069,
+  # W1-T3454). All are declared in deploy/runtime-env-vars.sh alongside GH_TOKEN and
+  # RMD_RESTART_THROTTLE_S above — this printed invocation carries a passthrough for EVERY declared
+  # name now, not just the two that existed when this block was first written. GH_APP_ID,
+  # GH_APP_INSTALLATION_ID and GH_APP_PRIVATE_KEY_PATH configure src/lib/github-app.ts's
+  # installation-token refresh; RMD_GIT_AUTHOR_NAME and RMD_GIT_AUTHOR_EMAIL configure
+  # deploy/entrypoint.sh's Git identity override. Leaving any one unset is not an error — these are
+  # operator commissioning inputs — but a printed command that silently omitted them handed an
+  # operator a recipe for the exact silent-drop outage this closes.
   docker run -d --name remudero-daemon \\
     --restart=on-failure:5 \\
     --cap-drop ALL \\
@@ -353,6 +354,8 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
     -e GH_APP_ID="\${GH_APP_ID:-}" \\
     -e GH_APP_INSTALLATION_ID="\${GH_APP_INSTALLATION_ID:-}" \\
     -e GH_APP_PRIVATE_KEY_PATH="\${GH_APP_PRIVATE_KEY_PATH:-}" \\
+    -e RMD_GIT_AUTHOR_NAME="\${RMD_GIT_AUTHOR_NAME:-}" \\
+    -e RMD_GIT_AUTHOR_EMAIL="\${RMD_GIT_AUTHOR_EMAIL:-}" \\
     -e NODE_OPTIONS="\${NODE_OPTIONS:-}" \\
 ${CODEX_MOUNT_LINE}${CONTAINER_CONFIG_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     -v ${CRED_DIR}:${CRED_MOUNT_DEST} \\
