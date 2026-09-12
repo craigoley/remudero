@@ -338,9 +338,8 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
   # name now, not just the two that existed when this block was first written. GH_APP_ID,
   # GH_APP_INSTALLATION_ID and GH_APP_PRIVATE_KEY_PATH configure src/lib/github-app.ts's
   # installation-token refresh; RMD_GIT_AUTHOR_NAME and RMD_GIT_AUTHOR_EMAIL configure
-  # deploy/entrypoint.sh's Git identity override. Leaving any one unset is not an error — these are
-  # operator commissioning inputs — but a printed command that silently omitted them handed an
-  # operator a recipe for the exact silent-drop outage this closes.
+  # deploy/entrypoint.sh's Git identity override; unset means "not commissioned", not an error. But
+  # a printed command that silently omitted them handed an operator the exact silent-drop outage.
   docker run -d --name remudero-daemon \\
     --restart=on-failure:5 \\
     --cap-drop ALL \\
