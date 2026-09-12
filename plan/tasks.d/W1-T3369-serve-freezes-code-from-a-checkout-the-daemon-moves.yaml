@@ -8,7 +8,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 18.00
-  files: [src/lib/serve.ts, deploy/serve-container.sh, test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts]
+  files: [src/lib/serve.ts, deploy/serve-container.sh, scripts/test-tier-manifest.json, test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts]
   origin: "operator-session#azure-console-2026-09-11"
   plan_refs: ["W1-T255", "W1-T152", "W1-T2924"]
   status: queued
@@ -70,13 +70,13 @@
     (iv) DO NOT ADD A REFUSAL. W1-T255's reasoning stands and #707 is the receipt.
   acceptance:
     - claim: "serve's running code identity is resolved from what it LOADED, not from the checkout's current HEAD, and the two are proved to differ"
-      proof: "unit test: test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts"
+      proof: "unit test: loaded console code identity ignores mutable cwd"
     - claim: "a console whose loaded code is not main says so in a surface readable at any time, not only in a boot-time log line"
-      proof: "unit test: test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts"
+      proof: "unit test: stale loaded code remains readable"
     - claim: "serve no longer takes its code from a checkout another process mutates, proved by moving that checkout under a running serve and seeing its identity unchanged"
-      proof: "unit test: test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts"
+      proof: "unit test: dedicated checkout overlays daemon checkout"
     - claim: "the W1-T255 posture is preserved — an off-main console still SERVES rather than refusing to bind"
-      proof: "unit test: test/the-console-does-not-serve-whatever-the-daemon-checked-out.test.ts"
+      proof: "unit test: off main loaded code still serves"
   falsifier: |
     REPRODUCE BEFORE FIXING, and the repro is two commands on the fleet host:
     `docker inspect remudero-serve -f '{{range .Mounts}}{{.Source}}{{println}}{{end}}'` against the
