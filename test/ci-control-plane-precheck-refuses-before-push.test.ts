@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 
 import { gitRepo } from "./helpers/git-repo.js";
+// @ts-expect-error -- test executes the untyped executable module directly.
+import { runCiControlPlanePrecheck } from "../scripts/ci-control-plane-precheck.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(REPO_ROOT, "hooks", "pre-push");
@@ -66,6 +68,31 @@ function fixture(t: TestContext) {
   };
   return { work, commit, push };
 }
+
+test("W1-T3423: unreadable diff and static inputs refuse before a hook can report a clean control plane", () => {
+  const errors: string[] = [];
+  const unreadableDiff = runCiControlPlanePrecheck({
+    readChangedFiles: () => {
+      throw new Error("merge base unavailable");
+    },
+    error: (message: string) => errors.push(message),
+  });
+  assert.equal(unreadableDiff, 2);
+  assert.match(errors[0] ?? "", /could not read the diff against origin\/main \(merge base unavailable\)/);
+
+  const emptyRoot = mkdtempSync(join(dirname(REPO_ROOT), "rmd-t3423-unreadable-static-"));
+  try {
+    const unreadableStatic = runCiControlPlanePrecheck({
+      repoRoot: emptyRoot,
+      readChangedFiles: () => [".github/workflows/ci.yml"],
+      error: (message: string) => errors.push(message),
+    });
+    assert.equal(unreadableStatic, 1);
+    assert.match(errors.at(-1) ?? "", /static control-plane inputs are unreadable or invalid/);
+  } finally {
+    rmSync(emptyRoot, { recursive: true, force: true });
+  }
+});
 
 test("W1-T3423: a missing PR check registry entry refuses the real hook", (t) => {
   const f = fixture(t);
