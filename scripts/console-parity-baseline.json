@@ -43,6 +43,7 @@
     "ops",
     "plan",
     "plan-reconcile",
+    "pr-owner",
     "preflight",
     "project",
     "proof-queue-audit",

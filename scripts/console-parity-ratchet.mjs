@@ -90,6 +90,7 @@ export const CLI_ONLY = {
       "reap-branches",
       "ledger-compact",
       "ledger-grep",
+      "pr-owner",
       "hand-runs",
       "ci-failures",
       "census-membership",

@@ -2087,6 +2087,242 @@ export async function peekCommand(
   return 0;
 }
 
+type PrOwnerVerdictName = "OWNED" | "FREE" | "UNKNOWN";
+
+interface PrOwnerEvidenceRow {
+  ts?: string;
+  taskId?: string;
+  runId?: string;
+  headSha?: string;
+}
+
+interface PrOwnerFixEvidence extends PrOwnerEvidenceRow {
+  strike?: number;
+  strikeCap?: number;
+  mode?: string;
+}
+
+interface PrOwnerSweepEvidence extends PrOwnerEvidenceRow {
+  disposition?: string;
+  reason?: string;
+  acted?: boolean;
+}
+
+interface PrOwnerVerdict {
+  verdict: PrOwnerVerdictName;
+  prNumber: number;
+  corpusNewestTs?: string;
+  reason: string;
+  archiveCount: number;
+  compressedArchiveCount: number;
+  liveFileRead: boolean;
+  filesRead: number;
+  fix?: PrOwnerFixEvidence;
+  sweep?: PrOwnerSweepEvidence;
+}
+
+interface PrOwnerLedgerRead {
+  rows: Array<Record<string, unknown>>;
+  archiveFiles: string[];
+  liveFileRead: boolean;
+  ok: boolean;
+  unread: string[];
+  filesRead: number;
+}
+
+function prNumberFromLedgerRow(row: Record<string, unknown>): number | undefined {
+  if (typeof row.pr_number === "number" && Number.isInteger(row.pr_number) && row.pr_number > 0) return row.pr_number;
+  if (typeof row.pr_url !== "string") return undefined;
+  const m = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(row.pr_url);
+  return m ? Number(m[1]) : undefined;
+}
+
+function parsePrOwnerNumber(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const n = raw.startsWith("#") ? Number(raw.slice(1)) : Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+function ledgerRowTime(row: Record<string, unknown>): number {
+  return typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+}
+
+function newestLedgerRow(rows: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> | undefined {
+  let newest: Record<string, unknown> | undefined;
+  let newestMs = Number.NEGATIVE_INFINITY;
+  for (const row of rows) {
+    const ms = ledgerRowTime(row);
+    if (!Number.isFinite(ms)) continue;
+    if (ms >= newestMs) {
+      newest = row;
+      newestMs = ms;
+    }
+  }
+  return newest;
+}
+
+function stringField(row: Record<string, unknown>, key: string): string | undefined {
+  return typeof row[key] === "string" ? row[key] : undefined;
+}
+
+function numberField(row: Record<string, unknown>, key: string): number | undefined {
+  return typeof row[key] === "number" ? row[key] : undefined;
+}
+
+function rowEvidence(row: Record<string, unknown>): PrOwnerEvidenceRow {
+  return {
+    ts: stringField(row, "ts"),
+    taskId: stringField(row, "task_id"),
+    runId: stringField(row, "run_id"),
+    headSha: stringField(row, "head_sha"),
+  };
+}
+
+function summarizeFixRow(row: Record<string, unknown>): PrOwnerFixEvidence {
+  return {
+    ...rowEvidence(row),
+    strike: numberField(row, "strike"),
+    strikeCap: numberField(row, "strike_cap"),
+    mode: stringField(row, "mode"),
+  };
+}
+
+function summarizeSweepRow(row: Record<string, unknown>): PrOwnerSweepEvidence {
+  return {
+    ...rowEvidence(row),
+    disposition: stringField(row, "disposition"),
+    reason: stringField(row, "reason"),
+    acted: typeof row.acted === "boolean" ? row.acted : undefined,
+  };
+}
+
+function activeSweepRow(row: Record<string, unknown>): boolean {
+  if (row.step !== "sweep.disposed") return false;
+  if (row.disposition === "wait") return true;
+  if ((row.disposition === "blocked-fixable" || row.disposition === "conflicted") && row.acted === true) {
+    return row.spent !== false;
+  }
+  return false;
+}
+
+export function derivePrOwnerVerdict(prNumber: number, corpus: PrOwnerLedgerRead): PrOwnerVerdict {
+  const compressedArchiveCount = corpus.archiveFiles.filter((p) => p.endsWith(".ndjson.gz")).length;
+  const corpusNewestTs = stringField(newestLedgerRow(corpus.rows) ?? {}, "ts");
+  const base = {
+    prNumber,
+    corpusNewestTs,
+    archiveCount: corpus.archiveFiles.length,
+    compressedArchiveCount,
+    liveFileRead: corpus.liveFileRead,
+    filesRead: corpus.filesRead,
+  };
+
+  if (!corpus.ok) {
+    return {
+      ...base,
+      verdict: "UNKNOWN",
+      reason: corpus.unread.length > 0
+        ? `ledger union incomplete: ${corpus.unread.length} unread rotation(s)`
+        : "ledger union unavailable or has no rotations",
+    };
+  }
+  if (compressedArchiveCount === 0) {
+    return { ...base, verdict: "UNKNOWN", reason: "no compressed ledger rotation opened" };
+  }
+
+  const sweepRows = corpus.rows.filter((row) => row.step === "sweep.disposed" && prNumberFromLedgerRow(row) === prNumber);
+  const taskIds = new Set(sweepRows.map((row) => stringField(row, "task_id")).filter((v): v is string => !!v && v !== "SWEEP"));
+  const headShas = new Set(sweepRows.map((row) => stringField(row, "head_sha")).filter((v): v is string => !!v));
+  const fixRows = corpus.rows.filter((row) => {
+    if (row.step !== "fix.dispatch") return false;
+    if (prNumberFromLedgerRow(row) === prNumber) return true;
+    const taskId = stringField(row, "task_id");
+    if (!taskId || !taskIds.has(taskId)) return false;
+    const headSha = stringField(row, "head_sha");
+    return headSha === undefined || headShas.size === 0 || headShas.has(headSha);
+  });
+  const latestFix = newestLedgerRow(fixRows);
+  const latestSweep = newestLedgerRow(sweepRows);
+
+  if (latestFix !== undefined || (latestSweep !== undefined && activeSweepRow(latestSweep))) {
+    return {
+      ...base,
+      verdict: "OWNED",
+      reason: latestFix !== undefined ? "fix.dispatch found for this pull request" : "active sweep disposition found for this pull request",
+      ...(latestFix !== undefined ? { fix: summarizeFixRow(latestFix) } : {}),
+      ...(latestSweep !== undefined ? { sweep: summarizeSweepRow(latestSweep) } : {}),
+    };
+  }
+
+  return {
+    ...base,
+    verdict: "FREE",
+    reason: "no fix.dispatch row or active sweep disposition found for this pull request",
+    ...(latestSweep !== undefined ? { sweep: summarizeSweepRow(latestSweep) } : {}),
+  };
+}
+
+function renderPrOwnerVerdict(v: PrOwnerVerdict): string {
+  const lines = [
+    `rmd pr-owner #${v.prNumber} — ${v.verdict}`,
+    `  reason: ${v.reason}`,
+    `  corpus_newest_ts: ${v.corpusNewestTs ?? "unknown"}`,
+    `  corpus: files_read=${v.filesRead}, archives=${v.archiveCount}, compressed_archives=${v.compressedArchiveCount}, live=${v.liveFileRead ? "yes" : "no"}`,
+  ];
+  if (v.fix) {
+    const strike = v.fix.strike !== undefined && v.fix.strikeCap !== undefined ? `${v.fix.strike}/${v.fix.strikeCap}` : "unknown";
+    lines.push(
+      `  fix.dispatch: ts=${v.fix.ts ?? "unknown"}, task=${v.fix.taskId ?? "unknown"}, run=${v.fix.runId ?? "unknown"}, ` +
+        `strike=${strike}, mode=${v.fix.mode ?? "unknown"}, head=${v.fix.headSha ?? "unknown"}`,
+    );
+  }
+  if (v.sweep) {
+    lines.push(
+      `  sweep.disposed: ts=${v.sweep.ts ?? "unknown"}, task=${v.sweep.taskId ?? "unknown"}, run=${v.sweep.runId ?? "unknown"}, ` +
+        `disposition=${v.sweep.disposition ?? "unknown"}, acted=${v.sweep.acted === undefined ? "unknown" : String(v.sweep.acted)}, ` +
+        `head=${v.sweep.headSha ?? "unknown"}, reason=${JSON.stringify(v.sweep.reason ?? "")}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+export function prOwnerCommand(
+  rest: string[],
+  deps: {
+    stateDir?: string;
+    readLedger?: (stateDir: string) => PrOwnerLedgerRead;
+    write?: (text: string) => void;
+    error?: (text: string) => void;
+  } = {},
+): number {
+  const badArg = unknownArgError("pr-owner", rest.slice(1), [], []);
+  if (badArg) {
+    (deps.error ?? console.error)(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const prNumber = parsePrOwnerNumber(rest[0]);
+  if (prNumber === undefined) {
+    (deps.error ?? console.error)(`rmd pr-owner: <pr-number> is required — usage: ${commandSyntax("pr-owner")}\n` + USAGE);
+    return 2;
+  }
+  const stateDir = deps.stateDir ?? (deps.readLedger ? "" : dirname(ledgerPathFor(loadConfig())));
+  let corpus: PrOwnerLedgerRead;
+  try {
+    corpus = (deps.readLedger ?? ((dir) => readLedgerUnionRecordsSync(dir, { requireArchives: true, refuseIncomplete: true })))(stateDir);
+  } catch (error) {
+    corpus = {
+      rows: [],
+      archiveFiles: [],
+      liveFileRead: false,
+      ok: false,
+      unread: [String((error as Error)?.message ?? error)],
+      filesRead: 0,
+    };
+  }
+  (deps.write ?? console.log)(renderPrOwnerVerdict(derivePrOwnerVerdict(prNumber, corpus)));
+  return 0;
+}
+
 /** Strips a global `--repo-root <path>` pair off argv before per-command flag
  *  validation — so a command whose own allow-list doesn't mention `--repo-root`
  *  (nearly all of them) never rejects it as an unexpected argument. */
@@ -37493,6 +37729,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T945: READ-ONLY tail of one run's output — the last <n> lines (default 50, never more than the 500-line ring ceiling) of its retained state/runs/<runId>.tail (W1-T942), printed with a LIVE/FINISHED verdict from the SAME liveInflightRuns pid-checked read every other liveness decision in this fleet uses — never a second definition of 'in flight'. Works identically on a FINISHED run's retained tail, the surviving half of fb-1784821673624-321a4b (its final-message half already shipped as report_excerpt, #1584). An unknown run id or an absent tail prints a NAMED reason and still exits 0 — never silent empty output. --follow re-polls and reprints on change, stopping on its own the moment the run is no longer live — it never hangs on an already-finished run. READ-ONLY BY CONSTRUCTION: no flag here writes to, signals, resumes or kills the run — there is no steering surface in v1.",
   },
   {
+    name: "pr-owner",
+    syntax: "rmd pr-owner <pr-number>",
+    summary: "Report whether the local ledger shows a fix lane owning one PR.",
+    detail: "W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. READ-ONLY: this verb writes, claims and releases nothing.",
+  },
+  {
     name: "plan",
     syntax: "rmd plan --mode=create|clarify|expand [<brief>...]",
     summary: "The unified Architect PLAN skill: create, clarify or expand plan tasks.",
@@ -37863,11 +38105,19 @@ function logCliInvocation(cmd: string | undefined, argv: string[]): void {
  *                   regardless, by never letting the guard reach a child it spawns. Both are
  *                   required — the exemption fixes the documented invocation; the spawn scrub
  *                   fixes what an operator's own shell might still carry for unrelated reasons.
+ * `pr-owner` (W1-T3281): a READ of the local ledger answering "does a fix lane own this PR". It
+ *                   is the same shape as `status` — a diagnostic that reports state and writes
+ *                   nothing: no ledger line, no git operation, no PR. Refusing it on a diverged
+ *                   checkout is self-defeating for the same reason it is for `doctor`: the moment
+ *                   an operator most needs to ask who owns a PR is while standing on a branch the
+ *                   gate would refuse, and the answer it returns cannot be affected by the
+ *                   staleness the gate is guarding, because the ledger it reads is host-local and
+ *                   not a checkout artifact at all.
  * `sweep`/`inbox` stay OUT even though their `--dry-run` forms are read-only: exempting the verb
  * name would also exempt their real (non-dry-run) dispatch. `run-task`/`drain`/`triage`/`fix`/
  * `approve`/`review`/`lint-plan` are untouched and keep falling to the gate's `else` branch.
  */
-const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight"]);
+const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight", "pr-owner"]);
 
 /**
  * A PROMISE REJECTION THAT ESCAPED EVERY HANDLER — the fourth named halt, alongside
@@ -38178,6 +38428,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot, resolveOwnerRepo }),
   ],
   ["peek", async (rest) => await peekCommand(rest)],
+  ["pr-owner", (rest) => prOwnerCommand(rest)],
   ["plan", async (rest) => await planCommand(rest)],
   ["inbox", async (rest) => await inboxCommand(rest)],
   [
