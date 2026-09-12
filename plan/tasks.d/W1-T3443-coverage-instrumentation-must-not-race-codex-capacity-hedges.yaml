@@ -48,4 +48,4 @@
     produce their required hedge observations under coverage. The current #5246 and #5256
     logs directly falsify those conditions. Reject any patch that changes production timeout,
     hedge, cache, or provider-selection behavior; this task owns test scheduling only.
-  note: "W1-T3443 was atomically reserved at refs/rmd-id/W1-T3443 before this filing."
+  note: "reservation hand-off: codex/w1-t3435-stabilize-hedge-test -> codex/w1-t3443-capacity-coverage-timers"
