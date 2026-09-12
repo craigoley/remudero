@@ -198,7 +198,7 @@ test("W1-T2969 an unreadable diff exits non-zero rather than rendering as 'joins
   assert.match(r.out, /could not read the diff/);
 });
 
-test("W1-T2969 an UNMODELLED census suite is NAMED on the verb's output, never silently dropped", () => {
+test("W1-T2969 a candidate census suite is NAMED on the verb's output, never silently dropped", () => {
   // The difference between "this diff joins nothing" and "the model does not know" is the only
   // thing separating a useful answer from a confident wrong one (P48). A spawn that yields a real
   // suite the table does not model drives that render path; `noExtraCandidates` cannot, because it
@@ -209,10 +209,14 @@ test("W1-T2969 an UNMODELLED census suite is NAMED on the verb's output, never s
     stderr: "",
   })) as never;
   const r = captured(() =>
-    censusMembershipCommand([], { changedPaths: ["src/lib/x.ts"], spawn: yieldsAnUnmodelledSuite }),
+    censusMembershipCommand([], {
+      changedPaths: ["src/lib/x.ts"],
+      spawn: yieldsAnUnmodelledSuite,
+      readFile: () => 'const files = globSync("src/**/*.ts");',
+    }),
   );
   assert.equal(r.code, 0, "naming an unmodelled suite is a report, never a refusal");
-  assert.match(r.out, /UNMODELLED census suite\(s\)/);
+  assert.match(r.out, /CANDIDATE census suite\(s\)/);
   assert.match(r.out, /test\/rule-efficacy\.test\.ts/, "and the suite is named, not counted");
 });
 

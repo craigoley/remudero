@@ -246,6 +246,7 @@
     "test/an-unaudited-sibling-call-site-is-named.test.ts": 0,
     "test/an-understood-request-reaches-execution-through-the-existing-tiering.test.ts": 1327,
     "test/an-unfetched-base-is-not-an-absent-file.test.ts": 0,
+    "test/an-unmodelled-census-is-named-with-what-it-walks.test.ts": 0,
     "test/an-unrelated-filing-keeps-a-tasks-recon.test.ts": 907,
     "test/analytics-route.test.ts": 1143,
     "test/api-client-base-url.test.ts": 238,

@@ -111,7 +111,7 @@ test("a known census suite's own test file is never duplicated into unknownCover
 
 test("the report shape carries no ok/verdict field — a caller cannot wire it into a refusal", () => {
   const report: CensusMembershipReport = censusSuiteMembership(["src/lib/anything.ts"], ["test/unmodeled.test.ts"]);
-  assert.deepEqual(Object.keys(report).sort(), ["entries", "unknownCoverage"]);
+  assert.deepEqual(Object.keys(report).sort(), ["candidateCoverage", "entries", "unknownCoverage"]);
   for (const entry of report.entries) {
     assert.deepEqual(Object.keys(entry).sort(), ["path", "suites"]);
   }
@@ -120,7 +120,7 @@ test("the report shape carries no ok/verdict field — a caller cannot wire it i
 test("an empty change set and an empty caller set both resolve without throwing", () => {
   assert.doesNotThrow(() => censusSuiteMembership([], []));
   const report = censusSuiteMembership([], []);
-  assert.deepEqual(report, { entries: [], unknownCoverage: [] });
+  assert.deepEqual(report, { entries: [], unknownCoverage: [], candidateCoverage: [] });
 });
 
 // ── censusSuiteMembershipFor — the impure edge, driving the real re-derivation shape ─────────
