@@ -512,13 +512,13 @@ export type ReviewerCodeFreshness =
   | { status: "stale"; codeSha: string; originMainSha: string; changedPaths?: string[]; diffUnreadable?: string }
   | { status: "unreadable"; reason: string };
 
-export interface ReviewerCodeFreshnessDeps {
+export interface ReviewerCodeFreshnessOptions {
   checkServiceFreshness?: typeof checkServiceFreshness;
   resolveHeadSha?: () => string;
   git?: GitRunner;
 }
 
-function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFreshnessDeps): ReviewerCodeFreshness {
+function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFreshnessOptions): ReviewerCodeFreshness {
   const git =
     deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", stdio: "pipe" }));
   try {
@@ -554,7 +554,7 @@ function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFr
 export function checkReviewerCodeFreshness(
   repoDir: string,
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
-  deps: ReviewerCodeFreshnessDeps = {},
+  deps: ReviewerCodeFreshnessOptions = {},
 ): ReviewerCodeFreshness {
   const service = (deps.checkServiceFreshness ?? checkServiceFreshness)(repoDir, env);
   if (service.status === "degraded") return { status: "unreadable", reason: service.reason };
