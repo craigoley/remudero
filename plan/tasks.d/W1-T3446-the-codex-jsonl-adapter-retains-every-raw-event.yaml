@@ -1,0 +1,84 @@
+- id: W1-T3446
+  title: "THE CODEX WORKER ADAPTER RETAINS EVERY RAW JSONL EVENT UNTIL EXIT — three live Codex repair workers grew the daemon from 1.01 GiB to 1.55 GiB RSS in five minutes, and `stdoutChunks.join(\"\")` retains ignored tool-output events before parsing, so the adapter must decode incrementally and bound every retained diagnostic field"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files: [src/lib/worker-provider.ts, test/codex-worker-jsonl-stream-is-bounded.test.ts, scripts/test-tier-manifest.json]
+  origin: "operator-session#daemon-oom-codex-jsonl-retention-2026-09-12"
+  plan_refs: ["W1-T3335", "W1-T3352", "W1-T1219"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on the Azure fleet host 2026-09-12. The daemon's actual Node process (pid 81) had
+    three live `codex exec --json` repair children. Its RSS rose from 1,048,684 KiB at 18:35:11Z,
+    to 1,198,180 KiB at 18:37:26Z, to 1,625,540 KiB at 18:40:33Z. Two immediately preceding
+    daemon processes reached V8's 8 GiB limit and aborted with exit 134 after 715s and 823s.
+    The current W1-T3335 pressure arm checks only between daemon ticks, so it cannot protect a
+    sweep that is still awaiting worker activity; it reports the crash class but cannot remove an
+    allocation retained inside that tick.
+
+    SOURCE CONFIRMED at origin/main `a5abfd0e`. `spawnCodexWorkerInPrivateTemp` creates
+    `stdoutChunks: string[]` in `src/lib/worker-provider.ts`, pushes every stdout data chunk, and
+    calls `parseCodexJsonl(stdoutChunks.join(""))` only after child exit. The Codex JSONL parser
+    consumes only thread ids, turn counters, terminal agent messages, terminal errors, and usage;
+    raw command/tool events (including `aggregated_output`) are discarded after parse. Holding the
+    whole raw stream therefore has no semantic consumer and grows with every ignored event. No
+    open PR head or existing task shard names `stdoutChunks`, `parseCodexJsonl`, or this retention
+    path at filing time.
+
+    W1-T3352 is not this defect: #5146 (`baae0218`) made the serve analytics reader process-owned
+    and cancellable. It does not touch the worker adapter. W1-T3335 is also not this defect: #5000
+    adds an between-tick pressure exit, while this task removes the in-tick unbounded collection.
+  design: |
+    Replace the raw-output accumulator with one incremental JSONL decoder owned by the Codex
+    adapter. Each complete line is parsed when it arrives, regardless of arbitrary Buffer chunk
+    boundaries. It retains only the provider-neutral fields the existing parser exposes: latest
+    thread id, turn count, usage totals, terminal agent-message transcript, and terminal errors.
+    Tool/command payloads are consumed and released immediately; no full raw transcript and no
+    `stdoutChunks.join("")` remains.
+
+    Put explicit byte ceilings on the only carry and semantic text that can survive between chunks:
+    an unterminated record, each retained error, and the complete retained agent-message transcript.
+    A ceiling breach must terminate the contained worker and return a named error outcome; it must
+    never silently drop a marker then return a successful worker result. Preserve the final-message
+    and terminal-error semantics for all streams under those ceilings, including a line split across
+    multiple chunks. Continue to cap persisted excerpts at their existing boundary; do not weaken
+    worker isolation, alter provider selection, increase the daemon heap, reduce worker lanes, or
+    change the sweep/fix wall-clock policies.
+
+    Keep `parseCodexJsonl` as the pure complete-string compatibility reader only if its tests and
+    non-live callers still need it; production `spawnCodexWorker` must use the incremental path.
+    The new test owns an injectable contained process and feeds a multi-megabyte ignored tool event
+    plus a valid terminal event. It proves retained decoder bytes remain at the stated fixed ceiling
+    while the final worker envelope remains correct. It also proves an oversized unterminated line
+    is named and reaped rather than accumulated.
+  acceptance:
+    - claim: "a Codex JSONL stream split at arbitrary Buffer boundaries produces the same thread id, final agent message, turn count, usage and terminal-error classification as the existing complete-string parser"
+      proof: "unit test: W1-T3446 criterion 1"
+    - claim: "a multi-megabyte ignored tool event does not scale retained adapter bytes, while the following valid terminal agent message and usage still produce a correct worker result"
+      proof: "unit test: W1-T3446 criterion 2"
+    - claim: "an over-ceiling incomplete record or retained transcript is terminated with a named non-success outcome and the contained worker group is reaped; it never becomes a silent partial success"
+      proof: "unit test: W1-T3446 criterion 3"
+    - claim: "the focused Codex JSONL streaming test is registered in the tier manifest"
+      proof: "grep: codex-worker-jsonl-stream-is-bounded\\.test\\.ts in scripts/test-tier-manifest.json"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if the live Codex adapter already parses stdout incrementally
+    without retaining the raw JSONL stream, and a production-shaped ignored tool event cannot grow
+    the adapter's retained bytes. At filing it does not: `stdoutChunks.push(text)` followed by
+    `parseCodexJsonl(stdoutChunks.join(""))` is directly reachable from the live spawn path.
+
+    Delete the incremental decoder or restore the raw accumulator: the large ignored-event case
+    must expose retained bytes proportional to the fixture and fail. Mutate the over-ceiling arm to
+    discard data then return success: the named non-success assertion must fail. Remove the
+    chunk-boundary handling: the split-line compatibility case must fail. A test that only calls
+    `parseCodexJsonl` on a finished string is insufficient because it never exercises the live
+    retention path.
+  note: |
+    Reservation W1-T3446 was atomically claimed on origin before filing. This is one allocation
+    boundary, not a reframe of W1-T3335 or W1-T3352. The plan status remains a filing state; merge
+    credit, not `status:`, determines whether the dispatcher may consider a task complete.
