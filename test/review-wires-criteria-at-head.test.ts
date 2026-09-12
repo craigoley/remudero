@@ -245,7 +245,7 @@ test("an untrailered body is unchanged — still resolves from its own PR body A
   const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   assert.match(
     runTaskSrc,
-    /if\s*\(taskId\)\s*{\s*const resolved = resolvePlanCriteriaAtHead\(body, repoRoot, /,
+    /if\s*\(taskId\)\s*{\s*const resolved = resolvePlanCriteriaAtHead\(body, subjectRepoDir, /,
     "resolvePlanCriteriaAtHead must be gated on a resolved taskId, never called for an untrailered body",
   );
 

@@ -14717,7 +14717,10 @@ interface ReviewCommandDeps {
   fetchView?: (args: string[]) => unknown;
   loadConfig?: () => Config;
   materialize?: typeof materializeReviewWorktree;
+  withMaterialized?: typeof withMaterializedWorktree;
+  buildBaseProof?: typeof buildBaseProofDir;
   runReview?: typeof runReview;
+  postStatus?: typeof postReviewStatusGuarded;
   /** W1-T913: injectable so a test can observe the pending post without a real `gh` spawn — see
    *  `postReviewPending`'s call site below. Defaults to the real {@link postReviewPending}. */
   postReviewPending?: typeof postReviewPending;
@@ -14733,6 +14736,124 @@ interface ReviewCommandDeps {
    *  that fact across the process boundary instead of making reviewCommand reclassify with the
    *  narrower emitter-ledger evidence available here. Undefined preserves the operator CLI. */
   planOnlyFiling?: boolean;
+  /** Test-only escape hatch for older injected reviewCommand fixtures that use `--repo` merely to
+   * avoid the live `resolveOwnerRepo()` read. Production callers never set this; explicit target
+   * reviews validate the managed clone before target data is read. */
+  enforceReviewSubjectCheckout?: boolean;
+}
+
+type ReviewSubjectFailureReason =
+  | "review-subject-missing"
+  | "review-subject-not-git"
+  | "review-subject-origin-mismatch";
+
+type ReviewSubjectCheckout =
+  | { ok: true; repoDir: string; explicitTarget: boolean }
+  | { ok: false; reason: ReviewSubjectFailureReason; message: string; repoDir: string; explicitTarget: true };
+
+function parseOwnerRepoFromOriginUrl(url: string): { owner: string; repo: string } | undefined {
+  const m = url.trim().match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
+  return m ? { owner: m[1]!, repo: m[2]! } : undefined;
+}
+
+function ownerRepoEqual(a: { owner: string; repo: string }, b: { owner: string; repo: string }): boolean {
+  return a.owner === b.owner && a.repo === b.repo;
+}
+
+export function resolveReviewSubjectCheckout(args: {
+  config: Config;
+  rest: string[];
+  self: { owner: string; repo: string };
+  target: { owner: string; repo: string };
+  controllerRepoRoot?: string;
+  git?: (repoDir: string, argv: string[]) => string;
+  exists?: (path: string) => boolean;
+  isDirectory?: (path: string) => boolean;
+}): ReviewSubjectCheckout {
+  const controllerRepoRoot = args.controllerRepoRoot ?? repoRoot;
+  const explicitRepo = flagValue(args.rest, "--repo") !== undefined;
+  if (!explicitRepo || ownerRepoEqual(args.self, args.target)) {
+    return { ok: true, repoDir: controllerRepoRoot, explicitTarget: explicitRepo };
+  }
+
+  const repoDir = join(args.config.root, "repos", args.target.repo);
+  const exists = args.exists ?? existsSync;
+  const isDirectory =
+    args.isDirectory ??
+    ((path: string) => {
+      try {
+        return lstatSync(path).isDirectory();
+      } catch (e) {
+        return false;
+      }
+    });
+  const git =
+    args.git ??
+    ((dir: string, argv: string[]) =>
+      execFileSync("git", ["-C", dir, ...argv], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim());
+
+  if (!exists(repoDir) || !isDirectory(repoDir)) {
+    return {
+      ok: false,
+      reason: "review-subject-missing",
+      message: `explicit review target ${args.target.owner}/${args.target.repo} has no managed checkout at ${repoDir}`,
+      repoDir,
+      explicitTarget: true,
+    };
+  }
+
+  try {
+    if (git(repoDir, ["rev-parse", "--is-inside-work-tree"]).trim() !== "true") {
+      return {
+        ok: false,
+        reason: "review-subject-not-git",
+        message: `explicit review target ${args.target.owner}/${args.target.repo} checkout at ${repoDir} is not a git work tree`,
+        repoDir,
+        explicitTarget: true,
+      };
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      reason: "review-subject-not-git",
+      message:
+        `explicit review target ${args.target.owner}/${args.target.repo} checkout at ${repoDir} is not readable as a git work tree: ` +
+        String((e as Error)?.message ?? e),
+      repoDir,
+      explicitTarget: true,
+    };
+  }
+
+  let origin;
+  try {
+    origin = parseOwnerRepoFromOriginUrl(git(repoDir, ["config", "--get", "remote.origin.url"]));
+  } catch (e) {
+    origin = undefined;
+  }
+  if (!origin || !ownerRepoEqual(origin, args.target)) {
+    const observed = origin ? `${origin.owner}/${origin.repo}` : "unreadable";
+    return {
+      ok: false,
+      reason: "review-subject-origin-mismatch",
+      message:
+        `explicit review target ${args.target.owner}/${args.target.repo} checkout at ${repoDir} has origin ${observed}`,
+      repoDir,
+      explicitTarget: true,
+    };
+  }
+
+  return { ok: true, repoDir, explicitTarget: true };
+}
+
+function reviewSubjectFallbackAllowed(deps: ReviewCommandDeps): boolean {
+  if (deps.enforceReviewSubjectCheckout === true) return false;
+  return (
+    deps.fetchView !== undefined ||
+    deps.fetchHead !== undefined ||
+    deps.materialize !== undefined ||
+    deps.runReview !== undefined ||
+    deps.postReviewPending !== undefined
+  );
 }
 
 // reviewPrNumber / reviewViewArgs moved to src/lib/report-commands.ts (W1-T2888) — imported/
@@ -14911,7 +15032,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     fetchView,
     loadConfig: loadConfigDep,
     materialize,
+    withMaterialized,
+    buildBaseProof,
     runReview: runReviewDep,
+    postStatus: postStatusDep,
     postReviewPending: postReviewPendingDep,
     fetchHead,
     executionMode,
@@ -14920,7 +15044,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     fetchView: ghJson,
     loadConfig,
     materialize: materializeReviewWorktree,
+    withMaterialized: withMaterializedWorktree,
+    buildBaseProof: buildBaseProofDir,
     runReview,
+    postStatus: postReviewStatusGuarded,
     postReviewPending,
     fetchHead: realDeps().reviewWorktree.fetch,
     executionMode: "deterministic" as const,
@@ -14962,6 +15089,45 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     view.headRefName,
     planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
   );
+  const runId = `review-PR${view.number}-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
+  const reviewSubject = resolveReviewSubjectCheckout({
+    config,
+    rest,
+    self: resolveOwnerRepo(),
+    target: { owner, repo },
+  });
+  const subjectCheckout = reviewSubject.ok || reviewSubjectFallbackAllowed(deps)
+    ? { ok: true as const, repoDir: reviewSubject.ok ? reviewSubject.repoDir : repoRoot, explicitTarget: reviewSubject.explicitTarget }
+    : reviewSubject;
+  if (!subjectCheckout.ok) {
+    log("review.subject_refused", {
+      reason: subjectCheckout.reason,
+      message: subjectCheckout.message,
+      subject_repo_dir: subjectCheckout.repoDir,
+      target_owner: owner,
+      target_repo: repo,
+    });
+    await postStatusDep({
+      owner,
+      repo,
+      sha: view.headRefOid,
+      state: "failure",
+      description: `remudero-review: FAIL — ${subjectCheckout.reason}`,
+      taskId: taskId ?? `PR-${view.number}`,
+      evidence: "no_evidence",
+      ledgerPath,
+      runId,
+      prUrl: view.url,
+      reviewInputDigest: inputDigest,
+      reviewEngineRevision: REVIEW_ENGINE_REVISION,
+      fetchLifecycle: () => fetchPrLifecycle(view.url),
+    });
+    console.error(`rmd review: REFUSED — ${subjectCheckout.message}`);
+    return 1;
+  }
+  const subjectRepoDir = subjectCheckout.repoDir;
   // W1-T322: the same plan lookup this block already does for `criteria` also carries the
   // task's declared scope — an advisory-only input judgeReview needs. Stays `undefined` on ANY
   // read/parse failure (see the catch below), exactly like `criteria` degrading to the body's
@@ -15003,8 +15169,9 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // outage through its own `fetch-failure` class, which is the degradation path this command
   // already has. Failing here instead would invent a second one for the same condition.
   try {
-    fetchHead(repoRoot, view.number);
-  } catch {
+    fetchHead(subjectRepoDir, view.number);
+  } catch (e) {
+    void e;
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
@@ -15013,7 +15180,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
   if (taskId && !reviewTaskIdFromBody(body)) body = `Remudero-Task: ${taskId}`;
   if (taskId) {
-    const resolved = resolvePlanCriteriaAtHead(body, repoRoot, "plan/tasks.yaml", view.headRefOid);
+    const resolved = resolvePlanCriteriaAtHead(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid);
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
     taskDeclaredFiles = resolved.taskDeclaredFiles;
@@ -15028,10 +15195,6 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       source = `PR body Acceptance: block (${fromBody.length} criteria)`;
     }
   }
-
-  const runId = `review-PR${view.number}-${Date.now()}`;
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
 
   const provenanceKey = { taskId: taskId ?? `PR-${view.number}`, prUrl: view.url, headSha: view.headRefOid };
   const provenance = resolveReviewProviderProvenance(reviewLedger, provenanceKey);
@@ -15115,7 +15278,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
   // never silently, and (W1-T233) the console line below now NAMES why,
   // instead of a bare "unavailable" with the real reason thrown away.
-  const materialized = materialize(config, repoRoot, view.number, view.headRefOid);
+  const materialized = materialize(config, subjectRepoDir, view.number, view.headRefOid);
   if (materialized.worktreePath === undefined) {
     console.log(
       `(worktree materialization failed [${materialized.failure.errorClass}]: ` +
@@ -15131,7 +15294,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // fallback (or undefined when the PR has no dialect proof / no resolvable base — the check then
   // stays inert, exactly as it was for its first 1,180 verdicts). W1-T460's `baseUnreadablePaths`
   // rides along: a per-proof fact the dir alone cannot carry.
-  const baseProof = worktreePath ? buildBaseProofDir(criteria, worktreePath) : undefined;
+  const baseProof = worktreePath ? buildBaseProof(criteria, worktreePath) : undefined;
 
   // W1-T185 (Gap 2, criterion 6): withMaterializedWorktree guarantees teardown
   // on EVERY exit path, including a throw from runReview itself — never just
@@ -15140,11 +15303,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // head goes first and the base follows on every exit path too; a blob-only
   // fallback dir is not a worktree and is left to the boot sweep (src/lib/tmp.ts)
   // exactly as before.
-  const verdict = await withMaterializedWorktree(
+  const verdict = await withMaterialized(
     baseProof?.baseIsCheckout ? baseProof.baseCheckoutDir : undefined,
-    repoRoot,
+    subjectRepoDir,
     () =>
-      withMaterializedWorktree(worktreePath, repoRoot, () =>
+      withMaterialized(worktreePath, subjectRepoDir, () =>
         runReviewDep({
           owner,
           repo,
@@ -15196,7 +15359,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   );
   if (verdict.codeFreshnessWithheld) return 2;
 
-  if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(source, repoRoot)) {
+  if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(source, subjectRepoDir)) {
     console.log(
       "NOTE: the criteria came from a plan tree older than origin/main; merge origin/main into the branch " +
         "before treating this unmet verdict as a diff defect",
