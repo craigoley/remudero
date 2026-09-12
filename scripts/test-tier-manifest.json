@@ -1,7 +1,6 @@
 {
   "thresholdMs": 5000,
   "files": {
-    "test/automated-retro-preflight-scrubs-self-sync.test.ts": 0,
     "test/a-bare-flagged-worktree-stops-the-whole-fleet.test.ts": 0,
     "test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts": 621,
     "test/a-blocked-ci-verdict-names-the-check-that-went-red.test.ts": 0,
@@ -280,6 +279,7 @@
     "test/auto-triage-policy-seam.test.ts": 949,
     "test/auto-triage-rung.test.ts": 1541,
     "test/auto-triage-wiring.test.ts": 20766,
+    "test/automated-retro-preflight-scrubs-self-sync.test.ts": 0,
     "test/automerge-hold.test.ts": 1941,
     "test/autonomy-ratchet.test.ts": 3921,
     "test/awareness-surface-ratchet.test.ts": 1073,
@@ -1110,6 +1110,7 @@
     "test/rule-15-16-filing-misattribution.test.ts": 1751,
     "test/rule-19-sizing-counts-a-test-as-a-concern.test.ts": 961,
     "test/rule-21-follow-up-couples-parent-disposition.test.ts": 914,
+    "test/rule-25-guards-the-gates-that-exist.test.ts": 0,
     "test/rule-citation-gate-engine-portable.test.ts": 457,
     "test/rule-citations-match-their-rule.test.ts": 372,
     "test/rule-efficacy.test.ts": 1103,
