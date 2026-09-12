@@ -1016,8 +1016,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     const prNumber = prNumberFromRef(prUrl);
     return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs));
   };
-  let mainCommitRead: Promise<{ sha?: string; committedAt?: string } | undefined> | undefined;
-  const readMainCommit = (): Promise<{ sha?: string; committedAt?: string } | undefined> => {
+  let mainCommitRead: Promise<{ sha?: string; committedAt?: string; error?: string } | undefined> | undefined;
+  const readMainCommit = (): Promise<{ sha?: string; committedAt?: string; error?: string } | undefined> => {
     mainCommitRead ??= (async () => {
       try {
         const commit = (await readJsonImpl(["api", `repos/${owner}/${repo}/commits/main`])) as {
@@ -1027,8 +1027,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const sha = typeof commit?.sha === "string" ? commit.sha : undefined;
         const committedAt = typeof commit?.commit?.committer?.date === "string" ? commit.commit.committer.date : undefined;
         return sha || committedAt ? { sha, committedAt } : undefined;
-      } catch {
-        return undefined;
+      } catch (caught) {
+        const error = String(caught);
+        return { error };
       }
     })();
     return mainCommitRead;
@@ -4221,7 +4222,8 @@ export async function selectStaleRedRelease(
       const runs = await readWorkflowRuns(pr);
       if (runs === undefined || runs.some((run) => (run.conclusion ?? "").trim() === "")) continue;
       return { pr, failure: candidate.failure, main, route: candidate.route };
-    } catch (error) {
+    } catch (caught) {
+      const error = String(caught);
       onReadError(pr, error);
     }
   }
@@ -8005,8 +8007,9 @@ export async function runSweep(
                 let routeResult: IsolatedMergeRouteResult;
                 try {
                   routeResult = await deps.runStaleRedLocalRoute!(target);
-                } catch (error) {
-                  routeResult = { outcome: "source-unreadable", detail: String((error as Error)?.message ?? error) };
+                } catch (caught) {
+                  const error = String((caught as Error)?.message ?? caught);
+                  routeResult = { outcome: "source-unreadable", detail: error };
                 }
                 appendLine(deps.ledgerPath, {
                   run_id: deps.runId,
@@ -8052,9 +8055,10 @@ export async function runSweep(
                     `stale-red release: ${target.failure.name} completed before main repair and passed its declared isolated merge route; ` +
                     `minted ${newHead}`;
                   break;
-                } catch (error) {
+                } catch (caught) {
+                  const error = String((caught as Error)?.message ?? caught);
                   acted = false;
-                  standDownReason = `stale-red release declined: lease-protected push failed (${String((error as Error)?.message ?? error)})`;
+                  standDownReason = `stale-red release declined: lease-protected push failed (${error})`;
                   break;
                 }
               }
