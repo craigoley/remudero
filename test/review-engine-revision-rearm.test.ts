@@ -67,6 +67,7 @@ const oldFailure: ReviewVerdict = {
 test("W1-T2872: the exact PR #4042 old-engine row spends zero current-engine attempts and re-enters post-review", () => {
   assert.equal(legacyInputDigest(HEAD_4042, PR_BODY_4042), OLD_INPUT_DIGEST_4042, "the fixture is the observed exact body and head");
   const currentDigest = reviewInputDigest(HEAD_4042, PR_BODY_4042);
+  const dispositionNow = Date.parse("2026-09-05T08:00:00.000Z");
   const ledger = [{
     ts: "2026-09-05T05:40:57.234Z",
     step: "review.posted",
@@ -89,7 +90,7 @@ test("W1-T2872: the exact PR #4042 old-engine row spends zero current-engine att
     unmetCriteria: oldFailure.criteria,
     criteriaRecoverable: true,
     priorStrikes: 1,
-    lastActivityAt: "2026-09-05T05:40:57.234Z",
+    lastActivityAt: new Date(dispositionNow - 2 * 60 * 60 * 1000).toISOString(),
     headSha: HEAD_4042,
     autoMergeArmed: false,
     requiredContextsUnreadable: false,
@@ -97,7 +98,7 @@ test("W1-T2872: the exact PR #4042 old-engine row spends zero current-engine att
     reviewInputDigest: currentDigest,
     priorReviewAttemptsForInput: attempts.attempts,
   };
-  const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, Date.parse("2026-09-05T08:00:00.000Z"));
+  const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, dispositionNow);
   assert.equal(disposition.disposition, "post-review");
   assert.match(disposition.reason, /authoritative reviewer/);
 });

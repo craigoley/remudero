@@ -80,7 +80,7 @@ function blockedPr(): OpenPrView {
       { claim: "finish the repair", proof: "unit test: x", met: false, reason: "not done", proof_exec: "executed_fail" },
     ],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-05T04:00:00Z",
+    lastActivityAt: new Date().toISOString(),
     headSha: "detached-fix-head",
     autoMergeArmed: false,
   };
