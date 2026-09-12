@@ -130,24 +130,35 @@ test("a design-only edit to a real shard raises the --base checked count from 0 
 });
 
 test("a source diff with no plan diff still computes base-side source existence", async () => {
-  const changed = execFileSync("git", ["-C", REPO_ROOT, "diff", "--name-only", "origin/main...HEAD"], { encoding: "utf8" })
-    .split("\n")
-    .filter(Boolean);
-  assert.ok(changed.includes("src/run-task.ts"), "control: this PR must still carry the source diff that drives the base-side source lookup");
-
-  const logs: string[] = [];
-  const origLog = console.log;
-  const origError = console.error;
-  console.log = (m: string) => logs.push(String(m));
-  console.error = (m: string) => logs.push(String(m));
+  const fixture = isolatedCheckout(REPO_ROOT);
   try {
-    const exitCode = await lintPlanCommand(["--base", "origin/main"], { offline: true });
-    const out = logs.join("\n");
-    assert.equal(exitCode, 0, `a source-only diff must not create a plan lint failure; saw:\n${out}`);
-    assert.match(out, /0 task\(s\) checked \(0 new\/changed vs origin\/main\)/);
+    const sourcePath = join(fixture.root, "src", "run-task.ts");
+    const original = readFileSync(sourcePath, "utf8");
+    writeFileSync(sourcePath, `${original}\n// source-only lint-plan base probe\n`, "utf8");
+    execFileSync("git", ["-C", fixture.root, "add", "src/run-task.ts"]);
+    execFileSync("git", ["-C", fixture.root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "test: source-only diff"]);
+
+    const changed = execFileSync("git", ["-C", fixture.root, "diff", "--name-only", "origin/main...HEAD"], { encoding: "utf8" })
+      .split("\n")
+      .filter(Boolean);
+    assert.deepEqual(changed, ["src/run-task.ts"], "control: the fixture must carry only the source diff that drives the base-side source lookup");
+
+    const logs: string[] = [];
+    const origLog = console.log;
+    const origError = console.error;
+    console.log = (m: string) => logs.push(String(m));
+    console.error = (m: string) => logs.push(String(m));
+    try {
+      const exitCode = await lintPlanCommand(["--base", "origin/main"], { offline: true, repoRoot: fixture.root });
+      const out = logs.join("\n");
+      assert.equal(exitCode, 0, `a source-only diff must not create a plan lint failure; saw:\n${out}`);
+      assert.match(out, /0 task\(s\) checked \(0 new\/changed vs origin\/main\)/);
+    } finally {
+      console.log = origLog;
+      console.error = origError;
+    }
   } finally {
-    console.log = origLog;
-    console.error = origError;
+    fixture.cleanup();
   }
 });
 
