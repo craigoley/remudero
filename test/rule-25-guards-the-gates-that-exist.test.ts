@@ -13,6 +13,23 @@ const TEST_FIXTURE = "test/rule-25-guards-the-gates-that-exist.test.ts";
 const CI = ".github/workflows/ci.yml";
 const PARITY = "src/lib/ci-parity.ts";
 const RATCHET = "scripts/coverage-ratchet.mjs";
+const SIZE_LEDGER = "scripts/source-size-baseline.json";
+
+function patchBesideReview(instrumentPath: string): string {
+  return [
+    `diff --git a/${instrumentPath} b/${instrumentPath}`,
+    `--- a/${instrumentPath}`,
+    `+++ b/${instrumentPath}`,
+    "@@ -1,3 +1,3 @@",
+    `-  "${REVIEW}": 8178,`,
+    `+  "${REVIEW}": 8209,`,
+    `diff --git a/${REVIEW} b/${REVIEW}`,
+    `--- a/${REVIEW}`,
+    `+++ b/${REVIEW}`,
+    "@@ -1,2 +1,3 @@",
+    "+export const somethingExecutable = 1;",
+  ].join("\n");
+}
 
 test("W1-T3329: src/lib/review.ts is on the instrument surface", () => {
   const surface = new RegExp(INSTRUMENT_SURFACE.join("|"));
@@ -53,4 +70,11 @@ test("W1-T3329: test fixtures are still not the product half", () => {
   assert.equal(r.entangled, false);
   assert.deepEqual(r.instrumentPaths, [REVIEW]);
   assert.deepEqual(r.srcPaths, []);
+});
+
+test("W1-T3329: review can still be the src half for an existing non-src instrument", () => {
+  const r = detectInstrumentEntanglement([SIZE_LEDGER, REVIEW], patchBesideReview(SIZE_LEDGER));
+  assert.equal(r.entangled, false);
+  assert.deepEqual(r.instrumentPaths, []);
+  assert.deepEqual(r.srcPaths, [REVIEW]);
 });

@@ -6574,19 +6574,35 @@ export function detectInstrumentEntanglement(
   diffFiles: string[],
   diff?: string,
 ): { entangled: boolean; instrumentPaths: string[]; srcPaths: string[] } {
-  const instrumentPaths = diffFiles.filter(
-    (f) => INSTRUMENT_SURFACE_RE.test(f) && !ENTANGLEMENT_EXEMPT_INSTRUMENTS.has(f),
+  const surfacePaths = diffFiles.filter((f) => INSTRUMENT_SURFACE_RE.test(f));
+  const nonSrcSurfacePaths = surfacePaths.filter((f) => !isProductPath(f));
+  const nonWorkflowSurfacePaths = nonSrcSurfacePaths.filter(
+    (f) => f !== CI_WORKFLOW_PATH && f !== CI_GATE_WORKFLOW_PATH,
+  );
+  const ordinarySrcPaths = diffFiles.filter(
+    (f) => isProductPath(f) && !INSTRUMENT_SURFACE_RE.test(f) && (diff === undefined || srcChangeIsExecutable(diff, f)),
+  );
+  const srcSurfaceAsProduct = new Set(
+    ordinarySrcPaths.length === 0 && nonWorkflowSurfacePaths.length > 0 ? surfacePaths.filter(isProductPath) : [],
+  );
+  const instrumentPaths = surfacePaths.filter(
+    (f) => !srcSurfaceAsProduct.has(f) && !ENTANGLEMENT_EXEMPT_INSTRUMENTS.has(f),
   );
   // A PATH ON THE INSTRUMENT SURFACE IS NOT PRODUCT CODE, EVEN WHEN IT LIVES UNDER `src/`. `isProductPath` is
   // unconditionally `src/` and not `test/`, so before this line a `src/` file named by {@link INSTRUMENT_SURFACE}
   // landed in BOTH arrays and `entangled` was true on that one file plus a workflow, which made the exemption
   // INEXPRESSIBLE. MEASURED on #1863's real file list with a candidate path added: still `entangled: true`. IT
-  // PRESERVES THE RULE'S REASON RATHER THAN MUTING IT, since a file that IS the instrument has no product falsifiers
-  // of its own. AND THE `src/` HALF MUST CARRY EXECUTABLE CONTENT when `diff` is supplied; omitting `diff` keeps the
-  // path-only reading.
+  // PRESERVES THE RULE'S REASON RATHER THAN MUTING IT, since a file that IS the instrument has no product falsifiers of
+  // its own. The one exception is a diff whose ONLY executable `src/` half is itself on the surface while a non-src
+  // instrument is present: there the non-src instrument is the thing being judged, and the `src/` file remains the
+  // product it measures. AND THE `src/` HALF MUST CARRY EXECUTABLE CONTENT when `diff` is supplied; omitting `diff`
+  // keeps the path-only reading.
   // // Why: #2884 was split by hand over one appended sentence; a later lane DUPLICATED a helper rather than register a path — the rule had begun shaping code to avoid itself.
   const srcPaths = diffFiles.filter(
-    (f) => isProductPath(f) && !INSTRUMENT_SURFACE_RE.test(f) && (diff === undefined || srcChangeIsExecutable(diff, f)),
+    (f) =>
+      isProductPath(f) &&
+      (!INSTRUMENT_SURFACE_RE.test(f) || srcSurfaceAsProduct.has(f)) &&
+      (diff === undefined || srcChangeIsExecutable(diff, f)),
   );
   // W1-T2521: subtract a newly introduced census gate (script + its own first registration, both new in THIS diff)
   // from the ENTANGLEMENT VERDICT only; `instrumentPaths`/`srcPaths` stay the raw, unedited evidence.
