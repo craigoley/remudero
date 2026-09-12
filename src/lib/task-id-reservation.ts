@@ -48,7 +48,7 @@ export function readTaskIdReservation(path: string): TaskIdReservationInfo | nul
 /** How a reservation failure is machine-classified: "unreachable" is a failed remote read/write
  *  (recoverable), "exhausted" means the scanned window was already fully held, "local" is a
  *  non-contention LOCAL store fault naming no remote id/ref. Ledgered as fields, never a string. */
-export type ReservationFailureOutcome = "unreachable" | "exhausted" | "local";
+export type ReservationFailureOutcome = "unreachable" | "exhausted" | "local" | "unknown";
 
 /**
  * Raised when a reservation fails for a reason that is NOT contention — an unwritable state
@@ -288,7 +288,7 @@ export function taskIdReservationRef(taskId: string): string {
 
 /** The outcome of one remote reservation attempt. `taken` is contention (advance); `unreachable`
  *  is a failed READ of the world and must never be read as "free" — the fail-closed direction. */
-export type RemoteReserveOutcome = "created" | "taken" | "unreachable";
+export type RemoteReserveOutcome = "created" | "taken" | "unreachable" | "local" | "unknown";
 
 /** Matches a DEFAULT-FAMILY reservation ref and captures its number. Anchored at both ends so a
  *  suffixed id (`W1-T1B`) is NOT read as the bare number; `[0-9]` not `\d` since a POSIX engine drops the latter silently. */
@@ -336,16 +336,27 @@ export interface RemoteRefReserver {
   /** Create-if-absent of {@link taskIdReservationRef}. Never throws — an unreachable remote is an
    *  OUTCOME, because a thrown error at this seam reads identically to contention at the caller. */
   attempt(taskId: string, anchor: string): RemoteReserveOutcome;
+  /** Stderr from the latest failed attempt, retained so a refusal can name the evidence. */
+  lastAttemptStderr?(): string | undefined;
   /** OPTIONAL, an optimisation only: the lowest id above every reservation this remote already
    *  holds, so {@link reserveTaskIdRemote} can start there instead of re-probing. Never a
    *  correctness input — a floor too LOW only costs attempts, one too HIGH only skips burned ids. */
   reservedFloor?(): number | "unknown";
 }
 
-/** Distinguishes CONTENTION from an unreachable remote. git exits 1 for both, so only the message
- *  tells them apart. Unknown defaults to `unreachable` deliberately — mistaking a network failure
- *  for contention would silently skip an id; the reverse only refuses to mint, which recovers. */
-export function classifyPushFailure(stderr: string): RemoteReserveOutcome {
+/** Classifies the reservation push's actual evidence. Unknown errors remain fail-closed, but are
+ *  not misreported as an unreachable origin. */
+export function classifyReservationPushFailure(stderr: string): RemoteReserveOutcome {
+  if (/pre-push\s+REFUSED\./i.test(stderr)) return "local";
+  if (/non-fast-forward|already exists|fetch first|rejected/i.test(stderr)) return "taken";
+  if (/could not read from remote repository|could not resolve host|unable to access|connection (?:timed out|refused)|network is unreachable|no route to host|ssh: connect to host/i.test(stderr)) {
+    return "unreachable";
+  }
+  return "unknown";
+}
+
+/** Distinguishes CONTENTION from an unreachable remote for existing non-reservation claim callers. */
+export function classifyPushFailure(stderr: string): "taken" | "unreachable" {
   return /non-fast-forward|already exists|fetch first|rejected/i.test(stderr) ? "taken" : "unreachable";
 }
 
@@ -445,7 +456,11 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
   // Cached once per reserver INSTANCE, not per attempt — a block makes N calls, and the push
   // staying the claim means a stale floor only costs attempts, never a wrong id.
   let floor: number | "unknown" | undefined;
+  let lastStderr: string | undefined;
   return {
+    lastAttemptStderr() {
+      return lastStderr;
+    },
     reservedFloor() {
       if (floor === undefined) floor = reservationFloorFrom(remoteReservedTaskIds(deps.run));
       return floor;
@@ -465,8 +480,12 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
     },
     attempt(taskId, anchor) {
       const res = deps.run(["push", "origin", `${anchor}:${taskIdReservationRef(taskId)}`]);
-      if (res.status === 0) return "created";
-      return classifyPushFailure(res.stderr);
+      if (res.status === 0) {
+        lastStderr = undefined;
+        return "created";
+      }
+      lastStderr = res.stderr;
+      return classifyReservationPushFailure(res.stderr);
     },
   };
 }
@@ -547,6 +566,20 @@ export function reserveTaskIdRemote(
         `cannot reach origin to reserve ${idFor(n)} — refusing to mint rather than minting optimistically, ` +
           "which is the behaviour that has already refused loadPlan on origin/main twice",
         { taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), outcome: "unreachable" },
+      );
+    }
+    if (outcome === "local") {
+      const stderr = reserver.lastAttemptStderr?.() ?? "pre-push REFUSED.";
+      throw new TaskIdReservationError(
+        `local pre-push gate refused reservation of ${idFor(n)} — refusing to mint. git said:\n${stderr}`,
+        { taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), outcome: "local" },
+      );
+    }
+    if (outcome === "unknown") {
+      const stderr = reserver.lastAttemptStderr?.() ?? "(no stderr was emitted)";
+      throw new TaskIdReservationError(
+        `UNKNOWN push failure while reserving ${idFor(n)} — refusing to mint. git said:\n${stderr}`,
+        { taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), outcome: "unknown" },
       );
     }
   }
