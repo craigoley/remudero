@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -66,38 +66,26 @@ function dirtyFleetPr(branch: string, oldHead: string): OpenPrView {
     mergeable: false,
     mergeableState: "dirty",
     mergeConflict: {
-      files: [{ path: "conflict.txt", oursDeleted: 0, theirsDeleted: 0 }],
-      oursLog: "branch changed conflict.txt",
-      theirsLog: "main changed conflict.txt too",
+      files: [{ path: "README.md", oursDeleted: 0, theirsDeleted: 0 }],
+      oursLog: "branch changed README.md",
+      theirsLog: "main changed README.md too",
     },
   };
 }
 
-function seedConflictingDirtyFleetRepo(root: string, branch: string): { oldHead: string; repoDir: string } {
-  const originDir = join(root, "origin.git");
-  const repoDir = join(root, "checkout");
-  mkdirSync(repoDir, { recursive: true });
-  git(root, ["init", "--bare", originDir]);
-  git(repoDir, ["init"]);
-  git(repoDir, ["config", "user.name", "Remudero Test"]);
-  git(repoDir, ["config", "user.email", "remudero-test@example.invalid"]);
-  git(repoDir, ["checkout", "-b", "main"]);
-  writeFileSync(join(repoDir, "conflict.txt"), "base\n");
-  git(repoDir, ["add", "conflict.txt"]);
-  git(repoDir, ["commit", "-m", "initial"]);
-  git(repoDir, ["remote", "add", "origin", originDir]);
-  git(repoDir, ["push", "-u", "origin", "main"]);
+function seedContentConflict(root: string, branch: string): { oldHead: string; repoDir: string } {
+  const { repoDir } = seedDirtyFleetRepo(root, branch);
 
-  git(repoDir, ["checkout", "-b", branch]);
-  writeFileSync(join(repoDir, "conflict.txt"), "branch\n");
-  git(repoDir, ["add", "conflict.txt"]);
+  git(repoDir, ["checkout", branch]);
+  writeFileSync(join(repoDir, "README.md"), "branch\n");
+  git(repoDir, ["add", "README.md"]);
   git(repoDir, ["commit", "-m", "branch change"]);
   const oldHead = git(repoDir, ["rev-parse", "HEAD"]).trim();
-  git(repoDir, ["push", "-u", "origin", branch]);
+  git(repoDir, ["push", "origin", branch]);
 
   git(repoDir, ["checkout", "main"]);
-  writeFileSync(join(repoDir, "conflict.txt"), "main\n");
-  git(repoDir, ["add", "conflict.txt"]);
+  writeFileSync(join(repoDir, "README.md"), "main\n");
+  git(repoDir, ["add", "README.md"]);
   git(repoDir, ["commit", "-m", "main change"]);
   git(repoDir, ["push", "origin", "main"]);
   return { oldHead, repoDir };
@@ -127,7 +115,7 @@ test("W1-T3333: a rebase that stops on a real content conflict is still reported
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t3333-conflict-"));
   const branch = "run-W1-T3333-1789187779834";
   try {
-    const { repoDir, oldHead } = seedConflictingDirtyFleetRepo(root, branch);
+    const { repoDir, oldHead } = seedContentConflict(root, branch);
 
     const outcome = rebaseDirtyFleetBranchViaGit(repoDir, join(root, "rebase-worktree"), dirtyFleetPr(branch, oldHead));
 
