@@ -507,6 +507,39 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     }
   }
 
+  if (argv.includes("--select-all")) {
+    const shard = parseShard(getFlagValue(argv, "--shard"));
+    if (shard === undefined || shard === null) {
+      console.error('test-tier-manifest: --select-all requires --shard "<index>/<count>" with 1 <= index <= count');
+      return 2;
+    }
+    const missing = classifyMissing();
+    if (missing.length > 0) {
+      console.error(
+        `test-tier-manifest: refusing to select coverage tests — ${missing.length} test file(s) are untiered (see --check).`,
+      );
+      return 1;
+    }
+    if (testFiles.length < shard.count) {
+      console.error(
+        `test-tier-manifest: refusing to select coverage tests — ${testFiles.length} test file(s) cannot fill ${shard.count} shards.`,
+      );
+      return 1;
+    }
+    const balanced = balanceFilesByDuration(testFiles, manifest, shard.count);
+    const files = balanced[shard.index - 1];
+    const balance = summarizeShardBalance(testFiles, manifest, shard.count, balanced);
+    console.error(
+      "test-tier-manifest: coverage shard summary " +
+        `assigned_count=${files.length} predicted_duration_ms=${files.reduce((sum, file) => sum + (manifest.files[file] ?? 0), 0)} ` +
+        `selected_total_duration_ms=${balance.selectedDurationMs} selected_mean_duration_ms=${balance.selectedMeanDurationMs} ` +
+        `slowest_shard_excess_ms=${balance.slowestShardExcessMs} binding_floor_file=${balance.bindingFloor?.file ?? "none"} ` +
+        `binding_floor_duration_ms=${balance.bindingFloor?.durationMs ?? 0} shard=${shard.index}/${shard.count}`,
+    );
+    console.log(files.join("\n"));
+    return 0;
+  }
+
   const runTier = getFlagValue(argv, "--run");
   if (runTier !== undefined) {
     if (runTier !== "fast" && runTier !== "slow") {

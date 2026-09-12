@@ -25,10 +25,15 @@ import { CI_PARITY_TABLE, coverageScratchDir } from "../src/lib/ci-parity.js";
 import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 
 function recordingSpawn(calls: { args: string[]; env?: NodeJS.ProcessEnv }[]): PreflightSpawn {
-  return (_file, args, opts) => {
+  return (file, args, opts) => {
     calls.push({ args, env: opts?.env });
+    if (file === "git" && args[0] === "rev-parse") return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
+    if (args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
+      return { status: 0, stdout: "test/the-local-gate-writes-coverage-where-ci-does.test.ts\n", stderr: "" };
+    }
     return { status: 0, stdout: "", stderr: "" };
   };
 }

@@ -806,13 +806,25 @@ jobs:
           # ci-gate's list — it must still register and still fail on a coverage regression. The
           # comment two blocks below is what makes artifact absence fail closed: no step in this job
           # carries a YAML conditional, so a failing shard makes the stable aggregator refuse.
+          if ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/4 --base HEAD^1 \
+            > coverage-test-files.txt 2> coverage-shard-selection.log; then
+            cat coverage-shard-selection.log || true
+            echo "coverage-ratchet: duration-balanced test selection failed; refusing to run a partial or unclassified coverage shard."
+            exit 1
+          fi
+          cat coverage-shard-selection.log || true
+          if ! grep -q . coverage-test-files.txt; then
+            echo "coverage-ratchet: duration-balanced test selection returned no files; refusing an empty coverage shard."
+            exit 1
+          fi
+          mapfile -t COVERAGE_TEST_FILES < coverage-test-files.txt
           mkdir -p coverage/raw
           set +e
           NODE_V8_COVERAGE=coverage/raw node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=tap --test-reporter-destination=stderr \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
-            --test --test-shard=${{ matrix.shard }}/4 --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
+            --test --import tsx --import ./test/setup/tmp-hygiene.ts "${COVERAGE_TEST_FILES[@]}"
           TEST_EXIT=$?
           set -e
           if [ "$TEST_EXIT" -ne 0 ]; then

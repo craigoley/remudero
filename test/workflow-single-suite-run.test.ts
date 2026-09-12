@@ -120,18 +120,21 @@ test("W1-T3207: a PUSH to main still runs the ci harness — the skip is event-c
   assert.match(mixedEnv.calls, /scripts\/test-with-retry\.mjs/, "a push must keep invoking the ci harness");
 });
 
-test("W1-T3207: the full test glob appears only in the instrumented coverage run", () => {
+test("W1-T3207: the instrumented coverage run selects every duration-balanced shard, never a direct full-suite glob", () => {
   const executableRunText = Object.values(doc.jobs)
     .flatMap((job) => job.steps ?? [])
     .flatMap((s) => (s.run ?? "").split("\n"))
     .filter((line) => !/^\s*#/.test(line))
     .join("\n");
-  assert.equal(
-    executableRunText.match(/"test\/\*\*\/\*\.test\.ts"/g)?.length,
-    1,
-    "the workflow must carry one executable full-suite glob, in the coverage harness",
+  assert.doesNotMatch(executableRunText, /"test\/\*\*\/\*\.test\.ts"/, "coverage must execute the manifest-selected files, not a direct full-suite glob");
+  const coverage = runnable("coverage-ratchet", "Test with coverage");
+  assert.match(coverage, /--experimental-test-coverage/);
+  assert.match(
+    coverage,
+    /node scripts\/test-tier-manifest\.mjs --select-all --shard 1\/4 --base HEAD\^1/,
+    "each matrix child must select its duration-balanced share of the complete manifest",
   );
-  assert.match(runnable("coverage-ratchet", "Test with coverage"), /--experimental-test-coverage/);
+  assert.match(coverage, /"\$\{COVERAGE_TEST_FILES\[@\]\}"/, "the coverage runner must consume the selector's exact file list");
 });
 
 test("W1-T3207: coverage gates consume downloaded artifacts without npm ci or Playwright", () => {
