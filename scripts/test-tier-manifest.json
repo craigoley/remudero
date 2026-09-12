@@ -1258,6 +1258,7 @@
     "test/test-with-retry.test.ts": 2067,
     "test/the-adoption-scan-reads-every-invoker-surface.test.ts": 0,
     "test/the-beat-reports-whether-the-fleet-builds.test.ts": 1148,
+    "test/the-blocked-resting-state-has-many-producers.test.ts": 0,
     "test/the-board-does-not-reship-the-whole-plan.test.ts": 0,
     "test/the-boot-fetch-survives-a-transient-ref-lock.test.ts": 7247,
     "test/the-browser-preflight-gates-on-dialect-not-on-need.test.ts": 1048,
