@@ -82,3 +82,4 @@
     Reservation W1-T3447 was atomically claimed on origin before filing. This is one allocation
     boundary, not a reframe of W1-T3335 or W1-T3352. The plan status remains a filing state; merge
     credit, not `status:`, determines whether the dispatcher may consider a task complete.
+    reservation hand-off: codex/fix-pr5285-reservation -> plan/W1-T3446-bound-codex-jsonl
