@@ -154,10 +154,27 @@ test("W1-T2957 the collector is reachable from the command surface, and writes n
   // else happened to be running.
   const porcelainEntries = (text: string) => new Set(text.split("\n").filter((line) => line.trim().length > 0));
   const entriesBefore = porcelainEntries(treeBefore);
+  // `test/run-task.test.ts` has one deliberately real, timestamped feedback write. Test files
+  // run in parallel against this checkout, so its transient untracked entry is another test's
+  // artifact, not evidence that this read-only command wrote. Keep every other added entry — and
+  // any tracked mutation under this path — visible to this assertion.
+  const concurrentFeedbackWrite = /^\?\? plan\/feedback\/fb-repair-w1t905-coverage-\d+\.yaml$/;
   const leftBehind = [...porcelainEntries(execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }))].filter(
-    (entry) => !entriesBefore.has(entry),
+    (entry) => !entriesBefore.has(entry) && !concurrentFeedbackWrite.test(entry),
   );
   assert.deepEqual(leftBehind, [], "and must leave no file behind");
+  assert.ok(
+    concurrentFeedbackWrite.test("?? plan/feedback/fb-repair-w1t905-coverage-1789251791320.yaml"),
+    "control: the only ignored entry is the known concurrent test fixture",
+  );
+  assert.ok(
+    !concurrentFeedbackWrite.test(" M plan/feedback/fb-repair-w1t905-coverage-1789251791320.yaml"),
+    "a tracked feedback mutation remains visible",
+  );
+  assert.ok(
+    !concurrentFeedbackWrite.test("?? plan/tasks.d/zzz-w1-t497-wiring-probe.yaml"),
+    "an untracked task shard remains visible",
+  );
 });
 
 // ── The command surface and the real loader, both over an INJECTED fetcher ──────────────────────
