@@ -89,7 +89,7 @@ test("W1-T2872: the exact PR #4042 old-engine row spends zero current-engine att
     unmetCriteria: oldFailure.criteria,
     criteriaRecoverable: true,
     priorStrikes: 1,
-    lastActivityAt: "2026-09-05T05:40:57.234Z",
+    lastActivityAt: "2026-09-05T05:40:57.234Z", // expiring-fixture: exempt -- deriveDisposition below pins now at 08:00Z (+2h19m), never the wall clock; suite passes at +400d
     headSha: HEAD_4042,
     autoMergeArmed: false,
     requiredContextsUnreadable: false,

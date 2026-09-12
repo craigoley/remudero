@@ -51,7 +51,7 @@ const GIT_ENV = {
 
 /** `git status --porcelain` for `dir`, as a set of lines — the tree's observable state. */
 function porcelain(dir: string): string[] {
-  return execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8", env: GIT_ENV })
+  return execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], { cwd: dir, encoding: "utf8", env: GIT_ENV })
     .split("\n")
     .filter(Boolean)
     .sort();
