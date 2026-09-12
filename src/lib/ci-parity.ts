@@ -889,6 +889,30 @@ export function runContextLine(ctx: RunContext): string {
   return `context: sha=${ctx.headSha}${base}, ${behind}, ${fetched}, ${load}`;
 }
 
+const MERGE_BASE_RELATIVE_STEP_NAMES = new Set([
+  "coverage-ratchet:diff-coverage",
+  "comment-load-ratchet",
+  "source-size",
+  "coverage-mode:diff-coverage",
+]);
+
+/** The steps whose verdicts are relative to the merge base, filtered to THIS run's own entries. */
+export function mergeBaseRelativeStepNames(steps: readonly CiParityStepResult[]): string[] {
+  return [...new Set(steps.map((s) => s.name).filter((name) => MERGE_BASE_RELATIVE_STEP_NAMES.has(name)))].sort();
+}
+
+/** Advisory only: a stale or unreadable checkout is reported beside the affected entries, never refused. */
+export function runTreeAdvisoryLine(ctx: RunContext, steps: readonly CiParityStepResult[]): string | undefined {
+  const names = mergeBaseRelativeStepNames(steps);
+  if (names.length === 0) return undefined;
+  if (ctx.behindCount === 0) return undefined;
+  const distance =
+    ctx.behindCount === undefined
+      ? `behind=UNKNOWN (${ctx.behindUnknownReason ?? "unreadable"})`
+      : `behind=${ctx.behindCount}`;
+  return `tree advisory: ${distance}; merge-base-relative entries in this run: ${names.join(", ")}`;
+}
+
 function fmtLoad(v: number | undefined): string {
   return v === undefined ? "?" : v.toFixed(2);
 }
