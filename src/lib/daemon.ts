@@ -967,6 +967,10 @@ export interface DaemonDeps {
   onSpawnInfraBlocked?: (info: { task: Task; reason: string }) => void | Promise<void>;
 }
 
+function retroTriggerCrossingKey(decision: Extract<RetroTriggerDecision, { fire: true }>): string {
+  return decision.reason;
+}
+
 /** Duck-typed classifier for a spawn-infrastructure failure, checked by a plain string tag rather than `instanceof` so
  * this module never imports worker.ts as a value. Any other throw is still a genuine, unclassified error: this daemon
  * must not learn to swallow every crash, only the one named infrastructure class (W1-T113). */
@@ -2002,6 +2006,8 @@ export async function runDaemon(
     return { kind: "merged" };
   };
 
+  let activeRetroCrossingKey: string | undefined;
+
   for (;;) {
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
     // Every other daemon-prefixed step is either boot-time and one-shot, or confined to the three windows the
@@ -2634,42 +2640,50 @@ export async function runDaemon(
       // trigger legitimately still reads `fire` on the next tick because the marker has not advanced
       // yet; logging first turned ONE retro into two `retro_triggered` rows and would have made every
       // later count of "how often did the retro fire" wrong by the number of ticks it spanned.
-      if (decision?.fire && deps.runRetroTrigger && detachedActionInFlight("retro")) {
+      if (!decision?.fire) {
+        activeRetroCrossingKey = undefined;
+      } else if (decision.fire && deps.runRetroTrigger && detachedActionInFlight("retro")) {
         log("daemon.retro_trigger.already_detached", { reason: decision.reason });
       } else if (decision?.fire) {
-        log("retro_triggered", {
-          reason: decision.reason,
-          merges_since_marker: decision.mergesSinceMarker,
-          // Infinity (the marker-absent case) is not JSON-representable — name it
-          // explicitly rather than let JSON.stringify silently collapse it to null.
-          days_since_marker: Number.isFinite(decision.daysSinceMarker) ? decision.daysSinceMarker : "unbounded",
-        });
-        if (deps.runRetroTrigger) {
-          // DETACHED, NOT AWAITED (W1-T2981). This await was unbounded and sits ABOVE the dispatch
-          // pick, so a fired retro held the whole tick: MEASURED 2026-09-06, the daemon logged
-          // `retro_triggered` and then never wrote `daemon.idle` or any dispatch row again, while the
-          // light sweep kept reviewing and merging — every liveness signal green, nothing built. With
-          // the marker 3.7 days / 446 merges behind and RETRO_MAX_RUNS_PER_PASS at 40, ~11 such ticks.
-          // A retro gates nothing: it SPENDS (hence its place below headroom) but no rung downstream
-          // reads its result. It goes on the registry the sweep's fix dispatches use, which
-          // `stopForFreshness` already drains, so a restart still lets a running retro finish.
-          // NO `sweepLightDuringRetro` HERE, deliberately: it starts a second "retro" ticker while the
-          // tick proceeds into dispatch, which starts its own — the overlap the clock handoff prevents.
-          {
-            detachSweepAction(
-              sweepLightDuringRetro(
-                deps,
-                pollIntervalMs,
-                log,
-                () => deps.runRetroTrigger!(decision),
-                diskHeadroomLatch,
-                sweepRetrigger,
-              ).catch((e) => {
-                log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
-              }),
-              { actionKind: "retro", taskId: "DAEMON" },
-            );
-            log("daemon.retro_trigger.detached", { reason: decision.reason });
+        const crossingKey = retroTriggerCrossingKey(decision);
+        if (activeRetroCrossingKey === crossingKey) {
+          log("daemon.retro_trigger.crossing_already_fired", { reason: decision.reason });
+        } else {
+          activeRetroCrossingKey = crossingKey;
+          log("retro_triggered", {
+            reason: decision.reason,
+            merges_since_marker: decision.mergesSinceMarker,
+            // Infinity (the marker-absent case) is not JSON-representable — name it
+            // explicitly rather than let JSON.stringify silently collapse it to null.
+            days_since_marker: Number.isFinite(decision.daysSinceMarker) ? decision.daysSinceMarker : "unbounded",
+          });
+          if (deps.runRetroTrigger) {
+            // DETACHED, NOT AWAITED (W1-T2981). This await was unbounded and sits ABOVE the dispatch
+            // pick, so a fired retro held the whole tick: MEASURED 2026-09-06, the daemon logged
+            // `retro_triggered` and then never wrote `daemon.idle` or any dispatch row again, while the
+            // light sweep kept reviewing and merging — every liveness signal green, nothing built. With
+            // the marker 3.7 days / 446 merges behind and RETRO_MAX_RUNS_PER_PASS at 40, ~11 such ticks.
+            // A retro gates nothing: it SPENDS (hence its place below headroom) but no rung downstream
+            // reads its result. It goes on the registry the sweep's fix dispatches use, which
+            // `stopForFreshness` already drains, so a restart still lets a running retro finish.
+            // NO `sweepLightDuringRetro` HERE, deliberately: it starts a second "retro" ticker while the
+            // tick proceeds into dispatch, which starts its own — the overlap the clock handoff prevents.
+            {
+              detachSweepAction(
+                sweepLightDuringRetro(
+                  deps,
+                  pollIntervalMs,
+                  log,
+                  () => deps.runRetroTrigger!(decision),
+                  diskHeadroomLatch,
+                  sweepRetrigger,
+                ).catch((e) => {
+                  log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
+                }),
+                { actionKind: "retro", taskId: "DAEMON" },
+              );
+              log("daemon.retro_trigger.detached", { reason: decision.reason });
+            }
           }
         }
       }

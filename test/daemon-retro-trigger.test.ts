@@ -110,6 +110,42 @@ test(
   },
 );
 
+test("three polls across ONE crossing spawn the Architect exactly once", async () => {
+  const plan = fixturePlan();
+  const now = new Date("2026-07-29T00:00:00.000Z");
+  let runCalls = 0;
+  let stopChecks = 0;
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+
+  const summary = await runDaemon(plan, {
+    refreshMerged: () => () => true,
+    runOne: async (id): Promise<RunResult> => {
+      throw new Error(`runOne must never be called in this fixture (task ${id})`);
+    },
+    checkStop: () => {
+      stopChecks++;
+      return stopChecks > 3 ? "test bound reached" : undefined;
+    },
+    sleep: async () => {},
+    now: () => now,
+    checkRetroTrigger: () => ({ fire: true, reason: "merges", mergesSinceMarker: 25, daysSinceMarker: 2 }),
+    runRetroTrigger: async () => {
+      runCalls++;
+      // No marker advance here: the daemon's crossing key, not a successful retro side effect,
+      // must be what prevents a poll cadence from spawning the same crossing again.
+    },
+    log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
+  });
+
+  assert.equal(summary.stopReason, "stopped");
+  assert.equal(runCalls, 1, "one continuous threshold crossing must spawn the Architect once");
+  assert.equal(lines.filter((l) => l.step === "retro_triggered").length, 1);
+  assert.ok(
+    lines.some((l) => l.step === "daemon.retro_trigger.crossing_already_fired"),
+    "later polls over the same still-fired crossing are named as suppressed, not silently ignored",
+  );
+});
+
 test("runDaemon: checkRetroTrigger below both thresholds never invokes runRetroTrigger, and no retro_triggered line is ever ledgered", async () => {
   const plan = fixturePlan();
   const now = new Date("2026-07-29T00:00:00.000Z");
