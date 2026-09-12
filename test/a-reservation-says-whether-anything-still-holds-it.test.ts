@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
+  RESERVATION_AUDIT_ISO_RE,
+  RUN_BRANCH_TASK_REF_RE,
   classifyReservationAuditRows,
   nextTaskIdCommand,
   type ReservationAuditRef,
@@ -60,6 +62,11 @@ function captureConsole(): { out: string[]; err: string[]; restore(): void } {
 }
 
 test("reservation audit classifies every readable reservation, and HELD rows name the holding evidence", () => {
+  assert.equal(RESERVATION_AUDIT_ISO_RE.test(OLD), true);
+  assert.equal(RESERVATION_AUDIT_ISO_RE.test("not an iso date"), false);
+  assert.equal(RUN_BRANCH_TASK_REF_RE.exec("refs/heads/run-W1-T103-1789")?.[1], "W1-T103");
+  assert.equal(RUN_BRANCH_TASK_REF_RE.exec("refs/heads/main"), null);
+
   const rows = classifyReservationAuditRows({
     reservations: [reservation(101), reservation(102), reservation(103), reservation(104), reservation(105), reservation(106, RECENT)],
     declaredIds: new Set(["W1-T101"]),

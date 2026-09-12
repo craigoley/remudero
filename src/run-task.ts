@@ -18738,8 +18738,8 @@ export interface NextTaskIdReserveDeps {
 
 const RESERVATION_AUDIT_DEFAULT_AGE_DAYS = 14;
 const RESERVATION_AUDIT_MS_PER_DAY = 24 * 60 * 60 * 1_000;
-const RESERVATION_AUDIT_ISO_RE = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z\b/;
-const RUN_BRANCH_TASK_REF_RE = /^refs\/heads\/run-(W1-T[0-9]+)-/;
+export const RESERVATION_AUDIT_ISO_RE = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z\b/;
+export const RUN_BRANCH_TASK_REF_RE = /^refs\/heads\/run-(W1-T[0-9]+)-/;
 
 export interface ReservationAuditRef {
   taskId: string;
@@ -18764,6 +18764,14 @@ export interface ReservationAuditReport {
   rows: ReservationAuditRow[];
   degraded: string[];
 }
+
+type ReservationAuditRefsRead =
+  | { status: "ok"; refs: ReservationAuditRef[] }
+  | { status: "unknown"; reason: string };
+
+type ReservationAuditBranchesRead =
+  | { status: "ok"; branches: Map<string, string[]> }
+  | { status: "unknown"; reason: string };
 
 function reservationAuditAgeDays(rest: string[]): number | null {
   const raw = flagValue(rest, "--audit-age-days");
@@ -18805,16 +18813,15 @@ function parseReservationAuditRefs(out: string): ReservationAuditRef[] {
   return refs.sort((a, b) => a.id - b.id);
 }
 
-function readReservationAuditRefs(run: (args: string[]) => { status: number; stdout: string; stderr: string }): ReservationAuditRef[] | "unknown" {
+function readReservationAuditRefs(run: (args: string[]) => { status: number; stdout: string; stderr: string }): ReservationAuditRefsRead {
   let res: { status: number; stdout: string; stderr: string };
   try {
     res = run(["ls-remote", "origin", "refs/rmd-id/*"]);
   } catch (err) {
-    void err;
-    return "unknown";
+    return { status: "unknown", reason: `reservation ref read threw: ${String(err)}` };
   }
-  if (res.status !== 0) return "unknown";
-  return parseReservationAuditRefs(res.stdout ?? "");
+  if (res.status !== 0) return { status: "unknown", reason: `reservation ref read exited ${res.status}: ${res.stderr}` };
+  return { status: "ok", refs: parseReservationAuditRefs(res.stdout ?? "") };
 }
 
 function readReservationAuditAnchor(
@@ -18829,15 +18836,14 @@ function readReservationAuditAnchor(
   return subject.status === 0 && subject.stdout.trim() ? subject.stdout.trim() : "<unreadable>";
 }
 
-function openRunBranchesByTaskId(run: (args: string[]) => { status: number; stdout: string; stderr: string }): Map<string, string[]> | "unknown" {
+function openRunBranchesByTaskId(run: (args: string[]) => { status: number; stdout: string; stderr: string }): ReservationAuditBranchesRead {
   let res: { status: number; stdout: string; stderr: string };
   try {
     res = run(["ls-remote", "--heads", "origin", "run-*"]);
   } catch (err) {
-    void err;
-    return "unknown";
+    return { status: "unknown", reason: `open run branch read threw: ${String(err)}` };
   }
-  if (res.status !== 0) return "unknown";
+  if (res.status !== 0) return { status: "unknown", reason: `open run branch read exited ${res.status}: ${res.stderr}` };
   const byId = new Map<string, string[]>();
   for (const raw of (res.stdout ?? "").split("\n")) {
     const ref = raw.trimEnd().split(/[ \t]+/)[1] ?? "";
@@ -18846,7 +18852,7 @@ function openRunBranchesByTaskId(run: (args: string[]) => { status: number; stdo
     const branch = ref.slice("refs/heads/".length);
     byId.set(m[1], [...(byId.get(m[1]) ?? []), branch]);
   }
-  return byId;
+  return { status: "ok", branches: byId };
 }
 
 export function classifyReservationAuditRows(opts: {
@@ -18918,8 +18924,8 @@ function buildReservationAuditReport(opts: {
 }): ReservationAuditReport | "unreadable-reservations" {
   const run = gitRunAdapter(opts.deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" })));
   const refs = readReservationAuditRefs(run);
-  if (refs === "unknown") return "unreadable-reservations";
-  const reservations = refs.map((r) => ({ ...r, anchor: readReservationAuditAnchor(r.ref, run) }));
+  if (refs.status === "unknown") return "unreadable-reservations";
+  const reservations = refs.refs.map((r) => ({ ...r, anchor: readReservationAuditAnchor(r.ref, run) }));
   const declaredIds = reservationAuditPlanIds(opts.planPath);
   const historicalIds = new Set(opts.deps.auditHistoryIds ? opts.deps.auditHistoryIds().map((n) => `W1-T${n}`) : [...reservationAuditHistoryIds(opts.planPath)]);
   const branches = openRunBranchesByTaskId(run);
@@ -18934,7 +18940,7 @@ function buildReservationAuditReport(opts: {
       degraded.push(`open PR read failed: ${String(err)}`);
     }
   }
-  if (branches === "unknown") degraded.push("open run branch read failed");
+  if (branches.status === "unknown") degraded.push(branches.reason);
   return {
     thresholdDays: opts.thresholdDays,
     degraded,
@@ -18942,7 +18948,7 @@ function buildReservationAuditReport(opts: {
       reservations,
       declaredIds,
       historicalIds,
-      openRunBranchesById: branches,
+      openRunBranchesById: branches.status === "ok" ? branches.branches : "unknown",
       openPrTrailerIds,
       thresholdDays: opts.thresholdDays,
       nowMs: opts.deps.auditNowMs?.() ?? Date.now(),
