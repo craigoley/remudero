@@ -21,10 +21,15 @@ async function creditRows(deps: Partial<DaemonDeps>): Promise<Array<{ step: stri
     writeFileSync(f, "- id: T1\n  title: t\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n");
     const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
     let stopChecks = 0;
+    let dispatches = 0;
     await runDaemon(loadPlan(f), {
       refreshMerged: () => () => true,
+      // A counter, not a throwing body: a fake that throws to prove it is never called is itself an
+      // added line no test enters, which `diff-coverage` flags — correctly. The assertion below reads
+      // the count instead.
       runOne: async () => {
-        throw new Error("never");
+        dispatches += 1;
+        return undefined as never;
       },
       checkStop: () => {
         stopChecks += 1;
@@ -34,6 +39,7 @@ async function creditRows(deps: Partial<DaemonDeps>): Promise<Array<{ step: stri
       log: (step: string, extra?: Record<string, unknown>) => rows.push({ step, extra }),
       ...deps,
     });
+    assert.equal(dispatches, 0, "these cycles dispatch no task, so the credit rung is what the rows describe");
     return rows.filter((r) => r.step.startsWith("credit_truth"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -81,14 +87,16 @@ test("a firing decision audits once and escalates the bounded slice, carrying TH
 });
 
 test("a CLEAN audit is logged, so 'nothing broken' is distinguishable from 'never ran'", async () => {
+  let deliveries = 0;
   const rows = await creditRows({
     checkCreditTruth: () => FIRES,
     runCreditTruthAudit: async () =>
       audit({ findings: [], unshipped: [], counts: { shipped: 825, "credit-elsewhere": 0, unshipped: 0, "plan-only": 0, undeterminable: 0, checked: 825 } }),
     onBrokenCredit: () => {
-      throw new Error("must not be called when nothing is actionable");
+      deliveries += 1;
     },
   });
+  assert.equal(deliveries, 0, "nothing actionable must reach the deliverer at all");
   assert.deepEqual(rows.map((r) => r.step), ["credit_truth.fired", "credit_truth.ran", "credit_truth.clean"]);
   assert.equal(rows[2].extra?.checked, 825);
 });
@@ -124,10 +132,7 @@ test("a throttled tick says so, and never audits", async () => {
   let audits = 0;
   const rows = await creditRows({
     checkCreditTruth: () => ({ fire: false, reason: "throttled — last credit-truth audit 60s ago, interval 21600s" }),
-    runCreditTruthAudit: async () => {
-      audits += 1;
-      return audit();
-    },
+    runCreditTruthAudit: async () => ((audits += 1), audit()),
   });
   assert.equal(audits, 0);
   assert.deepEqual(rows.map((r) => r.step), ["credit_truth.skipped"]);

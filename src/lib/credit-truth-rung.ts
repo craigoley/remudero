@@ -58,20 +58,34 @@ export interface CreditedTaskDeclaration {
  * imperfect match would fire on ordinary renames and be switched off inside a week — this repo's
  * recurring defect is a bound that fires on a healthy condition.
  */
-export type CreditTruthVerdict =
-  /** Every declared non-plan file exists. The credit is consistent with the tree. */
-  | "shipped"
-  /** Files are missing, but the crediting commit DID ship some declared file — a rename, a
-   *  restructure or genuinely partial work all look like this, so it is REPORTED and never escalated. */
-  | "credit-elsewhere"
-  /** The crediting commit shipped NONE of the declared files AND at least one is absent from the tree.
-   *  Both halves are required: the first says the credit is not evidence of work, the second says the
-   *  work is actually missing. This is the only verdict that escalates. */
-  | "unshipped"
-  /** The shard declares only `plan/` paths, so a plan-only diff genuinely builds it. Never a finding. */
-  | "plan-only"
-  /** The existence check itself could not answer. NEVER treated as missing — see below. */
-  | "undeterminable";
+/**
+ * The verdicts, as a runtime tuple so the set is enumerable and the type derives from ONE source.
+ *
+ * - `shipped` — every declared non-plan file exists; the credit is consistent with the tree.
+ * - `credit-elsewhere` — files are missing, but the crediting commit DID ship some declared file. A
+ *   rename, a restructure, or genuinely partial work all look like this, so it is REPORTED, never
+ *   escalated.
+ * - `unshipped` — the crediting commit shipped NONE of the declared files AND at least one is absent.
+ *   Both halves are required: the first says the credit is not evidence of work, the second says the
+ *   work is really missing. The only verdict that escalates.
+ * - `plan-only` — the shard declares only `plan/` paths, so a plan-only diff genuinely builds it.
+ * - `undeterminable` — the check could not answer. NEVER treated as missing.
+ *
+ * A TUPLE RATHER THAN A BARE UNION, for a measured reason: `diff-coverage`'s type-only exemption
+ * (`computeTypeOnlyRanges`) carves out `interface` and object-`type` members BY BRACE CONTEXT, and a
+ * string union has no braces — so each `| "member"` line took a `DA:<line>,0` the gate would not
+ * exempt and the PR blocked on six lines that erase to nothing. Deriving the type from real runtime
+ * code fixes that and is better anyway: the set can now be iterated instead of hand-copied.
+ */
+export const CREDIT_TRUTH_VERDICTS = [
+  "shipped",
+  "credit-elsewhere",
+  "unshipped",
+  "plan-only",
+  "undeterminable",
+] as const;
+
+export type CreditTruthVerdict = (typeof CREDIT_TRUTH_VERDICTS)[number];
 
 export interface CreditTruthFinding {
   taskId: string;
@@ -150,14 +164,11 @@ export function auditCreditTruth(
   exists: (path: string) => boolean,
 ): CreditTruthAudit {
   const findings = tasks.map((t) => classifyCreditTruth(t, exists));
-  const counts = {
-    shipped: 0,
-    "credit-elsewhere": 0,
-    unshipped: 0,
-    "plan-only": 0,
-    undeterminable: 0,
-    checked: findings.length,
-  };
+  // Built FROM the tuple, so a new verdict cannot be added without its counter appearing too.
+  const counts = { ...Object.fromEntries(CREDIT_TRUTH_VERDICTS.map((v) => [v, 0])), checked: findings.length } as Record<
+    CreditTruthVerdict,
+    number
+  > & { checked: number };
   for (const f of findings) counts[f.verdict] += 1;
   return {
     findings,
