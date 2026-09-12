@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { FAST_GATE_STEPS } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { isolatedCheckout } from "./helpers/isolated-checkout.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RATCHET = join(REPO_ROOT, "scripts", "source-size-ratchet.mjs");
+const GATE_CHECKOUT = isolatedCheckout(REPO_ROOT);
+symlinkSync(join(REPO_ROOT, "node_modules"), join(GATE_CHECKOUT.root, "node_modules"));
+
+after(() => GATE_CHECKOUT.cleanup());
 
 /**
  * test/a-gate-run-leaves-the-tracked-tree-clean.test.ts — W1-T2791.
@@ -77,8 +82,8 @@ test("W1-T2791 (acceptance 1): running the fast gate's OWN source-size step leav
   assert.ok(entry, "the fast gate still carries a source-size step");
   assert.equal(entry.script, "source-size-signal", "and it is the non-writing form");
 
-  const dirtied = dirtiedBy(REPO_ROOT, () => {
-    const r = spawnSync("npm", ["run", "--silent", entry.script], { cwd: REPO_ROOT, encoding: "utf8" });
+  const dirtied = dirtiedBy(GATE_CHECKOUT.root, () => {
+    const r = spawnSync("npm", ["run", "--silent", entry.script], { cwd: GATE_CHECKOUT.root, encoding: "utf8" });
     // The exit code is NOT the assertion — it is recorded only so a failure here is diagnosable.
     assert.ok(r.status === 0 || r.status === 1, `the step ran (status ${r.status}): ${r.stderr}`);
   });
@@ -101,8 +106,8 @@ test("W1-T2791 (acceptance 3): EVERY step the fast gate runs leaves the tracked 
   const offenders: string[] = [];
   for (const entry of FAST_GATE_STEPS) {
     let status: number | null = null;
-    const dirtied = dirtiedBy(REPO_ROOT, () => {
-      status = spawnSync("npm", ["run", "--silent", entry.script], { cwd: REPO_ROOT, encoding: "utf8" }).status;
+    const dirtied = dirtiedBy(GATE_CHECKOUT.root, () => {
+      status = spawnSync("npm", ["run", "--silent", entry.script], { cwd: GATE_CHECKOUT.root, encoding: "utf8" }).status;
     });
     // A step that never RAN dirties nothing and would pass this loop for the wrong reason — the
     // vacuity acceptance 1 guards with the same assertion. Exit code is otherwise not the subject.
