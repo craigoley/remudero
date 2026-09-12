@@ -193,7 +193,12 @@ test("W1-T3435 criterion 3: two bounded hedged exchanges fail closed and enter t
     }, () => { kills += 1; }) as never;
   };
   const cfg = config("/tmp/codex-singleflight-double-timeout");
-  const deps = { timeoutMs: 5, capabilities: CAPABILITIES, spawn, now: () => 1_000 };
+  // The 5ms bound left only a 2ms gap after the 60%-of-timeout hedge threshold. Under CI's
+  // instrumented full-suite scheduler, both timers can become due in the same turn and the
+  // primary timeout wins before this test has observed its required second bounded exchange.
+  // Twenty milliseconds is the established hedge window exercised above and still keeps this
+  // synthetic failure path fast while preserving the two-exchange contract.
+  const deps = { timeoutMs: 20, capabilities: CAPABILITIES, spawn, now: () => 1_000 };
 
   const failed = await readCodexCapacity(cfg, deps);
   assert.equal(failed.readable, false);
