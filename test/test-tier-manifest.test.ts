@@ -455,6 +455,27 @@ test("--select-all refuses an unfilled coverage matrix instead of silently emitt
   assert.match(result.stderr, /cannot fill 2 shards/);
 });
 
+test("--select-all rejects a missing shard argument before it can select the whole suite", () => {
+  const root = newFixtureRoot();
+  writeFixtureTestFile(root, "only.test.ts");
+  writeFixtureManifest(root, { thresholdMs: 5000, files: { "test/only.test.ts": 100 } });
+  let spawnCalls = 0;
+  const code = main(["--root", root, "--select-all"], { spawn: () => { spawnCalls += 1; return { status: 0 }; } });
+  assert.equal(code, 2);
+  assert.equal(spawnCalls, 0);
+});
+
+test("--select-all refuses an untiered test instead of returning a partial coverage suite", () => {
+  const root = newFixtureRoot();
+  writeFixtureTestFile(root, "recorded.test.ts");
+  writeFixtureTestFile(root, "untiered.test.ts");
+  writeFixtureManifest(root, { thresholdMs: 5000, files: { "test/recorded.test.ts": 100 } });
+  let spawnCalls = 0;
+  const code = main(["--root", root, "--select-all", "--shard", "1/1"], { spawn: () => { spawnCalls += 1; return { status: 0 }; } });
+  assert.equal(code, 1);
+  assert.equal(spawnCalls, 0);
+});
+
 test("--run adds a second event reporter only when a duration output is requested", () => {
   const root = newFixtureRoot();
   writeFixtureTestFile(root, "a.test.ts");

@@ -39,12 +39,14 @@ function coverageFixtureRoot(): string {
   return root;
 }
 
-function coverageSpawn(repoRoot: string, options: { missingArtifactShard?: number; missingSummaryShard?: number } = {}) {
+function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number; missingArtifactShard?: number; missingSummaryShard?: number } = {}) {
   const calls: Call[] = [];
   const spawn: PreflightSpawn = (file, args, opts) => {
     calls.push({ file, args, opts });
     const selectorShard = selectorShardNumber(args);
-    if (selectorShard !== undefined) return { status: 0, stdout: `test/coverage-shard-${selectorShard}.test.ts\n`, stderr: "" };
+    if (selectorShard !== undefined) {
+      return { status: 0, stdout: selectorShard === options.emptySelectionShard ? "" : `test/coverage-shard-${selectorShard}.test.ts\n`, stderr: "" };
+    }
     const shard = shardNumber(args);
     if (shard !== undefined) {
       const rawDir = opts?.env?.NODE_V8_COVERAGE;
@@ -138,6 +140,22 @@ test("coverage entry refuses a partial shard artifact set before merge or covera
     assert.equal(calls.some((c) => c.args.some((a) => a.endsWith("coverage-merge-ratchet.mjs"))), false);
     assert.equal(calls.some((c) => c.args.some((a) => a.endsWith("coverage-ratchet.mjs"))), false);
     assert.equal(calls.some((c) => c.args.some((a) => a.endsWith("diff-coverage.mjs"))), false);
+  } finally {
+    cleanup();
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("coverage entry refuses an empty duration-balanced selector before spawning an argument-less coverage run", () => {
+  const fixtureRoot = coverageFixtureRoot();
+  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { emptySelectionShard: 3 });
+  try {
+    const result = runCiParity(fixtureRoot, { spawn });
+    const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
+
+    assert.equal(coverage.ok, false);
+    assert.match(coverage.detail, /shard 3\/4 duration-balanced test selection returned no files/);
+    assert.equal(calls.some((c) => shardNumber(c.args) === 3), false);
   } finally {
     cleanup();
     rmSync(fixtureRoot, { recursive: true, force: true });
