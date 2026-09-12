@@ -41,7 +41,11 @@ function stubbedBin(root: string): string {
   const bin = join(root, "bin");
   mkdirSync(bin);
   for (const name of ["node", "npm", "npx"]) {
-    writeFileSync(join(bin, name), `#!/bin/sh\necho "$0 $*" >> "${root}/calls.log"\nexit 99\n`);
+    const script =
+      name === "node"
+        ? `#!/bin/sh\necho "$0 $*" >> "${root}/calls.log"\nif [ "$1" = "scripts/test-tier-manifest.mjs" ] && [ "$2" = "--select-all" ]; then\n  printf '%s\\n' "test/workflow-single-suite-run.test.ts"\n  exit 0\nfi\nexit 99\n`
+        : `#!/bin/sh\necho "$0 $*" >> "${root}/calls.log"\nexit 99\n`;
+    writeFileSync(join(bin, name), script);
     spawnSync("chmod", ["+x", join(bin, name)]);
   }
   return bin;
@@ -51,7 +55,20 @@ function runBash(script: string, env: Record<string, string> = {}) {
   const root = tmpRoot();
   const bin = stubbedBin(root);
   const summary = join(root, "summary.md");
-  const result = spawnSync("bash", ["-eo", "pipefail", "-c", script], {
+  // GitHub's runner has Bash 5's `mapfile`; macOS's system Bash does not. The workflow's
+  // duration-balanced coverage path now uses that builtin, so provide the narrow equivalent
+  // only when this test's local shell lacks it. The runner's normal implementation still wins.
+  const mapfileCompat = `if ! type mapfile >/dev/null 2>&1; then
+mapfile() {
+  local _flag="$1" _name="$2" _line
+  eval "\${_name}=()"
+  while IFS= read -r _line; do
+    eval "\${_name}+=(\"\${_line}\")"
+  done
+}
+fi
+`;
+  const result = spawnSync("bash", ["-eo", "pipefail", "-c", `${mapfileCompat}${script}`], {
     cwd: root,
     encoding: "utf8",
     env: {
@@ -186,6 +203,11 @@ test("W1-T2428: SOURCE reaches both coverage setup commands rather than silently
 
   const coverage = runBash(runnable("coverage-ratchet", "Test with coverage"));
   assert.notEqual(coverage.status, 0, coverage.stderr + coverage.stdout);
+  assert.match(
+    coverage.calls,
+    /scripts\/test-tier-manifest\.mjs --select-all --shard 1\/4 --base HEAD\^1/,
+    "a SOURCE diff must select its complete duration-balanced coverage shard before running it",
+  );
   assert.match(coverage.calls, /\/node --enable-source-maps --experimental-test-coverage/, "a SOURCE diff must invoke the coverage test runner");
 });
 

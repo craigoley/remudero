@@ -87,8 +87,8 @@ test("CRITERION 1: a head sha absent from local objects no longer resolves to ze
 
 test("CRITERION 2: the fetch that makes the head sha readable runs BEFORE criteria are resolved from it", () => {
   const src = readSource();
-  const fetchAt = src.indexOf("fetchHead(repoRoot, view.number);");
-  const resolveAt = src.indexOf("resolvePlanCriteriaAtHead(body, repoRoot,");
+  const fetchAt = src.indexOf("fetchHead(subjectRepoDir, view.number);");
+  const resolveAt = src.indexOf("resolvePlanCriteriaAtHead(body, subjectRepoDir,");
   assert.ok(fetchAt > 0, "reviewCommand must call the hoisted fetch");
   assert.ok(resolveAt > 0, "and must still resolve criteria at the head sha");
   assert.ok(
@@ -181,10 +181,10 @@ test("CRITERION 5: a fetch failure is still named through the same degradation p
   // The hoisted fetch must be BEST-EFFORT: a throw here must not invent a second failure path for a
   // condition materializeReviewWorktree already reports as `fetch-failure`.
   const hoisted = src.slice(
-    src.indexOf("try {\n    fetchHead(repoRoot, view.number);"),
+    src.indexOf("try {\n    fetchHead(subjectRepoDir, view.number);"),
     src.indexOf("let resolverDivergence"),
   );
-  assert.match(hoisted, /catch\s*\{/, "the hoisted fetch swallows its own failure");
+  assert.match(hoisted, /catch\s*(?:\([^)]*\))?\s*\{/, "the hoisted fetch swallows its own failure");
   assert.doesNotMatch(hoisted, /return\s+\d/, "and never returns an exit code of its own");
   assert.match(src, /errorClass: "fetch-failure"/, "the materializer's own named class still exists");
 });
