@@ -1101,6 +1101,7 @@
     "test/review-width-sheds-on-starvation-not-saturation.test.ts": 330,
     "test/review-wires-criteria-at-head.test.ts": 6932,
     "test/review.test.ts": 2896,
+    "test/reviewer-code-freshness-refusal-retry.test.ts": 0,
     "test/reviewer-traces-production-producers.test.ts": 990,
     "test/risk-judge-change-view.test.ts": 1742,
     "test/risk-judge-description-is-the-defect.test.ts": 789,
