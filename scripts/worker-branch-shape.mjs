@@ -17,7 +17,7 @@
 // to origin/main (skips, not fails, the shard check when unresolvable); --head-ref defaults to
 // $GITHUB_HEAD_REF, then the current branch.
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
@@ -87,14 +87,70 @@ export function shardTaskIds(addedFiles, readFile) {
   return ids;
 }
 
-/** The full set of task ids this branch claims: a deduplicated union of trailer and
- *  filed-shard ids, judged once even when the same id is claimed both ways.
- * @param {{ commitMessages: string | undefined, addedFiles: readonly string[], readFile: (path: string) => string | undefined }} input
+/** Task id(s) the head ref itself claims by starting with run-<declared-id>-.
+ *  This is deliberately driven by declared ids, not by parsing arbitrary run-* text as an id:
+ *  task ids contain hyphens, and ordinary branches like run-of-the-mill-thing must stay innocent.
+ * @param {string | undefined} headRef
+ * @param {readonly string[]} declaredTaskIds
  */
-export function claimedTaskIds({ commitMessages, addedFiles, readFile }) {
+export function headRefTaskIds(headRef, declaredTaskIds) {
+  if (!headRef) return [];
+  const ids = new Set();
+  for (const id of declaredTaskIds) {
+    if (headRef.startsWith(`run-${id}-`)) ids.add(id);
+  }
+  return [...ids];
+}
+
+const PLAN_TASK_ID_RE = /^\s*-\s*id:\s*([A-Za-z0-9-]+)\s*$/gm;
+
+/** Task ids declared in one plan YAML blob.
+ * @param {string | undefined} text
+ */
+export function planTaskIdsFromText(text) {
+  const ids = [];
+  for (const m of (text ?? "").matchAll(PLAN_TASK_ID_RE)) ids.push(m[1]);
+  return ids;
+}
+
+/** Every task id declared by the checkout's plan/tasks.yaml and plan/tasks.d/*.yaml shards.
+ *  Unreadable plan files degrade to an empty set so the gate never blocks on local setup gaps.
+ * @param {string} worktreePath
+ */
+export function declaredTaskIds(worktreePath) {
+  const ids = new Set();
+  for (const id of planTaskIdsFromText(readFileIfPresent(join(worktreePath, "plan", "tasks.yaml")))) ids.add(id);
+  const shardDir = join(worktreePath, "plan", "tasks.d");
+  let files;
+  try {
+    files = readdirSync(shardDir);
+  } catch {
+    return [...ids];
+  }
+  for (const file of files) {
+    if (!/\.ya?ml$/.test(file)) continue;
+    for (const id of planTaskIdsFromText(readFileIfPresent(join(shardDir, file)))) ids.add(id);
+  }
+  return [...ids];
+}
+
+function readFileIfPresent(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/** The full set of task ids this branch claims: a deduplicated union of trailer, filed-shard,
+ *  and declared-task head-ref ids, judged once even when the same id is claimed several ways.
+ * @param {{ commitMessages: string | undefined, addedFiles: readonly string[], readFile: (path: string) => string | undefined, headRef?: string | undefined, declaredTaskIds?: readonly string[] }} input
+ */
+export function claimedTaskIds({ commitMessages, addedFiles, readFile, headRef, declaredTaskIds = [] }) {
   const ids = new Set();
   for (const id of trailerTaskIds(commitMessages)) ids.add(id);
   for (const id of shardTaskIds(addedFiles, readFile)) ids.add(id);
+  for (const id of headRefTaskIds(headRef, declaredTaskIds)) ids.add(id);
   return [...ids];
 }
 
@@ -103,22 +159,24 @@ export function claimedTaskIds({ commitMessages, addedFiles, readFile }) {
  *  Falsifier: test/a-worker-branch-must-be-shaped-for-dispatch.test.ts. Why: a trailer-claimed
  *  id is always required, a shard-only id only when the diff is not plan-only — a plan-only
  *  filing is not a build claim (W1-T2530). docs/forensics/worker-branch-shape.md#evaluateworkerbranchshape-w1-t2530
- * @param {{ headRef: string | undefined, commitMessages: string | undefined, addedFiles: readonly string[], readFile: (path: string) => string | undefined, changedFiles?: readonly string[] }} input
+ * @param {{ headRef: string | undefined, commitMessages: string | undefined, addedFiles: readonly string[], readFile: (path: string) => string | undefined, changedFiles?: readonly string[], declaredTaskIds?: readonly string[] }} input
  */
-export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile, changedFiles = [] }) {
+export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile, changedFiles = [], declaredTaskIds = [] }) {
   const trailerIds = new Set(trailerTaskIds(commitMessages));
   const shardIds = new Set(shardTaskIds(addedFiles, readFile));
-  const claimed = [...new Set([...trailerIds, ...shardIds])];
+  const headRefIds = new Set(headRefTaskIds(headRef, declaredTaskIds));
+  const claimed = [...new Set([...trailerIds, ...shardIds, ...headRefIds])];
   if (claimed.length === 0) {
     return {
       ok: true,
-      message: "claims no task by trailer or filed shard — exempt from the run-<taskId>-<epochMs> shape check",
+      message:
+        "claims no task by trailer, filed shard, or declared-task head ref — exempt from the run-<taskId>-<epochMs> shape check",
     };
   }
 
   const planOnly = isPlanOnlyDiff(changedFiles);
   // A shard-only id is exempt exactly when the diff is plan-only — see this function's doc above.
-  const requiresShape = claimed.filter((id) => trailerIds.has(id) || !planOnly);
+  const requiresShape = claimed.filter((id) => trailerIds.has(id) || headRefIds.has(id) || !planOnly);
   const exemptByPlanOnlyFiling = claimed.filter((id) => !requiresShape.includes(id));
 
   if (requiresShape.length === 0) {
@@ -142,9 +200,10 @@ export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles,
     ok: false,
     defect: "unshaped-worker-branch",
     message:
-      `REFUSED — this branch claims ${unshaped.join(", ")} (by an anchored Remudero-Task trailer, or by filing a plan/tasks.d/ ` +
-      `shard for it, on a diff that is not plan-only) but its head ref "${headRef}" does not carry the shape dispatch reads to ` +
-      `make an in-flight task visible and the shape a merge is credited by when the trailer is missing: run-<taskId>-<epochMs> ` +
+      `REFUSED — this branch claims ${unshaped.join(", ")} (by an anchored Remudero-Task trailer, by filing a plan/tasks.d/ ` +
+      `shard for it on a diff that is not plan-only, or by naming a declared task id in the head ref) but its head ref "${headRef}" ` +
+      `does not carry the shape dispatch reads to make an in-flight task visible and the shape a merge is credited by when the ` +
+      `trailer is missing: run-<taskId>-<epochMs> ` +
       `(e.g. run-${unshaped[0]}-1787887966537). Rename the branch to that shape, or drop the claim if this build is not ${unshaped[0]}'s own.`,
   };
 }
@@ -250,6 +309,7 @@ export function main(argv) {
   const commitMessages = commitMessagesSinceBase(worktreePath, mergeBase);
   const addedFiles = addedFilesSinceBase(worktreePath, mergeBase);
   const changedFiles = changedFilesSinceBase(worktreePath, mergeBase);
+  const planTaskIds = declaredTaskIds(worktreePath);
   const readFile = (path) => {
     try {
       return readFileSync(join(worktreePath, path), "utf8");
@@ -258,7 +318,7 @@ export function main(argv) {
     }
   };
 
-  const result = evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile, changedFiles });
+  const result = evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles, readFile, changedFiles, declaredTaskIds: planTaskIds });
   if (!result.ok) {
     console.error(`worker-branch-shape: ${result.message}`);
     process.exitCode = 1;

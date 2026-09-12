@@ -99,6 +99,7 @@
     "test/a-module-that-compiles-to-nothing-is-not-a-coverage-gap.test.ts": 306,
     "test/a-mount-comparison-across-unmatched-populations-is-not-a-measurement.test.ts": 1262,
     "test/a-moving-base-attributes-another-lanes-lines.test.ts": 2781,
+    "test/a-near-miss-run-branch-earns-no-credit.test.ts": 0,
     "test/a-net-positive-claude-md-diff-is-not-refused.test.ts": 1255,
     "test/a-new-census-gate-cannot-ship-itself.test.ts": 800,
     "test/a-new-ci-yml-job-cannot-ship-its-own-registration.test.ts": 1089,
