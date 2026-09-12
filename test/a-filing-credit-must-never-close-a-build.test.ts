@@ -55,6 +55,13 @@ test("W1-T3063 criterion 1: THE #4461 INCIDENT — a filing credit never closes 
   assert.doesNotMatch(decision.reason, /already merged/, "and must not reach the close row");
 });
 
+test("a plan-only proof amendment headed fix(plan) never credits the task it corrects", () => {
+  const subject = "fix(plan): make W1-T3213 proofs discriminating (#5231)";
+  const { projected, decision } = dispose(openPr(), credit({ creditIsImplementation: creditSubjectIsImplementation(subject) }));
+  assert.equal(projected.taskMergedBy, undefined, "a fix(plan) amendment is not an implementation credit");
+  assert.doesNotMatch(decision.reason, /already merged/, "and must not close the implementation PR it unblocks");
+});
+
 test("W1-T3063 criterion 2 (falsifier): AN UNKNOWN SUBJECT ALSO DECLINES", () => {
   // Absence of evidence is not evidence of supersession. A credit older than the scan window, or a
   // failed git read, must leave the PR open.
@@ -77,11 +84,12 @@ test("W1-T3063 criterion 3 (falsifier): W1-T2794's OWN INCIDENT MUST STILL CLOSE
   assert.equal(decision.disposition, "stale");
 });
 
-test("W1-T3063 criterion 4: the filing vocabulary is lint-plan's, not a second list", () => {
+test("W1-T3063 criterion 4: plan filings and amendments never become implementation credits", () => {
   // Direct, literal both-arm drive: the shape negative-reachability-ratchet recognises.
   assert.equal(FILING_SUBJECT_RE.test("chore(plan): file a shard"), true);
   assert.equal(FILING_SUBJECT_RE.test("chore(triage): record a finding"), true);
   assert.equal(FILING_SUBJECT_RE.test("chore(feedback): note a ruling"), true);
+  assert.equal(FILING_SUBJECT_RE.test("fix(plan): correct an acceptance proof"), true);
   assert.equal(FILING_SUBJECT_RE.test("docs(plan): restate a rule"), true);
   assert.equal(FILING_SUBJECT_RE.test("plan: file"), true);
   assert.equal(FILING_SUBJECT_RE.test("docs: a doc"), true);

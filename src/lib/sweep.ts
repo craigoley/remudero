@@ -3789,9 +3789,10 @@ function resolveRatchetScript(checkName: string, admitted: ReadonlySet<string>):
 }
 
 /** W1-T3063 — the subject prefixes that FILE or AMEND a task rather than implementing it.
- *  Deliberately the vocabulary `lint-plan`'s failing-split already excludes, verbatim — "a filing
- *  cites a task; it does not implement it" — never a second list that could drift from it. */
-export const FILING_SUBJECT_RE = /^(?:chore\((?:plan|triage|feedback)\)|docs\(plan\)|plan:|docs:|chore:)/;
+ *  `fix(plan)` is an amendment: its scope identifies the control-plane record it changes, not an
+ *  implementation. A merged amendment may share the task's run-branch naming, but must never
+ *  credit or close the implementation PR it repairs (#5231). */
+export const FILING_SUBJECT_RE = /^(?:chore\(plan\)|fix\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/;
 
 /** W1-T3063 — does this merge subject describe an IMPLEMENTATION? `undefined` in, `undefined` out:
  *  a subject that could not be read is not evidence either way, and every destructive consumer must
