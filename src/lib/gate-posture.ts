@@ -39,7 +39,7 @@ export interface GatePostureDecision {
   repairResult?: string;
 }
 
-export interface GatePostureDeps {
+export interface GatePostureRuntime {
   runRiskJudge?: typeof runRiskJudge;
   judge?: RiskJudgeOrchestratorDeps["judge"];
   cache?: RiskJudgeCache;
@@ -81,7 +81,7 @@ function fallbackDecision(finding: GatePostureFinding, reason: string, judgment?
 }
 
 function logDecision(
-  deps: GatePostureDeps,
+  deps: GatePostureRuntime,
   finding: GatePostureFinding,
   decision: GatePostureDecision,
 ): GatePostureDecision {
@@ -108,7 +108,7 @@ async function applyConsequence(
   consequence: GatePostureOutcome,
   finding: GatePostureFinding,
   judgment: RiskJudgeResult,
-  deps: GatePostureDeps,
+  deps: GatePostureRuntime,
 ): Promise<GatePostureDecision> {
   if (consequence === "REPAIR") {
     const repairResult = await deps.repair?.(finding, judgment);
@@ -152,7 +152,7 @@ async function applyConsequence(
   };
 }
 
-export async function decideGatePosture(input: GatePostureInput, deps: GatePostureDeps = {}): Promise<GatePostureDecision> {
+export async function decideGatePosture(input: GatePostureInput, deps: GatePostureRuntime = {}): Promise<GatePostureDecision> {
   const finding = input.finding;
   if (finding === undefined) {
     return {

@@ -9,6 +9,7 @@ import {
 } from "../src/lib/gate-posture.js";
 import {
   buildRiskJudgePrompt,
+  parseRiskJudgeResponse,
   parseRiskJudgeVerdict,
   type RiskJudgeResult,
   type RiskJudgeVerdict,
@@ -138,17 +139,25 @@ test("acceptance 3: LAND+DEBT files its follow-up, and filing failure falls back
 });
 
 test("acceptance 4: judge outage or unparseable consequence restores the gate's current behaviour", async () => {
+  const thrownLog: { step: string; extra?: Record<string, unknown> }[] = [];
   const thrown = await decideGatePosture(
     { finding: FINDING },
     {
       runRiskJudge: async () => {
         throw new Error("worker unavailable");
       },
+      log: (step, extra) => thrownLog.push({ step, extra }),
     },
   );
   assert.equal(thrown.outcome, "STOP");
   assert.equal(thrown.fallback, true);
   assert.match(thrown.reason, /worker unavailable/);
+  assert.equal(thrownLog.find((entry) => entry.step === "gate_posture.decision")?.extra?.verdict, undefined);
+
+  const defaultJudgeUnavailable = await decideGatePosture({ finding: FINDING });
+  assert.equal(defaultJudgeUnavailable.outcome, "STOP");
+  assert.equal(defaultJudgeUnavailable.fallback, true);
+  assert.match(defaultJudgeUnavailable.reason, /no parseable gate consequence/);
 
   const unparseable = await decideGatePosture(
     { finding: FINDING },
@@ -223,4 +232,15 @@ test("risk judge prompt and parser carry the optional gate consequence protocol"
   );
   assert.equal(parsed.gateConsequence, "REPAIR");
   assert.deepEqual(parsed.reasons, ["remedy is computable"]);
+
+  const ordinary = parseRiskJudgeVerdict("RISK_VERDICT: low\nRISK_CONFIDENCE: 0.88\nRISK_REASON: ordinary risk check");
+  assert.equal(ordinary.gateConsequence, undefined);
+
+  assert.deepEqual(
+    parseRiskJudgeResponse("RISK_VERDICT: low\nRISK_CONFIDENCE: 0.88\nRISK_GATE_CONSEQUENCE: WAIT\nRISK_REASON: invalid"),
+    {
+      kind: "unparseable",
+      raw: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.88\nRISK_GATE_CONSEQUENCE: WAIT\nRISK_REASON: invalid",
+    },
+  );
 });
