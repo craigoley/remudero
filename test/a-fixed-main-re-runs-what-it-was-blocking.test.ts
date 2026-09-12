@@ -10,7 +10,7 @@ import {
   runIsolatedLocalMergeRoute,
 } from "../src/lib/ci-parity.js";
 import { rollupFromRest } from "../src/lib/open-prs-rest.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 
 const NOW = Date.parse("2026-09-12T12:00:00Z");
 const HEAD = "a".repeat(40);
@@ -196,6 +196,41 @@ test("W1-T3422: the check route is declared against ci.yml and executes in a rea
     source.git("push", "origin", "main");
     process.env.GIT_CONFIG_GLOBAL = "/dev/null";
     process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+    const invalid = runIsolatedLocalMergeRoute(source.dir, {
+      prNumber: 0,
+      headSha: head,
+      mainSha: main,
+      route: LOCAL_MERGE_CHECK_ROUTES[0]!,
+    });
+    assert.equal(invalid.outcome, "invalid-input");
+    const unreadable = runIsolatedLocalMergeRoute(join(remote.dir, "no-such-checkout"), {
+      prNumber: 1,
+      headSha: head,
+      mainSha: main,
+      route: LOCAL_MERGE_CHECK_ROUTES[0]!,
+    });
+    assert.equal(unreadable.outcome, "source-unreadable");
+    const headMoved = runIsolatedLocalMergeRoute(source.dir, {
+      prNumber: 1,
+      headSha: main,
+      mainSha: main,
+      route: LOCAL_MERGE_CHECK_ROUTES[0]!,
+    });
+    assert.equal(headMoved.outcome, "head-moved");
+    const mainMoved = runIsolatedLocalMergeRoute(source.dir, {
+      prNumber: 1,
+      headSha: head,
+      mainSha: head,
+      route: LOCAL_MERGE_CHECK_ROUTES[0]!,
+    });
+    assert.equal(mainMoved.outcome, "main-moved");
+    const routeFailed = runIsolatedLocalMergeRoute(source.dir, {
+      prNumber: 1,
+      headSha: head,
+      mainSha: main,
+      route: { checkName: "fixture-failure", command: process.execPath, args: ["-e", "process.stderr.write('expected failure'); process.exit(1)"], timeoutMs: 1_000 },
+    });
+    assert.equal(routeFailed.outcome, "route-failed");
     const result = runIsolatedLocalMergeRoute(source.dir, { prNumber: 1, headSha: head, mainSha: main, route: LOCAL_MERGE_CHECK_ROUTES[0]! });
     assert.equal(result.outcome, "passed", result.detail);
   } finally {
@@ -206,4 +241,36 @@ test("W1-T3422: the check route is declared against ci.yml and executes in a rea
     source.cleanup();
     remote.cleanup();
   }
+});
+
+test("W1-T3422: the production sweep builder keeps its existing mechanical effects callable beside the stale-red route", async () => {
+  const calls: string[] = [];
+  const effects = buildSweepEffects({
+    owner: "acme",
+    repo: "remudero",
+    config: { root: process.cwd() } as never,
+    ledgerPath: "/dev/null/w1-t3422-effects.ndjson",
+    runId: "W1-T3422-effects",
+    plan: { tasks: [], byId: new Map() } as never,
+    log: () => {},
+    updateBranchImpl: async (pr) => {
+      calls.push(`update:${pr.prNumber}`);
+      return "updated";
+    },
+    rebaseDirtyFleetBranchImpl: (pr) => {
+      calls.push(`rebase:${pr.prNumber}`);
+      return { outcome: "rebased", oldHeadSha: pr.headSha, newHeadSha: "c".repeat(40) };
+    },
+    captureRepairFeedbackImpl: (filing) => {
+      calls.push(`feedback:${filing.id}`);
+    },
+  });
+  assert.equal(await effects.updateBranch!({ prNumber: 3422 } as never), "updated");
+  assert.deepEqual(await effects.rebaseDirtyFleetBranch!(redPr()), {
+    outcome: "rebased",
+    oldHeadSha: HEAD,
+    newHeadSha: "c".repeat(40),
+  });
+  await effects.captureRepairFeedback!({ id: "fb-w1-t3422", origin: "repair#blocked-ambiguous", raw: "fixture" });
+  assert.deepEqual(calls, ["update:3422", "rebase:3422", "feedback:fb-w1-t3422"]);
 });
