@@ -141,7 +141,7 @@ const IMPLEMENTATION_FILES = [
 const IMPLEMENTATION_BODY = `This PR changes planning only.\n\nRemudero-Task: ${IMPLEMENTATION_TASK}\n`;
 const implementationTaskFiles: TaskFilesForId = (taskId) => (taskId === IMPLEMENTATION_TASK ? IMPLEMENTATION_FILES : undefined);
 
-test("W1-T3149 criterion 1: a plan-only diff trailered to an implementation task is refused with both remedies", () => {
+test("a plan-only diff cannot credit a task that declares source files", () => {
   const calls: string[][] = [];
   const changedPaths = changedPathsAtRange({
     baseSha: "base",
@@ -173,7 +173,7 @@ test("W1-T3149 criterion 1: a plan-only diff trailered to an implementation task
   assert.match(result.message, /include the implementation changes/);
 });
 
-test("W1-T3149 criterion 2: a plan-only task keeps its trailer on a plan-only diff", () => {
+test("a plan-only task is not refused by this gate", () => {
   const planTask = "W1-TPLAN";
   const result = evaluateGate({
     body: `Remudero-Task: ${planTask}\n`,
@@ -185,7 +185,7 @@ test("W1-T3149 criterion 2: a plan-only task keeps its trailer on a plan-only di
   assert.equal(result.ok, true, result.message);
 });
 
-test("W1-T3149 criterion 3: an implementation-task trailer passes when its diff changes source", () => {
+test("a PR shipping its declared files still passes", () => {
   const result = evaluateGate({
     body: IMPLEMENTATION_BODY,
     authorLogin: "a-human",
@@ -248,7 +248,7 @@ test("W1-T3149 criterion 5 mutation: removing only the structural predicate make
   }
 });
 
-test("W1-T3414: a trailer added by a follow-up commit is refused even when the PR body has none", () => {
+test("a trailer in any commit of the branch is caught", () => {
   const calls: string[][] = [];
   const trailers = commitTaskTrailersAtRange({
     baseSha: "base",
@@ -278,6 +278,29 @@ test("W1-T3414: a trailer added by a follow-up commit is refused even when the P
   assert.match(result.message, /src\/lib\/skill-workshop\.ts/);
   assert.match(result.message, /Remove the trailer from that commit/);
   assert.match(result.message, /include the implementation changes/);
+});
+
+test("the refusal names the offending commit and the unshipped files", () => {
+  const sha = "c".repeat(40);
+  const result = evaluateGate({
+    body: "## Acceptance\n\n- claim: plan filing\n  proof: grep: W1-T3414 in plan/tasks.d/W1-T3414.yaml\n",
+    authorLogin: "a-human",
+    changedPaths: ["plan/tasks.d/W1-T3414.yaml"],
+    taskFilesForId: implementationTaskFiles,
+    trailerCommits: [{ sha, subject: "chore: follow-up", taskId: IMPLEMENTATION_TASK }],
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.message, new RegExp(`Commit ${sha}`));
+  assert.match(result.message, /chore: follow-up/);
+  for (const path of IMPLEMENTATION_FILES) assert.ok(result.message.includes(path), `refusal names ${path}`);
+});
+
+test("W1-T3414 follow-up commit criterion", () => {
+  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "acceptance-author-gate.yml"), "utf8");
+  const source = readFileSync(SCRIPT, "utf8");
+  assert.match(workflow, /node --import tsx scripts\/acceptance-author-gate\.mjs/);
+  assert.match(source, /commitTaskTrailersAtRange\(/);
+  assert.match(source, /followupCommitImplementationTrailerRefusal\(/);
 });
 
 test("W1-T3414: source-changing and plan-only task controls pass, and unreadable commit history preserves the existing verdict", () => {
