@@ -811,6 +811,8 @@ function coverageShardArgs(repoRoot: string, shard: number): string[] {
     "--test-coverage-exclude=test/**",
     "--test-reporter=spec",
     "--test-reporter-destination=stdout",
+    "--test-reporter=tap",
+    "--test-reporter-destination=stderr",
     "--test-reporter=lcov",
     `--test-reporter-destination=${coverageShardLcovPath(repoRoot, shard)}`,
     "--test",
