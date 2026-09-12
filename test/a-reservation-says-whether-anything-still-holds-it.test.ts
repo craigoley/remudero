@@ -9,6 +9,7 @@ import {
   RUN_BRANCH_TASK_REF_RE,
   classifyReservationAuditRows,
   nextTaskIdCommand,
+  reservationAuditHistoryIds,
   type ReservationAuditRef,
 } from "../src/run-task.js";
 
@@ -200,6 +201,24 @@ test("reservation audit degrades the shipped CLI report to UNKNOWN when open PR 
   const text = cap.out.join("\n");
   assert.match(text, /DEGRADED: open PR read failed: Error: REST budget exhausted/);
   assert.match(text, /W1-T401 UNKNOWN open PR read failed/);
+});
+
+test("W1-T3300: reservation audit's default history read maps filed ids into HELD evidence ids", () => {
+  const calls: string[][] = [];
+  const ids = reservationAuditHistoryIds(join(process.cwd(), "plan", "tasks.yaml"), (args) => {
+    calls.push(args);
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return "abc123\n";
+    if (args[0] === "rev-parse" && args[1] === "--git-common-dir") throw new Error("no cache in this fixture");
+    if (args[0] === "log") return '+- id: W1-T302\n+  title: "historical"\n+- id: W1-T999999\n';
+    throw new Error(`unexpected git ${args.join(" ")}`);
+  });
+
+  assert.deepEqual(ids, new Set(["W1-T302"]));
+  assert.deepEqual(
+    calls.find((args) => args[0] === "log"),
+    ["log", "HEAD", "-p", "--", "plan"],
+    "the audit scans the repo-relative plan directory, matching the mint history source",
+  );
 });
 
 // ── W1-T3300: the arms diff-coverage named. Every one is a DEGRADED or REFUSED path — the places

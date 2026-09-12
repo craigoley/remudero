@@ -18892,7 +18892,7 @@ function reservationAuditPlanIds(planPath: string): Set<string> {
   return new Set(loadPlan(planPath).tasks.map((t) => t.id));
 }
 
-function reservationAuditHistoryIds(planPath: string, gitRunner?: (args: string[]) => string): Set<string> {
+export function reservationAuditHistoryIds(planPath: string, gitRunner?: (args: string[]) => string): Set<string> {
   const planRelPath = relative(repoRoot, dirname(planPath));
   if (isAbsolute(planRelPath) || planRelPath.startsWith("..")) return new Set();
   const history = taskIdsEverFiled(repoRoot, planRelPath === "" ? "." : planRelPath, gitRunner);
