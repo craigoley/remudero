@@ -169,9 +169,10 @@ export function runBoundedSuite(file: string, args: string[], opts: BoundedSuite
  * rule it serves; docs/forensics/ci-parity.md holds the design record.
  *
  * INVARIANTS
- * - ONE ENTRY PER ci.yml JOB. {@link CI_PARITY_TABLE} is data keyed by job name. A job not
- *   mirrored carries `mirrored: false` and a `reason`, so an absent entry and a considered
- *   exclusion never look alike.
+ * - ONE ENTRY PER PR-TRIGGERED JOB. {@link CI_PARITY_TABLE} owns ci.yml; {@link
+ *   PR_WORKFLOW_PARITY_TABLE} owns every other pull-request workflow. A job not mirrored carries
+ *   `mirrored: false` and a `reason`, so an absent entry and a considered exclusion never look
+ *   alike.
  * - CI'S OWN COMMAND, NEVER A PROXY. Each mirrored step shells the argv ci.yml invokes.
  * - MERGE-BASE PARITY. `origin/main` is fetched ONCE per run and immediately RESOLVED TO A SHA
  *   ({@link pinnedBase}); every diff-consuming step diffs three-dot against that SHA, never the
@@ -180,8 +181,9 @@ export function runBoundedSuite(file: string, args: string[], opts: BoundedSuite
  *   fetch cannot prevent, because refs are clone-scoped (W1-T3017).
  * - EACH STEP REPORTS INDEPENDENTLY. {@link runStep} never lets one job throw out of the run.
  *
- * TRAP: a job added to ci.yml with no entry would under-cover in silence; `ci-parity:drift` fails
- * on it. FALSIFIER: test/preflight-ci-parity.test.ts, test/ci-parity-contract.test.ts.
+ * TRAP: a job added to any pull-request workflow with no entry would under-cover in silence;
+ * `ci-parity:drift` fails on it. FALSIFIER: test/preflight-ci-parity.test.ts,
+ * test/a-required-check-outside-ci-yml-has-a-local-route.test.ts.
  */
 
 /** One `--ci-parity` step's outcome, keyed by an open `name`: one job can produce several steps. */
@@ -299,8 +301,10 @@ interface CiParityLeafResult {
 }
 
 /** One ci.yml job's parity entry. A `mirrored: false` entry MUST carry a `reason` — that is what records it. */
-interface CiParityEntry {
+export interface CiParityEntry {
   job: string;
+  /** Omitted only for ci.yml entries. Standalone workflow job names are not globally unique. */
+  workflow?: string;
   mirrored: boolean;
   reason?: string;
   run?: (repoRoot: string, spawn: PreflightSpawn) => CiParityStepResult[];
@@ -310,6 +314,49 @@ interface CiParityEntry {
 export function parseCiJobNames(ciYamlText: string): string[] {
   const doc = parseYaml(ciYamlText) as { jobs?: Record<string, unknown> } | null;
   return Object.keys(doc?.jobs ?? {});
+}
+
+export interface PullRequestWorkflowJob {
+  workflow: string;
+  job: string;
+}
+
+/** Whether a workflow's `on` declaration includes the pull-request event. Kept structural because
+ * GitHub accepts scalar, sequence and mapping spellings for the same event. */
+function runsOnPullRequest(trigger: unknown): boolean {
+  if (trigger === "pull_request") return true;
+  if (Array.isArray(trigger)) return trigger.includes("pull_request");
+  return typeof trigger === "object" && trigger !== null && Object.hasOwn(trigger, "pull_request");
+}
+
+/** Parse every job from supplied standalone workflow texts that fires on `pull_request`.
+ * `ci.yml` deliberately remains the owner of {@link parseCiJobNames}, so the old registry and its
+ * tests retain their one-file identity while this sibling owns the broader surface. */
+export function parsePullRequestWorkflowJobs(workflowTexts: Readonly<Record<string, string>>): PullRequestWorkflowJob[] {
+  return Object.entries(workflowTexts)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([workflow, text]) => {
+      const doc = parseYaml(text) as { on?: unknown; jobs?: Record<string, unknown> } | null;
+      if (!runsOnPullRequest(doc?.on)) return [];
+      return Object.keys(doc?.jobs ?? {})
+        .sort()
+        .map((job) => ({ workflow, job }));
+    });
+}
+
+/** The production reader for PR-triggered workflows outside ci.yml. Local filesystem only: the
+ * parity command gains coverage of the workflow surface without a GitHub request. */
+function readPullRequestWorkflowJobs(repoRoot: string): PullRequestWorkflowJob[] {
+  const workflowsRoot = join(repoRoot, ".github", "workflows");
+  const texts: Record<string, string> = {};
+  for (const workflow of readdirSync(workflowsRoot).filter((name) => /\.ya?ml$/.test(name) && name !== "ci.yml").sort()) {
+    texts[workflow] = readFileSync(join(workflowsRoot, workflow), "utf8");
+  }
+  return parsePullRequestWorkflowJobs(texts);
+}
+
+function workflowJobKey(workflow: string, job: string): string {
+  return `${workflow}:${job}`;
 }
 
 /** The ONE "toolchain unavailable" line, shared by every catch site so the phrasing cannot drift. */
@@ -1389,7 +1436,8 @@ export function hostCausedSuiteRedsStep(facts: HostFacts): CiParityLeafResult {
 
 /** One entry per .github/workflows/ci.yml job. The drift step fails the moment
  *  {@link parseCiJobNames} finds a job this table does not name; `mirrored: false` is a reasoned
- *  exclusion, never a gap. */
+ *  exclusion, never a gap. Standalone pull-request workflows live in the sibling table below so
+ *  this ci.yml-only registry remains independently inspectable. */
 export const CI_PARITY_TABLE: CiParityEntry[] = [
   { job: "ci-required", mirrored: false, reason: "GitHub-only stable-name aggregator; the ci entry below runs the equivalent complete test surface locally" },
   {
@@ -1618,10 +1666,118 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
     ],
   },
 ];
+
+function standaloneNpmScriptEntry(workflow: string, job: string, script: string): CiParityEntry {
+  return { ...npmScriptEntry(job, script), workflow };
+}
+
+/** One entry per job in a pull-request workflow other than ci.yml. The three mirrors are pure,
+ * deterministic repository checks; all other entries name why GitHub-only event, scanner or live
+ * fleet input makes a local pre-push run dishonest or disproportionately expensive. */
+export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
+  {
+    workflow: "acceptance-author-gate.yml",
+    job: "acceptance-author-gate",
+    mirrored: false,
+    reason: "needs the pull_request event's base/head range and PR body; a local checkout before a PR exists cannot supply either identity honestly",
+  },
+  {
+    workflow: "ci-gate.yml",
+    job: "ci-gate",
+    mirrored: false,
+    reason: "GitHub-only aggregate over completed check runs; the ci.yml entries above are its local evidence producers",
+  },
+  {
+    workflow: "clock-sweep.yml",
+    job: "clock-sweep",
+    mirrored: false,
+    reason: "a scheduled future-clock drill with issue delivery; its multi-minute simulated-time run is not a pre-push parity leaf",
+  },
+  {
+    workflow: "codeql.yml",
+    job: "analyze",
+    mirrored: false,
+    reason: "hosted CodeQL scanner with its own database and GitHub upload contract; running it locally is not CI's command",
+  },
+  standaloneNpmScriptEntry("coverage-session-blanking.yml", "coverage-session-blanking", "coverage-session-blanking:check"),
+  {
+    workflow: "dependency-review.yml",
+    job: "dependency-review",
+    mirrored: false,
+    reason: "depends on the pull request's dependency diff and GitHub review permissions",
+  },
+  {
+    workflow: "dependency-review.yml",
+    job: "license-review",
+    mirrored: false,
+    reason: "depends on the pull request's dependency diff and GitHub review permissions",
+  },
+  {
+    workflow: "docs-index-check.yml",
+    job: "docs-index-check",
+    mirrored: true,
+    run: (repoRoot, spawn) => [
+      runStep("docs-index-check:freshness", () =>
+        shellOut(spawn, "npm run --silent docs-index:check", "npm", ["run", "--silent", "docs-index:check"], { cwd: repoRoot }),
+      ),
+      runStep("docs-index-check:paths", () =>
+        shellOut(spawn, "npm run --silent docs-index:check-paths", "npm", ["run", "--silent", "docs-index:check-paths"], { cwd: repoRoot }),
+      ),
+    ],
+  },
+  {
+    workflow: "fleet-heartbeat-watch.yml",
+    job: "heartbeat-watch",
+    mirrored: false,
+    reason: "observes deployed heartbeat branches and daemon state, neither of which a local pre-push checkout may stand in for",
+  },
+  {
+    workflow: "osv-scanner-pr.yml",
+    job: "scan-pr",
+    mirrored: false,
+    reason: "hosted OSV scanner whose result depends on GitHub's pull-request integration rather than a repository-only command",
+  },
+  {
+    workflow: "probe-path-filter.yml",
+    job: "probe-path-filter",
+    mirrored: false,
+    reason: "path-filter sentinel with no repository assertion beyond GitHub selecting the workflow for its fixture path",
+  },
+  {
+    workflow: "recovery-drill.yml",
+    job: "recovery-drill",
+    mirrored: false,
+    reason: "scheduled recovery drill with issue delivery and a multi-minute fixture exercise, deliberately outside the bounded pre-push surface",
+  },
+  {
+    workflow: "semgrep.yml",
+    job: "semgrep",
+    mirrored: false,
+    reason: "hosted Semgrep scanner with GitHub upload/reporting behavior; a local substitute would not mirror CI",
+  },
+  {
+    workflow: "unwired-gate.yml",
+    job: "unwired-gate",
+    mirrored: true,
+    run: (repoRoot, spawn) => [
+      runStep("unwired-gate:mkdtemp", () =>
+        shellOut(spawn, "npm run --silent mkdtemp-callsite-check", "npm", ["run", "--silent", "mkdtemp-callsite-check"], { cwd: repoRoot }),
+      ),
+      runStep("unwired-gate:check", () =>
+        shellOut(spawn, "npm run --silent unwired-gate:check", "npm", ["run", "--silent", "unwired-gate:check"], { cwd: repoRoot }),
+      ),
+    ],
+  },
+];
+
 export interface CiParityDeps {
   spawn?: PreflightSpawn;
-  /** Test seam for the drift check — production reads the real ci.yml off disk. */
+  /** Test seam for ci.yml's half of the drift check — production reads it off disk. */
   ciYamlText?: string;
+  /** Test seam for the standalone pull-request workflow half of the drift check. */
+  workflowTexts?: Readonly<Record<string, string>>;
+  /** Test seam for a malformed external registry entry; production uses the checked-in table. */
+  prWorkflowParityTable?: readonly CiParityEntry[];
 }
 
 export interface CiParityResult {
@@ -1629,25 +1785,38 @@ export interface CiParityResult {
   ok: boolean;
 }
 
-/** `rmd preflight --ci-parity`'s engine. Prepends `ci-parity:drift` (red the moment ci.yml names
- *  a job this table doesn't) to each entry's steps, running EVERY entry regardless of an earlier
- *  outcome. `ok` is the AND of them all. */
+/** `rmd preflight --ci-parity`'s engine. Prepends `ci-parity:drift` (red the moment a
+ * pull-request workflow names a job its registry does not) to each entry's steps, running EVERY
+ * entry regardless of an earlier outcome. `ok` is the AND of them all. */
 export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParityResult {
   const spawn = deps.spawn ?? defaultPreflightSpawn;
   const ciYamlText = deps.ciYamlText ?? readFileSync(join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
   const ciJobs = parseCiJobNames(ciYamlText);
-  const tableJobs = new Set(CI_PARITY_TABLE.map((e) => e.job));
-  const missing = ciJobs.filter((j) => !tableJobs.has(j));
+  const standaloneJobs = deps.workflowTexts ? parsePullRequestWorkflowJobs(deps.workflowTexts) : readPullRequestWorkflowJobs(repoRoot);
+  const standaloneTable = deps.prWorkflowParityTable ?? PR_WORKFLOW_PARITY_TABLE;
+  const ciTableJobs = new Set(CI_PARITY_TABLE.map((e) => e.job));
+  const standaloneTableJobs = new Set(
+    standaloneTable.filter((e) => e.workflow !== undefined).map((e) => workflowJobKey(e.workflow!, e.job)),
+  );
+  const missing = [
+    ...ciJobs.filter((job) => !ciTableJobs.has(job)).map((job) => `.github/workflows/ci.yml:${job}`),
+    ...standaloneJobs
+      .filter(({ workflow, job }) => !standaloneTableJobs.has(workflowJobKey(workflow, job)))
+      .map(({ workflow, job }) => `.github/workflows/${workflow}:${job}`),
+    ...standaloneTable
+      .filter((entry) => entry.mirrored === false && !entry.reason?.trim())
+      .map((entry) => `.github/workflows/${entry.workflow ?? "(missing workflow)"}:${entry.job} (excluded without reason)`),
+  ];
   const driftStep: CiParityStepResult = {
     name: "ci-parity:drift",
     ok: missing.length === 0,
     detail:
       missing.length === 0
-        ? `ci-parity:drift: PASS — every ci.yml job (${ciJobs.length}) has a parity entry (mirrored or excluded-with-reason)`
-        : `ci-parity:drift: FAIL — ci.yml job(s) with no parity entry: ${missing.join(", ")}`,
+        ? `ci-parity:drift: PASS — every pull-request workflow job (${ciJobs.length + standaloneJobs.length}) has a parity entry (mirrored or excluded-with-reason)`
+        : `ci-parity:drift: FAIL — pull-request workflow job(s) missing a parity entry or exclusion reason: ${missing.join(", ")}`,
   };
 
-  const jobSteps = CI_PARITY_TABLE.flatMap((entry): CiParityStepResult[] => {
+  const jobSteps = [...CI_PARITY_TABLE, ...standaloneTable].flatMap((entry): CiParityStepResult[] => {
     if (!entry.mirrored) return [excludedStep(entry.job, entry.reason ?? "no reason recorded")];
     try {
       return entry.run!(repoRoot, spawn);
