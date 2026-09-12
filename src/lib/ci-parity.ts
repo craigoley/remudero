@@ -651,6 +651,7 @@ function coverageRawDirHasArtifact(rawDir: string): boolean {
   try {
     return readdirSync(rawDir).some((name) => name.startsWith("coverage-") && name.endsWith(".json"));
   } catch {
+    // Deliberate: unreadable and empty both mean this shard lacks a usable artifact; the caller names the shard.
     return false;
   }
 }
@@ -671,12 +672,12 @@ function coverageMergeArgs(repoRoot: string, lcovPath: string): string[] {
 
 function coverageShardRunnerProgram(workerContainmentUrl: string): string {
   return [
-    'import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";',
+    'import { mkdirSync, readdirSync } from "node:fs";',
     `import { killProcessGroup, spawnDetachedGroup } from ${JSON.stringify(workerContainmentUrl)};`,
     "const config = JSON.parse(process.argv[1]);",
     "const hasArtifact = (dir) => {",
     "  try { return readdirSync(dir).some((name) => name.startsWith('coverage-') && name.endsWith('.json')); }",
-    "  catch { return false; }",
+    "  catch { /* deliberate: unreadable and empty both mean this shard lacks a usable artifact. */ return false; }",
     "};",
     "const hasSummary = (text) => /^# tests\\s+\\d+/m.test(text);",
     "async function runOne(shard) {",
@@ -736,7 +737,7 @@ function runCoverageShardsBounded(repoRoot: string, lcovPath: string, timeoutMs:
     rmSync(shardRoot, { recursive: true, force: true });
     mkdirSync(shardRoot, { recursive: true });
   } catch {
-    // The helper below reports any concrete artifact failure; this setup is best-effort for tests.
+    // Deliberate: setup failure is re-read below as the concrete missing-shard artifact refusal.
   }
   const concurrency = coverageShardConcurrency();
   const config = {
