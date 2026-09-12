@@ -661,7 +661,62 @@ test("the wiring probe shard lands outside the live plan tree", () => {
   assert.match(src, /join\(REPO_ROOT/, "control: repo-root-anchored joins are still greppable in this file");
 });
 
+// W1-T2715 already ruled on this exact shape: an in-PROCESS snapshot of the shared tree "sees
+// other workers' in-flight fixtures and blames whoever exits while they exist", which is why the
+// tracked-tree check lives around the WHOLE suite in scripts/test-with-retry.mjs and not inside a
+// test. This one survives that ruling only because it catches what a TRACKED-tree check cannot --
+// an UNTRACKED probe landing in the live plan tree, which is W1-T515's actual hazard above. So it
+// is NARROWED rather than removed.
+//
+// WHY `plan/feedback/` AND NOTHING ELSE: that directory is a shared landing zone other test FILES
+// legitimately write into against THIS checkout -- test/feedback-landing.test.ts's "write a REAL
+// entry into THIS checkout's own plan/feedback/" precedent, and W1-T905's default-wiring test in
+// test/run-task.test.ts, whose `captureRepairFeedback` default has no fixture-root seam: it writes
+// a real `plan/feedback/fb-repair-w1t905-coverage-<epochMs>.yaml` and removes it in its own
+// `finally`. `node --test` runs test FILES in parallel and BOTH files land in coverage shard 1/4,
+// so that transient is observable from here. MEASURED: it took #5215 red on run 34687177795,
+// naming that exact path and nothing else.
+const CONCURRENT_FEEDBACK_WRITE = /^\?\? plan\/feedback\//;
+
 test("the plan tree is unchanged after the suite runs", () => {
-  const porcelain = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain", "--", "plan/"], { encoding: "utf8" }).trim();
-  assert.equal(porcelain, "", `this suite must leave plan/ byte-identical; saw:\n${porcelain}`);
+  const dirt = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain", "--", "plan/"], { encoding: "utf8" })
+    .split("\n")
+    .filter(Boolean)
+    .filter((line) => !CONCURRENT_FEEDBACK_WRITE.test(line));
+  assert.equal(dirt.join("\n"), "", `this suite must leave plan/ byte-identical; saw:\n${dirt.join("\n")}`);
+});
+
+test("the concurrent-writer exclusion cannot hide anything this suite could leave behind", () => {
+  // The ONLY line the exclusion may swallow -- the one observed on run 34687177795.
+  assert.ok(
+    CONCURRENT_FEEDBACK_WRITE.test("?? plan/feedback/fb-repair-w1t905-coverage-1789207422221.yaml"),
+    "control: the exclusion matches the concurrent-writer line that took #5215's shard 1/4 red",
+  );
+  // W1-T515's hazard -- an untracked probe in the live plan tree -- still fails the check above.
+  assert.ok(
+    !CONCURRENT_FEEDBACK_WRITE.test("?? plan/tasks.d/zzz-w1-t497-wiring-probe.yaml"),
+    "this suite's own probe landing in the live plan tree must still be observed",
+  );
+  // A TRACKED mutation is never untracked debris, even at the excluded path.
+  assert.ok(
+    !CONCURRENT_FEEDBACK_WRITE.test(" M plan/feedback/fb-repair-w1t905-coverage-1789207422221.yaml"),
+    "a tracked-file mutation under plan/feedback/ must still be observed",
+  );
+  assert.ok(
+    !CONCURRENT_FEEDBACK_WRITE.test("?? plan/MASTER-PLAN.md"),
+    "only plan/feedback/ is excluded, and only when untracked",
+  );
+  // And the exclusion is safe only while THIS suite never writes a feedback entry itself. Asserted
+  // on this file's own source, exactly as "the wiring probe shard lands outside the live plan tree"
+  // above does, so an edit that starts writing one fails HERE rather than going unobserved.
+  const self = readFileSync(fileURLToPath(new URL("./task-linter-wiring.test.ts", import.meta.url)), "utf8");
+  for (const writer of ["captureFeedback", "captureRepairFeedback", "feedbackEntryPath"]) {
+    assert.doesNotMatch(
+      self,
+      new RegExp(`${writer}\\(`),
+      `this suite must never write a feedback entry (${writer}) while plan/feedback/ is excluded`,
+    );
+  }
+  // CONTROL: a call shape IS findable in this file, so the four zeros above are a measurement.
+  assert.match(self, /execFileSync\(/, "control: the call-shape query can see this file's corpus");
 });
