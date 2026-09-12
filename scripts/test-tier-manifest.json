@@ -85,6 +85,7 @@
     "test/a-learning-firing-reports-into-the-inbox.test.ts": 0,
     "test/a-learning-is-selected-by-what-the-task-will-touch-not-only-where.test.ts": 0,
     "test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts": 1187,
+    "test/a-lesson-names-no-action-to-take.test.ts": 0,
     "test/a-live-console-review-is-runnable.test.ts": 0,
     "test/a-local-gate-run-has-no-bound-of-its-own.test.ts": 0,
     "test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts": 5609,
