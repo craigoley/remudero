@@ -89,15 +89,15 @@
     - claim: "a PR whose diff is entirely plan/ is refused when a trailer credits a task declaring non-plan deliverables"
       proof: "unit test: a plan-only diff cannot credit a task that declares source files"
     - claim: "a trailer in a FOLLOW-UP commit is caught, not only one in the PR's first commit, because squash concatenates every body"
-      proof: "unit test: a trailer in any commit of the branch is caught"
+      proof: "unit test: a trailer in any commit of the branch is caught — not only the first commit in the PR"
     - claim: "a PR that actually ships the declared files still passes, so the gate is not a blanket refusal of trailers"
-      proof: "unit test: a PR shipping its declared files still passes"
+      proof: "unit test: a PR shipping its declared files still passes — trailering alone is not enough to fail it"
     - claim: "a task whose shard declares only plan/ files is untouched, since a plan-only diff genuinely builds it"
-      proof: "unit test: a plan-only task is not refused by this gate"
+      proof: "unit test: a plan-only task whose shard declares no non-plan files is not refused by this gate"
     - claim: "the refusal names the offending commit sha and the declared files it failed to ship"
       proof: "unit test: the refusal names the offending commit and the unshipped files"
     - claim: "the existing workflow reaches the follow-up-commit check through its author-time gate"
-      proof: "unit test: W1-T3414 follow-up commit criterion"
+      proof: "unit test: the workflow reaches the follow-up-commit check through its existing author-time gate"
   falsifier: |
     RE-RUN THE AUDIT BEFORE BUILDING AND USE YOUR OWN NUMBERS. The 105/663 is a 14-day window on
     2026-09-11 and every figure moves. The audit is reproducible: for each merged commit with a
