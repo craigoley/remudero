@@ -156,6 +156,7 @@
     "test/a-report-with-no-reader-is-not-a-report.test.ts": 866,
     "test/a-required-comment-must-not-cost-a-relocation.test.ts": 0,
     "test/a-reservation-names-its-holder.test.ts": 0,
+    "test/a-reservation-says-whether-anything-still-holds-it.test.ts": 0,
     "test/a-reservation-seeds-from-the-namespace-it-owns.test.ts": 1544,
     "test/a-restart-is-only-warranted-by-a-material-advance.test.ts": 182,
     "test/a-restart-is-worth-its-interruption.test.ts": 0,
