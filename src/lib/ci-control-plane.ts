@@ -104,7 +104,7 @@ export function ciControlPlaneParity(ciJobNames: readonly string[], entries: rea
     }
     const entry = matches[0]!;
     if (entry.mirrored && typeof entry.run !== "function") problems.push(`ci.yml job '${job}' is mirrored but has no run()`);
-    if (!entry.mirrored && !entry.reason?.trim()) problems.push(`ci.yml job '${job}' is excluded but has no reason`);
+    if (!entry.mirrored && (entry.reason?.trim() ?? "") === "") problems.push(`ci.yml job '${job}' is excluded but has no reason`);
   }
   return { ok: problems.length === 0, problems };
 }
