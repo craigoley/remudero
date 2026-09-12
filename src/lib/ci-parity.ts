@@ -337,8 +337,9 @@ export function parsePullRequestWorkflowJobs(workflowTexts: Readonly<Record<stri
     .sort(([a], [b]) => a.localeCompare(b))
     .flatMap(([workflow, text]) => {
       const doc = parseYaml(text) as { on?: unknown; jobs?: Record<string, unknown> } | null;
-      if (!runsOnPullRequest(doc?.on)) return [];
-      return Object.keys(doc?.jobs ?? {})
+      const parsed = doc ?? {};
+      if (runsOnPullRequest(parsed.on) === false) return [];
+      return Object.keys(parsed.jobs ?? {})
         .sort()
         .map((job) => ({ workflow, job }));
     });
@@ -1804,7 +1805,11 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
       .filter(({ workflow, job }) => !standaloneTableJobs.has(workflowJobKey(workflow, job)))
       .map(({ workflow, job }) => `.github/workflows/${workflow}:${job}`),
     ...standaloneTable
-      .filter((entry) => entry.mirrored === false && !entry.reason?.trim())
+      .filter((entry) => {
+        if (entry.mirrored !== false) return false;
+        const reason = entry.reason;
+        return reason === undefined || reason.trim().length === 0;
+      })
       .map((entry) => `.github/workflows/${entry.workflow ?? "(missing workflow)"}:${entry.job} (excluded without reason)`),
   ];
   const driftStep: CiParityStepResult = {
