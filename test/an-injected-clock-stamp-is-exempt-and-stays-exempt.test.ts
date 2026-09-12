@@ -27,9 +27,9 @@ const { censusExpiringFixtures, EXEMPT_MARKER } = (await import(CENSUS_URL)) as 
 // FIXED offset before a FIXED now and no date can move them. The census cannot see that: it matches a
 // hardcoded stamp and assumes a live comparison.
 //
-// The exemption marker is the census's own documented remedy for precisely this. These tests make it
-// load-bearing rather than decorative: the marker must be what suppresses the report (not the stamp's
-// age), and the two real stamps must keep carrying it.
+// The exemption marker is the census's documented remedy for hardcoded stamps that cannot detonate.
+// The sweep fixture now goes one better: it derives those dates from the injected clock, so there is
+// no literal for the census to count. These tests keep both promises load-bearing.
 
 const THRESHOLD_DAYS = 14;
 const NOW = Date.parse("2026-09-12T00:00:00Z");
@@ -64,17 +64,15 @@ test("FALSIFIER: the same stamp WITHOUT the marker is reported, so the marker is
   assert.equal(out.reported.length, 1, "a crossing stamp with no marker MUST be reported");
 });
 
-test("the two frozen-clock stamps in the sweep fan-out test still carry the marker and a reason", () => {
-  // The guard against a future edit quietly dropping them: the census would then block the whole
-  // board again, and the cause would look like whichever PR happened to be open at the time.
+test("the sweep fan-out fixture derives both activity stamps from its injected clock", () => {
+  // The guard against a future edit reintroducing wall-clock-looking literals: the census would then
+  // block the whole board again, and the cause would look like whichever PR happened to be open.
   const src = readFileSync(join(REPO_ROOT, "test", "the-sweep-fan-out-respects-the-host-budget.test.ts"), "utf8");
-  const marked = src.split("\n").filter((l) => l.includes("lastActivityAt:") && l.includes(EXEMPT_MARKER));
-  assert.equal(marked.length, 2, `expected both stamps to carry ${EXEMPT_MARKER}; found ${marked.length}`);
-  for (const line of marked) {
-    const reason = line.slice(line.indexOf(EXEMPT_MARKER) + EXEMPT_MARKER.length).replace(/^\s*--\s*/, "");
-    assert.ok(reason.trim().length > 20, `the marker must carry a real reason, got: ${reason.trim()}`);
-    assert.match(reason, /INJECTED/, "the reason must name WHY it cannot detonate: the clock is injected");
-  }
+  const activityLines = src.split("\n").filter((l) => l.includes("lastActivityAt:")).map((l) => l.trim());
+  assert.deepEqual(activityLines, ["lastActivityAt: recentActivityIso(1),", "lastActivityAt: recentActivityIso(2),"]);
+  assert.equal(src.includes(EXEMPT_MARKER), false, "helper-derived stamps should not need exemption markers");
+  assert.match(src, /function recentActivityIso\(hoursAgo: number\): string \{/);
+  assert.match(src, /new Date\(NOW - hoursAgo \* HOUR\)\.toISOString\(\)/);
 });
 
 test("that sweep test really does inject its clock — the premise the exemption rests on", () => {
