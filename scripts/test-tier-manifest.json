@@ -35,6 +35,7 @@
     "test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts": 4548,
     "test/a-criterion-names-the-test-that-proves-it.test.ts": 1300,
     "test/a-criterion-restated-is-not-a-claim.test.ts": 0,
+    "test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts": 0,
     "test/a-dead-containers-claim-does-not-outlive-it.test.ts": 0,
     "test/a-deadlock-the-harness-cannot-count.test.ts": 1938,
     "test/a-declared-budget-is-calibrated-against-observed-runs.test.ts": 0,
