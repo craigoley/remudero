@@ -1,0 +1,20 @@
+id: fb-1789237820690-d3ce67
+ts: 2026-09-12T18:30:20.690Z
+raw: "Repair local CI-parity coverage scratch isolation: src/lib/ci-parity.ts
+  sets TMPDIR=coverageScratchDir(repoRoot), a path inside the git work tree. In
+  the W1-T3445 preflight run this caused WorkerHomePlacementError for
+  worker-home fixtures and many cascading coverage failures, while the hosted
+  coverage matrix passed because its workflow does not set that TMPDIR override.
+  Preserve bounded cleanup and coverage artifacts, but make the local parity
+  harness compatible with the worker-home safety boundary. Falsifier: a full
+  local rmd preflight --ci-parity reaches a green coverage shard without placing
+  worker homes inside a git work tree; hosted CI parity must remain unchanged."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
