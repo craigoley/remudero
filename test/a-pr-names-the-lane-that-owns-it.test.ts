@@ -139,6 +139,60 @@ test("the verdict names the corpus newest timestamp so stale reads are visible",
   assert.equal(verdict.corpusNewestTs, "2026-09-12T00:05:00.000Z");
 });
 
+test("an acted fixable sweep owns the PR unless it was explicitly unspent", () => {
+  const active = derivePrOwnerVerdict(12, {
+    archiveFiles: ["ledger.2026-09-12T00-01-00-000Z.ndjson.gz"],
+    liveFileRead: true,
+    ok: true,
+    unread: [],
+    filesRead: 1,
+    rows: [
+      {
+        ts: "2026-09-12T00:00:00.000Z",
+        step: "sweep.disposed",
+        pr_number: 12,
+        disposition: "blocked-fixable",
+        acted: true,
+        reason: "ci-log fix dispatched",
+      },
+    ],
+  });
+  assert.equal(active.verdict, "OWNED");
+  assert.equal(active.reason, "active sweep disposition found for this pull request");
+
+  const unspent = derivePrOwnerVerdict(12, {
+    archiveFiles: ["ledger.2026-09-12T00-01-00-000Z.ndjson.gz"],
+    liveFileRead: true,
+    ok: true,
+    unread: [],
+    filesRead: 1,
+    rows: [
+      {
+        ts: "2026-09-12T00:00:00.000Z",
+        step: "sweep.disposed",
+        pr_number: 12,
+        disposition: "blocked-fixable",
+        acted: true,
+        spent: false,
+        reason: "reservation lost before dispatch",
+      },
+    ],
+  });
+  assert.equal(unspent.verdict, "FREE");
+});
+
+test("pr-owner rejects unknown flags and missing PR numbers with usage", () => {
+  const errors: string[] = [];
+  assert.equal(prOwnerCommand(["4851", "--json"], { error: (text) => errors.push(text) }), 2);
+  assert.match(errors.join("\n"), /unexpected argument '--json'/);
+  assert.match(errors.join("\n"), /rmd pr-owner <pr-number>/);
+
+  errors.length = 0;
+  assert.equal(prOwnerCommand([], { error: (text) => errors.push(text) }), 2);
+  assert.match(errors.join("\n"), /<pr-number> is required/);
+  assert.match(errors.join("\n"), /rmd pr-owner <pr-number>/);
+});
+
 test("the read covers live, plain rotation and gzip rotation, and no gzip rotation reports UNKNOWN", () => {
   const allForms = tmpStateDir();
   const noGzip = tmpStateDir();
