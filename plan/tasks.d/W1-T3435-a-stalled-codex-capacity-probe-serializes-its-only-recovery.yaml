@@ -1,0 +1,73 @@
+- id: W1-T3435
+  title: "A stalled Codex capacity probe serializes its only recovery attempt and falsely removes a healthy provider from one routing decision"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 24.00
+  files:
+    - src/lib/worker-provider.ts
+    - test/codex-capacity-singleflight.test.ts
+  origin: "operator-session#codex-capacity-hedged-recovery-2026-09-12"
+  plan_refs: ["W1-T2704", "W1-T2711", "W1-T2750", "W1-T2772", "W1-T2840"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET HOST WITH PINNED CODEX CLI 0.152.0 ON 2026-09-12.
+    The daemon's production reader returned a readable Codex primary window with 11% used
+    (89% remaining) in 673ms, and the durable provider-routing status subsequently selected Codex
+    with 89% remaining. At 13:17:09Z, however, the same route refused a fix worker because both
+    `account/rateLimits/read` and `model/list` remained unfinished after its first 10-second
+    app-server bound and its one sequential retry also timed out. The refusal is telemetry
+    unreadability, not exhausted Codex capacity.
+
+    The exact-line-deduplicated fourteen-day ledger union contains 22 matching capacity-failure
+    rows and 12 `app-server recovered on timeout retry` rows. The latter proves the existing
+    W1-T2840 sequential retry can recover a real transient stall, but it waits a full ten seconds
+    before it begins. Current source runs that retry only after the first exchange finishes at its
+    timeout; a successful second exchange therefore cannot save the routing decision before about
+    twenty seconds. W1-T2772 already makes ordinary cold reads single-flight and W1-T2840 already
+    preserves fresh, fail-closed capacity semantics. Their plan shards still say `queued`, but
+    commits 146b901d and 70a2d83c respectively implement those concerns.
+
+    A controlled current-host auth-only temporary CODEX_HOME completed three independent fresh
+    capacity reads in 617-1381ms. That does not prove the shared durable CODEX_HOME causes the
+    observed stalls, so changing or cleaning the shared 7.2GB state is explicitly out of scope.
+  design: |
+    Replace W1-T2840's wait-then-retry timeout recovery with one bounded hedge inside the raw
+    Codex app-server exchange. Start the primary exchange normally. If it is still pending at six
+    seconds, start exactly one independent hedge using the same current control identity. Accept
+    only the first complete, freshly read, valid response; terminate and await cleanup of the
+    loser exactly once. Each child retains the existing ten-second bound. A normal successful
+    exchange therefore still creates one child, while a stalled exchange has one six-second-late
+    chance to recover before the primary's bound rather than waiting for a second serial bound.
+
+    Do not hedge after a prompt terminal failure, malformed payload, process failure, exit,
+    pagination failure, RPC error, or toolchain failure. If both bounded exchanges are unreadable,
+    preserve the current fail-closed result, bounded ordinary failure backoff, phase diagnostics,
+    and no-stale-headroom rule. The hedge belongs below the ordinary single-flight promise, so
+    concurrent ordinary callers share it. `forceRefresh` remains a separate attribution boundary;
+    it must never receive an ordinary cached or in-flight reading. Do not change provider policy,
+    reserve percentage, model selection, CLI version, CODEX_HOME topology, or Claude behavior.
+  acceptance:
+    - claim: "a primary app-server exchange still pending at six seconds and a successful hedge returns one fresh readable Codex capacity result, reports bounded hedge-recovery telemetry, and terminates each child exactly once"
+      proof: "grep: W1-T3435 criterion 1 in test/codex-capacity-singleflight.test.ts"
+    - claim: "a primary exchange that succeeds before the hedge threshold starts exactly one app-server child, and a prompt non-timeout terminal failure starts no hedge"
+      proof: "grep: W1-T3435 criterion 2 in test/codex-capacity-singleflight.test.ts"
+    - claim: "two unreadable bounded exchanges remain unreadable with both phase diagnostics, enter the existing ordinary failure backoff, and never revive stale capacity"
+      proof: "grep: W1-T3435 criterion 3 in test/codex-capacity-singleflight.test.ts"
+    - claim: "concurrent ordinary cold callers share one parent hedged exchange while forceRefresh remains independent from ordinary cache, failure-backoff, and in-flight state"
+      proof: "grep: W1-T3435 criterion 4 in test/codex-capacity-singleflight.test.ts"
+  falsifier: |
+    Do not replace sequential timeout recovery if current source already starts an independent
+    bounded recovery before the first ten-second timeout, if the observed failed route already
+    had a readable Codex window, or if normal fresh current-host reads routinely take six seconds
+    or more. None holds: src/lib/worker-provider.ts starts W1-T2840's second attempt only after
+    the first timeout; the 13:17Z refusal says capacity read failed; and three current controls
+    completed in 617-1381ms. Reject any implementation that accepts stale cached capacity, adds a
+    second hedge, fans out one hedge per ordinary caller, or attributes a shared-CODEX_HOME cause
+    without a reproducing measurement.
+  note: "reservation hand-off: codex/plan-w1-t3335-proof-repair-retrigger-body-fix -> codex/w1-t3435-hedged-codex-capacity"
