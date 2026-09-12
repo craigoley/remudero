@@ -19482,6 +19482,11 @@ export function readReservationHolder(
  *  CLI dispatch below) omit `deps` entirely and get the real functions, same DI shape as
  *  `runTask`'s `opts.config ?? loadConfig()` / `opts.github ?? ghGateway(...)`. */
 export type LintPlanStatusDeps = {
+  /**
+   * Checkout that owns an explicit `--plan` path and its `--base` reads. Omitted by the CLI;
+   * tests use a throwaway clone so a fixture mutation cannot be observed by sibling test workers.
+   */
+  repoRoot?: string;
   loadConfig?: typeof loadConfig;
   resolveOwnerRepo?: () => { owner: string; repo: string };
   ghGateway?: typeof ghGateway;
@@ -20253,16 +20258,17 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // defines what's in-bounds, and that mode stays byte-identical whether or not this is set.
   const allFlag = rest.includes("--all");
   const offline = deps.offline === true;
+  const checkoutRoot = deps.repoRoot ?? repoRoot;
   const planPathArg = flagValue(rest, "--plan");
-  const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(repoRoot, "plan", "tasks.yaml");
+  const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan resolving OUTSIDE the resolved root is REFUSED right
   // here, BY NAME — before any --base/git-show plumbing gets a chance to mis-report it
   // as a base-resolution failure (the #271 fixture's second false green: `relative(
   // repoRoot, planPath)` used to yield a `../../..` path that `git show <base>:<that>`
   // died on as though the BASE ref were the problem, never naming the real one).
-  if (planPathArg !== undefined && isPathOutsideRoot(repoRoot, planPath)) {
+  if (planPathArg !== undefined && isPathOutsideRoot(checkoutRoot, planPath)) {
     console.error(
-      `### rmd lint-plan: --plan ${planPath} resolves OUTSIDE the repo root ${repoRoot} — ` +
+      `### rmd lint-plan: --plan ${planPath} resolves OUTSIDE the repo root ${checkoutRoot} — ` +
         `refusing (a plan outside the gated tree is never in scope)`,
     );
     return 2;
@@ -20289,14 +20295,14 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // named here so the summary can report them, never silently drop them (design point (iv)).
   let statusFlipCarvedIds: string[] = [];
   if (baseRef) {
-    const relPath = relative(repoRoot, planPath);
+    const relPath = relative(checkoutRoot, planPath);
     const basePathCache = new Map<string, boolean>();
     pathExistsAtBase = (rel: string) => {
       const cached = basePathCache.get(rel);
       if (cached !== undefined) return cached;
       let exists = false;
       try {
-        execFileSync("git", ["-C", repoRoot, "cat-file", "-e", `${baseRef}:${rel}`], { stdio: "ignore" });
+        execFileSync("git", ["-C", checkoutRoot, "cat-file", "-e", `${baseRef}:${rel}`], { stdio: "ignore" });
         exists = true;
       } catch (e) {
         void e;
@@ -20316,7 +20322,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     const tmpDir = makeTempDir("lint-plan-base");
     try {
       const oldRaw = execFileSync("git", ["show", `${baseRef}:${relPath}`], {
-        cwd: repoRoot,
+        cwd: checkoutRoot,
         encoding: "utf8",
         // maxBuffer: the SAME blob syncPlanFromOrigin reads at :576, so it overflows Node's 1 MiB
         // default at the same moment — fixing one site alone would just move the failure to CI.
@@ -20324,7 +20330,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       });
       const tmpFile = join(tmpDir, "tasks.yaml");
       writeFileSync(tmpFile, oldRaw, "utf8");
-      materializeOriginShards(repoRoot, dirname(relPath), tmpDir, undefined, baseRef);
+      materializeOriginShards(checkoutRoot, dirname(relPath), tmpDir, undefined, baseRef);
       // A BASE THAT DOES NOT PARSE IS NOT THIS PR'S DEFECT, AND MUST NOT BE ITS FAILURE.
       // `loadPlan` refuses a tree carrying a duplicate id, and the base tree is whatever
       // origin/main happens to be — so one bad merge to main turned this REQUIRED check red on
@@ -20399,7 +20405,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       const statusFlipCarve = statusFlipOnlyTaskIds(oldCorpusTexts, newCorpusTexts);
       for (const id of statusFlipCarve) scope.delete(id);
       statusFlipCarvedIds = [...statusFlipCarve].sort();
-      const diffText = execFileSync("git", ["-C", repoRoot, "diff", "--no-ext-diff", "--unified=0", `${baseRef}...HEAD`, "--", "src"], {
+      const diffText = execFileSync("git", ["-C", checkoutRoot, "diff", "--no-ext-diff", "--unified=0", `${baseRef}...HEAD`, "--", "src"], {
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
       });
@@ -20559,7 +20565,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
-    opts.moduleExists = (rel: string) => existsSync(join(repoRoot, rel));
+    opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
     // W1-T497: the reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to this
     // checkout, wired ONLY in --base mode (`scope` is populated iff `baseRef` was given). It
     // shells out per proof — measured ~207ms/proof over the full corpus — so wiring it into the
@@ -20568,7 +20574,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // PR actually touches. Never reimplemented, so lint and review can never disagree about what
     // a proof's raw title resolves to.
     if (scope) {
-      opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(repoRoot, rawName);
+      opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(checkoutRoot, rawName);
       // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
       // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and
       // for the identical reason: a changed task's own grep proofs name a handful of files, so
@@ -20576,7 +20582,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // 66.4s and this does not reopen it). Absent path (not written yet) ⇒ undefined, exactly
       // the "no predicate ⇒ no opinion" contract `opts.moduleExists` above already uses.
       opts.readGrepProofFile = (rel: string) => {
-        const abs = join(repoRoot, rel);
+        const abs = join(checkoutRoot, rel);
         if (!existsSync(abs)) return undefined;
         try {
           return readFileSync(abs, "utf8");
@@ -20684,7 +20690,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let failingSplit = "";
   if (wholePlanScope && failingTaskIds.length > 0) {
     try {
-      const { dump, ref } = (deps.readMergeEvidenceLog ?? defaultMergeEvidenceLog)(repoRoot);
+      const { dump, ref } = (deps.readMergeEvidenceLog ?? defaultMergeEvidenceLog)(checkoutRoot);
       const { withImpl, without } = classifyFailingMergeEvidence(failingTaskIds, dump);
       failingSplit =
         ` (${withImpl.length} with a merged implementation, ${without.length} with none` +

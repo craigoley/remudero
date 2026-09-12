@@ -62,6 +62,10 @@ const DETACHED_FIX_NOW_MS = Date.parse("2026-09-05T04:40:00Z");
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+function isoBefore(nowMs: number, ageMs: number): string {
+  return new Date(nowMs - ageMs).toISOString();
+}
+
 async function waitFor(predicate: () => boolean, message: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt++) {
     if (predicate()) return;
