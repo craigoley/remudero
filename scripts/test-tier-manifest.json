@@ -1,7 +1,6 @@
 {
   "thresholdMs": 5000,
   "files": {
-    "test/automated-retro-preflight-scrubs-self-sync.test.ts": 0,
     "test/a-bare-flagged-worktree-stops-the-whole-fleet.test.ts": 0,
     "test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts": 621,
     "test/a-blocked-ci-verdict-names-the-check-that-went-red.test.ts": 0,
@@ -280,6 +279,7 @@
     "test/auto-triage-policy-seam.test.ts": 949,
     "test/auto-triage-rung.test.ts": 1541,
     "test/auto-triage-wiring.test.ts": 20766,
+    "test/automated-retro-preflight-scrubs-self-sync.test.ts": 0,
     "test/automerge-hold.test.ts": 1941,
     "test/autonomy-ratchet.test.ts": 3921,
     "test/awareness-surface-ratchet.test.ts": 1073,
@@ -1264,6 +1264,7 @@
     "test/the-census-roster-is-named-not-numbered.test.ts": 8673,
     "test/the-changed-files-block-has-no-production-caller.test.ts": 1053,
     "test/the-channel-is-built-and-the-digest-still-goes-nowhere.test.ts": 2141,
+    "test/the-ci-entry-shells-the-argv-ci-runs.test.ts": 0,
     "test/the-citation-miner-has-a-producer.test.ts": 798,
     "test/the-codex-lane-auto-loads-no-doctrine.test.ts": 0,
     "test/the-comment-load-baseline-is-the-one-gate-remedy-the-scope-guard-still-refuses.test.ts": 1274,

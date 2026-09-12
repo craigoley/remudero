@@ -663,6 +663,126 @@ function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath:
   );
 }
 
+const CI_TEST_SHARD_COUNT = 4;
+const CI_DIFF_CLASSES = new Set(["PLAN_ONLY", "DOCS_ONLY", "SOURCE"]);
+
+type CiTestPlan =
+  | { kind: "tier-shards"; base: string; diffClass: string }
+  | { kind: "source-skip"; reason: string }
+  | { kind: "full-suite-fallback"; reason: string };
+
+function ciChangedFilesListPath(
+  repoRoot: string,
+  spawn: PreflightSpawn,
+): { ok: true; path: string; base: string } | { ok: false; reason: string } {
+  let base: string;
+  try {
+    base = requirePinnedBase(repoRoot, spawn);
+  } catch (e) {
+    return { ok: false, reason: String((e as Error)?.message ?? e) };
+  }
+  const res = spawn("git", ["diff", "--name-only", `${base}...HEAD`], { cwd: repoRoot });
+  if (res.status !== 0) {
+    const stderr = (res.stderr ?? "").trim();
+    return {
+      ok: false,
+      reason:
+        `could not compute changed files for diff classification: git diff exited ${res.status ?? "null"}` +
+        `${stderr ? `: ${stderr.slice(0, 200)}` : ""}`,
+    };
+  }
+  const dir = mkdtempSync(join(tmpdir(), "rmd-ci-parity-ci-"));
+  const path = join(dir, "changed-files.txt");
+  writeFileSync(path, res.stdout, "utf8");
+  return { ok: true, path, base };
+}
+
+function ciTestPlan(repoRoot: string, spawn: PreflightSpawn): CiTestPlan {
+  const changed = ciChangedFilesListPath(repoRoot, spawn);
+  if (!changed.ok) return { kind: "full-suite-fallback", reason: changed.reason };
+  let res: ReturnType<PreflightSpawn>;
+  try {
+    res = spawn(process.execPath, ["--import", "tsx", join(repoRoot, "scripts", "diff-class.mjs"), "--changed-files", changed.path], {
+      cwd: repoRoot,
+    });
+  } catch (e) {
+    return { kind: "full-suite-fallback", reason: `diff class unavailable: ${String((e as Error)?.message ?? e)}` };
+  }
+  const spawnFailed = spawnFailureDetail("ci:test diff-class", res);
+  if (spawnFailed) return { kind: "full-suite-fallback", reason: `diff class unavailable: ${spawnFailed}` };
+  const diffClass = (res.stdout ?? "").trim();
+  if (res.status !== 0) {
+    const stderr = (res.stderr ?? "").trim();
+    return {
+      kind: "full-suite-fallback",
+      reason: `diff class unavailable: diff-class.mjs exited ${res.status}${stderr ? `: ${stderr.slice(0, 200)}` : ""}`,
+    };
+  }
+  if (!CI_DIFF_CLASSES.has(diffClass)) {
+    return { kind: "full-suite-fallback", reason: `diff class unavailable: unrecognised class ${JSON.stringify(diffClass)}` };
+  }
+  if (diffClass === "SOURCE") {
+    return {
+      kind: "source-skip",
+      reason:
+        "W1-T3207: coverage-ratchet owns the single instrumented full-suite run; ci skips the quieter second harness on SOURCE diffs",
+    };
+  }
+  return { kind: "tier-shards", base: changed.base, diffClass };
+}
+
+function ciTestSteps(repoRoot: string, spawn: PreflightSpawn): CiParityStepResult[] {
+  const plan = ciTestPlan(repoRoot, spawn);
+  if (plan.kind === "source-skip") {
+    return [runStep("ci:test", () => ({ ok: true, detail: `PASS — SKIPPED — ${plan.reason}` }))];
+  }
+  if (plan.kind === "full-suite-fallback") {
+    return [
+      runStep("ci:test", () =>
+        boundedSuiteLeaf(
+          spawn,
+          `ci:test FULL suite fallback (diff class could not be determined — ${plan.reason}; shard 1 owns the FULL suite fallback)`,
+          "npm",
+          ["run", "test:ci"],
+          { cwd: repoRoot, stream: true },
+        ),
+      ),
+    ];
+  }
+  const shardSteps = Array.from({ length: CI_TEST_SHARD_COUNT }, (_, idx) => {
+    const shard = `${idx + 1}/${CI_TEST_SHARD_COUNT}`;
+    return runStep(`ci:test:shard-${idx + 1}`, () =>
+      boundedSuiteLeaf(
+        spawn,
+        `ci:test ${plan.diffClass} fast-tier shard ${shard}`,
+        process.execPath,
+        [
+          join(repoRoot, "scripts", "test-with-retry.mjs"),
+          process.execPath,
+          join(repoRoot, "scripts", "test-tier-manifest.mjs"),
+          "--run",
+          "fast",
+          "--shard",
+          shard,
+          "--base",
+          plan.base,
+        ],
+        { cwd: repoRoot, stream: true },
+      ),
+    );
+  });
+  return [
+    runStep("ci:test", () => {
+      const ok = shardSteps.every((s) => s.ok);
+      return {
+        ok,
+        detail: `${ok ? "PASS" : "FAIL"} — ${plan.diffClass} fast tier split across ${CI_TEST_SHARD_COUNT} shard(s)`,
+      };
+    }),
+    ...shardSteps,
+  ];
+}
+
 /** The shared shape for a job whose CI step is exactly an npm script — no re-derived argv to drift. */
 function npmScriptEntry(job: string, script: string): CiParityEntry {
   return {
@@ -1214,19 +1334,10 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       // the parity fix (design v): give it its OWN step here, one list, one truth, rather than
       // leaving it discoverable only by reading ci:test's raw output.
       runStep("ci:cli-reference-check", () => shellOut(spawn, "npm run --silent cli-reference:check", "npm", ["run", "--silent", "cli-reference:check"], { cwd: repoRoot })),
-      // `stream: true` — this is the multi-minute step, and the one that produced an HOUR of
-      // total silence in a container. `npm run test:ci` routes through scripts/test-with-retry.mjs,
-      // which ALREADY tees (`stdio: ["inherit","pipe","pipe"]`, writing each chunk to
-      // process.stdout while accumulating it); the only thing swallowing that stream was this
-      // process capturing it. Its `FLAKE-RETRY:` line — the record that a second full pass began —
-      // was invisible for the same reason.
-      runStep("ci:test", () =>
-        boundedSuiteLeaf(spawn, "ci:test (test/**/*.test.ts)", "npm", ["run", "test:ci"], { cwd: repoRoot, stream: true }),
-      ),
+      ...ciTestSteps(repoRoot, spawn),
       // W1-T2234: named separately from ci:test, never gating it — see the file comment above
-      // "ci:host-caused-suite-reds". ci:test's own command/argv/stream mode are untouched by
-      // this entry; it only ADDS a report of which known clusters this host is expected to
-      // produce, so a red ci:test on a non-CI host can be told apart from this diff's own.
+      // "ci:host-caused-suite-reds". This only ADDS a report of which known clusters this host is
+      // expected to produce, so a red ci:test on a non-CI host can be told apart from this diff's own.
       runStep("ci:host-caused-suite-reds", () => hostCausedSuiteRedsStep(detectHostFacts(repoRoot, spawn))),
     ],
   },
