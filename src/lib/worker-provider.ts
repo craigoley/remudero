@@ -2,6 +2,7 @@ import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams 
 import { constants as fsConstants, accessSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import type { Clock } from "./clock.js";
 import type { UsageSnapshot } from "./headroom.js";
@@ -1246,6 +1247,10 @@ interface CodexJsonEvent {
   item?: { type?: string; text?: string; command?: string; aggregated_output?: string };
 }
 
+export const CODEX_JSONL_RECORD_MAX_BYTES = 8 * 1024 * 1024;
+export const CODEX_JSONL_TRANSCRIPT_MAX_BYTES = 1024 * 1024;
+export const CODEX_JSONL_ERROR_MAX_BYTES = 64 * 1024;
+
 export interface ParsedCodexEvents {
   sessionId: string;
   text: string;
@@ -1258,57 +1263,189 @@ export interface ParsedCodexEvents {
   usageRefusal?: UsageLimitRefusal;
 }
 
-/** Parse Codex exec JSONL into the existing provider-neutral worker envelope. */
-export function parseCodexJsonl(raw: string, nowMs = Date.now()): ParsedCodexEvents {
-  let sessionId = "";
-  const blocks: string[] = [];
-  const errors: string[] = [];
-  let input = 0;
-  let output = 0;
-  let cacheRead = 0;
-  let numTurns = 0;
-  let usageRefusal: UsageLimitRefusal | undefined;
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
+type CodexJsonlLimitCode =
+  | "codex_jsonl_record_too_large"
+  | "codex_jsonl_transcript_too_large"
+  | "codex_jsonl_errors_too_large";
+
+export class CodexJsonlStreamLimitError extends Error {
+  readonly code: CodexJsonlLimitCode;
+
+  constructor(code: CodexJsonlLimitCode, detail: string) {
+    super(`${code}: ${detail}`);
+    this.name = "CodexJsonlStreamLimitError";
+    this.code = code;
+  }
+}
+
+interface CodexJsonlStreamDecoderOptions {
+  nowMs?: number;
+  recordMaxBytes?: number;
+  transcriptMaxBytes?: number;
+  errorMaxBytes?: number;
+}
+
+interface CodexJsonlStreamIngestResult {
+  sawAgentMessage: boolean;
+}
+
+export class CodexJsonlStreamDecoder {
+  private readonly utf8 = new StringDecoder("utf8");
+  private readonly recordMaxBytes: number;
+  private readonly transcriptMaxBytes: number;
+  private readonly errorMaxBytes: number;
+  private readonly nowMs: number;
+  private carry = "";
+  private sessionId = "";
+  private readonly blocks: string[] = [];
+  private readonly errors: string[] = [];
+  private input = 0;
+  private output = 0;
+  private cacheRead = 0;
+  private numTurns = 0;
+  private usageRefusal: UsageLimitRefusal | undefined;
+  private transcriptBytes = 0;
+  private errorBytes = 0;
+
+  constructor(options: CodexJsonlStreamDecoderOptions = {}) {
+    this.recordMaxBytes = options.recordMaxBytes ?? CODEX_JSONL_RECORD_MAX_BYTES;
+    this.transcriptMaxBytes = options.transcriptMaxBytes ?? CODEX_JSONL_TRANSCRIPT_MAX_BYTES;
+    this.errorMaxBytes = options.errorMaxBytes ?? CODEX_JSONL_ERROR_MAX_BYTES;
+    this.nowMs = options.nowMs ?? Date.now();
+  }
+
+  ingest(chunk: Buffer | string): CodexJsonlStreamIngestResult {
+    const text = typeof chunk === "string" ? chunk : this.utf8.write(chunk);
+    return this.ingestText(text);
+  }
+
+  finish(): ParsedCodexEvents {
+    this.ingestText(this.utf8.end());
+    if (this.carry.trim()) {
+      const raw = this.carry;
+      this.carry = "";
+      this.processLine(raw);
+    } else {
+      this.carry = "";
+    }
+    return this.result();
+  }
+
+  retainedBytesForTest(): number {
+    return Buffer.byteLength(this.carry) + this.transcriptBytes + this.errorBytes + Buffer.byteLength(this.sessionId);
+  }
+
+  snapshot(): ParsedCodexEvents {
+    return this.result();
+  }
+
+  private ingestText(text: string): CodexJsonlStreamIngestResult {
+    let sawAgentMessage = false;
+    this.carry += text;
+    for (;;) {
+      const newline = this.carry.indexOf("\n");
+      if (newline < 0) break;
+      const raw = this.carry.slice(0, newline);
+      this.carry = this.carry.slice(newline + 1);
+      sawAgentMessage = this.processLine(raw) || sawAgentMessage;
+    }
+    this.ensureRecordBytes(this.carry);
+    return { sawAgentMessage };
+  }
+
+  private processLine(line: string): boolean {
+    if (!line.trim()) return false;
+    this.ensureRecordBytes(line);
     let event: CodexJsonEvent;
     try {
       event = JSON.parse(line) as CodexJsonEvent;
     } catch (error) {
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
-      errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
-      continue;
+      this.pushError(`unparseable Codex event: ${line.slice(0, 160)}`);
+      return false;
     }
-    if (event.type === "thread.started" && typeof event.thread_id === "string") sessionId = event.thread_id;
-    if (event.type === "turn.started") numTurns += 1;
+    if (event.type === "thread.started" && typeof event.thread_id === "string") this.sessionId = event.thread_id;
+    if (event.type === "turn.started") this.numTurns += 1;
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
-      blocks.push(event.item.text);
+      this.pushBlock(event.item.text);
+      return true;
     }
     if (event.type === "turn.completed" && event.usage) {
-      input += event.usage.input_tokens ?? 0;
-      output += event.usage.output_tokens ?? 0;
-      cacheRead += event.usage.cached_input_tokens ?? 0;
+      this.input += event.usage.input_tokens ?? 0;
+      this.output += event.usage.output_tokens ?? 0;
+      this.cacheRead += event.usage.cached_input_tokens ?? 0;
     }
     if (event.type === "turn.failed" || event.type === "error") {
       const message = event.error?.message ?? event.type;
-      errors.push(message);
+      this.pushError(message);
       // Codex 0.152.0 preserves its structured UsageLimitExceeded classification inside app-server,
       // but `codex exec --json` intentionally projects only the terminal message. Normalize at this
       // adapter boundary while the text is known to be provider error evidence; never scan agent
       // output, which may discuss usage limits as part of the task.
-      usageRefusal ??= detectUsageLimitRefusal(message, nowMs);
+      this.usageRefusal ??= detectUsageLimitRefusal(message, this.nowMs);
+    }
+    return false;
+  }
+
+  private ensureRecordBytes(line: string): void {
+    const bytes = Buffer.byteLength(line);
+    if (bytes > this.recordMaxBytes) {
+      throw new CodexJsonlStreamLimitError(
+        "codex_jsonl_record_too_large",
+        `current record is ${bytes} bytes; max is ${this.recordMaxBytes}`,
+      );
     }
   }
-  return {
-    sessionId,
-    text: blocks.at(-1) ?? "",
-    blocks,
-    tokens: { input, output, cacheRead, cacheCreation: 0 },
-    numTurns,
-    isError: errors.length > 0,
-    subtype: errors.length > 0 ? "error_codex" : "success",
-    errors,
-    ...(usageRefusal ? { usageRefusal } : {}),
-  };
+
+  private pushBlock(text: string): void {
+    const bytes = Buffer.byteLength(text);
+    if (this.transcriptBytes + bytes > this.transcriptMaxBytes) {
+      throw new CodexJsonlStreamLimitError(
+        "codex_jsonl_transcript_too_large",
+        `retained transcript would be ${this.transcriptBytes + bytes} bytes; max is ${this.transcriptMaxBytes}`,
+      );
+    }
+    this.transcriptBytes += bytes;
+    this.blocks.push(text);
+  }
+
+  private pushError(message: string): void {
+    const bytes = Buffer.byteLength(message);
+    if (this.errorBytes + bytes > this.errorMaxBytes) {
+      throw new CodexJsonlStreamLimitError(
+        "codex_jsonl_errors_too_large",
+        `retained errors would be ${this.errorBytes + bytes} bytes; max is ${this.errorMaxBytes}`,
+      );
+    }
+    this.errorBytes += bytes;
+    this.errors.push(message);
+  }
+
+  private result(): ParsedCodexEvents {
+    return {
+      sessionId: this.sessionId,
+      text: this.blocks.at(-1) ?? "",
+      blocks: this.blocks,
+      tokens: { input: this.input, output: this.output, cacheRead: this.cacheRead, cacheCreation: 0 },
+      numTurns: this.numTurns,
+      isError: this.errors.length > 0,
+      subtype: this.errors.length > 0 ? "error_codex" : "success",
+      errors: this.errors,
+      ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
+    };
+  }
+}
+
+/** Parse Codex exec JSONL into the existing provider-neutral worker envelope. */
+export function parseCodexJsonl(raw: string, nowMs = Date.now()): ParsedCodexEvents {
+  const parser = new CodexJsonlStreamDecoder({
+    nowMs,
+    recordMaxBytes: Infinity,
+    transcriptMaxBytes: Infinity,
+    errorMaxBytes: Infinity,
+  });
+  parser.ingest(raw);
+  return parser.finish();
 }
 
 type CodexSpawnEnvArgs = Pick<
@@ -1603,7 +1740,8 @@ async function spawnCodexWorkerInPrivateTemp(
 ): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
   const stderrChunks: string[] = [];
-  const stdoutChunks: string[] = [];
+  const stdout = new CodexJsonlStreamDecoder();
+  let streamLimitError: CodexJsonlStreamLimitError | undefined;
   const pidRef: { pid?: number } = {};
   const spawn = args.containment?.spawn ?? spawnDetachedGroup;
   const teardown = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
@@ -1634,10 +1772,18 @@ async function spawnCodexWorkerInPrivateTemp(
     }, args.clockBound.boundMs);
   };
   process.stdout.on("data", (chunk: Buffer) => {
-    const text = chunk.toString("utf8");
-    stdoutChunks.push(text);
-    if (/\"type\":\"agent_message\"/.test(text)) args.streamObserver?.({ kind: "working", tsMs: Date.now() });
-    else args.streamObserver?.({ kind: "message", tsMs: Date.now() });
+    try {
+      const decoded = stdout.ingest(chunk);
+      if (decoded.sawAgentMessage) args.streamObserver?.({ kind: "working", tsMs: Date.now() });
+      else args.streamObserver?.({ kind: "message", tsMs: Date.now() });
+    } catch (error) {
+      if (error instanceof CodexJsonlStreamLimitError) {
+        streamLimitError = error;
+        teardown(contained.pid);
+      } else {
+        throw error;
+      }
+    }
     armClockBound();
   });
   armClockBound();
@@ -1647,7 +1793,15 @@ async function spawnCodexWorkerInPrivateTemp(
   try {
     const exitCode = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardown);
     if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
-    const parsed = parseCodexJsonl(stdoutChunks.join(""));
+    let parsed = streamLimitError ? stdout.snapshot() : stdout.finish();
+    if (streamLimitError) {
+      parsed = {
+        ...parsed,
+        isError: true,
+        subtype: streamLimitError.code,
+        errors: [...parsed.errors, streamLimitError.message],
+      };
+    }
     const isError = parsed.isError || exitCode !== 0;
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     return {
@@ -1659,7 +1813,7 @@ async function spawnCodexWorkerInPrivateTemp(
       text: parsed.text,
       blocks: parsed.blocks,
       stderr: stderrChunks.join(""),
-      subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
+      subtype: isError ? (streamLimitError?.code ?? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`)) : "success",
       isError,
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),
       ...(parsed.usageRefusal ? { usageRefusal: parsed.usageRefusal } : {}),
