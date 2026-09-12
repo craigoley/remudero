@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDaemon } from "../src/lib/daemon.js";
-import { evaluateRetroTrigger, mergedSince, resolveMarkerForGather, saveMarker, type RunSummary } from "../src/lib/retro.js";
+import { checkRetroIntegrity, evaluateRetroTrigger, mergedSince, resolveMarkerForGather, saveMarker, type RunSummary } from "../src/lib/retro.js";
 import { AutomatedRetroSubprocessError } from "../src/lib/retro-subprocess.js";
 import type { RunResult } from "../src/lib/run-result.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // ── W1-T160: the DAEMON'S scheduling contract for the retro cadence trigger ───────
 //
@@ -110,6 +111,103 @@ test(
   },
 );
 
+test("a threshold crossing fires the retro from the daemon poll path with no CLI invocation", async () => {
+  const plan = fixturePlan();
+  let runCalls = 0;
+  let stopChecks = 0;
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+
+  const summary = await runDaemon(plan, {
+    refreshMerged: () => () => true,
+    runOne: async (id): Promise<RunResult> => {
+      throw new Error(`runOne must never be called in this fixture (task ${id})`);
+    },
+    checkStop: () => (++stopChecks > 1 ? "test bound reached" : undefined),
+    sleep: async () => {},
+    checkRetroTrigger: () => ({ fire: true, reason: "merges", mergesSinceMarker: 25, daysSinceMarker: 1 }),
+    runRetroTrigger: async () => {
+      runCalls++;
+    },
+    log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
+  });
+
+  assert.equal(summary.stopReason, "stopped");
+  assert.equal(runCalls, 1);
+  assert.equal(lines.filter((l) => l.step === "retro_triggered").length, 1);
+});
+
+test("the threshold crossed with no retro gather within two polls fails", async () => {
+  const plan = fixturePlan();
+  let runCalls = 0;
+  let stopChecks = 0;
+
+  await runDaemon(plan, {
+    refreshMerged: () => () => true,
+    runOne: async (id): Promise<RunResult> => {
+      throw new Error(`runOne must never be called in this fixture (task ${id})`);
+    },
+    checkStop: () => (++stopChecks > 2 ? "test bound reached" : undefined),
+    sleep: async () => {},
+    checkRetroTrigger: () => ({ fire: true, reason: "merges", mergesSinceMarker: 25, daysSinceMarker: 1 }),
+    runRetroTrigger: async () => {
+      runCalls++;
+    },
+  });
+
+  assert.ok(runCalls >= 1, "the daemon must gather a fired retro before two polls elapse");
+});
+
+test("three polls across ONE crossing spawn the Architect exactly once", async () => {
+  const plan = fixturePlan();
+  const now = new Date("2026-07-29T00:00:00.000Z");
+  let runCalls = 0;
+  let stopChecks = 0;
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+
+  const summary = await runDaemon(plan, {
+    refreshMerged: () => () => true,
+    runOne: async (id): Promise<RunResult> => {
+      throw new Error(`runOne must never be called in this fixture (task ${id})`);
+    },
+    checkStop: () => {
+      stopChecks++;
+      return stopChecks > 3 ? "test bound reached" : undefined;
+    },
+    sleep: async () => {},
+    now: () => now,
+    checkRetroTrigger: () => ({ fire: true, reason: "merges", mergesSinceMarker: 25, daysSinceMarker: 2 }),
+    runRetroTrigger: async () => {
+      runCalls++;
+      // No marker advance here: the daemon's crossing key, not a successful retro side effect,
+      // must be what prevents a poll cadence from spawning the same crossing again.
+    },
+    log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
+  });
+
+  assert.equal(summary.stopReason, "stopped");
+  assert.equal(runCalls, 1, "one continuous threshold crossing must spawn the Architect once");
+  assert.equal(lines.filter((l) => l.step === "retro_triggered").length, 1);
+  assert.ok(
+    lines.some((l) => l.step === "daemon.retro_trigger.crossing_already_fired"),
+    "later polls over the same still-fired crossing are named as suppressed, not silently ignored",
+  );
+});
+
+test("both cadence thresholds are policy data and changing them changes the firing decision", () => {
+  const now = new Date("2026-07-29T00:00:00.000Z");
+  const markerTs = "2026-07-26T00:00:00.000Z";
+
+  assert.equal(evaluateRetroTrigger(3, markerTs, now, { mergesThreshold: 25, daysThreshold: 7 }).fire, false);
+  assert.equal(evaluateRetroTrigger(3, markerTs, now, { mergesThreshold: 2, daysThreshold: 7 }).fire, true);
+  assert.equal(evaluateRetroTrigger(3, markerTs, now, { mergesThreshold: 25, daysThreshold: 2 }).fire, true);
+});
+
+test("the integrity gate blocks a retro the gather cannot honestly read", () => {
+  const blocked = checkRetroIntegrity(25, 0);
+  assert.equal(blocked.ok, false);
+  assert.match(String(blocked.reason), /trigger observed 25 merge/);
+});
+
 test("runDaemon: checkRetroTrigger below both thresholds never invokes runRetroTrigger, and no retro_triggered line is ever ledgered", async () => {
   const plan = fixturePlan();
   const now = new Date("2026-07-29T00:00:00.000Z");
@@ -205,4 +303,33 @@ test("runDaemon: an automated retro child exit 134 reaches run_failed and the sa
     String(lines.find((l) => l.step === "daemon.retro_trigger.run_failed")?.extra.error),
     /exit 134/,
   );
+});
+
+test("a retro failure fails SOFT — the daemon keeps running and the marker is not advanced", async () => {
+  const plan = fixturePlan();
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-retro-trigger-failsoft-`));
+  const markerPath = join(dir, "last-retro.json");
+  const marker = { ts: "2026-07-22T00:00:00.000Z", learnings_count: 0, runs_seen: 0 };
+  saveMarker(markerPath, marker);
+  let stopChecks = 0;
+  let runCalls = 0;
+
+  const summary = await runDaemon(plan, {
+    refreshMerged: () => () => true,
+    runOne: async (id): Promise<RunResult> => {
+      throw new Error(`runOne must never be called in this fixture (task ${id})`);
+    },
+    checkStop: () => (++stopChecks > 2 ? "test bound reached" : undefined),
+    sleep: async () => {},
+    checkRetroTrigger: () => evaluateRetroTrigger(0, marker.ts, new Date("2026-07-29T00:00:00.000Z")),
+    runRetroTrigger: async () => {
+      runCalls++;
+      throw new AutomatedRetroSubprocessError({ exitCode: 134, signal: null, stdoutTail: "", stderrTail: "heap OOM" });
+    },
+  });
+
+  const resolution = resolveMarkerForGather(markerPath);
+  assert.equal(summary.stopReason, "stopped");
+  assert.equal(runCalls, 1);
+  assert.deepEqual(resolution, { kind: "ok", marker });
 });
