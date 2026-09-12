@@ -33,27 +33,45 @@ function unadoptedSymbols(root: string): Set<string> {
   );
 }
 
-test("W1-T3409: a comment mention and an unreachable caller cannot launder symbol adoption", () => {
-  const root = fixture({
-    "src/lib/comment-only.ts": "export function commentOnly(): void {}\n",
-    "src/lib/dark-target.ts": "export function darkTarget(): void {}\n",
-    "src/lib/live-target.ts": "export function liveTarget(): void {}\n",
-    "src/lib/dark-region.ts": [
-      'import { darkTarget } from "./dark-target.js";',
-      "function neverReached(): void { darkTarget(); }",
-    ].join("\n"),
-    "src/run-task.ts": [
-      "/** {@link commentOnly} is documentation, not a caller. */",
-      'import { liveTarget } from "./lib/live-target.js";',
-      "liveTarget();",
-    ].join("\n"),
-  });
+function withFindings(files: Record<string, string>, assertion: (findings: Set<string>) => void): void {
+  const root = fixture(files);
   try {
-    const findings = unadoptedSymbols(root);
-    assert.ok(findings.has("commentOnly"), "a JSDoc-only identifier must remain a no-caller finding");
-    assert.ok(findings.has("darkTarget"), "a call in an unreachable module must remain a no-caller finding");
-    assert.ok(!findings.has("liveTarget"), "a reachable module importing and calling the symbol must clear the finding");
+    assertion(unadoptedSymbols(root));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+test("W1-T3409: an export named only in JSDoc remains a no-caller finding", () => {
+  withFindings(
+    {
+      "src/lib/comment-only.ts": "export function commentOnly(): void {}\n",
+      "src/run-task.ts": "/** {@link commentOnly} is documentation, not a caller. */\n",
+    },
+    (findings) => assert.ok(findings.has("commentOnly"), "a JSDoc-only identifier must remain a no-caller finding"),
+  );
+});
+
+test("W1-T3409: a call from an unreachable module remains a no-caller finding", () => {
+  withFindings(
+    {
+      "src/lib/dark-target.ts": "export function darkTarget(): void {}\n",
+      "src/lib/dark-region.ts": [
+        'import { darkTarget } from "./dark-target.js";',
+        "function neverReached(): void { darkTarget(); }",
+      ].join("\n"),
+      "src/run-task.ts": "export {};\n",
+    },
+    (findings) => assert.ok(findings.has("darkTarget"), "a call in an unreachable module must remain a no-caller finding"),
+  );
+});
+
+test("W1-T3409: a reachable imported call clears the no-caller finding", () => {
+  withFindings(
+    {
+      "src/lib/live-target.ts": "export function liveTarget(): void {}\n",
+      "src/run-task.ts": ['import { liveTarget } from "./lib/live-target.js";', "liveTarget();"].join("\n"),
+    },
+    (findings) => assert.ok(!findings.has("liveTarget"), "a reachable module importing and calling the symbol must clear the finding"),
+  );
 });
