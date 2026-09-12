@@ -23,7 +23,6 @@ const TASK_4042 = "W1-T2857";
 const HEAD_4042 = "eb44a4cab4e78a85c2fbb8e893b4225ab589cd4b";
 const OLD_INPUT_DIGEST_4042 = "v1:b22335c7bb6f0e240d71dde42fe50d6323181e89f424fcfb4fe7a9e7f9061d25";
 const OLD_DECISION_DIGEST_4042 = "v1:8dfa3c12ab6c35942fa0669bf9b983bc88862a23b7d3b76b579d8dc64efc12a7";
-const recentActivityIso = () => new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const PR_BODY_4042 = [
   "Adds a reusable host-side verifier for the provider bind mounts that make a recycled container operational, rather than treating image identity as sufficient. The verifier compares only explicit source/destination/read-write expectations and emits one bounded JSON verdict; drift output never includes credential or config source paths or contents.",
   "",
@@ -90,7 +89,7 @@ test("W1-T2872: the exact PR #4042 old-engine row spends zero current-engine att
     unmetCriteria: oldFailure.criteria,
     criteriaRecoverable: true,
     priorStrikes: 1,
-    lastActivityAt: recentActivityIso(),
+    lastActivityAt: "2026-09-05T05:40:57.234Z", // expiring-fixture: exempt -- deriveDisposition below pins now at 08:00Z (+2h19m), never the wall clock; suite passes at +400d
     headSha: HEAD_4042,
     autoMergeArmed: false,
     requiredContextsUnreadable: false,
@@ -98,7 +97,7 @@ test("W1-T2872: the exact PR #4042 old-engine row spends zero current-engine att
     reviewInputDigest: currentDigest,
     priorReviewAttemptsForInput: attempts.attempts,
   };
-  const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, Date.now());
+  const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, Date.parse("2026-09-05T08:00:00.000Z"));
   assert.equal(disposition.disposition, "post-review");
   assert.match(disposition.reason, /authoritative reviewer/);
 });

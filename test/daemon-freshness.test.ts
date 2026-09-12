@@ -59,10 +59,6 @@ function fakeClock(): { sleep: (ms: number) => Promise<void>; calls: number[] } 
 const OLD_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-function recentActivityIso(): string {
-  return new Date(Date.now() - 60 * 60 * 1000).toISOString();
-}
-
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 async function waitFor(predicate: () => boolean, message: string): Promise<void> {
@@ -84,7 +80,7 @@ function blockedPr(): OpenPrView {
       { claim: "finish the repair", proof: "unit test: x", met: false, reason: "not done", proof_exec: "executed_fail" },
     ],
     priorStrikes: 0,
-    lastActivityAt: recentActivityIso(),
+    lastActivityAt: "2026-09-05T04:00:00Z", // expiring-fixture: exempt -- judged only at detachedFixSweepDeps' pinned now (04:40Z, +40m), never the wall clock; suite passes at +400d
     headSha: "detached-fix-head",
     autoMergeArmed: false,
   };
@@ -102,7 +98,7 @@ function detachedFixSweepDeps(
     actionable: (disposition) => disposition === "blocked-fixable",
     ledgerPath,
     runId: "SWEEP-T2865",
-    now: () => Date.now(),
+    now: () => Date.parse("2026-09-05T04:40:00Z"),
   };
 }
 
