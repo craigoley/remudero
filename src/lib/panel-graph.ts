@@ -1436,17 +1436,23 @@ export function buildClearDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
   };
 }
 
-/** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
-export function buildPanelGraphRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
+/** Routes that can only read the process-owned plan snapshot. No write route accepts that capability. */
+export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
   return [
     buildFeedbackInboxRoute(deps),
-    buildSubmitFeedbackRoute(deps),
-    buildPreviewFeedbackRoute(deps),
     buildTraceRoute(deps),
-    buildProposalDecisionRoute(deps),
     buildDrainPreviewRoute(deps, readPlanSnapshot),
     buildPlanViewRoute(deps, readPlanSnapshot),
     buildInboxRoute(deps, readPlanSnapshot),
+  ];
+}
+
+/** Write factories take only durable dependencies, so a process read snapshot cannot reach a mutation. */
+export function buildPanelWriteRoutes(deps: PanelGraphDeps): Route[] {
+  return [
+    buildSubmitFeedbackRoute(deps),
+    buildPreviewFeedbackRoute(deps),
+    buildProposalDecisionRoute(deps),
     buildApproveProposalRoute(deps),
     buildReframeProposalRoute(deps),
     buildDeclineProposalRoute(deps),
@@ -1454,4 +1460,9 @@ export function buildPanelGraphRoutes(deps: PanelGraphDeps, readPlanSnapshot?: (
     buildSetDailyCostCeilingRoute(deps),
     buildClearDailyCostCeilingRoute(deps),
   ];
+}
+
+/** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
+export function buildPanelGraphRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
+  return [...buildPanelReadRoutes(deps, readPlanSnapshot), ...buildPanelWriteRoutes(deps)];
 }

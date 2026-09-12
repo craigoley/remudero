@@ -6,10 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  buildApproveProposalRoute,
   buildDrainPreviewRoute,
   buildInboxRoute,
   buildPlanViewRoute,
+  buildPanelWriteRoutes,
   type PanelGraphDeps,
   type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
@@ -227,7 +227,26 @@ test("inbox approval ignores the read snapshot and resolves the target ref", asy
     ratify,
   };
 
-  await withRoutes([buildApproveProposalRoute(deps)], async (baseUrl) => {
+  assert.equal(buildPanelWriteRoutes.length, 1, "write routes accept only PanelGraphDeps, never a read snapshot");
+  const writeRoutes = buildPanelWriteRoutes(deps);
+  assert.deepEqual(
+    writeRoutes.map((route) => route.path).sort(),
+    [
+      "/v1/feedback",
+      "/v1/feedback/decision",
+      "/v1/feedback/preview",
+      "/v1/inbox/approve",
+      "/v1/inbox/decline",
+      "/v1/inbox/reframe",
+      "/v1/inbox/restore",
+      "/v1/policy/daily-cost-ceiling",
+      "/v1/policy/daily-cost-ceiling/clear",
+    ],
+  );
+  const approve = writeRoutes.find((route) => route.path === "/v1/inbox/approve");
+  if (!approve) assert.fail("write route factory must retain inbox approval");
+
+  await withRoutes([approve], async (baseUrl) => {
     const response = await fetch(`${baseUrl}/v1/inbox/approve`, {
       method: "POST",
       headers: { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json" },
