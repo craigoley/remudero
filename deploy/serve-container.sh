@@ -114,6 +114,9 @@ TUNNEL_CONTAINER="${RMD_TUNNEL_CONTAINER:-cloudflared}"
 NETWORK="${RMD_SERVE_DOCKER_NETWORK:-rmd-net}"
 
 STATE_MOUNT_DEST="/home/node/Remudero"
+DAEMON_REPO_DIR="${STATE_MOUNT_DEST}/remudero"
+SERVE_REPO_DIR="${RMD_SERVE_REPO_DIR:-${HOME:-/root}/rmd-serve-repo}"
+CONSOLE_BUILD_ROOT="${DAEMON_REPO_DIR}/apps/dashboard/dist"
 # W1-T2434: the host-side account file and where it lands in the container — see the header note
 # above. Derived from `${HOME}` the same way `recycle-container.sh`'s `CRED_DIR` derives the
 # daemon's credential directory, so both containers agree on whose `.claude.json` is authoritative
@@ -203,6 +206,21 @@ fi
 if [ ! -d "${STATE_DIR}" ]; then
   echo "serve-container: REFUSING — state dir ${STATE_DIR} does not exist." >&2
   echo "  Set RMD_STATE_DIR to the tree the fleet actually uses." >&2
+  exit 1
+fi
+
+if [ -L "${SERVE_REPO_DIR}" ]; then
+  echo "serve-container: REFUSING — RMD_SERVE_REPO_DIR must be a real directory, not a symlink." >&2
+  echo "  A symlink can silently resolve back to the daemon checkout and reintroduce the shared-code race." >&2
+  exit 1
+fi
+if [ -e "${SERVE_REPO_DIR}" ] && [ ! -d "${SERVE_REPO_DIR}" ]; then
+  echo "serve-container: REFUSING — RMD_SERVE_REPO_DIR exists but is not a directory: ${SERVE_REPO_DIR}" >&2
+  exit 1
+fi
+if [ -d "${SERVE_REPO_DIR}" ] && [ "$(cd -P "${SERVE_REPO_DIR}" && pwd)" = "$(cd -P "${STATE_DIR}/remudero" 2>/dev/null && pwd)" ]; then
+  echo "serve-container: REFUSING — serve code directory is the daemon checkout: ${SERVE_REPO_DIR}" >&2
+  echo "  Give serve its own checkout; state stays shared, loaded code must not." >&2
   exit 1
 fi
 
@@ -470,7 +488,9 @@ RUN_ARGS=(
   -e GH_APP_INSTALLATION_ID
   -e GH_APP_PRIVATE_KEY_PATH
   -e "RMD_SERVE_NETWORK=${SERVE_NETWORK_ENV_VALUE}"
+  -e "RMD_CONSOLE_BUILD_ROOT=${CONSOLE_BUILD_ROOT}"
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
+  -v "${SERVE_REPO_DIR}:${DAEMON_REPO_DIR}"
   # W1-T2778: same bash-3.2-safe optional-array form as the two optional mounts below. This is
   # exactly one regular, non-empty, host-readable key file and is always read-only.
   "${APP_PRIVATE_KEY_ARGS[@]+"${APP_PRIVATE_KEY_ARGS[@]}"}"
@@ -498,6 +518,15 @@ if [ "${DRY_RUN}" -eq 1 ]; then
     echo "  NOTE: ${CONTAINER_NAME} already exists — a real run would REFUSE without --replace."
   fi
   exit 0
+fi
+
+if [ ! -d "${SERVE_REPO_DIR}" ]; then
+  mkdir -p "${SERVE_REPO_DIR}"
+fi
+if [ ! -w "${SERVE_REPO_DIR}" ]; then
+  echo "serve-container: REFUSING — serve code directory is not writable by this host user: ${SERVE_REPO_DIR}" >&2
+  echo "  The container runs as uid 1000 and must be able to clone and update its own checkout." >&2
+  exit 1
 fi
 
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
@@ -563,6 +592,6 @@ if [ "${FAIL}" -ne 0 ]; then
   exit 1
 fi
 
-echo "serve-container: OK — ${CONTAINER_NAME} on ${NETWORK}, state ${STATE_DIR}, image ${REF}"
+echo "serve-container: OK — ${CONTAINER_NAME} on ${NETWORK}, state ${STATE_DIR}, code ${SERVE_REPO_DIR}, image ${REF}"
 echo "  The console URL carries the read token; read it from the log or from"
 echo "  ${STATE_DIR}/state/service-tokens.json (0600) rather than pasting it anywhere."
