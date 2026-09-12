@@ -17,6 +17,7 @@
     - test/plan-filing-admission-bound.test.ts
     - test/the-conflict-rung-cannot-admit-a-regenerable-artifact.test.ts
     - test/stale-base-release-before-exhaustion.test.ts
+    - test/the-sweep-fan-out-respects-the-host-budget.test.ts
   origin: "operator-session#main-red-clock-boundary-2026-09-09"
   plan_refs: ["W1-T3270", "W1-T2250", "W1-T2732"]
   status: queued
@@ -60,6 +61,14 @@
     deliberately stale is correct, and a check that cannot tell the two apart would be reverted
     within a week.
 
+    ON 2026-09-12 THE SAME CLASS RETURNED IN THE SWEEP FAN-OUT FIXTURE. The required
+    expiring-fixture census named `test/the-sweep-fan-out-respects-the-host-budget.test.ts:64`:
+    its fixed `lastActivityAt="2026-09-05T18:00:00Z"` crosses `sweep.staleDays` on 2026-09-19.
+    The `comment-load-ratchet` job therefore refused unrelated rebased PRs #5220 and #5216 while
+    its actual comment-load measurement passed. This file is a real bomb, not a deliberate-stale
+    control: derive the fixture timestamp from its local test clock, then prove the census and its
+    behavioral assertions remain green. Moving the literal forward is explicitly not a remedy.
+
   design: |
     (i) THE CHECK IS "DOES THIS EXPIRE", NOT "IS THIS A DATE". A hardcoded ISO stamp is fine; a
     hardcoded stamp that some threshold ages against `Date.now()` is the defect. The census pairs
@@ -94,6 +103,12 @@
     (v) IT REPORTS, IT DOES NOT REWRITE. Auto-rewriting a fixture's date is the same fix as moving
     the constant forward, which CLAUDE.md names explicitly as re-arming the bomb.
 
+    (viii) THE SWEEP FAN-OUT FIXTURE USES ITS EXISTING `NOW` TEST CLOCK. Replace both direct
+    `lastActivityAt` strings with `new Date(NOW - 60 * 60 * 1000).toISOString()`: one hour old at
+    the clock that the fixture already injects into `runSweepLightPass`, not a calendar value CI
+    ages independently. Do not add an exemption marker; this fixture's disposition is part of the
+    host-budget behavior under test.
+
   acceptance:
     - claim: "the census finds a fixture whose hardcoded stamp expires against a real threshold and names the date it goes red"
       proof: "unit test: test/expiring-fixture-census.test.ts"
@@ -105,6 +120,8 @@
       proof: "unit test: test/expiring-fixture-census.test.ts"
     - claim: "a fixture with no expiring threshold is not reported, so the check does not ban hardcoded dates as such"
       proof: "unit test: test/expiring-fixture-census.test.ts"
+    - claim: "the sweep fan-out fixture derives its lastActivityAt value from its local test clock rather than a literal that the live sweep.staleDays boundary can age"
+      proof: "grep: lastActivityAt: new Date(NOW - 60 in test/the-sweep-fan-out-respects-the-host-budget.test.ts"
 
   falsifier: |
     Close this without implementation if the sweep's staleness rung and every sibling threshold gain
