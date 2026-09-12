@@ -64,7 +64,7 @@ test("W1-T3361: every real standalone PR workflow job has a parity entry, mirror
   }
 });
 
-test("W1-T3361: a standalone pull-request workflow job missing from the registry turns ci-parity drift red and names its workflow", () => {
+test("W1-T3361: a workflow that runs on pull_request and is absent from the parity table is named", () => {
   const result = runCiParity(REPO_ROOT, {
     spawn: cleanSpawn(),
     ciYamlText: MINIMAL_CI,
@@ -78,7 +78,20 @@ test("W1-T3361: a standalone pull-request workflow job missing from the registry
   assert.match(drift.detail, /new-required-gate\.yml:new-required-gate/);
 });
 
-test("W1-T3361: a deliberate standalone exclusion without a reason turns ci-parity drift red", () => {
+test("W1-T3361: a standalone PR workflow with no parity entry fails the drift step", () => {
+  const result = runCiParity(REPO_ROOT, {
+    spawn: cleanSpawn(),
+    ciYamlText: MINIMAL_CI,
+    workflowTexts: {
+      "new-required-gate.yml": "on:\n  pull_request:\njobs:\n  new-required-gate:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    },
+  });
+  const drift = result.steps.find((step) => step.name === "ci-parity:drift");
+  assert.ok(drift);
+  assert.equal(drift.ok, false);
+});
+
+test("W1-T3361: an unmirrored standalone entry without a reason is refused", () => {
   const malformed: CiParityEntry[] = [
     {
       workflow: "new-required-gate.yml",
