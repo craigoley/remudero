@@ -15040,6 +15040,15 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   let spawnReviewer = false, reviewerMount: Mount | undefined;
   let settingsFile = "";
   if (executionMode === "semantic") {
+    // W1-T3387: an untrailered / unfiled PR is still a PR the fleet chose to review.
+    // Its synthetic `PR-<number>` identity already keys the ledger and sweep arm; use the
+    // conservative task defaults here too, rather than treating absent metadata as permission
+    // to skip semantic review. A CLAIMED task whose head plan cannot supply metadata keeps the
+    // distinct refusal below: that is a plan-resolution fault, not an untasked PR.
+    if (taskId === undefined) {
+      taskRisk = DEFAULT_RISK;
+      taskBudgetUsd = DEFAULT_BUDGET_USD;
+    }
     if (taskRisk === undefined || taskBudgetUsd === undefined) {
       log("review.reviewer.skipped", {
         reason: "head-task-metadata-unavailable",
