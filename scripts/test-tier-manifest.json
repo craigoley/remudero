@@ -145,6 +145,7 @@
     "test/a-red-quality-gate-is-visible-to-the-sweep.test.ts": 915,
     "test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts": 0,
     "test/a-refusal-is-a-verdict-not-a-strike.test.ts": 0,
+    "test/a-refusal-names-the-remedy-that-works.test.ts": 0,
     "test/a-refused-draft-waits-out-the-stated-window.test.ts": 1506,
     "test/a-relocation-across-files-is-still-a-relocation.test.ts": 0,
     "test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts": 0,

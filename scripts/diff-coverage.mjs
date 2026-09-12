@@ -729,6 +729,31 @@ export function findUncoveredAddedLines(added, lcov) {
   return violations.sort();
 }
 
+export const EXTERNAL_TOOL_SPAWN_REMEDY =
+  'external-tool spawn: process-boundary directive cannot exempt external binaries; ' +
+  'cover the line: inject the spawn as a parameter defaulted to the real one, ' +
+  'appended last, and assert the recorded call';
+
+export function isExternalToolSpawnLine(text) {
+  const CALL = /\b(?:spawnSync|execFileSync)\s*\(\s*([^,\n)]*)/g;
+  for (const match of text.matchAll(CALL)) {
+    const firstArg = match[1]?.trim() ?? '';
+    if (firstArg === '') continue;
+    if (/^process\s*\.\s*execPath\b/.test(firstArg)) continue;
+    return true;
+  }
+  return false;
+}
+
+export function formatBlockingViolation(violation, added) {
+  const idx = violation.lastIndexOf(':');
+  const file = violation.slice(0, idx);
+  const line = Number(violation.slice(idx + 1));
+  const text = added.get(file)?.get(line) ?? '';
+  if (isExternalToolSpawnLine(text)) return `${violation} -- ${EXTERNAL_TOOL_SPAWN_REMEDY}`;
+  return violation;
+}
+
 // SELF-DESCRIBING FAILURES: a red run used to name its cause only in the job log, unreachable
 // from a diagnosing agent, so this writes an ANNOTATION instead (a workflow command GitHub turns
 // into a readable check-run annotation), gated on `RMD_CI_REPORT` (set per-STEP in ci.yml) so a
@@ -862,11 +887,13 @@ function main(argv) {
 
   if (blocking.length > 0) {
     const headline =
-      'BLOCKED -- this diff adds source line(s) with zero covering tests, even ' +
+      'BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, ' +
+      'or only for re-exec/exit glue use a process-boundary directive, even ' +
       'though the aggregate coverage-ratchet floor may still be satisfied:';
+    const blockingDetails = blocking.map((v) => formatBlockingViolation(v, added));
     console.error(`diff-coverage: ${headline}`);
-    for (const v of blocking) console.error(`  - ${v}`);
-    emitCiReport('diff-coverage', formatCiReport('diff-coverage', headline, blocking), { blocked: true });
+    for (const v of blockingDetails) console.error(`  - ${v}`);
+    emitCiReport('diff-coverage', formatCiReport('diff-coverage', headline, blockingDetails), { blocked: true });
     process.exitCode = 1;
     return;
   }
