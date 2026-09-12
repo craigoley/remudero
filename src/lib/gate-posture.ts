@@ -205,7 +205,7 @@ export async function decideGatePosture(input: GatePostureInput, deps: GatePostu
   return logDecision(deps, finding, { ...decision, reason });
 }
 
-+export type GatePosture = "REPAIR" | "ROUTE" | "CLOSE";
+export type GatePosture = "REPAIR" | "ROUTE" | "CLOSE";
 
 export type GateSurfaceKind = "refusal" | "state" | "task-stop";
 
