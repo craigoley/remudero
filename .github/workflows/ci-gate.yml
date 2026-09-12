@@ -17,6 +17,10 @@ name: CI gate
 
 on:
   pull_request:
+    # The two acceptance-body gates can change their result after a body-only repair.  Re-run the
+    # lightweight aggregate on `edited` so its required ci-gate context observes that new result
+    # without re-running ci.yml's expensive test jobs.
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   checks: read
@@ -74,6 +78,7 @@ jobs:
         "assertion-discrimination",
         "task-id-existence",
         "acceptance-author-gate",
+        "proof-discrimination",
         "unwired-gate",
         "comment-load-ratchet",
         "source-size",
