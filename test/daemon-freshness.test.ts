@@ -58,6 +58,7 @@ function fakeClock(): { sleep: (ms: number) => Promise<void>; calls: number[] } 
 
 const OLD_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const DETACHED_FIX_NOW_MS = Date.parse("2026-09-05T04:40:00Z");
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -80,7 +81,7 @@ function blockedPr(): OpenPrView {
       { claim: "finish the repair", proof: "unit test: x", met: false, reason: "not done", proof_exec: "executed_fail" },
     ],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-05T04:00:00Z", // expiring-fixture: exempt -- judged only at detachedFixSweepDeps' pinned now (04:40Z, +40m), never the wall clock; suite passes at +400d
+    lastActivityAt: new Date(DETACHED_FIX_NOW_MS - 40 * 60 * 1000).toISOString(),
     headSha: "detached-fix-head",
     autoMergeArmed: false,
   };
@@ -98,7 +99,7 @@ function detachedFixSweepDeps(
     actionable: (disposition) => disposition === "blocked-fixable",
     ledgerPath,
     runId: "SWEEP-T2865",
-    now: () => Date.parse("2026-09-05T04:40:00Z"),
+    now: () => DETACHED_FIX_NOW_MS,
   };
 }
 
