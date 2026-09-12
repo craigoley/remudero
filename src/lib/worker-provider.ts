@@ -1247,9 +1247,9 @@ interface CodexJsonEvent {
   item?: { type?: string; text?: string; command?: string; aggregated_output?: string };
 }
 
-export const CODEX_JSONL_RECORD_MAX_BYTES = 8 * 1024 * 1024;
-export const CODEX_JSONL_TRANSCRIPT_MAX_BYTES = 1024 * 1024;
-export const CODEX_JSONL_ERROR_MAX_BYTES = 64 * 1024;
+export const CODEX_JSONL_RECORD_MAX_BYTES = 8 * 1024 * 1024; // PRIMARY CONTROL: current JSONL record carry.
+export const CODEX_JSONL_TRANSCRIPT_MAX_BYTES = 1024 * 1024; // PRIMARY CONTROL: retained agent transcript.
+export const CODEX_JSONL_ERROR_MAX_BYTES = 64 * 1024; // PRIMARY CONTROL: retained diagnostic errors.
 
 export interface ParsedCodexEvents {
   sessionId: string;
