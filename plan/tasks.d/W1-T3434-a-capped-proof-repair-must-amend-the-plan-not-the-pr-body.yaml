@@ -14,6 +14,7 @@
     - src/run-task.ts
     - test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts
   origin: "operator-session#repair-the-stuck-capped-pr-2026-09-12"
+  note: "reservation hand-off: codex/plan-w1-t3335-proof-repair -> codex/w1-t3434-parent-verified-proof-amendment"
   plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T176", "W1-T3306", "W1-T273", "W1-T3063", "W1-T3213", "W1-T3335"]
   status: queued
   attempts: 0
