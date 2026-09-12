@@ -14784,6 +14784,7 @@ export function resolveReviewSubjectCheckout(args: {
       try {
         return lstatSync(path).isDirectory();
       } catch (e) {
+        // Unstatable is equivalent to absent for this clone validation.
         return false;
       }
     });
@@ -14828,6 +14829,7 @@ export function resolveReviewSubjectCheckout(args: {
   try {
     origin = parseOwnerRepoFromOriginUrl(git(repoDir, ["config", "--get", "remote.origin.url"]));
   } catch (e) {
+    // An unreadable origin is reported below as an origin mismatch, never a controller fallback.
     origin = undefined;
   }
   if (!origin || !ownerRepoEqual(origin, args.target)) {
