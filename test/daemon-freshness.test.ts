@@ -58,6 +58,8 @@ function fakeClock(): { sleep: (ms: number) => Promise<void>; calls: number[] } 
 
 const OLD_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const DETACHED_FIX_NOW = Date.parse("2026-09-05T04:40:00Z");
+const DETACHED_FIX_LAST_ACTIVITY = new Date(DETACHED_FIX_NOW - 40 * 60 * 1000).toISOString();
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -80,7 +82,7 @@ function blockedPr(): OpenPrView {
       { claim: "finish the repair", proof: "unit test: x", met: false, reason: "not done", proof_exec: "executed_fail" },
     ],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-05T04:00:00Z",
+    lastActivityAt: DETACHED_FIX_LAST_ACTIVITY,
     headSha: "detached-fix-head",
     autoMergeArmed: false,
   };
@@ -98,7 +100,7 @@ function detachedFixSweepDeps(
     actionable: (disposition) => disposition === "blocked-fixable",
     ledgerPath,
     runId: "SWEEP-T2865",
-    now: () => Date.parse("2026-09-05T04:40:00Z"),
+    now: () => DETACHED_FIX_NOW,
   };
 }
 
