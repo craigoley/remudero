@@ -23,6 +23,7 @@ import {
 import { activeWorkerCount, withWorkerOccupancy } from "../src/lib/worker.js";
 
 const NOW = Date.parse("2026-09-05T20:00:00Z");
+// Activity fixtures derive from NOW below so the live wall clock cannot age them.
 const HOUR = 60 * 60 * 1000;
 
 function recentActivityIso(hoursAgo: number): string {
