@@ -6,10 +6,10 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 70.00
-  risk: medium
+  risk: high
   origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
   plan_refs: ["W1-T273", "W1-T362", "W1-T185"]
-  files: [scripts/proof-discrimination-gate.mjs, .github/workflows/proof-discrimination-gate.yml, test/a-stale-proof-is-invisible-until-a-capped-verdict-hours-later.test.ts]
+  files: [scripts/proof-discrimination-gate.mjs, .github/workflows/proof-discrimination-gate.yml, .github/workflows/ci-gate.yml, src/lib/ci-parity.ts, test/a-stale-proof-is-invisible-until-a-capped-verdict-hours-later.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -44,7 +44,7 @@
     this moves WHEN the author learns, never WHAT the reviewer decides.
 
   acceptance:
-    - claim: "a proof that passes at the head and at the merge base fails the gate, naming the proof and both hit counts"
-      proof: "grep: proof at the PR head and again at the merge-base in plan/tasks.d/W1-T3386-a-stale-proof-is-invisible-until-a-capped-verdict-hours-later.yaml"
-    - claim: "a proof that passes at the head and misses at the merge base passes the gate, so a discriminating proof is never refused"
-      proof: "grep: Change no review-time grading, no capping rule and no arm predicate in plan/tasks.d/W1-T3386-a-stale-proof-is-invisible-until-a-capped-verdict-hours-later.yaml"
+    - claim: "ci-gate aggregates proof-discrimination as a required check, so a stale-proof verdict blocks the same required context authors rely on"
+      proof: "grep: proof-discrimination in .github/workflows/ci-gate.yml"
+    - claim: "ci-gate re-runs on pull-request body edits, so a repaired acceptance proof is observed without an unrelated code push"
+      proof: "grep: edited in .github/workflows/ci-gate.yml"
