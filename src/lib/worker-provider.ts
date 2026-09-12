@@ -1774,8 +1774,10 @@ async function spawnCodexWorkerInPrivateTemp(
   process.stdout.on("data", (chunk: Buffer) => {
     try {
       const decoded = stdout.ingest(chunk);
-      if (decoded.sawAgentMessage) args.streamObserver?.({ kind: "working", tsMs: Date.now() });
-      else args.streamObserver?.({ kind: "message", tsMs: Date.now() });
+      // ONE chunk is ONE observation, so it carries ONE timestamp. Reading the clock separately per
+      // branch also put this file over its clock-signature row for no behavioural gain.
+      const tsMs = Date.now();
+      args.streamObserver?.({ kind: decoded.sawAgentMessage ? "working" : "message", tsMs });
     } catch (error) {
       if (error instanceof CodexJsonlStreamLimitError) {
         streamLimitError = error;
