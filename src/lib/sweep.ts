@@ -70,12 +70,17 @@ import {
 import {
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
+  buildEscalationJudgePrompt,
   escalationCause,
   escalate,
   ghIssueGateway,
+  isEscalationJudgeExempt,
   tryEscalate,
   type AskType,
+  type Escalation,
   type EscalationClass,
+  type EscalationJudgeDecision,
+  type EscalationJudgeVerdict,
   type IssueGateway,
   type OpenIssue,
 } from "./escalate.js";
@@ -9948,6 +9953,286 @@ export async function runEscalationReconcile(
     ...(intake ? { issues_seen: intake.issuesSeen } : {}),
     ...(dropped ? { dropped } : {}),
   });
+  return summary;
+}
+
+// ── STALE ESCALATION RE-JUDGE (W1-T3167, MASTER-PLAN §4B) ────────────────────────────────────
+//
+// AN ESCALATION IS JUDGED AT MOST ONCE, AT BIRTH, and nothing above re-reads an item once it is
+// sitting on the NEEDS ME board. `runEscalationReconcile` closes an escalation once its REFERENT
+// goes terminal (merged, or closed without merging) — but the residue it structurally cannot
+// reach is an escalation whose referent is STILL OPEN and which no longer needs a human, because
+// ANOTHER open escalation already named the same condition. MEASURED 2026-09-08: issues #4541,
+// #4568, #4595 and #4604 all named the same still-open PR #4532 — the reconciler correctly left
+// all four live, and a human closed all four by hand. This rung is what would have caught them:
+// it re-judges what is ALREADY OPEN, using evidence only time can supply, and it may only
+// DEMOTE — closure stays the reconciler's job. See plan/tasks.d/W1-T3167-*.yaml for the design.
+
+/** AGE IS THE ADMISSION GATE, NOT THE VERDICT (design clause i): an escalation younger than this
+ *  dwell is never re-judged, no matter what a judge would say, so a fresh escalation is never
+ *  second-guessed before the operator has had a chance to see it. 6 HOURS — picked, not
+ *  measured, to clear a normal quiet stretch (a night, a weekend morning) while still catching a
+ *  same-day pile-up: the measured #4541..#4604 shape's own ages (p50 0.27d ≈ 6.5h) already clear
+ *  it, which is the case this rung exists for. */
+export const STALE_ESCALATION_REJUDGE_DWELL_MS = 6 * 60 * 60 * 1000;
+
+/** BOUNDED PER CYCLE (design clause iv) — this rung's own analog of {@link
+ *  MAX_ESCALATION_CLOSES_PER_CYCLE}, and for a stronger reason than that bound: each verdict here
+ *  is a MODEL SPAWN, so an unbounded re-judge over a large backlog is a token event, not a sweep. */
+export const MAX_ESCALATION_REJUDGES_PER_CYCLE = 20;
+
+/** The ledger step written for EVERY re-judge verdict, both arms — mirrors {@link
+ *  ESCALATION_JUDGED_STEP}'s own "a judge that only traces when it demotes cannot be calibrated"
+ *  doctrine. Also the durable history a caller reads back into {@link
+ *  StaleEscalationRejudgeDeps.alreadyJudgedStateKeys} so a later pass over UNCHANGED state costs
+ *  nothing (design clause v). */
+export const ESCALATION_REJUDGED_STEP = "escalation.rejudged";
+
+/** One OPEN needs-human/fleet-notice issue eligible for re-judging, paired with everything only
+ *  the passage of time can supply and the birth judge could never have seen (design clause iii):
+ *  how long it has been open, the referent's state RIGHT NOW, and any sibling escalations naming
+ *  the same condition. */
+export interface StaleEscalationRejudgeCandidate {
+  issueUrl: string;
+  issueNumber?: number;
+  /** The escalation exactly as raised at birth. Reused VERBATIM — never edited, never
+   *  re-summarized — so {@link buildEscalationJudgePrompt}'s asymmetry (WHEN IN DOUBT, DELIVER)
+   *  renders unchanged and the re-judge only ever APPENDS evidence on top of it. */
+  escalation: Escalation;
+  /** Milliseconds since the issue opened — the sole admission-gate input (design clause i). */
+  ageMs: number;
+  /** Prose describing the referent's state RIGHT NOW — e.g. "PR #4532 still open, unchanged since
+   *  this issue opened" or "PR #4532 still open, 3 commits pushed since". Design clause iii's
+   *  second required evidence item. */
+  referentStateNow: string;
+  /** Other OPEN escalations naming the SAME referent (design clause iii's third evidence item —
+   *  "whether sibling escalations name the same condition"). Empty when this issue stands alone. */
+  siblingSummaries: string[];
+  /** Identifies the OBSERVED STATE this candidate represents: the referent's identity/state plus
+   *  its current sibling set. DELIBERATELY EXCLUDES age (design clause v) — age advances on every
+   *  poll, so keying on it would make every pass read as "changed" and the memo below would never
+   *  fire. Two passes seeing the same referent state and the same siblings MUST compute the same
+   *  key, so the second is recognisable as a no-op. */
+  stateKey: string;
+}
+
+/** Injectable dependencies for {@link runStaleEscalationRejudge}. `judge` sees the FULL candidate
+ *  (not just the bare `Escalation`), because the extended prompt (design clause iii) needs the
+ *  age/referent/sibling evidence a plain `Escalation` cannot carry. `demote` is the ONLY mutation
+ *  this rung may perform on an existing issue (design clause ii) — move it to the fleet-notice
+ *  queue and post `reason` as the first comment; it must never close or delete. */
+export interface StaleEscalationRejudgeDeps {
+  judge: (candidate: StaleEscalationRejudgeCandidate) => Promise<EscalationJudgeVerdict>;
+  /** DEMOTE-ONLY (design clause ii): relabel `url` to {@link FLEET_NOTICE_LABEL} and post `reason`
+   *  as a comment. Never called on a "deliver" verdict; never asked to close or delete anything —
+   *  the type this rung hands back ({@link EscalationJudgeDecision}) cannot even express "close". */
+  demote: (url: string, reason: string) => void;
+  ledgerPath: string;
+  runId: string;
+  appendLine?: typeof appendLedger;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** dryRun leaves no trace (no demote call, no ledger line) — mirrors runEscalationReconcile. */
+  dryRun?: boolean;
+  /** Bound on judge spawns this cycle; defaults to {@link MAX_ESCALATION_REJUDGES_PER_CYCLE}. */
+  maxRejudges?: number;
+  /** Dwell before an item is eligible; defaults to {@link STALE_ESCALATION_REJUDGE_DWELL_MS}. */
+  dwellMs?: number;
+  /** State keys ALREADY judged in a prior pass (design clause v) — the caller derives this from
+   *  {@link ESCALATION_REJUDGED_STEP} ledger history. Omitted/empty re-judges everything eligible,
+   *  exactly like a fresh install with no history yet; this never widens who gets judged, only
+   *  whether a given observed state is judged MORE THAN ONCE. */
+  alreadyJudgedStateKeys?: ReadonlySet<string>;
+}
+
+/** One candidate's outcome this pass. */
+export interface StaleEscalationRejudgeResult {
+  issueUrl: string;
+  taskId: string;
+  stateKey: string;
+  outcome: "too-fresh" | "unchanged-state" | "deferred-cap" | "demoted" | "left-needs-human" | "demote-failed";
+  decision?: EscalationJudgeDecision;
+  reason?: string;
+}
+
+/** The whole re-judge pass's outcome. */
+export interface StaleEscalationRejudgeSummary {
+  total: number;
+  /** How many candidates actually spawned a judge this pass (excludes too-fresh, unchanged-state
+   *  and deferred-cap — the three ways a candidate is skipped WITHOUT a spawn). */
+  rejudged: number;
+  demoted: number;
+  results: StaleEscalationRejudgeResult[];
+  /** Every stateKey actually judged this pass — union this into the NEXT pass's
+   *  `alreadyJudgedStateKeys` (design clause v) so an unchanged referent costs nothing again. */
+  judgedStateKeys: string[];
+}
+
+/** The re-judge's prompt: {@link buildEscalationJudgePrompt}'s birth prompt PLUS what only time
+ *  can supply (design clause iii) — how long the issue has been open, the referent's state NOW,
+ *  and any sibling escalations naming the same condition. Without these three the re-judge knows
+ *  no more than the birth judge did and is pure cost; WITH them it can catch exactly the case the
+ *  birth judge structurally cannot: what SIX HOURS revealed that one moment could not. */
+export function buildStaleEscalationRejudgePrompt(c: StaleEscalationRejudgeCandidate): string {
+  const openForHours = Math.round((c.ageMs / (60 * 60 * 1000)) * 10) / 10;
+  const siblings =
+    c.siblingSummaries.length > 0
+      ? c.siblingSummaries.map((s) => `  - ${s}`).join("\n")
+      : "  (none — this is the only open escalation naming this referent)";
+  return [
+    buildEscalationJudgePrompt(c.escalation),
+    ``,
+    `── RE-JUDGE EVIDENCE (W1-T3167) ──────────────────────────────────────────────────────`,
+    `This escalation has been open a while. Below is everything that has changed since it was`,
+    `raised that the judgement above could not have seen at the time.`,
+    ``,
+    `OPEN FOR: ${openForHours} hours`,
+    `REFERENT STATE NOW: ${c.referentStateNow}`,
+    `SIBLING ESCALATIONS NAMING THE SAME CONDITION:`,
+    siblings,
+    ``,
+    `THE SAME ASYMMETRY GOVERNS THIS DECISION: WHEN IN DOUBT, DELIVER. You may still only demote`,
+    `or deliver — you may never close or delete this issue; that stays a human's or the`,
+    `deterministic reconciler's job.`,
+  ].join("\n");
+}
+
+/** Re-judge OPEN escalations that have sat long enough to be eligible (design clause i), reusing
+ *  evidence only time can supply (design clause iii). Demote-only (design clause ii): a "demote"
+ *  verdict relabels the issue via `deps.demote`; anything else — deliver, an exempt class, a
+ *  judge throw/timeout/unparseable verdict — leaves it open and needs-human, UNCHANGED, the same
+ *  fail-open polarity {@link judgeEscalation} uses at birth. Bounded per cycle (design clause iv)
+ *  and keyed so a second pass over unchanged state spawns nothing (design clause v). */
+export async function runStaleEscalationRejudge(
+  candidates: StaleEscalationRejudgeCandidate[],
+  deps: StaleEscalationRejudgeDeps,
+): Promise<StaleEscalationRejudgeSummary> {
+  const appendLine = deps.appendLine ?? appendLedger;
+  const log = deps.log ?? (() => {});
+  const dwellMs = deps.dwellMs ?? STALE_ESCALATION_REJUDGE_DWELL_MS;
+  const maxRejudges = deps.maxRejudges ?? MAX_ESCALATION_REJUDGES_PER_CYCLE;
+  const alreadyJudged = deps.alreadyJudgedStateKeys ?? new Set<string>();
+
+  const results: StaleEscalationRejudgeResult[] = [];
+  const judgedStateKeys: string[] = [];
+  let rejudged = 0;
+  let demoted = 0;
+
+  for (const c of candidates) {
+    // AGE IS THE ADMISSION GATE, NOT THE VERDICT (design i): never second-guess a fresh item.
+    // "Longer than" the dwell is STRICT — an item exactly at the dwell is not yet eligible.
+    if (c.ageMs <= dwellMs) {
+      results.push({ issueUrl: c.issueUrl, taskId: c.escalation.taskId, stateKey: c.stateKey, outcome: "too-fresh" });
+      continue;
+    }
+    // JUDGE ONCE PER OBSERVED STATE, NEVER ONCE PER PASS (design v): the identical referent state
+    // and sibling set already spent a spawn to reach this verdict.
+    if (alreadyJudged.has(c.stateKey)) {
+      results.push({ issueUrl: c.issueUrl, taskId: c.escalation.taskId, stateKey: c.stateKey, outcome: "unchanged-state" });
+      continue;
+    }
+    // BOUNDED PER CYCLE (design iv): the rest drain on the next sweep, never spend an unbounded
+    // number of spawns in one pass.
+    if (rejudged >= maxRejudges) {
+      results.push({ issueUrl: c.issueUrl, taskId: c.escalation.taskId, stateKey: c.stateKey, outcome: "deferred-cap" });
+      continue;
+    }
+    rejudged++;
+
+    // EXEMPT AT BIRTH, EXEMPT ON RE-JUDGE: MANUAL/GRILL stay operator-owned by rule, mirroring
+    // {@link judgeEscalation}'s own exemption check — never spend a spawn asking a question the
+    // birth judge was never asked either.
+    let verdict: EscalationJudgeVerdict;
+    if (isEscalationJudgeExempt(c.escalation)) {
+      verdict = { decision: "deliver", reason: `${c.escalation.class} is operator-owned by rule — exempt from judgement` };
+    } else {
+      try {
+        verdict = await deps.judge(c);
+      } catch (err) {
+        // FAIL-OPEN (acceptance criterion 5): a spawn throw, a timeout or an unparseable verdict
+        // all leave the item on needs-human, unchanged — the SAME polarity as the birth judge,
+        // never risking a silently-hidden escalation because a spawn misbehaved.
+        verdict = {
+          decision: "deliver",
+          reason:
+            `re-judge unavailable (${err instanceof Error ? err.message : String(err)}) — failing open to ` +
+            "leave needs-human, never silently hiding work from the operator",
+        };
+      }
+    }
+
+    judgedStateKeys.push(c.stateKey);
+    if (!deps.dryRun) {
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId,
+        task_id: c.escalation.taskId,
+        step: ESCALATION_REJUDGED_STEP,
+        issue_url: c.issueUrl,
+        class: c.escalation.class,
+        state_key: c.stateKey,
+        age_ms: c.ageMs,
+        judge_decision: verdict.decision,
+        judge_reason: verdict.reason,
+      });
+    }
+
+    // DEMOTE-ONLY, EXACTLY AS AT BIRTH (design ii): "demote" relabels via deps.demote; anything
+    // else — deliver, exempt, or a judge failure — leaves the issue open and needs-human, and this
+    // rung never calls anything that could close or delete it.
+    if (verdict.decision !== "demote") {
+      results.push({
+        issueUrl: c.issueUrl,
+        taskId: c.escalation.taskId,
+        stateKey: c.stateKey,
+        outcome: "left-needs-human",
+        decision: verdict.decision,
+        reason: verdict.reason,
+      });
+      continue;
+    }
+    if (deps.dryRun) {
+      demoted++;
+      results.push({
+        issueUrl: c.issueUrl,
+        taskId: c.escalation.taskId,
+        stateKey: c.stateKey,
+        outcome: "demoted",
+        decision: verdict.decision,
+        reason: verdict.reason,
+      });
+      continue;
+    }
+    try {
+      deps.demote(c.issueUrl, verdict.reason);
+      demoted++;
+      results.push({
+        issueUrl: c.issueUrl,
+        taskId: c.escalation.taskId,
+        stateKey: c.stateKey,
+        outcome: "demoted",
+        decision: verdict.decision,
+        reason: verdict.reason,
+      });
+    } catch (err) {
+      // PER-ISSUE THROW CONTAINMENT (W1-T99's lesson, same as runEscalationReconcile): one failed
+      // demote never strands the rest of the pass.
+      log("sweep.escalation_rejudge_demote_failed", {
+        issue_url: c.issueUrl,
+        task_id: c.escalation.taskId,
+        error: String((err as Error)?.message ?? err),
+      });
+      results.push({
+        issueUrl: c.issueUrl,
+        taskId: c.escalation.taskId,
+        stateKey: c.stateKey,
+        outcome: "demote-failed",
+        decision: verdict.decision,
+        reason: verdict.reason,
+      });
+    }
+  }
+
+  const summary: StaleEscalationRejudgeSummary = { total: candidates.length, rejudged, demoted, results, judgedStateKeys };
+  log("sweep.escalation_rejudge.summary", { total: summary.total, rejudged: summary.rejudged, demoted: summary.demoted });
   return summary;
 }
 
