@@ -10,8 +10,11 @@ import {
   CENSUS_ADMITTED_MEMBERS,
   CENSUS_POPULATION,
   FAST_GATE_CENSUS_BOUND_MS,
+  FAST_GATE_CENSUS_REFERENCE_FLOOR_MS,
+  FAST_GATE_CENSUS_RUNAWAY_MULTIPLE,
   FAST_GATE_STEPS,
   censusPopulationDrift,
+  censusRunawayThresholdMs,
   runPreflightFast,
 } from "../src/lib/ci-parity.js";
 
@@ -55,6 +58,32 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 
 const CENSUS_STEPS = FAST_GATE_STEPS.filter((s) => s.boundMs !== undefined);
 const NON_CENSUS_STEPS = FAST_GATE_STEPS.filter((s) => s.boundMs === undefined);
+
+/** A deterministic `now()` seam for `runPreflightFast`'s boundMs-bearing steps: each entry in
+ *  `elapsedMsList` (in step order) is consumed as exactly one `now()` call pair (`startedAt` then
+ *  `startedAt + elapsed`), so the reported `elapsedMs` for step `i` is exactly `elapsedMsList[i]`
+ *  with no real wall-clock spawn required. */
+function fakeNow(elapsedMsList: readonly number[]): () => number {
+  const queue: number[] = [];
+  let base = 0;
+  for (const elapsed of elapsedMsList) {
+    queue.push(base);
+    base += elapsed;
+    queue.push(base);
+  }
+  let i = 0;
+  return () => {
+    const value = queue[i];
+    i += 1;
+    return value ?? base;
+  };
+}
+
+/** A `packageJsonText` naming every one of `steps`'s scripts, so `runPreflightFast` never reports
+ *  SCRIPT MISSING for a step this file invented for a timing fixture. */
+function packageJsonTextFor(steps: readonly { script: string }[]): string {
+  return JSON.stringify({ scripts: Object.fromEntries(steps.map((s) => [s.script, "echo stub"])) });
+}
 
 // ═══════════════ acceptance: "every census-shaped suite appears in ONE enumerated ═══════════════
 // ═══════════════ population carrying a verdict, and no member is absent from it" ════════════════
@@ -253,6 +282,71 @@ test("runPreflightFast: run for real (unmocked, real spawn, real package.json) o
     assert.doesNotMatch(step.detail, /BOUND EXCEEDED/, `${step.name} must not report BOUND EXCEEDED on a clean, fast run`);
   }
   assert.equal(result.ok, true);
+});
+
+// ═══ acceptance (W1-T3408): "a census entry that would PASS on its own result is never ═══════
+// ═══ refused as RUNAWAY because a sibling ran fast, and a genuinely runaway entry is still ═════
+// ═══ refused — the bound no longer tightens purely because this run's fastest entry was fast" ══
+
+test("censusRunawayThresholdMs: a single trivially-cheap sibling does not tighten the threshold for an otherwise-healthy entry — the reference is this run's MEDIAN cost, not its minimum", () => {
+  // MEASURED shape of PR #5087 (2026-09-11): one near-trivial sibling (900ms, under the 1000ms
+  // floor) alongside a healthy-but-heavier entry that spiked to 4296ms under load. Against the
+  // OLD min-derived reference, threshold = max(1000, 900) * 4 = 4000ms, and 4296 > 4000 REFUSED
+  // it despite its own command PASSing. The median of the six durations below is 1725ms, so the
+  // fixed threshold is 1725 * 4 = 6900ms — comfortably clearing 4296ms.
+  const durationsMs = [900, 1600, 1700, 1750, 1800, 4296];
+  const threshold = censusRunawayThresholdMs(durationsMs);
+  assert.equal(threshold, 1725 * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE);
+  assert.ok(4296 < threshold!, `4296ms must clear the median-derived threshold ${threshold}ms`);
+  // The single cheap 900ms sibling, alone, would have floored a min-derived reference at
+  // FAST_GATE_CENSUS_REFERENCE_FLOOR_MS — confirm that number no longer drives this threshold.
+  assert.notEqual(threshold, FAST_GATE_CENSUS_REFERENCE_FLOOR_MS * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE);
+});
+
+test("censusRunawayThresholdMs: an entry costing several times the run's TYPICAL (median) entry is still refused as RUNAWAY — the guard is not merely deleted", () => {
+  // Same five healthy siblings as above; the sixth is genuinely runaway (10000ms), not merely
+  // slower than one fast sibling. The median (still 1725ms, the outlier is at one end) puts the
+  // threshold at 6900ms, and 10000ms is well over it.
+  const durationsMs = [900, 1600, 1700, 1750, 1800, 10_000];
+  const threshold = censusRunawayThresholdMs(durationsMs);
+  assert.equal(threshold, 1725 * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE);
+  assert.ok(10_000 > threshold!, `10000ms must exceed the median-derived threshold ${threshold}ms`);
+});
+
+test("runPreflightFast: mocked timings reproducing PR #5087's shape — a healthy entry whose own command PASSed is never marked RUNAWAY merely because a sibling finished fast", () => {
+  const steps = CENSUS_STEPS.map((s) => ({ ...s, boundMs: 999_999 })); // soft bound never engages; only PASS TWO is under test
+  const elapsedMsList = [900, 1600, 1700, 1750, 1800, 4296];
+  const { spawn } = recordingSpawn();
+  const result = runPreflightFast(REPO_ROOT, {
+    spawn,
+    steps,
+    packageJsonText: packageJsonTextFor(steps),
+    now: fakeNow(elapsedMsList),
+  });
+  for (const step of result.steps) {
+    assert.equal(step.ok, true, `expected ${step.name} to PASS (its own command succeeded): ${step.detail}`);
+    assert.doesNotMatch(step.detail, /RUNAWAY/, `${step.name} must not be refused as RUNAWAY: ${step.detail}`);
+  }
+  assert.equal(result.ok, true);
+});
+
+test("runPreflightFast: mocked timings — an entry costing several times the run's median is still refused as RUNAWAY, so the fix does not merely delete the guard", () => {
+  const steps = CENSUS_STEPS.map((s) => ({ ...s, boundMs: 999_999 }));
+  const elapsedMsList = [900, 1600, 1700, 1750, 1800, 10_000];
+  const { spawn } = recordingSpawn();
+  const result = runPreflightFast(REPO_ROOT, {
+    spawn,
+    steps,
+    packageJsonText: packageJsonTextFor(steps),
+    now: fakeNow(elapsedMsList),
+  });
+  const runawayStep = result.steps[result.steps.length - 1]!;
+  assert.equal(runawayStep.ok, false, `expected the 10000ms entry to be refused as RUNAWAY: ${runawayStep.detail}`);
+  assert.match(runawayStep.detail, /RUNAWAY/);
+  for (const step of result.steps.slice(0, -1)) {
+    assert.equal(step.ok, true, `expected ${step.name} to remain PASS: ${step.detail}`);
+  }
+  assert.equal(result.ok, false);
 });
 
 test("src/lib/ci-parity.ts documents the bound as a PRIMARY CONTROL and never labels it a backstop", () => {

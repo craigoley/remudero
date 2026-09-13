@@ -2052,23 +2052,51 @@ export const FAST_GATE_CENSUS_BOUND_MS = 2000;
  * entries over time, silently restoring the blindness W1-T2478 closed. MEASURED: the same entry
  * read 2509ms locally and 2268/2250ms on GitHub runners while main's `ci` passed.
  *
- * INVARIANT: refusal is measured against the SAME RUN's cheapest census entry, a ratio a slow
+ * INVARIANT: refusal is measured against the SAME RUN's own census durations, a ratio a slow
  * machine cannot manufacture; the soft bound still REPORTS its cost, so growth is visible first.
  * Why: docs/forensics/ci-parity.md (W1-T2545).
+ *
+ * W1-T3408 — THE REFERENCE IS THE RUN'S MEDIAN, NEVER ITS MINIMUM.
+ *
+ * TRAP: `Math.min` pins the reference to whichever single entry happens to be cheapest — often a
+ * near-trivial `git ls-files`/`git grep` walk whose own cost barely moves with load, while a
+ * heavier, spawn-and-I/O-bound entry (e.g. `negative-reachability-census`) IS sensitive to load.
+ * MEASURED 2026-09-11 on PR #5087: under contention that cheap entry stayed near the floor while
+ * a healthy sibling's cost rose from its usual range to 4296ms/5034ms, tripping a threshold that
+ * was floor-pinned at 4000/4776ms purely because the CHEAPEST entry never got slow — both refused
+ * steps' own commands PASSed, and the identical suite idle (or on origin/main) passed 20/20. The
+ * bound was tightest exactly when the fastest entry in the run was fastest — a healthy condition,
+ * not a runaway one.
+ *
+ * FIX: the reference is the MEDIAN of this run's own census durations, not the minimum. A single
+ * cheap outlier (or, symmetrically, a single genuinely-runaway one) cannot drag the median to an
+ * extreme the way it can drag a min or a mean — the reference tracks the run's typical entry, so
+ * a sibling that merely finished fast no longer manufactures a false RUNAWAY for a slower-but-
+ * healthy neighbour, while an entry costing several times the TYPICAL entry (not merely the
+ * cheapest one) is still refused. Why: docs/forensics/ci-parity.md (W1-T3408).
  */
 
-/** The same-run reference is floored, so one unusually cheap entry cannot make the ratio harsh for its siblings. */
+/** The same-run reference is floored, so a run with only trivially-cheap entries cannot make the ratio harsh for all of them. */
 export const FAST_GATE_CENSUS_REFERENCE_FLOOR_MS = 1000;
 
-/** How many times the same run's cheapest census entry an entry may cost before it is refused as
+/** How many times the same run's median census cost an entry may cost before it is refused as
  *  RUNAWAY. Sized against the measured spread (2026-08-31: 960/1128/2344/2615ms), so a
- *  merely-grown suite passes and one doing several times its sibling's work does not. */
+ *  merely-grown suite passes and one doing several times its typical sibling's work does not. */
 export const FAST_GATE_CENSUS_RUNAWAY_MULTIPLE = 4;
+
+/** The middle value of `values` sorted ascending — the mean of the two middle values when `values`
+ *  has even length. Unlike `Math.min`/`Math.max`, a single extreme entry (unusually cheap OR
+ *  unusually expensive) cannot drag this statistic to that entry's own value (W1-T3408). */
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+}
 
 /** This run's refusal threshold, from this run's own census durations; `undefined` when none ran. */
 export function censusRunawayThresholdMs(durationsMs: readonly number[]): number | undefined {
   if (durationsMs.length === 0) return undefined;
-  const reference = Math.max(FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, Math.min(...durationsMs));
+  const reference = Math.max(FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, median(durationsMs));
   return reference * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE;
 }
 
@@ -3220,8 +3248,9 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   );
 
   // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway is
-  // the entry costing several times its cheapest sibling — a ratio a slow runner cannot
-  // manufacture. An entry whose own command FAILED is left alone.
+  // the entry costing several times the run's TYPICAL (median) entry — a ratio neither a slow
+  // runner nor one accidentally-fast sibling can manufacture (W1-T3408). An entry whose own
+  // command FAILED is left alone.
   const threshold = censusRunawayThresholdMs([...censusCosts.values()]);
   if (threshold !== undefined) {
     for (const [i, elapsedMs] of censusCosts) {
@@ -3232,7 +3261,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         ok: false,
         detail:
           `${job}: RUNAWAY — npm run --silent ${script} took ${elapsedMs}ms, over ${threshold}ms ` +
-          `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x this run's cheapest census entry, floored at ` +
+          `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x this run's median census cost, floored at ` +
           `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms); its own result would have PASSed. Refused by a bound ` +
           `derived from this run's own measurements, never by a written constant a growing corpus outgrows`,
       };

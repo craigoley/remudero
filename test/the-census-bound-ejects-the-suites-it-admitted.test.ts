@@ -16,11 +16,20 @@
 // existed to close, reintroduced by its own control.
 //
 // THE SHAPE OF THE FIX. A wall-clock number conflates how much work a suite does with how fast
-// the machine is, and only the first is a property of the repo. The refusal is now measured
-// against the SAME RUN's cheapest census entry: a slow machine slows every entry together, so the
-// ratio is stable, while a suite doing several times the work of its siblings stands out on any
-// machine. The soft bound survives as a REPORT, which is the warning an absolute ceiling could
-// only ever deliver by failing the gate.
+// the machine is, and only the first is a property of the repo. The refusal is measured against
+// the SAME RUN's own census durations: a slow machine slows every entry together, so the ratio is
+// stable, while a suite doing several times the work of its siblings stands out on any machine.
+// The soft bound survives as a REPORT, which is the warning an absolute ceiling could only ever
+// deliver by failing the gate.
+//
+// W1-T3408 RETARGETED THE REFERENCE STATISTIC (criterion 2 below), and only that. The bound above
+// used the run's own MINIMUM census duration as the reference, which is unstable: whichever entry
+// happens to be cheapest is often a near-trivial walk that barely slows under load, while a
+// heavier sibling IS load-sensitive, so a healthy sibling could cost several times an
+// accidentally-fast minimum and be refused as RUNAWAY despite its own command PASSing (MEASURED
+// 2026-09-11, PR #5087). The reference is now the run's MEDIAN census duration: a single cheap
+// (or, symmetrically, a single genuinely runaway) entry cannot drag it the way it could drag a
+// minimum, so the ratio reflects the run's typical entry rather than its most trivial one.
 //
 // EVERY TEST BELOW DRIVES `runPreflightFast` ITSELF through its own injectable seams (`spawn`,
 // `now`, `steps`), never a re-implementation of its arithmetic — the falsifier for a wiring
@@ -77,38 +86,65 @@ test("W1-T2545 criterion 1: a census entry over the soft bound that PASSES is re
   assert.equal(r.ok, true, "and the gate as a whole passes — which it did not before this change");
 });
 
-test("W1-T2545 criterion 2: the bound is derived from the run's own measurements, not from a written constant", () => {
-  // The SAME absolute cost is judged differently depending on the population it ran beside — the
-  // property a constant cannot have. 4000ms passes beside a 1500ms sibling (ratio 2.7) and is
-  // refused beside a 500ms one (ratio 8, floored reference 1000 -> threshold 4000... so 4001).
-  const withSlowSibling = runPreflightFast("/repo", {
+test("W1-T2545/W1-T3408 criterion 2: the bound is derived from the run's own measurements, not from a written constant — and (W1-T3408) not from a single accidentally-cheap sibling either", () => {
+  // The SAME absolute cost (4001ms) is judged differently depending on the population it ran
+  // beside — the property a constant cannot have. Against a population whose OTHER two entries
+  // are both genuinely slow (typical/median cost 3100ms), 4001ms is unremarkable and passes.
+  // Against a population whose other two entries are both genuinely fast (median 1000ms), the
+  // SAME 4001ms is refused — because it is judged against this run's own typical entry, not a
+  // written millisecond constant.
+  const withSlowPopulation = runPreflightFast("/repo", {
     packageJsonText: PKG,
     spawn: okSpawn,
-    now: scriptedClock([1500, 4000]),
-    steps: [census("a-census", "census:a"), census("b-census", "census:b")],
+    now: scriptedClock([3000, 3200, 4001]),
+    steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
   });
-  assert.equal(withSlowSibling.steps.find((s) => s.name === "b-census")!.ok, true);
+  assert.equal(withSlowPopulation.steps.find((s) => s.name === "c-census")!.ok, true);
 
-  const withFastSibling = runPreflightFast("/repo", {
+  const withFastPopulation = runPreflightFast("/repo", {
     packageJsonText: PKG,
     spawn: okSpawn,
-    now: scriptedClock([200, 4001]),
-    steps: [census("a-census", "census:a"), census("b-census", "census:b")],
+    now: scriptedClock([900, 1000, 4001]),
+    steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
   });
   assert.equal(
-    withFastSibling.steps.find((s) => s.name === "b-census")!.ok,
+    withFastPopulation.steps.find((s) => s.name === "c-census")!.ok,
     false,
     "identical cost, different population, different verdict — that is what 'derived' means here",
+  );
+
+  // W1-T3408: a SINGLE accidentally-cheap sibling must not, by itself, manufacture the fast-
+  // population verdict above — the reference is the population's MEDIAN, not its minimum. Two
+  // entries costing 1000ms each are needed to pull the median down; one alone cannot.
+  const withOneCheapSibling = runPreflightFast("/repo", {
+    packageJsonText: PKG,
+    spawn: okSpawn,
+    now: scriptedClock([900, 3200, 4001]),
+    steps: [census("a-census", "census:a"), census("b-census", "census:b"), census("c-census", "census:c")],
+  });
+  assert.equal(
+    withOneCheapSibling.steps.find((s) => s.name === "c-census")!.ok,
+    true,
+    "one accidentally-fast sibling (900ms) beside one genuinely slow one (3200ms) must not tighten the bound enough to refuse a healthy 4001ms entry",
   );
 
   // And the derivation itself is a named, callable function rather than inline arithmetic.
   assert.equal(censusRunawayThresholdMs([]), undefined, "no census entries: no population, no invented bound");
   assert.equal(
-    censusRunawayThresholdMs([200, 4001]),
-    FAST_GATE_CENSUS_REFERENCE_FLOOR_MS * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE,
-    "a cheap outlier is floored, so it cannot make the ratio harsh for its siblings",
+    censusRunawayThresholdMs([900, 1000, 4001]),
+    1000 * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE,
+    "the median of [900, 1000, 4001] is 1000",
   );
-  assert.equal(censusRunawayThresholdMs([1500, 4000]), 1500 * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE);
+  assert.equal(
+    censusRunawayThresholdMs([3000, 3200, 4001]),
+    3200 * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE,
+    "the median of [3000, 3200, 4001] is 3200",
+  );
+  assert.equal(
+    censusRunawayThresholdMs([200, 300]),
+    FAST_GATE_CENSUS_REFERENCE_FLOOR_MS * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE,
+    "a population with no entry over the floor is floored, so it cannot invent a harsher-than-floor ratio",
+  );
 });
 
 test("W1-T2545 criterion 3: an entry whose own command FAILS is still a hard failure, cheap or not", () => {
