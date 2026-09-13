@@ -228,6 +228,24 @@ test("a duplicate identity also resumes via a live probe when the identity was n
   assert.equal(writeDeps.calls.worktreeAdd, 0, "a live probe hit short-circuits before ever cutting a worktree");
 });
 
+test("a shard that drifted since the evidence was read is refused, never rewritten against a stale line", () => {
+  // Validation passes (it checks the PROPOSAL against `evidence`, byte-for-byte) but the shard
+  // text `findShard` hands back no longer carries that exact old-proof text under the claim's
+  // line — someone else edited the shard between the evidence read and this dispatch. This must
+  // refuse before ever cutting a worktree, not silently write nothing under the claim.
+  const writeDeps = fakeWriteDeps({
+    findShard: () => ({
+      path: "plan/tasks.d/W1-T3434-FIXTURE.yaml",
+      text: `- id: ${TASK_ID}\n  acceptance:\n    - claim: "${CLAIM}"\n      proof: "unit test: test/already-drifted.test.ts"\n`,
+    }),
+  });
+  const outcome = requestProofAmendment(baseRequest(), writeDeps);
+  assert.deepEqual(outcome, { kind: "refused", reason: "shard-drifted", detail: `shard text no longer carries the exact old proof for: ${CLAIM}` });
+  assert.equal(writeDeps.calls.worktreeAdd, 0, "drift is caught before a worktree is ever cut");
+  assert.equal(writeDeps.calls.writeFile.length, 0);
+  assert.equal(writeDeps.calls.createPr, 0);
+});
+
 test("a merged amendment requests only an expected-head branch update", () => {
   const writeDeps = fakeWriteDeps();
   const first = requestProofAmendment(baseRequest(), writeDeps);
@@ -652,6 +670,39 @@ test("proofAmendmentIneligibleReason checks the five gates in order", () => {
   assert.equal(proofAmendmentIneligibleReason(eligiblePr(), evidence()), undefined);
 });
 
+test("validateProofAmendmentProposal refuses when an executor throws, not only when it returns fail", () => {
+  // Lines the coverage-ratchet flagged: both catch(){} arms exist because a whitelisted-proof
+  // executor is a real subprocess/filesystem probe (grep, unit-test runner) that can throw (a
+  // missing checkout, a permission error) independently of the pass/fail/no-match it returns on
+  // a clean run — this proves each catch maps to its OWN refusal reason, not a shared one.
+  const throwing = () => {
+    throw new Error("boom");
+  };
+  const headThrows = validateProofAmendmentProposal([validEntry()], evidence(), {
+    headCwd: "/head",
+    baseCwd: "/base",
+    currentHeadSha: HEAD_SHA,
+    pinnedHeadSha: HEAD_SHA,
+    planShardPaths: new Set(),
+    execAtHead: throwing,
+    execAtBase: fakeExecutors().execAtBase,
+  });
+  assert.equal(headThrows.ok, false);
+  if (!headThrows.ok) assert.equal(headThrows.refusal.reason, "head-unreadable");
+
+  const baseThrows = validateProofAmendmentProposal([validEntry()], evidence(), {
+    headCwd: "/head",
+    baseCwd: "/base",
+    currentHeadSha: HEAD_SHA,
+    pinnedHeadSha: HEAD_SHA,
+    planShardPaths: new Set(),
+    execAtHead: fakeExecutors().execAtHead,
+    execAtBase: throwing,
+  });
+  assert.equal(baseThrows.ok, false);
+  if (!baseThrows.ok) assert.equal(baseThrows.refusal.reason, "base-unreadable");
+});
+
 test("validateProofAmendmentProposal is the same gate requestProofAmendment uses internally", () => {
   const ok = validateProofAmendmentProposal([validEntry()], evidence(), {
     headCwd: "/head",
@@ -723,4 +774,17 @@ test("findTaskShard reads the plan/tasks.d shard by task-id prefix, matching dis
   assert.ok(found);
   assert.equal(found!.path, join("plan", "tasks.d", `${TASK_ID}-a-fixture.yaml`));
   assert.equal(findTaskShard(repoDir, "W1-T-NOT-PRESENT"), undefined);
+});
+
+test("findTaskShard falls back to the plan monolith when the task declares no shard file", () => {
+  const repoDir = mkdtempSync(join(tmpdir(), "rmd-proof-amendment-monolith-"));
+  // No `plan/tasks.d` directory at all — the shard lookup's own readdirSync throws and is
+  // swallowed, falling through to the monolith the way a still-inline (unsharded) task does.
+  mkdirSync(join(repoDir, "plan"), { recursive: true });
+  writeFileSync(join(repoDir, "plan", "tasks.yaml"), `- id: ${TASK_ID}\n  title: inline task\n`);
+  const found = findTaskShard(repoDir, TASK_ID);
+  assert.ok(found);
+  assert.equal(found!.path, join("plan", "tasks.yaml"));
+  assert.match(found!.text, new RegExp(`id: ${TASK_ID}`));
+  assert.equal(findTaskShard(repoDir, "W1-T-NOT-IN-MONOLITH"), undefined, "no matching id line at all — neither shard nor monolith");
 });
