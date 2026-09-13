@@ -1327,6 +1327,7 @@
     "test/the-followup-rung-amplifies-the-ledger.test.ts": 0,
     "test/the-forward-reference-carve-out-is-asymmetric.test.ts": 0,
     "test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts": 1099,
+    "test/the-gate-must-read-the-head-it-names.test.ts": 0,
     "test/the-golden-suite-has-every-piece-except-a-producer.test.ts": 1682,
     "test/the-headline-index-is-dark.test.ts": 0,
     "test/the-headroom-gate-reads-a-file-the-fleet-never-refreshes.test.ts": 844,
