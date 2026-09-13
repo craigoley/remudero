@@ -1,0 +1,24 @@
+id: fb-1789282072891-8e9428
+ts: 2026-09-13T06:47:52.891Z
+raw: "Prevent private-repository Vercel deployment stalls for RMD-authored
+  portal work. Portal PR #8 accumulated many remudero-worker commits that Vercel
+  could not identify for this private project; later Craig Oley-authored
+  retrigger commits were needed before the required Vercel status became
+  success. Design and implement an explicit, repository-allowlisted automated
+  commit-author/deployment identity contract that preserves automation
+  provenance and never silently impersonates an operator. It must fail closed
+  when absent or unverified, document the one-time Vercel/GitHub setup, preserve
+  the generic remudero-worker identity for public core work, and add regression
+  coverage plus a durable receipt. Do not weaken branch protection or replace
+  the required Vercel deployment signal with an unrelated check."
+attachments:
+  - https://github.com/craigoley/remudero-site/pull/8
+  - https://vercel.com/docs/deployments/troubleshoot-project-collaboration
+origin: issue
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
