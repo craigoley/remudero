@@ -754,6 +754,7 @@ export function unmetDependencies(
 ): string[] {
   return task.depends_on.filter((dep) => {
     const d = plan.byId.get(dep);
+    if (d?.retirement !== undefined) return false;
     return !d || !isMerged(d);
   });
 }
