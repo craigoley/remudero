@@ -549,6 +549,7 @@
     "test/disarm-lost-race-hard-stop.test.ts": 1369,
     "test/disarm-on-capped-verdict.test.ts": 1492,
     "test/disarm-outcome-recorded.test.ts": 1069,
+    "test/disk-artifact-reclaim-refuses-a-live-or-dirty-target.test.ts": 0,
     "test/dispatch-claim-evidence-reachability.test.ts": 1365,
     "test/dispatch-claim-names-its-cause.test.ts": 305,
     "test/dispatch-claim-stranded-visibility.test.ts": 1459,

@@ -802,6 +802,12 @@ export interface DaemonDeps {
    *  above. Best-effort: a throw is caught and logged, never allowed to take the tick down.
    *  Optional — omitted, this tick performs no sweep, unchanged behaviour for every existing caller. */
   sweepStrandedReviewWorktrees?: () => void;
+  /** Reclaim regenerable build output inside checkouts that must be KEPT — see {@link
+   *  import("./disk-artifact-reclaim.js").sweepReclaimableArtifacts} (W1-T3528). Every shipped
+   *  reclaim rung's unit is a whole tree, so none can free a `coverage/` or `node_modules` inside
+   *  a tree held by uncommitted work. Same zero-arg, best-effort contract as the sweep above.
+   *  Optional — omitted, this tick performs no artifact sweep. */
+  sweepReclaimableArtifacts?: () => void;
   /** Called on an idle tick whose census names at least one recoverable-class blocker — see
    *  {@link StarvationCensus}. Fires at most once per episode, and dispatch is already idle by then, so
    *  the hook is a pure notification. The real command wires an escalation with its own cross-boot
@@ -1229,6 +1235,16 @@ function startInFlightTicker(
               deps.sweepStrandedReviewWorktrees();
             } catch (e) {
               log("daemon.review_worktree_sweep.error", { error: String((e as Error)?.message ?? e) });
+            }
+          }
+          // W1-T3528: the sweep above reaps whole `review-PR*` trees; this one reaps regenerable
+          // build output INSIDE trees that must be kept, which no rung could express before. It
+          // no-ops entirely while the swept filesystem has headroom. Same best-effort contract.
+          if (deps.sweepReclaimableArtifacts) {
+            try {
+              deps.sweepReclaimableArtifacts();
+            } catch (e) {
+              log("daemon.disk_artifact_sweep.error", { error: String((e as Error)?.message ?? e) });
             }
           }
           // Sample account headroom once the last reading has gone stale. Placed after the liveness write on purpose:
