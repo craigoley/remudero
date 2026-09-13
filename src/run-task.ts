@@ -9588,6 +9588,8 @@ export async function runFixRung(opts: {
                 try {
                   merged = isPrMergedNow(amendmentUrl);
                 } catch {
+                  // best-effort: an unreadable live merge state defaults to un-merged, which only
+                  // means "resume the still-open PR" rather than crashing this round's dispatch.
                   merged = false;
                 }
                 return { amendmentUrl, amendmentNumber, merged };
