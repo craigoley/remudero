@@ -26567,7 +26567,7 @@ export function buildCiLearningCadenceRunner(deps: {
       throw e;
     }
     const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(deps.checkoutRoot);
-    const pendingOrigins = (deps.pendingOrigins ?? ciLearningPendingOrigins)(deps.root);
+    const pendingOrigins = (deps.pendingOrigins ?? ciLearningPendingOrigins)(deps.root, deps.checkoutRoot);
     const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins])];
     const result = mintCiLearningShards(corpus, idempotencyOrigins);
     const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));

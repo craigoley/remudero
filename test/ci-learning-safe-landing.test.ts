@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import { CI_LEARNING_LANDING_BRANCH, landCiLearningShards } from "../src/lib/feedback-landing.js";
 import { buildCiLearningCadenceRunner, ciLearningCommand } from "../src/run-task.js";
 import {
@@ -27,26 +28,20 @@ function git(dir: string, ...args: string[]): string {
 }
 
 function makeBareOrigin(): string {
-  const bare = mkdtempSync(join(tmpdir(), "rmd-ci-learning-landing-origin-"));
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
-
-  const seed = mkdtempSync(join(tmpdir(), "rmd-ci-learning-landing-seed-"));
-  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
-  mkdirSync(join(seed, "plan"), { recursive: true });
-  writeFileSync(join(seed, "README.md"), "seed\n");
-  writeFileSync(join(seed, "plan", "tasks.yaml"), "[]\n");
-  git(seed, "add", "-A");
-  git(seed, "commit", "--quiet", "-m", "chore: seed");
-  git(seed, "remote", "add", "origin", bare);
-  git(seed, "push", "--quiet", "origin", "main");
-  rmSync(seed, { recursive: true, force: true });
-  return bare;
+  const bare = gitRepo({ bare: true, kind: "ci-learning-landing-origin" });
+  const seed = gitRepo({ seedCommit: true, kind: "ci-learning-landing-seed" });
+  mkdirSync(join(seed.dir, "plan"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "[]\n");
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: add plan fixture");
+  seed.addRemote("origin", bare.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  seed.cleanup();
+  return bare.dir;
 }
 
 function cloneRoot(bareOrigin: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-ci-learning-landing-checkout-"));
-  execFileSync("git", ["clone", "--quiet", bareOrigin, dir], { encoding: "utf8", env: GIT_ENV });
-  return dir;
+  return gitRepo({ cloneFrom: bareOrigin, kind: "ci-learning-landing-checkout" }).dir;
 }
 
 function stateRoot(): string {
