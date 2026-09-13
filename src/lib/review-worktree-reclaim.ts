@@ -23,6 +23,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
 import { DEFAULT_WORKTREE_REAP_GRACE_MS, worktreesDir, worktreeRemove } from "./worker.js";
 
@@ -66,12 +67,13 @@ export interface ReviewWorktreeSweepSummary {
   kept: ReviewWorktreeSweepOutcome[];
 }
 
-export interface ReviewWorktreeSweepDeps {
+export interface ReviewWorktreeSweepOptions {
   /** Directory names directly under `worktreesDir(config)`. Defaults to a real `readdirSync`. */
   listEntries?: (dir: string) => string[];
   isDirectory?: (path: string) => boolean;
-  /** Injectable clock (tests drive "later" without a real 30-minute wait). Defaults to `Date.now`. */
-  now?: () => number;
+  /** Shared clock port. Tests drive "later" without a real 30-minute wait; production uses the
+   *  same system implementation every other time-aware module does. */
+  clock?: Clock;
   /** Overrides {@link DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS}. */
   graceMs?: number;
   /** The candidate's OWN parent repoDir, resolved from its `.git` gitdir pointer (mirrors
@@ -95,12 +97,12 @@ export interface ReviewWorktreeSweepDeps {
 export function sweepStrandedReviewWorktrees(
   config: Config,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: ReviewWorktreeSweepDeps = {},
+  opts: ReviewWorktreeSweepOptions = {},
 ): ReviewWorktreeSweepSummary {
   const root = worktreesDir(config);
-  const listEntries = deps.listEntries ?? ((dir: string) => readdirSync(dir));
+  const listEntries = opts.listEntries ?? ((dir: string) => readdirSync(dir));
   const isDirectory =
-    deps.isDirectory ??
+    opts.isDirectory ??
     ((p: string) => {
       try {
         return statSync(p).isDirectory();
@@ -111,12 +113,12 @@ export function sweepStrandedReviewWorktrees(
         return false;
       }
     });
-  const now = deps.now ?? (() => Date.now());
-  const graceMs = deps.graceMs ?? DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS;
-  const resolveRepoDir = deps.resolveRepoDir ?? defaultResolveRepoDir;
-  const readHeadSha = deps.readHeadSha ?? defaultReadHeadSha;
-  const readRemoteHeadSha = deps.readRemoteHeadSha ?? defaultReadRemoteHeadSha;
-  const removeWorktree = deps.removeWorktree ?? worktreeRemove;
+  const clock = opts.clock ?? systemClock;
+  const graceMs = opts.graceMs ?? DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS;
+  const resolveRepoDir = opts.resolveRepoDir ?? defaultResolveRepoDir;
+  const readHeadSha = opts.readHeadSha ?? defaultReadHeadSha;
+  const readRemoteHeadSha = opts.readRemoteHeadSha ?? defaultReadRemoteHeadSha;
+  const removeWorktree = opts.removeWorktree ?? worktreeRemove;
 
   const reclaimed: string[] = [];
   const kept: ReviewWorktreeSweepOutcome[] = [];
@@ -140,7 +142,7 @@ export function sweepStrandedReviewWorktrees(
     const path = join(root, name);
     if (!isDirectory(path)) continue;
 
-    if (now() - createdAtMs < graceMs) {
+    if (clock.now() - createdAtMs < graceMs) {
       keep(name, path, "too-young");
       continue;
     }

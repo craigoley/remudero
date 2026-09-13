@@ -8,7 +8,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 14.00
-  files: [src/lib/review-worktree-reclaim.ts, src/lib/daemon.ts, test/a-review-worktree-stranded-by-a-kill-is-swept-later.test.ts]
+  files: [src/lib/review-worktree-reclaim.ts, src/lib/daemon.ts, src/run-task.ts, test/a-review-worktree-stranded-by-a-kill-is-swept-later.test.ts]
   origin: "operator-session#mac-mini-disk-2026-09-11"
   plan_refs: ["W1-T233", "W1-T175", "W1-T1082", "W1-T3320"]
   status: queued
@@ -111,6 +111,8 @@
       proof: "unit test: the sweep leaves coverage and temp directories alone"
     - claim: "the new module is reached from the daemon tick, not only from its own tests"
       proof: "grep: sweepStrandedReviewWorktrees( in src/lib/daemon.ts"
+    - claim: "the production daemon command supplies the reclaimer callback, so the daemon-tick hook is reachable in a real daemon process"
+      proof: "unit test: the real daemon command supplies the stranded-review-worktree sweep hook"
   falsifier: |
     RE-COUNT THE STRANDED WORKTREES BEFORE BUILDING. The 932M above is the operator host on
     2026-09-11 and may have been cleared by hand since. A zero there does NOT retire this shard: the

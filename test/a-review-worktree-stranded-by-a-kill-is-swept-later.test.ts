@@ -7,8 +7,8 @@
  * NOTHING HERE MOCKS GIT for the eligibility gate itself: every fixture below is a REAL bare
  * "origin" repo plus a REAL clone with a REAL linked worktree (`git worktree add --detach`),
  * exactly the shape `materializeReviewWorktree` creates. The claim under test is about what git's
- * own `ls-remote`/`rev-parse` report, which a mock cannot witness. Only the clock is injected
- * (`now`), so "later" is provable without a real 30-minute wait.
+ * own `ls-remote`/`rev-parse` report, which a mock cannot witness. Only the shared Clock port is
+ * injected, so "later" is provable without a real 30-minute wait.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -18,7 +18,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { Config } from "../src/lib/config.js";
+import { fixedClock } from "../src/lib/clock.js";
+import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { worktreesDir } from "../src/lib/worker.js";
+import { daemonCommand } from "../src/run-task.js";
 import {
   DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS,
   sweepStrandedReviewWorktrees,
@@ -90,7 +93,7 @@ test("a stranded review worktree is swept by a later tick — past the grace win
     const { log, rows } = collectLedger();
 
     const summary = sweepStrandedReviewWorktrees(u.config, log, {
-      now: () => 1_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1,
+      clock: fixedClock(1_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1),
     });
 
     assert.deepEqual(summary.reclaimed, [name], "the stranded worktree is reclaimed");
@@ -111,8 +114,8 @@ test("the SAME tick that just created the worktree does not touch it — 'swept 
     const { name, path } = cutReviewWorktree(u, 4791, 2_000_000, sha);
     const { log } = collectLedger();
 
-    // "now" is still inside the grace window — a live `rmd review` could plausibly still be running.
-    const summary = sweepStrandedReviewWorktrees(u.config, log, { now: () => 2_000_000 + 1000 });
+    // The clock is still inside the grace window — a live `rmd review` could plausibly still be running.
+    const summary = sweepStrandedReviewWorktrees(u.config, log, { clock: fixedClock(2_000_000 + 1000) });
 
     assert.deepEqual(summary.reclaimed, [], "nothing reclaimed yet");
     assert.deepEqual(summary.kept, [{ name, path, reason: "too-young" }]);
@@ -138,7 +141,7 @@ test("a review worktree with unpushed commits is never eligible — holding a co
     const { log, rows } = collectLedger();
 
     const summary = sweepStrandedReviewWorktrees(u.config, log, {
-      now: () => 3_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1,
+      clock: fixedClock(3_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1),
     });
 
     assert.deepEqual(summary.reclaimed, [], "the guard refuses removal");
@@ -165,7 +168,7 @@ test("FALSIFIER: delete the unpushed-commit guard and the same fixture goes red 
     // The guard removed: readRemoteHeadSha reports whatever localHead is, so "no commit absent
     // from remote" is trivially (and wrongly) satisfied every time.
     sweepStrandedReviewWorktrees(u.config, log, {
-      now: () => 4_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1,
+      clock: fixedClock(4_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1),
       readRemoteHeadSha: (_repoDir, _prNumber) =>
         execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
       removeWorktree: () => {
@@ -189,7 +192,7 @@ test("a review worktree whose remote cannot be read is never eligible — an una
     const { log } = collectLedger();
 
     const summary = sweepStrandedReviewWorktrees(u.config, log, {
-      now: () => 5_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1,
+      clock: fixedClock(5_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1),
     });
 
     assert.deepEqual(summary.reclaimed, []);
@@ -211,7 +214,7 @@ test("every sweep outcome ledgers its own decision reason, whether reclaimed or 
     const { log, rows } = collectLedger();
 
     const summary = sweepStrandedReviewWorktrees(u.config, log, {
-      now: () => 6_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1,
+      clock: fixedClock(6_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1),
     });
 
     assert.deepEqual(summary.reclaimed, [reclaimable.name]);
@@ -244,7 +247,7 @@ test("the sweep leaves coverage and temp directories alone — a real coverage/ 
     const { log, rows } = collectLedger();
 
     const summary = sweepStrandedReviewWorktrees(u.config, log, {
-      now: () => 7_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1,
+      clock: fixedClock(7_000_000 + DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1),
       removeWorktree: (_repoDir, wt) => {
         removeCalledWith.push(wt);
         execFileSync("git", ["-C", u.repoDir, "worktree", "remove", "--force", wt]);
@@ -261,5 +264,31 @@ test("the sweep leaves coverage and temp directories alone — a real coverage/ 
     );
   } finally {
     rmSync(u.universe, { recursive: true, force: true });
+  }
+});
+
+test("the real daemon command supplies the stranded-review-worktree sweep hook — deleting its live wiring leaves the core hook absent", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-review-worktree-daemon-wiring-"));
+  const root = join(home, "state");
+  const planPath = join(home, "plan.yaml");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(planPath, "[]\n");
+  const priorHome = process.env.HOME;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(typeof captured?.sweepStrandedReviewWorktrees, "function");
+    assert.doesNotThrow(() => captured!.sweepStrandedReviewWorktrees!());
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+    rmSync(home, { recursive: true, force: true });
   }
 });
