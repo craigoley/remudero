@@ -5807,11 +5807,10 @@ export interface SweepDeps {
     /** W1-T3202 — already-read process count shared with repair admission. */
     activeWorkers?: number;
   }) => number;
-  /** W1-T2584 — MAY THE BOUNDED REVIEW POOL ADMIT ANOTHER HEAD from this pass's already-derived
-   *  pending set? Consulted synchronously before each worker pulls its next job; omission means
-   *  `true`. It never interrupts a running reviewer — only later admissions, whose keys are released
-   *  and whose heads re-derive next pass, so a timer expiry never becomes cancellation mid-write. */
+  /** W1-T2584 — time-bounded gate for a next review admission; it never interrupts a running reviewer. */
   continueReviewAdmissions?: () => boolean;
+  /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
+  workerAdmissionHold?: () => string | undefined;
   /** Dispatch the W1-T76 fix rung carrying the mode-appropriate evidence at once — the FULL unmet
    *  set for a review dispatch, or ci-log evidence for a blocked_ci one. W1-T2231: MAY return
    *  whether this call demonstrably SPENT a strike; `undefined` reads as spent, so this widening
@@ -6818,6 +6817,16 @@ export function createSweepFixAdmissionController(input: {
 /** Production composition for both full-sweep entry points. Kept pure so wiring cannot drift. */
 export function withFullSweepRepairAdmission(deps: SweepDeps): SweepDeps {
   return { ...deps, detachFixWait: true, repairAdmissionSurface: "full" };
+}
+
+function workerAdmissionHoldReason(deps: SweepDeps): string | undefined {
+  if (!deps.workerAdmissionHold) return undefined;
+  try {
+    return deps.workerAdmissionHold();
+  } catch (error) {
+    // Reason: an unreadable fleet-control check is held, never interpreted as permission to admit.
+    return `worker admission control check failed closed (${String((error as Error)?.message ?? error)})`;
+  }
 }
 
 /**
@@ -7889,6 +7898,12 @@ export async function runSweep(
               // anything it did not expect — an unexpected changed path, no change at all, a failed
               // push — and a refusal must cost the PR nothing but this pass. Never a stand-down:
               // the fix rung is still the right instrument when the cheap repair declined.
+              const workerHold = workerAdmissionHoldReason(deps);
+              if (workerHold) {
+                acted = false;
+                standDownReason = workerHold;
+                break;
+              }
               const ratchetScripts =
                 policy.recordableRatchetRepairEnabled === true && deps.repairRecordableRatchet
                   ? recordableRatchetRepairFor(pr)
@@ -7973,6 +7988,12 @@ export async function runSweep(
               }
               // W1-T2520: the conflicted twin of the blocked-fixable claim above, same reasoning
               // — see `claimFixDispatch`'s own doc.
+              const workerHold = workerAdmissionHoldReason(deps);
+              if (workerHold) {
+                acted = false;
+                standDownReason = workerHold;
+                break;
+              }
               const conflictedFixClaim = claimFixDispatch(pr);
               if (!conflictedFixClaim.ok) {
                 acted = false;
@@ -8373,6 +8394,11 @@ export async function runSweep(
 
   const takeNextReview = (): (typeof orderedReviews)[number] | undefined => {
     if (admissionStopReason !== undefined) return undefined;
+    const workerHold = workerAdmissionHoldReason(deps);
+    if (workerHold) {
+      closeAdmissions(workerHold);
+      return undefined;
+    }
     if (deps.continueReviewAdmissions) {
       try {
         if (!deps.continueReviewAdmissions()) {
