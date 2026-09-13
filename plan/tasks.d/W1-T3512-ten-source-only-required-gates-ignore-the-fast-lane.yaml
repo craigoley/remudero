@@ -1,0 +1,95 @@
+- id: W1-T3512
+  title: "TEN SOURCE-ONLY REQUIRED GATES IGNORE THE FAST-LANE CLASSIFIER THAT ALREADY SHIPS — a one-file plan filing still pays mutation-ratchet, jscpd, depcruise and seven more, and the mechanism to skip them has been in the repo since W1-T2428"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 16.00
+  files: [.github/workflows/ci.yml, test/fast-lane-classifier.test.ts]
+  origin: "operator-session#board-green-2026-09-13"
+  plan_refs: ["W1-T2428", "W1-T2680", "W1-T3177"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED on origin/main 2026-09-13 by parsing ci-gate.yml's REQUIRED list against ci.yml's jobs:
+
+      REQUIRED checks                                        28
+      jobs in ci.yml                                         26
+      jobs consulting scripts/diff-class.mjs                  3   (ci, test-slow, coverage-ratchet)
+      SOURCE-only required checks NOT consulting it          10
+
+    The ten: depcruise, mutation-ratchet, jscpd-gate, api-client-drift, no-hand-rolled-fetch,
+    assertion-discrimination, comment-load-ratchet, source-size, containment-probe, claims.
+
+    `scripts/diff-class.mjs` already classifies a diff PLAN_ONLY / DOCS_ONLY / SOURCE from
+    `isInPlanScope` — the SAME predicate the reviewer's own sweep uses (W1-T205) — and returns
+    PLAN_ONLY for a one-file `plan/tasks.d/*.yaml` change, verified by running it. Nothing needs
+    inventing; ten jobs simply never ask.
+
+    THE COST IS PAID ON EVERY FILING. Of 20 open PRs surveyed on 2026-09-12, EIGHT were plan updates
+    (`chore(plan):`/`fix(plan):`), and each was judged by coverage-ratchet, mutation-ratchet and
+    comment-load-ratchet among others. A YAML record cannot fail a source ratchet, so that work is
+    pure latency on the lane the fleet files through most.
+  rationale: |
+    THE PATTERN IS ALREADY DECIDED AND MUST BE FOLLOWED, NOT RE-CHOSEN. ci.yml's own comment beside
+    the `ci` job's classifier records the rejected alternative in its own words: a shared
+    classification job consumed via `needs:` "would chain two parallel jobs and cost more than the
+    skip saves". So the established shape is an IN-JOB step that classifies cheaply and exits the
+    expensive work early — which also means the required check still REGISTERS a conclusion rather
+    than being skipped at job level.
+
+    THAT REGISTRATION IS THE SAFETY PROPERTY, and it is why this task is risk:high on a
+    blast-radius band despite touching no product code. ci-gate.yml's own ADVISORY block states the
+    failure mode: a required check that is ABSENT "hangs branch protection forever". A job-level
+    `if:` that prevents the check-run from appearing at all would wedge every PR — the opposite of
+    this task's purpose. Ten edits, each of which must keep its check registering.
+
+    WHY IT IS WORTH DOING AT ALL, given the fleet already merges in 0.7h median: this is not about
+    latency in aggregate, it is about the FILING lane specifically. Filings are how tasks enter the
+    system, and they are the PRs most often blocked by a gate that structurally cannot apply to them
+    — measured repeatedly this week, where a one-file YAML filing was failed by expiring-fixture,
+    comment-load and coverage shards in turn, none of which its diff could have affected.
+  design: |
+    (i) FOLLOW THE IN-JOB PATTERN `ci`, `test-slow` and `coverage-ratchet` already use. Read those
+    three first and copy their shape, including their fail-closed handling: diff-class.mjs must
+    resolve to SOURCE on any unreadable or empty file list, and a nonzero exit from the classifier
+    must run the full gate rather than skip it.
+    (ii) EVERY TOUCHED CHECK MUST STILL REGISTER A CONCLUSION. Assert this, do not assume it: the
+    skip belongs INSIDE the job, after the classifier step, not in a job-level `if:`. A check-run
+    that never appears hangs branch protection (ci-gate.yml's ADVISORY block says so).
+    (iii) DO NOT SKIP A GATE WHOSE SUBJECT INCLUDES plan/. Check each of the ten against what it
+    actually walks before adding a skip — `claims` and `containment-probe` in particular are not
+    obviously src-only, and a wrong skip silently retires a gate. Name each one's walked population
+    in the PR body.
+    (iv) DOCS_ONLY IS A SEPARATE DECISION FROM PLAN_ONLY and this task should say which classes each
+    gate skips on, rather than treating the two as one.
+    (v) MEASURE THE SAVING AND REPORT IT. A before/after wall-clock on a one-file plan filing is the
+    only evidence this bought anything; without it the change is unfalsifiable.
+  acceptance:
+    - claim: "a PLAN_ONLY diff no longer runs the source-only gates, and the count that consult the classifier rises from three"
+      proof: "unit test: a PLAN_ONLY diff skips every source-only required gate"
+    - claim: "every gate the change touches still REGISTERS a conclusion, so no required check can go absent and hang branch protection"
+      proof: "unit test: a skipped source gate still registers a conclusion"
+    - claim: "the classifier still fails closed to SOURCE on an unreadable or empty changed-file list, so a fault runs the full gate"
+      proof: "unit test: an unreadable changed-file list runs the full gate"
+    - claim: "a SOURCE diff is unaffected and still runs all ten, so the skip is class-driven and not a blanket exemption"
+      proof: "unit test: a SOURCE diff still runs every source-only gate"
+  falsifier: |
+    RE-MEASURE THE TEN BEFORE BUILDING. The figures are from origin/main on 2026-09-13 and the
+    REQUIRED list moves weekly; re-derive by parsing ci-gate.yml's REQUIRED against ci.yml's jobs and
+    use YOUR list. If a gate has since gained a classifier step, drop it from scope rather than
+    editing it twice.
+    PROVE THE REGISTRATION PROPERTY BY BREAKING IT. Convert one skip to a job-level `if:` and show a
+    test goes red. A change that cannot tell an in-job skip from a job-level one has not asserted the
+    property that keeps branch protection alive, and that is the only way this task can do real harm.
+    DO NOT USE A SHARED `needs:` JOB. ci.yml's own comment rejects it by measurement — it "would chain
+    two parallel jobs and cost more than the skip saves". Re-litigating that is out of scope; if the
+    measurement is now wrong, say so with numbers in its own task.
+    DO NOT SKIP A GATE YOU HAVE NOT CHECKED THE SUBJECT OF. `claims` and `containment-probe` are the
+    two most likely to walk something other than src/, and silently retiring a gate is worse than the
+    latency this task removes.
+    A BEFORE/AFTER WALL-CLOCK ON A ONE-FILE PLAN FILING IS REQUIRED. Without it there is no evidence
+    the change bought anything, and "it should be faster" is not a measurement.
