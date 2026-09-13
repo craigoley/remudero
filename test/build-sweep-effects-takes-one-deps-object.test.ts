@@ -14,6 +14,9 @@ const EFFECT_KEYS = [
   "arm",
   "close",
   "dispatchFix",
+  // W1-T3390 — the plan-only shard-repair rung, dispatched once the body-repair budget above is
+  // spent and the caller has wired it (see planCappedRepair, classify.ts).
+  "dispatchPlanOnlyRepair",
   "escalate",
   "readLiveState",
   "terminalFixStandDown",

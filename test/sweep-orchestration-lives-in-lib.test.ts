@@ -24,6 +24,9 @@ const EFFECT_KEYS = [
   "depReview",
   "disarmAutoMerge",
   "dispatchFix",
+  // W1-T3390 — the plan-only shard-repair rung, dispatched once the body-repair budget above is
+  // spent and the caller has wired it (see planCappedRepair, classify.ts).
+  "dispatchPlanOnlyRepair",
   "escalate",
   "escalateCancelledCheck",
   "escalateInfrastructureCheck",

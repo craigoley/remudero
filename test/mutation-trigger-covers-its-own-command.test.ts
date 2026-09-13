@@ -76,6 +76,9 @@ test("W1-T108/R-42: positive control -- the real command really does name more t
   assert.deepEqual(
     [...commandTestFiles].sort(),
     [
+      // W1-T3390 added this importer of src/lib/classify.ts; the control is a PIN on the real set,
+      // so it moves with the set deliberately rather than being loosened to a subset check.
+      "test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts",
       "test/block-reason.test.ts",
       "test/classify.test.ts",
       "test/codex-quota-window-refusal.test.ts",
