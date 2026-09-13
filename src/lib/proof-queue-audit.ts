@@ -9,9 +9,9 @@
  * and every caller (`rmd proof-queue-audit`, the adoption-debt minter, measurement-cadence.ts)
  * exits/reads 0 regardless of offender count. A ratchet over this report is separate, ratified
  * work, never smuggled in here.
- * INVARIANT: a forward-referencing whole-file `unit test:` path is legitimate for a queued task
- * by construction; the identical shape on a task in `opts.creditedIds` IS checked (W1-T2280),
- * since a credited task has no forward left to reference.
+ * INVARIANT: a forward reference is legitimate for a queued task in BOTH proof shapes — whole-file
+ * path always, name-filtered title when `zeroMatchTitleIsReportable` calls it diagnostic (W1-T3513);
+ * on a task in `opts.creditedIds` both ARE checked, unnarrowed — no forward is left (W1-T2280).
  * INVARIANT: an absent injected predicate means "no opinion", never a false offense.
  * INVARIANT: a `grep-path-absent` candidate whose symbol is found at another declared path is
  * RELOCATED, not reported as absent — see {@link ProofQueueAuditReport.relocated}.
@@ -27,6 +27,7 @@ import {
   type NameFilterResolution,
 } from "./review.js";
 import { proofGrepTargets } from "./status.js";
+import { zeroMatchTitleIsReportable } from "./task-linter.js";
 
 /** The three ways a proof that parses as executable can still never resolve, plus a fourth that
  *  only exists for the credited pass (W1-T2280) — see {@link CREDITED_PROOF_QUEUE_AUDIT_CAUSES}. */
@@ -160,7 +161,7 @@ export function proofQueueAudit(tasks: readonly Task[], opts: ProofQueueAuditOpt
         const resolution = opts.resolveNameFilteredCandidates(whitelisted.label);
         // Only `absent` is positive evidence of a title matching nothing; `unresolvable` means
         // the lookup itself could not be trusted and is never read as an offense.
-        if (resolution.status === "absent") {
+        if (resolution.status === "absent" && (credited || zeroMatchTitleIsReportable(whitelisted.label))) {
           offenders.push({ taskId: task.id, criterionIndex, cause: "name-filtered-zero-match", claim, proof });
         }
         return;
