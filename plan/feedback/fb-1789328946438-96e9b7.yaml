@@ -1,0 +1,22 @@
+id: fb-1789328946438-96e9b7
+ts: 2026-09-13T19:49:06.438Z
+raw: "WORKTREE DEPENDENCY ISOLATION: Core and site worker logs repeatedly report
+  that a worktree created from origin main has node_modules symlinked from
+  /home/node/Remudero/repos/remudero whose package json and lockfile hash
+  differs; the canonical checkout is also dozens of commits behind. A worker can
+  therefore pass against dependencies its own commit did not request, or fail
+  Cannot find module unrelated to its diff. Replace the generic symlink with a
+  target repo plus lockfile hash keyed dependency cache, with installation
+  guarded by a lock and an explicit npm ci fallback. Prove two repositories with
+  distinct lockfiles never share node_modules, a stale canonical checkout cannot
+  supply dependencies to a fresh worktree, and cache reuse occurs only for the
+  exact lockfile hash."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

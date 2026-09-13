@@ -1,0 +1,23 @@
+id: fb-1789328786213-ba9741
+ts: 2026-09-13T19:46:26.213Z
+raw: "PER-REPOSITORY INSTANCE OWNERSHIP: A daemon running the Remudero harness
+  with --repo remudero-site dispatches target work, but target.isSelf is false
+  because the daemon source repo differs; current run-task wiring keeps feedback
+  landing, auto-triage, retro, posture, metric, and digest behavior in the core
+  source context. Site feedback consequently landed as core PR #5438 rather than
+  entering a remudero-site plan/inbox. Introduce explicit per-instance
+  repository/state ownership so dispatch, feedback capture/landing, plans,
+  inbox, lanes, ledgers, triage and review are target-owned even when the shared
+  RMD harness code comes from another checkout. Preserve a deliberate
+  hash-pinned shared knowledge exchange; no implicit cross-repo plan writes.
+  Prove two configured repos keep task/feedback/ledger identity isolated while
+  sharing only declared knowledge artifacts."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -1,0 +1,23 @@
+id: fb-1789329238411-3e0545
+ts: 2026-09-13T19:53:58.411Z
+raw: "OPEN PR CONVERGENCE: Core PR 5399 is GitHub mergeState CLEAN but cannot be
+  honestly merged: its squash-trailer-gate fails because Remudero Task W1-T3408
+  criterion 1 has an empty proof, and remudero-review reports capped and not
+  certified. It has no auto merge request and the current sweep did not dispatch
+  repair or an explicit retirement. Reconcile every open owned PR against both
+  GitHub required checks and Remudero self gates, regardless of GitHub
+  mergeState. For a noncertified or failed self gate, create or resume a bounded
+  repair task; for obsolete work, record an explicit retire or supersede
+  outcome; arm auto merge only after all applicable checks and review evidence
+  pass. Prove an old clean GitHub PR with a failing self gate cannot be silently
+  ignored or auto merged, while an actually certified old PR is armed and
+  converges without operator intervention."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
