@@ -1416,6 +1416,7 @@
     "test/turn-budget-units.test.ts": 924,
     "test/turn-efficiency.test.ts": 1095,
     "test/two-gates-demand-opposite-proof-dialects-for-a-new-module.test.ts": 1337,
+    "test/two-instruments-over-one-resolver-agree.test.ts": 0,
     "test/two-readers-cannot-disagree-about-one-sha.test.ts": 1239,
     "test/two-rungs-in-one-tick-cannot-collide-on-one-branch-name.test.ts": 1687,
     "test/un-crediting-a-task-today-means-editing-a-merged-pr-body.test.ts": 1041,

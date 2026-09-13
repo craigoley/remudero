@@ -181,7 +181,7 @@ test("proofQueueAudit: byCause dedupes a task with two offending criteria of the
 
 test("proofQueueAudit: reports a count plus offending ids split by all three causes at once", () => {
   const refused = fixtureTask({ id: "W9-G1", acceptance: [{ claim: "a", proof: "grep: no in-path clause" }] });
-  const zeroMatch = fixtureTask({ id: "W9-G2", acceptance: [{ claim: "b", proof: "unit test: nope not this one" }] });
+  const zeroMatch = fixtureTask({ id: "W9-G2", acceptance: [{ claim: "b", proof: "unit test: nope.*not this one" }] });
   const pathGone = fixtureTask({ id: "W9-G3", acceptance: [{ claim: "c", proof: "grep: X in no/such/path.ts" }] });
   const clean = fixtureTask({ id: "W9-G4", acceptance: [{ claim: "d", proof: "unit test: test/proof-queue-audit.test.ts" }] });
   const report = proofQueueAudit([refused, zeroMatch, pathGone, clean], {
@@ -228,7 +228,10 @@ function dumpOf(...entries: Array<[subject: string, body?: string]>): string {
 // file's own source — a real, in-repo `grep -F` (the resolver under test) would otherwise find
 // its own proof text sitting in test/proof-queue-audit.test.ts and "resolve" it right back,
 // exactly the false-negative this fixture exists to rule out.
-const ZERO_MATCH_TITLE = ["a fixture title that will", "never match any real test", "kx4471q"].join(" ");
+// W1-T3513: carries `.*` deliberately. A zero-match title is only REPORTED when it looks like an
+// author's regex the dialect silently made literal; a plain prose title is a forward reference and
+// is no longer an offender, so a plain fixture here would exercise nothing.
+const ZERO_MATCH_TITLE = ["a fixture title that will.*", "never match any real test", "kx4471q"].join(" ");
 
 function buildFixturePlan(): { tasksPath: string; dir: string } {
   const dir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t1053-audit-"));

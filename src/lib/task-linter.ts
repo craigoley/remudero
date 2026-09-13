@@ -1333,6 +1333,27 @@ export function literalOnlyMetacharsIn(rawName: string): string[] {
   return [...new Set(rawName.match(LITERAL_ONLY_METACHARS_RE) ?? [])];
 }
 
+/**
+ * Is a name-filtered `unit test:` title that resolved to ZERO tests worth REPORTING, or is it the
+ * ordinary forward reference of a task whose test is not written yet?
+ *
+ * THE NARROWING IS THE WHOLE SIGNAL. Zero-match is the normal, correct state for an open task
+ * authored test-first, so reporting it unconditionally reports correct authoring at scale. What is
+ * actually diagnostic is a title carrying a regex metacharacter: this dialect ESCAPES the body and
+ * matches it as a LITERAL substring (`parseTestTarget`, review.ts), so such a title can only ever
+ * match itself — the author near-certainly meant a pattern. A multi-clause narrative is excluded
+ * because `proofResolvabilityViolations` already warns on that shape and would double-report it.
+ *
+ * Exported so {@link proofQueueAudit} (lib/proof-queue-audit.ts) asks the SAME question on the SAME
+ * population rather than carrying a second, stricter opinion of its own — measured 2026-09-13, the
+ * two instruments disagreed 96-to-0 over one shared resolver and 146 open tasks.
+ */
+export function zeroMatchTitleIsReportable(rawName: string): boolean {
+  // Not the high-precision case — see this function's own doc, and the module comment above.
+  if (literalOnlyMetacharsIn(rawName).length === 0) return false;
+  return !looksLikeScenarioNarrative(rawName);
+}
+
 /** Every name-filtered `unit test:` proof whose raw title resolves to ZERO tests (narrowed as
  *  above) or into MANY test files. WARN-only with no override ever: zero is legitimately a forward
  *  reference, so blocking would refuse correct authoring at scale. Silent absent the resolver. */
@@ -1350,9 +1371,8 @@ export function proofNameResolutionViolations(task: Task, opts: LintOpts = {}): 
     const claimHead = (c.claim ?? "").slice(0, 60);
     const head = rawName.slice(0, 70) + (rawName.length > 70 ? "…" : "");
     if (resolution.status === "absent") {
+      if (!zeroMatchTitleIsReportable(rawName)) return; // see the predicate's own doc
       const metachars = literalOnlyMetacharsIn(rawName);
-      if (!metachars.length) return; // not the high-precision case — see module comment
-      if (looksLikeScenarioNarrative(rawName)) return; // proof-dialect already warns on this shape
       violations.push({
         check: "proof-name-resolution",
         severity: "warn",
