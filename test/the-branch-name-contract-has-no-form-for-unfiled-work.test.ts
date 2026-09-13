@@ -30,7 +30,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -71,7 +71,7 @@ const { evaluateHeadIdentityGate, isFilingShapedSubject, hasValidTaskTrailer, is
 
 // ── Acceptance criterion 1: a head matching neither form is refused, naming both ────────────────
 
-test("W1-T3388: a head with no filed shape, no unfiled shape, and no trailer is refused", () => {
+test("W1-T3388 criterion 1 refuses an unidentified head and names both forms", () => {
   const result = evaluateHeadIdentityGate({
     headCommitMessage: "refactor(cli): unrelated tidy-up with no trailer\n",
     headRef: "refactor/tidy-up",
@@ -284,6 +284,17 @@ test("W1-T3388: the unfiled form named in the prompt is the SAME literal the gat
   const example = RUN_BRANCH_UNFILED_FORM.replace("<epochMs>", "1787425298842");
   assert.match(example, RUN_BRANCH_UNFILED_RE);
   assert.equal(isDispatchedRunBranch(example), true);
+});
+
+test("W1-T3388: the head-identity gate runs on every PR and ci-gate requires its exact check name", () => {
+  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "head-identity-gate.yml"), "utf8");
+  const aggregate = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci-gate.yml"), "utf8");
+  const packageJson = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
+
+  assert.match(workflow, /pull_request:/, "the standalone workflow registers for every PR event");
+  assert.match(workflow, /npm run --silent head-identity-gate:check/, "the workflow invokes the named npm entry");
+  assert.equal(packageJson.scripts["head-identity-gate:check"], "node --import tsx scripts/head-identity-gate.mjs");
+  assert.match(aggregate, /"head-identity-gate"/, "the aggregate waits for the exact workflow check name");
 });
 
 test("W1-T3388: BRANCH_NAME_CONTRACT_PART sits beside IMPLEMENT_REFUSAL_REPORT_CONTRACT, both non-empty", () => {

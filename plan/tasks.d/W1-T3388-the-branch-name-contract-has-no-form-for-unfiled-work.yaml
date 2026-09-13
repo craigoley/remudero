@@ -9,7 +9,7 @@
   risk: high
   origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
   plan_refs: ["W1-T3387", "W1-T984"]
-  files: [src/run-task.ts, scripts/head-identity-gate.mjs, test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts]
+  files: [src/run-task.ts, scripts/head-identity-gate.mjs, package.json, .github/workflows/head-identity-gate.yml, .github/workflows/ci-gate.yml, test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -39,6 +39,8 @@
 
   acceptance:
     - claim: "a head matching neither the run-branch shape nor a valid trailer is refused at open, naming both conforming forms"
-      proof: "unit test: test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts"
+      proof: "unit test: W1-T3388 criterion 1 refuses an unidentified head and names both forms"
     - claim: "the naming contract reaches the dispatched worker through its rendered prompt, not only through CLAUDE.md"
-      proof: "unit test: test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts"
+      proof: "unit test: W1-T3388: BRANCH_NAME_CONTRACT_PART names both conforming forms"
+    - claim: "the head-identity check runs on every pull request and is required by the aggregate gate"
+      proof: "unit test: W1-T3388: the head-identity gate runs on every PR and ci-gate requires its exact check name"
