@@ -1,0 +1,22 @@
+id: fb-1789304804534-e29e68
+ts: 2026-09-13T13:06:44.534Z
+raw: "Durability defect: PR #5382 merged feedback#fb-1789282068794-2f0b7d with
+  status grilling, but feedback-landing PR #5383 merged commit 61c494f and
+  changed that same record back to status new. The bridge landed a stale local
+  copy as authoritative, which erased the triage transition and caused POST
+  /v1/feedback replyTo to refuse. Build one scoped repair: landing must
+  rebase/merge against current origin state and make feedback status monotonic
+  or compare-and-set; stale capture content must never overwrite a newer
+  transition. Include a deterministic concurrent fixture: source A has new,
+  source B advances grilling, then A attempts landing; final origin must retain
+  grilling and answer metadata. Also prove a rejected stale landing is surfaced
+  and does not silently auto-merge."
+attachments: []
+origin: ui
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: feedback-landing-stale-regression-20260913
+thread_id: null
