@@ -82,7 +82,7 @@ function collectLedger(): { log: (step: string, extra?: Record<string, unknown>)
 
 // ── Criterion 1: a stranded worktree with no live owner is reclaimed LATER, not on the same tick ──
 
-test("a review worktree stranded by a kill, past the grace window, with nothing unpushed, is reclaimed", () => {
+test("a stranded review worktree is swept by a later tick — past the grace window, with nothing unpushed, it is reclaimed", () => {
   const u = reviewWorktreeUniverse();
   try {
     const sha = headSha(u.repoDir);
@@ -124,7 +124,7 @@ test("the SAME tick that just created the worktree does not touch it — 'swept 
 
 // ── Criterion 2: unpushed commits refuse; an unreadable remote refuses too ─────────────────────
 
-test("a review worktree holding a commit absent from its remote is never eligible — the sweep never removes it", () => {
+test("a review worktree with unpushed commits is never eligible — holding a commit absent from its remote, the sweep never removes it", () => {
   const u = reviewWorktreeUniverse();
   try {
     const sha = headSha(u.repoDir);
@@ -230,7 +230,7 @@ test("every sweep outcome ledgers its own decision reason, whether reclaimed or 
 
 // ── Criterion 4: coverage/ and rmd-* temp directories are never candidates at all ──────────────
 
-test("the sweep leaves coverage and rmd-temp directories alone — closed to review worktrees by construction", () => {
+test("the sweep leaves coverage and temp directories alone — a real coverage/ and rmd-temp dir both untouched, closed to review worktrees by construction", () => {
   const u = reviewWorktreeUniverse();
   try {
     const sha = headSha(u.repoDir);
