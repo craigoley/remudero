@@ -16,6 +16,7 @@
  * docs/forensics/panel-graph.md
  */
 
+import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, join, relative } from "node:path";
@@ -1033,6 +1034,9 @@ function classifyAllProposals(
   // still looks READY (a drifted write) — re-derived from the ledger on every request,
   // never trusted from the registry's own state.
   const ledgerLines = readLedgerLines(deps.ledgerPath);
+  // W1-T3518: the last adoption scan's own output. Same posture as the ledger read above — read
+  // ONCE per request here, re-derived every pass, never cached across requests.
+  const adoptionLatest = readAdoptionLatest(adoptionLatestPath(join(deps.inboxRoot, "state")));
 
   const classifications = proposals.map((proposal) =>
     classifyProposal(proposal, drafts[proposal.id], {
@@ -1043,6 +1047,10 @@ function classifyAllProposals(
       openProposalIds: new Set([...allIds].filter((id) => id !== proposal.id)),
       isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
       isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+      // W1-T3518: the record is read ONCE per request above and this predicate closes over it.
+      // An absent or unparseable record reads as undefined, so NO proposal retires — the
+      // direction a missing measurement must always fail.
+      adoptionFindingGone: (id) => adoptionFindingGone(id, adoptionLatest),
       draftSpawnedAt: (id) => inflight[id],
     }),
   );

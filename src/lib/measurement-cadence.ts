@@ -335,6 +335,15 @@ export interface RevertRecallCadenceResult extends MeasurementCadenceVerbStatus 
 
 export type AdoptionShape = "symbol-no-caller" | "field-no-writer" | "script-no-invoker" | "gate-no-subject";
 
+/** Every {@link AdoptionShape}, as a value — {@link adoptionShapeOf} validates an id's shape
+ *  segment against this rather than trusting its regex alone. */
+export const ADOPTION_SHAPES: readonly AdoptionShape[] = [
+  "symbol-no-caller",
+  "field-no-writer",
+  "script-no-invoker",
+  "gate-no-subject",
+];
+
 /** One mechanism this report could not find an adopter for. */
 export interface AdoptionFinding {
   shape: AdoptionShape;
@@ -1130,6 +1139,100 @@ export function adoptionProposalId(finding: Pick<AdoptionFinding, "shape" | "mec
   return `adoption:${finding.shape}:${finding.definedIn}:${finding.mechanism}`;
 }
 
+/** The last adoption scan's own output, as {@link adoptionLatestRecord} renders it — the artifact
+ *  {@link classifyProposal} reads to tell a finding that is GONE from one it merely did not mint. */
+export interface AdoptionLatest {
+  /** ISO timestamp of the scan that produced this, so a stale file is visible rather than trusted. */
+  generatedAt: string;
+  /** Every finding's derived proposal id, UNFILTERED by the mint ceiling — a superset of what was
+   *  ever minted, which is the only safe direction: absence here means the finding is really gone,
+   *  never that this fire simply declined to mint it. */
+  proposalIds: string[];
+  /** The shapes that produced AT LEAST ONE finding this scan. THE GUARD LIVES HERE (W1-T3518):
+   *  a scan over a broken or partial checkout reports nothing, and a reader that trusted it would
+   *  retire the ENTIRE backlog in one tick. A shape absent from this list is a shape this scan
+   *  cannot be said to have measured, so nothing of that shape may retire against it.
+   *
+   *  IT IS A MINIMUM RESULT COUNT OF ONE, NOT A TUNED THRESHOLD — derived from the scan's own
+   *  output rather than configured, so there is no floor to drift, argue about, or raise. */
+  shapesObserved: AdoptionShape[];
+}
+
+/** The record a fired scan writes. `undefined` when the static scans did not run at all
+ *  ({@link runAdoptionReport} skips shapes 1-3 with no `checkoutDir` "rather than faked clean"),
+ *  because a record built from a scan that never looked would name zero findings and read as
+ *  "every mechanism is adopted". */
+export function adoptionLatestRecord(
+  report: AdoptionReportResult,
+  generatedAt: string,
+  ranStaticScans: boolean,
+): AdoptionLatest | undefined {
+  if (!ranStaticScans) return undefined;
+  const shapes = new Set<AdoptionShape>();
+  for (const f of report.findings) shapes.add(f.shape);
+  return {
+    generatedAt,
+    proposalIds: report.findings.map((f) => adoptionProposalId(f)),
+    shapesObserved: [...shapes],
+  };
+}
+
+/** Does `latest` show this adoption proposal's finding is GONE — adopted, retired, or fixed by a
+ *  scanner correction — rather than merely unminted?
+ *
+ *  MEASURED 2026-09-13: 15 of 108 open adoption proposals named a finding the live scan no longer
+ *  reported at all. Every `scripts/lib/*.mjs` one among them was minted while the scan could not
+ *  see `scripts/` as an invoker surface; W1-T3383 fixed the scanner and nothing told the backlog.
+ *
+ *  REFUSES ON IGNORANCE, in both directions: an id whose shape this scan did not observe returns
+ *  false, and so does one whose shape it cannot parse. */
+export function adoptionFindingGone(proposalId: string, latest: AdoptionLatest | undefined): boolean {
+  if (latest === undefined) return false;
+  const shape = adoptionShapeOf(proposalId);
+  if (shape === undefined || !latest.shapesObserved.includes(shape)) return false;
+  return !latest.proposalIds.includes(proposalId);
+}
+
+/** The shape segment of an `adoption:<shape>:<definedIn>:<mechanism>` id — `undefined` for any id
+ *  this module did not mint, so a foreign id can never be read as a retirable finding. */
+export function adoptionShapeOf(proposalId: string): AdoptionShape | undefined {
+  const shape = /^adoption:([a-z0-9-]+):/.exec(proposalId)?.[1];
+  return ADOPTION_SHAPES.includes(shape as AdoptionShape) ? (shape as AdoptionShape) : undefined;
+}
+
+/** `<stateDir>/adoption-latest.json` — a STABLE path overwritten each fire, never an accumulating
+ *  pile, exactly as `board-review-latest.json` is. The artifact answers "what did the last scan
+ *  see"; history stays in the cadence ledger row. */
+export function adoptionLatestPath(stateDir: string): string {
+  return join(stateDir, "adoption-latest.json");
+}
+
+/** Reads {@link adoptionLatestPath}'s record, or `undefined` when it is absent, unreadable or does
+ *  not parse as one. NEVER THROWS AND NEVER GUESSES: every failure is the same "no opinion" that
+ *  {@link adoptionFindingGone} turns into "nothing retires", because the alternative — treating an
+ *  unreadable measurement as an empty finding set — retires the entire backlog at once. */
+export function readAdoptionLatest(path: string): AdoptionLatest | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    // DELIBERATE, and the erasure is the correct answer here: absent, unreadable and malformed all
+    // mean the same thing to this reader — there is no measurement to retire anything against. The
+    // distinction would be actionable only if a present-but-corrupt record deserved a louder fate
+    // than a missing one, and it does not: both must yield "no opinion", because the alternative is
+    // retiring the entire adoption backlog on a file that could not be read.
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const r = parsed as Partial<AdoptionLatest>;
+  if (typeof r.generatedAt !== "string") return undefined;
+  if (!Array.isArray(r.proposalIds) || !r.proposalIds.every((x) => typeof x === "string")) return undefined;
+  if (!Array.isArray(r.shapesObserved)) return undefined;
+  const shapes = r.shapesObserved.filter((x): x is AdoptionShape => ADOPTION_SHAPES.includes(x as AdoptionShape));
+  if (shapes.length !== r.shapesObserved.length) return undefined; // an unknown shape means a record this build cannot read
+  return { generatedAt: r.generatedAt, proposalIds: r.proposalIds, shapesObserved: shapes };
+}
+
 /** One adoption-mint pass's outcome, named on the daemon's cadence ledger row. */
 export interface AdoptionMintCadenceResult {
   /** `"clear"`: no mintable finding this fire — a measured absence, never a bare zero.
@@ -1849,7 +1952,11 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   // what this run actually measured; only the WRITES below (the proposal, the ledger rows) are
   // gated on `opts.escalate`, matching this file's own "the only writes are gated" invariant.
   const driftBands = opts.driftBands ?? DEFAULT_DRIFT_BANDS;
-  const driftWindow = opts.driftWindow ?? (opts.now ?? new Date()).toISOString().slice(0, 10);
+  // ONE resolved clock read for this whole run (W1-T3518). Previously `driftWindow` read the wall
+  // clock here and the adoption record read it again a few hundred lines below, so two reads in one
+  // run could straddle midnight and disagree about the day. Hoisted rather than duplicated.
+  const nowDate = opts.now ?? new Date();
+  const driftWindow = opts.driftWindow ?? nowDate.toISOString().slice(0, 10);
   const driftClassification = classifyVerdictDrift(vReport, driftBands);
   let verdictEscalatedProposalIds: string[] = [];
   if (opts.escalate) {
@@ -1981,6 +2088,29 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
         mintedProposalIds: [],
         excludedMechanisms: [],
       };
+
+  // W1-T3518: record what this scan SAW, so a proposal whose finding is gone can retire itself.
+  //
+  // GATED ON `escalate`, like every other write in this module. An earlier draft of this was not,
+  // reasoning that a measurement is not an inbox write and a dry run's finding set is as true as a
+  // firing one's. That was wrong, and test/adoption-report-has-a-producer.test.ts is the ratified
+  // statement of why: `escalate: false` means the verb "writes nothing and files nothing" and
+  // "leaves the checkout and state dir byte-for-byte untouched". A report run must stay a report run.
+  //
+  // ALSO gated on the static scans having run: `runAdoptionReport` skips shapes 1-3 without a
+  // `checkoutDir`, and a record built from a scan that never looked would name zero findings and
+  // read as "everything is adopted".
+  const adoptionLatest = opts.escalate
+    ? adoptionLatestRecord(adoptionReport, nowDate.toISOString(), opts.checkoutDir !== undefined)
+    : undefined;
+  if (adoptionLatest) {
+    try {
+      writeFileSync(adoptionLatestPath(opts.stateDir), JSON.stringify(adoptionLatest, null, 2) + "\n");
+    } catch {
+      // A report, never a gate (this module's own posture): an unwritable state dir costs the
+      // self-retirement signal until the next fire, never the cadence tick that hosts it.
+    }
+  }
 
   // ── the board-review rung (W1-T2304): reads the whole open board, never one PR ───────────────
   const boardReview = opts.boardReview
