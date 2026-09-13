@@ -102,15 +102,43 @@ export function evaluateHeadIdentityGate({ headCommitMessage, headRef }) {
 }
 
 /**
- * The worktree's real HEAD commit message. Best-effort: `undefined` on any git failure rather than
- * throwing, matching {@link "./credit-surface-gate.mjs".readHeadCommitMessage}'s own contract at
+ * The newest message an AUTHOR wrote on this head. Best-effort: `undefined` on any git failure rather
+ * than throwing, matching {@link "./credit-surface-gate.mjs".readHeadCommitMessage}'s own contract at
  * the analogous call site.
+ *
+ * THE FLAGS ARE THE WHOLE FIX, and this is the second half of a two-part defect.
+ *
+ * The first half was the checkout: a `pull_request` event lands on GitHub's synthetic merge commit, so
+ * a bare `git log -1` read "Merge <sha> into <sha>" and neither the filing-subject nor the trailer route
+ * could match. Pinning the checkout to the event's head sha fixed that (merged 11:48:34Z).
+ *
+ * The second half survives it. "Update branch" — the GitHub button, or `PUT .../update-branch` — merges
+ * base into the PR branch, so the head becomes `Merge branch 'main' into <branch>`, equally unable to
+ * carry a subject or trailer. Three PRs (#5342, #5367, #5372) were refused at 12:35Z, forty-seven
+ * minutes AFTER the checkout fix landed, purely because their branches had been updated. A gate that a
+ * routine GitHub button turns red is one nobody can satisfy.
+ *
+ * BOTH FLAGS ARE LOAD-BEARING, and `--no-merges` ALONE IS A HOLE — measured on the branch this was
+ * written against, where the three queries return three different commits:
+ *
+ *   git log -1                            -> "Merge branch 'main' into chore/file-w1-t3512-fast-lane"
+ *   git log -1 --no-merges                -> "chore(feedback): land pending filings (#5380)"  <- MAIN's
+ *   git log -1 --first-parent --no-merges -> "chore(plan): file the ten source-only gates ..." <- ours
+ *
+ * Without `--first-parent`, git walks BOTH parents in date order, so after an update it returns a commit
+ * off MAIN — letting an unrelated PR's subject or trailer satisfy this gate for a head that declared
+ * nothing. `--first-parent` confines the walk to the branch's own line.
+ *
+ * A merge commit that genuinely carries a trailer is the deliberate trade: it is not read, because
+ * admitting one would re-open the synthetic-merge hole the first half closed.
  * @param {string} worktreePath
  */
 export function readHeadCommitMessage(worktreePath) {
-  const result = git(["log", "-1", "--format=%B"], { cwd: worktreePath });
+  const result = git(["log", "-1", "--first-parent", "--no-merges", "--format=%B"], { cwd: worktreePath });
   if (result.error || result.status !== 0) return undefined;
-  return result.stdout;
+  // A branch of nothing but merges yields an empty message rather than a git failure; `undefined` keeps
+  // that indistinguishable from an unreadable worktree, which both mean "no identity declared here".
+  return result.stdout.trim() === "" ? undefined : result.stdout;
 }
 
 /**
