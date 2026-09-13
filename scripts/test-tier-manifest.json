@@ -605,6 +605,7 @@
     "test/event-driven-semantic-review.test.ts": 6161,
     "test/event-review-backlog-drain.test.ts": 1515,
     "test/event-review-clock-all-phases.test.ts": 856,
+    "test/every-escalation-opened-today-was-non-conforming.test.ts": 0,
     "test/every-inbox-message-meets-the-standard.test.ts": 1051,
     "test/every-message-names-one-declared-sender.test.ts": 263,
     "test/every-pr-check-is-required-or-advisory.test.ts": 679,
