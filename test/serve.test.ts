@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { askTypeFromEscalationTitle, draftedTasksHtml } from "../src/lib/console-shell-script.js";
+import { classifyAskRecordItem } from "../src/lib/ask-classification.js";
 // W1-T2731: the shell's pure helpers are a real module now; these sandboxes take them from it
 // (via the SAME emitter the shell uses) instead of regexing them out of the rendered HTML.
 import { renderConsoleShellScript } from "../src/lib/console-shell-script.js";
@@ -988,7 +989,7 @@ test("the panel data routes are header-only (bare navigation 401s) — the shell
 
 test("the five operator-priority sections exist, in order, top to bottom; the old flat file-order table is GONE", () => {
   const html = renderShellHtml();
-  const order = ["id=\"now\"", "id=\"needs-me\"", "id=\"up-next\"", "id=\"recent\"", "id=\"rest\""];
+  const order = ["id=\"now\"", "id=\"inbox\"", "id=\"up-next\"", "id=\"recent\"", "id=\"rest\""];
   const indices = order.map((needle) => html.indexOf(needle));
   for (const [i, idx] of indices.entries()) assert.ok(idx >= 0, `missing section marker ${order[i]}`);
   for (let i = 1; i < indices.length; i++) {
@@ -1276,8 +1277,8 @@ test("W1-T193: a READY card renders each drafted task's id AND title (never just
 test("W1-T193: the APPROVE click handler ARMS on the first click (data-confirming) and only POSTs /v1/inbox/approve on a second click, mirroring STOP's arm-then-confirm exactly", () => {
   const html = renderShellHtml();
   assert.match(html, /class="proposal-approve-btn"/);
-  const clickHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(clickHandler, "no needs-me-list click handler found");
+  const clickHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(clickHandler, "no inbox-list click handler found");
   assert.match(clickHandler, /approveBtn\.dataset\.confirming !== "true"/, "first click must only ARM, never act");
   assert.match(clickHandler, /setTimeout\(\(\) => resetApproveButton\(approveBtn\), 8000\)/, "must reset after 8s, same window as STOP");
   assert.match(clickHandler, /postJson\("\/v1\/inbox\/approve", \{ proposalId \}\)/, "the second click posts to the write-token API");
@@ -1285,8 +1286,8 @@ test("W1-T193: the APPROVE click handler ARMS on the first click (data-confirmin
 
 test("W1-T193: REFRAME submits the textarea's value VERBATIM to POST /v1/inbox/reframe", () => {
   const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler, "no needs-me-list submit handler found");
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler, "no inbox-list submit handler found");
   assert.match(submitHandler, /needs-me-reframe/);
   assert.match(submitHandler, /postJson\("\/v1\/inbox\/reframe", \{ proposalId, feedback \}\)/);
 });
@@ -1309,8 +1310,8 @@ test("W1-T350: the Answer control renders UNARMED, with a 'File raw' escape one 
 
 test("W1-T350: the FIRST Answer submit PREVIEWS the expansion (POST /v1/feedback/preview) before anything files", () => {
   const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(submitHandler, "no needs-me-list submit handler found");
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler, "no inbox-list submit handler found");
   assert.match(submitHandler, /needs-me-answer-submit/);
   // W1-T2301: this call now opts OUT of postJson's automatic ack ({ suppressAck: true }) -- the
   // preview's own "nothing is filed yet" ack must never paint on the fail-open leg that files
@@ -1325,7 +1326,7 @@ test("W1-T350: the FIRST Answer submit PREVIEWS the expansion (POST /v1/feedback
 
 test("W1-T350: a SECOND submit while armed files WITH the previewed expansion, reading its claim back in the button label — never a bare 'Confirm?'", () => {
   const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler);
   assert.match(submitHandler, /submitBtn\.dataset\.confirming === "true"/, "a second submit must be distinguished from the first");
   assert.match(
@@ -1344,7 +1345,7 @@ test("W1-T350: a SECOND submit while armed files WITH the previewed expansion, r
 
 test("W1-T2206: the preview call renders a visible PENDING state (disabled + a plain-language label) for its whole duration, and clears it on EVERY exit — expansion, no expansion, and a rejected preview", () => {
   const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler);
   // Entered BEFORE the preview fetch: the button must go pending before the model call starts,
   // not after it settles.
@@ -1367,7 +1368,7 @@ test("W1-T2206: the preview call renders a visible PENDING state (disabled + a p
 
 test("W1-T2206: a second submit for the SAME replyTo while its preview is still in flight starts no second preview and files nothing, checked BEFORE the armed/confirm branch — while a different replyTo stays independently submittable", () => {
   const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler);
   const guardIdx = submitHandler.indexOf("answerPending.has(replyTo)");
   const confirmingIdx = submitHandler.indexOf('submitBtn.dataset.confirming === "true"');
@@ -1383,7 +1384,7 @@ test("W1-T2206: a second submit for the SAME replyTo while its preview is still 
 
 test("W1-T2206: the armed control states plainly that NOTHING IS FILED YET and the NEXT click files -- the exact ambiguity the operator hit", () => {
   const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler);
   assert.match(
     submitHandler,
@@ -1394,7 +1395,7 @@ test("W1-T2206: the armed control states plainly that NOTHING IS FILED YET and t
 
 test("W1-T2206: the fail-open leg (no expansion) gets its OWN signal, distinct from the armed vocabulary", () => {
   const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler);
   const noExpansionBranch = submitHandler.match(/if \(!expansion\) \{([\s\S]*?)return;\s*\n\s*\}/)?.[1];
   assert.ok(noExpansionBranch, "no `if (!expansion)` fallback branch found");
@@ -1404,7 +1405,7 @@ test("W1-T2206: the fail-open leg (no expansion) gets its OWN signal, distinct f
 
 test("W1-T2206: the 8s arm window (too short to read a four-section expansion) is widened, AND a lapsed arm is made VISIBLE so it is never presented as a fresh, un-clicked 'Answer'", () => {
   const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler);
   assert.match(
     submitHandler,
@@ -1419,7 +1420,7 @@ test("W1-T2206: the 8s arm window (too short to read a four-section expansion) i
 
 test("W1-T350: an expander failure/outage (nothing to show) leaves the FIRST click filing the plain submission, unchanged from before this task", () => {
   const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler);
   const noExpansionBranch = submitHandler.match(/if \(!expansion\) \{([\s\S]*?)return;\s*\n\s*\}/)?.[1];
   assert.ok(noExpansionBranch, "no `if (!expansion)` fallback branch found");
@@ -1443,7 +1444,7 @@ test("W1-T2302: a per-replyTo submissionKey map + mint function exist, and the k
     /function mintSubmissionKey\(\) \{[\s\S]*?randomUUID[\s\S]*?\n  \}/,
     "must mint an opaque per-submission id, never derived from the answer text",
   );
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler);
   const mintIdx = submitHandler.indexOf("answerSubmissionKeys.set(replyTo, mintSubmissionKey())");
   const previewIdx = submitHandler.indexOf('postJson("/v1/feedback/preview"');
@@ -1453,7 +1454,7 @@ test("W1-T2302: a per-replyTo submissionKey map + mint function exist, and the k
 
 test("W1-T2302: the fail-open leg sends the minted submissionKey on the filing POST (acceptance 4)", () => {
   const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler);
   const noExpansionBranch = submitHandler.match(/if \(!expansion\) \{([\s\S]*?)return;\s*\n\s*\}/)?.[1];
   assert.ok(noExpansionBranch);
@@ -1463,7 +1464,7 @@ test("W1-T2302: the fail-open leg sends the minted submissionKey on the filing P
 
 test("W1-T2302: the confirm leg sends the SAME per-replyTo submissionKey on the filing POST, reading it back rather than minting a fresh one (acceptance 4)", () => {
   const html = renderShellHtml();
-  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  const submitHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler);
   assert.match(
     submitHandler,
@@ -1474,8 +1475,8 @@ test("W1-T2302: the confirm leg sends the SAME per-replyTo submissionKey on the 
 
 test("W1-T350: 'File raw' ALWAYS skips the preview and files immediately — never armed, never a second click", () => {
   const html = renderShellHtml();
-  const clickHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
-  assert.ok(clickHandler, "no needs-me-list click handler found");
+  const clickHandler = html.match(/getElementById\("inbox-list"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(clickHandler, "no inbox-list click handler found");
   assert.match(clickHandler, /needs-me-answer-raw/);
   const rawBranch = clickHandler.match(/if \(rawBtn\) \{([\s\S]*?)\n\s*\} else if/)?.[1];
   assert.ok(rawBranch, "no rawBtn branch found");
@@ -1483,13 +1484,36 @@ test("W1-T350: 'File raw' ALWAYS skips the preview and files immediately — nev
   assert.match(rawBranch, /postJson\("\/v1\/feedback", \{ text: answer, replyTo \}\)/, "File raw files WITHOUT an expansion, exactly today's pre-W1-T350 shape");
 });
 
-test("W1-T193: a DRAFTING proposal renders a distinct state carrying its spawn timestamp, never nothing", () => {
+test("W1-T193: needsMeDraftingHtml still names the DRAFTING state and its spawn timestamp (kept for a future RECORD-side renderer)", () => {
   const html = renderShellHtml();
   const draftingFn = html.match(/function needsMeDraftingHtml\(p\) \{[\s\S]*?\n  \}/)?.[0];
   assert.ok(draftingFn, "needsMeDraftingHtml must exist");
   assert.match(draftingFn, /DRAFTING/);
   assert.match(draftingFn, /data-started="\$\{escapeHtml\(p\.spawnedAt\)\}"/, "must carry the real spawn timestamp, live-ticking off the SAME .elapsed mechanism NOW uses");
   assert.match(html, /renderNeedsMe\(tasks, latestFeedbackEntries, latestInboxReady, latestInboxDrafting\)/);
+});
+
+// W1-T3395 (ratifies W1-T3186 (ii), the criterion-3 cross-section falsifier): a DRAFTING
+// proposal already has an operator decision behind it (rmd approve already ran) --
+// classifyAskRecordItem's proposal arm classifies state "drafting" RECORD, not ASK, so it must
+// be ABSENT from INBOX now -- the opposite of the "never nothing" claim the superseded test
+// above once made about this exact row kind. This is the dissolved behavior, not a rename.
+test("W1-T3395: a DRAFTING proposal no longer reaches INBOX -- classifyAskRecordItem's RECORD verdict is honored, not just declared", () => {
+  const html = renderShellHtml();
+  const askRowSrc = html.match(/function askRow\(classifierItem, key, html, extra\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(askRowSrc, "askRow must exist in the shell's inline script");
+  const fn = new Function(
+    "classifyAskRecordItem",
+    `${askRowSrc}\nreturn askRow({ kind: "proposal", state: "drafting" }, "inbox-drafting:P1", "drafting-html", { ts: "2026-01-01T00:00:00.000Z" });`,
+  ) as (classify: typeof classifyAskRecordItem) => unknown;
+  assert.equal(fn(classifyAskRecordItem), null, "a drafting-state proposal must never become an ask row");
+  // Contrast: a READY proposal, the same call shape, DOES render -- proving the exclusion above
+  // is `classifyAskRecordItem`'s own verdict, not askRow silently rejecting every proposal.
+  const readyFn = new Function(
+    "classifyAskRecordItem",
+    `${askRowSrc}\nreturn askRow({ kind: "proposal", state: "ready" }, "inbox:P1", "ready-html");`,
+  ) as (classify: typeof classifyAskRecordItem) => unknown;
+  assert.notEqual(readyFn(classifyAskRecordItem), null, "a ready-state proposal must still become an ask row");
 });
 
 // ── W1-T182: the row template proven over its ACTUAL RENDERED OUTPUT, not just its source

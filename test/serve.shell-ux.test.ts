@@ -375,7 +375,7 @@ test("W1-T222: a read-only bookmark's inline card renders NO write affordance (M
     async function markHandledPresence(token: string): Promise<boolean> {
       const page = await openShell(base, token);
       try {
-        await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("needs a decision"));
+        await page.waitForFunction(() => (document.getElementById("inbox-list")?.textContent ?? "").includes("needs a decision"));
         // W1-T222 flake fix: the write-affordance is gated on the boot `/v1/auth/scope` probe,
         // which resolves asynchronously. A card expanded BEFORE it resolves renders against
         // hasWriteScope=false, so the write token's button was intermittently missing -- flaking
@@ -383,10 +383,10 @@ test("W1-T222: a read-only bookmark's inline card renders NO write affordance (M
         // unrelated PRs. Wait for the probe-resolved marker so the expand always renders against
         // the settled scope; the button state is then deterministic, no fixed timeout needed.
         await page.waitForFunction(() => document.body.dataset.writeScopeResolved === "1");
-        await reachSection(page, "needs-me"); // the row about to be clicked lives in "needs-me"
-        await page.click('#needs-me-list li[data-task-id="W1-T9"] .task-id');
+        await reachSection(page, "inbox"); // the row about to be clicked lives in "inbox"
+        await page.click('#inbox-list li[data-task-id="W1-T9"] .task-id');
         await page.waitForFunction(
-          () => document.querySelector('#needs-me-list li[data-task-id="W1-T9"] .row-chevron')?.getAttribute("aria-expanded") === "true",
+          () => document.querySelector('#inbox-list li[data-task-id="W1-T9"] .row-chevron')?.getAttribute("aria-expanded") === "true",
         );
         await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").length > 0);
         // TEARDOWN RACE FIX: `return await`, not a bare `return page.evaluate(...)`. Without the
@@ -421,8 +421,8 @@ test("W1-T223: an empty section defaults collapsed with an honest summary; a col
         nowExpanded: document.getElementById("now-toggle")?.getAttribute("aria-expanded"),
         nowBodyHidden: (document.getElementById("now-body") as HTMLElement)?.hidden,
         nowSummary: document.getElementById("now-summary")?.textContent,
-        needsMeExpanded: document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded"),
-        needsMeSummary: document.getElementById("needs-me-summary")?.textContent,
+        needsMeExpanded: document.getElementById("inbox-toggle")?.getAttribute("aria-expanded"),
+        needsMeSummary: document.getElementById("inbox-summary")?.textContent,
       }));
       assert.equal(state.nowExpanded, "false", "an empty section defaults COLLAPSED");
       assert.equal(state.nowBodyHidden, true, "collapsed means its rows are actually hidden");
@@ -463,11 +463,11 @@ test("W1-T223: NEEDS ME auto-expands by default when non-empty (the same collaps
   await withShell(deps, async (base) => {
     const page = await openShell(base);
     try {
-      await page.waitForFunction(() => (document.getElementById("needs-me-summary")?.textContent ?? "") !== "…");
+      await page.waitForFunction(() => (document.getElementById("inbox-summary")?.textContent ?? "") !== "…");
       const state = await page.evaluate(() => ({
-        expanded: document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded"),
-        bodyHidden: (document.getElementById("needs-me-body") as HTMLElement)?.hidden,
-        summary: document.getElementById("needs-me-summary")?.textContent,
+        expanded: document.getElementById("inbox-toggle")?.getAttribute("aria-expanded"),
+        bodyHidden: (document.getElementById("inbox-body") as HTMLElement)?.hidden,
+        summary: document.getElementById("inbox-summary")?.textContent,
       }));
       assert.equal(state.expanded, "true", "NEEDS ME auto-expands when non-empty");
       assert.equal(state.bodyHidden, false);
@@ -681,12 +681,12 @@ test("console tab bar: exactly five tabs (Decisions, Queue, Now, Plan, Feed), pi
       // reached after the change"), but each is visible on EXACTLY the one tab that owns it.
       const isVisible = (id: string) => page.$eval(id, (el) => (el as HTMLElement).offsetParent !== null);
       const inDocument = (id: string) => page.$eval(id, (el) => document.body.contains(el));
-      const ALL_SECTIONS = ["#needs-me", "#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#run-history", "#more"];
+      const ALL_SECTIONS = ["#inbox", "#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#run-history", "#more"];
       for (const sel of ALL_SECTIONS) assert.equal(await inDocument(sel), true, `${sel} missing from the document`);
 
-      // Decisions is the default active tab -- only its own section (needs-me) is visible.
+      // Decisions is the default active tab -- only its own section (inbox) is visible.
       await page.click("#tab-decisions");
-      assert.equal(await isVisible("#needs-me"), true);
+      assert.equal(await isVisible("#inbox"), true);
       for (const sel of ["#pr-queue", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#run-history", "#more"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Decisions is active`);
       }
@@ -694,21 +694,21 @@ test("console tab bar: exactly five tabs (Decisions, Queue, Now, Plan, Feed), pi
       // Queue owns the whole live open-PR cockpit and no task/firehose section.
       await page.click("#tab-queue");
       assert.equal(await isVisible("#pr-queue"), true);
-      for (const sel of ["#needs-me", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#run-history", "#more"]) {
+      for (const sel of ["#inbox", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#run-history", "#more"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Queue is active`);
       }
 
       // Now owns now/up-next/controls.
       await page.click("#tab-now");
       for (const sel of ["#now", "#up-next", "#controls"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Now tab`);
-      for (const sel of ["#needs-me", "#pr-queue", "#accepted", "#recent", "#rest", "#run-history", "#more"]) {
+      for (const sel of ["#inbox", "#pr-queue", "#accepted", "#recent", "#rest", "#run-history", "#more"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Now is active`);
       }
 
       // Feed owns accepted/recent/rest/run-history/more (recap is content-gated separately, not asserted here).
       await page.click("#tab-feed");
       for (const sel of ["#accepted", "#recent", "#rest", "#run-history", "#more"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Feed tab`);
-      for (const sel of ["#needs-me", "#pr-queue", "#now", "#up-next", "#controls"]) {
+      for (const sel of ["#inbox", "#pr-queue", "#now", "#up-next", "#controls"]) {
         assert.equal(await isVisible(sel), false, `${sel} must be hidden while Feed is active`);
       }
     } finally {
@@ -717,18 +717,18 @@ test("console tab bar: exactly five tabs (Decisions, Queue, Now, Plan, Feed), pi
   });
 });
 
-// ── W1-T336: the needs-me browser-tab badge fires regardless of which tab is active ─────────
+// ── W1-T336: the inbox browser-tab badge fires regardless of which tab is active ─────────
 // The alert this badge exists for must not depend on already looking at Decisions -- an escalation
 // landing while the operator sits on Now (or any other tab) must still flip the badge.
 
-test("the needs-me browser-tab badge still fires while Decisions is NOT the active tab", async () => {
+test("the inbox browser-tab badge still fires while Decisions is NOT the active tab", async () => {
   const root = tmpRoot();
   const deps = fixtureDeps(root);
   await withShell(deps, async (base) => {
     const page = await openShell(base);
     try {
       const baseTitle = await page.title();
-      assert.equal(baseTitle.startsWith("("), false, "no needs-me items yet -- no badge prefix");
+      assert.equal(baseTitle.startsWith("("), false, "no inbox items yet -- no badge prefix");
 
       await page.click("#tab-now");
       assert.equal(await page.$eval("#tab-now", (el) => el.getAttribute("aria-selected")), "true");
@@ -795,8 +795,8 @@ test("W1-T336: reachSection activates the real owning tab for a real section, an
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
     try {
-      // "needs-me" lives under Decisions, the default active tab -- a genuine no-op, no click.
-      await reachSection(page, "needs-me");
+      // "inbox" lives under Decisions, the default active tab -- a genuine no-op, no click.
+      await reachSection(page, "inbox");
       assert.equal(await page.$eval("#tab-decisions", (el) => el.getAttribute("aria-selected")), "true");
       for (const tab of ["tab-queue", "tab-now", "tab-plan", "tab-feed"]) {
         assert.equal(await page.$eval(`#${tab}`, (el) => el.getAttribute("aria-selected")), "false");

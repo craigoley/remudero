@@ -595,21 +595,21 @@ test("W1-T313 criterion 3: a proposed entry WITH a cached summary renders the su
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base);
     try {
-      await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("Simplify the console's wording"));
+      await page.waitForFunction(() => (document.getElementById("inbox-list")?.textContent ?? "").includes("Simplify the console's wording"));
 
-      const visibleText = await page.locator("#needs-me-list").innerText();
+      const visibleText = await page.locator("#inbox-list").innerText();
       // The falsifier: a card whose FIRST text is the raw payload. The raw marker text is not
       // part of the VISIBLE text while the <details> stays collapsed.
       assert.doesNotMatch(visibleText, /RAW-PAYLOAD-MARKER/, "the raw payload is not visible text while <details> is collapsed");
       assert.match(visibleText, /Simplify the console's wording/, "the summary headline is visible");
 
       // But the raw payload is still THERE, byte-identical, one click away.
-      const html = await page.locator("#needs-me-list").innerHTML();
+      const html = await page.locator("#inbox-list").innerHTML();
       assert.match(html, /RAW-PAYLOAD-MARKER/, "the raw payload is present in the DOM, just collapsed");
       assert.match(html, /<details class="decision-raw">/, "behind an expandable Details");
 
-      await page.click(`#needs-me-list details.decision-raw summary`);
-      const afterExpand = await page.locator("#needs-me-list").innerText();
+      await page.click(`#inbox-list details.decision-raw summary`);
+      const afterExpand = await page.locator("#inbox-list").innerText();
       assert.match(afterExpand, /RAW-PAYLOAD-MARKER/, "expanding Details reveals the byte-identical raw payload");
     } finally {
       await context.close();
@@ -626,10 +626,10 @@ test("W1-T313 criterion 4 (console): a proposed entry with NO cached summary ren
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base);
     try {
-      await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("an entry with no summary yet"));
-      const visibleText = await page.locator("#needs-me-list").innerText();
+      await page.waitForFunction(() => (document.getElementById("inbox-list")?.textContent ?? "").includes("an entry with no summary yet"));
+      const visibleText = await page.locator("#inbox-list").innerText();
       assert.match(visibleText, /proposes: an entry with no summary yet/, "degrades to exactly today's raw rendering");
-      const html = await page.locator("#needs-me-list").innerHTML();
+      const html = await page.locator("#inbox-list").innerHTML();
       assert.doesNotMatch(html, /decision-summary/, "no summary wrapper when there is no cached summary");
     } finally {
       await context.close();
@@ -662,7 +662,7 @@ test("W1-T313 criterion 5 (console): rendering a cached summary triggers NO extr
       }, WRITE_TOKEN);
       await page.goto(`${base}/?token=${READ_TOKEN}`);
       await page.waitForFunction(shellBootReady);
-      await page.waitForFunction((t) => (document.getElementById("needs-me-list")?.textContent ?? "").includes(t), waitText);
+      await page.waitForFunction((t) => (document.getElementById("inbox-list")?.textContent ?? "").includes(t), waitText);
       await context.close();
       return Array.from(new Set(paths)).sort();
     });

@@ -25,6 +25,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolveFreshness } from "./console-freshness.js";
+import { classifyAskRecordItem } from "./ask-classification.js";
 import {
   escapeHtml,
   formatRelative,
@@ -686,9 +687,9 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   // defaults ONCE per page load to collapsed iff it is genuinely empty at that point (this is the
   // whole of "NEEDS ME auto-expands when non-empty" -- it is not a special case, just this same
   // rule applied to the one section that is rarely empty on a busy fleet). ──────────────────────
-  const SECTION_IDS = ["now", "needs-me", "accepted", "up-next", "recent", "rest"];
-  const SECTION_BODY_ID = { now: "now-body", "needs-me": "needs-me-body", accepted: "accepted-body", "up-next": "up-next-body", recent: "recent-body", rest: "rest-detail" };
-  const SECTION_TOGGLE_ID = { now: "now-toggle", "needs-me": "needs-me-toggle", accepted: "accepted-toggle", "up-next": "up-next-toggle", recent: "recent-toggle", rest: "rest-toggle" };
+  const SECTION_IDS = ["now", "inbox", "accepted", "up-next", "recent", "rest"];
+  const SECTION_BODY_ID = { now: "now-body", inbox: "inbox-body", accepted: "accepted-body", "up-next": "up-next-body", recent: "recent-body", rest: "rest-detail" };
+  const SECTION_TOGGLE_ID = { now: "now-toggle", inbox: "inbox-toggle", accepted: "accepted-toggle", "up-next": "up-next-toggle", recent: "recent-toggle", rest: "rest-toggle" };
   const SECTION_PREFS_KEY = "rmd-console-sections-v1";
   function loadSectionPrefs() {
     try {
@@ -940,7 +941,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     }
     const parts = [];
     if (anomalousNow) parts.push("a run is past its phase threshold");
-    if (staleNeedsMe) parts.push("a needs-me item has waited over 24h");
+    if (staleNeedsMe) parts.push("an inbox item has waited over 24h");
     el.hidden = false;
     el.textContent = `⚠ ${parts.join(" · ")}`;
   }
@@ -1741,7 +1742,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     summary.textContent = `${shown.length} of ${rows.length} · ${counts.actionable || 0} actionable · ${counts.active || 0} active · ${counts["ready-held"] || 0} ready/held · as of ${rows[0] ? formatTimestamp(rows[0].snapshotAt) : "now"}`;
     reconcileRows(list, shown.length ? shown.map((row) => ({ key: `pr:${row.prNumber}:${row.headSha || row.headRefName || "unknown"}`, html: prQueueRowHtml(row) })) : [{ key: "queue-empty", html: '<span class="detail">No pull requests match these filters.</span>' }]);
   }
-  // ── MAILBOX (W1-T2497): same escalations, as threads, ADDITIVE alongside needs-me-list -- matched by (taskId, class) PREFIX.
+  // ── MAILBOX (W1-T2497): same escalations, as threads, ADDITIVE alongside inbox-list -- matched by (taskId, class) PREFIX.
   const MAILBOX_SENDER = { escalation: "Fleet", reply: "You", digest: "Daily digest" };
   function loadMailboxState() { try { const p = JSON.parse(localStorage.getItem("rmd-console-mailbox-v1")); return { read: Array.isArray(p && p.read) ? p.read : [], resolved: Array.isArray(p && p.resolved) ? p.resolved : [] }; } catch { return { read: [], resolved: [] }; /* corrupt/missing storage reads as empty, not an error */ } }
   function saveMailboxState(state) { try { localStorage.setItem("rmd-console-mailbox-v1", JSON.stringify(state)); } catch { /* full/blocked storage must not break the click */ } }
@@ -1752,7 +1753,18 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   function mailboxHtml(tasks, replies, readIds, resolvedIds, includeResolved, existingRowsHtml, digests) { let inner = ""; try { const threads = buildMailboxThreads(tasks, replies, digests); inner = threads === null ? "" : mailboxThreadsHtml(mailboxVisibleThreads(threads, resolvedIds, includeResolved), readIds, threads.digestOmitted); } catch { inner = ""; /* unreachable feeds degrade to existingRowsHtml below, never a thrown error */ } return inner || existingRowsHtml || "";
   }
   let mailboxState = loadMailboxState();
-  function renderMailbox(tasks, feedbackEntries, digests) { const el = document.getElementById("mailbox"); const list = document.getElementById("needs-me-list"); if (el) el.innerHTML = mailboxHtml(tasks, feedbackEntries, mailboxState.read, mailboxState.resolved, false, list ? list.innerHTML : "", digests); const badge = document.getElementById("mailbox-unread-count"); if (!badge) return; const threads = buildMailboxThreads(tasks, feedbackEntries, digests); const count = mailboxUnreadCount(threads === null ? [] : mailboxVisibleThreads(threads, mailboxState.resolved, false), mailboxState.read); badge.textContent = count > 0 ? String(count) : ""; }
+  function renderMailbox(tasks, feedbackEntries, digests) { const el = document.getElementById("mailbox"); const list = document.getElementById("inbox-list"); if (el) el.innerHTML = mailboxHtml(tasks, feedbackEntries, mailboxState.read, mailboxState.resolved, false, list ? list.innerHTML : "", digests); const badge = document.getElementById("mailbox-unread-count"); if (!badge) return; const threads = buildMailboxThreads(tasks, feedbackEntries, digests); const count = mailboxUnreadCount(threads === null ? [] : mailboxVisibleThreads(threads, mailboxState.resolved, false), mailboxState.read); badge.textContent = count > 0 ? String(count) : ""; }
+  // W1-T3395 (ratifies W1-T3186 (ii)): the ONE gate every ask candidate passes through before it
+  // reaches `rows` below -- consults {@link classifyAskRecordItem} (ask-classification.ts,
+  // W1-T3394) by the candidate's own TYPE (`classifierItem.kind`), never by which array/list it
+  // happened to arrive in. A RECORD verdict is not rendered at all, here, in INBOX -- never a
+  // second, disagreeing filter downstream deciding the same question differently. This is the
+  // ONE shared dispatch point all three ask sources (proposal/escalation/question) now go
+  // through, replacing the ad hoc per-source boolean each used to carry on its own.
+  function askRow(classifierItem, key, html, extra) {
+    if (classifyAskRecordItem(classifierItem) !== "ASK") return null;
+    return { key, html, ...extra };
+  }
   function renderNeedsMe(tasks, feedbackEntries, inboxReady, inboxDrafting) {
     const rows = [];
     const shown = new Set();
@@ -1764,33 +1776,62 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
       // that follows it fires), and the GLANCE strip's own >24h anomaly emphasis needs the real
       // one. Falls back to startedAt only for a row with no escalationOpenedAt at all (should not
       // happen for a real needsHuman row, but never let a missing field erase the row's age).
-      rows.push({ key: `task:${t.taskId}`, html: needsMeTaskRowHtml(t), taskId: t.taskId, ts: t.escalationOpenedAt ?? t.startedAt });
+      // W1-T3395: `resolved: false` here is not a shortcut -- `needsHuman` IS board.ts's own
+      // "still needs a human decision" flag (isBlockedRow's own invariant), so this loop only
+      // ever reaches an unresolved escalation; classifyAskRecordItem's escalation arm is
+      // consulted anyway so this is the SAME dispatch every other ask source below goes through.
+      const row = askRow({ kind: "escalation", resolved: false }, `task:${t.taskId}`, needsMeTaskRowHtml(t), { taskId: t.taskId, ts: t.escalationOpenedAt ?? t.startedAt });
+      if (row) rows.push(row);
     }
     // W1-T507: a DISTINCT kind, grouped in its OWN pass immediately after the escalation rows
     // above -- never folded into the `needsHuman` loop, so an escalation row's own affordance
     // (view issue / mark handled) is untouched by this addition. Reaches this list via its OWN
     // sparse field (status.ts's projectPlan-level `verifyHumanPending`, set only once a task is
     // filed verify: human AND not yet credited merged) -- never a widened `needsHuman`, per this
-    // task's design.
-    // W1-T3183: this is the ONLY row kind carrying no actionable referent -- no issue URL, no PR,
-    // no form, no button (needsMeVerifyRowHtml's own doc: "No action affordance renders here on
-    // purpose"). `group: "backlog"` names that fact right where the row is built, off the SAME
-    // `verifyHumanPending` field that already singles this loop out -- never a second classifier
-    // that re-derives actionability from the rendered html and could disagree with the renderer.
+    // task's design. NOT an ask classifyAskRecordItem has an opinion on (no "verify" kind exists
+    // in its union) -- it never needed a decision, so it stays outside the ASK/RECORD split
+    // entirely, exactly as before this task.
     for (const t of tasks) {
       if (!t.verifyHumanPending) continue;
       shown.add(t.taskId);
       rows.push({ key: `verify:${t.taskId}`, html: needsMeVerifyRowHtml(t), taskId: t.taskId, group: "backlog" });
     }
     for (const e of feedbackEntries ?? []) {
-      if (e.status === "grilling") rows.push({ key: `fbg:${e.id}`, html: needsMeGrillHtml(e), ts: e.ts });
-      else if (e.status === "proposed") rows.push({ key: `fbp:${e.id}`, html: needsMeProposedHtml(e), ts: e.ts });
+      // W1-T3395: a `proposed` feedback entry has not been decided yet either (accept/reject is
+      // still pending) -- both `grilling` and `proposed` map to the classifier's `question` kind,
+      // `answered: false`, so both are dispatched through the SAME `askRow` gate as the other two
+      // ask sources. An `accepted`/`rejected`/`answered` entry never reaches this loop at all
+      // (unchanged: the `else if` chain below still only matches these two statuses).
+      if (e.status === "grilling") {
+        const row = askRow({ kind: "question", answered: false }, `fbg:${e.id}`, needsMeGrillHtml(e), { ts: e.ts });
+        if (row) rows.push(row);
+      } else if (e.status === "proposed") {
+        const row = askRow({ kind: "question", answered: false }, `fbp:${e.id}`, needsMeProposedHtml(e), { ts: e.ts });
+        if (row) rows.push(row);
+      }
     }
-    for (const p of inboxReady ?? []) rows.push({ key: `inbox:${p.proposalId}`, html: needsMeInboxHtml(p) });
-    for (const p of inboxDrafting ?? []) rows.push({ key: `inbox-drafting:${p.proposalId}`, html: needsMeDraftingHtml(p), ts: p.spawnedAt });
+    for (const p of inboxReady ?? []) {
+      const row = askRow({ kind: "proposal", state: p.state ?? "ready" }, `inbox:${p.proposalId}`, needsMeInboxHtml(p));
+      if (row) rows.push(row);
+    }
+    // W1-T3395 (the criterion-3 cross-section falsifier): a DRAFTING proposal already has an
+    // operator DECISION behind it -- `rmd approve` already ran, and W1-T192's daemon-side rung is
+    // just turning that decision into a task. classifyAskRecordItem's proposal arm classifies
+    // state "drafting" RECORD, not ASK, so `askRow` below NEVER returns a row for it: a drafting
+    // proposal is progress to REPORT, not a decision to ask for, and it is deliberately absent
+    // from INBOX now (change management, W1-T3396, is where a RECORD-classified item belongs).
+    // Kept as its own loop/classifier call (never folded into inboxReady's above) so that a
+    // future RECORD-side renderer can reuse needsMeDraftingHtml and this exact dispatch verbatim.
+    for (const p of inboxDrafting ?? []) {
+      const row = askRow({ kind: "proposal", state: p.state ?? "drafting" }, `inbox-drafting:${p.proposalId}`, needsMeDraftingHtml(p), { ts: p.spawnedAt });
+      if (row) rows.push(row); // never true today -- "drafting" always classifies RECORD
+    }
     // W1-T1006: the sixth group, its OWN pass exactly like verifyHumanPending's above -- never
     // folded into the needsHuman loop, and reached via module state (latestBlockedPrs) rather
-    // than a new parameter here, so every existing caller of renderNeedsMe is untouched.
+    // than a new parameter here, so every existing caller of renderNeedsMe is untouched. NOT an
+    // ask classifyAskRecordItem has an opinion on either (no "blocked-pr" kind exists in its
+    // union) -- a PR-lifecycle hold is change management's remit (W1-T3396), unchanged by this
+    // task pending that renderer existing to own it.
     for (const r of latestBlockedPrs ?? []) rows.push({ key: `blocked-pr:${r.prNumber}`, html: needsMeBlockedPrRowHtml(r) + mergeHoldActionHtml(r.prNumber) });
     if (latestBlockedPrsUnverifiedReason) {
       rows.push({ key: "blocked-pr-unverified", html: needsMeBlockedPrUnverifiedHtml(latestBlockedPrsUnverifiedReason) });
@@ -1802,16 +1843,16 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     // purpose survives): it always renders, right alongside the asks.
     const askRows = rows.filter((r) => r.group !== "backlog");
     const backlogRows = rows.filter((r) => r.group === "backlog");
-    reconcileRows(document.getElementById("needs-me-list"), askRows, "nothing needs you right now");
-    reconcileRows(document.getElementById("needs-me-backlog-list"), backlogRows, "no verify: human backlog");
+    reconcileRows(document.getElementById("inbox-list"), askRows, "nothing needs you right now");
+    reconcileRows(document.getElementById("inbox-backlog-list"), backlogRows, "no verify: human backlog");
     tickElapsed(); // paint the DRAFTING row's freshly-(re)rendered elapsed span immediately, same as renderNow does
     updateNeedsMeArrivalEmphasis(askRows);
-    finishSectionRender("needs-me", askRows.length === 0 && backlogRows.length === 0, () => needsMeSummaryText(askRows));
-    if (sectionDefaultsReady) setSectionSummary("needs-me-backlog", needsMeBacklogSummaryText(backlogRows));
+    finishSectionRender("inbox", askRows.length === 0 && backlogRows.length === 0, () => needsMeSummaryText(askRows));
+    if (sectionDefaultsReady) setSectionSummary("inbox-backlog", needsMeBacklogSummaryText(backlogRows));
     // W1-T159/W1-T3183: the GLANCE strip's needs-me count AND the tab-title badge both read THIS
-    // exact ASK set (task escalations + feedback grilling/proposed + inbox ready/drafting) --
-    // never a second, independently-derived needs-me tally, and never the verify:human backlog,
-    // which never needed a decision and must never read as one more thing behind an alarm badge.
+    // exact ASK set (task escalations + feedback grilling/proposed + inbox ready) -- never a
+    // second, independently-derived tally, and never the verify:human backlog, which never
+    // needed a decision and must never read as one more thing behind an alarm badge.
     latestNeedsMeRows = askRows;
     renderGlanceStrip(tasks);
     updateTabTitle();
@@ -1856,10 +1897,10 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     const hasNewArrival = !isFirstRealRender && [...keys].some((k) => !needsMeKnownKeys.has(k));
     needsMeKnownKeys = keys;
     if (!hasNewArrival) return;
-    const toggle = document.getElementById("needs-me-toggle");
+    const toggle = document.getElementById("inbox-toggle");
     if (toggle && toggle.getAttribute("aria-expanded") === "false") {
       toggle.classList.add("section-emphasis");
-      announce("Needs me: a new item needs your attention.");
+      announce("Inbox: a new item needs your attention.");
     }
   }
 
@@ -2196,7 +2237,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   }
   wireSectionToggle("rest", () => renderFindView());
   wireSectionToggle("now");
-  wireSectionToggle("needs-me");
+  wireSectionToggle("inbox");
   wireSectionToggle("accepted");
   wireSectionToggle("up-next");
   wireSectionToggle("recent");
@@ -2261,7 +2302,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   // section's owning tab without walking the tree.
   const SECTION_TAB_OWNER = {
     "mailbox-section": "decisions",
-    "needs-me": "decisions",
+    inbox: "decisions",
     "pr-queue": "queue",
     now: "now",
     "up-next": "now",
@@ -2503,7 +2544,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
       answerExpansions.delete(replyTo);
     }
   }
-  document.getElementById("needs-me-list").addEventListener("submit", async (e) => {
+  document.getElementById("inbox-list").addEventListener("submit", async (e) => {
     const answerForm = e.target.closest(".needs-me-answer");
     const reframeForm = e.target.closest(".needs-me-reframe");
     // W1-T202 defense-in-depth: the submit button itself carries 'disabled' while read-only
@@ -2643,7 +2684,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     clearTimeout(approveConfirmTimers.get(btn.dataset.proposalId));
     approveConfirmTimers.delete(btn.dataset.proposalId);
   }
-  document.getElementById("needs-me-list").addEventListener("click", async (e) => {
+  document.getElementById("inbox-list").addEventListener("click", async (e) => {
     const decideBtn = e.target.closest(".needs-me-decide");
     const markHandledBtn = e.target.closest(".needs-me-mark-handled");
     const approveBtn = e.target.closest(".proposal-approve-btn");

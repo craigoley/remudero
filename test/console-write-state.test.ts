@@ -175,7 +175,7 @@ test("with no write token the console renders a clear read-only state in its hea
     // the Fleet-control section, eleventh on the page, which is why it was never seen.
     const placement = await page.evaluate(() => {
       const el = document.getElementById("write-state-badge");
-      const needsMe = document.getElementById("needs-me");
+      const needsMe = document.getElementById("inbox");
       return {
         inHeader: el?.closest("header") !== null && el?.closest("header") !== undefined,
         aboveNeedsMe: !!(el && needsMe) && !!(el!.compareDocumentPosition(needsMe!) & Node.DOCUMENT_POSITION_FOLLOWING),

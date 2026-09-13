@@ -112,7 +112,7 @@ async function acceptedListText(page: Page): Promise<string> {
   return page.locator("#accepted-list").innerText();
 }
 async function needsMeListText(page: Page): Promise<string> {
-  return page.locator("#needs-me-list").innerText();
+  return page.locator("#inbox-list").innerText();
 }
 
 test("W1-T285: an accepted entry is treated differently from a new one by a real consumer, reached from the console's own data path", async () => {
@@ -163,16 +163,16 @@ test("W1-T285: accepting a proposal through the console's own Accept button chan
     try {
       // Before: the button-path entry sits in NEEDS ME's actionable Accept/Reject queue, and does
       // NOT yet appear as accepted -- clicking Accept is the only thing that can change that.
-      await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("button-path accepted proposal"));
+      await page.waitForFunction(() => (document.getElementById("inbox-list")?.textContent ?? "").includes("button-path accepted proposal"));
       assert.doesNotMatch(await acceptedListText(page), /button-path accepted proposal/, "not accepted yet -- the button hasn't been clicked");
 
       // The console's OWN Accept affordance (needsMeProposedHtml's `.needs-me-decide[data-decision=accept]`,
       // POST /v1/feedback/decision) -- never a synthetic call to the API bypassing the UI.
-      await page.click(`#needs-me-list li:has-text("button-path accepted proposal") .needs-me-decide[data-decision="accept"]`);
+      await page.click(`#inbox-list li:has-text("button-path accepted proposal") .needs-me-decide[data-decision="accept"]`);
 
       // After: disappears from NEEDS ME, appears in Accepted -- accepting through the console
       // changed what the operator subsequently sees (acceptance criterion 3).
-      await page.waitForFunction(() => !(document.getElementById("needs-me-list")?.textContent ?? "").includes("button-path accepted proposal"));
+      await page.waitForFunction(() => !(document.getElementById("inbox-list")?.textContent ?? "").includes("button-path accepted proposal"));
       await page.waitForFunction(() => (document.getElementById("accepted-list")?.textContent ?? "").includes("button-path accepted proposal"));
 
       const acceptedText = await acceptedListText(page);

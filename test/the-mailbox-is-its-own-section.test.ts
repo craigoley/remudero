@@ -33,18 +33,18 @@ function largestScriptBlock(): string {
   return scripts.reduce((largest, script) => (script.length > largest.length ? script : largest), "");
 }
 
-test("W1-T3157: the mailbox renders as its own tab-owned section rather than inside needs-me", () => {
+test("W1-T3157: the mailbox renders as its own tab-owned section rather than inside inbox", () => {
   const mailbox = sectionHtml("mailbox-section");
-  const needsMe = sectionHtml("needs-me");
+  const inbox = sectionHtml("inbox");
 
   assert.match(mailbox, /data-owner-tab="decisions"/, "the mailbox section must be owned by a real tab");
   assert.match(mailbox, /<h2><span>Mailbox<\/span><\/h2>/);
   assert.match(mailbox, /<div id="mailbox" class="mailbox" aria-label="Mailbox"><\/div>/);
-  assert.doesNotMatch(needsMe, /\bid="mailbox"\b/, "needs-me must not own the mailbox list");
-  assert.doesNotMatch(needsMe, /mailbox-heading/, "needs-me must not carry a nested mailbox heading");
+  assert.doesNotMatch(inbox, /\bid="mailbox"\b/, "inbox must not own the mailbox list");
+  assert.doesNotMatch(inbox, /mailbox-heading/, "inbox must not carry a nested mailbox heading");
   assert.ok(
-    HTML.indexOf('<section id="mailbox-section"') < HTML.indexOf('<section id="needs-me"'),
-    "mailbox must render before the long needs-me/backlog rows",
+    HTML.indexOf('<section id="mailbox-section"') < HTML.indexOf('<section id="inbox"'),
+    "mailbox must render before the long inbox/backlog rows",
   );
 });
 
@@ -61,19 +61,19 @@ test("W1-T3157: the unread count is reachable from the tab strip without opening
   );
 });
 
-test("W1-T3157: the needs-me list rows and controls stay in their original section", () => {
-  const needsMe = sectionHtml("needs-me");
+test("W1-T3157: the inbox list rows and controls stay in their original section", () => {
+  const inbox = sectionHtml("inbox");
 
-  assert.match(needsMe, /id="needs-me-toggle"[\s\S]*?aria-controls="needs-me-body"/);
-  assert.match(needsMe, /<ul id="needs-me-list" class="row-list">/);
-  assert.match(needsMe, /<span id="needs-me-backlog-summary" class="section-summary">/);
+  assert.match(inbox, /id="inbox-toggle"[\s\S]*?aria-controls="inbox-body"/);
+  assert.match(inbox, /<ul id="inbox-list" class="row-list">/);
+  assert.match(inbox, /<span id="inbox-backlog-summary" class="section-summary">/);
   assert.match(
-    needsMe,
-    /<ul id="needs-me-backlog-list" class="row-list" aria-label="verify: human backlog, no action required"><\/ul>/,
+    inbox,
+    /<ul id="inbox-backlog-list" class="row-list" aria-label="verify: human backlog, no action required"><\/ul>/,
   );
   assert.ok(
-    needsMe.indexOf('id="needs-me-list"') < needsMe.indexOf('id="needs-me-backlog-list"'),
-    "the actionable needs-me rows must still render before the verify: human backlog",
+    inbox.indexOf('id="inbox-list"') < inbox.indexOf('id="inbox-backlog-list"'),
+    "the actionable inbox rows must still render before the verify: human backlog",
   );
 });
 
