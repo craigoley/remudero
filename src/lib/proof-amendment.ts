@@ -1,31 +1,21 @@
 // src/lib/proof-amendment.ts — W1-T3434: THE WRITER FOR A CAPPED IMPLEMENTATION PR'S STALE PROOF.
-//
-// #5154 was CAPPED because its `unit test:` proofs passed at both the implementation head and its
-// merge base — real evidence the proof needed repair — and the proof-discrimination fix worker was
-// told to "repair the PR BODY's Acceptance block only." `resolvePlanCriteriaAtHead` (review.ts)
-// reads a trailered PR's criteria from the PLAN at the PR's own head commit, never from the body,
-// so that instruction targeted an artifact the verdict cannot read. The safe recovery was a
-// separate plan-only PR editing the task's `proof:` fields directly (#5231) — this module makes
-// that recovery a parent-owned effect instead of a manual one.
+// #5154's proof-discrimination fix worker was told to "repair the PR BODY's Acceptance block
+// only," but `resolvePlanCriteriaAtHead` (review.ts) reads a trailered PR's criteria from the PLAN
+// at its own head commit, never the body, so that instruction targeted an unread artifact.
 //
 // STANDING RULE 15 BOUNDARY (mirrors src/lib/body-repair.ts's own docblock): the implementation
-// worker that produced the capped PR may PROPOSE a replacement proof; it is never handed GitHub
-// body, branch, PR-create, or task-edit authority. Every proposed entry is validated here against
-// OBSERVED state — the claim is byte-identical, the old proof is one of the review's own structured
-// stale rows, the replacement parses under the reviewer's own grammar, it discriminates head from
-// base, and it names evidence in the implementation diff rather than the plan shard that declares
-// it. Only once every entry survives does this module write anything, and what it writes is
-// SCOPED: replacement `proof:` scalars in the task's own shard, on a plan-only branch, via the
-// existing plan-PR emitter. It never edits `claim:`, never opens a second amendment for the same
-// identity, and never merges or arms the implementation PR itself — the guarded update-branch call
-// after a merged amendment is the only touch it makes on the implementation PR, and only that.
+// worker may PROPOSE a replacement proof; it is never handed GitHub body, branch, PR-create, or
+// task-edit authority. Every entry is validated against OBSERVED state — byte-identical claim, the
+// old proof is one of the review's own structured stale rows, the replacement parses under the
+// reviewer's grammar, discriminates head from base, and names evidence in the implementation diff
+// rather than the plan shard declaring it. Only then does this write anything, and only replacement
+// `proof:` scalars on a plan-only branch — never `claim:`, never a second amendment for the same
+// identity, and the only touch on the implementation PR itself is the guarded update-branch call
+// after a merged amendment.
 //
-// WHAT THIS MODULE DELIBERATELY DOES NOT DO: decide when a capped review is fix-rung-actionable
-// (that gate is `proofDiscriminationEvidenceFromCriteria`/`cappedProofDiscriminationFromLedger`,
-// sweep.ts, unchanged), flag a proof for human repair (`insertPlanRepairFlag`/
-// `dispatchPlanOnlyRepair`, sweep.ts's W1-T3390 rung, a distinct and lower-privilege remedy left
-// untouched), or repair a PR blocked by its own body (body-repair.ts, a disjoint failure mode: a
-// taskless PR's body IS authoritative and stays on that path).
+// OUT OF SCOPE: deciding when a capped review is fix-rung-actionable (sweep.ts, unchanged), the
+// lower-privilege human-flagging rung (`insertPlanRepairFlag`/`dispatchPlanOnlyRepair`, W1-T3390,
+// left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
