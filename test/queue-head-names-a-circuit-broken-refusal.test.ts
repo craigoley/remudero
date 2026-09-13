@@ -45,10 +45,14 @@ function projectionsFor(ids: readonly string[]): Map<string, StatusProjection> {
 }
 
 /** `isDispatchBreakerTripped` counts `run.start` since the last `pr.opened`/merge credit, so
- *  `DEFAULT_MAX_TASK_DISPATCHES` bare run.starts is exactly a tripped task. */
+ *  `DEFAULT_MAX_TASK_DISPATCHES` bare run.starts is exactly a tripped task. MINUTES apart, not
+ *  hours (W1-T3523): the ledger-derived orphan predicate (status.ts's `orphanedRunIds`) reads
+ *  elapsed time off the ledger's OWN newest row, and these fixtures carry no OTHER activity to
+ *  measure against, so a wide gap between a task's own dispatches would misread every earlier one
+ *  as infrastructure-killed rather than the genuinely-stalled task this fixture means to test. */
 function trippedRows(taskId: string): Array<Record<string, unknown>> {
   return Array.from({ length: DEFAULT_MAX_TASK_DISPATCHES }, (_, i) => ({
-    ts: `2026-08-24T0${i}:00:00.000Z`,
+    ts: `2026-08-24T00:0${i}:00.000Z`,
     step: "run.start",
     task_id: taskId,
     run_id: `${taskId}-${i}`,
