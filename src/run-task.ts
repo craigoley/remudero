@@ -26318,6 +26318,12 @@ export async function daemonCommand(
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
     /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
     now?: () => number;
+    /** W1-T3401: injectable residual escalation judge for `escalateBlock` below (the SAME seam
+     *  shape `runFixRung`'s own `opts.escalationJudge` already uses — `opts.escalationJudge ??
+     *  realEscalationJudge({...})`). Production omits it and gets the real, cheapest-mount,
+     *  no-tools spawn; a test injects a fake so the block-escalation wiring is exercised without
+     *  a real worker spawn. */
+    escalationJudge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
   } = {},
 ): Promise<number> {
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
@@ -27287,8 +27293,24 @@ export async function daemonCommand(
         // transitively needs the blocked task) opens a `needs-human` issue
         // naming the dependents it protects, via W1-T8's escalation taxonomy
         // — never a bare halt with no actionable trail.
-        escalateBlock: ({ task, result, dependents }) => {
-          escalate(
+        //
+        // W1-T3401: routed through `escalateWithJudge` rather than the bare `escalate` this used
+        // to call — BLOCKED was the largest never-judged class (49 of 72 escalated task ids,
+        // measured over the ledger union since 2026-09-08) precisely because THIS site never
+        // consulted the residual escalation judge at all. Safe to make async: `escalateBlock`
+        // is already declared `(info) => void | Promise<void>` (lib/daemon.ts) and its one caller
+        // already `await`s it (lib/daemon.ts) — unlike the genuinely-synchronous breaker callbacks
+        // elsewhere in this file (e.g. the crash-loop/rate-limit breakers), no interface change is
+        // needed to add the `await` here. `realEscalationJudge` is built from `effectiveRepoRoot`
+        // (this repo's own checkout, self-target-injectable — never `config.root`, the separate
+        // state/workspace root, nor the drained TARGET repo's own checkout), the SAME root
+        // `verifyHumanSweepCommand` resolves its own read-only judge mounts/settings against
+        // (`mountsPath(root)`/`join(root, "settings", "worker.json")` with `root = deps.root ??
+        // repoRoot`). A judge that throws, times out, or returns unparseable output fails OPEN to
+        // `deliver` (`judgeEscalation`'s documented polarity) — the halt path never loses an
+        // escalation, it only gains a chance to demote a non-issue to a fleet notice.
+        escalateBlock: async ({ task, result, dependents }) => {
+          await escalateWithJudge(
             {
               class: "BLOCKED",
               taskId: task.id,
@@ -27310,7 +27332,18 @@ export async function daemonCommand(
               ],
               recommendation: "fix and resume",
             },
-            { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId },
+            {
+              issues: ghIssueGateway(target.owner, target.repo),
+              ledgerPath,
+              runId,
+              judge:
+                deps.escalationJudge ??
+                realEscalationJudge({
+                  mounts: loadMounts(mountsPath(effectiveRepoRoot)),
+                  cwd: effectiveRepoRoot,
+                  settingsFile: join(effectiveRepoRoot, "settings", "worker.json"),
+                }),
+            },
           );
         },
         log,
