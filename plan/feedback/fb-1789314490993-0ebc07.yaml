@@ -1,0 +1,25 @@
+id: fb-1789314490993-0ebc07
+ts: 2026-09-13T15:48:10.994Z
+raw: "Deploy supervisor install-root topology is not commissioned on Azure.
+  OBSERVED after a deliberate rmd deploy marker: generic rmd deploy-run returned
+  no-op because install root /home/node/Remudero/daemon-install is absent. The
+  live Azure host instead boots the daemon from the bind-mounted state checkout
+  /home/craigoleyagent/rmd-state2/remudero via rmd-relaunch.sh and
+  recycle-container.sh. Do not paper this over by cloning an unused
+  daemon-install checkout. Reconcile the deployment configuration and host
+  launcher so rmd deploy, deploy-run, the checked install root, and the actual
+  mounted/booted checkout name one verified target. Add a deployment-contract
+  preflight that fails loudly before accepting a marker when those paths
+  diverge, and an end-to-end test that a normal marker can reach the guarded
+  idle-gated/restart/health/rollback path on the configured Azure-style
+  topology. Preserve no-raw-docker and the existing recycle script as the only
+  lifecycle executor."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
