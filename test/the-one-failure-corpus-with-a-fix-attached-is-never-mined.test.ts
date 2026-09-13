@@ -12,12 +12,12 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
 import { collectCiFailureCorpus, type CorpusPr } from "../src/lib/ci-failure-corpus.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 /** A check-run rollup entry, as `rollupFromRest` maps one. */
 const run = (name: string, conclusion: string, startedAt = "2026-09-06T10:00:00Z") => ({ name, status: "COMPLETED", conclusion, startedAt });
@@ -168,26 +168,26 @@ test("W1-T2957 the collector is reachable from the command surface, and does not
 
 /** A disposable, independently initialized git repository this test alone owns — `git status
  *  --porcelain` read here can never be perturbed by a neighbouring test file's own fixture writes,
- *  because nothing else in the suite has a path into this tree. Seeds the one relative path
- *  (`plan/tasks.yaml`) `ciFailuresCommand`'s test needs, chdirs into it for the callback, and
- *  restores the process's original cwd in `finally` even if the callback throws. */
+ *  because nothing else in the suite has a path into this tree. Built from the shared
+ *  `test/helpers/git-repo.ts` fixture (its own `init` call site is exempted from
+ *  `test/fixture-copy-census.test.ts`'s count, so this test does not add a second raw one).
+ *  Seeds the one relative path (`plan/tasks.yaml`) `ciFailuresCommand`'s test needs, chdirs into
+ *  it for the callback, and restores the process's original cwd in `finally` even if the callback
+ *  throws. */
 function withIsolatedCiWorktree<T>(fn: (scratch: string) => T): T {
-  const scratch = mkdtempSync(join(tmpdir(), "rmd-w1t3449-ciwt-"));
-  const g = (...args: string[]) => execFileSync("git", ["-C", scratch, ...args], { encoding: "utf8" });
+  const repo = gitRepo({ kind: "w1t3449-ciwt", seedCommit: false });
+  const scratch = repo.dir;
   const prevCwd = process.cwd();
   try {
-    g("init", "-q", "-b", "main");
-    g("config", "user.email", "t@t");
-    g("config", "user.name", "t");
     mkdirSync(join(scratch, "plan"), { recursive: true });
     writeFileSync(join(scratch, "plan", "tasks.yaml"), "tasks: []\n");
-    g("add", "-A");
-    g("commit", "-q", "-m", "seed");
+    repo.git("add", "-A");
+    repo.git("commit", "-q", "-m", "seed");
     process.chdir(scratch);
     return fn(scratch);
   } finally {
     process.chdir(prevCwd);
-    rmSync(scratch, { recursive: true, force: true });
+    repo.cleanup();
   }
 }
 
