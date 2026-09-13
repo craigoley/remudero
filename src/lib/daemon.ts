@@ -1186,8 +1186,21 @@ function startInFlightTicker(
     stop: async (generation) => {
       if (inFlightTickerOwner !== owner || owner.generation !== generation) return;
       owner.active = false;
-      inFlightTickerOwner = undefined;
-      if (owner.ticker) await owner.ticker;
+      // A light pass is best-effort and may outlive the full sweep it rode. Waiting for it here
+      // turns the sweep's wall-clock bound into an unbounded wait and can prevent the next
+      // top-of-loop freshness check. Keep this owner claimed until its ticker really settles, so
+      // a successor never starts a second in-flight ticker while the first pass is still running.
+      const release = () => {
+        if (inFlightTickerOwner === owner && owner.generation === generation) inFlightTickerOwner = undefined;
+      };
+      if (owner.ticker) {
+        void owner.ticker.then(release, (e) => {
+          release();
+          log("daemon.in_flight_ticker.failed", { phase: owner.phase, error: String((e as Error)?.message ?? e) });
+        });
+      } else {
+        release();
+      }
     },
   };
   inFlightTickerOwner = owner;
