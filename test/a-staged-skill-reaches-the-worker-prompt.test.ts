@@ -489,7 +489,7 @@ const makeSkillObservationGh = (branch: string): string =>
     { when: "body", stdout: '{"body":""}' },
   ], { kind: "skill-observation-gh" }).dir;
 
-test("W1-T3379 criterion 1: a real implement dispatch emits its run-correlated zero-selection observation", async (t) => {
+test("W1-T3379 criterion 1: a real implement dispatch emits its run-correlated approved-skill selection", async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}skill-observation-root-`));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, skillObservationPlan);
@@ -530,13 +530,13 @@ test("W1-T3379 criterion 1: a real implement dispatch emits its run-correlated z
     }, {
       run_id: `T-SKILL-OBSERVATION-${fixedNow}`,
       task_type: "implement",
-      approved_eligible_names: [],
-      selected_names: [],
+      approved_eligible_names: ["proof-preflight"],
+      selected_names: ["proof-preflight"],
       budget_omitted_names: [],
-      zero_selection: true,
+      zero_selection: false,
     });
-    assert.equal(ledger.some((row) => row.step === "skills.injected"), false,
-      "the compatibility event still has no zero row; skills.selection is the explicit denominator");
+    assert.equal(ledger.some((row) => row.step === "skills.injected"), true,
+      "an approved selected skill still reaches the compatibility injection event");
   } finally {
     now.mock.restore();
     process.env.PATH = oldPath;

@@ -33,6 +33,7 @@ const TABLE = join(REPO_ROOT, "settings", "macros.yaml");
 const {
   MacroSkillError,
   claudeMdHeadlines,
+  GENERATED_MACRO_MARKER,
   main,
   orphanedSkillNames,
   renderAllMacroSkills,
@@ -42,6 +43,7 @@ const {
 } = (await import(pathToFileURL(SCRIPT).href)) as {
   MacroSkillError: new (m: string) => Error;
   claudeMdHeadlines: (text: string) => string[];
+  GENERATED_MACRO_MARKER: string;
   main: (argv: string[], deps?: Record<string, unknown>) => number;
   orphanedSkillNames: (rendered: Array<{ name: string }>, skillsDir?: string) => string[];
   renderAllMacroSkills: (deps?: Record<string, unknown>) => Array<{ name: string; relPath: string; text: string }>;
@@ -181,9 +183,45 @@ test("W1-T2763 (acceptance 2b): the COMMITTED skills are current — the same ga
 });
 
 test("W1-T2763: a skill dir with no row is reported as ORPHANED — a deleted macro must not leave an invocable skill behind", () => {
-  const orphans = orphanedSkillNames([{ name: "tddr" }]);
-  assert.ok(orphans.includes("grfp"), `grfp has a row but was not declared here, so it reads orphaned: ${JSON.stringify(orphans)}`);
-  assert.deepEqual(orphanedSkillNames([{ name: "tddr" }, { name: "grfp" }]), [], "the real declared set leaves none");
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}macro-orphan-`));
+  try {
+    const skillsDir = join(root, ".claude", "skills");
+    const leftover = join(skillsDir, "leftover", "SKILL.md");
+    mkdirSync(dirname(leftover), { recursive: true });
+    writeFileSync(leftover, `${GENERATED_MACRO_MARKER} — do not edit. -->\n`);
+    const orphans = orphanedSkillNames([{ name: "tddr" }], skillsDir);
+    assert.ok(orphans.includes("leftover"), `a generated macro with no row is orphaned: ${JSON.stringify(orphans)}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2763: a skill dir with NO readable SKILL.md at all is reported as ORPHANED, not silently skipped", () => {
+  // The `applies-to` check reads SKILL.md and can throw (ENOENT, a directory instead of a file,
+  // etc.) — an unreadable directory must fail CLOSED into ORPHANED, never fail open into "not a
+  // macro, so ignore it", or a directory with no SKILL.md at all would sit invocable and unlisted.
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}macro-orphan-unreadable-`));
+  try {
+    const skillsDir = join(root, ".claude", "skills");
+    mkdirSync(join(skillsDir, "no-skill-md"), { recursive: true });
+    const orphans = orphanedSkillNames([{ name: "tddr" }], skillsDir);
+    assert.ok(orphans.includes("no-skill-md"), `an unreadable SKILL.md fails closed into ORPHANED: ${JSON.stringify(orphans)}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2763: an approved worker procedure with applies-to is not a macro orphan", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}manual-skill-`));
+  try {
+    const skillsDir = join(root, ".claude", "skills");
+    const procedure = join(skillsDir, "procedure", "SKILL.md");
+    mkdirSync(dirname(procedure), { recursive: true });
+    writeFileSync(procedure, "---\nname: procedure\napplies-to: implement\n---\n\n# Procedure\n");
+    assert.deepEqual(orphanedSkillNames([{ name: "tddr" }, { name: "grfp" }], skillsDir), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ── acceptance 3: a macro naming a missing headline is refused, with the headline QUOTED ───────
