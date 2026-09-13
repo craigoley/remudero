@@ -1,0 +1,111 @@
+- id: W1-T3528
+  title: "NOTHING RECLAIMS REGENERABLE BUILD OUTPUT, AND THE TWO LARGEST OBJECTS ON A HOST AT 88% WERE A `coverage/` AND A `node_modules` THAT EVERY EXISTING REAPER IS SCOPED TO IGNORE — `sweepStrandedReviewWorktrees` matches `review-PR*` only and says so, `pruneStaleRuns` walks registered worktrees only, and W1-T1082's disk rung deliberately deletes nothing, so the fleet detects ENOSPC pressure it has no path to relieve"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 55.00
+  files: [src/lib/disk-artifact-reclaim.ts, src/lib/daemon.ts, src/run-task.ts, test/disk-artifact-reclaim-refuses-a-live-or-dirty-target.test.ts]
+  origin: "operator-session#azure-disk-2026-09-13"
+  plan_refs: ["W1-T1082", "W1-T3378", "W1-T175", "W1-T2507"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED by hand on the Azure fleet host 2026-09-13, which was at 3.6GiB free / 88% and had
+    escalated issue #4831. Reclaimed 2.5GiB; the two largest objects were:
+
+      379 MB  /home/craigoleyagent/wt4844/coverage        build output, regenerable
+      836 MB  /home/craigoleyagent/rmd-pf/node_modules    regenerable via npm ci
+
+    NEITHER IS REACHABLE BY ANY EXISTING REAPER, and this is by design in all three cases:
+      - `sweepStrandedReviewWorktrees` (W1-T3378) says it outright: "SCOPE IS EXACTLY `review-PR*`.
+        The name pattern is the only filter: `coverage/`, `rmd-*` temp dirs and any hand-cut lane
+        never match it and are never even considered, let alone touched."
+      - `pruneStaleRuns` walks REGISTERED worktrees; both live in hand-made checkouts in $HOME.
+      - W1-T1082 shipped the daemon's disk reading as "additive and surfaces only - it gates
+        nothing, deletes nothing".
+      - W1-T175 (queued) reaps `~/Remudero/worktrees/`, which on this host is on /mnt/rmd with 65G
+        free. It would not have caught either object.
+
+    THE PRESSURED FILESYSTEM IS NOT THE ONE THE FLEET WATCHES. `/` is 29G at 88%; the state volume
+    `/mnt/rmd` is 126G at 46%. Docker's data root is `/mnt/rmd/docker`, so its 8.8GB of images were
+    never part of the pressure. A reclaimer that assumes the state volume is the scarce one will
+    free nothing.
+  rationale: |
+    THE DETECTION HALF ALREADY SHIPPED AND HAS NOWHERE TO GO. W1-T1082 gave the daemon a real
+    statfs reading and a WARN/FAIL judgement, then deliberately stopped short of acting. That was
+    right at the time and is now the whole problem: #4831 escalated, a human read it, and a human
+    ran `rm`. The rung can see the wall and cannot steer.
+
+    THIS IS NOT `doctor --fix`, AND MUST NOT BECOME IT. `rmd doctor` refuses `--fix` BY NAME, on
+    the stated ground that "every repair path already has an owner and a second actor mutating
+    state a live daemon depends on is the measured hazard". That reasoning is sound and this task
+    accepts it: the reclaimer is owned by the DAEMON's own tick, the same single actor that already
+    owns `sweepStrandedReviewWorktrees`, and is reachable no other way.
+
+    THE HAZARD IS REAL AND WAS OBSERVED THIS SESSION. Three separate would-be reclaims had to be
+    refused by hand on live evidence: `rmd-op` held 45 uncommitted files and 3 open file handles;
+    `/tmp/tsx-1000` had 14 open handles and had been written 30 seconds earlier; and a host-side
+    `git worktree prune` would have deleted metadata for worktrees that are ALIVE inside the
+    container, because they register under the container's `/home/node/...` paths which do not
+    exist on the host. An automated reclaimer that lacks any one of those three refusals is more
+    dangerous than the disk pressure it relieves.
+  design: |
+    (i) FOLLOW `review-worktree-reclaim.ts` EXACTLY — it is the shipped precedent for this shape.
+    An out-of-process sweep invoked once per daemon tick, a pure + injectable module, wired as a
+    zero-arg optional dep declared in src/lib/daemon.ts and supplied from src/run-task.ts. Read that
+    module first and mirror its structure rather than inventing a second idiom. THE EXPORTED SWEEP
+    IS NAMED `sweepReclaimableArtifacts` — an acceptance criterion greps for its CALL SITE in
+    src/run-task.ts, so a different name fails the gate. Wiring it is not optional polish: a module
+    reached only by its own tests is the `unwired-gate` defect this repo already refuses.
+    (ii) THE SCOPE IS AN ARTIFACT ALLOWLIST, NEVER A DIRECTORY WALK FOR BIG THINGS. Only names whose
+    contents are REGENERABLE qualify — `coverage/` and `node_modules/` are the measured two. Size is
+    never a reason to delete anything; the precedent refuses size by design and so must this.
+    (iii) EVERY TARGET NEEDS THREE INDEPENDENT REFUSALS, all of which fired for real this session:
+    an open file handle anywhere beneath it; a non-empty `git status --porcelain` in its enclosing
+    checkout; and a recent access time. All three are seams and must be INJECTED, so the tests need
+    no real filesystem at a real fill level (the same contract W1-T1082 used for `statfs`).
+    (iv) IT MUST STATFS THE FILESYSTEM IT IS ABOUT TO FREE, not the state root. On this host those
+    are different devices and the state volume has 65G free; reclaiming against the wrong one is a
+    no-op that reports success.
+    (v) NEVER `git worktree prune`, AND SAY SO IN THE CODE. From the host, live container worktrees
+    read as `prunable` because their registered paths are container-side. Encode that as a comment
+    at the refusal, so the next reader does not "fix" the omission.
+    (vi) LEDGER EVERY RECLAIM with the path, the bytes freed and the predicate that allowed it, the
+    way `worktree.reaped` does. A reclaimer whose work is invisible cannot be audited after it
+    deletes the wrong thing.
+    (vii) PREFER COMPRESSION WHERE THE DATA IS NOT REGENERABLE. The third reclaim this session was
+    1.3GB of Codex rollout `.jsonl` older than 3 days, which was GZIPPED rather than deleted because
+    it is forensic history, not build output. If this task covers that class at all, it compresses;
+    it does not delete. Say which classes are in scope.
+  acceptance:
+    - claim: "a regenerable artifact in a clean, idle checkout is reclaimed and the freed bytes are ledgered"
+      proof: "unit test: a regenerable artifact in a clean idle checkout is reclaimed"
+    - claim: "a target whose enclosing checkout has uncommitted changes is refused, so unpushed work is never destroyed"
+      proof: "unit test: a target in a dirty checkout is refused"
+    - claim: "a target with an open file handle beneath it is refused, so a live worker's tree is never reclaimed"
+      proof: "unit test: a target with an open file handle is refused"
+    - claim: "age alone never authorises a reclaim, mirroring the review sweep's own refusal of age and size as sufficient"
+      proof: "unit test: age alone does not authorise a reclaim"
+    - claim: "the sweep is actually WIRED into the daemon tick and not reachable only from its own tests"
+      proof: "grep: sweepReclaimableArtifacts( in src/run-task.ts"
+  falsifier: |
+    RE-MEASURE BEFORE BUILDING. The 88% reading is from 2026-09-13 and I freed 2.5GiB by hand the
+    same day; if `/` is now comfortable, confirm the pressure recurs before building a reaper for it.
+    The recurrence claim is the premise, and it is checkable: `df -h /` on the fleet host.
+    PROVE EACH REFUSAL BY DELETING IT. Three tests must each go red when its own guard is removed —
+    dirty checkout, open handle, recency. A reclaimer whose guards are untested is the failure mode
+    this task exists to avoid, and "it passed" is not evidence that a guard fired.
+    DO NOT WIDEN THE ALLOWLIST TO "LARGE DIRECTORIES". The moment size authorises deletion, this
+    becomes a tool that can eat an operator's working tree. `rmd-op` was 546MB of node_modules
+    beside 45 uncommitted files; size would have selected it and the dirty check is the only thing
+    that saved it.
+    DO NOT MOVE THIS INTO `rmd doctor`. `--fix` is refused there by name and for a stated reason;
+    re-litigating that belongs in its own task with its own argument, not as a side effect of this
+    one.
+    A SWEEP THAT NEVER FIRES IS THE EXPECTED FAILURE. Assert the positive case on a fixture that
+    really does qualify, or this ships as a no-op that reports healthy forever — the vacuous-pass
+    shape this repo has hit repeatedly.
