@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+
+import { gitRepo } from "./helpers/git-repo.js";
 
 import {
   findTaskShard,
@@ -285,24 +286,20 @@ test("renderFixPrompt gives a proof-discrimination worker a proposal grammar, no
 });
 
 test("checkProofCommand treats a grep target added on the head as discriminating despite base test materialisation", (t) => {
-  const repo = mkdtempSync(join(tmpdir(), "rmd-proof-amendment-check-proof-"));
+  // Built through the shared fixture (test/helpers/git-repo.ts) rather than a raw git-init call
+  // written out here — test/fixture-copy-census.test.ts's gitInitFiles count is a frozen ceiling
+  // over test/*.test.ts precisely so a new copy of that boilerplate does not creep back in.
+  const repo = gitRepo({ seedCommit: true }); // commit 1 (HEAD~1 below): the merge-base, no target file
   const savedCwd = process.cwd();
   const logs: string[] = [];
   try {
-    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
-    git("init", "--initial-branch=main");
-    git("config", "user.email", "test@example.invalid");
-    git("config", "user.name", "Test");
-    writeFileSync(join(repo, "README.md"), "base\n");
-    git("add", ".");
-    git("commit", "-m", "base");
     const target = "test/added-proof.test.ts";
     const marker = "proof-amendment-added-grep-target";
-    mkdirSync(join(repo, "test"), { recursive: true });
-    writeFileSync(join(repo, target), `${marker}\n`);
-    git("add", ".");
-    git("commit", "-m", "add proof target");
-    process.chdir(repo);
+    mkdirSync(join(repo.dir, "test"), { recursive: true });
+    writeFileSync(join(repo.dir, target), `${marker}\n`);
+    repo.git("add", ".");
+    repo.git("commit", "-m", "add proof target"); // commit 2 (HEAD): adds the grep target
+    process.chdir(repo.dir);
     t.mock.method(console, "log", (...args: unknown[]) => void logs.push(args.map(String).join(" ")));
     const code = checkProofCommand(["grep:", marker, "in", target, "--base", "HEAD~1"]);
     assert.equal(code, CHECK_PROOF_EXIT.pass, logs.join("\n"));
@@ -310,7 +307,7 @@ test("checkProofCommand treats a grep target added on the head as discriminating
     assert.match(logs.join("\n"), /discrimination:\s+discriminates/);
   } finally {
     process.chdir(savedCwd);
-    rmSync(repo, { recursive: true, force: true });
+    repo.cleanup();
   }
 });
 
