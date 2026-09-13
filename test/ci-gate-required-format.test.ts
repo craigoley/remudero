@@ -29,6 +29,12 @@ const CI_GATE_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 // pre-reformat fixture. Order and membership must be byte-identical to what W1-T107 replaced,
 // PLUS every entry a later PR has appended since (most recently head-identity-gate, W1-T3388 —
 // the convention this comment states: a PR that makes a check REQUIRED appends here too).
+// AND ONE REMOVAL, which is the rarer direction and so is recorded: squash-trailer-gate was
+// demoted to ADVISORY because it is a DUPLICATE — its step runs the acceptance-author-gate
+// script byte-identically, scripts/squash-trailer-gate.mjs does not exist, and W1-T3414's
+// protection lives inside that shared script. It blocked twice on one predicate (4 of 4
+// observed PRs red on one were red on both). A name leaves this fixture only when it stops
+// blocking, never to quiet a red.
 const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "ci",
   "lint-plan",
@@ -57,7 +63,6 @@ const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "coverage-session-blanking",
   "baseline-monotonic",
   "test-slow",
-  "squash-trailer-gate",
 ]);
 
 async function loadCiGate() {
