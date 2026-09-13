@@ -1,9 +1,14 @@
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
 // readPauseAgeMs, refuseUnsupportedArgs, classifyReadFailure, readDiskTotalBytes,
 // classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to
-// src/lib/report-commands.ts (W1-T2888); it imports them from lib/doctor.js directly. Only the
-// two symbols below have a SECOND caller outside doctorCommand and stay imported here too.
-import { readDiskFreeBytes, judgeDiskHeadroom } from "./lib/doctor.js";
+// src/lib/report-commands.ts (W1-T2888); it imports them from lib/doctor.js directly. The symbols
+// below have SECOND callers outside doctorCommand and stay imported here too.
+import {
+  appendCaptureSurfaceFireHistory,
+  judgeDiskHeadroom,
+  readDiskFreeBytes,
+  type CaptureSurfaceFireRecord,
+} from "./lib/doctor.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
@@ -658,6 +663,7 @@ import {
   readFeedbackDocketMarker,
   synthesizeFeedbackDocketProposal,
   writeFeedbackDocketMarker,
+  type FeedbackDocket,
 } from "./lib/feedback-docket.js";
 import { parseUsage, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
@@ -2949,7 +2955,8 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
       encoding: "utf8",
     }).trim();
     return subject.length > 0 ? subject : undefined;
-  } catch {
+  } catch (e) {
+    void e;
     return undefined;
   }
 }
@@ -31980,22 +31987,22 @@ export function runFeedbackDocketRung(
       .map((n) => ({ ts: n.ts as string, taskId: n.taskId as string, note: n.note as string }));
 
     const docket = buildFeedbackDocket({ ledgerLines, rejectedFeedback, questionLines, operatorNotes, window });
-    // Recorded BEFORE the file check below, deliberately — mirrors auto-triage's "record the
-    // fire first" discipline: a crash mid-file still costs one skipped week, never a re-gather
-    // storm on the next poll.
-    writeFeedbackDocketMarker(markerPath, { lastFireIso: now.toISOString() });
-
     if (docket.items.length === 0) {
+      // Recorded before returning, deliberately — mirrors auto-triage's "record the fire first"
+      // discipline while retaining the per-surface counts doctor judges after ledger rotation.
+      writeFeedbackDocketMarker(markerPath, feedbackDocketMarkerWithFire(markerPath, now, "feedback_docket.empty", docket));
       log("feedback_docket.empty", { window, counts_by_source: docket.countsBySource });
       return { fired: false };
     }
 
     const result = synthesize(docket);
     if (result.kind === "empty") {
+      writeFeedbackDocketMarker(markerPath, feedbackDocketMarkerWithFire(markerPath, now, "feedback_docket.empty", docket));
       log("feedback_docket.empty", { window, counts_by_source: docket.countsBySource });
       return { fired: false };
     }
 
+    writeFeedbackDocketMarker(markerPath, feedbackDocketMarkerWithFire(markerPath, now, "feedback_docket.published", docket));
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     let filed = false;
     updateProposalRegistry(registryPath, (current) => {
@@ -32021,6 +32028,33 @@ export function runFeedbackDocketRung(
     log("feedback_docket.error", { error: String((e as Error)?.message ?? e) });
     return { fired: false };
   }
+}
+
+function readFeedbackDocketMarkerJson(path: string): unknown {
+  if (!existsSync(path)) return undefined;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function feedbackDocketMarkerWithFire(
+  markerPath: string,
+  now: Date,
+  step: string,
+  docket: FeedbackDocket,
+): { lastFireIso: string; recentFires: CaptureSurfaceFireRecord[] } {
+  const fire: CaptureSurfaceFireRecord = {
+    ts: now.toISOString(),
+    step,
+    window: docket.window,
+    counts_by_source: docket.countsBySource,
+  };
+  return {
+    lastFireIso: now.toISOString(),
+    recentFires: appendCaptureSurfaceFireHistory(readFeedbackDocketMarkerJson(markerPath), fire),
+  };
 }
 
 export const MOUNT_RECOMMENDER_CADENCE_POLICY = {

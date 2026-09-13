@@ -717,6 +717,7 @@ export function renderDoctor(checks: readonly Check[]): string {
 export interface DoctorInputs {
   nowMs: number;
   ledgerLines: ReadonlyArray<Record<string, unknown>>;
+  captureSurfaceFires?: ReadonlyArray<Record<string, unknown>>;
   candidateCount: number;
   dispatchSinceMs?: number;
   dispatchBoundMs?: number;
@@ -764,6 +765,39 @@ const CAPTURE_MIN_FIRES = 3;
 
 type CaptureState = "fresh" | "stale" | "never";
 
+export const CAPTURE_SURFACE_FIRE_HISTORY_LIMIT = 12;
+
+export interface CaptureSurfaceFireRecord extends Record<string, unknown> {
+  ts: string;
+  step: string;
+  window: unknown;
+  counts_by_source: Record<string, unknown>;
+}
+
+function isCaptureSurfaceFireRecord(v: unknown): v is CaptureSurfaceFireRecord {
+  if (!v || typeof v !== "object") return false;
+  const row = v as Record<string, unknown>;
+  const counts = row.counts_by_source;
+  return (
+    typeof row.ts === "string" &&
+    typeof row.step === "string" &&
+    !!counts &&
+    typeof counts === "object" &&
+    !Array.isArray(counts)
+  );
+}
+
+export function parseCaptureSurfaceFireHistory(marker: unknown): CaptureSurfaceFireRecord[] {
+  if (!marker || typeof marker !== "object") return [];
+  const fires = (marker as { recentFires?: unknown }).recentFires;
+  if (!Array.isArray(fires)) return [];
+  return fires.filter(isCaptureSurfaceFireRecord).slice(-CAPTURE_SURFACE_FIRE_HISTORY_LIMIT);
+}
+
+export function appendCaptureSurfaceFireHistory(marker: unknown, fire: CaptureSurfaceFireRecord): CaptureSurfaceFireRecord[] {
+  return [...parseCaptureSurfaceFireHistory(marker), fire].slice(-CAPTURE_SURFACE_FIRE_HISTORY_LIMIT);
+}
+
 /**
  * W1-T3348 — does the feedback docket's INPUT still carry anything?
  *
@@ -785,13 +819,13 @@ type CaptureState = "fresh" | "stale" | "never";
  * the check is OK and SAYS it has not yet judged — this repo's recurring defect is a bound that
  * binds on a healthy condition, and a fresh host has simply not run the rung enough times yet.
  */
-export function judgeCaptureSurfaceLiveness(ledgerLines: ReadonlyArray<Record<string, unknown>>): Check {
+export function judgeCaptureSurfaceLiveness(fireHistory: ReadonlyArray<Record<string, unknown>>): Check {
   const countsOf = (row: Record<string, unknown>): Record<string, unknown> | undefined => {
     const c = row.counts_by_source;
     return c && typeof c === "object" ? (c as Record<string, unknown>) : undefined;
   };
-  const allFires = ledgerLines
-    .filter((l) => l.step === "feedback_docket.empty" || l.step === "feedback_docket.published")
+  const allFires = fireHistory
+    .filter((l) => countsOf(l) !== undefined || l.step === "feedback_docket.empty" || l.step === "feedback_docket.published")
     .sort((a, b) => (String(a.ts ?? "") < String(b.ts ?? "") ? -1 : 1));
   // ONLY A FIRE THAT CARRIES `counts_by_source` CAN WITNESS SILENCE. `feedback_docket.published`
   // rows carry none, and a publish is positive evidence that SOME surface fed — so counting one
@@ -815,7 +849,7 @@ export function judgeCaptureSurfaceLiveness(ledgerLines: ReadonlyArray<Record<st
       threshold,
       detail:
         `not yet judged — a "never fed" claim needs at least ${CAPTURE_MIN_FIRES} counted docket ` +
-        `fires, and the ledger holds ${fires.length}. This is an unobserved population, not a ` +
+        `fires, and the retained history holds ${fires.length}. This is an unobserved population, not a ` +
         `healthy one.${unjudgeableNote}`,
     };
   }
@@ -875,7 +909,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     judgeDiskHeadroom(inputs.diskFreeBytes, inputs.diskTotalBytes),
     judgeMemory(inputs.mem.availableBytes, inputs.mem.totalBytes, inputs.mem.swapTotalBytes),
     judgeNodeVersionPin(inputs.runningNodeVersion, inputs.nvmrcVersion),
-    judgeCaptureSurfaceLiveness(inputs.ledgerLines),
+    judgeCaptureSurfaceLiveness(inputs.captureSurfaceFires ?? inputs.ledgerLines),
   ];
   const worst = worstVerdict(checks);
   return { checks, worst, exitCode: exitCodeFor(worst), text: renderDoctor(checks) };
