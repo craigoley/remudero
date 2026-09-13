@@ -186,6 +186,17 @@ function checkOperatorMessageSafe(e: Escalation): OperatorMessageCheckResult | u
   }
 }
 
+/** Normalize an OMITTED `consequence` to explicit `null` before {@link toOperatorMessage} ever
+ *  sees it (W1-T3391). Every escalation producer traced today reached `escalate`/
+ *  `escalateWithJudge` without setting the property at all — never `undefined` on purpose — so an
+ *  omitted key and a deliberately-empty "nothing follows from inaction" answer were
+ *  indistinguishable to {@link checkOperatorMessage}, and every one of them ledgered
+ *  `operator_message_missing`. An EXPLICIT `consequence` (including the literal `undefined` the
+ *  non-conforming fixtures use on purpose) is left untouched, so that annotation path is unchanged. */
+function withExplicitConsequence(e: Escalation): Escalation {
+  return Object.prototype.hasOwnProperty.call(e, "consequence") ? e : { ...e, consequence: null };
+}
+
 /** The three-way cause split {@link Escalation.cause} keys on (W1-T195's design). */
 export type EscalationCause = "review" | "ci" | "conflict";
 
@@ -1051,7 +1062,7 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
   validateEscalationOptionKinds(e);
-  const resolved = refuseUnlessResolvable(e);
+  const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
   recordThreadMessage(resolved, deps);
   const dedup = lookupDuplicateEscalation(resolved, deps);
   if (dedup.kind === "found") return recordDuplicateEscalation(resolved, dedup.issue, deps);
@@ -1079,7 +1090,7 @@ export async function escalateWithJudge(
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
   validateEscalationOptionKinds(e);
-  const resolved = refuseUnlessResolvable(e);
+  const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
   recordThreadMessage(resolved, deps);
   const dedup = lookupDuplicateEscalation(resolved, deps);
   if (dedup.kind === "found") return recordDuplicateEscalation(resolved, dedup.issue, deps);

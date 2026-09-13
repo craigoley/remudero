@@ -50,7 +50,7 @@ export interface BodyCriterion {
  * human, never silently dropped.
  */
 export interface BodyDefect {
-  kind: "no-trailer" | "wrapped-proof" | "inert-proof" | "em-dash-separator";
+  kind: "no-trailer" | "wrapped-proof" | "inert-proof" | "em-dash-separator" | "exec-error";
   /** 1-based criterion index, when the defect belongs to one. */
   criterion?: number;
   /** What an operator (or a later writer) should do — derived, never invented. */
@@ -122,9 +122,17 @@ export function emDashSeparatedProof(claim: string): { claim: string; proof: str
   return undefined;
 }
 
+/**
+ * A `grep:` proof's declared pattern and path — shared by {@link unwrapGrepPattern} (which only
+ * ever fires for a WRAPPED pattern) and {@link diagnoseUnrunnableProofs} (which must also catch a
+ * proof that never had an `in <path>` clause at all, e.g. `grep: unit test: test/...`, the doubled
+ * dialect measured on PR 5108).
+ */
+export const GREP_PROOF_RE = /^\s*grep:\s*(.+?)\s+in\s+(\S+)\s*$/;
+
 /** A `grep:` proof's pattern wholly enclosed in a matching delimiter pair, and its bare form. */
 export function unwrapGrepPattern(proof: string): { wrapped: string; bare: string } | undefined {
-  const m = /^\s*grep:\s*(.+?)\s+in\s+(\S+)\s*$/.exec(proof ?? "");
+  const m = GREP_PROOF_RE.exec(proof ?? "");
   if (!m) return undefined;
   const pattern = m[1].trim();
   for (const d of ["`", '"', "'"]) {
@@ -225,6 +233,72 @@ export function diagnoseBodyDefects(
   });
 
   return out;
+}
+
+/**
+ * W1-T3389 — THE ASYMMETRY, CLOSED (rationale: this task's own plan shard). `execProof` already
+ * argues the fix rung can RUN a proof to settle an ambiguity rather than guess, applied so far only
+ * to DIAGNOSING somebody else's body. This applies the same reasoning to the rung's OWN output:
+ * given the exact criteria a repair is about to push, does every `grep:` proof among them parse and
+ * execute? A proof with no `in <path>` clause at all is caught with NO executor needed — that is a
+ * pure parse failure `rmd check-proof` would refuse in one call, not an ambiguity to settle. A proof
+ * that parses is then actually RUN when `deps.execProof` is supplied; `undefined` back (the
+ * reviewer's own `exec_error` causes: timeout, spawn failure, grep exit 2) is a defect too. ZERO
+ * hits is NOT a defect here — it ran cleanly and genuinely failed to prove the claim, a different,
+ * pre-existing verdict this gate does not police. A `unit test:` proof has no runner in this module
+ * (mirrors `execProof`'s own grep-only scope) and is left UNDIAGNOSED, the same silent default every
+ * other arm keeps. `repair` is always `undefined`: this module cannot know what the author MEANT,
+ * and inventing one is exactly the claim-authoring {@link refusesToAuthorAClaim} refuses.
+ */
+export function diagnoseUnrunnableProofs(
+  criteria: readonly BodyCriterion[],
+  deps: Pick<BodyRepairDeps, "execProof"> = {},
+): BodyDefect[] {
+  const out: BodyDefect[] = [];
+  criteria.forEach((c, i) => {
+    const proof = (c.proof ?? "").trim();
+    if (!/^grep:/i.test(proof)) return; // no runner here for unit test:/other dialects — silence
+
+    if (GREP_PROOF_RE.exec(proof) === null) {
+      out.push({
+        kind: "exec-error",
+        criterion: i + 1,
+        why:
+          "the proof declares the grep: dialect but carries no `in <path>` clause, so it can never " +
+          "parse or execute — this is the exact shape a proof takes when a second dialect's text " +
+          "(e.g. `unit test: test/...`) is wrongly prefixed with `grep:`, and rmd check-proof " +
+          "refuses it in one call; a body carrying it must never be pushed unverified",
+      });
+      return;
+    }
+
+    if (deps.execProof === undefined) return; // cannot settle real execution without a runner
+
+    if (deps.execProof(proof) === undefined) {
+      out.push({
+        kind: "exec-error",
+        criterion: i + 1,
+        why:
+          "the proof parses but raised exec_error when actually run (a timeout, a spawn failure, " +
+          "or a grep exit 2) — a proof that cannot execute must never be pushed as though it were a " +
+          "working replacement for whatever it is repairing",
+      });
+    }
+  });
+  return out;
+}
+
+/**
+ * W1-T3389 — THE REFUSAL ITSELF. `false` the instant one authored proof cannot be substantiated
+ * ({@link diagnoseUnrunnableProofs}); a caller must then refuse to push the repaired body and
+ * report the failing proofs to a human via {@link renderBodyDefects}, never emit the defective body
+ * as though it were a working replacement for whatever it is repairing.
+ */
+export function repairedProofsAreSafeToPush(
+  criteria: readonly BodyCriterion[],
+  deps: Pick<BodyRepairDeps, "execProof"> = {},
+): boolean {
+  return diagnoseUnrunnableProofs(criteria, deps).length === 0;
 }
 
 /**
