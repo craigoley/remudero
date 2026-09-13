@@ -693,6 +693,10 @@ export interface ReadinessContext {
   /** W1-T2604: the reason a `panel.proposal_declined` ledger line records. ⚠ NEVER inferred from the proposal's own
    *  prose — a keyword rule would let a worker retire its own proposal by phrasing. */
   isDeclined?: (proposalId: string) => string | undefined;
+  /** W1-T3518: does the LAST adoption scan show this proposal's finding is GONE — adopted, retired, or
+   *  fixed by a scanner correction? Optional, and absent means NO OPINION, never "gone": a caller that
+   *  cannot read the scan's own record must not retire the backlog by forgetting to supply this. */
+  adoptionFindingGone?: (proposalId: string) => boolean;
   /** W1-T2451: the ONE batched read of every referent's state this pass. Optional; omitting it makes such a proposal
    *  unreadable rather than live, so a forgetful caller never false-retires one. */
   boardReferents?: BoardReferentRead;
@@ -882,6 +886,26 @@ export function classifyProposal(
         `${proposal.id}'s referent (${referent.referentId}) has resolved — merged, dead, or its ` +
         `escalation handled — so this proposal can never render READY again; it stays in the registry ` +
         `as a record of the finding, never deleted`,
+    };
+  }
+  // W1-T3518: the same terminal override, for an ADOPTION proposal whose finding the current scan no
+  // longer reports. Third sibling, same reason they sit together.
+  //
+  // DERIVED, NEVER A LEDGER DECLINE, and that is the point. A decline records an operator's
+  // judgement and needs an operator to reverse it; this restates a live measurement. If the
+  // mechanism loses its adopter again, the next scan reports the finding again and the proposal
+  // stops being retired on its own — no restore, no re-mint, nothing for anyone to notice.
+  if (proposal.id.startsWith("adoption:") && ctx.adoptionFindingGone?.(proposal.id) === true) {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason:
+        `${proposal.id}'s finding is no longer reported by the adoption scan — the mechanism has an ` +
+        `adopter, was retired, or the scan itself was corrected. 15 of 108 open adoption proposals were ` +
+        `in this state on 2026-09-13, most minted while the scan could not yet see scripts/ as an ` +
+        `invoker surface (W1-T3383 fixed the scan and nothing told the backlog). Re-derived from ` +
+        `state/adoption-latest.json every pass, so a finding that returns un-retires this proposal`,
     };
   }
   // W1-T3385: the same terminal override, for a proposal whose referent is a PLAN TASK rather than a
