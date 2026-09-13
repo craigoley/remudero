@@ -3,7 +3,7 @@ import { constants as fsConstants, accessSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
-import type { Clock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
@@ -1070,7 +1070,7 @@ async function readCodexRuntimeWithTimeoutHedge(
   // settle first.
   // This measures scheduling, not cache age: callers inject `now` to test cache expiry and may
   // intentionally freeze it. A frozen cache clock must not delay a real-time timeout hedge.
-  const primaryStartedAt = Date.now();
+  const primaryStartedAt = systemClock.now();
   const primaryAbort = new AbortController();
   let primaryHedgeEligible = true;
   const primary = readCodexRuntime(config, bin, {
@@ -1144,7 +1144,7 @@ async function readCodexRuntimeWithTimeoutHedge(
     };
 
     primary.then(observePrimary);
-    const remainingHedgeDelayMs = hedgeDelayMs - (Date.now() - primaryStartedAt);
+    const remainingHedgeDelayMs = hedgeDelayMs - (systemClock.now() - primaryStartedAt);
     if (remainingHedgeDelayMs <= 0) {
       // Let an already-settled primary publish its result first; otherwise start the hedge before
       // the overdue primary timeout gets a timer turn.
