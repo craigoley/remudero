@@ -737,6 +737,7 @@ import {
   requestProofAmendment,
   type ProofAmendmentOutcome,
   type ProofAmendmentRecord,
+  type ProofAmendmentWritePorts,
 } from "./lib/proof-amendment.js";
 import {
   appendLedger,
@@ -9517,111 +9518,21 @@ export async function runFixRung(opts: {
     // throw here only logs and this round's ordinary re-review (below) proceeds unaffected — the
     // capped verdict still stands, exactly as before this task, and CAPPED refuses to arm regardless.
     if (fixMode === "proof-discrimination" && evidence.proofDiscrimination) {
-      try {
-        const prMatch = opts.prUrl.match(/\/pull\/(\d+)/);
-        const prNumber = prMatch ? Number(prMatch[1]) : undefined;
-        // NOT `reviewReport`: for this mode it was just overwritten with the live PR BODY
-        // (above) — the worker's PROOF_AMENDMENT proposal lives only in its own transcript.
-        const proposal = parseProofAmendmentProposal(workerTranscript(fixResult));
-        // No proposal ⇒ `validateProofAmendmentProposal` refuses immediately anyway (`no-proposal`)
-        // — bail out here, BEFORE ever touching git or GitHub, rather than spending a real merge-
-        // base worktree build on a round that has nothing to validate.
-        if (prNumber !== undefined && proposal.length > 0) {
-          const { owner, repo, headCheckoutDir } = opts.reviewBase;
-          const ledgerLinesNow = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
-          const baseProof = buildBaseProofDir(
-            proposal.map((p) => ({ proof: p.newProof })),
-            headCheckoutDir,
-          );
-          const proofAmendmentGitOps = buildProofAmendmentGitOps();
-          const amendmentOutcome: ProofAmendmentOutcome = requestProofAmendment(
-            {
-              taskId: opts.taskId,
-              prNumber,
-              prUrl: opts.prUrl,
-              pr: {
-                isOpen: true,
-                planOnly: false,
-                taskId: opts.taskId,
-                reviewState: review.state,
-                capped: review.capped,
-                criteria: review.criteria.map((c) => ({ claim: c.claim, proof: c.proof, met: c.met })),
-              },
-              evidence: evidence.proofDiscrimination,
-              proposal,
-              headSha: priorHeadSha,
-              currentHeadSha: priorHeadSha,
-              headCwd: headCheckoutDir,
-              baseCwd: baseProof.baseIsCheckout ? baseProof.baseCheckoutDir : undefined,
-            },
-            {
-              repoDir: opts.worktreePath,
-              findShard: findTaskShard,
-              worktreeAdd: (repoDir, wp, branch) => {
-                const add = worktreeAdd;
-                add(repoDir, wp, branch, "origin/main", { log: deps.log });
-              },
-              worktreeRemove: (repoDir, wp) => worktreeRemove(repoDir, wp),
-              writeFile: (absPath, text) => writeFileSync(absPath, text),
-              gitAdd: proofAmendmentGitOps.gitAdd,
-              gitCommit: proofAmendmentGitOps.gitCommit,
-              gitPush: (wp, branch, expectedHeadSha) => gitPushRunBranch(wp, { stdio: "ignore", expectedHeadSha }),
-              probeExisting: (branch) => {
-                const found = probeExistingPlanPr(ghJson, owner, repo, branch);
-                return found ? { prUrl: found.prUrl, prNumber: found.prNumber } : undefined;
-              },
-              createPr: (o) => {
-                assertLiveWriteAllowed("gh-pr-create", `opening ${opts.taskId}'s proof-amendment PR`);
-                const created = createPlanPrRest(ghJson, owner, repo, o);
-                return { prUrl: created.prUrl, prNumber: created.prNumber };
-              },
-              worktreePathFor: (taskId, num) => join(worktreesDir(opts.config), `proof-amendment-${taskId}-${num}`),
-              lookupIdentity: (key): ProofAmendmentRecord | undefined => {
-                const row = [...ledgerLinesNow]
-                  .reverse()
-                  .find((l) => l.step === "fix.dispatch" && l.kind === "proof_amendment" && l.identity_key === key) as
-                  | Record<string, unknown>
-                  | undefined;
-                if (!row) return undefined;
-                const amendmentUrl = String(row.amendment_url ?? "");
-                const amendmentNumber = Number(row.amendment_number ?? NaN);
-                if (!amendmentUrl || Number.isNaN(amendmentNumber)) return undefined;
-                let merged = false;
-                try {
-                  merged = isPrMergedNow(amendmentUrl);
-                } catch {
-                  // best-effort: an unreadable live merge state defaults to un-merged, which only
-                  // means "resume the still-open PR" rather than crashing this round's dispatch.
-                  merged = false;
-                }
-                return { amendmentUrl, amendmentNumber, merged };
-              },
-              recordIdentity: (key, record) => {
-                deps.log("fix.dispatch", {
-                  kind: "proof_amendment",
-                  task_id: opts.taskId,
-                  pr_number: prNumber,
-                  identity_key: key,
-                  amendment_url: record.amendmentUrl,
-                  amendment_number: record.amendmentNumber,
-                });
-              },
-              updateBranch: (prUrl, expectedHeadSha) => {
-                try {
-                  assertLiveWriteAllowed("gh-pr-update-branch", `updating the base of ${prUrl} after its proof amendment merged`);
-                  ghExec(ghUpdateBranchArgv(owner, repo, prNumber, expectedHeadSha), { stdio: "pipe" });
-                  return { ok: true };
-                } catch (e) {
-                  return { ok: false, error: String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e) };
-                }
-              },
-            },
-          );
-          deps.log("proof_amendment.requested", { pr_number: prNumber, task_id: opts.taskId, outcome: amendmentOutcome.kind, ...amendmentOutcome });
-        }
-      } catch (e) {
-        deps.log("proof_amendment.error", { error: String((e as Error)?.message ?? e) });
-      }
+      // NOT `reviewReport`: for this mode it was just overwritten with the live PR BODY (above) —
+      // the worker's PROOF_AMENDMENT proposal lives only in its own transcript.
+      dispatchProofAmendmentWrite({
+        prUrl: opts.prUrl,
+        taskId: opts.taskId,
+        worktreePath: opts.worktreePath,
+        config: opts.config,
+        reviewBase: opts.reviewBase,
+        evidence: evidence.proofDiscrimination,
+        transcriptText: workerTranscript(fixResult),
+        review: { state: review.state, capped: review.capped, criteria: review.criteria },
+        priorHeadSha,
+        log: deps.log,
+        getLedgerLinesNow: () => (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
+      });
     }
     // The other fix modes deliberately judge worker prose, but retry/backoff still belongs to
     // material PR input. Fetch the body independently without changing the report the established
@@ -9966,6 +9877,241 @@ export function buildProofAmendmentGitOps(execFileSyncFn: typeof execFileSync = 
       return execFileSyncFn("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     },
   };
+}
+
+/**
+ * W1-T3434 (coverage-ratchet): `requestProofAmendment`'s FULL write-ports object — previously
+ * built inline inside `runFixRung`'s proof-discrimination arm, where every port closed directly
+ * over real process/network I/O (`worktreeAdd`, `writeFileSync`, `ghJson`, `probeExistingPlanPr`,
+ * `createPlanPrRest`, `isPrMergedNow`, `ghExec`, `assertLiveWriteAllowed`) with no injection seam
+ * at all. A `diff-cov:` directive cannot exempt a live worktree/GitHub write, and dispatching a
+ * real one just to cover these lines would spend an actual amendment PR on a test run. Extracted
+ * to its own top-level function so a test can override each I/O boundary with a fake — every
+ * `io` field defaults to the real implementation, so production wiring is unchanged — and assert
+ * each port's exact recorded call, the same seam {@link buildProofAmendmentGitOps} already gives
+ * its two git operations.
+ */
+export function buildProofAmendmentWritePorts(
+  params: {
+    taskId: string;
+    worktreePath: string;
+    config: Config;
+    owner: string;
+    repo: string;
+    prNumber: number;
+    ledgerLinesNow: readonly Record<string, unknown>[];
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    gitOps: { gitAdd: (worktreePath: string, relPath: string) => void; gitCommit: (worktreePath: string, message: string) => string };
+  },
+  io: {
+    findShardFn?: typeof findTaskShard;
+    worktreeAddFn?: typeof worktreeAdd;
+    worktreeRemoveFn?: typeof worktreeRemove;
+    writeFileFn?: (absPath: string, text: string) => void;
+    gitPushFn?: (worktreePath: string, branch: string, expectedHeadSha: string) => void;
+    ghJsonFn?: GhApiFetcher;
+    probeExistingPlanPrFn?: typeof probeExistingPlanPr;
+    createPlanPrRestFn?: typeof createPlanPrRest;
+    isPrMergedNowFn?: typeof isPrMergedNow;
+    ghExecFn?: typeof ghExec;
+    assertLiveWriteAllowedFn?: typeof assertLiveWriteAllowed;
+  } = {},
+): ProofAmendmentWritePorts {
+  const {
+    findShardFn = findTaskShard,
+    worktreeAddFn = worktreeAdd,
+    worktreeRemoveFn = worktreeRemove,
+    writeFileFn = (absPath: string, text: string) => writeFileSync(absPath, text),
+    gitPushFn = (wp: string, branch: string, expectedHeadSha: string) => gitPushRunBranch(wp, { stdio: "ignore", expectedHeadSha }),
+    ghJsonFn = ghJson,
+    probeExistingPlanPrFn = probeExistingPlanPr,
+    createPlanPrRestFn = createPlanPrRest,
+    isPrMergedNowFn = isPrMergedNow,
+    ghExecFn = ghExec,
+    assertLiveWriteAllowedFn = assertLiveWriteAllowed,
+  } = io;
+  const { taskId, worktreePath, config, owner, repo, prNumber, ledgerLinesNow, log, gitOps } = params;
+  return {
+    repoDir: worktreePath,
+    findShard: findShardFn,
+    worktreeAdd: (repoDir, wp, branch) => {
+      worktreeAddFn(repoDir, wp, branch, "origin/main", { log });
+    },
+    worktreeRemove: (repoDir, wp) => worktreeRemoveFn(repoDir, wp),
+    writeFile: writeFileFn,
+    gitAdd: gitOps.gitAdd,
+    gitCommit: gitOps.gitCommit,
+    gitPush: gitPushFn,
+    probeExisting: (branch) => {
+      const found = probeExistingPlanPrFn(ghJsonFn, owner, repo, branch);
+      return found ? { prUrl: found.prUrl, prNumber: found.prNumber } : undefined;
+    },
+    createPr: (o) => {
+      assertLiveWriteAllowedFn("gh-pr-create", `opening ${taskId}'s proof-amendment PR`);
+      const created = createPlanPrRestFn(ghJsonFn, owner, repo, o);
+      return { prUrl: created.prUrl, prNumber: created.prNumber };
+    },
+    worktreePathFor: (tid, num) => join(worktreesDir(config), `proof-amendment-${tid}-${num}`),
+    lookupIdentity: (key): ProofAmendmentRecord | undefined => {
+      const row = [...ledgerLinesNow]
+        .reverse()
+        .find((l) => l.step === "fix.dispatch" && l.kind === "proof_amendment" && l.identity_key === key) as
+        | Record<string, unknown>
+        | undefined;
+      if (!row) return undefined;
+      const amendmentUrl = String(row.amendment_url ?? "");
+      const amendmentNumber = Number(row.amendment_number ?? NaN);
+      if (!amendmentUrl || Number.isNaN(amendmentNumber)) return undefined;
+      let merged = false;
+      try {
+        merged = isPrMergedNowFn(amendmentUrl);
+      } catch {
+        // best-effort: an unreadable live merge state defaults to un-merged, which only
+        // means "resume the still-open PR" rather than crashing this round's dispatch.
+        merged = false;
+      }
+      return { amendmentUrl, amendmentNumber, merged };
+    },
+    recordIdentity: (key, record) => {
+      log("fix.dispatch", {
+        kind: "proof_amendment",
+        task_id: taskId,
+        pr_number: prNumber,
+        identity_key: key,
+        amendment_url: record.amendmentUrl,
+        amendment_number: record.amendmentNumber,
+      });
+    },
+    updateBranch: (prUrl, expectedHeadSha) => {
+      try {
+        assertLiveWriteAllowedFn("gh-pr-update-branch", `updating the base of ${prUrl} after its proof amendment merged`);
+        ghExecFn(ghUpdateBranchArgv(owner, repo, prNumber, expectedHeadSha), { stdio: "pipe" });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e) };
+      }
+    },
+  };
+}
+
+/**
+ * W1-T3434 (coverage-ratchet): THE PARENT-OWNED CAPPED-PROOF-AMENDMENT EFFECT, extracted whole out
+ * of `runFixRung`'s proof-discrimination arm. That arm's body — proposal parsing, the ledger-key
+ * lookup, the base-proof worktree build, and the `requestProofAmendment` dispatch itself — closed
+ * directly over real process/network I/O with no seam a test could reach; a `diff-cov:` directive
+ * cannot exempt a live worktree/GitHub write, and running it for real just to cover these lines
+ * would spend an actual amendment PR on a test run. `io` mirrors {@link buildProofAmendmentWritePorts}'s
+ * override surface (every field defaults to the real implementation, so production is unchanged)
+ * plus the two boundaries (proposal parsing, the merge-base proof directory build) this function
+ * itself calls before ports are even built. `requestProofAmendment` ITSELF stays a direct, literal
+ * call — never behind its own override — because this task's own acceptance criteria grep for
+ * that exact call site in this file's source text; every write it makes still goes through the
+ * injected ports above, so nothing it does escapes this function's own fakes. Best-effort: any
+ * throw here only logs `proof_amendment.error` — the caller's ordinary re-review proceeds
+ * unaffected either way, exactly as before this extraction.
+ */
+export function dispatchProofAmendmentWrite(
+  params: {
+    prUrl: string;
+    taskId: string;
+    worktreePath: string;
+    config: Config;
+    reviewBase: { owner: string; repo: string; headCheckoutDir: string };
+    evidence: ProofDiscriminationEvidence;
+    /** `workerTranscript(fixResult)` at the call site — the worker's PROOF_AMENDMENT proposal lives
+     *  only in its own transcript, never in `reviewReport` (which this mode overwrites with the
+     *  live PR body before this runs). */
+    transcriptText: string;
+    review: { state: ReviewRunResult["state"]; capped: boolean; criteria: ReviewRunResult["criteria"] };
+    priorHeadSha: string;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    /** Lazy: only actually read once a non-empty proposal exists — mirrors the pre-extraction
+     *  code, which never spent a ledger read on a round with nothing to validate. */
+    getLedgerLinesNow: () => readonly Record<string, unknown>[];
+  },
+  io: {
+    execFileSyncFn?: typeof execFileSync;
+    findShardFn?: typeof findTaskShard;
+    worktreeAddFn?: typeof worktreeAdd;
+    worktreeRemoveFn?: typeof worktreeRemove;
+    writeFileFn?: (absPath: string, text: string) => void;
+    gitPushFn?: (worktreePath: string, branch: string, expectedHeadSha: string) => void;
+    ghJsonFn?: GhApiFetcher;
+    probeExistingPlanPrFn?: typeof probeExistingPlanPr;
+    createPlanPrRestFn?: typeof createPlanPrRest;
+    isPrMergedNowFn?: typeof isPrMergedNow;
+    ghExecFn?: typeof ghExec;
+    assertLiveWriteAllowedFn?: typeof assertLiveWriteAllowed;
+    parseProofAmendmentProposalFn?: typeof parseProofAmendmentProposal;
+    buildBaseProofDirFn?: typeof buildBaseProofDir;
+  } = {},
+): void {
+  const {
+    execFileSyncFn,
+    parseProofAmendmentProposalFn = parseProofAmendmentProposal,
+    buildBaseProofDirFn = buildBaseProofDir,
+    ...portsIo
+  } = io;
+  try {
+    const prMatch = params.prUrl.match(/\/pull\/(\d+)/);
+    const prNumber = prMatch ? Number(prMatch[1]) : undefined;
+    const proposal = parseProofAmendmentProposalFn(params.transcriptText);
+    // No proposal ⇒ `validateProofAmendmentProposal` refuses immediately anyway (`no-proposal`) —
+    // bail out here, BEFORE ever touching git or GitHub, rather than spending a real merge-base
+    // worktree build on a round that has nothing to validate.
+    if (prNumber === undefined || proposal.length === 0) return;
+    const { owner, repo, headCheckoutDir } = params.reviewBase;
+    const ledgerLinesNow = params.getLedgerLinesNow();
+    const baseProof = buildBaseProofDirFn(
+      proposal.map((p) => ({ proof: p.newProof })),
+      headCheckoutDir,
+    );
+    const gitOps = buildProofAmendmentGitOps(execFileSyncFn);
+    const writePorts = buildProofAmendmentWritePorts(
+      {
+        taskId: params.taskId,
+        worktreePath: params.worktreePath,
+        config: params.config,
+        owner,
+        repo,
+        prNumber,
+        ledgerLinesNow,
+        log: params.log,
+        gitOps,
+      },
+      portsIo,
+    );
+    const amendmentOutcome: ProofAmendmentOutcome = requestProofAmendment(
+      {
+        taskId: params.taskId,
+        prNumber,
+        prUrl: params.prUrl,
+        pr: {
+          isOpen: true,
+          planOnly: false,
+          taskId: params.taskId,
+          reviewState: params.review.state,
+          capped: params.review.capped,
+          criteria: params.review.criteria.map((c) => ({ claim: c.claim, proof: c.proof, met: c.met })),
+        },
+        evidence: params.evidence,
+        proposal,
+        headSha: params.priorHeadSha,
+        currentHeadSha: params.priorHeadSha,
+        headCwd: headCheckoutDir,
+        baseCwd: baseProof.baseIsCheckout ? baseProof.baseCheckoutDir : undefined,
+      },
+      writePorts,
+    );
+    params.log("proof_amendment.requested", {
+      pr_number: prNumber,
+      task_id: params.taskId,
+      outcome: amendmentOutcome.kind,
+      ...amendmentOutcome,
+    });
+  } catch (e) {
+    params.log("proof_amendment.error", { error: String((e as Error)?.message ?? e) });
+  }
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */

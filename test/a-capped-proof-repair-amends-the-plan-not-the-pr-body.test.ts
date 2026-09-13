@@ -22,7 +22,15 @@ import {
 } from "../src/lib/proof-amendment.js";
 import type { ProofDiscriminationEvidence } from "../src/lib/sweep.js";
 import type { WhitelistedProof } from "../src/lib/review.js";
-import { CHECK_PROOF_EXIT, buildProofAmendmentGitOps, checkProofCommand } from "../src/run-task.js";
+import type { Config } from "../src/lib/config-schema.js";
+import {
+  CHECK_PROOF_EXIT,
+  buildBaseProofDir,
+  buildProofAmendmentGitOps,
+  buildProofAmendmentWritePorts,
+  checkProofCommand,
+  dispatchProofAmendmentWrite,
+} from "../src/run-task.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
 
 // W1-T3434 — #5154 was CAPPED because its `unit test:` proofs passed at both the implementation
@@ -293,6 +301,295 @@ test("buildProofAmendmentGitOps runs git add/commit through an injected spawn, n
     { file: "git", args: ["-C", "/tmp/proof-amendment-wt", "rev-parse", "HEAD"] },
   ]);
   assert.equal(sha, "deadbeefcafefeed", "gitCommit trims the recorded rev-parse output");
+});
+
+test("buildProofAmendmentWritePorts wires every write port through its own injected I/O, never a live process/network call", () => {
+  // requestProofAmendment's write-ports object used to be built inline inside runFixRung's
+  // proof-discrimination arm, closing directly over real process/network I/O with no injection
+  // seam a test could reach. buildProofAmendmentWritePorts extracts that construction so every
+  // I/O boundary is overridable — this test overrides all of them and drives every port to
+  // assert the exact call it forwards, covering the lines a live worktree/GitHub write cannot.
+  const logCalls: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const worktreeAddCalls: unknown[] = [];
+  const worktreeRemoveCalls: unknown[] = [];
+  const writeFileCalls: Array<{ absPath: string; text: string }> = [];
+  const gitPushCalls: unknown[] = [];
+  const probeCalls: unknown[] = [];
+  const createPrCalls: unknown[] = [];
+  const isPrMergedCalls: string[] = [];
+  const ghExecCalls: unknown[] = [];
+  const assertLiveWriteCalls: Array<{ action: string; reason: string }> = [];
+  let isPrMergedThrows = false;
+
+  const gitOps = {
+    gitAdd: (_wp: string, _relPath: string) => {},
+    gitCommit: (_wp: string, _message: string) => "gitopssha",
+  };
+
+  const ports = buildProofAmendmentWritePorts(
+    {
+      taskId: "W1-T3434-FIXTURE",
+      worktreePath: "/tmp/proof-amendment-repo",
+      config: { root: "/tmp/rmd-root" } as unknown as Config,
+      owner: "acme",
+      repo: "remudero",
+      prNumber: 5154,
+      ledgerLinesNow: [
+        { step: "fix.dispatch", kind: "proof_amendment", identity_key: "found-key", amendment_url: "https://github.com/acme/remudero/pull/9001", amendment_number: 9001 },
+        { step: "fix.dispatch", kind: "proof_amendment", identity_key: "malformed-key", amendment_url: "", amendment_number: 9002 },
+      ],
+      log: (step, extra) => logCalls.push({ step, extra }),
+      gitOps,
+    },
+    {
+      worktreeAddFn: (...args) => {
+        worktreeAddCalls.push(args);
+      },
+      worktreeRemoveFn: (...args) => {
+        worktreeRemoveCalls.push(args);
+      },
+      writeFileFn: (absPath, text) => writeFileCalls.push({ absPath, text }),
+      gitPushFn: (...args) => {
+        gitPushCalls.push(args);
+      },
+      probeExistingPlanPrFn: (fetch, owner, repo, headBranch) => {
+        probeCalls.push({ owner, repo, headBranch });
+        return headBranch === "has-existing" ? { prUrl: "https://github.com/acme/remudero/pull/9010", prNumber: 9010 } : undefined;
+      },
+      createPlanPrRestFn: (fetch, owner, repo, o) => {
+        createPrCalls.push({ owner, repo, o });
+        return { prUrl: "https://github.com/acme/remudero/pull/9020", prNumber: 9020 };
+      },
+      isPrMergedNowFn: (prUrl) => {
+        isPrMergedCalls.push(prUrl);
+        if (isPrMergedThrows) throw new Error("unreadable merge state");
+        return true;
+      },
+      ghExecFn: ((...args: unknown[]) => {
+        ghExecCalls.push(args);
+        return Buffer.from("");
+      }) as unknown as typeof import("../src/lib/github-transport.js").ghExec,
+      assertLiveWriteAllowedFn: (action, reason) => {
+        assertLiveWriteCalls.push({ action, reason });
+      },
+    },
+  );
+
+  assert.equal(ports.repoDir, "/tmp/proof-amendment-repo");
+
+  ports.worktreeAdd("/repo", "/wt", "proof-amendment/W1-T3434-FIXTURE-5154");
+  assert.equal(worktreeAddCalls.length, 1);
+  const worktreeAddArgs = worktreeAddCalls[0] as readonly unknown[];
+  assert.deepEqual(worktreeAddArgs.slice(0, 4), ["/repo", "/wt", "proof-amendment/W1-T3434-FIXTURE-5154", "origin/main"]);
+  assert.equal(typeof (worktreeAddArgs[4] as { log?: unknown }).log, "function", "worktreeAdd forwards the injected log fn, not a fresh one");
+
+  ports.worktreeRemove("/repo", "/wt");
+  assert.deepEqual(worktreeRemoveCalls, [["/repo", "/wt"]]);
+
+  ports.writeFile("/repo/plan/tasks.d/W1-T3434.yaml", "new text");
+  assert.deepEqual(writeFileCalls, [{ absPath: "/repo/plan/tasks.d/W1-T3434.yaml", text: "new text" }]);
+
+  assert.equal(ports.gitAdd, gitOps.gitAdd, "gitAdd/gitCommit delegate straight to the injected gitOps, never rebuilt here");
+  assert.equal(ports.gitCommit, gitOps.gitCommit);
+
+  ports.gitPush("/wt", "proof-amendment/W1-T3434-FIXTURE-5154", "abc123");
+  assert.deepEqual(gitPushCalls, [["/wt", "proof-amendment/W1-T3434-FIXTURE-5154", "abc123"]]);
+
+  assert.equal(ports.probeExisting("no-existing-branch"), undefined);
+  assert.deepEqual(ports.probeExisting("has-existing"), { prUrl: "https://github.com/acme/remudero/pull/9010", prNumber: 9010 });
+  assert.equal(probeCalls.length, 2);
+
+  const created = ports.createPr({ title: "t", body: "b", head: "h", base: "main" });
+  assert.deepEqual(created, { prUrl: "https://github.com/acme/remudero/pull/9020", prNumber: 9020 });
+  assert.deepEqual(assertLiveWriteCalls[0], { action: "gh-pr-create", reason: "opening W1-T3434-FIXTURE's proof-amendment PR" });
+  assert.equal(createPrCalls.length, 1);
+
+  assert.equal(ports.worktreePathFor("W1-T3434-FIXTURE", 5154), join("/tmp/rmd-root", "worktrees", "proof-amendment-W1-T3434-FIXTURE-5154"));
+
+  // lookupIdentity: no matching row at all.
+  assert.equal(ports.lookupIdentity("missing-key"), undefined);
+  // lookupIdentity: row found but malformed (empty amendment_url) — still undefined.
+  assert.equal(ports.lookupIdentity("malformed-key"), undefined);
+  // lookupIdentity: row found and valid — isPrMergedNowFn answers merged.
+  assert.deepEqual(ports.lookupIdentity("found-key"), {
+    amendmentUrl: "https://github.com/acme/remudero/pull/9001",
+    amendmentNumber: 9001,
+    merged: true,
+  });
+  assert.deepEqual(isPrMergedCalls, ["https://github.com/acme/remudero/pull/9001"]);
+  // lookupIdentity: an unreadable live merge state (isPrMergedNowFn throws) defaults to un-merged.
+  isPrMergedThrows = true;
+  assert.deepEqual(ports.lookupIdentity("found-key"), {
+    amendmentUrl: "https://github.com/acme/remudero/pull/9001",
+    amendmentNumber: 9001,
+    merged: false,
+  });
+
+  ports.recordIdentity("some-key", { amendmentUrl: "https://github.com/acme/remudero/pull/9020", amendmentNumber: 9020, merged: false });
+  assert.deepEqual(logCalls.at(-1), {
+    step: "fix.dispatch",
+    extra: {
+      kind: "proof_amendment",
+      task_id: "W1-T3434-FIXTURE",
+      pr_number: 5154,
+      identity_key: "some-key",
+      amendment_url: "https://github.com/acme/remudero/pull/9020",
+      amendment_number: 9020,
+    },
+  });
+
+  const okResult = ports.updateBranch("https://github.com/acme/remudero/pull/5154", "def456");
+  assert.deepEqual(okResult, { ok: true });
+  assert.equal(ghExecCalls.length, 1);
+  assert.equal(assertLiveWriteCalls.at(-1)!.action, "gh-pr-update-branch");
+
+  const failingPorts = buildProofAmendmentWritePorts(
+    {
+      taskId: "W1-T3434-FIXTURE",
+      worktreePath: "/tmp/proof-amendment-repo",
+      config: { root: "/tmp/rmd-root" } as unknown as Config,
+      owner: "acme",
+      repo: "remudero",
+      prNumber: 5154,
+      ledgerLinesNow: [],
+      log: () => {},
+      gitOps,
+    },
+    {
+      ghExecFn: (() => {
+        throw { stderr: "rejected: non-fast-forward" };
+      }) as unknown as typeof import("../src/lib/github-transport.js").ghExec,
+      assertLiveWriteAllowedFn: () => {},
+    },
+  );
+  assert.deepEqual(failingPorts.updateBranch("https://github.com/acme/remudero/pull/5154", "def456"), {
+    ok: false,
+    error: "rejected: non-fast-forward",
+  });
+});
+
+function baseDispatchParams(over: Partial<Parameters<typeof dispatchProofAmendmentWrite>[0]> = {}): Parameters<typeof dispatchProofAmendmentWrite>[0] {
+  return {
+    prUrl: PR_URL,
+    taskId: TASK_ID,
+    worktreePath: "/tmp/proof-amendment-repo",
+    config: { root: "/tmp/rmd-root" } as unknown as Config,
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: "/tmp/head-checkout" },
+    evidence: evidence(),
+    transcriptText: [
+      "PROOF_AMENDMENT:",
+      `1. claim: ${CLAIM}`,
+      `   old_proof: ${OLD_PROOF}`,
+      `   new_proof: ${NEW_PROOF}`,
+      "",
+    ].join("\n"),
+    review: {
+      state: "success",
+      capped: true,
+      criteria: [{ claim: CLAIM, proof: OLD_PROOF, met: true, reason: "matched", proof_exec: "executed_pass" }],
+    },
+    priorHeadSha: HEAD_SHA,
+    log: () => {},
+    getLedgerLinesNow: () => [],
+    ...over,
+  };
+}
+
+test("dispatchProofAmendmentWrite is the whole proof-discrimination arm, extracted out of runFixRung and exercisable without a live git/GitHub write", () => {
+  // Proposal parsing and the base-proof build are overridable here; `requestProofAmendment`
+  // itself is called for real (this task's own acceptance criteria grep for that exact literal
+  // call site in run-task.ts — see the "the live fix rung calls the proof-amendment parent…"
+  // test above), but every write IT makes still goes through the injected write ports one layer
+  // down (buildProofAmendmentWritePorts), so nothing it does escapes this function's own fakes.
+  // This drives the FULL body — early-return on no PR number, early-return on an empty proposal,
+  // the success path, and the catch(e) path — the coverage-ratchet flagged as unreachable when
+  // everything closed over live process/network I/O with no seam at all.
+  const logCalls: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => logCalls.push({ step, extra });
+
+  // No PR number in the URL -> the transcript is still parsed (matches the pre-extraction
+  // order — parsing never depended on the PR number) but nothing further runs.
+  let parseCalls = 0;
+  dispatchProofAmendmentWrite(
+    baseDispatchParams({ prUrl: "https://github.com/acme/remudero/not-a-pull-url", log }),
+    { parseProofAmendmentProposalFn: (text) => { parseCalls += 1; return parseProofAmendmentProposal(text); } },
+  );
+  assert.equal(parseCalls, 1);
+  assert.deepEqual(logCalls, []);
+
+  // A transcript with no PROOF_AMENDMENT block parses to an empty proposal -> bails out before
+  // ever calling buildBaseProofDirFn or touching a write port (findShard included).
+  let baseProofCalls = 0;
+  let findShardCalls = 0;
+  dispatchProofAmendmentWrite(baseDispatchParams({ transcriptText: "no proposal here", log }), {
+    buildBaseProofDirFn: () => {
+      baseProofCalls += 1;
+      return { baseIsCheckout: false } as ReturnType<typeof buildBaseProofDir>;
+    },
+    findShardFn: () => {
+      findShardCalls += 1;
+      return undefined;
+    },
+  });
+  assert.equal(baseProofCalls, 0);
+  assert.equal(findShardCalls, 0);
+  assert.deepEqual(logCalls, []);
+
+  // The success path: a real PR number and a non-empty proposal reach the real
+  // `requestProofAmendment`, entirely through the injected write ports — never a live
+  // worktree/GitHub call — and its outcome is logged under `proof_amendment.requested`. The
+  // proposal's `old_proof` deliberately does not byte-match this `evidence`'s recorded proof, so
+  // `requestProofAmendment` refuses deterministically at `claim-not-recognised` — BEFORE it would
+  // ever try to execute the replacement proof against a real checkout — while still exercising
+  // every wiring line in between: the lazy ledger read, the base-proof build, the git-ops build,
+  // the write-ports build, the dispatch call itself, and the final log line.
+  logCalls.length = 0;
+  let getLedgerLinesCalls = 0;
+  let findShardCallsSuccess = 0;
+  dispatchProofAmendmentWrite(
+    baseDispatchParams({
+      log,
+      evidence: { proofs: [{ claim: CLAIM, proof: "a completely different old proof", proofExec: "executed_stale" }] },
+      getLedgerLinesNow: () => {
+        getLedgerLinesCalls += 1;
+        return [];
+      },
+    }),
+    {
+      buildBaseProofDirFn: () => ({ baseIsCheckout: false }) as ReturnType<typeof buildBaseProofDir>,
+      findShardFn: () => {
+        findShardCallsSuccess += 1;
+        return { path: "plan/tasks.d/W1-T3434-FIXTURE.yaml", text: "shard text" };
+      },
+    },
+  );
+  assert.equal(getLedgerLinesCalls, 1, "the ledger is read lazily, only once a real proposal exists");
+  assert.equal(findShardCallsSuccess, 1, "reached requestProofAmendment's own shard lookup — real dispatch, real ports");
+  assert.deepEqual(logCalls, [
+    {
+      step: "proof_amendment.requested",
+      extra: {
+        pr_number: 5154,
+        task_id: TASK_ID,
+        outcome: "refused",
+        kind: "refused",
+        reason: "claim-not-recognised",
+        detail: `no capped stale-proof row byte-matches this claim/old-proof pair: ${CLAIM}`,
+      },
+    },
+  ]);
+
+  // The catch(e) path: a throw anywhere inside (here: findShardFn, one of the injected write
+  // ports) is caught and logged as `proof_amendment.error`, never left to propagate into the
+  // caller's ordinary re-review below it.
+  logCalls.length = 0;
+  dispatchProofAmendmentWrite(baseDispatchParams({ log }), {
+    buildBaseProofDirFn: () => ({ baseIsCheckout: false }) as ReturnType<typeof buildBaseProofDir>,
+    findShardFn: () => {
+      throw new Error("shard lookup exploded");
+    },
+  });
+  assert.deepEqual(logCalls, [{ step: "proof_amendment.error", extra: { error: "shard lookup exploded" } }]);
 });
 
 test("renderFixPrompt gives a proof-discrimination worker a proposal grammar, not PR-body write instructions", () => {
