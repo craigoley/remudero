@@ -1,0 +1,63 @@
+- id: W1-T3501
+  title: "A FIX RUNG RE-REVIEW CAN JUDGE A WORKER TRANSCRIPT INSTEAD OF THE CURRENT PR BODY AND EXHAUST ITS STRIKES AGAINST A PLAN-ONLY PR THAT THE AUTHORITATIVE REVIEWER PASSES"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 18.00
+  files: [src/run-task.ts, test/fix-rung-report-provenance.test.ts]
+  origin: "operator-session#dropped-follow-ups-daemon-and-queue-2026-09-13"
+  plan_refs: ["W1-T256", "W1-T1254", "W1-T2293"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on PR #5289, head b05d6bd74bdf28531c36c4c8fddcf64c51890785. Its CI gate and
+    every deterministic check were green, but the fix rung spent two strikes and opened #5337.
+    The terminal review says the PR body was not read because `reviewer-unmet` mode does not
+    fetch it. `src/run-task.ts:9377-9406` starts with `workerTranscript(fixResult)` and fetches
+    the current PR body only for `body-coverage` and `proof-discrimination`; `ci-log`,
+    `reviewer-unmet`, and `merge-conflict` keep judging the transcript.
+
+    The same deployed checkout at a9e1438 proves the comparison. `rmd review 5289` uses
+    `report: reportBody` at `src/run-task.ts:15329` and, on the unchanged b05d6bd head, posted
+    `remudero-review=success`: `PASS — plan-only PR (1 criteria)`. The filing's stored body
+    declares one deterministic Acceptance criterion. The direct repair therefore edited a plan
+    filing and exhausted its cap while the only authoritative artifact already passed.
+
+    This is not a claim that worker prose is bad evidence for a fix prompt. It is the narrower
+    review-input mismatch: a post-worker verdict must judge the same current PR body as the
+    ordinary `rmd review` command. W1-T1254 correctly marks the transcript as a substitute to
+    avoid false changeset claims, but it still leaves keyword proof substantiation unavailable;
+    #5289 shows that fail-safe downgrade can strand an otherwise mergeable plan-only PR.
+  design: |
+    After each successful worker push and before post-worker `runReview`, fetch the current PR
+    body for every fix mode. When the read succeeds, pass that body as both `report` and
+    `reviewInputBody`, set `reportIsSubstitute: false`, and preserve the existing body-coverage
+    claim-repair flow against that same snapshot. The worker transcript remains available to the
+    fix prompt and diagnostics; it is never certified as the PR body.
+
+    If the body read fails, retain the current fail-safe behavior: review the transcript only as
+    an explicitly named substitute, log the fetch failure, and never manufacture a pass. Preserve
+    the infrastructure-fault stand-down boundary rather than consuming another code-edit strike
+    solely because GitHub body input is unreadable. Do not weaken the review judge, acceptance
+    author gate, semantic reviewer, strike cap, or auto-merge policy.
+  acceptance:
+    - claim: "a ci-log and reviewer-unmet fix re-review pass the freshly fetched PR body, rather than the worker transcript, to runReview with non-substitute provenance"
+      proof: "unit test: W1-T3501 ci-log and reviewer-unmet re-reviews judge the current PR body"
+    - claim: "a failed current-body read retains worker prose only as an explicitly named substitute and cannot produce a trusted success"
+      proof: "unit test: W1-T3501 body-fetch failure remains an explicit substitute"
+    - claim: "the body-coverage claim-repair path continues to judge the body it read or updated, and no fix mode adds a second body fetch after a successful read"
+      proof: "unit test: W1-T3501 body-coverage keeps one current-body review input"
+  falsifier: |
+    Delete the all-mode body-fetch assignment and run the added focused test. Its ci-log and
+    reviewer-unmet cases must again hand the worker transcript to runReview and fail. Mutate the
+    fetcher to throw: the failure case must observe `reportIsSubstitute: true` and must not return
+    a trusted success. The live comparator is the #5289 shape: if a direct fix re-review already
+    uses the stored body in ci-log/reviewer-unmet mode, this task is superseded; at filing,
+    `src/run-task.ts:9395` proves it does not.
+  note: |
+    Reservation W1-T3501 was atomically claimed on origin for
+    run-W1-T3501-1789284700000 before filing.
