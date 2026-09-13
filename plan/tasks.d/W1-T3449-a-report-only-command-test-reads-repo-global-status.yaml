@@ -50,7 +50,7 @@
     - claim: "the ci-failures report-only command is executed from a disposable git worktree whose porcelain is clean before and after the injected report call"
       proof: "unit test: W1-T3449 report-only command writes nothing in its isolated worktree"
     - claim: "a file created by a mutant report-only command in the isolated worktree fails the no-write assertion, so the isolation does not convert the test into a vacuous pass"
-      proof: "unit test: W1-T3449 isolated no-write assertion rejects a sentinel"
+      proof: "unit test: W1-T3449 isolated no-write assertion rejects a sentinel file write"
     - claim: "the test restores its original cwd and leaves no entry in the shared checkout after the isolated assertion"
       proof: "unit test: W1-T3449 restores the shared checkout after its isolated assertion"
   falsifier: |
