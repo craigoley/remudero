@@ -208,8 +208,9 @@ test("W1-T1006: a blocked PR row offers no card link for a cardless id", () => {
     "a blocked-PR row push must never carry a taskId -- that field ALONE is what wires reconcileRows' card-fetch affordance",
   );
   // Contrast: the escalation/verify-human pushes DO carry taskId -- proving the omission above
-  // is a deliberate asymmetry, not an accidental one shared by every row kind.
-  const escalationPush = renderNeedsMeFn!.match(/rows\.push\(\{ key: `task:\$\{t\.taskId\}`[\s\S]*?\}\);/)?.[0];
+  // is a deliberate asymmetry, not an accidental one shared by every row kind. W1-T3395: the
+  // escalation row is now built via the shared askRow() gate rather than a bare rows.push(...).
+  const escalationPush = renderNeedsMeFn!.match(/askRow\(\{ kind: "escalation", resolved: false \}, `task:\$\{t\.taskId\}`[\s\S]*?\);/)?.[0];
   assert.match(escalationPush ?? "", /taskId: t\.taskId/, "sanity: the escalation row DOES carry taskId -- it legitimately resolves a real plan task");
 
   // The row's ACTUAL rendered HTML carries no expand-chevron glyph either -- belt and braces

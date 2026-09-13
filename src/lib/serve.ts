@@ -2069,24 +2069,30 @@ export function renderShellHtml(
   <script>document.getElementById("mailbox")?.setAttribute("role", "list");</script>
 </section>
 
-<!-- DECISIONS: the needs-me set alone -- W1-T257's merged-proposal reconciler and the
-     escalation-lifecycle reconciler already run ahead of this render (GET /v1/feedback,
-     status.ts's deriveStatus), so an item they have already resolved never reaches
-     renderNeedsMe's own needsHuman/grilling/proposed filter in the first place. This tab adds
-     NO third staleness rule of its own -- it renders exactly the set those two verdicts leave
-     pending, same as today, just gated to its own tab now instead of the flat stack. -->
-<section id="needs-me" class="panel-section" aria-label="Needs me" data-owner-tab="decisions">
-  <h2><button type="button" class="section-header" id="needs-me-toggle" aria-expanded="true" aria-controls="needs-me-body">
-    <span>Needs me</span><span class="section-summary" id="needs-me-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
+<!-- INBOX (W1-T3395, ratifies W1-T3186 (ii)): the SOLE front door for an ask. NEEDS ME is
+     DISSOLVED, not renamed -- every item here is one classifyAskRecordItem()-verdict-ASK
+     candidate (ask-classification.ts, W1-T3394), sourced from inbox proposals, live
+     escalations, and unanswered feedback questions, routed through renderNeedsMe's ONE shared
+     askRow() gate regardless of which of those three sources it came from. A RECORD verdict
+     (an already-decided/drafting proposal, a resolved escalation, an answered question, a
+     drain-rundown outcome line) never reaches this list -- that is change management's remit
+     (W1-T3396). W1-T257's merged-proposal reconciler and the escalation-lifecycle reconciler
+     already run ahead of this render (GET /v1/feedback, status.ts's deriveStatus), so an item
+     they have already resolved never reaches askRow's gate in the first place. This tab adds NO
+     third staleness rule of its own -- it renders exactly the set those two verdicts leave
+     pending, gated to its own tab. -->
+<section id="inbox" class="panel-section" aria-label="Inbox" data-owner-tab="decisions">
+  <h2><button type="button" class="section-header" id="inbox-toggle" aria-expanded="true" aria-controls="inbox-body">
+    <span>Inbox</span><span class="section-summary" id="inbox-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
   </button></h2>
-  <div id="needs-me-body">
-    <ul id="needs-me-list" class="row-list">${skeletonRows(2)}</ul>
+  <div id="inbox-body">
+    <ul id="inbox-list" class="row-list">${skeletonRows(2)}</ul>
     <!-- W1-T3183: the verify:human backlog (W1-T507) is a SEPARATE population from the asks
-         above -- its own list, its own heading, its own count, never blended into needs-me-list
-         or needs-me-summary (see renderNeedsMe's own doc, below). W1-T507's purpose (the queue
+         above -- its own list, its own heading, its own count, never blended into inbox-list
+         or inbox-summary (see renderNeedsMe's own doc, below). W1-T507's purpose (the queue
          stays VISIBLE) survives exactly: this list is never collapsed, hidden or paginated. -->
-    <h3>Awaiting verification <span id="needs-me-backlog-summary" class="section-summary">…</span></h3>
-    <ul id="needs-me-backlog-list" class="row-list" aria-label="verify: human backlog, no action required"></ul>
+    <h3>Awaiting verification <span id="inbox-backlog-summary" class="section-summary">…</span></h3>
+    <ul id="inbox-backlog-list" class="row-list" aria-label="verify: human backlog, no action required"></ul>
   </div>
 </section>
 

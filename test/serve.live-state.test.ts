@@ -585,9 +585,9 @@ test("W1-T182: an escalation row renders the issue's real ask + a direct link + 
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base);
     try {
-      await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("needs a decision"));
+      await page.waitForFunction(() => (document.getElementById("inbox-list")?.textContent ?? "").includes("needs a decision"));
       const row = await page.evaluate(() => {
-        const li = document.querySelector("#needs-me-list li");
+        const li = document.querySelector("#inbox-list li");
         return {
           text: li?.textContent ?? "",
           hasApproveButton: Array.from(li?.querySelectorAll("button") ?? []).some((b) => b.textContent?.trim() === "Approve"),
@@ -655,9 +655,9 @@ test("W1-T223: a NEEDS ME item arriving while the section is collapsed adds head
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base);
     try {
-      await page.waitForFunction(() => document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded") === "false");
+      await page.waitForFunction(() => document.getElementById("inbox-toggle")?.getAttribute("aria-expanded") === "false");
       assert.equal(
-        await page.evaluate(() => document.getElementById("needs-me-toggle")?.classList.contains("section-emphasis")),
+        await page.evaluate(() => document.getElementById("inbox-toggle")?.classList.contains("section-emphasis")),
         false,
         "no emphasis before anything has arrived",
       );
@@ -666,19 +666,19 @@ test("W1-T223: a NEEDS ME item arriving while the section is collapsed adds head
         deps.board.ledgerPath,
         JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/1", class: "BLOCKED" }) + "\n",
       );
-      await page.waitForFunction(() => document.getElementById("needs-me-toggle")?.classList.contains("section-emphasis") === true, null, {
+      await page.waitForFunction(() => document.getElementById("inbox-toggle")?.classList.contains("section-emphasis") === true, null, {
         timeout: 5000,
       });
       // the falsifier this proves: collapsing must never become a way to silently miss the item --
       // but the fix is EMPHASIS, never a forced reopen the operator didn't ask for.
-      assert.equal(await page.evaluate(() => document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded")), "false");
-      assert.equal(await page.evaluate(() => (document.getElementById("needs-me-body") as HTMLElement)?.hidden), true);
+      assert.equal(await page.evaluate(() => document.getElementById("inbox-toggle")?.getAttribute("aria-expanded")), "false");
+      assert.equal(await page.evaluate(() => (document.getElementById("inbox-body") as HTMLElement)?.hidden), true);
 
-      await reachSection(page, "needs-me");
-      await page.click("#needs-me-toggle");
-      await page.waitForFunction(() => document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded") === "true");
+      await reachSection(page, "inbox");
+      await page.click("#inbox-toggle");
+      await page.waitForFunction(() => document.getElementById("inbox-toggle")?.getAttribute("aria-expanded") === "true");
       assert.equal(
-        await page.evaluate(() => document.getElementById("needs-me-toggle")?.classList.contains("section-emphasis")),
+        await page.evaluate(() => document.getElementById("inbox-toggle")?.classList.contains("section-emphasis")),
         false,
         "expanding the section clears the emphasis -- the operator has now seen it",
       );
@@ -700,10 +700,10 @@ test("W1-T182: clicking 'Mark handled' closes the issue via the real route, and 
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base, { token: WRITE_TOKEN });
     try {
-      await reachSection(page, "needs-me");
-      await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("force-push"));
-      await page.click("#needs-me-list button:has-text('Mark handled')");
-      await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("nothing needs you"), null, {
+      await reachSection(page, "inbox");
+      await page.waitForFunction(() => (document.getElementById("inbox-list")?.textContent ?? "").includes("force-push"));
+      await page.click("#inbox-list button:has-text('Mark handled')");
+      await page.waitForFunction(() => (document.getElementById("inbox-list")?.textContent ?? "").includes("nothing needs you"), null, {
         timeout: 5000,
       });
     } finally {
@@ -723,7 +723,7 @@ test("W1-T182: clicking 'Mark handled' closes the issue via the real route, and 
 // /v1/status poll alone, making that poll's response the one seam to hold open below.
 const SKELETON_SECTIONS = [
   { list: "now-list", emptyText: "nothing in flight" },
-  { list: "needs-me-list", emptyText: "nothing needs you right now" },
+  { list: "inbox-list", emptyText: "nothing needs you right now" },
   { list: "recent-list", emptyText: "no recent activity yet" },
 ];
 
@@ -770,7 +770,7 @@ test("skeleton lifecycle: NOW/NEEDS ME/RECENT show ONLY their first-paint skelet
 
       releaseFirstPoll();
       await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase: recon"));
-      await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("nothing needs you"));
+      await page.waitForFunction(() => (document.getElementById("inbox-list")?.textContent ?? "").includes("nothing needs you"));
       await page.waitForFunction(() => (document.getElementById("recent-list")?.textContent ?? "").includes("no recent activity"));
 
       // POST-FIRST-DATA: zero skeleton nodes remain, in EITHER the has-data (NOW) or the

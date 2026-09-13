@@ -395,14 +395,14 @@ test("one-click drill: a click on a row in EVERY section (NOW/NEEDS ME/UP NEXT/R
     try {
       const sections = [
         { list: "now-list", taskId: "W1-T1", title: "now section target" },
-        { list: "needs-me-list", taskId: "W1-T2", title: "needs me section target" },
+        { list: "inbox-list", taskId: "W1-T2", title: "needs me section target" },
         { list: "up-next-list", taskId: "W1-T3", title: "up next section target" },
         { list: "recent-list", taskId: "W1-T4", title: "recent section target" },
         { list: "rest-list", taskId: "W1-T5", title: "rest section target" },
       ];
       for (const s of sections) {
         // the row's OWNING SECTION is its list id with the "-list" suffix stripped ("now-list" ->
-        // "now", "needs-me-list" -> "needs-me", ...) -- reach it before the click below needs it
+        // "now", "inbox-list" -> "inbox", ...) -- reach it before the click below needs it
         // to be interactable, whatever shape the shell is currently in.
         await reachSection(page, s.list.replace(/-list$/, ""));
         await page.waitForFunction((sel) => !!document.querySelector(sel), `#${s.list} li[data-task-id="${s.taskId}"]`, { timeout: 5000 });
@@ -557,19 +557,19 @@ test("W1-T336: Decisions filters out a feedback entry whose proposal PR already 
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base);
     try {
-      // Decisions is the DEFAULT active tab -- reaching "needs-me" costs no click at all, proving
+      // Decisions is the DEFAULT active tab -- reaching "inbox" costs no click at all, proving
       // this criterion needs no navigation either.
       assert.equal(await page.$eval("#tab-decisions", (el) => el.getAttribute("aria-selected")), "true");
-      await page.waitForFunction(() => document.querySelectorAll("#needs-me-list li[data-key]").length > 0);
+      await page.waitForFunction(() => document.querySelectorAll("#inbox-list li[data-key]").length > 0);
 
-      const text = (await page.$eval("#needs-me-list", (el) => el.textContent)) ?? "";
+      const text = (await page.$eval("#inbox-list", (el) => el.textContent)) ?? "";
       assert.match(text, /still genuinely open/, "a genuinely pending decision must render in Decisions");
       assert.doesNotMatch(
         text,
         /resolved by a merged proposal/,
         "an entry whose proposal PR already merged must be filtered OUT, not sorted down, by the existing W1-T257 reconciler",
       );
-      assert.equal(await page.$$eval("#needs-me-list li[data-key]", (els) => els.length), 1);
+      assert.equal(await page.$$eval("#inbox-list li[data-key]", (els) => els.length), 1);
     } finally {
       await context.close();
     }

@@ -43,6 +43,14 @@
  * that each name was `typeof "function"`, did NOT redden when a helper was deliberately given a
  * module-level constant to close over — "defined" and "runnable" are different claims.)
  */
+// W1-T3395: the ONE exception to this file's zero-import history — imported, not duplicated,
+// because `classifyAskRecordItem` (ask-classification.ts, W1-T3394) is itself already fully
+// self-contained (a pure switch statement closing over nothing), so importing the REAL function
+// object here and shipping it via SHELL_SCRIPT_HELPERS below costs nothing at the browser
+// boundary while keeping this the ONE definition every consumer (server, this module, and
+// console-shell-client.ts's bootConsoleShellClient) shares — never a second, independently
+// re-typed copy that could drift from it.
+import { classifyAskRecordItem } from "./ask-classification.js";
 
 // ── the row shapes these helpers read ─────────────────────────────────────────────────────────
 // Each is deliberately NARROW — exactly the fields the helpers below touch — rather than the whole
@@ -681,7 +689,7 @@ export function journeyHtml(chain: JourneyChain | null | undefined): string {
 const SHELL_SCRIPT_HELPERS = [
   escapeHtml, formatRelative, formatTimestamp, formatClock, formatAgo, formatElapsed, formatBytes,
   isSameLocalDay, oldestAgoText, costLabel,
-  taskWorkstream, statusColorKey, searchHaystack, isBlockedRow,
+  taskWorkstream, statusColorKey, searchHaystack, isBlockedRow, classifyAskRecordItem,
   cmpMissingLast, cmpById, cmpByAge, cmpByRecency,
   fuzzyScore, facetValueMatches, withoutVolatile, parseSseFrame,
   askTypeFromEscalationTitle, usageWindowLabel, mergeHoldConfirmationText,

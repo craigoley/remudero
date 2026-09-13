@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { renderShellHtml } from "../src/lib/serve.js";
 import { needsMeBacklogSummaryText, needsMeSummaryText } from "../src/lib/console-shell-script.js";
+import { classifyAskRecordItem } from "../src/lib/ask-classification.js";
 
 const ASK_IDS = ["W1-T4522", "W1-T4559", "W1-T4621", "W1-T4619", "W1-T-MAIN-HEALTH"];
 const BACKLOG_IDS = Array.from({ length: 53 }, (_, i) => `W1-T${9000 + i}`);
@@ -50,12 +51,22 @@ interface Harness {
   shown: Set<string>;
 }
 
+// W1-T3395: renderNeedsMe now calls one collaborator of its own that this harness must extract
+// too -- askRow, the shared ask/RECORD gate declared just above it. askRow in turn calls
+// classifyAskRecordItem (ask-classification.ts, W1-T3394) by bare name; rather than regex-
+// extracting THAT function's text too (it is emitted via `.toString()`, W1-T2731's technique,
+// which does not preserve source formatting the way this file's own BODY-slice does), the REAL
+// imported function object is passed into the harness below as a plain collaborator -- still the
+// genuine, unit-tested classifier, never a reimplementation, just supplied the way any other
+// named import already is rather than by text-splicing.
 function extractRenderNeedsMe(html: string): string {
-  const src = html.match(
+  const askRowSrc = html.match(/function askRow\(classifierItem, key, html, extra\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(askRowSrc, "askRow must exist in the shell's inline script");
+  const renderNeedsMeSrc = html.match(
     /function renderNeedsMe\(tasks, feedbackEntries, inboxReady, inboxDrafting\) \{[\s\S]*?\n  \}/,
   )?.[0];
-  assert.ok(src, "renderNeedsMe must exist in the shell's inline script");
-  return src!;
+  assert.ok(renderNeedsMeSrc, "renderNeedsMe must exist in the shell's inline script");
+  return `${askRowSrc}\n${renderNeedsMeSrc}`;
 }
 
 /** Runs the REAL, just-extracted `renderNeedsMe` with every collaborator it reaches into
@@ -79,6 +90,7 @@ function run(src: string, tasks: Record<string, unknown>[]): Harness {
     "fixtureFeedback",
     "fixtureInboxReady",
     "fixtureInboxDrafting",
+    "classifyAskRecordItem",
     "needsMeTaskRowHtml",
     "needsMeVerifyRowHtml",
     "needsMeGrillHtml",
@@ -110,6 +122,7 @@ function run(src: string, tasks: Record<string, unknown>[]): Harness {
     [],
     [],
     [],
+    classifyAskRecordItem,
     (t: { taskId: string }) => `ask-html:${t.taskId}`,
     (t: { taskId: string }) => `backlog-html:${t.taskId}`,
     () => "grill-html",
@@ -145,10 +158,10 @@ test("W1-T3183: asks and the verify:human backlog render into SEPARATE lists, ea
   const result = run(src, mixedTasks());
 
   assert.equal(result.reconcile.length, 2, "exactly two reconcileRows calls -- one per group, never one blended call");
-  const askCall = result.reconcile.find((c) => c.id === "needs-me-list");
-  const backlogCall = result.reconcile.find((c) => c.id === "needs-me-backlog-list");
-  assert.ok(askCall, "the ask group must render into needs-me-list");
-  assert.ok(backlogCall, "the backlog group must render into its OWN list, needs-me-backlog-list");
+  const askCall = result.reconcile.find((c) => c.id === "inbox-list");
+  const backlogCall = result.reconcile.find((c) => c.id === "inbox-backlog-list");
+  assert.ok(askCall, "the ask group must render into inbox-list");
+  assert.ok(backlogCall, "the backlog group must render into its OWN list, inbox-backlog-list");
 
   assert.equal(askCall!.rows.length, 5, "5 asks, not 58 -- the escalations only");
   assert.deepEqual(
@@ -183,7 +196,7 @@ test("W1-T3183: the operator-facing count is the ASK count alone -- a 53-backlog
   const src = extractRenderNeedsMe(html);
   const result = run(src, mixedTasks());
 
-  assert.ok(result.finishSectionRender, "finishSectionRender must be called for the needs-me section header");
+  assert.ok(result.finishSectionRender, "finishSectionRender must be called for the inbox section header");
   assert.equal(result.finishSectionRender!.isEmpty, false, "58 total rows exist -- the section is not empty");
   // The REAL needsMeSummaryText (console-shell-script.ts), called with the ask rows ALONE.
   assert.equal(result.finishSectionRender!.text, "5 open", "the header/tab-title count reads 5, the ask count -- never 58, the blended total");
@@ -193,7 +206,7 @@ test("W1-T3183: the operator-facing count is the ASK count alone -- a 53-backlog
 
   // The backlog gets its OWN, separately labelled count -- never silently absent, never folded
   // into the number above.
-  const backlogSummary = result.setSectionSummary.find(([id]) => id === "needs-me-backlog");
+  const backlogSummary = result.setSectionSummary.find(([id]) => id === "inbox-backlog");
   assert.ok(backlogSummary, "the backlog list's own count must be set");
   assert.equal(backlogSummary![1], "53 queued, never dispatched");
 
@@ -227,19 +240,21 @@ test("W1-T3183: a row's group is read off the SAME field that already selected i
   assert.doesNotMatch(html, /function isActionable/);
 
   // Sanity: the escalation loop above never sets `group` at all -- a row with no actionable
-  // referent is the ONLY one that opts itself out of "ask" by construction.
-  const escalationPush = src.match(/rows\.push\(\{ key: `task:\$\{t\.taskId\}`[\s\S]*?\}\);/)?.[0];
+  // referent is the ONLY one that opts itself out of "ask" by construction. W1-T3395: the
+  // escalation row is now built via the shared askRow() gate rather than a bare rows.push(...),
+  // so this anchors to that call site instead.
+  const escalationPush = src.match(/askRow\(\{ kind: "escalation", resolved: false \}, `task:\$\{t\.taskId\}`[\s\S]*?\);/)?.[0];
   assert.ok(escalationPush);
   assert.doesNotMatch(escalationPush!, /group:/, "an escalation row never carries a group field -- it is an ask by omission, not by a second computed flag");
 });
 
 test("W1-T3183: the backlog list is a real, separate, always-rendered DOM element -- never a collapse, filter or pagination", () => {
   const html = renderShellHtml();
-  assert.match(html, /<ul id="needs-me-list" class="row-list">/, "the ask list keeps its own existing id");
-  assert.match(html, /<ul id="needs-me-backlog-list" class="row-list"[^>]*><\/ul>/, "the backlog gets its OWN list element, distinct from needs-me-list");
-  assert.match(html, /<h3>Awaiting verification <span id="needs-me-backlog-summary" class="section-summary">…<\/span><\/h3>/, "the backlog heading carries its own labelled, separate count span");
-  // The backlog heading/list carry no toggle/collapse control of their own (contrast: needs-me's
-  // OWN top-level section keeps its existing needs-me-toggle, untouched, above both lists) --
-  // W1-T507's "queue stays visible" purpose is preserved by never gating this list behind a click.
-  assert.doesNotMatch(html, /id="needs-me-backlog-toggle"/);
+  assert.match(html, /<ul id="inbox-list" class="row-list">/, "the ask list keeps its own existing id");
+  assert.match(html, /<ul id="inbox-backlog-list" class="row-list"[^>]*><\/ul>/, "the backlog gets its OWN list element, distinct from inbox-list");
+  assert.match(html, /<h3>Awaiting verification <span id="inbox-backlog-summary" class="section-summary">…<\/span><\/h3>/, "the backlog heading carries its own labelled, separate count span");
+  // The backlog heading/list carry no toggle/collapse control of their own (contrast: inbox's OWN
+  // top-level section keeps its existing inbox-toggle, untouched, above both lists) -- W1-T507's
+  // "queue stays visible" purpose is preserved by never gating this list behind a click.
+  assert.doesNotMatch(html, /id="inbox-backlog-toggle"/);
 });

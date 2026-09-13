@@ -432,7 +432,7 @@ test("W1-T2301 acceptance 1: the fail-open leg (one click previews, then files) 
 
   await withShell(deps, async (base) => {
     const page = await openShellWithWrite(base);
-    await reachSection(page, "needs-me");
+    await reachSection(page, "inbox");
     const form = page.locator(`.needs-me-answer[data-reply-to="${parked.id}"]`);
     await form.locator("input").waitFor();
     await form.locator("input").fill("a config default, please");
@@ -492,7 +492,7 @@ test("W1-T2301 acceptance 2: the armed leg (preview returns an expansion, files 
 
   await withShell(deps, async (base) => {
     const page = await openShellWithWrite(base);
-    await reachSection(page, "needs-me");
+    await reachSection(page, "inbox");
     const form = page.locator(`.needs-me-answer[data-reply-to="${parked.id}"]`);
     await form.locator("input").waitFor();
     await form.locator("input").fill("a config default, please");
@@ -522,7 +522,7 @@ test("W1-T2301 acceptance 3: a filing that fails after its preview succeeded lea
 
   await withShell(deps, async (base) => {
     const page = await openShellWithWrite(base);
-    await reachSection(page, "needs-me");
+    await reachSection(page, "inbox");
     const form = page.locator(`.needs-me-answer[data-reply-to="${parked.id}"]`);
     await form.locator("input").waitFor();
     await form.locator("input").fill("a config default, please");

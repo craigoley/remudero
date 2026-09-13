@@ -305,14 +305,18 @@ nodeTest("bootConsoleShellClient renders every actionable row and the separate v
       },
     },
     async (elements) => {
-      const asksHtml = await waitForStubChildrenHtml(elements, "needs-me-list", (value) =>
+      // W1-T3395 (ratifies W1-T3186 (ii)): PDRAFTING is deliberately NOT in this wait condition
+      // -- classifyAskRecordItem's proposal arm classifies InboxState "drafting" RECORD, not ASK
+      // (it already has an operator decision behind it), so it never reaches inbox-list at all.
+      // Waiting on its absence here would just be waiting on the first render, so the negative
+      // assertion below is checked directly instead, after the OTHER four sources have settled.
+      const asksHtml = await waitForStubChildrenHtml(elements, "inbox-list", (value) =>
         value.includes("W1-TNEED") &&
         value.includes("feedback#Q1") &&
         value.includes("feedback#P1") &&
-        value.includes("PREADY") &&
-        value.includes("PDRAFTING"),
+        value.includes("PREADY"),
       );
-      const backlogHtml = await waitForStubChildrenHtml(elements, "needs-me-backlog-list", (value) =>
+      const backlogHtml = await waitForStubChildrenHtml(elements, "inbox-backlog-list", (value) =>
         value.includes("W1-TVERIFY"),
       );
       assert.match(asksHtml, /Decide/);
@@ -322,7 +326,8 @@ nodeTest("bootConsoleShellClient renders every actionable row and the separate v
       assert.match(asksHtml, /Accept/);
       assert.match(asksHtml, /READY to ratify/);
       assert.match(asksHtml, /Reframe \(feedback\)/);
-      assert.match(asksHtml, /DRAFTING/);
+      assert.doesNotMatch(asksHtml, /DRAFTING/, "a drafting proposal is RECORD, not ASK -- it must be absent from the inbox list");
+      assert.doesNotMatch(asksHtml, /PDRAFTING/, "the drafting proposal's own id must not leak into the ask list either");
       assert.doesNotMatch(asksHtml, /W1-TVERIFY/, "verification backlog must not inflate the actionable list");
       assert.match(backlogHtml, /awaiting human verification/);
       assert.match(asksHtml, /Read-only/);
