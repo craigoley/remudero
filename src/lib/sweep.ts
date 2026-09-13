@@ -60,6 +60,7 @@ import {
   renderWorkerSettings,
   spawnWorker,
   STDERR_EXCERPT_CAP,
+  worktreeAdd,
   worktreeRemove,
   worktreesDir,
   type QuestionEntry,
@@ -2131,7 +2132,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           .filter((f) => f.startsWith(`${taskId}-`) && /\.ya?ml$/.test(f))
           .map((f) => join("plan", "tasks.d", f))[0];
       } catch {
-        /* plan/tasks.d unreadable — fall through to the monolith below */
+        /* the shard directory is unreadable — fall through to the monolith below */
       }
       if (!shardRelPath) {
         const monolith = join(repoDir, "plan", "tasks.yaml");
@@ -2175,9 +2176,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       let worktreePath = "";
       try {
         worktreePath = join(worktreesDir(config), `plan-repair-${taskId}-${nowMsImpl()}`);
-        execFileSync("git", ["-C", repoDir, "worktree", "add", "-B", branch, worktreePath, "origin/main"], {
-          stdio: "pipe",
-        });
+        // W1-T3390 fix rung: route through the registered worktreeAdd (src/lib/worker.ts)
+        // instead of a raw `git worktree add` — the worktree-sites census refuses any new raw
+        // invocation with no registry row, and this site is neither exempt nor routes-through
+        // without this call. worktreeAdd creates with `-b` (no force), so a stale LOCAL branch
+        // left over from an earlier, uncleaned attempt is dropped first — best-effort, since a
+        // branch still checked out elsewhere fails closed exactly as the prior `-B` did.
+        try {
+          execFileSync("git", ["-C", repoDir, "branch", "-D", branch], { stdio: "pipe" });
+        } catch {
+          /* no stale local branch to clear — the common case */
+        }
+        worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
         writeFileSync(join(worktreePath, shardRelPath), flagged);
         execFileSync("git", ["-C", worktreePath, "add", shardRelPath], { stdio: "pipe" });
         const commitMessage = buildPlanPrCommitMessage({
