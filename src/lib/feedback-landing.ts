@@ -724,22 +724,25 @@ function ciLearningPendingAbsPath(stateRoot: string, relPath: string): string {
   return join(ciLearningPendingRoot(stateRoot), relPath);
 }
 
-function ciLearningOriginFromContent(contents: string, label: string): string | undefined {
+function ciLearningOriginRead(contents: string, label: string): { ok: true; origin?: string } | { ok: false; reason: string } {
   try {
     const origin = loadPlanFromYaml(contents, label).tasks[0]?.origin;
-    return typeof origin === "string" && origin.length > 0 ? origin : undefined;
-  } catch {
-    return undefined;
+    return { ok: true, origin: typeof origin === "string" && origin.length > 0 ? origin : undefined };
+  } catch (e) {
+    return { ok: false, reason: String((e as Error)?.message ?? e) };
   }
 }
 
-function ciLearningFiledShardFromContent(relPath: string, contents: string): CiLearningFiledShard | undefined {
+function ciLearningFiledShardRead(
+  relPath: string,
+  contents: string,
+): { ok: true; filed?: CiLearningFiledShard } | { ok: false; reason: string } {
   try {
     const task = loadPlanFromYaml(contents, `pending-ci-learning:${relPath}`).tasks[0];
-    if (typeof task?.id !== "string" || typeof task.origin !== "string") return undefined;
-    return { relPath, taskId: task.id, findingId: task.origin };
-  } catch {
-    return undefined;
+    if (typeof task?.id !== "string" || typeof task.origin !== "string") return { ok: true };
+    return { ok: true, filed: { relPath, taskId: task.id, findingId: task.origin } };
+  } catch (e) {
+    return { ok: false, reason: String((e as Error)?.message ?? e) };
   }
 }
 
@@ -747,11 +750,11 @@ function ciLearningFiledShardFromContent(relPath: string, contents: string): CiL
 export function ciLearningPendingOrigins(stateRoot: string): string[] {
   const origins = new Set<string>();
   for (const relPath of ciLearningPendingRelPaths(stateRoot)) {
-    const origin = ciLearningOriginFromContent(
+    const read = ciLearningOriginRead(
       readFileSync(ciLearningPendingAbsPath(stateRoot, relPath), "utf8"),
       `pending-ci-learning:${relPath}`,
     );
-    if (origin) origins.add(origin);
+    if (read.ok && read.origin) origins.add(read.origin);
   }
   return [...origins].sort();
 }
@@ -838,8 +841,9 @@ export function landCiLearningShards(
   const landed = new Set(landing.files);
   const filed = inputs
     .filter((input) => landed.has(input.relPath))
-    .map((input) => ciLearningFiledShardFromContent(input.relPath, input.content))
-    .filter((f): f is CiLearningFiledShard => f !== undefined);
+    .map((input) => ciLearningFiledShardRead(input.relPath, input.content))
+    .filter((read): read is { ok: true; filed: CiLearningFiledShard } => read.ok && read.filed !== undefined)
+    .map((read) => read.filed);
   return { filed, skipped, refused };
 }
 
