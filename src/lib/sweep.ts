@@ -9966,7 +9966,7 @@ export async function runEscalationReconcile(
 // #4568, #4595 and #4604 all named the same still-open PR #4532 — the reconciler correctly left
 // all four live, and a human closed all four by hand. This rung is what would have caught them:
 // it re-judges what is ALREADY OPEN, using evidence only time can supply, and it may only
-// DEMOTE — closure stays the reconciler's job. See plan/tasks.d/W1-T3167-*.yaml for the design.
+// DEMOTE — closure stays the reconciler's job. See W1-T3167's task record for the design.
 
 /** AGE IS THE ADMISSION GATE, NOT THE VERDICT (design clause i): an escalation younger than this
  *  dwell is never re-judged, no matter what a judge would say, so a fresh escalation is never
@@ -9986,7 +9986,7 @@ export const MAX_ESCALATION_REJUDGES_PER_CYCLE = 20;
 /** The ledger step written for EVERY re-judge verdict, both arms — mirrors {@link
  *  ESCALATION_JUDGED_STEP}'s own "a judge that only traces when it demotes cannot be calibrated"
  *  doctrine. Also the durable history a caller reads back into {@link
- *  StaleEscalationRejudgeDeps.alreadyJudgedStateKeys} so a later pass over UNCHANGED state costs
+ *  StaleEscalationRejudgeOptions.alreadyJudgedStateKeys} so a later pass over UNCHANGED state costs
  *  nothing (design clause v). */
 export const ESCALATION_REJUDGED_STEP = "escalation.rejudged";
 
@@ -10023,7 +10023,7 @@ export interface StaleEscalationRejudgeCandidate {
  *  age/referent/sibling evidence a plain `Escalation` cannot carry. `demote` is the ONLY mutation
  *  this rung may perform on an existing issue (design clause ii) — move it to the fleet-notice
  *  queue and post `reason` as the first comment; it must never close or delete. */
-export interface StaleEscalationRejudgeDeps {
+export interface StaleEscalationRejudgeOptions {
   judge: (candidate: StaleEscalationRejudgeCandidate) => Promise<EscalationJudgeVerdict>;
   /** DEMOTE-ONLY (design clause ii): relabel `url` to {@link FLEET_NOTICE_LABEL} and post `reason`
    *  as a comment. Never called on a "deliver" verdict; never asked to close or delete anything —
@@ -10106,7 +10106,7 @@ export function buildStaleEscalationRejudgePrompt(c: StaleEscalationRejudgeCandi
  *  and keyed so a second pass over unchanged state spawns nothing (design clause v). */
 export async function runStaleEscalationRejudge(
   candidates: StaleEscalationRejudgeCandidate[],
-  deps: StaleEscalationRejudgeDeps,
+  deps: StaleEscalationRejudgeOptions,
 ): Promise<StaleEscalationRejudgeSummary> {
   const appendLine = deps.appendLine ?? appendLedger;
   const log = deps.log ?? (() => {});

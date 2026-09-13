@@ -11,7 +11,7 @@ import {
   STALE_ESCALATION_REJUDGE_DWELL_MS,
   type EscalationReconcileCandidate,
   type StaleEscalationRejudgeCandidate,
-  type StaleEscalationRejudgeDeps,
+  type StaleEscalationRejudgeOptions,
 } from "../src/lib/sweep.js";
 import type { Escalation, EscalationJudgeVerdict } from "../src/lib/escalate.js";
 
@@ -58,12 +58,12 @@ function stubJudge(verdict: EscalationJudgeVerdict, calls: StaleEscalationRejudg
   };
 }
 
-function freshDeps(overrides: Partial<StaleEscalationRejudgeDeps> = {}): { deps: StaleEscalationRejudgeDeps; ledgerPath: string; demotes: Array<{ url: string; reason: string }> } {
+function freshDeps(overrides: Partial<StaleEscalationRejudgeOptions> = {}): { deps: StaleEscalationRejudgeOptions; ledgerPath: string; demotes: Array<{ url: string; reason: string }> } {
   const dir = mkdtempSync(join(tmpdir(), "rmd-rejudge-"));
   const ledgerPath = join(dir, "ledger.ndjson");
   writeFileSync(ledgerPath, "");
   const demotes: Array<{ url: string; reason: string }> = [];
-  const deps: StaleEscalationRejudgeDeps = {
+  const deps: StaleEscalationRejudgeOptions = {
     judge: stubJudge({ decision: "deliver", reason: "stub" }),
     demote: (url, reason) => void demotes.push({ url, reason }),
     ledgerPath,
@@ -73,7 +73,7 @@ function freshDeps(overrides: Partial<StaleEscalationRejudgeDeps> = {}): { deps:
   return { deps, ledgerPath, demotes };
 }
 
-function ledgerRows(ledgerPath: string): Array<Record<string, unknown>> {
+function recordRows(ledgerPath: string): Array<Record<string, unknown>> {
   return readFileSync(ledgerPath, "utf8")
     .split("\n")
     .filter((l) => l.trim().length > 0)
@@ -121,7 +121,7 @@ test("a stale escalation whose referent is STILL OPEN is re-judged and demoted �
   assert.deepEqual(demotes[0], { url: candidate.issueUrl, reason: "same condition already triaged by three sibling escalations" });
   assert.equal(summary.results[0]!.outcome, "demoted");
 
-  const rows = ledgerRows(ledgerPath).filter((r) => r.step === ESCALATION_REJUDGED_STEP);
+  const rows = recordRows(ledgerPath).filter((r) => r.step === ESCALATION_REJUDGED_STEP);
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.judge_decision, "demote");
   assert.equal(rows[0]!.issue_url, candidate.issueUrl);
@@ -175,7 +175,7 @@ test("a deliver verdict leaves the issue open and needs-human — demote is neve
 });
 
 test("the dependency surface this rung is given has no close/delete primitive at all — demote-only by construction", () => {
-  // STRUCTURAL PROOF, not a behavioural probe: StaleEscalationRejudgeDeps declares exactly one
+  // STRUCTURAL PROOF, not a behavioural probe: StaleEscalationRejudgeOptions declares exactly one
   // mutation (`demote`), and EscalationJudgeDecision itself is the closed "demote" | "deliver"
   // union — there is no third value this rung could even route to a close call.
   const { deps } = freshDeps();
@@ -237,7 +237,7 @@ test("a throwing judge fails OPEN to deliver — the item stays needs-human, unc
   assert.equal(summary.results[0]!.decision, "deliver", "fail-open is 'deliver', the same polarity as birth");
   assert.match(summary.results[0]!.reason ?? "", /spawn timed out/);
 
-  const rows = ledgerRows(ledgerPath).filter((r) => r.step === ESCALATION_REJUDGED_STEP);
+  const rows = recordRows(ledgerPath).filter((r) => r.step === ESCALATION_REJUDGED_STEP);
   assert.equal(rows.length, 1, "the fail-open verdict is still ledgered — both arms, like the birth judge");
   assert.equal(rows[0]!.judge_decision, "deliver");
 });
@@ -312,5 +312,5 @@ test("dryRun previews without writing to the ledger or calling demote", async ()
   const summary = await runStaleEscalationRejudge([candidate], deps);
   assert.equal(summary.demoted, 1, "the preview still counts it");
   assert.equal(demotes.length, 0, "but the real mutation never runs");
-  assert.equal(ledgerRows(ledgerPath).length, 0, "and nothing is ledgered");
+  assert.equal(recordRows(ledgerPath).length, 0, "and nothing is ledgered");
 });
