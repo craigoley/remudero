@@ -8,43 +8,15 @@ import { runReview } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const REPO_ROOT = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const REVIEWER_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 const SOURCE_TEXT_SUBJECT_MARKER = "@source-text-subject";
 
-function writeGhStub(binDir: string, diff: string, headSha: string): void {
-  writeFileSync(
-    join(binDir, "gh"),
-    `#!/bin/sh
-case "$1 $2" in
-  "api "*)
-    case "$*" in
-      *pulls/*) echo '{"number":1,"html_url":"https://github.com/craigoley/remudero-site/pull/7","updated_at":"t","body":"","head":{"ref":"b","sha":"${headSha}"}}' ;;
-      *) echo '{}' ;;
-    esac ;;
-  "pr view")
-    case "$*" in
-      *headRefOid*) echo '{"headRefOid":"${headSha}"}' ;;
-      *state*) echo '{"state":"OPEN"}' ;;
-      *) echo '{}' ;;
-    esac ;;
-  "pr diff") cat <<'DIFF'
-${diff}
-DIFF
-    ;;
-  "pr comment") exit 0 ;;
-  *) exit 0 ;;
-esac
-`,
-    { mode: 0o755 },
-  );
-}
-
 async function reviewSiteProof(): Promise<Awaited<ReturnType<typeof runReview>>> {
   const root = mkdtempSync(join(tmpdir(), "rmd-run-review-target-root-"));
   const checkout = mkdtempSync(join(tmpdir(), "rmd-run-review-site-head-"));
-  const binDir = mkdtempSync(join(tmpdir(), "rmd-run-review-target-gh-"));
   const oldPath = process.env.PATH;
   const oldHome = process.env.HOME;
   const diff = [
@@ -56,6 +28,12 @@ async function reviewSiteProof(): Promise<Awaited<ReturnType<typeof runReview>>>
     "+  expect(1 + 1).toBe(2);",
     "+});",
   ].join("\n");
+  const gh = ghShim([
+    { when: "headRefOid", stdout: '{"headRefOid":"abc1234def5678abc1234def5678abc1234def56"}' },
+    { when: "state", stdout: '{"state":"OPEN"}' },
+    { when: "pulls/", stdout: '{"number":1,"html_url":"https://github.com/craigoley/remudero-site/pull/7","updated_at":"t","body":"","head":{"ref":"b","sha":"abc1234def5678abc1234def5678abc1234def56"}}' },
+    { when: "pr diff", stdout: diff },
+  ]);
   try {
     mkdirSync(join(root, "state"), { recursive: true });
     mkdirSync(join(checkout, "tests"), { recursive: true });
@@ -72,8 +50,7 @@ async function reviewSiteProof(): Promise<Awaited<ReturnType<typeof runReview>>>
       ].join("\n"),
       "utf8",
     );
-    writeGhStub(binDir, diff, "abc1234def5678abc1234def5678abc1234def56");
-    process.env.PATH = `${binDir}:${oldPath}`;
+    process.env.PATH = `${gh.dir}:${oldPath}`;
     process.env.HOME = root;
 
     return await runReview({
@@ -110,7 +87,7 @@ async function reviewSiteProof(): Promise<Awaited<ReturnType<typeof runReview>>>
     else process.env.HOME = oldHome;
     rmSync(root, { recursive: true, force: true });
     rmSync(checkout, { recursive: true, force: true });
-    rmSync(binDir, { recursive: true, force: true });
+    rmSync(gh.dir, { recursive: true, force: true });
   }
 }
 
