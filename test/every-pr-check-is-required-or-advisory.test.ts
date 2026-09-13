@@ -324,6 +324,18 @@ test("instrument census: every job this repo's own workflow files register on a 
   assert.deepEqual(stale, [], `stale REQUIRED/ADVISORY entr(y/ies) naming no real derived candidate: ${stale.join(", ")}`);
 });
 
+// ── PR-5370: squash-trailer-gate moved lists, not off the census ───────────────────────────────
+//
+// The instrument census above stays green whichever list a name sits in, so it cannot by itself
+// prove THIS PR's move — its own PASS predates the demotion. Pin the move directly: a duplicate
+// job is still ACCOUNTED FOR (never silently missing), but ADVISORY (never blocks) rather than
+// REQUIRED (blocks twice on the acceptance-author-gate predicate it shares byte-for-byte).
+test("squash-trailer-gate is ADVISORY (a named duplicate), not REQUIRED — the demotion this PR makes", async () => {
+  const { required, advisory } = await loadCiGateLists();
+  assert.ok(!required.has("squash-trailer-gate"), "squash-trailer-gate must no longer be in REQUIRED — it duplicates acceptance-author-gate's own predicate");
+  assert.ok(advisory.has("squash-trailer-gate"), "squash-trailer-gate must be in ADVISORY, so it stays accounted for rather than vanishing from the census");
+});
+
 // ── mkdtemp/writeFile/rmSync are imported for symmetry with this repo's other workflow-parsing
 // suites (e.g. test/a-gate-shaped-instrument-that-nothing-invokes.test.ts) that DO need a real
 // temp-file fixture; this suite's falsifiers operate on in-memory parsed docs instead (no
