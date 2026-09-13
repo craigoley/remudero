@@ -367,3 +367,30 @@ test("W1-T3388: resolveHeadRef refuses when neither the flag nor the env is set,
   assert.equal(viaEnv.ok, true);
   assert.equal(viaEnv.headRef, "run-unfiled-1787425298842");
 });
+
+// ── the gate must be handed the PR's own commit, or two of its three routes are dead ─────────────
+//
+// MEASURED on #5367, a `chore(plan):` amendment: CI refused it with "matches neither conforming form
+// and carries no valid Remudero-Task trailer", while running the SAME gate against the real head
+// commit locally printed `OK — filing-shaped subject … exempt` and exited 0. The logic was right; the
+// input was not. `actions/checkout` on a `pull_request` event defaults to GitHub's synthetic MERGE
+// commit, so `readHeadCommitMessage`'s `git log -1 --format=%B` read "Merge <sha> into <sha>" — a
+// message that can carry neither a filing-shaped subject nor a trailer.
+//
+// The consequence was not cosmetic. Only the branch-form route reads `$GITHUB_HEAD_REF` (a ref, not a
+// commit), so ONLY `run-*` branches could pass, and every `chore/amend-*` and `fix/*` head was
+// refused by a REQUIRED check — which is precisely the class of PR that repairs a stuck one. Worse,
+// the obvious way past it is to add a `Remudero-Task:` trailer to an amendment, which would falsely
+// credit the task (the W1-T3414 defect).
+test("W1-T3388: the workflow checks out the PR's OWN head sha, so the subject and trailer routes are reachable", () => {
+  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "head-identity-gate.yml"), "utf8");
+  assert.match(
+    workflow,
+    /ref:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\}\}/,
+    "the checkout must pin the head sha; without it the gate reads the merge commit and only the branch-form route can pass",
+  );
+  // The checkout that needs it is the one in THIS workflow, immediately before the gate step.
+  const gateStep = workflow.indexOf("head-identity-gate:check");
+  const checkoutRef = workflow.indexOf("github.event.pull_request.head.sha");
+  assert.ok(checkoutRef > -1 && checkoutRef < gateStep, "the pinned ref must precede the gate step it feeds");
+});
