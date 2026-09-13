@@ -1089,6 +1089,45 @@ RMD_NODE_MAX_OLD_SPACE_MB=8192 deploy/install-host-units.sh                 # CH
 RMD_NODE_MAX_OLD_SPACE_MB=8192 sudo -E deploy/install-host-units.sh --install  # renders, reloads systemd, enables the timers
 ```
 
+For a second daemon on the same host, do not copy the rendered unit files. Enroll it in a small
+YAML registry and select it by name; the installer refuses an unknown or malformed record before it
+writes a launcher or touches systemd:
+
+```
+RMD_INSTANCE_REGISTRY=/etc/remudero/daemon-instances.yaml deploy/install-host-units.sh --instance site
+RMD_INSTANCE_REGISTRY=/etc/remudero/daemon-instances.yaml sudo -E deploy/install-host-units.sh --install --instance site
+RMD_INSTANCE_REGISTRY=/etc/remudero/daemon-instances.yaml deploy/recycle-container.sh --instance site
+```
+
+Each record is closed over the lifecycle values that must never drift between call sites:
+
+```
+instances:
+  site:
+    repo: remudero-site
+    state_dir: /mnt/rmd/remudero-site-state
+    container_name: remudero-site-daemon
+    service_user: craigoleyagent
+    image: synthwatcholey0620.azurecr.io/remudero:latest
+    max_old_space_mb: 4096
+    service_name: rmd-site-fleet.service
+    watchdog_service_name: rmd-site-fleet-watchdog.service
+    watchdog_timer_name: rmd-site-fleet-watchdog.timer
+    launcher_path: /home/craigoleyagent/rmd-site-relaunch.sh
+    revival_log: /home/craigoleyagent/rmd-site-revivals.log
+    gh_app_id: "4648213"
+    gh_app_installation_id: "155256285"
+    gh_app_private_key_path: /home/node/.claude/rmd-app.pem
+    claude_dir: /home/craigoleyagent/.claude
+    codex_dir: /home/craigoleyagent/.codex
+    container_config_dir: /home/craigoleyagent/.config/remudero-container
+```
+
+`--instance site` renders only `rmd-site-fleet.*` and `rmd-site-relaunch.sh`; it does not check,
+install, relaunch, or recycle `remudero-daemon`. STOP/PAUSE markers remain under that instance's
+own `state_dir`, so a deliberate site stop blocks only the site revival path. The core daemon's
+legacy no-`--instance` invocation still uses the existing environment defaults.
+
 **`RMD_NODE_MAX_OLD_SPACE_MB` is required and has no default (W1-T2953).** It used to render 4096
 while this host runs 8192, so an `--install` would have silently *halved* the daemon's heap — and an
 undersized heap is what killed the retro rung for six days. Omitting it is now a named refusal. Set
