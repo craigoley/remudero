@@ -5,16 +5,10 @@
   "commandRunner": {
     "command": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/classify.test.ts test/fix-rung-classify.test.ts test/block-reason.test.ts test/three-retries-in-three-seconds-against-a-lockout.test.ts test/session-limit-is-a-refusal-not-a-success.test.ts test/codex-quota-window-refusal.test.ts test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts"
   },
-  "mutate": [
-    "src/lib/classify.ts"
-  ],
+  "mutate": ["src/lib/classify.ts"],
   "tsconfigFile": "tsconfig.stryker-unused.json",
   "disableTypeChecks": "{src,test}/**/*.ts",
-  "reporters": [
-    "clear-text",
-    "progress",
-    "json"
-  ],
+  "reporters": ["clear-text", "progress", "json"],
   "jsonReporter": {
     "fileName": "reports/mutation/mutation.json"
   },

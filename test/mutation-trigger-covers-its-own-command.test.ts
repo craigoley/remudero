@@ -9,20 +9,20 @@ import { dirname, join } from "node:path";
 // scripts/mutation-ratchet.mjs's path-filter mode (`evaluatePathFilter`) decides whether a diff
 // can move src/lib/classify.ts's mutation score by checking whether any changed path is a member
 // of scripts/mutation-relevant-paths.json -- an exact `Set.has`, no partial credit. stryker.conf.
-// json's `commandRunner.command` runs FIVE test files (classify, block-reason, and three quota/
-// lockout classification suites this task's own diff review found), but until this PR the
-// relevant-paths list named only ONE of them (test/classify.test.ts). A PR that weakened
+// json's `commandRunner.command` runs seven test files (classify, block-reason, and the quota/
+// lockout/classification suites later diff reviews found), but until this PR the
+// relevant-paths list originally named only ONE of them (test/classify.test.ts). A PR that weakened
 // test/block-reason.test.ts, test/three-retries-in-three-seconds-against-a-lockout.test.ts,
 // test/session-limit-is-a-refusal-not-a-success.test.ts or test/codex-quota-window-refusal.test.ts
 // alone -- none of which is scoped to a `src/` path the filter also watches -- would read
 // `matched: false` and skip Stryker entirely, so a weakened test could ship with the mutation gate
 // silently never having run against it.
 //
-// THE FIX HERE is the data-file edit (the four missing paths are now in
+// THE FIX is the data-file edit (the command-runner paths are now in
 // scripts/mutation-relevant-paths.json); THIS is the census that keeps it from drifting back --
 // every `*.test.ts` argument stryker.conf.json's own commandRunner.command names must appear in
 // the relevant-paths list, checked against the REAL production files (never a copy), so adding a
-// sixth test file to the Stryker command with no matching relevant-paths entry turns this red
+// next test file to the Stryker command with no matching relevant-paths entry turns this red
 // instead of silently reopening the gap.
 //
 // scripts/mutation-ratchet.mjs sits outside tsconfig's `include` (see tsconfig.json), so its pure
@@ -69,13 +69,14 @@ test("W1-T108/R-42: every test file stryker.conf.json's commandRunner.command ru
 
 test("W1-T108/R-42: positive control -- the real command really does name more than test/classify.test.ts", () => {
   // Regression pin for the exact defect this task fixes: R-42 measured `commandRunner.command`
-  // running five files while the relevant-paths list carried only one of them. If the command ever
-  // shrinks back to a single file, this control (not the assertion above) is what says so plainly.
+  // running multiple files while the relevant-paths list carried only one of them. If the command
+  // ever shrinks back to a single file, this control (not the assertion above) says so plainly.
   const strykerConfig = JSON.parse(readFileSync(STRYKER_CONFIG, "utf8")) as { commandRunner: { command: string } };
   const commandTestFiles = mod.extractCommandTestFiles(strykerConfig.commandRunner.command);
   assert.deepEqual(
     [...commandTestFiles].sort(),
     [
+      "test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts",
       "test/block-reason.test.ts",
       "test/classify.test.ts",
       "test/codex-quota-window-refusal.test.ts",
