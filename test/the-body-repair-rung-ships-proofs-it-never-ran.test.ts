@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
+  GREP_PROOF_RE,
   diagnoseUnrunnableProofs,
   refusesToAuthorAClaim,
   renderBodyDefects,
@@ -20,6 +21,15 @@ import {
  */
 
 const CRIT = (proof: string, claim = "c"): BodyCriterion => ({ claim, proof });
+
+test("W1-T3389: GREP_PROOF_RE accepts a well-formed grep: proof and refuses the doubled-dialect shape", () => {
+  // The healthy arm — a `grep:` proof that really does carry an `in <path>` clause.
+  assert.equal(GREP_PROOF_RE.test("grep: REAL in f.md"), true);
+  assert.equal(GREP_PROOF_RE.exec("grep: REAL in f.md")?.[2], "f.md");
+  // The unhealthy arm — the exact PR-5108 shape, a second dialect's text with no `in <path>` at all.
+  assert.equal(GREP_PROOF_RE.test("grep: unit test: test/the-body-repair-rung-ships-proofs-it-never-ran.test.ts"), false);
+  assert.equal(GREP_PROOF_RE.exec("grep: unit test: test/x.test.ts"), null);
+});
 
 test("W1-T3389 criterion 1: a doubled-dialect grep: proof (no `in <path>` clause) is never pushed", () => {
   // The EXACT shape measured on PR 5108: a second dialect's text wearing the grep: prefix, so it

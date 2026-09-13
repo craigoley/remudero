@@ -125,9 +125,10 @@ export function emDashSeparatedProof(claim: string): { claim: string; proof: str
 /**
  * A `grep:` proof's declared pattern and path — shared by {@link unwrapGrepPattern} (which only
  * ever fires for a WRAPPED pattern) and {@link diagnoseUnrunnableProofs} (which must also catch a
- * proof that never had an `in <path>` clause at all).
+ * proof that never had an `in <path>` clause at all, e.g. `grep: unit test: test/...`, the doubled
+ * dialect measured on PR 5108).
  */
-const GREP_PROOF_RE = /^\s*grep:\s*(.+?)\s+in\s+(\S+)\s*$/;
+export const GREP_PROOF_RE = /^\s*grep:\s*(.+?)\s+in\s+(\S+)\s*$/;
 
 /** A `grep:` proof's pattern wholly enclosed in a matching delimiter pair, and its bare form. */
 export function unwrapGrepPattern(proof: string): { wrapped: string; bare: string } | undefined {
