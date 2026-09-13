@@ -53,13 +53,13 @@
     unaffected by the new `target` field.
   acceptance:
     - claim: "runReview's judgeReview call passes target: { owner, repo } sourced from runReview's own args, unchanged from what the caller supplied"
-      proof: "unit test: test/run-review-evidence-target.test.ts"
+      proof: "grep: runReview passes its owner/repo target through to judgeReview evidence in test/run-review-evidence-target.test.ts"
     - claim: "the fix-rung re-review call path (runReview invoked with opts.reviewBase.owner/repo) reaches judgeReview with the same owner/repo, with no second, independent forwarding point added"
-      proof: "unit test: test/run-review-evidence-target.test.ts"
+      proof: "grep: fix-rung path still relies on its existing runReview owner/repo forwarding in test/run-review-evidence-target.test.ts"
     - claim: "every other judgeReview argument (diff, report, semantic, headCheckoutDir, baseCheckoutDir, taskDeclaredFiles, openTaskIds) is byte-for-byte unchanged by this addition"
-      proof: "unit test: test/run-review-evidence-target.test.ts"
+      proof: "grep: every pre-existing judgeReview evidence field remains in the runReview call in test/run-review-evidence-target.test.ts"
     - claim: "a target is never re-derived from a bare repo name lacking its owner"
-      proof: "unit test: test/run-review-evidence-target.test.ts"
+      proof: "grep: runReview does not re-derive the target from a bare repo name in test/run-review-evidence-target.test.ts"
   falsifier: |
     CLOSE IF `judgeReview(criteria, {...})` at src/run-task.ts:5317 already includes a `target`
     field sourced from `owner`/`repo`: `grep -n "target: { owner" src/run-task.ts` currently shows
