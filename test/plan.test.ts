@@ -63,7 +63,10 @@ test("B is runnable (dep A merged); C is not (dep B queued)", () => {
   assert.throws(() => assertRunnable(plan, selectTask(plan, "C")), PlanError);
 });
 
-test("retired dependencies stop blocking while live unmerged dependencies remain unmet", () => {
+/** W1-T3397's fixture, shared by the four criteria below. One retired dependency per retirement
+ *  reason, one LIVE unmerged dependency, and two downstream tasks: one depending on both, one on
+ *  retired dependencies only. */
+function retirementPlan(): ReturnType<typeof loadPlan> {
   const retiredDependencyEntries = RETIREMENT_REASONS.map(
     (reason) => `
 - id: W1-T3166-${reason}
@@ -77,7 +80,7 @@ test("retired dependencies stop blocking while live unmerged dependencies remain
   attempts: 0
 `,
   ).join("");
-  const plan = loadPlan(planFile(`
+  return loadPlan(planFile(`
 ${retiredDependencyEntries}
 - id: W1-T3199
   title: live dependency
@@ -104,11 +107,46 @@ ${retiredDependencyEntries}
   status: queued
   attempts: 0
 `));
+}
 
+test("retired dependencies are excluded from unmetDependencies", () => {
+  const plan = retirementPlan();
+  // Every retirement reason, not just one: the filter keys on `retirement !== undefined`, so a
+  // reason-specific implementation would pass a single-reason fixture and fail here.
   assert.deepEqual(unmetDependencies(plan, selectTask(plan, "RETIRED-ONLY")), []);
+});
+
+test("live unmerged dependencies remain unmet after retirement filtering", () => {
+  const plan = retirementPlan();
+  // The guard must not swallow the live dependency sitting beside a retired one — a filter that
+  // returned false unconditionally would satisfy the criterion above and fail this one.
   assert.deepEqual(unmetDependencies(plan, selectTask(plan, "W1-T3201")), ["W1-T3199"]);
+});
+
+test("assertRunnable accepts retired-only dependencies and rejects live unmet dependencies", () => {
+  const plan = retirementPlan();
   assert.doesNotThrow(() => assertRunnable(plan, selectTask(plan, "RETIRED-ONLY")));
   assert.throws(() => assertRunnable(plan, selectTask(plan, "W1-T3201")), PlanError);
+});
+
+test("retired dependencies bypass isMerged without changing merge status", () => {
+  const plan = retirementPlan();
+  const asked: string[] = [];
+  const spy = (t: { id: string }): boolean => {
+    asked.push(t.id);
+    return false; // nothing is merged: the ONLY thing clearing a retired dep may be retirement
+  };
+
+  assert.deepEqual(unmetDependencies(plan, selectTask(plan, "RETIRED-ONLY"), spy), []);
+  assert.deepEqual(asked, [], "a retired dependency must short-circuit BEFORE isMerged is consulted");
+
+  assert.deepEqual(unmetDependencies(plan, selectTask(plan, "W1-T3201"), spy), ["W1-T3199"]);
+  assert.deepEqual(asked, ["W1-T3199"], "and the live dependency must still be asked about");
+
+  // "without changing merge status": retirement excuses a dependency, it does not report it as
+  // merged. An implementation that made retired tasks answer `isMerged` true would pass every
+  // assertion above and fail this one.
+  assert.equal(spy(selectTask(plan, "W1-T3166-retired")), false);
 });
 
 test("rejects a dependency on an unknown task", () => {
