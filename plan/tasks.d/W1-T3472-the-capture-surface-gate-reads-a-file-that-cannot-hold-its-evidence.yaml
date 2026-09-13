@@ -1,0 +1,70 @@
+- id: W1-T3472
+  title: "THE CAPTURE-SURFACE GATE READS THE LIVE LEDGER FILE, WHICH HOLDS NONE OF THE WEEKLY FIRES IT JUDGES — it reports '0 counted fire(s) of 0 observed' and sits permanently OK below its own threshold while five fires exist, and no ledger window can fix it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  origin: "operator-session#capture-gate-cannot-fire-2026-09-13"
+  plan_refs: ["W1-T3348", "W1-T1273"]
+  files: [src/run-task.ts, src/lib/doctor.ts, test/the-capture-surface-gate-reads-a-file-that-cannot-hold-its-evidence.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    A GATE THAT CANNOT REACH ITS OWN THRESHOLD IS NOT A GATE. `judgeCaptureSurfaceLiveness`
+    (src/lib/doctor.ts) judges the docket's five capture surfaces from `feedback_docket.empty` /
+    `feedback_docket.published` rows and declines to judge below `CAPTURE_MIN_FIRES = 3` — correctly,
+    since a fresh host has not run the weekly rung often enough. It is fed `inputs.ledgerLines`,
+    which its caller in src/lib/report-commands.ts resolves through
+    `readLedgerLines(ledgerPathFor(config))`. `readLedgerLines` (src/lib/status.ts) reads ONE PATH:
+    it `existsSync`-checks that file and splits it. It never opens a rotation.
+
+    MEASURED ON THE FLEET HOST 2026-09-13. Five fires exist in the rotation union
+    (`feedback_docket.empty` = 3, `feedback_docket.published` = 2). The live `state/ledger.ndjson`
+    holds ZERO of either. `rmd doctor` prints, verbatim:
+      [OK  ] capture-surfaces   measured: 0 counted fire(s) of 0 observed
+                                threshold: every surface carries an item within 3 counted docket fires
+    Five fires happened, the gate sees none, and it reports OK because 0 < 3.
+
+    AND NO LEDGER WINDOW FIXES THIS — THE OBVIOUS REPAIR IS THE WRONG ONE. The five fires are stamped
+    2026-08-12, 08-20, 08-27, 09-03 and 09-10: one a week across a MONTH. The archives on disk span
+    only four days (oldest 2026-09-08T22:04, newest 2026-09-12T23:43, 835 of them) yet CONTAIN those
+    month-old rows, because rotation carries old lines forward. MEASURED through `openLedgerUnion`,
+    whose `since` genuinely skips archives by filename stamp:
+      no window : 1,155,307 rows,  5 docket fires,  20,881 ms
+      since 7d  :   520,203 rows,  1 docket fire,   21,296 ms
+      since 1h  :     1,068 rows,  0 docket fires,      62 ms
+    A window short enough to be fast EXCLUDES the evidence; a window long enough to reach three
+    fires skips no archive and costs the full ~21 s. `resolveLedgerUnion` (ledger-grep.ts) has no
+    archive-skip at all — a step-filtered pass over the same corpus measured 7.4 s and 649 MB RSS
+    for five matches. Twenty-one seconds on `rmd doctor`, an interactive command, is not a fix, and
+    the corpus is growing (506 archives on 09-11, 835 on 09-13), so it degrades.
+
+    THE PRODUCER ALREADY HOLDS THE ANSWER AND THROWS IT AWAY. Every fire row already carries exactly
+    what the check needs — `counts_by_source` with all five surfaces, plus its `window`. The rung
+    also already writes `state/last-feedback-docket.json`, which today holds 42 bytes:
+    `{"lastFireIso":"2026-09-10T01:34:34.560Z"}` — proof only that it FIRED, which is the very
+    defect W1-T3348 was filed to fix. Persisting a BOUNDED ROLLING HISTORY of the last N fires'
+    `counts_by_source` at write time makes the check O(1) at doctor time, needs no new sensor, and
+    keeps the evidence where rotation cannot reach it.
+
+    THIS IS THE FAILURE THE CHECK WAS BUILT TO REFUSE, WEARING THE CHECK'S OWN FACE. W1-T3348 exists
+    because a cadence marker proves only that a rung fired, so it reads fresh over permanently-empty
+    surfaces forever. The gate that replaced it now reads OK over an unobservable population forever.
+    The verdict rides `buildDoctorReport` into `exitCodeFor`, so what should be a non-zero exit on a
+    dead capture loop is a clean one.
+
+    SCOPE. Have the docket rung persist a bounded rolling history of recent fires' `counts_by_source`
+    beside the marker it already writes, and have the capture-surface check read that instead of the
+    live ledger file. Keep `CAPTURE_MIN_FIRES`, the three-state fresh/stale/never discipline and the
+    refusal semantics exactly as they are — a threshold lowered to fit a blind reader would certify
+    silence. Bound the retained history so the file cannot grow without limit. Do NOT put the ledger
+    union on `rmd doctor`'s path, and change no other `buildDoctorReport` input.
+
+  acceptance:
+    - claim: "the capture-surface check counts fires recorded by the rung itself, so a live ledger file holding none does not read as none observed"
+      proof: "unit test: test/the-capture-surface-gate-reads-a-file-that-cannot-hold-its-evidence.test.ts"
+    - claim: "below CAPTURE_MIN_FIRES the check still declines to judge and still says so, and the retained fire history stays bounded"
+      proof: "unit test: test/the-capture-surface-gate-reads-a-file-that-cannot-hold-its-evidence.test.ts"

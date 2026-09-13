@@ -1,0 +1,72 @@
+- id: W1-T3471
+  title: "A VERDICT ROTATED OUT OF THE LIVE LEDGER IS INDISTINGUISHABLE FROM ONE THAT NEVER EXISTED, AND BOTH ARM — decideSweepArm reads the live file alone, so it cannot tell a green PR whose evidence aged out from the PR that was never reviewed at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  risk: high
+  origin: "operator-session#pr-5096-capped-direct-merge-2026-09-11"
+  plan_refs: ["W1-T1028", "W1-T3306", "W1-T3390"]
+  files: [src/lib/sweep.ts, test/an-absent-verdict-is-not-permission-to-merge.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    TWO DIFFERENT FACTS ARRIVE AS ONE `undefined`, AND THE SAFE ANSWER TO EACH IS THE OPPOSITE OF
+    THE OTHER. `decideSweepArm` (src/lib/sweep.ts) resolves
+    `postedArmFactsFromLedger(ledgerLines, armId, pr.headSha)` and, when that returns `undefined`,
+    returns `{ arm: true, reason: "no ledgered verdict recoverable for this head — arming as before
+    (no evidence to refuse on)" }`. `decideAutoMergeArm`'s capped refusal is never reached, because
+    reaching it needs the facts whose absence just granted the arm.
+
+    THE FAIL-OPEN IS DELIBERATE AND MUST SURVIVE. Its corpus is the LIVE FILE ALONE:
+    `const readLedger = deps.readLedger ?? readLedgerLines` (sweep.ts), and `readLedgerLines`
+    (status.ts) reads one path and never opens a rotation. `rotateLedger` retains only
+    `MAX_RETAINED_LINES_PER_STEP = 200` newest rows PER STEP, and this fleet posts roughly 70
+    reviews a day, so a `review.posted` row falls out of the live view in about three days. A PR
+    still open past that has a perfectly good green verdict the sweep can no longer see.
+    `test/sweep-arm-parity.test.ts` states the requirement outright — "a rotated ledger must never
+    strand a green PR" — and it is right. FLIPPING THE DEFAULT TO REFUSE IS THEREFORE THE WRONG
+    FIX: it would stall healthy PRs on a healthy condition, this repo's own recurring defect.
+
+    BUT THE SAME `undefined` ALSO COVERS A VERDICT THAT NEVER EXISTED, AND THAT ONE MERGES. PR #5096
+    merged 2026-09-11T12:26:42Z as 370c6c066 carrying `remudero-review: CAPPED — 0/1 proofs
+    executed; not certified`. Its full rotation-union history is 39 deduped rows containing NO
+    `review.posted`, no `review.pending_posted`, no `review.reviewer`, no `automerge.armed`, no
+    `automerge.arm_skipped` and no direct-merge receipt. Feeding those exact rows to today's helpers
+    in a disposable process: `postedArmFactsFromLedger` → `undefined`, `decideSweepArm` →
+    `{arm: true}`. Adding ONE synthetic capped `review.posted` at the exact task+head to the SAME
+    rows flips it to `{arm: false, "CAPPED verdict (zero proofs executed)"}`. The refusal works
+    whenever the row is visible; only the blind default is wrong.
+
+    THE POPULATION IS SAFE TO TIGHTEN, MEASURED OVER THE UNION. Across every `automerge.armed` row
+    in the rotation union, 2,522 distinct task+head pairs armed and exactly ONE lacked a
+    `review.posted` at that same task+head — 0.04%, and that one (W1-T3212, head 47b4d59e5c,
+    2026-09-08) is the same anomaly class as #5096. Refusing on POSITIVELY OBSERVED absence costs
+    the healthy path essentially nothing. Runtime staleness is ruled out: the daemon that owned
+    #5096 booted on 432375bf, and 97bb8841 (#4990, W1-T3306) IS an ancestor of it.
+    `automerge.capped_override_granted` reads ZERO across the whole union, so no head-bound override
+    has ever been granted here — the merge rode the default, not an override.
+
+    SCOPE — SEPARATE THE TWO FACTS, THEN REFUSE ONLY THE PROVABLE ONE. When the live-file lookup
+    yields nothing, consult the rotation union for that ONE task+head before deciding, through an
+    injected seam appended LAST so no positional caller shifts. Three outcomes, never two: facts
+    recovered ⇒ decide on them exactly as today; the union positively shows NO verdict for this
+    head ⇒ REFUSE, naming that; the archive lookup is unavailable or fails ⇒ keep today's fail-open
+    verbatim, because an unreadable corpus is not evidence of absence. The recovery runs only on the
+    live-file miss, which is the rare path, and must be bounded rather than a full-corpus scan on
+    every sweep.
+
+    PRESERVE EVERY EXISTING REFUSAL. A CAPPED non-plan verdict still cannot arm or merge without an
+    explicit head-bound ledgered override; a capped proof problem still creates bounded repair work
+    rather than a silent stand-down. Add no second merge predicate and no queue manager: this is one
+    branch inside the predicate that already exists.
+
+  acceptance:
+    - claim: "a head the rotation union positively shows has no review.posted is refused, not armed, even when GitHub reports SUCCESS"
+      proof: "unit test: test/an-absent-verdict-is-not-permission-to-merge.test.ts"
+    - claim: "a green verdict that rotated out of the live file is recovered and still arms, so a rotated ledger never strands a green PR"
+      proof: "unit test: test/an-absent-verdict-is-not-permission-to-merge.test.ts"
+    - claim: "an archive lookup that is unavailable or throws keeps today's fail-open, because an unreadable corpus is not evidence of absence"
+      proof: "unit test: test/an-absent-verdict-is-not-permission-to-merge.test.ts"
