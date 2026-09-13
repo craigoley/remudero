@@ -7,8 +7,9 @@
 // to make structurally impossible rather than a rendering convention two templates might drift on.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyAskRecordItem, type AskRecordItem } from "../src/lib/ask-classification.js";
+import { classifyAskRecordItem } from "../src/lib/ask-classification.js";
 import type { InboxState } from "../src/lib/inbox.js";
+import { projectConsoleStatusResponse } from "../src/lib/serve.js";
 
 // Every InboxState the real registry can hold (inbox.ts) — asserted exhaustively below so a new
 // state added there without an opinion here fails loudly instead of silently defaulting.
@@ -29,8 +30,8 @@ test("proposal: DRAFTING or already-consumed (ratified/retired/declined) classif
 });
 
 test("proposal: the SAME proposal id flips ASK -> RECORD as its state moves from READY to DRAFTING", () => {
-  const ready: AskRecordItem = { kind: "proposal", state: "ready" };
-  const drafting: AskRecordItem = { kind: "proposal", state: "drafting" };
+  const ready = { kind: "proposal", state: "ready" } as const;
+  const drafting = { kind: "proposal", state: "drafting" } as const;
   assert.equal(classifyAskRecordItem(ready), "ASK");
   assert.equal(classifyAskRecordItem(drafting), "RECORD");
 });
@@ -53,9 +54,9 @@ test("question: an unanswered W1-T78 clarification question classifies ASK; once
 // ── Claim 3: the double-render falsifier ──────────────────────────────────────────────────────
 
 test("falsifier: a drain-rundown outcome line ALWAYS classifies RECORD, even alongside the same task's open ASK-classified escalation", () => {
-  const openEscalationForTask: AskRecordItem = { kind: "escalation", resolved: false };
+  const openEscalationForTask = { kind: "escalation", resolved: false } as const;
   for (const outcome of ["merged", "blocked", "escalated"] as const) {
-    const rundownLine: AskRecordItem = { kind: "rundown", outcome };
+    const rundownLine = { kind: "rundown", outcome } as const;
     // The escalation for this same task/event is a live ASK...
     assert.equal(classifyAskRecordItem(openEscalationForTask), "ASK");
     // ...while the rundown line for that identical event is ALWAYS RECORD — one ASK, one RECORD,
@@ -80,7 +81,7 @@ test("totality: every InboxState value the real registry can hold classifies to 
 });
 
 test("totality: every escalation/question boolean and every rundown outcome classifies to exactly ASK or RECORD", () => {
-  const items: AskRecordItem[] = [
+  const items = [
     { kind: "escalation", resolved: false },
     { kind: "escalation", resolved: true },
     { kind: "question", answered: false },
@@ -88,9 +89,29 @@ test("totality: every escalation/question boolean and every rundown outcome clas
     { kind: "rundown", outcome: "merged" },
     { kind: "rundown", outcome: "blocked" },
     { kind: "rundown", outcome: "escalated" },
-  ];
+  ] as const;
   for (const item of items) {
     const result = classifyAskRecordItem(item);
     assert.ok(result === "ASK" || result === "RECORD", `item ${JSON.stringify(item)} produced an unclassified result ${String(result)}`);
   }
+});
+
+test("falsifier: an unsupported runtime item kind throws instead of silently classifying it", () => {
+  assert.throws(
+    () => classifyAskRecordItem({ kind: "unknown" } as never),
+    /unclassified item kind "unknown"/,
+  );
+});
+
+test("production console projection retains a needs-human escalation through the classifier", () => {
+  const tasks = Array.from({ length: 501 }, (_, index) => ({ taskId: `W1-T-${index}`, needsHuman: false }));
+  tasks[250]!.needsHuman = true;
+
+  const projected = projectConsoleStatusResponse({ tasks, counts: { total: tasks.length } }) as {
+    tasks: Array<{ taskId: string }>;
+    statusTaskProjection: { returned: number; omitted: number };
+  };
+
+  assert.deepEqual(projected.tasks, [{ taskId: "W1-T-250", needsHuman: true }]);
+  assert.deepEqual(projected.statusTaskProjection, { returned: 1, omitted: 500 });
 });

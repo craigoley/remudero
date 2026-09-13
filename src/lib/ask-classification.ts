@@ -22,16 +22,6 @@
 import type { InboxState } from "./inbox.js";
 import type { RundownLine } from "./drain.js";
 
-/** Where an ASK/RECORD-classified item routes: ASK is a live decision still pending an operator
- *  verdict; RECORD is a fact about something that already happened or was already answered. */
-export type AskRecordClass = "ASK" | "RECORD";
-
-/** The {@link InboxState} values where a ratification decision is still pending (P25's own
- *  READY/NOT-READY/DEFERRED-WITH-TRIGGER tiering, inbox.ts) — every other state (drafting, an
- *  Architect is mid-draft; ratified/retired/declined, already consumed) is a record of what
- *  happened to the proposal, never a live ask. */
-const PENDING_INBOX_STATES: ReadonlySet<InboxState> = new Set(["ready", "not_ready", "deferred_with_trigger"]);
-
 /**
  * One item ASK/RECORD classification routes, over the four source shapes the design names:
  *
@@ -43,23 +33,19 @@ const PENDING_INBOX_STATES: ReadonlySet<InboxState> = new Set(["ready", "not_rea
  *    answered it, false while it is still an open, decidable ask.
  *  - `rundown`   — one post-drain rundown outcome line (drain.ts's {@link RundownLine}, W1-T141).
  *
- * Pure and total: every value of every shape maps to exactly one of {@link AskRecordClass}.
+ * Pure and total: every value of every shape maps to exactly one of ASK or RECORD.
  */
-export type AskRecordItem =
-  | { kind: "proposal"; state: InboxState }
-  | { kind: "escalation"; resolved: boolean }
-  | { kind: "question"; answered: boolean }
-  | { kind: "rundown"; outcome: RundownLine["outcome"] };
-
 /**
  * The ONE routing predicate every ASK/RECORD-aware renderer must consult (design note: "one
  * classifier, consulted by both renderers, makes single-destination routing a property of the
  * DATA rather than of two independently-written templates agreeing by convention").
  */
-export function classifyAskRecordItem(item: AskRecordItem): AskRecordClass {
+export function classifyAskRecordItem(item: { kind: "proposal"; state: InboxState } | { kind: "escalation"; resolved: boolean } | { kind: "question"; answered: boolean } | { kind: "rundown"; outcome: RundownLine["outcome"] }): "ASK" | "RECORD" {
   switch (item.kind) {
     case "proposal":
-      return PENDING_INBOX_STATES.has(item.state) ? "ASK" : "RECORD";
+      return item.state === "ready" || item.state === "not_ready" || item.state === "deferred_with_trigger"
+        ? "ASK"
+        : "RECORD";
     case "escalation":
       return item.resolved ? "RECORD" : "ASK";
     case "question":
