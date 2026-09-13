@@ -1,0 +1,69 @@
+- id: W1-T3492
+  title: "AUTOMATED CI-LEARNING FILING MUST NEVER DIRTY THE DAEMON CHECKOUT"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  origin: "operator-session#daemon-building-2026-09-13"
+  plan_refs: ["W1-T243", "W1-T530", "W1-T1054", "W1-T2968", "W1-T3324"]
+  files:
+    - src/lib/feedback-landing.ts
+    - src/run-task.ts
+    - test/ci-learning-safe-landing.test.ts
+    - test/the-scheduled-learning-rung-drafts-and-discards.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DAEMON STOPPED ADVANCING BECAUSE ITS OWN CI-LEARNING RUNG DIRTIED THE CHECKOUT
+    IT MUST LATER REFRESH. On 2026-09-13, the Azure daemon checkout was detached at
+    0e798e26 while origin/main was 4ef3b855 and held nine untracked `plan/tasks.d/`
+    CI-learning shards plus two feedback records. The supported recovery verb refused
+    that checkout because its detached HEAD is intentional; it cannot safely update a
+    dirty source tree. The files were preserved under state and the daemon was restarted
+    cleanly at origin/main, which restored dispatch. This is a production queue-liveness
+    defect, not an advisory about extra machine-authored plan work.
+
+    SOURCE IDENTIFIES THE WRITER. `buildCiLearningCadenceRunner` calls
+    `fileCiLearningShards(result.drafts, deps.checkoutRoot, ...)` in
+    `src/run-task.ts`. `fileCiLearningShards` writes each rendered task directly under
+    `<worktree>/plan/tasks.d/` in `src/lib/measurement-cadence.ts`. The scheduled
+    caller passes the daemon checkout as that worktree. In contrast, the existing
+    feedback/decision bridge in `src/lib/feedback-landing.ts` builds a scratch index
+    from origin/main, writes blobs outside the caller's worktree, force-pushes only a
+    bot-owned landing branch, and opens or reuses a gated PR. That is the correct
+    isolation boundary already used elsewhere in the fleet.
+
+    Build a dedicated CI-learning landing path. It must stage linter-validated rendered
+    shards in durable daemon state, never in the source checkout, and land those exact
+    bytes through a dedicated bot-owned branch and ordinary gated PR. Keep staged bytes
+    until fetched origin/main proves the same path and blob are durable; a failed push
+    or PR creation must leave retryable state rather than lose the generated task or
+    mint a duplicate. Pending staged origins must participate in the next mint's
+    idempotency input, so a second firing before merge cannot reserve a second task id
+    for the same finding. The daemon reports zero filed work when the landing attempt
+    fails and preserves its cadence fire after durable staging.
+
+    Preserve the manual `rmd ci-learning` command's explicit checkout-writing behavior;
+    it is an operator invocation, not the unattended service path. Do not change the
+    CI-learning corpus, cadence policy, task linter, machine-author/human-verify rule,
+    task-id reservation protocol, direct pushes to main, or worker dispatch eligibility.
+    Do not reimplement the scratch-index or PR/automerge machinery: extend the existing
+    landing bridge and test it with fake git/GitHub transports.
+  acceptance:
+    - claim: "a scheduled CI-learning firing stages a valid generated shard outside the daemon checkout and leaves that checkout's git status unchanged while its dedicated landing branch receives the exact task bytes"
+      proof: "unit test: W1-T3492 criterion 1"
+    - claim: "a pending CI-learning shard survives a landing transport failure, is retried from durable state, and is removed only after fetched origin/main contains the identical blob at the identical task path"
+      proof: "unit test: W1-T3492 criterion 2"
+    - claim: "a second scheduled firing while the first CI-learning landing PR is still pending reuses the staged finding rather than minting or landing a duplicate task id"
+      proof: "unit test: W1-T3492 criterion 3"
+    - claim: "the manual ci-learning command retains its direct operator checkout writer while the unattended runner reaches only the isolated landing path"
+      proof: "unit test: W1-T3492 criterion 4"
+  falsifier: |
+    This task is wrong if a driven scheduled run creates or modifies any tracked or untracked
+    path under its checkout, if a failed landing leaves no retryable staged bytes, if a duplicate
+    origin can consume another task id before the first landing merges, or if the manual command
+    no longer writes to the explicitly supplied operator checkout. In that case, keep the daemon
+    on the recovered clean revision and revise this contract before changing the live writer.
