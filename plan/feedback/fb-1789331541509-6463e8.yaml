@@ -1,0 +1,30 @@
+id: fb-1789331541509-6463e8
+ts: 2026-09-13T20:32:21.509Z
+raw: "DRAFT IS AN OPERATOR HOLD, NOT A RETRYABLE AUTO-MERGE ERROR. Site daemon
+  runtime evidence 2026-09-13: draft PR #14 (craigoley/remudero-site, head
+  602f8267) had green checks plus a remudero-review success;
+  src/lib/sweep.ts:5038 classifies that pair as mergeable without a draft
+  predicate. Each sweep then calls auto-merge, GitHub refuses because the PR is
+  draft, and the daemon logs automerge.arm_failed/arm-error-ignored while
+  treating the disposition as acted. This repeats and bypasses the intended
+  draft hold. Fix the shared PR state / sweep and post-fix reconciliation so a
+  draft has an explicit held-draft disposition before any automatic review,
+  comment, or auto-merge side effect. A manual rmd review may inspect a draft
+  but must not arm it. Add focused tests that a draft with green checks and
+  review success calls no arm effect in ordinary sweep and post-fix
+  re-verification, leaves acted false with a named hold reason, and preserves
+  behavior for non-draft PRs. Runtime acceptance: after the fix is deployed to
+  the site instance through deploy/recycle-container.sh, #14 remains draft with
+  auto-merge disabled and subsequent full sweep intervals add no draft-arm
+  attempt or GitHub draft-refusal log lines. Include the OpenPrView producer
+  mapping / API field verification so absent draft data cannot silently read as
+  false."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
