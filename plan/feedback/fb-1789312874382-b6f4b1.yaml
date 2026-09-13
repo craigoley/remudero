@@ -23,10 +23,27 @@ raw: "Priority site-review integration after PR #5410: OBSERVED at origin/main
   integration and #5410 have actually merged."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/5416
+summary:
+  headline: Add target field to ReviewEvidence for site proof registry
+  what_happened: "PR #5410 adds owner/repo registry but runReview omits target
+    field when calling judgeReview, blocking site daemon review. The fix adds
+    target: { owner: args.owner, repo: args.repo } with tests covering
+    direct/re-review paths and rejections."
+  decision: "Implement successor PR with target field and required tests; merge
+    only after #5410."
+  options:
+    - label: "Create successor PR after #5410 merges"
+      consequence: Unblocks site daemon automation; sequential merge reduces
+        integration risk
+    - label: "Hold for #5410 stable release cycle"
+      consequence: Adds validation delay but ensures upstream stability before proceeding
+    - label: "Bundle into #5410 revision"
+      consequence: Larger PR scope; violates sequential merge requirement; increases
+        review complexity
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
