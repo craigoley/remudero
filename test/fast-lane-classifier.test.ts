@@ -590,3 +590,147 @@ test("W1-T2428 ci half: fail-closed 6 — an enumeration that fails runs the FUL
   const after = run.slice(idxEmpty);
   assert.ok(after.includes("npm run test:ci"), "the empty-enumeration branch must run the FULL suite");
 });
+
+// ── W1-T3512 — TEN SOURCE-ONLY REQUIRED GATES, SEVEN NOW WIRED TO THE CLASSIFIER ────────────────
+//
+// MEASURED 2026-09-13 against origin/main: ci-gate.yml's REQUIRED list named 27 checks (not the
+// task's own 2026-09-13 count of 28 — a one-entry drift the task's own falsifier anticipates: "the
+// REQUIRED list moves weekly; re-derive"), and of ci.yml's jobs, three consulted
+// scripts/diff-class.mjs (ci, test-slow, coverage-ratchet). Ten SOURCE-only required checks did
+// not: depcruise, mutation-ratchet, jscpd-gate, api-client-drift, no-hand-rolled-fetch,
+// assertion-discrimination, comment-load-ratchet, source-size, containment-probe, claims.
+//
+// Checking each one's ACTUAL walked population (not just its name, per this task's design (iii))
+// found three that are not source-only and stay UNCHANGED — see their own ci.yml comments for the
+// measurement behind each: `claims` (plan/claims.yaml, the file it checks, lives under plan/
+// itself), `containment-probe` (its own path-pattern trigger matches on filename TEXT and can true
+// a plan/tasks.d/*.yaml filename), and `assertion-discrimination` (a test's readFileSync target can
+// be any repo path — test/pure-proof-incomplete-run.test.ts and
+// test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts both read plan/policy.yaml this
+// way). The other seven read only from src/, scripts/, apps/, packages/, openapi/, deploy/,
+// .github/workflows/, bin/ or hooks/ — never plan/ or docs/ — so a PLAN_ONLY or DOCS_ONLY diff
+// cannot move any of them, and each now classifies before npm ci and skips it on those two classes,
+// the SAME in-job shape `coverage-ratchet` already uses.
+
+const FAST_LANE_WIRED_JOBS = [
+  "depcruise",
+  "mutation-ratchet",
+  "jscpd-gate",
+  "api-client-drift",
+  "no-hand-rolled-fetch",
+  "source-size",
+  "comment-load-ratchet",
+];
+
+const FAST_LANE_UNWIRED_SOURCE_ONLY_NAMED_JOBS = ["claims", "containment-probe", "assertion-discrimination"];
+
+/** Every job's steps, parsed from the real ci.yml — never a hand-copied excerpt. */
+function jobSteps(jobId: string): Array<{ name?: string; id?: string; run?: string; if?: string }> {
+  const doc = parseYaml(CI_YML) as {
+    jobs: Record<string, { steps?: Array<{ name?: string; id?: string; run?: string; if?: string }> }>;
+  };
+  const steps = doc.jobs[jobId]?.steps;
+  assert.ok(steps, `ci.yml must declare a '${jobId}' job with steps`);
+  return steps!;
+}
+
+test("W1-T3512 acceptance 1: a PLAN_ONLY diff skips every source-only required gate wired to the classifier", () => {
+  for (const jobId of FAST_LANE_WIRED_JOBS) {
+    const steps = jobSteps(jobId);
+    const classifyStep = steps.find((s) => s.id === "classify");
+    assert.ok(classifyStep?.run, `${jobId} must carry a classify step`);
+    assert.match(classifyStep!.run!, /node scripts\/diff-class\.mjs --changed-files/, `${jobId}'s classify step must call the real classifier`);
+    assert.doesNotMatch(classifyStep!.run!, /--import tsx/, `${jobId}'s classify step must use bare node, not a package-installed loader (it runs before npm ci)`);
+    const installStep = steps.find((s) => s.name === "Install (clean, from lockfile)");
+    assert.ok(installStep?.run, `${jobId} must still carry an Install step`);
+    assert.match(installStep!.run!, /CLASS="\$\{\{ steps\.classify\.outputs\.class \}\}"/, `${jobId}'s Install step must read the canonical class output`);
+    assert.match(installStep!.run!, /\[ "\$CLASS" != "SOURCE" \]/, `${jobId} must skip npm ci on anything but SOURCE`);
+  }
+});
+
+test("W1-T3512 acceptance 1: classification precedes npm ci in every wired job (bare Node before any package-installed step)", () => {
+  for (const jobId of FAST_LANE_WIRED_JOBS) {
+    const steps = jobSteps(jobId);
+    const classifyIndex = steps.findIndex((s) => s.id === "classify");
+    const installIndex = steps.findIndex((s) => s.name === "Install (clean, from lockfile)");
+    assert.ok(classifyIndex >= 0 && installIndex >= 0, `${jobId} must carry both a classify and an Install step`);
+    assert.ok(classifyIndex < installIndex, `${jobId}'s classify step must precede its Install step`);
+  }
+});
+
+test("W1-T3512 acceptance 2: every wired gate still registers a conclusion — the skip lives in bash, never a step- or job-level `if:`", () => {
+  const doc = parseYaml(CI_YML) as { jobs: Record<string, { if?: string; steps?: Array<{ name?: string; id?: string; if?: string }> }> };
+  for (const jobId of FAST_LANE_WIRED_JOBS) {
+    const job = doc.jobs[jobId];
+    assert.equal(
+      job.if,
+      "github.event_name == 'pull_request'",
+      `${jobId}'s job-level if must stay a plain PR guard — a class-based job-level if would strand the check absent, deadlocking branch protection forever`,
+    );
+    const steps = job.steps ?? [];
+    const classifyStep = steps.find((s) => s.id === "classify");
+    const installStep = steps.find((s) => s.name === "Install (clean, from lockfile)");
+    assert.equal(classifyStep?.if, undefined, `${jobId}'s classify step must carry no step-level if:`);
+    assert.equal(installStep?.if, undefined, `${jobId}'s Install step must carry no step-level if: (the #729 discipline)`);
+  }
+});
+
+test("W1-T3512 acceptance 3: each wired gate's classify step fails closed to SOURCE on a crash or garbage output (same clamp shape as ci/coverage-ratchet)", () => {
+  for (const jobId of FAST_LANE_WIRED_JOBS) {
+    const steps = jobSteps(jobId);
+    const classifyStep = steps.find((s) => s.id === "classify");
+    assert.match(classifyStep!.run!, /\|\|\s*CLASS="SOURCE"/, `${jobId}'s classify step must fall back to SOURCE on a nonzero exit`);
+    assert.match(
+      classifyStep!.run!,
+      /PLAN_ONLY\|DOCS_ONLY\|SOURCE\)\s*;;\s*\n\s*\*\)\s*CLASS="SOURCE"/,
+      `${jobId}'s classify step must clamp any unrecognized token to SOURCE`,
+    );
+  }
+});
+
+test("W1-T3512 acceptance 3: an unreadable --changed-files list still classifies SOURCE for every wired job's own classify invocation shape (shared CLI contract)", () => {
+  // Every wired job's classify step drives the SAME `node scripts/diff-class.mjs --changed-files`
+  // CLI already proven fail-closed in acceptance 2's tests above; this pins that none of the seven
+  // respell the invocation in a way that could drift from that contract.
+  for (const jobId of FAST_LANE_WIRED_JOBS) {
+    const steps = jobSteps(jobId);
+    const classifyStep = steps.find((s) => s.id === "classify");
+    assert.match(classifyStep!.run!, /2>diff-class\.log/, `${jobId} must capture the classifier's stderr reason for the log, never discard it`);
+  }
+});
+
+test("W1-T3512 acceptance 4: a SOURCE diff is unaffected — each wired gate's real command is still reachable, unconditionally, when CLASS=SOURCE", () => {
+  const expectedCommand: Record<string, RegExp> = {
+    depcruise: /npm run --silent depcruise/,
+    "mutation-ratchet": /node scripts\/mutation-ratchet\.mjs --changed-files/,
+    "jscpd-gate": /npm run --silent jscpd/,
+    "api-client-drift": /npm run --silent api-client:check/,
+    "no-hand-rolled-fetch": /npm run --silent no-hand-rolled-fetch:check/,
+    "source-size": /npm run --silent source-size-signal/,
+    "comment-load-ratchet": /npm run --silent comment-load-signal/,
+  };
+  for (const [jobId, re] of Object.entries(expectedCommand)) {
+    const steps = jobSteps(jobId);
+    const hit = steps.some((s) => re.test(s.run ?? ""));
+    assert.ok(hit, `${jobId} must still contain its real, unmodified check command`);
+  }
+});
+
+test("W1-T3512: claims, containment-probe and assertion-discrimination are NOT wired to the classifier — each is named in ci.yml as not source-only", () => {
+  for (const jobId of FAST_LANE_UNWIRED_SOURCE_ONLY_NAMED_JOBS) {
+    const steps = jobSteps(jobId);
+    assert.ok(!steps.some((s) => s.id === "classify"), `${jobId} must not carry a fast-lane classify step — its walked population is not source-only`);
+  }
+});
+
+test("W1-T3512: ten ci.yml jobs now consult scripts/diff-class.mjs (three pre-existing plus the seven newly wired), up from three", () => {
+  const doc = parseYaml(CI_YML) as { jobs: Record<string, { steps?: Array<{ run?: string }> }> };
+  const consulting = Object.entries(doc.jobs)
+    .filter(([, job]) => (job.steps ?? []).some((s) => /diff-class\.mjs/.test(s.run ?? "")))
+    .map(([id]) => id);
+  const expected = ["ci", "test-slow", "coverage-ratchet", ...FAST_LANE_WIRED_JOBS];
+  assert.equal(consulting.length, expected.length, `expected ${expected.length} jobs consulting diff-class.mjs, got ${consulting.length}: ${consulting.join(", ")}`);
+  for (const jobId of expected) {
+    assert.ok(consulting.includes(jobId), `expected ${jobId} among the jobs consulting diff-class.mjs`);
+  }
+});
