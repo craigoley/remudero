@@ -1,0 +1,24 @@
+id: fb-1789282068794-2f0b7d
+ts: 2026-09-13T06:47:48.794Z
+raw: "Prioritize existing core bug #5314: RMD semantic review cannot execute
+  Vitest proofs in a private Next.js portal tests/** layout. Portal PR #8
+  (PORTAL-T1) has portal-ci, ci-gate, and Vercel success but is blocked solely
+  by remudero-review=failure. Current src/lib/review.ts recognizes test/ with
+  node:test and apps/dashboard/src/ with Vitest, while the portal uses
+  tests/unit/rmd-control.test.ts with Vitest. Extend the declared cross-repo
+  proof runner to support the target shape with direct-path and name-filtered
+  forms, correct pinned runner/output parsing, an explicit ambiguity refusal,
+  and byte-identical existing argv. Preserve zero-match test-theater protection.
+  Do not change PORTAL-T1 acceptance text to conceal this defect. After the fix
+  lands, rerun review on PR #8 and require an observed success."
+attachments:
+  - https://github.com/craigoley/remudero/issues/5314
+  - https://github.com/craigoley/remudero-site/pull/8
+origin: issue
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

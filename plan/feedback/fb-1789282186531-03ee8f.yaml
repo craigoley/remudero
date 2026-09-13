@@ -1,0 +1,24 @@
+id: fb-1789282186531-03ee8f
+ts: 2026-09-13T06:49:46.531Z
+raw: "Commission a safe persistent RMD lane for the private remudero-site
+  repository. The Azure host launcher currently runs only ./bin/rmd daemon
+  --repo remudero --allow-self-target, although the CLI supports rmd daemon
+  --repo remudero-site and cross-repository review. Do not launch an ad-hoc
+  second daemon against the primary state root: design an explicit allowlisted
+  multi-repository host supervisor with isolated target state/locks, lifecycle
+  ownership, credentials, health/heartbeat visibility, and one controlled
+  install/reconcile path. It must preserve the current core fleet, make portal
+  PR reviews and stuck-PR repair automatic, honor PAUSE/STOP boundaries, and
+  provide tested commissioning/rollback evidence. Portal task PORTAL-T1 / PR #8
+  is the first acceptance target; no browser-to-host access is in scope."
+attachments:
+  - https://github.com/craigoley/remudero-site
+  - https://github.com/craigoley/remudero-site/pull/8
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
