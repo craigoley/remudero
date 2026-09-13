@@ -1,0 +1,93 @@
+- id: W1-T3532
+  title: "NO PER-INSTANCE SUPERVISOR EXISTS FOR A SECOND DAEMON ON THE SAME HOST — install-host-units.sh renders the launcher and units for the literal remudero-daemon and core state root only, recycle-container.sh accepts a site container/repo override but nothing installs, checks or relaunches THAT instance alone, so a site daemon exit under restart=on-failure:5 stays down with no revival path and blocks the site's own required review status"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 80.00
+  files:
+    - deploy/install-host-units.sh
+    - deploy/recycle-container.sh
+    - src/lib/service.ts
+    - docs/operator-guide.md
+    - test/multi-instance-daemon-lifecycle-registry.test.ts
+  origin: "feedback#fb-1789311638612-56d5bd"
+  plan_refs: ["W1-T2877", "W1-T2953", "W1-T3245", "MASTER-PLAN.md D-11"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE HOST 2026-09-13: only `rmd-fleet.service` and `rmd-fleet-watchdog.timer`
+    are enabled; `remudero-site-daemon` exited 0 at 2026-09-13T00:43:01Z under
+    `restart=on-failure:5` and stayed down, so site PRs could not receive the required
+    `remudero-review` status. `deploy/install-host-units.sh` renders a launcher and units for the
+    literal `remudero-daemon` name and one core state root; `deploy/recycle-container.sh` can accept
+    a site container/repo override but there is no installed per-instance supervisor that watches,
+    checks or relaunches a named instance on its own. This is independent of W1-T3525 (proof-suite
+    routing) — that task fixes WHICH suite reviews a site PR, this task fixes whether the site
+    daemon that would PRODUCE that review status is even alive.
+
+    MASTER-PLAN D-11 already ratified "one rmd instance per codebase" as the cell topology, but its
+    arc (W1-T429..W1-T433) targets the operator's mini via launchd and the future relay/Pro surface,
+    not the Azure systemd fleet host where core and site instances must coexist today. Nothing in
+    that arc, nor W1-T2877/W1-T2953/W1-T3245 (which harden the SINGLE existing `remudero-daemon`
+    unit set), gives the installer a way to name, validate and act on more than one instance without
+    duplicating unit files or falling back to a bare `docker restart`.
+
+    THE ASK IS A CONFIG-DRIVEN, EXPLICITLY ENROLLED INSTANCE REGISTRY: one validated record per
+    instance (core, site, console, ...) from which repo, state root, container name,
+    credentials/config mounts, service/timer names and expected image are ALL derived — never
+    re-typed per call site, the same fragmentation class W1-T1062 named for owner resolution.
+    Install and check act on exactly the named instance. STOP and PAUSE precedence is retained per
+    instance. A healthy instance's tick stays idempotent. A clean exit relaunches only the instance
+    that exited. No tick may act on another instance. Existing guarded drain/recycle refusals
+    (`recycle-container.sh`'s four checks) are preserved, not bypassed. An unknown or malformed
+    instance record is refused before any Docker or systemd write — never silently defaulted to
+    core.
+  design: |
+    (i) A closed, declared instance registry (JSON/YAML config, validated shape) keyed on an
+    explicit instance name, each entry carrying repo, state root, container name, credential/config
+    mount paths, service+timer unit names and expected image — reusing existing owner/repo
+    resolution rather than re-deriving it.
+    (ii) `install-host-units.sh --instance <name>` and its check mode act ONLY on that instance's
+    rendered units; core's existing rendered artifacts are unchanged byte-for-byte when a new
+    instance is added.
+    (iii) The launcher's existing STOP refusal, unmounted-state refusal and idempotence (W1-T2877)
+    are preserved per instance, keyed off that instance's own state root and STOP marker, not a
+    shared one.
+    (iv) A stopped instance's clean exit triggers a relaunch of that instance's own container only;
+    a tick over instance A must never touch instance B's container, service or timer.
+    (v) An instance record failing validation (missing field, unresolvable repo, malformed name) is
+    refused before any `docker` or `systemctl` call — no partial write, no fallback to a default
+    instance.
+    (vi) No `docker restart` shortcut and no duplicated systemd unit files per instance; unit
+    names are templated from the registry record, not copy-pasted files.
+  acceptance:
+    - claim: "a site instance's clean exit relaunches the site instance only, never core"
+      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+    - claim: "STOP set for the site instance blocks only the site instance's revival; core's tick is unaffected"
+      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+    - claim: "a tick over one instance never installs, checks, relaunches or writes state for any other instance"
+      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+    - claim: "an unknown or malformed instance record is refused before any Docker or systemd write"
+      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+    - claim: "a healthy instance's repeated tick is idempotent and issues no redundant Docker or systemd action"
+      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+    - claim: "existing recycle-container.sh guarded refusals remain intact when invoked through the registry"
+      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+  falsifier: |
+    CLOSE IF the installer already derives units, state root, container name and credentials for
+    more than one named instance from one validated record, with per-instance STOP/PAUSE precedence
+    and refusal-before-write for a malformed record. As of this filing
+    `deploy/install-host-units.sh` renders exactly one launcher/unit set for the literal
+    `remudero-daemon`, and `recycle-container.sh` accepts overrides but has no supervisor loop that
+    watches a named instance and relaunches only it.
+    DO NOT satisfy this by adding `docker restart` on the site container, or by hand-copying
+    `install-host-units.sh`'s output into a second set of literal unit files — both are the
+    duplicate-arm anti-pattern the feedback explicitly rules out.
+  note: |
+    This does not change or supersede MASTER-PLAN D-11 or its mini/relay arc (W1-T429..W1-T433);
+    it is the concrete Azure-host lifecycle mechanism the feedback's "one instance per repo" ruling
+    needs to actually run core and site side by side, independent of W1-T3525's proof-suite routing
+    fix.
