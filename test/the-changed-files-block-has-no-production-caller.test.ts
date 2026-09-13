@@ -19,9 +19,9 @@ import {
  * closures — built their bodies without ever passing that field. The emitter was reached only by
  * its own test suite (test/a-changed-files-block-cannot-contradict-its-own-diff.test.ts).
  *
- * This wires the ONLY two `buildPlanPrBody` call sites that exist today (both plan-ratification
- * lanes; the build lane does not author its body through this module at all — out of scope, see
- * the task's own rationale) to pass the SAME path list they already compute for
+ * This originally wired the two plan-ratification call sites. The autonomous `rmd plan` lane now
+ * also authors through this module, but it must derive its list after the shared commit writer
+ * regenerates plan-index.json. Every caller passes the SAME path list it uses for
  * `filingAcceptanceCriteria`'s filing evidence. Nothing is invented: the list handed to
  * `changedFiles` is the identical `filedPaths`/`filedTaskIds` local each closure already builds
  * from what it just wrote to disk (`shardRelPaths`/`allShardRelPaths` + `"MASTER-PLAN.md"`).
@@ -59,17 +59,29 @@ test("W1-T2550: rmd approve's BATCH openPlanPr passes changedFiles too — the s
   assert.match(region, /changedFiles:\s*filedPaths/);
 });
 
-test("W1-T2550: git grep confirms exactly two buildPlanPrBody call sites in src/, and both now pass changedFiles", () => {
-  // Guards the premise itself: if a THIRD call site is ever added, this must be re-examined
-  // rather than silently leaving it unwired the way this task's own rationale measured.
+test("W1-T2550: every buildPlanPrBody call site in src/ passes its actual changed-file list", () => {
+  // Guard the production surface. A new caller must be deliberate about this evidence rather
+  // than silently opening a body that cannot account for its own diff.
   const callSites = [...RUN_TASK_SRC.matchAll(/buildPlanPrBody\(\{/g)];
-  assert.equal(callSites.length, 2, "src/run-task.ts must have exactly the two `rmd approve` call sites this task wires");
+  assert.equal(callSites.length, 3, "src/run-task.ts must have the two approval sites and the autonomous plan site");
   for (const m of callSites) {
     const from = m.index!;
     const to = RUN_TASK_SRC.indexOf("});", from);
     const call = RUN_TASK_SRC.slice(from, to);
-    assert.match(call, /changedFiles:\s*filedPaths/, "every buildPlanPrBody call site in run-task.ts must pass changedFiles");
+    assert.match(call, /changedFiles:\s*(?:filedPaths|planPrFiles)/, "every buildPlanPrBody call site in run-task.ts must pass changedFiles");
   }
+});
+
+test("W1-T2550: autonomous rmd plan captures committed files after regeneration before authoring its PR body", () => {
+  const from = RUN_TASK_SRC.indexOf("// propose\n    log(\"plan.verdict\"");
+  assert.ok(from >= 0, "could not locate planCommand's propose branch");
+  const to = RUN_TASK_SRC.indexOf("const prCreate = ghPrCreateFillCommand", from);
+  assert.ok(to > from, "could not locate plan PR creation");
+  const region = RUN_TASK_SRC.slice(from, to);
+  assert.ok(region.indexOf("applyPlanProposalCommit(worktreePath, commitMessage, log);") < region.indexOf("const planPrFiles ="));
+  assert.match(region, /"diff", "--name-only", worktreeMergeBase\(worktreePath\), "HEAD"/);
+  assert.match(region, /criteria:\s*filingAcceptanceCriteria\(reservedIds, planPrFiles\)/);
+  assert.match(region, /changedFiles:\s*planPrFiles/);
 });
 
 // ══ criterion 1 (functional) — exercising the SAME composition the wired call sites use actually

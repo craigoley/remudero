@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -296,18 +296,16 @@ test("decidePlanArchitect: any file outside plan scope fails loud regardless of 
 
 // ── planCommitMessage ──────────────────────────────────────────────────────────
 
-test("planCommitMessage: names the mode, the brief, and the Remudero-Task trailer", () => {
+test("planCommitMessage: names the mode and brief without crediting an unbuilt filed task", () => {
   const decision: PlanDecision = { action: "propose", detail: "add W1-T300", files: ["plan/tasks.yaml"] };
   const msg = planCommitMessage({
     decision: decision as Extract<PlanDecision, { action: "propose" }>,
     mode: "create",
     brief: "onboard a new repo",
-    taskId: "PLAN-create",
   });
   assert.match(msg, /^chore\(plan\): --mode=create — add W1-T300/);
   assert.match(msg, /Brief: onboard a new repo/);
-  assert.match(msg, /Acceptance:/);
-  assert.match(msg, /Remudero-Task: PLAN-create/);
+  assert.doesNotMatch(msg, /Acceptance:|Remudero-Task:/);
 });
 
 test("planCommitMessage: notes whole-plan scope when no brief was given", () => {
@@ -316,9 +314,29 @@ test("planCommitMessage: notes whole-plan scope when no brief was given", () => 
     decision: decision as Extract<PlanDecision, { action: "propose" }>,
     mode: "expand",
     brief: "",
-    taskId: "PLAN-expand",
   });
   assert.match(msg, /Brief: \(none — whole-plan scope\)/);
+});
+
+test("planCommitMessage: the production-length plan proposal is accepted by real commitlint", () => {
+  const message = planCommitMessage({
+    decision: {
+      action: "propose",
+      detail: "add W1-T3473 repairing triage claim and release when the canonical target clone has no node_modules",
+      files: ["plan/tasks.d/W1-T3473-triage-claim-runs-before-its-gate-runtime-exists.yaml"],
+    },
+    mode: "create",
+    brief:
+      "Repair RMD triage claim execution when the canonical target clone has no node_modules. Live evidence: rmd triage created its worktree then refused its claim.",
+  });
+  for (const line of message.split("\n")) assert.ok(line.length <= 100, `over-long line: ${JSON.stringify(line)}`);
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const result = spawnSync(process.execPath, [join(root, "node_modules", ".bin", "commitlint")], {
+    cwd: root,
+    input: message,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
 });
 
 // ── formatPlanVerdictLine ──────────────────────────────────────────────────────
@@ -413,7 +431,6 @@ test("REAL RUN: --mode=create scaffolds a fresh plan/tasks.yaml task for a novel
     decision: decision as Extract<PlanDecision, { action: "propose" }>,
     mode: "create",
     brief,
-    taskId: "PLAN-create",
   });
   assert.match(commitMessage, /--mode=create/);
   // The exact line `rmd plan`'s harness prints to the console for this decision (real CLI
@@ -533,7 +550,6 @@ test("REAL RUN: --mode=expand proposes a gap-filling task that cites a research 
     decision: decision as Extract<PlanDecision, { action: "propose" }>,
     mode: "expand",
     brief: "",
-    taskId: "PLAN-expand",
   });
   const consoleLine = `### [plan] ${formatPlanVerdictLine("expand", decision)}`;
   assert.equal(
