@@ -235,33 +235,19 @@ export function diagnoseBodyDefects(
 }
 
 /**
- * W1-T3389 — THE ASYMMETRY, CLOSED. `execProof` (above) already argues that the fix rung, running
- * in a worktree, can simply RUN a proof to settle an ambiguity rather than guess — applied so far
- * only to DIAGNOSING somebody else's body. This applies the identical reasoning to the rung's OWN
- * output: given the exact criteria a repair is about to push, does every `grep:` proof among them
- * actually parse and execute?
- *
- * MEASURED on PR 5108: a repaired body carried four `grep:`/`unit test:` criteria and every one
- * graded `exec_error` at review. One read `grep: unit test: test/...` — a SECOND dialect's text
- * wearing the FIRST dialect's prefix, so it never had an `in <path>` clause at all. That shape is
- * caught here with NO executor required, because it is a pure parse failure, not an ambiguity that
- * needs settling — `rmd check-proof` would refuse it in one call, and this settles the same
- * question before push rather than after a wasted review cycle.
- *
- * A proof that DOES parse is then actually RUN when `deps.execProof` is supplied; a run that
- * reports `undefined` (a timeout, a spawn failure, a `grep` exit 2 — the reviewer's OWN `exec_error`
- * causes) is a defect too. A run that executes and reads ZERO hits is NOT a defect here — it ran
- * cleanly and genuinely failed to prove the claim, which is a different, pre-existing verdict
- * (`not_yet_built`/fail) that this gate does not police.
- *
- * A `unit test:` proof has no runner in this module (mirrors {@link BodyRepairDeps.execProof}'s own
- * scope, which documents itself as `grep:`-only) and is left UNDIAGNOSED — silence, the same
- * default every other arm of this module keeps, never a guess dressed up as a verdict.
- *
- * `repair` is always `undefined`: this module cannot know what proof the author MEANT, and
- * inventing one would be exactly the claim-authoring {@link refusesToAuthorAClaim} exists to
- * refuse. A defect here must be reported to a human via {@link renderBodyDefects}, never silently
- * dropped or silently replaced.
+ * W1-T3389 — THE ASYMMETRY, CLOSED (rationale: plan/tasks.d/W1-T3389-*.yaml). `execProof` already
+ * argues the fix rung can RUN a proof to settle an ambiguity rather than guess, applied so far only
+ * to DIAGNOSING somebody else's body. This applies the same reasoning to the rung's OWN output:
+ * given the exact criteria a repair is about to push, does every `grep:` proof among them parse and
+ * execute? A proof with no `in <path>` clause at all is caught with NO executor needed — that is a
+ * pure parse failure `rmd check-proof` would refuse in one call, not an ambiguity to settle. A proof
+ * that parses is then actually RUN when `deps.execProof` is supplied; `undefined` back (the
+ * reviewer's own `exec_error` causes: timeout, spawn failure, grep exit 2) is a defect too. ZERO
+ * hits is NOT a defect here — it ran cleanly and genuinely failed to prove the claim, a different,
+ * pre-existing verdict this gate does not police. A `unit test:` proof has no runner in this module
+ * (mirrors `execProof`'s own grep-only scope) and is left UNDIAGNOSED, the same silent default every
+ * other arm keeps. `repair` is always `undefined`: this module cannot know what the author MEANT,
+ * and inventing one is exactly the claim-authoring {@link refusesToAuthorAClaim} refuses.
  */
 export function diagnoseUnrunnableProofs(
   criteria: readonly BodyCriterion[],
