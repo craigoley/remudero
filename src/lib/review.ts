@@ -327,6 +327,11 @@ export type ReportSubstituteCause =
 
 /** The evidence the JUDGE reads: the PR diff, the implement REPORT, optional LLM verdicts. */
 export interface ReviewEvidence {
+  /** The RESOLVED canonical `owner/repo` this review's proofs execute against (W1-T3525) — reused
+   *  from wherever the caller already resolved it (e.g. `resolveDaemonTarget`, W1-T1062), never
+   *  re-derived here. Absent is the LEGACY default: this repo's own two suite roots, unconditionally,
+   *  exactly as the dialect behaved before the registry existed. */
+  target?: SuiteRegistryTarget;
   /** The unified PR diff, as `gh pr diff` / `git diff` would produce. */
   diff: string;
   /** The implement worker's REPORT text (where proofs are pasted). */
@@ -682,17 +687,55 @@ export interface WhitelistedProof {
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
+
+/** The dashboard's Vitest config, named ONCE. W1-T3177 ships it; until then a dashboard proof
+ *  resolves and its file does not exist, which is the forward-reference the carve-out handles. */
+const DASHBOARD_VITEST_CONFIG = "apps/dashboard/vite.config.ts";
+
+/** One declared suite root: where it lives, the runner that executes it, and (Vitest only) an
+ *  optional FORCED `--config` path. Absent `configPath` means the runner finds its own config the
+ *  ordinary way — remudero-site's Vitest is checkout-local and pinned, so its entry names none
+ *  (W1-T3525's explicit instruction, unlike the dashboard's forced {@link DASHBOARD_VITEST_CONFIG}). */
+interface SuiteRoot {
+  readonly root: string;
+  readonly runner: "node" | "vitest";
+  readonly configPath?: string;
+}
+
+/** A resolved canonical target repo — BOTH fields, never a bare name (W1-T1062's `isSelf` note: a
+ *  repo-name match under the wrong owner is not the same target). Reused, never re-derived: this
+ *  module accepts an ALREADY-RESOLVED target rather than re-parsing `--repo owner/name` itself. */
+export interface SuiteRegistryTarget {
+  readonly owner: string;
+  readonly repo: string;
+}
+
 /**
- * W1-T3178 — THE DECLARED SUITE ROOTS, AND THE RUNNER EACH IS EXECUTED BY. Anchored `^test/` alone,
- * every `apps/dashboard/**` path fell through to the bare-TITLE arm, resolved zero tests and graded
- * `not_executable` — the console redesign was uncertifiable by construction. The roots are CLOSED
- * and each carries its runner WITH it: accepting a path without teaching the runner resolves and
- * then executes under the wrong tool, reporting a red suite as the author's defect.
+ * W1-T3178 — THIS REPO'S OWN DECLARED SUITE ROOTS, AND THE RUNNER EACH IS EXECUTED BY. Anchored
+ * `^test/` alone, every `apps/dashboard/**` path fell through to the bare-TITLE arm, resolved zero
+ * tests and graded `not_executable` — the console redesign was uncertifiable by construction. PRESERVED
+ * BYTE-FOR-BYTE by W1-T3525: this array's shape and argv are untouched, only the LOOKUP around it
+ * changed from a flat list to a registry keyed on the resolved target.
  */
 const SUITE_ROOTS = [
   { root: "test/", runner: "node" },
-  { root: "apps/dashboard/src/", runner: "vitest" },
+  { root: "apps/dashboard/src/", runner: "vitest", configPath: DASHBOARD_VITEST_CONFIG },
 ] as const;
+
+/** remudero-site (DECISIONS.md "W12-T1: THE SITE IS A SEPARATE REPOSITORY") — its own `tests/`
+ *  root under its own checkout-local pinned Vitest, no forced config path. */
+const REMUDERO_SITE_SUITE_ROOTS: readonly SuiteRoot[] = [{ root: "tests/", runner: "vitest" }] as const;
+
+/**
+ * W1-T3525 — THE CLOSED SUITE REGISTRY, KEYED ON THE RESOLVED CANONICAL `owner/repo`. A third
+ * hardcoded arm string-matched on a path prefix would repeat W1-T3178's exact mistake one repo
+ * later and could never refuse an unregistered target; this registry can, because the KEY is the
+ * target repo itself, not a path shape that any repo could coincidentally share.
+ */
+const SUITE_REGISTRY: ReadonlyArray<SuiteRegistryTarget & { roots: readonly SuiteRoot[] }> = [
+  { owner: "craigoley", repo: "remudero", roots: SUITE_ROOTS },
+  { owner: "craigoley", repo: "remudero-site", roots: REMUDERO_SITE_SUITE_ROOTS },
+];
 
 const TEST_PATH_EXACT_RE = /^(?:test|apps\/dashboard\/src)\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
 
@@ -700,16 +743,36 @@ const TEST_PATH_EXACT_RE = /^(?:test|apps\/dashboard\/src)\/[\w./-]+\.(?:test|sp
  *  (REFUSE) from "bare title" (name-filtered). Structurally total for this classifier: matching
  *  means path-shaped, nonmatching means the owning parser must handle it as some other form.
  *  Without it `src/foo.test.ts` reaches the title arm and matches nothing: the silent zero W1-T3073
- *  removed for `::`. */
+ *  removed for `::`. Root-independent, so it needs no target awareness. */
 const TEST_PATH_SHAPED_RE = /^[\w./-]+\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
 
-/** The dashboard's Vitest config, named ONCE. W1-T3177 ships it; until then a dashboard proof
- *  resolves and its file does not exist, which is the forward-reference the carve-out handles. */
-const DASHBOARD_VITEST_CONFIG = "apps/dashboard/vite.config.ts";
+/** The suite roots a TARGET repo has registered, or `undefined` when it carries none (W1-T3525: an
+ *  UNREGISTERED target refuses rather than inheriting another repo's runner). No `target` at all
+ *  is the LEGACY default — every call site pre-dating this registry — and resolves to this repo's
+ *  own roots exactly as the pre-registry flat array used to, unconditionally. */
+function suiteRootsFor(target: SuiteRegistryTarget | undefined): readonly SuiteRoot[] | undefined {
+  if (!target) return SUITE_ROOTS;
+  return SUITE_REGISTRY.find((e) => e.owner === target.owner && e.repo === target.repo)?.roots;
+}
 
-/** The suite root a declared path sits under, or `undefined` when it sits under none. */
-function suiteRootFor(path: string): (typeof SUITE_ROOTS)[number] | undefined {
-  return SUITE_ROOTS.find((r) => path.startsWith(r.root));
+/** The suite root a declared path sits under, or `undefined` when it sits under none — within the
+ *  ALREADY-RESOLVED `roots` list, never re-resolving the target. */
+function suiteRootFor(path: string, roots: readonly SuiteRoot[]): SuiteRoot | undefined {
+  return roots.find((r) => path.startsWith(r.root));
+}
+
+/** Build the "exact test-file path" matcher for an arbitrary registered root set. The DEFAULT
+ *  target's own {@link TEST_PATH_EXACT_RE} stays a literal, untouched constant (claim: byte-for-byte
+ *  unchanged); this is consulted only for a NON-DEFAULT, explicitly resolved target. */
+function suitePathExactRe(roots: readonly SuiteRoot[]): RegExp {
+  const alt = roots.map((r) => r.root.replace(/\/$/, "")).join("|");
+  return new RegExp(`^(?:${alt})/[\\w./-]+\\.(?:test|spec)\\.[cm]?[jt]sx?$`);
+}
+
+/** The exact-path matcher for a resolved root set — the module-level literal for the default
+ *  (remudero) roots, a freshly built one otherwise, so the hot path never allocates a new RegExp. */
+function suiteExactReFor(roots: readonly SuiteRoot[]): RegExp {
+  return roots === SUITE_ROOTS ? TEST_PATH_EXACT_RE : suitePathExactRe(roots);
 }
 
 /** The checkout's OWN Vitest CLI — same pinning argument as {@link pinnedPlaywrightCli}: `npx`
@@ -848,7 +911,7 @@ export function explainGrepProofRefusal(proof: string): string | undefined {
  *  explainGrepProofRefusal}; both exist so `rmd check-proof` and the task linter print the SAME
  *  sentence the parser actually decided on, rather than each hand-rolling an interpretation
  *  (W1-T3073's design says so in as many words). */
-export function explainUnitTestProofRefusal(proof: string): string | undefined {
+export function explainUnitTestProofRefusal(proof: string, target?: SuiteRegistryTarget): string | undefined {
   const m = proof.trim().match(/^unit test:\s*([\s\S]*)$/i);
   if (!m) return undefined;
   const trimmed = m[1].trim();
@@ -865,14 +928,27 @@ export function explainUnitTestProofRefusal(proof: string): string | undefined {
       "degrades to the keyword floor without saying so"
     );
   }
-  // W1-T3178 — A ROOT THIS DIALECT DOES NOT DECLARE. Path-shaped, so never a TITLE; unrooted, so no
-  // runner. Falling through would match zero tests and read as the author's defect, not the
-  // dialect's limit.
-  if (TEST_PATH_SHAPED_RE.test(trimmed) && !suiteRootFor(trimmed)) {
-    const roots = SUITE_ROOTS.map((r) => `\`${r.root}\` (${r.runner})`).join(" and ");
+  const roots = suiteRootsFor(target);
+  // W1-T3525 — A TARGET REPO THIS REGISTRY DOES NOT DECLARE AT ALL. Refused before the root check
+  // below, which only makes sense once a repo's OWN roots are known — never fall through to test/'s
+  // or the dashboard's runner for a repo that never registered either.
+  if (target && !roots) {
     return (
-      `\`${trimmed}\` is a test-file path under a suite root the \`unit test:\` dialect does not declare. ` +
-      `The declared roots are ${roots}. ` +
+      `\`${target.owner}/${target.repo}\` carries no registered suite for the \`unit test:\` dialect — ` +
+      "the registry names only the repos it has been taught, and an unregistered target is refused " +
+      "rather than silently inheriting another repo's runner"
+    );
+  }
+  const resolvedRoots = roots ?? SUITE_ROOTS;
+  // W1-T3178 — A ROOT THIS DIALECT DOES NOT DECLARE for the resolved target. Path-shaped, so never a
+  // TITLE; unrooted, so no runner. Falling through would match zero tests and read as the author's
+  // defect, not the dialect's limit.
+  if (TEST_PATH_SHAPED_RE.test(trimmed) && !suiteRootFor(trimmed, resolvedRoots)) {
+    const rootsDesc = resolvedRoots.map((r) => `\`${r.root}\` (${r.runner})`).join(" and ");
+    const forTarget = target ? ` for \`${target.owner}/${target.repo}\`` : "";
+    return (
+      `\`${trimmed}\` is a test-file path under a suite root the \`unit test:\` dialect does not declare${forTarget}. ` +
+      `The declared roots are ${rootsDesc}. ` +
       "A path under any other root has no runner to execute it, and falling through to the TITLE arm " +
       "would escape it into one --test-name-pattern that no test is named, matching zero tests and " +
       "degrading the criterion to the keyword floor without saying so"
@@ -1078,27 +1154,30 @@ function matchedLineCommentContext(w: WhitelistedProof, cwd: string): MatchedLin
 }
 
 /** Compile a `unit test:` dialect body — either a literal test-file path (reusing the exact-file
- *  shape verbatim) or a bare TEST NAME, name-filtered across the whole suite glob. */
-function parseTestTarget(body: string): WhitelistedProof | null {
+ *  shape verbatim) or a bare TEST NAME, name-filtered across the whole suite glob — against the
+ *  suite roots the RESOLVED `target` repo has registered (W1-T3525). Omitted `target` is the LEGACY
+ *  default (this repo, `craigoley/remudero`) and reproduces the pre-registry parse byte-for-byte;
+ *  an explicit `target` absent from {@link SUITE_REGISTRY} refuses rather than inheriting either of
+ *  this repo's own arms. */
+function parseTestTarget(body: string, target?: SuiteRegistryTarget): WhitelistedProof | null {
   const trimmed = body.trim();
   if (!trimmed) return null;
   // Refused BEFORE either supported arm: falling through to the bare-title arm is precisely the
   // silent zero-match this refusal exists to stop (W1-T3073).
   if (TEST_PATH_TITLE_SEPARATOR_RE.test(trimmed)) return null;
-  if (TEST_PATH_EXACT_RE.test(trimmed)) {
-    if (trimmed.includes("..")) return null; // no path traversal out of the checkout — BOTH roots
-    const suite = suiteRootFor(trimmed);
-    if (!suite) return null; // unreachable while the regex and SUITE_ROOTS agree; fail closed if not
+  const roots = suiteRootsFor(target);
+  if (!roots) return null; // W1-T3525: target repo carries no registry entry at all — refuse, never inherit
+  if (suiteExactReFor(roots).test(trimmed)) {
+    if (trimmed.includes("..")) return null; // no path traversal out of the checkout — every root
+    const suite = suiteRootFor(trimmed, roots);
+    if (!suite) return null; // unreachable while the regex and roots agree; fail closed if not
     if (suite.runner === "vitest") {
       // The FULL repo-relative path stays in argv: `purePathTestFiles` reads the args back for the
       // not_yet_built carve-out and base discrimination, and a package-relative path hides it.
-      return {
-        kind: "test",
-        command: "node",
-        args: [pinnedVitestCli(process.cwd()), "run", "--config", DASHBOARD_VITEST_CONFIG, trimmed],
-        label: trimmed,
-        runner: "vitest",
-      };
+      const args = [pinnedVitestCli(process.cwd()), "run"];
+      if (suite.configPath) args.push("--config", suite.configPath);
+      args.push(trimmed);
+      return { kind: "test", command: "node", args, label: trimmed, runner: "vitest" };
     }
     return {
       kind: "test",
@@ -1107,30 +1186,53 @@ function parseTestTarget(body: string): WhitelistedProof | null {
       label: trimmed,
     };
   }
-  // A path SHAPED like a suite file but under no declared root is an authoring error, and it is
-  // refused rather than allowed to reach the title arm, where it would resolve zero tests and grade
-  // not_executable in silence (the W1-T3073 lesson, applied to the root instead of the separator).
+  // A path SHAPED like a suite file but under no declared root (for this target) is an authoring
+  // error, and it is refused rather than allowed to reach the title arm, where it would resolve
+  // zero tests and grade not_executable in silence (the W1-T3073 lesson, applied to the root
+  // instead of the separator).
   if (TEST_PATH_SHAPED_RE.test(trimmed)) return null;
-  // No shell-metacharacter check on a bare TEST NAME (W1-T128): it is one `--test-name-pattern` argv value passed to
-  // execFile and this branch names no file, so there is no traversal or glob surface. TRAP (W1-T112 round 3): that
-  // flag compiles its argument as a REGEX, so a title echoing real syntax becomes an unescaped CHARACTER CLASS and
-  // manufactures a FAIL — hence {@link escapeRegExp}.
-  return {
-    kind: "test",
-    command: "node",
-    args: [
-      "--test",
-      "--import",
-      "tsx",
-      "--import",
-      TMP_HYGIENE_IMPORT,
-      "--test-name-pattern",
-      escapeRegExp(trimmed),
-      TEST_GLOB,
-    ],
-    label: trimmed,
-    nameFiltered: true,
-  };
+  // THE LEGACY DEFAULT TARGET'S BARE-TITLE ARM IS UNCHANGED (W1-T3525 design (ii)): node --test,
+  // name-filtered across this repo's own TEST_GLOB, exactly as before — a regression here re-grades
+  // every proof in the corpus. Multi-runner disambiguation for THIS repo's own two roots is not this
+  // task's concern.
+  if (roots === SUITE_ROOTS) {
+    // No shell-metacharacter check on a bare TEST NAME (W1-T128): it is one `--test-name-pattern` argv value passed to
+    // execFile and this branch names no file, so there is no traversal or glob surface. TRAP (W1-T112 round 3): that
+    // flag compiles its argument as a REGEX, so a title echoing real syntax becomes an unescaped CHARACTER CLASS and
+    // manufactures a FAIL — hence {@link escapeRegExp}.
+    return {
+      kind: "test",
+      command: "node",
+      args: [
+        "--test",
+        "--import",
+        "tsx",
+        "--import",
+        TMP_HYGIENE_IMPORT,
+        "--test-name-pattern",
+        escapeRegExp(trimmed),
+        TEST_GLOB,
+      ],
+      label: trimmed,
+      nameFiltered: true,
+    };
+  }
+  // A NON-DEFAULT REGISTERED TARGET'S BARE TITLE (W1-T3525) — only defined when that target
+  // declares exactly one Vitest root: with no node arm at all, this dialect has no other runner to
+  // name-filter against, and disambiguating across several roots for a repo this reviewer has never
+  // executed proofs against before is a guess this parser declines to make.
+  const soleRoot = roots.length === 1 ? roots[0] : undefined;
+  if (!soleRoot || soleRoot.runner !== "vitest") return null;
+  // `--reporter=tap` is load-bearing: {@link vitestNameFilteredOutcome} parses Vitest's TAP stream to
+  // tell a genuinely-run leaf from one Vitest marks `# SKIP` (its own all-skipped zero-exit trap);
+  // Vitest's default reporter carries neither shape.
+  const args = [pinnedVitestCli(process.cwd()), "run", "--reporter=tap"];
+  if (soleRoot.configPath) args.push("--config", soleRoot.configPath);
+  // `-t` is Vitest's own name filter (its sibling of node's --test-name-pattern); the root itself is
+  // passed as a positional scope so the search never reaches outside the declared suite. NO forced
+  // config: the target's own checkout-local pinned Vitest resolves its config the ordinary way.
+  args.push("-t", trimmed, soleRoot.root);
+  return { kind: "test", command: "node", args, label: trimmed, runner: "vitest", nameFiltered: true };
 }
 
 /** One `grep:` refusal, named for a human and paired with the REAL sentence {@link
@@ -1244,7 +1346,7 @@ export function wrappedGrepPattern(proof: string): { delimiter: string; bare: st
   }
   return undefined;
 }
-export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
+export function parseWhitelistedProof(proof: string, target?: SuiteRegistryTarget): WhitelistedProof | null {
   // Parse a proof for a whitelisted, mechanically-executable shape; `null` for free prose or an unsafe shape, and the
   // caller then defers entirely to the keyword floor. House dialect (W1-T72) is checked FIRST and EXCLUSIVELY: a proof
   // with a dialect label never falls through to a legacy shape, or a dialect body that fails its own safety check —
@@ -1258,7 +1360,7 @@ export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
   // backticks: bare text is tried first.
   const dialectSource = matchesDialectPrefix(trimmed) ? trimmed : stripCodeSpan(trimmed);
   const dialectTest = dialectSource.match(DIALECT_TEST_RE);
-  if (dialectTest) return parseTestTarget(dialectTest[1]);
+  if (dialectTest) return parseTestTarget(dialectTest[1], target);
   const dialectGrep = dialectSource.match(DIALECT_GREP_RE);
   if (dialectGrep) return parseDialectGrep(dialectGrep[1]);
   // `demonstration:` is never executable by construction (W1-T277) — it names an operator action, not an artifact this
@@ -1560,9 +1662,13 @@ function resolvedTestFilesNeedBrowserPreflight(cwd: string, files: readonly stri
   return false;
 }
 
+/** The exact test-file path(s) a PURE-PATH `unit test:` proof names — `whitelisted.label` IS that
+ *  path ({@link parseTestTarget} sets it to the trimmed body verbatim for every exact-path arm, of
+ *  any registered target), so reading it back needs no re-match against a suite-root regex (W1-T3525:
+ *  {@link TEST_PATH_EXACT_RE} alone could not recognise a non-default target's own root). */
 function purePathTestFiles(whitelisted: WhitelistedProof): string[] {
   if (whitelisted.kind !== "test" || whitelisted.nameFiltered) return [];
-  return whitelisted.args.filter((arg) => TEST_PATH_EXACT_RE.test(arg));
+  return [whitelisted.label];
 }
 
 /** The checkout's OWN Playwright CLI entry. Deliberately not `npx playwright`: `npx` resolves a name and on a cache
@@ -1772,10 +1878,17 @@ export function execWhitelistedProof(
   // A name-filtered proof's `args` still carry the FULL suite glob, so resolve the candidate file(s) now, against the
   // real PR-head checkout, and narrow before spawning node (W1-T227). Not folded into parseWhitelistedProof: that is a
   // pure parse with no `cwd`, and the candidate set can only be known against a real checkout.
+  // W1-T3525: Vitest's own name-filtered run is classified by {@link vitestNameFilteredOutcome}, a
+  // SEPARATE parser for a SEPARATE reporter shape (Vitest's nested TAP, not node's flat one). The
+  // candidate-narrowing below is node/grep-corpus specific (W1-T227's `resolveNameFilteredCandidates`
+  // fixed-string-searches a `test/**` style corpus and its zero-hit fast path assumes node's TAP
+  // wrapper semantics), so a Vitest name-filtered proof skips it and runs its already-scoped argv
+  // (the declared root is already a positional filter, per {@link parseTestTarget}) directly.
+  const vitestNameFiltered = whitelisted.nameFiltered === true && whitelisted.runner === "vitest";
   let args = whitelisted.args as readonly string[];
   let preflightFiles: readonly string[] | undefined =
     whitelisted.kind === "test" && !whitelisted.nameFiltered ? purePathTestFiles(whitelisted) : undefined;
-  if (whitelisted.nameFiltered) {
+  if (whitelisted.nameFiltered && !vitestNameFiltered) {
     const resolution = resolveNameFilteredCandidates(cwd, whitelisted.label);
     // FAIL FAST on positive evidence of absence: no test file contains this name and no interpolated title could
     // render to it, so the glob run's only possible finding is the same "no-match" — reached instead by loading 168
@@ -1806,7 +1919,7 @@ export function execWhitelistedProof(
   }
   try {
     const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
-    if (whitelisted.nameFiltered) return nameFilteredOutcome(stdout);
+    if (whitelisted.nameFiltered) return vitestNameFiltered ? vitestNameFilteredOutcome(stdout) : nameFilteredOutcome(stdout);
     // W1-T3208: a dialect grep's own compiled pattern/path names the exact self-declaration text to
     // exclude. `dialectGrepTargetPath` returning a path
     // confirms both the dialect shape (not the legacy fenced, author-selected argv) AND that
@@ -1833,7 +1946,7 @@ export function execWhitelistedProof(
     // TAP stream node still attaches to the error rather than trusting the code.
     if (whitelisted.nameFiltered) {
       const stdout = typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? "");
-      return nameFilteredOutcome(stdout);
+      return vitestNameFiltered ? vitestNameFilteredOutcome(stdout) : nameFilteredOutcome(stdout);
     }
     // grep exit 2 means it could not even LOOK — a renamed or missing target, a read error — distinct from exit 1's
     // "looked, found nothing" (W1-T219, recon R-13(iv)). Only the latter is evidence of absence.
@@ -1965,12 +2078,73 @@ export function nameFilteredOutcome(stdout: string): "pass" | "fail" | "no-match
   return anyRealFailure ? "fail" : "pass";
 }
 
+/** A Vitest `--reporter=tap` result line, indentation PRESERVED — MEASURED against installed
+ *  Vitest 5.0.0, never assumed. Its TAP is NESTED, unlike node's flat stream: the file's own outer
+ *  wrapper prints at column 0 (`not ok 1 - a.test.ts # time=8ms {`), and every real leaf result is
+ *  indented beneath it (`    ok 1 - real test name # time=1ms`). That depth, not the wrapper's own
+ *  name suffix, is what {@link vitestNameFilteredOutcome} uses to tell a file wrapper from a leaf —
+ *  {@link isFileWrapperResultName}'s suffix match cannot, because Vitest appends its own `# time=`/
+ *  `# SKIP` comment AFTER the file name, which no longer ends in `.test.ts`. */
+const VITEST_TAP_RESULT_LINE_RE = /^( *)(ok|not ok) \d+ - (.+?)\s*$/;
+/** The TAP13 plan line (`1..N`) Vitest's reporter writes ONCE, before any file's results — the
+ *  declared file count this run selected. Used the same way node's `# duration_ms` summary is used
+ *  above: fewer top-level wrapper lines observed than this plan promised means the run was cut off. */
+const VITEST_TAP_PLAN_RE = /^1\.\.(\d+)\s*$/m;
+/** Vitest marks a SKIPPED leaf with a trailing `# SKIP` comment on an `ok` line — never a `not ok`,
+ *  whatever the reason for the skip (name-filtered out, or `test.skip()` in the source). */
+const VITEST_TAP_SKIP_RE = /#\s*SKIP\b/i;
+
+/** (W1-T3525) The Vitest sibling of {@link nameFilteredOutcome} — SAME three-value contract, SAME
+ *  throw-on-truncation convention, but its OWN parse: node's TAP is flat and Vitest's is nested, and
+ *  Vitest 5.0.0 carries a trap node does not — it EXITS 0 when every selected test is SKIPPED, not
+ *  merely when name-filtering matched none. A skipped leaf still emits an `ok` TAP line, so reusing
+ *  {@link nameFilteredOutcome} unmodified would read "everything skipped" as "everything passed".
+ *  Zero non-skipped leaves on a COMPLETED run (every declared file's wrapper observed) is "no-match" —
+ *  the all-skipped trap AND the ordinary zero-match case read identically, correctly, since neither is
+ *  evidence the criterion's behaviour was exercised. Zero non-skipped leaves on an INCOMPLETE run
+ *  throws, inconclusive rather than absence — mirrors {@link nameFilteredOutcome}'s own truncation
+ *  guard, read off the TAP plan count instead of node's trailing summary line. */
+export function vitestNameFilteredOutcome(stdout: string): "pass" | "fail" | "no-match" {
+  let topLevelSeen = 0;
+  let matchedNonSkipped = false;
+  let anyRealFailure = false;
+  for (const line of stdout.split("\n")) {
+    const m = VITEST_TAP_RESULT_LINE_RE.exec(line);
+    if (!m) continue;
+    if (m[1].length === 0) {
+      topLevelSeen += 1; // the file's own wrapper line, never a real leaf result
+      continue;
+    }
+    if (VITEST_TAP_SKIP_RE.test(m[3])) continue; // skipped — not evidence either way
+    matchedNonSkipped = true;
+    if (m[2] === "not ok") anyRealFailure = true;
+  }
+  if (!matchedNonSkipped) {
+    const planMatch = VITEST_TAP_PLAN_RE.exec(stdout);
+    const planned = planMatch ? Number(planMatch[1]) : undefined;
+    if (planned === undefined || topLevelSeen < planned) {
+      throw new Error(
+        "name-filtered Vitest proof run was truncated before its TAP plan count completed — " +
+          "inconclusive, not evidence the named test is missing",
+      );
+    }
+    // Every selected leaf reported `# SKIP` (Vitest's all-skipped zero-exit trap) or none ran at all,
+    // on a run that COMPLETED. Neither is a passing observation — no-match, not a silent pass.
+    return "no-match";
+  }
+  return anyRealFailure ? "fail" : "pass";
+}
+
 // ── The pure JUDGE ─────────────────────────────────────────────────────────
 
 /** PR-head checkout a criterion's proof may be executed against (W1-T65). */
 export interface ProofExecContext {
   cwd: string;
   exec?: ProofExecutor;
+  /** (W1-T3525) mirrors {@link ReviewEvidence.target} — threaded into {@link parseWhitelistedProof} so
+   *  a `unit test:` proof resolves against the SAME registered target every other consumer would, never
+   *  a second, independently-guessed repo identity. Absent ⇒ the legacy default (this repo's own roots). */
+  target?: SuiteRegistryTarget;
   /** (W1-T273) mirrors {@link ReviewEvidence.baseCheckoutDir} — the merge-base checkout a `grep:` proof's pattern is
    * re-run against to test for non-discrimination. Absent ⇒ {@link preexistingProofHits} always reports `false`. */
   baseCwd?: string;
@@ -2247,7 +2421,7 @@ export function judgeCriterion(
   // with one that parsed and named nothing, and a CAPPED 0/N looked identical either way.
   let proofSkip: ProofSkipReason | undefined;
   if (execCtx) {
-    const whitelisted = parseWhitelistedProof(criterion.proof);
+    const whitelisted = parseWhitelistedProof(criterion.proof, execCtx.target);
     if (whitelisted) {
       proofSkip = undefined;
       // Checked BEFORE spawning anything (W1-T456, DEFECT A): an exact-path `unit test:` proof whose target is ABSENT
@@ -3403,6 +3577,7 @@ export function judgeReview(
     ? {
         cwd: evidence.headCheckoutDir,
         exec: proofMemo?.exec,
+        target: evidence.target,
         baseCwd: evidence.baseCheckoutDir,
         baseUnreadablePaths: evidence.baseUnreadablePaths,
         baseIsCheckout: evidence.baseIsCheckout,
