@@ -9520,10 +9520,13 @@ export async function runFixRung(opts: {
       try {
         const prMatch = opts.prUrl.match(/\/pull\/(\d+)/);
         const prNumber = prMatch ? Number(prMatch[1]) : undefined;
-        if (prNumber !== undefined) {
-          // NOT `reviewReport`: for this mode it was just overwritten with the live PR BODY
-          // (above) — the worker's PROOF_AMENDMENT proposal lives only in its own transcript.
-          const proposal = parseProofAmendmentProposal(workerTranscript(fixResult));
+        // NOT `reviewReport`: for this mode it was just overwritten with the live PR BODY
+        // (above) — the worker's PROOF_AMENDMENT proposal lives only in its own transcript.
+        const proposal = parseProofAmendmentProposal(workerTranscript(fixResult));
+        // No proposal ⇒ `validateProofAmendmentProposal` refuses immediately anyway (`no-proposal`)
+        // — bail out here, BEFORE ever touching git or GitHub, rather than spending a real merge-
+        // base worktree build on a round that has nothing to validate.
+        if (prNumber !== undefined && proposal.length > 0) {
           const { owner, repo, headCheckoutDir } = opts.reviewBase;
           const ledgerLinesNow = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
           const baseProof = buildBaseProofDir(
