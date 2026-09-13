@@ -855,6 +855,7 @@
     "test/mounts-wiring.test.ts": 1931,
     "test/mounts.test.ts": 440,
     "test/moving-base-changed-files.test.ts": 2197,
+    "test/multi-instance-daemon-lifecycle-registry.test.ts": 0,
     "test/mutation-gate-lifetime.test.ts": 1400,
     "test/mutation-gate-verdict-emission.test.ts": 1028,
     "test/mutation-per-file-runner.test.ts": 815,

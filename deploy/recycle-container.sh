@@ -73,6 +73,7 @@
 # USAGE
 #   ./deploy/recycle-container.sh                  # recycle onto :latest
 #   ./deploy/recycle-container.sh --tag <sha>       # a specific tag instead of :latest
+#   ./deploy/recycle-container.sh --instance site   # derive target container/state/repo from a registry
 #   REGISTRY=... IMAGE=... ./deploy/recycle-container.sh     # retarget without editing this file
 #   RMD_STATE_DIR=/path ./deploy/recycle-container.sh        # if the bind mount is not ~/rmd-state
 #   RMD_RECYCLE_WAIT_S=300 ./deploy/recycle-container.sh      # widen the bounded wait for workers
@@ -102,6 +103,104 @@ REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
 TAG="${TAG:-latest}"
 CONTAINER_NAME="${RMD_DAEMON_CONTAINER:-remudero-daemon}"
+INSTANCE_NAME=""
+for ((i = 1; i <= $#; i++)); do
+  if [ "${!i}" = "--instance" ]; then
+    j=$((i + 1))
+    INSTANCE_NAME="${!j:-}"
+    break
+  fi
+done
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+DEFAULT_INSTANCE_REGISTRY="${SCRIPT_DIR%/deploy}/.remudero/daemon-instances.yaml"
+
+validate_instance_name() {
+  case "$1" in
+    ""|*[!a-zA-Z0-9_-]*)
+      echo "recycle-container: REFUSING -- invalid instance name '$1'." >&2
+      echo "  Use only letters, digits, '_' and '-'." >&2
+      exit 2
+      ;;
+  esac
+}
+
+read_instance_registry() {
+  local registry_file="$1" want="$2"
+  awk -v want="$want" '
+    {
+      sub(/[[:space:]]+#.*/, "")
+    }
+    /^[[:space:]]*$/ { next }
+    $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+      name=$1
+      sub(/:$/, "", name)
+      current=name
+      next
+    }
+    current == want && $0 ~ /^    [A-Za-z_]+:[[:space:]]*/ {
+      key=$1
+      sub(/:$/, "", key)
+      value=$0
+      sub(/^    [A-Za-z_]+:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print key "=" value
+    }
+  ' "$registry_file"
+}
+
+if [ -n "$INSTANCE_NAME" ]; then
+  validate_instance_name "$INSTANCE_NAME"
+  INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY:-$DEFAULT_INSTANCE_REGISTRY}"
+  if [ ! -r "$INSTANCE_REGISTRY" ]; then
+    echo "recycle-container: REFUSING -- instance registry '${INSTANCE_REGISTRY}' is not readable." >&2
+    exit 2
+  fi
+  record="$(read_instance_registry "$INSTANCE_REGISTRY" "$INSTANCE_NAME")"
+  if [ -z "$record" ]; then
+    echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' is not declared in ${INSTANCE_REGISTRY}." >&2
+    exit 2
+  fi
+  repo=""; state_dir=""; container_name=""; image_ref=""; claude_dir=""; codex_dir=""; container_config_dir=""
+  while IFS='=' read -r key value; do
+    case "$key" in
+      repo) repo="$value" ;;
+      state_dir) state_dir="$value" ;;
+      container_name) container_name="$value" ;;
+      image) image_ref="$value" ;;
+      claude_dir) claude_dir="$value" ;;
+      codex_dir) codex_dir="$value" ;;
+      container_config_dir) container_config_dir="$value" ;;
+      service_user|max_old_space_mb|service_name|watchdog_service_name|watchdog_timer_name|launcher_path|revival_log|gh_app_id|gh_app_installation_id|gh_app_private_key_path) : ;;
+      *) echo "recycle-container: REFUSING -- unknown field '${key}' in instance '${INSTANCE_NAME}'." >&2; exit 2 ;;
+    esac
+  done <<EOF
+$record
+EOF
+  for pair in "repo:$repo" "state_dir:$state_dir" "container_name:$container_name" "image:$image_ref" "claude_dir:$claude_dir" "codex_dir:$codex_dir" "container_config_dir:$container_config_dir"; do
+    name="${pair%%:*}"; val="${pair#*:}"
+    [ -n "$val" ] || { echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' missing required field '${name}'." >&2; exit 2; }
+  done
+  case "$container_name" in *[!a-zA-Z0-9_.-]*|"") echo "recycle-container: REFUSING -- malformed container_name '${container_name}'." >&2; exit 2 ;; esac
+  case "$image_ref" in */*:*) : ;; *) echo "recycle-container: REFUSING -- image must be a registry/name:tag reference for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
+  case "$state_dir" in /*) : ;; *) echo "recycle-container: REFUSING -- state_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
+  case "$claude_dir" in /*) : ;; *) echo "recycle-container: REFUSING -- claude_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
+  case "$codex_dir" in /*) : ;; *) echo "recycle-container: REFUSING -- codex_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
+  case "$container_config_dir" in /*) : ;; *) echo "recycle-container: REFUSING -- container_config_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
+  image_without_tag="${image_ref%:*}"
+  image_tag="${image_ref##*:}"
+  registry_host="${image_without_tag%%/*}"
+  image_name="${image_without_tag#*/}"
+  REGISTRY="${registry_host%.azurecr.io}"
+  IMAGE="$image_name"
+  TAG="$image_tag"
+  CONTAINER_NAME="$container_name"
+  RMD_STATE_DIR="$state_dir"
+  RMD_CLAUDE_DIR="$claude_dir"
+  RMD_CODEX_DIR="$codex_dir"
+  RMD_CONTAINER_CONFIG_DIR="$container_config_dir"
+  RMD_DAEMON_REPO="$repo"
+fi
 
 # The HOST side of the state bind mount — same derivation and same default as deploy/host-update.sh,
 # so the two scripts agree on where the fleet's locks and control flags actually live.
@@ -224,6 +323,7 @@ while [ $# -gt 0 ]; do
     --registry)    REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
     --image)       IMAGE="${2:?--image needs a value}"; shift 2 ;;
     --container)   CONTAINER_NAME="${2:?--container needs a value}"; shift 2 ;;
+    --instance)    shift 2 ;;
     --first-boot)  FIRST_BOOT=1; shift ;;
     -h|--help)     sed -n '1,72p' "$0"; exit 0 ;;
     *) echo "recycle-container: unknown argument '$1' (try --help)" >&2; exit 2 ;;
