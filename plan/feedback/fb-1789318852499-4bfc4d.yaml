@@ -1,0 +1,25 @@
+id: fb-1789318852499-4bfc4d
+ts: 2026-09-13T17:00:52.500Z
+raw: "Observed PR-body pipeline defect on #5424 (W1-T3529): the generated body
+  uses a numbered acceptance bullet followed by a top-level Proof: line.
+  src/lib/review.ts parseAcceptanceBlock accepts an inline pipe proof or an
+  indented proof: continuation, so the live gate parsed criterion 1 with an
+  empty proof and acceptance-author-gate refused it. The same predicate is also
+  the required squash-trailer-gate job in .github/workflows/ci.yml; ci.yml
+  default pull_request events exclude edited, so a body-only repair can refresh
+  the standalone edited-aware acceptance gate while leaving a stale squash
+  failure. Repair the task-PR body renderer to emit the canonical parseable
+  shape, extend recovery to recognize and repair proof-shape on task-trailered
+  bodies without changing implementation, and prove a body-only repair produces
+  fresh terminal results for every required context before review and auto-merge
+  proceed. Include the #5424 body as a regression fixture and a falsifier that
+  restores the unindented Proof: line."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

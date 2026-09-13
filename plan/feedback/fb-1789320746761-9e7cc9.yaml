@@ -1,0 +1,27 @@
+id: fb-1789320746761-9e7cc9
+ts: 2026-09-13T17:32:26.761Z
+raw: "Graceful recycle does not converge under PAUSE: recycle-container.sh wrote
+  state/PAUSE at 2026-09-13T17:04:54Z, but docker ps at 17:31 observed a retro
+  worker with /tmp/retro-settings-RETRO-1789318858540.json (elapsed 135s) and
+  reviewer worker with /tmp/reviewer-settings-review-PR5423-1789320564933.json
+  (elapsed 127s). PAUSE must prevent every new worker-producing lane, not only
+  drain dispatch, or the recycler continues waiting for post-pause work.
+  Separately, deploy/recycle-container.sh worker_lines() matches all
+  Claude/Codex processes and counts normal lane-holding workers as lane-less in
+  addition to state/inflight locks; it also currently sees a sweep-fix worker
+  carrying an inflight lock despite comments asserting fix runs consume no lock.
+  Repair must establish a single worker identity model, classify
+  normal/retro/review/fix processes against actual inflight ownership, and add a
+  fresh state test proving PAUSE then recycle reaches zero without post-pause
+  worker creation. Evidence: deploy/recycle-container.sh lines 773-786, 905-986;
+  host state /home/craigoleyagent/rmd-state2/state/inflight; live container
+  f0b16d4d716d."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
