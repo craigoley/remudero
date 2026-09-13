@@ -61,13 +61,13 @@
     already-exists-but-will-never-merge case; it does not touch dangling-reference handling.
   acceptance:
     - claim: "a dependency carrying ANY retirement value (retired, closed, or withdrawn) is excluded from unmetDependencies's returned list, reproducing the exact W1-T3166/W1-T3201 fixture"
-      proof: "unit test: test/plan.test.ts"
+      proof: "unit test: retired dependencies are excluded from unmetDependencies"
     - claim: "a genuinely unmerged, NON-retired dependency is still reported as unmet — the falsifier proving the fix did not silently swallow every unmet dependency"
-      proof: "unit test: test/plan.test.ts"
+      proof: "unit test: live unmerged dependencies remain unmet after retirement filtering"
     - claim: "assertRunnable no longer throws for a task whose ONLY unmet dependency carries a retirement value, while it still throws when a non-retired dependency remains unmerged"
-      proof: "unit test: test/plan.test.ts"
+      proof: "unit test: assertRunnable accepts retired-only dependencies and rejects live unmet dependencies"
     - claim: "a retired dependency is never counted as merged elsewhere — MERGED_STATUSES is unchanged and isMerged(d) is never called with a fabricated true for a retired d"
-      proof: "grep: MERGED_STATUSES in src/lib/plan.ts"
+      proof: "unit test: retired dependencies bypass isMerged without changing merge status"
   falsifier: |
     CLOSE WITHOUT IMPLEMENTATION IF `unmetDependencies` already excludes retirement-carrying
     dependencies — grep the function body for `retirement`. MEASURED 2026-09-09, this session,
