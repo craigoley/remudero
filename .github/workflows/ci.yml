@@ -1379,8 +1379,8 @@ jobs:
     # W1-T3512: DELIBERATELY NOT WIRED TO THE FAST-LANE CLASSIFIER. The statically-resolvable
     # readFileSync target a test names can be ANY repo path, not just src/** — e.g.
     # test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts and
-    # test/pure-proof-incomplete-run.test.ts both read plan/policy.yaml this way (MEASURED
-    # 2026-09-13, `git grep 'readFileSync("plan/policy.yaml"'`). A PLAN_ONLY diff editing that file
+    # test/pure-proof-incomplete-run.test.ts both read a configurable policy file this way (MEASURED
+    # 2026-09-13 from their direct file-reader calls). A PLAN_ONLY diff editing that data
     # can move this check, so it is not source-only and must keep running in full.
     name: assertion-discrimination
     runs-on: ubuntu-latest
@@ -1739,7 +1739,7 @@ jobs:
         run: |
           CLASS="${{ steps.classify.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; source-size-ratchet walks only .ts files under src/, which this diff does not touch."
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; the source-size signal walks only .ts files under src/, which this diff does not touch."
             echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci and source-size-signal (no src/**/*.ts path in this diff)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
