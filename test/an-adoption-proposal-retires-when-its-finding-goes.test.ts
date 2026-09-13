@@ -19,6 +19,9 @@
  * proposal with no operator action, which is the property a decline could not have.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { classifyProposal, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
@@ -158,4 +161,53 @@ test("W1-T3518: a NON-adoption proposal is untouched even when the predicate wou
   const foreign: Proposal = { id: "proof-debt:W1-T965", summary: "proof debt", evidenceAnchors: [] };
   const result = classifyProposal(foreign, undefined, ctxWith(() => true));
   assert.notEqual(result.state, "retired", "the id prefix gate must hold, not just the shape parse");
+});
+
+// ── readAdoptionLatest's validation arms, against REAL files ───────────────────────────────────
+//
+// Every arm here is the corrupt-record guard, and an untested guard is the one that silently
+// stops guarding. Each malformed shape must yield `undefined` — which {@link adoptionFindingGone}
+// turns into "retire nothing" — rather than a partially-trusted record.
+
+test("W1-T3518: every malformed record shape reads as NO RECORD, never a partially-trusted one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-adopt-latest-"));
+  const write = (name: string, body: string): string => {
+    const f = join(dir, name);
+    writeFileSync(f, body);
+    return f;
+  };
+  try {
+    const good = { generatedAt: "2026-09-13T00:00:00Z", proposalIds: ["adoption:symbol-no-caller:a.ts:x"], shapesObserved: ["symbol-no-caller"] };
+    assert.deepEqual(readAdoptionLatest(write("ok.json", JSON.stringify(good))), good, "sanity: a well-formed record round-trips, or the negatives below prove nothing");
+
+    const cases: Array<[string, string]> = [
+      ["not-json.json", "{ this is not json"],
+      ["null.json", "null"],
+      ["array.json", "[]"],
+      ["no-generated-at.json", JSON.stringify({ ...good, generatedAt: 17 })],
+      ["ids-not-array.json", JSON.stringify({ ...good, proposalIds: "adoption:x" })],
+      ["ids-not-strings.json", JSON.stringify({ ...good, proposalIds: ["ok", 42] })],
+      ["shapes-not-array.json", JSON.stringify({ ...good, shapesObserved: "symbol-no-caller" })],
+      ["unknown-shape.json", JSON.stringify({ ...good, shapesObserved: ["symbol-no-caller", "a-shape-from-a-newer-build"] })],
+    ];
+    for (const [name, body] of cases) {
+      assert.equal(readAdoptionLatest(write(name, body)), undefined, `${name} must read as NO RECORD`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3518: an UNKNOWN shape is refused whole, never silently narrowed to the shapes this build knows", () => {
+  // The dangerous near-miss: dropping the unrecognised shape and keeping the rest would leave a
+  // record whose shapesObserved looks complete, so proposals of the dropped shape would retire
+  // against a scan that never reported them.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-adopt-unknown-"));
+  try {
+    const f = join(dir, "r.json");
+    writeFileSync(f, JSON.stringify({ generatedAt: "2026-09-13T00:00:00Z", proposalIds: [], shapesObserved: ["script-no-invoker", "gate-no-subject-from-the-future"] }));
+    assert.equal(readAdoptionLatest(f), undefined, "one unreadable member invalidates the whole record");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
