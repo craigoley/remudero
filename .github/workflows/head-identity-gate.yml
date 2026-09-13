@@ -12,7 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # A pull_request event's default ref/sha is the ephemeral test-merge commit, not the real
+      # head commit — `git log -1` against that merge commit reads its synthetic message instead
+      # of the head commit's real subject/trailer, which is exactly what this gate inspects. Pin
+      # the checkout to the event's head SHA (same fix as proof-discrimination-gate.yml) so the
+      # gate always reads the actual head commit, not a merge artifact.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
