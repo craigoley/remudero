@@ -21616,7 +21616,7 @@ export const DAEMON_LEDGER_COMPACT_OLDER_THAN_DAYS = 1;
 
 export function buildLedgerCompactionDaemonHooks(deps: {
   config?: Config;
-  now?: () => Date;
+  clock?: Clock;
   check?: () => LedgerCompactionDecision;
   run?: () => Promise<LedgerCompactionOutcome | undefined>;
   compact?: (rest: string[], deps: LedgerCompactCommandDeps) => number;
@@ -21626,7 +21626,7 @@ export function buildLedgerCompactionDaemonHooks(deps: {
 } {
   const configFor = () => deps.config ?? loadConfig();
   const stateDirFor = () => dirname(ledgerPathFor(configFor()));
-  const now = () => deps.now?.() ?? new Date();
+  const clock = deps.clock ?? systemClock;
   const check =
     deps.check ??
     (() => {
@@ -21638,7 +21638,7 @@ export function buildLedgerCompactionDaemonHooks(deps: {
         sizeOf: (path) => statSync(path).size,
       });
       const lastFiredAtMs = lastLedgerCompactionFiredAtMs(readLedgerRawLines(ledgerPath));
-      return decideLedgerCompaction(pressure, lastFiredAtMs, now().getTime());
+      return decideLedgerCompaction(pressure, lastFiredAtMs, clock.now());
     });
   const run =
     deps.run ??

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { buildLedgerCompactionDaemonHooks, daemonCommand, lastLedgerCompactionFiredAtMs } from "../src/run-task.js";
+import { fixedClock } from "../src/lib/clock.js";
 import { loadConfig } from "../src/lib/config.js";
 import type { LedgerCompactCommandDeps } from "../src/lib/ledger-compact.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
@@ -99,6 +100,29 @@ test("lastLedgerCompactionFiredAtMs: only a valid latest fire row throttles a la
   ];
   assert.equal(lastLedgerCompactionFiredAtMs(rows), Date.parse(latest));
   assert.equal(lastLedgerCompactionFiredAtMs(['{"step":"ledger_compaction.fired"']), undefined, "a torn row must not invent a throttle marker");
+});
+
+test("buildLedgerCompactionDaemonHooks: the shared Clock port controls the compaction cooldown", () => {
+  const { home, stateDir } = fixtureHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    writeOverboundCorpus(stateDir);
+    const lastFired = "2026-09-12T00:00:00.000Z";
+    writeFileSync(join(stateDir, "ledger.ndjson"), `${JSON.stringify({ ts: lastFired, step: "ledger_compaction.fired" })}\n`);
+    const hooks = buildLedgerCompactionDaemonHooks({
+      config: loadConfig(),
+      clock: fixedClock(Date.parse(lastFired) + 15 * 60_000),
+    });
+    const decision = hooks.checkLedgerCompaction();
+    assert.equal(decision.fire, false);
+    assert.equal(decision.overBound, true);
+    assert.match(decision.reason, /throttled — last compaction 900s ago/);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("buildLedgerCompactionDaemonHooks: an untrustworthy compactor outcome fails loudly instead of reading as a completed pass", async () => {
