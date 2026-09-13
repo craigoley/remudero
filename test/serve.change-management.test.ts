@@ -5,7 +5,11 @@
 // REAL shell functions from renderShellHtml(), then run them with the REAL classifier.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { Script } from "node:vm";
+import { fileURLToPath } from "node:url";
 import { renderShellHtml } from "../src/lib/serve.js";
 import { classifyAskRecordItem } from "../src/lib/ask-classification.js";
 
@@ -39,40 +43,30 @@ function needsMeSource(html: string): string {
 function runChangeManagement(src: string, fixture: { tasks?: unknown[]; recent?: unknown[] }): ReconcileCall[] {
   const calls: ReconcileCall[] = [];
   const reconcileRows = (el: { __id: string } | undefined, rows: ReconcileCall["rows"]) => calls.push({ id: el?.__id, rows });
-  const fn = new Function(
-    "fixtureTasks",
-    "fixtureRecent",
-    "classifyAskRecordItem",
-    "escapeHtml",
-    "statusBadge",
-    "rowChevronHtml",
-    "recentSpendHtml",
-    "recentPrLinkHtml",
-    "formatAgo",
-    "writeGateAttrs",
-    "reconcileRows",
-    "document",
-    "finishSectionRender",
-    "changeManagementSummaryText",
-    `${src}\nreturn renderChangeManagement(fixtureTasks, fixtureRecent);`,
-  ) as (...args: unknown[]) => Set<string>;
-  fn(
-    fixture.tasks ?? [],
-    fixture.recent ?? [],
-    classifyAskRecordItem,
-    (v: unknown) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
-    (key: string) => `<span class="status-label status-${key}">${key}</span>`,
-    () => '<button type="button" class="row-chevron"></button>',
-    () => "",
-    (e: { prUrl?: string }) => (e.prUrl ? ` <a class="recent-pr-link" href="${e.prUrl}">PR</a>` : ""),
-    () => "5m ago",
-    () => "",
-    reconcileRows,
-    { getElementById: (id: string) => ({ __id: id }) },
-    () => {},
-    (rows: unknown[]) => `${rows.length} lifecycle outcomes`,
-  );
+  const clientPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "console-shell-client.ts");
+  const clientText = readFileSync(clientPath, "utf8");
+  const line = clientText.slice(0, clientText.indexOf("const RECENT_VERB_LABEL")).split("\n").length - 1;
+  const context = {
+    fixtureTasks: fixture.tasks ?? [], fixtureRecent: fixture.recent ?? [], classifyAskRecordItem,
+    escapeHtml: (v: unknown) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
+    statusBadge: (key: string) => `<span class="status-label status-${key}">${key}</span>`, rowChevronHtml: () => '<button type="button" class="row-chevron"></button>', recentSpendHtml: () => "",
+    recentPrLinkHtml: (e: { prUrl?: string }) => (e.prUrl ? ` <a class="recent-pr-link" href="${e.prUrl}">PR</a>` : ""), formatAgo: () => "5m ago", writeGateAttrs: () => "",
+    reconcileRows, document: { getElementById: (id: string) => ({ __id: id }) }, finishSectionRender: () => {}, changeManagementSummaryText: (rows: unknown[]) => `${rows.length} lifecycle outcomes`, result: undefined as Set<string> | undefined,
+  };
+  new Script(`${"\n".repeat(line)}${src}\nresult = renderChangeManagement(fixtureTasks, fixtureRecent);`, { filename: clientPath }).runInNewContext(context);
   return calls;
+}
+
+function findRowFromClient(taskId: string, selectorHits: Record<string, unknown>): unknown {
+  const clientPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "console-shell-client.ts");
+  const clientText = readFileSync(clientPath, "utf8");
+  const start = clientText.indexOf("function findRowByTaskId");
+  const end = clientText.indexOf("  /**\n   * A dependency link", start);
+  assert.ok(start >= 0 && end > start, "findRowByTaskId must remain a bounded client helper");
+  const line = clientText.slice(0, start).split("\n").length - 1;
+  const context = { taskId, CSS: { escape: (value: string) => value }, document: { querySelector: (selector: string) => selectorHits[selector] ?? null }, result: undefined as unknown };
+  new Script(`${"\n".repeat(line)}${clientText.slice(start, end)}\nresult = findRowByTaskId(taskId);`, { filename: clientPath }).runInNewContext(context);
+  return context.result;
 }
 
 function runNeedsMe(src: string, fixture: { tasks?: unknown[]; feedback?: unknown[]; inboxReady?: unknown[]; inboxDrafting?: unknown[] }): ReconcileCall[] {
@@ -165,7 +159,7 @@ test("W1-T3396 (criterion 1): drain-rundown merged/blocked/escalated outcomes re
     "change-management-list",
   );
 
-  assert.deepEqual(rows.map((r) => r.taskId).sort(), ["W1-T-BLOCKED", "W1-T-ESC", "W1-T-MERGED"].sort());
+  assert.deepEqual(Array.from(rows, (r) => r.taskId).sort(), ["W1-T-BLOCKED", "W1-T-ESC", "W1-T-MERGED"].sort());
   const markup = rows.map((r) => r.html).join("\n");
   assert.match(markup, /data-verdict="good"/, "the W1-T141/W1-T435 good verdict button must survive");
   assert.match(markup, /data-verdict="wrong"/, "the W1-T141/W1-T435 wrong verdict button must survive");
@@ -178,7 +172,7 @@ test("W1-T3396 (criterion 2): a RECORD-classified resolved escalation renders in
   const resolvedEscalation = { taskId: "W1-T-RESOLVED", needsHuman: false, escalationTitle: "[BLOCKED] answered", escalationIssueUrl: "https://example.test/issue/1" };
 
   const changeRows = rowsFor(runChangeManagement(changeManagementSource(html), { tasks: [resolvedEscalation] }), "change-management-list");
-  assert.deepEqual(changeRows.map((r) => r.key), ["cm-escalation:W1-T-RESOLVED"]);
+  assert.deepEqual(Array.from(changeRows, (r) => r.key), ["cm-escalation:W1-T-RESOLVED"]);
   assert.match(changeRows[0]!.html, /resolved escalation:/);
 
   const inboxRows = rowsFor(runNeedsMe(needsMeSource(html), { tasks: [resolvedEscalation] }), "inbox-list");
@@ -206,4 +200,14 @@ test("W1-T3396 (criterion 3): CHANGE MANAGEMENT renders NO ASK-classified item",
     ];`,
   ) as (classify: typeof classifyAskRecordItem) => unknown[];
   assert.deepEqual(direct(classifyAskRecordItem), [null, null, null], "every ASK verdict must render as null in CHANGE MANAGEMENT");
+});
+
+test("W1-T3396: a lifecycle record never steals a deep link from the actionable or recent task row", () => {
+  const taskId = "W1-T-DUPLICATE";
+  const selector = `.row[data-task-id="${taskId}"]`;
+  const hits = {
+    [`#now-list ${selector}`]: { surface: "now" },
+    [`#change-management-list ${selector}`]: { surface: "change-management" },
+  };
+  assert.equal((findRowFromClient(taskId, hits) as { surface: string }).surface, "now");
 });
