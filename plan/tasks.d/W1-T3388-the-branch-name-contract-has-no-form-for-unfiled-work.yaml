@@ -9,7 +9,7 @@
   risk: high
   origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
   plan_refs: ["W1-T3387", "W1-T984"]
-  files: [src/run-task.ts, scripts/head-identity-gate.mjs, package.json, .github/workflows/head-identity-gate.yml, .github/workflows/ci-gate.yml, test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts]
+  files: [src/run-task.ts, src/lib/ci-parity.ts, src/lib/review.ts, scripts/head-identity-gate.mjs, package.json, .github/workflows/head-identity-gate.yml, .github/workflows/ci-gate.yml, scripts/comment-load-baseline.json, MASTER-PLAN.md, plan/plan-index.json, test/ci-gate-required-format.test.ts, test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts]
   status: queued
   attempts: 0
   rationale: |
