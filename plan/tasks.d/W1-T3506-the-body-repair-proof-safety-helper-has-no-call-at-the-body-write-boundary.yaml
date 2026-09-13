@@ -1,4 +1,4 @@
-- id: W1-T3504
+- id: W1-T3506
   title: "A BODY-REPAIR PROOF-SAFETY HELPER THAT IS NEVER CALLED CANNOT PROTECT THE BODY-WRITE RUNG — #5343 adds repairedProofsAreSafeToPush in body-repair.ts, while runFixRung still writes acceptance repairs through updatePrBody without importing or invoking it"
   repo: remudero
   depends_on: ["W1-T3389"]
@@ -9,11 +9,16 @@
   band_meaning: blast-radius
   budget_usd: 30.00
   origin: "operator-session#daemon-build-followups-2026-09-13"
-  plan_refs: ["W1-T3389", "W1-T2544"]
+  plan_refs: ["W1-T3389", "W1-T2544", "W1-T3504"]
   files: [src/run-task.ts, test/a-body-repair-proof-safety-is-enforced-at-the-write-boundary.test.ts]
   status: queued
   attempts: 0
   rationale: |
+    REISSUE OF W1-T3504, NOT A SECOND BODY-REPAIR DESIGN. W1-T3504 was filed on PR #5344 after
+    its immutable reservation was minted from a detached HEAD, recording `branch=unknown`. CI
+    correctly refuses that unreadable holder. W1-T3506 preserves the exact contract under this
+    branch-bound reservation and supersedes the unmergeable filing.
+
     OBSERVED 2026-09-13 at PR #5343 head 0a34488b: the implementation adds
     `diagnoseUnrunnableProofs` and `repairedProofsAreSafeToPush` to `src/lib/body-repair.ts`,
     with focused tests. Its complete diff contains no `src/run-task.ts` change. At the production
@@ -37,11 +42,11 @@
     only their actual connection and its live-boundary regression proof.
   acceptance:
     - claim: "a repaired acceptance body with an authored malformed grep proof is refused before updatePrBody, and the prior body remains unchanged"
-      proof: "unit test: W1-T3504 criterion 1"
+      proof: "unit test: W1-T3506 criterion 1"
     - claim: "a repaired acceptance body whose authored grep proof produces exec_error is refused at the same write boundary and emits a reason"
-      proof: "unit test: W1-T3504 criterion 2"
+      proof: "unit test: W1-T3506 criterion 2"
     - claim: "a candidate whose authored proofs are runnable reaches the existing updatePrBody path without modifying claim text"
-      proof: "unit test: W1-T3504 criterion 3"
+      proof: "unit test: W1-T3506 criterion 3"
   falsifier: |
     Remove the write-boundary call to `repairedProofsAreSafeToPush` while leaving W1-T3389's pure
     helper intact. Criteria 1 and 2 must then observe `updatePrBody` being called and fail; criterion
