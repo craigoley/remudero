@@ -364,7 +364,7 @@ test("one-click drill: clicking a dense NOW row opens W1-T158's task card direct
 test("one-click drill: a click on a row in EVERY section (NOW/NEEDS ME/UP NEXT/RECENT/rest) opens its card directly", async () => {
   const root = tmpRoot();
   const now = task({ id: "W1-T1", title: "now section target" });
-  const needsMe = task({ id: "W1-T2", title: "needs me section target" });
+  const inboxTask = task({ id: "W1-T2", title: "inbox section target" });
   const upNext = task({ id: "W1-T3", title: "up next section target" });
   const recent = task({ id: "W1-T4", title: "recent section target" });
   // W1-T223: REST's own header now defaults collapsed when its complement is genuinely EMPTY, so
@@ -377,7 +377,7 @@ test("one-click drill: a click on a row in EVERY section (NOW/NEEDS ME/UP NEXT/R
   const prUrl = "https://github.com/o/r/pull/4";
   const byRef = { [prUrl]: { number: 4, url: prUrl, state: "MERGED" } };
   const github = fakeGitHub(byRef);
-  const deps = fixtureDeps(root, [now, needsMe, upNext, recent, rest], { github });
+  const deps = fixtureDeps(root, [now, inboxTask, upNext, recent, rest], { github });
   appendFileSync(deps.board.ledgerPath, runStart("W1-T1"));
   appendFileSync(
     deps.board.ledgerPath,
@@ -395,7 +395,7 @@ test("one-click drill: a click on a row in EVERY section (NOW/NEEDS ME/UP NEXT/R
     try {
       const sections = [
         { list: "now-list", taskId: "W1-T1", title: "now section target" },
-        { list: "inbox-list", taskId: "W1-T2", title: "needs me section target" },
+        { list: "inbox-list", taskId: "W1-T2", title: "inbox section target" },
         { list: "up-next-list", taskId: "W1-T3", title: "up next section target" },
         { list: "recent-list", taskId: "W1-T4", title: "recent section target" },
         { list: "rest-list", taskId: "W1-T5", title: "rest section target" },
