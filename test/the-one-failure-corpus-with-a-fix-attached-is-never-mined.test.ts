@@ -12,10 +12,12 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 
 import { collectCiFailureCorpus, type CorpusPr } from "../src/lib/ci-failure-corpus.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 /** A check-run rollup entry, as `rollupFromRest` maps one. */
 const run = (name: string, conclusion: string, startedAt = "2026-09-06T10:00:00Z") => ({ name, status: "COMPLETED", conclusion, startedAt });
@@ -126,7 +128,7 @@ test("W1-T2957 a superseded red attempt does not outvote its own successor on on
   assert.equal(corpus.pairs.length, 0);
 });
 
-test("W1-T2957 the collector is reachable from the command surface, and writes nothing", () => {
+test("W1-T2957 the collector is reachable from the command surface, and does not touch the plan", () => {
   // BEHAVIOUR, NOT SOURCE TEXT (W1-T2905): reading run-task.ts as prose would pass on a comment and
   // break on a refactor that moved one. Instead CALL the shipped verb with a known window and read
   // its output — rendering a pair the collector alone can produce IS the proof it is wired.
@@ -139,41 +141,95 @@ test("W1-T2957 the collector is reachable from the command surface, and writes n
   assert.match(wired.out, /OPEN\s+#77 ci-gate\s+red=wiredred/, "an unwired collector renders no pair at all");
 
   // Law 5, also behavioural: the plan and the working tree are byte-identical after a full run, so a
-  // report cannot file, mint, or present a machine reading as a ratified one.
+  // report cannot file, mint, or present a machine reading as a ratified one. The no-write PORCELAIN
+  // check that used to live here moved into an isolated scratch tree (W1-T3449, below): `git status
+  // --porcelain` against THIS checkout is repo-global, and this suite's files run concurrently
+  // against it, so a neighbour's own fixture write landing between two reads was blamed on this
+  // report-only command (PR #5282). A single tracked file's bytes are not that check.
   const planBefore = readFileSync("plan/tasks.yaml");
-  const treeBefore = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" });
   ciFailuresCommand([], {
     loadWindow: () => ({ prs: [pr(78, [{ sha: "s", rollup: [run("ci-gate", "FAILURE")] }])] }),
   });
   assert.ok(planBefore.equals(readFileSync("plan/tasks.yaml")), "the collector must not touch the plan");
-  // W1-T3338: compare ADDED entries, never the whole porcelain string. `git status --porcelain` is
-  // REPO-GLOBAL while suites share one working tree, so a neighbour restoring its own fixture between
-  // these two reads deletes a line and fails byte-equality — accusing the collector of a write that
-  // provably did not happen. "Left behind" was only ever a claim about ADDITIONS; someone else's
-  // removal is not this subject's business, and asserting on it made the verdict a function of who
-  // else happened to be running.
-  const porcelainEntries = (text: string) => new Set(text.split("\n").filter((line) => line.trim().length > 0));
-  const entriesBefore = porcelainEntries(treeBefore);
-  // `test/run-task.test.ts` has one deliberately real, timestamped feedback write. Test files
-  // run in parallel against this checkout, so its transient untracked entry is another test's
-  // artifact, not evidence that this read-only command wrote. Keep every other added entry — and
-  // any tracked mutation under this path — visible to this assertion.
-  const concurrentFeedbackWrite = /^\?\? plan\/feedback\/fb-repair-w1t905-coverage-\d+\.yaml$/;
-  const leftBehind = [...porcelainEntries(execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }))].filter(
-    (entry) => !entriesBefore.has(entry) && !concurrentFeedbackWrite.test(entry),
-  );
-  assert.deepEqual(leftBehind, [], "and must leave no file behind");
-  assert.ok(
-    concurrentFeedbackWrite.test("?? plan/feedback/fb-repair-w1t905-coverage-1789251791320.yaml"),
-    "control: the only ignored entry is the known concurrent test fixture",
-  );
-  assert.ok(
-    !concurrentFeedbackWrite.test(" M plan/feedback/fb-repair-w1t905-coverage-1789251791320.yaml"),
-    "a tracked feedback mutation remains visible",
-  );
-  assert.ok(
-    !concurrentFeedbackWrite.test("?? plan/tasks.d/zzz-w1-t497-wiring-probe.yaml"),
-    "an untracked task shard remains visible",
+});
+
+// ── W1-T3449: the report-only no-write check, moved off the shared checkout ─────────────────────
+// PR #5282 failed `and must leave no file behind` on `test/fixtures/lint-plan-status-di/tasks.yaml`
+// — a fixture `ciFailuresCommand` cannot write (its own doc comment: report/console-only). The prior
+// shape read `git status --porcelain` against the repository this whole suite shares, and Node's
+// test runner executes test files concurrently against that one checkout: `test/run-task.test.ts`
+// rewriting its own fixture mid-window is a neighbour's write, not this command's. W1-T3338 (#4999)
+// already narrowed that comparison to ADDED entries with one named exemption; this is the residual
+// case its own caveat named — an add landing BETWEEN this test's two reads that the exemption never
+// anticipated. The durable fix is to stop reading the shared tree at all: run the command inside a
+// disposable git repository this test alone owns, seeded with the one relative path
+// (`plan/tasks.yaml`) the byte-equality check above needs, and restore the process's cwd before any
+// other test can observe it.
+
+/** A disposable, independently initialized git repository this test alone owns — `git status
+ *  --porcelain` read here can never be perturbed by a neighbouring test file's own fixture writes,
+ *  because nothing else in the suite has a path into this tree. Built from the shared
+ *  `test/helpers/git-repo.ts` fixture (its own `init` call site is exempted from
+ *  `test/fixture-copy-census.test.ts`'s count, so this test does not add a second raw one).
+ *  Seeds the one relative path (`plan/tasks.yaml`) `ciFailuresCommand`'s test needs, chdirs into
+ *  it for the callback, and restores the process's original cwd in `finally` even if the callback
+ *  throws. */
+function withIsolatedCiWorktree<T>(fn: (scratch: string) => T): T {
+  const repo = gitRepo({ kind: "w1t3449-ciwt", seedCommit: false });
+  const scratch = repo.dir;
+  const prevCwd = process.cwd();
+  try {
+    mkdirSync(join(scratch, "plan"), { recursive: true });
+    writeFileSync(join(scratch, "plan", "tasks.yaml"), "tasks: []\n");
+    repo.git("add", "-A");
+    repo.git("commit", "-q", "-m", "seed");
+    process.chdir(scratch);
+    return fn(scratch);
+  } finally {
+    process.chdir(prevCwd);
+    repo.cleanup();
+  }
+}
+
+test("W1-T3449 report-only command writes nothing in its isolated worktree", () => {
+  withIsolatedCiWorktree(() => {
+    const before = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" });
+    assert.equal(before, "", "the scratch worktree starts clean once seeded and committed");
+    ciFailuresCommand([], {
+      loadWindow: () => ({ prs: [pr(78, [{ sha: "s", rollup: [run("ci-gate", "FAILURE")] }])] }),
+    });
+    const after = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" });
+    assert.equal(after, before, "and must leave no file behind, observed in a tree this test owns alone");
+  });
+});
+
+test("W1-T3449 isolated no-write assertion rejects a sentinel file write", () => {
+  withIsolatedCiWorktree((scratch) => {
+    const before = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" });
+    // Stands in for the falsifier's mutation — a report-only command that writes a file instead
+    // of only reporting. If the isolated assertion cannot fail on this, isolating it only made
+    // the check watch an empty room instead of the shared checkout.
+    writeFileSync(join(scratch, "sentinel-write.txt"), "a mutant wrote this\n");
+    const after = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" });
+    assert.throws(
+      () => assert.equal(after, before, "and must leave no file behind"),
+      assert.AssertionError,
+      "a sentinel write left in the isolated tree must fail the same assertion test 1 relies on",
+    );
+  });
+});
+
+test("W1-T3449 restores the shared checkout after its isolated assertion", () => {
+  const cwdBefore = process.cwd();
+  withIsolatedCiWorktree(() => {
+    ciFailuresCommand([], { loadWindow: () => ({ prs: [] }) });
+  });
+  assert.equal(process.cwd(), cwdBefore, "the finally block must restore the shared checkout's cwd");
+  const sharedStatus = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" });
+  assert.doesNotMatch(
+    sharedStatus,
+    /w1t3449-ciwt-/,
+    "no artifact from the isolated scratch tree may leak into the shared checkout's porcelain",
   );
 });
 
