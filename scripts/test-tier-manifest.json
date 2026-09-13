@@ -75,6 +75,7 @@
     "test/a-genuine-blocker-does-not-restart-the-daemon.test.ts": 0,
     "test/a-github-check-fanout-is-a-sweep-storm.test.ts": 8128,
     "test/a-governor-that-sheds-must-recover.test.ts": 235,
+    "test/a-grandfathered-stale-proof-is-reported-not-refused.test.ts": 0,
     "test/a-grep-proof-naming-an-added-test-file-greps-the-copy-put-there-for-it.test.ts": 0,
     "test/a-grep-proof-whose-only-match-is-a-comment-certifies-nothing.test.ts": 0,
     "test/a-growing-task-cannot-record-its-own-ceiling.test.ts": 1353,

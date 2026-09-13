@@ -4,13 +4,15 @@
 // report a green aggregate.  `rmd check-proof --base` owns the execution and its `executed_stale`
 // verdict; this file owns only pull-request event wiring and the failure presentation.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
 import { readEventPayload } from "./acceptance-author-gate.mjs";
 import { CHECK_PROOF_EXIT } from "../src/run-task.ts";
-import { parseAcceptanceBlock, parseWhitelistedProof, resolvePlanCriteriaAtHead } from "../src/lib/review.ts";
+import { extractTaskTrailerId, parseAcceptanceBlock, parseWhitelistedProof, resolvePlanCriteriaAtHead } from "../src/lib/review.ts";
 
 function defaultGit(args, root) {
   return spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
@@ -81,12 +83,68 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
   return { stale, unreadable, executed };
 }
 
+/**
+ * The grandfathered stale-proof allowance for one task, from `scripts/proof-discrimination-baseline.json`.
+ *
+ * WHY THIS GATE NEEDS ONE AT ALL, measured on origin/main 2026-09-13: a whole-file `unit test: <path>`
+ * proof is stale BY CONSTRUCTION — `check-proof --base` returns exit 5 for it every time, verified by
+ * sampling `test/plan.test.ts`, `test/daemon.test.ts` and `test/mounts.test.ts` against a real base
+ * (hits 100/820/256, verdict pass, exit 5 in all three). And that shape is the repo's DOMINANT idiom:
+ * 5,368 such proofs across 1,214 tasks, roughly 69% of all 7,767 proofs in the plan.
+ *
+ * So without an allowance this REQUIRED gate refuses the majority of the plan on arrival. That is not
+ * the gate being wrong — a proof that passes at the base really cannot establish a PR's work — but a
+ * gate that refuses two thirds of its corpus stops being a signal and becomes a wall, and the repo
+ * already answers that with a ratchet: `clock-signature-baseline.json`, `comment-load-baseline.json`
+ * and `self-path-proof-baseline.json` all grandfather a measured backlog and refuse only GROWTH.
+ *
+ * The allowance is per TASK, keyed by the id the PR's `Remudero-Task:` trailer names, because that is
+ * the unit a shard's criteria belong to. A PR with no resolvable task id gets ZERO allowance: an
+ * unfiled PR writes its own body criteria and has no backlog to inherit.
+ */
+/** Read the grandfather table. A missing or unparseable file means NO allowance — the gate stays strict
+ *  rather than silently opening up, which is the fail-closed direction for a required check. */
+export function readStaleBaseline(root = REPO_ROOT) {
+  try {
+    const raw = JSON.parse(readFileSync(join(root, "scripts", "proof-discrimination-baseline.json"), "utf8"));
+    const out = {};
+    for (const [k, v] of Object.entries(raw)) if (!k.startsWith("_")) out[k] = v;
+    return out;
+  } catch {
+    // Fail closed: an unreadable table grandfathers nothing, so a fault cannot admit a stale proof.
+    return {};
+  }
+}
+
+export function staleAllowanceFor(taskId, baseline) {
+  if (!taskId) return 0;
+  const recorded = baseline?.[taskId];
+  return typeof recorded === "number" && Number.isInteger(recorded) && recorded > 0 ? recorded : 0;
+}
+
+/**
+ * Pure. Does this PR's stale count sit inside its task's grandfathered allowance?
+ *
+ * A RATCHET, SO THE COUNT CAN ONLY FALL. Exceeding the allowance is refused, which is what stops a new
+ * non-discriminating proof from being added; sitting at or under it passes, which is what stops the
+ * measured backlog from blocking every PR that touches those shards. Lower a row in the same change
+ * that repoints its proofs; never raise one.
+ *
+ * NOTE the allowance is counted against ANY stale proof, not only the whole-file shape it was seeded
+ * from. A task that also carries a stale `grep:` can therefore still exceed its row — deliberately,
+ * since a grep is the cheap one to repoint at the line a diff adds.
+ */
+export function judgeStaleAgainstAllowance(staleCount, allowed) {
+  return { ok: staleCount <= allowed, staleCount, allowed, excess: Math.max(0, staleCount - allowed) };
+}
+
 export function main(argv, {
   root = REPO_ROOT,
   readPayload = readEventPayload,
   mergeBase = resolveMergeBase,
   resolveCriteria = criteriaForReview,
   runProof = (proof, base) => runCheckProof(proof, base, { root }),
+  baseline = readStaleBaseline,
   log = console,
 } = {}) {
   const { values } = parseArgs({ args: argv, options: { "event-path": { type: "string" } } });
@@ -107,9 +165,23 @@ export function main(argv, {
   }
   const { criteria, source } = resolveCriteria(payload.body, payload.headSha, { root });
   const result = evaluateProofDiscrimination(criteria, base.mergeBase, runProof);
+  const taskId = extractTaskTrailerId(payload.body ?? "");
+  const allowed = staleAllowanceFor(taskId, baseline(root));
+  const verdict = judgeStaleAgainstAllowance(result.stale.length, allowed);
   if (result.unreadable.length > 0) {
     for (const row of result.unreadable) log.error(`proof-discrimination: REFUSED — could not run ${JSON.stringify(row.proof)}: ${row.detail}`);
     return 1;
+  }
+  if (result.stale.length > 0 && verdict.ok) {
+    // INSIDE the grandfathered allowance: reported, never refused. Silence here would hide a backlog
+    // that only shrinks if someone can see it.
+    log.log(
+      `proof-discrimination: OK (grandfathered) — ${verdict.staleCount} stale proof(s) for ${taskId}, ` +
+        `within its recorded allowance of ${verdict.allowed}. Repoint them at what this PR changes and ` +
+        `lower the row in scripts/proof-discrimination-baseline.json; the allowance never rises.`,
+    );
+    for (const row of result.stale) log.log(`  stale (allowed): ${row.proof}`);
+    return 0;
   }
   if (result.stale.length > 0) {
     log.error(`proof-discrimination: FAIL — ${result.stale.length} proof(s) pass at both PR head and merge base (${base.mergeBase}); they cannot establish this PR's work:`);
@@ -118,6 +190,11 @@ export function main(argv, {
       log.error(`  head hits: ${row.head}; base hits: ${row.base}`);
       if (row.output) log.error(row.output);
     }
+    log.error(
+      taskId
+        ? `Allowance for ${taskId}: ${verdict.allowed} (scripts/proof-discrimination-baseline.json); this PR carries ${verdict.staleCount}, ${verdict.excess} over.`
+        : "No resolvable Remudero-Task trailer, so no grandfathered allowance applies: a PR authoring its own body criteria has no backlog to inherit.",
+    );
     log.error("Remedy: replace each stale proof with one that names behavior this PR changes, then rerun this check.");
     return 1;
   }
