@@ -59,6 +59,7 @@ import {
   type WriteTier,
 } from "./service.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
+import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import type { GitHub } from "./status.js";
 import {
@@ -905,8 +906,17 @@ export interface ConsoleStatusTaskProjection {
   reason: string;
 }
 
+/** W1-T3394: `row.needsHuman` is one of the classifier's four source shapes — a needs-human
+ *  escalation (escalate.ts, W1-T8/T77's BLOCKED-AMBIGUOUS disposition) — so routed through {@link
+ *  classifyAskRecordItem} rather than read as a bare boolean here, even though today's only
+ *  consumer (this initial-board cut) still just wants "does this need attention now". Byte-
+ *  identical to the prior `row.needsHuman === true` check: `resolved` is the negation of the same
+ *  flag, and the classifier's `escalation` arm is exactly `resolved ? RECORD : ASK`. This is the
+ *  classifier's production call site (W1-T3395/W1-T3396 will consult it for the full NEEDS ME
+ *  split; this task only needs it reachable from src, not from its own tests alone). */
 function taskRendersOnInitialBoard(row: BoardRow): boolean {
-  return row.phase !== undefined || row.needsHuman === true || row.verifyHumanPending === true;
+  const escalationIsAsk = classifyAskRecordItem({ kind: "escalation", resolved: row.needsHuman !== true }) === "ASK";
+  return row.phase !== undefined || escalationIsAsk || row.verifyHumanPending === true;
 }
 
 export function projectConsoleStatusResponse(body: unknown): unknown {
