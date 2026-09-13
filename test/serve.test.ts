@@ -987,16 +987,16 @@ test("the panel data routes are header-only (bare navigation 401s) — the shell
 // interaction — live in test/serve.shell-ux.test.ts, a real browser being the only honest
 // client for "no horizontal scroll"/"computed contrast"/"a click fires no POST until confirmed").
 
-test("the five operator-priority sections exist, in order, top to bottom; the old flat file-order table is GONE", () => {
+test("the operator-priority sections exist, in order, top to bottom; the old flat file-order table is GONE", () => {
   const html = renderShellHtml();
-  const order = ["id=\"now\"", "id=\"inbox\"", "id=\"up-next\"", "id=\"recent\"", "id=\"rest\""];
+  const order = ["id=\"now\"", "id=\"inbox\"", "id=\"change-management\"", "id=\"up-next\"", "id=\"recent\"", "id=\"rest\""];
   const indices = order.map((needle) => html.indexOf(needle));
   for (const [i, idx] of indices.entries()) assert.ok(idx >= 0, `missing section marker ${order[i]}`);
   for (let i = 1; i < indices.length; i++) {
-    assert.ok(indices[i] > indices[i - 1], `section ${order[i]} does not come after ${order[i - 1]} (NOW, NEEDS ME, UP NEXT, RECENT, rest — top to bottom)`);
+    assert.ok(indices[i] > indices[i - 1], `section ${order[i]} does not come after ${order[i - 1]} (NOW, INBOX, CHANGE MANAGEMENT, UP NEXT, RECENT, rest — top to bottom)`);
   }
   // the falsifier: the v0 shell's single flat <table id="board-table"> (file-order rows) is gone —
-  // every task now renders inside one of the five sections above, never a raw plan/file-order dump.
+  // every task now renders inside one of the operator-priority sections above, never a raw plan/file-order dump.
   assert.doesNotMatch(html, /<table/);
   assert.doesNotMatch(html, /id="board-table"/);
 });

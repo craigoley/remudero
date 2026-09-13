@@ -1342,15 +1342,17 @@ export function gatePrewarmOnClients(
  *   2. NEEDS ME    — needs-human escalations (StatusProjection.needsHuman) + the feedback
  *      inbox's actionable entries (grilling/proposed, GET /v1/feedback) + W1-T110's READY
  *      ratification proposals (GET /v1/inbox) — one-line ask + action affordance each.
- *   3. UP NEXT     — the drain head, first ~5 of GET /v1/drain/preview (W1-T140), in
+ *   3. CHANGE MANAGEMENT — lifecycle RECORDs: drain-rundown outcome rows plus resolved
+ *      escalations, routed through classifyAskRecordItem (W1-T3396).
+ *   4. UP NEXT     — the drain head, first ~5 of GET /v1/drain/preview (W1-T140), in
  *      plannedSequence order.
- *   4. RECENT      — last ~10 merges/blocks with PR links, GET /v1/recent (board.ts, reusing
+ *   5. RECENT      — last ~10 merges/blocks with PR links, GET /v1/recent (board.ts, reusing
  *      W1-T141's `merged`/`blocked` outcome vocabulary — see board.ts's header for why this
  *      route exists instead of querying a live DrainSummary).
- *   5. everything else, COLLAPSED behind grouped counts (queued: N, merged: N, other: N) with
+ *   6. everything else, COLLAPSED behind grouped counts (queued: N, merged: N, other: N) with
  *      an expand + filter/search over the remaining GET /v1/status tasks.
  * Fleet control (Pause/Resume/STOP/quiet-hours) and an auxiliary "more tools" panel (submit
- * feedback, plan→task→PR graph) follow below the five sections.
+ * feedback, plan→task→PR graph) follow below the six sections.
  *
  * W1-T336: the priority order above is now expressed by WHICH TAB a section renders under
  * (Decisions/Now/Plan/Feed), not by its position on one continuous scroll — NEEDS ME is
@@ -1999,14 +2001,15 @@ export function renderShellHtml(
 <!-- W1-T336: THE TABS ARE NOW AUTHORITATIVE -- third and last shard split out of W1-T314.
      W1-T334 built this bar as a scaffold that governed nothing but its own (still-empty) Plan
      panel; W1-T335 gave every serve suite a shared reachSection helper that tolerates either
-     shape. This shard is what makes the bar real: every one of the ten sections below carries
+     shape. This shard is what makes the bar real: every one of the eleven sections below carries
      a \`data-owner-tab\` naming which tab governs it, and the script's own applyActiveTab hides
      every section whose owner isn't the active tab -- never a second copy, never rebuilt, never
      re-fetched. SECTION_TAB_OWNER (this shell's own script, near SECTION_IDS) is the single
      table this markup is a rendering of.
      DOCUMENT ORDER IS DELIBERATELY PRESERVED around the existing task sections (NOW, NEEDS ME,
-     ACCEPTED, UP NEXT, RECENT, rest, controls, more -- test/serve.test.ts's own structural check
-     polices this order); MAILBOX is now a sibling before NEEDS ME. Ownership is
+     CHANGE MANAGEMENT, ACCEPTED, UP NEXT, RECENT, rest, controls, more --
+     test/serve.test.ts's own structural check polices this order); MAILBOX is now a sibling
+     before NEEDS ME. Ownership is
      expressed by the attribute below, never by re-parenting a section into a per-tab container,
      which is also why NOW and UP NEXT can sit on the SAME tab while NEEDS ME (a DIFFERENT tab)
      still renders between them in the markup.
@@ -2093,6 +2096,19 @@ export function renderShellHtml(
          stays VISIBLE) survives exactly: this list is never collapsed, hidden or paginated. -->
     <h3>Awaiting verification <span id="inbox-backlog-summary" class="section-summary">…</span></h3>
     <ul id="inbox-backlog-list" class="row-list" aria-label="verify: human backlog, no action required"></ul>
+  </div>
+</section>
+
+<!-- CHANGE MANAGEMENT (W1-T3396, ratifies W1-T3186 (iii)): the RECORD-side sibling to INBOX.
+     It renders lifecycle outcomes that classifyAskRecordItem() says are RECORD: W1-T141-style
+     drain-rundown outcomes from the recent feed, plus resolved escalation records. ASK-classified
+     live work stays in INBOX, so the same ask is never duplicated here as a stale lifecycle row. -->
+<section id="change-management" class="panel-section" aria-label="Change management" data-owner-tab="feed">
+  <h2><button type="button" class="section-header" id="change-management-toggle" aria-expanded="true" aria-controls="change-management-body">
+    <span>Change management</span><span class="section-summary" id="change-management-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
+  </button></h2>
+  <div id="change-management-body">
+    <ul id="change-management-list" class="row-list">${skeletonRows(3)}</ul>
   </div>
 </section>
 
@@ -2309,14 +2325,14 @@ export function renderShellHtml(
 <!-- W1-T222: the DETAIL layer is now INLINE, not a bottom panel. This RETIRES W1-T158's
      #task-detail/#journey-view panel-section pair (standing rule 21 successor, not an amendment
      -- see this task's own plan note) -- reaching a task's detail must not mean leaving its row.
-     EVERY task row (NOW/NEEDS ME/UP NEXT/RECENT/rest) is itself the expand trigger (a right-edge
+     EVERY task row (NOW/NEEDS ME/CHANGE MANAGEMENT/UP NEXT/RECENT/rest) is itself the expand trigger (a right-edge
      chevron is the visible affordance; the whole row is the hit target); its own card is inserted
      as a sibling <li class="row-detail"> DIRECTLY BENEATH that row by reconcileRows/expandRow
      below, never a scroll-away section. The full journey (rmd trace, the SAME GET /v1/trace route
      W1-T158 used) lazy-loads INSIDE that card on demand (.card-journey-toggle), never eagerly. -->
 </main>
 
-<!-- W1-T157 cmd+K command palette: a global, additive modal (NOT a sixth section — the five-section
+<!-- W1-T157 cmd+K command palette: a global, additive modal (NOT an operator-priority section —
      order invariant stays intact). Opened by Cmd/Ctrl+K from ANY view via one document-level keydown
      listener; jumps to a task/PR or fires a fleet/panel action through the EXACT existing button. -->
 <div id="cmdk-overlay" class="cmdk-overlay" hidden>

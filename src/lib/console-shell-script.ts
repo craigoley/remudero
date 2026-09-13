@@ -379,6 +379,12 @@ export function recentSummaryText(list: readonly { verb?: string; ts: string }[]
   return `${landedToday} landed today · last ${formatAgo(list[0].ts)}`;
 }
 
+export function changeManagementSummaryText(rows: readonly { ts?: string }[]): string {
+  if (rows.length === 0) return "no lifecycle outcomes yet";
+  const ago = oldestAgoText(rows, (r) => r.ts);
+  return `${rows.length} lifecycle outcome${rows.length === 1 ? "" : "s"}${ago ? ` · most recent ${ago}` : ""}`;
+}
+
 export function acceptedSummaryText(rows: readonly { ts?: string }[]): string {
   if (rows.length === 0) return "nothing accepted yet";
   const ago = oldestAgoText(rows, (r) => r.ts);
@@ -696,7 +702,7 @@ const SHELL_SCRIPT_HELPERS = [
   mailboxEscalationClass, mailboxThreadKey, mailboxVisibleThreads, mailboxUnreadCount,
   mailboxMarkRead, mailboxMarkResolved,
   rowChevronHtml, rowDetailSkeletonHtml, planSectionRowHtml,
-  nowSummaryText, needsMeSummaryText, needsMeBacklogSummaryText, upNextSummaryText, recentSummaryText, acceptedSummaryText,
+  nowSummaryText, needsMeSummaryText, needsMeBacklogSummaryText, upNextSummaryText, recentSummaryText, changeManagementSummaryText, acceptedSummaryText,
   restSummaryText, selfMeasurementFigure, selfMeasurementRowHtml,
   liveSpendHtml, workerStateHtml, decisionSummaryHtml, draftedTasksHtml,
   recentPrLinkHtml, recentSpendHtml, runRowHtml, acceptanceRowHtml, depChainHtml, cardIssueLinkHtml,
