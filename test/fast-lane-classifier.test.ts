@@ -454,7 +454,7 @@ test("CLI: reading the changed-file list from stdin via '-' works the same as a 
 // is. Each fail-closed mode below is driven by EXECUTING the step's own script with `bash`, never
 // by asserting on prose.
 
-const CI_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+const CI_YML = readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8");
 
 /** The `ci` job's steps, parsed from the real workflow — never a hand-copied excerpt. */
 function ciSteps(): Array<{ name?: string; id?: string; run?: string }> {
@@ -634,6 +634,44 @@ function jobSteps(jobId: string): Array<{ name?: string; id?: string; run?: stri
   return steps!;
 }
 
+function workflowRunStep(jobId: string, stepName: string): string {
+  const step = jobSteps(jobId).find((s) => s.name === stepName || s.name?.startsWith(stepName));
+  assert.ok(step?.run, `${jobId} must carry a run step named ${stepName}`);
+  return step.run;
+}
+
+function workflowRunForClass(jobId: string, stepName: string, cls: string) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-t3512-workflow-"));
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  for (const command of ["node", "npm"]) {
+    const stub = join(bin, command);
+    writeFileSync(stub, `#!/bin/sh\necho "$0 $*" >> "${root}/calls.log"\nexit 73\n`);
+    execFileSync("chmod", ["+x", stub]);
+  }
+  const script = workflowRunStep(jobId, stepName)
+    .split("${{ steps.classify.outputs.class }}")
+    .join(cls);
+  const result = spawnSync("bash", ["-eo", "pipefail", "-c", script], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      GITHUB_STEP_SUMMARY: join(root, "summary.md"),
+    },
+  });
+  const calls = (() => {
+    try {
+      return readFileSync(join(root, "calls.log"), "utf8");
+    } catch {
+      return "";
+    }
+  })();
+  rmSync(root, { recursive: true, force: true });
+  return { ...result, calls };
+}
+
 test("W1-T3512 acceptance 1: a PLAN_ONLY diff skips every source-only required gate wired to the classifier", () => {
   for (const jobId of FAST_LANE_WIRED_JOBS) {
     const steps = jobSteps(jobId);
@@ -713,6 +751,60 @@ test("W1-T3512 acceptance 4: a SOURCE diff is unaffected — each wired gate's r
     const steps = jobSteps(jobId);
     const hit = steps.some((s) => re.test(s.run ?? ""));
     assert.ok(hit, `${jobId} must still contain its real, unmodified check command`);
+  }
+});
+
+test("W1-T3512: every new fast-lane workflow guard is behavioral — PLAN_ONLY skips and SOURCE reaches the command", () => {
+  const guardedSteps: Array<{ jobId: string; stepName: string; command: RegExp }> = [
+    { jobId: "mutation-ratchet", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+    { jobId: "jscpd-gate", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+    { jobId: "jscpd-gate", stepName: "jscpd duplication gate", command: /\/npm run --silent jscpd/ },
+    { jobId: "depcruise", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+    { jobId: "depcruise", stepName: "dependency-cruiser fitness rules", command: /\/npm run --silent depcruise/ },
+    { jobId: "depcruise", stepName: "Cycle-count ratchet", command: /\/npm run --silent cycle-ratchet/ },
+    { jobId: "api-client-drift", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+    { jobId: "api-client-drift", stepName: "api-client drift check", command: /\/npm run --silent api-client:check/ },
+    { jobId: "no-hand-rolled-fetch", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+    {
+      jobId: "no-hand-rolled-fetch",
+      stepName: "No-hand-rolled-fetch grep gate",
+      command: /\/npm run --silent no-hand-rolled-fetch:check/,
+    },
+    { jobId: "source-size", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+    { jobId: "source-size", stepName: "Source-size signal", command: /\/npm run --silent source-size-signal/ },
+    { jobId: "comment-load-ratchet", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+    {
+      jobId: "comment-load-ratchet",
+      stepName: "Comment-load ratchet",
+      command: /\/npm run --silent comment-load-signal/,
+    },
+    {
+      jobId: "comment-load-ratchet",
+      stepName: "Expiring-fixture census",
+      command: /\/node scripts\/expiring-fixture-census\.mjs/,
+    },
+    {
+      jobId: "comment-load-ratchet",
+      stepName: "Contract-coverage ratchet",
+      command: /\/node scripts\/contract-coverage-ratchet\.mjs/,
+    },
+    {
+      jobId: "comment-load-ratchet",
+      stepName: "Console-parity ratchet",
+      command: /\/npm run --silent console-parity/,
+    },
+  ];
+
+  for (const { jobId, stepName, command } of guardedSteps) {
+    const planOnly = workflowRunForClass(jobId, stepName, "PLAN_ONLY");
+    assert.equal(planOnly.status, 0, `${jobId}/${stepName} should skip cleanly on PLAN_ONLY:\n${planOnly.stderr}${planOnly.stdout}`);
+    assert.equal(planOnly.calls, "", `${jobId}/${stepName} must not invoke its command on PLAN_ONLY`);
+    assert.match(planOnly.stdout, /W1-T3512 fast-lane: class=PLAN_ONLY/, `${jobId}/${stepName} must name the skip`);
+
+    const source = workflowRunForClass(jobId, stepName, "SOURCE");
+    assert.equal(source.status, 73, `${jobId}/${stepName} should reach the stubbed command on SOURCE`);
+    assert.match(source.calls, command, `${jobId}/${stepName} must invoke its real command on SOURCE`);
+    assert.doesNotMatch(source.stdout, /skipping/, `${jobId}/${stepName} must not print a skip on SOURCE`);
   }
 });
 
