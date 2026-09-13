@@ -345,10 +345,33 @@ test("criterion 5: TASK_STATUSES gains no member, and a retired blocked task is 
   attempts: 0
 `;
   const plan = loadPlanFromYaml(yaml, "fixture");
+
+  // W1-T3397 SPLIT THESE TWO INVARIANTS, which this criterion originally asserted as one.
+  //
+  // The original assertion read `unmetDependencies(...) === ["RETIRED-DEP"]` under the rationale
+  // "no retirement can be credited as shipped". That conflated NOT-BLOCKING with MERGED, and the
+  // conflation is what W1-T3397 fixes: a dependent of a retired task was blocked FOREVER, because
+  // the retired task can never reach a merged status by construction. Keeping the dependent
+  // blocked does not protect the merge-credit invariant — it just strands the queue.
+  //
+  // So both halves are now asserted SEPARATELY, and the second is the one W1-T2200 actually cares
+  // about. If a future change ever did credit a retirement as shipped, the second assertion fails
+  // on its own — it no longer rides on the blocking behaviour to be observable.
   assert.deepEqual(
     unmetDependencies(plan, plan.byId.get("DEPENDENT")!),
-    ["RETIRED-DEP"],
-    "a retired blocked task is NOT counted as merged — no retirement can be credited as shipped",
+    [],
+    "a RETIRED dependency no longer blocks its dependent — it can never merge, so waiting on it is waiting forever (W1-T3397)",
+  );
+  const retired = plan.byId.get("RETIRED-DEP")!;
+  assert.ok(
+    !["merged", "done"].includes(retired.status),
+    "and it is STILL not merged — excluding a dep from the unmet set must never be read as crediting it as shipped",
+  );
+  assert.equal(retired.status, "blocked", "its status is untouched by the exclusion above");
+  assert.deepEqual(
+    unmetDependencies(plan, plan.byId.get("DEPENDENT")!, () => false),
+    [],
+    "and the exclusion is the RETIREMENT's doing, not a merge verdict: it still holds under an isMerged that calls nothing merged",
   );
 });
 
