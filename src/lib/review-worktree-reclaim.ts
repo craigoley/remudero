@@ -104,7 +104,10 @@ export function sweepStrandedReviewWorktrees(
     ((p: string) => {
       try {
         return statSync(p).isDirectory();
-      } catch {
+      } catch (e) {
+        // Bind + carry, never a bare erasure: a vanished-mid-loop entry and a genuinely unreadable
+        // one both read `false` to the caller, but the reason still reaches the console.
+        console.error(`review-worktree-reclaim: could not stat ${p} (${String((e as Error)?.message ?? e)})`);
         return false;
       }
     });
@@ -182,7 +185,10 @@ function defaultResolveRepoDir(worktreePath: string): string | undefined {
   let raw: string;
   try {
     raw = readFileSync(join(worktreePath, ".git"), "utf8");
-  } catch {
+  } catch (e) {
+    console.error(
+      `review-worktree-reclaim: could not read ${join(worktreePath, ".git")} (${String((e as Error)?.message ?? e)})`,
+    );
     return undefined;
   }
   const m = raw.match(/^gitdir:\s*(.+?)\s*$/m);
@@ -198,7 +204,8 @@ function defaultReadHeadSha(worktreePath: string): string | undefined {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-  } catch {
+  } catch (e) {
+    console.error(`review-worktree-reclaim: could not read HEAD at ${worktreePath} (${String((e as Error)?.message ?? e)})`);
     return undefined;
   }
 }
@@ -213,7 +220,11 @@ function defaultReadRemoteHeadSha(repoDir: string, prNumber: number): string | u
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-  } catch {
+  } catch (e) {
+    console.error(
+      `review-worktree-reclaim: could not ls-remote origin refs/pull/${prNumber}/head in ${repoDir} ` +
+        `(${String((e as Error)?.message ?? e)})`,
+    );
     return undefined;
   }
   const sha = out.split(/\s+/)[0]?.trim();

@@ -295,6 +295,7 @@
   "src/lib/retro.ts": 1250,
   "src/lib/review-capacity.ts": 250,
   "src/lib/review-provider-provenance.ts": 29,
+  "src/lib/review-worktree-reclaim.ts": 250,
   "src/lib/review.ts": 2750,
   "src/lib/risk-judge.ts": 500,
   "src/lib/risk-score.ts": 151,
