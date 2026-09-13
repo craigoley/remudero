@@ -24,10 +24,26 @@ raw: "Multi-instance daemon availability: OBSERVED on the Azure host 2026-09-13:
   per-repo was not a real dimension."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/5417
+summary:
+  headline: Choose implementation approach for multi-instance daemon registry
+  what_happened: Site daemon crashed and stayed down because no system manages
+    multiple daemon instances independently. Current scripts handle only the
+    core instance.
+  decision: Choose one approach and define scope, test requirements, and launch criteria.
+  options:
+    - label: Full registry with falsifiable proofs (recommended)
+      consequence: Validates isolation with unit tests; highest confidence for
+        production; longer development timeline.
+    - label: Registry without formal test suite
+      consequence: Faster deployment with manual testing required; higher risk of
+        undetected defects.
+    - label: Core and site only; defer console support
+      consequence: Addresses immediate need; reduces scope and complexity; adds
+        console support later.
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
