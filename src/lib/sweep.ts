@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -13,6 +13,7 @@ import {
   type DisarmOutcome,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects } from "./body-repair.js";
+import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
 import { type Config, fixStrikeCap } from "./config.js";
 import { gitPushEmptyCommit, gitPushRunBranch, LanePushForeignHeadError } from "./git-push.js";
 import { ghJson, ghJsonAsync } from "./github-transport.js";
@@ -22,6 +23,7 @@ import { appendLedger } from "./ledger.js";
 import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
+import { buildPlanPrBody, buildPlanPrCommitMessage, createPlanPrRest, probeExistingPlanPr } from "./plan-pr-emitter.js";
 import { DEFAULT_RISK, RETIREMENT_REASONS, type AcceptanceCriterion, type Plan, type RetirementReason, type TaskRisk } from "./plan.js";
 import {
   defaultCreditStorePath,
@@ -828,6 +830,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "arm"
   | "close"
   | "dispatchFix"
+  | "dispatchPlanOnlyRepair"
   | "escalate"
   | "readLiveState"
   | "terminalFixStandDown"
@@ -2112,6 +2115,117 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           `so the required checks recompute against CURRENT main. Automated by the base-caused ` +
           `release rung (W1-T2620).`,
       );
+    },
+
+    // W1-T3390 — THE MISSING RUNG. The shard's `proof:` text is wrong, and a bot proposing its OWN
+    // correction to Architect-owned criteria is what Standing rule 15 forbids — so this flags the
+    // line for an Architect instead of rewriting it, editing no `claim:`/`proof:`/`satisfied_by:`
+    // field. Stable per-task branch name: a second dispatch before the first PR lands DEDUPES.
+    dispatchPlanOnlyRepair: async (pr, evidence) => {
+      const taskId = pr.taskId;
+      const proof0 = evidence.proofs[0];
+      if (!taskId || !proof0) return;
+      let shardRelPath: string | undefined;
+      try {
+        shardRelPath = readdirSync(join(repoDir, "plan", "tasks.d"))
+          .filter((f) => f.startsWith(`${taskId}-`) && /\.ya?ml$/.test(f))
+          .map((f) => join("plan", "tasks.d", f))[0];
+      } catch {
+        /* plan/tasks.d unreadable — fall through to the monolith below */
+      }
+      if (!shardRelPath) {
+        const monolith = join(repoDir, "plan", "tasks.yaml");
+        if (existsSync(monolith) && readFileSync(monolith, "utf8").includes(`id: ${taskId}\n`)) {
+          shardRelPath = "plan/tasks.yaml";
+        }
+      }
+      const planRepairLog = (outcome: string, extra: Record<string, unknown> = {}) =>
+        log(PLAN_REPAIR_DISPATCH_STEP, {
+          task_id: taskId,
+          pr_number: pr.prNumber,
+          pr_url: pr.prUrl,
+          head_sha: pr.headSha,
+          outcome,
+          ...extra,
+        });
+      if (!shardRelPath) {
+        planRepairLog("no_shard");
+        return true;
+      }
+      const branch = `plan-repair/${taskId}`;
+      try {
+        execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
+      } catch {
+        /* best-effort — a stale local view still lets the probe below run */
+      }
+      const existing = probeExistingPlanPr(ghJson, owner, repo, branch);
+      if (existing) {
+        planRepairLog("deduped", { plan_repair_pr: existing.prUrl });
+        return true;
+      }
+      const original = readFileSync(join(repoDir, shardRelPath), "utf8");
+      const marker =
+        `sweep-flagged proof (${proof0.proofExec}) — an Architect must correct this criterion's ` +
+        `proof; W1-T3390 plan-only repair rung, PR #${pr.prNumber}, ${new Date(nowMsImpl()).toISOString()}`;
+      const flagged = insertPlanRepairFlag(original, proof0.proof, marker);
+      if (!flagged) {
+        planRepairLog("text_drift", { shard: shardRelPath });
+        return true;
+      }
+      let worktreePath = "";
+      try {
+        worktreePath = join(worktreesDir(config), `plan-repair-${taskId}-${nowMsImpl()}`);
+        execFileSync("git", ["-C", repoDir, "worktree", "add", "-B", branch, worktreePath, "origin/main"], {
+          stdio: "pipe",
+        });
+        writeFileSync(join(worktreePath, shardRelPath), flagged);
+        execFileSync("git", ["-C", worktreePath, "add", shardRelPath], { stdio: "pipe" });
+        const commitMessage = buildPlanPrCommitMessage({
+          scope: "plan",
+          subject: `flag a stale proof in ${taskId}'s shard for architect repair`,
+          extraBody:
+            `PR #${pr.prNumber} could not discriminate this criterion's proof (${proof0.proofExec}) from ` +
+            `inside its own diff — Standing rule 15 reserves the correction to an Architect. This filing ` +
+            `adds a comment above the affected criterion; it edits no claim/proof/satisfied_by field.`,
+        });
+        execFileSync("git", ["-C", worktreePath, "commit", "-m", commitMessage], { stdio: "pipe" });
+        const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        gitPushRunBranch(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
+        assertLiveWriteAllowed("gh-pr-create", `opening the plan-only repair PR for ${taskId}'s shard`);
+        const created = createPlanPrRest(ghJson, owner, repo, {
+          title: `chore(plan): flag a stale proof in ${taskId}'s shard for architect repair`,
+          body: buildPlanPrBody({
+            intro:
+              `AUTOMATED PLAN REPAIR (W1-T3390): ${pr.prUrl} is capped and its shared fix budget is ` +
+              `spent. Its criterion "${proof0.claim}" declares proof \`${proof0.proof}\`, which review ` +
+              `found \`${proof0.proofExec}\` — that text cannot be corrected from inside a non-plan-only ` +
+              `PR (Standing rule 15). This plan-only PR flags the line for an Architect; it does not ` +
+              `rewrite it.`,
+            criteria: [
+              {
+                claim: `the shard flags ${taskId}'s stale proof for architect repair`,
+                proof: `grep: sweep-flagged proof in ${shardRelPath}`,
+              },
+            ],
+            changedFiles: [shardRelPath],
+          }),
+          head: branch,
+          base: "main",
+        });
+        planRepairLog("dispatched", { plan_repair_pr: created.prUrl, shard_path: shardRelPath });
+        return true;
+      } catch (e) {
+        planRepairLog("error", { error: String((e as Error)?.message ?? e) });
+        return true;
+      } finally {
+        if (worktreePath) {
+          try {
+            worktreeRemove(repoDir, worktreePath);
+          } catch {
+            /* best-effort cleanup */
+          }
+        }
+      }
     },
   };
 }
@@ -5700,6 +5814,44 @@ export function cappedProofDiscriminationFromLedger(
   return evidence;
 }
 
+/** The ledger step {@link SweepDeps.dispatchPlanOnlyRepair}'s real implementation writes, and the
+ *  ONLY thing {@link priorPlanRepairStrikesFromLedger} reads — one constant so the writer and the
+ *  fold can never name two different steps. */
+export const PLAN_REPAIR_DISPATCH_STEP = "plan_repair.dispatch";
+
+/** Cumulative plan-only shard-repair dispatches this task's PR has already spent — the SAME
+ *  cumulative-across-heads shape `pr.priorStrikes` already uses for the body-repair budget
+ *  (W1-T2452), so raising one ceiling never silently widens the other. */
+export function priorPlanRepairStrikesFromLedger(
+  pr: Pick<OpenPrView, "taskId">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): number {
+  if (!pr.taskId) return 0;
+  let count = 0;
+  for (const line of lines) {
+    if (line.step === PLAN_REPAIR_DISPATCH_STEP && line.task_id === pr.taskId) count++;
+  }
+  return count;
+}
+
+/**
+ * Insert `marker` as a YAML comment directly above the line carrying `proof`'s exact text in
+ * `shardText`, so the flag sits beside the criterion it names WITHOUT touching the `proof:` field
+ * itself — `criterionFieldTampered` (review.ts) counts only an ADD/DEL of a criterion field
+ * line's own text, never an adjacent comment, so this filing needs no plan-only/human-authored
+ * carve-out to clear Standing rule 15's guard; it is a pointer, not a correction.
+ * Returns `undefined` when `proof`'s exact text is no longer present — the review that produced
+ * this evidence has gone stale, and flagging the wrong line would misattribute the repair.
+ */
+export function insertPlanRepairFlag(shardText: string, proof: string, marker: string): string | undefined {
+  const lines = shardText.split("\n");
+  const idx = lines.findIndex((line) => line.includes(proof));
+  if (idx < 0) return undefined;
+  const indent = /^(\s*)/.exec(lines[idx])?.[1] ?? "";
+  lines.splice(idx, 0, `${indent}# ${marker}`);
+  return lines.join("\n");
+}
+
 /** TERMINAL-STATE PREDICATE (W1-T177) — the ONE definition every spending site and the operator
  *  verb share, so a merged or closed PR is refused IDENTICALLY everywhere rather than through
  *  hardcoded copies that drift. Only `"OPEN"` carries a live block. Classifies a SUCCESSFULLY-READ
@@ -5818,6 +5970,17 @@ export interface SweepDeps {
   dispatchFix: (
     pr: OpenPrView,
     evidence: FixDispatchEvidence,
+  ) => boolean | void | Promise<boolean | void>;
+  /** W1-T3390 — dispatched once a capped verdict's non-discriminating proofs exhaust
+   *  `dispatchFix`'s body-repair budget — the shard's OWN text is wrong, and Standing rule 15's
+   *  `criterionFieldTampered` (review.ts) refuses a non-plan-only diff (any body repair) touching
+   *  it. OPTIONAL: omission preserves every caller's behaviour byte-for-byte (see
+   *  `planCappedRepair`'s `planRepairCapable` gate, classify.ts). Bounded by its OWN ceiling
+   *  ({@link "./classify.js".MAX_PLAN_REPAIR_STRIKES}), separate from `dispatchFix`'s strike cap.
+   *  Return contract mirrors `dispatchFix` ({@link dispatchFixSpent}). */
+  dispatchPlanOnlyRepair?: (
+    pr: OpenPrView,
+    evidence: ProofDiscriminationEvidence,
   ) => boolean | void | Promise<boolean | void>;
   /** W1-T2931 — claim one slot from the light pass's shared host budget immediately before a
    *  fix worker is dispatched. The claim is synchronous, so concurrent per-PR reconciliation
@@ -7353,14 +7516,30 @@ export async function runSweep(
       disposition === "mergeable" && automergeHoldFromLedger(ledgerLines, pr.prNumber) === undefined
         ? cappedProofDiscriminationFromLedger(pr, ledgerLines)
         : undefined;
+    // W1-T3390 — gated on capability: `planRepairCapable` is true only when `dispatchPlanOnlyRepair`
+    // is wired, so any caller that omits it (every pre-existing fixture) keeps the old ladder.
+    let planShardRepairDue = false;
     if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines).arm) {
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
-      if (pr.priorStrikes >= ceiling) {
+      const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
+      const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
+      const action = planCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
+        planRepairCapable,
+      });
+      if (action.kind === "give_up") {
         disposition = "blocked-ambiguous";
-        reason = `capped review still has non-discriminating proofs, but its shared fix budget is exhausted (${pr.priorStrikes}/${ceiling})`;
+        reason = planRepairCapable
+          ? `capped review still has non-discriminating proofs, but every repair path is exhausted ` +
+            `(body ${pr.priorStrikes}/${ceiling}, plan-shard repair ${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
+          : `capped review still has non-discriminating proofs, but its shared fix budget is exhausted (${pr.priorStrikes}/${ceiling})`;
       } else {
         disposition = "blocked-fixable";
-        reason = "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
+        planShardRepairDue = action.kind === "repair_plan_shard";
+        reason = planShardRepairDue
+          ? `capped review still has non-discriminating proofs and the shared fix budget is exhausted ` +
+            `(${pr.priorStrikes}/${ceiling}) — dispatching a plan-only repair of the offending shard ` +
+            `(${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
+          : "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
       }
     }
     byDisposition[disposition]++;
@@ -7942,6 +8121,23 @@ export async function runSweep(
                 fixClaim.release();
                 acted = false;
                 standDownReason = fixAdmission.reason;
+                break;
+              }
+              // W1-T3390 — fires here, in place of `dispatchFix` below, once the disposition
+              // decision above found the body budget spent and a plan-shard repair still owed.
+              if (planShardRepairDue && deps.dispatchPlanOnlyRepair && proofDiscrimination) {
+                const dispatchPlanOnlyRepair = deps.dispatchPlanOnlyRepair;
+                if (deps.detachFixWait) {
+                  detachSweepAction(
+                    fixClaim.run(() => dispatchPlanOnlyRepair(pr, proofDiscrimination)),
+                    // Shares "fix-dispatch"'s kind, deliberately: a plan-shard repair and an
+                    // ordinary body repair must never race for the SAME task's detached slot.
+                    { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
+                  );
+                  break;
+                }
+                const planRepairOutcome = await fixClaim.run(() => dispatchPlanOnlyRepair(pr, proofDiscrimination));
+                if (planRepairOutcome !== undefined) spent = dispatchFixSpent(planRepairOutcome);
                 break;
               }
               // W1-T2379: started either way — only the `await` moves. See `SweepDeps.detachFixWait`.
