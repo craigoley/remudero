@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ import {
   parseCaptureSurfaceFireHistory,
   type CaptureSurfaceFireRecord,
 } from "../src/lib/doctor.js";
+import { readCaptureSurfaceFireHistory } from "../src/lib/report-commands.js";
 import { doctorCommand, runFeedbackDocketRung } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -146,6 +147,33 @@ test("W1-T3472: too few retained fires still decline judgement, and retained his
     const report = buildDoctorReport(reportInputs(fires));
     const boundedCheck = report.checks.find((c) => c.name === "capture-surfaces");
     assert.equal(boundedCheck?.verdict, "FAIL", "the bound still leaves enough recent fires to judge silence");
+  } finally {
+    rmSync(instanceRoot, { recursive: true, force: true });
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3472: corrupt retained history is ignored and the next docket fire replaces its marker", () => {
+  const instanceRoot = tmp("capture-surface-corrupt-instance-");
+  const repoRoot = tmp("capture-surface-corrupt-repo-");
+  try {
+    const markerPath = join(instanceRoot, "state", "last-feedback-docket.json");
+    mkdirSync(join(instanceRoot, "state"), { recursive: true });
+    writeFileSync(markerPath, "{not-json", "utf8");
+
+    assert.deepEqual(
+      readCaptureSurfaceFireHistory(instanceRoot),
+      [],
+      "doctor treats corrupt retained history as no evidence rather than trusting unusable bytes",
+    );
+
+    runEmptyDocketFires(instanceRoot, repoRoot, 1);
+    const rewritten = JSON.parse(readFileSync(markerPath, "utf8")) as unknown;
+    assert.equal(
+      parseCaptureSurfaceFireHistory(rewritten).length,
+      1,
+      "the docket's marker reader also tolerates corruption and records the next real fire",
+    );
   } finally {
     rmSync(instanceRoot, { recursive: true, force: true });
     rmSync(repoRoot, { recursive: true, force: true });
