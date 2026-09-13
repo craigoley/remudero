@@ -79,7 +79,7 @@ import {
   type IssueGateway,
   type OpenIssue,
 } from "./escalate.js";
-import { fetchWorkflowRunObservations, GhPaceFloorStandDownError, paceGhEntry, type GhCallPacer } from "./open-prs-rest.js";
+import { fetchWorkflowRunObservations, GhPaceFloorStandDownError, paceGhEntry, type GhApiFetcher, type GhCallPacer } from "./open-prs-rest.js";
 // W1-T2384: the supersession types live in a leaf that imports nothing, so open-prs-rest.ts can
 // declare the producer without closing the type cycle this module's value import would complete.
 // Re-exported below, so every existing `from "…/sweep.js"` call site keeps working untouched.
@@ -664,6 +664,27 @@ export interface BuildSweepEffectsDeps {
   readPackageScriptsImpl?: SweepRuntimeFn;
   dispatchFixCatchOutcomeImpl?: typeof dispatchFixCatchOutcome;
   worktreeRemoveImpl?: typeof worktreeRemove;
+  /** W1-T3390 coverage seam — the plan-only shard-repair rung's own raw `git` spawns (branch -D,
+   *  add, commit, rev-parse). A bare inline `execFileSync` would leave every one of those lines
+   *  uncoverable without a real external git process on every test run; this seam defaults to
+   *  the real spawn (below) so a test injects a fake and asserts the recorded call instead
+   *  (coverage-ratchet's own remedy for a process-boundary line). Appended last, like every
+   *  other *Impl seam in this interface. */
+  planRepairGitImpl?: (
+    file: string,
+    args: readonly string[],
+    opts?: { encoding?: BufferEncoding },
+  ) => string;
+  /** Same coverage seam for the worktree this rung cuts — the real implementation lives in
+   *  worker.ts (registered with the worktree-sites census); injectable here only so a test
+   *  observes the call instead of cutting a real one. */
+  worktreeAddImpl?: typeof worktreeAdd;
+  /** Same coverage seam for the branch push this rung performs. */
+  gitPushRunBranchImpl?: typeof gitPushRunBranch;
+  /** Same coverage seam for the two REST calls (dedup probe + PR create) this rung performs.
+   *  `ghJson` already satisfies `GhApiFetcher`; a test swaps this for a fixture that never
+   *  spawns `gh`. */
+  ghJsonImpl?: GhApiFetcher;
   fixBranchClaimKeyImpl?: SweepRuntimeFn;
   boundedWorktreeOwnerPathImpl?: SweepRuntimeFn;
   decideRegisteredFixOwnerRecoveryImpl?: SweepRuntimeFn;
@@ -739,6 +760,16 @@ function defaultDirtyFleetRebaseGit(
     stdio: opts.stdio ?? "pipe",
     maxBuffer: 1 << 24,
   }) as string;
+}
+
+/** Default for {@link BuildSweepEffectsDeps.planRepairGitImpl} — the real spawn, appended last
+ *  as its own seam so a test injects a fake in its place and asserts the recorded call. */
+function defaultPlanRepairGit(
+  file: string,
+  args: readonly string[],
+  opts: { encoding?: BufferEncoding } = {},
+): string {
+  return execFileSync(file, [...args], { encoding: opts.encoding ?? "utf8", stdio: "pipe" }) as string;
 }
 
 export function rebaseDirtyFleetBranchViaGit(
@@ -917,6 +948,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readPackageScriptsImpl: readPackageScriptsFor = requiredSweepRuntime("readPackageScriptsImpl"),
     dispatchFixCatchOutcomeImpl: dispatchFixCatchOutcomeForBuild = dispatchFixCatchOutcome,
     worktreeRemoveImpl: worktreeRemoveForBuild = worktreeRemove,
+    planRepairGitImpl: planRepairGit = defaultPlanRepairGit,
+    worktreeAddImpl: worktreeAddForBuild = worktreeAdd,
+    gitPushRunBranchImpl: gitPushRunBranchForBuild = gitPushRunBranch,
+    ghJsonImpl: ghJsonForBuild = ghJson,
     fixBranchClaimKeyImpl: fixBranchClaimKey = requiredSweepRuntime("fixBranchClaimKeyImpl"),
     boundedWorktreeOwnerPathImpl: boundedWorktreeOwnerPath = requiredSweepRuntime("boundedWorktreeOwnerPathImpl"),
     decideRegisteredFixOwnerRecoveryImpl: decideRegisteredFixOwnerRecovery = requiredSweepRuntime("decideRegisteredFixOwnerRecoveryImpl"),
@@ -2155,11 +2190,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
       const branch = `plan-repair/${taskId}`;
       try {
-        execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
+        planRepairGit("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
       } catch {
         /* best-effort — a stale local view still lets the probe below run */
       }
-      const existing = probeExistingPlanPr(ghJson, owner, repo, branch);
+      const existing = probeExistingPlanPr(ghJsonForBuild, owner, repo, branch);
       if (existing) {
         planRepairLog("deduped", { plan_repair_pr: existing.prUrl });
         return true;
@@ -2183,13 +2218,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // left over from an earlier, uncleaned attempt is dropped first — best-effort, since a
         // branch still checked out elsewhere fails closed exactly as the prior `-B` did.
         try {
-          execFileSync("git", ["-C", repoDir, "branch", "-D", branch], { stdio: "pipe" });
+          planRepairGit("git", ["-C", repoDir, "branch", "-D", branch]);
         } catch {
           /* no stale local branch to clear — the common case */
         }
-        worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+        worktreeAddForBuild(repoDir, worktreePath, branch, "origin/main", { log });
         writeFileSync(join(worktreePath, shardRelPath), flagged);
-        execFileSync("git", ["-C", worktreePath, "add", shardRelPath], { stdio: "pipe" });
+        planRepairGit("git", ["-C", worktreePath, "add", shardRelPath]);
         const commitMessage = buildPlanPrCommitMessage({
           scope: "plan",
           subject: `flag a stale proof in ${taskId}'s shard for architect repair`,
@@ -2198,11 +2233,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             `inside its own diff — Standing rule 15 reserves the correction to an Architect. This filing ` +
             `adds a comment above the affected criterion; it edits no claim/proof/satisfied_by field.`,
         });
-        execFileSync("git", ["-C", worktreePath, "commit", "-m", commitMessage], { stdio: "pipe" });
-        const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-        gitPushRunBranch(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
+        planRepairGit("git", ["-C", worktreePath, "commit", "-m", commitMessage]);
+        const headSha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+        gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
         assertLiveWriteAllowed("gh-pr-create", `opening the plan-only repair PR for ${taskId}'s shard`);
-        const created = createPlanPrRest(ghJson, owner, repo, {
+        const created = createPlanPrRest(ghJsonForBuild, owner, repo, {
           title: `chore(plan): flag a stale proof in ${taskId}'s shard for architect repair`,
           body: buildPlanPrBody({
             intro:
@@ -2230,7 +2265,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       } finally {
         if (worktreePath) {
           try {
-            worktreeRemove(repoDir, worktreePath);
+            worktreeRemoveForBuild(repoDir, worktreePath);
           } catch {
             /* best-effort cleanup */
           }
