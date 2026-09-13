@@ -291,6 +291,7 @@ import {
   daemonBoot,
   daemonExitCode,
   daemonExitCodeForSummary,
+  resolveFleetControlHold,
   runDaemon,
   type CrashLoopVerdict,
   type DaemonOpts,
@@ -298,6 +299,7 @@ import {
   type HeadroomPolicy,
   type IntakeRungDecision,
   type IntakeRungRunResult,
+  type ReviewAdmissionGate,
   type StarvationCensus,
   type StarvationClearedInfo,
   priorUnrecognisedResetStrings,
@@ -26142,6 +26144,13 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
+    /** Injectable mutable boot routine. Tests use it to prove an already-held fleet does not
+     * enter daemonBoot's sweeps or keychain work. */
+    daemonBoot?: typeof daemonBoot;
+    /** Optional control readers for command-level wiring tests. Production omits them and reads
+     * the canonical local/shared fleet controls below. */
+    checkStop?: () => string | undefined;
+    checkPause?: () => string | undefined;
     /** Injectable W1-T2568 wake wiring and signal re-raise for deterministic shutdown coverage.
      * Production keeps the real filesystem watcher and `process.kill`; tests can observe that
      * the watcher closes before the daemon re-raises SIGINT/SIGTERM without signalling the test
@@ -26598,7 +26607,20 @@ export async function daemonCommand(
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
   // Also runs the W1-T115 boot sweep of stale rmd-owned temp dirs (the
   // 26,711-dir ENOSPC incident's backstop) and logs the count via daemon.tmp_sweep.
-  daemonBoot(
+  const checkStop = deps.checkStop ?? (() => stopDetail(config.root));
+  // `runDaemon` is a test-only loop seam. Its fixtures must not inherit the live shared hold a
+  // production daemon is deliberately required to honour; injected `checkPause` still takes precedence.
+  const checkPause = deps.checkPause ?? (deps.runDaemon ? () => pauseDetail(config.root) : () => checkSharedPause(config.root, realDeps().sharedPauseGit));
+  const invokeDaemonBoot: typeof daemonBoot = (...args) => daemonBoot(...args);
+  const bootHold = resolveFleetControlHold({ checkStop, checkPause });
+  if (bootHold) {
+    log("daemon.boot_held", {
+      control: bootHold.control,
+      detail: bootHold.detail,
+      reason: `fleet ${bootHold.control} hold: ${bootHold.detail}`,
+    });
+  } else {
+    (deps.daemonBoot ?? invokeDaemonBoot)(
     log,
     process.env,
     () => {
@@ -26719,7 +26741,8 @@ export async function daemonCommand(
     // Appended LAST, after the node pin, per `daemonBoot`'s own "no positional caller shifts"
     // discipline.
     readCheckoutDepth(dirname(dirname(fileURLToPath(import.meta.url)))),
-  );
+    );
+  }
 
   const runDaemonFn = deps.runDaemon ?? runDaemon;
   // W1-T160: the retro cadence hooks (self-target only) — see buildRetroDaemonHooks.
@@ -26907,11 +26930,12 @@ export async function daemonCommand(
         // This task: the cleared half — closes the escalation `escalateStarvation` opened, on
         // the SAME edge `runDaemon` already resets `starvationEscalated` at.
         onStarvationCleared: (info) => escalateStarvationCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-        checkStop: () => stopDetail(config.root),
+        checkStop,
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
         // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
         // own doc for why UNREACHABLE reads as held, never as clear.
-        checkPause: () => checkSharedPause(config.root, realDeps().sharedPauseGit),
+        checkPause,
+        workerAdmissionHold: () => resolveFleetControlHold({ checkStop, checkPause }),
         // CODE FRESHNESS — THE PRODUCER W1-T126 NEVER GOT. The consumer has read
         // `deps.checkFreshness` since 2026 and this object never supplied it, so the stale
         // self-restart had fired ZERO times in the Azure daemon's 6,838-row ledger. MEASURED
@@ -31843,7 +31867,7 @@ export function buildSweepHook(
   // liveness even when a test injection or future implementation accidentally throws.
   mainHealthRung?: () => Promise<void>,
   snapshotCache?: BoardSnapshotCache,
-): (continueReviewAdmissions?: () => boolean) => Promise<void> {
+): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
@@ -31940,10 +31964,11 @@ export function buildSweepHook(
           staleGateWorkflowsByPr,
           updatedForWorkflow,
           behindMainByPr,
-          // W1-T2584: supplied by daemon.ts's `runGatedSweep`, which closes the callback on its
-          // own wall-clock timeout and re-checks the existing STOP/PAUSE controls on every pull.
-          // Direct/tests calls omit it and receive the true default above.
+          // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
+          // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
+          // receive the true defaults above.
           continueReviewAdmissions,
+          workerAdmissionHold: continueReviewAdmissions.workerAdmissionHold,
         }),
         DEFAULT_SWEEP_POLICY,
       );

@@ -2009,6 +2009,56 @@ test("dry-run: derives dispositions but takes NO effects and writes NO ledger li
   assert.equal(real.fixed.length, 1);
 });
 
+test("W1-T3491 criterion 1: a fleet hold after full-sweep derivation fences review and repair callbacks", async () => {
+  for (const control of ["STOP", "PAUSE"] as const) {
+    const reviewed: number[] = [];
+    const deps = fakeDeps({
+      postReview: (candidate) => {
+        reviewed.push(candidate.prNumber);
+      },
+      workerAdmissionHold: () => `fleet ${control} hold: operator engaged the control after this sweep began`,
+    });
+    const review = ungatedGreenPr({ prNumber: 34_901, taskId: "W1-T3491-REVIEW", headSha: "w1t3491-review" });
+    const repair = Object.assign(blockedFixablePr(), {
+      prNumber: 34_902,
+      taskId: "W1-T3491-REPAIR",
+      headSha: "w1t3491-repair",
+    });
+
+    await runSweep([repair, review], deps, DEFAULT_SWEEP_POLICY);
+
+    assert.deepEqual(deps.fixed, [], `${control}: the repair callback was never admitted after the hold`);
+    assert.deepEqual(reviewed, [], `${control}: the semantic review callback was never admitted after the hold`);
+    const held = readLedgerLines(deps.ledgerPath)
+      .filter((line) => line.step === "sweep.disposed" && (line.pr_number === repair.prNumber || line.pr_number === review.prNumber));
+    assert.equal(held.length, 2, `${control}: both prospective actions remain visible as stood down`);
+    for (const line of held) {
+      assert.equal(line.acted, false);
+      assert.match(String(line.stand_down_reason), new RegExp(`fleet ${control} hold`));
+    }
+  }
+});
+
+test("W1-T3491: an unreadable full-sweep admission check fails closed before a worker callback", async () => {
+  const reviewed: number[] = [];
+  const deps = fakeDeps({
+    postReview: (candidate) => {
+      reviewed.push(candidate.prNumber);
+    },
+    workerAdmissionHold: () => {
+      throw new Error("test fleet-control read failed");
+    },
+  });
+  const review = ungatedGreenPr({ prNumber: 34_903, taskId: "W1-T3491-READ-FAIL", headSha: "w1t3491-read-fail" });
+
+  await runSweep([review], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.deepEqual(reviewed, [], "an unreadable control check never admits the review callback");
+  const held = readLedgerLines(deps.ledgerPath).find((line) => line.step === "sweep.disposed" && line.pr_number === review.prNumber);
+  assert.equal(held?.acted, false);
+  assert.match(String(held?.stand_down_reason), /worker admission control check failed closed \(test fleet-control read failed\)/);
+});
+
 // ── observed autoMergeArmed short-circuits arming (real-world dedup) ───────────
 
 test("an already-armed PR (observed autoMergeArmed=true) is not re-armed", async () => {
