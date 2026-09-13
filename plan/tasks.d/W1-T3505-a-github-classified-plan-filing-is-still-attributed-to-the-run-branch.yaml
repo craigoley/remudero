@@ -1,4 +1,4 @@
-- id: W1-T3503
+- id: W1-T3505
   title: "A GITHUB-CLASSIFIED PLAN FILING IS STILL ATTRIBUTED TO ITS RUN BRANCH — buildOpenPrViews proves the diff is plan-only, then resolveOpenPrTaskId discards that classification and offers the filing to the code-fixer lane"
   repo: remudero
   depends_on: []
@@ -9,11 +9,18 @@
   band_meaning: blast-radius
   budget_usd: 24.00
   origin: "operator-session#queue-auto-recovery-2026-09-13"
-  plan_refs: ["W1-T2439", "W1-T2864", "W1-T3063"]
+  plan_refs: ["W1-T2439", "W1-T2864", "W1-T3063", "W1-T3503"]
   files: [src/run-task.ts, test/openpr-taskid-resolver.test.ts]
   status: queued
   attempts: 0
   rationale: |
+    REISSUE OF W1-T3503, NOT A SECOND IMPLEMENTATION. W1-T3503 was filed on PR #5342 after its
+    immutable reservation was minted from a detached HEAD, recording `branch=unknown`. CI correctly
+    refuses an unreadable reservation holder, so W1-T3503 remains a permanently reserved but
+    unmergeable filing. W1-T3505 carries the identical one-concern contract under a reservation
+    whose holder is this plan branch; it supersedes that failed filing rather than creating a
+    second queue-identity design.
+
     OBSERVED 2026-09-13: PR #5340 was an externally filed, plan-only PR on
     `run-W1-T3501-*`. `buildOpenPrViews` correctly classified its complete GitHub file list as
     `isPlanFiling: true, planFilingSource: "github-files"`, but its task identity was separately
@@ -40,11 +47,11 @@
     changes no review lane or capacity policy, and does not alter direct `rmd review` behaviour.
   acceptance:
     - claim: "a complete GitHub-files plan-only filing on run-W1-T500 with no task trailer is classified as a filing and has no task id, so criteria are not recoverable as W1-T500"
-      proof: "unit test: W1-T3503 criterion 1"
+      proof: "unit test: W1-T3505 criterion 1"
     - claim: "a non-plan implementation on run-W1-T500 with no trailer still resolves W1-T500 through the branch fallback"
-      proof: "unit test: W1-T3503 criterion 2"
+      proof: "unit test: W1-T3505 criterion 2"
     - claim: "an unreadable plan-file observation does not manufacture filing evidence or suppress the existing branch task identity"
-      proof: "unit test: W1-T3503 criterion 3"
+      proof: "unit test: W1-T3505 criterion 3"
   falsifier: |
     Replace the classified boolean at the open-PR resolver call sites with the old
     `isPlanOnlyFilingPr(ledger, pr.url)` read. The criterion-1 fixture must again resolve W1-T500
