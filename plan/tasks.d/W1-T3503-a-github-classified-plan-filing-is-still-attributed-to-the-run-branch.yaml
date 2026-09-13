@@ -1,0 +1,52 @@
+- id: W1-T3503
+  title: "A GITHUB-CLASSIFIED PLAN FILING IS STILL ATTRIBUTED TO ITS RUN BRANCH — buildOpenPrViews proves the diff is plan-only, then resolveOpenPrTaskId discards that classification and offers the filing to the code-fixer lane"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 24.00
+  origin: "operator-session#queue-auto-recovery-2026-09-13"
+  plan_refs: ["W1-T2439", "W1-T2864", "W1-T3063"]
+  files: [src/run-task.ts, test/openpr-taskid-resolver.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-13: PR #5340 was an externally filed, plan-only PR on
+    `run-W1-T3501-*`. `buildOpenPrViews` correctly classified its complete GitHub file list as
+    `isPlanFiling: true, planFilingSource: "github-files"`, but its task identity was separately
+    resolved through `resolveOpenPrTaskId(pr, ledger)`. That helper only asks
+    `isPlanOnlyFilingPr`, whose sole positive signal is the local `pr.opened{plan_only:true}`
+    emitter receipt. The external filing has no such receipt, so its run-branch id W1-T3501 was
+    attributed to the filing. The fix rung then spawned a code worker for W1-T3501 against the
+    plan-filing branch; the worker was stopped before it pushed implementation code into the plan
+    PR. The queue therefore has two contradictory classifications for one PR: the admission lane
+    knows it is a plan filing while the task-credit and fix lanes treat it as an implementation.
+
+    The failure is a lost fact, not a missing GitHub read. `planFilingClassifications` is computed
+    before both the supersession loops and the returned OpenPrView. Thread that already-observed
+    boolean into every `resolveOpenPrTaskId` use in this one producer. A positively classified
+    plan filing with no explicit trailer must have no task id: it cannot become a supersession peer,
+    receive a task-keyed fix history, or dispatch implementation work from the filing branch.
+    Preserve the existing explicit-trailer precedence and the existing failure posture: unreadable
+    file observations are not proof of a filing, so they retain today's non-filing resolution rather
+    than silently suppressing a real implementation.
+
+    This is high risk because task identity feeds auto-merge, supersession, review keys and worker
+    dispatch. It is intentionally limited to reconciling existing classification with existing
+    identity resolution. It changes no classification predicate, makes no additional GitHub call,
+    changes no review lane or capacity policy, and does not alter direct `rmd review` behaviour.
+  acceptance:
+    - claim: "a complete GitHub-files plan-only filing on run-W1-T500 with no task trailer is classified as a filing and has no task id, so criteria are not recoverable as W1-T500"
+      proof: "unit test: W1-T3503 criterion 1"
+    - claim: "a non-plan implementation on run-W1-T500 with no trailer still resolves W1-T500 through the branch fallback"
+      proof: "unit test: W1-T3503 criterion 2"
+    - claim: "an unreadable plan-file observation does not manufacture filing evidence or suppress the existing branch task identity"
+      proof: "unit test: W1-T3503 criterion 3"
+  falsifier: |
+    Replace the classified boolean at the open-PR resolver call sites with the old
+    `isPlanOnlyFilingPr(ledger, pr.url)` read. The criterion-1 fixture must again resolve W1-T500
+    and fail, while criteria 2 and 3 remain green. That difference proves the fix preserves the
+    non-filing and unreadable populations rather than merely disabling branch identity globally.
