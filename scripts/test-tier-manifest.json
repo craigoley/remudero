@@ -487,6 +487,7 @@
     "test/cycle-ratchet.test.ts": 4071,
     "test/daemon-alive-liveness.test.ts": 760,
     "test/daemon-command-retro-wiring.test.ts": 5966,
+    "test/daemon-ledger-compaction-wiring.test.ts": 3862,
     "test/daemon-crashloop-wiring.test.ts": 25254,
     "test/daemon-crashloop.test.ts": 972,
     "test/daemon-default-credential.test.ts": 326,

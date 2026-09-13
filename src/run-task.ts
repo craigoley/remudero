@@ -38,8 +38,14 @@ import {
 // the runtime specifier below on its emitted `.js` form.
 import { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
 export { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs };
-import { ledgerCompactCommand } from "./lib/ledger-compact.js";
+import { ledgerCompactCommand, type LedgerCompactCommandDeps } from "./lib/ledger-compact.js";
 export { ledgerCompactCommand } from "./lib/ledger-compact.js";
+import {
+  decideLedgerCompaction,
+  readLedgerCorpusPressure,
+  type LedgerCompactionDecision,
+  type LedgerCompactionOutcome,
+} from "./lib/ledger-compaction-rung.js";
 // Compatibility re-export target: lib/escalation-catalogue"
 import {
   DISK_HEADROOM_EPISODE_MS,
@@ -21597,6 +21603,116 @@ export function autoTriageCheck(
   });
 }
 
+/**
+ * W1-T3368's daemon-side composition root. The loop already owns the decision and ledger rows in
+ * `daemon.ts`; this adapter supplies the two real effects it needs on the self-hosting daemon:
+ * measure archive pressure without opening an archive, then run exactly the existing bounded
+ * compaction command when that decision fires.
+ *
+ * The original implementation stopped at `DaemonDeps`' optional properties. That made its unit
+ * tests pass with injected functions while the real daemon supplied neither property, so the
+ * pressure guard had no effect on the fleet. Keep this construction beside the other daemon-hook
+ * producers and test it through `daemonCommand`, not by source grep alone.
+ */
+export const DAEMON_LEDGER_COMPACT_OLDER_THAN_DAYS = 1;
+
+export function buildLedgerCompactionDaemonHooks(deps: {
+  config?: Config;
+  clock?: Clock;
+  check?: () => LedgerCompactionDecision;
+  run?: () => Promise<LedgerCompactionOutcome | undefined>;
+  compact?: (rest: string[], deps: LedgerCompactCommandDeps) => number;
+} = {}): {
+  checkLedgerCompaction: () => LedgerCompactionDecision;
+  runLedgerCompaction: () => Promise<LedgerCompactionOutcome | undefined>;
+} {
+  const configFor = () => deps.config ?? loadConfig();
+  const stateDirFor = () => dirname(ledgerPathFor(configFor()));
+  const clock = deps.clock ?? systemClock;
+  const check =
+    deps.check ??
+    (() => {
+      const config = configFor();
+      const ledgerPath = ledgerPathFor(config);
+      const stateDir = dirname(ledgerPath);
+      const pressure = readLedgerCorpusPressure(stateDir, {
+        readdir: readdirSync,
+        sizeOf: (path) => statSync(path).size,
+      });
+      const lastFiredAtMs = lastLedgerCompactionFiredAtMs(readLedgerRawLines(ledgerPath));
+      return decideLedgerCompaction(pressure, lastFiredAtMs, clock.now());
+    });
+  const run =
+    deps.run ??
+    (async () => {
+      let report: string | undefined;
+      const errors: string[] = [];
+      const code = (deps.compact ?? ledgerCompactCommand)(["--older-than", String(DAEMON_LEDGER_COMPACT_OLDER_THAN_DAYS)], {
+        stateDir: stateDirFor(),
+        out: (line) => {
+          report = line;
+        },
+        error: (line) => errors.push(line),
+      });
+      if (code !== 0) {
+        throw new Error(errors.join("\n") || `rmd ledger-compact exited ${code}`);
+      }
+      if (report === undefined) {
+        throw new Error("rmd ledger-compact exited 0 without its required outcome report");
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(report);
+      } catch {
+        throw new Error("rmd ledger-compact emitted an unreadable outcome report");
+      }
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        !Number.isSafeInteger((parsed as { sourceCount?: unknown }).sourceCount) ||
+        !Number.isSafeInteger((parsed as { rowsWritten?: unknown }).rowsWritten) ||
+        !Number.isSafeInteger((parsed as { duplicatesCollapsed?: unknown }).duplicatesCollapsed) ||
+        typeof (parsed as { archiveName?: unknown }).archiveName !== "string"
+      ) {
+        throw new Error("rmd ledger-compact emitted an invalid outcome report");
+      }
+      const result = parsed as {
+        sourceCount: number;
+        rowsWritten: number;
+        duplicatesCollapsed: number;
+        archiveName: string;
+      };
+      if (result.sourceCount === 0) return undefined;
+      return {
+        sourceCount: result.sourceCount,
+        rowsWritten: result.rowsWritten,
+        duplicatesCollapsed: result.duplicatesCollapsed,
+        archiveName: result.archiveName,
+      };
+    });
+  return { checkLedgerCompaction: check, runLedgerCompaction: run };
+}
+
+/** The live ledger is bounded independently of its rotations, so this reads the recent fire
+ * marker without reopening the archive union that the compaction rung exists to protect. */
+export function lastLedgerCompactionFiredAtMs(lines: readonly string[]): number | undefined {
+  let latest: number | undefined;
+  for (const line of lines) {
+    if (!line.includes('"step":"ledger_compaction.fired"')) continue;
+    try {
+      const row = JSON.parse(line) as { step?: unknown; ts?: unknown };
+      if (row.step !== "ledger_compaction.fired" || typeof row.ts !== "string") continue;
+      const at = Date.parse(row.ts);
+      if (Number.isFinite(at) && (latest === undefined || at > latest)) latest = at;
+    } catch {
+      // A torn live-ledger line carries no safe throttle marker. The daemon's append boundary
+      // already treats it as absent for other local decision readers too.
+      continue;
+    }
+  }
+  return latest;
+}
+
 export function buildRetroDaemonHooks(deps: {
   check?: () => RetroTriggerDecision | undefined;
   runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
@@ -26770,6 +26886,10 @@ export async function daemonCommand(
   // undefined and the whole rung is dead code, exactly how #1066 merged auto-triage's consumer
   // with no producer.
   const digestCadenceHooks = target.isSelf ? buildDigestCadenceDaemonHooks({ config }) : undefined;
+  // W1-T3368: the compaction loop is self-target only for the same root-bound reason as every
+  // cadence beside it. Its state directory is this daemon's own `config.root/state`; wiring it
+  // for a drained repository would compact the fleet ledger while evaluating somebody else's plan.
+  const ledgerCompactionHooks = target.isSelf ? buildLedgerCompactionDaemonHooks({ config }) : undefined;
   // W1-T2923: one policy-gated cadence over the repository-intake rungs that used to require
   // hand-run verbs. SELF-TARGET ONLY: every runner writes this harness checkout/state.
   const intakeRungHooks = target.isSelf ? buildIntakeRungsDaemonHooks({ config }) : undefined;
@@ -27067,6 +27187,12 @@ export async function daemonCommand(
         // and writes nothing (Law 5), so it is safe to run unattended from the start.
         checkDigestCadence: digestCadenceHooks?.checkDigestCadence,
         runDigestCadence: digestCadenceHooks?.runDigestCadence,
+        // W1-T3368: this is the production edge the original feature omitted. `daemon.ts`
+        // deliberately owns its decision rows and invokes one bounded pass; this composition root
+        // owns filesystem pressure and the existing compactor. Leaving either undefined turns an
+        // over-bound corpus into a silent no-op until a union read OOMs the fleet.
+        checkLedgerCompaction: ledgerCompactionHooks?.checkLedgerCompaction,
+        runLedgerCompaction: ledgerCompactionHooks?.runLedgerCompaction,
         checkIntakeRungs: intakeRungHooks?.checkIntakeRungs,
         runIntakeRung: intakeRungHooks?.runIntakeRung,
         // BOARD-REVIEW RUNG (W1-T2304's design, wired here). Same shape as the two cadences

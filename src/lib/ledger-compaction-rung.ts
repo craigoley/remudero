@@ -70,6 +70,10 @@ export const DEFAULT_LEDGER_COMPACTION_TRIGGER: LedgerCompactionTrigger = {
 
 export interface LedgerCompactionDecision {
   fire: boolean;
+  /** True whenever the corpus exceeds either safety bound, including while the bounded compactor
+   * is cooling down. Consumers that would materialize the full union must defer on this signal;
+   * `fire` alone means only that THIS tick may run one bounded compaction window. */
+  overBound: boolean;
   /** Why, in the words the ledger line will carry. ALWAYS populated — a decision with no reason is
    *  the self-contradictory ledger row this repo has already been bitten by. */
   reason: string;
@@ -93,6 +97,7 @@ export function decideLedgerCompaction(
   if (!overCount && !overBytes) {
     return {
       fire: false,
+      overBound: false,
       reason:
         `corpus under bound — ${pressure.archiveCount} archive(s) (max ${trigger.maxArchives}), ` +
         `${pressure.archiveBytes} bytes on disk (max ${trigger.maxArchiveBytes})`,
@@ -114,6 +119,7 @@ export function decideLedgerCompaction(
     if (sinceMs < trigger.minIntervalMs) {
       return {
         fire: false,
+        overBound: true,
         reason:
           `over bound (${over}) but throttled — last compaction ${Math.max(0, Math.floor(sinceMs / 1000))}s ago, ` +
           `interval ${Math.floor(trigger.minIntervalMs / 1000)}s`,
@@ -121,7 +127,7 @@ export function decideLedgerCompaction(
     }
   }
 
-  return { fire: true, reason: `over bound — ${over}` };
+  return { fire: true, overBound: true, reason: `over bound — ${over}` };
 }
 
 /** What one bounded pass did, as the ledger should record it. */

@@ -4,7 +4,8 @@
  * `compactRotations` owns row-set preservation. This module owns the filesystem boundary the
  * compactor deliberately leaves to its caller: select a small oldest-first window, read plain or
  * gzip rotations, stage the replacement atomically, and remove sources only after that write.
- * It is a CLI leaf, never a daemon or rotation-path dependency.
+ * It is the bounded archive executor shared by the CLI and the daemon compaction rung; it is
+ * never a rotation-path dependency.
  */
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
