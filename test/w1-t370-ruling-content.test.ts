@@ -31,6 +31,7 @@ import test from "node:test";
 import {
   refusedRulingProposalId,
   rulingIsWellFormed,
+  rulingRecordContent,
   rulingRecordRelPath,
   type AgentRuling,
 } from "../src/lib/ruling-judge.js";
@@ -41,6 +42,8 @@ const TASK_ID = "W1-T370";
 /** `ruleCommand`'s own default when `--run` is omitted (`RULE-<taskId>`) — asserted against
  *  directly below, so this constant cannot silently drift from the real CLI's behavior. */
 const RUN_ID = "RULE-W1-T370";
+const RECORD_VERDICT = { decision: "record" as const, reason: "narrow, evidenced, reversible spend recommendation" };
+const RECORDED_RULING_TS = "2026-09-13T00:00:00.000Z";
 
 /**
  * THE RULING ITSELF. Recommends ATTRITION (W1-T370 option (a)): fix a row's proof only as part
@@ -86,6 +89,10 @@ const CLI_ARGS: string[] = [
   "--rollback", RULING.rollback,
 ];
 
+function expectedRecordedRuling(): string {
+  return rulingRecordContent(RULING, RECORD_VERDICT, RECORDED_RULING_TS);
+}
+
 // ── Criterion 1: the fixture is well formed, recommends ATTRITION, and cites its evidence ──────
 
 test("W1-T3392: the W1-T370 ruling fixture is well-formed, recommends ATTRITION, and declares no supersedes", () => {
@@ -125,9 +132,12 @@ test("W1-T3392: `rmd rule`'s own CLI parsing reproduces the authored fixture exa
   assert.deepEqual(captured, RULING, "the CLI's own parsing must not drift from the authored fixture");
 });
 
-// ── Criterion 2: routed through both injected judge arms ───────────────────────────────────────
+test("W1-T3392: the committed W1-T370 plan/decisions.d ruling matches the record arm's rendered output", () => {
+  const committed = readFileSync(join(process.cwd(), rulingRecordRelPath(TASK_ID, RUN_ID)), "utf8");
+  assert.equal(committed, expectedRecordedRuling());
+});
 
-const RECORD_VERDICT = { decision: "record" as const, reason: "narrow, evidenced, reversible spend recommendation" };
+// ── Criterion 2: routed through both injected judge arms ───────────────────────────────────────
 
 /** A `routeRuling` harness whose every outward effect is captured rather than performed — the
  *  same shape `an-agent-records-a-ruling-behind-a-judge.test.ts` uses for W1-T3212 generically. */
@@ -141,7 +151,7 @@ function harness(overrides: Partial<RouteRulingDeps> = {}) {
     land: (relPath, content) => void landed.set(relPath, content),
     stageProposal: (p) => void staged.push({ id: p.id, summary: p.summary }),
     appendRow: (row) => void rows.push(row),
-    clock: fixedClock(Date.parse("2026-09-13T00:00:00.000Z")),
+    clock: fixedClock(Date.parse(RECORDED_RULING_TS)),
     ...overrides,
   };
   return { deps, landed, staged, rows };
@@ -156,6 +166,7 @@ test("W1-T3392: the judge's record arm lands the W1-T370 ruling under plan/decis
   assert.deepEqual([...h.landed.keys()], [rulingRecordRelPath(TASK_ID, RUN_ID)]);
 
   const body = h.landed.get(rulingRecordRelPath(TASK_ID, RUN_ID))!;
+  assert.equal(body, expectedRecordedRuling(), "the route arm emits the exact committed ruling shard");
   assert.match(body, /ATTRITION/);
   assert.match(body, /391/);
   assert.match(body, /440/);
