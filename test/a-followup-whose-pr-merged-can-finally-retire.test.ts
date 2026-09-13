@@ -28,10 +28,7 @@ import {
 } from "../src/lib/retro.js";
 import type { Proposal } from "../src/lib/inbox.js";
 import { mergedPullRequestNumbers } from "../src/run-task.js";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { gitRepo } from "./helpers/git-repo.js";
 
 function fakeRegistry(initial: Proposal[] = []) {
   let state: Proposal[] = initial;
@@ -112,32 +109,27 @@ test("W1-T3524: a mixed registry retires exactly the settled rows and leaves the
 // ── the merged-PR set itself, against a REAL git repo built for the purpose ────────────────────
 
 test("W1-T3524: mergedPullRequestNumbers reads squash subjects, and only the trailing (#n)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-mergedpr-"));
-  const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, encoding: "utf8" });
+  const repo = gitRepo({ kind: "mergedpr", seedCommit: false });
   try {
-    git("init", "-q", "-b", "main");
-    git("config", "user.email", "t@t");
-    git("config", "user.name", "t");
-    git("commit", "-q", "--allow-empty", "-m", "feat: landed one (#101)");
-    git("commit", "-q", "--allow-empty", "-m", "fix: landed two (#102)");
+    repo.git("commit", "-q", "--allow-empty", "-m", "feat: landed one (#101)");
+    repo.git("commit", "-q", "--allow-empty", "-m", "fix: landed two (#102)");
     // A number that is NOT a trailing squash marker must not be harvested: this is the whole
     // reason the pattern is anchored to end-of-subject rather than matched anywhere.
-    git("commit", "-q", "--allow-empty", "-m", "chore: mentions (#999) mid-subject, not a merge");
-    git("commit", "-q", "--allow-empty", "-m", "docs: no marker at all");
-    const merged = mergedPullRequestNumbers(dir, "main");
+    repo.git("commit", "-q", "--allow-empty", "-m", "chore: mentions (#999) mid-subject, not a merge");
+    repo.git("commit", "-q", "--allow-empty", "-m", "docs: no marker at all");
+    const merged = mergedPullRequestNumbers(repo.dir, "main");
     assert.deepEqual([...merged].sort((a, b) => a - b), [101, 102]);
     assert.ok(!merged.has(999), "a mid-subject reference is not a merge marker");
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    repo.cleanup();
   }
 });
 
 test("W1-T3524: an unreadable base ref FAILS CLOSED to an empty set, never a throw", () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-mergedpr-empty-"));
+  const repo = gitRepo({ kind: "mergedpr-empty", seedCommit: false });
   try {
-    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
     // No commits and no such ref: the pass cannot observe merge state, so it must retire NOTHING.
-    const merged = mergedPullRequestNumbers(dir, "origin/does-not-exist");
+    const merged = mergedPullRequestNumbers(repo.dir, "origin/does-not-exist");
     assert.equal(merged.size, 0);
     const reg = fakeRegistry([PR_MERGED]);
     const out = retireSettledFollowups(
@@ -147,6 +139,6 @@ test("W1-T3524: an unreadable base ref FAILS CLOSED to an empty set, never a thr
     assert.deepEqual(out, [], "an empty set from an unreadable ref must not read as 'nothing merged, retire freely'");
     assert.deepEqual(reg.state(), [PR_MERGED]);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    repo.cleanup();
   }
 });
