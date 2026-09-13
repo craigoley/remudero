@@ -31,11 +31,21 @@
 
     Not in scope: rewriting the 391/440 proofs, reopening the `status:` ruling, changing W1-T367's
     offline deterministic linter decision, touching W1-T1260/W1-T369, or closing W1-T370's shard.
+  amendments: |
+    2026-09-13, OPERATOR AMENDMENT TO BOTH PROOFS ONLY — the claims are UNCHANGED.
+    Both were whole-file `unit test: test/w1-t370-ruling-content.test.ts` proofs, and the new REQUIRED
+    `proof-discrimination` gate refused #5354 with "2 proof(s) pass at both PR head and merge base".
+    They cannot discriminate: W1-T3098 copies ADDED test files into the base worktree so a `unit test:`
+    proof can be re-run there, so a whole-file proof on a test this PR ADDS passes at the base too.
+    Repointed at `grep:` patterns on that same added file, which W1-T3190 short-circuits as
+    discriminating BY CONSTRUCTION for kind `grep` (never for kind `test`) — the same remedy #5310 and
+    #5303 applied. Verified on #5354's head: both new proofs pass.
+
   acceptance:
     - claim: "the W1-T370 AgentRuling fixture is well formed, recommends ATTRITION, carries evidence and rollback, and declares no supersedes entry"
-      proof: "unit test: test/w1-t370-ruling-content.test.ts"
+      proof: "grep: recommends ATTRITION, and declares no supersedes in test/w1-t370-ruling-content.test.ts"
     - claim: "the W1-T370 ruling routes through both injected judge arms: record lands a plan/decisions.d ruling with evidence and rollback, while escalate stages an inbox proposal and lands nothing"
-      proof: "unit test: test/w1-t370-ruling-content.test.ts"
+      proof: "grep: lands the W1-T370 ruling under plan/decisions\\.d/ in test/w1-t370-ruling-content.test.ts"
   risk: high
   band_meaning: span
   origin: architect

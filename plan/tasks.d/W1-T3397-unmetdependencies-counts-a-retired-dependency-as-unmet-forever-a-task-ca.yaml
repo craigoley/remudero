@@ -67,7 +67,20 @@
     - claim: "assertRunnable no longer throws for a task whose ONLY unmet dependency carries a retirement value, while it still throws when a non-retired dependency remains unmerged"
       proof: "unit test: test/plan.test.ts"
     - claim: "a retired dependency is never counted as merged elsewhere — MERGED_STATUSES is unchanged and isMerged(d) is never called with a fabricated true for a retired d"
-      proof: "grep: MERGED_STATUSES in src/lib/plan.ts"
+      proof: "grep: retirement !== undefined) return false; in src/lib/plan.ts"
+  amendments: |
+    2026-09-13, OPERATOR AMENDMENT TO PROOFS ONLY — the claims are UNCHANGED.
+    The new REQUIRED `proof-discrimination` gate refused #5357 with "4 proof(s) pass at both PR head
+    and merge base": three whole-file `unit test: test/plan.test.ts` proofs and a
+    `grep: MERGED_STATUSES in src/lib/plan.ts`. Both shapes name things that already exist at the
+    merge base, so neither can establish what this PR changed.
+    The grep is repointed at the line the change actually adds. MEASURED on #5357's head: it passes,
+    and reads 0 against the real base blob of src/lib/plan.ts (38,743 bytes, not an empty read).
+    The three whole-file unit-test proofs are LEFT AS THEY ARE and this amendment does not pretend to
+    fix them: test/plan.test.ts is a large pre-existing suite, and choosing per-criterion titles from
+    it is a judgement about which assertion answers which claim that belongs with the build, not with
+    a proof repair. See the note filed about the 309-task population this gate now refuses.
+
   falsifier: |
     CLOSE WITHOUT IMPLEMENTATION IF `unmetDependencies` already excludes retirement-carrying
     dependencies — grep the function body for `retirement`. MEASURED 2026-09-09, this session,
