@@ -1,0 +1,21 @@
+id: fb-1789315360491-ff460c
+ts: 2026-09-13T16:02:40.491Z
+raw: "Azure runtime evidence: rmd inbox and rmd triage cut worktrees at
+  origin/main 229cecb but symlink node_modules from
+  /home/node/Remudero/repos/remudero, which reports 66 commits behind and a
+  package.json/package-lock hash mismatch. Make canonical checkout provisioning
+  and self-sync update the exact node_modules source before workers run; fail
+  closed or repair through the established lifecycle rather than proceeding with
+  a mismatched dependency tree. Add a regression that proves a stale canonical
+  root cannot silently supply dependencies to a fresh worktree, plus an
+  acceptance check that deployed core and site instances each identify their own
+  synchronized canonical root."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
