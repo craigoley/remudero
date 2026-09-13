@@ -21867,6 +21867,42 @@ export interface ProofDebtCadenceInputDeps {
  * (`buildMeasurementCadenceDaemonHooks`'s `run`, below) only runs on a tick that already decided
  * `fire: true` — so a tick that does not fire never reaches this function at all (design (iv)).
  */
+/**
+ * Every MERGED pull request number, read from `origin/main`'s own subject lines (W1-T3524).
+ *
+ * NO API CALLS, DELIBERATELY. This repo squash-merges, so every landed PR leaves exactly one
+ * commit on main whose subject ends `(#<n>)` — one local `git log` yields the whole set (4,161 on
+ * 2026-09-13) where asking GitHub would be one request per distinct referent. That matters here:
+ * the follow-up registry names 43 distinct PRs, and a per-pass burst of 43 reads is precisely the
+ * request RATE GitHub's secondary limit counts.
+ *
+ * VALIDATED AGAINST THE API on a 12-PR sample: the 11 the API reports merged are all present, and
+ * the one it reports closed-unmerged is absent. A PR closed without merging never lands a commit,
+ * so the set cannot contain one by construction.
+ *
+ * FAILS CLOSED: any git failure returns an EMPTY set, which retires nothing — never a throw, and
+ * never a set that could be mistaken for "measured and empty" by a caller that retires on absence.
+ */
+export function mergedPullRequestNumbers(repoRoot: string, baseRef = "origin/main"): ReadonlySet<number> {
+  try {
+    const out = execFileSync("git", ["log", baseRef, "--pretty=%s"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      maxBuffer: 1 << 26,
+    });
+    const numbers = new Set<number>();
+    for (const line of out.split("\n")) {
+      const n = /\(#(\d+)\)\s*$/.exec(line)?.[1];
+      if (n !== undefined) numbers.add(Number(n));
+    }
+    return numbers;
+  } catch {
+    // A shallow checkout, an absent base ref, or an unreadable object store — all of which mean
+    // "this pass cannot observe merge state", which must retire NOTHING (W1-T130's direction).
+    return new Set();
+  }
+}
+
 export function defaultProofDebtCadenceInput(
   repoRoot: string,
   deps: ProofDebtCadenceInputDeps = {},
@@ -23469,6 +23505,7 @@ async function retroCommand(
       followupReferentRead = {
         kind: "ok",
         merged: new Set([...planHealthProjection].filter(([, v]) => v.merged).map(([id]) => id)),
+        mergedPrs: mergedPullRequestNumbers(repoRoot),
       };
       isTaskMerged = (task) => planHealthProjection.get(task.id)?.merged ?? false;
       planStateResolver = (taskId) => {
