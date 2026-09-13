@@ -50,7 +50,7 @@ export interface BodyCriterion {
  * human, never silently dropped.
  */
 export interface BodyDefect {
-  kind: "no-trailer" | "wrapped-proof" | "inert-proof" | "em-dash-separator";
+  kind: "no-trailer" | "wrapped-proof" | "inert-proof" | "em-dash-separator" | "exec-error";
   /** 1-based criterion index, when the defect belongs to one. */
   criterion?: number;
   /** What an operator (or a later writer) should do — derived, never invented. */
@@ -122,9 +122,16 @@ export function emDashSeparatedProof(claim: string): { claim: string; proof: str
   return undefined;
 }
 
+/**
+ * A `grep:` proof's declared pattern and path — shared by {@link unwrapGrepPattern} (which only
+ * ever fires for a WRAPPED pattern) and {@link diagnoseUnrunnableProofs} (which must also catch a
+ * proof that never had an `in <path>` clause at all).
+ */
+const GREP_PROOF_RE = /^\s*grep:\s*(.+?)\s+in\s+(\S+)\s*$/;
+
 /** A `grep:` proof's pattern wholly enclosed in a matching delimiter pair, and its bare form. */
 export function unwrapGrepPattern(proof: string): { wrapped: string; bare: string } | undefined {
-  const m = /^\s*grep:\s*(.+?)\s+in\s+(\S+)\s*$/.exec(proof ?? "");
+  const m = GREP_PROOF_RE.exec(proof ?? "");
   if (!m) return undefined;
   const pattern = m[1].trim();
   for (const d of ["`", '"', "'"]) {
@@ -225,6 +232,86 @@ export function diagnoseBodyDefects(
   });
 
   return out;
+}
+
+/**
+ * W1-T3389 — THE ASYMMETRY, CLOSED. `execProof` (above) already argues that the fix rung, running
+ * in a worktree, can simply RUN a proof to settle an ambiguity rather than guess — applied so far
+ * only to DIAGNOSING somebody else's body. This applies the identical reasoning to the rung's OWN
+ * output: given the exact criteria a repair is about to push, does every `grep:` proof among them
+ * actually parse and execute?
+ *
+ * MEASURED on PR 5108: a repaired body carried four `grep:`/`unit test:` criteria and every one
+ * graded `exec_error` at review. One read `grep: unit test: test/...` — a SECOND dialect's text
+ * wearing the FIRST dialect's prefix, so it never had an `in <path>` clause at all. That shape is
+ * caught here with NO executor required, because it is a pure parse failure, not an ambiguity that
+ * needs settling — `rmd check-proof` would refuse it in one call, and this settles the same
+ * question before push rather than after a wasted review cycle.
+ *
+ * A proof that DOES parse is then actually RUN when `deps.execProof` is supplied; a run that
+ * reports `undefined` (a timeout, a spawn failure, a `grep` exit 2 — the reviewer's OWN `exec_error`
+ * causes) is a defect too. A run that executes and reads ZERO hits is NOT a defect here — it ran
+ * cleanly and genuinely failed to prove the claim, which is a different, pre-existing verdict
+ * (`not_yet_built`/fail) that this gate does not police.
+ *
+ * A `unit test:` proof has no runner in this module (mirrors {@link BodyRepairDeps.execProof}'s own
+ * scope, which documents itself as `grep:`-only) and is left UNDIAGNOSED — silence, the same
+ * default every other arm of this module keeps, never a guess dressed up as a verdict.
+ *
+ * `repair` is always `undefined`: this module cannot know what proof the author MEANT, and
+ * inventing one would be exactly the claim-authoring {@link refusesToAuthorAClaim} exists to
+ * refuse. A defect here must be reported to a human via {@link renderBodyDefects}, never silently
+ * dropped or silently replaced.
+ */
+export function diagnoseUnrunnableProofs(
+  criteria: readonly BodyCriterion[],
+  deps: Pick<BodyRepairDeps, "execProof"> = {},
+): BodyDefect[] {
+  const out: BodyDefect[] = [];
+  criteria.forEach((c, i) => {
+    const proof = (c.proof ?? "").trim();
+    if (!/^grep:/i.test(proof)) return; // no runner here for unit test:/other dialects — silence
+
+    if (GREP_PROOF_RE.exec(proof) === null) {
+      out.push({
+        kind: "exec-error",
+        criterion: i + 1,
+        why:
+          "the proof declares the grep: dialect but carries no `in <path>` clause, so it can never " +
+          "parse or execute — this is the exact shape a proof takes when a second dialect's text " +
+          "(e.g. `unit test: test/...`) is wrongly prefixed with `grep:`, and rmd check-proof " +
+          "refuses it in one call; a body carrying it must never be pushed unverified",
+      });
+      return;
+    }
+
+    if (deps.execProof === undefined) return; // cannot settle real execution without a runner
+
+    if (deps.execProof(proof) === undefined) {
+      out.push({
+        kind: "exec-error",
+        criterion: i + 1,
+        why:
+          "the proof parses but raised exec_error when actually run (a timeout, a spawn failure, " +
+          "or a grep exit 2) — a proof that cannot execute must never be pushed as though it were a " +
+          "working replacement for whatever it is repairing",
+      });
+    }
+  });
+  return out;
+}
+
+/**
+ * W1-T3389 — THE REFUSAL ITSELF. `false` the instant one authored proof cannot be substantiated
+ * ({@link diagnoseUnrunnableProofs}); a caller must then refuse to push the repaired body and
+ * report the failing proofs to a human via {@link renderBodyDefects}, never emit the defective body
+ * as though it were a working replacement for whatever it is repairing.
+ */
+export function repairedProofsAreSafeToPush(
+  criteria: readonly BodyCriterion[],
+  deps: Pick<BodyRepairDeps, "execProof"> = {},
+): boolean {
+  return diagnoseUnrunnableProofs(criteria, deps).length === 0;
 }
 
 /**
