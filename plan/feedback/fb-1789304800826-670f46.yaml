@@ -18,10 +18,11 @@ raw: "Operator decision confirmed: implement the cross-repository proof-suite
   observed remudero-review=SUCCESS without changing PORTAL-T1 acceptance text."
 attachments: []
 origin: ui
-status: new
+status: proposed
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: proof-suite-profile-registry-20260913
 thread_id: null
+answered_by: null
