@@ -1892,6 +1892,22 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     mirrored: false,
     reason: "observes deployed heartbeat branches and daemon state, neither of which a local pre-push checkout may stand in for",
   },
+  // W1-T3519: the gate-monotonic gate, MIRRORED — it is a pure, deterministic repository check
+  // (read ci-gate.yml at the base, read it at head, compare the REQUIRED sets), so a local run is
+  // honest and cheap. Written in the EXPLICIT object form rather than through standaloneNpmScriptEntry
+  // for the same reason as baseline-monotonic directly above: Standing rule 25's introducing-commit
+  // carve-out keys on an ADDED line carrying `job: "<name>"` beside the added workflow, and THIS PR
+  // adds both.
+  {
+    workflow: "gate-monotonic.yml",
+    job: "gate-monotonic",
+    mirrored: true,
+    run: (repoRoot, spawn) => [
+      runStep("gate-monotonic", () =>
+        shellOut(spawn, "node scripts/gate-monotonic-check.mjs", process.execPath, [join(repoRoot, "scripts", "gate-monotonic-check.mjs")], { cwd: repoRoot }),
+      ),
+    ],
+  },
   {
     workflow: "head-identity-gate.yml",
     job: "head-identity-gate",

@@ -1,0 +1,38 @@
+name: gate-monotonic
+
+# GATE-MONOTONIC gate (W1-T3519). The instrument census
+# (test/every-pr-check-is-required-or-advisory.test.ts) refuses a job in NEITHER of ci-gate.yml's
+# REQUIRED/ADVISORY lists, and its own falsifier covers a name DELETED from REQUIRED. A name MOVED
+# between the two still satisfies "in exactly one list", so it passes — measured 2026-09-13, moving
+# `head-identity-gate` from REQUIRED to ADVISORY passed that suite 9/9 while silently stopping a
+# required merge gate from blocking. This compares the REQUIRED SET against the base and refuses a
+# demotion carrying no fresh `GATE_RATIONALE`, the same self-service escape hatch (and the same
+# staleness rule) baseline-monotonic-check.mjs uses for a score floor.
+# FALSIFIER: test/a-required-gate-can-be-demoted-in-silence.test.ts.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate-monotonic:
+    name: gate-monotonic
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # It reads `origin/main:.github/workflows/ci-gate.yml`, so that ref must resolve — the
+          # same reason baseline-monotonic carries this, and the same refusal direction if it does
+          # not: an unreadable base exits 2 (could not measure), never 0.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Gate-monotonic check (no REQUIRED context is demoted against the base without a reviewed GATE_RATIONALE)
+        run: node scripts/gate-monotonic-check.mjs --base-ref "origin/${{ github.event.pull_request.base.ref }}"

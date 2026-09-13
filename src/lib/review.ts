@@ -5966,6 +5966,7 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   "^scripts/diff-class\\.mjs$",
   "^scripts/expiring-fixture-census\\.mjs$",
   "^scripts/baseline-monotonic-check\\.mjs$", // W1-T2906: refuses a baseline-score regression against origin/main
+  "^scripts/gate-monotonic-check\\.mjs$", // W1-T3519: refuses a REQUIRED gate demoted against origin/main
   // W1-T2764: the ledger-step ratchet's rule logic, behind the required `ledger-steps` ci.yml job —
   // the same shape as the task-id-existence and assertion-discrimination entries above. Before that
   // job existed `unwired-gate:check` refused it as "a gate-shaped instrument that nothing invokes";

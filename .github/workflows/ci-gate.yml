@@ -112,9 +112,13 @@ jobs:
       # (4 of 4 observed). Blocking twice on one predicate is what made it worth demoting. Removing
       # the job outright also touches src/lib/ci-parity.ts and src/lib/gate-posture.ts, which Rule 25
       # refuses in one changeset with a workflow — so that is a separate, sequenced pair of PRs.
+      # W1-T3519: `gate-monotonic` starts ADVISORY per this block's own rule that a name joins
+      # REQUIRED "once it is live on main". It refuses a REQUIRED context demoted with no reviewed
+      # GATE_RATIONALE; promoting it is a one-line follow-up after it has run clean on main.
       ADVISORY: >-
         [
         "squash-trailer-gate",
+        "gate-monotonic",
         "dashboard",
         "flake-retry-aggregate",
         "ci-shard (1/4)",

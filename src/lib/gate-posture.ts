@@ -469,6 +469,7 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "script:scripts/assertion-discrimination-check.mjs": repair(true, "assertion drift is repaired in tests or claims"),
   "script:scripts/baseline-monotonic-check.mjs": repair(true, "baseline regressions are computable ledger edits"),
   "script:scripts/claims-check.mjs": repair(true, "claim failures name the claim or proof to repair"),
+  "script:scripts/gate-monotonic-check.mjs": repair(true, "an unreviewed gate demotion names its own remedy: a GATE_RATIONALE line"),
   "script:scripts/coverage-session-blanking-check.mjs": repair(true, "workflow blanking has a mechanical workflow repair"),
   "script:scripts/learnings-assert-check.mjs": repair(true, "learning assertion drift is a computable source/data repair"),
   "script:scripts/mkdtemp-callsite-check.mjs": repair(true, "mkdtemp callsites either move to the helper or declare an allowance"),
