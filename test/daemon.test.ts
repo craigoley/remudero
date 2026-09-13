@@ -3631,6 +3631,30 @@ test("a settled full sweep is not held hostage by an in-flight light pass during
   await daemon;
 });
 
+test("a rejected detached ticker is logged after shutdown instead of becoming an unhandled rejection", async () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const daemon = runDaemon(
+    fixturePlan(),
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => okResult(id),
+      sweep: async () => {},
+      sweepLight: async () => {},
+      sleep: async () => { throw new Error("in-flight ticker sleep failed"); },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1, pollIntervalMs: 1, sweepWallClockBoundMs: 100 },
+  );
+
+  await daemon;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const detachedFailure = lines.find((line) => line.step === "daemon.in_flight_ticker.failed");
+  assert.deepEqual(detachedFailure, {
+    step: "daemon.in_flight_ticker.failed",
+    extra: { phase: "sweep", error: "in-flight ticker sleep failed" },
+  });
+});
+
 test("W1-T2584: the daemon sweep bound closes the continuation gate handed to the still-settling sweep", async () => {
   const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let continuation: (() => boolean) | undefined;
