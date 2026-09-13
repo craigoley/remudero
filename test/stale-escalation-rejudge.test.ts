@@ -174,6 +174,42 @@ test("a deliver verdict leaves the issue open and needs-human — demote is neve
   assert.equal(summary.results[0]!.decision, "deliver");
 });
 
+test("a failed demote leaves that issue needs-human and does not strand the next re-judge", async () => {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const { deps, demotes } = freshDeps({
+    judge: stubJudge({ decision: "demote", reason: "the sibling escalation already owns this condition" }),
+    demote: (url, reason) => {
+      if (url.endsWith("/4541")) throw new Error("GitHub relabel refused");
+      demotes.push({ url, reason });
+    },
+    log: (step, extra) => logs.push({ step, extra }),
+  });
+  const failed = candidateOf({ ageMs: STALE_ESCALATION_REJUDGE_DWELL_MS + HOUR });
+  const next = candidateOf({
+    issueUrl: "https://github.com/craigoley/remudero/issues/4568",
+    issueNumber: 4568,
+    stateKey: "pr-4533:open:siblings=1",
+    ageMs: STALE_ESCALATION_REJUDGE_DWELL_MS + HOUR,
+  });
+
+  const summary = await runStaleEscalationRejudge([failed, next], deps);
+
+  assert.equal(summary.rejudged, 2, "both eligible issues reached the judge");
+  assert.equal(summary.demoted, 1, "only the successful mutation counts as a demotion");
+  assert.equal(summary.results[0]!.outcome, "demote-failed");
+  assert.equal(summary.results[0]!.reason, "the sibling escalation already owns this condition");
+  assert.equal(summary.results[1]!.outcome, "demoted", "the next issue is not stranded by the first failure");
+  assert.deepEqual(demotes, [{ url: next.issueUrl, reason: "the sibling escalation already owns this condition" }]);
+  assert.deepEqual(logs[0], {
+    step: "sweep.escalation_rejudge_demote_failed",
+    extra: {
+      issue_url: failed.issueUrl,
+      task_id: failed.escalation.taskId,
+      error: "GitHub relabel refused",
+    },
+  });
+});
+
 test("the dependency surface this rung is given has no close/delete primitive at all — demote-only by construction", () => {
   // STRUCTURAL PROOF, not a behavioural probe: StaleEscalationRejudgeOptions declares exactly one
   // mutation (`demote`), and EscalationJudgeDecision itself is the closed "demote" | "deliver"
