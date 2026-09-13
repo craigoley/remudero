@@ -93,7 +93,7 @@ function draft(findingId = "ci-learning:4321:ci-gate"): CiLearningShardDraft {
     prs: [4321],
     repairFiles: ["src/lib/x.ts"],
     dominantRepairFiles: [{ file: "src/lib/x.ts", prs: 1 }],
-    action: "test",
+    action: "gate",
     author_class: "machine",
     verify: "human",
     remedySurface: "test",
