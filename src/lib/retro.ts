@@ -2041,7 +2041,12 @@ export interface PlanHealthReport {
  *
  *  "Already shipped" is decided by `isMerged`, NEVER by the yaml `status:` field. The
  *  {@link yamlMergedFallback} default exists only so this stays callable from a pure unit test.
- *  An unresolved read is safe to leave in scope: the worst case is one extra advisory proposal. */
+ *  An unresolved read is safe to leave in scope: the worst case is one extra advisory proposal.
+ *
+ *  A RETIRED task (any `retirement:` value) is also out of scope, and for the same "leave it
+ *  alone" reason `isMerged` already gets: W1-T3076's ratification (a) requires a retired shard to
+ *  leave every re-lint loop, this sweep included, so the operator's closed ruling never gets
+ *  re-flagged and re-proposed as a corrective task on every cycle (W1-T3399). */
 export function planHealthSweep(
   tasks: Task[],
   optsFor: (task: Task) => LintOpts = () => ({}),
@@ -2051,6 +2056,7 @@ export function planHealthSweep(
   const correctiveTasks: CorrectiveTaskProposal[] = [];
   for (const task of tasks) {
     if (isMerged(task)) continue; // out of scope — already shipped (derived; see doc above)
+    if (task.retirement !== undefined) continue; // out of scope — an operator's closed ruling
     const { violations } = lintTask(task, optsFor(task));
     const blocking = violations.filter((v) => v.severity === "block");
     if (blocking.length === 0) continue; // clean, or WARN-only — nothing to file
