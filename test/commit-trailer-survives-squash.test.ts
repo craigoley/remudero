@@ -151,7 +151,13 @@ test("W1-T1012: a plan filing run commits no task trailer", () => {
   // `appendTaskTrailerToCommit`'s path. Read straight from source: neither filing call site's
   // preceding region ever calls the trailer-append.
   const src = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
-  const filingCallSites = [...src.matchAll(/ghPrCreateFillCommand\(worktreePath,\s*owner,\s*repo,\s*branch,\s*commitMessage\.split\("\\n"\)\[0\]\)/g)];
+  // W1-T3489 widened this builder with an optional `bodyOverride`, so the plan-filing site now
+  // reads `..., commitMessage.split("\n")[0], planPrBody)`. The STRUCTURAL MARKER this test is
+  // about is the title argument — `commitMessage.split("\n")[0]` instead of
+  // `lastCommitSubject(worktreePath)` — not the argument count, so the optional trailing argument
+  // is tolerated. Tightening back to a bare `)` would silently drop a filing call site from the
+  // sweep and pass vacuously, which is the opposite of what acceptance 2 checks.
+  const filingCallSites = [...src.matchAll(/ghPrCreateFillCommand\(worktreePath,\s*owner,\s*repo,\s*branch,\s*commitMessage\.split\("\\n"\)\[0\](?:,\s*[A-Za-z_$][\w$]*)?\)/g)];
   assert.equal(filingCallSites.length, 2, "expected exactly the triage and plan filing PR-create call sites");
   for (const site of filingCallSites) {
     const before = src.slice(Math.max(0, (site.index ?? 0) - 600), site.index ?? 0);

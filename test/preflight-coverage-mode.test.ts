@@ -44,6 +44,10 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
     // names that sha rather than the moving ref. Below the map, so a test wanting a failed
     // resolve can still override it.
     if (file === "git" && args[0] === "rev-parse") return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
+    if (file === process.execPath && args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
+      const shard = args[args.indexOf("--shard") + 1]?.match(/^(\d+)\/4$/)?.[1];
+      return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
+    }
     return { status: 0, stdout: "", stderr: "" };
   };
   return { spawn, calls };
@@ -230,7 +234,7 @@ test("runPreflightCoverage: the suite run itself failing (e.g. a real test failu
     // invocation and STAYS in the `ci` job" — and this local run exists to MIRROR that job, so
     // keying the stub on the retry wrapper pinned a mechanism CI had already removed. The shard
     // invocation is what fails now; the short-circuit it must produce is unchanged.
-    "--test-shard=1/4": { status: 1, stderr: "1 test failed" },
+    "test/coverage-shard-1.test.ts": { status: 1, stderr: "1 test failed" },
   });
   const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
 
@@ -243,18 +247,25 @@ test("runPreflightCoverage: the suite run itself failing (e.g. a real test failu
   assert.equal(diffCoverageCalled, false);
 });
 
-test("runPreflightCoverage: the coverage run is invoked with --enable-source-maps, --test-coverage-exclude=test/**, and the FULL test/**/*.test.ts glob — same flags --ci-parity's coverage-ratchet job uses, never a scoped run", () => {
+test("runPreflightCoverage: the coverage runs retain source-map and test exclusions while every duration-balanced selector shard covers the complete manifest", () => {
   const { spawn, calls } = recordingSpawn({
     [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
   });
   runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
 
-  const coverageCall = calls.find((c) => c.args.includes("--experimental-test-coverage"));
-  assert.ok(coverageCall, "expected the coverage-run invocation");
-  assert.ok(coverageCall!.args.includes("--enable-source-maps"), "source maps must be enabled");
-  assert.ok(coverageCall!.args.includes("--test-coverage-exclude=test/**"), "test/** must stay excluded from the ratio");
-  assert.ok(coverageCall!.args.includes("test/**/*.test.ts"), "the FULL glob must be in scope — a scoped run cannot prove instrumentation honestly");
+  const coverageCalls = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
+  assert.equal(coverageCalls.length, 4, "expected one coverage invocation for each CI shard");
+  for (const coverageCall of coverageCalls) {
+    assert.ok(coverageCall.args.includes("--enable-source-maps"), "source maps must be enabled");
+    assert.ok(coverageCall.args.includes("--test-coverage-exclude=test/**"), "test/** must stay excluded from the ratio");
+    assert.equal(coverageCall.args.includes("test/**/*.test.ts"), false, "coverage must execute the duration-balanced manifest selection, not a glob mixed with a shard option");
+  }
+  const selectorShards = calls
+    .filter((c) => c.args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && c.args.includes("--select-all"))
+    .map((c) => c.args[c.args.indexOf("--shard") + 1])
+    .sort();
+  assert.deepEqual(selectorShards, ["1/4", "2/4", "3/4", "4/4"], "all selectors must partition the complete manifest");
 });
 
 test(

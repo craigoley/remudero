@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // scripts/diff-class.mjs — W1-T2428: classifies a diff as PLAN_ONLY, DOCS_ONLY, or SOURCE, so
 // `ci` and `coverage-ratchet` can skip suites that class cannot fail (no `src/**` or `test/**`
-// file moved). The class comes from `isInPlanScope` (src/lib/plan-architect.ts), the same
+// file moved). The class comes from `isInPlanScope` (src/lib/plan-scope.ts), the same
 // predicate the reviewer's sweep uses (W1-T205) — never a second scope-rule implementation.
 //
 // THREE CLASSES: PLAN_ONLY (every file in plan scope), DOCS_ONLY (every file in plan scope or
@@ -23,7 +23,9 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { isInPlanScope, outOfPlanScopeFiles } from "../src/lib/plan-architect.ts";
+// `plan-scope.ts` is the canonical predicate's dependency-free leaf. Node 22.22.3 can strip its
+// type annotations without `tsx`, so coverage-ratchet can classify before installing dependencies.
+import { isInPlanScope, outOfPlanScopeFiles } from "../src/lib/plan-scope.ts";
 import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
 
@@ -78,7 +80,7 @@ export function classify(files) {
     if (outOfPlan.length === 0) {
       return {
         class: CLASSES.PLAN_ONLY,
-        reason: `all ${files.length} changed file(s) are in plan scope per isInPlanScope (src/lib/plan-architect.ts)`,
+        reason: `all ${files.length} changed file(s) are in plan scope per isInPlanScope (src/lib/plan-scope.ts)`,
       };
     }
     const nonDocs = outOfPlan.filter((f) => !isDocsPath(f));

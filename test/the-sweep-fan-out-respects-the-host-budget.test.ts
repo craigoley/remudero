@@ -23,6 +23,11 @@ import {
 import { activeWorkerCount, withWorkerOccupancy } from "../src/lib/worker.js";
 
 const NOW = Date.parse("2026-09-05T20:00:00Z");
+const HOUR = 60 * 60 * 1000;
+
+function recentActivityIso(hoursAgo: number): string {
+  return new Date(NOW - hoursAgo * HOUR).toISOString();
+}
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-t2931-")), "ledger.ndjson");
@@ -46,7 +51,7 @@ function fixablePr(prNumber: number): OpenPrView {
     ],
     reviewSummary: "one criterion unmet",
     priorStrikes: 0,
-    lastActivityAt: "2026-09-05T19:00:00Z",
+    lastActivityAt: recentActivityIso(1),
     headSha: `fix-${prNumber}`,
     autoMergeArmed: false,
   };
@@ -61,7 +66,7 @@ function reviewablePr(prNumber: number): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-05T18:00:00Z",
+    lastActivityAt: recentActivityIso(2),
     headSha: `review-${prNumber}`,
     autoMergeArmed: false,
   };

@@ -652,6 +652,10 @@ export function decideAlertPoll(i: AlertPollInputs): AlertPollDecision {
   return { fire: true, reason: `last poll ${sinceMin.toFixed(1)}m ago — interval elapsed` };
 }
 
+export type ReviewAdmissionGate = (() => boolean) & {
+  workerAdmissionHold?: () => string | undefined;
+};
+
 export interface DaemonDeps {
   buildDispatchValueContext?: (plan: Plan, isMerged: MergedSet) => DispatchValueContext | undefined;
   /** W1-T3216 — the ledger's RAW lines, for {@link resolveReleasedIds}: a console KICK for an
@@ -813,6 +817,7 @@ export interface DaemonDeps {
    *  iterations only, after the current dispatch has resolved, so in-flight work always runs to full
    *  completion before a pause is honoured (W1-T11). */
   checkPause?: () => string | undefined;
+  workerAdmissionHold?: () => FleetControlHold | undefined;
   /** An optional check, consulted once per tick with the same between-iterations-only discipline as the
    *  operator holds, so it can never interrupt work already in flight. A stale result stops the loop with a
    *  deliberate non-zero exit and ledgers `daemon_selfrestart_for_freshness`, which is what a crash-loop
@@ -852,7 +857,7 @@ export interface DaemonDeps {
   /** The level-triggered PR-pipeline reconciler: the same entry point `rmd sweep` invokes, wired here so
    *  it runs once per poll iteration, re-deriving every open PR to a disposition and taking its gated
    *  action. Best-effort, and called alongside dispatch, never instead of it (W1-T77, ratifies P22). */
-  sweep?: (continueReviewAdmissions?: () => boolean) => Promise<void> | void;
+  sweep?: (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<void> | void;
   /** Run one security-alert poll. Best-effort by the same contract as the reconciler: a throw costs one logged tick.
    * Returns the poll's timestamp so the caller can persist the interval marker (W1-T462). */
   alertPoll?: () => Promise<string | undefined> | string | undefined;
@@ -965,6 +970,21 @@ export interface DaemonDeps {
    *  never an `instanceof` import, so this module stays decoupled from worker.ts. Content-keyed, so
    *  an already-open toolchain issue for the same cause suppresses a repeat (W1-T113 part iii). */
   onSpawnInfraBlocked?: (info: { task: Task; reason: string }) => void | Promise<void>;
+}
+
+export interface FleetControlHold {
+  control: "STOP" | "PAUSE";
+  detail: string;
+}
+
+export function resolveFleetControlHold(
+  deps: Pick<DaemonDeps, "checkStop" | "checkPause">,
+): FleetControlHold | undefined {
+  const stopped = deps.checkStop?.();
+  if (stopped !== undefined) return { control: "STOP", detail: stopped };
+  const paused = deps.checkPause?.();
+  if (paused !== undefined) return { control: "PAUSE", detail: paused };
+  return undefined;
 }
 
 function retroTriggerCrossingKey(decision: Extract<RetroTriggerDecision, { fire: true }>): string {
@@ -1342,8 +1362,16 @@ async function runGatedSweep(
   const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch, undefined, headroomSampler).stop;
   try {
     let reviewAdmissionsOpen = true;
-    const continueReviewAdmissions = (): boolean =>
-      reviewAdmissionsOpen && deps.checkStop?.() === undefined && deps.checkPause?.() === undefined;
+    const continueReviewAdmissions = (() =>
+      reviewAdmissionsOpen && deps.checkStop?.() === undefined && deps.checkPause?.() === undefined) as ReviewAdmissionGate;
+    const workerAdmissionHold = (): string | undefined => {
+      const hold = deps.workerAdmissionHold?.();
+      if (!hold) return undefined;
+      const reason = `fleet ${hold.control} hold: ${hold.detail}`;
+      log("daemon.admission_held", { surface: "full-sweep", control: hold.control, detail: hold.detail, reason });
+      return reason;
+    };
+    continueReviewAdmissions.workerAdmissionHold = workerAdmissionHold;
     const sweepPromise: Promise<void | undefined> = Promise.resolve().then(() => deps.sweep!(continueReviewAdmissions));
     // Cleared on settle, never on abandon. Attaching this to the pass promise itself, rather than to the
     // `finally` below, which runs when the await ends, is what keeps the flag true through the
@@ -2008,6 +2036,14 @@ export async function runDaemon(
 
   let activeRetroCrossingKey: string | undefined;
 
+  const holdWorkerAdmission = (surface: string): (FleetControlHold & { reason: string }) | undefined => {
+    const hold = deps.workerAdmissionHold?.();
+    if (!hold) return undefined;
+    const reason = `fleet ${hold.control} hold: ${hold.detail}`;
+    log("daemon.admission_held", { surface, control: hold.control, detail: hold.detail, reason });
+    return { ...hold, reason };
+  };
+
   for (;;) {
     // The liveness tick: the one row this loop writes unconditionally, every iteration, on every path below.
     // Every other daemon-prefixed step is either boot-time and one-shot, or confined to the three windows the
@@ -2287,15 +2323,15 @@ export async function runDaemon(
     // bounded pass on CORPUS PRESSURE; the incident and sizing are in `ledger-compaction-rung.ts`.
     //
     // THE REASON IS CARRIED FROM THE DECISION THAT PRODUCED THE OUTCOME, never re-derived here.
+    let ledgerCompactionDecision: LedgerCompactionDecision | undefined;
     if (deps.checkLedgerCompaction) {
-      let compactionDecision: LedgerCompactionDecision | undefined;
       try {
-        compactionDecision = deps.checkLedgerCompaction();
+        ledgerCompactionDecision = deps.checkLedgerCompaction();
       } catch (e) {
         log("ledger_compaction.check_failed", { error: String((e as Error)?.message ?? e) });
       }
-      if (compactionDecision?.fire) {
-        log("ledger_compaction.fired", { reason: compactionDecision.reason });
+      if (ledgerCompactionDecision?.fire) {
+        log("ledger_compaction.fired", { reason: ledgerCompactionDecision.reason });
         if (deps.runLedgerCompaction) {
           try {
             const outcome = await deps.runLedgerCompaction();
@@ -2303,10 +2339,10 @@ export async function runDaemon(
               // A pass that found nothing eligible is a RESULT, not a failure: the corpus is over the
               // bound but every archive is inside the age floor. Saying so keeps "nothing to merge"
               // distinguishable from "the run broke", which an absent row would not.
-              log("ledger_compaction.nothing_eligible", { reason: compactionDecision.reason });
+              log("ledger_compaction.nothing_eligible", { reason: ledgerCompactionDecision.reason });
             } else {
               log("ledger_compaction.ran", {
-                reason: compactionDecision.reason,
+                reason: ledgerCompactionDecision.reason,
                 source_count: outcome.sourceCount,
                 rows_written: outcome.rowsWritten,
                 duplicates_collapsed: outcome.duplicatesCollapsed,
@@ -2315,13 +2351,13 @@ export async function runDaemon(
             }
           } catch (e) {
             log("ledger_compaction.run_failed", {
-              reason: compactionDecision.reason,
+              reason: ledgerCompactionDecision.reason,
               error: String((e as Error)?.message ?? e),
             });
           }
         }
-      } else if (compactionDecision) {
-        log("ledger_compaction.skipped", { reason: compactionDecision.reason });
+      } else if (ledgerCompactionDecision) {
+        log("ledger_compaction.skipped", { reason: ledgerCompactionDecision.reason });
       }
     }
 
@@ -2610,6 +2646,11 @@ export async function runDaemon(
       }
       for (const decision of decisions ?? []) {
         if (decision.fire) {
+          const hold = holdWorkerAdmission("intake");
+          if (hold) {
+            log("intake_cadence.held", { rung: decision.rung, reason: hold.reason });
+            continue;
+          }
           log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
           if (deps.runIntakeRung) {
             try {
@@ -2628,7 +2669,9 @@ export async function runDaemon(
     // the same class of spend headroom exists to gate — and before the dispatch pick. There is deliberately
     // no wait-and-continue: the gates above exist to REFUSE a dispatch, but the retro gates nothing and
     // only delayed reaching dispatch by a full poll interval (W1-T2265). Forensics: docs/forensics/daemon.md.
-    if (deps.checkRetroTrigger) {
+    if (deps.checkRetroTrigger && ledgerCompactionDecision?.overBound) {
+      log("daemon.retro_trigger.deferred_ledger_pressure", { reason: ledgerCompactionDecision.reason });
+    } else if (deps.checkRetroTrigger) {
       let decision: RetroTriggerDecision | undefined;
       try {
         decision = deps.checkRetroTrigger();
@@ -2645,6 +2688,11 @@ export async function runDaemon(
       } else if (decision.fire && deps.runRetroTrigger && detachedActionInFlight("retro")) {
         log("daemon.retro_trigger.already_detached", { reason: decision.reason });
       } else if (decision?.fire) {
+        const hold = holdWorkerAdmission("retro");
+        if (hold) {
+          log("daemon.retro_trigger.held", { reason: hold.reason });
+          continue;
+        }
         const crossingKey = retroTriggerCrossingKey(decision);
         if (activeRetroCrossingKey === crossingKey) {
           log("daemon.retro_trigger.crossing_already_fired", { reason: decision.reason });
@@ -2701,6 +2749,11 @@ export async function runDaemon(
         log("wipetest.cadence.check_failed", { error: String((e as Error)?.message ?? e) });
       }
       if (decision?.fire) {
+        const hold = holdWorkerAdmission("wipe-test");
+        if (hold) {
+          log("wipetest.cadence.held", { reason: hold.reason, seq: decision.seq, subject: decision.subject.id });
+          continue;
+        }
         log("wipetest.cadence.fired", {
           reason: decision.reason,
           seq: decision.seq,
@@ -2948,6 +3001,11 @@ export async function runDaemon(
             reason: "an open triage PR already carries this feedback id's provenance",
           });
         } else {
+          const hold = holdWorkerAdmission("auto-triage");
+          if (hold) {
+            log("auto_triage.held", { feedback: decision.feedbackId, reason: hold.reason });
+            continue;
+          }
           if (deps.runAutoTriage) {
             const fired = decision;
             // W1-T2986 — DETACHED, exactly as W1-T2981 detached the retro beside it. This rung sits
@@ -3073,6 +3131,24 @@ export async function runDaemon(
     // between that read and here — measured, a hold created 4.5 minutes after the top-of-tick read still
     // dispatched (W1-T1065). Nothing has been admitted yet, so a hold observed here defers the whole
     // dispatch set and can never abort a lane already running. Forensics: docs/forensics/daemon.md.
+    const workerHold = holdWorkerAdmission("dispatch");
+    if (workerHold?.control === "STOP") {
+      await stopInterphaseReviewClock();
+      log("daemon.stop", { detail: workerHold.detail });
+      return summary("stopped", workerHold.detail);
+    }
+    if (workerHold?.control === "PAUSE") {
+      await stopInterphaseReviewClock();
+      ticks++;
+      log("daemon.pause", {
+        tick: ticks,
+        detail: workerHold.detail,
+        poll_interval_ms: pollIntervalMs,
+        recheck: true,
+      });
+      await sleepUntilSweepWake(pollIntervalMs);
+      continue;
+    }
     const restopped = deps.checkStop?.();
     if (restopped) {
       await stopInterphaseReviewClock();

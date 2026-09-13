@@ -804,22 +804,34 @@ function coverageShardLcovPath(repoRoot: string, shard: number): string {
   return join(coverageShardRoot(repoRoot), `shard-${shard}`, "lcov.info");
 }
 
-function coverageShardArgs(repoRoot: string, shard: number): string[] {
+function coverageShardSelectionArgs(repoRoot: string, shard: number, base: string): string[] {
+  return [
+    join(repoRoot, "scripts", "test-tier-manifest.mjs"),
+    "--select-all",
+    "--shard",
+    `${shard}/${CI_COVERAGE_SHARD_COUNT}`,
+    "--base",
+    base,
+  ];
+}
+
+function coverageShardArgs(repoRoot: string, shard: number, testFiles: readonly string[]): string[] {
   return [
     "--enable-source-maps",
     "--experimental-test-coverage",
     "--test-coverage-exclude=test/**",
     "--test-reporter=spec",
     "--test-reporter-destination=stdout",
+    "--test-reporter=tap",
+    "--test-reporter-destination=stderr",
     "--test-reporter=lcov",
     `--test-reporter-destination=${coverageShardLcovPath(repoRoot, shard)}`,
     "--test",
-    `--test-shard=${shard}/${CI_COVERAGE_SHARD_COUNT}`,
     "--import",
     "tsx",
     "--import",
     TMP_HYGIENE_IMPORT,
-    "test/**/*.test.ts",
+    ...testFiles,
   ];
 }
 
@@ -855,11 +867,29 @@ function testWithCoverageShards(repoRoot: string, spawn: PreflightSpawn, lcovPat
     // Deliberate: setup failure is re-read below as the concrete missing-shard artifact refusal.
   }
   const outputs = new Map<number, string>();
+  let base: string;
+  try {
+    base = requirePinnedBase(repoRoot, spawn);
+  } catch (error) {
+    return { ok: false, detail: `FAIL — coverage-ratchet: could not pin the duration-selector base: ${String(error)}` };
+  }
   for (let shard = 1; shard <= CI_COVERAGE_SHARD_COUNT; shard += 1) {
     const rawDir = coverageShardRawDir(repoRoot, shard);
     mkdirSync(rawDir, { recursive: true });
     const label = `coverage-ratchet:test-with-coverage shard ${shard}/${CI_COVERAGE_SHARD_COUNT}`;
-    const res = spawn(process.execPath, coverageShardArgs(repoRoot, shard), {
+    const selection = shellOut(
+      spawn,
+      `${label} duration-balanced test selection`,
+      process.execPath,
+      coverageShardSelectionArgs(repoRoot, shard, base),
+      { cwd: repoRoot, retainSuccessOutput: true },
+    );
+    if (!selection.ok) return selection;
+    const testFiles = selection.successOutput?.text.split("\n").filter(Boolean) ?? [];
+    if (testFiles.length === 0) {
+      return { ok: false, detail: `FAIL — ${label} duration-balanced test selection returned no files` };
+    }
+    const res = spawn(process.execPath, coverageShardArgs(repoRoot, shard, testFiles), {
       cwd: repoRoot,
       env: { TMPDIR: coverageScratchDir(repoRoot), NODE_V8_COVERAGE: rawDir },
     });
@@ -1873,6 +1903,12 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     job: "probe-path-filter",
     mirrored: false,
     reason: "path-filter sentinel with no repository assertion beyond GitHub selecting the workflow for its fixture path",
+  },
+  {
+    workflow: "proof-discrimination-gate.yml",
+    job: "proof-discrimination",
+    mirrored: false,
+    reason: "requires GitHub's pull_request event payload for the PR body and pinned base/head SHAs; a local pre-push checkout cannot supply that review identity honestly",
   },
   {
     workflow: "recovery-drill.yml",

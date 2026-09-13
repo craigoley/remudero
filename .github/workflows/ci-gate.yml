@@ -17,6 +17,10 @@ name: CI gate
 
 on:
   pull_request:
+    # The two acceptance-body gates can change their result after a body-only repair.  Re-run the
+    # lightweight aggregate on `edited` so its required ci-gate context observes that new result
+    # without re-running ci.yml's expensive test jobs.
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   checks: read
@@ -74,6 +78,7 @@ jobs:
         "assertion-discrimination",
         "task-id-existence",
         "acceptance-author-gate",
+        "proof-discrimination",
         "unwired-gate",
         "comment-load-ratchet",
         "source-size",
@@ -124,7 +129,10 @@ jobs:
       # W1-T261 re-aggregate grace window — the mechanism is in the step below. Env, not literals,
       # so tests shrink both to seconds.
       GRACE_WINDOW_SECONDS: "600"
-      GRACE_POLL_INTERVAL_SECONDS: "20"
+      # A terminal failure does not need a 20-second read cadence: the same-sha grace window
+      # stays 600s, and a rerun that lands GREEN is now observed within one minute. That reduces
+      # the grace read ceiling from 30 to 10 without shortening its false-hold protection.
+      GRACE_POLL_INTERVAL_SECONDS: "60"
       # W1-T312 wait cap. Sized from a measured distribution of this repo's own required-check
       # wall-clock, not a guess: n=10 on 2026-08-03, p95 ~1345s, so 2400s leaves ~79% headroom
       # while staying a finite, loud bound. TRAP: the old 900s cap sat below that p95 and turned
@@ -132,7 +140,14 @@ jobs:
       # knobs above, so tests can shrink it.
       # Why: the full n=10 sample is in docs/forensics/ci-gate-yml.md (W1-T312).
       WAIT_CAP_SECONDS: "2400"
+      # One recent successful ci-gate run (34709784197, 2026-09-12) emitted 73 wait-loop reads
+      # before its siblings completed. Preserve the 15s observation cadence while checks are
+      # first registering, then move to 60s: later reads only observe remote state and cannot
+      # make a required check complete sooner. At the 2400s cap this is at most 56 wait reads
+      # instead of 161, while adding no more than 60s to a long-tail terminal observation.
+      WAIT_FAST_WINDOW_SECONDS: "300"
       WAIT_POLL_INTERVAL_SECONDS: "15"
+      WAIT_SLOW_POLL_INTERVAL_SECONDS: "60"
     steps:
       - name: Aggregate sibling check results (fail only on a REAL failure; skipped/absent are OK)
         run: |
@@ -141,9 +156,11 @@ jobs:
           # Defensive defaults (job env already sets both -- see above) so the script never dies
           # on `set -u` if either is ever left unset.
           GRACE_WINDOW_SECONDS="${GRACE_WINDOW_SECONDS:-600}"
-          GRACE_POLL_INTERVAL_SECONDS="${GRACE_POLL_INTERVAL_SECONDS:-20}"
+          GRACE_POLL_INTERVAL_SECONDS="${GRACE_POLL_INTERVAL_SECONDS:-60}"
           WAIT_CAP_SECONDS="${WAIT_CAP_SECONDS:-2400}"
+          WAIT_FAST_WINDOW_SECONDS="${WAIT_FAST_WINDOW_SECONDS:-300}"
           WAIT_POLL_INTERVAL_SECONDS="${WAIT_POLL_INTERVAL_SECONDS:-15}"
+          WAIT_SLOW_POLL_INTERVAL_SECONDS="${WAIT_SLOW_POLL_INTERVAL_SECONDS:-60}"
 
           # A READ THAT FAILED IS NOT A READ THAT SAID NO. On 2026-08-11 a single x509 TLS error
           # on ONE poll killed this script under `set -euo pipefail` and ci-gate reported FAILURE
@@ -209,7 +226,8 @@ jobs:
           #    W1-T312: the cap is WAIT_CAP_SECONDS (measured + documented in the job env above),
           #    not a literal -- the old hardcoded 900s sat below this repo's own p95 wall-clock and
           #    turned the routine slow-but-green case into a false timeout (#1229, #1234).
-          deadline=$(( $(date +%s) + WAIT_CAP_SECONDS ))
+          wait_started_at="$(date +%s)"
+          deadline=$(( wait_started_at + WAIT_CAP_SECONDS ))
           while :; do
             runs="$(runs_json)" || unreadable_die
             not_ready="$(jq -r --argjson req "${REQUIRED}" '
@@ -217,7 +235,8 @@ jobs:
               | ($req - $done)
               | .[]' <<< "${runs}")"
             [ -z "${not_ready}" ] && break
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
+            now="$(date +%s)"
+            if [ "${now}" -ge "${deadline}" ]; then
               # W1-T312: this is a TIMEOUT, distinct from step 2/3's "required check(s) FAILED" --
               # nothing here concluded a failure, the wait cap simply elapsed first. Re-running the
               # SAME sha changes nothing (the check(s) below are still not registered/completed);
@@ -228,7 +247,12 @@ jobs:
             fi
             echo "waiting for required check(s) to complete:"
             printf '%s\n' "${not_ready}" | sed 's/^/  - /'
-            sleep "${WAIT_POLL_INTERVAL_SECONDS}"
+            wait_elapsed_seconds=$(( now - wait_started_at ))
+            wait_interval_seconds="${WAIT_POLL_INTERVAL_SECONDS}"
+            if [ "${wait_elapsed_seconds}" -ge "${WAIT_FAST_WINDOW_SECONDS}" ]; then
+              wait_interval_seconds="${WAIT_SLOW_POLL_INTERVAL_SECONDS}"
+            fi
+            sleep "${wait_interval_seconds}"
           done
 
           # 2) FAIL if a REQUIRED check (excluding IGNORE) concluded as a real failure. A check

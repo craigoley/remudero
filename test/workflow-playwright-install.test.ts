@@ -91,16 +91,18 @@ test("W1-T1027: no install step carries a retry, a lock wait, or a per-attempt t
   }
 });
 
-test("W1-T1027: all jobs carry a byte-identical install step (fix every copy or none)", async () => {
+test("W1-T1027: source-capable jobs retain the exact no-apt install command; coverage-ratchet alone may guard it by diff class", async () => {
   const jobs = await loadCiJobs();
-  const runs = playwrightInstallSteps(jobs).map(([, run]) => run);
-  assert.equal(runs.length, 3, "expected exactly three install steps");
+  const runs = Object.fromEntries(playwrightInstallSteps(jobs));
+  assert.equal(Object.keys(runs).length, 3, "expected exactly three install steps");
   assert.equal(
-    runs[0],
-    runs[1],
-    "the two install steps must stay byte-identical — PR #2150 took the board down on the copy " +
+    runs.ci,
+    runs["test-slow"],
+    "the unguarded install steps must stay byte-identical — PR #2150 took the board down on the copy " +
       "that had not been fixed, five minutes after PR #2148 hung on the other",
   );
+  assert.match(runs["coverage-ratchet"], /if \[ "\$CLASS" != "SOURCE" \]/, "coverage-ratchet may skip the browser only after the canonical source-class guard");
+  assert.match(runs["coverage-ratchet"], /npx playwright install chromium\s*$/, "a SOURCE coverage diff must retain the exact Chromium command");
 });
 
 test("W1-T1027: no fourth job silently grows a playwright install step", async () => {

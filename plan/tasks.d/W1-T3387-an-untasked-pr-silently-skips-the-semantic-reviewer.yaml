@@ -43,8 +43,20 @@
     reason distinct so the two causes never merge into one token again. Change no capping rule and
     no arm predicate.
 
+  amendments: |
+    2026-09-12, OPERATOR AMENDMENT TO BOTH PROOFS ONLY — the claims are UNCHANGED.
+    A self-referential proof cannot carry a verdict, and both of these greped THIS SHARD FILE.
+    Because the text is present at the MERGE BASE too, `classifyBaseProofOutcome` grades such a proof
+    `executed_stale`, every criterion drops to the keyword floor, and no evidence reaches the verdict.
+    #5256 is a correct implementation that sat at `FAIL - unmet` because of it; a body repair could not
+    lift it either, since the `Remudero-Task:` trailer makes the PLAN the source of criteria.
+    The proofs now name the two sentences the implementation writes into `src/run-task.ts`. MEASURED on
+    #5256's head: both pass, and both read 0 against the real base blob of that file (2,157,515 bytes,
+    not an empty read), so they discriminate in both directions.
+    It lands as an operator amendment because Standing rule 15 (`criterionFieldTampered`) refuses a PR
+    that edits its own criteria — a worker that can rewrite its own proof can pass anything.
   acceptance:
     - claim: "a PR with no derivable task id still spawns the semantic reviewer, under a default risk and budget"
-      proof: "grep: Resolve a default risk and budget for the in plan/tasks.d/W1-T3387-an-untasked-pr-silently-skips-the-semantic-reviewer.yaml"
+      proof: "grep: an untrailered / unfiled PR is still a PR the fleet chose to review in src/run-task.ts"
     - claim: "the skip survives only for an unresolvable reviewer mount or settings failure, under its own distinct ledger reason"
-      proof: "grep: Keep the skip only for an unresolvable reviewer mount or settings failure in plan/tasks.d/W1-T3387-an-untasked-pr-silently-skips-the-semantic-reviewer.yaml"
+      proof: "grep: that is a plan-resolution fault, not an untasked PR in src/run-task.ts"

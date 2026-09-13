@@ -87,7 +87,9 @@ test('coverage sharding: four lossless V8 bundles are required before Node-range
   assert.deepEqual(shards.strategy?.matrix?.shard, [1, 2, 3, 4]);
   assert.equal(shards.strategy?.['fail-fast'], false);
   assert.equal(shards.name, 'coverage-shard (${{ matrix.shard }}/4)');
-  assert.match(runBodies('coverage-ratchet'), /--test-shard=\$\{\{ matrix\.shard \}\}\/4/);
+  assert.match(runBodies('coverage-ratchet'), /test-tier-manifest\.mjs --select-all --shard \$\{\{ matrix\.shard \}\}\/4 --base HEAD\^1/);
+  assert.match(runBodies('coverage-ratchet'), /mapfile -t COVERAGE_TEST_FILES < coverage-test-files\.txt/);
+  assert.doesNotMatch(runBodies('coverage-ratchet'), /--test-shard=/, 'coverage must use the recorded-duration selector rather than Node\'s opaque shard assignment');
   assert.match(runBodies('coverage-ratchet'), /NODE_V8_COVERAGE=coverage\/raw node/);
   assert.match(runBodies('coverage-ratchet'), /scripts\/coverage-merge-ratchet\.mjs --compact-output coverage\/compact/);
   assert.doesNotMatch(runBodies('coverage-ratchet'), /cp coverage\/raw\/coverage-\*\.json/);

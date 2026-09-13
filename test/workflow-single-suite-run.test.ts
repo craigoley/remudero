@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
-const CI_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+const CI_YML = readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8");
 
 type Step = { name?: string; id?: string; run?: string; uses?: string };
 type Job = { steps?: Step[]; needs?: string[] | string; if?: string };
@@ -40,8 +40,12 @@ function tmpRoot(): string {
 function stubbedBin(root: string): string {
   const bin = join(root, "bin");
   mkdirSync(bin);
-  for (const name of ["node", "npm"]) {
-    writeFileSync(join(bin, name), `#!/bin/sh\necho "$0 $*" >> "${root}/calls.log"\nexit 99\n`);
+  for (const name of ["node", "npm", "npx"]) {
+    const script =
+      name === "node"
+        ? `#!/bin/sh\necho "$0 $*" >> "${root}/calls.log"\nif [ "$1" = "scripts/test-tier-manifest.mjs" ] && [ "$2" = "--select-all" ]; then\n  printf '%s\\n' "test/workflow-single-suite-run.test.ts"\n  exit 0\nfi\nexit 99\n`
+        : `#!/bin/sh\necho "$0 $*" >> "${root}/calls.log"\nexit 99\n`;
+    writeFileSync(join(bin, name), script);
     spawnSync("chmod", ["+x", join(bin, name)]);
   }
   return bin;
@@ -51,7 +55,20 @@ function runBash(script: string, env: Record<string, string> = {}) {
   const root = tmpRoot();
   const bin = stubbedBin(root);
   const summary = join(root, "summary.md");
-  const result = spawnSync("bash", ["-eo", "pipefail", "-c", script], {
+  // GitHub's runner has Bash 5's `mapfile`; macOS's system Bash does not. The workflow's
+  // duration-balanced coverage path now uses that builtin, so provide the narrow equivalent
+  // only when this test's local shell lacks it. The runner's normal implementation still wins.
+  const mapfileCompat = `if ! type mapfile >/dev/null 2>&1; then
+mapfile() {
+  local _flag="$1" _name="$2" _line
+  eval "\${_name}=()"
+  while IFS= read -r _line; do
+    eval "\${_name}+=(\"\${_line}\")"
+  done
+}
+fi
+`;
+  const result = spawnSync("bash", ["-eo", "pipefail", "-c", `${mapfileCompat}${script}`], {
     cwd: root,
     encoding: "utf8",
     env: {
@@ -120,18 +137,21 @@ test("W1-T3207: a PUSH to main still runs the ci harness — the skip is event-c
   assert.match(mixedEnv.calls, /scripts\/test-with-retry\.mjs/, "a push must keep invoking the ci harness");
 });
 
-test("W1-T3207: the full test glob appears only in the instrumented coverage run", () => {
+test("W1-T3207: the instrumented coverage run selects every duration-balanced shard, never a direct full-suite glob", () => {
   const executableRunText = Object.values(doc.jobs)
     .flatMap((job) => job.steps ?? [])
     .flatMap((s) => (s.run ?? "").split("\n"))
     .filter((line) => !/^\s*#/.test(line))
     .join("\n");
-  assert.equal(
-    executableRunText.match(/"test\/\*\*\/\*\.test\.ts"/g)?.length,
-    1,
-    "the workflow must carry one executable full-suite glob, in the coverage harness",
+  assert.doesNotMatch(executableRunText, /"test\/\*\*\/\*\.test\.ts"/, "coverage must execute the manifest-selected files, not a direct full-suite glob");
+  const coverage = runnable("coverage-ratchet", "Test with coverage");
+  assert.match(coverage, /--experimental-test-coverage/);
+  assert.match(
+    coverage,
+    /node scripts\/test-tier-manifest\.mjs --select-all --shard 1\/4 --base HEAD\^1/,
+    "each matrix child must select its duration-balanced share of the complete manifest",
   );
-  assert.match(runnable("coverage-ratchet", "Test with coverage"), /--experimental-test-coverage/);
+  assert.match(coverage, /"\$\{COVERAGE_TEST_FILES\[@\]\}"/, "the coverage runner must consume the selector's exact file list");
 });
 
 test("W1-T3207: coverage gates consume downloaded artifacts without npm ci or Playwright", () => {
@@ -167,6 +187,28 @@ test("W1-T3207: W1-T2428 fast-lane still skips coverage work for plan/docs diffs
   assert.equal(merge.status, 0, merge.stderr + merge.stdout);
   assert.equal(merge.calls, "", "docs-only coverage consumption must exit before merging or gating coverage");
   assert.match(merge.stdout, /W1-T2428 fast-lane: class=DOCS_ONLY/);
+});
+
+test("W1-T2428: SOURCE reaches both coverage setup commands rather than silently skipping them", () => {
+  // The PLAN_ONLY/DOCS_ONLY case above proves the fast lane can stand down. These are the other
+  // side of each new guard: if either condition becomes unconditional, its stub is never called
+  // and this test fails before a source PR can certify itself without its setup.
+  const install = runBash(runnable("coverage-ratchet", "Install (clean, from lockfile)"));
+  assert.equal(install.status, 99, install.stderr + install.stdout);
+  assert.match(install.calls, /\/npm ci/, "a SOURCE diff must invoke npm ci");
+
+  const chromium = runBash(runnable("coverage-ratchet", "Install Playwright's Chromium"));
+  assert.equal(chromium.status, 99, chromium.stderr + chromium.stdout);
+  assert.match(chromium.calls, /\/npx playwright install chromium/, "a SOURCE diff must invoke Playwright's Chromium install");
+
+  const coverage = runBash(runnable("coverage-ratchet", "Test with coverage"));
+  assert.notEqual(coverage.status, 0, coverage.stderr + coverage.stdout);
+  assert.match(
+    coverage.calls,
+    /scripts\/test-tier-manifest\.mjs --select-all --shard 1\/4 --base HEAD\^1/,
+    "a SOURCE diff must select its complete duration-balanced coverage shard before running it",
+  );
+  assert.match(coverage.calls, /\/node --enable-source-maps --experimental-test-coverage/, "a SOURCE diff must invoke the coverage test runner");
 });
 
 test("W1-T3207: the workflow names the lost second-harness signal", () => {

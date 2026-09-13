@@ -1,7 +1,7 @@
 import { reconcilePlan } from "./plan-reconcile.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport } from "./rule-efficacy.js";
 import {
   mineVerdictRows,
@@ -435,6 +435,125 @@ interface AdoptionCorpusFile {
   isTest: boolean;
 }
 
+interface AdoptionImport {
+  target: string;
+  localNames: Map<string, string>;
+}
+
+function isAdoptionSourcePath(path: string): boolean {
+  return /^src\/.+\.(?:[cm]?[jt]s|[jt]sx)$/.test(path);
+}
+
+/** Remove comments without mistaking a marker embedded in a quoted value for a comment.
+ *  `eraseStrings` gives call detection an executable-token view: a symbol quoted in prose or
+ *  data cannot become a caller. Template contents are conservatively erased as one value. */
+function stripAdoptionText(text: string, eraseStrings: boolean): string {
+  const out: string[] = [];
+  for (let i = 0; i < text.length;) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch === "/" && next === "/") {
+      out.push("  ");
+      i += 2;
+      while (i < text.length && text[i] !== "\n") {
+        out.push(" ");
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      out.push("  ");
+      i += 2;
+      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) {
+        out.push(text[i] === "\n" ? "\n" : " ");
+        i += 1;
+      }
+      if (i < text.length) {
+        out.push("  ");
+        i += 2;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch;
+      out.push(eraseStrings ? " " : ch);
+      i += 1;
+      while (i < text.length) {
+        const value = text[i];
+        if (value === "\\") {
+          out.push(eraseStrings ? " " : value);
+          i += 1;
+          if (i < text.length) {
+            out.push(eraseStrings ? (text[i] === "\n" ? "\n" : " ") : text[i]);
+            i += 1;
+          }
+          continue;
+        }
+        out.push(eraseStrings ? (value === "\n" ? "\n" : " ") : value);
+        i += 1;
+        if (value === quote) break;
+      }
+      continue;
+    }
+    out.push(ch);
+    i += 1;
+  }
+  return out.join("");
+}
+
+function resolveAdoptionImport(from: string, specifier: string, sourceRels: Set<string>): string | undefined {
+  if (!specifier.startsWith(".")) return undefined;
+  const raw = posix.normalize(posix.join(posix.dirname(from), specifier));
+  const stem = raw.replace(/\.(?:[cm]?[jt]s|[jt]sx)$/, "");
+  const candidates = [
+    raw,
+    ...[".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"].map((extension) => `${stem}${extension}`),
+    ...["index.ts", "index.tsx", "index.mts", "index.cts", "index.js", "index.jsx", "index.mjs", "index.cjs"].map((entry) => `${stem}/${entry}`),
+  ];
+  return candidates.find((candidate) => sourceRels.has(candidate));
+}
+
+function importsInAdoptionSource(from: string, text: string, sourceRels: Set<string>): AdoptionImport[] {
+  const imports: AdoptionImport[] = [];
+  const withoutComments = stripAdoptionText(text, false);
+  const importRe = /^[ \t]*import[ \t]+(?!type\b)([\s\S]*?)[ \t]+from[ \t]+["']([^"']+)["'];?/gm;
+  for (const match of withoutComments.matchAll(importRe)) {
+    const target = resolveAdoptionImport(from, match[2], sourceRels);
+    const named = /\{([\s\S]*?)\}/.exec(match[1]);
+    if (!target || !named) continue;
+    const localNames = new Map<string, string>();
+    for (const item of named[1].split(",")) {
+      const parsed = /^(?:type\s+)?(\w+)(?:\s+as\s+(\w+))?$/.exec(item.trim());
+      if (parsed && !item.trim().startsWith("type ")) localNames.set(parsed[1], parsed[2] ?? parsed[1]);
+    }
+    imports.push({ target, localNames });
+  }
+  return imports;
+}
+
+function reachableAdoptionSources(corpus: AdoptionCorpusFile[]): {
+  reachable: Set<string>;
+  imports: Map<string, AdoptionImport[]>;
+  executableText: Map<string, string>;
+} {
+  const sourceFiles = corpus.filter((file) => isAdoptionSourcePath(file.rel));
+  const sourceRels = new Set(sourceFiles.map((file) => file.rel));
+  const imports = new Map(sourceFiles.map((file) => [file.rel, importsInAdoptionSource(file.rel, file.text, sourceRels)]));
+  const executableText = new Map(sourceFiles.map((file) => [file.rel, stripAdoptionText(file.text, true)]));
+  const reachable = new Set<string>();
+  // Synthetic and partially checked-out repositories may not carry the CLI root. They can still
+  // prove a real cross-file call, but cannot support a negative claim about a module's reachability;
+  // preserve that established fallback only when the root is absent.
+  const pending = sourceRels.has("src/run-task.ts") ? ["src/run-task.ts"] : [...sourceRels];
+  while (pending.length) {
+    const current = pending.pop()!;
+    if (reachable.has(current)) continue;
+    reachable.add(current);
+    for (const imported of imports.get(current) ?? []) pending.push(imported.target);
+  }
+  return { reachable, imports, executableText };
+}
+
 /** Reads every candidate file once — `src/`, `scripts/`, `bin/`, `test/` — so a reachability
  *  check is a regex test over an already-loaded string, never a repeat disk read per candidate.
  *  Why: docs/forensics/measurement-cadence.md#buildadoptioncorpus (read-once timing). */
@@ -480,6 +599,7 @@ function scanUnadoptedSymbols(
   const EXPORT_DECL_RE = /^export\s+(?:async\s+)?function\s+(\w+)\s*\(|^export\s+const\s+(\w+)\s*=/gm;
   const findings: AdoptionFinding[] = [];
   const seen = new Set<string>();
+  const sources = reachableAdoptionSources(corpus);
   for (const file of corpus) {
     if (!file.rel.startsWith("src/lib/") || file.isTest) continue;
     for (const m of file.text.matchAll(EXPORT_DECL_RE)) {
@@ -489,26 +609,21 @@ function scanUnadoptedSymbols(
       if (seen.has(key)) continue;
       seen.add(key);
 
-      const re = new RegExp(`(?<![\\w$])${escapeAdoptionRegExp(name)}(?![\\w$])`);
-      const defRe = new RegExp(
-        `export\\s+(?:async\\s+)?function\\s+${escapeAdoptionRegExp(name)}\\b|export\\s+const\\s+${escapeAdoptionRegExp(name)}\\b`,
-      );
       let reached = false;
-      for (const candidate of corpus) {
-        if (candidate.rel === file.rel) {
-          const dm = defRe.exec(candidate.text);
-          const beyond = dm ? candidate.text.slice(0, dm.index) + candidate.text.slice(dm.index + dm[0].length) : candidate.text;
-          if (re.test(beyond)) {
+      for (const candidate of sources.reachable) {
+        if (candidate === file.rel) continue;
+        const executable = sources.executableText.get(candidate);
+        if (!executable) continue;
+        for (const imported of sources.imports.get(candidate) ?? []) {
+          const localName = imported.target === file.rel ? imported.localNames.get(name) : undefined;
+          if (!localName) continue;
+          const call = new RegExp(`(?<![\\w$.])${escapeAdoptionRegExp(localName)}\\s*\\(`);
+          if (call.test(executable)) {
             reached = true;
             break;
           }
-          continue;
         }
-        if (candidate.isTest) continue;
-        if (re.test(candidate.text)) {
-          reached = true;
-          break;
-        }
+        if (reached) break;
       }
       if (!reached) {
         findings.push({

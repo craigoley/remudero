@@ -34,11 +34,14 @@ function seam(diff: SpawnResult): { spawn: PreflightSpawn; stdinSeen: (string | 
     const a = [...args].join(" ");
     if (a === "rev-parse origin/main") return { status: 0, stdout: `${SHA}\n`, stderr: "" };
     if (a === `diff ${SHA}...HEAD`) return diff;
+    if (a.includes("test-tier-manifest.mjs") && a.includes("--select-all")) {
+      return { status: 0, stdout: "test/coverage-fixture.test.ts\n", stderr: "" };
+    }
     if (a.includes("diff-coverage.mjs")) {
       stdinSeen.push((opts as { input?: string } | undefined)?.input);
       return { status: 0, stdout: "diff-coverage: OK — every added line covered", stderr: "" };
     }
-    return { status: 0, stdout: "", stderr: "" }; // base-refresh, test-with-coverage, ratchet
+    return { status: 0, stdout: "", stderr: "" }; // base-refresh, coverage shards, merge, ratchet
   };
   return { spawn, stdinSeen };
 }

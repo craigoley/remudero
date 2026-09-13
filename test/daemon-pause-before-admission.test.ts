@@ -139,7 +139,7 @@ test("daemon pause: the re-check runs after the sweep and before the first itera
   );
 });
 
-test("daemon pause: an in-flight batch still drains rather than aborting", async () => {
+test("W1-T3491 criterion 2: an in-flight batch still drains rather than aborting", async () => {
   const plan = fixturePlan();
   const merged = new Set<string>();
   const root = mkdtempSync(join(tmpdir(), "daemon-pause-drain-"));
@@ -165,6 +165,92 @@ test("daemon pause: an in-flight batch still drains rather than aborting", async
   assert.equal(s.stopReason, "stopped");
   assert.deepEqual(s.merged, ["A"], "A, already in flight when the pause appeared, still reached merged (drain-and-hold)");
   assert.deepEqual(s.attempted, ["A"], "B (A's dependent) was never admitted while the pause held");
+});
+
+test("W1-T3491 criterion 2: a control raised after the tick starts fences every daemon-side worker admission", async () => {
+  for (const control of ["STOP", "PAUSE"] as const) {
+    for (const surface of ["intake", "retro", "wipe-test", "auto-triage", "dispatch"] as const) {
+      const plan = fixturePlan();
+      const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+      let held = false;
+      let sleeps = 0;
+      let workerCallbacks = 0;
+      const summary = await runDaemon(plan, {
+      refreshMerged: () => () => false,
+      runOne: async (id) => {
+        workerCallbacks++;
+        return okResult(id);
+      },
+      sweep:
+        surface === "dispatch"
+          ? async (continueReviewAdmissions) => {
+              held = true;
+              const reason = continueReviewAdmissions?.workerAdmissionHold?.();
+              assert.match(reason ?? "", new RegExp(`fleet ${control} hold`));
+            }
+          : undefined,
+      checkStop: () =>
+        held && control === "STOP" ? `operator STOP before ${surface}` : (sleeps > 0 ? "test stop after the held tick" : undefined),
+      checkPause: () => (held && control === "PAUSE" ? `operator PAUSE before ${surface}` : undefined),
+      workerAdmissionHold: () => {
+        if (held && control === "STOP") return { control, detail: `operator STOP before ${surface}` };
+        if (held && control === "PAUSE") return { control, detail: `operator PAUSE before ${surface}` };
+        return undefined;
+      },
+      sleep: async () => {
+        sleeps++;
+      },
+      checkIntakeRungs: () => {
+        if (surface !== "intake") return [];
+        held = true;
+        return [{ rung: "ops", fire: true, reason: "test admission edge" }];
+      },
+      runIntakeRung: async () => {
+        workerCallbacks++;
+        return { rung: "ops", status: "ok" } as never;
+      },
+      checkRetroTrigger: () => {
+        if (surface !== "retro") return undefined;
+        held = true;
+        return { fire: true, reason: "test admission edge" } as never;
+      },
+      runRetroTrigger: async () => {
+        workerCallbacks++;
+      },
+      checkWipeTestCadence: () => {
+        if (surface !== "wipe-test") return { fire: false, reason: "not this surface" } as never;
+        held = true;
+        return {
+          fire: true,
+          reason: "test admission edge",
+          seq: 1,
+          subject: { id: "wt-w1-t3491" },
+          factor: "learnings",
+        } as never;
+      },
+      runWipeTestCadence: async () => {
+        workerCallbacks++;
+        return { status: "ok" } as never;
+      },
+      checkAutoTriage: () => {
+        if (surface !== "auto-triage") return { fire: false, reason: "not this surface" } as never;
+        held = true;
+        return { fire: true, feedbackId: "fb-w1-t3491", reason: "test admission edge" };
+      },
+      runAutoTriage: async () => {
+        workerCallbacks++;
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(summary.stopReason, "stopped", `${control}/${surface}: the next tick stopped after the held tick`);
+      assert.equal(workerCallbacks, 0, `${control}/${surface}: the held prospective worker callback never ran`);
+      assert.ok(
+        lines.some((line) => line.step === "daemon.admission_held" && line.extra.surface === surface),
+        `${control}/${surface}: the held admission is ledger-visible by surface`,
+      );
+    }
+  }
 });
 
 test("daemon pause: stop gets the same re-check because it has the same single-read shape", async () => {

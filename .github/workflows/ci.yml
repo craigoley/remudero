@@ -29,6 +29,7 @@ on:
     branches: [main]
 
 permissions:
+  actions: read
   contents: read
 
 # R-50: a force-push mid-run left the superseded PR run competing for the same CI-minute budget as
@@ -408,6 +409,52 @@ jobs:
           GH_REPO_SLUG: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          print_unfinished_test_from_logs() {
+            if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GH_REPO_SLUG:-}" ]; then
+              echo "  Last started unfinished test: unavailable (workflow run id is not present)."
+              return 0
+            fi
+            LOG_FILE="$(mktemp)"
+            if ! gh run view "$GITHUB_RUN_ID" --repo "$GH_REPO_SLUG" --log > "$LOG_FILE" 2>/dev/null; then
+              echo "  Last started unfinished test: unavailable (could not read workflow logs)."
+              return 0
+            fi
+            node - "$LOG_FILE" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const text = readFileSync(process.argv[2], "utf8");
+          const active = new Map();
+          let order = 0;
+          for (const raw of text.split(/\r?\n/)) {
+            const parts = raw.split("\t");
+            const job = parts.length >= 3 ? parts[0] : "workflow log";
+            let line = parts.length >= 3 ? parts.slice(2).join("\t") : raw;
+            line = line.replace(/^\d{4}-\d\d-\d\dT\S+\s+/, "");
+            const started = line.match(/^\s*# Subtest: (.+?)\s*$/);
+            if (started) {
+              active.set(job, { job, name: started[1], order: ++order });
+              continue;
+            }
+            const finished = line.match(/^\s*(?:ok|not ok) \d+(?: - (.*?))?\s*$/);
+            if (!finished) continue;
+            const name = finished[1];
+            if (!name) {
+              active.delete(job);
+              continue;
+            }
+            for (const [key, value] of active.entries()) {
+              if (value.name === name) active.delete(key);
+            }
+          }
+          const newest = [...active.values()].sort((a, b) => b.order - a.order)[0];
+          if (newest) {
+            console.log(`  Last started unfinished test: ${newest.name} (${newest.job}).`);
+          } else {
+            console.log("  Last started unfinished test: unavailable (no started-without-finished TAP test found).");
+          }
+          NODE
+            rm -f "$LOG_FILE"
+          }
+
           case "$SHARD_RESULT" in
             success)
             echo "ci: all four test shards succeeded."
@@ -438,10 +485,10 @@ jobs:
               fi
               echo "::error::ci: SHARD HANG — the matrix was cancelled while the PR head"
               echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
-              echo "  timeout-minutes ceiling. THE TEST TESTS DID NOT RUN — this is NOT a failure of this"
+              echo "  timeout-minutes ceiling. THE TESTS DID NOT RUN — this is NOT a failure of this"
               echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
-              echo "  evidence of a test failure. Open the shard log and find the test that started and"
-              echo "  never finished."
+              echo "  evidence of a test failure."
+              print_unfinished_test_from_logs
               exit 1
               ;;
             skipped)
@@ -643,16 +690,15 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
       - name: Determine this diff's fast-lane class (W1-T2428 — a PLAN_ONLY/DOCS_ONLY diff cannot move source coverage)
         # INVARIANT: the class comes from the real predicate — scripts/diff-class.mjs imports
-        # `isInPlanScope` from src/lib/plan-architect.ts. Two of the repo's three scope predicates
+        # `isInPlanScope` from src/lib/plan-scope.ts. Two of the repo's three scope predicates
         # already disagree; a bash reimplementation here would be a fourth (W1-T2428, Q1). It fails
         # closed twice over: the script resolves an unreadable, empty or malformed input to SOURCE,
-        # and this step clamps stdout to the three known tokens, so even a `node`/`tsx` that cannot
-        # start leaves CLASS=SOURCE. On a push, changed-files.txt is left empty and the script's own
-        # empty-list rule resolves it to SOURCE.
+        # and this step clamps stdout to the three known tokens, so even a bare Node invocation that
+        # cannot start leaves CLASS=SOURCE. `plan-scope.ts` is a dependency-free leaf and Node 22.22.3
+        # strips its type annotations, so this runs before npm ci. On a push, changed-files.txt is left
+        # empty and the script's own empty-list rule resolves it to SOURCE.
         # TRAP: step-level bash, never a YAML `if:` — the class is READ by the bash guards below.
         id: classify
         run: |
@@ -661,7 +707,7 @@ jobs:
           else
             : > changed-files.txt
           fi
-          CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
           case "$CLASS" in
             PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
             *) CLASS="SOURCE" ;;
@@ -669,6 +715,14 @@ jobs:
           cat diff-class.log || true
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           echo "W1-T2428 fast-lane: this diff classifies as ${CLASS}."
+      - name: Install (clean, from lockfile)
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping npm ci; coverage collection will emit the required skipped artifact."
+            exit 0
+          fi
+          npm ci
       - name: Determine Playwright's pinned browser version (cache key input)
         id: playwright-version
         run: |
@@ -684,9 +738,16 @@ jobs:
       - name: Install Playwright's Chromium (same requirement as the ci job — W1-T153's shell a11y/responsive tests launch a real headless browser; this job runs the same test/**/*.test.ts glob under coverage, so it needs it too)
         # The same step as the `ci` job's above, and the same measurement behind dropping
         # `--with-deps`. Fixing one copy and not the other left the second free to take the board
-        # down alone — it did, PR #2150 five minutes after PR #2148. This `run:` line must stay
-        # byte-identical to the `ci` job's, which test/workflow-playwright-install.test.ts asserts.
-        run: npx playwright install chromium
+        # down alone — it did, PR #2150 five minutes after PR #2148. For SOURCE, the command stays
+        # byte-identical to the `ci` job's; the class guard makes this required matrix child a no-op
+        # before Playwright is available for PLAN_ONLY/DOCS_ONLY diffs.
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Playwright Chromium; coverage collection will emit the required skipped artifact."
+            exit 0
+          fi
+          npx playwright install chromium
       - name: Test with coverage (spec output to the CI log, lcov to a file — src/** only, test/** excluded from the ratio)
         # W1-T220 defect 1: a `spec` reporter to stdout runs alongside the `lcov` reporter pair.
         # With `--test-reporter=lcov` alone, a failing run's CI log carried zero test output — just
@@ -745,12 +806,25 @@ jobs:
           # ci-gate's list — it must still register and still fail on a coverage regression. The
           # comment two blocks below is what makes artifact absence fail closed: no step in this job
           # carries a YAML conditional, so a failing shard makes the stable aggregator refuse.
+          if ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/4 --base HEAD^1 \
+            > coverage-test-files.txt 2> coverage-shard-selection.log; then
+            cat coverage-shard-selection.log || true
+            echo "coverage-ratchet: duration-balanced test selection failed; refusing to run a partial or unclassified coverage shard."
+            exit 1
+          fi
+          cat coverage-shard-selection.log || true
+          if ! grep -q . coverage-test-files.txt; then
+            echo "coverage-ratchet: duration-balanced test selection returned no files; refusing an empty coverage shard."
+            exit 1
+          fi
+          mapfile -t COVERAGE_TEST_FILES < coverage-test-files.txt
           mkdir -p coverage/raw
           set +e
           NODE_V8_COVERAGE=coverage/raw node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=tap --test-reporter-destination=stderr \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
-            --test --test-shard=${{ matrix.shard }}/4 --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
+            --test --import tsx --import ./test/setup/tmp-hygiene.ts "${COVERAGE_TEST_FILES[@]}"
           TEST_EXIT=$?
           set -e
           if [ "$TEST_EXIT" -ne 0 ]; then
@@ -813,6 +887,52 @@ jobs:
           GH_REPO_SLUG: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          print_unfinished_test_from_logs() {
+            if [ -z "${GITHUB_RUN_ID:-}" ] || [ -z "${GH_REPO_SLUG:-}" ]; then
+              echo "  Last started unfinished test: unavailable (workflow run id is not present)."
+              return 0
+            fi
+            LOG_FILE="$(mktemp)"
+            if ! gh run view "$GITHUB_RUN_ID" --repo "$GH_REPO_SLUG" --log > "$LOG_FILE" 2>/dev/null; then
+              echo "  Last started unfinished test: unavailable (could not read workflow logs)."
+              return 0
+            fi
+            node - "$LOG_FILE" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const text = readFileSync(process.argv[2], "utf8");
+          const active = new Map();
+          let order = 0;
+          for (const raw of text.split(/\r?\n/)) {
+            const parts = raw.split("\t");
+            const job = parts.length >= 3 ? parts[0] : "workflow log";
+            let line = parts.length >= 3 ? parts.slice(2).join("\t") : raw;
+            line = line.replace(/^\d{4}-\d\d-\d\dT\S+\s+/, "");
+            const started = line.match(/^\s*# Subtest: (.+?)\s*$/);
+            if (started) {
+              active.set(job, { job, name: started[1], order: ++order });
+              continue;
+            }
+            const finished = line.match(/^\s*(?:ok|not ok) \d+(?: - (.*?))?\s*$/);
+            if (!finished) continue;
+            const name = finished[1];
+            if (!name) {
+              active.delete(job);
+              continue;
+            }
+            for (const [key, value] of active.entries()) {
+              if (value.name === name) active.delete(key);
+            }
+          }
+          const newest = [...active.values()].sort((a, b) => b.order - a.order)[0];
+          if (newest) {
+            console.log(`  Last started unfinished test: ${newest.name} (${newest.job}).`);
+          } else {
+            console.log("  Last started unfinished test: unavailable (no started-without-finished TAP test found).");
+          }
+          NODE
+            rm -f "$LOG_FILE"
+          }
+
           case "$SHARD_RESULT" in
             success)
             :
@@ -846,8 +966,8 @@ jobs:
               echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
               echo "  timeout-minutes ceiling. THE COVERAGE TESTS DID NOT RUN — this is NOT a failure of this"
               echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
-              echo "  evidence of a test failure. Open the shard log and find the test that started and"
-              echo "  never finished."
+              echo "  evidence of a test failure."
+              print_unfinished_test_from_logs
               exit 1
               ;;
             skipped)

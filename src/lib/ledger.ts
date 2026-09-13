@@ -355,6 +355,14 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T1082: `escalateDiskHeadroomBreach`'s (run-task.ts) dedup marker, compared against an
   // episode window; it is what stops a daemon RESTART mid-episode from re-opening the issue.
   "daemon.disk_headroom.escalated",
+  // W1-T3368: THE COMPACTION THROTTLE'S ONLY INPUT. `lastLedgerCompactionFiredAtMs`
+  // (run-task.ts) scans the live ledger for the newest row of this step and hands it to
+  // `decideLedgerCompaction(pressure, lastFiredAtMs, now)`. Rotated away, that read returns
+  // `undefined`, the throttle sees "never fired", and compaction re-fires on the very next
+  // daemon tick — the marker is what bounds it, so losing it converts a throttled rung into a
+  // loop. Deliberately NOT joined by "ledger_compaction.ran"/".nothing_eligible"/".run_failed":
+  // those are outcome records nothing decides off, the same reasoning as `worker.state`.
+  "ledger_compaction.fired",
   // W1-T2988: `escalateRetroPublicationFailure`'s (retro.ts) episode dedup marker, read back by
   // THAT function — a rotation dropping it re-opens one duplicate needs-human issue on every retro
   // fire while the condition persists, which is the very loop this step exists to stop.

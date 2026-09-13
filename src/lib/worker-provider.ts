@@ -1258,57 +1258,130 @@ export interface ParsedCodexEvents {
   usageRefusal?: UsageLimitRefusal;
 }
 
-/** Parse Codex exec JSONL into the existing provider-neutral worker envelope. */
-export function parseCodexJsonl(raw: string, nowMs = Date.now()): ParsedCodexEvents {
-  let sessionId = "";
-  const blocks: string[] = [];
-  const errors: string[] = [];
-  let input = 0;
-  let output = 0;
-  let cacheRead = 0;
-  let numTurns = 0;
-  let usageRefusal: UsageLimitRefusal | undefined;
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
+/** PRIMARY CONTROL: the maximum JSONL transcript one Codex worker may retain before it is
+ * terminated. This is the ordinary containment boundary for worker output, not a recovery
+ * fallback after another guard has failed. */
+export const CODEX_WORKER_STDOUT_MAX_BYTES = 1 * 1024 * 1024;
+/** PRIMARY CONTROL: stderr is diagnostic evidence, not protocol input, so it receives its own
+ * smaller containment ceiling. */
+export const CODEX_WORKER_STDERR_MAX_BYTES = 256 * 1024;
+
+/** A worker exceeded a bounded protocol or diagnostic stream before it could return a result. */
+export interface CodexWorkerOutputLimitError extends Error {
+  readonly name: "CodexWorkerOutputLimitError";
+  readonly reasonClass: "bounded_output";
+  readonly stream: "stdout" | "stderr";
+  readonly limitBytes: number;
+  readonly observedBytes: number;
+}
+
+export function isCodexWorkerOutputLimitError(error: unknown): error is CodexWorkerOutputLimitError {
+  if (!(error instanceof Error) || error.name !== "CodexWorkerOutputLimitError") return false;
+  const candidate = error as Partial<CodexWorkerOutputLimitError>;
+  return (
+    candidate.reasonClass === "bounded_output" &&
+    (candidate.stream === "stdout" || candidate.stream === "stderr") &&
+    typeof candidate.limitBytes === "number" &&
+    typeof candidate.observedBytes === "number"
+  );
+}
+
+function codexWorkerOutputLimitError(
+  stream: "stdout" | "stderr",
+  limitBytes: number,
+  observedBytes: number,
+): CodexWorkerOutputLimitError {
+  const error = new Error(
+    `Codex worker ${stream} output exceeded its ${limitBytes}-byte retention budget ` +
+      `(${observedBytes} bytes observed)`,
+  );
+  return Object.assign(error, {
+    name: "CodexWorkerOutputLimitError" as const,
+    reasonClass: "bounded_output" as const,
+    stream,
+    limitBytes,
+    observedBytes,
+  });
+}
+
+/** Incrementally reduce Codex JSONL without retaining the complete transcript. */
+class CodexJsonlAccumulator {
+  private sessionId = "";
+  private readonly blocks: string[] = [];
+  private readonly errors: string[] = [];
+  private input = 0;
+  private output = 0;
+  private cacheRead = 0;
+  private numTurns = 0;
+  private usageRefusal: UsageLimitRefusal | undefined;
+  private pending = "";
+
+  constructor(private nowMs: number) {}
+
+  push(chunk: string, nowMs = this.nowMs): void {
+    this.nowMs = nowMs;
+    this.pending += chunk;
+    for (;;) {
+      const newline = this.pending.indexOf("\n");
+      if (newline < 0) return;
+      this.consumeLine(this.pending.slice(0, newline));
+      this.pending = this.pending.slice(newline + 1);
+    }
+  }
+
+  finish(): ParsedCodexEvents {
+    if (this.pending.trim()) this.consumeLine(this.pending);
+    this.pending = "";
+    return {
+      sessionId: this.sessionId,
+      text: this.blocks.at(-1) ?? "",
+      blocks: this.blocks,
+      tokens: { input: this.input, output: this.output, cacheRead: this.cacheRead, cacheCreation: 0 },
+      numTurns: this.numTurns,
+      isError: this.errors.length > 0,
+      subtype: this.errors.length > 0 ? "error_codex" : "success",
+      errors: this.errors,
+      ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
+    };
+  }
+
+  private consumeLine(line: string): void {
+    if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
       event = JSON.parse(line) as CodexJsonEvent;
-    } catch (error) {
+    } catch {
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
-      errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
-      continue;
+      this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
+      return;
     }
-    if (event.type === "thread.started" && typeof event.thread_id === "string") sessionId = event.thread_id;
-    if (event.type === "turn.started") numTurns += 1;
+    if (event.type === "thread.started" && typeof event.thread_id === "string") this.sessionId = event.thread_id;
+    if (event.type === "turn.started") this.numTurns += 1;
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
-      blocks.push(event.item.text);
+      this.blocks.push(event.item.text);
     }
     if (event.type === "turn.completed" && event.usage) {
-      input += event.usage.input_tokens ?? 0;
-      output += event.usage.output_tokens ?? 0;
-      cacheRead += event.usage.cached_input_tokens ?? 0;
+      this.input += event.usage.input_tokens ?? 0;
+      this.output += event.usage.output_tokens ?? 0;
+      this.cacheRead += event.usage.cached_input_tokens ?? 0;
     }
     if (event.type === "turn.failed" || event.type === "error") {
       const message = event.error?.message ?? event.type;
-      errors.push(message);
+      this.errors.push(message);
       // Codex 0.152.0 preserves its structured UsageLimitExceeded classification inside app-server,
       // but `codex exec --json` intentionally projects only the terminal message. Normalize at this
       // adapter boundary while the text is known to be provider error evidence; never scan agent
       // output, which may discuss usage limits as part of the task.
-      usageRefusal ??= detectUsageLimitRefusal(message, nowMs);
+      this.usageRefusal ??= detectUsageLimitRefusal(message, this.nowMs);
     }
   }
-  return {
-    sessionId,
-    text: blocks.at(-1) ?? "",
-    blocks,
-    tokens: { input, output, cacheRead, cacheCreation: 0 },
-    numTurns,
-    isError: errors.length > 0,
-    subtype: errors.length > 0 ? "error_codex" : "success",
-    errors,
-    ...(usageRefusal ? { usageRefusal } : {}),
-  };
+}
+
+/** Parse Codex exec JSONL into the existing provider-neutral worker envelope. */
+export function parseCodexJsonl(raw: string, nowMs = Date.now()): ParsedCodexEvents {
+  const accumulator = new CodexJsonlAccumulator(nowMs);
+  accumulator.push(raw);
+  return accumulator.finish();
 }
 
 type CodexSpawnEnvArgs = Pick<
@@ -1602,20 +1675,43 @@ async function spawnCodexWorkerInPrivateTemp(
   selection?: Pick<ProviderCapacity, "model" | "effort">,
 ): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
-  const stderrChunks: string[] = [];
-  const stdoutChunks: string[] = [];
+  const startedAt = Date.now();
+  const stdout = new CodexJsonlAccumulator(startedAt);
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let stderr = "";
+  let outputLimit: CodexWorkerOutputLimitError | undefined;
   const pidRef: { pid?: number } = {};
   const spawn = args.containment?.spawn ?? spawnDetachedGroup;
   const teardown = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
-  const startedAt = Date.now();
   let timedOut = false;
+  let teardownRequested = false;
+  const teardownOnce = (pgid: number) => {
+    if (teardownRequested) return;
+    teardownRequested = true;
+    teardown(pgid);
+  };
+  const exceedOutputBudget = (stream: "stdout" | "stderr", limitBytes: number, observedBytes: number) => {
+    if (outputLimit || timedOut) return;
+    outputLimit = codexWorkerOutputLimitError(stream, limitBytes, observedBytes);
+    if (pidRef.pid !== undefined) teardownOnce(pidRef.pid);
+  };
   const childEnv = { ...codexSpawnEnv(config, args), TMPDIR: privateTmpDir };
   const contained = spawn(
     { command: bin, args: codexExecArgs(args, config, selection), cwd: args.cwd, env: childEnv },
-    (chunk) => stderrChunks.push(chunk),
+    (chunk) => {
+      if (outputLimit || timedOut) return;
+      stderrBytes += Buffer.byteLength(chunk, "utf8");
+      if (stderrBytes > CODEX_WORKER_STDERR_MAX_BYTES) {
+        exceedOutputBudget("stderr", CODEX_WORKER_STDERR_MAX_BYTES, stderrBytes);
+        return;
+      }
+      stderr += chunk;
+    },
     args.onSpawnError,
   );
   pidRef.pid = contained.pid;
+  if (outputLimit) teardownOnce(contained.pid);
   const process = contained.process as unknown as ContainedProcess["process"] & NodeJS.EventEmitter & {
     stdin: NodeJS.WritableStream;
     stdout: NodeJS.ReadableStream;
@@ -1629,15 +1725,23 @@ async function spawnCodexWorkerInPrivateTemp(
     if (!args.clockBound) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
+      if (outputLimit) return;
       timedOut = true;
-      teardown(contained.pid);
+      teardownOnce(contained.pid);
     }, args.clockBound.boundMs);
   };
   process.stdout.on("data", (chunk: Buffer) => {
+    if (outputLimit || timedOut) return;
     const text = chunk.toString("utf8");
-    stdoutChunks.push(text);
-    if (/\"type\":\"agent_message\"/.test(text)) args.streamObserver?.({ kind: "working", tsMs: Date.now() });
-    else args.streamObserver?.({ kind: "message", tsMs: Date.now() });
+    stdoutBytes += Buffer.byteLength(text, "utf8");
+    if (stdoutBytes > CODEX_WORKER_STDOUT_MAX_BYTES) {
+      exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_MAX_BYTES, stdoutBytes);
+      return;
+    }
+    const observedAt = Date.now();
+    stdout.push(text, observedAt);
+    if (/\"type\":\"agent_message\"/.test(text)) args.streamObserver?.({ kind: "working", tsMs: observedAt });
+    else args.streamObserver?.({ kind: "message", tsMs: observedAt });
     armClockBound();
   });
   armClockBound();
@@ -1645,9 +1749,10 @@ async function spawnCodexWorkerInPrivateTemp(
   process.stdin.write(`${prompt}\n`);
   process.stdin.end();
   try {
-    const exitCode = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardown);
+    const exitCode = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
+    if (outputLimit) throw outputLimit;
     if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
-    const parsed = parseCodexJsonl(stdoutChunks.join(""));
+    const parsed = stdout.finish();
     const isError = parsed.isError || exitCode !== 0;
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     return {
@@ -1658,7 +1763,7 @@ async function spawnCodexWorkerInPrivateTemp(
       maxTurns: undefined,
       text: parsed.text,
       blocks: parsed.blocks,
-      stderr: stderrChunks.join(""),
+      stderr,
       subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
       isError,
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),

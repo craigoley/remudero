@@ -49,18 +49,23 @@ const DECLARED_RUNTIME_FIXTURE: Record<string, string> = {
   GH_APP_ID: "app-id-fixture",
   GH_APP_INSTALLATION_ID: "install-id-fixture",
   GH_APP_PRIVATE_KEY_PATH: "/path/to/key.pem",
+  RMD_GIT_AUTHOR_NAME: "Vercel Recognized Author",
+  RMD_GIT_AUTHOR_EMAIL: "vercel-recognized-author@example.com",
   // W1-T2932: the heap ceiling. Its VALUE is a host sizing decision and deliberately not declared
   // anywhere in this repo; only the NAME is, so a recycle carries whatever the live container holds.
   NODE_OPTIONS: "--max-old-space-size=8192",
 };
 
 /** The image env plus every declared runtime var at its fixture value, one override or drop applied. */
-function containerEnvLines(opts: { drop?: string; extra?: string; override?: [string, string] } = {}): string[] {
+function containerEnvLines(opts: { drop?: string | string[]; extra?: string; override?: [string, string]; overrides?: Record<string, string> } = {}): string[] {
   const lines = [...IMAGE_ENV_LINES];
+  const drops = new Set(Array.isArray(opts.drop) ? opts.drop : opts.drop ? [opts.drop] : []);
+  const overrides = { ...opts.overrides };
+  if (opts.override) overrides[opts.override[0]] = opts.override[1];
   for (const [name, value] of Object.entries(DECLARED_RUNTIME_FIXTURE)) {
-    if (name === opts.drop) continue;
-    if (opts.override && opts.override[0] === name) {
-      lines.push(`${name}=${opts.override[1]}`);
+    if (drops.has(name)) continue;
+    if (Object.hasOwn(overrides, name)) {
+      lines.push(`${name}=${overrides[name]}`);
     } else {
       lines.push(`${name}=${value}`);
     }
@@ -85,6 +90,13 @@ const CONTAINER_ENV_BY_MODE: Record<string, string[]> = {
   // this fixture only) image itself bakes in — see IMAGE_ENV_BY_MODE below. A name-only diff would
   // read this as "unchanged from the image" and silently revert it (rationale 5, bullet 1).
   "shadow-declared": containerEnvLines({ override: ["GH_APP_ID", "real-appid"] }),
+  "git-author-shell-seed": containerEnvLines({ drop: ["RMD_GIT_AUTHOR_NAME", "RMD_GIT_AUTHOR_EMAIL"] }),
+  "git-author-live": containerEnvLines({
+    overrides: {
+      RMD_GIT_AUTHOR_NAME: "Live Container Author",
+      RMD_GIT_AUTHOR_EMAIL: "live-container-author@example.com",
+    },
+  }),
 };
 
 /** Per-STUB_MODE image env — always the five baked names, `shadow-declared` also bakes GH_APP_ID. */
@@ -700,11 +712,83 @@ test("W1-T1069: both scripts read the same declared name list", () => {
   assert.deepEqual([...printedNames].sort(), [...sharedNames].sort(), "the printed passthrough names must match the declared list exactly");
 });
 
+test("Git author names stay declared across every recycle surface", () => {
+  const sharedSrc = readFileSync(SHARED_RUNTIME_VARS_FILE, "utf8");
+  const recycleSrc = readFileSync(SCRIPT, "utf8");
+  const hostUpdateSrc = readFileSync(HOST_UPDATE_SCRIPT, "utf8");
+  const expected = ["RMD_GIT_AUTHOR_NAME", "RMD_GIT_AUTHOR_EMAIL"];
+
+  const sharedNames = extractBashArray(sharedSrc, "RMD_DAEMON_RUNTIME_ENV_VARS");
+  const recycleFallback = extractBashArray(recycleSrc, "RMD_DAEMON_RUNTIME_ENV_VARS");
+  const hostUpdateFallback = extractBashArray(hostUpdateSrc, "RMD_DAEMON_RUNTIME_ENV_VARS");
+  const printedNames = printDaemonRunEnvNames();
+
+  for (const name of expected) {
+    assert.ok(sharedNames.includes(name), `deploy/runtime-env-vars.sh must declare ${name}`);
+    assert.ok(recycleFallback.includes(name), `recycle-container.sh fallback must declare ${name}`);
+    assert.ok(hostUpdateFallback.includes(name), `host-update.sh fallback must declare ${name}`);
+    assert.ok(printedNames.includes(name), `--print-daemon-run must pass ${name} through`);
+  }
+});
+
+test("a first recycle seeds Git author overrides from the shell", () => {
+  const authorName = "Shell Seeded Author";
+  const authorEmail = "shell-seeded-author@example.com";
+  const run = runRecycle("git-author-shell-seed", {
+    extraEnv: {
+      RMD_GIT_AUTHOR_NAME: authorName,
+      RMD_GIT_AUTHOR_EMAIL: authorEmail,
+    },
+  });
+
+  assert.equal(run.status, 0, `expected success, got ${run.status}: ${run.stderr}`);
+  const runCall = run.calls.filter(isRun)[0];
+  assert.ok(runCall, "a docker run call must have happened");
+  assert.ok(runCall.argv.includes(`RMD_GIT_AUTHOR_NAME=${authorName}`), "the shell author name must seed the replacement container");
+  assert.ok(runCall.argv.includes(`RMD_GIT_AUTHOR_EMAIL=${authorEmail}`), "the shell author email must seed the replacement container");
+});
+
+test("a live Git author override outranks the shell on recycle", () => {
+  const run = runRecycle("git-author-live", {
+    extraEnv: {
+      RMD_GIT_AUTHOR_NAME: "Conflicting Shell Author",
+      RMD_GIT_AUTHOR_EMAIL: "conflicting-shell-author@example.com",
+    },
+  });
+
+  assert.equal(run.status, 0, `expected success, got ${run.status}: ${run.stderr}`);
+  const runCall = run.calls.filter(isRun)[0];
+  assert.ok(runCall, "a docker run call must have happened");
+  assert.ok(runCall.argv.includes("RMD_GIT_AUTHOR_NAME=Live Container Author"), "the live author name must win");
+  assert.ok(runCall.argv.includes("RMD_GIT_AUTHOR_EMAIL=live-container-author@example.com"), "the live author email must win");
+  assert.ok(!runCall.argv.includes("RMD_GIT_AUTHOR_NAME=Conflicting Shell Author"), "the shell author name must not replace the live value");
+  assert.ok(!runCall.argv.includes("RMD_GIT_AUTHOR_EMAIL=conflicting-shell-author@example.com"), "the shell author email must not replace the live value");
+});
+
+test("Git author override values never reach recycle output", () => {
+  const authorName = "Output Hidden Author";
+  const authorEmail = "output-hidden-author@example.com";
+  const run = runRecycle("git-author-shell-seed", {
+    extraEnv: {
+      RMD_GIT_AUTHOR_NAME: authorName,
+      RMD_GIT_AUTHOR_EMAIL: authorEmail,
+    },
+  });
+
+  assert.equal(run.status, 0, `expected success, got ${run.status}: ${run.stderr}`);
+  assert.match(run.stdout, /RMD_GIT_AUTHOR_NAME/);
+  assert.match(run.stdout, /RMD_GIT_AUTHOR_EMAIL/);
+  assert.doesNotMatch(run.stdout, new RegExp(authorName));
+  assert.doesNotMatch(run.stdout, new RegExp(authorEmail));
+  assert.doesNotMatch(run.stderr, new RegExp(authorName));
+  assert.doesNotMatch(run.stderr, new RegExp(authorEmail));
+});
+
 test("W1-T1069: MUTANT: a fallback array edited out of sync with deploy/runtime-env-vars.sh is caught", () => {
   // Proves the consistency test above actually discriminates, rather than passing on any six names.
   const recycleSrc = readFileSync(SCRIPT, "utf8");
   const mutated = recycleSrc.replace(
-    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH NODE_OPTIONS)",
+    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS)",
     "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S)",
   );
   assert.notEqual(mutated, recycleSrc, "the mutation target must actually be present and unique");

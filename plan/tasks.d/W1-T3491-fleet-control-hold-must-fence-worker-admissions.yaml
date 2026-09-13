@@ -1,0 +1,78 @@
+- id: W1-T3491
+  title: "FLEET PAUSE AND STOP MUST FENCE EVERY LATER WORKER ADMISSION"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  origin: "issue#5328"
+  plan_refs: ["W1-T11", "W1-T1065", "W1-T2584", "W1-T2981", "W1-T2986", "W1-T2659"]
+  files:
+    - src/lib/daemon.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/daemon-pause-before-admission.test.ts
+    - test/sweep.test.ts
+    - test/daemon-command-retro-wiring.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SHARED PAUSE HOLD DID NOT FENCE THE FLEET. At 2026-09-13T01:48:54Z an operator wrote
+    the persistent hold at Azure host path `/home/craigoleyagent/rmd-state2/state/PAUSE`; the
+    container's effective root is the bind mount `/home/node/Remudero`, so the daemon sees that
+    same marker at `/home/node/Remudero/state/PAUSE`. Despite that hold, the daemon later admitted
+    a PR-fix worker (which created an empty trailer commit) and a detached retro worker. Issue
+    #5328 has the live evidence and source-resolution record.
+
+    SOURCE EXPLAINS THE HOLE. `runDaemon` reads STOP at `src/lib/daemon.ts:2025` and PAUSE at
+    `:2094`, and W1-T1065 re-reads them immediately before ordinary `runOne` admission at
+    `:3076-3092`. The full sweep runs earlier at `:2164`. Its `runGatedSweep` callback at
+    `:1345-1346` is named and wired only as `continueReviewAdmissions`; `runSweep` consumes it
+    only in `takeNextReview` at `src/lib/sweep.ts:8375-8392`. The same sweep's fix-worker calls at
+    `src/lib/sweep.ts:7935-7940` and `:7995-8000` have no fleet-control recheck. The detached
+    retro admission at `src/lib/daemon.ts:2660-2685`, wipe-test cadence at `:2711-2713`, intake
+    runner at `:2614-2616` (whose alert-fix route can dispatch), and auto-triage admission at
+    `:2951-2988` are likewise after the top-of-tick read. These are worker-capable paths, not
+    merely reporting hooks: wipe-test invokes `runTask` in `src/lib/wipe-test.ts:679-695`; auto
+    triage delegates to `triageCommand`, which builds a worker run; and the intake alert-fix route
+    dispatches its repair command.
+
+    BUILD ONE FAIL-CLOSED ADMISSION FENCE, rather than independently copying `checkStop() ??
+    checkPause()` into each lane. It must be threaded from `runDaemon` through the full-sweep
+    bridge and checked immediately before every worker-capable callback above: semantic review,
+    PR-fix repair, intake, retro, wipe-test, auto-triage, and ordinary task dispatch. A hold that
+    appears after the tick begins must therefore stand the prospective action down with a named
+    ledger reason and leave it for a later post-resume pass. It must not interrupt work already
+    admitted: PAUSE remains drain-and-hold, while STOP returns through the existing graceful
+    summary once the current bounded section settles.
+
+    CLOSE THE BOOT GAP TOO. `daemonCommand` calls `daemonBoot` before it enters `runDaemon`
+    (`src/run-task.ts:26601`), and boot invokes mutable sweeps such as stale-lock/orphan/feedback
+    handling. A controlled Azure restart while STOP was present remained in boot work for more
+    than 20 seconds rather than recording the loop's control decision. Resolve the same STOP/PAUSE
+    predicate before those mutable boot callbacks; a pre-existing STOP exits gracefully and a
+    pre-existing PAUSE reaches the idle hold without running externally visible boot actions.
+    Do not cancel an already admitted worker, change provider selection, alter policy cadence,
+    consume PAUSE, or change the supervisor/watchdog policy in this task.
+
+    The dedicated tests listed here are intentional. `test/daemon-pause-before-admission.test.ts`
+    already proves W1-T1065's normal dispatch recheck; extend it with a control flip while each
+    daemon-side worker-capable cadence is poised to fire. `test/sweep.test.ts` must prove the
+    full-sweep review AND fix paths decline before their fake worker effects. The command-wiring
+    test must prove a pre-existing PAUSE and STOP suppress all mutable `daemonBoot` callbacks,
+    while an unheld boot preserves the existing wiring. Use injected callbacks and fake controls;
+    no paid provider, real worker, GitHub mutation, or sleep is an acceptance substitute.
+  acceptance:
+    - claim: "a STOP or PAUSE raised after a daemon tick starts but before a full-sweep review or repair admission prevents that fake worker callback from running and records a named held reason"
+      proof: "unit test: W1-T3491 criterion 1"
+    - claim: "a control raised before intake, retro, wipe-test, auto-triage, or ordinary task admission prevents each prospective worker-capable callback, while a worker admitted before PAUSE is allowed to settle"
+      proof: "unit test: W1-T3491 criterion 2"
+    - claim: "a pre-existing STOP or PAUSE is resolved before mutable daemon boot callbacks, and an unheld boot keeps the existing boot wiring"
+      proof: "unit test: W1-T3491 criterion 3"
+  falsifier: |
+    The task is wrong if any fake worker-capable callback can run after its test raises either
+    control, if an already-admitted fake task is cancelled by PAUSE, or if a pre-existing control
+    still invokes a mutable daemonBoot callback. In that case, find the missing admission edge and
+    revise this shard before changing fleet state.

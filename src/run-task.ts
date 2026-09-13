@@ -38,8 +38,14 @@ import {
 // the runtime specifier below on its emitted `.js` form.
 import { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
 export { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs };
-import { ledgerCompactCommand } from "./lib/ledger-compact.js";
+import { ledgerCompactCommand, type LedgerCompactCommandDeps } from "./lib/ledger-compact.js";
 export { ledgerCompactCommand } from "./lib/ledger-compact.js";
+import {
+  decideLedgerCompaction,
+  readLedgerCorpusPressure,
+  type LedgerCompactionDecision,
+  type LedgerCompactionOutcome,
+} from "./lib/ledger-compaction-rung.js";
 // Compatibility re-export target: lib/escalation-catalogue"
 import {
   DISK_HEADROOM_EPISODE_MS,
@@ -291,6 +297,7 @@ import {
   daemonBoot,
   daemonExitCode,
   daemonExitCodeForSummary,
+  resolveFleetControlHold,
   runDaemon,
   type CrashLoopVerdict,
   type DaemonOpts,
@@ -298,6 +305,7 @@ import {
   type HeadroomPolicy,
   type IntakeRungDecision,
   type IntakeRungRunResult,
+  type ReviewAdmissionGate,
   type StarvationCensus,
   type StarvationClearedInfo,
   priorUnrecognisedResetStrings,
@@ -2786,6 +2794,7 @@ export function ghPrCreateFillCommand(
   repo: string,
   branch: string,
   title?: string,
+  bodyOverride?: string,
 ): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
@@ -2795,8 +2804,8 @@ export function ghPrCreateFillCommand(
   const given = title && title.trim().length > 0 ? title.trim() : undefined;
   const derived = given ?? lastCommitSubject(worktreePath);
   const resolvedTitle = derived ?? branch;
-  const bodyParts = [fillDerivedBody(worktreePath)];
-  if (derived === undefined) {
+  const bodyParts = [bodyOverride ?? fillDerivedBody(worktreePath)];
+  if (derived === undefined && bodyOverride === undefined) {
     // design (iv): the branch-name fallback is stated in the body, never silent.
     bodyParts.push(`(no commit-derived title was available — this PR is titled after its branch, \`${branch}\`)`);
   }
@@ -14717,7 +14726,10 @@ interface ReviewCommandDeps {
   fetchView?: (args: string[]) => unknown;
   loadConfig?: () => Config;
   materialize?: typeof materializeReviewWorktree;
+  withMaterialized?: typeof withMaterializedWorktree;
+  buildBaseProof?: typeof buildBaseProofDir;
   runReview?: typeof runReview;
+  postStatus?: typeof postReviewStatusGuarded;
   /** W1-T913: injectable so a test can observe the pending post without a real `gh` spawn — see
    *  `postReviewPending`'s call site below. Defaults to the real {@link postReviewPending}. */
   postReviewPending?: typeof postReviewPending;
@@ -14733,6 +14745,126 @@ interface ReviewCommandDeps {
    *  that fact across the process boundary instead of making reviewCommand reclassify with the
    *  narrower emitter-ledger evidence available here. Undefined preserves the operator CLI. */
   planOnlyFiling?: boolean;
+  /** Test-only escape hatch for older injected reviewCommand fixtures that use `--repo` merely to
+   * avoid the live `resolveOwnerRepo()` read. Production callers never set this; explicit target
+   * reviews validate the managed clone before target data is read. */
+  enforceReviewSubjectCheckout?: boolean;
+}
+
+type ReviewSubjectFailureReason =
+  | "review-subject-missing"
+  | "review-subject-not-git"
+  | "review-subject-origin-mismatch";
+
+type ReviewSubjectCheckout =
+  | { ok: true; repoDir: string; explicitTarget: boolean }
+  | { ok: false; reason: ReviewSubjectFailureReason; message: string; repoDir: string; explicitTarget: true };
+
+function parseOwnerRepoFromOriginUrl(url: string): { owner: string; repo: string } | undefined {
+  const m = url.trim().match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
+  return m ? { owner: m[1]!, repo: m[2]! } : undefined;
+}
+
+function ownerRepoEqual(a: { owner: string; repo: string }, b: { owner: string; repo: string }): boolean {
+  return a.owner === b.owner && a.repo === b.repo;
+}
+
+export function resolveReviewSubjectCheckout(args: {
+  config: Config;
+  rest: string[];
+  self: { owner: string; repo: string };
+  target: { owner: string; repo: string };
+  controllerRepoRoot?: string;
+  git?: (repoDir: string, argv: string[]) => string;
+  exists?: (path: string) => boolean;
+  isDirectory?: (path: string) => boolean;
+}): ReviewSubjectCheckout {
+  const controllerRepoRoot = args.controllerRepoRoot ?? repoRoot;
+  const explicitRepo = flagValue(args.rest, "--repo") !== undefined;
+  if (!explicitRepo || ownerRepoEqual(args.self, args.target)) {
+    return { ok: true, repoDir: controllerRepoRoot, explicitTarget: explicitRepo };
+  }
+
+  const repoDir = join(args.config.root, "repos", args.target.repo);
+  const exists = args.exists ?? existsSync;
+  const isDirectory =
+    args.isDirectory ??
+    ((path: string) => {
+      try {
+        return lstatSync(path).isDirectory();
+      } catch (e) {
+        // Unstatable is equivalent to absent for this clone validation.
+        return false;
+      }
+    });
+  const git =
+    args.git ??
+    ((dir: string, argv: string[]) =>
+      execFileSync("git", ["-C", dir, ...argv], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim());
+
+  if (!exists(repoDir) || !isDirectory(repoDir)) {
+    return {
+      ok: false,
+      reason: "review-subject-missing",
+      message: `explicit review target ${args.target.owner}/${args.target.repo} has no managed checkout at ${repoDir}`,
+      repoDir,
+      explicitTarget: true,
+    };
+  }
+
+  try {
+    if (git(repoDir, ["rev-parse", "--is-inside-work-tree"]).trim() !== "true") {
+      return {
+        ok: false,
+        reason: "review-subject-not-git",
+        message: `explicit review target ${args.target.owner}/${args.target.repo} checkout at ${repoDir} is not a git work tree`,
+        repoDir,
+        explicitTarget: true,
+      };
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      reason: "review-subject-not-git",
+      message:
+        `explicit review target ${args.target.owner}/${args.target.repo} checkout at ${repoDir} is not readable as a git work tree: ` +
+        String((e as Error)?.message ?? e),
+      repoDir,
+      explicitTarget: true,
+    };
+  }
+
+  let origin;
+  try {
+    origin = parseOwnerRepoFromOriginUrl(git(repoDir, ["config", "--get", "remote.origin.url"]));
+  } catch (e) {
+    // An unreadable origin is reported below as an origin mismatch, never a controller fallback.
+    origin = undefined;
+  }
+  if (!origin || !ownerRepoEqual(origin, args.target)) {
+    const observed = origin ? `${origin.owner}/${origin.repo}` : "unreadable";
+    return {
+      ok: false,
+      reason: "review-subject-origin-mismatch",
+      message:
+        `explicit review target ${args.target.owner}/${args.target.repo} checkout at ${repoDir} has origin ${observed}`,
+      repoDir,
+      explicitTarget: true,
+    };
+  }
+
+  return { ok: true, repoDir, explicitTarget: true };
+}
+
+export function reviewSubjectFallbackAllowed(deps: ReviewCommandDeps): boolean {
+  if (deps.enforceReviewSubjectCheckout === true) return false;
+  return (
+    deps.fetchView !== undefined ||
+    deps.fetchHead !== undefined ||
+    deps.materialize !== undefined ||
+    deps.runReview !== undefined ||
+    deps.postReviewPending !== undefined
+  );
 }
 
 // reviewPrNumber / reviewViewArgs moved to src/lib/report-commands.ts (W1-T2888) — imported/
@@ -14911,7 +15043,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     fetchView,
     loadConfig: loadConfigDep,
     materialize,
+    withMaterialized,
+    buildBaseProof,
     runReview: runReviewDep,
+    postStatus: postStatusDep,
     postReviewPending: postReviewPendingDep,
     fetchHead,
     executionMode,
@@ -14920,7 +15055,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     fetchView: ghJson,
     loadConfig,
     materialize: materializeReviewWorktree,
+    withMaterialized: withMaterializedWorktree,
+    buildBaseProof: buildBaseProofDir,
     runReview,
+    postStatus: postReviewStatusGuarded,
     postReviewPending,
     fetchHead: realDeps().reviewWorktree.fetch,
     executionMode: "deterministic" as const,
@@ -14962,6 +15100,45 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     view.headRefName,
     planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
   );
+  const runId = `review-PR${view.number}-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
+  const reviewSubject = resolveReviewSubjectCheckout({
+    config,
+    rest,
+    self: resolveOwnerRepo(),
+    target: { owner, repo },
+  });
+  const subjectCheckout = reviewSubject.ok || reviewSubjectFallbackAllowed(deps)
+    ? { ok: true as const, repoDir: reviewSubject.ok ? reviewSubject.repoDir : repoRoot, explicitTarget: reviewSubject.explicitTarget }
+    : reviewSubject;
+  if (!subjectCheckout.ok) {
+    log("review.subject_refused", {
+      reason: subjectCheckout.reason,
+      message: subjectCheckout.message,
+      subject_repo_dir: subjectCheckout.repoDir,
+      target_owner: owner,
+      target_repo: repo,
+    });
+    await postStatusDep({
+      owner,
+      repo,
+      sha: view.headRefOid,
+      state: "failure",
+      description: `remudero-review: FAIL — ${subjectCheckout.reason}`,
+      taskId: taskId ?? `PR-${view.number}`,
+      evidence: "no_evidence",
+      ledgerPath,
+      runId,
+      prUrl: view.url,
+      reviewInputDigest: inputDigest,
+      reviewEngineRevision: REVIEW_ENGINE_REVISION,
+      fetchLifecycle: () => fetchPrLifecycle(view.url),
+    });
+    console.error(`rmd review: REFUSED — ${subjectCheckout.message}`);
+    return 1;
+  }
+  const subjectRepoDir = subjectCheckout.repoDir;
   // W1-T322: the same plan lookup this block already does for `criteria` also carries the
   // task's declared scope — an advisory-only input judgeReview needs. Stays `undefined` on ANY
   // read/parse failure (see the catch below), exactly like `criteria` degrading to the body's
@@ -15003,8 +15180,9 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // outage through its own `fetch-failure` class, which is the degradation path this command
   // already has. Failing here instead would invent a second one for the same condition.
   try {
-    fetchHead(repoRoot, view.number);
-  } catch {
+    fetchHead(subjectRepoDir, view.number);
+  } catch (e) {
+    void e;
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
@@ -15013,7 +15191,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
   if (taskId && !reviewTaskIdFromBody(body)) body = `Remudero-Task: ${taskId}`;
   if (taskId) {
-    const resolved = resolvePlanCriteriaAtHead(body, repoRoot, "plan/tasks.yaml", view.headRefOid);
+    const resolved = resolvePlanCriteriaAtHead(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid);
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
     taskDeclaredFiles = resolved.taskDeclaredFiles;
@@ -15028,10 +15206,6 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       source = `PR body Acceptance: block (${fromBody.length} criteria)`;
     }
   }
-
-  const runId = `review-PR${view.number}-${Date.now()}`;
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
 
   const provenanceKey = { taskId: taskId ?? `PR-${view.number}`, prUrl: view.url, headSha: view.headRefOid };
   const provenance = resolveReviewProviderProvenance(reviewLedger, provenanceKey);
@@ -15115,7 +15289,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
   // never silently, and (W1-T233) the console line below now NAMES why,
   // instead of a bare "unavailable" with the real reason thrown away.
-  const materialized = materialize(config, repoRoot, view.number, view.headRefOid);
+  const materialized = materialize(config, subjectRepoDir, view.number, view.headRefOid);
   if (materialized.worktreePath === undefined) {
     console.log(
       `(worktree materialization failed [${materialized.failure.errorClass}]: ` +
@@ -15131,7 +15305,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // fallback (or undefined when the PR has no dialect proof / no resolvable base — the check then
   // stays inert, exactly as it was for its first 1,180 verdicts). W1-T460's `baseUnreadablePaths`
   // rides along: a per-proof fact the dir alone cannot carry.
-  const baseProof = worktreePath ? buildBaseProofDir(criteria, worktreePath) : undefined;
+  const baseProof = worktreePath ? buildBaseProof(criteria, worktreePath) : undefined;
 
   // W1-T185 (Gap 2, criterion 6): withMaterializedWorktree guarantees teardown
   // on EVERY exit path, including a throw from runReview itself — never just
@@ -15140,11 +15314,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // head goes first and the base follows on every exit path too; a blob-only
   // fallback dir is not a worktree and is left to the boot sweep (src/lib/tmp.ts)
   // exactly as before.
-  const verdict = await withMaterializedWorktree(
+  const verdict = await withMaterialized(
     baseProof?.baseIsCheckout ? baseProof.baseCheckoutDir : undefined,
-    repoRoot,
+    subjectRepoDir,
     () =>
-      withMaterializedWorktree(worktreePath, repoRoot, () =>
+      withMaterialized(worktreePath, subjectRepoDir, () =>
         runReviewDep({
           owner,
           repo,
@@ -15196,7 +15370,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   );
   if (verdict.codeFreshnessWithheld) return 2;
 
-  if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(source, repoRoot)) {
+  if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(source, subjectRepoDir)) {
     console.log(
       "NOTE: the criteria came from a plan tree older than origin/main; merge origin/main into the branch " +
         "before treating this unmet verdict as a diff defect",
@@ -21430,6 +21604,116 @@ export function autoTriageCheck(
   });
 }
 
+/**
+ * W1-T3368's daemon-side composition root. The loop already owns the decision and ledger rows in
+ * `daemon.ts`; this adapter supplies the two real effects it needs on the self-hosting daemon:
+ * measure archive pressure without opening an archive, then run exactly the existing bounded
+ * compaction command when that decision fires.
+ *
+ * The original implementation stopped at `DaemonDeps`' optional properties. That made its unit
+ * tests pass with injected functions while the real daemon supplied neither property, so the
+ * pressure guard had no effect on the fleet. Keep this construction beside the other daemon-hook
+ * producers and test it through `daemonCommand`, not by source grep alone.
+ */
+export const DAEMON_LEDGER_COMPACT_OLDER_THAN_DAYS = 1;
+
+export function buildLedgerCompactionDaemonHooks(deps: {
+  config?: Config;
+  clock?: Clock;
+  check?: () => LedgerCompactionDecision;
+  run?: () => Promise<LedgerCompactionOutcome | undefined>;
+  compact?: (rest: string[], deps: LedgerCompactCommandDeps) => number;
+} = {}): {
+  checkLedgerCompaction: () => LedgerCompactionDecision;
+  runLedgerCompaction: () => Promise<LedgerCompactionOutcome | undefined>;
+} {
+  const configFor = () => deps.config ?? loadConfig();
+  const stateDirFor = () => dirname(ledgerPathFor(configFor()));
+  const clock = deps.clock ?? systemClock;
+  const check =
+    deps.check ??
+    (() => {
+      const config = configFor();
+      const ledgerPath = ledgerPathFor(config);
+      const stateDir = dirname(ledgerPath);
+      const pressure = readLedgerCorpusPressure(stateDir, {
+        readdir: readdirSync,
+        sizeOf: (path) => statSync(path).size,
+      });
+      const lastFiredAtMs = lastLedgerCompactionFiredAtMs(readLedgerRawLines(ledgerPath));
+      return decideLedgerCompaction(pressure, lastFiredAtMs, clock.now());
+    });
+  const run =
+    deps.run ??
+    (async () => {
+      let report: string | undefined;
+      const errors: string[] = [];
+      const code = (deps.compact ?? ledgerCompactCommand)(["--older-than", String(DAEMON_LEDGER_COMPACT_OLDER_THAN_DAYS)], {
+        stateDir: stateDirFor(),
+        out: (line) => {
+          report = line;
+        },
+        error: (line) => errors.push(line),
+      });
+      if (code !== 0) {
+        throw new Error(errors.join("\n") || `rmd ledger-compact exited ${code}`);
+      }
+      if (report === undefined) {
+        throw new Error("rmd ledger-compact exited 0 without its required outcome report");
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(report);
+      } catch {
+        throw new Error("rmd ledger-compact emitted an unreadable outcome report");
+      }
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        !Number.isSafeInteger((parsed as { sourceCount?: unknown }).sourceCount) ||
+        !Number.isSafeInteger((parsed as { rowsWritten?: unknown }).rowsWritten) ||
+        !Number.isSafeInteger((parsed as { duplicatesCollapsed?: unknown }).duplicatesCollapsed) ||
+        typeof (parsed as { archiveName?: unknown }).archiveName !== "string"
+      ) {
+        throw new Error("rmd ledger-compact emitted an invalid outcome report");
+      }
+      const result = parsed as {
+        sourceCount: number;
+        rowsWritten: number;
+        duplicatesCollapsed: number;
+        archiveName: string;
+      };
+      if (result.sourceCount === 0) return undefined;
+      return {
+        sourceCount: result.sourceCount,
+        rowsWritten: result.rowsWritten,
+        duplicatesCollapsed: result.duplicatesCollapsed,
+        archiveName: result.archiveName,
+      };
+    });
+  return { checkLedgerCompaction: check, runLedgerCompaction: run };
+}
+
+/** The live ledger is bounded independently of its rotations, so this reads the recent fire
+ * marker without reopening the archive union that the compaction rung exists to protect. */
+export function lastLedgerCompactionFiredAtMs(lines: readonly string[]): number | undefined {
+  let latest: number | undefined;
+  for (const line of lines) {
+    if (!line.includes('"step":"ledger_compaction.fired"')) continue;
+    try {
+      const row = JSON.parse(line) as { step?: unknown; ts?: unknown };
+      if (row.step !== "ledger_compaction.fired" || typeof row.ts !== "string") continue;
+      const at = Date.parse(row.ts);
+      if (Number.isFinite(at) && (latest === undefined || at > latest)) latest = at;
+    } catch {
+      // A torn live-ledger line carries no safe throttle marker. The daemon's append boundary
+      // already treats it as absent for other local decision readers too.
+      continue;
+    }
+  }
+  return latest;
+}
+
 export function buildRetroDaemonHooks(deps: {
   check?: () => RetroTriggerDecision | undefined;
   runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
@@ -25977,6 +26261,13 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
+    /** Injectable mutable boot routine. Tests use it to prove an already-held fleet does not
+     * enter daemonBoot's sweeps or keychain work. */
+    daemonBoot?: typeof daemonBoot;
+    /** Optional control readers for command-level wiring tests. Production omits them and reads
+     * the canonical local/shared fleet controls below. */
+    checkStop?: () => string | undefined;
+    checkPause?: () => string | undefined;
     /** Injectable W1-T2568 wake wiring and signal re-raise for deterministic shutdown coverage.
      * Production keeps the real filesystem watcher and `process.kill`; tests can observe that
      * the watcher closes before the daemon re-raises SIGINT/SIGTERM without signalling the test
@@ -26433,7 +26724,20 @@ export async function daemonCommand(
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
   // Also runs the W1-T115 boot sweep of stale rmd-owned temp dirs (the
   // 26,711-dir ENOSPC incident's backstop) and logs the count via daemon.tmp_sweep.
-  daemonBoot(
+  const checkStop = deps.checkStop ?? (() => stopDetail(config.root));
+  // `runDaemon` is a test-only loop seam. Its fixtures must not inherit the live shared hold a
+  // production daemon is deliberately required to honour; injected `checkPause` still takes precedence.
+  const checkPause = deps.checkPause ?? (deps.runDaemon ? () => pauseDetail(config.root) : () => checkSharedPause(config.root, realDeps().sharedPauseGit));
+  const invokeDaemonBoot: typeof daemonBoot = (...args) => daemonBoot(...args);
+  const bootHold = resolveFleetControlHold({ checkStop, checkPause });
+  if (bootHold) {
+    log("daemon.boot_held", {
+      control: bootHold.control,
+      detail: bootHold.detail,
+      reason: `fleet ${bootHold.control} hold: ${bootHold.detail}`,
+    });
+  } else {
+    (deps.daemonBoot ?? invokeDaemonBoot)(
     log,
     process.env,
     () => {
@@ -26554,7 +26858,8 @@ export async function daemonCommand(
     // Appended LAST, after the node pin, per `daemonBoot`'s own "no positional caller shifts"
     // discipline.
     readCheckoutDepth(dirname(dirname(fileURLToPath(import.meta.url)))),
-  );
+    );
+  }
 
   const runDaemonFn = deps.runDaemon ?? runDaemon;
   // W1-T160: the retro cadence hooks (self-target only) — see buildRetroDaemonHooks.
@@ -26582,6 +26887,10 @@ export async function daemonCommand(
   // undefined and the whole rung is dead code, exactly how #1066 merged auto-triage's consumer
   // with no producer.
   const digestCadenceHooks = target.isSelf ? buildDigestCadenceDaemonHooks({ config }) : undefined;
+  // W1-T3368: the compaction loop is self-target only for the same root-bound reason as every
+  // cadence beside it. Its state directory is this daemon's own `config.root/state`; wiring it
+  // for a drained repository would compact the fleet ledger while evaluating somebody else's plan.
+  const ledgerCompactionHooks = target.isSelf ? buildLedgerCompactionDaemonHooks({ config }) : undefined;
   // W1-T2923: one policy-gated cadence over the repository-intake rungs that used to require
   // hand-run verbs. SELF-TARGET ONLY: every runner writes this harness checkout/state.
   const intakeRungHooks = target.isSelf ? buildIntakeRungsDaemonHooks({ config }) : undefined;
@@ -26742,11 +27051,12 @@ export async function daemonCommand(
         // This task: the cleared half — closes the escalation `escalateStarvation` opened, on
         // the SAME edge `runDaemon` already resets `starvationEscalated` at.
         onStarvationCleared: (info) => escalateStarvationCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-        checkStop: () => stopDetail(config.root),
+        checkStop,
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
         // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
         // own doc for why UNREACHABLE reads as held, never as clear.
-        checkPause: () => checkSharedPause(config.root, realDeps().sharedPauseGit),
+        checkPause,
+        workerAdmissionHold: () => resolveFleetControlHold({ checkStop, checkPause }),
         // CODE FRESHNESS — THE PRODUCER W1-T126 NEVER GOT. The consumer has read
         // `deps.checkFreshness` since 2026 and this object never supplied it, so the stale
         // self-restart had fired ZERO times in the Azure daemon's 6,838-row ledger. MEASURED
@@ -26878,6 +27188,12 @@ export async function daemonCommand(
         // and writes nothing (Law 5), so it is safe to run unattended from the start.
         checkDigestCadence: digestCadenceHooks?.checkDigestCadence,
         runDigestCadence: digestCadenceHooks?.runDigestCadence,
+        // W1-T3368: this is the production edge the original feature omitted. `daemon.ts`
+        // deliberately owns its decision rows and invokes one bounded pass; this composition root
+        // owns filesystem pressure and the existing compactor. Leaving either undefined turns an
+        // over-bound corpus into a silent no-op until a union read OOMs the fleet.
+        checkLedgerCompaction: ledgerCompactionHooks?.checkLedgerCompaction,
+        runLedgerCompaction: ledgerCompactionHooks?.runLedgerCompaction,
         checkIntakeRungs: intakeRungHooks?.checkIntakeRungs,
         runIntakeRung: intakeRungHooks?.runIntakeRung,
         // BOARD-REVIEW RUNG (W1-T2304's design, wired here). Same shape as the two cadences
@@ -31678,7 +31994,7 @@ export function buildSweepHook(
   // liveness even when a test injection or future implementation accidentally throws.
   mainHealthRung?: () => Promise<void>,
   snapshotCache?: BoardSnapshotCache,
-): (continueReviewAdmissions?: () => boolean) => Promise<void> {
+): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
@@ -31775,10 +32091,11 @@ export function buildSweepHook(
           staleGateWorkflowsByPr,
           updatedForWorkflow,
           behindMainByPr,
-          // W1-T2584: supplied by daemon.ts's `runGatedSweep`, which closes the callback on its
-          // own wall-clock timeout and re-checks the existing STOP/PAUSE controls on every pull.
-          // Direct/tests calls omit it and receive the true default above.
+          // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
+          // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
+          // receive the true defaults above.
           continueReviewAdmissions,
+          workerAdmissionHold: continueReviewAdmissions.workerAdmissionHold,
         }),
         DEFAULT_SWEEP_POLICY,
       );
@@ -33930,13 +34247,29 @@ export async function planCommand(
     // propose
     log("plan.verdict", { action: "propose", detail: decision.detail, files: decision.files });
     say(formatPlanVerdictLine(mode, decision));
-    const commitMessage = planCommitMessage({ decision, mode, brief, taskId });
+    const commitMessage = planCommitMessage({ decision, mode, brief });
     applyPlanProposalCommit(worktreePath, commitMessage, log);
+    // Build the body only AFTER the shared commit writer has regenerated plan-index.json. The
+    // changed-files block is an assertion about the actual commit, not the worker's pre-harness
+    // advisory list; constructing it before regeneration would immediately make the PR contradict
+    // its own diff whenever the index changes.
+    const planPrFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const planPrBody = buildPlanPrBody({
+      intro: `rmd plan --mode=${mode} proposed plan-only changes.`,
+      criteria: filingAcceptanceCriteria(reservedIds, planPrFiles),
+      changedFiles: planPrFiles,
+    });
     gitPushRunBranch(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody);
     const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
@@ -33953,8 +34286,6 @@ export async function planCommand(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    ensureTaskTrailer(prUrl, taskId, log);
-
     // DETERMINISTIC GUARDS: a plan PR is PLAN-ONLY (plan/** or MASTER-PLAN.md), and an EXPAND
     // proposal must cite a research source (lib/plan-architect.ts's `outOfPlanScopeFilesInDiff`
     // / `diffCitesResearchSource`, the same shape as triage's plan-only + provenance guards).

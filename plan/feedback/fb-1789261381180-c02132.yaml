@@ -1,0 +1,17 @@
+id: fb-1789261381180-c02132
+ts: 2026-09-13T01:03:01.180Z
+raw: "RMD plan cannot file ordinary plan PRs: planCommitMessage emits unwrapped
+  Brief and built-in Acceptance lines that violate commitlint
+  footer-max-line-length. Live reproductions and source evidence are in GitHub
+  issue #5319. Build a durable message-shaping fix without weakening or
+  bypassing commitlint."
+attachments:
+  - https://github.com/craigoley/remudero/issues/5319
+origin: issue
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

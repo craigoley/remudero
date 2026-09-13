@@ -1,0 +1,77 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { test } from "node:test";
+
+import { runMeasurementCadenceReport } from "../src/lib/measurement-cadence.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+
+function fixture(files: Record<string, string>): string {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}adoption-symbol-callers-`));
+  for (const [rel, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), text, "utf8");
+  }
+  return root;
+}
+
+function unadoptedSymbols(root: string): Set<string> {
+  const result = runMeasurementCadenceReport({
+    stateDir: join(root, "state"),
+    cwd: root,
+    checkoutDir: root,
+    escalate: false,
+    gitLog: () => ({ dump: "", ref: "fixture" }),
+    shipDateFor: () => "2026-01-01T00:00:00Z",
+  });
+  assert.ok(result.adoptionReport, "the real cadence producer must attach an adoption report");
+  return new Set(
+    result.adoptionReport.findings
+      .filter((finding) => finding.shape === "symbol-no-caller")
+      .map((finding) => finding.mechanism),
+  );
+}
+
+function withFindings(files: Record<string, string>, assertion: (findings: Set<string>) => void): void {
+  const root = fixture(files);
+  try {
+    assertion(unadoptedSymbols(root));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("W1-T3409: an export named only in JSDoc remains a no-caller finding", () => {
+  withFindings(
+    {
+      "src/lib/comment-only.ts": "export function commentOnly(): void {}\n",
+      "src/run-task.ts": "/** {@link commentOnly} is documentation, not a caller. */\n",
+    },
+    (findings) => assert.ok(findings.has("commentOnly"), "a JSDoc-only identifier must remain a no-caller finding"),
+  );
+});
+
+test("W1-T3409: a call from an unreachable module remains a no-caller finding", () => {
+  withFindings(
+    {
+      "src/lib/dark-target.ts": "export function darkTarget(): void {}\n",
+      "src/lib/dark-region.ts": [
+        'import { darkTarget } from "./dark-target.js";',
+        "function neverReached(): void { darkTarget(); }",
+      ].join("\n"),
+      "src/run-task.ts": "export {};\n",
+    },
+    (findings) => assert.ok(findings.has("darkTarget"), "a call in an unreachable module must remain a no-caller finding"),
+  );
+});
+
+test("W1-T3409: a reachable imported call clears the no-caller finding", () => {
+  withFindings(
+    {
+      "src/lib/live-target.ts": "export function liveTarget(): void {}\n",
+      "src/run-task.ts": ['import { liveTarget } from "./lib/live-target.js";', "liveTarget();"].join("\n"),
+    },
+    (findings) => assert.ok(!findings.has("liveTarget"), "a reachable module importing and calling the symbol must clear the finding"),
+  );
+});

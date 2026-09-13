@@ -5807,11 +5807,10 @@ export interface SweepDeps {
     /** W1-T3202 — already-read process count shared with repair admission. */
     activeWorkers?: number;
   }) => number;
-  /** W1-T2584 — MAY THE BOUNDED REVIEW POOL ADMIT ANOTHER HEAD from this pass's already-derived
-   *  pending set? Consulted synchronously before each worker pulls its next job; omission means
-   *  `true`. It never interrupts a running reviewer — only later admissions, whose keys are released
-   *  and whose heads re-derive next pass, so a timer expiry never becomes cancellation mid-write. */
+  /** W1-T2584 — time-bounded gate for a next review admission; it never interrupts a running reviewer. */
   continueReviewAdmissions?: () => boolean;
+  /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
+  workerAdmissionHold?: () => string | undefined;
   /** Dispatch the W1-T76 fix rung carrying the mode-appropriate evidence at once — the FULL unmet
    *  set for a review dispatch, or ci-log evidence for a blocked_ci one. W1-T2231: MAY return
    *  whether this call demonstrably SPENT a strike; `undefined` reads as spent, so this widening
@@ -6072,6 +6071,7 @@ interface PriorActions {
    *  matching row is undated. Unlike {@link reviewRefused}, this is a bounded retry clock, not a
    *  semantic or lifecycle decision about the PR (W1-T2753). */
   reviewRetryableThrows: Map<string, number | undefined>;
+  reviewFreshnessRefusals: Map<string, number | undefined>;
   /** Exact-input keys where the thrown post-review attempt hit GitHub's permanent PR diff ceiling.
    *  The remedy is a new head with a smaller diff, so this is a terminal marker for the current
    *  key, not another entry in the timed retry bucket. */
@@ -6230,6 +6230,28 @@ function retryableReviewThrowBackoffReason(
   );
 }
 
+function isRetryableReviewerCodeFreshnessRefusal(line: Record<string, unknown>): boolean {
+  return line.reviewer_code_freshness === "stale" || line.reviewer_code_freshness === "unreadable";
+}
+
+function reviewerCodeFreshnessBackoffReason(
+  freshnessRefusals: ReadonlyMap<string, number | undefined>,
+  reviewKey: string,
+  policy: SweepPolicy,
+  now: number,
+): string | undefined {
+  if (!freshnessRefusals.has(reviewKey)) return undefined;
+  const attemptedAt = freshnessRefusals.get(reviewKey);
+  if (attemptedAt === undefined) return undefined;
+  const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
+  if (ageMinutes >= policy.pendingCeilingMinutes) return undefined;
+  return (
+    `the last reviewer-code freshness refusal for ${reviewKey} was ${Math.floor(ageMinutes)}m ago — ` +
+    `freshness recovery backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
+    `this is a bounded reviewer-source freshness refusal, not a durable review verdict`
+  );
+}
+
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
   const armed = new Set<string>();
   const fixed = new Set<string>();
@@ -6239,6 +6261,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const reviewDelivered = new Set<string>();
   const reviewRefused = new Set<string>();
   const reviewRetryableThrows = new Map<string, number | undefined>();
+  const reviewFreshnessRefusals = new Map<string, number | undefined>();
   const reviewDiffCeilingRefused = new Set<string>();
   const reviewRetryableThrowCounts = new Map<string, number>();
   const riskRefused = new Map<string, string | undefined>();
@@ -6267,6 +6290,13 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
           if (!reviewRetryableThrows.has(key)) reviewRetryableThrows.set(key, undefined);
           if (!Number.isNaN(parsed) && (existing === undefined || parsed > existing)) {
             reviewRetryableThrows.set(key, parsed);
+          }
+        } else if (isRetryableReviewerCodeFreshnessRefusal(line)) {
+          const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+          const existing = reviewFreshnessRefusals.get(key);
+          if (!reviewFreshnessRefusals.has(key)) reviewFreshnessRefusals.set(key, undefined);
+          if (!Number.isNaN(parsed) && (existing === undefined || parsed > existing)) {
+            reviewFreshnessRefusals.set(key, parsed);
           }
         } else if (!isReopenedClosedLifecycleRefusal(line.reason)) {
           // W1-T1213: the "PR is already closed" refusal is excluded here, never added to
@@ -6357,6 +6387,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
     reviewDelivered,
     reviewRefused,
     reviewRetryableThrows,
+    reviewFreshnessRefusals,
     reviewDiffCeilingRefused,
     reviewRetryableThrowCounts,
     riskRefused,
@@ -6788,6 +6819,16 @@ export function withFullSweepRepairAdmission(deps: SweepDeps): SweepDeps {
   return { ...deps, detachFixWait: true, repairAdmissionSurface: "full" };
 }
 
+function workerAdmissionHoldReason(deps: SweepDeps): string | undefined {
+  if (!deps.workerAdmissionHold) return undefined;
+  try {
+    return deps.workerAdmissionHold();
+  } catch (error) {
+    // Reason: an unreadable fleet-control check is held, never interpreted as permission to admit.
+    return `worker admission control check failed closed (${String((error as Error)?.message ?? error)})`;
+  }
+}
+
 /**
  * THE SHARED ENTRY POINT: BOTH `rmd sweep` and the daemon poll loop call this ONE function. It
  * re-derives every open PR's disposition fresh, takes the ONE gated action per PR, writes one
@@ -7045,7 +7086,9 @@ export async function runSweep(
       const fresh = priorActionsFromLedger(readLedger(deps.ledgerPath));
       const delivered = fresh.reviewDelivered.has(reviewKey);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
-      const retryBackoff = retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now);
+      const retryBackoff =
+        retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
+        reviewerCodeFreshnessBackoffReason(fresh.reviewFreshnessRefusals, reviewKey, policy, now);
       if (delivered || durableRefusal || retryBackoff !== undefined) {
         claimedReviewKeys.delete(reviewKey);
         return {
@@ -7476,7 +7519,9 @@ export async function runSweep(
         const reviewKey = reviewOutcomeKeyForPr(pr);
         const reviewDelivered = prior.reviewDelivered.has(reviewKey);
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
-        const retryBackoff = retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now);
+        const retryBackoff =
+          retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now) ??
+          reviewerCodeFreshnessBackoffReason(prior.reviewFreshnessRefusals, reviewKey, policy, now);
         alreadyDone = reviewDelivered || reviewDurablyRefused || retryBackoff !== undefined;
         // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT OTHERWISE LOOK IDENTICAL: this
         // dedup firing, `deps.postReview` never being wired, the light-pass admission being lost to
@@ -7853,6 +7898,12 @@ export async function runSweep(
               // anything it did not expect — an unexpected changed path, no change at all, a failed
               // push — and a refusal must cost the PR nothing but this pass. Never a stand-down:
               // the fix rung is still the right instrument when the cheap repair declined.
+              const workerHold = workerAdmissionHoldReason(deps);
+              if (workerHold) {
+                acted = false;
+                standDownReason = workerHold;
+                break;
+              }
               const ratchetScripts =
                 policy.recordableRatchetRepairEnabled === true && deps.repairRecordableRatchet
                   ? recordableRatchetRepairFor(pr)
@@ -7937,6 +7988,12 @@ export async function runSweep(
               }
               // W1-T2520: the conflicted twin of the blocked-fixable claim above, same reasoning
               // — see `claimFixDispatch`'s own doc.
+              const workerHold = workerAdmissionHoldReason(deps);
+              if (workerHold) {
+                acted = false;
+                standDownReason = workerHold;
+                break;
+              }
               const conflictedFixClaim = claimFixDispatch(pr);
               if (!conflictedFixClaim.ok) {
                 acted = false;
@@ -8337,6 +8394,11 @@ export async function runSweep(
 
   const takeNextReview = (): (typeof orderedReviews)[number] | undefined => {
     if (admissionStopReason !== undefined) return undefined;
+    const workerHold = workerAdmissionHoldReason(deps);
+    if (workerHold) {
+      closeAdmissions(workerHold);
+      return undefined;
+    }
     if (deps.continueReviewAdmissions) {
       try {
         if (!deps.continueReviewAdmissions()) {

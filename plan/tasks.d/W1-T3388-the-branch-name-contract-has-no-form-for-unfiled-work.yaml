@@ -39,6 +39,6 @@
 
   acceptance:
     - claim: "a head matching neither the run-branch shape nor a valid trailer is refused at open, naming both conforming forms"
-      proof: "grep: Add a required check that refuses a head matching in plan/tasks.d/W1-T3388-the-branch-name-contract-has-no-form-for-unfiled-work.yaml"
+      proof: "unit test: test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts"
     - claim: "the naming contract reaches the dispatched worker through its rendered prompt, not only through CLAUDE.md"
-      proof: "grep: Carry the naming contract into the rendered turn-0 worker prompt in plan/tasks.d/W1-T3388-the-branch-name-contract-has-no-form-for-unfiled-work.yaml"
+      proof: "unit test: test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts"

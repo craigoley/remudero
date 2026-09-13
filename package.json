@@ -84,6 +84,7 @@
     "census:bound-kind": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/bound-kind-declared.test.ts",
     "census:ledger-literal": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/ledger-literal-census.test.ts",
     "census:catch-erasure": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/catch-erasure-ratchet.test.ts",
+    "census:self-path-proof": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/a-shards-proof-cannot-target-its-own-file.test.ts",
     "census:negative-reachability": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/negative-reachability-ratchet.test.ts",
     "census:no-shallowing": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/no-shallowing-of-the-canonical-checkout.test.ts",
     "census:wall-clock-bound": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/a-wall-clock-bound-declares-itself.test.ts",

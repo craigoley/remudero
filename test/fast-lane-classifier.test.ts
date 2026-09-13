@@ -15,8 +15,9 @@
 // `import … from "../scripts/diff-class.mjs"` is a TS7016 — the same reason
 // test/acceptance-author-gate.test.ts reaches its script through a dynamic `import()` off a
 // `pathToFileURL` rather than a typed one. The CLI-level tests below drive the real script as a
-// subprocess (`node --import tsx scripts/diff-class.mjs`, the same tsx binding that script's own
-// header cites from scripts/acceptance-author-gate.mjs).
+// subprocess (`node scripts/diff-class.mjs`). The classifier imports the dependency-free
+// plan-scope leaf, so this is also the no-node_modules invocation coverage-ratchet uses before
+// deciding whether to install dependencies.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -54,17 +55,17 @@ function tmpFileList(lines: string[]): { path: string; cleanup: () => void } {
 }
 
 function runCli(args: string[]) {
-  return spawnSync(process.execPath, ["--import", "tsx", SCRIPT, ...args], { cwd: REPO_ROOT, encoding: "utf8" });
+  return spawnSync(process.execPath, [SCRIPT, ...args], { cwd: REPO_ROOT, encoding: "utf8" });
 }
 
 // ── acceptance 1: the class comes from the existing canonical predicate, never a fourth ────────
 // reimplementation ───────────────────────────────────────────────────────────────────────────
 
-test("acceptance 1: diff-class.mjs imports isInPlanScope/outOfPlanScopeFiles from src/lib/plan-architect.ts, never reimplements scope rules", () => {
+test("acceptance 1: diff-class.mjs imports isInPlanScope/outOfPlanScopeFiles from the dependency-free src/lib/plan-scope.ts leaf, never reimplements scope rules", () => {
   const source = readFileSync(SCRIPT, "utf8");
   assert.match(
     source,
-    /from ["']\.\.\/src\/lib\/plan-architect\.ts["']/,
+    /from ["']\.\.\/src\/lib\/plan-scope\.ts["']/,
     "the classifier must import the canonical predicate module, not restate scope rules itself",
   );
   assert.match(source, /\bisInPlanScope\b|\boutOfPlanScopeFiles\b/, "the classifier must call the real predicate by name");
@@ -292,6 +293,29 @@ test("acceptance 6: coverage collection carries no `if:` and the stable-name agg
   const doc = parseYaml(ciYml) as { jobs: Record<string, { if?: string; steps?: Array<{ if?: string }> }> };
   assert.equal(doc.jobs["coverage-ratchet-required"].if, "${{ always() }}");
   for (const step of doc.jobs["coverage-ratchet-required"].steps ?? []) assert.equal(step.if, undefined);
+});
+
+test("acceptance 6: coverage-ratchet classifies with bare Node before its dependency and Chromium guards", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  const doc = parseYaml(ciYml) as {
+    jobs: Record<string, { steps?: Array<{ id?: string; name?: string; run?: string }> }>;
+  };
+  const steps = doc.jobs["coverage-ratchet"].steps ?? [];
+  const classifyIndex = steps.findIndex((step) => step.id === "classify");
+  const installIndex = steps.findIndex((step) => step.name === "Install (clean, from lockfile)");
+  const chromiumIndex = steps.findIndex((step) => step.name?.startsWith("Install Playwright's Chromium"));
+  assert.ok(classifyIndex >= 0 && installIndex >= 0 && chromiumIndex >= 0, "coverage-ratchet must retain classify, install, and Chromium steps");
+  assert.ok(classifyIndex < installIndex && installIndex < chromiumIndex, "classification must precede every dependency-dependent coverage step");
+  const classifyRun = steps[classifyIndex].run ?? "";
+  const installRun = steps[installIndex].run ?? "";
+  const chromiumRun = steps[chromiumIndex].run ?? "";
+  assert.match(classifyRun, /node scripts\/diff-class\.mjs --changed-files/, "classification must use bare Node before npm ci");
+  assert.doesNotMatch(classifyRun, /--import tsx/, "classification must not require a package-installed loader");
+  for (const run of [installRun, chromiumRun]) {
+    assert.match(run, /CLASS="\$\{\{ steps\.classify\.outputs\.class \}\}"/, "the expensive step must read the canonical class output");
+    assert.match(run, /\[ "\$CLASS" != "SOURCE" \]/, "only SOURCE may pay the expensive setup cost");
+  }
 });
 
 test("acceptance 6: job-level conditions are only PR guards or stable-name aggregators", async () => {

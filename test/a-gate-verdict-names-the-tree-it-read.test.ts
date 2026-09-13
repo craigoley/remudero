@@ -35,6 +35,9 @@ function ciParitySpawn(behind: { kind: "count"; value: number } | { kind: "unkno
     if (file === "git" && args[0] === "diff") {
       return { status: 0, stdout: "diff --git a/src/lib/ci-parity.ts b/src/lib/ci-parity.ts\n+changed\n", stderr: "" };
     }
+    if (key.includes("test-tier-manifest.mjs") && key.includes("--select-all")) {
+      return { status: 0, stdout: "test/a-gate-verdict-names-the-tree-it-read.test.ts\n", stderr: "" };
+    }
     if (key.includes("mutation-ratchet.mjs --changed-files")) {
       return { status: 0, stdout: "mutation-ratchet: skip -- no relevant path touched\n", stderr: "" };
     }

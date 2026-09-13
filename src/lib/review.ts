@@ -5780,6 +5780,9 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // (.github/workflows/acceptance-author-gate.yml, already covered by the workflows entry above; this line is the
   // script that job's `run:` step calls).
   "^scripts/acceptance-author-gate\\.mjs$",
+  // W1-T3386: the proof-discrimination gate compares acceptance proofs against the PR head and merge base, and a
+  // change to it changes which stale proofs CI refuses.
+  "^scripts/proof-discrimination-gate\\.mjs$",
   // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and `coverage-ratchet` jobs RUN, so a
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",

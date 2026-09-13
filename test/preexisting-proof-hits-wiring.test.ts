@@ -236,7 +236,12 @@ test("the production call site actually supplies baseCheckoutDir — the gap tha
   // base worktree, which a spread onto the evidence could not express.
   assert.match(
     src,
-    /const baseProof = worktreePath \? buildBaseProofDir\(criteria, worktreePath\) : undefined/,
+    /buildBaseProof:\s*buildBaseProofDir/,
+    "reviewCommand's injectable base-proof seam must retain buildBaseProofDir as its production default",
+  );
+  assert.match(
+    src,
+    /const baseProof = worktreePath \? buildBaseProof\(criteria, worktreePath\) : undefined/,
     "reviewCommand must build the base facts from its own materialised head worktree",
   );
   assert.match(src, /baseCheckoutDir:\s*baseProof\?\.baseCheckoutDir/, "…and hand the dir to runReview");

@@ -7,7 +7,10 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import {
+  CODEX_WORKER_STDERR_MAX_BYTES,
+  CODEX_WORKER_STDOUT_MAX_BYTES,
   CodexToolchainBlockedError,
+  isCodexWorkerOutputLimitError,
   ProviderCapacityBlockedError,
   abandonProviderWindowMeasurement,
   beginProviderWindowMeasurement,
@@ -890,6 +893,95 @@ test("Codex JSONL maps thread, final message, and token usage to the worker enve
   assert.equal(parsed.isError, false);
 });
 
+test("W1-T3490 criterion 2: fragmented Codex JSONL remains a complete neutral worker result", async () => {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
+  const workerHome = mkdtempSync(join(tmpdir(), "rmd-codex-home-"));
+  try {
+    const resultPromise = spawnCodexWorker(
+      {
+        workerHome,
+        cwd: process.cwd(),
+        prompt: "collect fragmented JSONL",
+        settingsFile: join(process.cwd(), "settings", "worker.json"),
+        containment: {
+          spawn: () => ({ process: proc as never, pid: 34_901 }),
+          teardown: () => {},
+        },
+      },
+      { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+    );
+    stdout.write('{"type":"thread.');
+    stdout.write('started","thread_id":"fragmented-thread"}\n{"type":"turn.started"}\n');
+    stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n');
+    stdout.write('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":25,"output_tokens":10}}\n');
+    stdout.end();
+    proc.emit("exit", 0);
+
+    const result = await resultPromise;
+    assert.equal(result.sessionId, "fragmented-thread");
+    assert.equal(result.text, "done");
+    assert.deepEqual(result.blocks, ["done"]);
+    assert.deepEqual(result.tokens, { input: 100, output: 10, cacheRead: 25, cacheCreation: 0 });
+    assert.equal(result.isError, false);
+  } finally {
+    rmSync(workerHome, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3490 criterion 1: an over-budget Codex stream tears down its contained process exactly once", async () => {
+  for (const [stream, limitBytes] of [
+    ["stdout", CODEX_WORKER_STDOUT_MAX_BYTES],
+    ["stderr", CODEX_WORKER_STDERR_MAX_BYTES],
+  ] as const) {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
+    const workerHome = mkdtempSync(join(tmpdir(), "rmd-codex-home-"));
+    let teardownCalls = 0;
+    let exited = false;
+    try {
+      const resultPromise = spawnCodexWorker(
+        {
+          workerHome,
+          cwd: process.cwd(),
+          prompt: `bound ${stream}`,
+          settingsFile: join(process.cwd(), "settings", "worker.json"),
+          containment: {
+            spawn: (_options, onStderr) => {
+              stderr.on("data", (chunk: Buffer) => onStderr?.(chunk.toString("utf8")));
+              return { process: proc as never, pid: 34_902 };
+            },
+            teardown: (pid) => {
+              assert.equal(pid, 34_902);
+              teardownCalls += 1;
+              if (!exited) {
+                exited = true;
+                proc.emit("exit", null);
+              }
+            },
+          },
+        },
+        { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
+      );
+      (stream === "stdout" ? stdout : stderr).write("x".repeat(limitBytes + 1));
+      await assert.rejects(resultPromise, (error: unknown) => {
+        assert.ok(isCodexWorkerOutputLimitError(error));
+        assert.equal(error.stream, stream);
+        assert.equal(error.limitBytes, limitBytes);
+        assert.equal(error.observedBytes, limitBytes + 1);
+        return true;
+      });
+      assert.equal(teardownCalls, 1, `${stream} overflow tears down the contained group once`);
+    } finally {
+      rmSync(workerHome, { recursive: true, force: true });
+    }
+  }
+});
+
 test("Codex JSONL preserves turn failure as an error verdict", () => {
   const parsed = parseCodexJsonl([
     "not-json",
@@ -986,13 +1078,17 @@ test("Codex hook profile fails closed on a PreToolUse hook with an invalid timeo
   }
 });
 
-test("Codex spawn carries a subscription refusal through the shared ledger seam", async () => {
+test("Codex spawn carries a subscription refusal through the shared ledger seam", async (t) => {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
+  const startedAt = Date.UTC(2026, 0, 1, 4, 59, 0, 0);
+  const refusalAt = Date.UTC(2026, 0, 1, 5, 1, 0, 0);
+  let clockCalls = 0;
+  t.mock.method(Date, "now", () => (clockCalls++ === 0 ? startedAt : refusalAt));
   const message =
-    "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.";
+    "You've hit your usage limit. Your window resets 5:00 (UTC). Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.";
   stdin.on("finish", () => {
     stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: "codex-refused" })}\n`);
     stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
@@ -1018,6 +1114,7 @@ test("Codex spawn carries a subscription refusal through the shared ledger seam"
   assert.equal(result.isError, true, "Codex 0.152.0's turn.failed remains an error");
   assert.equal(result.subtype, "error_codex");
   assert.equal(result.usageRefusal?.matched, "You've hit your usage limit");
+  assert.equal(result.usageRefusal?.resetsAtMs, Date.UTC(2026, 0, 2, 5, 0, 0), "the terminal event time decides reset rollover");
   assert.equal(workerLedgerFields(result).verdict, "usage_refused");
 });
 
@@ -1361,7 +1458,7 @@ test("an unreadable closing boundary is explicit and releases the provider measu
   );
 });
 
-test("Codex worker clock bound tears down the contained process and fails the run", async () => {
+test("W1-T3490 criterion 3: Codex worker clock bound tears down the contained process and fails the run", async () => {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -1391,7 +1488,12 @@ test("Codex worker clock bound tears down the contained process and fails the ru
       },
       { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh" } },
     ),
-    /exceeded the 1ms clock bound/,
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok(!isCodexWorkerOutputLimitError(error));
+      assert.match(error.message, /exceeded the 1ms clock bound/);
+      return true;
+    },
   );
-  assert.ok(teardownCalls >= 1);
+  assert.equal(teardownCalls, 1, "the independent clock bound still owns one contained teardown");
 });

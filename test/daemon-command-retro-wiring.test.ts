@@ -81,3 +81,36 @@ test("daemonCommand: a SELF-TARGET non-dry-run boot wires checkRetroTrigger + ru
     "the default automated-retro hook reaches the subprocess adapter rather than retroCommand in the daemon pid",
   );
 });
+
+test("W1-T3491 criterion 3: pre-existing fleet controls fence mutable daemon boot callbacks", async () => {
+  for (const control of ["STOP", "PAUSE", undefined] as const) {
+    const { home, planPath } = fixtureHome();
+    const root = join(home, "Remudero");
+    const oldHome = process.env.HOME;
+    let bootCalls = 0;
+    let observedHold: string | undefined;
+    process.env.HOME = home;
+    try {
+      const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+        daemonBoot: () => {
+          bootCalls++;
+          return undefined as never;
+        },
+        checkStop: () => (control === "STOP" ? "test pre-existing STOP" : undefined),
+        checkPause: () => (control === "PAUSE" ? "test pre-existing PAUSE" : undefined),
+        runDaemon: async (_plan, daemonDeps): Promise<DaemonSummary> => {
+          observedHold = daemonDeps.checkStop?.() ?? daemonDeps.checkPause?.();
+          return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+        },
+      });
+      assert.equal(code, 0);
+    } finally {
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+    assert.equal(bootCalls, control === undefined ? 1 : 0, `${control ?? "clear"}: mutable boot callbacks are correctly fenced`);
+    if (control === undefined) assert.equal(observedHold, undefined, "an unheld boot keeps existing daemon wiring");
+    else assert.match(observedHold ?? "", new RegExp(control, "i"), `${control}: the loop receives the same pre-existing control`);
+  }
+});
