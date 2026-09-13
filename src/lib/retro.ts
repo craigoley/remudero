@@ -3090,7 +3090,16 @@ export function routeFollowupsToRegistry(harvest: FollowupHarvest, deps: RouteFo
 
 /** The ONE batched read this pass needs: which task referents have merged, read ONCE per pass.
  *  `"unreadable"` leaves every proposal alone — cannot-observe means WAIT (W1-T130). */
-export type FollowupReferentRead = { kind: "ok"; merged: ReadonlySet<string> } | { kind: "unreadable" };
+export type FollowupReferentRead =
+  | {
+      kind: "ok";
+      merged: ReadonlySet<string>;
+      /** W1-T3524 — merged PULL REQUEST numbers, for the 54% of follow-ups whose referent is a PR
+       *  rather than a task (measured 2026-09-13: 62 of 114). Absent ⇒ the PR arm is silent, the
+       *  same "no predicate, no opinion" direction `unreadable` takes for the task arm. */
+      mergedPrs?: ReadonlySet<number>;
+    }
+  | { kind: "unreadable" };
 
 /** Recover a routed follow-up's originating task id from its own minted summary, parsed at read
  *  time rather than stored as a structured field. Returns `undefined` for anything that is not a
@@ -3098,6 +3107,22 @@ export type FollowupReferentRead = { kind: "ok"; merged: ReadonlySet<string> } |
 export function followupOriginatingTaskId(proposal: Proposal): string | undefined {
   if (!proposal.id.startsWith("followup:")) return undefined;
   return /— from (\S+) \(run /.exec(proposal.summary)?.[1];
+}
+
+/** The originating PULL REQUEST number, when the referent {@link followupOriginatingTaskId}
+ *  recovers is a `PR-<n>` reference rather than a task id.
+ *
+ *  WHY THIS EXISTS. `retireSettledFollowups` matched its referent against a set of TASK ids, so a
+ *  `PR-3606` referent could never match anything and the proposal was unretirable by construction.
+ *  MEASURED 2026-09-13: 62 of 114 open follow-ups carried a PR referent — the single largest reason
+ *  the class only grows. A sampled 12 of those PRs: 11 merged, 1 closed-unmerged.
+ *
+ *  Same parse position, same summary, so the two readers cannot disagree about which token is the
+ *  referent — this only classifies the token the other one already found. */
+export function followupOriginatingPr(proposal: Proposal): number | undefined {
+  const referent = followupOriginatingTaskId(proposal);
+  const digits = /^PR-(\d+)$/.exec(referent ?? "")?.[1];
+  return digits === undefined ? undefined : Number(digits);
 }
 
 /** One proposal this pass actually retired, naming BOTH what settled it and the false-positive
@@ -3132,12 +3157,17 @@ export function retireSettledFollowups(read: FollowupReferentRead, deps: RetireF
     const settled: FollowupRetireOutcome[] = [];
     for (const p of current) {
       const taskId = followupOriginatingTaskId(p);
-      if (taskId === undefined || !read.merged.has(taskId)) continue;
+      if (taskId === undefined) continue;
+      // W1-T3524: a PR referent settles on the PR having MERGED — the same signal, and the same
+      // stated false-positive risk, keyed on the artifact the summary actually names.
+      const pr = followupOriginatingPr(p);
+      const settledByPr = pr !== undefined && read.mergedPrs?.has(pr) === true;
+      if (!settledByPr && !read.merged.has(taskId)) continue;
       settled.push({
         proposalId: p.id,
         taskId,
         reason:
-          `${p.id}'s originating task (${taskId}) has merged, so this routed follow-up is retired ` +
+          `${p.id}'s originating ${settledByPr ? "pull request" : "task"} (${taskId}) has merged, so this routed follow-up is retired ` +
           `and removed from the registry. KNOWN FALSE-POSITIVE RISK, NAMED RATHER THAN CLAIMED ` +
           `AWAY: a task can merge while leaving real follow-up work undone — this signal cannot ` +
           `tell that still-live candidate apart from a genuinely settled one, and wrongly retires ` +
