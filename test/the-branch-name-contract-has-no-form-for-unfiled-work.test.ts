@@ -118,6 +118,21 @@ test("W1-T3388: the NEW unfiled run-branch shape satisfies the check — the gap
   assert.match("run-unfiled-1787425298842", RUN_BRANCH_UNFILED_RE);
 });
 
+test("W1-T3388: a trailer AND a run-shaped ref together name the both-surfaces message", () => {
+  // Neither `trailered` alone nor `runShaped` alone below -- this is the third combination in
+  // evaluateHeadIdentityGate's own `if (trailered && runShaped)` branch, otherwise unreachable by
+  // any other fixture in this suite (each of those carries exactly one identifying surface).
+  const result = evaluateHeadIdentityGate({
+    headCommitMessage: "fix(drain): stop a stuck run branch\n\nRemudero-Task: W1-T2519\n",
+    headRef: "run-W1-T2519-1787425298842",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.defect, undefined);
+  assert.match(result.message, /identified on both surfaces/);
+  assert.match(result.message, /Remudero-Task trailer/);
+  assert.match(result.message, /run-shaped head ref/);
+});
+
 test("W1-T3388: a trailer alone satisfies the check even off a descriptively-named branch", () => {
   const result = evaluateHeadIdentityGate({
     headCommitMessage: "fix(drain): stop a stuck run branch\n\nRemudero-Task: W1-T2519\n",
@@ -194,6 +209,21 @@ test("W1-T3388: main prints OK with exit 0 for an unfiled-shaped head with no tr
     assert.equal(r.exitCode, 0);
     assert.equal(r.out.length, 1);
     assert.match(r.out[0], /head-identity-gate: OK/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3388: main REFUSES with exit 1 when the worktree's HEAD commit message can't be read", async () => {
+  // A directory with no git repo at all: readHeadCommitMessage (git.mjs) returns undefined rather
+  // than throwing, and main's own `if (headCommitMessage === undefined)` branch is what must
+  // refuse here -- distinct from resolveHeadRef's earlier, separate no-head-ref refusal above.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-head-identity-gate-main-nogit-"));
+  try {
+    const r = await withExitCode(() => main(["--head-ref", "feat/whatever", "--worktree-path", dir]));
+    assert.equal(r.exitCode, 1);
+    assert.match(r.err[0], /REFUSED — cannot read the HEAD commit message/);
+    assert.match(r.err[0], new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
