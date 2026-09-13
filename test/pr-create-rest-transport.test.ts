@@ -84,6 +84,19 @@ test("ghPrCreateFillCommand: the argv is the REST create — `api --method POST 
   }
 });
 
+test("ghPrCreateFillCommand: an explicit gate-clean plan body replaces commit-body derivation", () => {
+  const dir = makeFixtureRepo();
+  try {
+    commit(dir, "a.txt", "chore(plan): file W1-T3473", "Brief: long prose belongs in the PR body.");
+    const body = "Plan filing.\n\nAcceptance:\n- W1-T3473 filed | grep: id: W1-T3473 in plan/tasks.d/W1-T3473.yaml\n";
+    const built = withLiveWritesAllowed(() => ghPrCreateFillCommand(dir, "acme", "remudero", "run-PLAN-create-1", undefined, body));
+    const bodyArg = built.args.find((arg) => arg.startsWith("body="));
+    assert.equal(bodyArg, `body=${body}`, "the filing path must send its generated body, not the commit body");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runGhPrCreate: executes EXACTLY the argv ghPrCreateFillCommand built — the exec seam never sees a `pr create` invocation", () => {
   const dir = makeFixtureRepo();
   try {
@@ -254,7 +267,7 @@ test("STRUCTURAL: every one of the four run-task.ts call sites still passes an e
   // never a bare literal and never omitted, which is what this pattern enforces structurally.
   const callSites = [
     ...src.matchAll(
-      /ghPrCreateFillCommand\(worktreePath,\s*owner,\s*(?:task\.repo|repo),\s*branch,\s*(lastCommitSubject\(worktreePath\)|commitMessage\.split\("\\n"\)\[0\])\)/g,
+      /ghPrCreateFillCommand\(worktreePath,\s*owner,\s*(?:task\.repo|repo),\s*branch,\s*(lastCommitSubject\(worktreePath\)|commitMessage\.split\("\\n"\)\[0\])(?:,\s*planPrBody)?\)/g,
     ),
   ];
   assert.equal(callSites.length, 4, "exactly implement, retro, triage and plan build a create argv");

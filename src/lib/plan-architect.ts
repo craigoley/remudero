@@ -503,8 +503,7 @@ export function buildPlanGrillEscalation(opts: {
 // ── Commit message authorship (harness-owned, deterministic) ────────────────
 
 /**
- * The commit message (and, via `gh pr create --fill`, the PR title+body) the HARNESS authors
- * for a PROPOSED `rmd plan` outcome — never the LLM, mirroring
+ * The commit message the HARNESS authors for a PROPOSED `rmd plan` outcome — never the LLM, mirroring
  * {@link "./triage.js".triageCommitMessage}'s discipline. Only PROPOSED needs one: CLEAR and
  * GRILL touch no files and open no PR (there is no per-item status file to update, unlike
  * triage's feedback entry).
@@ -513,23 +512,16 @@ export function planCommitMessage(opts: {
   decision: Extract<PlanDecision, { action: "propose" }>;
   mode: PlanMode;
   brief: string;
-  taskId: string;
 }): string {
-  const { decision, mode, brief, taskId } = opts;
+  const { decision, mode, brief } = opts;
   // W1-T136 class: `decision.detail` is LLM free text, so this header could exceed
   // commitlint's header-max-length (100) — a red REQUIRED check on an already-open PR.
   // shapeCommitMessage caps it and preserves the overflow in the body.
-  const shapedHeader = shapeCommitMessage(`chore(plan)`, `--mode=${mode} — ${decision.detail}`).header;
-  return [
-    shapedHeader,
-    "",
+  return shapeCommitMessage(
+    `chore(plan)`,
+    `--mode=${mode} — ${decision.detail}`,
     brief.length > 0 ? `Brief: ${brief}` : "Brief: (none — whole-plan scope)",
-    "",
-    "Acceptance:",
-    `- rmd plan --mode=${mode} produced a plan-only proposal | this diff touches only plan/** and/or MASTER-PLAN.md (${decision.files.join(", ")}), gated by ci-gate+remudero-review`,
-    "",
-    `Remudero-Task: ${taskId}`,
-  ].join("\n");
+  ).message.trimEnd();
 }
 
 // ── Propose-outcome commit (harness-owned, REAL git — no dry-run) ───────────

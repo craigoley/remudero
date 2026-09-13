@@ -2786,6 +2786,7 @@ export function ghPrCreateFillCommand(
   repo: string,
   branch: string,
   title?: string,
+  bodyOverride?: string,
 ): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
@@ -2795,8 +2796,8 @@ export function ghPrCreateFillCommand(
   const given = title && title.trim().length > 0 ? title.trim() : undefined;
   const derived = given ?? lastCommitSubject(worktreePath);
   const resolvedTitle = derived ?? branch;
-  const bodyParts = [fillDerivedBody(worktreePath)];
-  if (derived === undefined) {
+  const bodyParts = [bodyOverride ?? fillDerivedBody(worktreePath)];
+  if (derived === undefined && bodyOverride === undefined) {
     // design (iv): the branch-name fallback is stated in the body, never silent.
     bodyParts.push(`(no commit-derived title was available — this PR is titled after its branch, \`${branch}\`)`);
   }
@@ -34095,13 +34096,29 @@ export async function planCommand(
     // propose
     log("plan.verdict", { action: "propose", detail: decision.detail, files: decision.files });
     say(formatPlanVerdictLine(mode, decision));
-    const commitMessage = planCommitMessage({ decision, mode, brief, taskId });
+    const commitMessage = planCommitMessage({ decision, mode, brief });
     applyPlanProposalCommit(worktreePath, commitMessage, log);
+    // Build the body only AFTER the shared commit writer has regenerated plan-index.json. The
+    // changed-files block is an assertion about the actual commit, not the worker's pre-harness
+    // advisory list; constructing it before regeneration would immediately make the PR contradict
+    // its own diff whenever the index changes.
+    const planPrFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const planPrBody = buildPlanPrBody({
+      intro: `rmd plan --mode=${mode} proposed plan-only changes.`,
+      criteria: filingAcceptanceCriteria(reservedIds, planPrFiles),
+      changedFiles: planPrFiles,
+    });
     gitPushRunBranch(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody);
     const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
@@ -34118,8 +34135,6 @@ export async function planCommand(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    ensureTaskTrailer(prUrl, taskId, log);
-
     // DETERMINISTIC GUARDS: a plan PR is PLAN-ONLY (plan/** or MASTER-PLAN.md), and an EXPAND
     // proposal must cite a research source (lib/plan-architect.ts's `outOfPlanScopeFilesInDiff`
     // / `diffCitesResearchSource`, the same shape as triage's plan-only + provenance guards).
