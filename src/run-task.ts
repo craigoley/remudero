@@ -5319,6 +5319,7 @@ async function runReview(args: {
     diff,
     report,
     implementationReport: args.implementationReport,
+    target: { owner, repo },
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
     reportIsSubstitute: args.reportIsSubstitute,
     reportSubstituteCause: args.reportSubstituteCause,
