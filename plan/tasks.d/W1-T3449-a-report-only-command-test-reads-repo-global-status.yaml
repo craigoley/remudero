@@ -1,0 +1,67 @@
+- id: W1-T3449
+  title: "A REPORT-ONLY COMMAND TEST ASSERTS A REPO-GLOBAL GIT STATUS, SO A NEIGHBOUR'S IN-FLIGHT FIXTURE WRITE IS BLAMED ON THE COMMAND AND FAILS AN UNRELATED PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files: [test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts]
+  origin: "operator-session#dropped-follow-ups-daemon-and-queue-2026-09-12"
+  plan_refs: ["W1-T2957", "W1-T3338"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on PR #5282 at head 9fb024f075e4255d455c07ff8b9e4163cd8a7961, Actions run
+    34711944662, coverage-shard (4/4). The sole failing assertion is
+    `test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts:160`:
+    `and must leave no file behind`; its actual new porcelain entry is
+    ` M test/fixtures/lint-plan-status-di/tasks.yaml`. The command under test is
+    `ciFailuresCommand([], { loadWindow })`, which at `src/run-task.ts:17347-17382` only
+    parses injected input and writes its report to console. It has no write path to that fixture.
+
+    The test's own subject is a real race. It snapshots `git status --porcelain` at :144 and
+    compares the entire repository again at :157-160. `test/run-task.test.ts:6444-6452` names
+    the exact same lint-plan fixture and documents that its tests temporarily rewrite and restore
+    it. Node's coverage runner executes test files concurrently against one checkout. A neighbour
+    beginning its fixture write in that interval creates a new porcelain entry, which this test
+    falsely attributes to the report-only command.
+
+    W1-T3338 (#4999) already corrected the opposite direction: it stopped treating a neighbour
+    restoring a pre-existing modification as a subject write. Its shipped caveat names the residual
+    add-between-reads case and says the durable remedy is a scratch tree. This run is that remaining
+    case, not a regression in `ciFailuresCommand` and not a reason to weaken the gate.
+  design: |
+    Keep `ciFailuresCommand` and its report-only contract unchanged. Replace only this test's
+    repository-global status observation with one in a disposable, independently initialized git
+    worktree owned by the test process. Seed the minimal plan path the existing byte-equality check
+    needs, switch the test process into that worktree only for the command invocation, and restore
+    its original cwd in `finally`. Read the scratch worktree's porcelain before and after the
+    command; a write by the command must still fail the test, while a concurrent mutation in the
+    shared CI checkout is outside the observed tree and cannot alter the verdict.
+
+    Do not change the command, silence the no-write assertion, exempt this test from coverage, or
+    globally serialize the suite. Reuse `test/setup/tmp-hygiene.ts`'s per-process temporary-directory
+    cleanup. The test must not leave a tracked or untracked file in the checkout it shares with its
+    neighbours.
+  acceptance:
+    - claim: "the ci-failures report-only command is executed from a disposable git worktree whose porcelain is clean before and after the injected report call"
+      proof: "unit test: W1-T3449 report-only command writes nothing in its isolated worktree"
+    - claim: "a file created by a mutant report-only command in the isolated worktree fails the no-write assertion, so the isolation does not convert the test into a vacuous pass"
+      proof: "unit test: W1-T3449 isolated no-write assertion rejects a sentinel file write"
+    - claim: "the test restores its original cwd and leaves no entry in the shared checkout after the isolated assertion"
+      proof: "unit test: W1-T3449 restores the shared checkout after its isolated assertion"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION if the current assertion already runs its before/after porcelain
+    reads in a per-test filesystem tree rather than the shared repository, or if the #5282 log's
+    fixture path is written by `ciFailuresCommand` itself. At filing neither is true: the test calls
+    plain `git status --porcelain` from the checkout and `ciFailuresCommand` has no filesystem write.
+
+    Mutation: insert a relative sentinel write into the report-only invocation; the scratch-tree
+    porcelain assertion must fail. Mutation: restore the shared-checkout porcelain read and run the
+    recorded competing fixture-write schedule; the test must fail again.
+  note: |
+    Reservation W1-T3449 was atomically claimed on origin before filing.
+    reservation hand-off: codex/W1-T3445-close-retired-task-prs -> plan/W1-T3449-isolate-ci-failure-corpus-test
