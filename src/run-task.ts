@@ -9533,6 +9533,7 @@ export async function runFixRung(opts: {
             proposal.map((p) => ({ proof: p.newProof })),
             headCheckoutDir,
           );
+          const proofAmendmentGitOps = buildProofAmendmentGitOps();
           const amendmentOutcome: ProofAmendmentOutcome = requestProofAmendment(
             {
               taskId: opts.taskId,
@@ -9562,13 +9563,8 @@ export async function runFixRung(opts: {
               },
               worktreeRemove: (repoDir, wp) => worktreeRemove(repoDir, wp),
               writeFile: (absPath, text) => writeFileSync(absPath, text),
-              gitAdd: (wp, relPath) => {
-                execFileSync("git", ["-C", wp, "add", relPath]);
-              },
-              gitCommit: (wp, message) => {
-                execFileSync("git", ["-C", wp, "commit", "-m", message]);
-                return execFileSync("git", ["-C", wp, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-              },
+              gitAdd: proofAmendmentGitOps.gitAdd,
+              gitCommit: proofAmendmentGitOps.gitCommit,
               gitPush: (wp, branch, expectedHeadSha) => gitPushRunBranch(wp, { stdio: "ignore", expectedHeadSha }),
               probeExisting: (branch) => {
                 const found = probeExistingPlanPr(ghJson, owner, repo, branch);
@@ -9945,6 +9941,31 @@ export async function runFixRung(opts: {
   deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: exhaustionReason });
   deps.say(`fix rung: exhausted after ${strikes} strike(s) — escalated: ${issueUrl}`);
   return { outcome: "escalated", review, strikes, retriggers, reason: exhaustionReason, issueUrl };
+}
+
+/**
+ * W1-T3434 (coverage-ratchet): the two LOCAL git operations `requestProofAmendment`'s write ports
+ * need inside its own throwaway worktree — never a GitHub write (those stay guarded by
+ * `assertLiveWriteAllowed` at their own call sites: `createPr`/`updateBranch`, above, in
+ * `runFixRung`). Extracted to its own top-level function, with `execFileSyncFn` APPENDED LAST and
+ * defaulted to the real `execFileSync` — the same injection shape this file's own
+ * `buildWipeTestCadenceDaemonHooks`/`resolveAutoMergeState` already use — so a test can inject a
+ * fake and assert the exact recorded `git add`/`git commit` invocation, rather than reaching for a
+ * `diff-cov:` directive a process-boundary spawn cannot use.
+ */
+export function buildProofAmendmentGitOps(execFileSyncFn: typeof execFileSync = execFileSync): {
+  gitAdd: (worktreePath: string, relPath: string) => void;
+  gitCommit: (worktreePath: string, message: string) => string;
+} {
+  return {
+    gitAdd: (worktreePath, relPath) => {
+      execFileSyncFn("git", ["-C", worktreePath, "add", relPath]);
+    },
+    gitCommit: (worktreePath, message) => {
+      execFileSyncFn("git", ["-C", worktreePath, "commit", "-m", message]);
+      return execFileSyncFn("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    },
+  };
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */

@@ -22,7 +22,7 @@ import {
 } from "../src/lib/proof-amendment.js";
 import type { ProofDiscriminationEvidence } from "../src/lib/sweep.js";
 import type { WhitelistedProof } from "../src/lib/review.js";
-import { CHECK_PROOF_EXIT, checkProofCommand } from "../src/run-task.js";
+import { CHECK_PROOF_EXIT, buildProofAmendmentGitOps, checkProofCommand } from "../src/run-task.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
 
 // W1-T3434 — #5154 was CAPPED because its `unit test:` proofs passed at both the implementation
@@ -269,6 +269,30 @@ test("the live fix rung calls the proof-amendment parent rather than granting th
   );
   assert.deepEqual(parsed, [{ claim: "a claim", oldProof: "unit test: test/x.test.ts", newProof: "grep: x( in src/x.ts" }]);
   assert.deepEqual(Object.keys(parsed[0]!).sort(), ["claim", "newProof", "oldProof"]);
+});
+
+test("buildProofAmendmentGitOps runs git add/commit through an injected spawn, never a real process", () => {
+  // The write ports `requestProofAmendment` receives for its `gitAdd`/`gitCommit` fields are built
+  // here through `execFileSyncFn`, APPENDED LAST and defaulted to the real `execFileSync` in
+  // production — this test injects a fake to assert the exact recorded external-tool invocation
+  // without ever crossing the process boundary, covering the lines a `diff-cov:` directive cannot
+  // exempt for a real spawn.
+  const calls: Array<{ file: string; args: readonly string[] }> = [];
+  const fakeExecFileSync = ((file: string, args: readonly string[]) => {
+    calls.push({ file, args });
+    return "deadbeefcafefeed\n";
+  }) as unknown as typeof import("node:child_process").execFileSync;
+  const ops = buildProofAmendmentGitOps(fakeExecFileSync);
+
+  ops.gitAdd("/tmp/proof-amendment-wt", "plan/tasks.d/W1-T3434.yaml");
+  const sha = ops.gitCommit("/tmp/proof-amendment-wt", "chore(plan): amend W1-T3434 proof");
+
+  assert.deepEqual(calls, [
+    { file: "git", args: ["-C", "/tmp/proof-amendment-wt", "add", "plan/tasks.d/W1-T3434.yaml"] },
+    { file: "git", args: ["-C", "/tmp/proof-amendment-wt", "commit", "-m", "chore(plan): amend W1-T3434 proof"] },
+    { file: "git", args: ["-C", "/tmp/proof-amendment-wt", "rev-parse", "HEAD"] },
+  ]);
+  assert.equal(sha, "deadbeefcafefeed", "gitCommit trims the recorded rev-parse output");
 });
 
 test("renderFixPrompt gives a proof-discrimination worker a proposal grammar, not PR-body write instructions", () => {
