@@ -1,0 +1,61 @@
+- id: W1-T3502
+  title: "A BOUNDED CODEX WORKER OUTPUT FAILURE IS RE-THROWN THROUGH `runTaskBody`, RESTARTING THE DAEMON INSTEAD OF TERMINATING ONE RUN"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  origin: "operator-session#daemon-building-2026-09-13"
+  plan_refs: ["W1-T3490", "W1-T1045", "W1-T113", "W1-T342"]
+  files:
+    - src/run-task.ts
+    - test/worker-clock-bound.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE AZURE FLEET, 2026-09-13. The daemon restarted at 08:18:48Z with Docker
+    `OOMKilled=false`. Its immediately preceding summary names the direct cause:
+    `W1-T3390: Codex worker stdout output exceeded its 1048576-byte retention budget
+    (1091550 bytes observed)`. The entrypoint then applied its deliberate 120-second nonzero-exit
+    delay before Docker restarted it. This is not an OOM and not evidence that the one-megabyte
+    bound is wrong. The bound stopped retaining a verbose worker transcript; the parent treated
+    that expected contained-worker terminal failure as a process-fatal exception.
+
+    SOURCE CONFIRMS THE COMPOSITION GAP. W1-T3490's Codex adapter creates a typed
+    `CodexWorkerOutputLimitError` with `reasonClass: "bounded_output"`, stream, limit and observed
+    byte fields in `src/lib/worker-provider.ts`; its exact predicate rejects malformed lookalikes.
+    `runTaskBody` in `src/run-task.ts` catches only `WorkerAbandonedError`, emits a terminal failed
+    verdict for that known contained-worker outcome, then rethrows every other error after best-effort
+    cleanup. `runDaemon` classifies only admission, positively transient GitHub transport and
+    spawn-infrastructure rejections as nonfatal. The bounded-output error therefore reaches its
+    fatal path, stops the tick after all lanes settle, and makes the service restart.
+
+    Add one equally narrow terminal boundary in `runTaskBody`: recognize only the existing validated
+    Codex bounded-output error and resolve it to a failed `RunResult`. Ledger a named terminal stage,
+    the stream, configured limit and observed bytes before cleanup. The result must not open a PR,
+    arm auto-merge, or be recorded as an ordinary worker success. Preserve the existing
+    `WorkerAbandonedError` behavior and the generic rethrow for every malformed or unclassified
+    error. The daemon must remain fail-closed for a novel crash; this task is not a blanket daemon
+    catch.
+
+    Do not raise, remove, or retune the Codex output ceilings; do not change Claude collection,
+    provider routing, model selection, worker retry policy, daemon restart policy, or the
+    spawn-infrastructure classifier. The follow-up Claude collection contract is separately filed
+    as W1-T3498. This task owns only the error boundary already reached by the capped Codex worker.
+  acceptance:
+    - claim: "a validated Codex bounded-output error crossing `runTaskBody` resolves to one failed terminal result with the stream, limit and observed-byte evidence, rather than rejecting the daemon lane"
+      proof: "unit test: W1-T3502 criterion 1"
+    - claim: "a bounded-output terminal result does not open a pull request or arm auto-merge, and its cleanup path still releases the run's resources"
+      proof: "unit test: W1-T3502 criterion 2"
+    - claim: "a malformed or unclassified error that merely resembles bounded output still follows the generic fatal rethrow path, so the daemon never swallows a novel worker crash"
+      proof: "unit test: W1-T3502 criterion 3"
+  falsifier: |
+    Delete the bounded-output terminal branch and drive a real `CodexWorkerOutputLimitError` through
+    `runTaskBody`: the first case must reject instead of returning its failed result. Mutate the
+    predicate so an object with `reasonClass: "bounded_output"` but an invalid stream or missing
+    byte field is accepted: the third case must fail. Mutate the terminal branch to return a normal
+    worker result or to call the ordinary PR/arming path: the second case must fail. If the daemon
+    still restarts for the same typed error after that result reaches its caller, the diagnosis is
+    incomplete and this task must not be declared complete.
