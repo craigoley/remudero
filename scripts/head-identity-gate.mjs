@@ -118,6 +118,9 @@ export function evaluateHeadIdentityGate({ headCommitMessage, headRef }) {
  * minutes AFTER the checkout fix landed, purely because their branches had been updated. A gate that a
  * routine GitHub button turns red is one nobody can satisfy.
  *
+ */
+
+/**
  * BOTH FLAGS ARE LOAD-BEARING, and `--no-merges` ALONE IS A HOLE — measured on the branch this was
  * written against, where the three queries return three different commits:
  *
