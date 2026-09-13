@@ -1,0 +1,24 @@
+id: fb-1789322793390-f544a6
+ts: 2026-09-13T18:06:33.390Z
+raw: "Regression discovered in merged W1-T3532 lifecycle PR #5423: it deletes
+  test/run-review-evidence-target.test.ts (143 lines) even though that file is
+  outside W1-T3532 declared files. The deleted W1-T3529 test was the only
+  end-to-end proof that runReview preserves explicit owner/repo through
+  judgeReview evidence for craigoley/remudero-site, executes the registered
+  target suite, does not re-derive from a bare repo string, and retains all
+  pre-existing evidence fields. The #5423 diff has no replacement test; direct
+  PR-head symbol search found only unrelated source-text marker use. Restore or
+  relocate this behavioral proof in a dedicated regression PR, and make scope
+  review block a task that deletes a test owned by another open task unless a
+  declared replacement is present. Evidence: git diff b3cb14b3..201aaa3 --
+  test/run-review-evidence-target.test.ts; W1-T3532 shard files excludes it;
+  fresh review emitted only advisory scope violations and auto-armed merge."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
