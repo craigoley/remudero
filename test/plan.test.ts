@@ -7,6 +7,7 @@ import {
   assertRunnable,
   loadPlan,
   PlanError,
+  RETIREMENT_REASONS,
   selectTask,
   TASK_STATUSES,
   transitiveDependents,
@@ -60,6 +61,54 @@ test("B is runnable (dep A merged); C is not (dep B queued)", () => {
   assert.deepEqual(unmetDependencies(plan, selectTask(plan, "C")), ["B"]);
   assert.doesNotThrow(() => assertRunnable(plan, selectTask(plan, "B")));
   assert.throws(() => assertRunnable(plan, selectTask(plan, "C")), PlanError);
+});
+
+test("retired dependencies stop blocking while live unmerged dependencies remain unmet", () => {
+  const retiredDependencyEntries = RETIREMENT_REASONS.map(
+    (reason) => `
+- id: W1-T3166-${reason}
+  title: retired dependency ${reason}
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  status: blocked
+  retirement: ${reason}
+  attempts: 0
+`,
+  ).join("");
+  const plan = loadPlan(planFile(`
+${retiredDependencyEntries}
+- id: W1-T3199
+  title: live dependency
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  status: queued
+  attempts: 0
+- id: W1-T3201
+  title: downstream task with retired and live dependencies
+  repo: remudero
+  depends_on: [W1-T3199, W1-T3166-withdrawn]
+  type: implement
+  verify: auto
+  status: queued
+  attempts: 0
+- id: RETIRED-ONLY
+  title: downstream task with only retired dependencies
+  repo: remudero
+  depends_on: [W1-T3166-retired, W1-T3166-closed, W1-T3166-withdrawn]
+  type: implement
+  verify: auto
+  status: queued
+  attempts: 0
+`));
+
+  assert.deepEqual(unmetDependencies(plan, selectTask(plan, "RETIRED-ONLY")), []);
+  assert.deepEqual(unmetDependencies(plan, selectTask(plan, "W1-T3201")), ["W1-T3199"]);
+  assert.doesNotThrow(() => assertRunnable(plan, selectTask(plan, "RETIRED-ONLY")));
+  assert.throws(() => assertRunnable(plan, selectTask(plan, "W1-T3201")), PlanError);
 });
 
 test("rejects a dependency on an unknown task", () => {

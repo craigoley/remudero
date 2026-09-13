@@ -745,8 +745,8 @@ export type MergedResolver = (task: Task) => boolean;
 
 const yamlStatusMerged: MergedResolver = (t) => MERGED_STATUSES.has(t.status);
 
-/** Refuse to run a task whose dependencies have not merged (§12 rule 3). Returns the unmet
- *  dependency ids; empty means clear. `isMerged` decides landed-ness. */
+/** Refuse to run a task whose dependencies have not merged (§12 rule 3). Returns the unmet ids;
+ *  `isMerged` decides landed-ness, but a `retirement`-carrying dep is excluded, never merged. */
 export function unmetDependencies(
   plan: Plan,
   task: Task,
@@ -754,6 +754,7 @@ export function unmetDependencies(
 ): string[] {
   return task.depends_on.filter((dep) => {
     const d = plan.byId.get(dep);
+    if (d?.retirement !== undefined) return false;
     return !d || !isMerged(d);
   });
 }
