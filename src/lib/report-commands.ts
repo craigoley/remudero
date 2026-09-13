@@ -70,6 +70,7 @@ import {
   buildDoctorReport,
   classifyReadFailure,
   classifyWorktreeBase,
+  parseCaptureSurfaceFireHistory,
   readDiskFreeBytes,
   readDiskTotalBytes,
   readGitLocks,
@@ -492,6 +493,20 @@ export interface DoctorDeps extends ReportRepoContext {
   readCheckoutDepth?: (cwd: string) => { shallow: boolean; commitCount: number } | undefined;
   /** R-49 — the `node-version-pin` arm's only measurement. Defaults to {@link readNvmrcVersion}. */
   readNvmrcVersion?: (root: string) => string | undefined;
+  /** W1-T3472 — persisted feedback-docket fires. Defaults to `state/last-feedback-docket.json`. */
+  readCaptureSurfaceFireHistory?: (root: string) => Array<Record<string, unknown>>;
+}
+
+export function readCaptureSurfaceFireHistory(root: string): Array<Record<string, unknown>> {
+  const markerPath = join(root, "state", "last-feedback-docket.json");
+  if (!existsSync(markerPath)) return [];
+  try {
+    return parseCaptureSurfaceFireHistory(JSON.parse(readFileSync(markerPath, "utf8")) as unknown);
+  } catch (e) {
+    // Corrupt marker JSON reads as no retained capture-surface history, not as live-ledger evidence.
+    void e;
+    return [];
+  }
 }
 
 /**
@@ -553,6 +568,7 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
   const report = buildDoctorReport({
     nowMs,
     ledgerLines: ledgerLines as Array<Record<string, unknown>>,
+    captureSurfaceFires: (deps.readCaptureSurfaceFireHistory ?? readCaptureSurfaceFireHistory)(root),
     candidateCount: head.rows.length,
     ...(Number.isFinite(newestDispatchMs) ? { dispatchSinceMs: Math.max(0, nowMs - newestDispatchMs) } : {}),
     ...(cadence.boundMs === undefined ? {} : { dispatchBoundMs: cadence.boundMs }),
