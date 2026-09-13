@@ -196,6 +196,21 @@ test("W1-T2763: a skill dir with no row is reported as ORPHANED — a deleted ma
   }
 });
 
+test("W1-T2763: a skill dir with NO readable SKILL.md at all is reported as ORPHANED, not silently skipped", () => {
+  // The `applies-to` check reads SKILL.md and can throw (ENOENT, a directory instead of a file,
+  // etc.) — an unreadable directory must fail CLOSED into ORPHANED, never fail open into "not a
+  // macro, so ignore it", or a directory with no SKILL.md at all would sit invocable and unlisted.
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}macro-orphan-unreadable-`));
+  try {
+    const skillsDir = join(root, ".claude", "skills");
+    mkdirSync(join(skillsDir, "no-skill-md"), { recursive: true });
+    const orphans = orphanedSkillNames([{ name: "tddr" }], skillsDir);
+    assert.ok(orphans.includes("no-skill-md"), `an unreadable SKILL.md fails closed into ORPHANED: ${JSON.stringify(orphans)}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T2763: an approved worker procedure with applies-to is not a macro orphan", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}manual-skill-`));
   try {
