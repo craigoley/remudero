@@ -19,7 +19,8 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
+import { resolveRepoLayout } from "./repo-layout.js";
 import { execWhitelistedProof, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
 
@@ -126,7 +127,7 @@ function targetsPlanShard(whitelisted: WhitelistedProof, planShardPaths: Readonl
   return typeof target === "string" && planShardPaths.has(target);
 }
 
-export interface ProofAmendmentValidationDeps {
+export interface ProofAmendmentValidationInput {
   readonly headCwd: string;
   readonly baseCwd: string | undefined;
   readonly execAtHead?: (whitelisted: WhitelistedProof, cwd: string) => "pass" | "fail" | "no-match";
@@ -148,17 +149,17 @@ export type ProofAmendmentValidation =
 export function validateProofAmendmentProposal(
   proposal: readonly ProofAmendmentProposalEntry[],
   evidence: ProofDiscriminationEvidence,
-  deps: ProofAmendmentValidationDeps,
+  input: ProofAmendmentValidationInput,
 ): ProofAmendmentValidation {
   if (proposal.length === 0) {
     return { ok: false, refusal: { reason: "no-proposal", detail: "the worker's report carried no PROOF_AMENDMENT proposal" } };
   }
-  if (deps.currentHeadSha !== deps.pinnedHeadSha) {
+  if (input.currentHeadSha !== input.pinnedHeadSha) {
     return {
       ok: false,
       refusal: {
         reason: "head-moved",
-        detail: `implementation head moved from ${deps.pinnedHeadSha} to ${deps.currentHeadSha} since this evidence was read`,
+        detail: `implementation head moved from ${input.pinnedHeadSha} to ${input.currentHeadSha} since this evidence was read`,
       },
     };
   }
@@ -169,8 +170,8 @@ export function validateProofAmendmentProposal(
     }
     seenClaims.add(entry.claim);
   }
-  const execAtHead = deps.execAtHead ?? execWhitelistedProof;
-  const execAtBase = deps.execAtBase ?? execWhitelistedProof;
+  const execAtHead = input.execAtHead ?? execWhitelistedProof;
+  const execAtBase = input.execAtBase ?? execWhitelistedProof;
   for (const entry of proposal) {
     const evidenceRow = evidence.proofs.find((p) => p.claim === entry.claim);
     if (!evidenceRow || evidenceRow.proof !== entry.oldProof) {
@@ -189,7 +190,7 @@ export function validateProofAmendmentProposal(
         refusal: { reason: "parse-error", detail: `replacement does not parse under the reviewer's proof grammar: ${entry.newProof}` },
       };
     }
-    if (targetsPlanShard(parsed, deps.planShardPaths)) {
+    if (targetsPlanShard(parsed, input.planShardPaths)) {
       return {
         ok: false,
         refusal: { reason: "targets-plan-shard", detail: `replacement names the plan shard rather than the implementation diff: ${entry.newProof}` },
@@ -197,7 +198,7 @@ export function validateProofAmendmentProposal(
     }
     let headResult: "pass" | "fail" | "no-match";
     try {
-      headResult = execAtHead(parsed, deps.headCwd);
+      headResult = execAtHead(parsed, input.headCwd);
     } catch {
       return {
         ok: false,
@@ -210,12 +211,12 @@ export function validateProofAmendmentProposal(
         refusal: { reason: "not-discriminating", detail: `replacement does not pass at the implementation head: ${entry.newProof}` },
       };
     }
-    if (deps.baseCwd === undefined) {
+    if (input.baseCwd === undefined) {
       return { ok: false, refusal: { reason: "base-unreadable", detail: "no merge-base checkout was available to test discrimination" } };
     }
     let baseResult: "pass" | "fail" | "no-match";
     try {
-      baseResult = execAtBase(parsed, deps.baseCwd);
+      baseResult = execAtBase(parsed, input.baseCwd);
     } catch {
       return {
         ok: false,
@@ -244,13 +245,13 @@ export interface ProofAmendmentIdentity {
 }
 
 export function proofAmendmentIdempotencyKey(identity: ProofAmendmentIdentity): string {
-  const digestInput = identity.proposal.map((e) => `${e.claim} ${e.oldProof}`).sort().join("\n");
+  const digestInput = identity.proposal.map((e) => `${e.claim}\0${e.oldProof}`).sort().join("\n");
   const digest = createHash("sha256").update(digestInput).digest("hex").slice(0, 20);
   return `${identity.taskId}:${identity.prNumber}:${identity.headSha}:${digest}`;
 }
 
 /** Stable per-implementation-PR branch name — deterministic so a re-run that pushed but crashed
- *  before recording finds its own prior push via {@link ProofAmendmentWriteDeps.probeExisting}
+ *  before recording finds its own prior push via {@link ProofAmendmentWritePorts.probeExisting}
  *  rather than opening a second PR (mirrors `dispatchPlanOnlyRepair`'s `plan-repair/${taskId}`). */
 export function proofAmendmentBranchName(taskId: string, prNumber: number): string {
   return `proof-amendment/${taskId}-${prNumber}`;
@@ -280,22 +281,23 @@ export function replaceProofScalar(shardText: string, claim: string, oldProof: s
   return lines.join("\n");
 }
 
-/** Locate a task's plan shard by the same convention `dispatchPlanOnlyRepair` (sweep.ts) already
- *  uses: a `plan/tasks.d/<taskId>-*.yaml` file, falling back to the monolith `plan/tasks.yaml` when
- *  it declares the task inline. `undefined` when neither carries the task at all. */
+/** Locate a task's plan shard through the repository's resolved layout, falling back to its plan
+ *  monolith when it declares the task inline. `undefined` when neither carries the task at all. */
 export function findTaskShard(repoDir: string, taskId: string): { path: string; text: string } | undefined {
+  const layout = resolveRepoLayout(repoDir);
+  const toRepoRelative = (path: string) => relative(repoDir, path).split(sep).join("/");
   let shardRelPath: string | undefined;
   try {
-    shardRelPath = readdirSync(join(repoDir, "plan", "tasks.d"))
+    shardRelPath = readdirSync(join(layout.planDir, "tasks.d"))
       .filter((f) => f.startsWith(`${taskId}-`) && /\.ya?ml$/.test(f))
-      .map((f) => join("plan", "tasks.d", f))[0];
+      .map((f) => toRepoRelative(join(layout.planDir, "tasks.d", f)))[0];
   } catch {
-    /* no tasks.d directory readable — fall through to the monolith below */
+    /* no readable task-shard directory — fall through to the monolith below */
   }
   if (!shardRelPath) {
-    const monolith = join(repoDir, "plan", "tasks.yaml");
+    const monolith = layout.planMonolith;
     if (existsSync(monolith) && readFileSync(monolith, "utf8").includes(`id: ${taskId}\n`)) {
-      shardRelPath = "plan/tasks.yaml";
+      shardRelPath = toRepoRelative(monolith);
     }
   }
   if (!shardRelPath) return undefined;
@@ -311,7 +313,7 @@ export interface ProofAmendmentRecord {
   readonly merged: boolean;
 }
 
-export interface ProofAmendmentWriteDeps {
+export interface ProofAmendmentWritePorts {
   readonly repoDir: string;
   readonly findShard: (repoDir: string, taskId: string) => { path: string; text: string } | undefined;
   readonly worktreeAdd: (repoDir: string, worktreePath: string, branch: string) => void;
@@ -393,7 +395,7 @@ function buildAmendmentBody(
  *  a prior identical filing, opens exactly one plan-only amendment PR, or — once that amendment has
  *  merged — requests a same-head guarded branch update so the ordinary CI/review/arm path picks up
  *  the corrected criteria on its own. Never merges or arms anything itself. */
-export function requestProofAmendment(request: ProofAmendmentRequest, deps: ProofAmendmentWriteDeps): ProofAmendmentOutcome {
+export function requestProofAmendment(request: ProofAmendmentRequest, deps: ProofAmendmentWritePorts): ProofAmendmentOutcome {
   const ineligible = proofAmendmentIneligibleReason(request.pr, request.evidence);
   if (ineligible) return { kind: "ineligible", reason: ineligible };
   const evidence = request.evidence!;
@@ -401,7 +403,7 @@ export function requestProofAmendment(request: ProofAmendmentRequest, deps: Proo
   const shard = deps.findShard(deps.repoDir, request.taskId);
   if (!shard) return { kind: "refused", reason: "shard-not-found", detail: `no plan shard found for ${request.taskId}` };
 
-  const planShardPaths = new Set<string>([shard.path, "plan/tasks.yaml"]);
+  const planShardPaths = new Set<string>([shard.path]);
   const validation = validateProofAmendmentProposal(request.proposal, evidence, {
     headCwd: request.headCwd,
     baseCwd: request.baseCwd,

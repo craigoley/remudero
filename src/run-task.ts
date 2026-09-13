@@ -9556,7 +9556,10 @@ export async function runFixRung(opts: {
             {
               repoDir: opts.worktreePath,
               findShard: findTaskShard,
-              worktreeAdd: (repoDir, wp, branch) => worktreeAdd(repoDir, wp, branch, "origin/main", { log: deps.log }),
+              worktreeAdd: (repoDir, wp, branch) => {
+                const add = worktreeAdd;
+                add(repoDir, wp, branch, "origin/main", { log: deps.log });
+              },
               worktreeRemove: (repoDir, wp) => worktreeRemove(repoDir, wp),
               writeFile: (absPath, text) => writeFileSync(absPath, text),
               gitAdd: (wp, relPath) => {
@@ -9580,7 +9583,7 @@ export async function runFixRung(opts: {
               lookupIdentity: (key): ProofAmendmentRecord | undefined => {
                 const row = [...ledgerLinesNow]
                   .reverse()
-                  .find((l) => l.step === "proof_amendment.dispatch" && l.identity_key === key) as
+                  .find((l) => l.step === "fix.dispatch" && l.kind === "proof_amendment" && l.identity_key === key) as
                   | Record<string, unknown>
                   | undefined;
                 if (!row) return undefined;
@@ -9598,7 +9601,8 @@ export async function runFixRung(opts: {
                 return { amendmentUrl, amendmentNumber, merged };
               },
               recordIdentity: (key, record) => {
-                deps.log("proof_amendment.dispatch", {
+                deps.log("fix.dispatch", {
+                  kind: "proof_amendment",
                   task_id: opts.taskId,
                   pr_number: prNumber,
                   identity_key: key,
@@ -18832,6 +18836,20 @@ export function checkProofCommand(
         );
       }
       console.log("discrimination: unknown — reported verdict above stands unchanged");
+      return headExit;
+    }
+
+    // `buildBaseProofDir` copies ADDED test files into its base checkout only so a `unit test:`
+    // proof can exercise the same test against base source. A `grep:` proof targeting that copied
+    // file still names a path absent at the merge base, so it discriminates by construction. The
+    // reviewer owns this distinction in `classifyBaseProofOutcome`; without this matching arm the
+    // public diagnostic executes grep against the copied head file and falsely reports stale.
+    if (w!.kind === "grep" && grepTargetPath !== undefined && base.addedTestFiles.has(grepTargetPath)) {
+      console.log(
+        `base:       ABSENT at ${baseRef} — ${grepTargetPath} was copied only to re-run added unit tests; ` +
+          "a grep proof still names a path the merge base did not contain.",
+      );
+      console.log("discrimination: discriminates — this proof's target did not exist at the merge base.");
       return headExit;
     }
 

@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -13,10 +17,12 @@ import {
   type ProofAmendmentProposalEntry,
   type ProofAmendmentRecord,
   type ProofAmendmentRequest,
-  type ProofAmendmentWriteDeps,
+  type ProofAmendmentWritePorts,
 } from "../src/lib/proof-amendment.js";
 import type { ProofDiscriminationEvidence } from "../src/lib/sweep.js";
 import type { WhitelistedProof } from "../src/lib/review.js";
+import { CHECK_PROOF_EXIT, checkProofCommand } from "../src/run-task.js";
+import { renderFixPrompt } from "../src/lib/prompt-render.js";
 
 // W1-T3434 — #5154 was CAPPED because its `unit test:` proofs passed at both the implementation
 // head and its merge base, and the proof-discrimination worker was told to repair the PR BODY's
@@ -62,7 +68,7 @@ function fakeExecutors(overrides: { head?: "pass" | "fail" | "no-match"; base?: 
   };
 }
 
-interface RecordingWriteDeps extends ProofAmendmentWriteDeps {
+interface RecordingWritePorts extends ProofAmendmentWritePorts {
   calls: {
     worktreeAdd: number;
     worktreeRemove: number;
@@ -79,9 +85,9 @@ interface RecordingWriteDeps extends ProofAmendmentWriteDeps {
 /** A fully-faked write side: an in-memory "durable" identity store (mirroring the ledger's own
  *  append-then-read discipline) plus counters so a test can prove, by COUNTING, that a refused or
  *  resumed outcome never touched git or GitHub. */
-function fakeWriteDeps(overrides: Partial<ProofAmendmentWriteDeps> = {}): RecordingWriteDeps {
+function fakeWriteDeps(overrides: Partial<ProofAmendmentWritePorts> = {}): RecordingWritePorts {
   const identities = new Map<string, ProofAmendmentRecord>();
-  const calls: RecordingWriteDeps["calls"] = {
+  const calls: RecordingWritePorts["calls"] = {
     worktreeAdd: 0,
     worktreeRemove: 0,
     writeFile: [],
@@ -92,7 +98,7 @@ function fakeWriteDeps(overrides: Partial<ProofAmendmentWriteDeps> = {}): Record
     createPr: 0,
     updateBranch: 0,
   };
-  const deps: ProofAmendmentWriteDeps = {
+  const deps: ProofAmendmentWritePorts = {
     repoDir: "/repo",
     findShard: () => ({ path: "plan/tasks.d/W1-T3434-FIXTURE.yaml", text: `- id: ${TASK_ID}\n  acceptance:\n    - claim: "${CLAIM}"\n      proof: "${OLD_PROOF}"\n` }),
     worktreeAdd: () => {
@@ -246,6 +252,7 @@ test("the live fix rung calls the proof-amendment parent rather than granting th
   const { join } = await import("node:path");
   const runTaskSrc = readFileSync(join(import.meta.dirname, "..", "src", "run-task.ts"), "utf8");
   assert.match(runTaskSrc, /requestProofAmendment\(/, "the fix rung must call the parent effect directly");
+  assert.match(runTaskSrc, /kind:\s*"proof_amendment"/, "the durable fix.dispatch record identifies this amendment subtype");
   assert.doesNotMatch(
     runTaskSrc.match(/if \(mode === "proof-discrimination"\)[\s\S]{0,400}/)?.[0] ?? "",
     /repair the pr body/i,
@@ -261,6 +268,50 @@ test("the live fix rung calls the proof-amendment parent rather than granting th
   );
   assert.deepEqual(parsed, [{ claim: "a claim", oldProof: "unit test: test/x.test.ts", newProof: "grep: x( in src/x.ts" }]);
   assert.deepEqual(Object.keys(parsed[0]!).sort(), ["claim", "newProof", "oldProof"]);
+});
+
+test("renderFixPrompt gives a proof-discrimination worker a proposal grammar, not PR-body write instructions", () => {
+  const prompt = renderFixPrompt({
+    task: { id: TASK_ID, title: "proof amendment", files: ["src/lib/proof-amendment.ts"] },
+    round: 1,
+    branch: "run-W1-T3434-1",
+    evidence: { proofDiscrimination: evidence() },
+  });
+  assert.match(prompt, /MODE: proof-discrimination/);
+  assert.match(prompt, /THE PLAN, NOT THIS PR'S BODY/i);
+  assert.match(prompt, /PROOF_AMENDMENT:/);
+  assert.match(prompt, /old_proof:/);
+  assert.doesNotMatch(prompt, /Repair the PR BODY's Acceptance block only/);
+});
+
+test("checkProofCommand treats a grep target added on the head as discriminating despite base test materialisation", (t) => {
+  const repo = mkdtempSync(join(tmpdir(), "rmd-proof-amendment-check-proof-"));
+  const savedCwd = process.cwd();
+  const logs: string[] = [];
+  try {
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+    git("init", "--initial-branch=main");
+    git("config", "user.email", "test@example.invalid");
+    git("config", "user.name", "Test");
+    writeFileSync(join(repo, "README.md"), "base\n");
+    git("add", ".");
+    git("commit", "-m", "base");
+    const target = "test/added-proof.test.ts";
+    const marker = "proof-amendment-added-grep-target";
+    mkdirSync(join(repo, "test"), { recursive: true });
+    writeFileSync(join(repo, target), `${marker}\n`);
+    git("add", ".");
+    git("commit", "-m", "add proof target");
+    process.chdir(repo);
+    t.mock.method(console, "log", (...args: unknown[]) => void logs.push(args.map(String).join(" ")));
+    const code = checkProofCommand(["grep:", marker, "in", target, "--base", "HEAD~1"]);
+    assert.equal(code, CHECK_PROOF_EXIT.pass, logs.join("\n"));
+    assert.match(logs.join("\n"), /base:\s+ABSENT at HEAD~1/);
+    assert.match(logs.join("\n"), /discrimination:\s+discriminates/);
+  } finally {
+    process.chdir(savedCwd);
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test("parseProofAmendmentProposal returns nothing for a report with no PROOF_AMENDMENT block", () => {

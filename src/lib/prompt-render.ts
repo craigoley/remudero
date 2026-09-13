@@ -688,7 +688,7 @@ export function renderFixPrompt(opts: {
       `branch from its merge base. THE PLAN, NOT THIS PR'S BODY, IS WHAT A TRAILERED PR IS JUDGED AGAINST —`,
       `editing the PR body cannot change this verdict, and you have no authority to edit the plan or this`,
       `PR's own task criteria (Standing rule 15). Do NOT edit the PR body's Acceptance block, do NOT change`,
-      `code merely to manufacture a proof, and do NOT touch plan/tasks.yaml or any plan/tasks.d/*.yaml shard.`,
+      `code merely to manufacture a proof, and do NOT touch the plan monolith or any task-criteria YAML shard.`,
       `Instead PROPOSE a replacement for each proof below; a separate, parent-owned process validates and`,
       `writes it. A pure-path \`unit test:\` proof discriminates only when its file is absent or failing at`,
       `merge base — for an existing suite, propose a \`grep:\` proof on a CHANGED line instead. End your report`,
