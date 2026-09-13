@@ -1,0 +1,17 @@
+id: fb-1789259749891-f16610
+ts: 2026-09-13T00:35:49.891Z
+raw: "Prioritize and design the bounded cross-repo proof-runner repair from
+  issue #5314. The immediate user-visible consequence is private portal PR #8:
+  its exact Vitest proofs under tests/unit are executed as zero-match Node
+  test/** proofs. Preserve test-theater safety; do not weaken PORTAL-T1
+  acceptance."
+attachments:
+  - https://github.com/craigoley/remudero/issues/5314
+origin: issue
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
