@@ -1,6 +1,6 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-13T21:04:52.461Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-13T21:13:09.856Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
@@ -450,3 +450,10 @@ not by re-deriving state from the full plan and ledger.
   lane, past and future, and the credit resolver rejects each one as stale/foreign. A credit rate
   computed over such a lane measures the KEY, never the work, and must be published as a key defect
   rather than as a merge rate. [RETRO-1789326941957; DR-29; P69; 2026-09-13]
+- 30. AN APPEND-ONLY CREDIT LIST IS DIFFED BEFORE IT IS APPENDED. A credit row stamped when the
+  reconciler ran, rather than when the pull request merged, re-enters every window whose marker
+  precedes that batch, so "since the marker" selects on when the harness last looked and not on
+  when the work landed. Any rung appending credited `(task, PR)` pairs must first set-difference
+  them against the pairs it appended last time and publish the overlap; a count computed over an
+  un-deduplicated credit list states a batch schedule, never work. [RETRO-1789332224777; DR-30;
+  P70; 2026-09-13]
