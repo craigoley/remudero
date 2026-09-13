@@ -385,7 +385,7 @@ test("planHealthSweep: a MERGED/DONE task is out of scope even if it would other
   assert.deepEqual(report.correctiveTasks, []);
 });
 
-test("planHealthSweep: retired tasks are out of scope even if they would otherwise violate a rule", () => {
+test("planHealthSweep: every retirement reason is out of scope even if it would otherwise violate a rule", () => {
   const retiredTasks = RETIREMENT_REASONS.map((retirement, index) =>
     task({
       id: `W1-T-RETIRED-${index}`,
@@ -395,13 +395,19 @@ test("planHealthSweep: retired tasks are out of scope even if they would otherwi
       acceptance: [{ claim: "the daemon does X", proof: "unit test asserts X" }],
     }),
   );
+  const report = planHealthSweep(retiredTasks);
+  assert.deepEqual(report.flags, []);
+  assert.deepEqual(report.correctiveTasks, []);
+});
+
+test("planHealthSweep: a non-retired twin with the same violation is still flagged and proposed", () => {
   const activeTwin = task({
     id: "W1-T-ACTIVE-TWIN",
     status: "blocked",
     files: ["src/lib/foo.ts"],
     acceptance: [{ claim: "the daemon does X", proof: "unit test asserts X" }],
   });
-  const report = planHealthSweep([...retiredTasks, activeTwin]);
+  const report = planHealthSweep([activeTwin]);
   assert.deepEqual(
     report.flags.map((f) => f.taskId),
     ["W1-T-ACTIVE-TWIN"],
@@ -411,6 +417,25 @@ test("planHealthSweep: retired tasks are out of scope even if they would otherwi
     ["W1-T-ACTIVE-TWIN"],
   );
   assert.ok(report.flags[0]!.violations.some((v) => v.check === "sizing"));
+});
+
+test("planHealthSweep: merged and retired exclusions compose without flags or corrective proposals", () => {
+  const retiredButBad = task({
+    id: "W1-T-RETIRED",
+    status: "blocked",
+    retirement: RETIREMENT_REASONS[0]!,
+    files: ["src/lib/foo.ts"],
+    acceptance: [{ claim: "the daemon does X", proof: "unit test asserts X" }],
+  });
+  const mergedButBad = task({
+    id: "W1-T-MERGED",
+    status: "merged",
+    files: ["src/lib/foo.ts"],
+    acceptance: [{ claim: "the daemon does X", proof: "unit test asserts X" }],
+  });
+  const report = planHealthSweep([retiredButBad, mergedButBad]);
+  assert.deepEqual(report.flags, []);
+  assert.deepEqual(report.correctiveTasks, []);
 });
 
 // ── W1-T367: "already shipped" is decided by the DERIVED projection, not the decorative
