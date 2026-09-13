@@ -2051,6 +2051,7 @@ export function planHealthSweep(
   const correctiveTasks: CorrectiveTaskProposal[] = [];
   for (const task of tasks) {
     if (isMerged(task)) continue; // out of scope — already shipped (derived; see doc above)
+    if (task.retirement !== undefined) continue; // out of scope — an operator's closed ruling
     const { violations } = lintTask(task, optsFor(task));
     const blocking = violations.filter((v) => v.severity === "block");
     if (blocking.length === 0) continue; // clean, or WARN-only — nothing to file
