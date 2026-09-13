@@ -3776,7 +3776,7 @@ const PR_OPEN_TIME_ACCEPTANCE_FALLBACK: AcceptanceCriterion[] = [
       "this PR body carries a judgeable Acceptance block (auto-authored when the PR was opened, " +
       "because the commit-derived body carried none) — not a claim that the underlying diff is " +
       "correct, or that any task's acceptance is met",
-    proof: "acceptanceAuthorTimeCheck (src/lib/review.ts) — the same predicate scripts/acceptance-author-gate.mjs runs in CI — returns ok:true for this body",
+    proof: "grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts",
   },
 ];
 
@@ -3786,7 +3786,7 @@ const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
       "this PR body carries a judgeable Acceptance block (mechanically repaired by the fix rung " +
       "after acceptance-author-gate refused it) — not a claim that the underlying diff is correct, " +
       "or that any task's acceptance is met",
-    proof: "acceptanceAuthorTimeCheck (src/lib/review.ts) — the same predicate scripts/acceptance-author-gate.mjs runs in CI — now returns ok:true for this body",
+    proof: "grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts",
   },
 ];
 
