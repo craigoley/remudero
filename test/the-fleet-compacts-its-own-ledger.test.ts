@@ -33,6 +33,7 @@ const FRESH = { archiveCount: 12, archiveBytes: 6 * 1024 * 1024 };
 test("W1-T3368: the corpus that killed the daemon fires the rung", () => {
   const d = decideLedgerCompaction(FATAL, undefined, NOW);
   assert.equal(d.fire, true, d.reason);
+  assert.equal(d.overBound, true);
   assert.match(d.reason, /over bound/);
   assert.match(d.reason, /959/, "the reason must carry the measurement that decided it");
 });
@@ -40,6 +41,7 @@ test("W1-T3368: the corpus that killed the daemon fires the rung", () => {
 test("W1-T3368 (control): a SMALL corpus fires nothing — a healthy host never pays for this", () => {
   const d = decideLedgerCompaction(FRESH, undefined, NOW);
   assert.equal(d.fire, false);
+  assert.equal(d.overBound, false);
   assert.match(d.reason, /under bound/);
   assert.match(d.reason, /12 archive/, "a skip must still say what it measured");
 });
@@ -71,6 +73,7 @@ test("W1-T3368: the BYTES axis fires independently — a few enormous archives a
 test("W1-T3368: a fire inside the interval is THROTTLED, and says so rather than reading as healthy", () => {
   const d = decideLedgerCompaction(FATAL, NOW - 5 * MIN, NOW);
   assert.equal(d.fire, false);
+  assert.equal(d.overBound, true, "a cooling-down compactor does not make the materialized corpus safe");
   assert.match(d.reason, /throttled/);
   assert.match(d.reason, /over bound/, "a throttled tick must still report that the corpus is over bound");
   assert.doesNotMatch(d.reason, /under bound/, "throttled and healthy must never render the same");
@@ -147,7 +150,10 @@ test("W1-T3368: an archive that cannot be stat'd still COUNTS — it is a file a
  * wiring rather than the wiring — it passes on a block no caller can reach (#981 sent a diagnosis
  * the wrong way for hours on exactly that mismatch).
  */
-async function daemonRows(deps: Partial<DaemonDeps>): Promise<Array<{ step: string; extra?: Record<string, unknown> }>> {
+async function daemonRows(
+  deps: Partial<DaemonDeps>,
+  allRows = false,
+): Promise<Array<{ step: string; extra?: Record<string, unknown> }>> {
   const { runDaemon } = await import("../src/lib/daemon.js");
   const { loadPlan } = await import("../src/lib/plan.js");
   const dir = mkdtempSync(join(tmpdir(), "rmd-lcr-"));
@@ -169,13 +175,13 @@ async function daemonRows(deps: Partial<DaemonDeps>): Promise<Array<{ step: stri
       log: (step: string, extra?: Record<string, unknown>) => rows.push({ step, extra }),
       ...deps,
     });
-    return rows.filter((r) => r.step.startsWith("ledger_compaction"));
+    return allRows ? rows : rows.filter((r) => r.step.startsWith("ledger_compaction"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-const FIRES = { fire: true as const, reason: "959 archives over bound 400" };
+const FIRES = { fire: true as const, overBound: true, reason: "959 archives over bound 400" };
 const OUTCOME = { sourceCount: 40, rowsWritten: 9_000, duplicatesCollapsed: 3, archiveName: "ledger.2026-09-01T00-00-00-000Z.ndjson.gz" };
 
 test("W1-T3368: a FIRING decision runs one pass, and the .ran row carries THAT decision's reason", async () => {
@@ -218,7 +224,7 @@ test("W1-T3368: a compaction that THROWS is best-effort — the cycle survives a
 test("W1-T3368: a REFUSING decision never runs a pass, and names why", async () => {
   let passes = 0;
   const rows = await daemonRows({
-    checkLedgerCompaction: () => ({ fire: false, reason: "12 archives under bound 400" }),
+    checkLedgerCompaction: () => ({ fire: false, overBound: false, reason: "12 archives under bound 400" }),
     runLedgerCompaction: async () => {
       passes += 1;
       return OUTCOME;
@@ -242,6 +248,23 @@ test("W1-T3368: a CHECK that throws is survivable too — an unreadable corpus n
   });
   assert.equal(passes, 0);
   assert.deepEqual(rows.map((r) => r.step), ["ledger_compaction.check_failed"]);
+});
+
+test("W1-T3368: an over-bound corpus defers the retro but not the daemon's ordinary work", async () => {
+  let retroRuns = 0;
+  const rows = await daemonRows({
+    // This is the critical interval state after the first 50-source pass: still unsafe to
+    // materialize, but not permitted to compact again yet.
+    checkLedgerCompaction: () => ({ fire: false, overBound: true, reason: "835 archives over bound 400 but throttled" }),
+    checkRetroTrigger: () => ({ fire: true, reason: "merges", mergesSinceMarker: 25, daysSinceMarker: 0 }),
+    runRetroTrigger: async () => {
+      retroRuns += 1;
+    },
+  }, true);
+  assert.equal(retroRuns, 0, "the full-union retro must not start while the corpus is still unsafe");
+  const deferred = rows.find((row) => row.step === "daemon.retro_trigger.deferred_ledger_pressure");
+  assert.equal(deferred?.extra?.reason, "835 archives over bound 400 but throttled");
+  assert.equal(rows.some((row) => row.step === "retro_triggered"), false, "a deferral must not forge a fire receipt");
 });
 
 test("W1-T3368: the rung is OPTIONAL, so a host that never wires it behaves exactly as before", async () => {

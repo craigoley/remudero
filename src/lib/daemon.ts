@@ -2287,15 +2287,15 @@ export async function runDaemon(
     // bounded pass on CORPUS PRESSURE; the incident and sizing are in `ledger-compaction-rung.ts`.
     //
     // THE REASON IS CARRIED FROM THE DECISION THAT PRODUCED THE OUTCOME, never re-derived here.
+    let ledgerCompactionDecision: LedgerCompactionDecision | undefined;
     if (deps.checkLedgerCompaction) {
-      let compactionDecision: LedgerCompactionDecision | undefined;
       try {
-        compactionDecision = deps.checkLedgerCompaction();
+        ledgerCompactionDecision = deps.checkLedgerCompaction();
       } catch (e) {
         log("ledger_compaction.check_failed", { error: String((e as Error)?.message ?? e) });
       }
-      if (compactionDecision?.fire) {
-        log("ledger_compaction.fired", { reason: compactionDecision.reason });
+      if (ledgerCompactionDecision?.fire) {
+        log("ledger_compaction.fired", { reason: ledgerCompactionDecision.reason });
         if (deps.runLedgerCompaction) {
           try {
             const outcome = await deps.runLedgerCompaction();
@@ -2303,10 +2303,10 @@ export async function runDaemon(
               // A pass that found nothing eligible is a RESULT, not a failure: the corpus is over the
               // bound but every archive is inside the age floor. Saying so keeps "nothing to merge"
               // distinguishable from "the run broke", which an absent row would not.
-              log("ledger_compaction.nothing_eligible", { reason: compactionDecision.reason });
+              log("ledger_compaction.nothing_eligible", { reason: ledgerCompactionDecision.reason });
             } else {
               log("ledger_compaction.ran", {
-                reason: compactionDecision.reason,
+                reason: ledgerCompactionDecision.reason,
                 source_count: outcome.sourceCount,
                 rows_written: outcome.rowsWritten,
                 duplicates_collapsed: outcome.duplicatesCollapsed,
@@ -2315,13 +2315,13 @@ export async function runDaemon(
             }
           } catch (e) {
             log("ledger_compaction.run_failed", {
-              reason: compactionDecision.reason,
+              reason: ledgerCompactionDecision.reason,
               error: String((e as Error)?.message ?? e),
             });
           }
         }
-      } else if (compactionDecision) {
-        log("ledger_compaction.skipped", { reason: compactionDecision.reason });
+      } else if (ledgerCompactionDecision) {
+        log("ledger_compaction.skipped", { reason: ledgerCompactionDecision.reason });
       }
     }
 
@@ -2628,7 +2628,9 @@ export async function runDaemon(
     // the same class of spend headroom exists to gate — and before the dispatch pick. There is deliberately
     // no wait-and-continue: the gates above exist to REFUSE a dispatch, but the retro gates nothing and
     // only delayed reaching dispatch by a full poll interval (W1-T2265). Forensics: docs/forensics/daemon.md.
-    if (deps.checkRetroTrigger) {
+    if (deps.checkRetroTrigger && ledgerCompactionDecision?.overBound) {
+      log("daemon.retro_trigger.deferred_ledger_pressure", { reason: ledgerCompactionDecision.reason });
+    } else if (deps.checkRetroTrigger) {
       let decision: RetroTriggerDecision | undefined;
       try {
         decision = deps.checkRetroTrigger();
