@@ -65,17 +65,17 @@
     names are templated from the registry record, not copy-pasted files.
   acceptance:
     - claim: "a site instance's clean exit relaunches the site instance only, never core"
-      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+      proof: "grep: a site instance's clean exit relaunches the site instance only, never core in test/multi-instance-daemon-lifecycle-registry.test.ts"
     - claim: "STOP set for the site instance blocks only the site instance's revival; core's tick is unaffected"
-      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+      proof: "grep: STOP set for the site instance blocks only site revival; core's tick is unaffected in test/multi-instance-daemon-lifecycle-registry.test.ts"
     - claim: "a tick over one instance never installs, checks, relaunches or writes state for any other instance"
-      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+      proof: "grep: a tick over one instance never checks or writes another instance's units in test/multi-instance-daemon-lifecycle-registry.test.ts"
     - claim: "an unknown or malformed instance record is refused before any Docker or systemd write"
-      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+      proof: "grep: an unknown or malformed instance record is refused before Docker or systemd writes in test/multi-instance-daemon-lifecycle-registry.test.ts"
     - claim: "a healthy instance's repeated tick is idempotent and issues no redundant Docker or systemd action"
-      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+      proof: "grep: a healthy instance's repeated tick is idempotent and issues no redundant Docker action in test/multi-instance-daemon-lifecycle-registry.test.ts"
     - claim: "existing recycle-container.sh guarded refusals remain intact when invoked through the registry"
-      proof: "unit test: test/multi-instance-daemon-lifecycle-registry.test.ts"
+      proof: "grep: existing recycle-container\\.sh guarded refusals remain intact through the registry in test/multi-instance-daemon-lifecycle-registry.test.ts"
   falsifier: |
     CLOSE IF the installer already derives units, state root, container name and credentials for
     more than one named instance from one validated record, with per-instance STOP/PAUSE precedence
