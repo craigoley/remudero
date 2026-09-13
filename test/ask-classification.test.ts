@@ -109,9 +109,12 @@ test("production console projection retains a needs-human escalation through the
 
   const projected = projectConsoleStatusResponse({ tasks, counts: { total: tasks.length } }) as {
     tasks: Array<{ taskId: string }>;
-    statusTaskProjection: { returned: number; omitted: number };
+    taskProjection: { returned: number; omitted: number };
   };
 
   assert.deepEqual(projected.tasks, [{ taskId: "W1-T-250", needsHuman: true }]);
-  assert.deepEqual(projected.statusTaskProjection, { returned: 1, omitted: 500 });
+  assert.deepEqual(
+    { returned: projected.taskProjection.returned, omitted: projected.taskProjection.omitted },
+    { returned: 1, omitted: 500 },
+  );
 });
