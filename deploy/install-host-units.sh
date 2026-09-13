@@ -42,6 +42,7 @@
 #
 # USAGE
 #   deploy/install-host-units.sh              # CHECK (default): report drift, change nothing, exit 1 if any
+#   deploy/install-host-units.sh --instance site
 #   sudo deploy/install-host-units.sh --install
 #
 # OVERRIDES (all optional; the *_DIR ones exist so the test suite can run this against a temp tree)
@@ -51,8 +52,61 @@
 set -euo pipefail
 
 MODE="check"
-[ "${1:-}" = "--install" ] && MODE="install"
-[ "${1:-}" = "--help" ] && { sed -n '1,60p' "$0"; exit 0; }
+INSTANCE_NAME=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --install) MODE="install"; shift ;;
+    --check) MODE="check"; shift ;;
+    --instance) INSTANCE_NAME="${2:?--instance needs a value}"; shift 2 ;;
+    --help) sed -n '1,72p' "$0"; exit 0 ;;
+    *) echo "install-host-units: unknown argument '$1' (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+DEFAULT_INSTANCE_REGISTRY="${SCRIPT_DIR%/deploy}/.remudero/daemon-instances.yaml"
+
+validate_instance_name() {
+  case "$1" in
+    ""|*[!a-zA-Z0-9_-]*)
+      echo "install-host-units: FATAL -- invalid instance name '$1'." >&2
+      echo "  Use only letters, digits, '_' and '-'." >&2
+      exit 2
+      ;;
+  esac
+}
+
+read_instance_registry() {
+  local registry_file="$1" want="$2"
+  awk -v want="$want" '
+    {
+      sub(/[[:space:]]+#.*/, "")
+    }
+    /^[[:space:]]*$/ { next }
+    $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+      name=$1
+      sub(/:$/, "", name)
+      current=name
+      next
+    }
+    current == want && $0 ~ /^    [A-Za-z_]+:[[:space:]]*/ {
+      key=$1
+      sub(/:$/, "", key)
+      value=$0
+      sub(/^    [A-Za-z_]+:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print key "=" value
+    }
+  ' "$registry_file"
+}
+
+require_abs_path() {
+  local name="$1" value="$2"
+  case "$value" in
+    /*) : ;;
+    *) echo "install-host-units: FATAL -- ${name} must be absolute for instance ${INSTANCE_NAME}, got '${value}'." >&2; exit 2 ;;
+  esac
+}
 
 # `${VAR-default}` NOT `${VAR:-default}` — WITHOUT THE COLON, ON PURPOSE. The colon form
 # substitutes the default for an EMPTY value as well as an unset one, so `RMD_STATE_DIR=` would
@@ -62,6 +116,8 @@ MODE="check"
 STATE_DIR="${RMD_STATE_DIR-/home/craigoleyagent/rmd-state2}"
 IMAGE="${RMD_IMAGE-synthwatcholey0620.azurecr.io/remudero:latest}"
 SERVICE_USER="${RMD_SERVICE_USER-craigoleyagent}"
+CONTAINER_NAME="${RMD_DAEMON_CONTAINER-remudero-daemon}"
+DAEMON_REPO="${RMD_DAEMON_REPO-remudero}"
 # W1-T2953 — NO SILENT DEFAULT. This rendered 4096 when the variable was unset, while the live
 # Azure host runs 8192; a `--install` would have DOWNGRADED the daemon's heap without a word, and
 # the retro rung is the first thing an undersized heap kills. The value is now REQUIRED and
@@ -69,7 +125,7 @@ SERVICE_USER="${RMD_SERVICE_USER-craigoleyagent}"
 # read back from the installed launcher: deriving the desired value from the current one makes
 # drift self-ratifying, which is the whole failure this task exists to end.
 MAX_OLD_SPACE_MB="${RMD_NODE_MAX_OLD_SPACE_MB-}"
-if [ -z "$MAX_OLD_SPACE_MB" ]; then
+if [ -z "$MAX_OLD_SPACE_MB" ] && [ -z "$INSTANCE_NAME" ]; then
   echo "install-host-units: FATAL — RMD_NODE_MAX_OLD_SPACE_MB is required and has no default." >&2
   echo "  It sizes the daemon's V8 heap. This host (32 GiB / 8 vCPU) runs 8192; a smaller host needs less." >&2
   echo "  Set it explicitly, e.g. RMD_NODE_MAX_OLD_SPACE_MB=8192 — never inferred from the installed unit." >&2
@@ -78,19 +134,107 @@ fi
 GH_APP_ID_V="${RMD_GH_APP_ID:-4648213}"
 GH_APP_INST_V="${RMD_GH_APP_INSTALLATION_ID:-155256285}"
 GH_APP_KEY_V="${RMD_GH_APP_PRIVATE_KEY_PATH:-/home/node/.claude/rmd-app.pem}"
+CLAUDE_DIR="${RMD_CLAUDE_DIR:-/home/${SERVICE_USER}/.claude}"
+CODEX_DIR="${RMD_CODEX_DIR:-/home/${SERVICE_USER}/.codex}"
+CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-/home/${SERVICE_USER}/.config/remudero-container}"
 UNIT_DIR="${RMD_UNIT_DIR:-/etc/systemd/system}"
 BIN_DIR="${RMD_BIN_DIR:-/usr/local/bin}"
 LAUNCHER="${RMD_LAUNCHER_PATH:-/home/${SERVICE_USER}/rmd-relaunch.sh}"
 REVIVAL_LOG="${RMD_REVIVAL_LOG:-/home/${SERVICE_USER}/rmd-revivals.log}"
+SERVICE_UNIT_NAME="rmd-fleet.service"
+WATCHDOG_SERVICE_NAME="rmd-fleet-watchdog.service"
+WATCHDOG_TIMER_NAME="rmd-fleet-watchdog.timer"
+REGISTRY_FILE="${RMD_INSTANCE_REGISTRY:-}"
+
+if [ -n "$INSTANCE_NAME" ]; then
+  validate_instance_name "$INSTANCE_NAME"
+  if [ -z "$REGISTRY_FILE" ]; then
+    REGISTRY_FILE="$DEFAULT_INSTANCE_REGISTRY"
+  fi
+  if [ ! -r "$REGISTRY_FILE" ]; then
+    echo "install-host-units: FATAL -- instance registry '${REGISTRY_FILE}' is not readable." >&2
+    echo "  Pass RMD_INSTANCE_REGISTRY=/path/to/daemon-instances.yaml or omit --instance for the legacy core defaults." >&2
+    exit 2
+  fi
+  record="$(read_instance_registry "$REGISTRY_FILE" "$INSTANCE_NAME")"
+  if [ -z "$record" ]; then
+    echo "install-host-units: FATAL -- instance '${INSTANCE_NAME}' is not declared in ${REGISTRY_FILE}." >&2
+    exit 2
+  fi
+  repo=""; state_dir=""; container_name=""; service_user=""; image=""; max_old_space_mb=""
+  service_name=""; watchdog_service_name=""; watchdog_timer_name=""; launcher_path=""; revival_log=""
+  gh_app_id=""; gh_app_installation_id=""; gh_app_private_key_path=""
+  claude_dir=""; codex_dir=""; container_config_dir=""
+  while IFS='=' read -r key value; do
+    case "$key" in
+      repo) repo="$value" ;;
+      state_dir) state_dir="$value" ;;
+      container_name) container_name="$value" ;;
+      service_user) service_user="$value" ;;
+      image) image="$value" ;;
+      max_old_space_mb) max_old_space_mb="$value" ;;
+      service_name) service_name="$value" ;;
+      watchdog_service_name) watchdog_service_name="$value" ;;
+      watchdog_timer_name) watchdog_timer_name="$value" ;;
+      launcher_path) launcher_path="$value" ;;
+      revival_log) revival_log="$value" ;;
+      gh_app_id) gh_app_id="$value" ;;
+      gh_app_installation_id) gh_app_installation_id="$value" ;;
+      gh_app_private_key_path) gh_app_private_key_path="$value" ;;
+      claude_dir) claude_dir="$value" ;;
+      codex_dir) codex_dir="$value" ;;
+      container_config_dir) container_config_dir="$value" ;;
+      *) echo "install-host-units: FATAL -- unknown field '${key}' in instance '${INSTANCE_NAME}'." >&2; exit 2 ;;
+    esac
+  done <<EOF
+$record
+EOF
+  for pair in \
+    "repo:$repo" "state_dir:$state_dir" "container_name:$container_name" "service_user:$service_user" \
+    "image:$image" "max_old_space_mb:$max_old_space_mb" "service_name:$service_name" \
+    "watchdog_service_name:$watchdog_service_name" "watchdog_timer_name:$watchdog_timer_name" \
+    "launcher_path:$launcher_path" "revival_log:$revival_log" "gh_app_id:$gh_app_id" \
+    "gh_app_installation_id:$gh_app_installation_id" "gh_app_private_key_path:$gh_app_private_key_path" \
+    "claude_dir:$claude_dir" "codex_dir:$codex_dir" "container_config_dir:$container_config_dir"; do
+    name="${pair%%:*}"; val="${pair#*:}"
+    [ -n "$val" ] || { echo "install-host-units: FATAL -- instance '${INSTANCE_NAME}' missing required field '${name}'." >&2; exit 2; }
+  done
+  STATE_DIR="$state_dir"
+  IMAGE="$image"
+  SERVICE_USER="$service_user"
+  CONTAINER_NAME="$container_name"
+  DAEMON_REPO="$repo"
+  MAX_OLD_SPACE_MB="$max_old_space_mb"
+  GH_APP_ID_V="$gh_app_id"
+  GH_APP_INST_V="$gh_app_installation_id"
+  GH_APP_KEY_V="$gh_app_private_key_path"
+  CLAUDE_DIR="$claude_dir"
+  CODEX_DIR="$codex_dir"
+  CONTAINER_CONFIG_DIR="$container_config_dir"
+  LAUNCHER="$launcher_path"
+  REVIVAL_LOG="$revival_log"
+  SERVICE_UNIT_NAME="$service_name"
+  WATCHDOG_SERVICE_NAME="$watchdog_service_name"
+  WATCHDOG_TIMER_NAME="$watchdog_timer_name"
+fi
 
 # REFUSE RATHER THAN GUESS. Same posture `--print-daemon-run` takes when it cannot find a ledger:
 # a wrong state root is silent, and lands PAUSE/STOP where nothing reads them.
-for pair in "STATE_DIR:$STATE_DIR" "IMAGE:$IMAGE" "SERVICE_USER:$SERVICE_USER" "MAX_OLD_SPACE_MB:$MAX_OLD_SPACE_MB"; do
+for pair in "STATE_DIR:$STATE_DIR" "IMAGE:$IMAGE" "SERVICE_USER:$SERVICE_USER" "MAX_OLD_SPACE_MB:$MAX_OLD_SPACE_MB" "CONTAINER_NAME:$CONTAINER_NAME" "DAEMON_REPO:$DAEMON_REPO"; do
   name="${pair%%:*}"; val="${pair#*:}"
   [ -n "$val" ] || { echo "install-host-units: FATAL — ${name} resolved to empty; pass RMD_${name}." >&2; exit 2; }
 done
 case "$MAX_OLD_SPACE_MB" in ''|*[!0-9]*) echo "install-host-units: FATAL — RMD_NODE_MAX_OLD_SPACE_MB must be an integer, got '${MAX_OLD_SPACE_MB}'." >&2; exit 2 ;; esac
 case "$STATE_DIR" in /*) : ;; *) echo "install-host-units: FATAL — RMD_STATE_DIR must be absolute, got '${STATE_DIR}'." >&2; exit 2 ;; esac
+case "$CONTAINER_NAME" in *[!a-zA-Z0-9_.-]*|"") echo "install-host-units: FATAL -- container name must be Docker-safe, got '${CONTAINER_NAME}'." >&2; exit 2 ;; esac
+case "$SERVICE_UNIT_NAME" in *.service) : ;; *) echo "install-host-units: FATAL -- service_name must end in .service, got '${SERVICE_UNIT_NAME}'." >&2; exit 2 ;; esac
+case "$WATCHDOG_SERVICE_NAME" in *.service) : ;; *) echo "install-host-units: FATAL -- watchdog_service_name must end in .service, got '${WATCHDOG_SERVICE_NAME}'." >&2; exit 2 ;; esac
+case "$WATCHDOG_TIMER_NAME" in *.timer) : ;; *) echo "install-host-units: FATAL -- watchdog_timer_name must end in .timer, got '${WATCHDOG_TIMER_NAME}'." >&2; exit 2 ;; esac
+require_abs_path "launcher_path" "$LAUNCHER"
+require_abs_path "revival_log" "$REVIVAL_LOG"
+require_abs_path "claude_dir" "$CLAUDE_DIR"
+require_abs_path "codex_dir" "$CODEX_DIR"
+require_abs_path "container_config_dir" "$CONTAINER_CONFIG_DIR"
 
 render_launcher() {
   cat <<EOF
@@ -106,6 +250,8 @@ REVIVAL_LOG=${REVIVAL_LOG}
 # in rather than re-derived, so the converge below uses the same inputs this file was rendered with.
 CHECKOUT=${STATE_DIR}/remudero
 UNITS_HEAP_MB=${MAX_OLD_SPACE_MB}
+INSTANCE_NAME=${INSTANCE_NAME:-}
+INSTANCE_REGISTRY=${REGISTRY_FILE:-}
 BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
 
@@ -205,7 +351,13 @@ converge_host_units() {
 
   # CHECK BEFORE INSTALL, ALWAYS. The steady state is a silent no-op, which is what makes a converge
   # event rare enough to be worth a record.
-  if RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB" "\$CHECKOUT/deploy/install-host-units.sh" >/dev/null 2>&1; then
+  INSTALLER_ARGS=()
+  INSTALLER_ENV=(RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB")
+  if [ -n "\$INSTANCE_NAME" ]; then
+    INSTALLER_ARGS=(--instance "\$INSTANCE_NAME")
+    INSTALLER_ENV=(RMD_INSTANCE_REGISTRY="\$INSTANCE_REGISTRY")
+  fi
+  if env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" "\${INSTALLER_ARGS[@]}" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -217,7 +369,7 @@ converge_host_units() {
   fi
 
   echo "rmd-relaunch: units DRIFTED at \$head_sha -- converging."
-  if sudo -n env RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB" "\$CHECKOUT/deploy/install-host-units.sh" --install; then
+  if sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install "\${INSTALLER_ARGS[@]}"; then
     printf '%s units-converged sha=%s\\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$head_sha" >> "\$REVIVAL_LOG" 2>/dev/null || true
   else
     echo "rmd-relaunch: units -- converge FAILED; the next tick re-asks." >&2
@@ -252,7 +404,7 @@ fi
 # deliverable (no credential, workers still running, a failed pull, a digest mismatch). A tick with
 # no drift does nothing at all, so this is DRIFT-driven and not clock-driven; the clock only sets
 # how often the question is asked.
-if [ -n "\$(docker ps -q -f name='^remudero-daemon\$' 2>/dev/null)" ]; then
+if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # W1-T3268 -- THE FLAG'S ONLY PATH BACK. The arm that cleared DAEMON_CRASH_LOOP sat on the
   # revival path below, after this very return, so a host that recovered stopped reviving and never
   # reached it. This is the one place the script observes the daemon HEALTHY.
@@ -262,11 +414,11 @@ if [ -n "\$(docker ps -q -f name='^remudero-daemon\$' 2>/dev/null)" ]; then
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
   if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
-    echo "rmd-relaunch: remudero-daemon healthy -- asking the supervisor whether a RECYCLE is due."
+    echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only || \\
       echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
   else
-    echo "rmd-relaunch: remudero-daemon already running -- nothing to do."
+    echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."
   fi
   exit 0
 fi
@@ -285,9 +437,9 @@ fi
 # this record a crash loop is invisible: every beat is fresh and every daemon is young.
 printf '%s revive boot=%s prev_status=%s prev_exit=%s prev_restarts=%s\n' \\
   "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$BOOT" \\
-  "\$(docker inspect remudero-daemon --format '{{.State.Status}}' 2>/dev/null || echo none)" \\
-  "\$(docker inspect remudero-daemon --format '{{.State.ExitCode}}' 2>/dev/null || echo none)" \\
-  "\$(docker inspect remudero-daemon --format '{{.RestartCount}}' 2>/dev/null || echo none)" \\
+  "\$(docker inspect ${CONTAINER_NAME} --format '{{.State.Status}}' 2>/dev/null || echo none)" \\
+  "\$(docker inspect ${CONTAINER_NAME} --format '{{.State.ExitCode}}' 2>/dev/null || echo none)" \\
+  "\$(docker inspect ${CONTAINER_NAME} --format '{{.RestartCount}}' 2>/dev/null || echo none)" \\
   >> "\$REVIVAL_LOG" 2>/dev/null || true
 
 # THE COUNT IS TAKEN AFTER the STOP refusal, the idempotence check and the mount checks, so none of
@@ -305,12 +457,12 @@ else
   rm -f "\$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
 fi
 
-docker rm -f remudero-daemon >/dev/null 2>&1 || true
+docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
 
 # --restart=on-failure:5 IS DELIBERATE: exit 0 is a STOP and must not be undone. Reboot survival is
 # rmd-fleet.service; crash recovery past the budget is rmd-fleet-watchdog.timer.
 # NODE_OPTIONS: without it V8 caps at ~2GB and the retro rung aborts at ~2046 MB on a 7.9GB host.
-docker run -d --name remudero-daemon \\
+docker run -d --name ${CONTAINER_NAME} \\
   --restart=on-failure:5 \\
   --cap-drop ALL \\
   --security-opt seccomp=unconfined \\
@@ -323,14 +475,14 @@ docker run -d --name remudero-daemon \\
   -e NODE_OPTIONS=--max-old-space-size=${MAX_OLD_SPACE_MB} \\
   -e RMD_RESTART_THROTTLE_S=120 \\
   -e RMD_FRESHNESS_RESTART_MAX=100 \\
-  -v /home/${SERVICE_USER}/.codex:/home/node/.codex \\
-  -v /home/${SERVICE_USER}/.config/remudero-container:/home/node/.config/remudero \\
+  -v ${CODEX_DIR}:/home/node/.codex \\
+  -v ${CONTAINER_CONFIG_DIR}:/home/node/.config/remudero \\
   -v "\$STATE_DIR":/home/node/Remudero \\
-  -v /home/${SERVICE_USER}/.claude:/home/node/.claude \\
+  -v ${CLAUDE_DIR}:/home/node/.claude \\
   "\$IMAGE" \\
-  ./bin/rmd daemon --repo remudero --allow-self-target
+  ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
 
-echo "rmd-relaunch: started remudero-daemon (boot=\$BOOT)"
+echo "rmd-relaunch: started ${CONTAINER_NAME} (boot=\$BOOT)"
 EOF
 }
 
@@ -379,7 +531,7 @@ EOF
 }
 
 render_watchdog_timer() {
-  cat <<'EOF'
+  cat <<EOF
 [Unit]
 Description=Revive the Remudero daemon if docker has given up on it
 
@@ -387,7 +539,7 @@ Description=Revive the Remudero daemon if docker has given up on it
 OnBootSec=5min
 OnUnitActiveSec=5min
 AccuracySec=30s
-Unit=rmd-fleet-watchdog.service
+Unit=${WATCHDOG_SERVICE_NAME}
 
 [Install]
 WantedBy=timers.target
@@ -483,13 +635,17 @@ effective_directives() {
 # path : renderer : mode
 UNITS="
 ${LAUNCHER}:render_launcher:0755
+${UNIT_DIR}/${SERVICE_UNIT_NAME}:render_fleet_service:0644
+${UNIT_DIR}/${WATCHDOG_SERVICE_NAME}:render_watchdog_service:0644
+${UNIT_DIR}/${WATCHDOG_TIMER_NAME}:render_watchdog_timer:0644
+"
+if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
+  UNITS="${UNITS}
 ${BIN_DIR}/rmd-reap-stray-containers:render_reaper_bin:0755
-${UNIT_DIR}/rmd-fleet.service:render_fleet_service:0644
-${UNIT_DIR}/rmd-fleet-watchdog.service:render_watchdog_service:0644
-${UNIT_DIR}/rmd-fleet-watchdog.timer:render_watchdog_timer:0644
 ${UNIT_DIR}/rmd-reap-stray.service:render_reaper_service:0644
 ${UNIT_DIR}/rmd-reap-stray.timer:render_reaper_timer:0644
 "
+fi
 
 drift=0
 for row in $UNITS; do
@@ -528,9 +684,13 @@ fi
 # Only touch systemd when it is really systemd — the test suite renders into a temp tree.
 if [ "$UNIT_DIR" = "/etc/systemd/system" ] && command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload
-  systemctl enable rmd-fleet.service >/dev/null
-  systemctl enable --now rmd-fleet-watchdog.timer >/dev/null
-  systemctl enable --now rmd-reap-stray.timer >/dev/null
-  echo "install-host-units: reloaded systemd and enabled rmd-fleet.service, rmd-fleet-watchdog.timer, rmd-reap-stray.timer"
+  systemctl enable "${SERVICE_UNIT_NAME}" >/dev/null
+  systemctl enable --now "${WATCHDOG_TIMER_NAME}" >/dev/null
+  if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
+    systemctl enable --now rmd-reap-stray.timer >/dev/null
+    echo "install-host-units: reloaded systemd and enabled ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}, rmd-reap-stray.timer"
+  else
+    echo "install-host-units: reloaded systemd and enabled ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}"
+  fi
   echo "install-host-units: NOTE — the daemon itself was not started or stopped; run ${LAUNCHER} to bring it up."
 fi
