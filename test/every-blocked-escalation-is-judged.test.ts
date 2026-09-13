@@ -89,9 +89,14 @@ const BLOCKED_TASK = { id: "W1-T9001", title: "the blocked task" } as unknown as
 /** Drive the REAL `daemonCommand` far enough to capture the `escalateBlock` closure it actually
  *  builds, via the pre-existing `runDaemon` loop-capture seam — the daemon's own real loop never
  *  runs. Returns the closure so a test can invoke it directly against a controlled block/dependents
- *  payload, exactly the shape `daemon.ts`'s own `await deps.escalateBlock({...})` call site uses. */
+ *  payload, exactly the shape `daemon.ts`'s own `await deps.escalateBlock({...})` call site uses.
+ *
+ *  `escalationJudge` is OPTIONAL, and its omission is deliberate: it is what lets one test below
+ *  reach `escalateBlock`'s own `deps.escalationJudge ?? realEscalationJudge({...})` fallback for
+ *  real — the exact branch a `??` short-circuits away on every other test in this file, which is
+ *  why the coverage ratchet (not a functional gap) flagged that construction as untested. */
 async function wiredEscalateBlock(
-  escalationJudge: (e: Escalation) => Promise<EscalationJudgeVerdict>,
+  escalationJudge?: (e: Escalation) => Promise<EscalationJudgeVerdict>,
 ): Promise<{ home: string; root: string; escalateBlock: NonNullable<DaemonDeps["escalateBlock"]> }> {
   const { home, root, planPath } = fixtureHome();
   const oldHome = process.env.HOME;
@@ -233,6 +238,69 @@ test("W1-T3401: a judge that THROWS still opens the needs-human issue — fail-o
   assert.equal(rows.length, 1);
   assert.equal(rows[0]?.judge_decision, "deliver");
   assert.match(String(rows[0]?.judge_reason ?? ""), /judge unavailable/);
+});
+
+// ── the PRODUCTION fallback: no injected judge at all, the shape every real (non-test) daemon
+// boot actually takes ────────────────────────────────────────────────────────────────────────
+
+test("W1-T3401: with NO escalationJudge injected, escalateBlock still wires a real judge — proven via the dedup path that never has to call it", async () => {
+  // Every test above passes an explicit `escalationJudge`, so `deps.escalationJudge ?? realEscalationJudge({...})`
+  // always short-circuits on its left arm — the SAME `??` a real (non-test) daemon boot never gets
+  // to take, because nothing ever supplies `deps.escalationJudge` in production. This test omits it,
+  // so `escalateBlock` must build the right-hand `realEscalationJudge({ mounts: loadMounts(...), cwd,
+  // settingsFile })` for real — a plain, synchronous, file-backed construction against this repo's
+  // OWN `.remudero/mounts.yaml` (the repoRoot `daemonCommand` resolves to when no `deps.repoRoot`
+  // override is given either), never a network call and never a worker spawn on its own.
+  //
+  // What proves the construction actually ran, without this test having to let a real judge spawn
+  // execute: `escalateWithJudge`'s own documented order runs its dedup lookup BEFORE it ever
+  // consults `deps.judge` at all. The `judge:` field above is still built (a plain function-call
+  // argument, evaluated before `escalateWithJudge`'s body ever starts) — it is simply never CALLED
+  // when the dedup lookup already finds an open match, exactly like a demoted or newly-delivered
+  // escalation never re-judges an already-open sibling. So a dedup hit here still proves the
+  // construction reached, with no real judge invocation anywhere in this test.
+  const { home, root, escalateBlock } = await wiredEscalateBlock(/* no escalationJudge override */);
+  // No `prUrl` on this result: `matchDuplicateEscalation` only needs a PR reference from BOTH sides
+  // when one is present, so leaving it off routes the dedup match through its plainer (taskId,
+  // class, title) arm instead — the exact literal `escalateBlock` itself builds for `summary`.
+  const result = blockedResult({ prUrl: undefined });
+  const dependents = ["W1-T9002"];
+  const dupTitle = `[BLOCKED] ${BLOCKED_TASK.id}: ${BLOCKED_TASK.id} blocked (${result.verdict}) — ${dependents.length} task(s) transitively need it`;
+  // `gh-shim.ts` prints a route's `stdout` through `/bin/sh`'s builtin `echo`, which (dash, this
+  // repo's `/bin/sh`) is XSI-conformant and rewrites the two-character JSON newline escape INSIDE
+  // its argument into a real newline BYTE before this fake issue body ever reaches the real
+  // `ghIssueGateway#listOpen` caller — corrupting the JSON it has to parse back. The six-character
+  // JSON unicode escape for the same code point sits OUTSIDE echo's own escape set, so it survives
+  // the shim unmolested and still parses to a real embedded newline, which is what
+  // `TASK_LINE_RE`/`CLASS_LINE_RE`'s `^...$/m` line-anchored matching needs the fake body to carry.
+  const dupBody = "**Class:** BLOCKED\\u000a**Task:** W1-T9001\\u000a";
+  const shim = ghShim([
+    {
+      // `ghIssueGateway#listOpen` reads REST's `/issues?labels=...` — the dedup lookup `escalate()`/
+      // `escalateWithJudge()` both run FIRST, before any judge or issue-create call.
+      when: "issues?labels=",
+      stdout: `[{"number":9050,"html_url":"https://github.com/craigoley/remudero/issues/9050","state":"open","title":${JSON.stringify(dupTitle)},"body":"${dupBody}"}]`,
+    },
+    { when: "issue comment", exit: 0 },
+  ]);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+  try {
+    await withLiveWritesAllowed(() => escalateBlock({ task: BLOCKED_TASK, result, dependents }));
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+  }
+
+  const fullLog = shim.calls().join("\n");
+  assert.ok(fullLog.includes("issue comment"), `the dedup path must append to the existing issue: ${fullLog}`);
+  assert.ok(!fullLog.includes("issue create"), "a duplicate must never open a second issue");
+
+  const judgedRows = ledgerLines(root).filter((r) => r.step === ESCALATION_JUDGED_STEP);
+  const dedupedRows = ledgerLines(root).filter((r) => r.step === "escalation.deduped");
+  rmSync(home, { recursive: true, force: true });
+  assert.equal(judgedRows.length, 0, "dedup short-circuits BEFORE the judge is ever consulted — no judged row here");
+  assert.equal(dedupedRows.length, 1, "the block escalation still recognised the open duplicate and appended to it");
 });
 
 // ── criterion 3: a census names every OTHER BLOCKED-class producer this task leaves unconverted ─
