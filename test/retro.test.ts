@@ -60,7 +60,7 @@ import {
   type RunSummary,
   type ShippedGithub,
 } from "../src/lib/retro.js";
-import type { Task } from "../src/lib/plan.js";
+import { RETIREMENT_REASONS, type Task } from "../src/lib/plan.js";
 import { selectLearnings, type LearningEntry } from "../src/lib/learnings.js";
 import { configPath } from "../src/lib/config.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -383,6 +383,34 @@ test("planHealthSweep: a MERGED/DONE task is out of scope even if it would other
   const report = planHealthSweep([shippedButBad]);
   assert.deepEqual(report.flags, []);
   assert.deepEqual(report.correctiveTasks, []);
+});
+
+test("planHealthSweep: retired tasks are out of scope even if they would otherwise violate a rule", () => {
+  const retiredTasks = RETIREMENT_REASONS.map((retirement, index) =>
+    task({
+      id: `W1-T-RETIRED-${index}`,
+      status: "blocked",
+      retirement,
+      files: ["src/lib/foo.ts"],
+      acceptance: [{ claim: "the daemon does X", proof: "unit test asserts X" }],
+    }),
+  );
+  const activeTwin = task({
+    id: "W1-T-ACTIVE-TWIN",
+    status: "blocked",
+    files: ["src/lib/foo.ts"],
+    acceptance: [{ claim: "the daemon does X", proof: "unit test asserts X" }],
+  });
+  const report = planHealthSweep([...retiredTasks, activeTwin]);
+  assert.deepEqual(
+    report.flags.map((f) => f.taskId),
+    ["W1-T-ACTIVE-TWIN"],
+  );
+  assert.deepEqual(
+    report.correctiveTasks.map((c) => c.forTaskId),
+    ["W1-T-ACTIVE-TWIN"],
+  );
+  assert.ok(report.flags[0]!.violations.some((v) => v.check === "sizing"));
 });
 
 // ── W1-T367: "already shipped" is decided by the DERIVED projection, not the decorative
