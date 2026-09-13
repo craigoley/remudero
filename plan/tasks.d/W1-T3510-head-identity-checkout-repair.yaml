@@ -1,0 +1,68 @@
+- id: W1-T3510
+  title: "the head-identity gate reads the pull request head rather than its merge ref"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  files:
+    - .github/workflows/head-identity-gate.yml
+    - test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts
+  origin: "operator-session#queue-supervision-2026-09-13"
+  plan_refs: ["W1-T3388"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on 2026-09-13: two plan-only amendment PRs used the required
+    `run-unfiled-<epoch>` form solely to satisfy #5336's head-identity gate. The
+    queue then treated both as task `unfiled`; #5359 was closed as superseded by
+    #5360. That queue effect is real, but its proposed status.ts repair was
+    falsified before implementation: both affected PR heads had a filing-shaped
+    `chore(plan): ...` subject, and the gate's own production predicate returns
+    OK for either subject on their neutral `codex/plan-*` branches.
+
+    The gate nevertheless failed on both neutral PRs. Its workflow checks out
+    the default pull-request merge ref, then `readHeadCommitMessage()` reads that
+    synthetic merge commit rather than the PR head. A merge subject is not the
+    filing subject the predicate is meant to exempt. GitHub's official
+    actions/checkout documentation states that a pull_request workflow checks
+    out the merge branch by default and documents
+    `ref: ${{ github.event.pull_request.head.sha }}` for the PR head. The source
+    predicate control and the two GitHub failures falsify an intended rejection
+    of neutral plan filings; the checkout boundary is the cause.
+  design: |
+    Change only `.github/workflows/head-identity-gate.yml`: make its pinned
+    checkout action use `${{ github.event.pull_request.head.sha }}`. The gate then
+    reads the same head commit whose branch `$GITHUB_HEAD_REF` identifies, so its
+    filing-shaped-subject exception has a coherent input pair. Extend its existing
+    behavioural suite to assert that the dedicated workflow pins checkout to that
+    exact event-head expression. That test must also retain a production-predicate
+    control: the filing-shaped subject on a neutral branch is accepted, establishing
+    that the checkout input, rather than the predicate, is the changed boundary.
+
+    Do not change `taskIdFromRunBranch`, open-PR supersession, `run-unfiled-*`,
+    branch contracts, plan-filing classification, or the broader CI workflow.
+    The resulting neutral `codex/plan-*` plan filing is already supported by the
+    gate's intended predicate; it avoids creating the fabricated `unfiled` task
+    identity without weakening identity requirements for implementation PRs.
+  acceptance:
+    - claim: "the head-identity workflow checks out the pull request head SHA before reading its commit subject, while its filing-shaped-subject exemption remains accepted on a neutral branch"
+      proof: "unit test: W1-T3510 criterion 1: workflow pins checkout to the pull request head"
+  falsifier: |
+    Remove the explicit checkout ref and run the workflow assertion: it must fail.
+    In the unchanged gate predicate, supply #5359's actual filing subject with its
+    neutral branch and confirm it remains accepted; if it is refused, checkout
+    selection is not sufficient and this task must not ship.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` held refs/rmd-id/W1-T3510 on
+    origin before this task was written. Its holder names this filing branch;
+    both scope-time checks then found no active run branch and no merged PR
+    trailer for this id.
+
+    reservation hand-off: codex/plan-w1-t3509-unfiled-supersession -> run-W1-T3510-1789297821
+
+    This task changes one required-check workflow and its test only. It does not
+    authorize merging or closing pull requests, changing fleet policy, or
+    deploying the daemon.
