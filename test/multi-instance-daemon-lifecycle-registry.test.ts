@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -9,6 +9,13 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const INSTALLER = join(REPO_ROOT, "deploy", "install-host-units.sh");
 const RECYCLE = join(REPO_ROOT, "deploy", "recycle-container.sh");
+const BASH_BIN = ["/opt/homebrew/opt/bash/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"]
+  .find((candidate) => existsSync(candidate) && spawnSync(candidate, ["-c", "declare -A probe"]).status === 0)
+  ?? "bash";
+const BASH_SUPPORTS_ASSOCIATIVE_ARRAYS = spawnSync(BASH_BIN, ["-c", "declare -A probe"], {
+  encoding: "utf8",
+}).status === 0;
+const BASH4_REQUIRED = !BASH_SUPPORTS_ASSOCIATIVE_ARRAYS && "deploy scripts require Bash 4; macOS may ship Bash 3.2";
 
 interface Fixture {
   root: string;
@@ -127,7 +134,7 @@ function writeStubs(bin: string): void {
 }
 
 function run(command: string, args: string[], fx: Fixture, extraEnv: Record<string, string> = {}) {
-  const result = spawnSync("bash", [command, ...args], {
+  const result = spawnSync(BASH_BIN, [command, ...args], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: {
@@ -154,7 +161,7 @@ function calls(fx: Fixture): string[] {
   return readFileSync(fx.calls, "utf8").split("\n").filter(Boolean);
 }
 
-test("W1-T3532: a site instance's clean exit relaunches the site instance only, never core", () => {
+test("W1-T3532: a site instance's clean exit relaunches the site instance only, never core", { skip: BASH4_REQUIRED }, () => {
   const fx = makeFixture();
   const launcher = installInstance(fx, "site");
 
@@ -168,7 +175,7 @@ test("W1-T3532: a site instance's clean exit relaunches the site instance only, 
   assert.doesNotMatch(recorded, /remudero-daemon/);
 });
 
-test("W1-T3532: STOP set for the site instance blocks only site revival; core's tick is unaffected", () => {
+test("W1-T3532: STOP set for the site instance blocks only site revival; core's tick is unaffected", { skip: BASH4_REQUIRED }, () => {
   const fx = makeFixture();
   const siteLauncher = installInstance(fx, "site");
   const coreLauncher = installInstance(fx, "core");
@@ -185,7 +192,7 @@ test("W1-T3532: STOP set for the site instance blocks only site revival; core's 
   assert.match(calls(fx).join("\n"), /\^remudero-daemon\$/);
 });
 
-test("W1-T3532: a tick over one instance never checks or writes another instance's units", () => {
+test("W1-T3532: a tick over one instance never checks or writes another instance's units", { skip: BASH4_REQUIRED }, () => {
   const fx = makeFixture();
   installInstance(fx, "site");
 
@@ -197,7 +204,7 @@ test("W1-T3532: a tick over one instance never checks or writes another instance
   assert.doesNotMatch(check.output, /rmd-reap-stray/);
 });
 
-test("W1-T3532: an unknown or malformed instance record is refused before Docker or systemd writes", () => {
+test("W1-T3532: an unknown or malformed instance record is refused before Docker or systemd writes", { skip: BASH4_REQUIRED }, () => {
   const fx = makeFixture();
   const missing = run(INSTALLER, ["--install", "--instance", "missing"], fx);
   assert.equal(missing.status, 2, missing.output);
@@ -212,7 +219,7 @@ test("W1-T3532: an unknown or malformed instance record is refused before Docker
   assert.deepEqual(calls(fx), []);
 });
 
-test("W1-T3532: a healthy instance's repeated tick is idempotent and issues no redundant Docker action", () => {
+test("W1-T3532: a healthy instance's repeated tick is idempotent and issues no redundant Docker action", { skip: BASH4_REQUIRED }, () => {
   const fx = makeFixture();
   const launcher = installInstance(fx, "site");
 
@@ -226,7 +233,7 @@ test("W1-T3532: a healthy instance's repeated tick is idempotent and issues no r
   assert.doesNotMatch(recorded, /systemctl/);
 });
 
-test("W1-T3532: existing recycle-container.sh guarded refusals remain intact through the registry", () => {
+test("W1-T3532: existing recycle-container.sh guarded refusals remain intact through the registry", { skip: BASH4_REQUIRED }, () => {
   const fx = makeFixture();
   const uncommissionedState = join(fx.root, "uncommissioned-site");
   const registry = readFileSync(fx.registry, "utf8").replace(fx.siteState, uncommissionedState);
