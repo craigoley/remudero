@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import { CI_LEARNING_LANDING_BRANCH, landCiLearningShards } from "../src/lib/feedback-landing.js";
+import { CI_LEARNING_LANDING_BRANCH, ciLearningPendingOrigins, landCiLearningShards } from "../src/lib/feedback-landing.js";
 import { buildCiLearningCadenceRunner, ciLearningCommand } from "../src/run-task.js";
 import {
   ciLearningRecordVerdict,
@@ -243,6 +243,62 @@ test("W1-T3492 criterion 3: a second scheduled firing reuses a pending finding i
   assert.equal(minted, 1, "no second task id is consumed for the same pending finding");
   assert.equal(createCount(), 1, "the second pass reuses the existing landing PR");
   assert.equal(landingBranchFiles(bareOrigin).filter((f) => f.startsWith("plan/tasks.d/")).length, 1);
+});
+
+test("W1-T3492: malformed queued bytes, held findings, and refused drafts stay uncredited", () => {
+  const bareOrigin = makeBareOrigin();
+  const checkout = cloneRoot(bareOrigin);
+  const root = stateRoot();
+  const { gh } = fakeGh("https://github.com/o/r/pull/3496");
+  const queue = join(root, "state", "ci-learning-pending", "plan", "tasks.d");
+  mkdirSync(queue, { recursive: true });
+  writeFileSync(join(queue, "W1-T9006-broken.yaml"), "tasks: [\n", "utf8");
+
+  assert.deepEqual(
+    ciLearningPendingOrigins(root, checkout),
+    [],
+    "unparseable queued bytes must not reserve an origin against a later valid finding",
+  );
+
+  const malformed = withLiveWritesAllowed(() =>
+    landCiLearningShards([], checkout, {
+      stateRoot: root,
+      mintTaskId: () => "W1-T9006",
+      planOrigins: [],
+      renderShard: ciLearningShardYaml,
+      recordVerdict: ciLearningRecordVerdict,
+      gh,
+    }),
+  );
+  assert.deepEqual(malformed.filed, [], "a malformed queued file must never receive filed credit after transport");
+  assert.equal(pendingFiles(root).length, 1, "the malformed durable bytes remain visible for repair");
+
+  const duplicate = withLiveWritesAllowed(() =>
+    landCiLearningShards([draft()], checkout, {
+      stateRoot: stateRoot(),
+      mintTaskId: () => {
+        throw new Error("a held finding must not consume an id");
+      },
+      planOrigins: [draft().findingId],
+      renderShard: ciLearningShardYaml,
+      recordVerdict: ciLearningRecordVerdict,
+      gh,
+    }),
+  );
+  assert.deepEqual(duplicate.skipped, [draft().findingId], "the already-held finding is skipped before staging");
+
+  const rejectedDraft = draft("ci-learning:4321:rejected");
+  const refused = withLiveWritesAllowed(() =>
+    landCiLearningShards([rejectedDraft], checkout, {
+      stateRoot: stateRoot(),
+      mintTaskId: () => "W1-T9007",
+      planOrigins: [],
+      renderShard: ciLearningShardYaml,
+      recordVerdict: () => ({ ok: false, reason: "fixture lint refusal" }),
+      gh,
+    }),
+  );
+  assert.deepEqual(refused.refused, [{ findingId: rejectedDraft.findingId, reason: "fixture lint refusal" }]);
 });
 
 test("W1-T3492 criterion 4: manual ci-learning keeps the direct checkout writer while scheduled uses isolated landing", async () => {
