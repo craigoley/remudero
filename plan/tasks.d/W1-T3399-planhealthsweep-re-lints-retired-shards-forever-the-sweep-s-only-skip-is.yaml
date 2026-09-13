@@ -49,11 +49,11 @@
     operator has already ruled on its fate independent of what the deterministic linter would say.
   acceptance:
     - claim: "a task carrying ANY retirement value (retired, closed, or withdrawn) with an active blocking lint violation produces NO flag and NO corrective-task proposal — locking the exact 31-shard gap the operator measured"
-      proof: "unit test: test/retro.test.ts"
+      proof: "unit test: planHealthSweep: every retirement reason is out of scope even if it would otherwise violate a rule"
     - claim: "a non-retired, non-merged task with the SAME violation is still flagged and still proposed — the falsifier proving the exclusion is scoped to retirement, not to violations in general"
-      proof: "unit test: test/retro.test.ts"
+      proof: "unit test: planHealthSweep: a non-retired twin with the same violation is still flagged and proposed"
     - claim: "a merged task's existing skip is unchanged — the two exclusions compose without either one masking the other's own regression coverage"
-      proof: "unit test: test/retro.test.ts"
+      proof: "unit test: planHealthSweep: merged and retired exclusions compose without flags or corrective proposals"
   falsifier: |
     CLOSE WITHOUT IMPLEMENTATION IF `planHealthSweep` already skips retirement-carrying tasks — grep
     the function body (`src/lib/retro.ts:1945-1966`) for `retirement`. MEASURED 2026-09-09, this
