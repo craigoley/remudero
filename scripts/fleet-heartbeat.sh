@@ -465,23 +465,35 @@ INSTALL_SHA="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null)"
 [ -n "$INSTALL_SHA" ] || INSTALL_SHA="unknown"
 
 # ── probe: the container restart budget (W1-T483) ─────────────────────────────────────────────
-# THIS IS AN EARLY WARNING, NOT A DETECTOR, AND THE DISTINCTION IS THE WHOLE POINT. Docker's
-# `--restart=on-failure:N` caps the COUNT of automatic restarts for a container instance, and
-# nothing restores it: measured on this host with three throwaway containers, a container that ran
-# healthily for twenty seconds — and one that ran for two full minutes, twice — still reached the
-# cap and stayed exited. Every non-zero exit spends one, and `daemonExitCode` (src/lib/daemon.ts)
-# returns non-zero for a routine freshness restart as well as for a crash, so a HEALTHY, MERGING
-# fleet empties the budget as fast as it merges. When it empties the container stops for good and
-# nothing brings it back. Publishing the count while the fleet is still up is what turns that from
-# a post-mortem into a warning.
-# WHAT THIS CAN NEVER DO: report the budget once the container is already down — there is nothing
-# left to inspect. THE DETECTOR IS THE BEAT'S ABSENCE, which the watcher already reads. This field
-# only buys the operator the interval BEFORE the stop.
+# THIS WAS PUBLISHED AS AN EARLY WARNING ONLY, UNTIL W1-T3411. Docker's `--restart=on-failure:N`
+# caps the COUNT of automatic restarts for a container instance, and nothing restores it: measured
+# on this host with three throwaway containers, a container that ran healthily for twenty
+# seconds — and one that ran for two full minutes, twice — still reached the cap and stayed
+# exited. Every non-zero exit spends one, and `daemonExitCode` (src/lib/daemon.ts) returns
+# non-zero for a routine freshness restart as well as for a crash, so a HEALTHY, MERGING fleet
+# empties the budget as fast as it merges. When it empties the container stops for good and
+# nothing brings it back.
+# W1-T3411: A STOPPED-BUT-NOT-REMOVED CONTAINER IS STILL INSPECTABLE, SO THE READ SURVIVES THE
+# STOP TOO. The original note here claimed the budget could never be reported once the container
+# was down, on the theory that "there is nothing left to inspect" — false: `docker` does not
+# remove a container's own record on exit (only `docker rm` does that, or `--rm`, which Docker
+# refuses to combine with a restart policy at all), so `RestartCount` and `.State.Status` both
+# keep answering for an exited container exactly as they did for a running one. What is genuinely
+# true is that THIS SCRIPT reads them from the HOST (see the file header), never from inside the
+# container, which is what makes the reading independent of whatever state the daemon is in.
+# `restart_verdict` below is the reader this task adds: `ok` while under budget, `AT_LIMIT` when
+# the count has reached the cap but the container is still `running` (one more non-zero exit away
+# from stranded), `STOPPED_RETRY_EXHAUSTED` once it is both at cap AND no longer running — the
+# fleet-down case with no ledger row and no process left to write one — and `unlimited`/`unknown`
+# for an uncapped policy or a failed read, exactly mirroring the numeric fields' own cases below.
 # AND IT DEGRADES TO ABSENT, NEVER TO ZERO. A `restart_count=0` means "the whole budget is
 # untouched" — the most reassuring value in the field's range — so a read that FAILED must never
 # produce it. On a host with no docker, or where the inspect fails, the numeric fields are OMITTED
 # ENTIRELY and only `restart_source` is written, carrying the reason. This is the law this repo has
 # corrected seven times, applied to a field whose failure direction is unusually dangerous.
+# `restart_verdict` cannot be omitted the same way — a MISSING field is a worse UI than a wrong
+# one for something meant to be read at a glance — so it degrades to the WORD `unknown` instead,
+# which reads as "no reading", never as "ok".
 RESTART_CONTAINER="${RMD_HEARTBEAT_CONTAINER:-remudero-daemon}"
 # The runtime is a NAME, not a hardcoded call, for two reasons that are not about testing: a host
 # may keep it off the default PATH, and a podman-based host answers the identical `inspect
@@ -491,18 +503,20 @@ RESTART_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
 RESTART_COUNT=""
 RESTART_MAX=""
 RESTART_POLICY=""
+RESTART_VERDICT="unknown"
 if [ "$RESTART_CONTAINER" = "none" ]; then
   RESTART_SOURCE="skipped — RMD_HEARTBEAT_CONTAINER=none"
+  RESTART_VERDICT="skipped"
 elif ! command -v "$RESTART_RUNTIME" >/dev/null 2>&1; then
   RESTART_SOURCE="unavailable — no ${RESTART_RUNTIME} on this host"
 else
   RESTART_RAW="$("$RESTART_RUNTIME" inspect "$RESTART_CONTAINER" \
-    --format '{{.RestartCount}} {{.HostConfig.RestartPolicy.MaximumRetryCount}} {{.HostConfig.RestartPolicy.Name}}' \
+    --format '{{.RestartCount}} {{.HostConfig.RestartPolicy.MaximumRetryCount}} {{.HostConfig.RestartPolicy.Name}} {{.State.Status}}' \
     2>/dev/null)"
   if [ -z "$RESTART_RAW" ]; then
     RESTART_SOURCE="unavailable — ${RESTART_RUNTIME} inspect ${RESTART_CONTAINER} returned nothing"
   else
-    read -r RESTART_COUNT RESTART_MAX RESTART_POLICY <<<"$RESTART_RAW"
+    read -r RESTART_COUNT RESTART_MAX RESTART_POLICY RESTART_STATE <<<"$RESTART_RAW"
     # A non-numeric count is a parse failure, not a reading. Clearing BOTH numbers here is what
     # keeps the absent-never-zero rule true for a malformed answer as well as for a missing one.
     case "${RESTART_COUNT:-}" in
@@ -515,9 +529,23 @@ else
         RESTART_SOURCE="${RESTART_RUNTIME} inspect ${RESTART_CONTAINER}"
         # `MaximumRetryCount` is 0 for every policy that does not cap, and for `on-failure` with no
         # `:N`. Rendering that 0 verbatim would read as "no restarts left" — the opposite of what it
-        # means — so an uncapped policy says so in words.
+        # means — so an uncapped policy says so in words, and the verdict agrees with it.
         if [ "$RESTART_POLICY" != "on-failure" ] || [ "$RESTART_MAX" = "0" ]; then
+          RESTART_VERDICT="unlimited"
           RESTART_MAX="unlimited"
+        elif [ "$RESTART_COUNT" -ge "$RESTART_MAX" ]; then
+          # AT OR OVER THE CAP. `.State.Status` is the only remaining thing that tells "still up,
+          # one crash from stranded" apart from "already down, and Docker will not try again" —
+          # the silent-fleet-retirement case this task exists for. A status that came back empty
+          # or unrecognised is treated as NOT running, same absent-never-reassuring law as above:
+          # the alarming reading is the safe default, never the reassuring one.
+          if [ "$RESTART_STATE" = "running" ]; then
+            RESTART_VERDICT="AT_LIMIT"
+          else
+            RESTART_VERDICT="STOPPED_RETRY_EXHAUSTED"
+          fi
+        else
+          RESTART_VERDICT="ok"
         fi
         ;;
     esac
@@ -646,6 +674,7 @@ disk_min_free_kb=${DISK_MIN_FREE_KB}
 prev_beat_ts=${PREV_BEAT_TS:-none}
 since_prev_beat_s=${SINCE_PREV_S:-unknown}
 restart_source=${RESTART_SOURCE}
+restart_verdict=${RESTART_VERDICT}
 image_build_sha_source=${IMAGE_BUILD_SHA_SOURCE}
 EOF
 )"
