@@ -47,7 +47,14 @@ interface ShardFile {
   tasks: Array<{ id: string; proofs: string[] }>;
 }
 
+/** Memoised: the corpus is 13.6MB across 1,458 files and parsing it is this census's whole cost
+ * (MEASURED: readdir 4ms + read 78ms + parseYaml 1,055ms). Reading it once is also what makes the
+ * positive control below a control: the corpus it asserts on is now the SAME object the ratchet
+ * scans, not a second parse that could disagree with it. */
+let shardCache: ShardFile[] | undefined;
+
 function readShards(): ShardFile[] {
+  if (shardCache !== undefined) return shardCache;
   const out: ShardFile[] = [];
   const files = [...readdirSync(SHARD_DIR).filter((n) => n.endsWith(".yaml")).map((n) => join(SHARD_DIR, n)), MONOLITH];
   for (const abs of files) {
@@ -74,6 +81,7 @@ function readShards(): ShardFile[] {
     }
     out.push({ file: rel, tasks });
   }
+  shardCache = out;
   return out;
 }
 

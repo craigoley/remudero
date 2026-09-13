@@ -62,17 +62,12 @@ const NON_CENSUS_STEPS = FAST_GATE_STEPS.filter((s) => s.boundMs === undefined);
 // ═══════════════════ acceptance: "the fast gate runs every census suite that ═══════════════════
 // ═══════════════════ measures under the per-step bound" ═════════════════════════════════════
 
-test("FAST_GATE_STEPS: exactly seven census entries, each bound at the shared FAST_GATE_CENSUS_BOUND_MS constant — never a one-off number per entry", () => {
+test("FAST_GATE_STEPS: exactly six census entries, each bound at the shared FAST_GATE_CENSUS_BOUND_MS constant — never a one-off number per entry", () => {
   // W1-T2695 added a fifth (`authority-census`) under the same measured predicate this task's own
   // header describes — not the `enforcement-data-carveout` suite this file's header excludes.
   // W1-T2898 added a sixth (`ledger-literal-census`) on the same terms: clause (a) satisfied, and
   // MEASURED at a 452ms median, well under the shared bound.
-  // The seventh is `self-path-proof-census`, on the same terms again: it parses the tracked
-  // plan/tasks.d corpus plus the monolith and holds a per-file baseline, and MEASURED at 1063ms —
-  // under the shared bound. It is admitted because the defect it holds is a PR-stopper: a shard
-  // acceptance proof that greps its own file passes at the merge base, grades executed_stale, and
-  // leaves a correct implementation at FAIL-unmet (#5256, repaired by #5303 and #5310).
-  assert.equal(CENSUS_STEPS.length, 7, "four of the six measured census suites, plus authority-census, ledger-literal-census and self-path-proof-census");
+  assert.equal(CENSUS_STEPS.length, 6, "the task admits four of the six measured census suites, plus W1-T2695's authority-census and W1-T2898's ledger-literal-census");
   for (const step of CENSUS_STEPS) {
     assert.equal(step.boundMs, FAST_GATE_CENSUS_BOUND_MS, `${step.job} must reference the shared PRIMARY CONTROL constant`);
   }
@@ -86,9 +81,7 @@ test("runPreflightFast: run for real (unmocked, real spawn, real package.json) o
   // class this task adds, not a re-verification of the other seven's own environment.
   const result = runPreflightFast(REPO_ROOT, { steps: CENSUS_STEPS });
   // W1-T2898: `ledger-literal-census` joins on the same terms — clause (a) satisfied (it asserts a property EVERY enumerated src/ file must hold) and MEASURED at a 452ms median, well under the bound. Named rather than counted, so the addition stays a reviewed one.
-  // The seventh is `self-path-proof-census` (see the count pin above): admitted on the same terms,
-  // MEASURED at 1063ms, and it holds a defect that stops PRs rather than one that merely tidies.
-  assert.equal(result.steps.length, 7);
+  assert.equal(result.steps.length, 6);
   for (const step of result.steps) {
     assert.equal(step.ok, true, `expected ${step.name} to pass on a clean HEAD: ${step.detail}`);
     assert.doesNotMatch(step.detail, /BOUND EXCEEDED/, `${step.name} must not report BOUND EXCEEDED on a clean, fast run`);

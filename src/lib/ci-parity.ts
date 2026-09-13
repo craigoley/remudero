@@ -2144,19 +2144,6 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     verdict: { status: "ADMITTED", measuredMs: 803 },
   },
   {
-    testFile: "test/a-shards-proof-cannot-target-its-own-file.test.ts",
-    job: "self-path-proof-census",
-    script: "census:self-path-proof",
-    walks: ["plan/"],
-    reason:
-      "same-class (W1-T2478) — a census suite: walks tracked plan/tasks.d/*.yaml plus the plan monolith, asserts for every " +
-      "shard that no acceptance proof greps the shard it lives in, and holds each file against its per-file baseline in " +
-      "scripts/self-path-proof-baseline.json (the 44 files measured at filing are grandfathered there, so only GROWTH is " +
-      "refused). Such a proof passes at the MERGE BASE too, grades executed_stale and drops the criterion to the keyword " +
-      "floor, which is what left #5256 at FAIL-unmet on a correct implementation and took #5303 plus #5310 to repair by hand",
-    verdict: { status: "ADMITTED", measuredMs: 1063 },
-  },
-  {
     testFile: "test/negative-reachability-ratchet.test.ts",
     job: "negative-reachability-census",
     script: "census:negative-reachability",

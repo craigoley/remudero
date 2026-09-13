@@ -150,13 +150,10 @@ test("FAST_GATE_CENSUS_BOUND_MS is unchanged at 2000ms — this task does not to
   assert.equal(FAST_GATE_CENSUS_BOUND_MS, 2000);
 });
 
-test("the seven census entries admitted since W1-T2478 are still admitted, by job name, and CENSUS_POPULATION carries no `ok`/refusal field of its own — the derivation is data, never a second gate", () => {
+test("the six census entries admitted since W1-T2478 are still admitted, by job name, and CENSUS_POPULATION carries no `ok`/refusal field of its own — the derivation is data, never a second gate", () => {
   const jobs = CENSUS_ADMITTED_MEMBERS.map((m) => m.job).sort();
   // W1-T2695: `authority-census` joins the four W1-T2478 admitted — the same growth shape the
   // COMMANDS registry baseline follows when a genuinely new, identically-shaped suite lands.
-  // `self-path-proof-census` joins on the same shape: it walks the tracked plan corpus and holds a
-  // per-file baseline, and the defect it refuses is a PR-stopper (a shard proof that greps its own
-  // file passes at the merge base, so a correct implementation grades FAIL-unmet — #5256/#5303/#5310).
   assert.deepEqual(
     jobs,
     [
@@ -166,7 +163,6 @@ test("the seven census entries admitted since W1-T2478 are still admitted, by jo
       "ledger-literal-census",
       "negative-reachability-census",
       "no-shallowing-census",
-      "self-path-proof-census",
     ].sort(),
   );
   for (const m of CENSUS_POPULATION) {
