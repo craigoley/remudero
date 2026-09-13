@@ -265,6 +265,63 @@ export function planRetry(state: RetryState, cls: FailureClass): RetryAction {
   return { kind: "retry_strike", state: next };
 }
 
+// ── The capped-proof repair ladder (W1-T3390) ───────────────────────────────
+//
+// A CAPPED review's non-discriminating proofs are repaired through a separate dispatch surface
+// (sweep.ts's `dispatchFix`, bounded by `fixCeilingInForce`), not the patch-attempt ladder above.
+// MEASURED on PR 5107: once that body-repair budget was spent, the PR stood down behind a deduped
+// escalation forever — the shard's OWN `proof:` text was wrong, and Standing rule 15's
+// `criterionFieldTampered` (review.ts) refuses a non-plan-only diff that touches it.
+// `planCappedRepair` is the missing rung: try a bounded plan-only shard repair before giving up.
+
+/** PRIMARY CONTROL: the ceiling on the plan-only shard-repair rung — separate from, and never
+ *  widening, `dispatchFix`'s own body-repair ceiling. */
+export const MAX_PLAN_REPAIR_STRIKES = 2;
+
+/** Cumulative counters for the two capped-repair rungs, folded from the ledger by the caller
+ *  (sweep.ts) — this module stays pure and carries neither across calls. */
+export interface CappedRepairState {
+  /** The SAME cumulative count `fixCeilingInForce`'s ceiling already bounds — read here, never
+   *  recomputed. */
+  bodyStrikes: number;
+  /** Dispatches of the plan-only shard-repair rung this task's PR has already spent. */
+  planRepairStrikes: number;
+}
+
+export type CappedRepairAction =
+  /** The ordinary in-PR body repair (`dispatchFix`) — unchanged whenever the body budget still
+   *  has room. */
+  | { kind: "repair_body" }
+  /** The missing rung: a plan-only PR flagging the shard's own proof for an Architect. Returned
+   *  ONLY when the caller declared itself capable (`opts.planRepairCapable`) — a caller that never
+   *  wires the new dispatch surface is never told to use it. */
+  | { kind: "repair_plan_shard" }
+  /** Every repair path this call knows about is spent; the caller escalates to a human. */
+  | { kind: "give_up"; reason: string };
+
+/**
+ * Decide the next capped-repair action. `opts.planRepairCapable` is the caller's own admission
+ * that it actually wired {@link "./sweep.js".SweepDeps.dispatchPlanOnlyRepair} — omitted (or
+ * false), this degrades BYTE-FOR-BYTE to the pre-W1-T3390 ladder (body budget, then give up), so
+ * a caller that has not adopted the new rung is unaffected by this function's existence.
+ */
+export function planCappedRepair(
+  state: CappedRepairState,
+  bodyCeiling: number,
+  opts: { planRepairCapable: boolean },
+): CappedRepairAction {
+  if (state.bodyStrikes < bodyCeiling) return { kind: "repair_body" };
+  if (opts.planRepairCapable && state.planRepairStrikes < MAX_PLAN_REPAIR_STRIKES) {
+    return { kind: "repair_plan_shard" };
+  }
+  return {
+    kind: "give_up",
+    reason: opts.planRepairCapable
+      ? `capped repair budget exhausted: body ${state.bodyStrikes}/${bodyCeiling}, plan-shard repair ${state.planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES}`
+      : `strikes exhausted (${bodyCeiling})`,
+  };
+}
+
 // ── The diagnose-then-retry driver ─────────────────────────────────────────
 
 export interface AttemptSuccess {
