@@ -24,6 +24,9 @@ import {
   parseWhitelistedProof,
   pinnedVitestCli,
   vitestNameFilteredOutcome,
+  VITEST_TAP_PLAN_RE,
+  VITEST_TAP_RESULT_LINE_RE,
+  VITEST_TAP_SKIP_RE,
   type ProofSpawner,
   type SuiteRegistryTarget,
 } from "../src/lib/review.js";
@@ -178,6 +181,30 @@ test("W1-T3525: a bare-title Vitest proof whose selected leaf test fails is clas
 
 test("W1-T3525: truncated Vitest output is classified inconclusive (throws) rather than pass or fail", () => {
   assert.throws(() => vitestNameFilteredOutcome(VITEST_TAP_TRUNCATED), /truncated/, "cut off before the TAP plan count completed");
+});
+
+// ── The three TAP-parsing regexes {@link vitestNameFilteredOutcome} is built on, each exercised
+// directly on BOTH arms (negative-reachability-ratchet, W1-T2317): a fixture merely driving the
+// classifier as a whole cannot credit the regex it is text-searched by identifier, so each gets its
+// own healthy/unhealthy pair here.
+
+test("W1-T3525: VITEST_TAP_RESULT_LINE_RE matches an indented TAP result line and rejects a non-result line", () => {
+  // Not a result line at all — the negative arm.
+  assert.equal(VITEST_TAP_RESULT_LINE_RE.exec("TAP version 13"), null);
+  // A real, indented result line, captured — the positive arm.
+  assert.equal(VITEST_TAP_RESULT_LINE_RE.exec("    ok 1 - alpha passes # time=1.42ms")?.[2], "ok");
+});
+
+test("W1-T3525: VITEST_TAP_PLAN_RE matches a TAP13 plan line and rejects ordinary output", () => {
+  // No plan line present — the negative arm.
+  assert.equal(VITEST_TAP_PLAN_RE.exec("TAP version 13\nok 1 - x\n"), null);
+  // The declared file count, captured — the positive arm.
+  assert.equal(VITEST_TAP_PLAN_RE.exec("TAP version 13\n1..3\n")?.[1], "3");
+});
+
+test("W1-T3525: VITEST_TAP_SKIP_RE recognises Vitest's `# SKIP` comment and rejects a genuinely-run leaf's line", () => {
+  assert.equal(VITEST_TAP_SKIP_RE.test("ok 1 - alpha passes # time=1.42ms"), false, "a genuinely-run leaf carries no SKIP marker");
+  assert.equal(VITEST_TAP_SKIP_RE.test("ok 3 - gamma skipped # SKIP"), true, "Vitest's own skip marker");
 });
 
 test("W1-T3525: execWhitelistedProof routes a Vitest name-filtered proof through the Vitest classifier, not node's", () => {

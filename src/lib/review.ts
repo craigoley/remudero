@@ -2085,14 +2085,14 @@ export function nameFilteredOutcome(stdout: string): "pass" | "fail" | "no-match
  *  name suffix, is what {@link vitestNameFilteredOutcome} uses to tell a file wrapper from a leaf —
  *  {@link isFileWrapperResultName}'s suffix match cannot, because Vitest appends its own `# time=`/
  *  `# SKIP` comment AFTER the file name, which no longer ends in `.test.ts`. */
-const VITEST_TAP_RESULT_LINE_RE = /^( *)(ok|not ok) \d+ - (.+?)\s*$/;
+export const VITEST_TAP_RESULT_LINE_RE = /^( *)(ok|not ok) \d+ - (.+?)\s*$/;
 /** The TAP13 plan line (`1..N`) Vitest's reporter writes ONCE, before any file's results — the
  *  declared file count this run selected. Used the same way node's `# duration_ms` summary is used
  *  above: fewer top-level wrapper lines observed than this plan promised means the run was cut off. */
-const VITEST_TAP_PLAN_RE = /^1\.\.(\d+)\s*$/m;
+export const VITEST_TAP_PLAN_RE = /^1\.\.(\d+)\s*$/m;
 /** Vitest marks a SKIPPED leaf with a trailing `# SKIP` comment on an `ok` line — never a `not ok`,
  *  whatever the reason for the skip (name-filtered out, or `test.skip()` in the source). */
-const VITEST_TAP_SKIP_RE = /#\s*SKIP\b/i;
+export const VITEST_TAP_SKIP_RE = /#\s*SKIP\b/i;
 
 /** (W1-T3525) The Vitest sibling of {@link nameFilteredOutcome} — SAME three-value contract, SAME
  *  throw-on-truncation convention, but its OWN parse: node's TAP is flat and Vitest's is nested, and
