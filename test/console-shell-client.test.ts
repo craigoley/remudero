@@ -335,6 +335,59 @@ nodeTest("bootConsoleShellClient renders every actionable row and the separate v
   );
 });
 
+nodeTest("W1-T3395: a genuinely NEW ask arriving while INBOX is collapsed announces INBOX's OWN name, never the dissolved 'Needs me' string", async () => {
+  const ts = "2026-09-08T01:00:00.000Z";
+  await withStubbedBoot(
+    {
+      storageSeed: { "rmd-console-write-token": "stub-write-token" },
+      status: { generated_at: ts, tasks: [], counts: {}, spend: null },
+      // Answered NOT-ok on purpose: postJson's ok-path schedules a real 12s write-ack timer
+      // (showWriteAck) this test has no reason to wait out, and the click handler calls
+      // refreshAll() unconditionally either way -- the arrival this test drives never depends on
+      // the write itself succeeding.
+      errorResponses: { "/v1/escalation/mark-handled": { status: 500, body: "{}" } },
+    },
+    async (elements, endpointBodies) => {
+      const body = elements.get("body");
+      await waitForStubValue(elements, "body", () => body?.dataset.writeScopeResolved === "1");
+
+      // The FIRST real render is a baseline, never an "arrival" -- and an empty INBOX defaults
+      // collapsed (ensureSectionDefault's own `isEmpty` default). Neither emphasis nor an SR
+      // announcement has any reason to exist yet.
+      const toggle = elements.get("inbox-toggle");
+      assert.equal(toggle?.getAttribute("aria-expanded"), "false", "an empty INBOX defaults collapsed");
+      assert.equal(toggle?.classList.contains("section-emphasis"), false);
+      assert.equal(elements.get("aria-announcer")?.textContent ?? "", "", "the FIRST paint must not announce an arrival");
+
+      // Mutate the SAME endpoint a live poll re-fetches -- a genuinely NEW escalation appears
+      // where none was before -- then trigger a SECOND refreshAll() the same way an operator's
+      // own write action would (Mark handled), never a fabricated internal call.
+      endpointBodies["/v1/status"] = {
+        generated_at: ts,
+        tasks: [{ taskId: "W1-TNEW", title: "just escalated", status: "queued", needsHuman: true, escalationTitle: "[BLOCKED] W1-TNEW: stuck" }],
+        counts: {},
+        spend: null,
+      };
+      const inboxList = elements.get("inbox-list");
+      const markHandledBtn = new StubElement();
+      markHandledBtn.dataset.taskId = "W1-TOLD";
+      markHandledBtn.dataset.issueUrl = "https://github.test/o/r/issues/1";
+      const target = new StubElement();
+      target.setClosest(".needs-me-mark-handled", markHandledBtn);
+      assert.ok(await inboxList?.dispatch("click", { target }), "a click handler is wired on inbox-list");
+
+      await waitForStubValue(elements, "aria-announcer", (value) => value !== "");
+      assert.equal(
+        elements.get("aria-announcer")?.textContent,
+        "Inbox: a new item needs your attention.",
+        "the SR announcement must carry INBOX's OWN name, never the dissolved 'Needs me' string",
+      );
+      assert.equal(toggle?.classList.contains("section-emphasis"), true, "the still-collapsed toggle must carry emphasis for the new arrival");
+      assert.equal(toggle?.getAttribute("aria-expanded"), "false", "an arrival adds emphasis -- it must never force the section open");
+    },
+  );
+});
+
 // ── (2) bootConsoleShellClient exercised directly, under the real DOM harness ───────────────
 
 function task(over: Partial<Task> = {}): Task {
@@ -587,7 +640,12 @@ async function withStubbedBoot(
      *  which is truthy, so a failed fetch and an empty body were indistinguishable to a test. */
     failingEndpoints?: string[];
   },
-  fn: (elements: Map<string, StubElement>) => Promise<void>,
+  /** `endpointBodies` is handed to `fn` too -- mutating one of its entries IN PLACE (never
+   *  reassigning the object) before triggering a write action's own `refreshAll()` (below) is how
+   *  a test drives a SECOND, genuinely different poll without a second `withStubbedBoot` call --
+   *  the only way to reach a live-update code path (a new arrival, a row disappearing) from this
+   *  harness, since `setInterval` here never fires on its own. */
+  fn: (elements: Map<string, StubElement>, endpointBodies: Record<string, unknown>) => Promise<void>,
 ): Promise<void> {
   const { document, elements } = makeStubDocument(payloads.selectorAll);
   const original = {
@@ -667,7 +725,7 @@ async function withStubbedBoot(
       }) as typeof fetch,
     });
     bootConsoleShellClient({ default: 1 }, resolveFreshness);
-    await fn(elements);
+    await fn(elements, endpointBodies);
     await new Promise((resolve) => setTimeout(resolve, 0));
   } finally {
     Object.assign(globalThis, original);
