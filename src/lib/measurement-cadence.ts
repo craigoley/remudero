@@ -1952,7 +1952,11 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   // what this run actually measured; only the WRITES below (the proposal, the ledger rows) are
   // gated on `opts.escalate`, matching this file's own "the only writes are gated" invariant.
   const driftBands = opts.driftBands ?? DEFAULT_DRIFT_BANDS;
-  const driftWindow = opts.driftWindow ?? (opts.now ?? new Date()).toISOString().slice(0, 10);
+  // ONE resolved clock read for this whole run (W1-T3518). Previously `driftWindow` read the wall
+  // clock here and the adoption record read it again a few hundred lines below, so two reads in one
+  // run could straddle midnight and disagree about the day. Hoisted rather than duplicated.
+  const nowDate = opts.now ?? new Date();
+  const driftWindow = opts.driftWindow ?? nowDate.toISOString().slice(0, 10);
   const driftClassification = classifyVerdictDrift(vReport, driftBands);
   let verdictEscalatedProposalIds: string[] = [];
   if (opts.escalate) {
@@ -2086,11 +2090,19 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
       };
 
   // W1-T3518: record what this scan SAW, so a proposal whose finding is gone can retire itself.
-  // NOT gated on `escalate` — this is a measurement, not a write into the operator's inbox, and a
-  // dry run's finding set is exactly as true as a firing one's. It IS gated on the static scans
-  // having run: `runAdoptionReport` skips shapes 1-3 without a `checkoutDir`, and a record built
-  // from a scan that never looked would name zero findings and read as "everything is adopted".
-  const adoptionLatest = adoptionLatestRecord(adoptionReport, new Date().toISOString(), opts.checkoutDir !== undefined);
+  //
+  // GATED ON `escalate`, like every other write in this module. An earlier draft of this was not,
+  // reasoning that a measurement is not an inbox write and a dry run's finding set is as true as a
+  // firing one's. That was wrong, and test/adoption-report-has-a-producer.test.ts is the ratified
+  // statement of why: `escalate: false` means the verb "writes nothing and files nothing" and
+  // "leaves the checkout and state dir byte-for-byte untouched". A report run must stay a report run.
+  //
+  // ALSO gated on the static scans having run: `runAdoptionReport` skips shapes 1-3 without a
+  // `checkoutDir`, and a record built from a scan that never looked would name zero findings and
+  // read as "everything is adopted".
+  const adoptionLatest = opts.escalate
+    ? adoptionLatestRecord(adoptionReport, nowDate.toISOString(), opts.checkoutDir !== undefined)
+    : undefined;
   if (adoptionLatest) {
     try {
       writeFileSync(adoptionLatestPath(opts.stateDir), JSON.stringify(adoptionLatest, null, 2) + "\n");
