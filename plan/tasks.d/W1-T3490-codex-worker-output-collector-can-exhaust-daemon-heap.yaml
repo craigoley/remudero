@@ -1,0 +1,59 @@
+- id: W1-T3490
+  title: "CODEX WORKER OUTPUT COLLECTION CAN EXHAUST THE DAEMON HEAP"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  origin: "issue#5325"
+  plan_refs: ["W1-T2748", "W1-T2750", "W1-T2840", "W1-T2859"]
+  files: [src/lib/worker-provider.ts, test/worker-provider.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE AUTOMATED DAEMON CRASHED, NOT THE CONTAINER. At 2026-09-13T01:45Z, its Node process
+    reached 8.2 GiB and terminated with V8's `Ineffective mark-compacts near heap limit` error.
+    The container was not OOM-killed; its entrypoint used the configured 120-second nonzero-exit
+    backoff and restarted. The shared fleet PAUSE was then engaged to prevent a repeat while this
+    repair is filed.
+
+    SOURCE EXPLAINS A DIRECT UNBOUNDED PATH. `spawnCodexWorkerInPrivateTemp` creates
+    `stderrChunks` and `stdoutChunks` at `src/lib/worker-provider.ts:1605-1606`, appends every
+    stderr callback at `:1613-1616` and every stdout callback at `:1636-1641`, then joins the
+    entire stdout history for `parseCodexJsonl` at `:1650` and the stderr history at `:1661`.
+    The Codex worker was selected immediately before the daemon process died. The observed crash
+    proves the daemon heap failed; it does not by itself measure the worker's byte stream. The
+    unbounded collector is therefore the specific hazardous path to remove, not a claim that a
+    particular model response alone is the sole cause.
+
+    Stream JSONL incrementally. Retain only bounded protocol facts needed by the existing neutral
+    worker envelope: terminal session id, token totals, bounded error evidence, and bounded agent
+    message text. Independently bound stdout and stderr by named byte limits. On either overflow,
+    immediately tear down the contained process group and surface a named terminal failure after
+    the child exits; never join or parse an arbitrary complete stream. Handle JSON objects split
+    across chunks without changing normal terminal JSONL mapping. Keep the existing clock-bound
+    teardown and ordinary successful Codex result shape intact.
+
+    Do not change provider selection, model mapping, usage accounting, sandbox permissions,
+    worker-home isolation, or the daemon's restart policy. This is a single adapter-memory safety
+    concern, with a deterministic fake-process test rather than a paid provider invocation.
+
+    W1-T2859 ALSO DECLARES `worker-provider.ts` and `worker-provider.test.ts`, but it changes
+    automatic provider allocation after capacity has already been read. This task changes neither
+    capacity nor selection: it bounds the lifetime of output from a Codex process that has already
+    been selected. The shared adapter surface is explicit to avoid concurrent file conflict, not
+    concealed by omitting a required file.
+  acceptance:
+    - claim: "a Codex stdout or stderr stream that exceeds its named retention budget tears down the contained process group and returns a named bounded-output failure instead of retaining the full stream"
+      proof: "unit test: W1-T3490 criterion 1"
+    - claim: "fragmented normal Codex JSONL still yields the existing session, final agent message, token, and success-result fields through the bounded collector"
+      proof: "unit test: W1-T3490 criterion 2"
+    - claim: "the existing Codex clock-bound teardown remains distinct from output-overflow handling"
+      proof: "unit test: W1-T3490 criterion 3"
+  falsifier: |
+    The task is wrong if a bounded fake process that emits more than the configured stdout or
+    stderr ceiling can complete without teardown, or if normal JSONL fragmented across stream
+    chunks no longer produces the existing worker result. In either case, revise this shard before
+    changing production behavior.
