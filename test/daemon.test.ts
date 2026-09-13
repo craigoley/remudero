@@ -3589,6 +3589,72 @@ test("W1-T1272: an over-running sweep is still abandoned when reached from the s
   void root;
 });
 
+test("a settled full sweep is not held hostage by an in-flight light pass during ticker shutdown", async () => {
+  const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let releaseSweep: () => void = () => {};
+  const sweepSettled = new Promise<void>((resolve) => { releaseSweep = resolve; });
+  let releaseLight: () => void = () => {};
+  const lightSettled = new Promise<void>((resolve) => { releaseLight = resolve; });
+  let signalLightStarted: () => void = () => {};
+  const lightStarted = new Promise<void>((resolve) => { signalLightStarted = resolve; });
+  let lightCalls = 0;
+
+  const daemon = runDaemon(
+    fixturePlan(),
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => okResult(id),
+      sweep: async () => { await sweepSettled; },
+      sweepLight: async () => {
+        lightCalls += 1;
+        if (lightCalls === 1) {
+          signalLightStarted();
+          await lightSettled;
+        }
+      },
+      sleep: REAL_SLEEP,
+    },
+    { max: 1, pollIntervalMs: 1, sweepWallClockBoundMs: 100 },
+  );
+
+  await Promise.race([
+    lightStarted,
+    new Promise<void>((_, reject) => setTimeout(() => reject(new Error("the ticker never entered its light pass")), 50)),
+  ]);
+  releaseSweep();
+  const returnedBeforeLightSettles = await Promise.race([
+    daemon.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 20)),
+  ]);
+  assert.equal(returnedBeforeLightSettles, true, "a settled sweep must not wait for an unrelated light pass to settle");
+  releaseLight();
+  await daemon;
+});
+
+test("a rejected detached ticker is logged after shutdown instead of becoming an unhandled rejection", async () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const daemon = runDaemon(
+    fixturePlan(),
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => okResult(id),
+      sweep: async () => {},
+      sweepLight: async () => {},
+      sleep: async () => { throw new Error("in-flight ticker sleep failed"); },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1, pollIntervalMs: 1, sweepWallClockBoundMs: 100 },
+  );
+
+  await daemon;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const detachedFailure = lines.find((line) => line.step === "daemon.in_flight_ticker.failed");
+  assert.deepEqual(detachedFailure, {
+    step: "daemon.in_flight_ticker.failed",
+    extra: { phase: "sweep", error: "in-flight ticker sleep failed" },
+  });
+});
+
 test("W1-T2584: the daemon sweep bound closes the continuation gate handed to the still-settling sweep", async () => {
   const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let continuation: (() => boolean) | undefined;
