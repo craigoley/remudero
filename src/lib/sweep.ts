@@ -9976,9 +9976,11 @@ export async function runEscalationReconcile(
  *  it, which is the case this rung exists for. */
 export const STALE_ESCALATION_REJUDGE_DWELL_MS = 6 * 60 * 60 * 1000;
 
-/** BOUNDED PER CYCLE (design clause iv) — this rung's own analog of {@link
+/** PRIMARY CONTROL: BOUNDED PER CYCLE (design clause iv) — this rung's own analog of {@link
  *  MAX_ESCALATION_CLOSES_PER_CYCLE}, and for a stronger reason than that bound: each verdict here
- *  is a MODEL SPAWN, so an unbounded re-judge over a large backlog is a token event, not a sweep. */
+ *  is a MODEL SPAWN, so an unbounded re-judge over a large backlog is a token event, not a sweep.
+ *  This is what normally stops the per-cycle spend, not a backstop firing on an already-failed
+ *  condition — a large backlog is the EXPECTED healthy population, not an error state. */
 export const MAX_ESCALATION_REJUDGES_PER_CYCLE = 20;
 
 /** The ledger step written for EVERY re-judge verdict, both arms — mirrors {@link
