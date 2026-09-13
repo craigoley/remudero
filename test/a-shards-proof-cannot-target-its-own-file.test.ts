@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -59,7 +59,11 @@ function readShards(): ShardFile[] {
       // ONE gate responsible for parse failures; counting it as zero would hide a real row.
       continue;
     }
-    const rel = abs.startsWith(REPO_ROOT) ? abs.slice(REPO_ROOT.length + 1) : abs;
+    // `relative`, never a manual slice: REPO_ROOT comes from `new URL("..")` and so ends in a
+    // separator, and `slice(REPO_ROOT.length + 1)` therefore ate the leading `p` — every recorded
+    // key read `lan/tasks.d/…`. The basename arm of `proofTargetsOwnFile` hid it: the counts were
+    // right while the paths a developer is told to edit were not.
+    const rel = relative(REPO_ROOT, abs);
     const tasks: Array<{ id: string; proofs: string[] }> = [];
     for (const t of (parsed as Array<Record<string, unknown>>) ?? []) {
       if (!t || typeof t !== "object" || typeof t.id !== "string") continue;
