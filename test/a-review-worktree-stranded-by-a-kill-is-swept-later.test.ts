@@ -219,6 +219,70 @@ test("a review worktree whose remote cannot be read is never eligible — an una
   }
 });
 
+test("unreadable git state and a failed removal are retained — every fail-closed branch names why it kept the candidate", () => {
+  const u = reviewFixture();
+  try {
+    const sha = headSha(u.repoDir);
+    const noRepo = "review-PR4800-1000";
+    const noHead = "review-PR4801-1000";
+    const removalFails = "review-PR4802-1000";
+    const { log } = collector();
+
+    const summary = sweepStrandedReviewWorktrees(u.config, log, {
+      clock: fixedClock(DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1001),
+      listEntries: () => [noRepo, noHead, removalFails],
+      isDirectory: () => true,
+      resolveRepoDir: (path) => (path.endsWith(noRepo) ? undefined : u.repoDir),
+      readHeadSha: (path) => (path.endsWith(noHead) ? undefined : sha),
+      readRemoteHeadSha: () => sha,
+      removeWorktree: () => {
+        throw new Error("permission denied");
+      },
+    });
+
+    assert.deepEqual(summary.reclaimed, []);
+    assert.deepEqual(
+      summary.kept.map(({ name, reason }) => ({ name, reason })),
+      [
+        { name: noRepo, reason: "git-unreadable" },
+        { name: noHead, reason: "git-unreadable" },
+        { name: removalFails, reason: "removal-failed" },
+      ],
+    );
+  } finally {
+    u.cleanup();
+  }
+});
+
+test("the default filesystem and git readers fail closed when a candidate vanishes or is malformed", () => {
+  const u = reviewFixture();
+  try {
+    const missing = "review-PR4803-1000";
+    const unreadablePointer = "review-PR4804-1000";
+    const invalidHead = "review-PR4805-1000";
+    mkdirSync(join(u.worktreesRoot, unreadablePointer));
+    mkdirSync(join(u.worktreesRoot, invalidHead));
+    writeFileSync(join(u.worktreesRoot, invalidHead, ".git"), `gitdir: ${join(u.repoDir, ".git", "worktrees", "not-real")}\n`);
+    const { log } = collector();
+
+    const summary = sweepStrandedReviewWorktrees(u.config, log, {
+      clock: fixedClock(DEFAULT_REVIEW_WORKTREE_SWEEP_GRACE_MS + 1001),
+      listEntries: () => [missing, unreadablePointer, invalidHead],
+    });
+
+    assert.deepEqual(summary.reclaimed, []);
+    assert.deepEqual(
+      summary.kept.map(({ name, reason }) => ({ name, reason })),
+      [
+        { name: unreadablePointer, reason: "git-unreadable" },
+        { name: invalidHead, reason: "git-unreadable" },
+      ],
+    );
+  } finally {
+    u.cleanup();
+  }
+});
+
 // ── Criterion 3: every outcome ledgers its own reason — a silent sweep is never mistaken for an idle one ──
 
 test("every sweep outcome ledgers its own decision reason, whether reclaimed or kept", () => {
