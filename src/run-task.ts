@@ -195,6 +195,45 @@ export const IMPLEMENT_REFUSAL_REPORT_CONTRACT = [
   "  in the PR body. That explicit contradiction fails review.",
 ].join("\n");
 
+/**
+ * THE TWO CONFORMING SESSION-BRANCH FORMS (W1-T3388). CLAUDE.md's own rule names
+ * `run-<taskId>-<epochMs>` but binds it only "WHEN BUILDING A FILED TASK" — PR 5106 was an
+ * ad-hoc repair with no filed task and therefore no id to put there, so an agent that read the
+ * rule correctly still had no conforming name available to it. `isDispatchedRunBranch` (a
+ * task-agnostic SHAPE test, `/^run-.+-\d+$/`) already ACCEPTS the unfiled literal below — nothing
+ * before this task NAMED it as the canonical spelling for the excluded case, so no worker ever
+ * reached for it. Fixed here, ONCE, so {@link BRANCH_NAME_CONTRACT_PART} (the turn-0 prompt text)
+ * and `scripts/head-identity-gate.mjs` (the refusal gate) can never name a different spelling for
+ * the same case.
+ */
+export const RUN_BRANCH_FILED_FORM = "run-<taskId>-<epochMs>";
+export const RUN_BRANCH_UNFILED_FORM = "run-unfiled-<epochMs>";
+/** {@link RUN_BRANCH_UNFILED_FORM} as a matchable shape (a real epoch-ms literal in place of the
+ *  placeholder) — the one `scripts/head-identity-gate.mjs` tests a real head ref against. */
+export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
+
+/**
+ * THE BRANCH-NAME CONTRACT, CARRIED INTO THE PROMPT ITSELF (W1-T3388). CLAUDE.md's own
+ * maintenance note says a DISPATCHED WORKER never loads CLAUDE.md at all — `spawnWorker` passes
+ * `settingSources: []`, and the SDK needs `'project'` to read it — so a naming rule that lived
+ * only there bound nothing for the lane that actually pays for a bad branch name. This constant
+ * is appended to the turn-0 prompt AND the post-compaction anchor from the SAME two call sites
+ * {@link IMPLEMENT_REFUSAL_REPORT_CONTRACT} already uses, UNCONDITIONALLY — no `policy.ts` flag
+ * gates it, unlike {@link buildRuleHeadlinesPart}'s headline index, so the rule reaches every
+ * dispatched worker regardless of that flag's setting. `scripts/head-identity-gate.mjs` refuses a
+ * head that satisfies neither form named here (and carries no trailer), so the contract is bound
+ * on both the telling side and the refusing side.
+ */
+export const BRANCH_NAME_CONTRACT_PART = [
+  "",
+  "# BRANCH NAME CONTRACT",
+  `- Name this session's branch \`${RUN_BRANCH_FILED_FORM}\` when you are building a filed task.`,
+  `- Name it \`${RUN_BRANCH_UNFILED_FORM}\` when the work has no filed task to embed an id from`,
+  "  (an ad-hoc repair, a recon-only fix — anything dispatched with no task id).",
+  "- A head matching NEITHER of those two shapes, and carrying no anchored `Remudero-Task: <id>`",
+  "  trailer on its head commit, is refused at PR open (scripts/head-identity-gate.mjs).",
+].join("\n");
+
 /*
 Source-text compatibility for legacy tests whose subject is the pre-extraction dispatcher text.
 The live implementations above are imported from "lib/prompt-render" (src/lib/prompt-render.ts).
@@ -12766,7 +12805,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // This is an output-only contract, deliberately outside `# CONTEXT`; the provenance manifest
     // still hashes the exact prompt sent to the worker below. The companion anchor append keeps a
     // compaction from deleting the only syntax the deterministic judge is allowed to honour.
-    const prompt = `${renderedImplementPrompt}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}`;
+    const prompt = `${renderedImplementPrompt}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -12798,7 +12837,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}`;
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
