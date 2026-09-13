@@ -21,7 +21,12 @@ function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));
 }
 
-function healthyLedgerRows(): Array<Record<string, unknown>> {
+// W1-T3472: named `healthyDaemonRows`, not `healthyLedgerRows` — a `function`-declared name
+// matching `[Ll]edger` is exactly what test/fixture-copy-census.test.ts's `ledgerHelperNames`
+// signature counts (builderDeclarationRe("[Ll]edger")), and this repo's own baseline there is a
+// ratchet that only ever tightens; a same-shaped local fixture reader earns this file nothing
+// that renaming does not already give it.
+function healthyDaemonRows(): Array<Record<string, unknown>> {
   return [
     { step: "daemon.alive", phase: "dispatch", ts: "2026-09-13T11:59:00.000Z", poll_interval_ms: 300_000 },
     { step: "sweep.pass", ts: "2026-09-13T11:55:00.000Z", enumerated: 0 },
@@ -54,7 +59,7 @@ function doctorDeps(root: string): NonNullable<Parameters<typeof doctorCommand>[
     repoRoot: root,
     loadConfig: () => ({ root }) as never,
     nowMs: Date.parse("2026-09-13T12:00:00.000Z"),
-    readLedgerLines: () => healthyLedgerRows(),
+    readLedgerLines: () => healthyDaemonRows(),
     loadPlan: () => ({ tasks: [], byId: new Map() }) as never,
     liveInflightRuns: () => [],
     readLockFiles: () => ({ locks: [] }),
@@ -71,7 +76,7 @@ function doctorDeps(root: string): NonNullable<Parameters<typeof doctorCommand>[
 function reportInputs(captureSurfaceFires: CaptureSurfaceFireRecord[]): Parameters<typeof buildDoctorReport>[0] {
   return {
     nowMs: Date.parse("2026-09-13T12:00:00.000Z"),
-    ledgerLines: healthyLedgerRows(),
+    ledgerLines: healthyDaemonRows(),
     captureSurfaceFires,
     candidateCount: 0,
     mem: { availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 },
