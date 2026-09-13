@@ -1,0 +1,48 @@
+- id: W1-T3483
+  title: "THE PLAN-PROPOSAL HARNESS BUILDS BODY AND FOOTER LINES THAT COMMITLINT REJECTS — planCommitMessage shapes only its header, so a long operator brief or an ordinary generated task shard makes rmd plan discard a valid proposal before any PR exists"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  origin: "issue#5319"
+  plan_refs: ["W1-T416", "W1-T137"]
+  files: [src/lib/plan-architect.ts, test/plan-architect.test.ts, test/commit-message.test.ts]
+  status: queued
+  attempts: 0
+  note: "reservation hand-off: run-TRIAGE-fb-1789261381180-c02132-1789261879686 -> codex/plan-w1-t3483-plan-message"
+  rationale: |
+    RMD'S PLAN LANE CAN PROPOSE A VALID TASK AND THEN DESTROY ITS OWN WORKTREE WITHOUT OPENING A
+    PR. Two real `rmd plan --mode=create` runs on 2026-09-13 reached PROPOSED, staged their
+    plan-only shard, and failed at the harness-owned `git commit`. The first passed a 738-character
+    brief and commitlint rejected its unwrapped `Brief:` line with `footer-max-line-length`. A
+    second brief was only 92 characters, yet the generated `Acceptance:` line plus an ordinary
+    task-shard filename still exceeded the same limit. The worker proposal was removed with the
+    worktree; neither task became a durable PR.
+
+    SOURCE EXPLAINS THE FAILURE. `planCommitMessage` in `src/lib/plan-architect.ts` calls
+    `shapeCommitMessage` only for its header, then appends the raw brief and acceptance text as
+    individual lines. `shapeCommitMessage` already owns the repository's body-line limit and uses
+    `wrapBodyLines`, while `checkCommitMessage` deliberately applies that budget to every
+    post-header line, including footers. The plan emitter therefore has a proven shaping primitive
+    and bypasses it exactly where its harness writes unbounded input.
+
+    W1-T416 IS NOT THIS FIX. It is merged and keeps the checker aligned with commitlint; it does
+    not cause planProposalCommitMessage to emit a valid message. Weakening commitlint, omitting
+    brief provenance, or dropping the acceptance/trailer data would hide the failure rather than
+    make the generated artifact valid.
+
+    Scope is the plan proposal message builder and its proofs. Shape every generated non-header
+    line through the existing line-budget primitive while preserving the explicit brief,
+    acceptance content, and `Remudero-Task` trailer. Prove the full emitted message against the
+    real configured commitlint behavior, not only a helper-local length assertion. Do not alter
+    ordinary worker-authored commit handling or the repository's commitlint policy.
+  acceptance:
+    - claim: "a long operator brief produces a plan proposal commit message whose every line satisfies the configured commitlint budget and still contains the brief provenance"
+      proof: "unit test: planCommitMessage wraps a long brief and preserves it"
+    - claim: "a normal generated task-shard path cannot make the harness-owned Acceptance block exceed commitlint's line limit, and the Remudero-Task trailer is preserved"
+      proof: "unit test: planCommitMessage wraps structured plan acceptance and preserves trailer"
+    - claim: "the complete generated plan proposal message passes the real configured commitlint invocation"
+      proof: "unit test: planCommitMessage passes real configured commitlint"
