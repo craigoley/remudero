@@ -236,7 +236,7 @@ export function diagnoseBodyDefects(
 }
 
 /**
- * W1-T3389 — THE ASYMMETRY, CLOSED (rationale: plan/tasks.d/W1-T3389-*.yaml). `execProof` already
+ * W1-T3389 — THE ASYMMETRY, CLOSED (rationale: this task's own plan shard). `execProof` already
  * argues the fix rung can RUN a proof to settle an ambiguity rather than guess, applied so far only
  * to DIAGNOSING somebody else's body. This applies the same reasoning to the rung's OWN output:
  * given the exact criteria a repair is about to push, does every `grep:` proof among them parse and
