@@ -2,12 +2,19 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { ghPrCreateFillCommand } from "../src/run-task.js";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { acceptanceGateBodyRepair, ghPrCreateFillCommand } from "../src/run-task.js";
 import { bodyNeedsAcceptanceRepair } from "../src/lib/plan-pr-emitter.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const GATE_URL = pathToFileURL(join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs")).href;
+const { evaluateGate } = (await import(GATE_URL)) as {
+  evaluateGate: (input: { body: string; authorLogin?: string }) => { ok: boolean; defect?: string; message: string };
+};
 
 /**
  * test/a-pr-opens-with-a-judgeable-body.test.ts — W1-T3066.
@@ -72,6 +79,27 @@ test("a commit-derived body opens the PR with a block the gate can judge, not wi
   // ACCEPTANCE_HEADER_RE accepts — asserting the `##` spelling would pin a format the parser
   // never required and redden on a cosmetic change.
   assert.match(body, /^\s*#{0,6}\s*Acceptance\b/mi, "a judgeable body carries a header the parser resolves");
+});
+
+test("W1-T3508 open-time fallback: the rendered body passes the production author-time proof-shape gate", () => {
+  const dir = fixture();
+  commit(dir, "feat(x): a subject", "no Acceptance block in this commit message");
+  const result = evaluateGate({ body: bodyOf(dir), authorLogin: "a-human" });
+  assert.equal(result.ok, true, result.message);
+});
+
+test("W1-T3508 fallback proof target: both fallbacks retain the single-line grep proof for acceptanceAuthorTimeCheck", () => {
+  const dir = fixture();
+  commit(dir, "feat(x): a subject", "no Acceptance block in this commit message");
+  const repaired = acceptanceGateBodyRepair("no Acceptance block in this live PR body");
+  assert.ok(repaired, "the no-header fixture must take the fallback path");
+  for (const body of [bodyOf(dir), repaired.repairedBody]) {
+    assert.match(
+      body,
+      /grep: \^export function acceptanceAuthorTimeCheck in src\/lib\/review\.ts/,
+      "both renderers must carry the same executable, single-line proof",
+    );
+  }
 });
 
 test("the auto-authored block says WHEN it was authored, and does not borrow the fix rung's story", () => {

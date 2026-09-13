@@ -796,6 +796,12 @@ export interface DaemonDeps {
    *  and the ledger row are all writes that may lose to the same ENOSPC this reports ahead of. Never
    *  called for an unreadable read (W1-T1082). */
   onDiskHeadroomBreach?: (info: { freeBytes: number; verdict: "WARN" | "FAIL"; ts: string }) => void | Promise<void>;
+  /** Reclaim `review-PR*` worktrees a SIGKILL stranded — see {@link
+   *  import("./review-worktree-reclaim.js").sweepStrandedReviewWorktrees} (W1-T3378). A zero-arg
+   *  closure so the caller binds `config` and its own ledger `log`, matching `readDiskHeadroom`
+   *  above. Best-effort: a throw is caught and logged, never allowed to take the tick down.
+   *  Optional — omitted, this tick performs no sweep, unchanged behaviour for every existing caller. */
+  sweepStrandedReviewWorktrees?: () => void;
   /** Called on an idle tick whose census names at least one recoverable-class blocker — see
    *  {@link StarvationCensus}. Fires at most once per episode, and dispatch is already idle by then, so
    *  the hook is a pure notification. The real command wires an escalation with its own cross-boot
@@ -1214,6 +1220,17 @@ function startInFlightTicker(
             ...(holdSeen !== undefined ? { pause_seen: holdSeen } : {}),
             ...(diskHeadroom?.freeBytes !== undefined ? { disk_free_bytes: diskHeadroom.freeBytes } : {}),
           });
+          // W1-T3378: a `review-PR*` worktree a SIGKILL stranded is never revisited by anything
+          // in-process (materializeReviewWorktree/withMaterializedWorktree's teardown are both
+          // `finally`-only), so this out-of-process sweep is what actually reclaims it. Best-
+          // effort — a thrown sweep is caught and logged, never allowed to take the tick down.
+          if (deps.sweepStrandedReviewWorktrees) {
+            try {
+              deps.sweepStrandedReviewWorktrees();
+            } catch (e) {
+              log("daemon.review_worktree_sweep.error", { error: String((e as Error)?.message ?? e) });
+            }
+          }
           // Sample account headroom once the last reading has gone stale. Placed after the liveness write on purpose:
           // this tick's heartbeat is already on the ledger before the probe is awaited, so a slow probe can delay the
           // next heartbeat but never swallow this one. Telemetry, not enforcement — a reading taken here cannot abort

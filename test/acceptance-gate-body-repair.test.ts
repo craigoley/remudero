@@ -23,8 +23,9 @@
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { runFixRung, acceptanceGateBodyRepair } from "../src/run-task.js";
 import { acceptanceAuthorTimeCheck } from "../src/lib/review.js";
@@ -34,6 +35,12 @@ import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const GATE_URL = pathToFileURL(join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs")).href;
+const { evaluateGate } = (await import(GATE_URL)) as {
+  evaluateGate: (input: { body: string; authorLogin?: string }) => { ok: boolean; defect?: string; message: string };
+};
 
 // ── Fixtures, byte-identical in shape to the ones review.ts's own tests already lock ───────────
 
@@ -164,6 +171,13 @@ test("acceptanceGateBodyRepair: an empty-proofs body is repaired, and the repair
   assert.equal(repair!.defect, "empty-proofs");
   const recheck = acceptanceAuthorTimeCheck(repair!.repairedBody);
   assert.equal(recheck.ok, true, "the repaired body must itself pass the SAME gate predicate");
+});
+
+test("W1-T3508 fix-rung fallback: the repaired body passes the production author-time proof-shape gate", () => {
+  const repair = acceptanceGateBodyRepair(NO_HEADER_BODY);
+  assert.ok(repair, "the no-header fixture must take the fallback path");
+  const result = evaluateGate({ body: repair.repairedBody, authorLogin: "a-human" });
+  assert.equal(result.ok, true, result.message);
 });
 
 test("acceptanceGateBodyRepair: an unparseable (wrapped-claim) body is left alone — undefined, never attempted", () => {

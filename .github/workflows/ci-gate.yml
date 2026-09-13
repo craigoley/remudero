@@ -78,6 +78,7 @@ jobs:
         "assertion-discrimination",
         "task-id-existence",
         "acceptance-author-gate",
+        "head-identity-gate",
         "proof-discrimination",
         "unwired-gate",
         "comment-load-ratchet",

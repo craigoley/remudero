@@ -1,0 +1,45 @@
+- id: W1-T3508
+  title: "THE OPEN-TIME ACCEPTANCE FALLBACK MUST USE AN EXECUTABLE PROOF — both PR_OPEN_TIME_ACCEPTANCE_FALLBACK and ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK emit bare prose that the author-time gate refuses even when the task trailer resolves"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 30.00
+  origin: "operator-session#daemon-build-followups-2026-09-13"
+  plan_refs: ["W1-T3066", "W1-T1060"]
+  files: [src/run-task.ts, test/a-pr-opens-with-a-judgeable-body.test.ts, test/acceptance-gate-body-repair.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-13 on daemon-created PR #5347 at head faca42ca: the dedicated
+    `acceptance-author-gate` refused the PR with `proof-shape`, specifically that its one body
+    criterion had no `grep:` or `unit test:` dialect. The task trailer was healthy and resolves to
+    W1-T3390's shard; this is not a task-contract defect. The PR body came from
+    `PR_OPEN_TIME_ACCEPTANCE_FALLBACK` in `src/run-task.ts`, whose proof is bare prose about
+    `acceptanceAuthorTimeCheck`. The same bare proof appears in
+    `ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK`, so a later body-only repair would recreate the same
+    gate failure.
+
+    Replace only those two generic fallback proof strings with one valid, single-line grep proof
+    of the exported predicate they describe: `^export function acceptanceAuthorTimeCheck` in
+    `src/lib/review.ts`. Preserve the claims' explicit disclaimer that a body shape does not certify
+    the underlying diff or a task's acceptance. Preserve criteria resolution, PR creation, repair
+    selection, external write behavior, and every other fallback field. The new tests must pass the
+    actual `evaluateGate` proof-shape path for each rendered fallback, not merely assert that a pipe
+    was printed. This is high risk by blast radius: either fallback can author a body for any worker
+    PR, though the behavior change is one mechanically verifiable proof string.
+  acceptance:
+    - claim: "an open-time fallback body passes the author-time gate's executable-proof validation without asserting the diff or task acceptance"
+      proof: "unit test: W1-T3508 open-time fallback"
+    - claim: "a fix-rung fallback body passes the same executable-proof validation, so a body repair cannot recreate the original proof-shape refusal"
+      proof: "unit test: W1-T3508 fix-rung fallback"
+    - claim: "both fallback proofs remain a single-line grep against the exported acceptanceAuthorTimeCheck declaration"
+      proof: "unit test: W1-T3508 fallback proof target"
+  falsifier: |
+    Restore either fallback's current bare prose proof while leaving the fallback claim and rendered
+    body intact. Its corresponding W1-T3508 test must turn the real evaluateGate result into
+    proof-shape refusal. A test that only checks for an Acceptance header or a non-empty proof does
+    not discriminate this defect.

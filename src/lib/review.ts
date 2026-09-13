@@ -5783,6 +5783,9 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T3386: the proof-discrimination gate compares acceptance proofs against the PR head and merge base, and a
   // change to it changes which stale proofs CI refuses.
   "^scripts/proof-discrimination-gate\\.mjs$",
+  // W1-T3388: the head-identity gate refuses an unidentifiable PR head, so changing this script changes which
+  // pull requests CI permits to enter the queue.
+  "^scripts/head-identity-gate\\.mjs$",
   // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and `coverage-ratchet` jobs RUN, so a
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",

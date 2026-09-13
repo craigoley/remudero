@@ -1893,6 +1893,12 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     reason: "observes deployed heartbeat branches and daemon state, neither of which a local pre-push checkout may stand in for",
   },
   {
+    workflow: "head-identity-gate.yml",
+    job: "head-identity-gate",
+    mirrored: false,
+    reason: "requires GitHub's pull_request head ref and the head commit selected by that event; a local pre-push checkout cannot establish that PR identity honestly",
+  },
+  {
     workflow: "osv-scanner-pr.yml",
     job: "scan-pr",
     mirrored: false,
