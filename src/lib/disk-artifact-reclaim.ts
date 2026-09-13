@@ -204,7 +204,10 @@ export function sweepReclaimableArtifacts(
 function defaultIsDirectory(path: string): boolean {
   try {
     return statSync(path).isDirectory();
-  } catch {
+  } catch (e) {
+    console.error(
+      `disk-artifact-reclaim: could not stat ${path} while checking for a directory (${String((e as Error)?.message ?? e)})`,
+    );
     return false;
   }
 }
@@ -247,7 +250,8 @@ function defaultIsInUse(path: string): boolean | undefined {
     return out.trim() !== "";
   } catch (e) {
     const err = e as { status?: number; stdout?: string; stderr?: string };
-    if (err.status === 1 && !err.stderr?.trim()) return false; // clean "no open files"
+    const stderr = err.stderr?.trim() ?? "";
+    if (err.status === 1 && stderr === "") return false; // clean "no open files"
     return undefined;
   }
 }
@@ -257,7 +261,10 @@ function defaultSizeBytes(path: string): number {
     const out = execFileSync("du", ["-sk", path], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     const kb = Number(out.split(/\s+/)[0]);
     return Number.isFinite(kb) ? kb * 1024 : 0;
-  } catch {
+  } catch (e) {
+    console.error(
+      `disk-artifact-reclaim: could not measure size of ${path} (${String((e as Error)?.message ?? e)}) — ledgering 0 bytes, best-effort`,
+    );
     return 0;
   }
 }
