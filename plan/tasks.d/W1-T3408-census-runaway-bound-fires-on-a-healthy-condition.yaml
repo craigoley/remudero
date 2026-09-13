@@ -35,9 +35,9 @@
     comparison against a recorded distribution rather than against one run's own minimum.
   acceptance:
     - claim: "a census entry that would PASS on its own result is never refused as RUNAWAY because a sibling ran fast"
-      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+      proof: "grep: a single trivially-cheap sibling does not tighten the threshold in test/the-census-admission-set-is-derived-not-enumerated.test.ts"
     - claim: "a genuinely runaway entry is still refused, so the guard is not merely deleted"
-      proof: "unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts"
+      proof: "grep: TYPICAL (median) entry is still refused as RUNAWAY in test/the-census-admission-set-is-derived-not-enumerated.test.ts"
   falsifier: |
     CLOSE THIS TASK if the bound no longer derives from this run's own minimum. Read
     `runPreflightFast`'s RUNAWAY arm: if the refusal threshold is computed from anything that
