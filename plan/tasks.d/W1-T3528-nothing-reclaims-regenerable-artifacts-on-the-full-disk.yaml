@@ -1,5 +1,5 @@
 - id: W1-T3528
-  title: "NOTHING RECLAIMS REGENERABLE BUILD OUTPUT, AND THE TWO LARGEST OBJECTS ON A HOST AT 88% WERE A `coverage/` AND A `node_modules` THAT EVERY EXISTING REAPER IS SCOPED TO IGNORE — `sweepStrandedReviewWorktrees` matches `review-PR*` only and says so, `pruneStaleRuns` walks registered worktrees only, and W1-T1082's disk rung deliberately deletes nothing, so the fleet detects ENOSPC pressure it has no path to relieve"
+  title: "NOTHING RECLAIMS REGENERABLE BUILD OUTPUT, AND THE TWO LARGEST OBJECTS ON A HOST AT 88% WERE A `coverage/` AND A `node_modules` THAT EVERY EXISTING REAPER IS SCOPED TO IGNORE — `sweepStrandedReviewWorktrees` matches `review-PR*` only and says so, `pruneStaleRuns` walks registered worktrees only, and every shipped rung's unit is a WHOLE TREE under a MANAGED ROOT, so nothing can express \"delete the artifact, keep the tree\" and nothing walks a standalone clone in $HOME"
   repo: remudero
   depends_on: []
   type: implement
@@ -20,7 +20,17 @@
       379 MB  /home/craigoleyagent/wt4844/coverage        build output, regenerable
       836 MB  /home/craigoleyagent/rmd-pf/node_modules    regenerable via npm ci
 
-    NEITHER IS REACHABLE BY ANY EXISTING REAPER, and this is by design in all three cases:
+    CORRECTION TO THIS RECORD'S FIRST DRAFT, WHICH SAID THE FLEET HAS NO RECLAIM PATH AT ALL. It
+    has THREE, all merged, and they are not in question here:
+      - `logDiskReclaimRung` (W1-T411, src/run-task.ts) sweeps stale rmd temp dirs, abandoned
+        review clones and per-spawn worker homes, ARMED, at start of run.
+      - `runAdhocLaneReapRung` (W1-T2847, src/lib/worker.ts) reaps ad-hoc lanes, survey-first,
+        refusing on live pid, live upstream branch, incomplete probe and a 14-day ceiling.
+      - `object-reaper.ts` (W1-T3090) reclaims unreachable git objects.
+    The first draft's framing was wrong and is retracted. The gap below is narrower and real.
+
+    NEITHER OBJECT IS REACHABLE BY ANY EXISTING REAPER, for two structural reasons rather than an
+    oversight — every one of those rungs removes a WHOLE TREE under a MANAGED ROOT:
       - `sweepStrandedReviewWorktrees` (W1-T3378) says it outright: "SCOPE IS EXACTLY `review-PR*`.
         The name pattern is the only filter: `coverage/`, `rmd-*` temp dirs and any hand-cut lane
         never match it and are never even considered, let alone touched."
@@ -30,15 +40,27 @@
       - W1-T175 (queued) reaps `~/Remudero/worktrees/`, which on this host is on /mnt/rmd with 65G
         free. It would not have caught either object.
 
+    SO THE TWO MISSING CAPABILITIES ARE PRECISELY THESE, AND NEITHER IS A DUPLICATE OF THE ABOVE:
+
+    (1) ARTIFACT-LEVEL RECLAIM INSIDE A TREE THAT MUST BE KEPT. Every existing rung's unit is the
+        whole tree, so each must refuse a checkout that is live or dirty — correctly. `rmd-op` held
+        45 uncommitted files AND 546MB of `node_modules`; whole-tree reaping is right to refuse it,
+        and the regenerable half is therefore unreclaimable by ANY current rung. No existing code
+        can express "delete the artifact, keep the tree", and that is the capability this adds.
+    (2) STANDALONE CLONES OUTSIDE EVERY MANAGED ROOT. `rmd-pf` is a clone, not a worktree, sitting
+        in $HOME. No worktree reaper can reach it by construction — it has no registration to read.
+
     THE PRESSURED FILESYSTEM IS NOT THE ONE THE FLEET WATCHES. `/` is 29G at 88%; the state volume
     `/mnt/rmd` is 126G at 46%. Docker's data root is `/mnt/rmd/docker`, so its 8.8GB of images were
     never part of the pressure. A reclaimer that assumes the state volume is the scarce one will
     free nothing.
   rationale: |
-    THE DETECTION HALF ALREADY SHIPPED AND HAS NOWHERE TO GO. W1-T1082 gave the daemon a real
-    statfs reading and a WARN/FAIL judgement, then deliberately stopped short of acting. That was
-    right at the time and is now the whole problem: #4831 escalated, a human read it, and a human
-    ran `rm`. The rung can see the wall and cannot steer.
+    THE RECLAIM RUNGS ARE REAL AND THIS TASK DOES NOT SECOND-GUESS THEM. W1-T411, W1-T2847 and
+    W1-T3090 all ship and all work; the objects they own are temp dirs, worker homes, review
+    clones, ad-hoc lanes and loose git objects. What none of them owns is a regenerable artifact
+    INSIDE a tree that must be kept, because their unit is the tree. On 2026-09-13 that distinction
+    cost 1.2GiB on a host at 88%: #4831 escalated, a human read it, and a human ran `rm` — on two
+    objects every rung was correct to leave alone.
 
     THIS IS NOT `doctor --fix`, AND MUST NOT BECOME IT. `rmd doctor` refuses `--fix` BY NAME, on
     the stated ground that "every repair path already has an owner and a second actor mutating
