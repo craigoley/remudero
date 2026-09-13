@@ -13,6 +13,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # THE PR'S OWN HEAD COMMIT, NOT THE MERGE REF. Without this, a `pull_request` checkout
+          # lands on GitHub's synthetic merge commit, so the gate's `git log -1 --format=%B` reads
+          # "Merge <sha> into <sha>" — a message that can carry neither a filing-shaped subject nor a
+          # `Remudero-Task:` trailer. Two of the gate's three routes were therefore unreachable and
+          # only the branch-form route (which reads $GITHUB_HEAD_REF, not a commit) ever passed.
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
