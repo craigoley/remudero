@@ -181,6 +181,7 @@
   "src/lib/deploy-judge.ts": 250,
   "src/lib/deployer.ts": 500,
   "src/lib/digest.ts": 326,
+  "src/lib/disk-artifact-reclaim.ts": 250,
   "src/lib/dispatch-claim.ts": 130,
   "src/lib/dispatch-governor.ts": 250,
   "src/lib/dispatch-overlap.ts": 150,
