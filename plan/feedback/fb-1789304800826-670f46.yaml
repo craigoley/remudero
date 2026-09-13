@@ -18,10 +18,26 @@ raw: "Operator decision confirmed: implement the cross-repository proof-suite
   observed remudero-review=SUCCESS without changing PORTAL-T1 acceptance text."
 attachments: []
 origin: ui
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/5401
+summary:
+  headline: Implement test registry spanning multiple code repositories
+  what_happened: "The team has designed a system to manage and run tests across
+    multiple separate code repositories, with specific validation rules to
+    prevent invalid results from being accepted. This unblocks remudero-site PR
+    #8 pending final review checkpoint."
+  decision: Approve implementation of the cross-repository test registry
+  options:
+    - label: Proceed as designed
+      consequence: "System built and deployed; PR #8 advances after review checkpoint
+        passes"
+    - label: Request modifications
+      consequence: Design revisions allowed; implementation paused pending changes to
+        requirements
+    - label: Reject and defer
+      consequence: "PR #8 remains blocked; decision postponed pending further analysis"
 expansion: null
 submission_key: proof-suite-profile-registry-20260913
 thread_id: null
+answered_by: null
