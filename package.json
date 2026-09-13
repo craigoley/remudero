@@ -52,6 +52,7 @@
     "api-client:check": "node scripts/generate-api-client.mjs --check",
     "no-hand-rolled-fetch:check": "node scripts/no-hand-rolled-fetch-check.mjs",
     "unwired-gate:check": "node scripts/unwired-gate-check.mjs",
+    "head-identity-gate:check": "node --import tsx scripts/head-identity-gate.mjs",
     "coverage-session-blanking:check": "node scripts/coverage-session-blanking-check.mjs",
     "mkdtemp-callsite-check": "node scripts/mkdtemp-callsite-check.mjs",
     "prompt-surface-gate": "node --import tsx scripts/prompt-surface-gate.mjs",
