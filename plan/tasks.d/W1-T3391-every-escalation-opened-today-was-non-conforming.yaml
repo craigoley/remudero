@@ -37,6 +37,6 @@
 
   acceptance:
     - claim: "every escalation producer supplies consequence, explicitly null where nothing follows from inaction"
-      proof: "grep: so the slot is answered rather than omitted in plan/tasks.d/W1-T3391-every-escalation-opened-today-was-non-conforming.yaml"
+      proof: "unit test: test/every-escalation-opened-today-was-non-conforming.test.ts"
     - claim: "a checker failure still never stops an escalation being raised"
-      proof: "grep: a checker failure must never stop an escalation being raised in plan/tasks.d/W1-T3391-every-escalation-opened-today-was-non-conforming.yaml"
+      proof: "unit test: test/every-escalation-opened-today-was-non-conforming.test.ts"

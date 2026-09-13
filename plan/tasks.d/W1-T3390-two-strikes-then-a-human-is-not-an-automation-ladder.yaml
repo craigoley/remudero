@@ -40,6 +40,6 @@
 
   acceptance:
     - claim: "a capped PR whose criteria live in a shard outside its own diff dispatches a plan-only repair of that shard instead of standing down"
-      proof: "grep: when the offending criteria live in a shard outside the PR's own diff in plan/tasks.d/W1-T3390-two-strikes-then-a-human-is-not-an-automation-ladder.yaml"
+      proof: "unit test: test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts"
     - claim: "a human is reached only after both repair paths are exhausted, and a capped non-plan verdict still cannot arm without a head-bound override"
-      proof: "grep: Escalate only when both repair paths are in plan/tasks.d/W1-T3390-two-strikes-then-a-human-is-not-an-automation-ladder.yaml"
+      proof: "unit test: test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts"

@@ -36,6 +36,6 @@
 
   acceptance:
     - claim: "a repaired body whose authored proofs do not parse and execute is never pushed"
-      proof: "grep: Before the rung pushes a repaired body, run every proof it authored in plan/tasks.d/W1-T3389-the-body-repair-rung-ships-proofs-it-never-ran.yaml"
+      proof: "unit test: test/the-body-repair-rung-ships-proofs-it-never-ran.test.ts"
     - claim: "a proof the rung cannot substantiate is reported as an undiagnosable defect rather than emitted"
-      proof: "grep: never emitted as a silent replacement in plan/tasks.d/W1-T3389-the-body-repair-rung-ships-proofs-it-never-ran.yaml"
+      proof: "unit test: test/the-body-repair-rung-ships-proofs-it-never-ran.test.ts"
