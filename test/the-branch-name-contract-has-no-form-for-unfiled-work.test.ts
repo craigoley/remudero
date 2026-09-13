@@ -394,3 +394,28 @@ test("W1-T3388: the workflow checks out the PR's OWN head sha, so the subject an
   const checkoutRef = workflow.indexOf("github.event.pull_request.head.sha");
   assert.ok(checkoutRef > -1 && checkoutRef < gateStep, "the pinned ref must precede the gate step it feeds");
 });
+
+// ── an "Update branch" merge must not erase the head's declared identity ──────────────────────────
+//
+// TWO-PART DEFECT, and the checkout pin only fixed the first part. A `pull_request` event lands on
+// GitHub's synthetic merge commit, so `git log -1` read "Merge <sha> into <sha>" — fixed by pinning the
+// checkout to the event head sha. But pressing "Update branch" merges base INTO the branch, so the head
+// becomes `Merge branch 'main' into <branch>`, equally unable to carry a subject or trailer. Three PRs
+// (#5342, #5367, #5372) were refused at 12:35Z, forty-seven minutes AFTER that fix landed at 11:48:34Z,
+// purely because their branches had been updated.
+test("W1-T3388: readHeadCommitMessage skips merges and stays on the branch's own line", () => {
+  const src = readFileSync(join(REPO_ROOT, "scripts", "head-identity-gate.mjs"), "utf8");
+  // BOTH flags, and `--no-merges` alone is the dangerous half: without `--first-parent`, git walks BOTH
+  // parents in date order and returns a commit off MAIN, letting an unrelated PR's subject or trailer
+  // satisfy this gate for a head that declared nothing. Measured on chore/file-w1-t3512-fast-lane:
+  //   --no-merges                -> "chore(feedback): land pending filings (#5380)"   (main's)
+  //   --first-parent --no-merges -> "chore(plan): file the ten source-only gates ..."  (the branch's)
+  assert.match(src, /"--first-parent"/, "without --first-parent the walk can return a commit off main");
+  assert.match(src, /"--no-merges"/, "without --no-merges an Update-branch merge erases the declared identity");
+  const call = /git\(\["log",\s*"-1",([^\]]*)\]/.exec(src);
+  assert.ok(call, "the head-message read must still be a single `git log -1` call");
+  assert.ok(
+    call[1].includes("--first-parent") && call[1].includes("--no-merges"),
+    `both flags must be on the SAME call; saw: ${call?.[1]?.trim()}`,
+  );
+});
