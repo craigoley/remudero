@@ -1439,6 +1439,7 @@
     "test/w1-t187-end-to-end.test.ts": 1241,
     "test/w1-t187-equivalence.test.ts": 3773,
     "test/w1-t187-invocation-count.test.ts": 1038,
+    "test/w1-t370-ruling-content.test.ts": 0,
     "test/what-a-worker-loads.test.ts": 1772,
     "test/window-share-recommender-input.test.ts": 1127,
     "test/wipe-test-arm-isolation.test.ts": 1373,
