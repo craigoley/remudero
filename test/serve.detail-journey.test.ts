@@ -213,6 +213,12 @@ test("clicking a task row expands its own card INLINE, directly beneath that row
       await reachSection(page, "recent"); // this whole suite's rows all live in "recent"
       await page.waitForFunction(() => (document.querySelector("#recent-list")?.textContent ?? "").includes("W1-T2"));
 
+      // A visible row is the premise of this interaction assertion: a browser is allowed to
+      // scroll an off-screen target into view before dispatching its click. Feed can gain new
+      // record sections, so establish that premise explicitly rather than treating an old page
+      // height as part of the no-jump contract.
+      await page.locator('#recent-list li[data-task-id="W1-T2"]').scrollIntoViewIfNeeded();
+
       const rowTopBefore = await page.evaluate(
         () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')!.getBoundingClientRect().top,
       );
@@ -384,6 +390,12 @@ test("?task=<id> opens the shell with that row already expanded and scrolled int
         { timeout: 5000 },
       );
       await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("frobnicator"));
+      // `focusAndExpandTask` deliberately uses smooth scroll for a deep link. Wait for that
+      // promised end state rather than assuming the target began inside this fixture's viewport.
+      await page.waitForFunction(() => {
+        const r = document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getBoundingClientRect();
+        return r !== undefined && r.top >= 0 && r.top <= window.innerHeight;
+      });
       const inView = await page.evaluate(() => {
         const r = document.querySelector('#recent-list li[data-task-id="W1-T2"]')!.getBoundingClientRect();
         return r.top >= 0 && r.top <= window.innerHeight;

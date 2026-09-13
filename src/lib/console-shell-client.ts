@@ -31,6 +31,7 @@ import {
   formatRelative,
   formatTimestamp,
   formatClock,
+  formatAgo,
   formatElapsed,
   formatBytes,
   costLabel,
@@ -62,6 +63,7 @@ import {
   needsMeBacklogSummaryText,
   upNextSummaryText,
   recentSummaryText,
+  changeManagementSummaryText,
   acceptedSummaryText,
   restSummaryText,
   selfMeasurementRowHtml,
@@ -391,7 +393,8 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   }
 
   // ── the five-state status color taxonomy (W1-T153 design system) — ONE mapping, reused
-  // everywhere a task's state renders (NOW/NEEDS ME/UP NEXT/RECENT/rest), never re-derived. ──
+  // everywhere a task's state renders (NOW/NEEDS ME/CHANGE MANAGEMENT/UP NEXT/RECENT/rest),
+  // never re-derived. ──
   const STATUS_LABELS = { running: "running", blocked: "blocked", "needs-human": "needs human", merged: "merged", queued: "queued" };
   function statusBadge(key) {
     return `<span class="status-dot status-${key}" aria-hidden="true"></span><span class="status-label status-${key}">${STATUS_LABELS[key]}</span>`;
@@ -676,7 +679,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   const BASE_TITLE = document.title;
   const NEEDS_ME_STALE_MS = 24 * 60 * 60 * 1000; // criterion 3's ">24h" anomaly-emphasis bound
 
-  // ── W1-T223: SECTION COLLAPSE + SUMMARY -- every one of the five sections collapses, and its
+  // ── W1-T223: SECTION COLLAPSE + SUMMARY -- every one of the routed sections collapses, and its
   // header carries an ALWAYS-VISIBLE one-line summary derived from the SAME array its own
   // render*() below already built the rows from (never a second query over tasksById/latest* --
   // standing rule 22: a header claiming a different count than its own rows is a surface
@@ -687,9 +690,9 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   // defaults ONCE per page load to collapsed iff it is genuinely empty at that point (this is the
   // whole of "NEEDS ME auto-expands when non-empty" -- it is not a special case, just this same
   // rule applied to the one section that is rarely empty on a busy fleet). ──────────────────────
-  const SECTION_IDS = ["now", "inbox", "accepted", "up-next", "recent", "rest"];
-  const SECTION_BODY_ID = { now: "now-body", inbox: "inbox-body", accepted: "accepted-body", "up-next": "up-next-body", recent: "recent-body", rest: "rest-detail" };
-  const SECTION_TOGGLE_ID = { now: "now-toggle", inbox: "inbox-toggle", accepted: "accepted-toggle", "up-next": "up-next-toggle", recent: "recent-toggle", rest: "rest-toggle" };
+  const SECTION_IDS = ["now", "inbox", "change-management", "accepted", "up-next", "recent", "rest"];
+  const SECTION_BODY_ID = { now: "now-body", inbox: "inbox-body", "change-management": "change-management-body", accepted: "accepted-body", "up-next": "up-next-body", recent: "recent-body", rest: "rest-detail" };
+  const SECTION_TOGGLE_ID = { now: "now-toggle", inbox: "inbox-toggle", "change-management": "change-management-toggle", accepted: "accepted-toggle", "up-next": "up-next-toggle", recent: "recent-toggle", rest: "rest-toggle" };
   const SECTION_PREFS_KEY = "rmd-console-sections-v1";
   function loadSectionPrefs() {
     try {
@@ -847,7 +850,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     }
   }
 
-  /** Repaints the task-driven sections (NOW/NEEDS ME/ACCEPTED/UP NEXT/RECENT/rest) from
+  /** Repaints the task-driven sections (NOW/NEEDS ME/CHANGE MANAGEMENT/ACCEPTED/UP NEXT/RECENT/rest) from
    *  `tasksById` + the latest cached feedback/inbox/up-next/recent data -- the ONE function an
    *  SSE delta, a poll snapshot, AND the cache-restore path all funnel through, so they can never
    *  drift into different rendering codepaths. Every section render below is keyed/reconciled
@@ -860,10 +863,11 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     renderMergeHoldControls();
     renderPrQueue(latestPrQueue);
     renderMailbox(tasks, latestFeedbackEntries, latestInboxDigests);
+    const changeManagementIds = renderChangeManagement(tasks, latestRecentEntries);
     renderAccepted(latestFeedbackEntries);
     const upNextIds = renderUpNext(latestUpNextCards);
     const recentIds = renderRecent(latestRecentEntries);
-    renderRest(tasks, new Set([...nowIds, ...needsMeIds, ...upNextIds, ...recentIds]));
+    renderRest(tasks, new Set([...nowIds, ...needsMeIds, ...changeManagementIds, ...upNextIds, ...recentIds]));
     updateGithubBanner(tasks);
     document.getElementById("summary").textContent = summaryText(tasks);
   }
@@ -1996,6 +2000,53 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     return new Set(list.map((e) => e.taskId));
   }
 
+  // ── CHANGE MANAGEMENT — the RECORD side of the ASK/RECORD split (W1-T3396) ───────────────
+  function recordRow(classifierItem, key, html, extra) {
+    if (classifyAskRecordItem(classifierItem) !== "RECORD") return null;
+    return { key, html, ...extra };
+  }
+
+  function changeManagementOutcome(e) {
+    if (e.verb === "merged") return "merged";
+    if (e.verb === "escalated") return "escalated";
+    if (e.verb === "verdict") return "blocked";
+    return null;
+  }
+
+  function changeManagementEscalationHtml(t) {
+    const detail = t.escalationTitle ? `resolved escalation: ${escapeHtml(t.escalationTitle)}` : "resolved escalation";
+    const issue = t.escalationIssueUrl
+      ? ` · <a href="${escapeHtml(t.escalationIssueUrl)}" target="_blank" rel="noopener noreferrer">issue</a>`
+      : "";
+    return (
+      `${statusBadge("merged")}<span class="task-id">${escapeHtml(t.taskId)}</span>` +
+      `<span class="detail">${detail}${issue}</span>` +
+      rowChevronHtml()
+    );
+  }
+
+  function changeManagementRowHtml(e) {
+    return recentRowHtml(e);
+  }
+
+  function renderChangeManagement(tasks, recentEntries) {
+    const rows = [];
+    for (const e of recentEntries ?? []) {
+      const outcome = changeManagementOutcome(e);
+      if (!outcome) continue;
+      const row = recordRow({ kind: "rundown", outcome }, `cm-recent:${e.taskId}:${e.ts}:${rows.length}`, changeManagementRowHtml(e), { taskId: e.taskId, ts: e.ts });
+      if (row) rows.push(row);
+    }
+    for (const t of tasks ?? []) {
+      if (!t.escalationTitle || t.needsHuman === true) continue;
+      const row = recordRow({ kind: "escalation", resolved: true }, `cm-escalation:${t.taskId}`, changeManagementEscalationHtml(t), { taskId: t.taskId, ts: t.escalationOpenedAt ?? t.lastActivityAt ?? t.startedAt });
+      if (row) rows.push(row);
+    }
+    reconcileRows(document.getElementById("change-management-list"), rows, "no lifecycle outcomes yet");
+    finishSectionRender("change-management", rows.length === 0, () => changeManagementSummaryText(rows));
+    return new Set(rows.map((r) => r.taskId).filter((id) => id !== undefined));
+  }
+
   // ── W1-T163: "since you last checked" — a ONE-TIME recap, rendered off THIS page load's
   // FIRST /v1/status response and never again (see refreshAll's `recapRendered` gate, below).
   // Every subsequent poll's own `recap` field reflects an ALREADY-ADVANCED marker (board.ts
@@ -2238,6 +2289,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
   wireSectionToggle("rest", () => renderFindView());
   wireSectionToggle("now");
   wireSectionToggle("inbox");
+  wireSectionToggle("change-management");
   wireSectionToggle("accepted");
   wireSectionToggle("up-next");
   wireSectionToggle("recent");
@@ -2308,6 +2360,7 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     "up-next": "now",
     controls: "now",
     recap: "feed",
+    "change-management": "feed",
     accepted: "feed",
     recent: "feed",
     rest: "feed",
@@ -3419,7 +3472,16 @@ export function bootConsoleShellClient(phaseElapsedThresholdsMs, resolveFreshnes
     expandRow(row, key, taskId);
   }
   function findRowByTaskId(taskId) {
-    return document.querySelector(`.row[data-task-id="${CSS.escape(taskId)}"]`);
+    const rowSelector = `.row[data-task-id="${CSS.escape(taskId)}"]`;
+    // A lifecycle RECORD may legitimately repeat a task already represented by its live/recency
+    // row. Do not let CHANGE MANAGEMENT's earlier document position silently retarget old task
+    // links: preserve the established actionable/recency priority, then fall back to any future
+    // row surface the priority table does not yet name.
+    for (const listId of ["now-list", "inbox-list", "up-next-list", "recent-list", "rest-list", "change-management-list", "accepted-list"]) {
+      const row = document.querySelector(`#${listId} ${rowSelector}`);
+      if (row) return row;
+    }
+    return document.querySelector(rowSelector);
   }
   /**
    * A dependency link / journey task link / `?task=<id>` deep link all land here: find that
