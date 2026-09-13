@@ -765,6 +765,7 @@ const CAPTURE_MIN_FIRES = 3;
 
 type CaptureState = "fresh" | "stale" | "never";
 
+/** PRIMARY CONTROL: the marker keeps enough weekly fires to judge, but never grows as a ledger. */
 export const CAPTURE_SURFACE_FIRE_HISTORY_LIMIT = 12;
 
 export interface CaptureSurfaceFireRecord extends Record<string, unknown> {

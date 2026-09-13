@@ -503,6 +503,7 @@ export function readCaptureSurfaceFireHistory(root: string): Array<Record<string
   try {
     return parseCaptureSurfaceFireHistory(JSON.parse(readFileSync(markerPath, "utf8")) as unknown);
   } catch (e) {
+    // Corrupt marker JSON reads as no retained capture-surface history, not as live-ledger evidence.
     void e;
     return [];
   }

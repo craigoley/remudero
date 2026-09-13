@@ -2956,6 +2956,7 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
     }).trim();
     return subject.length > 0 ? subject : undefined;
   } catch (e) {
+    // Corrupt marker JSON fails open to a new retained-history window; cadence parsing is separate.
     void e;
     return undefined;
   }
