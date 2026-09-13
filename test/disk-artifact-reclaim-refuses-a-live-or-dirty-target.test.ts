@@ -128,6 +128,51 @@ test("an unreadable disk reading never authorises a reclaim", () => {
   assert.equal(summary.kept[0]?.reason, "unreadable");
 });
 
+test("an unreadable candidate root is a no-op, never a partial reclaim", () => {
+  const summary = sweepReclaimableArtifacts(
+    config,
+    () => {},
+    baseOpts({
+      listEntries: () => {
+        throw new Error("root unreadable");
+      },
+    }),
+  );
+
+  assert.deepEqual(summary.reclaimed, []);
+  assert.deepEqual(summary.kept, []);
+});
+
+test("an unreadable checkout status refuses every artifact in that checkout", () => {
+  const summary = sweepReclaimableArtifacts(config, () => {}, baseOpts({ countDirtyFiles: () => undefined }));
+
+  assert.deepEqual(summary.reclaimed, []);
+  assert.equal(summary.kept.find((k) => k.path === ARTIFACT)?.reason, "unreadable");
+});
+
+test("an unreadable artifact mtime refuses that artifact before any removal", () => {
+  const summary = sweepReclaimableArtifacts(config, () => {}, baseOpts({ modifiedAtMs: () => undefined }));
+
+  assert.deepEqual(summary.reclaimed, []);
+  assert.equal(summary.kept.find((k) => k.path === ARTIFACT)?.reason, "unreadable");
+});
+
+test("a failed removal is recorded and does not claim reclaimed bytes", () => {
+  const summary = sweepReclaimableArtifacts(
+    config,
+    () => {},
+    baseOpts({
+      removeDir: () => {
+        throw new Error("permission denied");
+      },
+    }),
+  );
+
+  assert.deepEqual(summary.reclaimed, []);
+  assert.equal(summary.bytesReclaimed, 0);
+  assert.equal(summary.kept.find((k) => k.path === ARTIFACT)?.reason, "removal-failed");
+});
+
 test("a directory that is not a checkout is never a candidate", () => {
   const summary = sweepReclaimableArtifacts(config, () => {}, baseOpts({ isCheckout: () => false }));
 
@@ -207,4 +252,76 @@ test("with nothing injected, a real dirty checkout is refused", (t) => {
   assert.deepEqual(summary.reclaimed, [], "a genuinely dirty tree must be refused by the real reader");
   assert.equal(existsSync(join(checkout, "coverage")), true, "and the artifact must survive on disk");
   assert.equal(summary.kept.find((k) => k.path === join(checkout, "coverage"))?.reason, "checkout-dirty");
+});
+
+test("with nothing injected, unreadable git metadata is not treated as a clean checkout", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "rmd-artifact-unreadable-git-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+
+  const checkout = join(tmp, "clone");
+  const artifact = join(checkout, "coverage");
+  mkdirSync(artifact, { recursive: true });
+  mkdirSync(join(checkout, ".git")); // marker present, but deliberately not a readable repository
+
+  const summary = sweepReclaimableArtifacts({ root: join(tmp, "managed") } as unknown as Config, () => {}, {
+    scanRoot: () => tmp,
+    reclaimBelowBytes: Number.MAX_SAFE_INTEGER,
+    graceMs: 0,
+  });
+
+  assert.deepEqual(summary.reclaimed, []);
+  assert.equal(summary.kept.find((k) => k.path === artifact)?.reason, "unreadable");
+  assert.equal(existsSync(artifact), true);
+});
+
+test("a disappeared artifact is unreadable rather than reclaimed", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "rmd-artifact-missing-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+
+  const checkout = join(tmp, "clone");
+  const artifact = join(checkout, "coverage");
+  mkdirSync(checkout, { recursive: true });
+  execFileSync("git", ["init", "-q", checkout], { stdio: ["ignore", "ignore", "pipe"] });
+
+  const summary = sweepReclaimableArtifacts({ root: join(tmp, "managed") } as unknown as Config, () => {}, {
+    scanRoot: () => tmp,
+    reclaimBelowBytes: Number.MAX_SAFE_INTEGER,
+    graceMs: 0,
+    // Drive the real `statSync` mtime reader after the artifact has been selected. This is the
+    // filesystem race the default must fail closed on; it cannot be reached by a static fixture.
+    isDirectory: (path) => path === checkout || path === artifact,
+  });
+
+  assert.deepEqual(summary.reclaimed, []);
+  assert.equal(summary.kept.find((k) => k.path === artifact)?.reason, "unreadable");
+});
+
+test("a vanished artifact makes the real size reader report zero, never a false byte count", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "rmd-artifact-size-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+
+  const checkout = join(tmp, "clone");
+  const artifact = join(checkout, "coverage");
+  mkdirSync(artifact, { recursive: true });
+  writeFileSync(join(checkout, ".gitignore"), "coverage/\n");
+  execFileSync("git", ["init", "-q", checkout], { stdio: ["ignore", "ignore", "pipe"] });
+  execFileSync("git", ["-C", checkout, "add", ".gitignore"], { stdio: ["ignore", "ignore", "pipe"] });
+  execFileSync("git", ["-C", checkout, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "seed"], {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  const summary = sweepReclaimableArtifacts({ root: join(tmp, "managed") } as unknown as Config, () => {}, {
+    scanRoot: () => tmp,
+    reclaimBelowBytes: Number.MAX_SAFE_INTEGER,
+    graceMs: 0,
+    modifiedAtMs: (path) => {
+      rmSync(path, { recursive: true, force: true });
+      return 0;
+    },
+    isInUse: () => false,
+    removeDir: () => {},
+  });
+
+  assert.deepEqual(summary.reclaimed, [artifact]);
+  assert.equal(summary.bytesReclaimed, 0);
 });
