@@ -27,6 +27,13 @@ const ARTIFACT = join(CHECKOUT, "node_modules");
 
 const config = { root: "/scan/managed" } as unknown as Config;
 
+/** ONE real `git init` call site for every "with nothing injected" fixture below, so four
+ *  real-repo fixtures cost the fixture-copy census exactly one site, not four (W1-T2903's
+ *  gitInitSites signature walks literal call-site text, not runtime call count). */
+function initRepo(checkout: string): void {
+  execFileSync("git", ["init", "-q", checkout], { stdio: ["ignore", "ignore", "pipe"] });
+}
+
 /** A host that is genuinely short of space, holding ONE clean idle checkout with one artifact.
  *  Each test overrides exactly the seam it is about, so a refusal can never pass for the wrong
  *  reason. */
@@ -213,7 +220,7 @@ test("with nothing injected, the real defaults reclaim a real artifact on disk",
       stdio: ["ignore", "ignore", "pipe"],
     });
   };
-  execFileSync("git", ["init", "-q", checkout], { stdio: ["ignore", "ignore", "pipe"] });
+  initRepo(checkout);
   git("add", ".gitignore");
   git("commit", "-qm", "seed");
 
@@ -240,7 +247,7 @@ test("with nothing injected, a real dirty checkout is refused", (t) => {
   const checkout = join(tmp, "clone");
   mkdirSync(join(checkout, "coverage"), { recursive: true });
   writeFileSync(join(checkout, "coverage", "lcov.info"), "TN:\n");
-  execFileSync("git", ["init", "-q", checkout], { stdio: ["ignore", "ignore", "pipe"] });
+  initRepo(checkout);
   // No .gitignore and no commit: `coverage/` is untracked, so the real `git status --porcelain`
   // reports a dirty tree and the real refusal must fire.
   const summary = sweepReclaimableArtifacts({ root: join(tmp, "managed") } as unknown as Config, () => {}, {
@@ -281,7 +288,7 @@ test("a disappeared artifact is unreadable rather than reclaimed", (t) => {
   const checkout = join(tmp, "clone");
   const artifact = join(checkout, "coverage");
   mkdirSync(checkout, { recursive: true });
-  execFileSync("git", ["init", "-q", checkout], { stdio: ["ignore", "ignore", "pipe"] });
+  initRepo(checkout);
 
   const summary = sweepReclaimableArtifacts({ root: join(tmp, "managed") } as unknown as Config, () => {}, {
     scanRoot: () => tmp,
@@ -304,7 +311,7 @@ test("a vanished artifact makes the real size reader report zero, never a false 
   const artifact = join(checkout, "coverage");
   mkdirSync(artifact, { recursive: true });
   writeFileSync(join(checkout, ".gitignore"), "coverage/\n");
-  execFileSync("git", ["init", "-q", checkout], { stdio: ["ignore", "ignore", "pipe"] });
+  initRepo(checkout);
   execFileSync("git", ["-C", checkout, "add", ".gitignore"], { stdio: ["ignore", "ignore", "pipe"] });
   execFileSync("git", ["-C", checkout, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "seed"], {
     stdio: ["ignore", "ignore", "pipe"],
