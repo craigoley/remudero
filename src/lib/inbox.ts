@@ -307,6 +307,26 @@ export function deriveTaskReferent(proposalId: string): string | undefined {
   return /^(?:proof-debt|verify-human):([A-Za-z0-9][A-Za-z0-9-]*?)(?::\d+)?$/.exec(proposalId)?.[1];
 }
 
+/**
+ * W1-T3511 — THE CONSOLIDATED SUCCESSOR that supersedes a finer-grained predecessor, if one exists.
+ *
+ * W1-T3385b regrouped proof-debt from one proposal per CRITERION to one per TASK. That changed what
+ * gets MINTED and nothing else: the predecessors it supersedes stayed in the registry, open, because
+ * they carry different ids and nothing retires them. MEASURED 2026-09-13, two days after that rule
+ * shipped: 22 per-criterion proposals still open against 1 per-task successor, and the operator
+ * inbox had GROWN, 139 -> 143. A consolidation rule that only filters new mints cannot shrink an
+ * existing backlog — it can only stop it growing faster.
+ *
+ * ID-SHAPE ONLY, and deliberately narrow: `proof-debt:<task>:<n>` is a strict refinement of
+ * `proof-debt:<task>`, so the relationship is derivable with no similarity score and no guess. The
+ * skill-draft consolidation (W1-T3385c) has no such relationship — its old ids hash a RUN SET and
+ * its new ones a procedure, with no textual path between them — so it is deliberately not covered
+ * here and its predecessors still need a separate disposition.
+ */
+export function supersedingProposalId(proposalId: string): string | undefined {
+  return /^(proof-debt:[A-Za-z0-9][A-Za-z0-9-]*):\d+$/.exec(proposalId)?.[1];
+}
+
 /** Whether a task-referent proposal's own task has merged. `undefined` means NO OPINION — the id
  *  carries no task, or the plan does not hold it — never a false retirement. */
 function taskReferentMerged(proposal: Proposal, ctx: ReadinessContext): string | undefined {
@@ -887,6 +907,21 @@ export function classifyProposal(
   // W1-T3385: the same terminal override, for a proposal whose referent is a PLAN TASK rather than a
   // board item. Checked HERE, beside its sibling, so both resolutions read together and neither can
   // be reached only through the draft rung — these proposals already HAVE drafts.
+  // W1-T3511: a predecessor retires once its CONSOLIDATED successor is open. Checked beside the
+  // other terminal overrides, and gated on the successor being genuinely open — `openProposalIds`
+  // is every registry id, so a DECLINED successor must not retire the finding it was meant to carry.
+  const successor = supersedingProposalId(proposal.id);
+  if (successor !== undefined && ctx.openProposalIds.has(successor) && ctx.isDeclined?.(successor) === undefined) {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason:
+        `${proposal.id} is superseded by ${successor}, which carries every criterion of that task as ` +
+        `its own evidence anchor (W1-T3385b). The finding is not dropped — it moved to the one ask an ` +
+        `operator actually decides in; this row stays in the registry as a record, never deleted`,
+    };
+  }
   const mergedTaskReferent = taskReferentMerged(proposal, ctx);
   if (mergedTaskReferent !== undefined) {
     return {
