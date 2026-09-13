@@ -1186,20 +1186,25 @@ function startInFlightTicker(
     stop: async (generation) => {
       if (inFlightTickerOwner !== owner || owner.generation !== generation) return;
       owner.active = false;
-      // A light pass is best-effort and may outlive the full sweep it rode. Waiting for it here
-      // turns the sweep's wall-clock bound into an unbounded wait and can prevent the next
-      // top-of-loop freshness check. Keep this owner claimed until its ticker really settles, so
-      // a successor never starts a second in-flight ticker while the first pass is still running.
-      const release = () => {
-        if (inFlightTickerOwner === owner && owner.generation === generation) inFlightTickerOwner = undefined;
-      };
+      // Release the global slot THE INSTANT this stop is accepted, never deferred until the
+      // ticker's own loop notices `active = false` and its outstanding iteration finishes. A
+      // deferred release was tried and reverted (W1-T2744's own review-clock test caught it): the
+      // very next phase transition (an abandoned sweep's dispatch ticker, or the interphase clock)
+      // runs essentially back-to-back with this stop, reads the slot as still occupied, and is
+      // silently no-op'd for that whole phase -- no heartbeat, no light pass, nothing to release a
+      // runOne that is itself waiting on that light pass. A light pass is best-effort and may
+      // outlive the full sweep it rode; AWAITING it here turns the sweep's wall-clock bound into
+      // an unbounded wait, which is the other half of the same defect this stop must not
+      // reintroduce.
+      inFlightTickerOwner = undefined;
+      // The now-orphaned ticker cannot start a SECOND iteration on its own: `while (owner.active)`
+      // and the post-sleep `if (!owner.active) break` both already read false, so at most the one
+      // call already in flight (if any) is left to finish, tracked here only so its eventual
+      // failure is logged rather than becoming an unhandled rejection.
       if (owner.ticker) {
-        void owner.ticker.then(release, (e) => {
-          release();
+        void owner.ticker.catch((e) => {
           log("daemon.in_flight_ticker.failed", { phase: owner.phase, error: String((e as Error)?.message ?? e) });
         });
-      } else {
-        release();
       }
     },
   };
