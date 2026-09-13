@@ -1,0 +1,27 @@
+id: fb-1789304800826-670f46
+ts: 2026-09-13T13:06:40.826Z
+raw: "Operator decision confirmed: implement the cross-repository proof-suite
+  registry that unblocks private remudero-site PR #8 (PORTAL-T1); do not add a
+  global tests/ root. Key closed profiles by resolved canonical owner/repo.
+  Preserve the existing craigoley/remudero Node test/ and dashboard Vitest
+  apps/dashboard/src/ direct-path argv byte-for-byte. Add
+  craigoley/remudero-site: root tests/, checkout-local pinned Vitest, no forced
+  config path. Thread the resolved target profile through parser, lint,
+  candidate discovery, base-proof copy, and execution so unregistered targets
+  refuse rather than inherit a runner. For bare Vitest title proofs, use
+  runner-specific machine-readable parsing: Vitest 5.0.0 exits zero when every
+  test is skipped, so require an actually selected non-skipped leaf test;
+  classify all-skipped as no-match, selected failure as fail, and truncated
+  output as inconclusive. Test direct portal file, exact title pass, absent
+  title zero-exit refusal, failure, truncation, containment, and existing core
+  argv stability. Then rerun semantic review for remudero-site PR #8 and require
+  observed remudero-review=SUCCESS without changing PORTAL-T1 acceptance text."
+attachments: []
+origin: ui
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: proof-suite-profile-registry-20260913
+thread_id: null
