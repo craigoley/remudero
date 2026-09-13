@@ -23,10 +23,11 @@ raw: "Priority site-review integration after PR #5410: OBSERVED at origin/main
   integration and #5410 have actually merged."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
