@@ -109,6 +109,7 @@
   "scripts/no-hand-rolled-fetch-check.mjs": 32,
   "scripts/plan-state-claims.mjs": 60,
   "scripts/prompt-surface-gate.mjs": 250,
+  "scripts/proof-discrimination-baseline.json": 250,
   "scripts/proof-discrimination-gate.mjs": 250,
   "scripts/recovery-drill.mjs": 148,
   "scripts/rmd-help.mjs": 250,
