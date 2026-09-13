@@ -85,6 +85,7 @@
   "scripts/generate-proof-dialect.mjs": 250,
   "scripts/gh-transport-baseline.json": 250,
   "scripts/git-credential-socket-helper.mjs": 12,
+  "scripts/head-identity-gate.mjs": 250,
   "scripts/host-parity.ts": 86,
   "scripts/knowledge-budget-baseline.json": 0,
   "scripts/learnings-assert-check.mjs": 57,
