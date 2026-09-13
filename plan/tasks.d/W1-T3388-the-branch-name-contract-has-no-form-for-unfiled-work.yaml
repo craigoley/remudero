@@ -39,8 +39,6 @@
 
   acceptance:
     - claim: "a head matching neither the run-branch shape nor a valid trailer is refused at open, naming both conforming forms"
-      proof: "unit test: W1-T3388 criterion 1 refuses an unidentified head and names both forms"
+      proof: "unit test: test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts"
     - claim: "the naming contract reaches the dispatched worker through its rendered prompt, not only through CLAUDE.md"
-      proof: "unit test: W1-T3388: BRANCH_NAME_CONTRACT_PART names both conforming forms"
-    - claim: "the head-identity check runs on every pull request and is required by the aggregate gate"
-      proof: "unit test: W1-T3388: the head-identity gate runs on every PR and ci-gate requires its exact check name"
+      proof: "unit test: test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts"
