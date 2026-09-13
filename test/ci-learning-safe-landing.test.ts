@@ -8,7 +8,11 @@ import { test } from "node:test";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { CI_LEARNING_LANDING_BRANCH, landCiLearningShards } from "../src/lib/feedback-landing.js";
 import { buildCiLearningCadenceRunner, ciLearningCommand } from "../src/run-task.js";
-import type { CiLearningShardDraft } from "../src/lib/measurement-cadence.js";
+import {
+  ciLearningRecordVerdict,
+  ciLearningShardYaml,
+  type CiLearningShardDraft,
+} from "../src/lib/measurement-cadence.js";
 
 const GIT_ENV = {
   ...process.env,
@@ -173,6 +177,8 @@ test("W1-T3492 criterion 2: pending CI-learning bytes survive transport failure,
       stateRoot: root,
       mintTaskId: () => "W1-T9002",
       planOrigins: [],
+      renderShard: ciLearningShardYaml,
+      recordVerdict: ciLearningRecordVerdict,
       gh,
       git: failingPushGit,
     }),
@@ -188,6 +194,8 @@ test("W1-T3492 criterion 2: pending CI-learning bytes survive transport failure,
         throw new Error("retry must reuse the staged task id");
       },
       planOrigins: [],
+      renderShard: ciLearningShardYaml,
+      recordVerdict: ciLearningRecordVerdict,
       gh,
     }),
   );
@@ -206,6 +214,8 @@ test("W1-T3492 criterion 2: pending CI-learning bytes survive transport failure,
         throw new Error("acknowledgement must not mint");
       },
       planOrigins: [],
+      renderShard: ciLearningShardYaml,
+      recordVerdict: ciLearningRecordVerdict,
       gh,
     }),
   );

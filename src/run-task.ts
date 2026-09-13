@@ -809,6 +809,8 @@ import {
   type CiLearningCadencePolicy,
   type CiLearningCadenceRunResult,
   measurementCadenceMarkerPath,
+  ciLearningRecordVerdict,
+  ciLearningShardYaml,
   fileCiLearningShards,
   mintCiLearningShards,
   readMeasurementCadenceMarker,
@@ -26591,6 +26593,8 @@ export function buildCiLearningCadenceRunner(deps: {
               stateRoot: deps.root,
               mintTaskId,
               planOrigins: idempotencyOrigins,
+              renderShard: ciLearningShardYaml,
+              recordVerdict: ciLearningRecordVerdict,
             });
         filed = filing.filed.length;
         skipped = filing.skipped.length;

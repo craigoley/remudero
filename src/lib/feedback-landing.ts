@@ -32,16 +32,42 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { automergeHoldFromLedger } from "./review.js";
-import {
-  ciLearningRecordVerdict,
-  ciLearningShardYaml,
-  type CiLearningFiledShard,
-  type CiLearningFilingDeps,
-  type CiLearningFilingResult,
-  type CiLearningShardDraft,
-} from "./measurement-cadence.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
+
+/**
+ * Mirrors measurement-cadence.ts's `CiLearningShardDraft`/`CiLearningFiledShard`/
+ * `CiLearningFilingResult`, defined LOCALLY rather than imported (W1-T3492): measurement-cadence.ts
+ * already reaches this module via `task-linter -> plan-architect -> escalate -> feedback ->
+ * feedback-landing`, so importing it here — even `import type` — closes that chain into the cycle
+ * `.dependency-cruiser.cjs`'s `no-circular` rule holds at zero. Structural typing keeps every real
+ * caller (run-task.ts, which imports both modules) type-compatible with no cast at the call site.
+ */
+export interface CiLearningShardDraft {
+  findingId: string;
+  title: string;
+  gate: string;
+  pr: number;
+  prs: number[];
+  repairFiles: string[];
+  dominantRepairFiles: { file: string; prs: number }[];
+  action?: "gate" | "docs" | "build" | "unclear";
+  author_class: "machine";
+  verify: "human";
+  remedySurface: string;
+}
+
+export interface CiLearningFiledShard {
+  relPath: string;
+  taskId: string;
+  findingId: string;
+}
+
+export interface CiLearningFilingResult {
+  filed: CiLearningFiledShard[];
+  skipped: string[];
+  refused: { findingId: string; reason: string }[];
+}
 
 const FEEDBACK_REL_DIR = "plan/feedback";
 
@@ -786,8 +812,19 @@ function acknowledgeMergedCiLearningShards(stateRoot: string, git: GitExec): voi
 export interface LandCiLearningShardsDeps extends LandFeedbackOpts {
   /** Daemon state root; staged shards live under `state/ci-learning-pending`, never the checkout. */
   stateRoot: string;
-  mintTaskId: CiLearningFilingDeps["mintTaskId"];
-  planOrigins: CiLearningFilingDeps["planOrigins"];
+  /** THE RESERVATION PATH (task-id-reservation.ts), never `max(id)+1`. */
+  mintTaskId: () => string;
+  /** Every `origin:` the plan ALREADY holds. */
+  planOrigins: readonly string[];
+  /** Render one draft as the shard's YAML bytes. INJECTED rather than imported from
+   *  measurement-cadence.ts's `ciLearningShardYaml` — see the cycle note on
+   *  {@link CiLearningShardDraft} above. run-task.ts passes the real renderer for both the
+   *  scheduled and directly-tested paths. */
+  renderShard: (draft: CiLearningShardDraft, taskId: string) => string;
+  /** Parse the rendered bytes back and lint them before they are staged. INJECTED for the same
+   *  cycle reason as `renderShard`; the real, lint-backed verdict is
+   *  measurement-cadence.ts's `ciLearningRecordVerdict`. */
+  recordVerdict: (contents: string, label: string) => { ok: boolean; reason: string };
 }
 
 /** Stage CI-learning shards in daemon state, then land that durable queue via a gated PR. */
@@ -814,8 +851,8 @@ export function landCiLearningShards(
       continue;
     }
     const taskId = deps.mintTaskId();
-    const content = ciLearningShardYaml(draft, taskId);
-    const verdict = ciLearningRecordVerdict(content, `ci-learning:${taskId}`);
+    const content = deps.renderShard(draft, taskId);
+    const verdict = deps.recordVerdict(content, `ci-learning:${taskId}`);
     if (!verdict.ok) {
       refused.push({ findingId: draft.findingId, reason: verdict.reason });
       continue;
