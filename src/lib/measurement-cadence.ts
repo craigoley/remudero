@@ -1216,6 +1216,11 @@ export function readAdoptionLatest(path: string): AdoptionLatest | undefined {
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch {
+    // DELIBERATE, and the erasure is the correct answer here: absent, unreadable and malformed all
+    // mean the same thing to this reader — there is no measurement to retire anything against. The
+    // distinction would be actionable only if a present-but-corrupt record deserved a louder fate
+    // than a missing one, and it does not: both must yield "no opinion", because the alternative is
+    // retiring the entire adoption backlog on a file that could not be read.
     return undefined;
   }
   if (typeof parsed !== "object" || parsed === null) return undefined;
