@@ -1,0 +1,32 @@
+id: fb-1789312874382-b6f4b1
+ts: 2026-09-13T15:21:14.382Z
+raw: "Priority site-review integration after PR #5410: OBSERVED at origin/main
+  src/run-task.ts:5317-5333, runReview calls judgeReview with ReviewEvidence
+  that omits target. OBSERVED at src/run-task.ts:5119, runReview already
+  receives owner and repo, and at 9512-9533 re-reviews already forward owner and
+  repo. PR #5410 adds the closed owner/repo proof-suite registry but cannot
+  alter production behavior until this call adds target: { owner: args.owner,
+  repo: args.repo }. Implement this as a narrow successor after #5410 merges,
+  with tests covering both direct rmd review and re-review/fix-rung evidence
+  construction so craigoley/remudero-site selects only its registered tests/
+  Vitest suite and core arguments remain byte-for-byte unchanged. Live site
+  contract verified 2026-09-13 at
+  /mnt/rmd/remudero-site-state/repos/remudero-site: origin
+  craigoley/remudero-site, package pin vitest 5.0.0,
+  tests/unit/auth-config.test.ts exists, no vite or vitest config, package
+  script is vitest run tests/unit. The successor must prove the target is not
+  re-derived from a bare repo name, an unregistered owner/repo is refused, and a
+  real site PR proof does not inherit core test/ or dashboard configuration. It
+  must not use raw Docker actions, manual GitHub merge, or change the site
+  lifecycle instance design. User priority: unblock the site daemon automated
+  review path, then recycle through the guarded script only after both this
+  integration and #5410 have actually merged."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
