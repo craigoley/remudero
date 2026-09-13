@@ -1,0 +1,54 @@
+- id: W1-T3472
+  title: "THE CAPTURE-SURFACE GATE READS THE LIVE LEDGER FILE, WHICH HOLDS NONE OF THE WEEKLY FIRES IT JUDGES — it reports '0 counted fire(s) of 0 observed' and sits permanently OK below its own threshold while the rotation union holds five"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: medium
+  origin: "operator-session#capture-gate-cannot-fire-2026-09-13"
+  plan_refs: ["W1-T3348", "W1-T1273"]
+  files: [src/lib/report-commands.ts, test/the-capture-surface-gate-reads-a-file-that-cannot-hold-its-evidence.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    A GATE THAT CANNOT REACH ITS OWN THRESHOLD IS NOT A GATE. `judgeCaptureSurfaceLiveness`
+    (src/lib/doctor.ts) judges the feedback docket's five capture surfaces from
+    `feedback_docket.empty` / `feedback_docket.published` rows, and declines to judge below
+    `CAPTURE_MIN_FIRES = 3` — correctly, since a fresh host has simply not run the weekly rung often
+    enough. It is fed `inputs.ledgerLines`, which `buildDoctorReport`'s caller in
+    src/lib/report-commands.ts resolves through `readLedgerLines(ledgerPathFor(config))`.
+    `readLedgerLines` (src/lib/status.ts) reads ONE PATH: it `existsSync`-checks that file and splits
+    it. It never opens a rotation.
+
+    MEASURED ON THE FLEET HOST 2026-09-13. Across the rotation union: `feedback_docket.empty` = 3 and
+    `feedback_docket.published` = 2, five fires in total. In the live `state/ledger.ndjson`: ZERO of
+    each. `rmd doctor` on that host prints, verbatim:
+      [OK  ] capture-surfaces   measured: 0 counted fire(s) of 0 observed
+                                threshold: every surface carries an item within 3 counted docket fires
+    Five fires exist, the gate sees none, and it reports OK because 0 < 3. The docket rung fires
+    WEEKLY while rotation moves rows out of the live file continuously, so the evidence this check
+    needs is in the archives by construction, not by accident — and the gap widens, never closes.
+
+    THIS IS THE FAILURE THE CHECK WAS BUILT TO REFUSE, WEARING THE CHECK'S OWN FACE. W1-T3348 exists
+    because `state/last-feedback-docket.json` proves only that the rung FIRED, so a cadence marker
+    reads fresh over permanently-empty surfaces forever. The gate that replaced it now reads OK over
+    an unobservable population forever. The verdict rides `buildDoctorReport` into `exitCodeFor`, so
+    what should be a non-zero exit on a dead capture loop is a clean one.
+
+    THE UNION READER ALREADY EXISTS AND IS ALREADY USED FOR EXACTLY THIS. W1-T1273 put the docket's
+    own gather on the deduplicated archive-plus-live union for this same reason. The fix is to feed
+    this check the same corpus its subject is written to, not to invent a sensor or lower the
+    threshold: a threshold lowered to fit a blind reader would certify silence.
+
+    SCOPE. Resolve the capture-surface check's input from the rotation union rather than the live
+    file alone, so the fires it counts are the fires that happened. Change `CAPTURE_MIN_FIRES`, the
+    three-state fresh/stale/never discipline and the refusal semantics not at all. Leave every other
+    `buildDoctorReport` input alone: this is one input to one check, not a doctor-wide re-plumbing.
+
+  acceptance:
+    - claim: "the capture-surface check counts docket fires that exist only in rotated archives, so a live file holding none does not read as none observed"
+      proof: "unit test: test/the-capture-surface-gate-reads-a-file-that-cannot-hold-its-evidence.test.ts"
+    - claim: "below CAPTURE_MIN_FIRES the check still declines to judge and still says so, so a fresh host is never failed on an unobserved population"
+      proof: "unit test: test/the-capture-surface-gate-reads-a-file-that-cannot-hold-its-evidence.test.ts"

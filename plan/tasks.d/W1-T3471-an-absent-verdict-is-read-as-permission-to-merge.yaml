@@ -1,0 +1,54 @@
+- id: W1-T3471
+  title: "AN ABSENT VERDICT IS READ AS PERMISSION TO MERGE — decideSweepArm returns arm:true when no review.posted row exists for the head, so a PR with NO ledgered verdict arms while an explicitly CAPPED one is refused"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  risk: high
+  origin: "operator-session#pr-5096-capped-direct-merge-2026-09-11"
+  plan_refs: ["W1-T3306", "W1-T3390"]
+  files: [src/lib/sweep.ts, test/an-absent-verdict-is-not-permission-to-merge.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE FAIL-OPEN IS ONE BRANCH AND IT INVERTS THE GATE. `decideSweepArm` (src/lib/sweep.ts) resolves
+    `postedArmFactsFromLedger(ledgerLines, armId, pr.headSha)` and, when that returns `undefined`,
+    returns `{ arm: true, reason: "no ledgered verdict recoverable for this head — arming as before
+    (no evidence to refuse on)" }`. The capped refusal in `decideAutoMergeArm` is never reached,
+    because reaching it requires the very facts whose absence just granted the arm. So the system is
+    STRICTER about a verdict that exists and says CAPPED than about no verdict at all.
+
+    MEASURED, WITH THE CALL CHAIN EXECUTED AGAINST THE REAL ROWS. PR #5096 merged at
+    2026-09-11T12:26:42Z as 370c6c066 with a `remudero-review` reading "CAPPED — 0/1 proofs executed;
+    not certified". Its full rotation-union history is 39 deduped rows and contains NO
+    `review.posted`, no `review.pending_posted`, no `review.reviewer`, no `automerge.armed`, no
+    `automerge.arm_skipped` and no direct-merge receipt. Feeding those exact 39 rows to the current
+    helpers in a disposable process: `postedArmFactsFromLedger` → `undefined`,
+    `cappedProofDiscriminationFromLedger` → `undefined`, `decideSweepArm` → `{arm: true, "no
+    ledgered verdict recoverable for this head"}`. Adding ONE synthetic capped `review.posted` at the
+    exact task+head to the SAME rows flips it to `{arm: false, "CAPPED verdict (zero proofs
+    executed)"}`. The refusal works perfectly whenever the row exists; the defect is only the default.
+
+    THE RUNTIME WAS NOT STALE, WHICH RULES OUT THE EASY EXPLANATION. The daemon run that owned #5096
+    at merge time booted on 432375bf ("fix(review): escalate structured worker refusals"), and
+    97bb8841 (#4990, W1-T3306) IS an ancestor of it. The repair that routes capped evidence to a
+    bounded fix rung was present and simply never consulted, because it keys on facts that were
+    absent.
+
+    AND `automerge.capped_override_granted` READS ZERO ACROSS THE ENTIRE UNION, so no head-bound
+    override has ever been granted on this fleet. The merge did not ride an override; it rode the
+    default.
+
+    SCOPE. Make the absent-facts branch REFUSE rather than arm: no exact task+head structured verdict
+    is not evidence of permission. Preserve every existing refusal — a CAPPED non-plan verdict still
+    cannot arm or merge without an explicit head-bound ledgered override, and a capped proof problem
+    must still create bounded repair work rather than a silent stand-down. Add no second merge
+    predicate and no queue manager: this is one branch in the predicate that already exists.
+
+  acceptance:
+    - claim: "a PR whose exact task+head carries no structured review.posted row is refused, not armed, even when GitHub reports SUCCESS"
+      proof: "unit test: test/an-absent-verdict-is-not-permission-to-merge.test.ts"
+    - claim: "a capped review.posted row at the exact task+head still refuses, so the fix is not a blanket refusal that would have passed anyway"
+      proof: "unit test: test/an-absent-verdict-is-not-permission-to-merge.test.ts"
