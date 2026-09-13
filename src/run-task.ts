@@ -349,6 +349,7 @@ import {
   type StarvationClearedInfo,
   priorUnrecognisedResetStrings,
 } from "./lib/daemon.js";
+import { sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
@@ -3775,7 +3776,7 @@ const PR_OPEN_TIME_ACCEPTANCE_FALLBACK: AcceptanceCriterion[] = [
       "this PR body carries a judgeable Acceptance block (auto-authored when the PR was opened, " +
       "because the commit-derived body carried none) — not a claim that the underlying diff is " +
       "correct, or that any task's acceptance is met",
-    proof: "acceptanceAuthorTimeCheck (src/lib/review.ts) — the same predicate scripts/acceptance-author-gate.mjs runs in CI — returns ok:true for this body",
+    proof: "grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts",
   },
 ];
 
@@ -3785,7 +3786,7 @@ const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
       "this PR body carries a judgeable Acceptance block (mechanically repaired by the fix rung " +
       "after acceptance-author-gate refused it) — not a claim that the underlying diff is correct, " +
       "or that any task's acceptance is met",
-    proof: "acceptanceAuthorTimeCheck (src/lib/review.ts) — the same predicate scripts/acceptance-author-gate.mjs runs in CI — now returns ok:true for this body",
+    proof: "grep: ^export function acceptanceAuthorTimeCheck in src/lib/review.ts",
   },
 ];
 
@@ -27083,6 +27084,10 @@ export async function daemonCommand(
         // cross-restart ledger episode window) this wiring relies on.
         onDiskHeadroomBreach: (info) =>
           escalateDiskHeadroomBreach(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // W1-T3378: the daemon core owns the tick; this command owns the real filesystem/git
+        // effect. Supplying the closure here makes the reviewed `review-PR*` reclaimer reachable
+        // on every live daemon rather than leaving an optional DaemonDeps hook dead.
+        sweepStrandedReviewWorktrees: () => sweepStrandedReviewWorktrees(config, log),
         // oper#queue-starvation-2026-08-03: the idle rung's starvation notification — dispatch
         // is already idle (runDaemon's own in-process bound, `starvationEscalated`) by the time
         // this fires.

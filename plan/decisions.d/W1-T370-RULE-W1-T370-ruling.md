@@ -1,0 +1,11 @@
+## 2026-09-13T00:00:00.000Z — RULING: attrition: fix a W1-T370 row's proofs only when a diff already touches it (W1-T370)
+- Agent-ruled, judged: authored by worker/W1-T3392, recorded under W1-T3212's judged path.
+- Ruling: Recommend ATTRITION (W1-T370 option a) for the merged proof debt: change no rows now, and fix a row's proofs only as part of a diff that already touches it, rather than (b) bulk-rewriting all of them for work that already shipped or (c) reopening how the linter grades a changed task. W1-T369 already closed the 39 open, unmerged tasks that actually stall live runs; this debt is merged, shipped work that costs nothing until a future diff touches one of its rows. Both adjacent levers that would have avoided grading it at all were already declined by name, and this ruling reopens neither.
+- Evidence:
+  - W1-T370, 2026-08-05 census: 136 merged tasks carry 391 blocking violations — 239 proof-dialect, 147 proof-resolvability, 5 headless-fitness
+  - W1-T370, 2026-09-02 re-measurement at origin/main 31288519: 166 merged tasks carry 440 comparable violations — 265 proof-dialect, 170 proof-resolvability, 5 headless-fitness; +49 (+12.5%) in 28 days, about +1.75 lines/day
+  - W1-T369 closed the 39 open (unmerged) tasks that actually stall live runs, leaving this merged debt live only when a future diff touches one of its rows
+  - the `status:` field lever was declined by the operator on 2026-08-05: the field is decorative by documented design and plan/tasks.yaml's own header says the runner never writes it back
+  - W1-T367 design (iii) declined turning `isOpenLintTask` into a derived projection, because `rmd lint-plan` stays an offline, deterministic linter and a projection would need a GitHub read
+- Judge: record — narrow, evidenced, reversible spend recommendation
+- Rollback: delete plan/decisions.d/W1-T370-RULE-W1-T370-ruling.md; attrition changes no code, lint rule, or task shard, so removing the record fully undoes the ruling

@@ -1,0 +1,20 @@
+id: fb-1789301944158-5ef7b8
+ts: 2026-09-13T12:19:04.158Z
+raw: "Observed on PR #5379: the daemon posted remudero-review=success for the
+  current head, then its immediate gh pr merge --auto call returned GraphQL Pull
+  Request is not mergeable. GitHub later merged only because auto-merge had
+  already been armed. The current sweep classifier treats that generic message
+  as unknown, records acted true, and seeds head-keyed dedup, so a normal
+  daemon-created PR can remain unarmed after GitHub status propagation. Diagnose
+  and repair the post-review-to-auto-merge handoff without broadening generic
+  merge-conflict retries. Require a fresh attributable status or mergeability
+  fact, bounded behavior, and unit falsifiers."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
