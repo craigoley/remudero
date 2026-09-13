@@ -388,6 +388,7 @@
     "test/ci-gate-reaggregate.test.ts": 28743,
     "test/ci-gate-required-format.test.ts": 532,
     "test/ci-gate-transport-retry.test.ts": 3648,
+    "test/ci-learning-safe-landing.test.ts": 0,
     "test/ci-log-generator-remedy-retention.test.ts": 1421,
     "test/ci-log-unavailable-is-named.test.ts": 1172,
     "test/ci-parity-contract.test.ts": 1589,

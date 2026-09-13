@@ -488,7 +488,14 @@ import {
   type FeedbackOrigin,
   type SummarizeDeps,
 } from "./lib/feedback.js";
-import { findPendingLandingPr, recordDecision, recordRuling, sweepFeedbackLanding } from "./lib/feedback-landing.js";
+import {
+  ciLearningPendingOrigins,
+  findPendingLandingPr,
+  landCiLearningShards,
+  recordDecision,
+  recordRuling,
+  sweepFeedbackLanding,
+} from "./lib/feedback-landing.js";
 // renderTraceChain/traceForward/traceReverse: only traceCommand read them, and it moved to
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
@@ -26533,7 +26540,10 @@ export function buildCiLearningCadenceRunner(deps: {
   loadWindow: (days: number) => CiFailureCorpusInput;
   loadLessons?: () => ReturnType<typeof readFiledCiLessons>;
   fileShards?: typeof fileCiLearningShards;
+  landShards?: typeof landCiLearningShards;
   planOrigins?: string[];
+  pendingOrigins?: typeof ciLearningPendingOrigins;
+  mintTaskId?: () => string;
   recordFire?: (root: string, at: Date) => void;
   releaseFire?: (root: string) => void;
   windowDays?: number;
@@ -26555,7 +26565,9 @@ export function buildCiLearningCadenceRunner(deps: {
       throw e;
     }
     const planOrigins = deps.planOrigins ?? ciLearningPlanOrigins(deps.checkoutRoot);
-    const result = mintCiLearningShards(corpus, planOrigins);
+    const pendingOrigins = (deps.pendingOrigins ?? ciLearningPendingOrigins)(deps.root);
+    const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins])];
+    const result = mintCiLearningShards(corpus, idempotencyOrigins);
     const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
     const lessonRecurrences =
       filedLessons.status === "measured"
@@ -26567,12 +26579,19 @@ export function buildCiLearningCadenceRunner(deps: {
     let filed = 0;
     let skipped = 0;
     let refused = 0;
-    if (result.drafts.length > 0) {
+    if (result.drafts.length > 0 || pendingOrigins.length > 0) {
       try {
-        const filing = (deps.fileShards ?? fileCiLearningShards)(result.drafts, deps.checkoutRoot, {
-          mintTaskId: ciLearningTaskIdMinter(deps.checkoutRoot),
-          planOrigins,
-        });
+        const mintTaskId = deps.mintTaskId ?? ciLearningTaskIdMinter(deps.checkoutRoot);
+        const filing = deps.fileShards
+          ? deps.fileShards(result.drafts, deps.checkoutRoot, {
+              mintTaskId,
+              planOrigins: idempotencyOrigins,
+            })
+          : (deps.landShards ?? landCiLearningShards)(result.drafts, deps.checkoutRoot, {
+              stateRoot: deps.root,
+              mintTaskId,
+              planOrigins: idempotencyOrigins,
+            });
         filed = filing.filed.length;
         skipped = filing.skipped.length;
         refused = filing.refused.length;
