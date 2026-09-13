@@ -339,11 +339,15 @@ test("planCommitMessage: the production-length plan proposal is accepted by real
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
 });
 
-// W1-T3483: the actual incident — a real `rmd plan --mode=create` run on 2026-09-13 passed a
-// 738-character operator brief and commitlint rejected the resulting message's unwrapped
-// `Brief:` line (`footer-max-line-length`). This reproduces that magnitude directly (628 chars,
-// same order as the real one) rather than the ~140-char brief the test above already covers, and
-// additionally proves no word of the brief is lost in the wrap — only re-flowed onto more lines.
+// W1-T3483 acceptance criterion 1: the actual incident — a real `rmd plan --mode=create` run on
+// 2026-09-13 passed a 738-character operator brief and commitlint rejected the resulting
+// message's unwrapped `Brief:` line (`footer-max-line-length`). This reproduces that magnitude
+// directly (628 chars, same order as the real one) rather than the ~140-char brief the test above
+// already covers, and additionally proves no word of the brief is lost in the wrap — only
+// re-flowed onto more lines. (Criterion 3 — the full message against the real commitlint CLI — is
+// re-proven below too; criterion 2's Acceptance-block-plus-trailer bundling no longer exists in
+// this function — PR #5321 moved that concern to buildPlanPrBody/plan-pr-emitter.ts, which carries
+// its own falsifier suite, test/plan-pr-emitter.test.ts's "#387" tests.)
 test("planCommitMessage: a 600+ character brief wraps to commitlint-legal lines and loses no word", () => {
   const brief =
     "Repair the RMD plan lane so a long operator-supplied brief never blows commitlint line-length " +
