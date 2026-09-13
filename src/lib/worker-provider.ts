@@ -1060,7 +1060,7 @@ function codexCapacityHedgeDelay(timeoutMs: number): number {
 async function readCodexRuntimeWithTimeoutHedge(
   config: Config,
   bin: string,
-  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now"> },
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs">,
 ): Promise<CodexRuntimeResult> {
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const hedgeDelayMs = codexCapacityHedgeDelay(timeoutMs);
@@ -1068,7 +1068,9 @@ async function readCodexRuntimeWithTimeoutHedge(
   // hedge from before that setup, not after it returns: synchronous setup work (notably coverage
   // instrumentation) must not consume the hedge's entire head start and let the primary timeout
   // settle first.
-  const primaryStartedAt = deps.clock.now();
+  // This measures scheduling, not cache age: callers inject `now` to test cache expiry and may
+  // intentionally freeze it. A frozen cache clock must not delay a real-time timeout hedge.
+  const primaryStartedAt = Date.now();
   const primaryAbort = new AbortController();
   let primaryHedgeEligible = true;
   const primary = readCodexRuntime(config, bin, {
@@ -1142,7 +1144,7 @@ async function readCodexRuntimeWithTimeoutHedge(
     };
 
     primary.then(observePrimary);
-    const remainingHedgeDelayMs = hedgeDelayMs - (deps.clock.now() - primaryStartedAt);
+    const remainingHedgeDelayMs = hedgeDelayMs - (Date.now() - primaryStartedAt);
     if (remainingHedgeDelayMs <= 0) {
       // Let an already-settled primary publish its result first; otherwise start the hedge before
       // the overdue primary timeout gets a timer turn.
@@ -1212,11 +1214,11 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     if (active) {
       exchange = active;
     } else {
-      exchange = readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, clock: { now } });
+      exchange = readCodexRuntimeWithTimeoutHedge(config, bin, deps);
       codexCapacityInFlight.set(cacheKey, exchange);
     }
   } else {
-    exchange = readCodexRuntimeWithTimeoutHedge(config, bin, { ...deps, clock: { now } });
+    exchange = readCodexRuntimeWithTimeoutHedge(config, bin, deps);
   }
 
   let value: CodexRuntimeResult;

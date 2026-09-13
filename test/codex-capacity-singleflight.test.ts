@@ -146,7 +146,7 @@ test("W1-T3435 criterion 1: a stalled primary is recovered by one fresh hedge an
   }
 });
 
-test("a stalled primary whose setup consumes the hedge interval still starts the fresh hedge", async () => {
+test("a frozen cache clock cannot suppress a hedge after synchronous setup consumes its interval", async () => {
   clearCodexCapacityCache();
   let spawns = 0;
   let kills = 0;
@@ -156,10 +156,12 @@ test("a stalled primary whose setup consumes the hedge interval still starts the
     if (spawns === 1) {
       return fakeAppServer((request, { stdout }) => {
         if (request.id === 1) {
-          // The primary timeout is already armed when this synchronous setup delay runs. Before
-          // the hedge was anchored at primary start, the overdue primary timer won before a hedge
-          // could be registered under coverage instrumentation.
-          now += 8;
+          // The primary timeout is already armed when this synchronous setup delay runs. `now`
+          // deliberately stays frozen because it is the cache-age clock, not a scheduler clock.
+          const deadline = Date.now() + 8;
+          while (Date.now() < deadline) {
+            // Coverage instrumentation can consume this much synchronous setup time.
+          }
           stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
         }
       }, () => { kills += 1; }) as never;
