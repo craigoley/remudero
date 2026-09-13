@@ -186,6 +186,10 @@ function checkOperatorMessageSafe(e: Escalation): OperatorMessageCheckResult | u
   }
 }
 
+function withExplicitConsequence(e: Escalation): Escalation {
+  return Object.prototype.hasOwnProperty.call(e, "consequence") ? e : { ...e, consequence: null };
+}
+
 /** The three-way cause split {@link Escalation.cause} keys on (W1-T195's design). */
 export type EscalationCause = "review" | "ci" | "conflict";
 
@@ -1051,7 +1055,7 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
   validateEscalationOptionKinds(e);
-  const resolved = refuseUnlessResolvable(e);
+  const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
   recordThreadMessage(resolved, deps);
   const dedup = lookupDuplicateEscalation(resolved, deps);
   if (dedup.kind === "found") return recordDuplicateEscalation(resolved, dedup.issue, deps);
@@ -1079,7 +1083,7 @@ export async function escalateWithJudge(
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
   validateEscalationOptionKinds(e);
-  const resolved = refuseUnlessResolvable(e);
+  const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
   recordThreadMessage(resolved, deps);
   const dedup = lookupDuplicateEscalation(resolved, deps);
   if (dedup.kind === "found") return recordDuplicateEscalation(resolved, dedup.issue, deps);
