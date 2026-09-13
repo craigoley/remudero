@@ -1,28 +1,22 @@
 /**
  * ASK vs RECORD classification (W1-T3394, ratifies W1-T3186 clause (i)).
  *
- * THE PROBLEM THIS CLOSES: the unbuilt NEEDS ME section was specified to fold FOUR unrelated
- * sources into one banner — inbox proposals (inbox.ts, W1-T110/T111), needs-human escalations
- * (escalate.ts, W1-T8/T77's BLOCKED-AMBIGUOUS disposition), clarification questions (W1-T78's
- * decidable-question rung), and the post-drain rundown's merged/blocked/escalated outcome lines
- * (drain.ts's {@link RundownLine}, W1-T141). W1-T141's rundown and W1-T8/T77's escalation both
- * fire on the SAME blocked-task event with DIFFERENT resolution verbs, so the same real
- * escalation was specified to render TWICE.
+ * THE INVARIANT: {@link classifyAskRecordItem} is the ONE pure, total, deterministic function
+ * BOTH the inbox renderer (W1-T3395) and the change-management renderer (W1-T3396) consult to
+ * decide "is this mine?" — so single-destination routing is a property of the DATA, never of two
+ * independently-written templates agreeing by convention. Every value of every source shape below
+ * maps to exactly ASK or RECORD, enforced by the `never` check in the exhaustiveness switch.
  *
- * THE FIX IS A ROUTING PREDICATE, NOT A RENDERING TWEAK: {@link classifyAskRecordItem} is the ONE
- * pure, deterministic, total function BOTH the inbox renderer (W1-T3395) and the change-management
- * renderer (W1-T3396) consult to decide "is this mine?" — so single-destination routing is a
- * property of the DATA, never of two independently-written templates agreeing by convention.
+ * THE TRAP THIS CLOSES: the unbuilt NEEDS ME section was specified to fold four unrelated sources
+ * into one banner — inbox proposals (inbox.ts), needs-human escalations (escalate.ts, W1-T8/T77's
+ * BLOCKED-AMBIGUOUS disposition), W1-T78 clarification questions, and the post-drain rundown's
+ * outcome lines ({@link RundownLine}, W1-T141) — and the rundown and the escalation fire on the
+ * SAME blocked-task event with DIFFERENT resolution verbs, so one real escalation double-rendered.
  *
- * TOTAL AND EXHAUSTIVE: every one of the four source shapes below maps to exactly ASK or RECORD,
- * with no residual "unclassified" bucket — enforced by the `never` check in {@link
- * classifyAskRecordItem}'s exhaustiveness switch, not merely by convention.
- *
- * THE DOUBLE-RENDER FALSIFIER this design encodes: a task with an open BLOCKED-AMBIGUOUS
- * escalation AND a rundown line for the same event yields exactly one ASK (the escalation) and
- * exactly one RECORD (the rundown line) — never an ASK from both, never a RECORD from both. A
- * rundown line reports what HAPPENED to a change; it never itself asks a question, so it is
- * ALWAYS RECORD regardless of what any sibling escalation for the same task classifies as.
+ * THE FALSIFIER: a task with an open BLOCKED-AMBIGUOUS escalation AND a rundown line for the same
+ * event yields exactly one ASK (the escalation) and exactly one RECORD (the rundown line) — a
+ * rundown line reports what HAPPENED, never asks a question, so it is ALWAYS RECORD regardless of
+ * what a sibling escalation for the same task classifies as.
  */
 
 import type { InboxState } from "./inbox.js";
