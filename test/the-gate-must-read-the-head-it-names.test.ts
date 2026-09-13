@@ -26,13 +26,22 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
-
-import { evaluateHeadIdentityGate } from "../scripts/head-identity-gate.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WORKFLOW = join(REPO_ROOT, ".github", "workflows", "head-identity-gate.yml");
+const SCRIPT = join(REPO_ROOT, "scripts", "head-identity-gate.mjs");
+
+// `scripts/**` sits outside tsconfig's `include`, so a static import from the `.mjs` gate is a
+// TS7016. Load the production module dynamically, matching the older head-identity suite.
+const mod = (await import(pathToFileURL(SCRIPT).href)) as {
+  evaluateHeadIdentityGate: (input: { headCommitMessage: string; headRef: string | undefined }) => {
+    ok: boolean;
+    message: string;
+  };
+};
+const { evaluateHeadIdentityGate } = mod;
 
 /** What a head commit built for a filed task actually looks like — the form the gate advertises. */
 const HEAD_WITH_TRAILER = "fix(inbox): something real\n\nbody prose\n\nRemudero-Task: W1-T3511\n";
