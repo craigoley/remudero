@@ -274,8 +274,8 @@ export function planRetry(state: RetryState, cls: FailureClass): RetryAction {
 // `criterionFieldTampered` (review.ts) refuses a non-plan-only diff that touches it.
 // `planCappedRepair` is the missing rung: try a bounded plan-only shard repair before giving up.
 
-/** The ceiling on the plan-only shard-repair rung — separate from, and never widening,
- *  `dispatchFix`'s own body-repair ceiling. */
+/** PRIMARY CONTROL: the ceiling on the plan-only shard-repair rung — separate from, and never
+ *  widening, `dispatchFix`'s own body-repair ceiling. */
 export const MAX_PLAN_REPAIR_STRIKES = 2;
 
 /** Cumulative counters for the two capped-repair rungs, folded from the ledger by the caller
