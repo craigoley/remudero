@@ -1,0 +1,27 @@
+id: fb-1789313854640-76360d
+ts: 2026-09-13T15:37:34.640Z
+raw: "Core deploy marker is invisible to the Azure watchdog. OBSERVED:
+  /home/craigoleyagent/rmd-relaunch.sh invokes bin/rmd deploy-run
+  --image-drift-only when remudero-daemon is healthy. In src/lib/deployer.ts
+  decideDeployTrigger, imageDriftOnly disables mount-side restart reasons and
+  returns the up-to-date/image-only skip before testing markerPresent when the
+  image is not stale. Therefore rmd deploy writes state/DEPLOY_REQUESTED but the
+  five-minute watchdog cannot honor a normal code-refresh request; the stale
+  reviewer remains stale. Implement a generated-launcher and deploy-supervisor
+  fix: preserve the image-drift-only path for ordinary watchdog ticks, but when
+  DEPLOY_REQUESTED is present invoke the normal guarded deploy-run path (or make
+  the equivalent explicit, proven marker override). Preserve the existing idle
+  gate, idle re-check, health check, rollback, and no-raw-docker invariant. Add
+  an end-to-end generated-launcher/deployer test proving a marker with code-only
+  staleness reaches the normal supervisor and that an absent marker remains
+  image-only. This is distinct from the existing multi-instance lifecycle
+  feedback."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -1,0 +1,33 @@
+id: fb-1789311638612-56d5bd
+ts: 2026-09-13T15:00:38.612Z
+raw: "Multi-instance daemon availability: OBSERVED on the Azure host 2026-09-13:
+  only core rmd-fleet.service and rmd-fleet-watchdog.timer are enabled.
+  remudero-site-daemon exited 0 at 2026-09-13T00:43:01Z under
+  restart=on-failure:5 and remained down; therefore site PRs could not receive
+  the required remudero-review status. Core deploy/install-host-units.sh renders
+  a launcher and units for the literal remudero-daemon and core state root,
+  while recycle-container.sh can accept site container/repo overrides but no
+  installed per-instance supervisor exists. This is independent of W1-T3525
+  proof-suite execution. Design a config-driven, explicitly enrolled
+  multi-instance lifecycle registry for isolated core/site/console state roots.
+  It must derive each instance's repo, state root, container name,
+  credentials/config mounts, service/timer names, and expected image from one
+  validated record; install/check only that instance; retain STOP and PAUSE
+  precedence; make healthy-instance ticks idempotent; relaunch only the stopped
+  instance after a clean exit; never act on another instance; preserve guarded
+  drain/recycle semantics. Add falsifiable unit or fixture proofs for: site
+  clean exit relaunches site only, STOP blocks only site revival, core remains
+  untouched, and an unknown/malformed instance is refused before Docker/systemd
+  writes. Do not paper over with docker restart or duplicate systemd unit files.
+  User decision: one RMD instance per repo with separate plans/tasks/lanes plus
+  shared opt-in knowledge; this supersedes older planning assumptions that
+  per-repo was not a real dimension."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
