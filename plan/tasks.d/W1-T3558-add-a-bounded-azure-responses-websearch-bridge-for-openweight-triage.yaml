@@ -11,6 +11,7 @@
   files:
     - src/lib/config.ts
     - src/lib/worker-provider.ts
+    - src/lib/worker.ts
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
   origin: "operator-session#open-weight-routing-follow-up-2026-09-14"
   plan_refs: ["W1-T3545", "W1-T3546", "W1-T3547", "W1-T3549", "W1-T3094"]
@@ -76,11 +77,23 @@
     citation-positive path, every malformed or missing-evidence refusal path, the no-key/no-consent
     preflight path proving zero HTTP calls, and the cash-limit refusal. This task changes no mount,
     worker tier, provider auction, Azure resource, secret store, or deployed configuration.
+
+    The existing lane log sites already spread `workerLedgerFields`; therefore extend the
+    OpenWeight result and `workerLedgerFields` in `src/lib/worker.ts` with explicit WebSearch
+    attempted/accepted/refused counts and attributable bounded cost. This is the only durable
+    path for the bridge evidence; do not hand-roll per-lane logging in `run-task.ts`. A daily
+    reservation must be recorded before its outbound request and remain charged after request
+    start, including an unreadable response, so a transport failure cannot silently return paid
+    authority to the allowance. The reservation/settlement path must be safe across concurrent
+    daemon workers and process restart; a live ledger row without a reservation that governed it
+    is insufficient evidence of a daily hard bound.
   acceptance:
     - claim: "a declared OpenWeight WebSearch tool returns only a bounded provider-issued response containing a web_search_call and URL-citation provenance"
       proof: "unit test: openweight WebSearch bridge returns provider-issued citations"
     - claim: "missing consent, credential, endpoint, citation evidence, or remaining bounded allowance refuses before an unaccounted search can be treated as success"
       proof: "unit test: openweight WebSearch bridge refuses every unproven authority"
+    - claim: "each attempted WebSearch carries its bounded cost and accepted/refused counts through the shared worker ledger fields"
+      proof: "unit test: openweight WebSearch bridge ledger fields report bounded spend"
   falsifier: |
     Delete the bridge registration for `WebSearch` and the citation-positive test must fail rather
     than receiving a local or model-authored answer. Mutate a response by removing its
