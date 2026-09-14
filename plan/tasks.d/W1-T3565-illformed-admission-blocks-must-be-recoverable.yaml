@@ -1,0 +1,72 @@
+- id: W1-T3565
+  title: "A ZERO-COST blocked_illformed ADMISSION REFUSAL IS DURABLY INDISTINGUISHABLE FROM A PAID INDEPENDENT FAILURE — a corrected task remains blocked after its plan amendment because status.ts sees only dispatch.blocked_independent; retain durable blocks for real worker failures, but re-admit the legacy and new pre-dispatch refusal once its contract is corrected"
+  repo: remudero
+  depends_on: ["W1-T2910"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 45.00
+  files: [src/lib/daemon.ts, src/lib/status.ts, test/blocked-status-survives-plan-reload.test.ts]
+  origin: "operator-session#site-daemon-admission-recovery-2026-09-14"
+  plan_refs: ["W1-T2910", "W1-T46", "W1-T174", "W1-T340"]
+  status: queued
+  attempts: 0
+  rationale: |
+    The site cell refused PORTAL-T4 before any worker launch because its task was correctly
+    recognized as a five-surface design change marked risk:medium. The repaired plan changes
+    that task to risk:high, was reviewed, and merged as remudero-site #19. After a graceful
+    recycle, the cell's target checkout reached that merge, but its first selector tick still
+    reported PORTAL-T4 as blocked.
+
+    The live ledger explains the contradiction. The first refusal returned
+    verdict=blocked_illformed at costUsd=0, then daemon.ts classified the leaf task as an
+    independent failure and wrote dispatch.blocked_independent with that verdict. The status
+    projection derives independentFailureBlocked from the latest such row without inspecting
+    its verdict. Consequently the W1-T2910 durable-block repair, merged in #4629, preserves a
+    free, correctable admission refusal exactly as though a worker had run and failed.
+
+    This is not permission to forget real failures. A paid blocked_review, failed, or other
+    genuine independent result must remain ledger-derived and survive a plan reload. The narrow
+    distinction is that blocked_illformed occurs before the in-flight lock and worker spawn, and
+    runTask returns costUsd=0. Its only purpose is to prevent a retry loop against the same
+    immutable plan; once a later plan revision corrects the admission defect, the daemon must
+    re-lint and may dispatch normally.
+  design: |
+    (i) Preserve W1-T2910's durable independent-failure semantics for verdicts that reached
+    substantive work. A later unrelated plan reload must still not re-dispatch a
+    blocked_review independent task.
+
+    (ii) Treat blocked_illformed as an admission refusal rather than a durable independent
+    failure. It may exclude the task for the current daemon lifetime, preventing a zero-cost
+    lint spin, but it must not cause status.ts to carry an old
+    dispatch.blocked_independent row across a corrected task contract.
+
+    (iii) Make the status projection recognize historical rows written before this repair:
+    a dispatch.blocked_independent row whose recorded verdict is blocked_illformed does not
+    establish independentFailureBlocked. Do not delete, rewrite, or conceal the ledger row;
+    the history remains visible while eligibility is recovered.
+
+    (iv) Add behavioral coverage in the existing reload harness for both directions: a
+    blocked_review leaf remains blocked across a reload, while a legacy blocked_illformed row
+    is re-admitted after the corrected plan is loaded. Also prove an unchanged ill-formed task
+    is not re-offered repeatedly within one daemon lifetime. Do not alter lint severity,
+    acceptance-proof policy, scheduler cadence, or site-specific code.
+  acceptance:
+    - claim: "a paid independent blocked_review remains ledger-blocked across an unrelated plan reload"
+      proof: "unit test: W1-T3565 preserves paid independent block across reload"
+    - claim: "a legacy blocked_illformed independent-block row no longer suppresses a corrected task"
+      proof: "unit test: W1-T3565 releases legacy illformed block after reload"
+    - claim: "a new unchanged blocked_illformed refusal is excluded for the current daemon lifetime rather than retried in a loop"
+      proof: "unit test: W1-T3565 prevents illformed retry loop within process"
+  falsifier: |
+    Close without implementation if the current status projection already checks the
+    dispatch.blocked_independent row's verdict and ignores blocked_illformed, or if
+    blocked_illformed can occur after the worker spawn or with non-zero cost. At filing,
+    src/lib/status.ts reacts only to the row step, while src/run-task.ts returns
+    { costUsd: 0, verdict: "blocked_illformed" } from the pre-dispatch linter catch.
+  note: |
+    This is the direct shared-core recovery required for the private site cell to resume
+    PORTAL-T4 automatically. It creates no core scheduler or recurring automation.
+    reservation hand-off: main -> plan-admission-refusal-recovery-1789389002000
