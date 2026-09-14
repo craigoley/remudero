@@ -5264,6 +5264,7 @@ async function runReview(args: {
     model: args.reviewerMount.model,
     effort: args.reviewerMount.effort,
     maxTurns: args.reviewerMount.maxTurns,
+    provider: args.reviewerMount.provider,
   };
   let evaluatorProvenance: ReviewEvaluatorProvenance = {
     provider: null,
@@ -5315,6 +5316,7 @@ async function runReview(args: {
             // `error_max_turns` on every substantive code PR — a floor-only PASS silently masquerading
             // as a completed review (P10-a; reviewerOutcome below makes it legible).
             model: reviewerSpawnMount!.model,
+            mountProvider: reviewerSpawnMount!.provider,
             effort: reviewerSpawnMount!.effort,
             maxTurns: reviewerSpawnMount!.maxTurns,
             maxBudgetUsd: args.budgetUsd,
@@ -6954,6 +6956,7 @@ export function buildPrerequisitePrDispatchArgs(args: {
     permissionMode: "bypassPermissions",
     settingsFile: args.settingsFile,
     model: args.mount.model,
+    mountProvider: args.mount.provider,
     effort: args.mount.effort,
     maxTurns: args.mount.maxTurns,
     maxBudgetUsd: args.budgetUsd,
@@ -9180,6 +9183,7 @@ export async function runFixRung(opts: {
       permissionMode: "bypassPermissions",
       settingsFile: opts.settingsFile,
       model: opts.mount.model,
+      mountProvider: opts.mount.provider,
       effort: opts.mount.effort,
       maxTurns: opts.mount.maxTurns,
       maxBudgetUsd: opts.budgetUsd,
@@ -12915,6 +12919,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         permissionMode: "bypassPermissions",
         settingsFile,
         model: reconMount?.model,
+        mountProvider: reconMount?.provider,
         effort: reconMount?.effort,
         // maxTurns DELIBERATELY NOT taken from the mount, and the ROW agrees with this cap.
         // impl-BP flagged a 50x contradiction (rows said 400, this said 8); the operator ruled the
@@ -13271,6 +13276,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // are the real backstop. Recalibrated in mounts.yaml from OBSERVED runs (W1-T6
           // needed >61 turns — docs/archive/DIAGNOSIS.md), an order of magnitude above expected.
           model: implementMount.model,
+          mountProvider: implementMount.provider,
           effort: implementMount.effort,
           maxTurns: implementMount.maxTurns,
           maxBudgetUsd: budgetUsd,
@@ -13336,6 +13342,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
           model: diagnoseMount.model,
+          mountProvider: diagnoseMount.provider,
           effort: diagnoseMount.effort,
           maxTurns: diagnoseMount.maxTurns,
           maxBudgetUsd: budgetUsd,
@@ -13513,6 +13520,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           settingsFile,
           resumeSessionId: impl.sessionId,
           model: implementMount.model, // same mount as the initial implement spawn (§9).
+          mountProvider: implementMount.provider,
           effort: implementMount.effort,
           maxTurns: implementMount.maxTurns,
           maxBudgetUsd: budgetUsd,
@@ -23419,6 +23427,7 @@ export function buildPromotionJudgeSpawnArgs(opts: {
     settingsFile: opts.settingsFile,
     prompt: buildPromotionJudgePrompt(opts.entry),
     model: opts.mount.model,
+    mountProvider: opts.mount.provider,
     effort: opts.mount.effort,
     maxTurns: opts.mount.maxTurns,
     tools: PROMOTION_JUDGE_TOOLS,
@@ -24157,6 +24166,7 @@ async function retroCommand(
       permissionMode: "bypassPermissions",
       settingsFile,
       model: arch, // W1-T2559: retro's own `synthesis.retro` mount, not the Architect's
+      mountProvider: mountsTable.synthesis.retro.provider,
       effort: archEffort, // W1-T2559: this rung's own effort, now actually wired to the spawn
       maxTurns: mountsTable.synthesis.retro.maxTurns, // MOUNT-GOVERNED (W1-T64/W1-T2559) — never a hardcoded literal.
       maxBudgetUsd: DEFAULT_BUDGET_USD,
@@ -24282,6 +24292,7 @@ async function retroCommand(
           permissionMode: "bypassPermissions",
           settingsFile,
           model: arch,
+          mountProvider: mountsTable.synthesis.retro.provider,
           effort: archEffort,
           maxTurns: mountsTable.synthesis.retro.maxTurns,
           maxBudgetUsd: DEFAULT_BUDGET_USD,
@@ -34210,6 +34221,7 @@ async function triageCommandLocked(
           permissionMode: "bypassPermissions",
           settingsFile,
           model: arch, // W1-T2559: triage's own `synthesis.triage` mount, not the Architect's
+          mountProvider: mountsTable.synthesis.triage.provider,
           effort: archEffort, // W1-T2559: this rung's own effort, now actually wired to the spawn
           maxTurns: mountsTable.synthesis.triage.maxTurns, // MOUNT-GOVERNED (§9/W1-T2559) — never a hardcoded literal.
           maxBudgetUsd: DEFAULT_BUDGET_USD,
@@ -34951,6 +34963,37 @@ export async function planCommand(
 const INBOX_DRAFT_WORKER_TOOLS = ["Read", "Grep", "Glob"];
 
 /**
+ * Build the one inbox-draft worker request from its resolved mount.  Keeping this as a pure
+ * boundary makes the mount affinity observable without creating a worktree or attempting a
+ * paid spawn; {@link draftProposalBatch} remains the only production caller.
+ */
+export function buildInboxDraftSpawnArgs(args: {
+  cwd: string;
+  settingsFile: string;
+  prompt: string;
+  mount: Mount;
+  config: Config;
+  disallowedTools: readonly string[];
+}): SpawnWorkerArgs {
+  return {
+    cwd: args.cwd,
+    permissionMode: "bypassPermissions",
+    settingsFile: args.settingsFile,
+    model: args.mount.model,
+    mountProvider: args.mount.provider,
+    effort: args.mount.effort,
+    maxTurns: args.mount.maxTurns,
+    // The one worktree below is shared by every draft lane, so enforce the read-only tool
+    // surface at the spawn boundary rather than asking the worker to respect prose.
+    disallowedTools: args.disallowedTools,
+    maxBudgetUsd: DEFAULT_BUDGET_USD,
+    config: args.config,
+    prompt: args.prompt,
+    tools: INBOX_DRAFT_WORKER_TOOLS,
+  };
+}
+
+/**
  * Materialize ONE worktree and draft EVERY proposal in `toDraft` against it — the shared
  * harness-owned glue {@link runDraftRung}'s pure core (lib/inbox.ts) needs: a real
  * `spawnWorker` inside a real worktree. Both `inboxCommand` (CLI, `rmd inbox`) and
@@ -35023,8 +35066,7 @@ export async function draftProposalBatch(
   // never `architectModel`'s `architect:` row. `assertArchitectAboveWorker` is deliberately NOT
   // called here any more — see the identical note at the retro call site.
   const mountsTable = loadMounts(mountsPath(repoRoot));
-  const arch = synthesisModel(mountsTable, "inbox_draft");
-  const archEffort = synthesisEffort(mountsTable, "inbox_draft");
+  const inboxDraftMount = mountsTable.synthesis.inbox_draft;
 
   const settingsFile = renderWorkerSettings({
     templatePath: join(repoRoot, "settings", "worker.json"),
@@ -35046,25 +35088,18 @@ export async function draftProposalBatch(
       toDraft,
       planText,
       {
-        spawn: (proposal, prompt) =>
-          spawnWorker({
+        spawn: (_proposal, prompt) =>
+          spawnWorker(buildInboxDraftSpawnArgs({
             cwd: worktreePath,
-            permissionMode: "bypassPermissions",
             settingsFile,
-            model: arch, // W1-T2559: this rung's own `synthesis.inbox_draft` mount, not the Architect's
-            effort: archEffort, // W1-T2559: this rung's own effort, now actually wired to the spawn
-            maxTurns: mountsTable.synthesis.inbox_draft.maxTurns, // MOUNT-GOVERNED (W1-T2559) — never a hardcoded literal.
-            // W1-T2591: the ONE worktree above is shared by every lane of `runDraftRung`'s pool
-            // (#3588/W1-T2664), so the prompt's "you have NO Write/Edit/Bash tools" is enforced
-            // here rather than merely asserted — see INBOX_DRAFT_DISALLOWED_TOOLS' own doc for
-            // why this rung needs none of them and why enforcement was chosen over per-lane
-            // worktrees. This is what makes the sharing read-only by construction.
-            disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-            maxBudgetUsd: DEFAULT_BUDGET_USD,
+            mount: inboxDraftMount,
             config,
             prompt,
-            tools: INBOX_DRAFT_WORKER_TOOLS,
-          }),
+            // Keep the enforced list at the shared-worktree spawn site. The companion invariant
+            // test reads this body so a later extraction cannot silently turn the guarantee into
+            // a helper-level convention.
+            disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+          })),
         log,
       },
       runId,
@@ -37284,6 +37319,7 @@ export async function dispatchAlertFixRun(
       permissionMode: "bypassPermissions",
       settingsFile,
       model: fixMount.model,
+      mountProvider: fixMount.provider,
       effort: fixMount.effort,
       maxTurns: fixMount.maxTurns,
       maxBudgetUsd: DEFAULT_BUDGET_USD,

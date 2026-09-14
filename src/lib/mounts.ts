@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { isWorkerProviderId, WORKER_PROVIDER_IDS, type WorkerProviderId } from "./config.js";
 import { DEFAULT_TASK_CLASS } from "./task-class.js";
 
 /**
@@ -87,6 +88,7 @@ export interface Mount {
   maxTurns: number;
   /** Context budget (tokens) this mount plans against. */
   contextBudget: number;
+  provider?: WorkerProviderId;
 }
 
 /** The three synthesis rungs (W1-T2559), exempt from the Tier Invariant — see this file's header. */
@@ -192,7 +194,7 @@ function parseMount(
   efforts: Record<string, number>,
 ): Mount {
   if (!isObject(raw)) throw new MountsError(`mount ${where} must be a mapping.`);
-  const { model, effort, max_turns, context_budget } = raw;
+  const { model, effort, max_turns, context_budget, provider } = raw;
   if (typeof model !== "string" || !(model in tiers)) {
     throw new MountsError(`mount ${where}: 'model' must be one of ${Object.keys(tiers).join(", ")}, got ${JSON.stringify(model)}.`);
   }
@@ -205,7 +207,10 @@ function parseMount(
   if (typeof context_budget !== "number" || !Number.isInteger(context_budget) || context_budget <= 0) {
     throw new MountsError(`mount ${where}: 'context_budget' must be a positive integer, got ${JSON.stringify(context_budget)}.`);
   }
-  return { model, effort, maxTurns: max_turns, contextBudget: context_budget };
+  if (provider !== undefined && !isWorkerProviderId(provider)) {
+    throw new MountsError(`mount ${where}: 'provider' must be one of ${JSON.stringify(WORKER_PROVIDER_IDS)}, got ${JSON.stringify(provider)}.`);
+  }
+  return { model, effort, maxTurns: max_turns, contextBudget: context_budget, ...(provider === undefined ? {} : { provider }) };
 }
 
 /**

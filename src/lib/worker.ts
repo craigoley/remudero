@@ -25,10 +25,12 @@ import { query, type Options, type PermissionMode, type SettingSource } from "@a
 import { detectUsageLimitRefusal } from "./classify.js";
 import {
   loadConfig,
+  enabledWorkerProviders,
   workerHomeDir,
   workerShell,
   workerZdotdir,
   type Config,
+  type WorkerProviderId,
 } from "./config.js";
 import { usageSnapshotFromSdk } from "./headroom.js";
 import {
@@ -113,7 +115,11 @@ import {
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
 } from "./worker-provider.js";
-import { resolveProviderRoutingPolicy, selectWorkerProviderForPolicy } from "./provider-routing-policy.js";
+import {
+  resolveProviderRoutingPolicy,
+  selectWorkerProviderForPolicy,
+  type ProviderRoutingPreference,
+} from "./provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 
 /** Aggregate token usage off the SDK result envelope's `usage` field (SDK 0.3.209 `sdk.d.ts`: `NonNullableUsage`, snake_case
@@ -139,7 +145,7 @@ export interface ModelUsageEntry {
 /** Structured result of one worker run. */
 export interface WorkerResult {
   /** Backend that executed this call. Optional only for pre-connector test fixtures. */
-  provider?: "claude" | "codex";
+  provider?: WorkerProviderId;
   sessionId: string;
   costUsd: number;
   /** Turns the worker actually took (SDK `num_turns`), recorded on BOTH the success and error paths, because turn count seeds
@@ -277,24 +283,27 @@ export interface WorkerSelectionAssignment {
     maxTurns: number | null;
   };
   selected: {
-    provider: "claude" | "codex";
+    provider: WorkerProviderId;
     model: string;
     effort: string;
     accountLabel?: string;
   };
   routing: {
-    mode: "claude-only" | "multi-provider";
+    /** `mount-affinity` bypasses the capacity auction without fabricating a capacity reading. */
+    mode: "claude-only" | "multi-provider" | "mount-affinity";
+    /** The source that chose the provider, distinct from a provider receipt. */
+    selectionPath?: "auction" | "mount-affinity";
     policy: {
-      preference: "automatic" | "claude" | "codex";
+      preference: ProviderRoutingPreference;
       reservePercent: number;
       provenance: "default" | "overridden";
     };
     tightestRemainingPercent?: number;
     allocationSharePercent?: number;
-    preferenceBypass?: { provider: "claude" | "codex"; reason: string };
+    preferenceBypass?: { provider: WorkerProviderId; reason: string };
   };
   candidates: Array<{
-    provider: "claude" | "codex";
+    provider: WorkerProviderId;
     readable: boolean;
     model?: string;
     effort?: string;
@@ -383,7 +392,7 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * present, defaulted to `null`, so a silent provider renders an honest unknown rather than a key that looks forgotten, and an
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
-  provider?: "claude" | "codex";
+  provider?: WorkerProviderId;
   model: string;
   routed_model?: string;
   model_health_state?: ClaudeModelHealthState;
@@ -408,7 +417,7 @@ export function workerLedgerFields(r: WorkerResult): {
   lost_grants?: string[];
   worker_duration_ms?: number;
   window_consumption?: {
-    provider: "claude" | "codex";
+    provider: WorkerProviderId;
     percent_consumed: number | null;
     window?: string;
     resets_at?: number | string;
@@ -850,6 +859,12 @@ export interface SpawnWorkerArgs {
   /** Extra env vars merged into the allowlisted child env (never ANTHROPIC_*). */
   env?: Record<string, string>;
   model?: string;
+  /**
+   * A validated mount's explicit provider affinity. This deliberately bypasses the capacity
+   * auction; a pay-per-token provider has no subscription window and must never be admitted by
+   * invented capacity telemetry.
+   */
+  mountProvider?: WorkerProviderId;
   /** Reasoning effort (mount-resolved, §9): 'low'|'medium'|'high'|'xhigh'|'max'. */
   effort?: string;
   maxTurns?: number;
@@ -1005,19 +1020,20 @@ function selectionCandidateSnapshot(capacity: ProviderCapacity): WorkerSelection
 export function workerSelectionAssignment(
   args: SpawnWorkerArgs,
   input: {
-    provider: "claude" | "codex";
+    provider: WorkerProviderId;
     model: string | undefined;
     effort: string | undefined;
     capacity?: ProviderCapacity;
     capacities?: ProviderCapacity[];
-    mode: "claude-only" | "multi-provider";
+    mode: "claude-only" | "multi-provider" | "mount-affinity";
+    selectionPath: "auction" | "mount-affinity";
     policy: {
-      preference: "automatic" | "claude" | "codex";
+      preference: ProviderRoutingPreference;
       reservePercent: number;
       provenance: "default" | "overridden";
     };
     selection?: ProviderSelection;
-    preferenceBypass?: { provider: "claude" | "codex"; reason: string };
+    preferenceBypass?: { provider: WorkerProviderId; reason: string };
   },
 ): WorkerSelectionAssignment {
   const selected = input.capacity;
@@ -1038,6 +1054,7 @@ export function workerSelectionAssignment(
     },
     routing: {
       mode: input.mode,
+      selectionPath: input.selectionPath,
       policy: {
         preference: input.policy.preference,
         reservePercent: input.policy.reservePercent,
@@ -1392,6 +1409,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // here is inert; each branch materializes and reaps it (W1-T2800, W1-T170, W1-T2463).
   const workerHomeRoot = workerHomeDir(config);
   const workerHome = perRunWorkerHomeDir(workerHomeRoot, args.runId, { perSpawn: true });
+  if (args.mountProvider && !enabledWorkerProviders(config).includes(args.mountProvider)) {
+    throw new Error(`mount provider '${args.mountProvider}' is not enabled by the committed host config`);
+  }
+  // Read the override for operator provenance, but never let it participate in an explicit mount
+  // affinity. A pay-per-token provider has no subscription window; inventing one merely to enter
+  // the auction would manufacture telemetry and make routine routing depend on a false reading.
   const routingPolicy = resolveProviderRoutingPolicy(config.root, config, { now: args.providerRouting?.now });
   if (routingPolicy.fallback) {
     console.error(JSON.stringify({
@@ -1399,7 +1422,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       reason: routingPolicy.fallback.reason,
     }));
   }
-  const providers = routingPolicy.routableProviders;
+  const providers = args.mountProvider ? [args.mountProvider] : routingPolicy.routableProviders;
   const capabilities = resolveWorkerCapabilities(args.cwd);
   const claudeHealthRoute = providers.includes("claude")
     ? await resolveWorkerClaudeHealth(args, capabilities)
@@ -1417,7 +1440,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   }
   let routedClaudeSelection: ProviderSelection | undefined;
   let routedClaudeCapacities: ProviderCapacity[] | undefined;
-  let routedClaudePreferenceBypass: { provider: "claude" | "codex"; reason: string } | undefined;
+  let routedClaudePreferenceBypass: { provider: WorkerProviderId; reason: string } | undefined;
   if (providers.length === 1 && providers[0] === "claude" && claudeHealthRoute && !claudeHealthRoute.eligible) {
     const capacity = unavailableClaudeCapacity(claudeHealthRoute);
     try {
@@ -1455,7 +1478,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       console.error(JSON.stringify({ event: "worker.provider_routing_status_write_failed", reason: "write-failed" }));
     }
   }
-  if (!(providers.length === 1 && providers[0] === "claude")) {
+  if (!args.mountProvider && !(providers.length === 1 && providers[0] === "claude")) {
     const capacities = await Promise.all(
       providers.map((provider) => {
         if (provider === "codex") {
@@ -1553,6 +1576,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         capacity: selection.capacity,
         capacities,
         mode: "multi-provider",
+        selectionPath: "auction",
         policy: routingPolicy,
         selection,
         preferenceBypass,
@@ -1619,6 +1643,32 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     routedClaudeSelection = selection;
     routedClaudeCapacities = capacities;
     routedClaudePreferenceBypass = preferenceBypass;
+  }
+  if (args.mountProvider === "codex") {
+    const runCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
+      args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+    if (args.providerRouting?.spawnCodex === undefined) {
+      assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
+    }
+    // No ProviderCapacity is read or fabricated on this path. The mount is the authority for
+    // choosing Codex; capacity remains an auction-only concept.
+    const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
+      provider: "codex",
+      model: args.model,
+      effort: args.effort,
+      mode: "mount-affinity",
+      selectionPath: "mount-affinity",
+      policy: routingPolicy,
+    });
+    try {
+      materializeWorkerHome({ workerHome, realHome });
+      const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
+      result.selectionAssignmentId = selectionAssignmentId;
+      if (args.model) result.model = args.model;
+      return result;
+    } finally {
+      reapWorkerHome(workerHomeRoot, workerHome);
+    }
   }
   // PREFLIGHT: resolve the real binary FRESH before any worker-home or keychain work. Throws ClaudeToolchainBlockedError,
   // never a raw ENOENT, naming every searched path and carrying `reasonClass: "blocked_toolchain"` so daemon.ts can classify
@@ -1811,7 +1861,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       effort: routedClaudeSelection?.capacity.effort ?? args.effort,
       capacity: routedClaudeSelection?.capacity,
       capacities: routedClaudeCapacities,
-      mode: routedClaudeSelection ? "multi-provider" : "claude-only",
+      mode: args.mountProvider ? "mount-affinity" : routedClaudeSelection ? "multi-provider" : "claude-only",
+      selectionPath: args.mountProvider ? "mount-affinity" : "auction",
       policy: routingPolicy,
       selection: routedClaudeSelection,
       preferenceBypass: routedClaudePreferenceBypass,

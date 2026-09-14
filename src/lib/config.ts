@@ -31,7 +31,17 @@ export function resolveHeadroomEnabled(
   return config.headroom?.enabled ?? true;
 }
 
-export type WorkerProviderId = "claude" | "codex";
+/**
+ * The closed set of worker-provider ids.  Keep runtime validation and the exported union derived
+ * from this one value: a new provider must not be accepted by mounts/policy in one path while a
+ * second, hand-written literal silently rejects it elsewhere.
+ */
+export const WORKER_PROVIDER_IDS = ["claude", "codex"] as const;
+export type WorkerProviderId = (typeof WORKER_PROVIDER_IDS)[number];
+
+export function isWorkerProviderId(value: unknown): value is WorkerProviderId {
+  return typeof value === "string" && (WORKER_PROVIDER_IDS as readonly string[]).includes(value);
+}
 
 /** Provider list with the backwards-compatible Claude-only default. */
 export function enabledWorkerProviders(config: Pick<Config, "workerProviders">): WorkerProviderId[] {
@@ -73,8 +83,10 @@ export function validateConfig(config: Config): void {
   if (new Set(providers).size !== providers.length) {
     throw new ConfigValidationError("invalid config: workerProviders.enabled contains a duplicate provider");
   }
-  if (providers.some((provider) => provider !== "claude" && provider !== "codex")) {
-    throw new ConfigValidationError('invalid config: workerProviders.enabled accepts only "claude" and "codex"');
+  if (providers.some((provider) => !isWorkerProviderId(provider))) {
+    throw new ConfigValidationError(
+      `invalid config: workerProviders.enabled accepts only ${WORKER_PROVIDER_IDS.map((provider) => JSON.stringify(provider)).join(", ")}`,
+    );
   }
   const reserve = config.workerProviders?.reservePercent ?? 5;
   if (!Number.isFinite(reserve) || reserve < 0 || reserve >= 100) {
