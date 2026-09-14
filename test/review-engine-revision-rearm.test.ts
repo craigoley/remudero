@@ -44,6 +44,55 @@ const PR_BODY_4042 = [
   "",
 ].join("\n");
 
+// W1-T3580 fixture: console PR #12's exact head, replaying operator-session#console-pr-12-review-replay-2026-09-14.
+const CONSOLE_PR = "https://github.com/craigoley/remudero-console/pull/12";
+const CONSOLE_TASK = "W1-T3564";
+const CONSOLE_HEAD = "c0ff33d0c0ff33d0c0ff33d0c0ff33d0c0ff33d0";
+const CONSOLE_PR_BODY = [
+  "Adds the private console's tests/ Vitest proof profile to the closed suite registry so console",
+  "acceptance criteria route to real Vitest runs instead of falling back to prose review.",
+  "",
+  "Acceptance:",
+  "- the console's initial load renders without a stale session banner | unit test: CONSOLE-T2 initial load renders",
+  "- a dropped connection retry clears the banner once the console reconnects | unit test: CONSOLE-T2 retry banner clears",
+  "",
+  "Remudero-Task: W1-T3564",
+  "",
+].join("\n");
+const CONSOLE_DECLARED_FILES = ["tests/console-initial-load.test.ts", "tests/console-retry-banner.test.ts"];
+
+const consoleCappedTerminal: ReviewVerdict = {
+  state: "failure",
+  criteria: parseAcceptanceBlock(CONSOLE_PR_BODY).map((criterion) => ({
+    ...criterion,
+    met: false,
+    reason: "no v1-routable dialect for the console suite",
+    proof_exec: "not_executable",
+  })),
+  testTheater: false,
+  summary: "capped under the v1 engine: neither CONSOLE-T2 proof had a routable dialect",
+  floorDegraded: true,
+  capped: true,
+  keywordOnly: false,
+  planOnly: false,
+};
+
+const consolePass: ReviewVerdict = {
+  state: "success",
+  criteria: parseAcceptanceBlock(CONSOLE_PR_BODY).map((criterion) => ({
+    ...criterion,
+    met: true,
+    reason: "both CONSOLE-T2 Vitest proofs executed and passed",
+    proof_exec: "executed_pass",
+  })),
+  testTheater: false,
+  summary: "v2 engine: both CONSOLE-T2 proofs executed",
+  floorDegraded: false,
+  capped: false,
+  keywordOnly: false,
+  planOnly: false,
+};
+
 function legacyInputDigest(headSha: string, body: string): string {
   const encoded = JSON.stringify({ version: 1, headSha, body });
   return `v1:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
@@ -135,7 +184,7 @@ test("W1-T2872: the current engine owns a new decision instead of replaying PR #
 
 test("the semantic scope-context bump rearms both identities while operational churn changes neither", () => {
   const previousRevision = "w1-t2946-codex-disposable-review-v1";
-  assert.equal(REVIEW_ENGINE_REVISION, "reviewer-scope-context-v1");
+  assert.equal(REVIEW_ENGINE_REVISION, "reviewer-scope-context-v2");
   const currentInput = reviewInputDigest(HEAD_4042, PR_BODY_4042, REVIEW_ENGINE_REVISION);
   assert.notEqual(currentInput, reviewInputDigest(HEAD_4042, PR_BODY_4042, previousRevision));
   assert.notEqual(currentInput, reviewInputDigest(`${HEAD_4042}a`, PR_BODY_4042, REVIEW_ENGINE_REVISION));
@@ -200,4 +249,80 @@ test("W1-T2872 mutation: deleting the engine revision independently restores adm
     decisionMutant.reviewDecisionDigest({ ...material, engineRevision: "review-engine-pre-exact-head-v1" }),
     "without the revision, the old engine's terminal decision becomes replayable again",
   );
+});
+
+test("W1-T3580 console proof router rearm", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-console-proof-router-rearm-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const material = {
+    headSha: CONSOLE_HEAD,
+    diff: "diff --git a/tests/console-initial-load.test.ts b/tests/console-initial-load.test.ts\n",
+    report: "console reviewer materialized at PR #12's exact head",
+    body: CONSOLE_PR_BODY,
+    acceptance: parseAcceptanceBlock(CONSOLE_PR_BODY),
+    declaredFiles: CONSOLE_DECLARED_FILES,
+  };
+  // The v1 terminal: W1-T3564 had not yet advanced the revision, so both CONSOLE-T2 proofs
+  // were judged not_executable and the review capped, exactly as observed on console PR #12.
+  const v1TerminalDigest = reviewDecisionDigest({ ...material, engineRevision: "reviewer-scope-context-v1" });
+  // The v2 identity: the same exact head and body, but under the revision this task advances to.
+  const v2Digest = reviewDecisionDigest({ ...material, engineRevision: REVIEW_ENGINE_REVISION });
+  assert.notEqual(v1TerminalDigest, v2Digest, "the v2 proof-routing revision must mint a fresh decision identity");
+  try {
+    appendLedger(ledgerPath, {
+      run_id: "review-console-pr12-v1-capped-terminal",
+      task_id: CONSOLE_TASK,
+      step: "review.posted",
+      pr_url: CONSOLE_PR,
+      head_sha: CONSOLE_HEAD,
+      review_decision_digest: v1TerminalDigest,
+      decision_verdict: consoleCappedTerminal,
+      reviewer_outcome: "success",
+    });
+    const claim = await claimReviewDecision({ ledgerPath, taskId: CONSOLE_TASK, prUrl: CONSOLE_PR, digest: v2Digest });
+    assert.equal(
+      claim.kind,
+      "owned",
+      "the v2 engine must execute both CONSOLE-T2 proofs rather than replaying the v1-capped terminal",
+    );
+    if (claim.kind === "owned") claim.release();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3580 v2 decision repeats replay", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-console-proof-router-replay-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const v2Digest = reviewDecisionDigest({
+    headSha: CONSOLE_HEAD,
+    diff: "diff --git a/tests/console-initial-load.test.ts b/tests/console-initial-load.test.ts\n",
+    report: "console reviewer materialized at PR #12's exact head",
+    body: CONSOLE_PR_BODY,
+    acceptance: parseAcceptanceBlock(CONSOLE_PR_BODY),
+    declaredFiles: CONSOLE_DECLARED_FILES,
+  });
+  try {
+    const first = await claimReviewDecision({ ledgerPath, taskId: CONSOLE_TASK, prUrl: CONSOLE_PR, digest: v2Digest });
+    assert.equal(first.kind, "owned", "the first v2 sweep must own and execute the CONSOLE-T2 proofs");
+    if (first.kind === "owned") first.release();
+    appendLedger(ledgerPath, {
+      run_id: "review-console-pr12-v2-terminal",
+      task_id: CONSOLE_TASK,
+      step: "review.posted",
+      pr_url: CONSOLE_PR,
+      head_sha: CONSOLE_HEAD,
+      review_decision_digest: v2Digest,
+      decision_verdict: consolePass,
+      reviewer_outcome: "success",
+    });
+    const second = await claimReviewDecision({ ledgerPath, taskId: CONSOLE_TASK, prUrl: CONSOLE_PR, digest: v2Digest });
+    assert.equal(
+      second.kind,
+      "replay",
+      "an identical second sweep under the unchanged v2 revision must dedupe, not spawn a duplicate review",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

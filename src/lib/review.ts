@@ -45,8 +45,10 @@ export type PostableReviewState = ReviewState | "pending";
 /** Stable identity for the material a review judges: the PR head binds the diff, the exact body the authored claims,
  *  so a new commit OR a body edit earns a fresh retry budget while comments, labels and other `updated_at` churn do
  *  not. The revision rearms the same evidence only after a material reviewer-contract change, independent of boot
- *  commits, provider choice and model sampling. */
-export const REVIEW_ENGINE_REVISION = "reviewer-scope-context-v1";
+ *  commits, provider choice and model sampling. Bumped to v2 (W1-T3580) because W1-T3564 changed proof-execution
+ *  semantics (the closed console suite registry) without advancing this revision, so a v1 terminal cached before
+ *  that change stayed an exact cache hit and replayed instead of executing the newly routable proofs. */
+export const REVIEW_ENGINE_REVISION = "reviewer-scope-context-v2";
 
 export function reviewInputDigest(
   headSha: string,
