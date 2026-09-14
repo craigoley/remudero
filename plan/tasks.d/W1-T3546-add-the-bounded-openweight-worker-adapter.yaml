@@ -12,6 +12,7 @@
     - src/lib/config.ts
     - src/lib/config-schema.ts
     - src/lib/mounts.ts
+    - src/lib/inbox.ts
     - src/lib/worker.ts
     - src/lib/worker-provider.ts
     - .remudero/mounts.yaml
@@ -60,9 +61,12 @@
       proof: "unit test: the open-weight adapter contains tools and bounds their conversation"
     - claim: "an enabled cash-billed openweight provider without dailyCapUsd refuses at config load, while no credential is written into configuration or worker environment"
       proof: "unit test: openweight configuration requires a daily cash cap and keeps its key outside worker env"
+    - claim: "the task-shard authoring prompt requires double-quoted proof values, so a proof containing a colon remains valid YAML"
+      proof: "unit test: inbox draft prompts require double-quoted proof values"
   falsifier: |
     Delete the openweight capability row and require the lookup test to fail. Reintroduce
     `response_format: json_object`, a 1,500 completion ceiling, an uncontained path, an undeclared
     tool, or an unbounded loop in a fixture; each must make its corresponding test fail. Remove the
-    daily cap and require config refusal. A mount declaring `openweight` in this phase is a boundary
+    daily cap and require config refusal. Remove the prompt's double-quoted `proof:` requirement and
+    require the prompt regression to fail. A mount declaring `openweight` in this phase is a boundary
     violation even if the adapter itself passes.
