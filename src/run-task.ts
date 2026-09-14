@@ -28245,21 +28245,50 @@ export function updatedForWorkflowFromLedger(ledgerPath: string): Set<string> {
   return out;
 }
 
+/** PRIMARY CONTROL — the most direct graph evidence the distance-refresh rung may read on one pass.
+ * It ignores GitHub's `mergeable_state`: `open-prs-rest.ts` normalizes `behind` to `clean`, and
+ * GitHub can report `clean` even when its compare endpoint says main is many commits ahead. Three
+ * serial reads every five-minute rotation keep the observation bounded while eventually covering
+ * every open, updateable PR.
+ */
+export const DISTANCE_REFRESH_PROBE_LIMIT = 3;
+export const DISTANCE_REFRESH_ROTATION_MS = 5 * 60_000;
+
+/** W1-T3277 — choose a small, fair rotating slice of PRs for direct graph comparison. A draft or
+ * conflicted PR cannot reach `update-branch`, so probing it would spend GitHub capacity without
+ * creating an admissible candidate. The activity order is stable within a window; the window
+ * offset guarantees an unchanged population larger than the cap is not permanently starved. */
+export function distanceRefreshProbeTargets(
+  openPrs: readonly OpenPrView[],
+  nowMs: number = Date.now(),
+): OpenPrView[] {
+  const eligible = openPrs
+    .filter((pr) => pr.isDraft !== true && pr.mergeState !== "dirty" && pr.mergeable !== false)
+    .slice()
+    .sort((a, b) => a.lastActivityAt.localeCompare(b.lastActivityAt) || a.prNumber - b.prNumber);
+  if (eligible.length <= DISTANCE_REFRESH_PROBE_LIMIT) return eligible;
+  const window = Math.floor(nowMs / DISTANCE_REFRESH_ROTATION_MS);
+  const start = (window * DISTANCE_REFRESH_PROBE_LIMIT) % eligible.length;
+  return Array.from(
+    { length: DISTANCE_REFRESH_PROBE_LIMIT },
+    (_, index) => eligible[(start + index) % eligible.length]!,
+  );
+}
+
 /**
- * W1-T3277 — the generic stale-PR distance reader. Scoped to PRs GitHub already reports as
- * `behind`, so the full sweep pays only for heads whose base freshness is already suspicious; the
- * pure selector in `sweep.ts` receives a map and decides from policy data.
+ * W1-T3277 — the generic stale-PR distance reader. It deliberately derives freshness from the
+ * compare endpoint rather than `mergeable_state`: the latter is a mergeability label, not a
+ * graph-distance guarantee. The pure selector in `sweep.ts` receives only measured distances.
  */
 export function buildBehindMainByPr(
   owner: string,
   repo: string,
   openPrs: readonly OpenPrView[],
   fetch: GhApiFetcher = ghJson,
+  nowMs: number = Date.now(),
 ): Map<number, number> {
   const out = new Map<number, number>();
-  for (const pr of openPrs) {
-    if (pr.mergeState !== "behind") continue;
-    if (pr.mergeable === false) continue;
+  for (const pr of distanceRefreshProbeTargets(openPrs, nowMs)) {
     try {
       const compare = fetch(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...main`]) as { ahead_by?: unknown };
       if (typeof compare?.ahead_by === "number" && Number.isFinite(compare.ahead_by)) {
