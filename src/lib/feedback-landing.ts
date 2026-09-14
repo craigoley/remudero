@@ -449,6 +449,7 @@ function repositoryFromGitConfig(git: GitExec): LandingRepository | undefined {
   try {
     return parseGithubRepository(git(["config", "--get", "remote.origin.url"]).trim());
   } catch {
+    // An unreadable target origin means there is no repository scope to derive.
     return undefined;
   }
 }
@@ -461,6 +462,7 @@ function sourceRepositoryFromCwd(): LandingRepository | undefined {
     });
     return parseGithubRepository(out.trim());
   } catch {
+    // An unreadable source checkout only disables the legacy self comparison.
     return undefined;
   }
 }
