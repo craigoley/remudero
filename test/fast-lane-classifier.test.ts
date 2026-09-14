@@ -672,6 +672,54 @@ function workflowRunForClass(jobId: string, stepName: string, cls: string) {
   return { ...result, calls };
 }
 
+/**
+ * Every classify-gated step this task wired, across every wired job — the population both the
+ * pre-existing "behavioral" test below and the new W1-T3512-acceptance-phrased tests further down
+ * drive. Hoisted to module scope so both can walk the SAME list rather than two hand-copies
+ * drifting apart. None of these `run:` bodies shell out to `git`, so each is safe to execute in a
+ * bare (non-git) scratch directory via {@link workflowRunForClass} — unlike mutation-ratchet's own
+ * unconditional `trigger` step, which calls `git diff` directly and is exercised separately below.
+ */
+const FAST_LANE_GUARDED_STEPS: Array<{ jobId: string; stepName: string; command: RegExp }> = [
+  { jobId: "mutation-ratchet", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+  { jobId: "jscpd-gate", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+  { jobId: "jscpd-gate", stepName: "jscpd duplication gate", command: /\/npm run --silent jscpd/ },
+  { jobId: "depcruise", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+  { jobId: "depcruise", stepName: "dependency-cruiser fitness rules", command: /\/npm run --silent depcruise/ },
+  { jobId: "depcruise", stepName: "Cycle-count ratchet", command: /\/npm run --silent cycle-ratchet/ },
+  { jobId: "api-client-drift", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+  { jobId: "api-client-drift", stepName: "api-client drift check", command: /\/npm run --silent api-client:check/ },
+  { jobId: "no-hand-rolled-fetch", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+  {
+    jobId: "no-hand-rolled-fetch",
+    stepName: "No-hand-rolled-fetch grep gate",
+    command: /\/npm run --silent no-hand-rolled-fetch:check/,
+  },
+  { jobId: "source-size", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+  { jobId: "source-size", stepName: "Source-size signal", command: /\/npm run --silent source-size-signal/ },
+  { jobId: "comment-load-ratchet", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
+  {
+    jobId: "comment-load-ratchet",
+    stepName: "Comment-load ratchet",
+    command: /\/npm run --silent comment-load-signal/,
+  },
+  {
+    jobId: "comment-load-ratchet",
+    stepName: "Expiring-fixture census",
+    command: /\/node scripts\/expiring-fixture-census\.mjs/,
+  },
+  {
+    jobId: "comment-load-ratchet",
+    stepName: "Contract-coverage ratchet",
+    command: /\/node scripts\/contract-coverage-ratchet\.mjs/,
+  },
+  {
+    jobId: "comment-load-ratchet",
+    stepName: "Console-parity ratchet",
+    command: /\/npm run --silent console-parity/,
+  },
+];
+
 test("W1-T3512 acceptance 1: a PLAN_ONLY diff skips every source-only required gate wired to the classifier", () => {
   for (const jobId of FAST_LANE_WIRED_JOBS) {
     const steps = jobSteps(jobId);
@@ -755,47 +803,7 @@ test("W1-T3512 acceptance 4: a SOURCE diff is unaffected — each wired gate's r
 });
 
 test("W1-T3512: every new fast-lane workflow guard is behavioral — PLAN_ONLY skips and SOURCE reaches the command", () => {
-  const guardedSteps: Array<{ jobId: string; stepName: string; command: RegExp }> = [
-    { jobId: "mutation-ratchet", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-    { jobId: "jscpd-gate", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-    { jobId: "jscpd-gate", stepName: "jscpd duplication gate", command: /\/npm run --silent jscpd/ },
-    { jobId: "depcruise", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-    { jobId: "depcruise", stepName: "dependency-cruiser fitness rules", command: /\/npm run --silent depcruise/ },
-    { jobId: "depcruise", stepName: "Cycle-count ratchet", command: /\/npm run --silent cycle-ratchet/ },
-    { jobId: "api-client-drift", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-    { jobId: "api-client-drift", stepName: "api-client drift check", command: /\/npm run --silent api-client:check/ },
-    { jobId: "no-hand-rolled-fetch", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-    {
-      jobId: "no-hand-rolled-fetch",
-      stepName: "No-hand-rolled-fetch grep gate",
-      command: /\/npm run --silent no-hand-rolled-fetch:check/,
-    },
-    { jobId: "source-size", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-    { jobId: "source-size", stepName: "Source-size signal", command: /\/npm run --silent source-size-signal/ },
-    { jobId: "comment-load-ratchet", stepName: "Install (clean, from lockfile)", command: /\/npm ci/ },
-    {
-      jobId: "comment-load-ratchet",
-      stepName: "Comment-load ratchet",
-      command: /\/npm run --silent comment-load-signal/,
-    },
-    {
-      jobId: "comment-load-ratchet",
-      stepName: "Expiring-fixture census",
-      command: /\/node scripts\/expiring-fixture-census\.mjs/,
-    },
-    {
-      jobId: "comment-load-ratchet",
-      stepName: "Contract-coverage ratchet",
-      command: /\/node scripts\/contract-coverage-ratchet\.mjs/,
-    },
-    {
-      jobId: "comment-load-ratchet",
-      stepName: "Console-parity ratchet",
-      command: /\/npm run --silent console-parity/,
-    },
-  ];
-
-  for (const { jobId, stepName, command } of guardedSteps) {
+  for (const { jobId, stepName, command } of FAST_LANE_GUARDED_STEPS) {
     const planOnly = workflowRunForClass(jobId, stepName, "PLAN_ONLY");
     assert.equal(planOnly.status, 0, `${jobId}/${stepName} should skip cleanly on PLAN_ONLY:\n${planOnly.stderr}${planOnly.stdout}`);
     assert.equal(planOnly.calls, "", `${jobId}/${stepName} must not invoke its command on PLAN_ONLY`);
@@ -824,5 +832,83 @@ test("W1-T3512: ten ci.yml jobs now consult scripts/diff-class.mjs (three pre-ex
   assert.equal(consulting.length, expected.length, `expected ${expected.length} jobs consulting diff-class.mjs, got ${consulting.length}: ${consulting.join(", ")}`);
   for (const jobId of expected) {
     assert.ok(consulting.includes(jobId), `expected ${jobId} among the jobs consulting diff-class.mjs`);
+  }
+});
+
+// ── W1-T3512 task acceptance — literal proof names, run end-to-end (not just re-asserted by name) ──
+//
+// The task's own `plan/tasks.d/` shard quotes each proof as `unit test: <exact phrase>`. The three
+// tests below carry those exact phrases in their titles AND drive the real, unstubbed classifier
+// plus a stubbed-command execution of the real workflow step bodies parsed from ci.yml — so the
+// proof is a real assertion on production code, not a restatement of an acceptance test that
+// already exists under a different name.
+
+test("W1-T3512 acceptance 2: a skipped source gate still registers a conclusion — every classify-gated step exits 0 on PLAN_ONLY AND DOCS_ONLY, never absent", () => {
+  for (const { jobId, stepName } of FAST_LANE_GUARDED_STEPS) {
+    const planOnly = workflowRunForClass(jobId, stepName, "PLAN_ONLY");
+    assert.equal(
+      planOnly.status,
+      0,
+      `${jobId}/${stepName} must exit 0 on PLAN_ONLY so the step (and the job it belongs to) registers a successful conclusion instead of the required check going absent:\n${planOnly.stderr}${planOnly.stdout}`,
+    );
+    assert.equal(planOnly.calls, "", `${jobId}/${stepName} must not invoke its real command on PLAN_ONLY — the skip lives in bash, not in a missing check-run`);
+
+    // DOCS_ONLY is the other skip-eligible class and is untested by name elsewhere in this file —
+    // the same conclusion-registering guarantee must hold for it too, not just PLAN_ONLY.
+    const docsOnly = workflowRunForClass(jobId, stepName, "DOCS_ONLY");
+    assert.equal(
+      docsOnly.status,
+      0,
+      `${jobId}/${stepName} must exit 0 on DOCS_ONLY too — a class-based job-level if: would strand the check-run absent, the failure ci-gate.yml's own ADVISORY block names`,
+    );
+    assert.equal(docsOnly.calls, "", `${jobId}/${stepName} must not invoke its real command on DOCS_ONLY`);
+  }
+});
+
+test("W1-T3512 acceptance 3: an unreadable changed-file list runs the full gate — the real CLI fails closed to SOURCE and every wired job's Install step then runs npm ci", () => {
+  const unreadable = join(REPO_ROOT, "definitely-does-not-exist-W1-T3512.txt");
+  const result = runCli(["--changed-files", unreadable]);
+  assert.equal(result.status, 0, "the CLI must always exit 0 in classify mode, even when --changed-files names a path that cannot be read");
+  const cls = result.stdout.trim();
+  assert.equal(cls, CLASSES.SOURCE, "an unreadable --changed-files path must classify SOURCE, never PLAN_ONLY or DOCS_ONLY");
+  assert.match(result.stderr, /could not read --changed-files/, "the CLI must name WHY it fell back, not fail silently");
+
+  for (const jobId of FAST_LANE_WIRED_JOBS) {
+    const install = workflowRunForClass(jobId, "Install (clean, from lockfile)", cls);
+    assert.equal(install.status, 73, `${jobId}'s Install step must reach the stubbed npm ci — the full gate — once the classify step failed closed to SOURCE`);
+    assert.match(install.calls, /\/npm ci/, `${jobId} must actually invoke npm ci when the changed-file list was unreadable`);
+  }
+});
+
+test("W1-T3512 acceptance 4: a SOURCE diff still runs every source-only gate — every classify-gated step executes its real command end to end", () => {
+  for (const { jobId, stepName, command } of FAST_LANE_GUARDED_STEPS) {
+    const source = workflowRunForClass(jobId, stepName, "SOURCE");
+    assert.equal(source.status, 73, `${jobId}/${stepName} must reach its final stubbed command on SOURCE, not exit early on a skip:\n${source.stderr}${source.stdout}`);
+    assert.match(source.calls, command, `${jobId}/${stepName} must actually invoke its real check command on SOURCE, not merely contain the text unreached`);
+    assert.doesNotMatch(source.stdout, /skipping/, `${jobId}/${stepName} must not print a fast-lane skip on a SOURCE diff`);
+  }
+  // mutation-ratchet's own real check (its `trigger` step) is unconditional BY THE JOB'S
+  // PRE-EXISTING (pre-W1-T3512) design — it never consults the classify output at all — which is
+  // the strongest form of "still runs on SOURCE": there is no bash arm that could skip it.
+  const mutationTrigger = workflowRunStep(
+    "mutation-ratchet",
+    "Determine whether this diff can move src/lib/classify.ts's mutation score",
+  );
+  assert.doesNotMatch(
+    mutationTrigger,
+    /steps\.classify\.outputs\.class/,
+    "mutation-ratchet's trigger step must not gate on this task's classify output — it already runs unconditionally on every diff, SOURCE included",
+  );
+  assert.match(mutationTrigger, /node scripts\/mutation-ratchet\.mjs --changed-files/, "mutation-ratchet's trigger step must still call the real scorer script");
+
+  // The three NAMED source-only gates left deliberately unwired never consult the classifier at
+  // all, so a SOURCE diff (or any diff) reaches their real step unconditionally — same guarantee,
+  // simpler proof: no bash arm exists that could skip them.
+  for (const jobId of FAST_LANE_UNWIRED_SOURCE_ONLY_NAMED_JOBS) {
+    const steps = jobSteps(jobId);
+    assert.ok(
+      steps.every((s) => !/steps\.classify\.outputs\.class/.test(s.run ?? "")),
+      `${jobId} must carry no fast-lane class check anywhere in its steps — every diff, SOURCE included, reaches its real command unconditionally`,
+    );
   }
 });
