@@ -142,5 +142,8 @@ test("W1-T3581 unproved loaded reviewer code keeps withheld pending review bound
     assert.equal(ancestryChecks, candidate.expectedAncestryChecks, `${candidate.name} must reach the fail-closed ancestry boundary exactly when stale provenance is present`);
     const disposed = readLedgerLines(path).findLast((line) => line.step === "sweep.disposed");
     assert.match(String(disposed?.stand_down_reason), /freshness recovery backoff.*60m pending ceiling/);
+    if (candidate.name === "unreadable ancestry") {
+      assert.match(String(disposed?.stand_down_reason), /ancestry check failed \(Error\)/, "an unreadable ancestry check stays bounded and names the failed evidence channel");
+    }
   }
 });

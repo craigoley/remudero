@@ -68,4 +68,13 @@ test("W1-T3581 loaded reviewer provenance invokes git ancestry from the module t
   assert.equal(recovery.isLoadedCodeAtOrAfter("required-sha"), true);
   assert.deepEqual(ancestryCalls, [["-C", "/module-root", "merge-base", "--is-ancestor", "required-sha", "loaded-sha"]]);
   assert.equal(reviewerCodeRecoveryFromLoadedModule("/module-root", undefined).isLoadedCodeAtOrAfter("required"), false);
+
+  const unreadable = reviewerCodeRecoveryFromLoadedModule(
+    "/module-root",
+    "loaded-sha",
+    (() => { throw new Error("git unreadable"); }) as never,
+  );
+  assert.equal(unreadable.isLoadedCodeAtOrAfter("required-sha"), false, "an ancestry execution error fails closed");
+  assert.equal(unreadable.takeAncestryFailure?.(), "Error", "the bounded stand-down reason can name the failed ancestry evidence");
+  assert.equal(unreadable.takeAncestryFailure?.(), undefined, "a reported failure is consumed before the next ancestry check");
 });

@@ -26984,6 +26984,7 @@ export function reviewerCodeRecoveryFromLoadedModule(
   loadedCodeSha: string | undefined,
   spawn: typeof spawnSync = spawnSync,
 ): NonNullable<SweepDeps["reviewerCodeRecovery"]> {
+  let pendingAncestryFailure: string | undefined;
   return {
     loadedCodeSha,
     isLoadedCodeAtOrAfter: (requiredOriginMainSha: string) => {
@@ -26994,12 +26995,28 @@ export function reviewerCodeRecoveryFromLoadedModule(
           ["-C", moduleRepoDir, "merge-base", "--is-ancestor", requiredOriginMainSha, loadedCodeSha],
           { stdio: "ignore" },
         ).status === 0;
-      } catch {
+      } catch (error) {
+        const reason = error instanceof Error && error.name.length > 0 ? error.name : typeof error;
+        pendingAncestryFailure = reason;
         return false;
       }
     },
+    takeAncestryFailure: () => {
+      const failure = pendingAncestryFailure;
+      pendingAncestryFailure = undefined;
+      return failure;
+    },
   };
 }
+
+// Function declarations are initialized before module evaluation, so these retain the production
+// builders while `daemonCommand` may shadow their names with a test injection below. Keeping the
+// live calls as `buildSweepHook(...)`/`buildSweepLightHook(...)` preserves the composition-root
+// contract that existing daemon wiring tests inspect.
+const daemonDefaultBuildSweepHook = buildSweepHook;
+const daemonDefaultBuildSweepLightHook = buildSweepLightHook;
+type DaemonSweepHookBuilder = typeof buildSweepHook;
+type DaemonSweepLightHookBuilder = typeof buildSweepLightHook;
 
 export async function daemonCommand(
   rest: string[],
@@ -27026,8 +27043,8 @@ export async function daemonCommand(
     /** Injectable sweep-hook builders for composition-root tests. Production keeps both real
      * builders; the seam lets a test observe the immutable reviewer-code provenance handed to
      * the full and light paths without reading this source file as text. */
-    buildSweepHook?: typeof buildSweepHook;
-    buildSweepLightHook?: typeof buildSweepLightHook;
+    buildSweepHook?: DaemonSweepHookBuilder;
+    buildSweepLightHook?: DaemonSweepLightHookBuilder;
     /** Injectable mutable boot routine. Tests use it to prove an already-held fleet does not
      * enter daemonBoot's sweeps or keychain work. */
     daemonBoot?: typeof daemonBoot;
@@ -27127,8 +27144,8 @@ export async function daemonCommand(
     }
   })();
   const reviewerCodeRecovery = reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha);
-  const buildFullSweepHook = deps.buildSweepHook ?? buildSweepHook;
-  const buildLightSweepHook = deps.buildSweepLightHook ?? buildSweepLightHook;
+  const buildSweepHook: DaemonSweepHookBuilder = deps.buildSweepHook ?? daemonDefaultBuildSweepHook;
+  const buildSweepLightHook: DaemonSweepLightHookBuilder = deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook;
 
   // ── REPO TARGETING + self-target GUARD (fix/daemon-repo-targeting). The daemon must know
   // WHICH repo to drain, EXPLICITLY — the old code read the plan from its own checkout and
@@ -27918,7 +27935,7 @@ export async function daemonCommand(
         // trips GitHub's secondary rate limit at the poll cadence cannot collide. `github` (the
         // param before this one) is left undefined so the hook builds its own board gateway,
         // which is the ONLY construction this pacer can actually reach.
-        sweep: buildFullSweepHook(
+        sweep: buildSweepHook(
           target.owner,
           target.repo,
           config,
@@ -27941,7 +27958,7 @@ export async function daemonCommand(
         // the deterministic post-review re-post while `runOne` is unbounded and in
         // flight, so a green PR whose review went absent re-posts within one poll
         // interval. Dangerous lanes (fix/close/arm/escalate) stay non-concurrent.
-        sweepLight: buildLightSweepHook(
+        sweepLight: buildSweepLightHook(
           target.owner,
           target.repo,
           config,

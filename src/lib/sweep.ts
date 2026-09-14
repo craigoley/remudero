@@ -6040,6 +6040,9 @@ export interface SweepDeps {
   reviewerCodeRecovery?: {
     loadedCodeSha?: string;
     isLoadedCodeAtOrAfter: (requiredOriginMainSha: string) => boolean;
+    /** Returns and clears the last local ancestry-read failure, if the recovery implementation
+     * can distinguish one. The sweep keeps the bounded backoff either way. */
+    takeAncestryFailure?: () => string | undefined;
   };
   /** W1-T2853 — choose this pass's review width from one already-derived queue and ledger snapshot.
    *  Omission preserves the committed `reviewLanes` behaviour for CLI and test callers. */
@@ -6510,6 +6513,7 @@ function reviewerCodeFreshnessBackoffReason(
   if (refusal === undefined) return undefined;
   const attemptedAt = refusal.attemptedAt;
   if (attemptedAt === undefined) return undefined;
+  let ancestryCheckFailure: string | undefined;
   // The 60-minute ceiling protects an old or unprovable reviewer from certifying a newer
   // origin/main. A daemon that has proved its already-loaded module graph contains that exact
   // target no longer needs the delay. This is intentionally narrower than "the checkout is
@@ -6525,9 +6529,11 @@ function reviewerCodeFreshnessBackoffReason(
   ) {
     try {
       if (recovery.isLoadedCodeAtOrAfter(refusal.requiredOriginMainSha)) return undefined;
-    } catch {
+      ancestryCheckFailure = recovery.takeAncestryFailure?.();
+    } catch (error) {
       // The predicate is Git ancestry in production. A read error is unproved provenance, not a
       // reason to turn an intentionally withheld verdict into a terminal status.
+      ancestryCheckFailure = error instanceof Error ? error.name : typeof error;
     }
   }
   const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
@@ -6535,6 +6541,7 @@ function reviewerCodeFreshnessBackoffReason(
   return (
     `the last reviewer-code freshness refusal for ${reviewKey} was ${Math.floor(ageMinutes)}m ago — ` +
     `freshness recovery backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
+    `${ancestryCheckFailure ? `ancestry check failed (${ancestryCheckFailure}); ` : ""}` +
     `this is a bounded reviewer-source freshness refusal, not a durable review verdict`
   );
 }
