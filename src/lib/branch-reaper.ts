@@ -21,6 +21,8 @@
  * is a pure function of the facts handed to it. That is not incidental tidiness — a module with no
  * imports cannot be one end of a cycle, which is what makes this the safe first region to move.
  */
+import { isLandingRef } from "./feedback-landing.js";
+
 /**
  * The declared guard list (W1-T447) — branches the fleet must never delete, DECLARED so the
  * decision is reviewable, alongside the name grep that derives the same answer independently.
@@ -57,6 +59,10 @@ export const DECLARED_BRANCH_GUARDS: readonly string[] = [
   "diag/drain-concurrency",
   "diag/drain-sequential-await",
 ];
+
+export function isDeclaredBranchGuard(name: string, declaredGuards: readonly string[] = DECLARED_BRANCH_GUARDS): boolean {
+  return name === "main" || declaredGuards.includes(name) || isLandingRef(name);
+}
 
 /** Every remote branch name, newest-agnostic — `git ls-remote --heads`, parsed. */
 export function remoteBranchNames(exec: (cmd: string, args: string[]) => string): string[] {

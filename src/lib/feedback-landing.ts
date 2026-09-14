@@ -15,6 +15,7 @@
  * Why: the full precedent this replaced is archived in docs/forensics/feedback-landing.md#module-header.
  */
 
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import {
@@ -101,6 +102,29 @@ const LANDING_AUTHOR_EMAIL = "rmd-feedback-bridge@users.noreply.github.com";
 type GitExec = (args: string[], opts?: { env?: NodeJS.ProcessEnv }) => string;
 type GhExec = (args: string[]) => string;
 
+export interface LandingRepository {
+  owner: string;
+  repo: string;
+}
+
+type LandingFamily = "feedback" | "decisions" | "ci-learning";
+
+export interface LandingIdentityInput {
+  family?: LandingFamily;
+  targetRepository?: LandingRepository;
+  sourceRepository?: LandingRepository;
+  landingOwner?: string;
+}
+
+export interface LandingIdentity {
+  branch: string;
+  prHead: string;
+  ownedDir: string;
+  prTitle: string;
+  targetRepository?: LandingRepository;
+  landingOwner?: string;
+}
+
 export interface LandFeedbackOpts {
   /** Injectable `git` exec — real callers omit it; tests can force specific failure paths. */
   git?: GitExec;
@@ -117,6 +141,15 @@ export interface LandFeedbackOpts {
    * Why: docs/forensics/feedback-landing.md#landfeedbackopts_ledgerlines.
    */
   ledgerLines?: () => Array<Record<string, unknown>>;
+  /** Repository the landing PR is opened against. Omitted: resolved from this checkout's origin. */
+  targetRepository?: LandingRepository;
+  /**
+   * Stable owner for this landing writer, e.g. a daemon instance/state owner. Omitted keeps the
+   * existing self/core branch names unless the target repo is visibly not this source repo.
+   */
+  landingOwner?: string;
+  /** Test seam for preserving the self/core identity without reading the caller's cwd. */
+  sourceRepository?: LandingRepository;
 }
 
 export interface LandFeedbackResult {
@@ -222,14 +255,73 @@ function listRelFiles(root: string, relDir: string): string[] {
 /** One landing target's shape — every kind shares the same commit/push/PR tail (see
  *  {@link finishLanding}); only the branch, the commit/PR text, and which directory it walks differ. */
 interface LandingKind {
+  family: LandingFamily;
   branch: string;
+  prHead: string;
   /** The one repo-relative directory this kind owns — {@link landContent}'s carry-forward is
    *  filtered to it, so a landing can only ever re-stage its own records.
    *  Why: docs/forensics/feedback-landing.md#landingkind_owneddir. */
   ownedDir: string;
   prTitle: string;
+  targetRepository?: LandingRepository;
+  landingOwner?: string;
   commitMessage: (unlanded: string[]) => string;
   prBody: (unlanded: string[]) => string;
+}
+
+const LANDING_BASES: Record<LandingFamily, { branch: string; ownedDir: string; prTitle: string }> = {
+  feedback: { branch: LANDING_BRANCH, ownedDir: FEEDBACK_REL_DIR, prTitle: LANDING_PR_TITLE },
+  decisions: { branch: DECISIONS_LANDING_BRANCH, ownedDir: DECISIONS_REL_DIR, prTitle: DECISIONS_LANDING_PR_TITLE },
+  "ci-learning": {
+    branch: CI_LEARNING_LANDING_BRANCH,
+    ownedDir: "",
+    prTitle: CI_LEARNING_LANDING_PR_TITLE,
+  },
+};
+
+function repoKey(repo: LandingRepository): string {
+  return `${repo.owner}/${repo.repo}`;
+}
+
+function sameRepository(a: LandingRepository | undefined, b: LandingRepository | undefined): boolean {
+  return Boolean(a && b && a.owner === b.owner && a.repo === b.repo);
+}
+
+function branchSlug(s: string, maxLen: number): string {
+  return kebabSlug(s, maxLen).replace(/-+$/, "") || "owner";
+}
+
+function scopedLandingBranch(base: string, target: LandingRepository, owner: string): string {
+  const scope = `${repoKey(target)}:${owner}`;
+  const digest = createHash("sha256").update(scope).digest("hex").slice(0, 12);
+  const targetSlug = branchSlug(`${target.owner}-${target.repo}`, 44);
+  const ownerSlug = branchSlug(owner, 28);
+  return `${base}-${targetSlug}-${ownerSlug}-${digest}`;
+}
+
+export function landingIdentity(input: LandingIdentityInput = {}): LandingIdentity {
+  const family = input.family ?? "feedback";
+  const base = LANDING_BASES[family];
+  const owner = input.landingOwner?.trim();
+  const target = input.targetRepository;
+  const scoped = target !== undefined && (Boolean(owner) || !sameRepository(target, input.sourceRepository));
+  const branch = scoped ? scopedLandingBranch(base.branch, target, owner || "default") : base.branch;
+  return {
+    branch,
+    prHead: branch,
+    ownedDir: base.ownedDir,
+    prTitle: base.prTitle,
+    ...(target ? { targetRepository: target } : {}),
+    ...(owner ? { landingOwner: owner } : {}),
+  };
+}
+
+const LEGACY_LANDING_REFS = new Set([LANDING_BRANCH, DECISIONS_LANDING_BRANCH, CI_LEARNING_LANDING_BRANCH]);
+const SCOPED_LANDING_REF =
+  /^(?:feedback-landing|decisions-landing|ci-learning-landing)-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[0-9a-f]{12}$/;
+
+export function isLandingRef(ref: string): boolean {
+  return LEGACY_LANDING_REFS.has(ref) || SCOPED_LANDING_REF.test(ref);
 }
 
 function feedbackCommitMessage(unlanded: string[]): string {
@@ -288,18 +380,14 @@ function decisionsPrBody(unlanded: string[]): string {
   ].join("\n");
 }
 
-const FEEDBACK_LANDING_KIND: LandingKind = {
-  branch: LANDING_BRANCH,
-  ownedDir: FEEDBACK_REL_DIR,
-  prTitle: LANDING_PR_TITLE,
+const FEEDBACK_LANDING_KIND: Omit<LandingKind, keyof LandingIdentity> = {
+  family: "feedback",
   commitMessage: feedbackCommitMessage,
   prBody: feedbackPrBody,
 };
 
-const DECISIONS_LANDING_KIND: LandingKind = {
-  branch: DECISIONS_LANDING_BRANCH,
-  ownedDir: DECISIONS_REL_DIR,
-  prTitle: DECISIONS_LANDING_PR_TITLE,
+const DECISIONS_LANDING_KIND: Omit<LandingKind, keyof LandingIdentity> = {
+  family: "decisions",
   commitMessage: decisionsCommitMessage,
   prBody: decisionsPrBody,
 };
@@ -334,14 +422,62 @@ function ciLearningShardRelDir(checkoutRoot: string): string {
   return relative(checkoutRoot, join(resolveRepoLayout(checkoutRoot).planDir, "tasks.d"));
 }
 
-function ciLearningLandingKind(checkoutRoot: string): LandingKind {
-  return {
-    branch: CI_LEARNING_LANDING_BRANCH,
+function ciLearningLandingKind(checkoutRoot: string, opts: LandFeedbackOpts, git: GitExec): LandingKind {
+  const identity = {
+    ...landingIdentity({
+      family: "ci-learning",
+      targetRepository: opts.targetRepository ?? repositoryFromGitConfig(git),
+      landingOwner: opts.landingOwner,
+      sourceRepository: opts.sourceRepository ?? sourceRepositoryFromCwd(),
+    }),
     ownedDir: ciLearningShardRelDir(checkoutRoot),
-    prTitle: CI_LEARNING_LANDING_PR_TITLE,
+  };
+  return {
+    family: "ci-learning",
+    ...identity,
     commitMessage: ciLearningCommitMessage,
     prBody: ciLearningPrBody,
   };
+}
+
+function parseGithubRepository(value: string): LandingRepository | undefined {
+  const m = /(?:github\.com[:/])([^/\s]+)\/([^/\s]+?)(?:\.git)?$/.exec(value.trim());
+  return m ? { owner: m[1], repo: m[2] } : undefined;
+}
+
+function repositoryFromGitConfig(git: GitExec): LandingRepository | undefined {
+  try {
+    return parseGithubRepository(git(["config", "--get", "remote.origin.url"]).trim());
+  } catch {
+    return undefined;
+  }
+}
+
+function sourceRepositoryFromCwd(): LandingRepository | undefined {
+  try {
+    const out = execFileSync("git", ["-C", process.cwd(), "config", "--get", "remote.origin.url"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return parseGithubRepository(out.trim());
+  } catch {
+    return undefined;
+  }
+}
+
+function landingKind(
+  template: Omit<LandingKind, keyof LandingIdentity>,
+  root: string,
+  opts: LandFeedbackOpts,
+  git: GitExec,
+): LandingKind {
+  const identity = landingIdentity({
+    family: template.family,
+    targetRepository: opts.targetRepository ?? repositoryFromGitConfig(git),
+    landingOwner: opts.landingOwner,
+    sourceRepository: opts.sourceRepository ?? sourceRepositoryFromCwd(),
+  });
+  return { ...template, ...identity };
 }
 
 /** Anchors on `/pull/<n>`, mirroring `prUrlTarget` (run-task.ts) — duplicated locally since this
@@ -361,6 +497,10 @@ function remoteBranchTree(git: GitExec, branch: string): string | null {
   }
 }
 
+function landingRepoArgs(identity: Pick<LandingIdentity, "targetRepository">): string[] {
+  return identity.targetRepository ? ["--repo", repoKey(identity.targetRepository)] : [];
+}
+
 /**
  * Open (or reuse) the one shared PR for `kind.branch`'s current tip. Shared by both branches of
  * {@link finishLanding} — the fresh-push path and the already-landed short-circuit — so a push
@@ -376,14 +516,26 @@ function ensurePrOpen(
   unlanded: string[],
   ledgerLines?: () => Array<Record<string, unknown>>,
 ): { prUrl?: string; error?: string } {
-  const existing = findPendingLandingPr({ gh, branch: kind.branch });
+  const existing = findPendingLandingPr({ gh, identity: kind });
   if (existing) return { prUrl: existing };
 
   const body = kind.prBody(unlanded);
   let prUrl: string | undefined;
   try {
     assertLiveWriteAllowed("gh-pr-create", `opening the landing PR for ${kind.branch}`);
-    const out = gh(["pr", "create", "--base", "main", "--head", kind.branch, "--title", kind.prTitle, "--body", body]);
+    const out = gh([
+      "pr",
+      "create",
+      "--base",
+      "main",
+      "--head",
+      kind.prHead,
+      "--title",
+      kind.prTitle,
+      "--body",
+      body,
+      ...landingRepoArgs(kind),
+    ]);
     prUrl = out.match(/https:\/\/\S+\/pull\/\d+/)?.[0];
   } catch (e) {
     // Push already succeeded — only opening the PR failed; a later call or a human `gh pr create` can pick it up.
@@ -396,7 +548,7 @@ function ensurePrOpen(
     if (!hold) {
       try {
         assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-        gh(["pr", "merge", prUrl, "--auto", "--squash"]);
+        gh(["pr", "merge", prUrl, "--auto", "--squash", ...landingRepoArgs(kind)]);
       } catch {
         // Best-effort — the ci + remudero-review gate decides either way (Standing rule 3B).
       }
@@ -481,7 +633,7 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
     const mainSha = git(["rev-parse", "origin/main"]).trim();
     acknowledgement = acknowledgeLandedQueueCopies(root, kind, git);
 
-    const unlanded = listRelFiles(root, FEEDBACK_REL_DIR).filter((rel) => {
+    const unlanded = listRelFiles(root, kind.ownedDir).filter((rel) => {
       const localSha = git(["hash-object", join(root, rel)]).trim();
       let remoteSha: string | null;
       try {
@@ -518,7 +670,8 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
 }
 
 export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFeedbackResult {
-  return landPending(root, FEEDBACK_LANDING_KIND, opts);
+  const git = opts.git ?? defaultGit(root);
+  return landPending(root, landingKind(FEEDBACK_LANDING_KIND, root, opts, git), { ...opts, git });
 }
 
 export interface SweepFeedbackLandingOpts extends LandFeedbackOpts {
@@ -541,7 +694,12 @@ export interface SweepFeedbackLandingOpts extends LandFeedbackOpts {
  */
 export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpts = {}): LandFeedbackResult {
   const { log, ...landOpts } = opts;
-  const result = landPending(root, FEEDBACK_LANDING_KIND, { ...landOpts, reportAcknowledgement: true });
+  const git = landOpts.git ?? defaultGit(root);
+  const result = landPending(root, landingKind(FEEDBACK_LANDING_KIND, root, landOpts, git), {
+    ...landOpts,
+    git,
+    reportAcknowledgement: true,
+  });
   if (log) {
     const acknowledgement = result.acknowledgement;
     const acknowledgementEvidence = acknowledgement
@@ -714,7 +872,11 @@ export function recordDecision(
   opts: LandFeedbackOpts = {},
 ): LandFeedbackResult {
   const relPath = decisionRecordRelPath(params.taskId, params.runId);
-  return landContent(root, DECISIONS_LANDING_KIND, [{ relPath, content: decisionRecordContent(params) }], opts);
+  const git = opts.git ?? defaultGit(root);
+  return landContent(root, landingKind(DECISIONS_LANDING_KIND, root, opts, git), [{ relPath, content: decisionRecordContent(params) }], {
+    ...opts,
+    git,
+  });
 }
 
 /** Land one agent-authored RULING record (W1-T3212) via {@link landContent} — the governance
@@ -727,7 +889,8 @@ export function recordRuling(
   content: string,
   opts: LandFeedbackOpts = {},
 ): LandFeedbackResult {
-  return landContent(root, DECISIONS_LANDING_KIND, [{ relPath, content }], opts);
+  const git = opts.git ?? defaultGit(root);
+  return landContent(root, landingKind(DECISIONS_LANDING_KIND, root, opts, git), [{ relPath, content }], { ...opts, git });
 }
 
 /** Land one feedback entry's already-serialized YAML via {@link landContent} — the write-site-2
@@ -741,7 +904,8 @@ export function landFeedbackStatusContent(
   content: string,
   opts: LandFeedbackOpts = {},
 ): LandFeedbackResult {
-  return landContent(root, FEEDBACK_LANDING_KIND, [{ relPath, content }], opts);
+  const git = opts.git ?? defaultGit(root);
+  return landContent(root, landingKind(FEEDBACK_LANDING_KIND, root, opts, git), [{ relPath, content }], { ...opts, git });
 }
 
 function ciLearningPendingRoot(stateRoot: string): string {
@@ -874,7 +1038,7 @@ export function landCiLearningShards(
   const inputs = readPendingCiLearningInputs(deps.stateRoot, shardRelDir);
   if (inputs.length === 0) return { filed: [], skipped, refused };
 
-  const landing = landContent(checkoutRoot, ciLearningLandingKind(checkoutRoot), inputs, deps);
+  const landing = landContent(checkoutRoot, ciLearningLandingKind(checkoutRoot, deps, git), inputs, deps);
   try {
     acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git);
   } catch {
@@ -891,16 +1055,19 @@ export function landCiLearningShards(
   return { filed, skipped, refused };
 }
 
-/** The URL of the currently-open shared landing PR for `opts.branch` (default
- *  {@link LANDING_BRANCH}), if any — best-effort, `undefined` on any `gh` failure, same as "no PR
- *  yet". Also used by `rmd triage`'s exit-2 branch to name the pending PR instead of a misleading
- *  "no such feedback entry" (W1-T243 acceptance claim 4). */
-export function findPendingLandingPr(opts: { gh?: GhExec; branch?: string } = {}): string | undefined {
+/** The URL of the currently-open landing PR for this identity, if any — best-effort,
+ *  `undefined` on any `gh` failure, same as "no PR yet". Also used by `rmd triage`'s exit-2 branch
+ *  to name the pending PR instead of a misleading "no such feedback entry" (W1-T243 claim 4). */
+export function findPendingLandingPr(
+  opts: { gh?: GhExec; branch?: string; identity?: LandingIdentity; targetRepository?: LandingRepository } = {},
+): string | undefined {
   const gh = opts.gh ?? defaultGh();
-  const branch = opts.branch ?? LANDING_BRANCH;
+  const identity = opts.identity ?? landingIdentity({ targetRepository: opts.targetRepository });
+  const branch = opts.branch ?? identity.prHead;
+  const repoArgs = landingRepoArgs(opts.targetRepository ? { targetRepository: opts.targetRepository } : identity);
   try {
     const existing = JSON.parse(
-      gh(["pr", "list", "--head", branch, "--state", "open", "--json", "url"]),
+      gh(["pr", "list", "--head", branch, "--state", "open", "--json", "url", ...repoArgs]),
     ) as Array<{ url: string }>;
     return existing[0]?.url;
   } catch {
