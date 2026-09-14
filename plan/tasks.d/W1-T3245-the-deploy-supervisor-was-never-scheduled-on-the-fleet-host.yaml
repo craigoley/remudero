@@ -8,11 +8,39 @@
   budget_usd: 70.00
   risk: high
   origin: "operator-session#no-image-has-ever-been-deployed-on-a-schedule-2026-09-09"
-  plan_refs: ["W1-T3200", "W1-T3240", "W1-T2877", "W1-T2953", "W1-T3233"]
+  plan_refs: ["W1-T3199", "W1-T3200", "W1-T3201", "W1-T3240", "W1-T2877", "W1-T2953", "W1-T3233", "W1-T3583"]
   files: [deploy/install-host-units.sh, docs/operator-guide.md, test/host-units-install.test.ts]
   status: queued
   attempts: 0
   rationale: |
+    OPERATOR SUPERSESSION, 2026-09-14 — W1-T3245 was implemented in #5551 with the plan edits
+    below mixed into the code PR. Rule 15 correctly refused that shape, and the PR was closed.
+    This plan-only amendment separates the revised contract before a replacement implementation.
+
+    SOURCE AND LIVE-HOST RECONCILIATION, 2026-09-14. W1-T3201's weighted deploy-pressure
+    accumulator is already merged at 08b91cec (#5140), despite this task shard still saying
+    `status: queued`; merged commit identity, not that declarative field, is the completion
+    evidence. `runDeployCycle` computes and persists that pressure only in its full reading when
+    auto mode is armed. The Azure watchdog currently invokes `rmd deploy-run --image-drift-only`,
+    which intentionally sets `restartReasons` false and bypasses the full change-and-risk decision.
+    The live host has neither `state/DEPLOY_AUTO` nor a restart-pressure state file, while a
+    Sep-13 `state/DEPLOY_REQUESTED` marker remains. Each five-minute image-only tick logs an
+    `up-to-date` skip even though its recorded install and origin SHAs differ, because image-only
+    mode is designed to ignore mounted-code and marker-driven restart reasons.
+
+    THE REVISED BOUNDARY IS ONE HOST CONTROLLER, NOT TWO RESTARTERS. The daemon keeps ownership of
+    its cheap in-container freshness exit. The healthy watchdog invokes the full deploy supervisor,
+    whose explicit marker path and, after deliberate DEPLOY_AUTO commissioning, persistent weighted
+    pressure remain subject to the existing idle, health, rollback, and restart-rate gates. A down
+    daemon still uses the cached-image revival path. This amendment does not enable DEPLOY_AUTO,
+    write any host marker, restart a daemon, or change the scoring policy; those are deployment
+    operations after reviewed code is available.
+
+    W1-T3583 remains distinct and dependent on this task: it safely fast-forwards the dedicated
+    control checkout before unit convergence after a below-threshold change. This task changes
+    only the healthy watchdog's deploy-supervisor invocation; it neither advances that checkout
+    nor rewrites units.
+
     OBSERVED READ-ONLY ON THE AZURE HOST, 2026-09-09. `systemctl list-units` names exactly three
     rmd units: `rmd-fleet.service`, `rmd-fleet-watchdog.timer` and `rmd-reap-stray.timer`.
     `deploy/install-host-units.sh` renders SEVEN artifacts — launcher, fleet service, watchdog
@@ -118,9 +146,9 @@
     session to queue behind that task.
 
   acceptance:
-    - claim: "a healthy fleet's watchdog tick evaluates a recycle through the supervisor, and no second timer is rendered"
-      proof: "unit test: W1-T3245: the watchdog tick evaluates a recycle and no second timer exists"
-    - claim: "the tick acts on IMAGE drift only — mount-side staleness stays the daemon's own freshness restart"
-      proof: "unit test: W1-T3245: the tick recycles for image drift and never for mount drift"
+    - claim: "a healthy fleet's watchdog tick invokes the complete deploy supervisor, and no second timer is rendered"
+      proof: "unit test: W1-T3245: the watchdog invokes the complete supervisor and renders no second timer"
+    - claim: "the healthy scheduled reading preserves the weighted restart-pressure admission gate instead of bypassing it with the image-only mode"
+      proof: "unit test: W1-T3245: the full watchdog reading waits for weighted restart pressure"
     - claim: "a daemon that is DOWN is still revived from the cached image, never pulled into mid-crash-loop"
       proof: "unit test: W1-T3245: a down daemon is revived from cache, not recycled"
