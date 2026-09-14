@@ -34,7 +34,12 @@ import {
   type SweepDeps,
 } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
-import { armIfVerdictPermits } from "../src/lib/arm-auto-merge.js";
+import {
+  armAutoMergeAtOpen,
+  armIfVerdictPermits,
+  armOutcomeReason,
+  attemptArm,
+} from "../src/lib/arm-auto-merge.js";
 
 const NOW = Date.parse("2026-09-14T12:00:00Z");
 const RECENT = "2026-09-14T11:00:00Z";
@@ -200,4 +205,101 @@ test("W1-T3551: armIfVerdictPermits still reaches the arm effector for the ident
     assert.equal(outcome, "armed");
     assert.equal(armCalled, true, `the arm effector still fires when isDraft is ${String(isDraft)}`);
   }
+});
+
+// ── attemptArm's own shared gate: the ONE choke point armAutoMergeDetailed and armAutoMergeAtOpen
+// both route through — driven DIRECTLY (not via runSweep's higher-level `deps.arm`) so the
+// isDraft === true branch inside attemptArm itself is exercised, not just its callers' decision
+// never to invoke the sweep's own arm effector ──────────────────────────────────────────────────
+
+test("W1-T3551: attemptArm refuses immediately on isDraft === true, before the ledger-hold read, and never calls armAuto/mergeDirect", () => {
+  const said: string[] = [];
+  let ledgerReadCalled = false;
+  const result = attemptArm(
+    PR_URL,
+    {
+      armAuto: () => {
+        throw new Error("armAuto must never be called for a draft PR");
+      },
+      mergeDirect: () => {
+        throw new Error("mergeDirect must never be called for a draft PR");
+      },
+      isMerged: () => false,
+      say: (m) => void said.push(m),
+      ledgerLines: () => {
+        ledgerReadCalled = true;
+        return [];
+      },
+    },
+    HEAD,
+    true, // isDraft
+  );
+
+  assert.deepEqual(result, { outcome: "draft-refused" });
+  assert.equal(ledgerReadCalled, false, "the draft check is FIRST — it never even reads the hold ledger");
+  assert.ok(
+    said.some((m) => m.includes("automerge.draft_refused") && m.includes(PR_URL)),
+    "the draft refusal is said with the W1-T3551 tag and the PR url",
+  );
+});
+
+test("W1-T3551: attemptArm still reaches the ledger-hold read and arms normally when isDraft is undefined or false", () => {
+  for (const isDraft of [undefined, false] as const) {
+    const ghCalls: string[] = [];
+    const result = attemptArm(
+      PR_URL,
+      {
+        armAuto: () => void ghCalls.push("armAuto"),
+        mergeDirect: () => void ghCalls.push("mergeDirect"),
+        isMerged: () => false,
+        say: () => {},
+        ledgerLines: () => [],
+      },
+      HEAD,
+      isDraft,
+    );
+    assert.equal(result.outcome, "armed", `isDraft=${String(isDraft)} must still arm`);
+    assert.deepEqual(ghCalls, ["armAuto"]);
+  }
+});
+
+test("W1-T3551: armAutoMergeAtOpen threads isDraft straight through to attemptArm's shared gate — the ungated at-open arm holds a draft too", () => {
+  let armAutoCalled = false;
+  const outcome = armAutoMergeAtOpen(
+    PR_URL,
+    {
+      armAuto: () => void (armAutoCalled = true),
+      mergeDirect: () => void (armAutoCalled = true),
+      isMerged: () => false,
+      say: () => {},
+    },
+    false, // irreversible
+    true, // isDraft
+  );
+  assert.equal(outcome, "draft-refused");
+  assert.equal(armAutoCalled, false, "the at-open arm effector must never fire for a draft PR");
+});
+
+test("W1-T3551: armAutoMergeAtOpen's isDraft parameter defaults to false — every pre-existing call site (which never passes it) keeps arming exactly as before", () => {
+  const ghCalls: string[] = [];
+  const outcome = armAutoMergeAtOpen(PR_URL, {
+    armAuto: () => void ghCalls.push("armAuto"),
+    mergeDirect: () => void ghCalls.push("mergeDirect"),
+    isMerged: () => false,
+    say: () => {},
+  });
+  assert.equal(outcome, "armed");
+  assert.deepEqual(ghCalls, ["armAuto"]);
+});
+
+// ── armOutcomeReason's new "draft-refused" case ──────────────────────────────────────────────────
+
+test("W1-T3551: armOutcomeReason names the draft state and says only marking it ready lifts the hold", () => {
+  const reason = armOutcomeReason("draft-refused", "verdict is a full PASS");
+  assert.match(reason, /draft/i, "the ledger row names WHAT refused, not just that something did");
+  assert.match(reason, /held until marked ready for review/i, "and names the ONE thing that lifts it");
+  // PAIRED POSITIVE CONTROL: the SAME decision reason under a different outcome reads
+  // differently, so the assertions above are not satisfied by a switch returning one string.
+  assert.notEqual(armOutcomeReason("armed", "verdict is a full PASS"), reason);
+  assert.equal(armOutcomeReason("armed", "verdict is a full PASS"), "verdict is a full PASS");
 });
