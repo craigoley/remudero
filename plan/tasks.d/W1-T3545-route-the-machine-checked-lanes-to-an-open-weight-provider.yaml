@@ -13,8 +13,10 @@
     - src/lib/config-schema.ts
     - src/lib/mounts.ts
     - src/lib/provider-routing-policy.ts
+    - src/lib/sweep.ts
     - src/lib/worker.ts
     - src/lib/worker-provider.ts
+    - src/run-task.ts
     - .remudero/mounts.yaml
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
   origin: "operator-session#open-weight-research-2026-09-13"
