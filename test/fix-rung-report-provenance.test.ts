@@ -34,7 +34,7 @@ import { test } from "node:test";
 
 import { runFixRung } from "../src/run-task.js";
 import { judgeReview } from "../src/lib/review.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
+import type { CriterionVerdict, PlanCriteriaAtHeadResult, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
@@ -247,4 +247,145 @@ test("criterion 5: worker narrative with changeset shorthand produces no contrad
     (loud.changesetContradictions ?? []).some((c) => /plan-only|no code/.test(c.claim)),
     "and it contradicts on the shorthand itself, not on something incidental",
   );
+});
+
+// ── W1-T3557 ─────────────────────────────────────────────────────────────────────────────────
+//
+// THE DEFECT (OBSERVED 2026-09-14, daemon run DAEMON-1789351932540). `runFixRung` passes
+// `task: opts.task` — the task snapshot captured once at sweep admission — straight into
+// `deps.runReview`, which reads `task.acceptance`/`task.files` directly. A plan split or scope
+// amendment landing on the PR head AFTER this rung was dispatched (the W1-T3545 shape) leaves
+// `opts.task` answering a SUPERSEDED contract: the terminal verdict judges criteria the plan no
+// longer declares. `rmd review` does not have this defect — it re-resolves via
+// `resolvePlanCriteriaAtHead` at the PR's actual head before judging. These two tests drive the
+// fix rung's own re-resolution of the SAME contract at the SAME kind of boundary.
+
+/** A fresh refreshed-contract fixture, distinguishable from the stale `opts.task` shape every
+ *  helper below hands it — a different claim text and a different file list, so a test that reads
+ *  the STALE ones back is caught rather than passing on overlap. */
+function refreshedContract(over: Partial<PlanCriteriaAtHeadResult> = {}): PlanCriteriaAtHeadResult {
+  return {
+    criteria: [{ claim: "the head-resolved criterion", proof: "unit test: refreshed" }],
+    taskId: "W1-T3557X",
+    taskDeclaredFiles: ["src/run-task.ts", "test/fix-rung-report-provenance.test.ts"],
+    source: "plan at headsha task W1-T3557X (1 criteria)",
+    ...over,
+  };
+}
+
+/** The shape `deps.runReview` actually receives its `task` argument as (run-task.ts's own
+ *  `runReview` param type) — reproduced narrowly here so this test file need not import it. */
+interface CapturedReviewTask {
+  id: string;
+  acceptance?: { claim: string; proof: string }[];
+  files?: string[];
+}
+
+/** Drive ONE strike of the fix rung, capturing whatever `task` reached `deps.runReview` (or
+ *  `undefined` if it was never called) alongside the rung's own terminal outcome — both needed to
+ *  tell "refreshed and passed through" apart from "refused before the reviewer ever ran". */
+async function runContractRefreshRung(over: {
+  resolveTaskContractAtHead?: (
+    prUrl: string,
+    taskId: string,
+  ) => PlanCriteriaAtHeadResult | undefined | Promise<PlanCriteriaAtHeadResult | undefined>;
+}): Promise<{
+  reviewedTask: CapturedReviewTask | undefined;
+  reviewCalled: boolean;
+  outcome: string;
+  reason: string;
+}> {
+  let reviewCalled = false;
+  let reviewedTask: CapturedReviewTask | undefined;
+  const staleTask = {
+    id: "W1-T3557X",
+    title: "the sweep-start snapshot, stale by the time this rung re-reviews",
+    // Six criteria, standing in for the pre-split contract the note describes — deliberately
+    // disjoint from `refreshedContract()`'s one criterion so the two can never be confused.
+    acceptance: Array.from({ length: 6 }, (_, i) => ({ claim: `stale criterion ${i}`, proof: "stale proof" })),
+    files: ["src/stale-only-file.ts"],
+  };
+  const rung = await runFixRung({
+    taskId: "W1-T3557X",
+    runId: "W1-T3557X-1730000000000",
+    task: staleTask,
+    prUrl: "https://github.com/acme/remudero/pull/2",
+    branch: "run-W1-T3557X-1730000000000",
+    worktreePath: "/tmp/rmd-fixrung-contract-wt",
+    initialSessionId: "session-0",
+    mount: MOUNT,
+    settingsFile: "/tmp/rmd-fixrung-contract-settings.json",
+    config: {} as Config,
+    budgetUsd: 10,
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: "/tmp/rmd-fixrung-contract-wt", reviewerMount: MOUNT },
+    strikeCap: 2,
+    initialReview: verdict("failure", [OTHER_UNMET]),
+    deps: {
+      spawn: async () => result({ text: NARRATIVE_WITH_SHORTHAND }),
+      waitForCiGreen: async () => "green",
+      runReview: async (args) => {
+        reviewCalled = true;
+        reviewedTask = args.task;
+        return { ...verdict("success", [criterion({ claim: "c", met: true })]), headSha: "sha-1" };
+      },
+      push: () => {},
+      issues: issueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+      ...(over.resolveTaskContractAtHead ? { resolveTaskContractAtHead: over.resolveTaskContractAtHead } : {}),
+    },
+  });
+  return { reviewedTask, reviewCalled, outcome: rung.outcome, reason: rung.reason };
+}
+
+test("W1-T3557 criterion 1: a fix-rung re-review refreshes its task contract at the current PR head", async () => {
+  let resolveArgs: { prUrl: string; taskId: string } | undefined;
+  const got = await runContractRefreshRung({
+    resolveTaskContractAtHead: (prUrl, taskId) => {
+      resolveArgs = { prUrl, taskId };
+      return refreshedContract();
+    },
+  });
+  assert.ok(got.reviewCalled, "the reviewer must still run once a readable head contract resolves");
+  assert.deepEqual(
+    resolveArgs,
+    { prUrl: "https://github.com/acme/remudero/pull/2", taskId: "W1-T3557X" },
+    "the resolver is asked about THIS PR and THIS task, not some other identity",
+  );
+  assert.deepEqual(
+    got.reviewedTask?.acceptance,
+    refreshedContract().criteria,
+    "the reviewer receives the HEAD-resolved criteria, not opts.task's six-criterion sweep-start snapshot",
+  );
+  assert.deepEqual(
+    got.reviewedTask?.files,
+    refreshedContract().taskDeclaredFiles,
+    "the reviewer also receives the HEAD-resolved declared files, not opts.task's stale one-file list",
+  );
+});
+
+test("W1-T3557 criterion 2: a fix-rung re-review refuses an unreadable current task contract without replaying stale criteria", async () => {
+  const got = await runContractRefreshRung({
+    resolveTaskContractAtHead: () => ({
+      criteria: [],
+      taskId: "W1-T3557X",
+      divergence: { taskId: "W1-T3557X", reason: "duplicate id W1-T3557X in plan/tasks.yaml", cause: "readable-object" },
+    }),
+  });
+  assert.equal(got.reviewCalled, false, "an unreadable head contract must never reach the reviewer at all");
+  assert.equal(got.outcome, "stood_down", "the rung stands down rather than fabricating or reusing a contract");
+  assert.match(got.reason, /unreadable/, "the stand-down reason names the unreadable-contract cause, not a generic failure");
+});
+
+test("W1-T3557 criterion 2 (the OTHER unreadable shape): a resolver that throws also refuses rather than falling back to opts.task", async () => {
+  const got = await runContractRefreshRung({
+    resolveTaskContractAtHead: () => {
+      throw new Error("gh outage resolving plan at head");
+    },
+  });
+  assert.equal(got.reviewCalled, false, "a throwing resolver is exactly as unreadable as one returning a divergence");
+  assert.equal(got.outcome, "stood_down");
+  assert.match(got.reason, /unreadable/);
 });

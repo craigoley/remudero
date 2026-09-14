@@ -1084,6 +1084,7 @@ import {
   reviewLedgerReasons,
   resolvePlanCriteriaAtHead,
   type PlanCriteriaAtHeadDivergence,
+  type PlanCriteriaAtHeadResult,
   parseWhitelistedProof,
   resolveNameFilteredCandidates,
   narrowNameFilteredArgs,
@@ -7919,6 +7920,28 @@ export async function runFixRung(opts: {
      * never a second hand-rolled one.
      */
     execAcceptanceGateRepairProof?: (proof: string) => { hits: number } | undefined;
+    /**
+     * W1-T3557: re-resolve THIS task's acceptance criteria + declared files from the plan AS IT
+     * STANDS AT THE CURRENT PR HEAD — the same head-bound resolver `rmd review` uses
+     * ({@link "./lib/review.js".resolvePlanCriteriaAtHead}) — rather than replaying `opts.task`,
+     * a snapshot captured once at sweep admission. A daemon run that begins before a legitimate
+     * plan split or scope amendment (the W1-T3545 shape this fixes) can otherwise judge a PR
+     * against a contract the plan has already superseded by the time this rung's re-review
+     * actually runs. `undefined` back means the current head's contract could not be read (an
+     * unresolvable git object, a duplicate id) — the call site below NEVER falls back to
+     * `opts.task` on that signal; it stands the rung down instead (see the call site's own
+     * comment). A LEGITIMATE empty/narrowed criteria set at a READABLE head (no divergence) is
+     * not this case — it is exactly the refreshed contract this task exists to pass through.
+     * OPTIONAL, purely for pre-existing fixtures: omitted preserves the exact pre-W1-T3557
+     * behavior of passing `opts.task` straight through, so every fixture that predates this task
+     * needs no update. Production wires {@link resolveFixRungTaskContractAtHead}, which always
+     * runs — an un-updated production call site is not a shape this deps object allows silently,
+     * only a test fixture that never touches this field is.
+     */
+    resolveTaskContractAtHead?: (
+      prUrl: string,
+      taskId: string,
+    ) => PlanCriteriaAtHeadResult | undefined | Promise<PlanCriteriaAtHeadResult | undefined>;
     runReview: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
     /** Push whatever the fix worker committed. Best-effort — a worker that
      * already pushed leaves nothing new, which is not an error.
@@ -9655,11 +9678,50 @@ export async function runFixRung(opts: {
         deps.log("review.input_body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
       }
     }
+    // W1-T3557: RE-RESOLVE THE CONTRACT AT THE CURRENT PR HEAD, right before it is handed to the
+    // reviewer — never earlier, so a strike's own push (just landed, just gone CI-green above)
+    // is the head this resolves against, not some earlier round's. `opts.task` is the sweep-start
+    // snapshot named in this task's rationale; `reviewTask` is what actually reaches the reviewer.
+    let reviewTask = opts.task;
+    if (deps.resolveTaskContractAtHead) {
+      let resolvedContract: PlanCriteriaAtHeadResult | undefined;
+      let resolveError: string | undefined;
+      try {
+        resolvedContract = await deps.resolveTaskContractAtHead(opts.prUrl, opts.taskId);
+      } catch (e) {
+        // A throwing resolver is exactly as unreadable as one that returns `undefined` — carry
+        // the message into `resolveError` so the stand-down reason below names WHICH it was.
+        resolveError = String((e as Error)?.message ?? e);
+      }
+      if (resolvedContract === undefined || resolvedContract.divergence !== undefined) {
+        // UNREADABLE OR MISSING — never fall back to `opts.task`'s stale criteria (that is the
+        // exact defect this task exists to close): stand the rung down, named, without ever
+        // calling `deps.runReview`. A later fresh sweep re-dispatches and re-resolves.
+        const reason = resolveError
+          ? `fix rung: current PR-head task contract unreadable — resolver threw: ${resolveError}`
+          : `fix rung: current PR-head task contract unreadable — ${resolvedContract?.divergence?.reason ?? "no contract returned"}`;
+        deps.log("fix.stood_down", { site: "rung.head_contract", strikes, reason, taskId: opts.taskId });
+        deps.say(`fix rung: standing down — ${reason}`);
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+      }
+      reviewTask = {
+        id: opts.task.id,
+        title: opts.task.title,
+        acceptance: resolvedContract.criteria,
+        files: resolvedContract.taskDeclaredFiles,
+      };
+      deps.log("fix.head_contract_refreshed", {
+        strike: strikes,
+        criteria_count: resolvedContract.criteria.length,
+        files_count: resolvedContract.taskDeclaredFiles?.length ?? 0,
+        source: resolvedContract.source,
+      });
+    }
     review = await deps.runReview({
       owner: opts.reviewBase.owner,
       repo: opts.reviewBase.repo,
       prUrl: opts.prUrl,
-      task: opts.task,
+      task: reviewTask,
       report: reviewReport,
       reportIsSubstitute: reviewReportIsSubstitute,
       reportSubstituteCause: reviewReportSubstituteCause,
@@ -14013,6 +14075,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             };
             return v.statusCheckRollup ?? [];
           },
+          // W1-T3557: ALWAYS wired in production — `worktreePath` is this rung's own checkout,
+          // the SAME one `headCheckoutDir` above already points at, so no extra fetch is spent
+          // resolving the plan at whatever head this round's push just landed.
+          resolveTaskContractAtHead: (prUrlArg, taskIdArg) => resolveFixRungTaskContractAtHead(prUrlArg, taskIdArg, worktreePath),
           runReview,
           fetchPrBody: fetchPrBodyViaGh,
           // W1-T3506: the SAME worktree this round pushes to, run through the SAME proof
@@ -15388,6 +15454,46 @@ export function readHeadShaRest(prUrl: string, fetch: GhApiFetcher = ghJson): st
     throw new Error(`head-sha read: ${prUrl} returned no head sha — refusing to report an empty head`);
   }
   return sha;
+}
+
+/**
+ * W1-T3557: `runFixRung`'s `deps.resolveTaskContractAtHead` production wiring — resolve `taskId`'s
+ * acceptance criteria + declared files from the plan AS IT STANDS AT `prUrl`'s CURRENT head, via
+ * {@link resolvePlanCriteriaAtHead} (lib/review.ts), the SAME head-bound resolver `reviewCommand`
+ * already uses. `repoDir` is the rung's own checkout (`headCheckoutDir`/`worktreePath` — this
+ * rung's most recent push landed there, so its objects are local; no second fetch is spent here,
+ * mirroring `reviewCommand`'s own reasoning for its best-effort `fetchHead`, done once earlier in
+ * that command's own flow rather than repeated per resolve).
+ *
+ * NO PR-BODY READ. `resolvePlanCriteriaAtHead` extracts its task id from an anchored
+ * `Remudero-Task:` trailer, but this rung already KNOWS `taskId` — it was dispatched for this one
+ * task — so a synthetic single-line body carrying just that trailer is handed in instead of
+ * spending a `gh` call to re-derive an id already known with certainty (the same trailer-recovery
+ * shape `reviewCommand` itself falls back to, W1-T2846, applied here as the ONLY input rather than
+ * a fallback).
+ *
+ * Returns `undefined` (never throws past this point) only when `readHeadSha` itself throws — an
+ * unresolvable head sha is exactly as unreadable as an unresolvable plan object, and the caller's
+ * own stand-down arm treats the two identically. A resolver failure INSIDE
+ * `resolvePlanCriteriaAtHead` is not swallowed here at all: it already returns its own
+ * `divergence` field rather than throwing (see that function's own doc), which the caller reads
+ * directly.
+ */
+export function resolveFixRungTaskContractAtHead(
+  prUrl: string,
+  taskId: string,
+  repoDir: string,
+  readHeadSha: (prUrl: string) => string = readHeadShaRest,
+): PlanCriteriaAtHeadResult | undefined {
+  let headSha: string;
+  try {
+    headSha = readHeadSha(prUrl);
+  } catch {
+    // The caller distinguishes "unreadable" from "readable-but-empty" only by presence/absence
+    // of a result — an unreadable HEAD is unreadable regardless of which read failed first.
+    return undefined;
+  }
+  return resolvePlanCriteriaAtHead(`Remudero-Task: ${taskId}`, repoDir, "plan/tasks.yaml", headSha);
 }
 
 /**
