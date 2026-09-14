@@ -1,0 +1,82 @@
+- id: W1-T3582
+  title: "THE TRUSTED UNIT CONTROL CHECKOUT ONLY ADVANCES AFTER A DAEMON RESTART — a clean, below-threshold change to install-host-units.sh is fetched but never fast-forwarded, so the watchdog refuses its own out-of-date control tree forever and the rendered units remain inert"
+  repo: remudero
+  depends_on: ["W1-T3245"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files:
+    - deploy/install-host-units.sh
+    - test/host-units-install.test.ts
+  origin: "operator-session#azure-recycle-control-checkout-advance-2026-09-14"
+  plan_refs: ["W1-T924", "W1-T3199", "W1-T3201", "W1-T3245", "W1-T3269"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED from the deployed Azure control path on 2026-09-14. The daemon's bind-mounted
+    checkout is detached at its boot SHA, while the dedicated <state>/daemon-install checkout is
+    clean on main and is the only source safe for the watchdog's narrowly-elevated unit rewrite.
+    W1-T3245 corrects the launcher to use that dedicated control checkout.
+
+    The current deploy controller does not make that checkout current unless it admits a daemon
+    restart. `runDeployCycle` fetches first, records weighted restart pressure when auto mode is
+    armed, and returns before `pullFf` when pressure is below threshold or the fleet is not idle.
+    `pullFf` is the only production fast-forward of the install root. The unit convergence guard
+    then requires `HEAD == origin/main`, so an installer-only change that does not justify a
+    restart cannot reach the check or install path. The intended five-minute self-maintenance loop
+    has therefore moved its trust source but not gained an independent, safe way to refresh it.
+
+    This is not a case for lowering restart pressure or enabling DEPLOY_AUTO. A daemon restart and
+    a root-owned rendered-unit rewrite have different interruption costs and admission rules. The
+    latter needs a clean, main-only control checkout; it does not need to restart a healthy daemon.
+  design: |
+    (i) In the healthy, non-boot unit-convergence arm, verify the dedicated control checkout exists,
+    has no tracked changes, and is on branch main before any update. Fetch origin as the service
+    user, then fast-forward only with `git merge --ff-only origin/main`. A fetch or fast-forward
+    failure is named and returns normally. It never resets, rebases, switches branches, cleans a
+    dirty tree, or invokes sudo.
+
+    (ii) Run the existing rendered-unit check only after that safe advance. A matching renderer is
+    still a silent no-op; a true drift still needs the existing `sudo -n`-gated install and durable
+    convergence record. The checkout advance itself writes no systemd file and restarts no process.
+
+    (iii) Preserve liveness ordering. STOP and boot keep their existing refusal; a down daemon still
+    takes the cached-image revival path. An unfit or unreachable control checkout must not block the
+    healthy daemon's full W1-T3245 deploy-supervisor reading on the same tick.
+
+    (iv) Keep W1-T3245 separate. It makes the existing watchdog invoke the full pressure-gated
+    supervisor and selects the dedicated control source. This task only gives that already-trusted
+    source a safe, no-restart fast-forward for unit reconciliation.
+  acceptance:
+    - claim: "a clean main control checkout behind origin/main fast-forwards before the unit drift check, allowing a newly merged installer to converge without a daemon restart"
+      proof: "unit test: W1-T3582: clean control checkout fast-forwards before unit drift check"
+    - claim: "a missing, tracked-dirty, off-main, diverged, unreadable, or failed-to-fast-forward control checkout is named and never installed from, reset, rebased, or elevated"
+      proof: "unit test: W1-T3582: unit checkout advance refuses unfit control state"
+    - claim: "a failed control-checkout advance leaves the healthy daemon's full deploy-supervisor reading reachable and never restarts or recycles the daemon itself"
+      proof: "unit test: W1-T3582: advance failure preserves healthy daemon path"
+  falsifier: |
+    Close without implementation if a healthy watchdog tick can advance the dedicated control
+    checkout to origin/main and run the new installer after a below-threshold merged change, while
+    the daemon remains running and no `deploy.pulled`, restart backend, or systemd install occurs
+    merely from the advance. At filing, `runDeployCycle` reaches `pullFf` only after its restart
+    decision and idle gate; the unit guard consequently sees a stale control checkout and refuses.
+
+    The implementation must delete the new control-checkout fast-forward and make the first
+    acceptance test fail before its drift check; restoring it must make that exact test pass. A
+    fixture that invokes `deploy-run`, writes DEPLOY_AUTO, or accepts a reset/rebase does not prove
+    this task.
+  note: |
+    ID PROVENANCE: `rmd next-task-id --reserve` atomically held W1-T3582 at
+    refs/rmd-id/W1-T3582 before this record was written. Scope-time checks found no
+    `run-W1-T3582-*` head, no exact merged `Remudero-Task: W1-T3582` trailer, and no merged
+    `run-W1-T3582-<epoch>` head in the returned closed-PR page. The exact trailer predicate was
+    positively controlled by merged #5544, #5542, #5527, #5528, and #5498. The open W1-T3245
+    repair (#5551) overlaps this launcher deliberately and is declared as a dependency; this
+    record does not authorize building on or merging that PR.
+
+    This task changes no deploy threshold, marker, systemd unit privilege, Docker command, daemon
+    restart policy, or GitHub workflow. Its only new mutation is an ff-only update of the already
+    dedicated, clean, main control checkout before the existing unit-convergence decision.
