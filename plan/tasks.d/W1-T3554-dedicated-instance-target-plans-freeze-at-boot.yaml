@@ -73,14 +73,14 @@
         the report and must stay so.
       - Cross-instance lock or state sharing of any kind.
   acceptance:
-    - claim: "a non-self dedicated target's plan reload path is no longer unconditionally undefined — a bounded, tested reload-or-restart path exists for target.isSelf === false"
-      proof: "unit test: test/dedicated-target-plan-freshness.test.ts"
+    - claim: "a dedicated non-self target reloader returns no plan while its target tree is unchanged and a fresh plan after origin/main moves"
+      proof: "unit test: dedicatedTargetPlanReloader: null while the tree sha is unchanged, a fresh plan when it moves"
     - claim: "a merged non-self target plan change (origin/main moving past the tree sha read at boot) changes dispatch eligibility on the running daemon without a manual restart"
-      proof: "unit test: test/dedicated-target-plan-freshness.test.ts"
+      proof: "unit test: W1-T3554 acceptance 2: a target plan change merged to origin/main changes dispatch eligibility on the running daemon, with no restart"
     - claim: "the reload/restart never fires mid-batch — only between workers — so an in-flight batch's plan snapshot stays consistent for its own lifetime"
-      proof: "unit test: test/dedicated-target-plan-freshness.test.ts"
-    - claim: "the fix does not touch how worker worktrees resolve the target's origin/main, preserving the already-correct worker fetch path named in the report"
-      proof: "grep: isSelf in src/run-task.ts"
+      proof: "unit test: W1-T3554 acceptance 3: the reload is observed only BETWEEN workers, never mid-batch"
+    - claim: "the dedicated reloader's real defaults fetch origin and resolve the plan tree from its target checkout, not the daemon cwd"
+      proof: "unit test: dedicatedTargetPlanReloader REAL DEFAULT: fetches origin and resolves the plan tree sha from the checkout, not the cwd"
   origin: "feedback#fb-1789349833277-20ca42"
   plan_refs: ["W1-T1062", "W1-T403", "W1-T340", "W1-T978"]
   files: [src/run-task.ts, test/dedicated-target-plan-freshness.test.ts]
