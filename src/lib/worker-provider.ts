@@ -2000,7 +2000,20 @@ export async function spawnOpenWeightWorker(
       }
     }
   } catch (error) {
-    return openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, error });
+    // Preserve the transport/tool failure in the result's stderr + error flags; a failure must not
+    // collapse into an ordinary empty worker response for callers or the catch-erasure census.
+    return openWeightResult({
+      model: selection.model,
+      effort: selection.effort,
+      startedAt,
+      clock,
+      text,
+      sessionId,
+      turns,
+      promptTokens,
+      completionTokens,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
