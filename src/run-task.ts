@@ -1110,6 +1110,9 @@ import {
   type CreditedAmendmentReport,
   type ProofQueueAuditReport,
 } from "./lib/proof-queue-audit.js";
+// W1-T3506: the pure write-boundary refusal (W1-T3389) `runFixRung`'s acceptance-gate body repair
+// must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
+import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
 import {
@@ -3852,6 +3855,41 @@ export function acceptanceGateBodyRepair(body: string): AcceptanceGateBodyRepair
   const check = acceptanceAuthorTimeCheck(body);
   if (check.ok || (check.defect !== "no-header" && check.defect !== "empty-proofs")) return undefined;
   return { defect: check.defect, repairedBody: ensureJudgeableBody(body, ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK) };
+}
+
+/**
+ * W1-T3506 — THE WORKTREE PROOF EXECUTOR, ADAPTED TO `BodyRepairDeps.execProof`'S CONTRACT. Binds
+ * `cwd` (the fix rung's OWN checkout, `opts.worktreePath` — never a second, freshly-cloned tree)
+ * and hands back a function `repairedProofsAreSafeToPush` can call once per candidate `grep:`
+ * proof. Reuses {@link "./lib/review.js".parseWhitelistedProof}/{@link
+ * "./lib/review.js".execWhitelistedProof} — the SAME parse-then-run pair `judgeCriterion` itself
+ * calls at review time — rather than a second, hand-rolled grep invocation. `undefined` covers
+ * every `exec_error` cause that pair already recognises: a proof that fails to parse as a
+ * whitelisted proof at all, a target outside the checkout ({@link
+ * "./lib/review.js".assertGrepTargetsInsideCheckout}/`assertGrepTargetIsFile`), or the underlying
+ * `execFileSync` throwing (grep exit 2, ENOENT, a timeout). The thrown error is DELIBERATELY not
+ * carried further than this boolean-shaped signal: `diagnoseUnrunnableProofs` (body-repair.ts)
+ * only ever asks "did this come back `undefined`", and its own `why` text already names every one
+ * of those causes for the human who reads the refusal — recording the same list twice would drift.
+ * A non-`grep:` proof (e.g. `unit test:`) is out of this adapter's scope, mirroring
+ * `diagnoseUnrunnableProofs`'s own `grep:`-only reach, and reports `undefined` too — refuse rather
+ * than guess at a dialect this write-boundary gate was never asked to run.
+ */
+export function execGrepProofInWorktree(cwd: string): (proof: string) => { hits: number } | undefined {
+  return (proof: string): { hits: number } | undefined => {
+    const whitelisted = parseWhitelistedProof(proof);
+    if (whitelisted === null || whitelisted.kind !== "grep") return undefined;
+    try {
+      const outcome = execWhitelistedProof(whitelisted, cwd);
+      return { hits: outcome === "pass" ? (whitelisted.matchedLines?.length ?? 1) : 0 };
+    } catch {
+      // Every exec_error cause execWhitelistedProof/its own preflight can throw — grep exit 2, an
+      // out-of-checkout target, ENOENT, a timeout — collapses to `undefined` on purpose: that is
+      // the exact signal diagnoseUnrunnableProofs (body-repair.ts) reads as "cannot substantiate
+      // this proof", and its own `why` text names the cause class for the human who reads it.
+      return undefined;
+    }
+  };
 }
 
 /**
@@ -7862,6 +7900,22 @@ export async function runFixRung(opts: {
      * report is still used for this round's verdict even if persisting it to GitHub failed).
      */
     updatePrBody?: (prUrl: string, body: string) => Promise<void>;
+    /**
+     * W1-T3506: runs one `grep:` proof from a CANDIDATE acceptance-gate body repair, exactly at
+     * the moment `acceptanceGateBodyRepair` is about to be pushed via `updatePrBody` — the write
+     * boundary {@link repairedProofsAreSafeToPush} (W1-T3389, lib/body-repair.ts) exists to guard
+     * but that PR never wired in. `undefined` reports the SAME `exec_error` causes the reviewer's
+     * own `judgeCriterion` reports (a parse failure, a timeout, a spawn error, grep exit 2) — this
+     * gate refuses to push on any of them. OPTIONAL WITH NO INTERNAL DEFAULT (mirrors
+     * `readCiRollup`/`fetchPrDiffFiles` above, never `fetchPrBody`'s `?? fetchPrBodyViaGh` shape):
+     * omitted, `diagnoseUnrunnableProofs` (body-repair.ts) itself degrades to its pure parse-shape
+     * check only — never a false refusal from a caller that never wired a runner. The real
+     * production call site wires {@link execGrepProofInWorktree} bound to that round's own
+     * `worktreePath`, the SAME checkout every other strike in this rung already reads and writes,
+     * through {@link "./lib/review.js".execWhitelistedProof} — this repo's ONE proof executor,
+     * never a second hand-rolled one.
+     */
+    execAcceptanceGateRepairProof?: (proof: string) => { hits: number } | undefined;
     runReview: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
     /** Push whatever the fix worker committed. Best-effort — a worker that
      * already pushed leaves nothing new, which is not an error.
@@ -8354,7 +8408,42 @@ export async function runFixRung(opts: {
         deps.log("fix.body_gate_check_error", { strike: strikes + 1, error: String((e as Error)?.message ?? e) });
       }
       const repair = liveBody !== undefined ? acceptanceGateBodyRepair(liveBody) : undefined;
-      if (repair) {
+      // W1-T3506 — THE WRITE-BOUNDARY CALL W1-T3389's HELPER WAS SHIPPED WITHOUT. `repair` above is
+      // PURE and never inspects whether its own authored `grep:` proofs actually run — that is
+      // exactly the asymmetry `repairedProofsAreSafeToPush` (lib/body-repair.ts) exists to close,
+      // and closing it here, once, at the ONE place a repaired body reaches `updatePrBody`, is this
+      // task's whole scope. `parseAcceptanceBlock` reads the EXACT candidate criteria this write is
+      // about to push — never `liveBody`'s own (already-defective) block — through the SAME parser
+      // `acceptanceAuthorTimeCheck` itself reuses, so this refuses on what would actually ship.
+      const repairedCriteria = repair !== undefined ? parseAcceptanceBlock(repair.repairedBody) : [];
+      // NO internal `?? execGrepProofInWorktree(...)` FALLBACK HERE, unlike `fetchPrBody`/
+      // `updatePrBody` just above — this dep is genuinely OPTIONAL the way `readCiRollup`/
+      // `fetchPrDiffFiles` already are (their own docs: "omitted... skips this check entirely").
+      // `diagnoseUnrunnableProofs` already treats an absent `execProof` as "cannot settle real
+      // execution without a runner" and silently limits itself to the pure parse-shape check — so
+      // omitting this dep degrades to catching only a structurally-malformed proof (criterion 1),
+      // never a false refusal. The real production call site below wires the real worktree
+      // executor explicitly, exactly like its own `fetchPrBody: fetchPrBodyViaGh`.
+      const proofExecDeps = { execProof: deps.execAcceptanceGateRepairProof };
+      const repairSafeToPush = repair === undefined || repairedProofsAreSafeToPush(repairedCriteria, proofExecDeps);
+      if (repair && !repairSafeToPush) {
+        // REFUSE the write; PRESERVE the old body (never call updatePrBody) — the falsifier this
+        // task ships against removes exactly this call and expects criteria 1/2 to then observe
+        // `updatePrBody` invoked regardless. Falling through (no `continue`) lets the round proceed
+        // to whatever it would have done had `acceptanceGateBodyRepair` itself returned `undefined`
+        // — never a special "refused" strike, since nothing was written and nothing should be spent
+        // on the refusal alone.
+        deps.log("fix.body_gate_repair_proof_unsafe", {
+          strike: strikes + 1,
+          pr_number: prNumber,
+          defect: repair.defect,
+          reason: renderBodyDefects(diagnoseUnrunnableProofs(repairedCriteria, proofExecDeps)),
+        });
+        deps.say(
+          `fix rung: refused an author-time acceptance-gate body repair — its repaired body carries ` +
+            `an authored proof that will not parse/execute; the live body is left unchanged: ${opts.prUrl}`,
+        );
+      } else if (repair) {
         const attempt = strikes + 1;
         const writeBody = deps.updatePrBody ?? updatePrBodyViaGh;
         try {
@@ -13918,6 +14007,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           },
           runReview,
           fetchPrBody: fetchPrBodyViaGh,
+          // W1-T3506: the SAME worktree this round pushes to, run through the SAME proof
+          // executor `judgeCriterion` itself uses (review.ts's parseWhitelistedProof/
+          // execWhitelistedProof) — never a second, hand-rolled grep invocation.
+          execAcceptanceGateRepairProof: execGrepProofInWorktree(worktreePath),
           // W1-T2610: `expectedHeadSha` (the sha this rung just committed) is WIRED here, not
           // merely accepted — `gitPushRunBranch`'s post-condition re-reads this worktree's HEAD
           // right before pushing and raises `LanePushForeignHeadError` if it no longer matches,
