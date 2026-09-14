@@ -1,0 +1,63 @@
+- id: W1-T3573
+  title: "GIVE GENERIC ROUTES EXPLICIT PER-LANE TOOL BOUNDS BEFORE OPENWEIGHT — routes.review and routes.manual inherit the worker's unrestricted default, so model-affinity routing must wait for a minimal declared capability surface"
+  repo: remudero
+  depends_on: [W1-T3546]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  files:
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - test/a-generic-route-has-an-explicit-tool-bound.test.ts
+  origin: "operator-session#open-weight-resequence-2026-09-14"
+  plan_refs: ["W1-T62", "W1-T94", "W1-T3545", "W1-T3569", "W1-T3570", "W1-T3572", "W1-T2591"]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-lane-tool-bounds-1789389121907
+
+    OBSERVED at origin/main 1aad6122: SpawnWorkerArgs makes `disallowedTools`
+    optional and documents the omitted value as UNRESTRICTED
+    (src/lib/worker.ts:852-857); it then omits the SDK option entirely when no list
+    is supplied (1846-1848). A low-cost mount is not an authority declaration. The
+    inbox-draft route is independent because it already has a separate Read/Grep/Glob
+    declaration and deny list. This task does not route a generic lane and does not
+    add WebSearch or Bash to OPENWEIGHT_FUNCTIONS. Any later per-lane provider route
+    remains gated on W1-T3570's measurement record; the boundary work itself is safe
+    to perform first because it only makes authority explicit.
+  rationale: |
+    A generic route can be mechanically low-risk while still relying on filesystem,
+    process, or network tools. Letting the adapter's missing functions become an
+    accidental policy is unsafe in both directions: a future function may silently
+    widen a route, while an absent declaration can starve a worker of a required tool.
+    Lane policy must declare its authority before provider selection consumes it.
+
+    W1-T62 shares the orchestration files for PR-attribution integrity and W1-T94
+    shares them for fix-rung mode contracts; neither assigns generic-route authority
+    or provider affinity. Their shared surface is recorded rather than hidden, and
+    this task must rebase over either one before it starts.
+  design: |
+    Trace each generic routes.review and routes.manual spawn to its current tool
+    request and classify the minimum supported set from actual successful runs. Add a
+    named per-lane allowlist/deny boundary at the production spawn seam, with a
+    fail-closed resolver for unknown lane names. Preserve every current premium
+    provider's behavior until an individual follow-up explicitly assigns openweight
+    after W1-T3570's verdict. Tests must prove a known route receives its declared
+    set, an unknown route refuses rather than defaulting unrestricted, and a route
+    declaring WebSearch or Bash is rejected by the OpenWeight capability check before
+    transport. Do not use a global tool shrink that changes implement, fix, judge, or
+    architect authority as collateral.
+  acceptance:
+    - claim: "each generic review/manual route has an explicit, testable tool boundary and an unknown route refuses rather than inheriting unrestricted tools"
+      proof: "unit test: generic routes require explicit tool bounds"
+    - claim: "a generic route requiring WebSearch or Bash cannot reach OpenWeight transport as if its capability were complete"
+      proof: "unit test: generic openweight route refuses unsupported tools before transport"
+  falsifier: |
+    Delete a known route's declared bound and its lookup test must refuse; restoring an omitted
+    default must not pass. Mutate the OpenWeight capability check to drop unsupported names and
+    the no-transport test must fail. If source tracing proves a named generic route already has a
+    narrower real boundary, preserve that finding in the implementation rather than overwriting it
+    with an assumed list.
