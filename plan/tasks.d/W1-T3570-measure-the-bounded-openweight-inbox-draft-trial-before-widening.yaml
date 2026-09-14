@@ -15,7 +15,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: main -> chore/file-openweight-resequence-1789389121907
+    reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-resequence-1789389121907
 
     This is the required decision record before any second lane. It reads durable
     receipt/classification evidence only after W1-T3569's real, capped production

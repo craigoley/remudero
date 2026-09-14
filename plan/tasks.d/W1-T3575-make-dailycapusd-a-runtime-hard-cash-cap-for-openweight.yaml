@@ -17,7 +17,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: main -> chore/file-openweight-resequence-1789389121907
+    reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-resequence-1789389121907
 
     OBSERVED at origin/main 1aad6122: `dailyCapUsd` occurs in source only in
     config-schema/config validation and no provider or dispatch path reads it before

@@ -16,7 +16,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: main -> chore/file-openweight-resequence-1789389121907
+    reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-resequence-1789389121907
 
     OBSERVED at origin/main 1aad6122: INBOX_DRAFT_WORKER_TOOLS is exactly
     [Read, Grep, Glob] (src/run-task.ts:35108) and the spawn's independent deny
