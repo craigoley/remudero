@@ -12,6 +12,7 @@ import type { Plan } from "../src/lib/plan.js";
 import {
   buildSweepEffects,
   DEFAULT_SWEEP_POLICY,
+  openPrsBehindMain,
   rebaseDirtyFleetBranchViaGit,
   runSweep,
   type BuildSweepEffectsDeps,
@@ -205,6 +206,37 @@ test("W1-T2999: a dirty fleet PR without the rebase dependency keeps the existin
   assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
   assert.equal(deps.escalated.length, 1);
   assert.match(deps.escalated[0].reason, /merge conflict \(mergeState dirty\)/);
+});
+
+test("W1-T3568: stale-red rebase does not lower ordinary refresh eligibility", () => {
+  const pr = dirtyFleetPr({ mergeState: "behind", mergeable: true, mergeableState: "behind" });
+  const candidates = openPrsBehindMain(
+    [pr],
+    new Map([[pr.prNumber, 4]]),
+    { reviewWaitingBranchRefreshEnabled: true, reviewWaitingBranchRefreshThreshold: 10 },
+  );
+
+  assert.deepEqual(candidates, []);
+});
+
+test("W1-T3568: stale-red rebase failure leaves the observed remote head untouched when main advanced after route validation", () => {
+  const commands: string[][] = [];
+  const outcome = rebaseDirtyFleetBranchViaGit("/repo", "/tmp/w1-t3568-rebase", dirtyFleetPr(), {
+    expectedMainSha: "verified-main",
+    git: (_file, args) => {
+      commands.push([...args]);
+      const command = args.slice(2);
+      if (command[0] === "fetch") return "";
+      if (command[0] === "rev-parse" && command[1] === "refs/remotes/origin/run-W1-T2999-1789036344804") return "old-head\n";
+      if (command[0] === "rev-parse" && command[1] === "refs/remotes/origin/main") return "newer-main\n";
+      throw new Error(`unexpected git command: ${command.join(" ")}`);
+    },
+  });
+
+  assert.equal(outcome.outcome, "lease-mismatch");
+  assert.match(outcome.reason, /verified-main to newer-main/);
+  assert.equal(commands.some((args) => args.slice(2)[0] === "worktree"), false);
+  assert.equal(commands.some((args) => args.slice(2)[0] === "push"), false);
 });
 
 test("W1-T2999: the git rebase helper refuses a branch that moved before checkout", () => {

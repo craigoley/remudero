@@ -11,6 +11,7 @@ import {
 } from "../src/lib/ci-parity.js";
 import { rollupFromRest } from "../src/lib/open-prs-rest.js";
 import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 const NOW = Date.parse("2026-09-12T12:00:00Z");
 const HEAD = "a".repeat(40);
@@ -96,7 +97,7 @@ async function sweep(
       releaseStaleRed: () => {
         const newHead = "d".repeat(40);
         released.push(newHead);
-        return newHead;
+        return { outcome: "rebased", oldHeadSha: HEAD, newHeadSha: newHead };
       },
       ...over,
     },
@@ -155,6 +156,42 @@ test("W1-T3422: a passing isolated merge route redrives one candidate once", asy
   assert.deepEqual(duplicate.released, []);
 });
 
+test("W1-T3568: stale-red rebase failure leaves the observed remote head untouched", async () => {
+  const result = await sweep(redPr(), {
+    releaseStaleRed: () => ({ outcome: "lease-mismatch", reason: "origin moved before the leased push" }),
+  });
+
+  assert.deepEqual(result.released, []);
+  assert.equal(result.appended.some((line) => line.step === "sweep.stale_red_redrive.released"), false);
+  const standDown = result.appended.find((line) => line.step === "sweep.stale_red_redrive.lease-mismatch");
+  assert.equal(standDown?.head_sha, HEAD);
+  assert.match(String(standDown?.reason), /origin moved/);
+});
+
+test("W1-T3577: a thrown stale-red rebase is ledgered as an error without a release receipt", async () => {
+  const result = await sweep(redPr(), {
+    releaseStaleRed: () => {
+      throw new Error("fixture rebase setup failed");
+    },
+  });
+
+  assert.equal(result.appended.some((line) => line.step === "sweep.stale_red_redrive.released"), false);
+  const standDown = result.appended.find((line) => line.step === "sweep.stale_red_redrive.error");
+  assert.equal(standDown?.head_sha, HEAD);
+  assert.match(String(standDown?.reason), /fixture rebase setup failed/);
+});
+
+test("W1-T3568: stale-red rebase preserves the verified one-per-pass decision boundary", async () => {
+  const first = await sweep(redPr());
+  assert.deepEqual(first.routed, ["comment-load-ratchet"]);
+  assert.equal(first.released.length, 1);
+
+  const duplicate = await sweep(redPr(), {}, first.appended);
+  assert.deepEqual(duplicate.routed, []);
+  assert.deepEqual(duplicate.released, []);
+  assert.equal(duplicate.workflowReads, 0);
+});
+
 test("W1-T3422: an unregistered or failing local route never mints a new head", async () => {
   const unregistered = await sweep(
     redPr({ ciFailures: [failure({ name: "unknown-required-check" })], redRequiredChecks: ["unknown-required-check"] }),
@@ -169,7 +206,7 @@ test("W1-T3422: an unregistered or failing local route never mints a new head", 
   assert.ok(failed.appended.some((line) => line.step === "sweep.stale_red_redrive.local_route" && line.outcome === "route-failed"));
 });
 
-test("W1-T3422: the production builder reads, proves, and redrives through the declared isolated route", async () => {
+test("W1-T3568: a verified stale-red release rebases the observed PR head onto main", async () => {
   const repoRoot = join(process.cwd());
   assert.deepEqual(localMergeRouteContractErrors(readFileSync(join(repoRoot, ".github", "workflows", "ci.yml"), "utf8")), []);
   const remote = gitRepo({ bare: true, kind: "stale-red-origin" });
@@ -187,6 +224,7 @@ test("W1-T3422: the production builder reads, proves, and redrives through the d
     source.git("add", ".");
     source.git("commit", "-m", "head");
     const head = source.git("rev-parse", "HEAD");
+    source.git("push", "origin", "HEAD:pr-head");
     source.git("push", "origin", "HEAD:refs/pull/1/head");
     source.git("checkout", "main");
     writeFileSync(join(source.dir, "README.md"), "main repair\n");
@@ -235,7 +273,6 @@ test("W1-T3422: the production builder reads, proves, and redrives through the d
     assert.equal(result.outcome, "passed", result.detail);
 
     const workflowReads: Array<{ owner: string; repo: string; headSha: string }> = [];
-    const pushes: Array<{ repoDir: string; branch: string; headSha: string; message: string }> = [];
     const paceEvents: string[] = [];
     const effects = buildSweepEffects({
       owner: "acme",
@@ -256,10 +293,6 @@ test("W1-T3422: the production builder reads, proves, and redrives through the d
         workflowReads.push({ owner: readOwner, repo: readRepo, headSha: readHeadSha });
         return [];
       },
-      pushEmptyCommit: (repoDir, branch, headSha, message) => {
-        pushes.push({ repoDir, branch, headSha, message });
-        return "d".repeat(40);
-      },
     });
     assert.deepEqual(await effects.readMainRepair!(), { sha: main, committedAt: "2026-09-12T10:00:00.000Z" });
     assert.equal(await effects.readMainTip!(), main, "the compatible SHA reader reuses the same main observation");
@@ -274,19 +307,16 @@ test("W1-T3422: the production builder reads, proves, and redrives through the d
     };
     const builtRoute = await effects.runStaleRedLocalRoute!(target);
     assert.equal(builtRoute.outcome, "passed", builtRoute.detail);
-    assert.equal(await effects.releaseStaleRed!(target), "d".repeat(40));
-    assert.equal(pushes.length, 1);
-    assert.deepEqual({
-      repoDir: source.dir,
-      branch: "pr-head",
-      headSha: head,
-    }, {
-      repoDir: pushes[0]!.repoDir,
-      branch: pushes[0]!.branch,
-      headSha: pushes[0]!.headSha,
-    }, "the redrive must retain the observed branch and head");
-    assert.match(pushes[0]!.message, /#1/);
-    assert.match(pushes[0]!.message, /comment-load-ratchet/);
+    const release = await withLiveWritesAllowed(() => effects.releaseStaleRed!(target));
+    assert.equal(release.outcome, "rebased", "the verified route must publish a rebase, never an empty commit");
+    assert.equal(release.oldHeadSha, head);
+    const remoteHead = source.git("ls-remote", "origin", "refs/heads/pr-head").split(/\s+/)[0];
+    assert.equal(remoteHead, release.newHeadSha, "the leased publish updates the observed PR branch");
+    source.git("merge-base", "--is-ancestor", main, remoteHead!);
+    assert.throws(
+      () => source.git("merge-base", "--is-ancestor", main, head),
+      "the old PR head must not already contain the main repair",
+    );
   } finally {
     if (savedGlobalConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
     else process.env.GIT_CONFIG_GLOBAL = savedGlobalConfig;
