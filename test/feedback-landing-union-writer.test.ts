@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LANDING_BRANCH, landFeedback } from "../src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 // ── W1-T3560 — THE UNION WRITER + LEASE, NOT A WHOLE-REF REPLACE ───────────────────────────
 //
@@ -21,39 +21,22 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 // kept separate from test/feedback-landing.test.ts (that file's own tests are pinned by title and
 // own the original W1-T243/W1-T191 reconciliation mechanism, not this task's two-root shape).
 
-const GIT_ENV = {
-  ...process.env,
-  GIT_AUTHOR_NAME: "t",
-  GIT_AUTHOR_EMAIL: "t@t",
-  GIT_COMMITTER_NAME: "t",
-  GIT_COMMITTER_EMAIL: "t@t",
-};
-
-function git(dir: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GIT_ENV });
-}
-
 /** A bare "origin" remote, seeded with one commit on `main` — no network involved anywhere. */
 function makeBareOrigin(): string {
-  const bare = mkdtempSync(join(tmpdir(), "rmd-feedback-landing-union-origin-"));
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
-
-  const seed = mkdtempSync(join(tmpdir(), "rmd-feedback-landing-union-seed-"));
-  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
-  writeFileSync(join(seed, "README.md"), "seed\n");
-  git(seed, "add", "-A");
-  git(seed, "commit", "--quiet", "-m", "chore: seed");
-  git(seed, "remote", "add", "origin", bare);
-  git(seed, "push", "--quiet", "origin", "main");
-  rmSync(seed, { recursive: true, force: true });
-  return bare;
+  const bare = gitRepo({ bare: true, kind: "feedback-landing-union-origin" });
+  const seed = gitRepo({ kind: "feedback-landing-union-seed" });
+  writeFileSync(join(seed.dir, "README.md"), "seed\n");
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: seed");
+  seed.addRemote("origin", bare.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  seed.cleanup();
+  return bare.dir;
 }
 
 /** A real clone of `bareOrigin` — one independent state root's own checkout. */
 function cloneRoot(bareOrigin: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-feedback-landing-union-root-"));
-  execFileSync("git", ["clone", "--quiet", bareOrigin, dir], { encoding: "utf8", env: GIT_ENV });
-  return dir;
+  return gitRepo({ cloneFrom: bareOrigin, kind: "feedback-landing-union-root" }).dir;
 }
 
 /** A fake `gh` — no real GitHub call anywhere; tracks every invocation for assertions. */
