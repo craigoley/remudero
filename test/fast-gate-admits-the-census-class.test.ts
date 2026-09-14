@@ -97,32 +97,39 @@ test("runPreflightFast: run for real (unmocked, real spawn, real package.json) o
 // through a synthetic job name production source never mentions. What changed is the number the
 // measurement is compared against: an ABSOLUTE ceiling ejected its own entries as the corpus they
 // walk grew (measured on main: 2509ms against 2000ms, own result "would have PASSed", whole gate
-// FAIL), so the refusal is now a multiple of the SAME RUN's cheapest census entry. The sibling
-// below supplies that population; without one there is nothing to be a multiple OF.
+// FAIL), so the refusal is a multiple of the SAME RUN's own census durations (W1-T3408: the
+// MEDIAN of them, not the minimum — a single cheap sibling cannot manufacture the ratio, so this
+// fixture carries two cheap siblings, not one, to give the median something to be).
 test("runPreflightFast: an entry whose OWN measured wall time runs away from its siblings is refused as RUNAWAY even though its command exits zero — proven against a synthetic job name the production source never mentions, so the mechanism cannot be a name-matched exception", () => {
   const { spawn } = recordingSpawn(); // every call returns {status: 0} — the underlying command WOULD pass
-  // Two steps, four reads: cheap sibling 0->1000ms, then the runaway 1000->31000ms (30s, well
-  // over 4x the 1000ms reference).
-  const clockTicks = [0, 1000, 1000, 31000];
+  // Three steps, six reads: two cheap siblings (0->1000ms, 1000->2000ms) then the runaway
+  // 2000->32000ms (30s, well over 4x the 1000ms median of [1000, 1000, 30000]).
+  const clockTicks = [0, 1000, 1000, 2000, 2000, 32000];
   let tick = 0;
   const now = () => clockTicks[tick++];
   const syntheticSteps = [
     { job: "synthetic-cheap-census-zzq", script: "synthetic-cheap-census-zzq", reason: "test fixture only", boundMs: FAST_GATE_CENSUS_BOUND_MS },
+    { job: "synthetic-cheap2-census-zzq", script: "synthetic-cheap2-census-zzq", reason: "test fixture only", boundMs: FAST_GATE_CENSUS_BOUND_MS },
     { job: "synthetic-slow-census-zzq", script: "synthetic-slow-census-zzq", reason: "test fixture only", boundMs: FAST_GATE_CENSUS_BOUND_MS },
   ];
   const packageJsonText = JSON.stringify({
-    scripts: { "synthetic-cheap-census-zzq": "echo stub", "synthetic-slow-census-zzq": "echo stub" },
+    scripts: {
+      "synthetic-cheap-census-zzq": "echo stub",
+      "synthetic-cheap2-census-zzq": "echo stub",
+      "synthetic-slow-census-zzq": "echo stub",
+    },
   });
 
   const result = runPreflightFast(REPO_ROOT, { spawn, now, steps: syntheticSteps, packageJsonText });
-  const step = result.steps[1];
+  const step = result.steps[2];
 
   assert.equal(step.ok, false);
   assert.match(step.detail, /RUNAWAY/);
   assert.match(step.detail, /would have PASSed/, "the underlying command DID succeed — refusal is the measured bound, not the command's own exit code");
   assert.doesNotMatch(step.detail, /FAIL —/, "must not be reported as an ordinary command failure");
   assert.equal(result.ok, false);
-  assert.equal(result.steps[0].ok, true, "the cheap sibling is untouched — a refusal is per-entry, never a class ejection");
+  assert.equal(result.steps[0].ok, true, "a cheap sibling is untouched — a refusal is per-entry, never a class ejection");
+  assert.equal(result.steps[1].ok, true, "the other cheap sibling is untouched too");
 });
 
 test("src/lib/ci-parity.ts contains no per-job-name branch deciding admission — the generic bound above fired for a job name the module's own source text never mentions", () => {
