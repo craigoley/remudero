@@ -4,14 +4,26 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join as joinPath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { parse as parseYaml } from "yaml";
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a STATIC import of the .mjs is a TS7016 and
 // fails typecheck — the same reason test/a-source-file-cannot-outgrow-its-baseline.test.ts reaches
 // its script this way. A dynamic specifier is not statically resolved, so this loads the REAL
 // module with no shadow copy that could drift from it.
-const SCRIPT = joinPath(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "expiring-fixture-census.mjs");
-const { AGED_FIELDS, EXEMPT_MARKER, MARGIN_DAYS, assertFieldsStillAged, censusExpiringFixtures, formatReport, main, refusePopulationDrop } =
-  (await import(pathToFileURL(SCRIPT).href)) as {
+const REPO_ROOT = joinPath(dirname(fileURLToPath(import.meta.url)), "..");
+const SCRIPT = joinPath(REPO_ROOT, "scripts", "expiring-fixture-census.mjs");
+const {
+  AGED_FIELDS,
+  EXEMPT_MARKER,
+  MARGIN_DAYS,
+  assertFieldsStillAged,
+  censusExpiringFixtures,
+  emitCiReport,
+  encodeAnnotation,
+  formatReport,
+  main,
+  refusePopulationDrop,
+} = (await import(pathToFileURL(SCRIPT).href)) as {
     AGED_FIELDS: ReadonlyArray<{ field: string; threshold: string; source: string; evidence: string[] }>;
     EXEMPT_MARKER: string;
     MARGIN_DAYS: number;
@@ -34,6 +46,17 @@ const { AGED_FIELDS, EXEMPT_MARKER, MARGIN_DAYS, assertFieldsStillAged, censusEx
       recordedByFile?: Record<string, number>,
     ) => Array<{ file: string; current: number; recorded: number; missing: number }>;
     formatReport: (r: unknown, marginDays?: number) => string;
+    encodeAnnotation: (text: string) => string;
+    emitCiReport: (
+      tool: string,
+      report: string,
+      opts: {
+        blocked: boolean;
+        env?: NodeJS.ProcessEnv;
+        log?: (line: string) => void;
+        append?: (path: string, text: string) => void;
+      },
+    ) => boolean;
     main: (o?: {
       execFile?: (cmd: string, args: string[], opts: { encoding: "utf8" }) => string;
       readFile?: (p: string) => string;
@@ -261,4 +284,128 @@ test("W1-T3334: main exits nonzero when the measured population falls below the 
 
   assert.equal(code, 1);
   assert.match(output.join("\n"), /dropped below the recorded fixture population/);
+});
+
+// ── W1-T3578: THE CENSUS NAMES THE BLOCKING TEST ONLY IN AN UNREADABLE JOB LOG ───────────────────
+//
+// A red `comment-load-ratchet` check run's only annotation was GitHub's bare
+// `Process completed with exit code 1.` — the actionable report (fixture path, line, remedy) only
+// ever reached stdout, which an unproxied job-log read cannot see. `failingTestFilesFromCiFailures`
+// (src/lib/sweep.ts, W1-T3278) already recognizes a `test/...test.ts:<line>` path inside a
+// check-run annotation; these tests pin that this gate now publishes one, opt-in only, reusing the
+// identical encoder/emitter test/coverage-report-annotation.test.ts pins for the other two gates.
+
+/** Capture what an emit would send to each channel, without touching the real env or disk. */
+function captureEmit(report: string, blocked: boolean, env: NodeJS.ProcessEnv) {
+  const logged: string[] = [];
+  const appended: Array<{ path: string; text: string }> = [];
+  const emitted = emitCiReport("expiring-fixture-census", report, {
+    blocked,
+    env,
+    log: (l) => logged.push(l),
+    append: (path, text) => appended.push({ path, text }),
+  });
+  return { emitted, logged, appended };
+}
+
+test("W1-T3578: census BLOCKED report is emitted as actionable annotation evidence", () => {
+  const r = censusExpiringFixtures(tree({ "test/a-stale-fixture.test.ts": `  lastActivityAt: "${at(-13 * DAY)}",\n` }));
+  assert.equal(r.reported.length, 1, "precondition: this tree must actually be blocking");
+  const report = formatReport(r);
+
+  const { emitted, logged, appended } = captureEmit(report, true, {
+    RMD_CI_REPORT: "1",
+    GITHUB_STEP_SUMMARY: "/tmp/does-not-need-to-exist",
+  });
+
+  assert.equal(emitted, true);
+  assert.equal(logged.length, 1, "exactly one annotation carries the whole report");
+  const line = logged[0]!;
+  assert.ok(
+    line.startsWith("::error title=expiring-fixture-census::"),
+    `must be a workflow command, got: ${line.slice(0, 60)}`,
+  );
+
+  const decoded = line
+    .replace("::error title=expiring-fixture-census::", "")
+    .replace(/%0A/g, "\n")
+    .replace(/%0D/g, "\r")
+    .replace(/%25/g, "%");
+  assert.equal(decoded, report, "the annotation round-trips to the same report main() logs to stdout");
+  assert.match(decoded, /test\/a-stale-fixture\.test\.ts:1/, "the blocking fixture's path and line are named");
+  assert.match(decoded, /goes red 2026-09-10/, "the date it goes red survives into the annotation");
+  assert.match(decoded, /TO FIX:/, "the existing remedy text is preserved, not summarized away");
+
+  assert.equal(appended.length, 1, "the step summary carries the same report");
+  assert.ok(appended[0]!.text.includes("test/a-stale-fixture.test.ts:1"));
+});
+
+test("W1-T3578: census annotation is opt-in and clean runs stay silent", () => {
+  const blockedReport = formatReport(
+    censusExpiringFixtures(tree({ "test/a.test.ts": `lastActivityAt: "${at(-13 * DAY)}",` })),
+  );
+
+  // Without the opt-in, a BLOCKED run in an Actions-shaped env must publish nothing — this is the
+  // trap: test/expiring-fixture-census.test.ts (this very file) spawns the script over blocking
+  // fixtures with no env override, so the opt-in, not `GITHUB_ACTIONS`, must gate emission.
+  const noOptIn = captureEmit(blockedReport, true, {
+    GITHUB_ACTIONS: "true",
+    GITHUB_STEP_SUMMARY: "/tmp/does-not-need-to-exist",
+  });
+  assert.equal(noOptIn.emitted, false, "no RMD_CI_REPORT ⇒ the reporter is inert");
+  assert.equal(noOptIn.logged.length, 0);
+  assert.equal(noOptIn.appended.length, 0);
+
+  // With the opt-in but a CLEAN result, no failure annotation may appear — a clean local or nested
+  // test run must never manufacture a CI failure.
+  const cleanResult = censusExpiringFixtures(tree({ "test/a.test.ts": `lastActivityAt: "${at(-1 * DAY)}",` }));
+  assert.equal(cleanResult.reported.length, 0, "precondition: this tree must actually be clean");
+  const cleanReport = formatReport(cleanResult);
+  const clean = captureEmit(cleanReport, false, {
+    RMD_CI_REPORT: "1",
+    GITHUB_STEP_SUMMARY: "/tmp/does-not-need-to-exist",
+  });
+  assert.equal(clean.emitted, true);
+  assert.equal(clean.logged.length, 0, "a clean run writes no ::error annotation even with the opt-in set");
+  assert.equal(clean.appended.length, 1, "the step summary still records the clean result");
+  assert.ok(!clean.appended[0]!.text.includes("BLOCKED"), "a clean summary never says BLOCKED");
+});
+
+test("W1-T3578: the real workflow opts in only the expiring-fixture census", () => {
+  const workflow = parseYaml(readFileSync(joinPath(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
+    jobs: Record<
+      string,
+      {
+        steps?: Array<{ name?: string; env?: Record<string, string> }>;
+      }
+    >;
+  };
+
+  const optedIn: string[] = [];
+  for (const job of Object.values(workflow.jobs)) {
+    for (const step of job.steps ?? []) {
+      if (step.env?.RMD_CI_REPORT !== undefined) optedIn.push(step.name ?? "<unnamed step>");
+    }
+  }
+
+  const census = optedIn.filter((name) => name.includes("Expiring-fixture census"));
+  assert.equal(census.length, 1, `exactly one step must opt in for the census, found: ${JSON.stringify(optedIn)}`);
+
+  // The two existing coverage gates are the only other opt-in producers; nothing else — least of
+  // all an unrelated fast-lane step in the census's own job — may pick up the flag.
+  const unexpected = optedIn.filter(
+    (name) => !name.includes("Expiring-fixture census") && !name.includes("Diff coverage") && !name.includes("Coverage ratchet"),
+  );
+  assert.deepEqual(unexpected, [], "no unrelated step may carry RMD_CI_REPORT");
+
+  const ratchetJob = workflow.jobs["comment-load-ratchet"];
+  assert.ok(ratchetJob, "the census's own job must exist");
+  const siblingSteps = (ratchetJob!.steps ?? []).filter((s) => !s.name?.includes("Expiring-fixture census"));
+  for (const sibling of siblingSteps) {
+    assert.equal(
+      sibling.env?.RMD_CI_REPORT,
+      undefined,
+      `sibling step "${sibling.name}" in the census's own job must not receive the opt-in`,
+    );
+  }
 });
