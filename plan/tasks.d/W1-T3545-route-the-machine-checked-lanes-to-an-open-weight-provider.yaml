@@ -1,0 +1,126 @@
+- id: W1-T3545
+  title: "THE LANE THAT IS 45% OF ALL SPEND IS MACHINE-CHECKED AND STILL RIDES A SUBSCRIPTION MOUNT — `inbox_draft` is 1,436 runs and $4,486, its output is judged by a deterministic linter that has NEVER rejected one on content, and an open-weight model measured 11/11 on its exact output contract at 1/25th the token price; add a THIRD provider to the capability ladder and route the machine-checked lanes to it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 55.00
+  files: [src/lib/config.ts, src/lib/worker.ts, src/lib/worker-provider.ts, .remudero/mounts.yaml, test/an-open-weight-provider-rides-the-capability-ladder.test.ts]
+  origin: "operator-session#open-weight-research-2026-09-13"
+  plan_refs: ["W1-T2573", "W1-T3094", "W1-T2559", "W1-T258", "W1-T3095"]
+  status: queued
+  attempts: 0
+  note: |
+    THE SPEND EVIDENCE IS ALREADY IN THIS REPO. `.remudero/mounts.yaml`'s own W1-T3094 block,
+    measured 2026-09-08 over 4,131,278 run-tagged rows -> 915 distinct runs:
+
+      inbox.draft_synthesized   1,436 runs   $4,486   45% of ALL metered spend
+      implement.done              668 runs   $3,429   (the lane that actually ships code)
+      triage                      176 runs
+      retro                        89 runs     $740
+
+    AND THE GATE HAS NEVER REJECTED A DRAFT ON CONTENT. Across 468 retained `inbox.classified`
+    rows, all 299 `not_ready` verdicts failed on exactly ONE predicate — `drafted`. ZERO failed
+    `lint_clean`, `deps_merged`, `evidence_anchors` or `no_conflict`. The top mount is buying a
+    margin nothing downstream has ever spent.
+
+    THE OPEN-WEIGHT MODEL WAS MEASURED ON THIS REPO'S OWN OUTPUT CONTRACT, 2026-09-13, against
+    `gpt-oss-120b` (Apache 2.0) on `GlobalStandard` in the `synthwatch-foundry` AIServices account
+    (eastus2), NOT from a public benchmark:
+
+      shard authoring   11/11 field checks, YAML parses, 2/2 acceptance proofs dialect-valid
+                        (`unit test: ` / `grep: ... in ...`) — 451 prompt + 583 completion tokens
+      classification    5/5 escalation classes, including the branch-name `credit_error` case
+                        — 2,012 tokens total for all five, ~$0.0012
+
+    PRICE, from the Azure retail API the same day: $0.15 / 1M input, $0.60 / 1M output. That is
+    roughly 1/25th of the balanced Claude mount these lanes ride today, and it is CASH rather than
+    subscription window — which is the entire point: the three subscriptions are the scarce
+    resource, and this lane is 45% of what consumes them.
+  rationale: |
+    THIS IS NOT THE OVERFLOW VALVE, AND MUST NOT BE BUILT AS ONE. `config.overflow: "api_key"`
+    (W1-T258) already exists and fires only when a window is exhausted. That leaves the 45% lane
+    consuming subscription headroom every single run until the moment it runs out. The lever here is
+    ROUTINE routing of lanes whose output is MACHINE-CHECKED, so the subscription is spent only on
+    work that needs judgement no linter can supply.
+
+    THE ARCHITECTURE WAS BUILT FOR THIS. W1-T2573 made the capability axis provider-neutral
+    explicitly so "a SECOND vendor's adapter performs a TABLE LOOKUP here rather than a substring
+    match" — `.remudero/mounts.yaml`'s `capabilities` block already carries `claude`,
+    `claude_candidates` and `codex` keys. A third provider is the shape that block was designed to
+    accept. `WorkerProviderId` ("claude" | "codex", src/lib/config.ts) is the one union that must
+    widen, and it appears as an inline literal in roughly eight places in src/lib/worker.ts — those
+    are the real edit surface, not the ladder.
+
+    THE MEASURED FAILURE MODES ARE PROMPT-SHAPED, NOT CAPABILITY-SHAPED, and each has a fix that
+    must be encoded rather than rediscovered:
+      (a) `response_format: {type:"json_object"}` IS BROKEN on this model — it returned
+          `{"final{": 0}`. Plain prompting with an explicit inline schema returned 5/5. Do not set it.
+      (b) IT IS A REASONING MODEL: reasoning tokens consume the completion budget. A 1,500-token
+          ceiling truncated a shard mid-string; 5,000 completed in 583. Size the budget accordingly.
+      (c) A `proof:` VALUE CONTAINS A COLON, so unquoted it is invalid YAML. The first attempt
+          failed on exactly that. The prompt must require double-quoting; this repo's own shards do.
+
+    PHI-4-MINI WAS TESTED AND REJECTED, so nobody re-litigates it: asked for JSON-only it returned
+    prose troubleshooting advice, and under `json_object` it emitted valid JSON with an INVENTED
+    schema. At $0.08 vs $0.15 per 1M the saving cannot pay for that unreliability. ONE open-weight
+    model, not a mix — a second adds vendor variance and a second failure mode for pennies.
+  design: |
+    (i) WIDEN THE UNION AT ITS SOURCE. `WorkerProviderId` in src/lib/config.ts gains one member.
+    Then fix every inline `provider: "claude" | "codex"` literal in src/lib/worker.ts to reference
+    the union instead of restating it — restating is what made this a multi-site edit at all.
+    (ii) ADD THE LADDER ROW AS DATA. A new key under `capabilities` in `.remudero/mounts.yaml`,
+    capability -> effort -> ordered model ids, exactly the shape `codex` already uses. Adding a
+    model stays a data edit.
+    (iii) THE ADAPTER MIRRORS `spawnCodexWorker`. It is an OpenAI-compatible `/chat/completions`
+    endpoint, so the closest existing shape is the Codex path, including its capacity read and its
+    model-id allowlist regex. Encode the three failure modes above IN the adapter, each with a
+    comment naming what it prevents.
+    (iv) THE CREDENTIAL NEVER LANDS ON DISK OR IN THIS REPO. Read the endpoint from config and the
+    key from the environment, resolved the way `secret-boundary.ts` already keeps a worker's real
+    token out of its env. The key is retrievable with
+    `az cognitiveservices account keys list --name synthwatch-foundry --resource-group synthwatch-rg`
+    — that command, never the value, belongs in any file.
+    (v) ROUTE ONLY THE MACHINE-CHECKED LANES, and say in the PR body why each qualifies:
+    `synthesis.inbox_draft` (deterministic linter + bounded relint), `synthesis.triage`
+    (classification), `routes.review.low`, `routes.manual.low|medium`, and
+    `routes.implement.*.docs|plan-lint`. Recon low/medium MAY follow once the first five are
+    measured, not in the same change.
+    (vi) LEAVE THESE ON CLAUDE, DELIBERATELY: `architect` and `judge` (the Tier Invariant binds
+    them), `retro` (89 runs, output acted on directly, mounts.yaml states the reasoning),
+    `implement.src`, `reviewer`, `diagnose`, `fix`. The implement lane trips on this repo's own
+    conventions even on a frontier mount — literal proof-title matching, the `## Acceptance` heading
+    trap, the fully-injected-coverage trap were all observed the same day — and a weaker model there
+    buys retries, not savings.
+  acceptance:
+    - claim: "the capability ladder resolves an open-weight provider by table lookup, never a substring match on a Claude model name"
+      proof: "unit test: the capability ladder resolves an open-weight provider by table lookup"
+    - claim: "the machine-checked lanes route to the open-weight provider while architect, judge and retro stay on Claude"
+      proof: "unit test: only the machine-checked lanes route to the open-weight provider"
+    - claim: "the Tier Invariant still refuses a mounts table whose architect does not strictly outrank every worker, with the third provider declared"
+      proof: "unit test: the tier invariant still refuses an under-ranked architect with a third provider"
+    - claim: "the adapter never sets json_object response_format, which this model answers with malformed output"
+      proof: "grep: response_format in test/an-open-weight-provider-rides-the-capability-ladder.test.ts"
+    - claim: "the provider is WIRED, not reachable only from its own tests"
+      proof: "grep: openWeight in src/lib/worker.ts"
+  falsifier: |
+    RE-MEASURE THE LANE BEFORE BUILDING. The 45% figure is mounts.yaml's own 2026-09-08 measurement
+    and the fleet has run a week since. Re-derive `inbox.draft_synthesized` spend from the ledger
+    union and use YOUR number; if the lane has shrunk, the premise is weaker and the scope should
+    shrink with it.
+    RE-RUN THE MODEL PROBE, DO NOT TRUST MINE. The 11/11 and 5/5 above are single runs at
+    temperature 0 on 2026-09-13. Run each at least five times before wiring: a lane at 1,436 runs
+    per window needs a pass RATE, and one sample is not one.
+    PROVE THE TIER INVARIANT STILL BITES. Declare an open-weight model above the architect in a
+    fixture and show load REFUSES. A third provider that quietly escapes G-17 is the one way this
+    task can do real harm.
+    DO NOT ROUTE `implement.src`, `reviewer`, `architect`, `judge` OR `retro`. If a measurement
+    later argues for one of them, that is its own task with its own evidence. Widening scope here
+    converts a cost change into a quality regression nobody measured.
+    A PASS RATE BELOW THE RELINT BUDGET IS A FAILURE, NOT A TUNING NOTE. `inbox_draft` retries
+    through `MAX_RELINT_ATTEMPTS`; if the open-weight draft needs more relints than that bound
+    allows, it is cheaper per token and more expensive per accepted draft. Measure accepted drafts
+    per dollar, never tokens per dollar.
