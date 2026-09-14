@@ -1,0 +1,68 @@
+- id: W1-T3578
+  title: "THE EXPIRING-FIXTURE CENSUS NAMES THE BLOCKING TEST ONLY IN AN UNREADABLE JOB LOG — the fix rung already consumes check-run annotations and already recognizes test paths, but this gate publishes only GitHub's bare exit-code annotation, so a stale main fixture sends unrelated PRs into an unnecessary repair worker"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 12.00
+  files:
+    - scripts/expiring-fixture-census.mjs
+    - .github/workflows/ci.yml
+    - test/expiring-fixture-census.test.ts
+  origin: "operator-session#site-console-cell-ci-self-recovery-2026-09-14"
+  plan_refs: ["W1-T3278", "W1-T3272", "W1-T2671", "W1-T2782"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on the original W1-T3565 head `de7646be3bf0251aac9240005504068f06a62129`.
+    Its failed `comment-load-ratchet` job (run 34844003932, job/check-run 103975410477) printed
+    the actionable census result in the job log:
+      expiring-fixture-census: BLOCKED -- 1 fixture(s) CROSS their threshold within 7 day(s):
+        - test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts:52 ... goes red 2026-09-21
+    That path was changed on newer main by #5524, so it was a stale-base candidate rather than a
+    defect in the feature task.
+
+    OBSERVED from the same check-run's REST annotations endpoint: its only message was `Process
+    completed with exit code 1.` The fleet can read that annotations endpoint, but it cannot rely
+    on the Actions log endpoint under its GitHub App credential. `fetchCiFailures` therefore had
+    only the bare annotation; `failingTestFilesFromCiFailures` received no path and the pre-strike
+    stale-base decision did not refresh the branch. The ordinary fix rung then added an unnecessary
+    fixture repair to the feature branch, and the main change made that redundant repair conflict.
+
+    The parser is not the missing piece. `failingTestFilesFromCiFailures` in `src/lib/sweep.ts`
+    already recognizes the exact `test/...test.ts` path printed above, and W1-T3278 already makes
+    check-run annotations the bounded failure-evidence channel. This task supplies the missing
+    producer evidence for this one gate; it does not change credentials, polling, the parser,
+    stale-base eligibility, or the conflict rung.
+  design: |
+    Reuse the existing opt-in CI-report mechanism so `expiring-fixture-census.mjs` emits its
+    already-structured BLOCKED report as one GitHub `::error` annotation only when
+    `RMD_CI_REPORT=1`. Enable that variable only on the real Expiring-fixture census workflow
+    step. Its annotation must preserve every named fixture path and the existing remedy; a passing
+    census, already-expired state, and exempt fixture remain free of failure annotations.
+
+    The opt-in is load-bearing. The same script runs under local and nested test processes, where
+    automatic GitHub-action detection would publish misleading annotations. Reuse the existing
+    report encoder rather than inventing a second escaping dialect. Do not try to read job logs,
+    change the GitHub App's scopes, or add a broad retry/rebase path: after GitHub exposes the
+    report as an annotation, the existing W1-T3278 reader and W1-T2671 path matcher provide the
+    only consumer required here.
+  acceptance:
+    - claim: "a BLOCKED census under the explicit CI-report opt-in emits one check-run error annotation that preserves the named test file, line, and remedy"
+      proof: "unit test: W1-T3578 census BLOCKED report is emitted as actionable annotation evidence"
+    - claim: "the census stays silent on the annotation channel when the opt-in is absent or when the result is clean, so local and nested test runs cannot manufacture a CI failure"
+      proof: "unit test: W1-T3578 census annotation is opt-in and clean runs stay silent"
+    - claim: "the real workflow enables the opt-in on the Expiring-fixture census step and no unrelated fast-lane step receives it"
+      proof: "unit test: W1-T3578 workflow opts in only the expiring-fixture census"
+  falsifier: |
+    CLOSE AS ALREADY SATISFIED if the failing check-run annotation for a real census block already
+    contains its `test/...test.ts` path and remedy, not merely an exit code. The direct controls are
+    required: remove the opt-in and the annotation must disappear; make the census clean and no
+    error annotation may remain. A job-log-only assertion is not evidence, because the fleet's
+    actual failure reader consumes annotations when log access is unavailable.
+
+    Do not change `failingTestFilesFromCiFailures`, issue a blanket update-branch, relax a merge
+    conflict, or widen GitHub credentials in this task. Those routes would hide the producer gap
+    instead of making the existing bounded recovery path observable.

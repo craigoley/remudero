@@ -20,7 +20,7 @@
     - test/the-sweep-fan-out-respects-the-host-budget.test.ts
   origin: "operator-session#main-red-clock-boundary-2026-09-09"
   plan_refs: ["W1-T3270", "W1-T2250", "W1-T2732"]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     RENUMBERED FROM W1-T3271. The fleet reserved `refs/rmd-id/W1-T3271` at 2026-09-09T19:36:22Z from
