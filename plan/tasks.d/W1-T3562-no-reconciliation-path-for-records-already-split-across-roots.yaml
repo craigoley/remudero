@@ -1,0 +1,117 @@
+- id: W1-T3562
+  title: "NOTHING CAN ANSWER WHICH FEEDBACK RECORDS ARE CURRENTLY LOST — the fixes forward stop the next clobber but no surface enumerates what the core and site state roots already hold that origin/main does not, or which records a landing has already regressed: build one bounded, dry-run-first reconciliation that reports the difference and re-lands the union through the ordinary gated PR path"
+  repo: remudero
+  depends_on: ["W1-T3560", "W1-T3561"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 60.00
+  files:
+    - src/lib/feedback-reconcile.ts
+    - src/run-task.ts
+    - test/feedback-landing-reconcile.test.ts
+  origin: architect
+  plan_refs: ["W1-T3559", "W1-T3560", "W1-T3561", "W1-T530", "W1-T2749", "W1-T3532", "§7B"]
+  status: queued
+  attempts: 0
+  rationale: |
+    (1) THE FORWARD FIXES DO NOT REPAIR THE PAST. W1-T3560 stops a disjoint batch from replacing
+    another root's records and W1-T3561 stops a stale copy from regressing one, but both act at the
+    moment of a landing. Records dropped by an earlier force-push, or reset by the measured PR #5383
+    regression (feedback#fb-1789304804534-e29e68), stay wrong on origin/main until something reads
+    them back.
+
+    (2) AND THE ONLY EXISTING BACKSTOP CANNOT SEE THEM. `sweepFeedbackLanding` (W1-T530) re-scans
+    exactly one root's own disk. A record captured on the site state root is invisible to the core
+    root's sweep, and feedback#fb-1789311638612-56d5bd records the site daemon exiting 0 at
+    2026-09-13T00:43:01Z under `restart=on-failure:5` and staying down — so for that window the
+    sweep that would have re-landed those records was not running at all. There is no surface
+    anywhere that answers "which records exist in some root, or on a landing branch, but not on
+    origin/main".
+
+    (3) THE ACKNOWLEDGEMENT PATH PROVES THE COMPARISON IS CHEAP AND SAFE. W1-T2749 already walks a
+    root's untracked `plan/feedback/**` and compares each file's bytes against the same path on
+    fetched origin/main before acting, and it is deliberately conservative: it only removes a copy
+    Git has proved durable upstream. The same read is the basis of an honest difference report.
+  design: |
+    (i) A REPORT BEFORE AN ACTION. Default is a dry run that produces a MANIFEST and changes
+    nothing: for each record id, where it was found (each enrolled state root's inbox, each landing
+    branch tip, the target's origin/main), and its classification — present-everywhere, missing
+    upstream, or REGRESSED upstream (origin/main sits at an earlier lifecycle position than some
+    root holds), reusing W1-T3561's pure predicate rather than a second copy of the ordering rule.
+
+    (ii) RE-LAND THROUGH THE ORDINARY DOOR. Applying the reconciliation must go through the same
+    landing bridge, the same gated PR, the same `ci + remudero-review` protected statuses and the
+    same `automergeHoldFromLedger` consult. It may NOT push to main, may not merge anything itself,
+    and may not arm around a gate — §2's "the Architect proposes, merges nothing" is not relaxed for
+    a repair. A reconciliation that would regress any record is refused, not forced.
+
+    (iii) BOUNDED AND IDEMPOTENT. The scan is bounded (record count and byte size stated in the PR
+    body, since this can run on an interactive verb) and running it twice over unchanged state is a
+    no-op that pushes nothing and opens no second PR — the same idempotence `findPendingLandingPr`
+    plus the tree-compare short-circuit already give the sweep.
+
+    (iv) WHICH ROOTS IT READS IS DECLARED, NOT DISCOVERED. It reads the roots it is given (an
+    explicit enrolment, the shape W1-T3532 is filing for instances) and refuses an unknown or
+    malformed root before any read — never a glob over the host's filesystem, and never a write into
+    another instance's state.
+
+    (v) NAME THE CURRENT CORE AND SITE RECORDS. The task is not done when the machinery exists: the
+    PR body must carry the manifest actually produced for the core and site roots as they stand,
+    including the disposition of `fb-1789282068794-2f0b7d` (the record PR #5383 reset) and of any
+    site record that landed into core as PR #5438
+    (feedback#fb-1789328786213-ba9741). A manifest with no entries is an acceptable answer ONLY if
+    it is accompanied by the read that produced it.
+
+    (vi) ONE ENTRY POINT, AND THE HUB CALLS IT. `src/lib/feedback-reconcile.ts` exports
+    `reconcileFeedbackLanding(...)` — dry-run by default, apply behind an explicit flag — and
+    `src/run-task.ts` CALLS it from the verb registration. The hub holds no scan, no classification
+    and no second copy of the ordering rule: registration, argument parsing, and the call. A module
+    that only its own suite reaches is the impl-DO failure this plan has already merged eleven times,
+    so the call site is an acceptance criterion here, not an implementation detail.
+
+    (vii) NOT IN SCOPE. Changing the status lifecycle; deciding which repository a record belongs to
+    (that routing question is explicitly left open by W1-T3559 (v)); moving records between
+    repositories; any automatic scheduled run of the apply path — the cadence question is separate
+    and this lands as an operator-invoked verb with a dry-run default.
+  acceptance:
+    - claim: "the dry-run default produces a manifest of records present in a state root or on a landing branch but absent from origin/main, and writes nothing"
+      proof: "unit test: test/feedback-landing-reconcile.test.ts"
+    - claim: "a record whose upstream copy sits at an earlier lifecycle position than a root's copy is classified as regressed rather than merely differing"
+      proof: "unit test: test/feedback-landing-reconcile.test.ts"
+    - claim: "applying the reconciliation re-lands the union through the ordinary gated pull request and never pushes to main or merges anything itself"
+      proof: "unit test: test/feedback-landing-reconcile.test.ts"
+    - claim: "a second run over unchanged state pushes nothing and opens no second pull request"
+      proof: "unit test: test/feedback-landing-reconcile.test.ts"
+    - claim: "an unknown or malformed state root is refused before any read or write, and no other instance's state is touched"
+      proof: "unit test: test/feedback-landing-reconcile.test.ts"
+    - claim: "the reconciliation refuses rather than forces when applying it would regress any record"
+      proof: "unit test: test/feedback-landing-reconcile.test.ts"
+    - claim: "the operator verb, dispatched the way the CLI dispatches it, produces the manifest by reaching the library builder rather than a second copy of the scan inside the hub"
+      proof: "unit test: test/feedback-landing-reconcile.test.ts"
+    - claim: "the hub calls the library manifest builder, so the new module is reached by the program and not only by its own tests"
+      proof: "grep: reconcileFeedbackLanding( in src/run-task.ts"
+  falsifier: |
+    CLOSE IF some existing surface already enumerates records held by one state root and missing or
+    regressed on the target's origin/main across MORE THAN ONE root. As of this filing
+    `sweepFeedbackLanding` and `acknowledgeLandedQueueCopies` each read exactly one root's own disk,
+    and `rmd triage` reads a fresh origin/main worktree only.
+    DO NOT satisfy this by hand-committing the missing records: the point is a repeatable read that
+    can be run again after the next incident, and a hand commit also bypasses the gates (ii) keeps.
+  note: |
+    RULE 19 / #588 MERITS TEST — RAISED, NOT DECOMPOSED, AND HERE IS THE ONE-LINE REASON: the
+    acceptance asserts a single cross-file invariant that is unsatisfiable piecewise — the verb in
+    `src/run-task.ts` must REACH `reconcileFeedbackLanding(` in `src/lib/feedback-reconcile.ts`, and
+    no test of either file alone can assert it, so splitting the module from its only call site is
+    precisely how a module merges green and unreached (impl-DO).
+    `band_meaning: span` because the two declared concerns (`feedback-reconcile`, `run-task`) ARE the
+    reason for the band; the change itself is not blast-radius — the dry-run default means a wrong
+    answer prints a wrong manifest rather than writing one, and the apply path reuses the existing
+    gated bridge instead of a new write route.
+    `src/run-task.ts` IS declared, and only for the verb wiring: it is the 37%-declared hub that
+    serialises a lane (W1-T471), so the manifest logic lives in `src/lib/feedback-reconcile.ts` and
+    the hub edit must stay a thin registration — a registration and its call, nothing more.
+    depends_on both forward fixes because the manifest's regression classification reuses W1-T3561's
+    predicate and the apply path rides W1-T3560's union writer.

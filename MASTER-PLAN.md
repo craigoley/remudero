@@ -5766,6 +5766,32 @@ an external Architect. The measurable calibration metric is **what fraction of p
 UNCHANGED** — track it; strategy, contested calls, and deep research stay a human/chat path until that
 number earns trust.
 
+### The landing bridge's ownership invariant — repository-scoped, union-complete, monotonic
+
+**THE INBOX'S DURABILITY PROMISE EXTENDS TO THE BRIDGE THAT PUBLISHES IT.** §7B says an entry is
+"never lost in a chat scrollback"; that is only true if the bridge which force-pushes those entries to
+`origin/main` cannot lose one either. Three properties are now REQUIRED of every landing owner, and each
+is filed rather than assumed:
+
+1. **SCOPED IDENTITY (W1-T3559).** A landing owner's branch, PR head and owned directory are DERIVED
+   from the resolved target repository plus the owner — never a module-level literal. Two owners must be
+   unable to address one ref. Measured cause: a daemon run with `--repo remudero-site` landed site
+   feedback as core PR #5438 (feedback#fb-1789328786213-ba9741).
+2. **UNION-COMPLETE WRITES (W1-T3560).** A landing writes the union of what the branch already holds and
+   what this state root has pending, and replaces the tip only against the value it computed from — a
+   disjoint batch may never force-replace another root's records, and **auto-merge is armed only while
+   the PR head is the owner's complete pending union.** No record's survival may depend on another
+   process running again; a daemon that has exited (feedback#fb-1789311638612-56d5bd) is the normal case.
+3. **MONOTONIC RECORDS (W1-T3561).** A landing may only ADVANCE a record through the status lifecycle
+   above. A stale copy that would return an entry to an earlier position is REFUSED and surfaced, never
+   staged and never auto-merged — the measured regression is PR #5383 resetting a `grilling` entry to
+   `new` and breaking the `replyTo` route (feedback#fb-1789304804534-e29e68).
+
+**AND THE PAST IS REPAIRED THROUGH THE SAME DOOR (W1-T3562):** a dry-run-first reconciliation reports
+which records any enrolled state root holds that `origin/main` lacks or has regressed, and re-lands them
+through the ordinary gated PR. **No gate is relaxed for a repair** — the bridge still proposes and merges
+nothing, `ci + remudero-review` still decide, and a standing auto-merge hold is still honoured.
+
 ## 7C. Design Review (the visual/UX skill)
 
 The one genuinely-MISSING capability: an **Architect-tier skill that validates and improves UI/UX**. It is

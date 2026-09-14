@@ -1,0 +1,121 @@
+- id: W1-T3560
+  title: "THE FEEDBACK LANDING PUSH IS A WHOLE-REF REPLACE WITH NO UNION AND NO LEASE — `landPending` builds its tree as origin/main plus THIS state root's unlanded files only (never carrying forward what the branch already holds, which the sibling `landContent` does do), then `finishLanding` runs `git push --force` with no expected-old-value, so a second state root with a disjoint inbox batch silently drops the first root's records from a branch whose PR is already armed for auto-merge"
+  repo: remudero
+  depends_on: ["W1-T3559"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 75.00
+  files:
+    - src/lib/feedback-landing.ts
+    - test/feedback-landing-union-writer.test.ts
+  origin: architect
+  plan_refs: ["W1-T3559", "W1-T530", "W1-T191", "W1-T2749", "W1-T3532", "§7B"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL FOUR FACTS BELOW WERE READ IN `src/lib/feedback-landing.ts` AT THIS COMMIT.
+
+    (1) THE FEEDBACK TREE IS NOT A UNION. `landPending` does `read-tree origin/main` against a
+    scratch index and then stages ONLY the files it found on THIS root's disk that differ from
+    origin/main. It never reads `origin/<landing branch>`. The in-memory sibling `landContent`
+    DOES carry the branch's pending content forward — scoped to `kind.ownedDir` — and its own
+    comment states exactly why: "without this a second call would drop the first call's content
+    entirely" (W1-T191 criterion 2). The disk-scanning path never got that carry-forward, because
+    it was reasoned about as ONE writer re-scanning ONE disk.
+
+    (2) THE PUSH IS UNCONDITIONAL. `finishLanding` reads `remoteBranchTree` (a `rev-parse
+    origin/<branch>^{tree}`) purely as a no-op short-circuit, then issues
+    `git push --force origin <commitSha>:refs/heads/<branch>` with no `--force-with-lease` and no
+    expected old value. Between that read and that push any other owner's tip is discarded without
+    a refusal, and the short-circuit itself makes the clobber MORE likely rather than less: the
+    other root's records on the branch are exactly what makes the remote tree differ from mine, so
+    a disjoint batch always takes the push path.
+
+    (3) TWO ROOTS WITH DISJOINT BATCHES THEREFORE ALTERNATE, AND ONE OF THEM CAN STOP.
+    Root A holds record X, root B holds record Y. A pushes {X}. B rebuilds from origin/main and
+    pushes {Y} — X is gone from the branch. X survives ONLY because A's next `sweepFeedbackLanding`
+    re-scans A's disk and re-adds it. That premise fails whenever A stops: feedback
+    fb-1789311638612-56d5bd records the site daemon exiting 0 at 2026-09-13T00:43:01Z under
+    `restart=on-failure:5` and staying down. A record whose only re-scanner is dead is stranded off
+    origin/main with no error anywhere, which is the precise durability promise §7B makes.
+
+    (4) AND AUTO-MERGE IS ARMED FOR A TREE THAT IS NO LONGER THE HEAD. `ensurePrOpen` arms
+    `gh pr merge --auto --squash` ONLY in the call that CREATES the PR, and every later call is a
+    one-`gh pr list` no-op by design (W1-T530). So the arm granted to A's tree stays attached while
+    the head is force-moved to B's disjoint tree: what merges is a subset of the union, under an arm
+    nothing re-evaluated. The arming policy is correct about not re-arming; it is wrong about
+    treating the head as immutable once armed.
+  design: |
+    (i) PICK ONE OF TWO SHAPES AND JUSTIFY IT — do not invent a third.
+      UNION WRITER: before writing the tree, read `origin/<branch>`'s own `ownedDir` content and
+      carry it forward exactly as `landContent` already does (skipping anything already identical on
+      origin/main), so the pushed tree is origin/main + every owner's still-pending records, then
+      replace `push --force` with a compare-and-swap (`--force-with-lease` against the ref value the
+      union was computed from) and re-derive the union ONCE on a lost lease before refusing.
+      SERIALISED WRITER: a durable, owner-identified claim on the ref such that a second writer
+      defers rather than replaces, with a bounded, reclaimable hold (the reclaim discipline
+      W1-T289/W1-T368/W1-T978 already argue for locks, not a new one).
+      Whichever is chosen must be argued against the other in the PR body.
+
+    (ii) THE FALSIFIABLE CLAIM. Two independent state roots with DISJOINT pending batches, landing
+    in either order, end with BOTH records present on the branch and on origin/main. Neither record
+    may depend on the other root running again. A deterministic fixture (two roots, one bare origin,
+    injected `git`/`gh`) must encode this, including the interleaving where B's push is computed
+    before A's push lands.
+
+    (iii) THE ARM GATE. Auto-merge may be armed only while the PR head tree EQUALS the owner's
+    complete pending union at the moment of arming. A head that is not the complete union is left
+    unarmed and the reason is surfaced (a ledger line and a field on the result, not a swallowed
+    catch), so an incomplete landing is visible instead of merging quietly. The existing
+    `automergeHoldFromLedger` consult stays, and the "never re-arm on a quiet pass" property of
+    `ensurePrOpen` must be preserved — this adds a precondition to arming, it does not add a repeated
+    `gh pr merge` on an already-open PR.
+
+    (iv) WHAT MUST NOT REGRESS. The tree-compare short-circuit (the #1113 racing-cancellation
+    deadlock it fixed), the #954 guard that rides with the push call, the scratch-index isolation
+    (W1-T60), `assertLiveWriteAllowed` on every live write, the W1-T2749 queue acknowledgement, the
+    never-throws contract of every entry point, the `ci + remudero-review` protected statuses, and
+    the rule that this module never pushes to main. A quiet pass must still push nothing.
+
+    (v) SCOPE. `plan/feedback/**` is the subject; the `decisions-landing` and `ci-learning-landing`
+    kinds share `finishLanding` and so inherit the push change, and the work must state explicitly
+    whether the union/lease applies to all kinds or only to the feedback kind — silence there is a
+    half-applied fix. Record-level monotonicity (a stale copy overwriting a NEWER transition of the
+    SAME record) is W1-T3561 and is NOT solved by a union of paths; reconciling the records already
+    split between core and site is W1-T3562.
+  acceptance:
+    - claim: "two independent state roots landing disjoint pending batches in either order end with both records on the landing branch and neither is dropped"
+      proof: "unit test: test/feedback-landing-union-writer.test.ts"
+    - claim: "a landing whose branch tip moved after the tree was computed is refused or recomputed rather than force-replacing the tip that was never read"
+      proof: "unit test: test/feedback-landing-union-writer.test.ts"
+    - claim: "a stranded record survives even though the state root that captured it never runs another landing pass"
+      proof: "unit test: test/feedback-landing-union-writer.test.ts"
+    - claim: "auto-merge is not armed when the pull request head is not the owner's complete pending union, and the reason is surfaced rather than swallowed"
+      proof: "unit test: test/feedback-landing-union-writer.test.ts"
+    - claim: "an already-open landing pull request is still a one-call no-op on a quiet pass and is never re-armed"
+      proof: "unit test: test/feedback-landing-union-writer.test.ts"
+    - claim: "unchanged content still pushes nothing, preserving the tree-compare short-circuit that stopped the racing CI cancellations"
+      proof: "unit test: test/feedback-landing-union-writer.test.ts"
+    - claim: "the landing write is refused rather than applied when the ref it was computed against is no longer the tip, whichever of the two shapes in design (i) is chosen"
+      proof: "unit test: test/feedback-landing-union-writer.test.ts"
+  falsifier: |
+    CLOSE IF the disk-scanning landing path already unions the branch's pending content and the push
+    already carries an expected old value. As of this filing `landPending` reads only
+    `origin/main` plus local disk, and `finishLanding` issues a bare
+    `push --force origin <sha>:refs/heads/<branch>`.
+    DO NOT satisfy this by making each state root push its own private branch — that multiplies
+    landing PRs per capture, which is the PR-spam shape `LANDING_BRANCH`'s own doc rejects, and it
+    does not make the shared-record case safe. DO NOT satisfy it by removing the tree-compare
+    short-circuit.
+  note: |
+    risk:high — this is the durability of operator feedback, and the failure mode is silent: a
+    dropped record produces no error on any surface today. `band_meaning: blast-radius`, not span:
+    the declared work is ONE concern (`src/lib/feedback-landing.ts` plus its own suite), so the band
+    is not a sizing measure — it is that this task changes a force-push into a compare-and-swap on a
+    live bot-owned ref, and a wrong answer there discards another owner's merged-bound tree. budget_usd 75 reflects a two-root,
+    interleaved fixture over a real bare origin (the existing `test/feedback-landing.test.ts` idiom)
+    rather than logic size. depends_on W1-T3559 because the identity must be unambiguous before the
+    writer can name the ref it holds a lease on, and because both tasks edit the same file.
