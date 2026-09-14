@@ -17,7 +17,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: main -> chore/file-openweight-lane-tool-bounds-1789389121907
+    reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-lane-tool-bounds-1789389121907
 
     OBSERVED at origin/main 1aad6122: SpawnWorkerArgs makes `disallowedTools`
     optional and documents the omitted value as UNRESTRICTED
