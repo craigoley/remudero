@@ -6032,6 +6032,15 @@ export interface SweepDeps {
    *  W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
    *  with each review-input key claimed synchronously before scheduling. */
   postReview?: (pr: OpenPrView) => void | Promise<void>;
+  /** W1-T3581 — provenance of the module graph THIS daemon process loaded at boot. A stale
+   * reviewer-code refusal may bypass its ordinary time backoff only when this narrow predicate
+   * proves the loaded code is at or after the refusal's recorded origin/main target. Omitted
+   * (the CLI and existing direct callers) is deliberately fail-closed: the ordinary bounded
+   * backoff remains in force. */
+  reviewerCodeRecovery?: {
+    loadedCodeSha?: string;
+    isLoadedCodeAtOrAfter: (requiredOriginMainSha: string) => boolean;
+  };
   /** W1-T2853 — choose this pass's review width from one already-derived queue and ledger snapshot.
    *  Omission preserves the committed `reviewLanes` behaviour for CLI and test callers. */
   selectAdaptiveReviewWidth?: (input: {
@@ -6317,7 +6326,7 @@ interface PriorActions {
    *  matching row is undated. Unlike {@link reviewRefused}, this is a bounded retry clock, not a
    *  semantic or lifecycle decision about the PR (W1-T2753). */
   reviewRetryableThrows: Map<string, number | undefined>;
-  reviewFreshnessRefusals: Map<string, number | undefined>;
+  reviewFreshnessRefusals: Map<string, ReviewerCodeFreshnessRefusal>;
   /** Exact-input keys where the thrown post-review attempt hit GitHub's permanent PR diff ceiling.
    *  The remedy is a new head with a smaller diff, so this is a terminal marker for the current
    *  key, not another entry in the timed retry bucket. */
@@ -6476,19 +6485,51 @@ function retryableReviewThrowBackoffReason(
   );
 }
 
-function isRetryableReviewerCodeFreshnessRefusal(line: Record<string, unknown>): boolean {
+function isRetryableReviewerCodeFreshnessRefusal(
+  line: Record<string, unknown>,
+): line is Record<string, unknown> & { reviewer_code_freshness: "stale" | "unreadable" } {
   return line.reviewer_code_freshness === "stale" || line.reviewer_code_freshness === "unreadable";
 }
 
+interface ReviewerCodeFreshnessRefusal {
+  attemptedAt: number | undefined;
+  freshness: "stale" | "unreadable";
+  /** Present only on a stale refusal emitted by postReviewStatusGuarded. A missing or malformed
+   * value must never license recovery: an old ledger row cannot prove what source it required. */
+  requiredOriginMainSha?: string;
+}
+
 function reviewerCodeFreshnessBackoffReason(
-  freshnessRefusals: ReadonlyMap<string, number | undefined>,
+  freshnessRefusals: ReadonlyMap<string, ReviewerCodeFreshnessRefusal>,
   reviewKey: string,
   policy: SweepPolicy,
   now: number,
+  recovery: SweepDeps["reviewerCodeRecovery"] | undefined,
 ): string | undefined {
-  if (!freshnessRefusals.has(reviewKey)) return undefined;
-  const attemptedAt = freshnessRefusals.get(reviewKey);
+  const refusal = freshnessRefusals.get(reviewKey);
+  if (refusal === undefined) return undefined;
+  const attemptedAt = refusal.attemptedAt;
   if (attemptedAt === undefined) return undefined;
+  // The 60-minute ceiling protects an old or unprovable reviewer from certifying a newer
+  // origin/main. A daemon that has proved its already-loaded module graph contains that exact
+  // target no longer needs the delay. This is intentionally narrower than "the checkout is
+  // fresh": the predicate sees the boot-captured SHA, never a mutable working-tree HEAD, and
+  // any missing provenance, non-stale refusal, unreadable ancestry, or false result retains the
+  // existing ceiling.
+  if (
+    refusal.freshness === "stale" &&
+    typeof refusal.requiredOriginMainSha === "string" &&
+    refusal.requiredOriginMainSha.length > 0 &&
+    typeof recovery?.loadedCodeSha === "string" &&
+    recovery.loadedCodeSha.length > 0
+  ) {
+    try {
+      if (recovery.isLoadedCodeAtOrAfter(refusal.requiredOriginMainSha)) return undefined;
+    } catch {
+      // The predicate is Git ancestry in production. A read error is unproved provenance, not a
+      // reason to turn an intentionally withheld verdict into a terminal status.
+    }
+  }
   const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
   if (ageMinutes >= policy.pendingCeilingMinutes) return undefined;
   return (
@@ -6507,7 +6548,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const reviewDelivered = new Set<string>();
   const reviewRefused = new Set<string>();
   const reviewRetryableThrows = new Map<string, number | undefined>();
-  const reviewFreshnessRefusals = new Map<string, number | undefined>();
+  const reviewFreshnessRefusals = new Map<string, ReviewerCodeFreshnessRefusal>();
   const reviewDiffCeilingRefused = new Set<string>();
   const reviewRetryableThrowCounts = new Map<string, number>();
   const riskRefused = new Map<string, string | undefined>();
@@ -6540,9 +6581,14 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
         } else if (isRetryableReviewerCodeFreshnessRefusal(line)) {
           const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
           const existing = reviewFreshnessRefusals.get(key);
-          if (!reviewFreshnessRefusals.has(key)) reviewFreshnessRefusals.set(key, undefined);
-          if (!Number.isNaN(parsed) && (existing === undefined || parsed > existing)) {
-            reviewFreshnessRefusals.set(key, parsed);
+          if (!existing || (!Number.isNaN(parsed) && (existing.attemptedAt === undefined || parsed > existing.attemptedAt))) {
+            reviewFreshnessRefusals.set(key, {
+              attemptedAt: Number.isNaN(parsed) ? undefined : parsed,
+              freshness: line.reviewer_code_freshness,
+              ...(line.reviewer_code_freshness === "stale" && typeof line.origin_main_sha === "string"
+                ? { requiredOriginMainSha: line.origin_main_sha }
+                : {}),
+            });
           }
         } else if (!isReopenedClosedLifecycleRefusal(line.reason)) {
           // W1-T1213: the "PR is already closed" refusal is excluded here, never added to
@@ -7335,7 +7381,13 @@ export async function runSweep(
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
         retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
-        reviewerCodeFreshnessBackoffReason(fresh.reviewFreshnessRefusals, reviewKey, policy, now);
+        reviewerCodeFreshnessBackoffReason(
+          fresh.reviewFreshnessRefusals,
+          reviewKey,
+          policy,
+          now,
+          deps.reviewerCodeRecovery,
+        );
       if (delivered || durableRefusal || retryBackoff !== undefined) {
         claimedReviewKeys.delete(reviewKey);
         return {
@@ -7784,7 +7836,13 @@ export async function runSweep(
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
         const retryBackoff =
           retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now) ??
-          reviewerCodeFreshnessBackoffReason(prior.reviewFreshnessRefusals, reviewKey, policy, now);
+          reviewerCodeFreshnessBackoffReason(
+            prior.reviewFreshnessRefusals,
+            reviewKey,
+            policy,
+            now,
+            deps.reviewerCodeRecovery,
+          );
         alreadyDone = reviewDelivered || reviewDurablyRefused || retryBackoff !== undefined;
         // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT OTHERWISE LOOK IDENTICAL: this
         // dedup firing, `deps.postReview` never being wired, the light-pass admission being lost to
