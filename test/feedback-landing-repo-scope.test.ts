@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -127,4 +128,40 @@ test("landFeedback pushes and opens the PR on the derived owner branch", () => {
   assert.ok(create?.includes("--repo"));
   assert.equal(create?.[create.indexOf("--repo") + 1], "craigoley/remudero-site");
   assert.equal(create?.[create.indexOf("--head") + 1], identity.prHead);
+});
+
+test("landFeedback keeps the target repository scoped when its source CWD has no readable origin", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const sourceWithoutOrigin = mkdtempSync(join(tmpdir(), "rmd-landing-source-without-origin-"));
+  const initialCwd = process.cwd();
+  const targetRepository = { owner: "craigoley", repo: "remudero-site" };
+  const identity = landingIdentity({ targetRepository });
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-no-source-origin.yaml"), "id: fb-no-source-origin\nraw: target scoped feedback\n");
+
+  const calls: string[][] = [];
+  const gh = (args: string[]): string => {
+    calls.push(args);
+    if (args[0] === "pr" && args[1] === "list") return "[]";
+    if (args[0] === "pr" && args[1] === "create") {
+      return "Creating pull request\nhttps://github.com/craigoley/remudero-site/pull/23\n";
+    }
+    if (args[0] === "pr" && args[1] === "merge") return "";
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+
+  try {
+    process.chdir(sourceWithoutOrigin);
+    const result = withLiveWritesAllowed(() => landFeedback(root, { gh, targetRepository }));
+    assert.equal(result.landed, true);
+    assert.equal(result.prUrl, "https://github.com/craigoley/remudero-site/pull/23");
+    const create = calls.find((c) => c[0] === "pr" && c[1] === "create");
+    assert.equal(create?.[create.indexOf("--repo") + 1], "craigoley/remudero-site");
+    assert.equal(create?.[create.indexOf("--head") + 1], identity.prHead);
+    assert.notEqual(identity.branch, LANDING_BRANCH, "the unreadable source origin must not collapse a foreign target to the legacy branch");
+  } finally {
+    process.chdir(initialCwd);
+    rmSync(sourceWithoutOrigin, { recursive: true, force: true });
+  }
 });
