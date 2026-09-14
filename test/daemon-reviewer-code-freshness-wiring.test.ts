@@ -1,28 +1,61 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { reviewerCodeRecoveryFromLoadedModule } from "../src/run-task.js";
+import { buildSweepHook, buildSweepLightHook, daemonCommand, reviewerCodeRecoveryFromLoadedModule } from "../src/run-task.js";
+import type { DaemonSummary } from "../src/lib/daemon.js";
+import type { SweepDeps } from "../src/lib/sweep.js";
 
-const runTaskSource = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+type Recovery = NonNullable<SweepDeps["reviewerCodeRecovery"]>;
 
-test("W1-T3581 daemon wires loaded reviewer provenance into both sweep paths", () => {
-  const daemonWiring = runTaskSource.slice(
-    runTaskSource.indexOf("const daemonModuleRepoDir ="),
-    runTaskSource.indexOf("// W1-T117/W1-T356: the per-poll half of the orphan sweep"),
-  );
-  assert.match(daemonWiring, /daemonModuleRepoDir = dirname\(dirname\(fileURLToPath\(import\.meta\.url\)\)\)/);
-  assert.match(daemonWiring, /reviewerCodeRecoveryFromLoadedModule\(daemonModuleRepoDir, daemonLoadedCodeSha\)/);
-  assert.match(daemonWiring, /sweep: buildSweepHook\([\s\S]*boardSnapshotFor\(target\.owner, target\.repo\),\s*reviewerCodeRecovery,/);
-  assert.match(daemonWiring, /sweepLight: buildSweepLightHook\([\s\S]*log,\s*reviewerCodeRecovery,/);
+function fixtureHome(): { home: string; planPath: string } {
+  const home = mkdtempSync(join(tmpdir(), "rmd-daemon-reviewer-code-wiring-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  return { home, planPath };
+}
 
-  const fullHook = runTaskSource.slice(
-    runTaskSource.indexOf("export function buildSweepHook("),
-    runTaskSource.indexOf("export function buildSweepLightHook("),
-  );
-  assert.match(fullHook, /behindMainByPr,\s*reviewerCodeRecovery,/);
-  const lightHook = runTaskSource.slice(runTaskSource.indexOf("export function buildSweepLightHook("));
-  assert.match(lightHook, /ledgerPath,\s*runId,\s*log,\s*reviewerCodeRecovery,/);
+test("W1-T3581 daemon wires loaded reviewer provenance into both sweep paths", async () => {
+  const { home, planPath } = fixtureHome();
+  const oldHome = process.env.HOME;
+  let fullRecovery: Recovery | undefined;
+  let lightRecovery: Recovery | undefined;
+  const captureFullHook = (...args: Parameters<typeof buildSweepHook>): ReturnType<typeof buildSweepHook> => {
+    fullRecovery = args[13] as Recovery | undefined;
+    return async () => {};
+  };
+  const captureLightHook = (...args: Parameters<typeof buildSweepLightHook>): ReturnType<typeof buildSweepLightHook> => {
+    lightRecovery = args[7] as Recovery | undefined;
+    return async () => {};
+  };
 
+  process.env.HOME = home;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      buildSweepHook: captureFullHook,
+      buildSweepLightHook: captureLightHook,
+      wireSweepWake: () => ({ sleep: async () => "timeout" as const, acknowledge: () => {}, close: () => {} }),
+      runDaemon: async (): Promise<DaemonSummary> => ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 }),
+    });
+    assert.equal(code, 0);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+
+  assert.ok(fullRecovery, "the production daemon supplies recovery provenance to the full sweep");
+  assert.strictEqual(lightRecovery, fullRecovery, "full and light sweeps share the same boot-loaded provenance");
+  assert.equal(fullRecovery.isLoadedCodeAtOrAfter(fullRecovery.loadedCodeSha ?? ""), true, "the captured module SHA proves itself through the fail-closed ancestry check");
+  assert.equal(fullRecovery.isLoadedCodeAtOrAfter("definitely-not-a-commit"), false, "unreadable ancestry stays fail-closed");
+});
+
+test("W1-T3581 loaded reviewer provenance invokes git ancestry from the module tree", () => {
   const ancestryCalls: string[][] = [];
   const recovery = reviewerCodeRecoveryFromLoadedModule(
     "/module-root",

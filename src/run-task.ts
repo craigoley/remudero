@@ -27023,6 +27023,11 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
+    /** Injectable sweep-hook builders for composition-root tests. Production keeps both real
+     * builders; the seam lets a test observe the immutable reviewer-code provenance handed to
+     * the full and light paths without reading this source file as text. */
+    buildSweepHook?: typeof buildSweepHook;
+    buildSweepLightHook?: typeof buildSweepLightHook;
     /** Injectable mutable boot routine. Tests use it to prove an already-held fleet does not
      * enter daemonBoot's sweeps or keychain work. */
     daemonBoot?: typeof daemonBoot;
@@ -27122,6 +27127,8 @@ export async function daemonCommand(
     }
   })();
   const reviewerCodeRecovery = reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha);
+  const buildFullSweepHook = deps.buildSweepHook ?? buildSweepHook;
+  const buildLightSweepHook = deps.buildSweepLightHook ?? buildSweepLightHook;
 
   // ── REPO TARGETING + self-target GUARD (fix/daemon-repo-targeting). The daemon must know
   // WHICH repo to drain, EXPLICITLY — the old code read the plan from its own checkout and
@@ -27911,7 +27918,7 @@ export async function daemonCommand(
         // trips GitHub's secondary rate limit at the poll cadence cannot collide. `github` (the
         // param before this one) is left undefined so the hook builds its own board gateway,
         // which is the ONLY construction this pacer can actually reach.
-        sweep: buildSweepHook(
+        sweep: buildFullSweepHook(
           target.owner,
           target.repo,
           config,
@@ -27934,7 +27941,7 @@ export async function daemonCommand(
         // the deterministic post-review re-post while `runOne` is unbounded and in
         // flight, so a green PR whose review went absent re-posts within one poll
         // interval. Dangerous lanes (fix/close/arm/escalate) stay non-concurrent.
-        sweepLight: buildSweepLightHook(
+        sweepLight: buildLightSweepHook(
           target.owner,
           target.repo,
           config,
