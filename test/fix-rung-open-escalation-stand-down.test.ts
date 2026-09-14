@@ -35,7 +35,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { runFixRung, openEscalationStandDownReason, taskContractRevision } from "../src/run-task.js";
-import { escalationHeadSha, escalationContractRevision, findDuplicateEscalation, type EscalationDedupKey } from "../src/lib/escalate.js";
+import {
+  escalationHeadSha,
+  escalationContractRevision,
+  findDuplicateEscalation,
+  CONTRACT_REVISION_LINE_RE,
+  type EscalationDedupKey,
+} from "../src/lib/escalate.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -459,6 +465,11 @@ test("W1-T3579 ignores unrelated task contract revision", () => {
     undefined,
     "a revision that does not name THIS task's own current contract can never stand a repair down",
   );
+});
+
+test("negative-reachability: CONTRACT_REVISION_LINE_RE drives both its unhealthy (no line) and healthy (a captured revision) arm", () => {
+  assert.equal(CONTRACT_REVISION_LINE_RE.test(`**Task:** ${TASK_ID}\n**Head:** ${HEAD_3}\n`), false, "a body with no **Contract:** line never matches — the unhealthy arm");
+  assert.equal(CONTRACT_REVISION_LINE_RE.exec(`**Contract:** deadbeef00112233\n`)?.[1], "deadbeef00112233", "a body carrying one captures the revision — the healthy arm, distinct output");
 });
 
 test("W1-T3579 preserves legacy head-only stand-down", () => {

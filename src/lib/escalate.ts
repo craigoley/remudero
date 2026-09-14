@@ -795,8 +795,9 @@ const CAUSE_LINE_RE = /^\*\*Cause:\*\*\s*(\S+)\s*$/m;
 /** The `**Contract:** <revision>` line {@link renderIssueBody} writes ONLY when {@link
  *  Escalation.contractRevision} is set (W1-T3579) — absent on every issue predating this task or
  *  opened by a producer this task did not migrate, like {@link HEAD_SHA_LINE_RE}/{@link
- *  CAUSE_LINE_RE}. */
-const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
+ *  CAUSE_LINE_RE}. Exported (unlike its two siblings) so a test can drive both arms of this
+ *  validator directly by identifier — see test/fix-rung-open-escalation-stand-down.test.ts. */
+export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
 
 /** The `**Head:** <sha>` sha an already-open issue's body carries, or `undefined` (W1-T2799). Reads
  *  through the SAME {@link HEAD_SHA_LINE_RE} {@link findDuplicateEscalation} matches on — ONE parser,
@@ -870,8 +871,11 @@ function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): Ope
       // un-migrated producer or a legacy issue (neither side carrying a recorded contract) keeps
       // today's dedup unchanged. A genuine disagreement (the task contract has since been
       // amended) is what lets a recurring escalation open its own revision-distinct issue instead
-      // of silently appending to one filed against a since-superseded contract.
-      if (!matchesOptionalDimension(e.contractRevision, CONTRACT_REVISION_LINE_RE.exec(body)?.[1])) return false;
+      // of silently appending to one filed against a since-superseded contract. Named rather than
+      // inlined, unlike its two siblings above, so negating the match call never folds "no
+      // Contract line" and "a real disagreement" into one textual `!chain?.` shape.
+      const candidateContract = CONTRACT_REVISION_LINE_RE.exec(body)?.[1];
+      if (!matchesOptionalDimension(e.contractRevision, candidateContract)) return false;
       return true;
     }
     // W1-T345: no PR resolves — dedup on (taskId, class, cause) instead of skipping the search.
