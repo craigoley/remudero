@@ -1,9 +1,9 @@
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { constants as fsConstants, accessSync, realpathSync } from "node:fs";
+import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
-import type { Clock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
@@ -511,6 +511,9 @@ const FALLBACK_CODEX_MODELS: Record<CodexModelTier, string[]> = {
   frontier: ["gpt-5.6-sol", "gpt-5.5"],
 };
 const SAFE_CODEX_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,95}$/;
+// Same deployment-id grammar as Codex. The Azure deployment id reaches a URL path, so accepting
+// a broader string would make a configuration typo an outbound-target bug.
+const SAFE_OPENWEIGHT_MODEL_ID = SAFE_CODEX_MODEL_ID;
 const SAFE_CODEX_MODEL_LABEL = /^[A-Za-z0-9][A-Za-z0-9 ._()+:@-]{0,95}$/;
 const SAFE_CODEX_EFFORT = /^[a-z][a-z0-9-]{0,31}$/;
 
@@ -597,6 +600,54 @@ export function codexCandidatesForCapability(
   if (!byEffort) return FALLBACK_CODEX_MODELS[tier];
   const row = (requestedEffort && byEffort[requestedEffort]) || byEffort.medium;
   return row ?? FALLBACK_CODEX_MODELS[tier];
+}
+
+/** Last-resort data for a missing capability table. Real open-weight routing resolves the table
+ * below; this keeps a malformed optional table from changing the existing fail-soft contract. */
+const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
+  economy: ["gpt-oss-120b"],
+  balanced: ["gpt-oss-120b"],
+  frontier: ["gpt-oss-120b"],
+};
+
+/** The provider-neutral Claude-model -> capability lookup is shared with Codex: both adapters
+ * resolve a mount by table data, never a substring heuristic over a Claude model name. */
+export function openWeightCapabilityForRequestedModel(
+  capabilities: CapabilityLadder | undefined,
+  requestedModel: string | undefined,
+): CodexModelTier {
+  return codexCapabilityForRequestedModel(capabilities, requestedModel);
+}
+
+/** Ordered Azure deployment candidates for a capability/effort pair. This mirrors the Codex
+ * table shape so model additions stay a mounts-data edit. */
+export function openWeightCandidatesForCapability(
+  capabilities: CapabilityLadder | undefined,
+  tier: CodexModelTier,
+  requestedEffort: string | undefined,
+): string[] {
+  const byEffort = capabilities?.openweight?.[tier];
+  if (!byEffort) return FALLBACK_OPENWEIGHT_MODELS[tier];
+  return (requestedEffort && byEffort[requestedEffort]) || byEffort.medium || FALLBACK_OPENWEIGHT_MODELS[tier];
+}
+
+export interface OpenWeightModelSelection {
+  model: string;
+  effort: string;
+  capability: CodexModelTier;
+}
+
+/** Resolve and validate the first configured deployment before it can enter an Azure URL. */
+export function selectOpenWeightModel(
+  capabilities: CapabilityLadder | undefined,
+  requestedModel: string | undefined,
+  requestedEffort: string | undefined,
+): OpenWeightModelSelection {
+  const capability = openWeightCapabilityForRequestedModel(capabilities, requestedModel);
+  const candidates = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
+  const model = candidates.find((candidate) => SAFE_OPENWEIGHT_MODEL_ID.test(candidate));
+  if (!model) throw new Error(`openweight capability '${capability}' has no safe deployment id`);
+  return { model, effort: requestedEffort ?? "default", capability };
 }
 
 function codexBucketForModel(result: CodexRateLimitResult, model: CodexModelInfo): CodexRateLimitBucket | undefined {
@@ -1666,6 +1717,302 @@ export async function spawnCodexWorker(
   return withTempDir("codex-worker", (privateTmpDir) =>
     spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection),
   );
+}
+
+/** Azure deployment authentication is process-local to the daemon. It is deliberately not a
+ * config field and never enters a worker environment or a ledger row. */
+export const OPENWEIGHT_API_KEY_ENV = "RMD_OPENWEIGHT_API_KEY";
+/** PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the live probe. */
+export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 5_000;
+const OPENWEIGHT_INPUT_USD_PER_MILLION = 0.15;
+const OPENWEIGHT_OUTPUT_USD_PER_MILLION = 0.6;
+
+export interface OpenWeightSpawnArgs {
+  cwd: string;
+  prompt: string;
+  workerHome: string;
+  effort?: string;
+  maxTurns?: number;
+  tools?: string[];
+  runId?: string;
+  taskId?: string;
+  /** Test-only override; production uses the global fetch implementation. */
+  fetchImpl?: typeof fetch;
+  /** Test-only override; production reads the daemon process environment. */
+  env?: NodeJS.ProcessEnv;
+  /** Test-only clock port; production records duration from the system clock. */
+  clock?: Pick<Clock, "now">;
+}
+
+export interface OpenWeightWorkerResult {
+  provider: "openweight";
+  sessionId: string;
+  costUsd: number;
+  numTurns: number;
+  maxTurns?: number;
+  text: string;
+  blocks: string[];
+  stderr: string;
+  subtype: string;
+  isError: boolean;
+  apiError: boolean;
+  permissionDenials: unknown[];
+  /** This adapter runs in the daemon, not a child worker process. The Azure key is absent. */
+  childEnvKeys: string[];
+  model: string;
+  routedModel?: string;
+  effort: string;
+  selectionAssignmentId?: string;
+  tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  modelUsage: Record<string, never>;
+  compactionEvents: [];
+  compactionFailures: [];
+  compactionConfigured: false;
+  qualitySuspect: false;
+  workerDurationMs: number;
+}
+
+type OpenWeightMessage = Record<string, unknown>;
+type OpenWeightToolCall = { id?: unknown; type?: unknown; function?: { name?: unknown; arguments?: unknown } };
+
+const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: string; required: string[] }> = {
+  Read: { name: "read_file", description: "Read a UTF-8 file under the worker cwd.", required: ["path"] },
+  Write: { name: "write_file", description: "Write a UTF-8 file under the worker cwd.", required: ["path", "content"] },
+  Edit: { name: "edit_file", description: "Replace one exact UTF-8 string in a file under the worker cwd.", required: ["path", "old_string", "new_string"] },
+  Grep: { name: "grep_files", description: "Find a literal string in UTF-8 files under the worker cwd.", required: ["query"] },
+  Glob: { name: "glob_files", description: "List files under the worker cwd by a suffix-like pattern.", required: ["pattern"] },
+};
+
+function openWeightTools(declared: readonly string[] | undefined): Array<Record<string, unknown>> {
+  const requested = [...new Set(declared ?? [])];
+  const unsupported = requested.filter((tool) => OPENWEIGHT_FUNCTIONS[tool] === undefined);
+  // Never silently drop a declared tool: the prompt may rely on it (for example triage's
+  // WebSearch), and a partial capability set would make the model fabricate a missing result.
+  if (unsupported.length > 0) throw new Error(`openweight adapter does not implement declared tool(s): ${unsupported.join(", ")}`);
+  return requested
+    .map((tool) => OPENWEIGHT_FUNCTIONS[tool]!)
+    .map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: {
+          type: "object",
+          properties: Object.fromEntries(tool.required.map((name) => [name, { type: "string" }])),
+          required: tool.required,
+          additionalProperties: false,
+        },
+      },
+    }));
+}
+
+function openWeightContainedPath(cwd: string, candidate: unknown): string {
+  if (typeof candidate !== "string" || candidate.trim() === "") throw new Error("tool path must be a non-empty string");
+  const root = realpathSync(cwd);
+  const target = resolve(root, candidate);
+  let existing = target;
+  // A declared Write may create nested paths. Resolve the nearest existing parent before the
+  // write, so a missing child cannot turn containment into an ENOENT bypass.
+  while (!existsSync(existing) && dirname(existing) !== existing) existing = dirname(existing);
+  const physical = realpathSync(existing);
+  const rel = relative(root, physical);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error("tool path escapes the worker cwd");
+  }
+  return target;
+}
+
+function openWeightFiles(root: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (entry.name === ".git" || entry.name === "node_modules") continue;
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) openWeightFiles(path, out);
+    else if (entry.isFile()) out.push(path);
+    if (out.length >= 100) return out;
+  }
+  return out;
+}
+
+function objectArguments(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== "string") throw new Error("tool arguments must be JSON text");
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("tool arguments must be an object");
+  return parsed as Record<string, unknown>;
+}
+
+function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd: string): unknown {
+  switch (name) {
+    case "read_file":
+      return { content: readFileSync(openWeightContainedPath(cwd, args.path), "utf8") };
+    case "write_file": {
+      if (typeof args.content !== "string") throw new Error("write_file content must be a string");
+      const path = openWeightContainedPath(cwd, args.path);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, args.content, "utf8");
+      return { written: relative(realpathSync(cwd), path) };
+    }
+    case "edit_file": {
+      if (typeof args.old_string !== "string" || typeof args.new_string !== "string") throw new Error("edit_file strings must be strings");
+      const path = openWeightContainedPath(cwd, args.path);
+      const before = readFileSync(path, "utf8");
+      const at = before.indexOf(args.old_string);
+      if (at < 0 || before.indexOf(args.old_string, at + args.old_string.length) >= 0) {
+        throw new Error("edit_file old_string must match exactly once");
+      }
+      writeFileSync(path, `${before.slice(0, at)}${args.new_string}${before.slice(at + args.old_string.length)}`, "utf8");
+      return { edited: relative(realpathSync(cwd), path) };
+    }
+    case "grep_files": {
+      if (typeof args.query !== "string" || args.query.length === 0) throw new Error("grep_files query must be a non-empty string");
+      const query = args.query;
+      const root = realpathSync(cwd);
+      const matches = openWeightFiles(root).flatMap((path) => {
+        const lines = readFileSync(path, "utf8").split("\n");
+        return lines.flatMap((line, index) => line.includes(query) ? [{ path: relative(root, path), line: index + 1, text: line.slice(0, 500) }] : []);
+      }).slice(0, 100);
+      return { matches };
+    }
+    case "glob_files": {
+      if (typeof args.pattern !== "string" || args.pattern.length === 0) throw new Error("glob_files pattern must be a non-empty string");
+      const root = realpathSync(cwd);
+      const suffix = args.pattern.replace(/^\*+/, "");
+      return { paths: openWeightFiles(root).filter((path) => path.endsWith(suffix)).map((path) => relative(root, path)).slice(0, 100) };
+    }
+    default:
+      throw new Error(`openweight tool '${name}' is not implemented`);
+  }
+}
+
+function openWeightEndpoint(config: Config, model: string): string {
+  const raw = config.workerProviders?.openweightEndpoint;
+  if (typeof raw !== "string" || raw.trim() === "") throw new Error("openweight provider requires workerProviders.openweightEndpoint");
+  const endpoint = new URL(raw.endsWith("/") ? raw : `${raw}/`);
+  if (endpoint.protocol !== "https:") throw new Error("openweight endpoint must use https");
+  return new URL(`openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=2024-10-21`, endpoint).toString();
+}
+
+function openWeightResult(input: {
+  model: string;
+  effort: string;
+  startedAt: number;
+  clock: Pick<Clock, "now">;
+  text?: string;
+  sessionId?: string;
+  turns: number;
+  promptTokens: number;
+  completionTokens: number;
+  error?: unknown;
+}): OpenWeightWorkerResult {
+  const text = input.text ?? "";
+  const error = input.error instanceof Error ? input.error.message : input.error === undefined ? undefined : String(input.error);
+  return {
+    provider: "openweight",
+    sessionId: input.sessionId ?? "",
+    costUsd: (input.promptTokens * OPENWEIGHT_INPUT_USD_PER_MILLION + input.completionTokens * OPENWEIGHT_OUTPUT_USD_PER_MILLION) / 1_000_000,
+    numTurns: input.turns,
+    maxTurns: undefined,
+    text,
+    blocks: text ? [text] : [],
+    stderr: error ?? "",
+    subtype: error ? "openweight_error" : "success",
+    isError: error !== undefined,
+    apiError: error !== undefined,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: input.model,
+    effort: input.effort,
+    tokens: { input: input.promptTokens, output: input.completionTokens, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    compactionFailures: [],
+    compactionConfigured: false,
+    qualitySuspect: false,
+    workerDurationMs: input.clock.now() - input.startedAt,
+  };
+}
+
+/** Run one bounded OpenAI-compatible Azure conversation. Do not add `response_format` here:
+ * gpt-oss-120b returned malformed JSON under json_object in the measured probe. */
+export async function spawnOpenWeightWorker(
+  args: OpenWeightSpawnArgs,
+  config: Config,
+  selection: Pick<OpenWeightModelSelection, "model" | "effort">,
+): Promise<OpenWeightWorkerResult> {
+  const clock = args.clock ?? systemClock;
+  const startedAt = clock.now();
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let turns = 0;
+  let sessionId = "";
+  let text = "";
+  try {
+    const tools = openWeightTools(args.tools);
+    const key = (args.env ?? process.env)[OPENWEIGHT_API_KEY_ENV];
+    if (!key) throw new Error(`openweight provider requires ${OPENWEIGHT_API_KEY_ENV} in the daemon environment`);
+    const declaredNames = new Set(tools.map((tool) => String((tool.function as { name?: unknown }).name)));
+    const messages: OpenWeightMessage[] = [{ role: "user", content: args.prompt }];
+    const maxTurns = args.maxTurns ?? 1;
+    if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error("openweight maxTurns must be a positive integer");
+    for (;;) {
+      turns += 1;
+      const response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
+        method: "POST",
+        headers: { "content-type": "application/json", "api-key": key },
+        body: JSON.stringify({
+          model: selection.model,
+          messages,
+          temperature: 0,
+          max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
+          ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
+        }),
+      });
+      if (!response.ok) throw new Error(`openweight request failed with HTTP ${response.status}`);
+      const payload = await response.json() as {
+        id?: unknown;
+        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
+        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }>;
+      };
+      sessionId = typeof payload.id === "string" ? payload.id : sessionId;
+      promptTokens += typeof payload.usage?.prompt_tokens === "number" ? payload.usage.prompt_tokens : 0;
+      completionTokens += typeof payload.usage?.completion_tokens === "number" ? payload.usage.completion_tokens : 0;
+      const message = payload.choices?.[0]?.message;
+      if (!message) throw new Error("openweight response has no assistant message");
+      const calls = Array.isArray(message.tool_calls) ? message.tool_calls as OpenWeightToolCall[] : [];
+      text = typeof message.content === "string" ? message.content : text;
+      if (calls.length === 0) return openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens });
+      if (turns >= maxTurns) throw new Error(`openweight tool loop exceeded maxTurns=${maxTurns}`);
+      messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls });
+      for (const call of calls) {
+        const name = call.function?.name;
+        const id = call.id;
+        if (typeof name !== "string" || !declaredNames.has(name) || typeof id !== "string") {
+          throw new Error("openweight response requested an undeclared tool");
+        }
+        let content: string;
+        try {
+          content = JSON.stringify(executeOpenWeightTool(name, objectArguments(call.function?.arguments), args.cwd));
+        } catch (error) {
+          content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
+        }
+        messages.push({ role: "tool", tool_call_id: id, content });
+      }
+    }
+  } catch (error) {
+    // Preserve the transport/tool failure in the result's stderr + error flags; a failure must not
+    // collapse into an ordinary empty worker response for callers or the catch-erasure census.
+    return openWeightResult({
+      model: selection.model,
+      effort: selection.effort,
+      startedAt,
+      clock,
+      text,
+      sessionId,
+      turns,
+      promptTokens,
+      completionTokens,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 async function spawnCodexWorkerInPrivateTemp(

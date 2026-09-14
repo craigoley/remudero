@@ -1,5 +1,9 @@
 export const CONFIG_SCHEMA_VERSION = 1;
 
+/** The shared provider identity; config re-exports it for existing consumers. */
+export const WORKER_PROVIDER_IDS = ["claude", "codex", "openweight"] as const;
+export type WorkerProviderId = (typeof WORKER_PROVIDER_IDS)[number];
+
 export interface Config {
   claudeBin: string;
   root: string;
@@ -21,7 +25,7 @@ export interface Config {
   relay?: { url?: string; token?: string };
   headroom?: { enabled?: boolean };
   workerProviders?: {
-    enabled?: Array<"claude" | "codex">;
+    enabled?: WorkerProviderId[];
     reservePercent?: number;
     capacityCacheMs?: number;
     codexBin?: string;
@@ -32,6 +36,9 @@ export interface Config {
       balanced?: string[];
       frontier?: string[];
     };
+    /** Azure OpenAI-compatible endpoint for the bounded open-weight adapter. The API key is
+     * intentionally environment-only and is never a config field. */
+    openweightEndpoint?: string;
   };
   learningsHomes?: { userOverall?: string; global?: string };
 }
@@ -90,7 +97,7 @@ const workerProvidersShape: ValueSchema = {
   fields: [
     configField(
       "enabled",
-      '"claude" | "codex"[]',
+      '"claude" | "codex" | "openweight"[]',
       true,
       ["claude"],
       "config.json",
@@ -103,6 +110,7 @@ const workerProvidersShape: ValueSchema = {
     configField("codexHome", "string", true, undefined, "config.json", "Codex state/auth home.", stringShape),
     configField("codexModel", "string", true, undefined, "config.json", "Hard Codex model override.", stringShape),
     configField("codexModels", "object", true, undefined, "config.json", "Codex model preferences per mount tier.", codexModelsShape),
+    configField("openweightEndpoint", "string", true, undefined, "config.json", "Azure OpenAI-compatible endpoint for the open-weight worker adapter.", stringShape),
   ],
 };
 
@@ -183,6 +191,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_GITHUB_WEBHOOK_SECRET_FILE", "Names the file holding the GitHub webhook secret.", ["src/lib/github-event-wake.ts", "src/lib/serve.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
+  envEntry("RMD_OPENWEIGHT_API_KEY", "Supplies the Azure API key to the daemon-local open-weight adapter; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_RESTART_THROTTLE_S", "Documents restart throttling excluded from proof environments.", ["src/lib/review.ts"]),
   envEntry("RMD_SELF_SYNC_DONE", "Guards CLI self-sync re-exec loops.", ["src/lib/self-sync.ts", "src/lib/commit-message.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_HOST", "Overrides operator console bind hosts.", ["src/lib/serve.ts", "src/lib/launchd.ts", "src/run-task.ts"]),

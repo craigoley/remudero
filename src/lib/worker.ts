@@ -106,7 +106,9 @@ import {
   claudeCapacityFromUsage,
   finishProviderWindowMeasurement,
   readCodexCapacity,
+  selectOpenWeightModel,
   spawnCodexWorker,
+  spawnOpenWeightWorker,
   type CodexCapacityDeps,
   type CodexModelTier,
   type ProviderCapacity,
@@ -887,6 +889,13 @@ export interface SpawnWorkerArgs {
       config: Config,
       selection?: Pick<ProviderCapacity, "model" | "effort">,
     ) => Promise<WorkerResult>;
+    /** Test seam for the contained Azure adapter. Production reads the daemon-only API key
+     * directly and never places it in a worker environment. */
+    spawnOpenWeight?: (
+      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string },
+      config: Config,
+      selection: { model: string; effort: string },
+    ) => Promise<WorkerResult>;
     tieBreaker?: number;
     /** Best-effort durable projection for the console; never allowed to change spawn outcome. */
     writeStatus?: typeof writeProviderRoutingStatus;
@@ -1422,7 +1431,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       reason: routingPolicy.fallback.reason,
     }));
   }
-  const providers = args.mountProvider ? [args.mountProvider] : routingPolicy.routableProviders;
+  // `openweight` is a mount-affinity-only cash provider. It has no subscription window and is
+  // deliberately excluded from the auction instead of being represented by fabricated capacity.
+  const providers = args.mountProvider
+    ? [args.mountProvider]
+    : routingPolicy.routableProviders.filter((provider) => provider !== "openweight");
   const capabilities = resolveWorkerCapabilities(args.cwd);
   const claudeHealthRoute = providers.includes("claude")
     ? await resolveWorkerClaudeHealth(args, capabilities)
@@ -1665,6 +1678,32 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
       result.selectionAssignmentId = selectionAssignmentId;
       if (args.model) result.model = args.model;
+      return result;
+    } finally {
+      reapWorkerHome(workerHomeRoot, workerHome);
+    }
+  }
+  if (args.mountProvider === "openweight") {
+    const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
+    if (args.providerRouting?.spawnOpenWeight === undefined) {
+      assertLiveSpawnAllowed(`spawnOpenWeightWorker for task ${args.taskId ?? "<no taskId>"}`);
+    }
+    // This lookup is the provider's authority: a Claude mount model/effort resolves through the
+    // capability table. No capacity record exists or is fabricated for a cash-billed endpoint.
+    const openWeight = selectOpenWeightModel(capabilities, args.model, args.effort);
+    const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
+      provider: "openweight",
+      model: openWeight.model,
+      effort: openWeight.effort,
+      mode: "mount-affinity",
+      selectionPath: "mount-affinity",
+      policy: routingPolicy,
+    });
+    try {
+      materializeWorkerHome({ workerHome, realHome });
+      const result = await runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, openWeight);
+      result.routedModel = openWeight.model;
+      result.selectionAssignmentId = selectionAssignmentId;
       return result;
     } finally {
       reapWorkerHome(workerHomeRoot, workerHome);

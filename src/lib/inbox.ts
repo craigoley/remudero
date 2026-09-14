@@ -1112,6 +1112,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "the same shape as an existing RATIFIED stamp (`- P## (...) — RATIFIED <date> -> <task ids>.`),",
     "with the task-id list written as the placeholders (e.g. `-> NEW-1/NEW-2.`).",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
+    'Every acceptance `proof:` value MUST be double-quoted (for example, `proof: "grep: symbol in src/file.ts"`): a proof contains a colon and unquoted YAML is invalid.',
     "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
     "(no ```yaml or ``` line before or after it); the harness parses the fragment as YAML",
     "verbatim, and a fence around it fails that parse.",
