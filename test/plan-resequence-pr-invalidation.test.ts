@@ -150,6 +150,17 @@ test("W1-T3585 plan resequence closes the invalidated task-owned PR", () => {
 });
 
 test("W1-T3585 plan invalidation fails closed and preserves eligible PRs", () => {
+  // Positive control: this test's negative cases are meaningful only if the same harness can
+  // actually observe a proven current-plan invalidation. Without this, every assertion below
+  // also passes on the pre-W1-T3585 base, which cannot close any resequenced task at all.
+  const invalidated = projectedView({ readMainPlan: () => planWithUnmetDependency(), isMerged: NOTHING_MERGED });
+  assert.match(invalidated.planResequenceIneligible ?? "", new RegExp(DEP_ID), "the control task is genuinely invalidated");
+  assert.equal(
+    deriveDisposition(invalidated, DEFAULT_SWEEP_POLICY, NOW).disposition,
+    "stale",
+    "positive control: only the current-plan invalidation guard may close this task-owned PR",
+  );
+
   // An otherwise identical, genuinely still-runnable task (no unmet dependency) closes nothing.
   const runnable = projectedView({ readMainPlan: () => planStillRunnable(), isMerged: NOTHING_MERGED });
   assert.equal(runnable.planResequenceIneligible, undefined, "a still-runnable task is never closure authority");
