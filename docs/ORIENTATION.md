@@ -1,45 +1,19 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-14T08:03:13.580Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-14T21:29:58.423Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-40 run(s) since the last retro marker. Verdicts: {"incomplete":24,"merged":16}.
+28 run(s) since the last retro marker. Verdicts: {"blocked_budget":7,"blocked_ci":4,"incomplete":13,"merged":4}.
 
 ### Shipped since marker
-- RETRO → https://github.com/craigoley/remudero/pull/5499 (gate-side merge; run ended incomplete)
-- TRIAGE-fb-1789282068794-2f0b7d → https://github.com/craigoley/remudero/pull/5382 (gate-side merge; run ended incomplete)
-- TRIAGE-fb-1789304800826-670f46 → https://github.com/craigoley/remudero/pull/5401 (gate-side merge; run ended incomplete)
-- TRIAGE-fb-1789311638612-56d5bd → https://github.com/craigoley/remudero/pull/5417 (gate-side merge; run ended incomplete)
-- TRIAGE-fb-1789312874382-b6f4b1 → https://github.com/craigoley/remudero/pull/5416 (gate-side merge; run ended incomplete)
-- TRIAGE-fb-1789316903515-dc1a98 → https://github.com/craigoley/remudero/pull/5426 (gate-side merge; run ended incomplete)
-- TRIAGE-fb-1789331541509-6463e8 → https://github.com/craigoley/remudero/pull/5492 (gate-side merge; run ended incomplete)
-- W1-T3167 → https://github.com/craigoley/remudero/pull/5437 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3392 → https://github.com/craigoley/remudero/pull/5354 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3394 → https://github.com/craigoley/remudero/pull/5361 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3395 → https://github.com/craigoley/remudero/pull/5413 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked)
-- W1-T3396 → https://github.com/craigoley/remudero/pull/5431 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3397 → https://github.com/craigoley/remudero/pull/5357 (gate-side merge; run ended incomplete)
-- W1-T3399 → https://github.com/craigoley/remudero/pull/5366 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3401 → https://github.com/craigoley/remudero/pull/5371 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3408 → https://github.com/craigoley/remudero/pull/5399 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3411 → https://github.com/craigoley/remudero/pull/5407 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3434 → https://github.com/craigoley/remudero/pull/5433 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3442 → https://github.com/craigoley/remudero/pull/5436 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3449 → https://github.com/craigoley/remudero/pull/5441 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3472 → https://github.com/craigoley/remudero/pull/5443 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3483 → https://github.com/craigoley/remudero/pull/5445 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3492 → https://github.com/craigoley/remudero/pull/5446 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3505 → https://github.com/craigoley/remudero/pull/5448 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3506 → https://github.com/craigoley/remudero/pull/5454 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3512 → https://github.com/craigoley/remudero/pull/5451 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3523 → https://github.com/craigoley/remudero/pull/5456 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked)
-- W1-T3525 → https://github.com/craigoley/remudero/pull/5410 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3529 → https://github.com/craigoley/remudero/pull/5424 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3532 → https://github.com/craigoley/remudero/pull/5423 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
+- W1-T3559 → https://github.com/craigoley/remudero/pull/5519 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
+- W1-T3564 → https://github.com/craigoley/remudero/pull/5542 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
+- W1-T3573 → https://github.com/craigoley/remudero/pull/5549 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
+- W1-T3579 → https://github.com/craigoley/remudero/pull/5562 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
 
 ## Next runnable task
 
