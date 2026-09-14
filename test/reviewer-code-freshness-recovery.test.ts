@@ -97,20 +97,24 @@ test("W1-T3581 unproved loaded reviewer code keeps withheld pending review bound
     name: string;
     freshness?: "stale" | "unreadable";
     recovery?: SweepDeps["reviewerCodeRecovery"];
+    expectedAncestryChecks: number;
   }> = [
-    { name: "missing loaded-code provenance" },
+    { name: "missing loaded-code provenance", expectedAncestryChecks: 0 },
     {
       name: "older or divergent loaded code",
       recovery: { loadedCodeSha: "older-or-divergent", isLoadedCodeAtOrAfter: () => false },
+      expectedAncestryChecks: 1,
     },
     {
       name: "unreadable ancestry",
       recovery: { loadedCodeSha: "unreadable", isLoadedCodeAtOrAfter: () => { throw new Error("git unreadable"); } },
+      expectedAncestryChecks: 1,
     },
     {
       name: "unreadable prior reviewer-code provenance",
       freshness: "unreadable",
       recovery: { loadedCodeSha: "newer", isLoadedCodeAtOrAfter: () => true },
+      expectedAncestryChecks: 0,
     },
   ];
 
@@ -119,12 +123,23 @@ test("W1-T3581 unproved loaded reviewer code keeps withheld pending review bound
     const pr = pendingReview();
     appendWithheldReview(path, pr, candidate.freshness);
     const posted: number[] = [];
+    let ancestryChecks = 0;
+    const recovery = candidate.recovery === undefined
+      ? undefined
+      : {
+        ...candidate.recovery,
+        isLoadedCodeAtOrAfter: (required: string) => {
+          ancestryChecks += 1;
+          return candidate.recovery!.isLoadedCodeAtOrAfter(required);
+        },
+      };
     await runSweep(
       [pr],
-      sweepDeps(path, posted, { reviewerCodeRecovery: candidate.recovery }),
+      sweepDeps(path, posted, { reviewerCodeRecovery: recovery }),
       DEFAULT_SWEEP_POLICY,
     );
     assert.deepEqual(posted, [], `${candidate.name} must not release a withheld terminal verdict`);
+    assert.equal(ancestryChecks, candidate.expectedAncestryChecks, `${candidate.name} must reach the fail-closed ancestry boundary exactly when stale provenance is present`);
     const disposed = readLedgerLines(path).findLast((line) => line.step === "sweep.disposed");
     assert.match(String(disposed?.stand_down_reason), /freshness recovery backoff.*60m pending ceiling/);
   }
