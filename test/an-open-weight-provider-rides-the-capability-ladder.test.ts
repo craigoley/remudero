@@ -14,7 +14,12 @@ import {
 } from "../src/lib/provider-routing-policy.js";
 import { LiveSpawnBlockedError } from "../src/lib/spawn-guard.js";
 import { spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { OPENWEIGHT_MAX_COMPLETION_TOKENS, selectOpenWeightModel, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
+import {
+  OPENWEIGHT_MAX_COMPLETION_TOKENS,
+  OPENWEIGHT_OUTPUT_CONTRACT,
+  selectOpenWeightModel,
+  spawnOpenWeightWorker,
+} from "../src/lib/worker-provider.js";
 import { inboxDraftPrompt } from "../src/lib/inbox.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { buildInboxDraftSpawnArgs, draftProposalBatch } from "../src/run-task.js";
@@ -309,7 +314,7 @@ test("the capability ladder resolves an open-weight provider by table lookup", (
   assert.throws(() => validateMounts(malformedModels), /capabilities\.openweight\.economy\.low.*non-empty/);
 });
 
-test("the open-weight adapter contains tools and bounds their conversation", async (t) => {
+test("the openweight adapter prepends its output contract to every request and contains tools and bounds their conversation", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rmd-openweight-tools-"));
   const priorKey = process.env.RMD_OPENWEIGHT_API_KEY;
   writeFileSync(join(root, "ground.txt"), "bounded ground\n", "utf8");
@@ -349,6 +354,17 @@ test("the open-weight adapter contains tools and bounds their conversation", asy
     assert.equal(requests[0]?.body.max_completion_tokens, OPENWEIGHT_MAX_COMPLETION_TOKENS);
     assert.ok(OPENWEIGHT_MAX_COMPLETION_TOKENS >= 5_000, "a reasoning-model response budget below 5,000 truncates task shards");
     assert.equal("response_format" in (requests[0]?.body ?? {}), false, "json_object produced malformed gpt-oss output in the probe");
+    for (const request of requests) {
+      const messages = request.body.messages;
+      assert.ok(Array.isArray(messages), "each serialized Azure request carries its conversation");
+      assert.deepEqual(messages[0], { role: "system", content: OPENWEIGHT_OUTPUT_CONTRACT });
+    }
+    const firstMessages = requests[0]?.body.messages;
+    assert.ok(Array.isArray(firstMessages));
+    assert.deepEqual(firstMessages[1], { role: "user", content: "classify" }, "the caller prompt remains the user message after the adapter preamble");
+    assert.match(OPENWEIGHT_OUTPUT_CONTRACT, /double-quote.*colon.*proof:/s);
+    assert.match(OPENWEIGHT_OUTPUT_CONTRACT, /closed enum.*exactly one listed literal.*rather than inventing/s);
+    assert.match(OPENWEIGHT_OUTPUT_CONTRACT, /raw document.*without Markdown fences/s);
     assert.match(JSON.stringify(requests[1]?.body.messages), /bounded ground/, "the tool result returns to the same conversation");
     assert.match(JSON.stringify(requests[0]?.body.tools), /read_file/);
     assert.doesNotMatch(JSON.stringify(requests[0]?.body.tools), /write_file/, "only declared tools are exposed");
@@ -454,6 +470,31 @@ test("the open-weight adapter contains tools and bounds their conversation", asy
   assert.equal(unsupported.isError, true);
   assert.match(unsupported.stderr, /does not implement declared tool\(s\): WebSearch/);
   assert.equal(unsupportedFetches, 0);
+});
+
+test("the openweight adapter sends no response format after adding its output contract", async () => {
+  let requestBody: Record<string, unknown> | undefined;
+  const result = await spawnOpenWeightWorker(
+    {
+      cwd: REPO_ROOT,
+      workerHome: join(REPO_ROOT, "tmp", "openweight-output-contract"),
+      prompt: "Return a raw document.",
+      env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+      fetchImpl: async (_input, init) => {
+        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ choices: [{ message: { content: "raw document" } }] }), { status: 200 });
+      },
+    },
+    { claudeBin: "/unused/claude", root: REPO_ROOT, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+    { model: "gpt-oss-120b", effort: "low" },
+  );
+  assert.equal(result.isError, false);
+  assert.ok(requestBody);
+  assert.equal("response_format" in requestBody, false);
+  assert.deepEqual(requestBody.messages, [
+    { role: "system", content: OPENWEIGHT_OUTPUT_CONTRACT },
+    { role: "user", content: "Return a raw document." },
+  ]);
 });
 
 test("openweight configuration requires a daily cash cap and keeps its key outside worker env", async () => {

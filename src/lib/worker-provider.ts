@@ -1724,6 +1724,16 @@ export async function spawnCodexWorker(
 export const OPENWEIGHT_API_KEY_ENV = "RMD_OPENWEIGHT_API_KEY";
 /** PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the live probe. */
 export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 5_000;
+/**
+ * Adapter-owned output constraints for every OpenWeight lane. Each rule is conditional: the
+ * adapter must not turn a code-review or prose task into a YAML-only task by accident.
+ */
+export const OPENWEIGHT_OUTPUT_CONTRACT = [
+  "Apply each output rule below only when its condition is true:",
+  "- When emitting YAML, double-quote every scalar value containing a colon (`:`), especially a `proof:` value.",
+  "- When the request names a closed enum, emit exactly one listed literal; choose the nearest listed value rather than inventing `unknown` or `ambiguous`.",
+  "- When the request asks for a raw document, emit that document without Markdown fences.",
+].join("\n");
 const OPENWEIGHT_INPUT_USD_PER_MILLION = 0.15;
 const OPENWEIGHT_OUTPUT_USD_PER_MILLION = 0.6;
 
@@ -1950,7 +1960,10 @@ export async function spawnOpenWeightWorker(
     const key = (args.env ?? process.env)[OPENWEIGHT_API_KEY_ENV];
     if (!key) throw new Error(`openweight provider requires ${OPENWEIGHT_API_KEY_ENV} in the daemon environment`);
     const declaredNames = new Set(tools.map((tool) => String((tool.function as { name?: unknown }).name)));
-    const messages: OpenWeightMessage[] = [{ role: "user", content: args.prompt }];
+    const messages: OpenWeightMessage[] = [
+      { role: "system", content: OPENWEIGHT_OUTPUT_CONTRACT },
+      { role: "user", content: args.prompt },
+    ];
     const maxTurns = args.maxTurns ?? 1;
     if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error("openweight maxTurns must be a positive integer");
     for (;;) {
