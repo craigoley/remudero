@@ -1,0 +1,52 @@
+- id: W1-T3547
+  title: "ROUTE ONLY SYNTHESIS.TRIAGE TO GPT-OSS-120B AND MEASURE ACCEPTED OUTPUTS PER DOLLAR — the adapter must prove itself on the smallest machine-checked lane before the 45%-of-spend inbox-draft lane moves"
+  repo: remudero
+  depends_on: [W1-T3546]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files:
+    - .remudero/mounts.yaml
+    - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
+  origin: "operator-session#open-weight-research-2026-09-13"
+  plan_refs: ["W1-T3545", "W1-T3546", "W1-T3094"]
+  status: queued
+  attempts: 0
+  note: |
+    THIS IS PHASE THREE AND THE ONLY ROUTED LANE IS `synthesis.triage`. The 2026-09-13 probe
+    classified five exact cases correctly, including a branch-name credit error, but five samples
+    are not a production rate. Triage is the smallest suitable proving lane: 176 measured runs,
+    machine-checked plan-diff behavior, and the bounded adapter from W1-T3546.
+
+    Do not route inbox draft or any other lane in this task. At least 20 real triage runs must be
+    measured after rollout. The PR body reports accepted-output-per-dollar, acceptance pass rate,
+    relint count, and the stated recommendation to proceed to inbox draft or stop. Tokens-per-dollar
+    is not the decision metric.
+  rationale: |
+    The openweight endpoint is cash-billed and subscription headroom is scarce. A cheap token that
+    causes a retry or a rejected plan artifact is not a cheap accepted output. The deterministic
+    triage gates make the first outcome observable without changing architect, judge, retro,
+    implement source, reviewer, diagnose, or fix mounts; all remain on Claude.
+  design: |
+    Set only the `synthesis.triage` worker mount's provider to `openweight` using the Phase One
+    affinity seam. Add a regression test that loads the real mounts table and proves triage alone
+    receives the new provider among the listed machine-checked candidates. After merge, read the
+    production ledger through its three-form rotation union until at least 20 terminal triage runs
+    have an explicit provider-selection path and deterministic acceptance outcome. Compare the
+    resulting accepted-output-per-dollar to the recorded Claude baseline in the PR body; do not
+    widen routing until this measurement is complete.
+  acceptance:
+    - claim: "only synthesis.triage declares openweight; architect, judge, retro, implement source, reviewer, diagnose and fix remain on Claude"
+      proof: "unit test: only synthesis triage routes to the open-weight provider"
+    - claim: "the routed mount carries an explicit openweight declaration, so its provider choice is auditable rather than inferred from capacity"
+      proof: "grep: provider: openweight in .remudero/mounts.yaml"
+  falsifier: |
+    Remove the triage provider declaration and require the real-mount regression to fail. Declare
+    openweight on any non-triage mount and require that same regression to fail. Before recommending
+    expansion, take the ledger union with positive controls for plain rotations, compressed
+    rotations and live ledger. Fewer than 20 terminal runs, missing deterministic acceptance
+    outcomes, or a pass rate that exceeds the lane's retry budget means stop rather than route
+    inbox draft.

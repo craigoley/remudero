@@ -1,0 +1,68 @@
+- id: W1-T3546
+  title: "ADD THE BOUNDED GPT-OSS-120B ADAPTER WITHOUT ROUTING A LANE — the Azure deployment supports an OpenAI-compatible tool conversation but has cash spend and model-specific response constraints that must be encoded and tested before production traffic"
+  repo: remudero
+  depends_on: [W1-T3545]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 25.00
+  files:
+    - src/lib/config.ts
+    - src/lib/config-schema.ts
+    - src/lib/mounts.ts
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
+    - .remudero/mounts.yaml
+    - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
+  origin: "operator-session#open-weight-research-2026-09-13"
+  plan_refs: ["W1-T3545", "W1-T3547", "W1-T2573", "W1-T258", "W1-T3094"]
+  status: queued
+  attempts: 0
+  note: |
+    THIS IS PHASE TWO. It introduces the `openweight` provider identity and an unused adapter for
+    Azure AIServices deployment `gpt-oss-120b` in eastus2. It does not assign `provider: openweight`
+    to any mount. The adapter must be ready before Phase Three can route triage because triage has
+    Read/Write/Edit/Grep/Glob/WebSearch tools and deterministically refuses a PROPOSED verdict with
+    no changed plan file.
+
+    The credential is an Azure API key obtained from the operator environment; it must never enter
+    a repository file, test fixture, commit, or worker environment. The endpoint is configuration,
+    the key is an environment-only secret, and enabling this cash-billed provider requires a
+    `dailyCapUsd` at config load.
+  rationale: |
+    Five live `tool_choice: auto` probe conversations on 2026-09-14 completed a bounded
+    `read_file` tool exchange; `tool_choice: required` was rejected with `UnsupportedToolUse`.
+    The adapter must therefore mirror the contained Codex function bridge, not reduce triage to a
+    prose prompt. It maps only declared worker tools, confines paths to cwd, returns tool results
+    to the same conversation, and stops at `maxTurns`.
+
+    Three model facts are measured. `response_format: json_object` produced malformed output; a
+    1,500 completion cap truncated reasoning output; and unquoted YAML proof values containing a
+    colon are invalid. The implementation must respectively omit that response format, use
+    `max_completion_tokens` at least 5,000, and require double-quoted `proof:` values in shard
+    authoring prompts.
+  design: |
+    Widen the central provider union to `openweight`; derive all validation from it. Add a
+    capability-to-effort-to-ordered-model table in mounts data, matching Codex's existing shape.
+    Mirror the Codex adapter's safe model-id validation and fallback shape. Implement an
+    OpenAI-compatible chat-completions client with `api-key` authentication, an explicit tool
+    allowlist and cwd containment, and a max-turn refusal. Add configuration that refuses an
+    enabled openweight provider without a positive daily cash cap. Keep every mount on its current
+    provider: this PR is wired but unused. W1-T3547 is the dependent, later task that changes the
+    mounts data and extends this test file to route triage; the overlap is intentional sequencing,
+    not concurrent ownership.
+  acceptance:
+    - claim: "the capability ladder resolves openweight by table lookup and its adapter never sends json_object response_format"
+      proof: "unit test: the capability ladder resolves an open-weight provider by table lookup"
+    - claim: "the openweight adapter contains declared tools inside cwd, returns tool results to the conversation, and refuses a loop beyond maxTurns"
+      proof: "unit test: the open-weight adapter contains tools and bounds their conversation"
+    - claim: "an enabled cash-billed openweight provider without dailyCapUsd refuses at config load, while no credential is written into configuration or worker environment"
+      proof: "unit test: openweight configuration requires a daily cash cap and keeps its key outside worker env"
+  falsifier: |
+    Delete the openweight capability row and require the lookup test to fail. Reintroduce
+    `response_format: json_object`, a 1,500 completion ceiling, an uncontained path, an undeclared
+    tool, or an unbounded loop in a fixture; each must make its corresponding test fail. Remove the
+    daily cap and require config refusal. A mount declaring `openweight` in this phase is a boundary
+    violation even if the adapter itself passes.
