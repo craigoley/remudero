@@ -1441,32 +1441,6 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   let routedClaudeSelection: ProviderSelection | undefined;
   let routedClaudeCapacities: ProviderCapacity[] | undefined;
   let routedClaudePreferenceBypass: { provider: WorkerProviderId; reason: string } | undefined;
-  if (args.mountProvider === "codex") {
-    const runCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
-      args.providerRouting?.spawnCodex ?? spawnCodexWorker;
-    if (args.providerRouting?.spawnCodex === undefined) {
-      assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
-    }
-    // No ProviderCapacity is read or fabricated on this path. The mount is the authority for
-    // choosing Codex; capacity remains an auction-only concept.
-    const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
-      provider: "codex",
-      model: args.model,
-      effort: args.effort,
-      mode: "mount-affinity",
-      selectionPath: "mount-affinity",
-      policy: routingPolicy,
-    });
-    try {
-      materializeWorkerHome({ workerHome, realHome });
-      const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
-      result.selectionAssignmentId = selectionAssignmentId;
-      if (args.model) result.model = args.model;
-      return result;
-    } finally {
-      reapWorkerHome(workerHomeRoot, workerHome);
-    }
-  }
   if (providers.length === 1 && providers[0] === "claude" && claudeHealthRoute && !claudeHealthRoute.eligible) {
     const capacity = unavailableClaudeCapacity(claudeHealthRoute);
     try {
@@ -1504,7 +1478,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       console.error(JSON.stringify({ event: "worker.provider_routing_status_write_failed", reason: "write-failed" }));
     }
   }
-  if (!(providers.length === 1 && providers[0] === "claude")) {
+  if (!args.mountProvider && !(providers.length === 1 && providers[0] === "claude")) {
     const capacities = await Promise.all(
       providers.map((provider) => {
         if (provider === "codex") {
@@ -1669,6 +1643,32 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     routedClaudeSelection = selection;
     routedClaudeCapacities = capacities;
     routedClaudePreferenceBypass = preferenceBypass;
+  }
+  if (args.mountProvider === "codex") {
+    const runCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
+      args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+    if (args.providerRouting?.spawnCodex === undefined) {
+      assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
+    }
+    // No ProviderCapacity is read or fabricated on this path. The mount is the authority for
+    // choosing Codex; capacity remains an auction-only concept.
+    const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
+      provider: "codex",
+      model: args.model,
+      effort: args.effort,
+      mode: "mount-affinity",
+      selectionPath: "mount-affinity",
+      policy: routingPolicy,
+    });
+    try {
+      materializeWorkerHome({ workerHome, realHome });
+      const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
+      result.selectionAssignmentId = selectionAssignmentId;
+      if (args.model) result.model = args.model;
+      return result;
+    } finally {
+      reapWorkerHome(workerHomeRoot, workerHome);
+    }
   }
   // PREFLIGHT: resolve the real binary FRESH before any worker-home or keychain work. Throws ClaudeToolchainBlockedError,
   // never a raw ENOENT, naming every searched path and carrying `reasonClass: "blocked_toolchain"` so daemon.ts can classify
