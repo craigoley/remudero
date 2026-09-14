@@ -996,12 +996,14 @@ export interface SpawnWorkerArgs {
   secretBoundary?: SecretBoundaryHandles;
 }
 
-/** W1-T3573: `routes.review`/`routes.manual` share `routes.implement`'s spawn (same OUTPUT
- * CONTRACT: git push, `gh pr create`) and previously inherited `disallowedTools`'s UNRESTRICTED
- * default above with no lane declared. This is the coding toolkit that contract needs (Bash for
- * `git`/`gh`, WebSearch/WebFetch like TRIAGE_WORKER_TOOLS/PLAN_WORKER_TOOLS), minus the
- * unattended-unsafe `AskUserQuestion`/`Agent`/`Monitor`. `implement`/`diagnose`/`recon`/fix keep
- * their own untouched spawns. */
+/** W1-T3573, PRIMARY CONTROL (test/bound-kind-declared.test.ts): the declaration below IS what
+ * stops `review`/`manual` from reaching the SDK unrestricted — nothing else backstops it.
+ * `routes.review`/`routes.manual` share `routes.implement`'s spawn (same OUTPUT CONTRACT: git
+ * push, `gh pr create`) and previously inherited `disallowedTools`'s UNRESTRICTED default above
+ * with no lane declared. This is the coding toolkit that contract needs (Bash for `git`/`gh`,
+ * WebSearch/WebFetch like TRIAGE_WORKER_TOOLS/PLAN_WORKER_TOOLS), minus the unattended-unsafe
+ * `AskUserQuestion`/`Agent`/`Monitor`. `implement`/`diagnose`/`recon`/fix keep their own
+ * untouched spawns. */
 export const GENERIC_ROUTE_TOOL_BOUNDS = {
   review: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"],
   manual: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"],
