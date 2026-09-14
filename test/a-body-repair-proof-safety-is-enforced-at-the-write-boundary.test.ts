@@ -19,10 +19,11 @@
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { runFixRung } from "../src/run-task.js";
+import { execGrepProofInWorktree, runFixRung } from "../src/run-task.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
@@ -146,6 +147,8 @@ function fakeIssueStore(): IssueGateway & { calls: Array<{ title: string; body: 
 
 const AUTHOR_GATE_CI_FAILURE: CiFailure = { name: "acceptance-author-gate", logTail: "REFUSED (empty-proofs)" };
 
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
 test("W1-T3506 criterion 1: a repaired acceptance body with an authored malformed grep proof is refused before updatePrBody, and the prior body remains unchanged", async () => {
   const noReviewYet = fakeReview("failure", [], "original-head-sha");
   const spawnCalls: SpawnWorkerArgs[] = [];
@@ -261,4 +264,31 @@ test("W1-T3506 criterion 3: a candidate whose authored proofs are runnable reach
     "the author's own claim text is carried through untouched — this gate may refuse a push, never author or edit a claim");
   const refusals = logs.filter((l) => l.step === "fix.body_gate_repair_proof_unsafe");
   assert.equal(refusals.length, 0, "a safe repair must never be logged as refused");
+});
+
+// ── execGrepProofInWorktree — the adaptER ITSELF, exercised directly ────────────────────────────
+//
+// The three tests above all inject a fake `execAcceptanceGateRepairProof`, exactly like
+// test/acceptance-gate-body-repair.test.ts's own suite does — none of them ever run
+// `execGrepProofInWorktree`'s own body (the real production adapter wired at runFixRung's one call
+// site, `execGrepProofInWorktree(worktreePath)`). These two tests call it directly, against this
+// checkout's own real files, so its parse-exec-catch shape is proven rather than merely declared.
+
+test("W1-T3506: execGrepProofInWorktree runs a real, parseable grep proof end-to-end and reports genuine hits", () => {
+  const exec = execGrepProofInWorktree(REPO_ROOT);
+  // The pattern is `repairedProofsAreSafeToPush`'s own declaration in the file W1-T3389 shipped it
+  // in — guaranteed present, so this proves the pass path (parse ⇒ execWhitelistedProof ⇒ hits > 0)
+  // without depending on any fixture that could drift.
+  const outcome = exec("grep: export function repairedProofsAreSafeToPush in src/lib/body-repair.ts");
+  assert.ok(outcome !== undefined, "a proof that parses and executes cleanly must never report undefined");
+  assert.ok(outcome && outcome.hits > 0, "the searched-for declaration must match at least once");
+});
+
+test("W1-T3506: execGrepProofInWorktree collapses an exec_error (a target absent from the checkout) to undefined, never throwing", () => {
+  const exec = execGrepProofInWorktree(REPO_ROOT);
+  // Parses (it carries `in <path>`) but the target does not exist on disk — grep's own exit 2 makes
+  // `execWhitelistedProof` throw, and this adapter's `catch` must swallow it into `undefined` rather
+  // than letting the exception escape into `repairedProofsAreSafeToPush`'s caller.
+  const outcome = exec("grep: SOMETHING in src/does/not/exist.ts");
+  assert.equal(outcome, undefined, "a target absent from the checkout must collapse to undefined, not throw");
 });
