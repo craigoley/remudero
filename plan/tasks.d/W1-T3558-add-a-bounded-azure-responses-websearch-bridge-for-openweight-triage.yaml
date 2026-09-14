@@ -9,10 +9,12 @@
   band_meaning: blast-radius
   budget_usd: 20.00
   files:
+    - src/lib/config-schema.ts
     - src/lib/config.ts
     - src/lib/worker-provider.ts
     - src/lib/worker.ts
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
+    - test/config-schema.test.ts
   origin: "operator-session#open-weight-routing-follow-up-2026-09-14"
   plan_refs: ["W1-T3545", "W1-T3546", "W1-T3547", "W1-T3549", "W1-T3094"]
   status: queued
@@ -62,8 +64,8 @@
     in the same gpt-oss conversation; do not hand the search model's un-attributed prose to the
     worker as evidence.
 
-    Parse and validate the new non-secret configuration fields in `Config`. The bridge stays
-    disabled by default and config validation must reject a configured search endpoint unless its
+    Parse and validate the new non-secret configuration fields in `Config` and
+    `config-schema.ts`. The bridge stays disabled by default and config validation must reject a configured search endpoint unless its
     explicit data-boundary consent and a positive bounded search allowance are present. Meter
     every attempted and accepted search separately from gpt-oss token use, attach that cost and
     call count to the worker's durable outcome, and refuse before a new outbound call when the
@@ -77,6 +79,11 @@
     citation-positive path, every malformed or missing-evidence refusal path, the no-key/no-consent
     preflight path proving zero HTTP calls, and the cash-limit refusal. This task changes no mount,
     worker tier, provider auction, Azure resource, secret store, or deployed configuration.
+
+    Keep the configuration-schema regression in scope because it asserts the exact accepted
+    config-key set. The new fields must therefore be admitted explicitly there and remain absent
+    from the generated/default config until an operator opts in; accepting an arbitrary endpoint
+    as an unvalidated extra field is not an alternative implementation.
 
     The existing lane log sites already spread `workerLedgerFields`; therefore extend the
     OpenWeight result and `workerLedgerFields` in `src/lib/worker.ts` with explicit WebSearch
