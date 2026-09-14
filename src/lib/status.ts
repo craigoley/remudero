@@ -2584,19 +2584,25 @@ export interface EscalationState {
   openedAt?: string;
 }
 
-/** The latest independent-failure block if no later dispatch superseded it. */
+/** The latest durable independent-failure block if no later dispatch superseded it.
+ *
+ * `blocked_illformed` is a zero-cost admission refusal: run-task returns it before an inflight
+ * lock or worker can exist. Older daemons recorded that refusal through the same ledger step as a
+ * paid independent failure, so recognize that exact historical verdict without rewriting or
+ * concealing the row. Unknown or absent verdicts deliberately remain durable: only the proven
+ * pre-dispatch refusal is re-admittable. */
 export function latestIndependentFailureBlock(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   index?: LedgerIndex,
 ): boolean {
-  let last: "run" | "blocked" | undefined;
+  let last: "run" | "blocked" | "admission_refused" | undefined;
   for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id !== taskId && line.task !== taskId) continue;
     if (line.step === "run.start") {
       last = "run";
     } else if (line.step === "dispatch.blocked_independent") {
-      last = "blocked";
+      last = line.verdict === "blocked_illformed" ? "admission_refused" : "blocked";
     }
   }
   return last === "blocked";
