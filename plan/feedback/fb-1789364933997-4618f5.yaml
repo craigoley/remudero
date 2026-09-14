@@ -1,0 +1,23 @@
+id: fb-1789364933997-4618f5
+ts: 2026-09-14T05:48:53.997Z
+raw: Add a real authenticated Playwright layer for the private console. The
+  current suite only proves the unconfigured fail-closed state. Use Clerk
+  official Playwright testing helpers and a dedicated non-production test
+  instance/test users, with keys supplied only as CI secrets and never persisted
+  in the repo, browser artifacts, or deployed production config. Configure a
+  serial Clerk setup project and reusable auth state. Cover an administrator
+  viewing the Now/Inbox summary in verified, stale, and unavailable upstream
+  states; anonymous and non-administrator no-payload denial; desktop and Pixel 7
+  responsive/no-overflow/error-free behavior; and sign-out recovery. Keep
+  deterministic daemon responses behind a test-only server seam; do not rely on
+  a live fleet or a real operator session.
+attachments:
+  - https://clerk.com/docs/guides/development/testing/playwright/overview
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
