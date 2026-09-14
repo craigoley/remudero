@@ -9,10 +9,21 @@
   risk: high
   origin: "operator-session#no-image-has-ever-been-deployed-on-a-schedule-2026-09-09"
   plan_refs: ["W1-T3200", "W1-T3240", "W1-T2877", "W1-T2953", "W1-T3233"]
-  files: [deploy/install-host-units.sh, docs/operator-guide.md, test/host-units-install.test.ts]
+  files: [deploy/install-host-units.sh, docs/operator-guide.md, src/run-task.ts, test/host-units-install.test.ts]
   status: queued
   attempts: 0
   rationale: |
+    OPERATOR SUPERSESSION, 2026-09-14. The image-only reading described below made the existing
+    five-minute host tick reach `rmd deploy-run` while bypassing W1-T3201's persistent weighted
+    change pressure. That meant the change-and-risk controller was built but unreachable on Azure.
+    The same one-tick/no-second-reconciler rule remains. The healthy tick now invokes the FULL
+    supervisor; it continues to leave cheap in-container source freshness to the daemon, while the
+    higher-cost host recycle is admitted only by pressure plus its deterministic idle, health,
+    rollback, and restart-rate gates. The Azure checkout also contains untracked runtime feedback
+    and the former core invocation expanded an empty array under `set -u`; both prevented the
+    watchdog from self-converging a corrected launcher. They are part of this wiring, not separate
+    work, because without convergence the corrected supervisor call can never reach the host.
+
     OBSERVED READ-ONLY ON THE AZURE HOST, 2026-09-09. `systemctl list-units` names exactly three
     rmd units: `rmd-fleet.service`, `rmd-fleet-watchdog.timer` and `rmd-reap-stray.timer`.
     `deploy/install-host-units.sh` renders SEVEN artifacts — launcher, fleet service, watchdog
@@ -118,9 +129,7 @@
     session to queue behind that task.
 
   acceptance:
-    - claim: "a healthy fleet's watchdog tick evaluates a recycle through the supervisor, and no second timer is rendered"
-      proof: "unit test: W1-T3245: the watchdog tick evaluates a recycle and no second timer exists"
-    - claim: "the tick acts on IMAGE drift only — mount-side staleness stays the daemon's own freshness restart"
-      proof: "unit test: W1-T3245: the tick recycles for image drift and never for mount drift"
-    - claim: "a daemon that is DOWN is still revived from the cached image, never pulled into mid-crash-loop"
-      proof: "unit test: W1-T3245: a down daemon is revived from cache, not recycled"
+    - claim: "a healthy fleet's watchdog tick invokes the full recycle supervisor, and no second timer is rendered"
+      proof: "unit test: W1-T3245: the watchdog invokes the full supervisor and renders no second timer"
+    - claim: "the full scheduled reading admits a host recycle only when weighted restart pressure crosses its threshold"
+      proof: "unit test: W1-T3199/W1-T3201: the watchdog's full reading waits for weighted restart pressure"
