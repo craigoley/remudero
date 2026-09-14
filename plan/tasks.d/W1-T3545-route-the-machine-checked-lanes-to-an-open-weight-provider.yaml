@@ -8,7 +8,15 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 55.00
-  files: [src/lib/config.ts, src/lib/worker.ts, src/lib/worker-provider.ts, .remudero/mounts.yaml, test/an-open-weight-provider-rides-the-capability-ladder.test.ts]
+  files:
+    - src/lib/config.ts
+    - src/lib/config-schema.ts
+    - src/lib/mounts.ts
+    - src/lib/provider-routing-policy.ts
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
+    - .remudero/mounts.yaml
+    - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
   origin: "operator-session#open-weight-research-2026-09-13"
   plan_refs: ["W1-T2573", "W1-T3094", "W1-T2559", "W1-T258", "W1-T3095"]
   status: queued
