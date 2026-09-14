@@ -36,7 +36,9 @@ const TMP_HYGIENE_IMPORT = "./test/setup/tmp-hygiene.ts";
 
 const REMUDERO: SuiteRegistryTarget = { owner: "craigoley", repo: "remudero" };
 const REMUDERO_SITE: SuiteRegistryTarget = { owner: "craigoley", repo: "remudero-site" };
+const REMUDERO_CONSOLE: SuiteRegistryTarget = { owner: "craigoley", repo: "remudero-console" };
 const UNKNOWN_TARGET: SuiteRegistryTarget = { owner: "someone-else", repo: "unregistered-repo" };
+const WRONG_OWNER_CONSOLE: SuiteRegistryTarget = { owner: "someone-else", repo: "remudero-console" };
 
 // A no-op preflight: these tests never need this REPOSITORY'S own Chromium cache warmed, and the
 // real default would attempt it against the host's actual manifest (W1-T2317's ensureBrowsersOnce).
@@ -105,6 +107,39 @@ test("W1-T3525: the default target's test/ node --test argv and the dashboard's 
 
 test("W1-T3525: a `..` segment is refused on the new remudero-site root too", () => {
   assert.equal(parseWhitelistedProof("unit test: tests/../../../etc/passwd.test.ts", REMUDERO_SITE), null);
+});
+
+test("W1-T3564 console suite registry exact path", () => {
+  const p = parseWhitelistedProof("unit test: tests/unit/authenticated-read-route.test.ts", REMUDERO_CONSOLE);
+  assert.ok(p, "the console's declared tests/ root must resolve through its own target entry");
+  assert.equal(p!.kind, "test");
+  assert.equal(p!.runner, "vitest");
+  assert.equal(p!.command, "node");
+  assert.deepEqual(p!.args, [pinnedVitestCli(process.cwd()), "run", "tests/unit/authenticated-read-route.test.ts"]);
+  assert.ok(!p!.args.includes("--config"), "the console profile uses its checkout-local Vitest config");
+});
+
+test("W1-T3564 console suite registry bare title", () => {
+  const title = "authenticated read route returns private data";
+  const p = parseWhitelistedProof(`unit test: ${title}`, REMUDERO_CONSOLE);
+  assert.ok(p, "the console's single Vitest root must support name-filtered proofs");
+  assert.equal(p!.runner, "vitest");
+  assert.equal(p!.nameFiltered, true);
+  assert.deepEqual(p!.args, [pinnedVitestCli(process.cwd()), "run", "--reporter=tap", "-t", title, "tests/"]);
+});
+
+test("W1-T3564 console suite registry rejects wrong owner", () => {
+  assert.equal(
+    parseWhitelistedProof("unit test: tests/unit/authenticated-read-route.test.ts", WRONG_OWNER_CONSOLE),
+    null,
+    "a same-named repo under another owner must not inherit craigoley's console profile",
+  );
+  assert.equal(parseWhitelistedProof("unit test: authenticated read route returns private data", WRONG_OWNER_CONSOLE), null);
+
+  const why = explainUnitTestProofRefusal("unit test: tests/unit/authenticated-read-route.test.ts", WRONG_OWNER_CONSOLE);
+  assert.ok(why);
+  assert.match(why!, /no registered suite/i);
+  assert.match(why!, /someone-else\/remudero-console/);
 });
 
 // ── Vitest's own exit-code trap (Vitest 5.0.0 exits 0 when every selected test is SKIPPED) ─────
