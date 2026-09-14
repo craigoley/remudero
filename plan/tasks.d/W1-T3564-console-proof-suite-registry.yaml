@@ -1,0 +1,65 @@
+- id: W1-T3564
+  title: "THE CLOSED CROSS-REPO PROOF SUITE REGISTRY KNOWS craigoley/remudero-site BUT NOT THE PRIVATE remudero-console — register the console's checkout-local tests/ Vitest suite by canonical owner/repo so its acceptance proofs execute, while a same-named repository under another owner still refuses"
+  repo: remudero
+  depends_on: ["W1-T3525", "W1-T3529"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 45.00
+  files: [src/lib/review.ts, test/cross-repo-proof-suite-registry.test.ts]
+  origin: "operator-session#console-pr-12-proof-routing-2026-09-14"
+  plan_refs: ["W1-T3525", "W1-T3529", "W1-T3073", "W1-T72", "W1-T1062"]
+  status: queued
+  attempts: 0
+  rationale: |
+    PR #12 in the private craigoley/remudero-console repository has passing Vitest coverage for
+    its authenticated read route, but its remudero-review verdict is capped because its declared
+    unit-test proofs cannot execute against that target. This is a proof-routing fault, not a
+    reason to weaken the no-auto-merge rule.
+
+    The deployed W1-T3525 registry in src/lib/review.ts currently declares only
+    craigoley/remudero and craigoley/remudero-site. W1-T3529 is already merged and its live
+    runReview -> judgeReview call supplies target: { owner, repo }, so a console review now reaches
+    the closed registry and correctly finds no matching console entry. The console itself pins
+    Vitest and keeps its unit suites under tests/, matching the already-registered site's runner
+    shape but requiring its own canonical owner/repo key.
+
+    Adding a wildcard, a bare repo-name match, or dynamic runner discovery from the target
+    repository would defeat W1-T1062/W1-T3525's fail-closed boundary: an unreviewed repository
+    could select an arbitrary test runner. The narrow repair is one declared console profile and
+    direct parser tests for both its success and owner-qualified refusal.
+  design: |
+    (i) Extend the existing closed SUITE_REGISTRY with exactly
+    { owner: "craigoley", repo: "remudero-console", roots: [{ root: "tests/", runner: "vitest" }] }.
+    Use the console checkout's own pinned Vitest and no forced config path, matching its actual
+    repository convention.
+
+    (ii) Preserve every existing remudero and remudero-site profile and argv byte-for-byte. Do not
+    add package.json inspection, a wildcard, a repo-name-only fallback, or a second resolver.
+
+    (iii) Add direct parser tests showing that a console tests/unit route test resolves through
+    Vitest, and that a bare console test title resolves only through that declared Vitest root.
+    Add the negative same-name/different-owner case: it must refuse rather than inherit the
+    craigoley console profile.
+
+    (iv) This task changes review proof routing only. It does not alter the console's browser
+    authentication, daemon API credentials, Vercel environment, or the policy that withholds
+    auto-merge when proof execution is absent.
+  acceptance:
+    - claim: "a direct tests/unit path for craigoley/remudero-console resolves through that target's checkout-local Vitest runner with no forced config path"
+      proof: "unit test: W1-T3564 console suite registry exact path"
+    - claim: "a bare console unit-test title resolves only through the console's registered Vitest root rather than the core node test suite"
+      proof: "unit test: W1-T3564 console suite registry bare title"
+    - claim: "a remudero-console name under a different owner is refused instead of inheriting craigoley's console suite profile"
+      proof: "unit test: W1-T3564 console suite registry rejects wrong owner"
+  falsifier: |
+    Close without implementation if src/lib/review.ts already has a SUITE_REGISTRY entry for both
+    owner "craigoley" and repo "remudero-console", or if runReview's judgeReview evidence does not
+    receive target: { owner, repo }. At filing, the registry has only remudero and remudero-site,
+    while runReview already supplies target at its judgeReview call.
+  note: |
+    This is the direct shared contract dependency for automated review of the private console
+    repository. It does not create, restore, or schedule a daemon for the public core repository.
+    reservation hand-off: main -> plan-console-proof-suite-registry-1789389000000
