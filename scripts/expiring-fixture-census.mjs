@@ -26,7 +26,7 @@
 // them due to flip the next day.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 
 /** Days of warning before a fixture actually expires. One CI-week: long enough that the failure
  *  lands as a named warning someone can act on, short enough not to flag half the corpus. */
@@ -223,6 +223,40 @@ export function formatReport({ population, reported, exempt, alreadyExpired = []
   return out.join("\n");
 }
 
+// SELF-DESCRIBING FAILURES (W1-T3578). A BLOCKED run used to leave only GitHub's bare exit-code
+// annotation (`Process completed with exit code 1.`) -- the actionable report above only ever
+// reached stdout, which an unproxied job-log read cannot see (the same #2828/#2895 shape
+// scripts/{coverage-ratchet,diff-coverage}.mjs already fixed for their own gates). The fix rung's
+// evidence reader (`failingTestFilesFromCiFailures` in src/lib/sweep.ts, W1-T3278) already
+// recognizes a `test/...test.ts:<line>` path inside a check-run annotation; this gate simply never
+// published one. `formatReport`'s output above already names every crossing fixture's path, line
+// and remedy verbatim, so it is published AS-IS -- no second report-assembly function is invented.
+//
+// OPT-IN, AND DELIBERATELY NOT AN "in Actions" CHECK. test/expiring-fixture-census.test.ts spawns
+// this very script over BLOCKING fixture trees with no env override, so an automatic-detection
+// gate would publish those as real annotations. `RMD_CI_REPORT` is set per-STEP on the real
+// "Expiring-fixture census" step in ci.yml (never job-wide -- see the comment there), matching the
+// identical trap the two coverage gates already guard against.
+
+/** Encode a report for a `::error::` workflow command. `%` FIRST or the escapes eat each other.
+ *  Identical to scripts/{coverage-ratchet,diff-coverage}.mjs's encoder -- reused, not reinvented,
+ *  so the three gates cannot drift into different escaping dialects for the same channel. */
+export function encodeAnnotation(text) {
+  return text.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+
+/** Write the report to the two channels a job can actually reach. No-op unless RMD_CI_REPORT is set. */
+export function emitCiReport(tool, report, { blocked, env = process.env, log = console.log, append = null } = {}) {
+  if (!env.RMD_CI_REPORT) return false;
+  if (blocked) log(`::error title=${tool}::${encodeAnnotation(report)}`);
+  const summaryPath = env.GITHUB_STEP_SUMMARY;
+  if (summaryPath) {
+    const write = append ?? appendFileSync;
+    write(summaryPath, `### ${tool}\n\n\u0060\u0060\u0060\n${report}\n\u0060\u0060\u0060\n\n`);
+  }
+  return true;
+}
+
 export function main({
   execFile = execFileSync,
   readFile = (p) => readFileSync(p, "utf8"),
@@ -242,8 +276,11 @@ export function main({
     thresholdDays: policy.staleDays,
   });
   const populationDrop = refusePopulationDrop(result.populationByFile, recordedPopulationByFile);
-  log(formatReport({ ...result, populationDrop }));
-  return result.reported.length > 0 || populationDrop.length > 0 ? 1 : 0;
+  const report = formatReport({ ...result, populationDrop });
+  log(report);
+  const blocked = result.reported.length > 0 || populationDrop.length > 0;
+  emitCiReport("expiring-fixture-census", report, { blocked });
+  return blocked ? 1 : 0;
 }
 
 if (process.argv[1] && process.argv[1].endsWith("expiring-fixture-census.mjs")) process.exit(main());

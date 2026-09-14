@@ -1824,7 +1824,14 @@ jobs:
       # bomb" has been in CLAUDE.md since W1-T2250 and bound nothing. On 2026-09-09 a fixture
       # stamped 2026-08-26T18:15:00Z crossed the sweep's 14-day rung at exactly 18:15:00Z and took
       # `main` red, blocking every PR (W1-T3270). FALSIFIER: test/expiring-fixture-census.test.ts.
+      #
+      # TRAP (W1-T3578): RMD_CI_REPORT is set per-STEP on this one step, never job-wide, for the
+      # identical reason the coverage job's two gate steps above are scoped the same way —
+      # test/expiring-fixture-census.test.ts spawns this script over BLOCKING fixture trees with no
+      # env override, and a job-wide flag would publish those as real check-run annotations.
       - name: Expiring-fixture census (no fixture crosses its threshold inside the margin)
+        env:
+          RMD_CI_REPORT: "1"
         run: |
           CLASS="${{ steps.classify.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
