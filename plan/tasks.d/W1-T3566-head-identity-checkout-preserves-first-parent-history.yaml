@@ -1,0 +1,69 @@
+- id: W1-T3566
+  title: "the head-identity gate pins the pull request head but checks it out shallowly, so a GitHub update-branch merge has no reachable first-parent non-merge commit and an otherwise valid filing is refused"
+  repo: remudero
+  depends_on: ["W1-T3510"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  files:
+    - .github/workflows/head-identity-gate.yml
+    - test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts
+  origin: "operator-session#site-console-pr-recovery-2026-09-14"
+  plan_refs: ["W1-T3510", "W1-T3388"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on 2026-09-14 while recovering plan PR #5520. The required head-identity workflow
+    checks out `${{ github.event.pull_request.head.sha }}`, the correct W1-T3510 repair for the
+    synthetic pull-request merge ref. Its production reader then deliberately executes
+    `git log -1 --first-parent --no-merges`: when GitHub's update-branch operation makes a real
+    merge commit at the PR head, that is the only traversal which stays on the PR's own line and
+    cannot borrow an unrelated main-line commit's identity.
+
+    The same workflow does not set `fetch-depth`. actions/checkout defaults to a one-commit
+    checkout. On #5520's update-branch merge head, the reader therefore had no reachable
+    first-parent non-merge commit and refused a filing whose original first-parent subject was a
+    valid `chore(plan): ...` subject. A full local checkout of that exact head made the gate pass;
+    this falsifies a subject, branch-name, or author-identity defect and isolates checkout history
+    as the missing input.
+
+    This is not a reason to weaken the first-parent traversal. Without it, a merge head can reach
+    main's most recent non-merge commit and accept an unrelated identity. The gate needs the
+    explicit pull-request head AND enough ancestry to read the first non-merge commit on that
+    head's first-parent line.
+  design: |
+    Change only the dedicated head-identity workflow checkout to request full history with
+    `fetch-depth: 0`, retaining its existing explicit `${{ github.event.pull_request.head.sha }}`
+    ref. Extend the existing head-identity suite with a focused workflow-contract assertion that
+    locates that checkout step and requires both settings. Keep `readHeadCommitMessage`'s
+    `--first-parent --no-merges` traversal unchanged; it is the protection against accepting a
+    main-line identity after update-branch.
+
+    Do not change the head-identity predicate, branch-name contract, acceptance-author gate,
+    broader CI checkout policy, automatic merge policy, or GitHub's update-branch behavior. This
+    narrowly supplies the ancestry the existing required gate already consumes.
+  acceptance:
+    - claim: "the head-identity workflow retains first-parent history while checking out the pull request head SHA"
+      proof: "unit test: W1-T3566 head identity checkout preserves first-parent history"
+    - claim: "the workflow-contract test still requires the explicit pull request head ref, so full history cannot silently restore the synthetic merge ref"
+      proof: "unit test: W1-T3510 criterion 1: workflow pins checkout to the pull request head"
+  falsifier: |
+    Close without implementation if the workflow's checkout step already combines
+    `ref: ${{ github.event.pull_request.head.sha }}` with `fetch-depth: 0`, or if the exact #5520
+    merge head passes `readHeadCommitMessage` in a depth-one checkout. As of this filing neither is
+    true: the workflow has the explicit ref but no fetch depth, while its locally reproduced full
+    checkout passes. Remove `fetch-depth: 0` from the implemented workflow and run the focused
+    assertion; it must fail. If it does not, the assertion is not load-bearing and this task must
+    not ship.
+  note: |
+    SIZING BAND: `risk: high` is blast radius. This is a required gate on every pull request, but
+    its source change is restricted to one checkout option and an existing workflow-contract test.
+    It does not authorize manual PR merges, a daemon recycle, or a change to any repo's review
+    policy.
+
+    ID PROVENANCE: `rmd next-task-id --reserve` held refs/rmd-id/W1-T3566 on origin before this
+    task was written. The holder began as `main`; this plan filing takes ownership below.
+
+    reservation hand-off: main -> plan-head-identity-history-1789389004000
