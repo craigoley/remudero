@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { MountsError, TierInvariantError, validateMounts } from "../src/lib/mounts.js";
-import { ProviderRoutingPolicyError, writeProviderRoutingPolicyOverride } from "../src/lib/provider-routing-policy.js";
+import {
+  ProviderRoutingPolicyError,
+  writeProviderRoutingPolicyOverride,
+  type ProviderRoutingPolicyOverrideInput,
+} from "../src/lib/provider-routing-policy.js";
 import { LiveSpawnBlockedError } from "../src/lib/spawn-guard.js";
 import { spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "../src/lib/worker.js";
-import { buildInboxDraftSpawnArgs } from "../src/run-task.js";
+import { buildInboxDraftSpawnArgs, draftProposalBatch } from "../src/run-task.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SETTINGS_FILE = join(REPO_ROOT, "settings", "worker.json");
@@ -59,6 +64,30 @@ function codexResult(): WorkerResult {
     compactionConfigured: false,
     qualitySuspect: false,
   };
+}
+
+function draftRepoFixture(root: string): string {
+  const origin = mkdtempSync(join(tmpdir(), "rmd-mount-affinity-origin-"));
+  const seed = mkdtempSync(join(tmpdir(), "rmd-mount-affinity-seed-"));
+  const repoDir = join(root, "repos", "repo");
+  try {
+    execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", origin]);
+    execFileSync("git", ["clone", "-q", origin, seed]);
+    execFileSync("git", ["-C", seed, "config", "user.email", "mount-affinity@example.invalid"]);
+    execFileSync("git", ["-C", seed, "config", "user.name", "mount-affinity-test"]);
+    mkdirSync(join(seed, "plan"), { recursive: true });
+    writeFileSync(join(seed, "plan", "tasks.yaml"), "tasks: []\n");
+    execFileSync("git", ["-C", seed, "add", "plan/tasks.yaml"]);
+    execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
+    execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
+    mkdirSync(join(root, "repos"), { recursive: true });
+    execFileSync("git", ["clone", "-q", origin, repoDir]);
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "mount-affinity@example.invalid"]);
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "mount-affinity-test"]);
+    return origin;
+  } finally {
+    rmSync(seed, { recursive: true, force: true });
+  }
 }
 
 test("mount provider affinity parses only known providers, and the Tier Invariant still rejects an under-ranked architect with a provider declared", () => {
@@ -155,26 +184,32 @@ test("mount affinity refuses a disabled provider before routing, and a real adap
 
 test("provider policy preference is validated from the shared provider union", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-mount-affinity-policy-"));
-  assert.throws(
-    () => writeProviderRoutingPolicyOverride(
-      root,
-      {
-        enabledProviders: ["claude"],
-        preference: "codex",
-        reservePercent: 5,
-        parks: [],
-        expiresAt: "2026-09-14T00:00:00.000Z",
-        codexModelPreference: null,
-      },
-      {
-        config: { workerProviders: { enabled: ["claude", "codex"] } },
-        writerFingerprint: "0123456789ab",
-        now: () => Date.parse("2026-09-13T00:00:00.000Z"),
-      },
-    ),
-    ProviderRoutingPolicyError,
-    "a valid provider id still refuses when the override did not enable it",
-  );
+  const config: Pick<Config, "workerProviders"> = { workerProviders: { enabled: ["claude", "codex"] } };
+  const policy = {
+    reservePercent: 5,
+    parks: [],
+    expiresAt: "2026-09-14T00:00:00.000Z",
+    codexModelPreference: null,
+  };
+  for (const candidate of [
+    { ...policy, enabledProviders: ["not-a-provider"], preference: "automatic" },
+    { ...policy, enabledProviders: ["claude"], preference: "not-a-provider" },
+    { ...policy, enabledProviders: ["claude"], preference: "codex" },
+  ]) {
+    assert.throws(
+      () => writeProviderRoutingPolicyOverride(
+        root,
+        candidate as unknown as ProviderRoutingPolicyOverrideInput,
+        {
+          config,
+          writerFingerprint: "0123456789ab",
+          now: () => Date.parse("2026-09-13T00:00:00.000Z"),
+        },
+      ),
+      ProviderRoutingPolicyError,
+      "an override accepts neither a provider outside the shared union nor a known provider it did not enable",
+    );
+  }
 });
 
 test("the inbox-draft spawn derives its provider affinity from the synthesis mount", () => {
@@ -200,4 +235,24 @@ test("the inbox-draft spawn derives its provider affinity from the synthesis mou
   assert.equal(args.mountProvider, "codex", "the provider comes from the mounted row, not capacity policy");
   assert.deepEqual(args.disallowedTools, ["Write", "Edit", "NotebookEdit", "Bash"]);
   assert.deepEqual(args.tools, ["Read", "Grep", "Glob"]);
+});
+
+test("draftProposalBatch reaches the mount-derived inbox args through an offline worktree and never starts a real worker", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-mount-affinity-draft-"));
+  const origin = draftRepoFixture(root);
+  try {
+    const outcomes = await draftProposalBatch(
+      [{ id: "mount-affinity:offline", summary: "exercise the wiring", evidenceAnchors: [] }] as never,
+      { claudeBin: "/bin/true", root },
+      "owner",
+      "repo",
+      "MOUNT-AFFINITY-DRAFT",
+      () => {},
+    );
+    assert.equal(outcomes.length, 1);
+    assert.equal(outcomes[0]?.ok, false, "the test-runner guard or preflight stops the default adapter without a process");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(origin, { recursive: true, force: true });
+  }
 });
