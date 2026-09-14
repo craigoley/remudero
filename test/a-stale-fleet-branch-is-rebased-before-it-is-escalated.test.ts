@@ -49,7 +49,7 @@ function dirtyFleetPr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "none",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-07T11:45:00.000Z",
+    lastActivityAt: new Date(NOW - 15 * 60 * 1000).toISOString(),
     headSha: "old-head",
     headRefName: "run-W1-T2999-1789036344804",
     autoMergeArmed: false,

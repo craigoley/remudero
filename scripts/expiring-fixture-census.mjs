@@ -72,7 +72,7 @@ export const RECORDED_POPULATION_BY_FILE = Object.freeze({
   "test/a-push-does-not-re-ask-a-head-independent-question.test.ts": 3,
   "test/a-refusal-is-a-verdict-not-a-strike.test.ts": 1,
   "test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts": 1,
-  "test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts": 1,
+  "test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts": 0,
   "test/an-open-pr-does-not-rot-while-it-waits.test.ts": 2,
   "test/arm-failure-classification.test.ts": 1,
   "test/board.test.ts": 4,
