@@ -1,4 +1,4 @@
-- id: W1-T3568
+- id: W1-T3577
   title: "A verified stale-red release proves head+main locally but publishes an empty commit on the old head — PR-head checks therefore re-run the unrepaired tree, while the ordinary refresh lane ignores a recently-behind red PR"
   repo: remudero
   depends_on: []
