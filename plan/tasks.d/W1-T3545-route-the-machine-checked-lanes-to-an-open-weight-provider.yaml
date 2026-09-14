@@ -14,6 +14,7 @@
     - src/lib/provider-routing-policy.ts
     - src/lib/worker.ts
     - src/run-task.ts
+    - scripts/test-tier-manifest.json
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
   origin: "operator-session#open-weight-research-2026-09-13"
   plan_refs: ["W1-T62", "W1-T77", "W1-T78", "W1-T94", "W1-T100", "W1-T150", "W1-T168", "W1-T176", "W1-T2573", "W1-T3094", "W1-T2559", "W1-T258", "W1-T3095"]
@@ -33,6 +34,11 @@
     spend, while all 299 retained `not_ready` inbox verdicts failed only `drafted`, never the
     content predicates. This phase creates no cost-bearing path; it makes later deliberate routing
     possible without fabricated capacity telemetry.
+
+    THE TEST TIER RECORD IS REQUIRED RUNTIME WIRING, NOT A BASELINE. The CI admission gate refused
+    the first Phase One head before any test or coverage shard ran because the new test was absent
+    from `scripts/test-tier-manifest.json`. The manifest must therefore travel with this test as a
+    fast-tier declaration; it is neither a coverage baseline nor an instrument-surface exception.
   rationale: |
     Provider selection is currently fleet-global. `resolveProviderRoutingPolicy` reads one
     preference and `selectWorkerProviderForPolicy` is a capacity auction that refuses a provider
