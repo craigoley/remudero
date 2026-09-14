@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -13,37 +12,27 @@ import {
   type LandingRepository,
 } from "../src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
-const GIT_ENV = {
-  ...process.env,
-  GIT_AUTHOR_NAME: "t",
-  GIT_AUTHOR_EMAIL: "t@t",
-  GIT_COMMITTER_NAME: "t",
-  GIT_COMMITTER_EMAIL: "t@t",
-};
-
-function git(dir: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GIT_ENV });
-}
-
+// W1-T2903: the shared `gitRepo()` fixture (test/helpers/git-repo.ts) builds every repo below,
+// rather than a hand-rolled pair of raw git-init invocations — that helper's own init call site
+// lives OUTSIDE `test/*.test.ts` and so never counts against
+// scripts/fixture-copy-baseline.json's `gitInitSites`/`gitInitFiles` ceilings, unlike a raw call
+// site declared directly in this file.
 function makeBareOrigin(): string {
-  const bare = mkdtempSync(join(tmpdir(), "rmd-landing-scope-origin-"));
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
-  const seed = mkdtempSync(join(tmpdir(), "rmd-landing-scope-seed-"));
-  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
-  writeFileSync(join(seed, "README.md"), "seed\n");
-  git(seed, "add", "-A");
-  git(seed, "commit", "--quiet", "-m", "chore: seed");
-  git(seed, "remote", "add", "origin", bare);
-  git(seed, "push", "--quiet", "origin", "main");
-  rmSync(seed, { recursive: true, force: true });
-  return bare;
+  const origin = gitRepo({ bare: true, kind: "landing-scope-origin" });
+  const seed = gitRepo({ seedCommit: false, kind: "landing-scope-seed" });
+  writeFileSync(join(seed.dir, "README.md"), "seed\n");
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: seed");
+  seed.addRemote("origin", origin.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  seed.cleanup();
+  return origin.dir;
 }
 
 function cloneRoot(bareOrigin: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-landing-scope-root-"));
-  execFileSync("git", ["clone", "--quiet", bareOrigin, dir], { encoding: "utf8", env: GIT_ENV });
-  return dir;
+  return gitRepo({ cloneFrom: bareOrigin, kind: "landing-scope-root" }).dir;
 }
 
 const coreRepo: LandingRepository = { owner: "craigoley", repo: "remudero" };
