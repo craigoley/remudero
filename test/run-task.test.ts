@@ -7704,7 +7704,7 @@ if (command.includes("required_status_checks")) {
 
 test("buildSweepLightHook: a cancelled-only CI PR reaches its separate requeue batch and reruns only that job", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-lighthook-requeue-"));
-  const bin = mkdtempSync(join(tmpdir(), "gh-lighthook-requeue-"));
+  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-lighthook-requeue-`));
   const callsFile = join(root, "gh-calls.ndjson");
   writeFileSync(join(bin, "gh"), ghStubForCancelledLightRequeue(callsFile), { mode: 0o755 });
   const oldPath = process.env.PATH;
