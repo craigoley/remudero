@@ -1,0 +1,93 @@
+- id: W1-T3584
+  title: "A TARGET REPOSITORY'S GREEN REQUIRED CHECKS MUST RELEASE ITS FIX RUNG — the shared waiter currently requires a context literally named ci, turns healthy site/console gates into false timeouts, and spends phantom strikes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 35.00
+  files:
+    - src/run-task.ts
+    - test/run-task.test.ts
+    - test/check-wait-progress.test.ts
+  origin: "operator-session#console-pr-22-false-ci-timeout-2026-09-14"
+  plan_refs: ["W1-T382", "W1-T1211", "W1-T2268", "W1-T2804", "W1-T3554"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on remudero-console PR #22 at head 122cc3608c06c20cd19fec2ad790283f768f7aaa
+    (2026-09-14). The target protection set was console-ci, ci-gate, Vercel, and
+    remudero-review. console-ci, ci-gate, and Vercel were SUCCESS; the semantic review was
+    correctly still PENDING. At 17:14:18Z the shared fix rung nevertheless logged ci.stalled,
+    then at 17:14:20Z recorded fix.ci_not_green and fix.ci_evidence_disagreement, spending two
+    strikes without spawning a second worker or changing the pull request. The independent
+    semantic review completed successfully and the pull request auto-merged at 17:15:47Z.
+
+    The exact authoritative predicate in src/run-task.ts dedupes and excludes
+    remudero-review, uses readable required contexts only to choose RED voters, then declares
+    GREEN only if a rollup entry literally named ci is SUCCESS. A direct fixture containing the
+    three successful console contexts plus a PENDING remudero-review returns pending with and
+    without that required-context list. waitForCiGreen calls that predicate without resolving the
+    target's required contexts, then passes the full rollup to checkWaitStalled; the pending
+    self-review is consequently recorded as a stalled CI dependency. This is shared core code,
+    not a console routing or protection failure.
+  design: |
+    (i) Preserve the current fail-closed fallback whenever required status contexts cannot be
+    read or are empty: every reported non-review terminal failure remains RED and GREEN still
+    requires a successful ci context. Never manufacture green from an arbitrary non-required
+    check, from remudero-review alone, or from a missing protection response.
+
+    (ii) When the target repository's required contexts are readable, derive the pre-review gate
+    from that set after excluding remudero-review. GREEN requires every remaining required
+    context to have a current accepted success conclusion; RED requires a current terminal-red
+    conclusion from one of those contexts; absent, queued, cancelled, or pending required
+    contexts remain pending. Keep latest-attempt de-duplication and the existing stale-review
+    exclusion. Do not change branch protection, check names, reviewer semantics, or auto-merge
+    policy.
+
+    (iii) Resolve the target's required contexts once per waitForCiGreen invocation and pass the
+    resulting readable set to every poll verdict. Feed the same pre-review view, rather than the
+    raw rollup containing remudero-review, to timeout/pending evidence so a pending review that
+    this rung is about to run cannot create ci.stalled. Retain existing logging and the existing
+    single target/sha read per polling iteration.
+
+    (iv) The resulting green path enters the existing semantic-review and guarded auto-merge
+    flow. It must not write a terminal status directly, bypass review-source freshness, widen
+    worker capability, alter budgets, or make the generic core scheduler responsible for site or
+    console work. A dedicated site/console daemon remains the owner of its own target work.
+  acceptance:
+    - claim: "when a target's readable required pre-review contexts are all successful and remudero-review is pending, the shared CI gate returns green even if no context is named ci"
+      proof: "unit test: W1-T3584 target required checks release pre-review gate"
+    - claim: "a missing, unreadable, empty, queued, cancelled, or terminal-red required context cannot manufacture green; the existing ci-only fallback remains fail-closed"
+      proof: "unit test: W1-T3584 absent target gate stays fail closed"
+    - claim: "the real REST-backed wait resolves a console-shaped protection response once, returns green before the stall window, and does not report its pending remudero-review as ci.stalled"
+      proof: "unit test: W1-T3584 console wait ignores pending self review"
+    - claim: "a fix rung receiving that target-green verdict reaches its ordinary fresh semantic review without emitting fix.ci_not_green or spending a second strike"
+      proof: "unit test: W1-T3584 target-green fix rung does not spend a false strike"
+  falsifier: |
+    Close without implementation only if the authoritative current predicate, given SUCCESS
+    console-ci, ci-gate, and Vercel entries plus a PENDING remudero-review and the readable
+    target context set, already returns green and the real waiter completes before
+    checkWaitStalled records any self-review as pending. At filing it returns pending; the
+    observed #22 ledger proves the consequent timeout and false-strike path.
+
+    The implementation must delete the required-context green path and make the console-shaped
+    fixture return pending/timeout and the fix-rung fixture emit fix.ci_not_green; restoring the
+    path must restore green and exactly one ordinary review attempt. A stubbed green return, a
+    renamed console check, a changed branch-protection rule, an immediate terminal-status write,
+    or an auto-merge assertion without the real waiter does not satisfy the falsifier.
+  note: |
+    reservation hand-off: plan/mint-required-check-gate -> plan/file-W1-T3584-required-check-gate
+
+    Scope is deliberately limited to target-aware check classification for existing repair/review
+    mechanics. It does not re-enable a broad core scheduled job, change deployment lifecycle
+    scripts, recreate a user-closed console analytics pull request, or alter the planned domain
+    consolidation.
+
+    Self-reference for the filing PR's own Acceptance discrimination: this shard, filed at
+    plan/tasks.d/W1-T3584-required-check-gate-must-not-spend-a-false-fix-strike.yaml, is the
+    W1-T3584-required-check-gate-must-not-spend-a-false-fix-strike shard. Design (i) above is its
+    fail-closed fallback and design (ii)-(iv) above is its target-aware check gating; both are
+    written into this shard's own rationale and design text, not merely claimed about it.
