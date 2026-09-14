@@ -1,0 +1,80 @@
+- id: W1-T3568
+  title: "A verified stale-red release proves head+main locally but publishes an empty commit on the old head — PR-head checks therefore re-run the unrepaired tree, while the ordinary refresh lane ignores a recently-behind red PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 35.00
+  files:
+    - src/lib/sweep.ts
+    - test/a-fixed-main-re-runs-what-it-was-blocking.test.ts
+    - test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts
+  origin: "operator-session#auto-rebase-5505-2026-09-14"
+  plan_refs: ["W1-T3422", "W1-T3277", "W1-T3410", "W1-T2620"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at origin/main 1aad61229 (2026-09-14). W1-T3422 correctly admits a stale-red
+    candidate only after terminal-time evidence, a bounded live-workflow read, and a passing
+    isolated merge route. But its action leaf (`src/lib/sweep.ts:2092-2115`) calls
+    `pushEmptyCommit` with the observed PR head; it does not apply the observed main repair to
+    the PR branch. Its own production test asserts that empty-commit call
+    (`test/a-fixed-main-re-runs-what-it-was-blocking.test.ts:275-289`).
+
+    That event is insufficient for required jobs that deliberately inspect the PR head. The
+    proof-discrimination workflow checks out `github.event.pull_request.head.sha` explicitly
+    (`.github/workflows/proof-discrimination-gate.yml:18-23`), so a task-proof repair merged to
+    main is still absent from an empty-commit redrive of an older head. The generic branch-refresh
+    selector is intentionally not a fallback: `openPrsBehindMain` excludes a branch at or below
+    `reviewWaitingBranchRefreshThreshold` (`src/lib/sweep.ts:5352-5373`), and its dirty-branch
+    rebase leaf is called only for `mergeState === "dirty"` dispatched branches
+    (`src/lib/sweep.ts:7269-7285`).
+
+    The #5505 repair reproduced this gap: after inherited-main repairs merged, its branch was
+    behind main and could not receive the repaired PR-head proof contract until a leased rebase.
+    The repair must be narrow. This is NOT a lower global refresh threshold, a retry loop, or a
+    generic rebase of every red PR; it changes only the already verified W1-T3422 release action.
+  design: |
+    (i) PRESERVE W1-T3422'S ADMISSION BOUNDARY. Keep its completion-time ordering, required-check
+    route registry, live-workflow stand-down, isolated merge proof, oldest-first selection,
+    one-candidate-per-pass limit, and `(PR, observed-head, observed-main, check)` durable dedupe.
+    No new GitHub read, wait, retry, or broad behind-main candidate may be introduced.
+
+    (ii) MAKE THE RELEASE MATERIALISE MAIN. Only after the exact existing local route passes,
+    replace the empty-commit leaf with a detached, lease-protected rebase of the observed PR head
+    onto the observed `origin/main`. Reuse or carefully generalize the existing tested rebase
+    primitive rather than inventing a second unsafe git path: fetch main plus the branch, prove the
+    remote still equals the observed head, rebase a disposable worktree, push with the exact
+    force-with-lease, read back the remote SHA, and remove the worktree. A successful receipt names
+    both old and new head SHAs.
+
+    (iii) FAIL CLOSED. A head move, merge conflict, rebase error, lease loss, unreadable readback,
+    or cleanup error must not turn into an empty commit, a second push, or a retry in the same pass.
+    Record the structured stand-down reason and retain the prior escalation behaviour where the
+    existing dirty-branch policy requires it. A conflict is evidence for human/worker repair, not
+    authorization to force a synthetic merge.
+
+    (iv) KEEP THE LANES DISJOINT. W1-T3277's deliberately high-distance ordinary refresh and
+    W1-T2620's cohort redrive retain their current predicates and actions. This path is solely the
+    evidence-backed stale-red release which has already proved the repaired main tree locally.
+  acceptance:
+    - claim: "after the existing stale-red terminal-time, live-workflow, and isolated-route checks pass, the release publishes a lease-protected rebase whose resulting PR head contains the observed main repair, not an empty commit on the old tree"
+      proof: "unit test: W1-T3568: a verified stale-red release rebases the observed PR head onto main"
+    - claim: "a stale-red rebase conflict, observed-head mismatch, push lease loss, or unreadable remote readback produces no branch mutation and a structured durable stand-down"
+      proof: "unit test: W1-T3568: stale-red rebase failure leaves the observed remote head untouched"
+    - claim: "the rebase release remains bounded to one oldest eligible candidate and preserves W1-T3422's completion-time, route, live-run, and dedupe controls"
+      proof: "unit test: W1-T3568: stale-red rebase preserves the verified one-per-pass decision boundary"
+    - claim: "the ordinary behind-main refresh threshold and the dirty-branch rebase lane do not widen or become alternate entry points for this stale-red action"
+      proof: "unit test: W1-T3568: stale-red rebase does not lower ordinary refresh eligibility"
+  falsifier: |
+    Close as already satisfied only if the W1-T3422 release action already changes the remote PR
+    head so the observed main SHA is an ancestor, after the same route evidence, and records the
+    exact new head under a lease. `pushEmptyCommit` producing a fresh SHA is not that evidence.
+
+    The implementation must include a real disposable git fixture: deleting the rebase must leave
+    the repaired-main commit absent from the remote PR head, while restoring it must make that
+    commit an ancestor. It must also prove the negative paths publish nothing. A mocked successful
+    callback or a check run merely queued by GitHub is insufficient.
