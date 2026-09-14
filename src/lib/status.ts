@@ -37,6 +37,7 @@ import {
   singlePrRestArgs,
 } from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
+import { isDeclaredBranchGuard } from "./branch-reaper.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1). Merge-state is DERIVED FROM GITHUB, never written back to
@@ -1844,11 +1845,13 @@ export function planBranchReap(
   }
   for (const f of facts) {
     // `main` is never a candidate, whatever else is true of it.
-    const isGuarded = f.name === "main" || f.namedInSource || declared.has(f.name);
+    const isGuarded = f.namedInSource || isDeclaredBranchGuard(f.name, declaredGuards);
     if (isGuarded) {
       plan.guarded.push(f.name);
       plan.reasons[f.name] = "protected";
-      if (f.namedInSource && !declared.has(f.name) && f.name !== "main") plan.undeclaredGuards.push(f.name);
+      if (f.namedInSource && !declared.has(f.name) && !isDeclaredBranchGuard(f.name, declaredGuards)) {
+        plan.undeclaredGuards.push(f.name);
+      }
       continue;
     }
     // MERGED AND CLOSED ARE DECIDED BY `prState` ALONE, BEFORE PATCH ID IS EVEN CONSULTED (W1-T2247: a

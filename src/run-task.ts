@@ -27378,7 +27378,14 @@ export async function daemonCommand(
   // W1-T1000002: `ledgerLines` lets this rung's ONE arm-origin (`ensurePrOpen`, feedback-landing.ts)
   // honour a standing operator hold — the SAME `ledgerPath` this daemon boot already reads
   // everywhere else in this function, never a second path construction.
-  const sweepFeedbackLandingRung = () => sweepFeedbackLanding(repoRoot, { log, ledgerLines: () => readLedgerLines(ledgerPath) });
+  const sweepFeedbackLandingRung = () =>
+    sweepFeedbackLanding(repoRoot, {
+      log,
+      ledgerLines: () => readLedgerLines(ledgerPath),
+      ...(target.isSelf
+        ? {}
+        : { targetRepository: { owner: target.owner, repo: target.repo }, sourceRepository: self, landingOwner: config.root }),
+    });
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
   // starts, over the daemon process's OWN live env — belt-and-suspenders atop
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
