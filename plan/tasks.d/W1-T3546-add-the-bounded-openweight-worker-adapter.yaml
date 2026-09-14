@@ -15,10 +15,12 @@
     - src/lib/inbox.ts
     - src/lib/worker.ts
     - src/lib/worker-provider.ts
+    - src/run-task.ts
     - .remudero/mounts.yaml
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
+    - test/retro-marker-atomic.test.ts
   origin: "operator-session#open-weight-research-2026-09-13"
-  plan_refs: ["W1-T3545", "W1-T3547", "W1-T2573", "W1-T258", "W1-T3094"]
+  plan_refs: ["W1-T110", "W1-T111", "W1-T241", "W1-T3545", "W1-T3547", "W1-T2573", "W1-T258", "W1-T3094", "W1-T62", "W1-T94"]
   status: queued
   attempts: 0
   note: |
@@ -54,6 +56,22 @@
     provider: this PR is wired but unused. W1-T3547 is the dependent, later task that changes the
     mounts data and extends this test file to route triage; the overlap is intentional sequencing,
     not concurrent ownership.
+
+    Widening the worker provider union also reaches `retroCommand`'s prepublish provenance
+    boundary. `RetroPrepublishProvenance` intentionally accepts only Claude/Codex: retro remains
+    on its existing premium mount and a future openweight provider must not be represented there
+    merely because the shared union widened. `src/run-task.ts` is therefore an in-scope compatibility
+    mapping: retain Claude/Codex provenance and omit any other provider. The existing
+    `test/retro-marker-atomic.test.ts` integration fixture exercises that real `retroCommand`
+    mapping with an openweight worker result; it changes no mount, endpoint, credential, or
+    routing decision.
+
+    The added `src/run-task.ts` scope overlaps older W1-T110/W1-T111 inbox and approval flows,
+    W1-T241's atomic draft-cache work, W1-T62's report-attribution path, and W1-T94's fix-rung
+    taxonomy only because they share the command host. This task changes none of those behaviors;
+    it changes the one retro provenance object needed to preserve their existing provider contract.
+    Its mount and test overlap with W1-T3547 is deliberate sequencing: W1-T3546 supplies inert
+    adapter data, while W1-T3547 alone may assign a mount after its separate authority proof.
   acceptance:
     - claim: "the capability ladder resolves openweight by table lookup and its adapter never sends json_object response_format"
       proof: "unit test: the capability ladder resolves an open-weight provider by table lookup"
