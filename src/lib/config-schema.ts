@@ -39,6 +39,29 @@ export interface Config {
     /** Azure OpenAI-compatible endpoint for the bounded open-weight adapter. The API key is
      * intentionally environment-only and is never a config field. */
     openweightEndpoint?: string;
+    /** Azure OpenAI-compatible Responses endpoint for the bounded WebSearch bridge triage's
+     * gpt-oss-120b `WebSearch` function call reaches through. Absent (disabled) by default; the
+     * API key is intentionally environment-only and is never a config field. Azure Responses
+     * `web_search` is a paid platform tool that sends query data beyond the normal
+     * compliance/geographic boundary, so this stays operator opt-in (see
+     * `openweightSearchConsent`). */
+    openweightSearchEndpoint?: string;
+    /** The deployed Azure Responses search model (e.g. "gpt-5-mini") the WebSearch bridge calls.
+     * Required alongside `openweightSearchEndpoint`. */
+    openweightSearchModel?: string;
+    /** Explicit non-secret operator opt-in acknowledging the data-boundary crossing documented on
+     * `openweightSearchEndpoint`. Required, and must be `true`, whenever that endpoint is
+     * configured; config validation rejects an endpoint without it. */
+    openweightSearchConsent?: boolean;
+    /** Operator-declared, versioned price per accepted search call (USD) — the observable price
+     * input the bridge's bounded daily reservation is derived from. Never a hard-coded
+     * platform-price constant for a paid platform tool. Required, and must be positive, whenever
+     * `openweightSearchEndpoint` is configured. */
+    openweightSearchCostUsdPerCall?: number;
+    /** Bounded daily cash allowance for the WebSearch bridge, metered separately from
+     * `dailyCapUsd`'s gpt-oss token spend. Required, and must be positive, whenever
+     * `openweightSearchEndpoint` is configured. */
+    openweightSearchDailyUsd?: number;
   };
   learningsHomes?: { userOverall?: string; global?: string };
 }
@@ -111,6 +134,11 @@ const workerProvidersShape: ValueSchema = {
     configField("codexModel", "string", true, undefined, "config.json", "Hard Codex model override.", stringShape),
     configField("codexModels", "object", true, undefined, "config.json", "Codex model preferences per mount tier.", codexModelsShape),
     configField("openweightEndpoint", "string", true, undefined, "config.json", "Azure OpenAI-compatible endpoint for the open-weight worker adapter.", stringShape),
+    configField("openweightSearchEndpoint", "string", true, undefined, "config.json", "Azure OpenAI-compatible Responses endpoint for the bounded WebSearch bridge.", stringShape),
+    configField("openweightSearchModel", "string", true, undefined, "config.json", "Deployed Azure Responses search model for the WebSearch bridge.", stringShape),
+    configField("openweightSearchConsent", "boolean", true, undefined, "config.json", "Explicit opt-in to the WebSearch bridge's data-boundary crossing.", booleanShape),
+    configField("openweightSearchCostUsdPerCall", "number", true, undefined, "config.json", "Operator-declared price per accepted WebSearch bridge call (USD).", numberShape),
+    configField("openweightSearchDailyUsd", "number", true, undefined, "config.json", "Bounded daily cash allowance for the WebSearch bridge (USD).", numberShape),
   ],
 };
 
@@ -192,6 +220,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
   envEntry("RMD_OPENWEIGHT_API_KEY", "Supplies the Azure API key to the daemon-local open-weight adapter; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),
+  envEntry("RMD_OPENWEIGHT_SEARCH_API_KEY", "Supplies the separate Azure API key to the daemon-local WebSearch bridge; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_RESTART_THROTTLE_S", "Documents restart throttling excluded from proof environments.", ["src/lib/review.ts"]),
   envEntry("RMD_SELF_SYNC_DONE", "Guards CLI self-sync re-exec loops.", ["src/lib/self-sync.ts", "src/lib/commit-message.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_HOST", "Overrides operator console bind hosts.", ["src/lib/serve.ts", "src/lib/launchd.ts", "src/run-task.ts"]),

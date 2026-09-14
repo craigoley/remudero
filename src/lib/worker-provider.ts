@@ -1,5 +1,17 @@
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  constants as fsConstants,
+  accessSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
@@ -1722,10 +1734,27 @@ export async function spawnCodexWorker(
 /** Azure deployment authentication is process-local to the daemon. It is deliberately not a
  * config field and never enters a worker environment or a ledger row. */
 export const OPENWEIGHT_API_KEY_ENV = "RMD_OPENWEIGHT_API_KEY";
+/** The WebSearch bridge's OWN daemon-local credential — a separate env var because the bridge
+ * calls a different, separately provisioned Azure resource (`synthwatch-aoai`'s Responses
+ * deployment) than gpt-oss-120b's Chat Completions deployment. Never a config field; never
+ * copied into a worker environment. */
+export const OPENWEIGHT_SEARCH_API_KEY_ENV = "RMD_OPENWEIGHT_SEARCH_API_KEY";
 /** PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the live probe. */
 export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 5_000;
 const OPENWEIGHT_INPUT_USD_PER_MILLION = 0.15;
 const OPENWEIGHT_OUTPUT_USD_PER_MILLION = 0.6;
+/** Azure Responses api-version pinned for the WebSearch bridge, the same "one literal, named
+ * once" discipline {@link openWeightEndpoint} already keeps for the Chat Completions surface. */
+const OPENWEIGHT_SEARCH_API_VERSION = "2025-03-01-preview";
+/** Short abortable bound on the WebSearch bridge's own outbound request — bounded per the design
+ * note, deliberately far tighter than a worker's own max-turn clock bound. */
+const OPENWEIGHT_SEARCH_TIMEOUT_MS = 8_000;
+/** Strict response-size ceiling for the WebSearch bridge's own outbound request, so a
+ * misbehaving or compromised search deployment cannot hand gpt-oss an unbounded payload. */
+const OPENWEIGHT_SEARCH_MAX_RESPONSE_BYTES = 200_000;
+/** The declared-tool function name backing the `WebSearch` capability — distinct from the
+ * Chat Completions surface's own `openai/deployments` model naming. */
+const OPENWEIGHT_WEBSEARCH_FUNCTION_NAME = "web_search_query";
 
 export interface OpenWeightSpawnArgs {
   cwd: string;
@@ -1770,6 +1799,27 @@ export interface OpenWeightWorkerResult {
   compactionConfigured: false;
   qualitySuspect: false;
   workerDurationMs: number;
+  /** Present only when `WebSearch` was among the declared tools for this call — absent, not
+   * zeroed, on every call that never declared it, the same "absent on the healthy/inapplicable
+   * path" discipline {@link WorkerResult.lostGrants} already keeps. `callsAttempted` counts every
+   * time gpt-oss invoked the bridge; `callsAccepted` counts only a citation-bearing provider
+   * result; `callsRefused` is the remainder (missing evidence, malformed response, or an
+   * exhausted bounded allowance); `costUsd` is the bounded spend actually RESERVED — charged the
+   * moment a reservation is recorded, before the outbound request, so a transport failure after
+   * that point still counts against the allowance (see {@link reserveOpenWeightSearchSpend}). */
+  webSearch?: {
+    callsAttempted: number;
+    callsAccepted: number;
+    callsRefused: number;
+    costUsd: number;
+  };
+}
+
+/** One provider-issued URL citation surfaced by the WebSearch bridge — bounded, structured
+ *  evidence only; never the search model's un-attributed prose. */
+export interface OpenWeightSearchCitation {
+  url: string;
+  title?: string;
 }
 
 type OpenWeightMessage = Record<string, unknown>;
@@ -1781,13 +1831,21 @@ const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: string; 
   Edit: { name: "edit_file", description: "Replace one exact UTF-8 string in a file under the worker cwd.", required: ["path", "old_string", "new_string"] },
   Grep: { name: "grep_files", description: "Find a literal string in UTF-8 files under the worker cwd.", required: ["query"] },
   Glob: { name: "glob_files", description: "List files under the worker cwd by a suffix-like pattern.", required: ["pattern"] },
+  WebSearch: {
+    name: OPENWEIGHT_WEBSEARCH_FUNCTION_NAME,
+    description: "Search the web through the bounded Azure Responses bridge; returns only a provider-issued web_search_call result and its URL citations.",
+    required: ["query"],
+  },
 };
 
 function openWeightTools(declared: readonly string[] | undefined): Array<Record<string, unknown>> {
   const requested = [...new Set(declared ?? [])];
   const unsupported = requested.filter((tool) => OPENWEIGHT_FUNCTIONS[tool] === undefined);
-  // Never silently drop a declared tool: the prompt may rely on it (for example triage's
-  // WebSearch), and a partial capability set would make the model fabricate a missing result.
+  // Never silently drop a declared tool: the prompt may rely on it, and a partial capability set
+  // would make the model fabricate a missing result. `WebSearch` is declared here too, but it is
+  // never a local tool: `openWeightSearchBridgeConfig` below fails the whole spawn closed before
+  // any request when the bounded Azure Responses bridge is unconfigured or the model never asks
+  // for it.
   if (unsupported.length > 0) throw new Error(`openweight adapter does not implement declared tool(s): ${unsupported.join(", ")}`);
   return requested
     .map((tool) => OPENWEIGHT_FUNCTIONS[tool]!)
@@ -1891,6 +1949,174 @@ function openWeightEndpoint(config: Config, model: string): string {
   return new URL(`openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=2024-10-21`, endpoint).toString();
 }
 
+/** The bounded WebSearch bridge's non-secret configuration, resolved and fully validated once per
+ *  spawn. Every field is REQUIRED the moment `workerProviders.openweightSearchEndpoint` is set —
+ *  `config.ts`'s `validateConfig` refuses an incomplete set at config-load time, and this
+ *  redundant runtime check is what makes the spawn itself fail closed even for a `Config` object
+ *  a test hand-builds without going through `validateConfig`. */
+interface OpenWeightSearchBridgeConfig {
+  endpoint: string;
+  model: string;
+  costUsdPerCall: number;
+  dailyUsd: number;
+}
+
+/** Resolve and validate the WebSearch bridge's config, or throw naming exactly the missing/
+ *  invalid field — never a generic refusal. Deliberately mirrors {@link openWeightEndpoint}'s
+ *  own https-only, trailing-slash-tolerant URL shape. */
+function openWeightSearchBridgeConfig(config: Config): OpenWeightSearchBridgeConfig {
+  const workerProviders = config.workerProviders;
+  const endpoint = workerProviders?.openweightSearchEndpoint;
+  if (typeof endpoint !== "string" || endpoint.trim() === "") {
+    throw new Error("openweight WebSearch bridge requires workerProviders.openweightSearchEndpoint");
+  }
+  const parsedEndpoint = new URL(endpoint.endsWith("/") ? endpoint : `${endpoint}/`);
+  if (parsedEndpoint.protocol !== "https:") throw new Error("openweight WebSearch bridge endpoint must use https");
+  const model = workerProviders?.openweightSearchModel;
+  if (typeof model !== "string" || model.trim() === "") {
+    throw new Error("openweight WebSearch bridge requires workerProviders.openweightSearchModel");
+  }
+  if (workerProviders?.openweightSearchConsent !== true) {
+    throw new Error("openweight WebSearch bridge requires explicit workerProviders.openweightSearchConsent");
+  }
+  const costUsdPerCall = workerProviders?.openweightSearchCostUsdPerCall;
+  if (typeof costUsdPerCall !== "number" || !Number.isFinite(costUsdPerCall) || costUsdPerCall <= 0) {
+    throw new Error("openweight WebSearch bridge requires a positive workerProviders.openweightSearchCostUsdPerCall");
+  }
+  const dailyUsd = workerProviders?.openweightSearchDailyUsd;
+  if (typeof dailyUsd !== "number" || !Number.isFinite(dailyUsd) || dailyUsd <= 0) {
+    throw new Error("openweight WebSearch bridge requires a positive workerProviders.openweightSearchDailyUsd");
+  }
+  return { endpoint, model, costUsdPerCall, dailyUsd };
+}
+
+/** The Azure Responses request URL for the WebSearch bridge's OWN deployment — a distinct surface
+ *  from {@link openWeightEndpoint}'s Chat Completions URL, never the deprecated preview tool. */
+function openWeightSearchUrl(bridge: Pick<OpenWeightSearchBridgeConfig, "endpoint" | "model">): string {
+  const base = new URL(bridge.endpoint.endsWith("/") ? bridge.endpoint : `${bridge.endpoint}/`);
+  return new URL(
+    `openai/deployments/${encodeURIComponent(bridge.model)}/responses?api-version=${OPENWEIGHT_SEARCH_API_VERSION}`,
+    base,
+  ).toString();
+}
+
+/** Durable per-instance ledger the WebSearch bridge's bounded daily allowance is reserved
+ *  against — `<config.root>/state/…`, the same state-directory convention `policy.ts`'s daily
+ *  cost ceiling override already uses, so it survives a daemon restart. */
+function openWeightSearchLedgerPath(config: Config): string {
+  return join(config.root, "state", "openweight-search-spend.jsonl");
+}
+
+/**
+ * Reserve `bridge.costUsdPerCall` against today's bounded WebSearch allowance BEFORE the outbound
+ * request runs, refusing with NO reservation and NO request when the remaining allowance would be
+ * exceeded. Once a reservation is appended, the spend counts even if the request that follows
+ * times out or returns garbage — a transport failure must never silently hand paid authority back
+ * to the allowance. `O_APPEND` makes concurrent daemon writers safe with no lock, the exact idiom
+ * `ledger.ts`'s `appendLedger` documents and relies on for the same reason; the file surviving on
+ * disk (never in memory) is what makes the bound durable across a process restart.
+ */
+function reserveOpenWeightSearchSpend(config: Config, bridge: Pick<OpenWeightSearchBridgeConfig, "costUsdPerCall" | "dailyUsd">, clock: Pick<Clock, "now">): void {
+  const path = openWeightSearchLedgerPath(config);
+  mkdirSync(dirname(path), { recursive: true });
+  const today = new Date(clock.now()).toISOString().slice(0, 10);
+  let spentTodayUsd = 0;
+  try {
+    const raw = readFileSync(path, "utf8");
+    for (const line of raw.split("\n")) {
+      if (line.trim() === "") continue;
+      try {
+        const record = JSON.parse(line) as { date?: unknown; costUsd?: unknown };
+        if (record.date === today && typeof record.costUsd === "number") spentTodayUsd += record.costUsd;
+      } catch {
+        // A torn or corrupt line never blocks the read — only that one line's own charge is unproven, and
+        // undercounting spend fails toward MORE refusals, never fewer.
+      }
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (spentTodayUsd + bridge.costUsdPerCall > bridge.dailyUsd) {
+    throw new Error(
+      `openweight WebSearch bridge daily allowance exhausted: $${spentTodayUsd.toFixed(4)} of $${bridge.dailyUsd} already reserved today`,
+    );
+  }
+  const buf = Buffer.from(`${JSON.stringify({ date: today, costUsd: bridge.costUsdPerCall, ts: new Date(clock.now()).toISOString() })}\n`, "utf8");
+  const fd = openSync(path, "a");
+  try {
+    writeSync(fd, buf, 0, buf.length);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Run the WebSearch bridge's own bounded, abortable Azure Responses request — a short timeout
+ *  and a strict response-size ceiling, so a slow or oversized deployment cannot stall or flood the
+ *  gpt-oss conversation it feeds. */
+async function fetchOpenWeightSearch(
+  fetchImpl: typeof fetch,
+  bridge: Pick<OpenWeightSearchBridgeConfig, "endpoint" | "model">,
+  apiKey: string,
+  query: string,
+): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OPENWEIGHT_SEARCH_TIMEOUT_MS);
+  try {
+    const response = await fetchImpl(openWeightSearchUrl(bridge), {
+      method: "POST",
+      headers: { "content-type": "application/json", "api-key": apiKey },
+      body: JSON.stringify({ model: bridge.model, input: query, tools: [{ type: "web_search" }] }),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`openweight WebSearch bridge request failed with HTTP ${response.status}`);
+    const raw = await response.text();
+    if (Buffer.byteLength(raw, "utf8") > OPENWEIGHT_SEARCH_MAX_RESPONSE_BYTES) {
+      throw new Error(`openweight WebSearch bridge response exceeded ${OPENWEIGHT_SEARCH_MAX_RESPONSE_BYTES} bytes`);
+    }
+    return JSON.parse(raw) as unknown;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Accept a WebSearch bridge response ONLY when it carries both a provider `web_search_call`
+ *  output item and at least one structured `url_citation` annotation — the exact falsifier the
+ *  task record names. Anything else (missing output, no search call, prose with no citation)
+ *  throws, naming what was absent, rather than returning a model-authored answer as evidence. */
+function parseOpenWeightSearchResponse(payload: unknown): { text: string; citations: OpenWeightSearchCitation[] } {
+  if (!payload || typeof payload !== "object") throw new Error("openweight WebSearch bridge response is not a JSON object");
+  const output = (payload as { output?: unknown }).output;
+  if (!Array.isArray(output)) throw new Error("openweight WebSearch bridge response carries no output items");
+  const hasSearchCall = output.some(
+    (item) => item !== null && typeof item === "object" && (item as { type?: unknown }).type === "web_search_call",
+  );
+  if (!hasSearchCall) throw new Error("openweight WebSearch bridge response carries no provider web_search_call");
+  const citations: OpenWeightSearchCitation[] = [];
+  let text = "";
+  for (const item of output) {
+    if (item === null || typeof item !== "object" || (item as { type?: unknown }).type !== "message") continue;
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (part === null || typeof part !== "object") continue;
+      const partText = (part as { text?: unknown }).text;
+      if (typeof partText === "string") text = partText;
+      const annotations = (part as { annotations?: unknown }).annotations;
+      if (!Array.isArray(annotations)) continue;
+      for (const annotation of annotations) {
+        if (annotation === null || typeof annotation !== "object") continue;
+        const url = (annotation as { url?: unknown }).url;
+        if ((annotation as { type?: unknown }).type === "url_citation" && typeof url === "string" && url.trim() !== "") {
+          const title = (annotation as { title?: unknown }).title;
+          citations.push({ url, ...(typeof title === "string" ? { title } : {}) });
+        }
+      }
+    }
+  }
+  if (citations.length === 0) throw new Error("openweight WebSearch bridge response carries no url_citation annotations");
+  return { text, citations };
+}
+
 function openWeightResult(input: {
   model: string;
   effort: string;
@@ -1902,6 +2128,7 @@ function openWeightResult(input: {
   promptTokens: number;
   completionTokens: number;
   error?: unknown;
+  webSearch?: OpenWeightWorkerResult["webSearch"];
 }): OpenWeightWorkerResult {
   const text = input.text ?? "";
   const error = input.error instanceof Error ? input.error.message : input.error === undefined ? undefined : String(input.error);
@@ -1928,6 +2155,7 @@ function openWeightResult(input: {
     compactionConfigured: false,
     qualitySuspect: false,
     workerDurationMs: input.clock.now() - input.startedAt,
+    ...(input.webSearch ? { webSearch: input.webSearch } : {}),
   };
 }
 
@@ -1945,11 +2173,33 @@ export async function spawnOpenWeightWorker(
   let turns = 0;
   let sessionId = "";
   let text = "";
+  // Declared once up front (off the RAW request, not `declaredNames`) so it is available to the
+  // catch handler even when the bridge's own config/credential preflight is what throws.
+  const webSearchDeclared = (args.tools ?? []).includes("WebSearch");
+  let webSearchCallsAttempted = 0;
+  let webSearchCallsAccepted = 0;
+  let webSearchCallsRefused = 0;
+  let webSearchCostUsd = 0;
+  const webSearchFields = (): OpenWeightWorkerResult["webSearch"] =>
+    webSearchDeclared
+      ? { callsAttempted: webSearchCallsAttempted, callsAccepted: webSearchCallsAccepted, callsRefused: webSearchCallsRefused, costUsd: webSearchCostUsd }
+      : undefined;
   try {
     const tools = openWeightTools(args.tools);
     const key = (args.env ?? process.env)[OPENWEIGHT_API_KEY_ENV];
     if (!key) throw new Error(`openweight provider requires ${OPENWEIGHT_API_KEY_ENV} in the daemon environment`);
     const declaredNames = new Set(tools.map((tool) => String((tool.function as { name?: unknown }).name)));
+    // The WebSearch bridge's own config and credential are validated ONCE, here, before ANY
+    // request (including the primary Chat Completions turn below) — so an unconfigured or
+    // uncredentialed bridge refuses the whole spawn with zero HTTP calls, never a mid-conversation
+    // surprise the model has to route around.
+    let searchBridge: OpenWeightSearchBridgeConfig | undefined;
+    let searchApiKey: string | undefined;
+    if (declaredNames.has(OPENWEIGHT_WEBSEARCH_FUNCTION_NAME)) {
+      searchBridge = openWeightSearchBridgeConfig(config);
+      searchApiKey = (args.env ?? process.env)[OPENWEIGHT_SEARCH_API_KEY_ENV];
+      if (!searchApiKey) throw new Error(`openweight WebSearch bridge requires ${OPENWEIGHT_SEARCH_API_KEY_ENV} in the daemon environment`);
+    }
     const messages: OpenWeightMessage[] = [{ role: "user", content: args.prompt }];
     const maxTurns = args.maxTurns ?? 1;
     if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error("openweight maxTurns must be a positive integer");
@@ -1979,7 +2229,12 @@ export async function spawnOpenWeightWorker(
       if (!message) throw new Error("openweight response has no assistant message");
       const calls = Array.isArray(message.tool_calls) ? message.tool_calls as OpenWeightToolCall[] : [];
       text = typeof message.content === "string" ? message.content : text;
-      if (calls.length === 0) return openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens });
+      if (calls.length === 0) {
+        return openWeightResult({
+          model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens,
+          webSearch: webSearchFields(),
+        });
+      }
       if (turns >= maxTurns) throw new Error(`openweight tool loop exceeded maxTurns=${maxTurns}`);
       messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls });
       for (const call of calls) {
@@ -1989,10 +2244,32 @@ export async function spawnOpenWeightWorker(
           throw new Error("openweight response requested an undeclared tool");
         }
         let content: string;
-        try {
-          content = JSON.stringify(executeOpenWeightTool(name, objectArguments(call.function?.arguments), args.cwd));
-        } catch (error) {
-          content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
+        if (name === OPENWEIGHT_WEBSEARCH_FUNCTION_NAME) {
+          // Reachable only when `declaredNames` carried this name, which is set only inside the
+          // `searchBridge`-populating branch above — both are therefore always defined here.
+          const bridge = searchBridge!;
+          const apiKey = searchApiKey!;
+          webSearchCallsAttempted += 1;
+          try {
+            const query = objectArguments(call.function?.arguments).query;
+            if (typeof query !== "string" || query.trim() === "") throw new Error("web_search_query requires a non-empty query");
+            // Reserved BEFORE the outbound request: an unreadable/failed response below still
+            // leaves the allowance charged (see reserveOpenWeightSearchSpend's own contract).
+            reserveOpenWeightSearchSpend(config, bridge, clock);
+            webSearchCostUsd += bridge.costUsdPerCall;
+            const outcome = parseOpenWeightSearchResponse(await fetchOpenWeightSearch(args.fetchImpl ?? fetch, bridge, apiKey, query));
+            webSearchCallsAccepted += 1;
+            content = JSON.stringify({ query, citations: outcome.citations, text: outcome.text });
+          } catch (error) {
+            webSearchCallsRefused += 1;
+            content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
+          }
+        } else {
+          try {
+            content = JSON.stringify(executeOpenWeightTool(name, objectArguments(call.function?.arguments), args.cwd));
+          } catch (error) {
+            content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
+          }
         }
         messages.push({ role: "tool", tool_call_id: id, content });
       }
@@ -2011,6 +2288,7 @@ export async function spawnOpenWeightWorker(
       promptTokens,
       completionTokens,
       error: error instanceof Error ? error.message : String(error),
+      webSearch: webSearchFields(),
     });
   }
 }

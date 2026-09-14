@@ -75,6 +75,39 @@ test("validateConfigShape refuses a missing required root and a non-object docum
   );
 });
 
+test("validateConfigShape admits the WebSearch bridge's non-secret workerProviders fields and rejects a wrong-typed one", () => {
+  const valid = validateConfigShape(
+    {
+      claudeBin: "/usr/bin/claude",
+      root: "/tmp/root",
+      workerProviders: {
+        openweightSearchEndpoint: "https://search.example.test/",
+        openweightSearchModel: "gpt-5-mini",
+        openweightSearchConsent: true,
+        openweightSearchCostUsdPerCall: 0.02,
+        openweightSearchDailyUsd: 1,
+      },
+    },
+    "websearch-bridge-config.json",
+  ) as Config;
+  assert.equal(valid.workerProviders?.openweightSearchModel, "gpt-5-mini");
+  assert.equal(valid.workerProviders?.openweightSearchConsent, true);
+  assert.doesNotMatch(JSON.stringify(valid), /api.?key|secret/i, "the accepted shape carries an endpoint, never a credential");
+
+  assert.throws(
+    () =>
+      validateConfigShape(
+        { claudeBin: "/usr/bin/claude", root: "/tmp/root", workerProviders: { openweightSearchConsent: "yes" } },
+        "websearch-bridge-bad.json",
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof ConfigShapeError);
+      assert.match(err.message, /workerProviders\.openweightSearchConsent: expected boolean/);
+      return true;
+    },
+  );
+});
+
 test("CONFIG_SCHEMA declares the config field shape as metadata", () => {
   const fields = new Set<keyof Config>([
     "claudeBin",

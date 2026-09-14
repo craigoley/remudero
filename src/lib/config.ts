@@ -100,6 +100,33 @@ export function validateConfig(config: Config): void {
   if (!Number.isFinite(cacheMs) || cacheMs <= 0) {
     throw new ConfigValidationError("invalid config: workerProviders.capacityCacheMs must be > 0");
   }
+  const searchEndpoint = config.workerProviders?.openweightSearchEndpoint;
+  if (typeof searchEndpoint === "string" && searchEndpoint.trim() !== "") {
+    const searchModel = config.workerProviders?.openweightSearchModel;
+    if (typeof searchModel !== "string" || searchModel.trim() === "") {
+      throw new ConfigValidationError(
+        "invalid config: workerProviders.openweightSearchEndpoint requires workerProviders.openweightSearchModel",
+      );
+    }
+    if (config.workerProviders?.openweightSearchConsent !== true) {
+      throw new ConfigValidationError(
+        "invalid config: workerProviders.openweightSearchEndpoint requires explicit workerProviders.openweightSearchConsent " +
+          "(Azure Responses web_search is a paid platform tool that crosses the normal compliance/geographic boundary)",
+      );
+    }
+    const costUsdPerCall = config.workerProviders?.openweightSearchCostUsdPerCall;
+    if (typeof costUsdPerCall !== "number" || !Number.isFinite(costUsdPerCall) || costUsdPerCall <= 0) {
+      throw new ConfigValidationError(
+        "invalid config: workerProviders.openweightSearchEndpoint requires a positive workerProviders.openweightSearchCostUsdPerCall",
+      );
+    }
+    const searchDailyUsd = config.workerProviders?.openweightSearchDailyUsd;
+    if (typeof searchDailyUsd !== "number" || !Number.isFinite(searchDailyUsd) || searchDailyUsd <= 0) {
+      throw new ConfigValidationError(
+        "invalid config: workerProviders.openweightSearchEndpoint requires a positive workerProviders.openweightSearchDailyUsd",
+      );
+    }
+  }
   for (const tier of ["economy", "balanced", "frontier"] as const) {
     const models = config.workerProviders?.codexModels?.[tier];
     if (models !== undefined && (models.length === 0 || models.some((model) => typeof model !== "string" || model.trim() === ""))) {

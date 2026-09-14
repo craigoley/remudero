@@ -261,6 +261,18 @@ export interface WorkerResult {
     candidates: string[];
     searchedPaths: string[];
   };
+  /** Present only on an openweight call that declared the `WebSearch` tool — the bounded Azure
+   *  Responses bridge's own accounting (W1-T3558), absent on every other provider/call the same
+   *  "absent on the healthy/inapplicable path" discipline {@link lostGrants} already keeps.
+   *  `callsAttempted`/`callsAccepted`/`callsRefused` count the bridge invocation, never gpt-oss's
+   *  own turns; `costUsd` is the bounded spend RESERVED against the daily allowance, metered
+   *  separately from `costUsd` above (gpt-oss token spend). */
+  webSearch?: {
+    callsAttempted: number;
+    callsAccepted: number;
+    callsRefused: number;
+    costUsd: number;
+  };
 }
 
 /** `model`/`effort` label logged when a call rides no explicit mount override (e.g. recon, the advisory reviewer) — an honest
@@ -432,6 +444,12 @@ export function workerLedgerFields(r: WorkerResult): {
     candidates: string[];
     searched_paths: string[];
   };
+  web_search?: {
+    calls_attempted: number;
+    calls_accepted: number;
+    calls_refused: number;
+    cost_usd: number;
+  };
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
@@ -514,6 +532,16 @@ export function workerLedgerFields(r: WorkerResult): {
             capability_used: r.codexCapabilityFallback.capabilityUsed,
             candidates: r.codexCapabilityFallback.candidates,
             searched_paths: r.codexCapabilityFallback.searchedPaths,
+          },
+        }
+      : {}),
+    ...(r.webSearch
+      ? {
+          web_search: {
+            calls_attempted: r.webSearch.callsAttempted,
+            calls_accepted: r.webSearch.callsAccepted,
+            calls_refused: r.webSearch.callsRefused,
+            cost_usd: r.webSearch.costUsd,
           },
         }
       : {}),
