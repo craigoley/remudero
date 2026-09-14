@@ -932,10 +932,12 @@ export interface DaemonDeps {
    *  two-bound decision. Optional like its siblings. WITHOUT run-task.ts's producer line these are
    *  undefined and the rung is dead code — the shape #1066 and #2952 shipped, W1-T2959 making three. */
   checkCiLearningCadence?: () => MeasurementCadenceDecision;
-  /** Run one ci-learning tick, returning counts this loop logs. Report-only: it drafts MARKED,
-   *  PARKED shards and files nothing (Law 5). Best-effort — a throw is logged and the tick
-   *  continues. */
-  runCiLearningCadence?: () => Promise<CiLearningCadenceRunResult>;
+  /** Run one ci-learning tick, returning its draft and state-backed landing counts for the durable
+   *  row. Every resulting task remains MARKED/PARKED (`author_class: machine`, `verify: human`);
+   *  a throw is best-effort and the tick continues. */
+  runCiLearningCadence?: () => Promise<
+    CiLearningCadenceRunResult & { filedCount: number; skippedCount: number; refusedCount: number }
+  >;
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
    * degraded read — and the loop only acts on an explicit fire. Optional (W1-T160). */
@@ -2413,7 +2415,8 @@ export async function runDaemon(
     }
 
     // W1-T2972: same tick discipline and best-effort contract as the two cadences above, on its own
-    // row and marker. DRAFTS marked, parked shards and files nothing — a fire spends no budget.
+    // row and marker. It stages MARKED, PARKED shards through the isolated landing bridge; a fire
+    // spends the cadence budget before the potentially slow corpus read.
     if (deps.checkCiLearningCadence) {
       let ciLearningDecision: MeasurementCadenceDecision | undefined;
       try {
@@ -2432,6 +2435,9 @@ export async function runDaemon(
               drafts: result.draftCount,
               excluded: result.excludedCount,
               unreadable: result.unreadableCount,
+              filed: result.filedCount,
+              skipped: result.skippedCount,
+              refused: result.refusedCount,
               lesson_recurrences: result.lessonRecurrences,
             });
           } catch (e) {

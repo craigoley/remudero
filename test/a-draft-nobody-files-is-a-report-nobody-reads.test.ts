@@ -293,7 +293,7 @@ const repairedWindow = () => ({
   ],
 });
 
-test("W1-T2968 REACHABILITY: a firing of the VERB reaches the filer — not just the filer's own unit", () => {
+test("W1-T2968 REACHABILITY: a firing of the VERB reaches the landing bridge — not just the bridge's own unit", () => {
   // W1-T2972's lesson, applied to this task: a suite that only called `fileCiLearningShards` would
   // pass just as happily on a verb that still printed drafts and wrote nothing, which is precisely
   // the defect being closed. So drive the real command and assert on what it hands the filer.
@@ -306,16 +306,17 @@ test("W1-T2968 REACHABILITY: a firing of the VERB reaches the filer — not just
         root,
         loadWindow: () => repairedWindow() as never,
         planOrigins: [],
-        fileShards: (drafts, worktree, deps) => {
+        landShards: (drafts, worktree, deps) => {
           handed = drafts;
-          assert.equal(worktree, root, "the filer writes under the rung's OWN root");
+          assert.equal(worktree, root, "the bridge receives the rung's OWN checkout");
+          assert.equal(deps.stateRoot, root, "and stages under the independently supplied state root");
           assert.equal(typeof deps.mintTaskId, "function", "and is given a minter, not a counter");
           return { filed: [{ relPath: "plan/tasks.d/W1-T2994-x.yaml", taskId: "W1-T2994", findingId: drafts[0].findingId }], skipped: [], refused: [] };
         },
       }),
     );
     assert.equal(r.code, 0);
-    assert.ok(handed, "THE CLAIM: the verb reached the filer. Before this task it printed and returned.");
+    assert.ok(handed, "THE CLAIM: the verb reached the landing bridge. Before this task it printed and returned.");
     assert.equal(handed?.length, 1, "and handed it the drafted shard");
     assert.match(r.out, /FILED W1-T2994 -> plan\/tasks\.d\//, "and the filing is reported, not silent");
   } finally {
@@ -335,7 +336,7 @@ test("W1-T2968 the verb feeds the plan's own origins into the minter, closing th
         root,
         loadWindow: () => repairedWindow() as never,
         planOrigins: ["ci-learning:4283:coverage-ratchet"], // the plan ALREADY holds this finding
-        fileShards: (drafts) => {
+        landShards: (drafts) => {
           called = true;
           return { filed: [], skipped: [], refused: [] };
         },
@@ -361,7 +362,7 @@ test("W1-T2968 a filer that THROWS does not take the report down with it, and sa
         root,
         loadWindow: () => repairedWindow() as never,
         planOrigins: [],
-        fileShards: () => {
+        landShards: () => {
           throw new Error("origin unreachable");
         },
       }),

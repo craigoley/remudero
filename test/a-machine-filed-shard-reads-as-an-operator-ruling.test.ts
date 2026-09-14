@@ -448,8 +448,9 @@ test("W1-T3032: the plan is read from the CHECKOUT, while the cadence marker sta
       root: stateRoot,
       checkoutRoot,
       loadWindow: () => repairedWindow() as never,
-      fileShards: ((_d: unknown, where: string) => {
+      landShards: ((_d: unknown, where: string, deps: { stateRoot: string }) => {
         filedInto = where;
+        assert.equal(deps.stateRoot, stateRoot, "the isolated landing queue belongs to the state root");
         return { filed: [], skipped: [], refused: [] };
       }) as never,
     }),
@@ -489,7 +490,7 @@ test("W1-T3032: an origin already in the checkout's plan is not re-drafted — d
       root: stateRoot,
       checkoutRoot,
       loadWindow: () => repairedWindow() as never,
-      fileShards: (() => ({ filed: [], skipped: [], refused: [] })) as never,
+      landShards: (() => ({ filed: [], skipped: [], refused: [] })) as never,
     }),
   );
   assert.doesNotMatch(r.out, /DRAFT ci-learning:42:coverage-ratchet/, "an already-filed finding must not re-draft");
@@ -504,7 +505,7 @@ test("W1-T3032: an injected root alone keeps the run self-contained, so a suite 
     ciLearningCommand(["--force"], {
       root: only,
       loadWindow: () => repairedWindow() as never,
-      fileShards: ((_d: unknown, where: string) => {
+      landShards: ((_d: unknown, where: string) => {
         filedInto = where;
         return { filed: [], skipped: [], refused: [] };
       }) as never,
