@@ -541,6 +541,8 @@ function setupFakeRetroFixture(
     preflightExercisesRepair?: boolean;
     /** Override only the resumed repair worker result; the initial Architect result stays valid. */
     repairWorkerResult?: Partial<WorkerResult>;
+    /** Simulate a future provider result reaching retro's historical provenance boundary. */
+    workerProvider?: "claude" | "codex" | "openweight";
   } = {},
 ): FakeRetroFixture {
   const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-success-home-"));
@@ -676,7 +678,7 @@ function setupFakeRetroFixture(
   const fakeSpawn = async (args?: SpawnWorkerArgs): Promise<WorkerResult> => {
     if (args) spawnArgs.push(args);
     const result: WorkerResult = {
-    provider: "claude",
+    provider: opts.workerProvider ?? "claude",
     sessionId: "s-retro-fixture",
     costUsd: 0.01,
     numTurns: 1,
@@ -802,6 +804,21 @@ test("retroCommand: a clean run reaches the REAL saveMarker call at the end of t
     assert.ok(preflightIndex >= 0, "the production retro path must call the prepublish preflight");
     assert.ok(preflightIndex < openedIndex, "preflight must pass before pr.opened is emitted");
     assert.ok(preflightIndex < markerIndex, "preflight must pass before the retro marker advances");
+  });
+});
+
+test("retroCommand: an openweight worker result is omitted from the Claude/Codex-only prepublish provenance", async (t) => {
+  const fx = setupFakeRetroFixture(t, { workerProvider: "openweight" });
+  await fx.run(async () => {
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], {
+      spawn: fx.fakeSpawn,
+      github: offlineGh,
+      prepublishPreflight: fx.prepublishPreflight,
+    }));
+    assert.equal(exitCode, 1, "the fixture's red CI exits only after the prepublish boundary is crossed");
+    const rows = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const preflight = rows.find((row) => row.step === "retro.preflight_passed");
+    assert.equal(Object.hasOwn(preflight, "provider"), false, "openweight must not enter retro's historical Claude/Codex provenance shape");
   });
 });
 
