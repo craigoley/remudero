@@ -20,6 +20,7 @@ import {
 } from "../src/lib/worker.js";
 import { spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
 import { runTask } from "../src/run-task.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 // ── W1-T3573: routes.review and routes.manual (`.remudero/mounts.yaml`) dispatch through the
 // SAME generic implement spawn as routes.implement — before this task, that spawn passed no
@@ -129,20 +130,19 @@ const GENERIC_ROUTE_CLEAN_ISOLATION_EXEC = (): Promise<IsolationProbeExecResult>
   });
 
 function genericRouteGitFixture(root: string): void {
-  const originGit = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtask-generic-route-origin-`));
-  execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", originGit]);
-  const seed = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}runtask-generic-route-seed-`));
-  execFileSync("git", ["clone", "-q", originGit, seed]);
-  execFileSync("git", ["-C", seed, "config", "user.email", "generic-route-test@example.invalid"]);
-  execFileSync("git", ["-C", seed, "config", "user.name", "generic-route-test"]);
-  writeFileSync(join(seed, "README.md"), "seed\n");
-  execFileSync("git", ["-C", seed, "add", "-A"]);
-  execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
-  execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
+  // W1-T3573 census note: built on the shared `gitRepo()` fixture (test/helpers/git-repo.ts,
+  // W1-T2903) rather than a hand-rolled `git init`, so this new test file adds no fresh raw
+  // `git init` call site for test/fixture-copy-census.test.ts's `gitInitFiles` signature to count.
+  const origin = gitRepo({ bare: true, kind: "runtask-generic-route-origin" });
+  const seed = gitRepo({ cloneFrom: origin.dir, kind: "runtask-generic-route-seed" });
+  writeFileSync(join(seed.dir, "README.md"), "seed\n");
+  seed.git("add", "-A");
+  seed.git("commit", "-q", "-m", "seed");
+  seed.git("push", "-q", "origin", "main");
 
   const repoDir = join(root, "repos", "remudero");
   mkdirSync(join(root, "repos"), { recursive: true });
-  execFileSync("git", ["clone", "-q", originGit, repoDir]);
+  execFileSync("git", ["clone", "-q", origin.dir, repoDir]);
   execFileSync("git", ["-C", repoDir, "config", "user.email", "generic-route-test@example.invalid"]);
   execFileSync("git", ["-C", repoDir, "config", "user.name", "generic-route-test"]);
 }
