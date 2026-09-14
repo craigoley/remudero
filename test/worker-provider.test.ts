@@ -62,7 +62,8 @@ test("provider selector uses the subscription with the most tight-window headroo
 function providerSequence(claudeUsed: number, codexUsed: number, dispatches = 200): Record<"claude" | "codex", number> {
   const counts = { claude: 0, codex: 0 };
   for (let index = 0; index < dispatches; index += 1) {
-    counts[selectWorkerProvider([capacity("claude", claudeUsed), capacity("codex", codexUsed)], 5, index).provider] += 1;
+    const selected = selectWorkerProvider([capacity("claude", claudeUsed), capacity("codex", codexUsed)], 5, index).provider;
+    if (selected === "claude" || selected === "codex") counts[selected] += 1;
   }
   return counts;
 }
@@ -88,7 +89,8 @@ test("automatic provider routing weights provider pressure separately from model
   };
   const counts = { claude: 0, codex: 0 };
   for (let index = 0; index < 200; index += 1) {
-    counts[selectWorkerProvider([claude, codex], 5, index).provider] += 1;
+    const selected = selectWorkerProvider([claude, codex], 5, index).provider;
+    if (selected === "claude" || selected === "codex") counts[selected] += 1;
   }
   assert.ok(counts.claude >= 150, `provider pressure should favor Claude, got ${JSON.stringify(counts)}`);
   assert.ok(counts.codex > 0, "independently eligible Spark remains a bounded comparison sample");

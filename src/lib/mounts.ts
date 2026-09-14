@@ -135,8 +135,9 @@ export interface CapabilityLadder {
    * loader always validates and populates this field whenever `capabilities` is declared.
    */
   claudeCandidates?: Record<string, string[]>;
-  /** capability -> effort -> ordered provider candidate model ids (non-empty per (capability, effort)). */
+  /** capability -> effort -> ordered provider candidate model ids. */
   codex: Record<string, Record<string, string[]>>;
+  openweight?: Record<string, Record<string, string[]>>;
 }
 
 /** The whole parsed, validated routing table. */
@@ -401,7 +402,31 @@ function parseCapabilities(
     }
   }
 
-  return { ladder, claude, claudeCandidates, codex };
+  let openweight: Record<string, Record<string, string[]>> | undefined;
+  if (raw.openweight !== undefined) {
+    if (!isObject(raw.openweight)) {
+      throw new MountsError("'capabilities.openweight' must be a mapping of capability -> effort -> model list.");
+    }
+    openweight = {};
+    for (const capability of Object.keys(ladder)) {
+      const byEffort = raw.openweight[capability];
+      if (!isObject(byEffort)) {
+        throw new MountsError(`'capabilities.openweight.${capability}' must be a mapping of effort -> model list.`);
+      }
+      openweight[capability] = {};
+      for (const effort of Object.keys(efforts)) {
+        const models = byEffort[effort];
+        if (!Array.isArray(models) || models.length === 0 || !models.every((entry) => typeof entry === "string" && entry.length > 0)) {
+          throw new MountsError(
+            `'capabilities.openweight.${capability}.${effort}' must be a non-empty list of model ids, got ${JSON.stringify(models)}.`,
+          );
+        }
+        openweight[capability][effort] = [...(models as string[])];
+      }
+    }
+  }
+
+  return { ladder, claude, claudeCandidates, codex, ...(openweight ? { openweight } : {}) };
 }
 
 /**
