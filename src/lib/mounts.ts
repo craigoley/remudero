@@ -88,7 +88,6 @@ export interface Mount {
   maxTurns: number;
   /** Context budget (tokens) this mount plans against. */
   contextBudget: number;
-  /** Explicit provider route; it bypasses the capacity auction. */
   provider?: WorkerProviderId;
 }
 
