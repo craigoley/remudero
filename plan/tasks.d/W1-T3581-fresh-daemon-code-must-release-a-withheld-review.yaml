@@ -13,6 +13,7 @@
     - src/run-task.ts
     - test/reviewer-code-freshness-recovery.test.ts
     - test/daemon-reviewer-code-freshness-wiring.test.ts
+    - scripts/test-tier-manifest.json
   origin: "operator-session#pr-5544-withheld-review-recovery-2026-09-14"
   plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T176", "W1-T2753", "W1-T2872", "W1-T3564", "W1-T3580"]
   status: queued
