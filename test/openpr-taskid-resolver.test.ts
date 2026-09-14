@@ -131,7 +131,7 @@ test("a plan-only filing PR on a run branch does not resolve a task id it would 
  * arm) and must withhold the run branch's task id exactly like an emitter-ledger hit does — not
  * only stamp `isPlanFiling: true` while `resolveOpenPrTaskId` still credits the branch.
  */
-test("a complete GitHub-files plan-only filing with no trailer is classified as a filing and resolves no task id", () => {
+test("W1-T3505 criterion 1: GitHub-files plan-only filing resolves no task id", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-openpr-taskid-"));
   const lp = ledgerPath(dir);
   writeLedger(lp, []); // no emitter receipt — this host never ran the filing
@@ -162,7 +162,7 @@ test("a complete GitHub-files plan-only filing with no trailer is classified as 
  * `isPlanFiling: false, source: "not-plan-only"`. The threaded classification must not suppress
  * the run-branch fallback for this population; only a POSITIVE filing classification withholds it.
  */
-test("a non-plan implementation with a complete non-plan-scoped file list still resolves the run branch's task id", () => {
+test("W1-T3505 criterion 2: non-plan implementation resolves the run branch task id", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-openpr-taskid-"));
   const lp = ledgerPath(dir);
   writeLedger(lp, []); // no emitter receipt
@@ -187,7 +187,7 @@ test("a non-plan implementation with a complete non-plan-scoped file list still 
  * a filing and must not manufacture one, but it must also not suppress the existing branch task
  * identity — the pre-existing, non-filing resolution for this population is unchanged.
  */
-test("an unreadable file observation neither manufactures a filing nor suppresses the branch task id", () => {
+test("W1-T3505 criterion 3: unreadable file observation keeps the branch task id", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-openpr-taskid-"));
   const lp = ledgerPath(dir);
   writeLedger(lp, []); // no emitter receipt
