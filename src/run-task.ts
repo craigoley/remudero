@@ -4515,6 +4515,15 @@ export interface PollDeps {
   readJson?: (args: string[]) => Promise<unknown>;
   /** Defaults to {@link yieldingSleep}. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * W1-T3584: the target repo's own required-status-check contexts — the SAME seam shape
+   * `ghRequiredStatusCheckContexts` already exposes and the sweep's `deps.requiredContexts`
+   * (line ~30372) already takes, so no new contract is invented. `waitForCiGreen` calls this
+   * ONCE per wait (never per poll — see its own call site) and defaults to
+   * {@link ghRequiredStatusCheckContexts}. `undefined` (unreadable protection or a genuinely
+   * unprotected branch) takes `ciGateFromRollup` down its unchanged fail-closed fallback.
+   */
+  requiredContexts?: (owner: string, repo: string) => string[] | undefined;
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
@@ -4606,6 +4615,33 @@ export async function pollToGate(
  * is judged FRESH by `runReview` every strike, never trusted from the
  * rollup here.
  */
+/**
+ * W1-T3584 — the PRE-REVIEW VIEW `ciGateFromRollup` judges from, factored out so
+ * `waitForCiGreen` can feed the IDENTICAL view to `checkWaitStalled`'s timeout/pending evidence
+ * instead of the raw rollup: `remudero-review` (this rung's own judge, about to run fresh once
+ * CI goes green) is excluded UNCONDITIONALLY, never merely when the required-context list
+ * happens to be readable — a review that has not been given a chance to run yet is never
+ * evidence that CI itself has stalled. Deduped to the latest attempt per check
+ * ({@link dedupeRollupByLatestAttempt}), and — only when the target's required contexts are
+ * READABLE (`requiredContexts` non-empty) — narrowed to just that set, mirroring
+ * `checksStateFromRollup`'s own `knownRequired` narrowing. An empty/absent list answers the
+ * full (review-excluded, deduped) rollup, unchanged from before this task.
+ */
+export function ciGatePreReviewView(
+  rollup: RollupEntry[] | undefined,
+  requiredContexts: Iterable<string> | undefined = undefined,
+): RollupEntry[] {
+  const roll = dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX));
+  // `remudero-review` is branch protection's own name for THIS rung's judge, so it can appear
+  // inside the required-contexts list itself — excluded here too, the same as it is excluded from
+  // `roll` just above, so a required list of exactly `["remudero-review"]` narrows to nothing
+  // rather than matching a rollup entry this function already stripped.
+  const required = new Set([...(requiredContexts ?? [])].filter((name) => name !== REVIEW_CTX));
+  return required.size > 0
+    ? roll.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? ""))
+    : roll;
+}
+
 export function ciGateFromRollup(
   rollup: RollupEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined = undefined,
@@ -4613,20 +4649,32 @@ export function ciGateFromRollup(
   // W1-T2804: DEDUPE BEFORE JUDGING, by CALLING the rule the siblings call. A sha accumulates one
   // entry PER ATTEMPT, so without this a superseded CANCELLED/FAILURE attempt outvotes its own
   // green successor and the run books `blocked_ci` while GitHub is merging the PR.
-  const roll = dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX));
+  //
   // W1-T2804: the RED vote is cast only by REQUIRED contexts when the list is readable. The degrade
   // is READ FROM the sibling (`checksStateFromRollup`), not re-decided: an empty/absent list means
   // every reported context counts, because an unreadable protection rule (the container PAT's 403,
-  // the common case on this fleet) must never manufacture a false green. The GREEN verdict is
-  // deliberately unchanged and still requires a check named `ci` reporting SUCCESS — sharing the
-  // RULES with `checksStateFromRollup` must not collapse the two distinct VERDICTS.
-  const required = new Set(requiredContexts ?? []);
-  const voters = required.size > 0
-    ? roll.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? ""))
-    : roll;
+  // the common case on this fleet) must never manufacture a false green.
+  const required = new Set([...(requiredContexts ?? [])].filter((name) => name !== REVIEW_CTX));
+  const voters = ciGatePreReviewView(rollup, requiredContexts);
   const red = voters.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
   if (red) return "red";
-  const ci = roll.find((c) => (c.name ?? c.context) === "ci");
+  if (required.size > 0) {
+    // W1-T3584: the GREEN verdict, when the target's required contexts are READABLE, is derived
+    // from THAT set alone — never a check literally named `ci`, which a target whose protection
+    // names console-ci/ci-gate/Vercel (or any other names) never reports at all. Every required
+    // context (remudero-review already excluded above) must be PRESENT on this head with a
+    // REQUIRED_CHECK_OK conclusion (the same ok-set `checksStateFromRollup` reads); an absent,
+    // queued, cancelled, or otherwise-pending required context falls through to "pending" below —
+    // it can never manufacture a green.
+    const allOk = [...required].every((name) => {
+      const entry = voters.find((c) => (c.name ?? "") === name || (c.context ?? "") === name);
+      return entry !== undefined && REQUIRED_CHECK_OK.has(String(entry.conclusion ?? entry.state ?? ""));
+    });
+    return allOk ? "green" : "pending";
+  }
+  // Fail-closed fallback (W1-T176 design (i), unchanged): required contexts unreadable or empty —
+  // GREEN still requires a check literally named `ci` reporting SUCCESS.
+  const ci = voters.find((c) => (c.name ?? c.context) === "ci");
   if (ci && String(ci.conclusion ?? ci.state ?? "") === "SUCCESS") return "green";
   return "pending";
 }
@@ -4840,25 +4888,34 @@ async function waitForCiGreen(
   const sleep = deps.sleep ?? yieldingSleep;
   // W1-T2268: REST, never GraphQL — see the block above `restRollupFor`.
   const { owner, repo, number } = pollRestTarget(prUrl, "waitForCiGreen");
+  // W1-T3584: resolved ONCE per wait, never per poll — branch protection does not change
+  // mid-wait, and a repeated read is only a repeated chance for a rate-limited or 403'd token to
+  // flip an already-resolved answer under the SAME wait. Passed to EVERY poll's verdict below
+  // (`ciGateFromRollup`) and to the pre-review view fed to `checkWaitStalled`, so the two never
+  // judge against a different notion of "required" mid-wait.
+  const requiredContexts = (deps.requiredContexts ?? ghRequiredStatusCheckContexts)(owner, repo);
   const readings: (RollupEntry[] | undefined)[] = [];
   let sha = "";
   for (let i = 0; ; i++) {
     const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
     sha = mapRestPr(row).headRefOid;
     const roll = await restRollupFor(owner, repo, sha, read);
-    const state = ciGateFromRollup(roll);
+    const state = ciGateFromRollup(roll, requiredContexts);
     // W1-T2804: the sha this iteration RESOLVED and judged rides out with the verdict. It is the
     // already-resolved head, never a second read — a second read is a second chance to skew.
     if (state === "red") {
       const red = boundedCiGateChecks(
-        dedupeRollupByLatestAttempt((roll ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX))
+        ciGatePreReviewView(roll, requiredContexts)
           .filter((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")))
           .map((c) => c.name ?? c.context ?? "unknown"),
       );
       return { state: "red", sha, ...red };
     }
     if (state === "green") return { state: "green", sha };
-    readings.push(roll);
+    // W1-T3584: the SAME pre-review view `ciGateFromRollup` just judged — never the raw rollup —
+    // so a still-PENDING `remudero-review` entry can never be recorded by `checkWaitStalled` as a
+    // stalled CI dependency (the console PR #22 false `ci.stalled` this task exists to fix).
+    readings.push(ciGatePreReviewView(roll, requiredContexts));
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
     const ci = roll.find((c) => (c.name ?? c.context) === "ci");
