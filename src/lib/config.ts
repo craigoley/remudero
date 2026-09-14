@@ -2,9 +2,10 @@ import { execFileSync } from "node:child_process";
 import { closeSync, mkdirSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { validateConfigShape, type Config } from "./config-schema.js";
+import { validateConfigShape, WORKER_PROVIDER_IDS, type Config, type WorkerProviderId } from "./config-schema.js";
 import { createOrReadExclusive } from "./fs-race-safe.js";
-export type { Config } from "./config-schema.js";
+export { WORKER_PROVIDER_IDS } from "./config-schema.js";
+export type { Config, WorkerProviderId } from "./config-schema.js";
 
 /**
  * Instance configuration for a Remudero install. Machine-specific paths live ONLY in
@@ -36,9 +37,6 @@ export function resolveHeadroomEnabled(
  * from this one value: a new provider must not be accepted by mounts/policy in one path while a
  * second, hand-written literal silently rejects it elsewhere.
  */
-export const WORKER_PROVIDER_IDS = ["claude", "codex"] as const;
-export type WorkerProviderId = (typeof WORKER_PROVIDER_IDS)[number];
-
 export function isWorkerProviderId(value: unknown): value is WorkerProviderId {
   return typeof value === "string" && (WORKER_PROVIDER_IDS as readonly string[]).includes(value);
 }
@@ -48,7 +46,8 @@ export function enabledWorkerProviders(config: Pick<Config, "workerProviders">):
   return config.workerProviders?.enabled ?? ["claude"];
 }
 
-/** True only when provider-local capacity routing replaces the Claude-only daemon gate. */
+/** True only when a subscription provider's local capacity routing replaces the Claude-only daemon gate.
+ * The open-weight provider deliberately has no window and is selected only by mount affinity. */
 export function providerRoutingOwnsHeadroom(config: Pick<Config, "workerProviders">): boolean {
   return enabledWorkerProviders(config).includes("codex");
 }
@@ -77,6 +76,11 @@ export function validateConfig(config: Config): void {
     );
   }
   const providers = enabledWorkerProviders(config);
+  if (providers.includes("openweight") && dailyCapIsNone) {
+    throw new ConfigValidationError(
+      'invalid config: workerProviders.enabled includes "openweight" and requires a dailyCapUsd (cash-billed runs must be hard-capped)',
+    );
+  }
   if (providers.length === 0) {
     throw new ConfigValidationError("invalid config: workerProviders.enabled must contain at least one provider");
   }

@@ -24273,7 +24273,9 @@ async function retroCommand(
     }
 
     const provenance: RetroPrepublishProvenance = {
-      ...(worker.provider ? { provider: worker.provider } : {}),
+      // Retro is deliberately Claude/Codex-only. Keep its historical provenance vocabulary
+      // narrow even after the worker union gains a mount-affine open-weight provider.
+      ...(worker.provider && worker.provider !== "openweight" ? { provider: worker.provider } : {}),
       model: worker.model,
       servedModel: worker.servedModel ?? null,
       effort: worker.effort,
