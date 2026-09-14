@@ -84,6 +84,8 @@
     current checkout HEAD, a new PR head, a manual status write, or a lowered ceiling does not
     satisfy the falsifier.
   note: |
+    reservation hand-off: main -> chore/file-reviewer-freshness-recovery-1789402000000
+
     Scope is deliberately limited to automatic recovery after a withheld terminal review. This
     task does not weaken review freshness, rework provider routing, change review-engine revision,
     alter branch protection, or authorize a merge. The immediate #5544 recovery was a fresh
