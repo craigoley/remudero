@@ -74,7 +74,7 @@
       - Cross-instance lock or state sharing of any kind.
   acceptance:
     - claim: "a non-self dedicated target's plan reload path is no longer unconditionally undefined — a bounded, tested reload-or-restart path exists for target.isSelf === false"
-      proof: "unit test: a NON-self target gets dedicatedTargetPlanReloader"
+      proof: "unit test: resolveReloadPlan: a NON-self target gets dedicatedTargetPlanReloader's reloader, not planReloader's frozen-at-boot refusal"
     - claim: "a merged non-self target plan change (origin/main moving past the tree sha read at boot) changes dispatch eligibility on the running daemon without a manual restart"
       proof: "unit test: W1-T3554: reload changes dispatch eligibility after target plan merge"
     - claim: "the reload/restart never fires mid-batch — only between workers — so an in-flight batch's plan snapshot stays consistent for its own lifetime"
