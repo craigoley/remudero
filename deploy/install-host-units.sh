@@ -355,21 +355,30 @@ converge_host_units() {
   # W1-T3583 -- ADVANCE THE ALREADY-TRUSTED CHECKOUT WITHOUT A DAEMON RESTART. runDeployCycle's own
   # fast-forward (deployer.ts's pullFf) runs only behind its restart-pressure decision, so a clean,
   # below-threshold installer-only change never reaches it -- this checkout would otherwise sit
-  # fetched-but-unmerged, and the check below would refuse it on every tick forever. FETCH AND
-  # FF-ONLY MERGE ONLY, as the service user -- never a reset, a rebase or a clean -- so a genuine
-  # divergence is named here and never silently overwritten.
-  if ! git -C "\$CHECKOUT" fetch --quiet origin main 2>/dev/null; then
-    echo "rmd-relaunch: units -- fetch of origin/main FAILED; not converging." >&2
-    return 0
-  fi
-  if ! git -C "\$CHECKOUT" merge --ff-only --quiet origin/main 2>/dev/null; then
-    echo "rmd-relaunch: units -- checkout DIVERGED from origin/main (fast-forward refused); not converging." >&2
-    return 0
+  # fetched-but-unmerged, and the check below would refuse it on every tick forever. FETCH, THEN
+  # FF-ONLY MERGE, as the service user -- never a reset, a rebase or a clean. BOTH ARE BEST-EFFORT:
+  # a fetch that cannot reach origin (offline tick, no remote configured) must never newly refuse a
+  # checkout the OLD comparison below would have accepted, so its failure falls straight through to
+  # that same, already-tested comparison rather than returning here. A fetch that DOES succeed but
+  # whose merge is refused is a real, named divergence and returns here rather than falling through
+  # silently -- that is the one failure this step must still surface on its own.
+  if git -C "\$CHECKOUT" fetch --quiet origin main 2>/dev/null; then
+    if ! git -C "\$CHECKOUT" merge --ff-only --quiet origin/main 2>/dev/null; then
+      echo "rmd-relaunch: units -- checkout DIVERGED from origin/main (fast-forward refused); not converging." >&2
+      return 0
+    fi
   fi
 
   # CHECK BEFORE INSTALL, ALWAYS. The steady state is a silent no-op, which is what makes a converge
-  # event rare enough to be worth a record.
+  # event rare enough to be worth a record. This is also the FALLBACK comparison for a tick whose
+  # fetch above could not run at all: it names the same checkout-is-stale condition the fetch exists
+  # to close, rather than a new one.
   head_sha=\$(git -C "\$CHECKOUT" rev-parse HEAD 2>/dev/null || echo unknown)
+  main_sha=\$(git -C "\$CHECKOUT" rev-parse origin/main 2>/dev/null || echo unknown)
+  if [ "\$head_sha" = unknown ] || [ "\$head_sha" != "\$main_sha" ]; then
+    echo "rmd-relaunch: units -- checkout is not at origin/main (\$head_sha vs \$main_sha); not converging."
+    return 0
+  fi
   INSTALLER_ARGS=()
   INSTALLER_ENV=(RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB")
   if [ -n "\$INSTANCE_NAME" ]; then
