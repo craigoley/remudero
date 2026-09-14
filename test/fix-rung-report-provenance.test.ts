@@ -32,7 +32,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung } from "../src/run-task.js";
+import { resolveFixRungTaskContractAtHead, runFixRung } from "../src/run-task.js";
 import { judgeReview } from "../src/lib/review.js";
 import type { CriterionVerdict, PlanCriteriaAtHeadResult, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
@@ -388,4 +388,19 @@ test("W1-T3557 criterion 2 (the OTHER unreadable shape): a resolver that throws 
   assert.equal(got.reviewCalled, false, "a throwing resolver is exactly as unreadable as one returning a divergence");
   assert.equal(got.outcome, "stood_down");
   assert.match(got.reason, /unreadable/);
+});
+
+test("W1-T3557: resolveFixRungTaskContractAtHead's production wiring returns undefined (not a thrown error) when reading the PR's live head sha fails", () => {
+  // Exercises the production seam directly rather than through a mocked deps override — this is
+  // the ONE call site that decides "unreadable" for the caller above, so its own throw-to-undefined
+  // boundary needs a test that cannot pass by mocking the boundary away.
+  const got = resolveFixRungTaskContractAtHead(
+    "https://github.com/acme/remudero/pull/2",
+    "W1-T3557X",
+    "/tmp/rmd-fixrung-contract-wt",
+    () => {
+      throw new Error("rate-limited reading head sha over REST");
+    },
+  );
+  assert.equal(got, undefined, "an unreadable head sha must surface as undefined, the same 'unreadable' shape the fix rung's stand-down arm checks for");
 });
