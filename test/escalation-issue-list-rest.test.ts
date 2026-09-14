@@ -6,6 +6,7 @@ import {
   parseLabelledIssuesRest,
   splitConcatenatedJsonPages,
   NEEDS_HUMAN_LABEL,
+  escalationContractRevision,
 } from "../src/lib/escalate.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
 import { ghUpdateBranchArgv } from "../src/run-task.js";
@@ -254,4 +255,16 @@ test("a malformed page THROWS rather than reading as zero open escalations", () 
   // PAIRED POSITIVE CONTROL: a well-formed EMPTY page really does yield `[]`, so the throws
   // above are the guards firing and not a parser that can never return an empty result.
   assert.deepEqual(parseLabelledIssuesRest("[]"), [], "a genuinely empty page is an empty list");
+});
+
+// ── W1-T3579: the REST list read must round-trip the new **Contract:** dedup line unmangled ────
+
+test("W1-T3579: a body carrying **Contract:** survives the REST read byte-identical, and reads back through escalationContractRevision", () => {
+  const revision = "deadbeef00112233";
+  const body = `**Class:** BLOCKED\n**Task:** W1-T2799X\n**Host:** h\n**Head:** ${"a".repeat(40)}\n**Cause:** review\n**Contract:** ${revision}\n\ndetail`;
+  const rows = parseLabelledIssuesRest(onePage({ body }));
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].body, body, "the REST parse never rewrites or truncates the issue body");
+  assert.equal(escalationContractRevision(rows[0].body), revision, "the fix rung's pre-strike probe can read the revision straight off a REST-fetched OpenIssue");
 });

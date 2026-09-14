@@ -34,8 +34,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung, openEscalationStandDownReason } from "../src/run-task.js";
-import { escalationHeadSha, findDuplicateEscalation, type EscalationDedupKey } from "../src/lib/escalate.js";
+import { runFixRung, openEscalationStandDownReason, taskContractRevision } from "../src/run-task.js";
+import {
+  escalationHeadSha,
+  escalationContractRevision,
+  findDuplicateEscalation,
+  CONTRACT_REVISION_LINE_RE,
+  type EscalationDedupKey,
+} from "../src/lib/escalate.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -100,11 +106,15 @@ function falseBlockedReview(headSha: string): ReviewVerdict & { headSha: string;
 
 const FIX_RUNG_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 
-function fixRungBaseOpts() {
+/** W1-T3579: `taskOverride` lets a test dispatch `runFixRung` against a task carrying a
+ *  DIFFERENT declared `files:`/`acceptance:` between two sweeps — exactly what a plan-only scope
+ *  or acceptance amendment does — without disturbing any other fixture caller, which all omit it
+ *  and get today's byte-identical `{ id: TASK_ID, title: "Some task" }`. */
+function fixRungBaseOpts(taskOverride?: { files?: string[]; acceptance?: Array<{ claim: string; proof: string }> }) {
   return {
     taskId: TASK_ID,
     runId: `${TASK_ID}-1730000000000`,
-    task: { id: TASK_ID, title: "Some task" },
+    task: { id: TASK_ID, title: "Some task", ...taskOverride },
     prUrl: PR_URL,
     branch: `run-${TASK_ID}-1730000000000`,
     worktreePath: "/tmp/rmd-fixrung-open-escalation-wt",
@@ -173,10 +183,12 @@ async function sweep(opts: {
   headSha: string;
   spawnCalls: SpawnWorkerArgs[];
   logs?: Array<{ step: string; extra?: Record<string, unknown> }>;
+  /** W1-T3579: the task contract THIS sweep dispatches against — see {@link fixRungBaseOpts}. */
+  task?: { files?: string[]; acceptance?: Array<{ claim: string; proof: string }> };
 }) {
   const review = falseBlockedReview(opts.headSha);
   return await runFixRung({
-    ...fixRungBaseOpts(),
+    ...fixRungBaseOpts(opts.task),
     strikeCap: 3,
     initialReview: review,
     deps: {
@@ -365,4 +377,115 @@ test("criterion 6: the issue escalate() files on one sweep is exactly the one th
   // The two can never disagree in the other direction either: a probe on a head nobody has
   // escalated for finds nothing, so the next real push is never silently suppressed.
   assert.equal(findDuplicateEscalation({ ...probeKey, headSha: HEAD_1 }, { issues }), undefined);
+});
+
+// ── W1-T3579: A CORRECTED TASK CONTRACT CANNOT RE-ADMIT A SAME-HEAD FIX ─────────────────────────
+//
+// THE DEFECT. `openEscalationStandDownReason` above compares only `headSha`: a plan-only scope or
+// acceptance amendment that newly AUTHORIZES a repair on the exact PR head an open false-block
+// issue already names is indistinguishable from "a human already answered this question" — the
+// repair stays stood down forever (remudero-site PR #21, 2026-09-14: PORTAL-T4 was correctly
+// refused, a plan-only amendment re-authorized the identical repair on the identical head, and the
+// daemon refused every subsequent attempt). These four tests are named to match this task's own
+// four acceptance criteria one-for-one.
+
+test("W1-T3579 re-admits same-head fix after task contract changes", async () => {
+  const issues = fakeIssueStore();
+  const ledgerPath = tmpLedgerPath();
+  const spawnCalls: SpawnWorkerArgs[] = [];
+
+  const originalTask = { files: ["a.ts"], acceptance: [{ claim: "does the original thing", proof: "test: original" }] };
+  const amendedTask = { files: ["a.ts", "b.ts"], acceptance: originalTask.acceptance };
+  assert.notEqual(
+    taskContractRevision({ id: TASK_ID, ...originalTask }),
+    taskContractRevision({ id: TASK_ID, ...amendedTask }),
+    "sanity: a real files: amendment must move the revision",
+  );
+
+  // Sweep 1: the ORIGINAL contract escalates and opens an issue recording its own revision.
+  const first = await sweep({ issues, ledgerPath, headSha: HEAD_3, spawnCalls, task: originalTask });
+  assert.equal(first.outcome, "escalated");
+  assert.equal(issues.created.length, 1);
+  assert.match(issues.created[0].body, /^\*\*Contract:\*\*\s*\S+\s*$/m, "the producer records its own contract revision");
+
+  // Sweep 2: the SAME PR head, but the plan amended this task's declared files (the PORTAL-T4/#21
+  // shape) — a fresh runFixRung dispatched against the AMENDED task must re-admit exactly one
+  // attempt rather than standing down on the stale head-only match.
+  const second = await sweep({ issues, ledgerPath, headSha: HEAD_3, spawnCalls, task: amendedTask });
+  assert.equal(second.outcome, "escalated", "the amended contract re-admits — this must NOT be stood_down");
+  assert.equal(spawnCalls.length, 2, "both the original and the amended contract each spend exactly one strike");
+  assert.equal(issues.created.length, 2, "a REVISION-DISTINCT issue, never appended to the one filed under the stale contract");
+  assert.equal(issues.comments.length, 0, "the amended contract's escalation is a NEW issue, not a comment on the old one");
+  assert.notEqual(
+    escalationContractRevision(issues.created[0].body),
+    escalationContractRevision(issues.created[1].body),
+    "the two issues record two DIFFERENT contract revisions",
+  );
+});
+
+test("W1-T3579 preserves same-head stand-down for unchanged contract", async () => {
+  const issues = fakeIssueStore();
+  const ledgerPath = tmpLedgerPath();
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const task = { files: ["a.ts"], acceptance: [{ claim: "does the thing", proof: "test: thing" }] };
+
+  const outcomes = [];
+  for (let i = 0; i < 8; i++) {
+    outcomes.push(await sweep({ issues, ledgerPath, headSha: HEAD_3, spawnCalls, task }));
+  }
+
+  assert.equal(spawnCalls.length, 1, "an UNCHANGED contract, carried across every sweep, must still spend exactly one strike");
+  assert.equal(issues.created.length, 1, "and open exactly one issue — the new dimension never defeats the existing dedup");
+  assert.equal(outcomes[0].outcome, "escalated");
+  for (const outcome of outcomes.slice(1)) {
+    assert.equal(outcome.outcome, "stood_down", "every later sweep, still on the SAME contract, stands down exactly as W1-T2799 intended");
+  }
+});
+
+test("W1-T3579 ignores unrelated task contract revision", () => {
+  const sharedShape = { files: ["a.ts"], acceptance: [{ claim: "does the thing", proof: "test: thing" }] };
+  const thisTaskRevision = taskContractRevision({ id: TASK_ID, ...sharedShape });
+  const unrelatedTaskRevision = taskContractRevision({ id: "W1-T9999", ...sharedShape });
+  assert.notEqual(
+    thisTaskRevision,
+    unrelatedTaskRevision,
+    "byte-identical files/acceptance on a DIFFERENT task id must never collide — task identity is part of the revision, per design note (i)",
+  );
+
+  // Even if an unrelated task's revision somehow ended up on THIS task's candidate (a copy-paste
+  // shape a producer bug might one day produce), it must never be read as THIS task's own current
+  // authority: it disagrees with the live revision, so the guard re-admits rather than trusting it.
+  const candidate = {
+    number: 3889,
+    url: "https://github.com/craigoley/remudero/issues/3889",
+    body: `**Task:** ${TASK_ID}\n**Head:** ${HEAD_3}\n**Contract:** ${unrelatedTaskRevision}\n`,
+  };
+  assert.equal(
+    openEscalationStandDownReason(HEAD_3, candidate, thisTaskRevision),
+    undefined,
+    "a revision that does not name THIS task's own current contract can never stand a repair down",
+  );
+});
+
+test("negative-reachability: CONTRACT_REVISION_LINE_RE drives both its unhealthy (no line) and healthy (a captured revision) arm", () => {
+  assert.equal(CONTRACT_REVISION_LINE_RE.test(`**Task:** ${TASK_ID}\n**Head:** ${HEAD_3}\n`), false, "a body with no **Contract:** line never matches — the unhealthy arm");
+  assert.equal(CONTRACT_REVISION_LINE_RE.exec(`**Contract:** deadbeef00112233\n`)?.[1], "deadbeef00112233", "a body carrying one captures the revision — the healthy arm, distinct output");
+});
+
+test("W1-T3579 preserves legacy head-only stand-down", () => {
+  const currentContractRevision = taskContractRevision({
+    id: TASK_ID,
+    files: ["a.ts"],
+    acceptance: [{ claim: "does the thing", proof: "test: thing" }],
+  });
+  // W1-T2799's own shape — every issue predating this task, carrying **Head:** but no
+  // **Contract:** line at all.
+  const legacy = {
+    number: 3889,
+    url: "https://github.com/craigoley/remudero/issues/3889",
+    body: `**Task:** ${TASK_ID}\n**Head:** ${HEAD_3}\n`,
+  };
+  assert.equal(escalationContractRevision(legacy.body), undefined, "sanity: the fixture really carries no Contract line");
+  const got = openEscalationStandDownReason(HEAD_3, legacy, currentContractRevision);
+  assert.ok(got, "a legacy issue recording no contract revision keeps the ORIGINAL head-only stand-down, unchanged by this task");
 });

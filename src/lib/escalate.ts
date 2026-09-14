@@ -151,6 +151,14 @@ export interface Escalation {
    *  must still open separately. See {@link escalationCause}; permissive when absent, like
    *  {@link Escalation.headSha}. */
   cause?: EscalationCause;
+  /** OPTIONAL (W1-T3579) — a deterministic revision of the CURRENT authoritative task contract
+   *  (see {@link "../run-task.js".taskContractRevision}) — the key's 4th dimension. `headSha`
+   *  alone cannot tell "a human was already asked about this exact repair" from "a plan-only
+   *  scope/acceptance amendment newly authorized a repair the open issue predates": both render
+   *  the identical head. Permissive when absent on either side, exactly like {@link
+   *  Escalation.headSha}/{@link Escalation.cause} — an un-migrated caller or a legacy issue keeps
+   *  today's dedup unchanged. */
+  contractRevision?: string;
   /** A plain-language decision card, generated ONCE at creation time by {@link summarizeEscalation};
    *  {@link renderIssueBody} renders it above the raw `detail`. Named `decisionSummary` because
    *  {@link Escalation.summary} is the issue title. Absent degrades to the raw-only body (W1-T313). */
@@ -683,6 +691,10 @@ export function renderIssueBody(e: Escalation): string {
     // the field, so an un-migrated caller's issues render byte-identical to before.
     e.headSha ? `**Head:** ${e.headSha}` : undefined,
     e.cause ? `**Cause:** ${e.cause}` : undefined,
+    // W1-T3579: the 4th dedup dimension, round-tripped through CONTRACT_REVISION_LINE_RE exactly
+    // like Head/Cause above — omitted entirely (never a blank/placeholder line) when the caller
+    // didn't set it, so a producer this task did not migrate renders byte-identical to before.
+    e.contractRevision ? `**Contract:** ${e.contractRevision}` : undefined,
     "",
     ...(decisionSummary
       ? ["## Decision Summary", decisionSummary.headline, "", decisionSummary.what_happened, "", `**Decision:** ${decisionSummary.decision}`, ""]
@@ -780,6 +792,13 @@ const HEAD_SHA_LINE_RE = /^\*\*Head:\*\*\s*(\S+)\s*$/m;
  *  Escalation.cause} is set (W1-T195) — absent by default, like {@link HEAD_SHA_LINE_RE}. */
 const CAUSE_LINE_RE = /^\*\*Cause:\*\*\s*(\S+)\s*$/m;
 
+/** The `**Contract:** <revision>` line {@link renderIssueBody} writes ONLY when {@link
+ *  Escalation.contractRevision} is set (W1-T3579) — absent on every issue predating this task or
+ *  opened by a producer this task did not migrate, like {@link HEAD_SHA_LINE_RE}/{@link
+ *  CAUSE_LINE_RE}. Exported (unlike its two siblings) so a test can drive both arms of this
+ *  validator directly by identifier — see test/fix-rung-open-escalation-stand-down.test.ts. */
+export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
+
 /** The `**Head:** <sha>` sha an already-open issue's body carries, or `undefined` (W1-T2799). Reads
  *  through the SAME {@link HEAD_SHA_LINE_RE} {@link findDuplicateEscalation} matches on — ONE parser,
  *  so a caller asking "is this issue about the head I am about to strike against?" can never disagree
@@ -787,6 +806,15 @@ const CAUSE_LINE_RE = /^\*\*Cause:\*\*\s*(\S+)\s*$/m;
  *  {@link matchesOptionalDimension} is permissive on an absent dimension, the wrong polarity there. */
 export function escalationHeadSha(body: string | undefined): string | undefined {
   return HEAD_SHA_LINE_RE.exec(body ?? "")?.[1];
+}
+
+/** The `**Contract:** <revision>` an already-open issue's body carries, or `undefined` (W1-T3579).
+ *  Reads through the SAME {@link CONTRACT_REVISION_LINE_RE} {@link findDuplicateEscalation}
+ *  matches on — ONE parser, exactly like {@link escalationHeadSha} beside it. Exported so the fix
+ *  rung's pre-strike gate can compare a candidate's RECORDED contract against the CURRENT one it
+ *  is about to strike against. */
+export function escalationContractRevision(body: string | undefined): string | undefined {
+  return CONTRACT_REVISION_LINE_RE.exec(body ?? "")?.[1];
 }
 
 /** Does an OPTIONAL composite-key dimension veto a dedup match? Only when BOTH sides carry a value
@@ -818,6 +846,8 @@ export interface EscalationDedupKey {
   headSha?: string;
   headDedup?: EscalationHeadDedup;
   cause?: EscalationCause;
+  /** W1-T3579 — see {@link Escalation.contractRevision}'s own doc. */
+  contractRevision?: string;
 }
 
 /** Scan an already-fetched OPEN-issue list for a duplicate of `e` — the pure matching predicate
@@ -837,6 +867,15 @@ function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): Ope
       const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
       if (matchesHeadDimension(e, candidateHead, issue.title) === false) return false;
       if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
+      // W1-T3579: the 4th dimension — permissive exactly like cause/head above, so an
+      // un-migrated producer or a legacy issue (neither side carrying a recorded contract) keeps
+      // today's dedup unchanged. A genuine disagreement (the task contract has since been
+      // amended) is what lets a recurring escalation open its own revision-distinct issue instead
+      // of silently appending to one filed against a since-superseded contract. Named rather than
+      // inlined, unlike its two siblings above, so negating the match call never folds "no
+      // Contract line" and "a real disagreement" into one textual `!chain?.` shape.
+      const candidateContract = CONTRACT_REVISION_LINE_RE.exec(body)?.[1];
+      if (!matchesOptionalDimension(e.contractRevision, candidateContract)) return false;
       return true;
     }
     // W1-T345: no PR resolves — dedup on (taskId, class, cause) instead of skipping the search.
