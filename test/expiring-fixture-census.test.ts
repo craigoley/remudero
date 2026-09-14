@@ -308,7 +308,7 @@ function captureEmit(report: string, blocked: boolean, env: NodeJS.ProcessEnv) {
   return { emitted, logged, appended };
 }
 
-test("W1-T3578: census BLOCKED report is emitted as actionable annotation evidence", () => {
+test("W1-T3578 census BLOCKED report is emitted as actionable annotation evidence", () => {
   const r = censusExpiringFixtures(tree({ "test/a-stale-fixture.test.ts": `  lastActivityAt: "${at(-13 * DAY)}",\n` }));
   assert.equal(r.reported.length, 1, "precondition: this tree must actually be blocking");
   const report = formatReport(r);
@@ -340,7 +340,7 @@ test("W1-T3578: census BLOCKED report is emitted as actionable annotation eviden
   assert.ok(appended[0]!.text.includes("test/a-stale-fixture.test.ts:1"));
 });
 
-test("W1-T3578: census annotation is opt-in and clean runs stay silent", () => {
+test("W1-T3578 census annotation is opt-in and clean runs stay silent", () => {
   const blockedReport = formatReport(
     censusExpiringFixtures(tree({ "test/a.test.ts": `lastActivityAt: "${at(-13 * DAY)}",` })),
   );
