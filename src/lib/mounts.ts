@@ -88,10 +88,7 @@ export interface Mount {
   maxTurns: number;
   /** Context budget (tokens) this mount plans against. */
   contextBudget: number;
-  /**
-   * Optional provider affinity. When present, the spawn uses this configured provider directly
-   * instead of treating a capacity snapshot as evidence it should win the subscription auction.
-   */
+  /** Explicit provider route; it bypasses the capacity auction. */
   provider?: WorkerProviderId;
 }
 
