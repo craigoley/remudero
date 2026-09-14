@@ -34,6 +34,7 @@ import {
 } from "./plan.js";
 import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
 import {
+  buildLedgerIndex,
   projectPlan,
   readLedgerLines,
   isDispatchBreakerTripped,
@@ -700,7 +701,10 @@ export function buildPlanFrontier(
   isCreditIndeterminate?: (taskId: string) => boolean,
 ): FrontierRow[] {
   const heldReasons = new Map<string, { kind: FrontierReasonKind; reason: string }>();
-  const isCircuitTripped = (id: string) => isDispatchBreakerTripped(ledgerLines, id, maxDispatches);
+  // W1-T3523's stale-orphan check needs the newest ledger timestamp. Reuse the existing index
+  // while this frontier evaluates every candidate, instead of repeatedly scanning the same ledger.
+  const index = buildLedgerIndex(ledgerLines);
+  const isCircuitTripped = (id: string) => isDispatchBreakerTripped(ledgerLines, id, maxDispatches, index);
   // A large limit, never the caller's: this one call must classify every non-merged task so the
   // dispatchOrder walk below finds each verdict, however many held rows precede the runnable ones.
   const eligible = runnableCandidates(plan, isMerged, plan.tasks.length, {
@@ -711,7 +715,7 @@ export function buildPlanFrontier(
     },
     isCircuitTripped,
     onCircuitBreak: (task) => {
-      const dispatches = dispatchesWithoutNewOwnedPr(ledgerLines, task.id);
+      const dispatches = dispatchesWithoutNewOwnedPr(ledgerLines, task.id, index);
       heldReasons.set(task.id, {
         kind: "circuit-breaker",
         reason: `dispatch circuit tripped (${dispatches}/${maxDispatches} dispatches since the last owned PR) — resets only on a fresh owned PR for ${task.id}`,

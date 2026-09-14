@@ -144,7 +144,11 @@ test("W1-T2423: the reset rule is unchanged and a fresh owned PR still zeroes th
   const lines = [
     ...w1t2323(),
     { ts: "2026-08-27T21:11:57.575Z", step: "pr.opened", task_id: "W1-T2323", pr_url: "u" },
-    runStart("W1-T2323", "after"),
+    // W1-T3523: `runStart` stamps a fixed 2026-08-24 ts — older than the `pr.opened` line just
+    // above once the ledger's OWN newest activity (status.ts's `orphanedRunIds`) is the measure of
+    // "now", which would otherwise misread this as a stale orphan. Bumped to sit AFTER the reset
+    // so this stays what it always was: the ordinary next dispatch, counted.
+    { ...runStart("W1-T2323", "after"), ts: "2026-08-27T21:12:00.000Z" },
   ];
   assert.equal(dispatchesWithoutNewOwnedPr(lines, "W1-T2323"), 1, "pr.opened resets, then the later run counts");
   const merged = [

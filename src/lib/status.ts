@@ -997,6 +997,10 @@ export interface LedgerIndex {
   readonly byStep: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
   /** Every `pr_url` carried by a `plan_only: true` `pr.opened` row — `isPlanOnlyFilingPr`'s set. */
   readonly planOnlyFilingPrUrls: ReadonlySet<string>;
+  /** W1-T3523: the newest parseable `ts` anywhere in `rows` — {@link orphanedRunIds}'s ledger-derived
+   *  "now", computed ONCE here rather than re-scanned per task (R-23's own discipline). Undefined
+   *  when no row carries a parseable `ts` at all. */
+  readonly latestTsMs: number | undefined;
 }
 
 /** Append `row` to `id`'s bucket, creating it on first use. */
@@ -1015,6 +1019,7 @@ export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): 
   const byTask = new Map<string, Array<Record<string, unknown>>>();
   const byStep = new Map<string, Array<Record<string, unknown>>>();
   const planOnlyFilingPrUrls = new Set<string>();
+  let latestTsMs: number | undefined;
   for (const row of rows) {
     const step = row.step;
     if (typeof step === "string") {
@@ -1029,8 +1034,12 @@ export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): 
     // DEDUPED against `task_id` above: a row carrying the same id in both fields must land in the bucket ONCE,
     // or {@link dispatchesEver} would count one dispatch twice.
     if (typeof task === "string" && task !== taskId) pushIndexed(byTask, task, row);
+    if (typeof row.ts === "string") {
+      const ms = Date.parse(row.ts);
+      if (Number.isFinite(ms) && (latestTsMs === undefined || ms > latestTsMs)) latestTsMs = ms;
+    }
   }
-  return { rows, byTask, byStep, planOnlyFilingPrUrls };
+  return { rows, byTask, byStep, planOnlyFilingPrUrls, latestTsMs };
 }
 
 /** The empty bucket handed back for an id the index saw no rows for — never `lines`. */
@@ -1163,17 +1172,105 @@ export function seedCountFromCircuitBreak(
  */
 const PRE_WORKER_REFUSAL_VERDICTS: ReadonlySet<string> = new Set(["blocked_containment", "blocked_isolation"]);
 
+/** Options shared by {@link orphanedRunIds} and every counter built on it — never widened for
+ *  anything else, so a caller cannot smuggle unrelated behavior through this bag. */
+export interface OrphanDetectionOpts {
+  /** Overrides the LEDGER-DERIVED "now" {@link orphanedRunIds} computes by default — tests only. */
+  nowMs?: number;
+  /** Overrides {@link DEFAULT_LIVENESS_BOUND_MS} — tests only. */
+  livenessBoundMs?: number;
+}
+
+/** THE LEDGER'S OWN "now": the newest parseable `ts` anywhere in `lines`, never the wall clock.
+ *  DELIBERATE, not a shortcut — {@link orphanedRunIds} must stay a PURE function of the ledger it is
+ *  handed (this file's whole-suite convention: every sibling counter here takes no clock at all),
+ *  and a live fleet ledger keeps receiving rows from OTHER tasks continuously, so "how much newer
+ *  activity has this ledger seen since this run started" is a self-contained, deterministic proxy
+ *  for elapsed time — needing no injected clock in production and no wall-clock read in a test.
+ *  Absent when NOTHING in `lines` carries a parseable `ts` — a caller with no notion of "now" gets
+ *  no orphans, never a false one. Callers that evaluate multiple tasks over one ledger supply a
+ *  {@link LedgerIndex}; caching the array identity here would make a later appended ledger row
+ *  invisible to this exported pure reader. */
+function latestLedgerTsMs(lines: ReadonlyArray<Record<string, unknown>>): number | undefined {
+  let max: number | undefined;
+  for (const line of lines) {
+    if (typeof line.ts !== "string") continue;
+    const ms = Date.parse(line.ts);
+    if (Number.isFinite(ms) && (max === undefined || ms > max)) max = ms;
+  }
+  return max;
+}
+
+/**
+ * W1-T3523 — THE ORPHAN AS A FIRST-CLASS READING. Every `run_id` for `taskId` whose ONLY ledger row,
+ * of ANY step, is its own `run.start` — MEASURED on the live ledger 2026-09-13: 97 of 203 dispatched
+ * runs (47%) carry no other row at all, the container-recycle shape (`deploy/recycle-container.sh`
+ * `docker stop`s a worker whose liveness probe is process-only, so a killed worker never gets to
+ * write anything past its own start). This needs no new writer and no schema change: every row this
+ * reads has always been on the ledger, for a ledger written before this predicate existed — derived
+ * entirely {@link latestLedgerTsMs} "from the rows already present" (design (i)'s own words).
+ *
+ * STALE, NOT MERELY QUIET (the falsifier's own demand): a `run.start` ten seconds behind the
+ * ledger's own newest activity is a run STILL RUNNING, not a corpse, so a run_id only qualifies once
+ * {@link DEFAULT_LIVENESS_BOUND_MS} has passed since its `run.start` — the SAME bound
+ * {@link deriveStatus}'s in-flight branch already trusts to tell a live run from a stale one,
+ * applied here across every HISTORICAL run_id rather than only the newest.
+ *
+ * A run_id this repo cannot even NAME, or cannot AGE, is never orphaned: a `run.start` with no
+ * `run_id` (every fixture predating W1-T2423's per-run tracking), no parseable `ts`, or a ledger
+ * with no parseable `ts` ANYWHERE to measure elapsed time against, falls back to "unknown stays
+ * counted" — the same fail-closed default {@link dispatchesWithoutNewOwnedPr} has always applied to
+ * a run with no verdict, so a malformed row can never buy a task extra dispatches.
+ */
+export function orphanedRunIds(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+  opts: OrphanDetectionOpts = {},
+): ReadonlySet<string> {
+  // R-23: reuse the index's already-computed "now" when it was built over THIS exact array — the
+  // same identity guard {@link indexedTaskRows} applies — falling back to a fresh scan otherwise.
+  const nowMs = opts.nowMs ?? (index?.rows === lines ? index.latestTsMs : latestLedgerTsMs(lines));
+  const livenessBoundMs = opts.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
+  const rowCountByRunId = new Map<string, number>();
+  const startTsByRunId = new Map<string, string>();
+  for (const line of indexedTaskRows(lines, taskId, index)) {
+    if (line.task_id !== taskId || typeof line.run_id !== "string") continue;
+    rowCountByRunId.set(line.run_id, (rowCountByRunId.get(line.run_id) ?? 0) + 1);
+    if (line.step === "run.start" && typeof line.ts === "string" && !startTsByRunId.has(line.run_id)) {
+      startTsByRunId.set(line.run_id, line.ts);
+    }
+  }
+  const orphans = new Set<string>();
+  if (nowMs === undefined) return orphans; // no notion of "now" anywhere in this ledger — unknown stays counted
+  for (const [runId, ts] of startTsByRunId) {
+    if ((rowCountByRunId.get(runId) ?? 0) > 1) continue; // a later row exists for this run_id — not an orphan
+    const startMs = Date.parse(ts);
+    if (!Number.isFinite(startMs) || nowMs - startMs < livenessBoundMs) continue; // unknown age, or still live
+    orphans.add(runId);
+  }
+  return orphans;
+}
+
 /**
  * How many `run.start` lines exist for `taskId` SINCE its most recent FORWARD-PROGRESS line — P29(ii)'s
  * "dispatches with no NEW owned PR". A merge resets the streak as well as a `pr.opened` ({@link
  * isMergeCreditLine}): the PR line is written only for an `ownsBranch` head, so a slug-branch PR left the task
  * MERGED to the backfill and MAKING NO PROGRESS here at once. A "succeeds every time" loop is {@link
  * dispatchesEver}'s remit. Why: docs/forensics/status.md#second-pass-2026-09-06
+ *
+ * W1-T3523 WIDENS THE EXCLUSION ALONGSIDE W1-T2423's PREFLIGHT-REFUSAL ONE: a `run.start` whose run_id is
+ * {@link orphanedRunIds} — infrastructure killed the worker before it wrote anything else — is likewise
+ * excluded, because it is evidence about the HOST, not about the task, and an orphan must never cost the task
+ * the same dispatch budget a real no-PR attempt does. A run.start with ANY other row for its run_id — even a
+ * failing `verdict` — still counts: only a run with genuinely NO evidence past its own start, held stale long
+ * enough to rule out "still running", is excused.
  */
 export function dispatchesWithoutNewOwnedPr(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   index?: LedgerIndex,
+  opts: OrphanDetectionOpts = {},
 ): number {
   const rows = indexedTaskRows(lines, taskId, index);
   // PRE-SCAN (W1-T2249's shape, widened by W1-T2423) — two passes over the small per-task line set, because a
@@ -1190,6 +1287,7 @@ export function dispatchesWithoutNewOwnedPr(
       preWorkerRefusalRunIds.add(line.run_id);
     }
   }
+  const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
   let count = 0;
   for (const line of rows) {
     if (line.task_id !== taskId) continue;
@@ -1197,9 +1295,13 @@ export function dispatchesWithoutNewOwnedPr(
       count = 0; // forward progress — a new PR, or a credited merge, resets the streak
     } else if (line.step === "run.start") {
       // W1-T2423: a dispatch whose OWN run ended before the task worker started is a HOST preflight refusal,
-      // not a dispatch that produced nothing. A run with NO verdict row is NOT excluded: unknown stays counted,
-      // so a crash can never buy a task extra dispatches.
+      // not a dispatch that produced nothing.
       if (typeof line.run_id === "string" && preWorkerRefusalRunIds.has(line.run_id)) continue;
+      // W1-T3523: a dispatch whose run_id never wrote a SECOND row of any kind, held stale long enough to rule
+      // out "still running" — see {@link orphanedRunIds} — is a HOST killing the worker, not a task producing
+      // nothing. A run with no `run_id` at all, or one with any other row (even a failing verdict), still
+      // counts: unknown stays counted, so a crash can never buy a task extra dispatches.
+      if (typeof line.run_id === "string" && orphanRunIds.has(line.run_id)) continue;
       count++;
     }
   }
@@ -1208,20 +1310,29 @@ export function dispatchesWithoutNewOwnedPr(
 
 /** True once `taskId` has been dispatched {@link DEFAULT_MAX_TASK_DISPATCHES} times with no new owned PR since
  *  — dispatch nothing further and escalate exactly once (P29(ii)). Re-derived FRESH from the ledger every call,
- *  so unlike an in-memory flip it PERSISTS across restarts, which is what the W1-T1 storm needed. */
+ *  so unlike an in-memory flip it PERSISTS across restarts, which is what the W1-T1 storm needed. `opts` reaches
+ *  {@link dispatchesWithoutNewOwnedPr}'s own {@link orphanedRunIds} clock/bound override — tests only; every
+ *  real caller gets the wall clock and {@link DEFAULT_LIVENESS_BOUND_MS} untouched. */
 export function isDispatchBreakerTripped(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   maxDispatches: number = DEFAULT_MAX_TASK_DISPATCHES,
   index?: LedgerIndex,
+  opts?: OrphanDetectionOpts,
 ): boolean {
-  return dispatchesWithoutNewOwnedPr(lines, taskId, index) >= maxDispatches;
+  return dispatchesWithoutNewOwnedPr(lines, taskId, index, opts) >= maxDispatches;
 }
 
 /** SIBLING LIFETIME DISPATCH COUNTER (W1-T271). The streak counter resets on every `pr.opened` — correct for
  *  the failure IT guards, but BLIND BY CONSTRUCTION to a task that re-dispatches forever while merging a
  *  genuine no-op PR each time. This counts EVERY `run.start` and no step resets it.
- *  Why: W1-T254 dispatched five times in eighty minutes, each merge resetting the streak counter */
+ *  Why: W1-T254 dispatched five times in eighty minutes, each merge resetting the streak counter
+ *
+ *  W1-T3523 design (ii): DELIBERATELY UNTOUCHED BY THE ORPHAN EXCLUSION ABOVE. This guards a DIFFERENT failure
+ *  — a task that keeps getting re-dispatched at all, streak resets notwithstanding — and an orphan dispatch is
+ *  still a dispatch by that measure: the host spent a worker slot on it whether or not the worker ever wrote a
+ *  second row. Excluding orphans here would let a task that reliably kills its own worker (an OOM, a poison
+ *  input) re-dispatch forever with NOTHING counting it — exactly what this task's own rationale forbids. */
 export function dispatchesEver(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -1248,6 +1359,68 @@ export function isLifetimeDispatchCapExceeded(
   index?: LedgerIndex,
 ): boolean {
   return dispatchesEver(lines, taskId, index) >= maxLifetimeDispatches;
+}
+
+/**
+ * BACKSTOP (W1-T1266's declaration discipline): this fires only once repeated infrastructure death
+ * has ALREADY happened, never as the normal-path control on ordinary dispatch — that role stays
+ * {@link DEFAULT_MAX_TASK_DISPATCHES}'s.
+ *
+ * W1-T3523 design (iii) — BOUND ORPHANS SEPARATELY, so repeated infrastructure death is visible AS
+ * infrastructure death rather than silently ignored (design's own falsifier: "a change that only
+ * stops counting, with nothing taking its place, converts a wrong escalation into a silent infinite
+ * redispatch — strictly worse, because nothing reports it"). Sized the same as
+ * {@link DEFAULT_MAX_TASK_DISPATCHES} — the six tasks measured 2026-09-13 each carried EXACTLY 5
+ * orphans — but named and tracked separately, because a task's worker dying five times running is a
+ * claim about the HOST, never about the task, and the two must stay tellable-apart.
+ */
+export const DEFAULT_MAX_TASK_ORPHANED_DISPATCHES = 5;
+
+/** WHAT {@link isOrphanFaultTripped} SAW — {@link DispatchBreakerDetail}'s host-fault sibling. `reason` is
+ *  the text an escalation call site (mirroring `escalateCircuitBreak`/`escalateLifetimeCapExceeded`, both in
+ *  lib/escalation-catalogue.ts, neither wired to this yet — see this task's PR body) would surface verbatim;
+ *  it names the HOST and the run_ids so an operator reading only a title can tell this apart from the
+ *  per-task circuit breaker's own reason. */
+export interface OrphanFaultDetail {
+  tripped: boolean;
+  /** Every orphaned run_id this evaluation saw for `taskId`, oldest-observed first. */
+  orphanRunIds: string[];
+  maxOrphanedDispatches: number;
+  reason: string;
+}
+
+/** {@link orphanedRunIds}, judged against a bound (design iii) — `taskId`'s worker has been killed by its
+ *  host, with no evidence of ever running, at least `maxOrphanedDispatches` times. Never resets on `pr.opened`
+ *  the way {@link dispatchesWithoutNewOwnedPr} does: a host that kills a worker five times and then happens to
+ *  let one succeed is still a host worth naming, so this counts every orphan `orphanedRunIds` finds, not a
+ *  streak since the last success. */
+export function evaluateOrphanFault(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  index?: LedgerIndex,
+  opts: OrphanDetectionOpts & { maxOrphanedDispatches?: number } = {},
+): OrphanFaultDetail {
+  const maxOrphanedDispatches = opts.maxOrphanedDispatches ?? DEFAULT_MAX_TASK_ORPHANED_DISPATCHES;
+  const orphanRunIds = [...orphanedRunIds(lines, taskId, index, opts)];
+  const tripped = orphanRunIds.length >= maxOrphanedDispatches;
+  const reason = tripped
+    ? `HOST FAULT, not a task failure: ${taskId}'s worker was killed by its host before writing any evidence ` +
+      `of running, ${orphanRunIds.length} time(s) (run_ids: ${orphanRunIds.join(", ")}) — at or above the ` +
+      `${maxOrphanedDispatches}-orphan bound. This names the infrastructure, never the task.`
+    : `${taskId} has ${orphanRunIds.length} orphaned run(s) (run_ids: ${orphanRunIds.join(", ") || "none"}), ` +
+      `below the ${maxOrphanedDispatches}-orphan host-fault bound.`;
+  return { tripped, orphanRunIds, maxOrphanedDispatches, reason };
+}
+
+/** Thin boolean read over {@link evaluateOrphanFault} — {@link isDispatchBreakerTripped}'s host-fault sibling. */
+export function isOrphanFaultTripped(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  maxOrphanedDispatches: number = DEFAULT_MAX_TASK_ORPHANED_DISPATCHES,
+  index?: LedgerIndex,
+  opts?: OrphanDetectionOpts,
+): boolean {
+  return evaluateOrphanFault(lines, taskId, index, { ...opts, maxOrphanedDispatches }).tripped;
 }
 
 /** Per-process, cross-tick memory {@link evaluateDispatchBreaker} uses to notice an impossible regression

@@ -100,6 +100,21 @@ test("W1-T2425: a tripped breaker stays tripped across a rotation that drops its
   try {
     const taskId = "W1-TROT";
     const ledgerPath = ledgerWithTaskRunsOldest(dir, taskId, DEFAULT_MAX_TASK_DISPATCHES, MAX_RETAINED_LINES_PER_STEP);
+    // W1-T3523: `ledgerWithTaskRunsOldest`'s five run.start rows sit HOURS behind the noise
+    // population's own timestamps on purpose (so PASS 4's cap drops them first) — which the
+    // ledger-derived orphan predicate (status.ts's `orphanedRunIds`) would otherwise read as five
+    // infrastructure-killed runs, not five genuine no-PR dispatches. A same-run_id verdict row
+    // keeps this fixture's actual claim (a genuinely stalled task) intact under the new predicate
+    // without touching the ts-ordering W1-T2425's own rotation assertion depends on.
+    for (let i = 0; i < DEFAULT_MAX_TASK_DISPATCHES; i++) {
+      appendLine(ledgerPath, {
+        ts: `2026-08-24T0${i}:00:01.000Z`,
+        step: "verdict",
+        task_id: taskId,
+        run_id: `${taskId}-${i}`,
+        verdict: "no_pr",
+      });
+    }
     const trip = evaluateDispatchBreakerDetailed(ledgerPath, taskId, createDispatchBreakerCache());
     assert.equal(trip.state, "tripped", "setup: five runs with no owned PR trips at the default bound");
     appendLine(ledgerPath, circuitBrokenRow(taskId, trip.freshCount, "2026-08-24T09:40:38.142Z"));
