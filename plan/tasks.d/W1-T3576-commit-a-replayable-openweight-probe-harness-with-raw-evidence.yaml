@@ -1,4 +1,4 @@
-- id: W1-T3571
+- id: W1-T3576
   title: "COMMIT A REPLAYABLE OPENWEIGHT PROBE HARNESS WITH RAW EVIDENCE — a retained aggregate cannot distinguish prompt-contract failure from model failure, so make lane-shaped A/B probes reproducible without ever persisting an Azure key"
   repo: remudero
   depends_on: [W1-T3546]
@@ -16,7 +16,11 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: main -> chore/file-openweight-probe-harness-1789389121907
+    RENUMBERED 2026-09-14: originally filed as W1-T3571, which task-id-existence found HELD
+    by a different reservation holder (chore/file-openweight-output-contract-1789389121907, a
+    concurrent mint for an unrelated task) rather than by this branch. Renumbered to a fresh
+    id this branch reserves itself (refs/rmd-id/W1-T3576) rather than record a hand-off, since
+    the prior holder was never this branch's own reservation to begin with.
 
     OBSERVED 2026-09-14: the first openweight authoring recon retained only aggregate
     outcomes, so a purported 0/5 YAML failure could not be independently attributed.
