@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
 
 // scripts/cycle-ratchet.mjs is a plain .mjs file outside tsconfig's `include`, so it is driven
 // HERE AS A SUBPROCESS rather than imported — the same shape test/coverage-ratchet.test.ts and
@@ -139,6 +140,9 @@ test("no-circular is `error` as of W1-T2895 — the tolerated count reached 0, s
 
 test("the ratchet is wired into CI's depcruise job and into package.json", () => {
   assert.match(readFileSync(join(REPO_ROOT, "package.json"), "utf8"), /"cycle-ratchet":\s*"node scripts\/cycle-ratchet\.mjs"/);
-  const ci = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  assert.match(ci, /run: npm run --silent cycle-ratchet/, "an unwired gate proves nothing");
+  const ci = parseYaml(readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
+    jobs?: Record<string, { steps?: Array<{ name?: string; run?: string }> }>;
+  };
+  const step = ci.jobs?.depcruise?.steps?.find((candidate) => candidate.name?.startsWith("Cycle-count ratchet"));
+  assert.match(step?.run ?? "", /npm run --silent cycle-ratchet/, "an unwired gate proves nothing");
 });

@@ -1135,8 +1135,35 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Determine this diff's fast-lane class (W1-T3512 — this job's own trigger step below already narrows to src/lib/classify.ts; this narrows further, to whether npm ci is worth paying at all)
+        # Bare `node`, no --import tsx: scripts/diff-class.mjs imports the dependency-free
+        # src/lib/plan-scope.ts leaf, so this classifies before npm ci (coverage-ratchet's pattern).
+        # Fails closed twice: an unreadable/empty list resolves to SOURCE inside the script, and
+        # this step's case clamp forces anything else to SOURCE too.
+        # INVARIANT this relies on: `matched=true` below requires touching src/lib/classify.ts or
+        # one of its two test files, all three outside plan scope and outside docs/, so CLASS is
+        # always SOURCE whenever `matched` could be true — skipping npm ci here can never skip a
+        # Stryker run the unmodified trigger step below would otherwise have started.
+        id: classify
+        run: |
+          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
       - name: Install (clean, from lockfile)
-        run: npm ci
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; mutation-ratchet's own trigger step below can only match a src/lib/classify.ts diff, which this diff is not."
+            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci and the mutation trigger check (no src/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm ci
       - name: Determine whether this diff can move src/lib/classify.ts's mutation score
         id: trigger
         run: |
@@ -1239,14 +1266,44 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # fetch-depth: 0 so HEAD^1 (the PR's base side) resolves for the classify step below.
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Determine this diff's fast-lane class (W1-T3512 — jscpd walks only src/ and scripts/, so a PLAN_ONLY/DOCS_ONLY diff cannot move its duplication percentage)
+        # Bare `node`, no --import tsx: see the depcruise job's identical classify step above for
+        # why this classifies before npm ci and how it fails closed.
+        id: classify
+        run: |
+          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
       - name: Install (clean, from lockfile)
-        run: npm ci
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; jscpd walks only src/ and scripts/, which this diff does not touch."
+            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci and jscpd (no src/**/scripts/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm ci
       - name: jscpd duplication gate (blocks a duplicate above the recorded threshold)
-        run: npm run --silent jscpd
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping jscpd (no src/**/scripts/** path in this diff)."
+            exit 0
+          fi
+          npm run --silent jscpd
 
   dashboard:
     # W1-T3177 — THE DASHBOARD'S OWN SUITE, AS ITS OWN JOB, and that separation is the point.
@@ -1283,6 +1340,10 @@ jobs:
     # exits non-zero, printing the false claim's id, prose and plan_section so the log NAMES the lie
     # instead of leaving a bare exit code. A claim can be falsified by a change anywhere in the tree,
     # not just under plan/. FALSIFIER: test/claims-check.test.ts.
+    #
+    # W1-T3512: DELIBERATELY NOT WIRED TO THE FAST-LANE CLASSIFIER. plan/claims.yaml itself lives
+    # under plan/, so a PLAN_ONLY diff can edit the very file this job checks — skipping on
+    # PLAN_ONLY would retire the gate for exactly the diff shape most likely to touch it.
     name: claims
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
@@ -1314,6 +1375,13 @@ jobs:
     # the literal against the stripped copy, against scripts/assertion-discrimination-baseline.json,
     # whose every entry must carry a written reason.
     # FALSIFIER: test/assertion-discrimination-check.test.ts.
+    #
+    # W1-T3512: DELIBERATELY NOT WIRED TO THE FAST-LANE CLASSIFIER. The statically-resolvable
+    # readFileSync target a test names can be ANY repo path, not just src/** — e.g.
+    # test/a-machine-filed-shard-reads-as-an-operator-ruling.test.ts and
+    # test/pure-proof-incomplete-run.test.ts both read a configurable policy file this way (MEASURED
+    # 2026-09-13 from their direct file-reader calls). A PLAN_ONLY diff editing that data
+    # can move this check, so it is not source-only and must keep running in full.
     name: assertion-discrimination
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
@@ -1372,14 +1440,46 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # fetch-depth: 0 so HEAD^1 (the PR's base side) resolves for the classify step below.
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Determine this diff's fast-lane class (W1-T3512 — depcruise and cycle-ratchet only ever read src/**, so a PLAN_ONLY/DOCS_ONLY diff cannot move either)
+        # Bare `node`, no --import tsx: scripts/diff-class.mjs imports the dependency-free
+        # src/lib/plan-scope.ts leaf, so this classifies before npm ci (coverage-ratchet's pattern).
+        # Fails closed twice: an unreadable/empty list resolves to SOURCE inside the script, and
+        # this step's case clamp forces anything else to SOURCE too.
+        id: classify
+        run: |
+          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
       - name: Install (clean, from lockfile)
-        run: npm ci
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; depcruise/cycle-ratchet read only src/**, which this diff does not touch."
+            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci, dependency-cruiser and the cycle-count ratchet (no src/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm ci
       - name: dependency-cruiser fitness rules
-        run: npm run --silent depcruise
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping dependency-cruiser (no src/** path in this diff)."
+            exit 0
+          fi
+          npm run --silent depcruise
 
       # THE CYCLE-COUNT RATCHET. `no-circular` is deliberately `warn`: `error` would fail every PR
       # touching any module in an existing ring, and thirteen rings knot much of src/lib. The cruise
@@ -1387,7 +1487,13 @@ jobs:
       # ceiling, so net growth blocks and touching a ring does not. #2798 cut the count from 24 to 13
       # and nothing held the result; this does. It runs in THIS job so it adds no required context.
       - name: Cycle-count ratchet (blocks a diff that ADDS a dependency cycle; existing rings stay warn-only)
-        run: npm run --silent cycle-ratchet
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping the cycle-count ratchet (no src/** path in this diff)."
+            exit 0
+          fi
+          npm run --silent cycle-ratchet
 
   containment-probe:
     # MASTER-PLAN §5 TIER 1 (W1-T28): the containment probe as a required check on any diff touching
@@ -1400,6 +1506,15 @@ jobs:
     # the same deterministic predicate the Layer-4 containment specialist is routed by — so the CI
     # gate and the advisory panel never drift on what "touches sandbox/hooks/env/deny-floor" means.
     # On a match the job runs test/containment.test.ts; on no match it still completes successfully.
+    #
+    # W1-T3512: DELIBERATELY NOT WIRED TO THE FAST-LANE CLASSIFIER, on top of its own trigger
+    # above. CONTAINMENT_PATH_PATTERNS (src/lib/specialist-panel.ts) matches on PATH TEXT alone
+    # (e.g. /sandbox/i, /deny[-_]?floor/i) — a plan/tasks.d/*.yaml filename can contain one of those
+    # words (a task ABOUT sandbox hardening, filed as a PLAN_ONLY diff) and this job's own trigger
+    # already, correctly, runs test/containment.test.ts for it today. A coarser PLAN_ONLY/DOCS_ONLY
+    # skip layered on top would silently retire that case — the exact risk this task's design (iii)
+    # names both this job and `claims` for. Its own trigger is the finer, correct scope; this task
+    # adds nothing here.
     name: containment-probe
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
@@ -1444,14 +1559,44 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # fetch-depth: 0 so HEAD^1 (the PR's base side) resolves for the classify step below.
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Determine this diff's fast-lane class (W1-T3512 — the client can only drift when openapi/daemon.yaml or packages/api-client/** moves, so a PLAN_ONLY/DOCS_ONLY diff cannot move this check)
+        # Bare `node`, no --import tsx: see the depcruise job's identical classify step above for
+        # why this classifies before npm ci and how it fails closed.
+        id: classify
+        run: |
+          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
       - name: Install (clean, from lockfile)
-        run: npm ci
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; the generated client can only drift from openapi/daemon.yaml or packages/api-client/**, which this diff does not touch."
+            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci and api-client:check (no openapi/**/packages/api-client/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm ci
       - name: api-client drift check (committed client must match a fresh regeneration from openapi/daemon.yaml)
-        run: npm run --silent api-client:check
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping api-client:check (no openapi/**/packages/api-client/** path in this diff)."
+            exit 0
+          fi
+          npm run --silent api-client:check
 
   no-hand-rolled-fetch:
     # §7A: "no client may hand-roll a `fetch` to the daemon — a grep gate fails the build" (W3-T1c).
@@ -1466,14 +1611,44 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # fetch-depth: 0 so HEAD^1 (the PR's base side) resolves for the classify step below.
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Determine this diff's fast-lane class (W1-T3512 — this grep gate walks only apps/ and packages/, so a PLAN_ONLY/DOCS_ONLY diff cannot move it)
+        # Bare `node`, no --import tsx: see the depcruise job's identical classify step above for
+        # why this classifies before npm ci and how it fails closed.
+        id: classify
+        run: |
+          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
       - name: Install (clean, from lockfile)
-        run: npm ci
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; this grep gate walks only apps/ and packages/, which this diff does not touch."
+            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci and no-hand-rolled-fetch:check (no apps/**/packages/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm ci
       - name: No-hand-rolled-fetch grep gate (apps/**, packages/** except packages/api-client)
-        run: npm run --silent no-hand-rolled-fetch:check
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping no-hand-rolled-fetch:check (no apps/**/packages/** path in this diff)."
+            exit 0
+          fi
+          npm run --silent no-hand-rolled-fetch:check
 
   prompt-surface-gate:
     name: prompt-surface-gate
@@ -1546,10 +1721,37 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Determine this diff's fast-lane class (W1-T3512 — source-size-ratchet walks only .ts files under src/, so a PLAN_ONLY/DOCS_ONLY diff cannot move it)
+        # Bare `node`, no --import tsx: see the depcruise job's identical classify step above for
+        # why this classifies before npm ci and how it fails closed.
+        id: classify
+        run: |
+          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
       - name: Install (clean, from lockfile)
-        run: npm ci
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; the source-size signal walks only .ts files under src/, which this diff does not touch."
+            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci and source-size-signal (no src/**/*.ts path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm ci
       - name: Source-size signal (growth informs review and follow-up work; measurement failure still refuses)
-        run: npm run --silent source-size-signal
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping source-size-signal (no src/**/*.ts path in this diff)."
+            exit 0
+          fi
+          npm run --silent source-size-signal
 
   comment-load-ratchet:
     # COMMENT-LOAD ratchet — a CEILING on comment volume, the same shape as the learnings-budget
@@ -1576,10 +1778,42 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Determine this diff's fast-lane class (W1-T3512 — every step below reads only src/, scripts/, apps/, packages/, deploy/, .github/workflows/, bin/ or hooks/, so a PLAN_ONLY/DOCS_ONLY diff cannot move any of them)
+        # Bare `node`, no --import tsx: see the depcruise job's identical classify step above for
+        # why this classifies before npm ci and how it fails closed. This job's own comment-load
+        # ratchet is itself the proof its MEASURED_ROOTS excludes plan/ and docs/
+        # (scripts/comment-load-ratchet.mjs); expiring-fixture-census walks test/ fixtures only;
+        # contract-coverage-ratchet reads openapi/daemon.yaml plus apps/dashboard/src and
+        # packages/daemon-client-smoke/src; console-parity reads src/run-task.ts. None of the four
+        # can be moved by a diff that stays inside plan scope or docs/.
+        id: classify
+        run: |
+          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          case "$CLASS" in
+            PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
+            *) CLASS="SOURCE" ;;
+          esac
+          cat diff-class.log || true
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
       - name: Install (clean, from lockfile)
-        run: npm ci
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping npm ci; this job's four checks read only src/, scripts/, apps/, packages/, deploy/, .github/workflows/, bin/ or hooks/, none of which this diff touches."
+            echo "- W1-T3512 fast-lane: class=${CLASS} — skipped npm ci, comment-load-signal, the expiring-fixture census, the contract-coverage ratchet and console-parity (no matching path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm ci
       - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
-        run: npm run --silent comment-load-signal
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping comment-load-signal (no matching path in this diff)."
+            exit 0
+          fi
+          npm run --silent comment-load-signal
       # EXPIRING-FIXTURE census (W1-T3272) — refuse a fixture whose hardcoded date will cross a live
       # threshold, a margin BEFORE the day it takes CI red. It rides this job as a STEP rather than
       # as its own job on purpose: a new ci.yml job must be registered in ci-gate.yml AND in
@@ -1591,7 +1825,13 @@ jobs:
       # stamped 2026-08-26T18:15:00Z crossed the sweep's 14-day rung at exactly 18:15:00Z and took
       # `main` red, blocking every PR (W1-T3270). FALSIFIER: test/expiring-fixture-census.test.ts.
       - name: Expiring-fixture census (no fixture crosses its threshold inside the margin)
-        run: node scripts/expiring-fixture-census.mjs
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping the expiring-fixture census (no matching path in this diff)."
+            exit 0
+          fi
+          node scripts/expiring-fixture-census.mjs
 
       # CONTRACT-COVERAGE ratchet (W1-T3174) — every `/v1/` route a first-party client calls must be
       # declared in openapi/daemon.yaml; the uncovered count may FALL and never RISE.
@@ -1606,7 +1846,13 @@ jobs:
       # and a workflow changed beside a `src/` product path is Standing rule 25 entanglement.
       # FALSIFIER: test/the-contract-covers-its-own-console.test.ts.
       - name: Contract-coverage ratchet (no first-party route escapes the contract)
-        run: node scripts/contract-coverage-ratchet.mjs
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping the contract-coverage ratchet (no matching path in this diff)."
+            exit 0
+          fi
+          node scripts/contract-coverage-ratchet.mjs
 
       # CONSOLE-PARITY ratchet (W1-T2926) — every COMMANDS verb maps to a console route or a
       # stated cli-only reason; an unmapped verb fails outright, and the recorded cli-only SET
@@ -1620,7 +1866,13 @@ jobs:
       # A STEP, NOT A JOB, same reasoning as the contract-coverage step directly above it.
       # FALSIFIER: test/console-parity-ratchet.test.ts.
       - name: Console-parity ratchet (every verb maps to a route or a stated cli-only reason)
-        run: npm run --silent console-parity
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          if [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T3512 fast-lane: class=${CLASS} — skipping console-parity (no matching path in this diff)."
+            exit 0
+          fi
+          npm run --silent console-parity
 
   baseline-monotonic:
     # BASELINE-MONOTONIC gate (W1-T2906). Every ratchet above reads ITS OWN scripts/*-baseline.json
