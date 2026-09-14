@@ -15,7 +15,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: main -> chore/file-acceptance-trailer-shadow-recon-1789389121907
+    reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-acceptance-trailer-shadow-recon-1789389121907
 
     The reported shape is important but unproven at current main. OBSERVED at
     1aad6122: ACCEPTANCE_HEADER_RE deliberately accepts `Acceptance criteria:`
