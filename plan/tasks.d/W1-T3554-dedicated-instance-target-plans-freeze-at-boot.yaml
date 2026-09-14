@@ -1,0 +1,88 @@
+- id: W1-T3554
+  title: "A dedicated instance's non-self target plan never reloads: planReloader returns undefined whenever target.isSelf is false, and checkFreshness only watches the Remudero engine checkout, so a daemon launched with --repo <target> freezes that target's plan tree at boot and keeps dispatching against it forever"
+  repo: remudero
+  risk: high
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    REPORTED VIA FEEDBACK (fb-1789349833277-20ca42, 2026-09-14). A daemon launched with
+    `--repo remudero-console` (a non-self target) freezes that target's plan at boot.
+
+    (1) `planReloader` (src/run-task.ts, ~line 26448) opens `if (!target.isSelf) return undefined;`
+    — its own docstring says this keeps "the frozen-at-boot behaviour" for "an explicit --plan, or
+    a non-self target". That is deliberate for the explicit-`--plan` case, but for a dedicated
+    non-self target it means the daemon NEVER re-reads that target's plan tree for the rest of its
+    life: every tick keeps dispatching, gating and rendering status against whatever
+    `plan/tasks.yaml` looked like at boot.
+
+    (2) `checkFreshness` (wired at src/run-task.ts ~line 27616 via `checkServiceFreshness(repoRoot,
+    process.env)`) resolves freshness from `repoRoot` — the Remudero engine's OWN checkout — not
+    from the target repo's checkout under `env.reposDir`. So the daemon's freshness gate has no
+    opinion at all about whether the TARGET's origin/main has moved.
+
+    (3) OBSERVED: console plan PR #7 merged, moving the target's origin/main to df1198a. The
+    worker worktree correctly picked up target origin/main (worktree provisioning re-clones/fetches
+    per dispatch, unaffected by this gap). But the daemon's own status projection kept showing
+    CONSOLE-T1 in `verifyHumanPending` sourced from the STALE canonical target HEAD 9d6ba1d it read
+    at boot — a merged target-plan change (e.g. an operator resolving a `needs-human` gate, or
+    retiring/adding a task) never reaches dispatch eligibility for the lifetime of that daemon
+    process.
+
+    (4) DO NOT FIX WITH A RAW PULL. The worker worktree's existing target-fetch path is correct and
+    must stay the single source of truth for what a WORKER runs against; a raw pull inside the
+    long-lived daemon process risks racing an in-flight batch's already-resolved plan snapshot
+    (W1-T340's per-dispatch-batch snapshot invariant) and mutates daemon-owned instance state
+    (locks, ledger cursors) that MUST stay independent per dedicated instance (W1-T1062, W1-T403).
+  design: |
+    (i) WHAT MUST NOT CHANGE. `planReloader`'s explicit-`--plan` early-return stays exactly as is —
+    that arm is for an operator-pinned snapshot and is out of scope. Self-target reload
+    (`target.isSelf`) is already correct and must not be touched. Per-instance state — drain locks,
+    review locks, ledger cursors — stays scoped to THIS daemon's own `state/` and must never be
+    read from or written across instances (W1-T1062, W1-T978's independence concerns apply
+    analogously here even though the surface differs).
+
+    (ii) WHAT IS NEEDED. A bounded, tested freshness path for a non-self DEDICATED target
+    (`target.isSelf === false` and no explicit `--plan` override) that:
+      - detects when the target repo's origin/main has moved past the tree sha the daemon booted
+        with (the target checkout under `env.reposDir` already exists for worker provisioning and
+        is the natural read source — no new clone needed);
+      - reloads the target plan tree in place when that is safe to do BETWEEN workers (i.e., not
+        mid-batch, mirroring how self-target reload is gated), OR triggers a graceful, bounded
+        restart of the daemon process at the next between-workers boundary if in-place reload is
+        not safe for a non-self target's plan-loading path — an implementer must justify which of
+        the two arms is chosen against the existing self-target reload precedent, not invent a
+        third mechanism;
+      - never reloads or restarts WHILE a batch is in flight, so a dispatched batch's plan snapshot
+        stays internally consistent for its own lifetime;
+      - leaves per-instance locks and ledger state untouched by the reload/restart itself — only
+        the in-memory plan tree (and anything strictly downstream of re-parsing it) may change.
+
+    (iii) THE FALSIFIABLE CLAIM THIS MUST PROVE. A target plan change merged to the target's
+    origin/main (e.g. a task's status flipping, or a `verifyHumanPending` gate resolving) changes
+    what the running daemon considers eligible for dispatch WITHOUT an operator restarting the
+    process by hand — the CONSOLE-T1 scenario in the rationale, reproduced as a test.
+
+    (iv) EXPLICITLY OUT OF SCOPE.
+      - Extending `checkFreshness`/`checkServiceFreshness` to watch the ENGINE's own code
+        freshness for a non-self target's daemon binary — that is the existing self-freshness
+        contract and is unrelated to the target PLAN going stale.
+      - Any change to how worker worktrees fetch/checkout the target repo — already correct per
+        the report and must stay so.
+      - Cross-instance lock or state sharing of any kind.
+  acceptance:
+    - claim: "a non-self dedicated target's plan reload path is no longer unconditionally undefined — a bounded, tested reload-or-restart path exists for target.isSelf === false"
+      proof: "unit test: test/dedicated-target-plan-freshness.test.ts"
+    - claim: "a merged non-self target plan change (origin/main moving past the tree sha read at boot) changes dispatch eligibility on the running daemon without a manual restart"
+      proof: "unit test: test/dedicated-target-plan-freshness.test.ts"
+    - claim: "the reload/restart never fires mid-batch — only between workers — so an in-flight batch's plan snapshot stays consistent for its own lifetime"
+      proof: "unit test: test/dedicated-target-plan-freshness.test.ts"
+    - claim: "the fix does not touch how worker worktrees resolve the target's origin/main, preserving the already-correct worker fetch path named in the report"
+      proof: "grep: isSelf in src/run-task.ts"
+  origin: "feedback#fb-1789349833277-20ca42"
+  plan_refs: ["W1-T1062", "W1-T403", "W1-T340", "W1-T978"]
+  files: [src/run-task.ts, test/dedicated-target-plan-freshness.test.ts]
+  status: queued
+  attempts: 0
