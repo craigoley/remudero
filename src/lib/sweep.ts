@@ -24,7 +24,17 @@ import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, createPlanPrRest, probeExistingPlanPr } from "./plan-pr-emitter.js";
-import { DEFAULT_RISK, RETIREMENT_REASONS, type AcceptanceCriterion, type Plan, type RetirementReason, type TaskRisk } from "./plan.js";
+import {
+  DEFAULT_RISK,
+  RETIREMENT_REASONS,
+  unmetDependencies,
+  type AcceptanceCriterion,
+  type MergedResolver,
+  type Plan,
+  type RetirementReason,
+  type Task,
+  type TaskRisk,
+} from "./plan.js";
 import {
   defaultCreditStorePath,
   hasCreditBackfillReceipt,
@@ -209,6 +219,38 @@ export function fixRungTaskFor(
     },
     synthetic: true,
   };
+}
+
+/**
+ * W1-T3585 — replay of #5545/W1-T3558 (2026-09-14): a plan resequence merged (#5537) and added an
+ * unmet dependency to a task AFTER a worker had already been admitted and opened its implementation
+ * PR. Current dispatch (drain.ts's `isDispatchEligible`) will never rebuild that PR — it refuses the
+ * task outright — yet the sweep had no current-plan eligibility predicate for an already-open,
+ * task-owned PR, so the draft sat open, unbuildable, and undispatchable until an operator closed it
+ * by hand.
+ *
+ * This is the SAME per-task reason family `isDispatchEligible` applies, reduced to the THREE
+ * conditions that make a task's own open PR no longer authoritative: a `blocked` status, an
+ * explicit `retirement` ruling (a named subtype of `blocked`), or an unmet dependency the CURRENT
+ * plan and a freshly-derived {@link MergedResolver} both agree on — never a title, a branch prefix,
+ * or a stale snapshot. Returns `undefined` (no closure authority) for a still-runnable task, exactly
+ * mirroring `isDispatchEligible`'s own `unmetDependencies(...).length > 0` gate (never re-derived
+ * independently) and its `status === "blocked"` split between "retired" and "blocked".
+ *
+ * PURE: takes the plan/task/resolver a caller already proved fresh; this function never reads a
+ * checkout, never fetches, and never infers eligibility on its own.
+ */
+export function currentPlanIneligibilityReason(plan: Plan, task: Task, isMerged: MergedResolver): string | undefined {
+  if (task.status === "blocked") {
+    return task.retirement !== undefined
+      ? `retired in the current plan (${task.retirement})`
+      : "blocked in the current plan";
+  }
+  const unmet = unmetDependencies(plan, task, isMerged);
+  if (unmet.length > 0) {
+    return `unmet dependenc${unmet.length === 1 ? "y" : "ies"} in the current plan: ${unmet.join(", ")}`;
+  }
+  return undefined;
 }
 
 /** The synthetic lane namespaces whose PR branches are created by the orchestrator itself. */
@@ -2955,6 +2997,13 @@ export interface OpenPrView {
   /** The task this PR credits (its `Remudero-Task:` trailer), if resolved. */
   taskId?: string;
   taskRetirement?: RetirementReason;
+  /** W1-T3585 — {@link currentPlanIneligibilityReason}'s verdict for `taskId`, populated ONLY when
+   *  the producer positively proved an exact trailer-owned task id, a readable current plan that
+   *  resolves that task, AND a freshly-derived merged-task set — never inferred from a title, a
+   *  branch prefix, or a stale snapshot. `undefined` means "not proven ineligible": an unreadable
+   *  plan, an unreadable merged-task set, an absent/synthetic task id, a missing task record, or a
+   *  genuinely still-runnable task all leave this `undefined` and change nothing. */
+  planResequenceIneligible?: string;
   /** Rolled-up remudero-review state on the head. */
   reviewState: "success" | "failure" | "pending" | "none";
   /** Rolled-up required-checks state on the head. */
@@ -4716,6 +4765,26 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "stale",
     when: (pr) => pr.taskMergedBy != null,
     reason: (pr) => `task ${pr.taskId ?? "(unknown)"} already merged by #${pr.taskMergedBy} — closing the leftover implementation PR`,
+  },
+  {
+    // W1-T3585 — replay of #5545/W1-T3558: a plan resequence can add an unmet dependency (or a
+    // fresh blocked/retirement ruling) to a task AFTER its worker was already admitted and opened
+    // this PR. `planResequenceIneligible` (buildOpenPrViews) is set ONLY off a positively proven
+    // exact task identity, a readable current plan, and a freshly-derived merged-task set — see
+    // {@link currentPlanIneligibilityReason}'s own doc for the fail-closed contract this row
+    // trusts without re-deriving. Sits ABOVE the narrower legacy retirement row directly below (a
+    // retired task is a `blocked` subtype this row already covers) and reuses the SAME guarded,
+    // non-plan-filing condition that row established — never widens WHICH PRs a plan-filing
+    // observation can close. Routes through the SAME reversible "stale" close every row here uses.
+    disposition: "stale",
+    when: (pr) =>
+      pr.taskId !== undefined &&
+      pr.isPlanFiling === false &&
+      pr.planFilingSource === "not-plan-only" &&
+      pr.planResequenceIneligible !== undefined,
+    reason: (pr) =>
+      `task ${pr.taskId ?? "(unknown)"} is ${pr.planResequenceIneligible} — the plan resequenced after this PR was ` +
+      `admitted, current dispatch will not rebuild it, and it cannot be left owning the task — closing the leftover implementation PR`,
   },
   {
     disposition: "stale",

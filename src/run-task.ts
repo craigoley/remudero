@@ -1261,6 +1261,7 @@ import {
   ABSENT_REPUSH_CAP,
   DEFAULT_FIX_CLASSES,
   buildSweepEffects as buildSweepEffectsFromLib,
+  currentPlanIneligibilityReason,
   defaultSweepGhRun,
   dispatchFixCatchOutcome,
   escalationTaskIdFor,
@@ -27892,12 +27893,30 @@ export async function daemonCommand(
           policy.values.workerStall,
           mainHealthRung,
           boardSnapshotFor(target.owner, target.repo),
+          // W1-T3585 — the SAME `lastProj` snapshot `isOpenPr`/`isCreditIndeterminate` above already
+          // read, never a second GitHub walk: `refreshMerged()` runs once at the top of THIS tick
+          // (runDaemon's loop body, lib/daemon.ts) and this hook's own closure runs later in the
+          // same tick, so by the time it calls `buildOpenPrViews`, `lastProj` is already this tick's
+          // fresh dispatch projection.
+          (t) => lastProj?.get(t.id)?.merged ?? false,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
         // flight, so a green PR whose review went absent re-posts within one poll
         // interval. Dangerous lanes (fix/close/arm/escalate) stay non-concurrent.
-        sweepLight: buildSweepLightHook(target.owner, target.repo, config, ledgerPath, runId, plan, log),
+        sweepLight: buildSweepLightHook(
+          target.owner,
+          target.repo,
+          config,
+          ledgerPath,
+          runId,
+          plan,
+          log,
+          // W1-T3585 — the SAME accessor `sweep:` above threads, off the SAME `lastProj` tick
+          // snapshot: both daemon sweep paths must reconcile the identical current-plan
+          // eligibility predicate, never two independently-derived ones.
+          (t) => lastProj?.get(t.id)?.merged ?? false,
+        ),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
         // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
@@ -30394,6 +30413,12 @@ export function buildOpenPrViews(
      *  parameter, so without a seam no test can reach the unreadable-plan arm below — the checkout
      *  a test runs in always has a readable plan. Omitted, it is `loadPlan` on the real path. */
     readMainPlan?: (root: string) => Plan;
+    /** W1-T3585 — the SAME freshly-derived merged-task set daemon dispatch consults (the daemon's
+     *  own `refreshMerged()` projection, never a second GitHub walk this producer invents), threaded
+     *  through so {@link currentPlanIneligibilityReason} can resolve an unmet dependency exactly as
+     *  drain.ts's `isDispatchEligible` would. Omitted ⇒ `planResequenceIneligible` stays `undefined`
+     *  for every PR — fail closed, exactly today's behavior for every existing caller/fixture. */
+    isMerged?: MergedResolver;
   } = {},
 ): ClassifiedOpenPrView[] {
   const fetch = deps.fetch ?? ghJson;
@@ -30529,6 +30554,15 @@ export function buildOpenPrViews(
     // like an emitter-ledger-classified one already does — see resolveOpenPrTaskId's own doc.
     const taskId = resolveOpenPrTaskId(pr, planFiling.isPlanFiling);
     const taskRecord = taskId ? mainPlan?.byId.get(taskId) : undefined;
+    // W1-T3585 — fail-closed on EVERY input this needs: an exact trailer-owned `taskId` (above), a
+    // readable current plan that resolves it (`taskRecord`/`mainPlan`), AND a freshly-derived
+    // merged-task set (`deps.isMerged`). Any one absent leaves `planResequenceIneligible`
+    // `undefined` — never inferred from `taskId`/`headRefName` alone. See
+    // `currentPlanIneligibilityReason`'s own doc (lib/sweep.ts) for the reason it can return.
+    const planResequenceIneligible =
+      mainPlan && taskRecord && deps.isMerged
+        ? currentPlanIneligibilityReason(mainPlan, taskRecord, deps.isMerged)
+        : undefined;
     const fileObservation = planFilingFiles.get(pr.number);
     const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
     const reviewLedgerKey = taskId ?? `PR-${pr.number}`;
@@ -30618,6 +30652,7 @@ export function buildOpenPrViews(
       isPlanFiling: planFiling.isPlanFiling,
       planFilingSource: planFiling.source,
       taskRetirement: taskRecord?.retirement,
+      planResequenceIneligible,
       // W1-T923: a SIBLING read, off the SAME `review.posted` ledger line `unmetCriteria` above
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
@@ -32846,6 +32881,17 @@ export function buildSweepHook(
   // liveness even when a test injection or future implementation accidentally throws.
   mainHealthRung?: () => Promise<void>,
   snapshotCache?: BoardSnapshotCache,
+  // W1-T3585 — the SAME freshly-derived merged-task set `daemonCommand`'s own `refreshMerged()`
+  // projection already computes once per poll tick, threaded through so `buildOpenPrViews` can
+  // resolve `planResequenceIneligible` off the CURRENT dispatch snapshot rather than a second,
+  // independently-derived GitHub walk. Trailing and optional, the same convention every other seam
+  // on this function follows; omitted ⇒ `planResequenceIneligible` stays `undefined` everywhere
+  // (fail closed), exactly today's behavior for every caller/fixture that predates this task.
+  isMerged?: MergedResolver,
+  // W1-T3585 — injectable ONLY for a test to pin the current plan this closure's own eligibility
+  // read resolves against; real callers omit it and `buildOpenPrViews` falls through to its own
+  // `loadPlan` default, unchanged.
+  readMainPlan?: (root: string) => Plan,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
@@ -32898,6 +32944,8 @@ export function buildSweepHook(
         pacer,
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
+        isMerged,
+        readMainPlan,
       });
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
@@ -33192,6 +33240,11 @@ export function buildSweepLightHook(
   runId: string,
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  // W1-T3585 — the SAME two seams `buildSweepHook` accepts, for the SAME reason: the light pass
+  // must resolve `planResequenceIneligible` off the identical current-plan eligibility predicate
+  // the full sweep uses, never a second one. Trailing and optional; omitted ⇒ today's behavior.
+  isMerged?: MergedResolver,
+  readMainPlan?: (root: string) => Plan,
 ): () => Promise<void> {
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
@@ -33200,6 +33253,8 @@ export function buildSweepLightHook(
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
+        isMerged,
+        readMainPlan,
       });
       const effects = buildSweepEffects({
         owner: owner,
@@ -33485,6 +33540,11 @@ export async function fixCommand(
     // UNKNOWN, leaving every disposition it feeds untouched.
     taskMergedBy: undefined,
     taskRetirement: undefined,
+    // W1-T3585 — same reasoning as `taskMergedBy` directly above: `currentPlanIneligibilityReason`
+    // needs a freshly-derived merged-task set this single-PR, operator-invoked bootstrap has no
+    // board-wide projection to supply. `undefined` is the field's own defined "not proven
+    // ineligible" state, so every disposition it feeds stays exactly what it was before this task.
+    planResequenceIneligible: undefined,
     planFilingSource: undefined,
     lastActivityAt: raw.updatedAt,
     // W1-T1201: same age-clamp projection as buildOpenPrViews above — see RawOpenPr.createdAt's
