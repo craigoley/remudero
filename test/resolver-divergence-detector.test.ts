@@ -201,17 +201,23 @@ test("the gate STILL resolves a duplicated id fine (it never adopts loadPlan) ev
 
 // ── ACCEPTANCE 8: NO MERGED PR IS RE-REVIEWED, NO MERGED ACCEPTANCE RECORD IS AMENDED ───────────
 
-test("resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — W1-T2462 moved reviewCommand's own manual/live path onto resolvePlanCriteriaAtHead, and neither a merged-PR sweep nor retro path ever gained one", () => {
+test("resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — the head-bound resolver has exactly the review command and W1-T3557 fix-rung contract paths", () => {
   const runTaskSrc = readSrc("run-task.ts");
   // Only its own declaration remains; `reviewCommand` no longer calls it (see the
   // `resolvePlanCriteriaAtHead` assertion below) and this suite exercises it directly instead.
   const callSites = runTaskSrc.split("resolvePlanCriteriaForReview(").length - 1;
   assert.equal(callSites, 1, "exactly one definition and no call site; any second occurrence means it was wired somewhere new");
-  // `resolvePlanCriteriaAtHead` (imported from lib/review.ts) is wired at exactly one call site —
-  // `reviewCommand`'s own `if (taskId)` branch, asserted precisely above.
+  // `resolvePlanCriteriaAtHead` (imported from lib/review.ts) has exactly TWO intentional call
+  // sites: `reviewCommand`'s own `if (taskId)` branch and W1-T3557's dedicated fix-rung helper.
+  // A merged-PR sweep or retro path must not gain a third.
   const atHeadCallSites = runTaskSrc.split("resolvePlanCriteriaAtHead(").length - 1;
-  assert.equal(atHeadCallSites, 1, "exactly one call site for the head-sha resolver; any second occurrence means it was wired somewhere new");
-  // Neither retroCommand nor the fix-rung sweep (which DOES touch merged-adjacent state) gained a
+  assert.equal(atHeadCallSites, 2, "exactly the review-command and fix-rung-head-contract resolver call sites are permitted");
+  assert.match(
+    runTaskSrc,
+    /export function resolveFixRungTaskContractAtHead[\s\S]*?return resolvePlanCriteriaAtHead\(`Remudero-Task: \$\{taskId\}`/,
+    "the second resolver call is confined to the W1-T3557 fix-rung contract helper",
+  );
+  // Neither retroCommand nor a merged-PR sweep (which DO touch merged-adjacent state) gained a
   // reference to either resolver.
   for (const fn of ["async function retroCommand", "export function fixRungTaskFor("]) {
     const start = runTaskSrc.indexOf(fn);
