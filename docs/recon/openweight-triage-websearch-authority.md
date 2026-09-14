@@ -53,6 +53,43 @@ filed because the positive condition for one did not occur. Reconsider routing
 only after an Azure deployment/surface produces an actual web-search output with
 provider provenance and URL-citation evidence within the configured cash guard.
 
+## Addendum: an existing Azure Responses surface satisfies the authority condition
+
+After this report, one bounded probe against the existing `synthwatch-aoai`
+eastus2 Azure OpenAI resource's `gpt-5-mini` deployment returned the required
+surface: output item types `reasoning`, `web_search_call`, `reasoning`, and
+`message`, with two structured `url_citation` annotations. It used 8,569 input
+and 1,117 output tokens. The key was retrieved into process memory on the fleet
+host; neither the key nor response body was retained.
+
+This does not change the gpt-oss finding: its Chat Completions deployment still
+cannot supply WebSearch. It establishes that an existing Azure surface can serve
+as a search authority. Pending plan task `W1-T3558` therefore owns a separate,
+explicitly configured and cash-bounded bridge from a gpt-oss `WebSearch`
+function call to the Azure Responses API. The gpt-oss worker remains the triage
+author. The bridge must return only provider-issued URL-citation evidence and
+must fail closed on absent consent, credential, endpoint, allowance, or required
+provenance. Until it is implemented and proven, `W1-T3547` remains blocked and
+its mount stays on Claude.
+
+## Follow-up quality probe: route admission remains unproven
+
+Five zero-temperature direct Chat Completions authoring probes against
+`gpt-oss-120b` each returned all expected task fields and parseable YAML, but
+none satisfied the required double-quoted `proof:`-value dialect check. The
+authoring success rate under that full contract was therefore 0/5. Five
+zero-temperature classification probes produced four expected terminal markers;
+the fifth returned `AMBIGUOUS` for a settled cash-cap case. The classification
+success rate was 4/5. The ten calls used 1,955 input and 5,820 output tokens.
+
+This is a bounded synthetic quality signal, not a substitute for W1-T3547's
+production measurement: it does not reproduce the complete triage worktree or
+its deterministic downstream checks, and only aggregate outcomes were retained.
+It nevertheless fails the required repeated-probe threshold. Completing the
+WebSearch bridge cannot authorize the triage mount on its own. Before any route,
+repeat the exact lane-shaped evaluation with retained non-sensitive outcome
+evidence; a failure to meet its accepted-output retry bound is a stop result.
+
 ## Falsifier
 
 This conclusion is false if a bounded request to the existing deployment returns
