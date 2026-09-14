@@ -146,7 +146,7 @@ function taskYaml(ids: string[]): string {
     .join("");
 }
 
-test("W1-T3554 acceptance 2: a target plan change merged to origin/main changes dispatch eligibility on the running daemon, with no restart", async () => {
+test("W1-T3554: reload changes dispatch eligibility after target plan merge", async () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3554-target-`));
   const planPath = join(dir, "tasks.yaml");
   writeFileSync(planPath, taskYaml(["A"]));
@@ -254,7 +254,7 @@ test("W1-T3554 acceptance 3: the reload is observed only BETWEEN workers, never 
 // test proves the fetch really does pick up a commit pushed to a real local "origin" remote AFTER
 // boot, never merely a working-tree edit.
 
-test("dedicatedTargetPlanReloader REAL DEFAULT: fetches origin and resolves the plan tree sha from the checkout, not the cwd", () => {
+test("W1-T3554: dedicated reloader defaults use target checkout", () => {
   const bareDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3554-bare-`));
   const workDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3554-work-`));
   const cloneDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3554-clone-`));
