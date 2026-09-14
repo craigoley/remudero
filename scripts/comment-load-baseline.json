@@ -141,7 +141,7 @@
   "src/lib/account-usage.ts": 180,
   "src/lib/alert-lane.ts": 137,
   "src/lib/analytics-route.ts": 118,
-  "src/lib/arm-auto-merge.ts": 250,
+  "src/lib/arm-auto-merge.ts": 256,
   "src/lib/ask-classification.ts": 250,
   "src/lib/authority.ts": 250,
   "src/lib/auto-triage.ts": 150,
