@@ -1,7 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  mkdirSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -534,6 +543,289 @@ test("W1-T3245: a down daemon is revived from cache, not recycled", () => {
     // On --boot the daemon is not running, so the recycle branch is unreachable there by
     // construction; the guard states it rather than relying on that.
     assert.match(launcher, /\[ "\$BOOT" -eq 0 \]/, "the recycle is never considered on a boot run");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T3583: the trusted control checkout advances without waiting on a daemon restart ────────
+//
+// OBSERVED from the deployed Azure control path on 2026-09-14: `runDeployCycle` fetches, but its
+// own fast-forward (`pullFf`) is reached only behind the restart-pressure decision. The unit-
+// convergence guard above compares HEAD to whatever `origin/main` already resolves to LOCALLY and
+// never fetches, so a clean, below-threshold installer-only change sits fetched-but-unmerged and
+// the guard refuses its own out-of-date control tree forever. These cases drive the RENDERED
+// launcher end to end against a real, local (no-network) git checkout and origin, so the fetch and
+// the `git merge --ff-only` run for real rather than being asserted on source text.
+
+function git(dir: string, args: string[]): string {
+  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
+}
+
+function writeExecutable(path: string, contents: string): void {
+  writeFileSync(path, contents);
+  chmodSync(path, 0o755);
+}
+
+/**
+ * A local (no-network) bare origin plus a seed checkout, pushed twice. Commit "v1" always
+ * reports clean and installs nothing; commit "v2" is the "newly merged installer" — it reports
+ * DRIFTED and its `--install` writes `markerPath`, so the marker existing at all proves the CHECK
+ * ran v2's content and not v1's. Both commits also carry a `bin/rmd` stub that logs every
+ * invocation to `deployRunLog`, standing in for the real deploy-supervisor CLI.
+ *
+ * `cloneAtV1` clones `checkoutDir` before v2 is pushed (checkout starts genuinely BEHIND
+ * origin/main, on branch main, clean); otherwise it clones at the v2 tip.
+ */
+function buildControlCheckout(
+  scratchRoot: string,
+  checkoutDir: string,
+  opts: { cloneAtV1?: boolean } = {},
+): { originDir: string; seedDir: string; markerPath: string; deployRunLog: string; v1Sha: string; v2Sha: string } {
+  mkdirSync(scratchRoot, { recursive: true });
+  const originDir = join(scratchRoot, "origin.git");
+  const seedDir = join(scratchRoot, "seed");
+  const markerPath = join(scratchRoot, "install-marker.txt");
+  const deployRunLog = join(scratchRoot, "deploy-run.log");
+
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", originDir]);
+  execFileSync("git", ["init", "--quiet", "-b", "main", seedDir]);
+  git(seedDir, ["config", "user.email", "t@example.invalid"]);
+  git(seedDir, ["config", "user.name", "Test"]);
+  git(seedDir, ["remote", "add", "origin", originDir]);
+
+  mkdirSync(join(seedDir, "deploy"), { recursive: true });
+  mkdirSync(join(seedDir, "bin"), { recursive: true });
+  writeExecutable(join(seedDir, "bin", "rmd"), `#!/usr/bin/env bash\necho "$@" >> "${deployRunLog}"\nexit 0\n`);
+  writeExecutable(
+    join(seedDir, "deploy", "install-host-units.sh"),
+    `#!/usr/bin/env bash\nif [ "\${1:-}" = "--install" ]; then exit 0; fi\nexit 0\n`,
+  );
+  git(seedDir, ["add", "."]);
+  git(seedDir, ["commit", "--quiet", "-m", "v1"]);
+  git(seedDir, ["push", "--quiet", "origin", "main"]);
+  const v1Sha = git(seedDir, ["rev-parse", "HEAD"]);
+
+  if (opts.cloneAtV1) {
+    execFileSync("git", ["clone", "--quiet", originDir, checkoutDir]);
+  }
+
+  writeExecutable(
+    join(seedDir, "deploy", "install-host-units.sh"),
+    `#!/usr/bin/env bash\nif [ "\${1:-}" = "--install" ]; then echo v2 > "${markerPath}"; exit 0; fi\nexit 1\n`,
+  );
+  git(seedDir, ["add", "."]);
+  git(seedDir, ["commit", "--quiet", "-m", "v2"]);
+  git(seedDir, ["push", "--quiet", "origin", "main"]);
+  const v2Sha = git(seedDir, ["rev-parse", "HEAD"]);
+
+  if (!opts.cloneAtV1) {
+    execFileSync("git", ["clone", "--quiet", originDir, checkoutDir]);
+  }
+
+  return { originDir, seedDir, markerPath, deployRunLog, v1Sha, v2Sha };
+}
+
+/** A stub `docker` (always reports the container running, and logs every call) and a stub `sudo`
+ *  (drops `-n` and execs directly) so the rendered launcher's healthy, non-boot arm runs for real
+ *  without touching the host's actual Docker or elevation. */
+function buildStubBin(root: string): { stubDir: string; dockerLog: string } {
+  const stubDir = join(root, "stubbin");
+  mkdirSync(stubDir, { recursive: true });
+  const dockerLog = join(root, "docker.log");
+  writeExecutable(
+    join(stubDir, "docker"),
+    `#!/usr/bin/env bash\necho "$@" >> "${dockerLog}"\nif [ "\${1:-}" = "ps" ]; then echo fake-container-id; fi\nexit 0\n`,
+  );
+  writeExecutable(join(stubDir, "sudo"), `#!/usr/bin/env bash\nif [ "\${1:-}" = "-n" ]; then shift; fi\nexec "$@"\n`);
+  return { stubDir, dockerLog };
+}
+
+/** Renders the launcher with `stateDir` baked in as `STATE_DIR`, into its own scratch subdir of
+ *  `root` so repeated calls (one per fixture) never collide. */
+function renderLauncher(root: string, stateDir: string, label: string): string {
+  const renderRoot = join(root, `render-${label}`);
+  mkdirSync(renderRoot, { recursive: true });
+  const r = run(["--install"], { RMD_STATE_DIR: stateDir }, renderRoot);
+  assert.equal(r.status, 0, `render failed: ${r.stderr}`);
+  return join(renderRoot, "rmd-relaunch.sh");
+}
+
+/** Runs the rendered launcher's healthy, non-boot path (`docker ps` reports a container) against
+ *  the stub bin dir built by `buildStubBin`. */
+function runLauncherHealthy(launcher: string, stubDir: string): { status: number | null; stdout: string; stderr: string } {
+  return spawnSync("bash", [launcher], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${stubDir}:${process.env.PATH}` },
+  });
+}
+
+test("W1-T3583: clean control checkout fast-forwards before unit drift check", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-checkout-ff-"));
+  try {
+    const stateDir = join(root, "state-root");
+    mkdirSync(stateDir, { recursive: true });
+    const checkoutDir = join(stateDir, "remudero");
+    const { markerPath, deployRunLog, v2Sha } = buildControlCheckout(join(root, "scratch"), checkoutDir, {
+      cloneAtV1: true,
+    });
+    const { stubDir, dockerLog } = buildStubBin(root);
+    const launcher = renderLauncher(root, stateDir, "ff");
+
+    const result = runLauncherHealthy(launcher, stubDir);
+    assert.equal(result.status, 0, `launcher failed: ${result.stderr}`);
+
+    // THE ADVANCE HAPPENED: a checkout that started behind origin/main is now AT it.
+    assert.equal(git(checkoutDir, ["rev-parse", "HEAD"]), v2Sha, "the checkout must fast-forward to origin/main");
+
+    // AND IT HAPPENED BEFORE THE DRIFT CHECK: v1's stub installer always reports clean and never
+    // writes the marker, so the marker's very existence proves the check ran v2's — the newly
+    // merged — content, not the stale one the checkout started at.
+    assert.equal(
+      readFileSync(markerPath, "utf8"),
+      "v2\n",
+      "the newly merged installer must be what converged, proving the advance ran before the check",
+    );
+
+    // NO DAEMON RESTART: this is the healthy tick's own unit convergence, not a recreate.
+    const dockerCalls = readFileSync(dockerLog, "utf8");
+    assert.doesNotMatch(dockerCalls, /^run /m, "the checkout advance must never restart the daemon");
+    assert.doesNotMatch(dockerCalls, /^rm /m, "the checkout advance must never recreate the daemon");
+
+    // The same tick's full deploy-supervisor reading still happens.
+    assert.match(readFileSync(deployRunLog, "utf8"), /deploy-run --image-drift-only/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3583: unit checkout advance refuses unfit control state", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-checkout-unfit-"));
+  try {
+    const { stubDir } = buildStubBin(root);
+
+    // MISSING -- no checkout at all.
+    {
+      const stateDir = join(root, "missing-state");
+      mkdirSync(stateDir, { recursive: true });
+      const launcher = renderLauncher(root, stateDir, "missing");
+      const result = runLauncherHealthy(launcher, stubDir);
+      assert.equal(result.status, 0);
+      assert.match(result.stdout + result.stderr, /is not a checkout/);
+    }
+
+    // TRACKED-DIRTY -- content is already at v2 (which would otherwise DRIFT and try to install),
+    // but an uncommitted tracked change must refuse before that is ever considered.
+    {
+      const stateDir = join(root, "dirty-state");
+      mkdirSync(stateDir, { recursive: true });
+      const checkoutDir = join(stateDir, "remudero");
+      const { markerPath } = buildControlCheckout(join(root, "dirty-scratch"), checkoutDir);
+      writeFileSync(join(checkoutDir, "bin", "rmd"), "#!/usr/bin/env bash\nexit 0\n# tampered, uncommitted\n");
+      const dirtyBefore = git(checkoutDir, ["status", "--porcelain"]);
+      assert.notEqual(dirtyBefore, "", "fixture sanity: the tree must actually be dirty");
+
+      const launcher = renderLauncher(root, stateDir, "dirty");
+      const result = runLauncherHealthy(launcher, stubDir);
+      assert.equal(result.status, 0);
+      assert.match(result.stdout + result.stderr, /checkout is DIRTY/);
+      assert.equal(git(checkoutDir, ["status", "--porcelain"]), dirtyBefore, "a dirty tree must never be cleaned");
+      assert.ok(!existsSync(markerPath), "never installs from a dirty tree");
+    }
+
+    // OFF-MAIN -- a foreign branch, otherwise clean and at origin/main's own content.
+    {
+      const stateDir = join(root, "offmain-state");
+      mkdirSync(stateDir, { recursive: true });
+      const checkoutDir = join(stateDir, "remudero");
+      const { markerPath } = buildControlCheckout(join(root, "offmain-scratch"), checkoutDir);
+      git(checkoutDir, ["checkout", "--quiet", "-b", "other-branch"]);
+
+      const launcher = renderLauncher(root, stateDir, "offmain");
+      const result = runLauncherHealthy(launcher, stubDir);
+      assert.equal(result.status, 0);
+      assert.match(result.stdout + result.stderr, /not on branch main/);
+      assert.equal(
+        git(checkoutDir, ["rev-parse", "--abbrev-ref", "HEAD"]),
+        "other-branch",
+        "an off-main checkout must never be switched onto main",
+      );
+      assert.ok(!existsSync(markerPath), "never installs off main");
+    }
+
+    // DIVERGED -- a local, unpushed commit while origin ALSO moved on: the ff-only merge must
+    // refuse rather than reset or rebase the local work away.
+    {
+      const stateDir = join(root, "diverged-state");
+      mkdirSync(stateDir, { recursive: true });
+      const checkoutDir = join(stateDir, "remudero");
+      const { markerPath } = buildControlCheckout(join(root, "diverged-scratch"), checkoutDir, { cloneAtV1: true });
+      writeFileSync(join(checkoutDir, "local-only.txt"), "local\n");
+      git(checkoutDir, ["add", "."]);
+      git(checkoutDir, ["commit", "--quiet", "-m", "local divergent commit"]);
+      const localHead = git(checkoutDir, ["rev-parse", "HEAD"]);
+
+      const launcher = renderLauncher(root, stateDir, "diverged");
+      const result = runLauncherHealthy(launcher, stubDir);
+      assert.equal(result.status, 0);
+      assert.match(result.stdout + result.stderr, /DIVERGED|fast-forward refused/);
+      assert.equal(
+        git(checkoutDir, ["rev-parse", "HEAD"]),
+        localHead,
+        "a diverged checkout must never be reset or rebased onto origin/main",
+      );
+      assert.ok(!existsSync(markerPath), "never installs from a diverged checkout");
+    }
+
+    // UNREADABLE -- a corrupted .git must be named and refused, never crash the tick.
+    {
+      const stateDir = join(root, "unreadable-state");
+      mkdirSync(stateDir, { recursive: true });
+      const checkoutDir = join(stateDir, "remudero");
+      const { markerPath } = buildControlCheckout(join(root, "unreadable-scratch"), checkoutDir);
+      rmSync(join(checkoutDir, ".git", "HEAD"));
+
+      const launcher = renderLauncher(root, stateDir, "unreadable");
+      const result = runLauncherHealthy(launcher, stubDir);
+      assert.equal(result.status, 0, "an unreadable checkout must not crash the tick");
+      assert.match(result.stdout + result.stderr, /unreadable/);
+      assert.ok(!existsSync(markerPath), "never installs from an unreadable checkout");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3583: advance failure preserves healthy daemon path", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-checkout-preserve-"));
+  try {
+    const stateDir = join(root, "state");
+    mkdirSync(stateDir, { recursive: true });
+    const checkoutDir = join(stateDir, "remudero");
+    const { deployRunLog } = buildControlCheckout(join(root, "scratch"), checkoutDir, { cloneAtV1: true });
+    // Diverge it so the advance refuses.
+    writeFileSync(join(checkoutDir, "local-only.txt"), "local\n");
+    git(checkoutDir, ["add", "."]);
+    git(checkoutDir, ["commit", "--quiet", "-m", "local divergent commit"]);
+
+    const { stubDir, dockerLog } = buildStubBin(root);
+    const launcher = renderLauncher(root, stateDir, "preserve");
+
+    const result = runLauncherHealthy(launcher, stubDir);
+    assert.equal(result.status, 0, `a failed checkout advance must not fail the tick: ${result.stderr}`);
+    assert.match(result.stdout + result.stderr, /DIVERGED|fast-forward refused/);
+
+    // THE FULL DEPLOY-SUPERVISOR READING STILL HAPPENS THE SAME TICK.
+    assert.match(
+      readFileSync(deployRunLog, "utf8"),
+      /deploy-run --image-drift-only/,
+      "the healthy daemon's deploy-supervisor reading must stay reachable despite the refused advance",
+    );
+
+    // AND THE DAEMON ITSELF IS NEVER TOUCHED BY THE FAILED ADVANCE.
+    const dockerCalls = readFileSync(dockerLog, "utf8");
+    assert.doesNotMatch(dockerCalls, /^run /m, "a failed checkout advance must never restart the daemon");
+    assert.doesNotMatch(dockerCalls, /^rm /m, "a failed checkout advance must never recycle the daemon");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
