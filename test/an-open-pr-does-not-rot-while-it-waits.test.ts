@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   buildBehindMainByPr,
   classifyUpdateBranchFailure,
+  DISTANCE_REFRESH_ROTATION_MS,
   ghUpdateBranchArgv,
 } from "../src/run-task.js";
 import {
@@ -221,15 +222,50 @@ test("distance refresh ledger rows name the commit distance for updated and decl
   assert.equal(errorOutcome?.error, "branch update unavailable");
 });
 
-test("the production distance reader reports main's ahead_by count for behind PRs only", () => {
-  const subject = pr({ prNumber: 4809, headSha: "head4809", mergeState: "behind" });
-  const current = pr({ prNumber: 4810, headSha: "head4810", mergeState: "clean" });
+test("the production distance reader compares a normalized-clean PR, rather than mistaking mergeability for graph freshness", () => {
+  const subject = pr({ prNumber: 4809, headSha: "head4809", mergeState: "clean" });
+  const rawBehind = pr({ prNumber: 4810, headSha: "head4810", mergeState: "behind" });
+  const dirty = pr({ prNumber: 4811, headSha: "head4811", mergeState: "dirty" });
+  const draft = pr({ prNumber: 4812, headSha: "head4812", isDraft: true });
   const calls: string[] = [];
-  const distances = buildBehindMainByPr("craigoley", "remudero", [subject, current], (args) => {
+  const distances = buildBehindMainByPr("craigoley", "remudero", [subject, rawBehind, dirty, draft], (args) => {
     calls.push(args[1]);
     return { ahead_by: 14 };
-  });
+  }, 0);
 
-  assert.deepEqual([...distances], [[4809, 14]]);
-  assert.deepEqual(calls, ["repos/craigoley/remudero/compare/head4809...main"]);
+  assert.deepEqual([...distances], [[4809, 14], [4810, 14]]);
+  assert.deepEqual(calls, [
+    "repos/craigoley/remudero/compare/head4809...main",
+    "repos/craigoley/remudero/compare/head4810...main",
+  ]);
+});
+
+test("the production distance reader rotates its bounded direct-compare budget instead of starving later clean PRs", () => {
+  const candidates = [
+    pr({ prNumber: 4820, headSha: "head4820", lastActivityAt: "2026-09-09T08:00:00Z" }),
+    pr({ prNumber: 4821, headSha: "head4821", lastActivityAt: "2026-09-09T09:00:00Z" }),
+    pr({ prNumber: 4822, headSha: "head4822", lastActivityAt: "2026-09-09T10:00:00Z" }),
+    pr({ prNumber: 4823, headSha: "head4823", lastActivityAt: "2026-09-09T11:00:00Z" }),
+  ];
+  const firstCalls: string[] = [];
+  const secondCalls: string[] = [];
+  buildBehindMainByPr("craigoley", "remudero", candidates, (args) => {
+    firstCalls.push(args[1]);
+    return { ahead_by: 14 };
+  }, 0);
+  buildBehindMainByPr("craigoley", "remudero", candidates, (args) => {
+    secondCalls.push(args[1]);
+    return { ahead_by: 14 };
+  }, DISTANCE_REFRESH_ROTATION_MS);
+
+  assert.deepEqual(firstCalls, [
+    "repos/craigoley/remudero/compare/head4820...main",
+    "repos/craigoley/remudero/compare/head4821...main",
+    "repos/craigoley/remudero/compare/head4822...main",
+  ]);
+  assert.deepEqual(secondCalls, [
+    "repos/craigoley/remudero/compare/head4823...main",
+    "repos/craigoley/remudero/compare/head4820...main",
+    "repos/craigoley/remudero/compare/head4821...main",
+  ]);
 });
