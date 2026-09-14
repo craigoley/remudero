@@ -996,6 +996,30 @@ export interface SpawnWorkerArgs {
   secretBoundary?: SecretBoundaryHandles;
 }
 
+/** W1-T3573, PRIMARY CONTROL (test/bound-kind-declared.test.ts): the declaration below IS what
+ * stops `review`/`manual` from reaching the SDK unrestricted — nothing else backstops it.
+ * `routes.review`/`routes.manual` share `routes.implement`'s spawn (same OUTPUT CONTRACT: git
+ * push, `gh pr create`) and previously inherited `disallowedTools`'s UNRESTRICTED default above
+ * with no lane declared. This is the coding toolkit that contract needs (Bash for `git`/`gh`,
+ * WebSearch/WebFetch like TRIAGE_WORKER_TOOLS/PLAN_WORKER_TOOLS), minus the unattended-unsafe
+ * `AskUserQuestion`/`Agent`/`Monitor`. `implement`/`diagnose`/`recon`/fix keep their own
+ * untouched spawns. */
+export const GENERIC_ROUTE_TOOL_BOUNDS = {
+  review: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"],
+  manual: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"],
+} as const satisfies Record<string, readonly string[]>;
+
+export type GenericRouteLane = keyof typeof GENERIC_ROUTE_TOOL_BOUNDS;
+
+/** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
+ * deleting a declared bound must make its own lookup refuse, not silently resume unrestricted). */
+export function resolveGenericRouteToolBound(lane: string): readonly string[] {
+  if (lane === "review" || lane === "manual") return GENERIC_ROUTE_TOOL_BOUNDS[lane];
+  throw new Error(
+    `no declared tool bound for generic route '${lane}' — refusing rather than defaulting to unrestricted tools (W1-T3573)`,
+  );
+}
+
 function selectionCandidateSnapshot(capacity: ProviderCapacity): WorkerSelectionAssignment["candidates"][number] {
   const decision = capacity.modelDecision;
   return {

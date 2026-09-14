@@ -1441,6 +1441,7 @@ import {
   removeWorktreeBase,
   removeRunLock,
   renderWorkerSettings,
+  resolveGenericRouteToolBound,
   resolveClaudeExecutable,
   claudeExecutableCache,
   runAdhocLaneReapRung,
@@ -12573,6 +12574,15 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   const implementConfig = explored.config;
   say(`run ${runId} — target ${owner}/${task.repo} · mount ${implementMount.model}/${implementMount.effort} · ${implementMount.maxTurns} turns (${task.type}×${task.risk}×${taskClass})`);
 
+  // W1-T3573: `task.type` "review"/"manual" ride this SAME generic implement spawn (below) with
+  // no dedicated dispatch path of their own, so — unlike `implement`/`diagnose`/`recon`, which
+  // this deliberately leaves untouched — they get an EXPLICIT declared tool bound instead of the
+  // spawn's unrestricted default. `resolveGenericRouteToolBound` is fail-closed: a lane it does
+  // not name throws rather than resuming unrestricted, so this is only ever called for the two
+  // lanes the table declares.
+  const genericRouteTools =
+    task.type === "review" || task.type === "manual" ? [...resolveGenericRouteToolBound(task.type)] : undefined;
+
   // W1-T2557: THE RUNAWAY BOUND — sized against THIS task's own class's OBSERVED turn-count
   // history (see `deriveRunawayTurnBound`'s own doc), read ONCE here rather than re-derived on
   // every poll tick. `taskClass` is only known from this point on (resolveRunMounts, above), so
@@ -13344,6 +13354,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           maxBudgetUsd: budgetUsd,
           settingsFile,
           config: implementConfig,
+          // W1-T3573: `undefined` for `implement`/`diagnose`/`recon` — byte-identical
+          // unrestricted behavior. Only `review`/`manual` carry a declared bound (above).
+          tools: genericRouteTools,
           // W1-T7B: a diagnose-informed attempt gets the SAME task prompt, plus the prior
           // DIAGNOSE worker's report appended verbatim — never paraphrased, never silently
           // re-issued as an identical blind prompt (acceptance #1's "never blind" falsifier).
@@ -13587,6 +13600,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           maxTurns: implementMount.maxTurns,
           maxBudgetUsd: budgetUsd,
           config: implementConfig,
+          // W1-T3573: same declared bound as the initial spawn above — a resumed session is
+          // still the SAME lane, so it must not regain unrestricted tools on resume.
+          tools: genericRouteTools,
           prompt:
             `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
             `commit, \`git push origin HEAD\` (no -u), open the PR with \`gh pr create --fill --base main\`, ` +
