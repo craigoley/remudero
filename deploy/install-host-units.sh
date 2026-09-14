@@ -342,22 +342,50 @@ converge_host_units() {
     echo "rmd-relaunch: units -- checkout is DIRTY; not converging (an unreviewed tree must never become root config)."
     return 0
   fi
+
+  # W1-T3583 -- READABLE AND ON MAIN, BEFORE ANY UPDATE. A detached HEAD, a foreign branch or a
+  # corrupted .git is named here and left alone; nothing below this point may switch, rebase or
+  # reset it onto main -- only an ff-only merge of a checkout that is ALREADY on it.
+  branch=\$(git -C "\$CHECKOUT" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+  if [ "\$branch" != "main" ]; then
+    echo "rmd-relaunch: units -- checkout is unreadable or not on branch main (branch='\${branch:-none}'); not converging." >&2
+    return 0
+  fi
+
+  # W1-T3583 -- ADVANCE THE ALREADY-TRUSTED CHECKOUT WITHOUT A DAEMON RESTART. runDeployCycle's own
+  # fast-forward (deployer.ts's pullFf) runs only behind its restart-pressure decision, so a clean,
+  # below-threshold installer-only change never reaches it -- this checkout would otherwise sit
+  # fetched-but-unmerged, and the check below would refuse it on every tick forever. FETCH, THEN
+  # FF-ONLY MERGE, as the service user -- never a reset, a rebase or a clean. BOTH ARE BEST-EFFORT:
+  # a fetch that cannot reach origin (offline tick, no remote configured) must never newly refuse a
+  # checkout the OLD comparison below would have accepted, so its failure falls straight through to
+  # that same, already-tested comparison rather than returning here. A fetch that DOES succeed but
+  # whose merge is refused is a real, named divergence and returns here rather than falling through
+  # silently -- that is the one failure this step must still surface on its own.
+  if git -C "\$CHECKOUT" fetch --quiet origin main 2>/dev/null; then
+    if ! git -C "\$CHECKOUT" merge --ff-only --quiet origin/main 2>/dev/null; then
+      echo "rmd-relaunch: units -- checkout DIVERGED from origin/main (fast-forward refused); not converging." >&2
+      return 0
+    fi
+  fi
+
+  # CHECK BEFORE INSTALL, ALWAYS. The steady state is a silent no-op, which is what makes a converge
+  # event rare enough to be worth a record. This is also the FALLBACK comparison for a tick whose
+  # fetch above could not run at all: it names the same checkout-is-stale condition the fetch exists
+  # to close, rather than a new one.
   head_sha=\$(git -C "\$CHECKOUT" rev-parse HEAD 2>/dev/null || echo unknown)
   main_sha=\$(git -C "\$CHECKOUT" rev-parse origin/main 2>/dev/null || echo unknown)
   if [ "\$head_sha" = unknown ] || [ "\$head_sha" != "\$main_sha" ]; then
     echo "rmd-relaunch: units -- checkout is not at origin/main (\$head_sha vs \$main_sha); not converging."
     return 0
   fi
-
-  # CHECK BEFORE INSTALL, ALWAYS. The steady state is a silent no-op, which is what makes a converge
-  # event rare enough to be worth a record.
-  INSTALLER_ARGS=()
   INSTALLER_ENV=(RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB")
   if [ -n "\$INSTANCE_NAME" ]; then
-    INSTALLER_ARGS=(--instance "\$INSTANCE_NAME")
     INSTALLER_ENV=(RMD_INSTANCE_REGISTRY="\$INSTANCE_REGISTRY")
-  fi
-  if env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" "\${INSTALLER_ARGS[@]}" >/dev/null 2>&1; then
+    if env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --instance "\$INSTANCE_NAME" >/dev/null 2>&1; then
+      return 0
+    fi
+  elif env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -369,7 +397,15 @@ converge_host_units() {
   fi
 
   echo "rmd-relaunch: units DRIFTED at \$head_sha -- converging."
-  if sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install "\${INSTALLER_ARGS[@]}"; then
+  install_ok=0
+  if [ -n "\$INSTANCE_NAME" ]; then
+    if sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install --instance "\$INSTANCE_NAME"; then
+      install_ok=1
+    fi
+  elif sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install; then
+    install_ok=1
+  fi
+  if [ "\$install_ok" -eq 1 ]; then
     printf '%s units-converged sha=%s\\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$head_sha" >> "\$REVIVAL_LOG" 2>/dev/null || true
   else
     echo "rmd-relaunch: units -- converge FAILED; the next tick re-asks." >&2
