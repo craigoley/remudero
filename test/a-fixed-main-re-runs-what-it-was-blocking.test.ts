@@ -361,6 +361,20 @@ test("W1-T3422: the production sweep builder keeps its existing mechanical effec
     oldHeadSha: HEAD,
     newHeadSha: "c".repeat(40),
   });
+  assert.deepEqual(
+    await effects.releaseStaleRed!({
+      pr: redPr(),
+      failure: failure(),
+      main: MAIN_REPAIR,
+      route: LOCAL_MERGE_CHECK_ROUTES[0]!,
+    }),
+    {
+      outcome: "rebased",
+      oldHeadSha: HEAD,
+      newHeadSha: "c".repeat(40),
+    },
+    "the stale-red release shares the injected leased-rebase seam",
+  );
   await effects.captureRepairFeedback!({ id: "fb-w1-t3422", origin: "repair#blocked-ambiguous", raw: "fixture" });
-  assert.deepEqual(calls, ["update:3422", "rebase:3422", "feedback:fb-w1-t3422"]);
+  assert.deepEqual(calls, ["update:3422", "rebase:3422", "rebase:3422", "feedback:fb-w1-t3422"]);
 });
