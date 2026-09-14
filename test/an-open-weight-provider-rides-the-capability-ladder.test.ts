@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import type { Config } from "../src/lib/config.js";
 import { MountsError, TierInvariantError, validateMounts } from "../src/lib/mounts.js";
+import { ProviderRoutingPolicyError, writeProviderRoutingPolicyOverride } from "../src/lib/provider-routing-policy.js";
+import { LiveSpawnBlockedError } from "../src/lib/spawn-guard.js";
 import { spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "../src/lib/worker.js";
+import { buildInboxDraftSpawnArgs } from "../src/run-task.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SETTINGS_FILE = join(REPO_ROOT, "settings", "worker.json");
@@ -117,4 +121,83 @@ test("mount affinity bypasses the capacity auction and records that path", async
   assert.equal(assignments[0]?.routing.mode, "mount-affinity");
   assert.equal(assignments[0]?.routing.selectionPath, "mount-affinity");
   assert.deepEqual(assignments[0]?.candidates, [], "the record names an explicit affinity, never a fabricated capacity candidate");
+});
+
+test("mount affinity refuses a disabled provider before routing, and a real adapter before any spawn", async () => {
+  const disabledRoot = mkdtempSync(join(tmpdir(), "rmd-mount-affinity-disabled-"));
+  await assert.rejects(
+    spawnWorker({
+      cwd: REPO_ROOT,
+      permissionMode: "bypassPermissions",
+      settingsFile: SETTINGS_FILE,
+      prompt: "classification only",
+      mountProvider: "codex",
+      config: { claudeBin: "/unused/claude", root: disabledRoot, workerProviders: { enabled: ["claude"] } },
+    }),
+    /mount provider 'codex' is not enabled by the committed host config/,
+    "a mount cannot name an adapter that the committed host has not enabled",
+  );
+
+  const guardedRoot = mkdtempSync(join(tmpdir(), "rmd-mount-affinity-guarded-"));
+  await assert.rejects(
+    spawnWorker({
+      cwd: REPO_ROOT,
+      permissionMode: "bypassPermissions",
+      settingsFile: SETTINGS_FILE,
+      prompt: "classification only",
+      mountProvider: "codex",
+      config: { claudeBin: "/unused/claude", root: guardedRoot, workerProviders: { enabled: ["codex"] } },
+    }),
+    LiveSpawnBlockedError,
+    "the default Codex adapter is stopped by the live-spawn guard before it can create a paid process",
+  );
+});
+
+test("provider policy preference is validated from the shared provider union", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-mount-affinity-policy-"));
+  assert.throws(
+    () => writeProviderRoutingPolicyOverride(
+      root,
+      {
+        enabledProviders: ["claude"],
+        preference: "codex",
+        reservePercent: 5,
+        parks: [],
+        expiresAt: "2026-09-14T00:00:00.000Z",
+        codexModelPreference: null,
+      },
+      {
+        config: { workerProviders: { enabled: ["claude", "codex"] } },
+        writerFingerprint: "0123456789ab",
+        now: () => Date.parse("2026-09-13T00:00:00.000Z"),
+      },
+    ),
+    ProviderRoutingPolicyError,
+    "a valid provider id still refuses when the override did not enable it",
+  );
+});
+
+test("the inbox-draft spawn derives its provider affinity from the synthesis mount", () => {
+  const table = validMounts();
+  (table.synthesis.inbox_draft as Record<string, unknown>).provider = "codex";
+  const mount = validateMounts(table).synthesis.inbox_draft;
+  const config: Config = {
+    claudeBin: "/unused/claude",
+    root: "/tmp/rmd-mount-affinity-inbox",
+    workerProviders: { enabled: ["codex"] },
+  };
+  const args = buildInboxDraftSpawnArgs({
+    cwd: "/tmp/rmd-mount-affinity-inbox/worktree",
+    settingsFile: SETTINGS_FILE,
+    prompt: "draft this task",
+    mount,
+    config,
+  });
+
+  assert.equal(args.model, mount.model);
+  assert.equal(args.effort, mount.effort);
+  assert.equal(args.maxTurns, mount.maxTurns);
+  assert.equal(args.mountProvider, "codex", "the provider comes from the mounted row, not capacity policy");
+  assert.deepEqual(args.disallowedTools, ["Write", "Edit", "NotebookEdit", "Bash"]);
+  assert.deepEqual(args.tools, ["Read", "Grep", "Glob"]);
 });

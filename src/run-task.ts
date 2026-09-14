@@ -34963,6 +34963,36 @@ export async function planCommand(
 const INBOX_DRAFT_WORKER_TOOLS = ["Read", "Grep", "Glob"];
 
 /**
+ * Build the one inbox-draft worker request from its resolved mount.  Keeping this as a pure
+ * boundary makes the mount affinity observable without creating a worktree or attempting a
+ * paid spawn; {@link draftProposalBatch} remains the only production caller.
+ */
+export function buildInboxDraftSpawnArgs(args: {
+  cwd: string;
+  settingsFile: string;
+  prompt: string;
+  mount: Mount;
+  config: Config;
+}): SpawnWorkerArgs {
+  return {
+    cwd: args.cwd,
+    permissionMode: "bypassPermissions",
+    settingsFile: args.settingsFile,
+    model: args.mount.model,
+    mountProvider: args.mount.provider,
+    effort: args.mount.effort,
+    maxTurns: args.mount.maxTurns,
+    // The one worktree below is shared by every draft lane, so enforce the read-only tool
+    // surface at the spawn boundary rather than asking the worker to respect prose.
+    disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+    maxBudgetUsd: DEFAULT_BUDGET_USD,
+    config: args.config,
+    prompt: args.prompt,
+    tools: INBOX_DRAFT_WORKER_TOOLS,
+  };
+}
+
+/**
  * Materialize ONE worktree and draft EVERY proposal in `toDraft` against it — the shared
  * harness-owned glue {@link runDraftRung}'s pure core (lib/inbox.ts) needs: a real
  * `spawnWorker` inside a real worktree. Both `inboxCommand` (CLI, `rmd inbox`) and
@@ -35035,8 +35065,7 @@ export async function draftProposalBatch(
   // never `architectModel`'s `architect:` row. `assertArchitectAboveWorker` is deliberately NOT
   // called here any more — see the identical note at the retro call site.
   const mountsTable = loadMounts(mountsPath(repoRoot));
-  const arch = synthesisModel(mountsTable, "inbox_draft");
-  const archEffort = synthesisEffort(mountsTable, "inbox_draft");
+  const inboxDraftMount = mountsTable.synthesis.inbox_draft;
 
   const settingsFile = renderWorkerSettings({
     templatePath: join(repoRoot, "settings", "worker.json"),
@@ -35058,26 +35087,14 @@ export async function draftProposalBatch(
       toDraft,
       planText,
       {
-        spawn: (proposal, prompt) =>
-          spawnWorker({
+        spawn: (_proposal, prompt) =>
+          spawnWorker(buildInboxDraftSpawnArgs({
             cwd: worktreePath,
-            permissionMode: "bypassPermissions",
             settingsFile,
-            model: arch, // W1-T2559: this rung's own `synthesis.inbox_draft` mount, not the Architect's
-            mountProvider: mountsTable.synthesis.inbox_draft.provider,
-            effort: archEffort, // W1-T2559: this rung's own effort, now actually wired to the spawn
-            maxTurns: mountsTable.synthesis.inbox_draft.maxTurns, // MOUNT-GOVERNED (W1-T2559) — never a hardcoded literal.
-            // W1-T2591: the ONE worktree above is shared by every lane of `runDraftRung`'s pool
-            // (#3588/W1-T2664), so the prompt's "you have NO Write/Edit/Bash tools" is enforced
-            // here rather than merely asserted — see INBOX_DRAFT_DISALLOWED_TOOLS' own doc for
-            // why this rung needs none of them and why enforcement was chosen over per-lane
-            // worktrees. This is what makes the sharing read-only by construction.
-            disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-            maxBudgetUsd: DEFAULT_BUDGET_USD,
+            mount: inboxDraftMount,
             config,
             prompt,
-            tools: INBOX_DRAFT_WORKER_TOOLS,
-          }),
+          })),
         log,
       },
       runId,
