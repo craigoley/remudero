@@ -26717,6 +26717,123 @@ export function planReloader(
 }
 
 /**
+ * W1-T3554 — the NON-self counterpart to {@link planReloader}. A dedicated instance launched with
+ * `--repo <target>` (a non-self target, no explicit `--plan`) used to freeze that target's plan
+ * tree at boot forever: `planReloader` returns `undefined` whenever `target.isSelf` is false, and
+ * `checkFreshness` (wired a few lines below this function's own call site) watches only the
+ * daemon's OWN engine checkout — so nothing in the running process ever re-read the target's
+ * `plan/tasks.yaml` after boot. A merged target-plan change (a task's status flipping, a
+ * `needs-human` gate resolving) never reached dispatch eligibility for the daemon's whole lifetime
+ * (the CONSOLE-T1 incident this task's rationale reports).
+ *
+ * SAME SHAPE, SAME PLACEMENT, SAME "never fires mid-batch" GUARANTEE as `planReloader` — and for
+ * the identical reason: `runDaemon` calls whichever function is wired through `deps.reloadPlan` at
+ * the very TOP of each tick, before any dispatch decision, and does not return to that call site
+ * until the CURRENT batch's `Promise.allSettled` has resolved (lib/daemon.ts). That placement is
+ * what makes "never mid-batch" true for `planReloader` today, with no batch-aware code inside it —
+ * this function inherits the identical property from the identical caller, with no new gate to add
+ * or get wrong.
+ *
+ * THIS IS A NEW FUNCTION, NOT A MODIFICATION OF `planReloader`. `planReloader`'s own self-target
+ * arm is byte-for-byte untouched, and its documented non-self behaviour ("only the git-synced self
+ * target re-reads") still holds for THAT function — see
+ * test/daemon-plan-freshness.test.ts's "a NON-self target gets no reloader" case. Only the daemon's
+ * WIRING (below) now also reaches this second reloader for the non-self arm.
+ *
+ * WHY IN-PLACE RELOAD, MIRRORING THE SELF-TARGET ARM, RATHER THAN A RESTART. The daemon's own BOOT
+ * path already calls `loadPlan(target.planPath)` against this exact checkout for a non-self target
+ * (see the `!target.isSelf && !flagValue(rest, "--plan")` branch above, in `daemonCommand`) —
+ * parsing that tree is already proven safe outside a fresh boot, so there is no plan-loading hazard
+ * a restart would avoid and an in-place reload would not. A restart would also risk crossing the
+ * boundary this task's design rules out: per-instance state (drain locks, review locks, ledger
+ * cursors) lives in THIS process and must stay independent per dedicated instance (W1-T1062,
+ * W1-T978) — an in-place reload touches only the in-memory plan tree, never that state, so there is
+ * nothing for a restart to protect that reload does not already leave alone.
+ *
+ * WHY THIS FETCHES, UNLIKE `planReloader`. The self-target arm reads `origin/main` with no fetch of
+ * its own because `checkFreshness` (`checkServiceFreshness`, wired immediately above this
+ * function's call site) already fetches that SAME checkout every tick, for the engine's own
+ * freshness. `checkFreshness` never reads a non-self TARGET's checkout at all (out of scope per
+ * this task's design — it watches the engine's own code, not a target's plan) and nothing else
+ * keeps `env.reposDir/<repo>`'s `origin/main` ref current between dispatches: worker provisioning
+ * (`worktreeAdd`, lib/worker.ts) fetches that identical directory, but only WHILE a worker is
+ * running. An idle dedicated daemon between dispatches would otherwise never observe a merged
+ * target-plan change — reproducing the exact staleness this task exists to close. So this reloader
+ * fetches for itself, once per tick, at the SAME bounded cadence `checkServiceFreshness` already
+ * pays for the engine checkout.
+ *
+ * WHY THIS ALSO RESETS THE WORKING TREE, UNLIKE `planReloader`. `load` (below, like
+ * `planReloader`'s own) is a plain `loadPlan(target.planPath)` — a filesystem read of whatever is
+ * literally CHECKED OUT, never a `git show <ref>:<path>` read of the ref itself. For a self target
+ * that is safe DORMANT-BY-DESIGN: the deploy supervisor restarts the whole process on any main
+ * move (see `planReloader`'s own doc), so by the time a self-target reload could fire, a fresh
+ * checkout has usually already replaced the process. A dedicated non-self daemon has no such
+ * external restart — proven by this exact task existing — so nothing else ever moves this
+ * checkout's WORKING TREE past whatever `git reset --hard origin/main` boot performed once (see
+ * the `!target.isSelf && !flagValue(rest, "--plan")` boot branch above). A fetched `origin/main`
+ * ref with a stale working tree would make `load` re-parse the SAME stale content forever — a
+ * silent no-op reload, worse than the frozen-at-boot bug this task closes, because it would look
+ * like it worked. So a genuine sha move resets the checkout the SAME way boot already does,
+ * before reading it — mirroring, not inventing, the one existing non-self sync path.
+ *
+ * Returns a closure holding the last-seen plan tree sha, identically to `planReloader`: it answers
+ * `null` while that sha is unchanged, so `runDaemon` re-parses only when the target plan genuinely
+ * moved on its own origin/main.
+ */
+export function dedicatedTargetPlanReloader(
+  target: { isSelf: boolean; planPath: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    fetch?: () => void;
+    treeSha?: () => string;
+    resetWorkingTree?: () => void;
+    load?: (planPath: string) => Plan;
+  } = {},
+): (() => Plan | null) | undefined {
+  // Mirrors `planReloader`'s own early return, inverted: THIS reloader exists only for the arm
+  // `planReloader` refuses. Wiring (below) never hands a self target here, but the guard keeps
+  // this function correct in isolation, not merely correct-by-caller-discipline.
+  if (target.isSelf) return undefined;
+  const repoDirForGit = dirname(target.planPath);
+  const fetch =
+    deps.fetch ??
+    (() => execFileSync("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"], { stdio: "pipe" }));
+  const treeSha =
+    deps.treeSha ??
+    (() =>
+      execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
+        encoding: "utf8",
+      }).trim());
+  // SAME command boot already runs on this exact checkout (`!target.isSelf` branch, above) — only
+  // deferred to fire here, once, precisely when a genuine reload is due.
+  const resetWorkingTree =
+    deps.resetWorkingTree ??
+    (() => execFileSync("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" }));
+  const load = deps.load ?? ((pp: string) => loadPlan(pp));
+  let lastSha: string | undefined;
+  return () => {
+    // A failed fetch propagates — caught by `runDaemon`'s own `daemon.plan_reload_failed` wrapper
+    // (the SAME generic catch `planReloader`'s own treeSha throw already relies on), never
+    // swallowed here. Keeping the plan we already have is the correct degrade either way.
+    fetch();
+    const sha = treeSha();
+    if (lastSha === undefined) {
+      // First tick: record the boot's sha without reloading — see `planReloader`'s identical
+      // comment for why reporting a reload here would be a lie. The working tree already matches
+      // this sha (boot's own reset put it there), so no reset is needed on this arm either.
+      lastSha = sha;
+      log("daemon.target_plan_unchanged", { tree_sha: sha.slice(0, 12), first_tick: true });
+      return null;
+    }
+    if (sha === lastSha) return null;
+    lastSha = sha;
+    resetWorkingTree();
+    log("daemon.target_plan_changed", { tree_sha: sha.slice(0, 12) });
+    return load(target.planPath);
+  };
+}
+
+/**
  * W1-T2509 — MEMOISE ONE {@link GitHub} GATEWAY PER `owner/repo`, so N dispatch lanes pay ONE cold
  * walk instead of N.
  *
@@ -27892,19 +28009,26 @@ export async function daemonCommand(
         // dispatch runs to its verdict first, which is also what bounds the restart rate (measured:
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
         checkFreshness: () => daemonFreshnessFromService(checkServiceFreshness(repoRoot, process.env)),
-        // impl-FZ — PLAN FRESHNESS. Wired ONLY on the git-synced self-target path, so the reload
-        // reads the SAME source the boot did (origin/main, never the working tree). An explicit
-        // `--plan` keeps the frozen-at-boot behaviour, because that caller asked for a literal file.
+        // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
+        // paths, so the reload always reads the SAME source the boot did (origin/main, never the
+        // working tree). An explicit `--plan` keeps the frozen-at-boot behaviour for BOTH, because
+        // that caller asked for a literal file.
         //
         // Change detection is a TREE SHA, not a timestamp: `origin/main:plan` covers the monolith
         // AND all 45 shards in one ~8ms call, and only when it moves do we pay the ~60ms parse of
-        // a ~1MB plan. Unchanged ticks therefore cost 8ms, not 60. The sha is read from the
-        // already-fetched origin/main ref rather than fetching here — the deploy supervisor keeps
-        // that ref current on its own ~2-minute cadence, and adding a per-tick fetch to the
-        // dispatch path would be new network I/O for no extra freshness.
-        // Mirrors the BOOT condition at the plan binding above (`target.isSelf && !--plan`)
-        // exactly, so the reload source can never diverge from the load source.
-        reloadPlan: flagValue(rest, "--plan") ? undefined : planReloader(target, allowStale, log),
+        // a ~1MB plan. Unchanged ticks therefore cost 8ms, not 60. The self-target sha is read from
+        // the already-fetched origin/main ref rather than fetching here — `checkFreshness` above
+        // already fetches this SAME checkout every tick — while the dedicated non-self target
+        // fetches for itself (see `dedicatedTargetPlanReloader`'s own doc for why: nothing else
+        // keeps ITS checkout's origin/main current between dispatches).
+        // Mirrors the BOOT condition at the plan binding above (`target.isSelf && !--plan` /
+        // `!target.isSelf && !--plan`) exactly, so the reload source can never diverge from the
+        // load source.
+        reloadPlan: flagValue(rest, "--plan")
+          ? undefined
+          : target.isSelf
+            ? planReloader(target, allowStale, log)
+            : dedicatedTargetPlanReloader(target, log),
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
         // consumes markers the write-token API drops, dispatching a kicked task
         // through its normal assertRunnable-gated path and honouring "drain now".
