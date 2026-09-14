@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { decideDeployTrigger } from "../src/lib/deployer.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
 const SCRIPT = "deploy/install-host-units.sh";
 
@@ -559,7 +560,16 @@ test("W1-T3245: a down daemon is revived from cache, not recycled", () => {
 // the `git merge --ff-only` run for real rather than being asserted on source text.
 
 function git(dir: string, args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
+  return execFileSync("git", ["-C", dir, ...args], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+      GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+      GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+      GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+    },
+  }).trim();
 }
 
 function writeExecutable(path: string, contents: string): void {
@@ -577,53 +587,48 @@ function writeExecutable(path: string, contents: string): void {
  * `cloneAtV1` clones `checkoutDir` before v2 is pushed (checkout starts genuinely BEHIND
  * origin/main, on branch main, clean); otherwise it clones at the v2 tip.
  */
-function buildControlCheckout(
+function controlFixture(
   scratchRoot: string,
   checkoutDir: string,
   opts: { cloneAtV1?: boolean } = {},
-): { originDir: string; seedDir: string; markerPath: string; deployRunLog: string; v1Sha: string; v2Sha: string } {
+): { markerPath: string; deployRunLog: string; v1Sha: string; v2Sha: string } {
   mkdirSync(scratchRoot, { recursive: true });
-  const originDir = join(scratchRoot, "origin.git");
-  const seedDir = join(scratchRoot, "seed");
   const markerPath = join(scratchRoot, "install-marker.txt");
   const deployRunLog = join(scratchRoot, "deploy-run.log");
+  const origin = gitRepo({ bare: true, kind: "host-units-control-origin" });
+  const seed = gitRepo({ kind: "host-units-control-seed" });
 
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", originDir]);
-  execFileSync("git", ["init", "--quiet", "-b", "main", seedDir]);
-  git(seedDir, ["config", "user.email", "t@example.invalid"]);
-  git(seedDir, ["config", "user.name", "Test"]);
-  git(seedDir, ["remote", "add", "origin", originDir]);
-
-  mkdirSync(join(seedDir, "deploy"), { recursive: true });
-  mkdirSync(join(seedDir, "bin"), { recursive: true });
-  writeExecutable(join(seedDir, "bin", "rmd"), `#!/usr/bin/env bash\necho "$@" >> "${deployRunLog}"\nexit 0\n`);
+  mkdirSync(join(seed.dir, "deploy"), { recursive: true });
+  mkdirSync(join(seed.dir, "bin"), { recursive: true });
+  writeExecutable(join(seed.dir, "bin", "rmd"), `#!/usr/bin/env bash\necho "$@" >> "${deployRunLog}"\nexit 0\n`);
   writeExecutable(
-    join(seedDir, "deploy", "install-host-units.sh"),
+    join(seed.dir, "deploy", "install-host-units.sh"),
     `#!/usr/bin/env bash\nif [ "\${1:-}" = "--install" ]; then exit 0; fi\nexit 0\n`,
   );
-  git(seedDir, ["add", "."]);
-  git(seedDir, ["commit", "--quiet", "-m", "v1"]);
-  git(seedDir, ["push", "--quiet", "origin", "main"]);
-  const v1Sha = git(seedDir, ["rev-parse", "HEAD"]);
+  seed.addRemote("origin", origin.dir);
+  seed.git("add", ".");
+  seed.git("commit", "--quiet", "-m", "v1");
+  seed.git("push", "--quiet", "origin", "main");
+  const v1Sha = seed.git("rev-parse", "HEAD");
 
   if (opts.cloneAtV1) {
-    execFileSync("git", ["clone", "--quiet", originDir, checkoutDir]);
+    execFileSync("git", ["clone", "--quiet", origin.dir, checkoutDir]);
   }
 
   writeExecutable(
-    join(seedDir, "deploy", "install-host-units.sh"),
+    join(seed.dir, "deploy", "install-host-units.sh"),
     `#!/usr/bin/env bash\nif [ "\${1:-}" = "--install" ]; then echo v2 > "${markerPath}"; exit 0; fi\nexit 1\n`,
   );
-  git(seedDir, ["add", "."]);
-  git(seedDir, ["commit", "--quiet", "-m", "v2"]);
-  git(seedDir, ["push", "--quiet", "origin", "main"]);
-  const v2Sha = git(seedDir, ["rev-parse", "HEAD"]);
+  seed.git("add", ".");
+  seed.git("commit", "--quiet", "-m", "v2");
+  seed.git("push", "--quiet", "origin", "main");
+  const v2Sha = seed.git("rev-parse", "HEAD");
 
   if (!opts.cloneAtV1) {
-    execFileSync("git", ["clone", "--quiet", originDir, checkoutDir]);
+    execFileSync("git", ["clone", "--quiet", origin.dir, checkoutDir]);
   }
 
-  return { originDir, seedDir, markerPath, deployRunLog, v1Sha, v2Sha };
+  return { markerPath, deployRunLog, v1Sha, v2Sha };
 }
 
 /** A stub `docker` (always reports the container running, and logs every call) and a stub `sudo`
@@ -666,7 +671,7 @@ test("W1-T3583: clean control checkout fast-forwards before unit drift check", (
     const stateDir = join(root, "state-root");
     mkdirSync(stateDir, { recursive: true });
     const checkoutDir = join(stateDir, "remudero");
-    const { markerPath, deployRunLog, v2Sha } = buildControlCheckout(join(root, "scratch"), checkoutDir, {
+    const { markerPath, deployRunLog, v2Sha } = controlFixture(join(root, "scratch"), checkoutDir, {
       cloneAtV1: true,
     });
     const { stubDir, dockerLog } = buildStubBin(root);
@@ -720,7 +725,7 @@ test("W1-T3583: unit checkout advance refuses unfit control state", () => {
       const stateDir = join(root, "dirty-state");
       mkdirSync(stateDir, { recursive: true });
       const checkoutDir = join(stateDir, "remudero");
-      const { markerPath } = buildControlCheckout(join(root, "dirty-scratch"), checkoutDir);
+      const { markerPath } = controlFixture(join(root, "dirty-scratch"), checkoutDir);
       writeFileSync(join(checkoutDir, "bin", "rmd"), "#!/usr/bin/env bash\nexit 0\n# tampered, uncommitted\n");
       const dirtyBefore = git(checkoutDir, ["status", "--porcelain"]);
       assert.notEqual(dirtyBefore, "", "fixture sanity: the tree must actually be dirty");
@@ -738,7 +743,7 @@ test("W1-T3583: unit checkout advance refuses unfit control state", () => {
       const stateDir = join(root, "offmain-state");
       mkdirSync(stateDir, { recursive: true });
       const checkoutDir = join(stateDir, "remudero");
-      const { markerPath } = buildControlCheckout(join(root, "offmain-scratch"), checkoutDir);
+      const { markerPath } = controlFixture(join(root, "offmain-scratch"), checkoutDir);
       git(checkoutDir, ["checkout", "--quiet", "-b", "other-branch"]);
 
       const launcher = renderLauncher(root, stateDir, "offmain");
@@ -759,7 +764,7 @@ test("W1-T3583: unit checkout advance refuses unfit control state", () => {
       const stateDir = join(root, "diverged-state");
       mkdirSync(stateDir, { recursive: true });
       const checkoutDir = join(stateDir, "remudero");
-      const { markerPath } = buildControlCheckout(join(root, "diverged-scratch"), checkoutDir, { cloneAtV1: true });
+      const { markerPath } = controlFixture(join(root, "diverged-scratch"), checkoutDir, { cloneAtV1: true });
       writeFileSync(join(checkoutDir, "local-only.txt"), "local\n");
       git(checkoutDir, ["add", "."]);
       git(checkoutDir, ["commit", "--quiet", "-m", "local divergent commit"]);
@@ -782,7 +787,7 @@ test("W1-T3583: unit checkout advance refuses unfit control state", () => {
       const stateDir = join(root, "unreadable-state");
       mkdirSync(stateDir, { recursive: true });
       const checkoutDir = join(stateDir, "remudero");
-      const { markerPath } = buildControlCheckout(join(root, "unreadable-scratch"), checkoutDir);
+      const { markerPath } = controlFixture(join(root, "unreadable-scratch"), checkoutDir);
       rmSync(join(checkoutDir, ".git", "HEAD"));
 
       const launcher = renderLauncher(root, stateDir, "unreadable");
@@ -802,7 +807,7 @@ test("W1-T3583: advance failure preserves healthy daemon path", () => {
     const stateDir = join(root, "state");
     mkdirSync(stateDir, { recursive: true });
     const checkoutDir = join(stateDir, "remudero");
-    const { deployRunLog } = buildControlCheckout(join(root, "scratch"), checkoutDir, { cloneAtV1: true });
+    const { deployRunLog } = controlFixture(join(root, "scratch"), checkoutDir, { cloneAtV1: true });
     // Diverge it so the advance refuses.
     writeFileSync(join(checkoutDir, "local-only.txt"), "local\n");
     git(checkoutDir, ["add", "."]);

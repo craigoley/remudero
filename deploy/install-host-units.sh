@@ -379,13 +379,13 @@ converge_host_units() {
     echo "rmd-relaunch: units -- checkout is not at origin/main (\$head_sha vs \$main_sha); not converging."
     return 0
   fi
-  INSTALLER_ARGS=()
   INSTALLER_ENV=(RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB")
   if [ -n "\$INSTANCE_NAME" ]; then
-    INSTALLER_ARGS=(--instance "\$INSTANCE_NAME")
     INSTALLER_ENV=(RMD_INSTANCE_REGISTRY="\$INSTANCE_REGISTRY")
-  fi
-  if env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" "\${INSTALLER_ARGS[@]}" >/dev/null 2>&1; then
+    if env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --instance "\$INSTANCE_NAME" >/dev/null 2>&1; then
+      return 0
+    fi
+  elif env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -397,7 +397,15 @@ converge_host_units() {
   fi
 
   echo "rmd-relaunch: units DRIFTED at \$head_sha -- converging."
-  if sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install "\${INSTALLER_ARGS[@]}"; then
+  install_ok=0
+  if [ -n "\$INSTANCE_NAME" ]; then
+    if sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install --instance "\$INSTANCE_NAME"; then
+      install_ok=1
+    fi
+  elif sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install; then
+    install_ok=1
+  fi
+  if [ "\$install_ok" -eq 1 ]; then
     printf '%s units-converged sha=%s\\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$head_sha" >> "\$REVIVAL_LOG" 2>/dev/null || true
   else
     echo "rmd-relaunch: units -- converge FAILED; the next tick re-asks." >&2
