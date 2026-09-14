@@ -413,6 +413,7 @@ import {
   escalationCause,
   realEscalationJudge,
   escalationHeadSha,
+  escalationContractRevision,
   findDuplicateEscalation,
   ghIssueGateway,
   presenceMode,
@@ -6501,6 +6502,33 @@ export function unchangedTreeStandDownReason(
 }
 
 /**
+ * W1-T3579: one deterministic revision of the CURRENT authoritative task contract the fix rung's
+ * open-escalation guard (immediately below) versions its stand-down against — covers task
+ * identity, declared `files:`, and every acceptance criterion's `claim`/`proof` pair, never
+ * `satisfied_by`/`holdout` or any other decorative/volatile field (a `status`/`attempts` bump on
+ * every dispatch must never move this). THE DEFECT THIS CLOSES: PORTAL-T4 (remudero-site PR #21,
+ * 2026-09-14) was correctly refused, then a plan-only scope amendment re-authorized the exact same
+ * repair on the exact same PR head — and the open-escalation guard, keyed on `headSha` alone,
+ * stood the repair down forever because nothing distinguished "a human already answered this
+ * question" from "the question changed underneath an open issue". Declared files are sorted
+ * first (order is never part of the contract — {@link filesDigest}'s own convention); acceptance
+ * pairs are read in DECLARED order, because reordering criteria is itself an amendment a re-admit
+ * should notice. PURE: reads nothing off disk — the caller already holds the live `Task`/{@link
+ * runFixRung}'s own `opts.task` this rung dispatched against, never a worker report or PR-body
+ * prose (design note (i) — recovering it from either would let a worker's own claim decide
+ * whether it gets re-admitted).
+ */
+export function taskContractRevision(task: {
+  id: string;
+  files?: readonly string[];
+  acceptance?: ReadonlyArray<Pick<AcceptanceCriterion, "claim" | "proof">>;
+}): string {
+  const files = [...(task.files ?? [])].sort();
+  const acceptance = (task.acceptance ?? []).map((c) => ({ claim: c.claim, proof: c.proof }));
+  return sha256Hex(JSON.stringify({ id: task.id, files, acceptance }));
+}
+
+/**
  * W1-T2799 (the fix-rung pre-strike gate's SIXTH reason source, composed into {@link
  * fixRungStandDownReason} below — never a parallel early return): has a human ALREADY been asked
  * about this exact state?
@@ -6541,10 +6569,29 @@ export function unchangedTreeStandDownReason(
  *
  * PURE and exported so the boundary is unit-testable independent of the rung's issue plumbing,
  * exactly like {@link unchangedTreeStandDownReason} beside it.
+ *
+ * W1-T3579 extends this SAME function with a FOURTH parameter, `currentContractRevision` — again
+ * never a parallel early-return path. `headSha` alone answers "is this the same push", not "is
+ * this the same QUESTION": a plan-only scope/acceptance amendment re-authorizes a repair on the
+ * identical head an open issue already names, and the head-only check above stood that repair
+ * down permanently (the PORTAL-T4/#21 defect this task closes — see {@link taskContractRevision}'s
+ * own doc). So once a candidate is HEAD-QUALIFIED (survived the check above), its RECORDED
+ * contract revision (read through {@link escalationContractRevision}, the same
+ * `CONTRACT_REVISION_LINE_RE` {@link matchDuplicateEscalation} matches on) is compared against
+ * the CURRENT one. A candidate recording NO revision at all (every issue predating this task,
+ * W1-T2799's own legacy shape) keeps the ORIGINAL head-only stand-down untouched — permissive
+ * exactly like `matchesOptionalDimension`'s absent-side rule, never a second matcher, and
+ * consistent with design note (iii): "an existing head-qualified escalation without a contract
+ * revision remains a stand-down; this task does not mass-retry old issues". Only a candidate that
+ * DOES record one, and disagrees with the current, live revision, re-admits — exactly ONE strike,
+ * because the next round either resolves it (no new escalation) or the false-block producer files
+ * a REVISION-DISTINCT issue (the dedup key's 4th dimension, above), so a second loop on the SAME
+ * unchanged contract is caught exactly as before.
  */
 export function openEscalationStandDownReason(
   headSha: string,
   candidate: OpenIssue | undefined,
+  currentContractRevision?: string,
 ): { reason: string } | undefined {
   if (!candidate) return undefined; // nothing open on this key — the ordinary path
   const candidateHead = escalationHeadSha(candidate.body);
@@ -6553,11 +6600,21 @@ export function openEscalationStandDownReason(
   // push whose issue has not been filed yet — in both, the failure direction of guessing wrong is
   // "stop fixing things", so both fail open.
   if (candidateHead === undefined || candidateHead !== headSha) return undefined;
+  const candidateRevision = escalationContractRevision(candidate.body);
+  // W1-T3579: a genuine disagreement between the RECORDED and CURRENT contract revision means the
+  // question this issue asked has since changed underneath it — re-admit rather than stand down.
+  // Either side missing (a legacy issue, or a caller with no live task to hash) says nothing, so
+  // the original head-only stand-down applies unchanged — fail toward standing down, never toward
+  // mass-retrying, on anything short of a positively OBSERVED contract change.
+  if (candidateRevision !== undefined && currentContractRevision !== undefined && candidateRevision !== currentContractRevision) {
+    return undefined;
+  }
   return {
     reason:
       `a needs-human escalation for this exact (task, PR, head ${headSha}, cause) is ALREADY OPEN and ` +
       `awaiting a human (${candidate.url}) — a strike here would re-ask a question already in front of ` +
-      `someone and append to that same issue; standing down until it is closed or the head moves`,
+      `someone and append to that same issue; standing down until it is closed, the head moves, or the ` +
+      `task contract changes`,
   };
 }
 
@@ -6701,6 +6758,11 @@ async function fixRungStandDownReason(
    * CHECKED LAST of the six, deliberately: it is the only source that costs an issue-list read
    * this round would not otherwise perform, so the five cheaper answers — all of them either
    * already-fetched facts or reads the rung needs regardless — get to answer first.
+   *
+   * W1-T3579 — `key.contractRevision` (set by the caller from {@link taskContractRevision}) is
+   * read straight off THIS `key`, never a second parameter here: it is both the 4th dedup
+   * dimension `find` searches with and the CURRENT revision {@link openEscalationStandDownReason}
+   * compares a head-qualified candidate against, so the two can never drift apart.
    */
   openEscalation?: {
     headSha: string;
@@ -6796,6 +6858,10 @@ async function fixRungStandDownReason(
     const alreadyAsked = openEscalationStandDownReason(
       openEscalation.headSha,
       openEscalation.find(openEscalation.key),
+      // W1-T3579: read straight off the SAME key the probe/producer both build below — never a
+      // second computation — so the comparison and the dedup key can never disagree about which
+      // revision "current" names.
+      openEscalation.key.contractRevision,
     );
     if (alreadyAsked) return alreadyAsked;
   }
@@ -8068,6 +8134,12 @@ export async function runFixRung(opts: {
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
+  // W1-T3579: computed ONCE, from the live task this rung was dispatched against — never
+  // recomputed per round (a task's own contract cannot change mid-rung; only a FRESH `runFixRung`
+  // built by the next sweep, after a plan amendment, would ever see a different one). Threaded
+  // into both the pre-strike probe's key and the false-block producer below, so the two can never
+  // disagree about "current".
+  const currentContractRevision = taskContractRevision(opts.task);
   // W1-T3166 — THE CALL W1-T349's judge never had: zero production callers, an empty fleet-notice
   // queue, no ledger step. The ten fix-rung sites below are the NEEDS ME board's largest class.
   // Built here, not per callsite, so a construction failure surfaces once at rung entry.
@@ -8249,6 +8321,8 @@ export async function runFixRung(opts: {
               detail: "",
               headSha: review.headSha,
               cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
+              // W1-T3579: the 4th dedup dimension — see this function's own `openEscalation` doc.
+              contractRevision: currentContractRevision,
             },
             find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
           }
@@ -9840,6 +9914,11 @@ export async function runFixRung(opts: {
           // producer below already uses, never a new derivation.
           headSha: review.headSha,
           cause: escalationCause(currentMergeConflict !== undefined, noReviewYet),
+          // W1-T3579: the same 4th dedup dimension the pre-strike probe's key above already
+          // carries — so a strike this task re-admits, if it needs to escalate again, opens a
+          // REVISION-DISTINCT issue rather than silently appending to one filed against a since-
+          // amended contract (design note (ii)).
+          contractRevision: currentContractRevision,
           summary: `review false-block after ${strikes} strike(s) (${falseBlockReason}) — ${opts.prUrl}`,
           detail:
             `The blocked_review FIX RUNG (W1-T76, W1-T168) detected a REVIEW FALSE-BLOCK it cannot resolve by ` +
