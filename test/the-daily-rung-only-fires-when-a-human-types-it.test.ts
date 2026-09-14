@@ -254,7 +254,7 @@ async function tickWith(extra: Partial<Parameters<typeof runDaemon>[1]>): Promis
 /** The one task {@link fixturePlan} offers. Reaching the dispatch rung means attempting it. */
 const DISPATCHED = ["W1-T2972FIX"];
 
-test("W1-T2972 the poll loop runs the rung ONLY on a tick that decided to fire", async () => {
+test("W1-T3542 criterion 2: a fired CI-learning daemon row names draft and landing counts", async () => {
   let ran = 0;
   await tickWith({
     checkCiLearningCadence: () => ({ fire: false, reason: "held by the interval bound" }),
@@ -299,6 +299,9 @@ test("W1-T2972 the poll loop runs the rung ONLY on a tick that decided to fire",
       draftCount: 0,
       excludedCount: 0,
       unreadableCount: 0,
+      filedCount: 2,
+      skippedCount: 3,
+      refusedCount: 4,
       lessonRecurrences: { status: "unreadable" },
     }),
   } as never);
@@ -306,6 +309,20 @@ test("W1-T2972 the poll loop runs the rung ONLY on a tick that decided to fire",
     rows.find((row) => row.step === "ci_learning_cadence.ran")?.fields?.lesson_recurrences,
     { status: "unreadable" },
     "the bounded efficacy object reaches the durable cadence row",
+  );
+  assert.deepEqual(
+    rows.find((row) => row.step === "ci_learning_cadence.ran")?.fields,
+    {
+      status: "clear",
+      drafts: 0,
+      excluded: 0,
+      unreadable: 0,
+      filed: 2,
+      skipped: 3,
+      refused: 4,
+      lesson_recurrences: { status: "unreadable" },
+    },
+    "W1-T3542 criterion 2: the durable row distinguishes landing outcomes from merely drafted work",
   );
 });
 

@@ -301,7 +301,7 @@ test("W1-T3492: malformed queued bytes, held findings, and refused drafts stay u
   assert.deepEqual(refused.refused, [{ findingId: rejectedDraft.findingId, reason: "fixture lint refusal" }]);
 });
 
-test("W1-T3492 criterion 4: manual ci-learning keeps the direct checkout writer while scheduled uses isolated landing", async () => {
+test("W1-T3542 criterion 1: manual ci-learning uses the isolated landing queue too", async () => {
   const scheduledBare = makeBareOrigin();
   const scheduledCheckout = cloneRoot(scheduledBare);
   const scheduledRoot = stateRoot();
@@ -322,15 +322,33 @@ test("W1-T3492 criterion 4: manual ci-learning keeps the direct checkout writer 
   const manualBare = makeBareOrigin();
   const manualCheckout = cloneRoot(manualBare);
   const manualRoot = stateRoot();
-  const code = ciLearningCommand(["--force"], {
-    root: manualRoot,
-    checkoutRoot: manualCheckout,
-    loadWindow: () => repairedWindow(),
-    planOrigins: [],
-  });
+  const manualGh = fakeGh("https://github.com/o/r/pull/3542");
+  const code = withLiveWritesAllowed(() =>
+    ciLearningCommand(["--force"], {
+      root: manualRoot,
+      checkoutRoot: manualCheckout,
+      loadWindow: () => repairedWindow(),
+      planOrigins: [],
+      landShards: (drafts, checkoutRoot, deps) =>
+        landCiLearningShards(drafts, checkoutRoot, { ...deps, gh: manualGh.gh }),
+    }),
+  );
 
   assert.equal(code, 0, "the manual operator command still succeeds");
-  const manualStatus = git(manualCheckout, "status", "--porcelain");
-  assert.match(manualStatus, /\?\? plan\/tasks\.d\//, "the manual verb retains its direct checkout-writing behavior");
-  assert.equal(existsSync(join(manualRoot, "state", "ci-learning-pending")), false, "manual filing does not use the daemon staging queue");
+  assert.equal(git(manualCheckout, "status", "--porcelain").trim(), "", "the manual run leaves its checkout clean");
+  assert.equal(pendingFiles(manualRoot).length, 1, "the manual run retains exact bytes in the durable queue");
+  assert.equal(
+    landingBranchFiles(manualBare).filter((f) => f.startsWith("plan/tasks.d/")).length,
+    1,
+    "the manual run reaches the same dedicated landing branch",
+  );
+});
+
+test("W1-T3542 criterion 3: generated CLI and operator docs describe queue-backed CI-learning", () => {
+  const cli = readFileSync("docs/cli-reference.md", "utf8");
+  const guide = readFileSync("docs/operator-guide.md", "utf8");
+  assert.match(cli, /queue-backed landing bridge/, "the generated CLI reference names the durable path");
+  assert.match(guide, /queue-backed landing bridge/, "the operator guide names the durable path");
+  assert.doesNotMatch(cli, /REPORT-ONLY: prints the drafts, writes no plan record/, "the stale report-only claim is gone");
+  assert.doesNotMatch(guide, /Report-only: prints the drafts, writes no plan record/, "the stale guide claim is gone");
 });

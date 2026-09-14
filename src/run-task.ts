@@ -18163,11 +18163,10 @@ export function callerSweepCommand(
 /** `rmd ci-learning [--days N] [--force]` — W1-T2959: the daily rung that turns W1-T2957's repaired
  *  failure pairs into MARKED, PARKED shard drafts.
  *
- *  REPORTS THE DRAFTS; DOES NOT WRITE THE PLAN. Every draft carries `author_class: machine` and
- *  `verify: human`, which `machineAuthorVerifyViolation` refuses at `verify: auto` — a machine may
- *  propose work into the plan, and only an operator releases it (Law 5). Filing is deliberately a
- *  separate operator step: the safety argument is that a machine conclusion cannot act on itself,
- *  and a rung that both concluded and committed would be that argument's only weak point. */
+ *  Every draft carries `author_class: machine` and `verify: human`, which
+ *  `machineAuthorVerifyViolation` refuses at `verify: auto`. The command stages the linter-checked
+ *  bytes outside its checkout and uses the same gated landing bridge as the scheduled rung, so a
+ *  manual inspection cannot leave a daemon checkout unable to refresh. */
 export function ciLearningCommand(
   rest: string[],
   deps: CiFailuresCommandDeps & {
@@ -18178,8 +18177,9 @@ export function ciLearningCommand(
     /** W1-T2968 — every `origin:` the plan already holds. Injected so a test drives idempotency
      *  without a plan on disk; production reads the real plan. */
     planOrigins?: readonly string[];
-    /** W1-T2968 — the filer. Injected so a test writes nothing; production files for real. */
-    fileShards?: typeof fileCiLearningShards;
+    /** W1-T3542 — the isolated landing bridge. Injected so a test writes nothing; production
+     *  stages outside the checkout and lands only through the dedicated gated PR. */
+    landShards?: typeof landCiLearningShards;
   } = {},
 ): number {
   const badArg = unknownArgError("ci-learning", rest, ["--days"], ["--force"]);
@@ -18290,20 +18290,28 @@ export function ciLearningCommand(
     console.log(`  EXCLUDED by the ceiling (named, not dropped): ${e}`);
   }
 
-  // W1-T2968 — FILE THEM. W1-T2959's acceptance said "one firing FILES at most the ceiling many
+  // W1-T2968 — LAND THEM. W1-T2959's acceptance said "one firing FILES at most the ceiling many
   // records" while this verb printed and wrote nothing; a draft nobody files is a report nobody
-  // reads. Each record lands MARKED (`author_class: machine`) and PARKED (`verify: human`), which
+  // reads. W1-T3542 routes the manual caller through the state-backed landing bridge too: a direct
+  // write would dirty exactly the checkout an operator may later ask the daemon to refresh. Each
+  // record remains MARKED (`author_class: machine`) and PARKED (`verify: human`), which
   // `isDispatchEligible` refuses and `machineAuthorVerifyViolation` blocks if it ever reads `auto`.
   if (result.drafts.length > 0) {
-    const file = deps.fileShards ?? fileCiLearningShards;
-    // FILING IS BEST-EFFORT AND MUST NEVER TAKE THE REPORT DOWN WITH IT. The minter fails CLOSED by
+    const land = deps.landShards ?? landCiLearningShards;
+    // LANDING IS BEST-EFFORT AND MUST NEVER TAKE THE REPORT DOWN WITH IT. The minter fails CLOSED by
     // inheritance — an unreachable origin or an unreadable plan throws rather than minting
     // optimistically — and that is right for the CLAIM but wrong for the OPERATOR: the drafts above
     // are already on screen and losing them to an exception turns a partial success into nothing.
     // MEASURED: without this, an unreadable plan under the run's root took the whole verb out with
     // ENOENT, reddening three of W1-T2959's tests, which pass a tmp root with no plan in it.
     try {
-      const filing = file(result.drafts, checkoutRoot, { mintTaskId: ciLearningTaskIdMinter(checkoutRoot), planOrigins });
+      const filing = land(result.drafts, checkoutRoot, {
+        stateRoot: root,
+        mintTaskId: ciLearningTaskIdMinter(checkoutRoot),
+        planOrigins,
+        renderShard: ciLearningShardYaml,
+        recordVerdict: ciLearningRecordVerdict,
+      });
       for (const f of filing.filed) console.log(`  FILED ${f.taskId} -> ${f.relPath}`);
       for (const sk of filing.skipped) console.log(`  ALREADY IN THE PLAN (not re-filed): ${sk}`);
       // A refusal is NAMED. A rung that silently dropped what the linter would not accept would be
@@ -18312,7 +18320,7 @@ export function ciLearningCommand(
     } catch (e) {
       // NAMED, never swallowed: "drafted but not filed" is a different outcome from "filed", and an
       // operator reading this must be able to tell them apart.
-      console.error(`  NOT FILED — the filer could not run (${(e as Error).message}); the drafts above stand unfiled`);
+      console.error(`  NOT FILED — the landing bridge could not run (${(e as Error).message}); the drafts above stand unfiled`);
     }
   }
 
@@ -18320,8 +18328,8 @@ export function ciLearningCommand(
   return 0;
 }
 
-/** Every `origin:` the plan already holds — the idempotency surface {@link fileCiLearningShards}
- *  consults. An unreadable plan yields `[]` and the linter-validated write still cannot duplicate a
+/** Every `origin:` the plan already holds — the idempotency surface the landing bridge
+ *  consults. An unreadable plan yields `[]` and the linter-validated staging write still cannot duplicate a
  *  record within one firing; it is a degraded read, and the verb says so rather than crashing. */
 export function ciLearningPlanOrigins(root: string): string[] {
   try {
@@ -26571,8 +26579,8 @@ function memoiseBoardSnapshotByRepo(
  * THE HALF W1-T2959 DID NOT SHIP — it built the row, marker, decision and minter, all green, but
  * only the CLI verb called them, so the "daily" loop ran by hand. RECORD THE FIRE FIRST, per
  * {@link buildMeasurementCadenceDaemonHooks}'s crash-safety discipline: a throwing body costs one
- * skipped period, never a re-fire on every poll forever. REPORT-ONLY — drafts MARKED, PARKED shards
- * and writes no plan record; whether the rung FILES is W1-T2968's question, not reopened here.
+ * skipped period, never a re-fire on every poll forever. It stages MARKED, PARKED shards outside
+ * the checkout and lands them only through the dedicated gated PR (W1-T3492).
  */
 export function buildCiLearningDaemonHooks(deps: {
   config?: Config;
@@ -26591,7 +26599,7 @@ export function buildCiLearningDaemonHooks(deps: {
   loadLessons?: () => FiledCiLessonsRead;
 } = {}): {
   checkCiLearningCadence: () => MeasurementCadenceDecision;
-  runCiLearningCadence: () => Promise<CiLearningCadenceRunResult>;
+  runCiLearningCadence: () => Promise<CiLearningCadenceRunnerResult>;
 } {
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
@@ -26637,7 +26645,7 @@ export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResul
  * SAME body, and so the four defects below are pinned by a falsifier rather than by inspection.
  *
  * IT FILES. The previous arm minted drafts and returned counts; `rmd ci-learning` typed by hand
- * called `fileCiLearningShards`. Two callers, one wired: six drafts were minted on 2026-09-07 and
+ * was the only caller that filed. Two callers, one wired: six drafts were minted on 2026-09-07 and
  * 2026-09-08 and the plan held zero ci-learning records.
  *
  * IT PASSES THE REAL ORIGIN SURFACE. The previous arm passed `[]`, so wiring the filer alone would
@@ -38721,8 +38729,8 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "ci-learning",
     syntax: "rmd ci-learning [--days N] [--force]",
-    summary: "Draft a marked, parked shard for each repaired CI failure in the window.",
-    detail: "W1-T2959: the daily learning rung over `ci-failures`' corpus. Paces on its OWN policy row (ciLearningCadence, DEFAULT OFF — the only cadence row that is, because this rung drafts records rather than only reading) and its OWN marker (state/last-ci-learning-cadence.json), through the same two-bound decideMeasurementCadence every sibling cadence shares, never a second decision function; --force runs once past the bound without recording a fire. Only a REPAIRED pair is mintable, because the lesson is in the delta and an open failure has no fix yet. Caps one firing at CI_LEARNING_MINT_CEILING drafts as a PRIMARY control, NAMES every finding the ceiling excluded rather than dropping it, and keys idempotency on a deterministic pr+gate id. Every draft carries Law 5's author_class: machine and verify: human, so machineAuthorVerifyViolation refuses it at verify:auto and isDispatchEligible parks it — a machine may propose into the plan, only an operator releases. A remedy names learnings/*.yaml, never CLAUDE.md, because spawnWorker passes settingSources: [] and no dispatched worker reads it. REPORT-ONLY: prints the drafts, writes no plan record and mints no id.",
+    summary: "Stage a marked, parked shard for each repaired CI failure in the window.",
+    detail: "W1-T2959/W1-T3542: the daily learning rung over `ci-failures`' corpus. The checked-in ciLearningCadence policy is enabled and paces on its OWN marker (state/last-ci-learning-cadence.json) through the shared two-bound decision; --force runs once past the bound without recording a fire. Only a REPAIRED pair is mintable, because the lesson is in the delta and an open failure has no fix yet. Caps one firing at CI_LEARNING_MINT_CEILING drafts as a PRIMARY control, NAMES every finding the ceiling excluded rather than dropping it, and keys idempotency on a deterministic pr+gate id. Every draft carries Law 5's author_class: machine and verify: human, so machineAuthorVerifyViolation refuses it at verify:auto and isDispatchEligible parks it — a machine may propose work into the plan, only an operator releases it. A remedy names learnings/*.yaml, never CLAUDE.md, because spawnWorker passes settingSources: [] and no dispatched worker reads it. Each linter-validated draft enters the queue-backed landing bridge outside the checkout, then reaches a dedicated ordinary gated PR; it never writes a plan/task path directly into the caller's checkout.",
   },
   {
     name: "rule-efficacy",
