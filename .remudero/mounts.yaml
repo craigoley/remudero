@@ -115,6 +115,25 @@ capabilities:
       low:    [gpt-5.5]
       medium: [gpt-5.6-sol, gpt-5.5]
       high:   [gpt-5.6-sol, gpt-5.5]
+  # openweight (W1-T3546): the Azure AIServices `gpt-oss-120b` deployment in eastus2 — ONE
+  # deployment, not a model family, so every capability/effort cell resolves to the same candidate.
+  # This is PHASE TWO: the row exists so cross-provider routing is a table lookup once a mount
+  # opts in, but no `routes`/`synthesis` mount below declares `provider: openweight` yet — that is
+  # W1-T3547's job, scoped to `synthesis.triage` alone. Declaring the row here without wiring a
+  # mount to it is deliberate, not an oversight (W1-T3546's own falsifier).
+  openweight:
+    economy:
+      low:    [gpt-oss-120b]
+      medium: [gpt-oss-120b]
+      high:   [gpt-oss-120b]
+    balanced:
+      low:    [gpt-oss-120b]
+      medium: [gpt-oss-120b]
+      high:   [gpt-oss-120b]
+    frontier:
+      low:    [gpt-oss-120b]
+      medium: [gpt-oss-120b]
+      high:   [gpt-oss-120b]
 
 # ── The Architect mount (the bookend: plan authorship, orchestration) ──────────
 # claude-opus-5/high — the sole top-tier mount; strictly above every worker below. Governs ONLY

@@ -137,6 +137,13 @@ export interface CapabilityLadder {
   claudeCandidates?: Record<string, string[]>;
   /** capability -> effort -> ordered provider candidate model ids (non-empty per (capability, effort)). */
   codex: Record<string, Record<string, string[]>>;
+  /**
+   * capability -> effort -> ordered openweight (Azure gpt-oss-120b, W1-T3546) candidate model ids.
+   * OPTIONAL, same backward-compatible shape as `capabilities` itself: a table that omits this key
+   * validates unchanged (every fixture that predates the openweight adapter). `.remudero/mounts.yaml`
+   * declares it once the adapter exists, even though PHASE TWO assigns it to no mount's `provider`.
+   */
+  openweight?: Record<string, Record<string, string[]>>;
 }
 
 /** The whole parsed, validated routing table. */
@@ -380,28 +387,48 @@ function parseCapabilities(
     }
   }
 
-  if (!isObject(raw.codex)) {
-    throw new MountsError("'capabilities.codex' must be a mapping of capability -> effort -> model list.");
+  const codex = parseProviderCandidateTable(raw.codex, ladder, efforts, "codex");
+  // W1-T3546: OPTIONAL, same shape as `codex` above — present only once a table opts a SECOND
+  // second-vendor adapter (Azure gpt-oss-120b) in, so a fixture that predates it keeps validating
+  // unchanged (parseCapabilities' own header note).
+  const openweight = raw.openweight === undefined ? undefined : parseProviderCandidateTable(raw.openweight, ladder, efforts, "openweight");
+
+  return { ladder, claude, claudeCandidates, codex, ...(openweight ? { openweight } : {}) };
+}
+
+/**
+ * Validate one provider's `capability -> effort -> ordered model list` block (W1-T2573's `codex`
+ * shape, generalized so W1-T3546's `openweight` block is the SAME validation, not a hand-copied
+ * second version). Every `ladder` capability MUST have a row; every `efforts` key within it MUST
+ * resolve to a non-empty candidate list — same requirement `codex` always enforced.
+ */
+function parseProviderCandidateTable(
+  raw: unknown,
+  ladder: Record<string, number>,
+  efforts: Record<string, number>,
+  label: string,
+): Record<string, Record<string, string[]>> {
+  if (!isObject(raw)) {
+    throw new MountsError(`'capabilities.${label}' must be a mapping of capability -> effort -> model list.`);
   }
-  const codex: Record<string, Record<string, string[]>> = {};
+  const table: Record<string, Record<string, string[]>> = {};
   for (const capability of Object.keys(ladder)) {
-    const byEffort = raw.codex[capability];
+    const byEffort = raw[capability];
     if (!isObject(byEffort)) {
-      throw new MountsError(`'capabilities.codex.${capability}' must be a mapping of effort -> model list.`);
+      throw new MountsError(`'capabilities.${label}.${capability}' must be a mapping of effort -> model list.`);
     }
-    codex[capability] = {};
+    table[capability] = {};
     for (const effort of Object.keys(efforts)) {
       const models = byEffort[effort];
       if (!Array.isArray(models) || models.length === 0 || !models.every((entry) => typeof entry === "string" && entry.length > 0)) {
         throw new MountsError(
-          `'capabilities.codex.${capability}.${effort}' must be a non-empty list of model ids, got ${JSON.stringify(models)}.`,
+          `'capabilities.${label}.${capability}.${effort}' must be a non-empty list of model ids, got ${JSON.stringify(models)}.`,
         );
       }
-      codex[capability][effort] = [...(models as string[])];
+      table[capability][effort] = [...(models as string[])];
     }
   }
-
-  return { ladder, claude, claudeCandidates, codex };
+  return table;
 }
 
 /**

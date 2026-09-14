@@ -36,7 +36,7 @@ export function resolveHeadroomEnabled(
  * from this one value: a new provider must not be accepted by mounts/policy in one path while a
  * second, hand-written literal silently rejects it elsewhere.
  */
-export const WORKER_PROVIDER_IDS = ["claude", "codex"] as const;
+export const WORKER_PROVIDER_IDS = ["claude", "codex", "openweight"] as const;
 export type WorkerProviderId = (typeof WORKER_PROVIDER_IDS)[number];
 
 export function isWorkerProviderId(value: unknown): value is WorkerProviderId {
@@ -87,6 +87,19 @@ export function validateConfig(config: Config): void {
     throw new ConfigValidationError(
       `invalid config: workerProviders.enabled accepts only ${WORKER_PROVIDER_IDS.map((provider) => JSON.stringify(provider)).join(", ")}`,
     );
+  }
+  // The openweight (Azure gpt-oss-120b) provider is cash-billed, unlike claude/codex subscription
+  // capacity — enabling it without a hard, POSITIVE daily cap is refused at load, the same
+  // conditional-cap discipline `overflow: "api_key"` enforces above, but stricter: a cap of `0` or
+  // a negative number would validate under that check's "not none" test and still bill unbounded.
+  if (providers.includes("openweight")) {
+    const cap = config.dailyCapUsd;
+    if (typeof cap !== "number" || !Number.isFinite(cap) || cap <= 0) {
+      throw new ConfigValidationError(
+        'invalid config: workerProviders.enabled includes "openweight" (cash-billed) which requires ' +
+          `a positive dailyCapUsd; got dailyCapUsd: ${JSON.stringify(cap ?? null)}`,
+      );
+    }
   }
   const reserve = config.workerProviders?.reservePercent ?? 5;
   if (!Number.isFinite(reserve) || reserve < 0 || reserve >= 100) {

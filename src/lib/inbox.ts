@@ -1112,6 +1112,14 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "the same shape as an existing RATIFIED stamp (`- P## (...) — RATIFIED <date> -> <task ids>.`),",
     "with the task-id list written as the placeholders (e.g. `-> NEW-1/NEW-2.`).",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
+    // W1-T3546: measured 2026-09-13 against the openweight drafting model — an UNQUOTED
+    // acceptance `proof:` value containing a colon (e.g. `proof: grep: foo: bar in baz.ts`) is
+    // invalid YAML, since the first bare colon after the key is read as another mapping. Every
+    // proof value must therefore be double-quoted, even one with no colon at all, so the rule
+    // never depends on the drafting model correctly predicting which proofs will need it.
+    'Every acceptance `proof:` value MUST be a double-quoted YAML string, e.g. proof: "grep: foo:',
+    'bar in baz.ts" — an unquoted value containing a colon is invalid YAML, and this applies even',
+    "to a proof with no colon in it.",
     "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
     "(no ```yaml or ``` line before or after it); the harness parses the fragment as YAML",
     "verbatim, and a fence around it fails that parse.",

@@ -59,8 +59,8 @@ test("provider selector uses the subscription with the most tight-window headroo
   assert.equal(selectWorkerProvider([capacity("claude", 30, 70), capacity("codex", 25, 40)]).provider, "codex");
 });
 
-function providerSequence(claudeUsed: number, codexUsed: number, dispatches = 200): Record<"claude" | "codex", number> {
-  const counts = { claude: 0, codex: 0 };
+function providerSequence(claudeUsed: number, codexUsed: number, dispatches = 200): Record<"claude" | "codex" | "openweight", number> {
+  const counts = { claude: 0, codex: 0, openweight: 0 };
   for (let index = 0; index < dispatches; index += 1) {
     counts[selectWorkerProvider([capacity("claude", claudeUsed), capacity("codex", codexUsed)], 5, index).provider] += 1;
   }
@@ -86,7 +86,7 @@ test("automatic provider routing weights provider pressure separately from model
       { name: "GPT-5.3-Codex-Spark primary", usedPercent: 12 },
     ],
   };
-  const counts = { claude: 0, codex: 0 };
+  const counts = { claude: 0, codex: 0, openweight: 0 };
   for (let index = 0; index < 200; index += 1) {
     counts[selectWorkerProvider([claude, codex], 5, index).provider] += 1;
   }

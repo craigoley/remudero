@@ -21,7 +21,7 @@ export interface Config {
   relay?: { url?: string; token?: string };
   headroom?: { enabled?: boolean };
   workerProviders?: {
-    enabled?: Array<"claude" | "codex">;
+    enabled?: Array<"claude" | "codex" | "openweight">;
     reservePercent?: number;
     capacityCacheMs?: number;
     codexBin?: string;
@@ -32,6 +32,12 @@ export interface Config {
       balanced?: string[];
       frontier?: string[];
     };
+    // Azure AIServices endpoint for the openweight gpt-oss-120b adapter — CONFIGURATION, never the
+    // credential: the API key is env-only (RMD_OPENWEIGHT_API_KEY, worker-provider.ts), so it has
+    // deliberately no field here for a key/secret to land in.
+    openweightBaseUrl?: string;
+    openweightDeployment?: string;
+    openweightApiVersion?: string;
   };
   learningsHomes?: { userOverall?: string; global?: string };
 }
@@ -90,7 +96,7 @@ const workerProvidersShape: ValueSchema = {
   fields: [
     configField(
       "enabled",
-      '"claude" | "codex"[]',
+      '"claude" | "codex" | "openweight"[]',
       true,
       ["claude"],
       "config.json",
@@ -103,6 +109,9 @@ const workerProvidersShape: ValueSchema = {
     configField("codexHome", "string", true, undefined, "config.json", "Codex state/auth home.", stringShape),
     configField("codexModel", "string", true, undefined, "config.json", "Hard Codex model override.", stringShape),
     configField("codexModels", "object", true, undefined, "config.json", "Codex model preferences per mount tier.", codexModelsShape),
+    configField("openweightBaseUrl", "string", true, undefined, "config.json", "Azure AIServices base URL for the openweight adapter.", stringShape),
+    configField("openweightDeployment", "string", true, undefined, "config.json", "Azure AIServices deployment name (e.g. gpt-oss-120b).", stringShape),
+    configField("openweightApiVersion", "string", true, undefined, "config.json", "Azure AIServices chat-completions API version.", stringShape),
   ],
 };
 
@@ -183,6 +192,12 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_GITHUB_WEBHOOK_SECRET_FILE", "Names the file holding the GitHub webhook secret.", ["src/lib/github-event-wake.ts", "src/lib/serve.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
+  envEntry(
+    "RMD_OPENWEIGHT_API_KEY",
+    "Azure AIServices API key for the openweight gpt-oss-120b adapter; read only at call time, " +
+      "never written to config or a spawned worker's environment.",
+    ["src/lib/worker-provider.ts"],
+  ),
   envEntry("RMD_RESTART_THROTTLE_S", "Documents restart throttling excluded from proof environments.", ["src/lib/review.ts"]),
   envEntry("RMD_SELF_SYNC_DONE", "Guards CLI self-sync re-exec loops.", ["src/lib/self-sync.ts", "src/lib/commit-message.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_HOST", "Overrides operator console bind hosts.", ["src/lib/serve.ts", "src/lib/launchd.ts", "src/run-task.ts"]),

@@ -1,13 +1,15 @@
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants as fsConstants, accessSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import type { Clock } from "./clock.js";
 import type { UsageSnapshot } from "./headroom.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
+import { assertLiveSpawnAllowed } from "./spawn-guard.js";
 import { withTempDir } from "./tmp.js";
 import {
   spawnDetachedGroup,
@@ -597,6 +599,34 @@ export function codexCandidatesForCapability(
   if (!byEffort) return FALLBACK_CODEX_MODELS[tier];
   const row = (requestedEffort && byEffort[requestedEffort]) || byEffort.medium;
   return row ?? FALLBACK_CODEX_MODELS[tier];
+}
+
+/**
+ * Last-resort openweight candidate (W1-T3546), mirroring {@link FALLBACK_CODEX_MODELS}'s role:
+ * used ONLY when `.remudero/mounts.yaml`'s `capabilities.openweight` axis is unavailable. There is
+ * exactly one deployment (`gpt-oss-120b`, Azure AIServices, eastus2), so every tier falls back to
+ * the same id — unlike Codex's per-tier fallback lists, this is not a degenerate simplification of
+ * a real ladder, it is the whole ladder.
+ */
+const FALLBACK_OPENWEIGHT_MODEL = "gpt-oss-120b";
+
+/**
+ * Resolve the ordered openweight candidate models for a (capability, effort) pair — the SAME
+ * table-lookup shape {@link codexCandidatesForCapability} performs, over
+ * `capabilities.openweight` (W1-T3546) instead of `capabilities.codex`. `requestedEffort` still
+ * crosses the provider boundary via (capability, effort) keying, even though today's table maps
+ * every cell to the one gpt-oss-120b deployment: a future second openweight deployment is then a
+ * data edit here, not a code change, exactly as Codex's own multi-model rows already are.
+ */
+export function openweightCandidatesForCapability(
+  capabilities: CapabilityLadder | undefined,
+  tier: CodexModelTier,
+  requestedEffort: string | undefined,
+): string[] {
+  const byEffort = capabilities?.openweight?.[tier];
+  if (!byEffort) return [FALLBACK_OPENWEIGHT_MODEL];
+  const row = (requestedEffort && byEffort[requestedEffort]) || byEffort.medium;
+  return row ?? [FALLBACK_OPENWEIGHT_MODEL];
 }
 
 function codexBucketForModel(result: CodexRateLimitResult, model: CodexModelInfo): CodexRateLimitBucket | undefined {
@@ -1442,11 +1472,16 @@ export function codexSpawnEnvForTest(config: Config, args: CodexSpawnEnvArgs): R
 }
 
 function physicalPath(path: string): string {
+  const absolute = resolve(path);
   try {
-    return realpathSync(path);
+    return realpathSync(absolute);
   } catch (error) {
-    // A not-yet-created path still has a lexical absolute form; callers separately check scope.
-    return resolve(path);
+    // Keep any existing parent canonical: on macOS, `/var` is a symlink to `/private/var`, so a
+    // not-yet-created child otherwise compares a lexical `/var/...` path with a physical root and
+    // is falsely rejected as outside it. Walking to the first resolvable ancestor preserves both
+    // that platform alias and containment through a symlinked parent.
+    const parent = dirname(absolute);
+    return parent === absolute ? absolute : join(physicalPath(parent), basename(absolute));
   }
 }
 
@@ -1494,6 +1529,301 @@ export function codexGitWritableRoots(cwd: string, configRoot: string): string[]
     // A non-repository or unreadable Git layout earns no extra writable root, never a broad grant.
     return [];
   }
+}
+
+// ── The openweight adapter (W1-T3546) ───────────────────────────────────────────────────────────
+//
+// A contained function bridge for the Azure AIServices `gpt-oss-120b` deployment, mirroring the
+// Codex adapter's shape above (declared-tool allowlist, cwd containment, a bounded turn loop) but
+// over an OpenAI-compatible chat-completions HTTP call rather than a CLI subprocess. PHASE TWO
+// (this task): the adapter exists and is unit-tested; no mount routes to it yet (`.remudero/
+// mounts.yaml` declares the capability row but assigns `provider: openweight` to nothing).
+//
+// Three measured model facts (five live `tool_choice: auto` probes, 2026-09-14) shape this code
+// rather than a generic guess: `response_format: json_object` produced malformed output (so this
+// adapter never sends that field — see {@link openweightChatRequestBody}), a 1,500-token
+// completion cap truncated reasoning output (so {@link OPENWEIGHT_MIN_COMPLETION_TOKENS} floors
+// every request at 5,000), and `tool_choice: required` was rejected with `UnsupportedToolUse` (so
+// requests use `tool_choice: "auto"`, never `"required"`).
+
+/** The env var carrying the Azure API key (W1-T3546). Read directly from `process.env` at call
+ *  time by {@link openweightApiKey} — deliberately NOT a `Config` field (config-schema.ts has no
+ *  slot for it) and deliberately excluded from {@link openweightWorkerEnv}, so the credential can
+ *  reach neither a persisted config file nor a spawned worker's environment. */
+export const OPENWEIGHT_API_KEY_ENV_VAR = "RMD_OPENWEIGHT_API_KEY";
+
+/** Read the Azure key straight from the process environment. Never sourced from `Config` — there
+ *  is no field for it (config-schema.ts) — and never returned by {@link openweightWorkerEnv}. */
+export function openweightApiKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env[OPENWEIGHT_API_KEY_ENV_VAR];
+}
+
+/**
+ * The env a worker process may inherit alongside the openweight adapter, with the credential
+ * deliberately stripped even if present on `baseEnv` — the same shape {@link codexSpawnEnv} uses
+ * to exclude `ANTHROPIC_`/`OPENAI_API_KEY` from a Codex child's environment. There is no Codex-style
+ * spawn on this path (the adapter calls out over HTTP from the parent process, not a subprocess),
+ * but this is the seam a future caller that DOES thread env into a worker must go through, so the
+ * exclusion holds even if that caller is added later without re-deriving it.
+ */
+export function openweightWorkerEnv(baseEnv: NodeJS.ProcessEnv = process.env): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (key === OPENWEIGHT_API_KEY_ENV_VAR) continue;
+    env[key] = value;
+  }
+  return env;
+}
+
+/** The Azure endpoint shape — CONFIGURATION (config-schema.ts's `workerProviders.openweight*`
+ *  fields), never the credential. */
+export interface OpenweightEndpointConfig {
+  baseUrl: string;
+  deployment: string;
+  apiVersion: string;
+}
+
+/** Resolve the configured Azure endpoint, or `undefined` when any part is unset — a caller must
+ *  refuse to dispatch rather than guess a base URL, deployment, or API version. */
+export function resolveOpenweightEndpoint(config: Config): OpenweightEndpointConfig | undefined {
+  const baseUrl = config.workerProviders?.openweightBaseUrl;
+  const deployment = config.workerProviders?.openweightDeployment;
+  const apiVersion = config.workerProviders?.openweightApiVersion;
+  if (!baseUrl || !deployment || !apiVersion) return undefined;
+  return { baseUrl, deployment, apiVersion };
+}
+
+/** The Azure AIServices chat-completions URL for one endpoint. */
+export function openweightChatUrl(endpoint: OpenweightEndpointConfig): string {
+  return `${endpoint.baseUrl.replace(/\/+$/, "")}/openai/deployments/${encodeURIComponent(endpoint.deployment)}/chat/completions?api-version=${encodeURIComponent(endpoint.apiVersion)}`;
+}
+
+/** Azure's `api-key` header authentication (not `Authorization: Bearer`) — the key never crosses
+ *  into a returned/loggable object except this one short-lived header map. */
+export function openweightAuthHeaders(apiKey: string): Record<string, string> {
+  return { "api-key": apiKey, "content-type": "application/json" };
+}
+
+/** One tool this adapter declares to the model — the SAME allowlist shape a worker's declared
+ *  tools already take, translated to the OpenAI `function` tool wire shape at request time. */
+export interface OpenweightToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+/** One model-issued tool call, OpenAI wire shape (`arguments` is a JSON-encoded string, not an
+ *  object — matching the Azure response body this adapter actually parses). */
+export interface OpenweightToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+/** One message in the bounded conversation this adapter drives. */
+export interface OpenweightChatMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  toolCalls?: OpenweightToolCall[];
+  toolCallId?: string;
+}
+
+/** The floor {@link openweightChatRequestBody} enforces on `max_completion_tokens` — measured
+ *  2026-09-14: a 1,500-token cap truncated reasoning output before the model reached a tool call
+ *  or a final answer. 5,000 is the measured-safe floor, not a tuned default; a caller may request
+ *  more but never less. */
+export const OPENWEIGHT_MIN_COMPLETION_TOKENS = 5000;
+
+export interface OpenweightChatRequestArgs {
+  model: string;
+  messages: OpenweightChatMessage[];
+  tools: OpenweightToolDefinition[];
+  maxCompletionTokens?: number;
+}
+
+/**
+ * Build the Azure chat-completions request body. Deliberately OMITS `response_format` — the
+ * 2026-09-14 probes measured `response_format: json_object` producing malformed output on this
+ * deployment, so there is no parameter here for a caller to set it through. `tool_choice` is
+ * always `"auto"`: the same probes measured `"required"` rejected outright with
+ * `UnsupportedToolUse`.
+ */
+export function openweightChatRequestBody(args: OpenweightChatRequestArgs): Record<string, unknown> {
+  return {
+    model: args.model,
+    messages: args.messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+      ...(message.toolCalls
+        ? {
+            tool_calls: message.toolCalls.map((call) => ({
+              id: call.id,
+              type: "function",
+              function: { name: call.name, arguments: call.arguments },
+            })),
+          }
+        : {}),
+      ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+    })),
+    ...(args.tools.length > 0
+      ? {
+          tools: args.tools.map((tool) => ({
+            type: "function",
+            function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+          })),
+          tool_choice: "auto",
+        }
+      : {}),
+    max_completion_tokens: Math.max(args.maxCompletionTokens ?? OPENWEIGHT_MIN_COMPLETION_TOKENS, OPENWEIGHT_MIN_COMPLETION_TOKENS),
+  };
+}
+
+/** A tool call the bounded conversation refuses: an undeclared tool name, or a `path` argument
+ *  that escapes `cwd`. Named so callers/tests assert on it specifically. */
+export class OpenweightToolBoundsError extends RmdError {
+  constructor(message: string) {
+    super("usage", GENERIC_EXIT_CODE, message);
+    this.name = "OpenweightToolBoundsError";
+  }
+}
+
+/** The conversation ran past its declared `maxTurns` without a final (non-tool-call) reply. */
+export class OpenweightMaxTurnsError extends RmdError {
+  constructor(message: string) {
+    super("usage", GENERIC_EXIT_CODE, message);
+    this.name = "OpenweightMaxTurnsError";
+  }
+}
+
+/** Executes ONE declared tool call (already bounds-checked) and returns its result as the string
+ *  tool-message content the next turn's request carries. */
+export type OpenweightToolExecutor = (name: string, args: Record<string, unknown>) => Promise<string>;
+
+/** Sends one chat-completions turn and returns the model's reply message. Injected so tests drive
+ *  the conversation without a real HTTP call; {@link defaultOpenweightSendChat} is the live wiring. */
+export type OpenweightSendChat = (body: Record<string, unknown>) => Promise<OpenweightChatMessage>;
+
+export interface OpenweightConversationArgs {
+  cwd: string;
+  model: string;
+  tools: OpenweightToolDefinition[];
+  maxTurns: number;
+  systemPrompt: string;
+  userPrompt: string;
+  sendChat: OpenweightSendChat;
+  executeTool: OpenweightToolExecutor;
+}
+
+export interface OpenweightConversationResult {
+  messages: OpenweightChatMessage[];
+  turns: number;
+  finalText: string;
+}
+
+/** A tool call's `path`-shaped argument escapes `cwd` (symlink-resolved, matching Codex's own
+ *  {@link isWithin}/{@link physicalPath} containment). Only argument KEYS that look like a
+ *  filesystem path (`path`, `file`, `file_path`) are checked — an unrelated string argument (a
+ *  grep pattern, a shell command) is not a path and is not this function's concern. */
+function openweightToolPathArgKeys(args: Record<string, unknown>): string[] {
+  return ["path", "file", "file_path"].filter((key) => typeof args[key] === "string");
+}
+
+/**
+ * Drive one bounded tool-calling conversation (W1-T3546's contained function bridge). Every tool
+ * call the model issues must name a tool in `args.tools` (else {@link OpenweightToolBoundsError})
+ * and, when it carries a path-shaped argument, that path must resolve inside `args.cwd` (else the
+ * same error) — mirroring the Codex adapter's declared-tool-allowlist and cwd-containment shape,
+ * over HTTP instead of a CLI subprocess. A tool's result is appended to the SAME conversation as a
+ * `role: "tool"` message, so the next turn's request sees it. The loop refuses
+ * ({@link OpenweightMaxTurnsError}) once `maxTurns` chat turns have passed without the model
+ * returning a final (non-tool-call) reply — never an unbounded loop.
+ */
+export async function runOpenweightConversation(args: OpenweightConversationArgs): Promise<OpenweightConversationResult> {
+  const messages: OpenweightChatMessage[] = [
+    { role: "system", content: args.systemPrompt },
+    { role: "user", content: args.userPrompt },
+  ];
+  const declaredTools = new Set(args.tools.map((tool) => tool.name));
+  for (let turn = 1; turn <= args.maxTurns; turn++) {
+    const body = openweightChatRequestBody({ model: args.model, messages, tools: args.tools });
+    const reply = await args.sendChat(body);
+    messages.push(reply);
+    if (!reply.toolCalls || reply.toolCalls.length === 0) {
+      return { messages, turns: turn, finalText: reply.content ?? "" };
+    }
+    for (const call of reply.toolCalls) {
+      if (!declaredTools.has(call.name)) {
+        throw new OpenweightToolBoundsError(`openweight adapter refuses undeclared tool '${call.name}'`);
+      }
+      let parsedArgs: Record<string, unknown>;
+      try {
+        parsedArgs = call.arguments ? (JSON.parse(call.arguments) as Record<string, unknown>) : {};
+      } catch (error) {
+        throw new OpenweightToolBoundsError(`openweight adapter refuses unparseable arguments for tool '${call.name}': ${String(error)}`);
+      }
+      for (const key of openweightToolPathArgKeys(parsedArgs)) {
+        const candidate = physicalPath(resolve(args.cwd, String(parsedArgs[key])));
+        if (!isWithin(physicalPath(args.cwd), candidate)) {
+          throw new OpenweightToolBoundsError(
+            `openweight adapter refuses tool '${call.name}' argument '${key}' outside cwd: ${String(parsedArgs[key])}`,
+          );
+        }
+      }
+      const resultText = await args.executeTool(call.name, parsedArgs);
+      messages.push({ role: "tool", content: resultText, toolCallId: call.id });
+    }
+  }
+  throw new OpenweightMaxTurnsError(`openweight conversation exceeded maxTurns (${args.maxTurns}) without a final reply`);
+}
+
+/**
+ * Parse one Azure chat-completions HTTP response body into the wire message
+ * {@link runOpenweightConversation} consumes. Exported for the live transport below and for tests
+ * that want to exercise real Azure response JSON without a network call.
+ */
+export function parseOpenweightChatResponse(body: unknown): OpenweightChatMessage {
+  const choice = (body as { choices?: Array<{ message?: Record<string, unknown> }> } | undefined)?.choices?.[0];
+  const message = choice?.message;
+  if (!message) throw new Error("openweight chat-completions response is missing choices[0].message");
+  const rawToolCalls = message.tool_calls;
+  const toolCalls = Array.isArray(rawToolCalls)
+    ? rawToolCalls.map((call) => {
+        const c = call as { id?: unknown; function?: { name?: unknown; arguments?: unknown } };
+        return {
+          id: typeof c.id === "string" ? c.id : "",
+          name: typeof c.function?.name === "string" ? c.function.name : "",
+          arguments: typeof c.function?.arguments === "string" ? c.function.arguments : "{}",
+        };
+      })
+    : undefined;
+  return {
+    role: "assistant",
+    content: typeof message.content === "string" ? message.content : null,
+    ...(toolCalls && toolCalls.length > 0 ? { toolCalls } : {}),
+  };
+}
+
+/**
+ * The LIVE transport: an actual Azure AIServices HTTP call, guarded by
+ * {@link assertLiveSpawnAllowed} exactly like {@link spawnCodexWorker} — a test that reaches this
+ * function without injecting its own `sendChat` fails the same live-spawn boundary Codex's own
+ * adapter does, rather than silently billing the cash-capped endpoint.
+ */
+export async function defaultOpenweightSendChat(
+  endpoint: OpenweightEndpointConfig,
+  apiKey: string,
+  body: Record<string, unknown>,
+): Promise<OpenweightChatMessage> {
+  assertLiveSpawnAllowed("defaultOpenweightSendChat");
+  const response = await fetch(openweightChatUrl(endpoint), {
+    method: "POST",
+    headers: openweightAuthHeaders(apiKey),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(`openweight chat-completions request failed: ${response.status} ${response.statusText}`);
+  }
+  return parseOpenweightChatResponse(await response.json());
 }
 
 /**

@@ -90,7 +90,7 @@ export type RetroPrepublishRunner = (
 ) => RetroPrepublishCommandResult | Promise<RetroPrepublishCommandResult>;
 
 export interface RetroPrepublishProvenance {
-  provider?: "claude" | "codex";
+  provider?: "claude" | "codex" | "openweight";
   model: string;
   servedModel?: string | null;
   effort: string;
