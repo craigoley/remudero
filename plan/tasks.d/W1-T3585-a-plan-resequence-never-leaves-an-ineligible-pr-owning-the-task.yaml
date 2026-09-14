@@ -1,0 +1,94 @@
+- id: W1-T3585
+  title: "A PLAN RESEQUENCE NEVER LEAVES AN INELIGIBLE PR OWNING THE TASK — a worker admitted before its record gains an unmet dependency can open a draft that current dispatch will not rebuild, while sweep only waits on its red or conflicted state"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/plan-resequence-pr-invalidation.test.ts
+    - test/plan-resequence-pr-invalidation-wiring.test.ts
+  origin: "operator-session#pr-5545-plan-resequence-reconciliation-2026-09-14"
+  plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T176", "W1-T3219", "W1-T3558", "W1-T3570"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on PR #5545 / W1-T3558 (2026-09-14). The worker started at
+    14:00:29Z and opened draft PR #5545 at 14:22Z. At that moment W1-T3558 was
+    runnable. The plan resequence merged as #5537 at 14:15:55Z and added the
+    unmet W1-T3570 dependency before #5545 existed. At reconciliation #5545
+    was draft, conflicted, and CI-red. The current sweep recorded only the
+    ordinary dirty-merge-state stand-down; it has no current-plan eligibility
+    predicate for an already-open task PR. Current dispatch will not choose
+    W1-T3558, yet the already-open draft continues to own the task and cannot
+    obtain check runs until somebody closes it.
+
+    The immediate incident was closed through the existing reversible sweep
+    close semantics: the PR branch was retained. That manual recovery is not a
+    queue contract. A later plan mutation must not leave a now-ineligible PR
+    blocking a task that the daemon correctly refuses to dispatch.
+
+    W1-T77, W1-T78, W1-T100, W1-T150, W1-T168, and W1-T176 own existing
+    sweep/run-task reconciliation, review, status, and check-recovery edges.
+    This task shares their composition root but adds no alternate reviewer,
+    fixer, classifier, or check-state rule: it inserts one current-plan
+    lifecycle guard ahead of those existing effects. W1-T3219 owns the
+    complementary admission-time rule that an exact open task PR blocks a
+    duplicate dispatch; this task closes the later-resequence gap after that PR
+    has become ineligible.
+  design: |
+    Derive a narrow current-plan eligibility predicate at the command boundary
+    from the same freshly synchronized plan and merged-task set used for daemon
+    dispatch. Thread it into both the full and light sweep paths. Before review,
+    repair, arm, branch refresh, or ordinary red/dirty disposition, a sweep may
+    close an open PR only when all of these are positively proven: (1) the PR
+    has an exact fleet-owned task identity, (2) the current plan resolves that
+    task, and (3) the current runnable predicate says it is not runnable because
+    of a recorded blocked, retired, or unmet dependency condition. The closure
+    must use the existing reversible close effect, preserve the head branch,
+    state the task and current reason in the comment and ledger, and deduplicate
+    on the PR/head/reason so a later tick does not repeat it.
+
+    An unreadable plan, unreadable merged set, absent task identity, missing task
+    record, synthetic/foreign PR, or still-runnable task is not closure authority.
+    Those cases fail closed and retain today's behavior. The predicate is a PR
+    lifecycle reconciliation only: it does not cancel a running worker, delete a
+    branch, write a terminal review, change the planner's dispatch rules, or
+    authorize a merge. Once the prerequisite later satisfies, normal dispatch
+    may create a fresh implementation PR from current main.
+
+    The exact regression fixture must replay W1-T3558: admission happened before
+    the plan resequence, then the current plan requires W1-T3570. It must prove
+    that the invalidated PR is closed before the dirty-state stand-down, while an
+    otherwise identical current-runnable task and any unproved plan state issue
+    no close. Production wiring must prove the full and light sweeps receive the
+    same current-plan predicate; do not read a mutable checkout from sweep or
+    infer eligibility from a PR title, branch name alone, or stale task record.
+  acceptance:
+    - claim: "a current-plan resequence closes an exact task-owned PR whose task has become non-runnable before ordinary review, repair, arm, refresh, or dirty-state handling"
+      proof: "unit test: W1-T3585 plan resequence closes the invalidated task-owned PR"
+    - claim: "an unreadable or unproved plan state, a foreign or synthetic PR, and a still-runnable task retain the existing no-close behavior"
+      proof: "unit test: W1-T3585 plan invalidation fails closed and preserves eligible PRs"
+    - claim: "both full and light daemon sweep paths receive the same freshly synchronized current-plan eligibility predicate"
+      proof: "unit test: W1-T3585 plan invalidation uses current plan eligibility in both sweep paths"
+  falsifier: |
+    Delete the current-plan invalidation predicate and the W1-T3558 replay must
+    change from one close call before its dirty-state stand-down to zero close
+    calls; restoring it must restore exactly one. Mutate the predicate to close
+    an unreadable or still-runnable task and the fail-closed fixture must turn
+    red. A closure inferred from a title, a run-branch prefix alone, a mutable
+    checkout, or a stale dispatch snapshot does not satisfy this task.
+  note: |
+    reservation hand-off: main -> chore/file-inflight-plan-invalidation-1789406900000
+
+    This is the autonomous reconciliation complement to the planner's existing
+    admission-time invalidation checks. It deliberately does not reopen #5545,
+    change W1-T3558's dependencies, weaken W1-T3570's twenty-outcome measurement
+    gate, or conflate a plan filing with task completion. The immediate PR was
+    closed with its branch preserved; implementation must make the same safe
+    decision without operator intervention on the next comparable resequence.
