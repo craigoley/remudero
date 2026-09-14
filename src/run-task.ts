@@ -29731,15 +29731,24 @@ export function resolveReviewTaskId(
  * while a branch name is minted by `worktreeAdd` — on a genuine disagreement (a worker that
  * opens a PR for task A from a worktree cut for task B) the explicit statement wins.
  *
- * The head-ref fallback is WITHHELD for a plan-only filing PR ({@link isPlanOnlyFilingPr}):
- * #1527 deliberately strips the trailer from a filing PR so merging it cannot credit the
- * task(s) it just filed as IMPLEMENTED. A filing PR dispatched from an existing task's own
- * `run-<taskId>-*` worktree sits on that task's run branch too — falling back to the head ref
- * unconditionally would re-open that exact hole by crediting the DISPATCHED task from a
- * plan-only diff, the trap design (iii) of this task names explicitly.
+ * The head-ref fallback is WITHHELD for a plan-only filing PR: #1527 deliberately strips the
+ * trailer from a filing PR so merging it cannot credit the task(s) it just filed as IMPLEMENTED.
+ * A filing PR dispatched from an existing task's own `run-<taskId>-*` worktree sits on that
+ * task's run branch too — falling back to the head ref unconditionally would re-open that exact
+ * hole by crediting the DISPATCHED task from a plan-only diff, the trap design (iii) of this
+ * task names explicitly.
+ *
+ * `planOnlyFiling` is the caller's ALREADY-COMPUTED {@link classifyPlanFiling} verdict for this
+ * exact PR (W1-T3505) — never re-derived from `isPlanOnlyFilingPr` alone here. `buildOpenPrViews`
+ * classifies every open PR through both the emitter-ledger receipt AND, absent one, a GitHub file
+ * list read (`planFilingClassifications`); a PR whose diff is provably plan-only by that second,
+ * `"github-files"`-sourced read must withhold the head-ref fallback exactly like an emitter-ledger
+ * hit does. Resolving task identity from the narrower emitter-only signal instead let a
+ * `github-files`-classified plan filing (PR #5340) keep its dispatched run branch's task id,
+ * offering the plan-only diff to the code-fixer lane as if it were that task's implementation.
  */
-function resolveOpenPrTaskId(pr: RawOpenPr, ledger: Array<Record<string, unknown>>): string | undefined {
-  return resolveReviewTaskId(pr.body ?? "", pr.headRefName, isPlanOnlyFilingPr(ledger, pr.url));
+function resolveOpenPrTaskId(pr: RawOpenPr, planOnlyFiling: boolean): string | undefined {
+  return resolveReviewTaskId(pr.body ?? "", pr.headRefName, planOnlyFiling);
 }
 
 /** Recover refusal metadata from a review's structured decision verdict. It is deliberately not
@@ -30230,7 +30239,10 @@ export function buildOpenPrViews(
   // supersededBy: the HIGHEST-numbered other open PR crediting the same task.
   const byTask = new Map<string, number[]>();
   for (const pr of raw) {
-    const t = resolveOpenPrTaskId(pr, ledger);
+    // W1-T3505: the SAME already-computed classification the returned view stamps as
+    // `isPlanFiling`/`planFilingSource` below — never `isPlanOnlyFilingPr` re-derived narrower,
+    // which only sees the emitter-ledger receipt and misses a `github-files`-sourced filing.
+    const t = resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false);
     if (!t) continue;
     (byTask.get(t) ?? byTask.set(t, []).get(t)!).push(pr.number);
   }
@@ -30243,7 +30255,8 @@ export function buildOpenPrViews(
   // unscoped shape that made W1-T2340's first attempt N+1 per PR.
   const supersededPrs: { number: number; supersededBy: number; taskId: string }[] = [];
   for (const pr of raw) {
-    const t = resolveOpenPrTaskId(pr, ledger);
+    // W1-T3505: see the `byTask` loop above — the classified boolean, not the emitter-only one.
+    const t = resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false);
     if (!t) continue;
     const peers = byTask.get(t) ?? [];
     const newest = peers.length ? Math.max(...peers) : pr.number;
@@ -30253,7 +30266,10 @@ export function buildOpenPrViews(
 
   return raw.map((pr) => {
     const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
-    const taskId = resolveOpenPrTaskId(pr, ledger);
+    // W1-T3505: thread the SAME classification this view stamps below into task-identity
+    // resolution, so a `github-files`-classified plan filing withholds its run-branch id exactly
+    // like an emitter-ledger-classified one already does — see resolveOpenPrTaskId's own doc.
+    const taskId = resolveOpenPrTaskId(pr, planFiling.isPlanFiling);
     const taskRecord = taskId ? mainPlan?.byId.get(taskId) : undefined;
     const fileObservation = planFilingFiles.get(pr.number);
     const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
