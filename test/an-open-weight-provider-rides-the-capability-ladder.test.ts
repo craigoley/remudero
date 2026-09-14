@@ -227,6 +227,7 @@ test("the inbox-draft spawn derives its provider affinity from the synthesis mou
     prompt: "draft this task",
     mount,
     config,
+    disallowedTools: ["Write", "Edit", "NotebookEdit", "Bash"],
   });
 
   assert.equal(args.model, mount.model);

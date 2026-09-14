@@ -34973,6 +34973,7 @@ export function buildInboxDraftSpawnArgs(args: {
   prompt: string;
   mount: Mount;
   config: Config;
+  disallowedTools: readonly string[];
 }): SpawnWorkerArgs {
   return {
     cwd: args.cwd,
@@ -34984,7 +34985,7 @@ export function buildInboxDraftSpawnArgs(args: {
     maxTurns: args.mount.maxTurns,
     // The one worktree below is shared by every draft lane, so enforce the read-only tool
     // surface at the spawn boundary rather than asking the worker to respect prose.
-    disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+    disallowedTools: args.disallowedTools,
     maxBudgetUsd: DEFAULT_BUDGET_USD,
     config: args.config,
     prompt: args.prompt,
@@ -35094,6 +35095,10 @@ export async function draftProposalBatch(
             mount: inboxDraftMount,
             config,
             prompt,
+            // Keep the enforced list at the shared-worktree spawn site. The companion invariant
+            // test reads this body so a later extraction cannot silently turn the guarantee into
+            // a helper-level convention.
+            disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           })),
         log,
       },
