@@ -1,0 +1,75 @@
+- id: W1-T3579
+  title: "A CORRECTED TASK CONTRACT CANNOT RE-ADMIT A SAME-HEAD FIX — the open-escalation guard keys only on PR head, so a plan-only scope or acceptance amendment leaves an already-authorized repair permanently stood down"
+  repo: remudero
+  depends_on: ["W1-T3557", "W1-T3565"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 45.00
+  files: [src/run-task.ts, src/lib/escalate.ts, test/fix-rung-open-escalation-stand-down.test.ts, test/escalation-issue-list-rest.test.ts]
+  origin: "operator-session#site-console-self-recovery-2026-09-14"
+  plan_refs: ["W1-T2799", "W1-T3557", "W1-T3565", "W1-T195"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on remudero-site PR #21 (2026-09-14). PORTAL-T4 legitimately removed public
+    portal copy, but its pre-existing Playwright contract still asserted that copy. The first
+    site fix correctly refused to edit tests/e2e/portal.spec.ts because PORTAL-T4 had not
+    declared that file. A plan-only scope amendment then added that exact existing test file and
+    merged as site PR #23, but the daemon still refused every subsequent repair attempt.
+
+    The refusal is structural, not a human decision. src/run-task.ts's
+    openEscalationStandDownReason compares only the open issue's **Head:** value with the PR
+    head. The prior false-block escalation therefore remains an exact match after the task's
+    authoritative contract changes, even though the repair is newly authorized. W1-T3557
+    re-resolves review criteria at a PR head and W1-T3565 releases corrected zero-cost admission
+    refusals; neither versions the open-escalation guard against the current planning contract.
+
+    A generic plan SHA would be wrong: an unrelated task filing must not re-spend a fix strike.
+    Conversely, weakening the guard for every open issue would restore the repeated same-head
+    worker loop W1-T2799 stopped. The narrow missing fact is the current task's execution
+    contract revision.
+  design: |
+    (i) Derive one deterministic revision for the authoritative current task contract used by the
+    repair lane. It must cover the task identity, declared files, and acceptance claim/proof
+    pairs, but not unrelated tasks or decorative/volatile fields. The revision must be available
+    before the pre-strike open-escalation check; do not recover it from a worker report or PR-body
+    prose.
+
+    (ii) Carry that revision through the false-block escalation record and its deduplication key.
+    An open escalation blocks a repair only when task, PR, head, cause, and task-contract revision
+    all still agree. When the current task contract has changed, re-admit one normal fix-rung
+    attempt; if it again needs escalation, create or record a revision-distinct escalation so the
+    new unchanged contract is protected from a second loop.
+
+    (iii) Preserve W1-T2799's conservative legacy behavior. An existing head-qualified escalation
+    without a contract revision remains a stand-down; this task does not mass-retry old issues.
+    It also must not auto-close, rewrite, or hide any issue. Ordinary terminal reconciliation still
+    closes an escalation only when its PR/task has genuinely resolved.
+
+    (iv) Add direct behavioral tests at the existing guard and issue-gateway seams. Prove a
+    changed current contract re-admits exactly once on the same PR head, whereas an unchanged
+    contract, an unrelated plan change, and a legacy head-only issue do not. Do not change the
+    strike cap, generic plan reload cadence, CI-gate grace timing, or any site/console application
+    code.
+  acceptance:
+    - claim: "a changed authoritative task contract re-admits one same-head fix attempt and records a revision-distinct escalation key if escalation recurs"
+      proof: "unit test: W1-T3579 re-admits same-head fix after task contract changes"
+    - claim: "an unchanged task contract still stands down repeated same-head repair attempts before a worker is spawned"
+      proof: "unit test: W1-T3579 preserves same-head stand-down for unchanged contract"
+    - claim: "a revision of an unrelated task cannot re-admit a repair for this task"
+      proof: "unit test: W1-T3579 ignores unrelated task contract revision"
+    - claim: "a legacy open escalation without a task-contract revision keeps W1-T2799's head-only stand-down behavior"
+      proof: "unit test: W1-T3579 preserves legacy head-only stand-down"
+  falsifier: |
+    Close without implementation if the live fix-rung's open-escalation comparison already includes
+    a deterministic revision of the current task's declared files and acceptance pairs, and the
+    escalation producer/deduplication record persists and compares that same revision. At filing,
+    the guard compares only headSha while the issue record has no task-contract revision.
+  note: |
+    This is a direct shared-core recovery for the private site and console cells. It creates no
+    public-core scheduler and does not alter a user-facing console action. PR #21 has separately
+    received a normal GitHub branch update to move its head while this permanent repair is built.
+    reservation hand-off: main -> plan-contract-revision-reentry
