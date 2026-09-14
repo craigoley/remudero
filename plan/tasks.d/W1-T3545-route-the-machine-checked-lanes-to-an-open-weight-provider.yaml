@@ -50,6 +50,15 @@
     roughly 1/25th of the balanced Claude mount these lanes ride today, and it is CASH rather than
     subscription window — which is the entire point: the three subscriptions are the scarce
     resource, and this lane is 45% of what consumes them.
+
+    TRIAGE IS NOT TEXT-ONLY CLASSIFICATION. At `origin/main` on 2026-09-14,
+    `TRIAGE_WORKER_TOOLS` is Read/Write/Edit/Grep/Glob/WebSearch and a PROPOSED verdict with no
+    changed plan file is deterministically refused. The Azure deployment supports the required
+    function-call conversation shape, but rejects `tool_choice: "required"` with
+    `UnsupportedToolUse`; with `tool_choice: "auto"`, five live runs each emitted a bounded
+    `read_file` call and accepted its tool result before returning the final answer. The adapter
+    therefore needs a contained, allowlisted tool loop before this lane can be routed. That is a
+    correction to the "classification" shorthand, not a relaxation of any deterministic gate.
   rationale: |
     THE DISPATCH-CHOKE-POINT OVERLAP IS DECLARED, NOT HIDDEN. W1-T62/W1-T77/W1-T78/W1-T94/
     W1-T100/W1-T150/W1-T168/W1-T176 are the historical owners of integrity, sweep, and fix-rung
@@ -93,9 +102,13 @@
     capability -> effort -> ordered model ids, exactly the shape `codex` already uses. Adding a
     model stays a data edit.
     (iii) THE ADAPTER MIRRORS `spawnCodexWorker`. It is an OpenAI-compatible `/chat/completions`
-    endpoint, so the closest existing shape is the Codex path, including its capacity read and its
-    model-id allowlist regex. Encode the three failure modes above IN the adapter, each with a
-    comment naming what it prevents.
+    endpoint, so the closest existing shape is the Codex path, including its model-id allowlist
+    regex. It maps ONLY the named `SpawnWorkerArgs.tools` capability set to function definitions,
+    contains every repository path under `cwd`, returns each result to the same conversation, and
+    stops at `maxTurns`; it never gives the model an ambient shell or a tool not explicitly
+    granted. The deployment rejects `tool_choice: "required"`, so the adapter uses `"auto"` and
+    its system instruction requires a granted tool when the task needs one. Encode the three
+    failure modes above IN the adapter, each with a comment naming what it prevents.
     (iv) THE CREDENTIAL NEVER LANDS ON DISK OR IN THIS REPO. Read the endpoint from config and the
     key from the environment, resolved the way `secret-boundary.ts` already keeps a worker's real
     token out of its env. The key is retrievable with
@@ -103,7 +116,8 @@
     — that command, never the value, belongs in any file.
     (v) ROUTE ONLY THE MACHINE-CHECKED LANES, and say in the PR body why each qualifies:
     `synthesis.inbox_draft` (deterministic linter + bounded relint), `synthesis.triage`
-    (classification), `routes.review.low`, `routes.manual.low|medium`, and
+    (classification plus deterministic plan-diff verification through the bounded tool bridge),
+    `routes.review.low`, `routes.manual.low|medium`, and
     `routes.implement.*.docs|plan-lint`. Recon low/medium MAY follow once the first five are
     measured, not in the same change.
     (vi) LEAVE THESE ON CLAUDE, DELIBERATELY: `architect` and `judge` (the Tier Invariant binds
@@ -121,6 +135,8 @@
       proof: "unit test: the tier invariant still refuses an under-ranked architect with a third provider"
     - claim: "the adapter never sets json_object response_format, which this model answers with malformed output"
       proof: "grep: response_format in test/an-open-weight-provider-rides-the-capability-ladder.test.ts"
+    - claim: "the open-weight adapter can execute only its declared tool allowlist inside the worker cwd and refuses a tool loop beyond maxTurns"
+      proof: "unit test: the open-weight adapter contains tools and bounds their conversation"
     - claim: "the provider is WIRED, not reachable only from its own tests"
       proof: "grep: openWeight in src/lib/worker.ts"
   falsifier: |
@@ -131,6 +147,10 @@
     RE-RUN THE MODEL PROBE, DO NOT TRUST MINE. The 11/11 and 5/5 above are single runs at
     temperature 0 on 2026-09-13. Run each at least five times before wiring: a lane at 1,436 runs
     per window needs a pass RATE, and one sample is not one.
+    DO NOT TREAT TRIAGE AS TEXT-ONLY. Before routing it, prove the deployment accepts the complete
+    function-call conversation with `tool_choice: "auto"`, and prove a fixture cannot read or
+    write outside its cwd, invoke an undeclared tool, or exceed `maxTurns`. A prose-only adapter
+    would return PROPOSED with no plan diff and `decideTriage` would correctly refuse it.
     PROVE THE TIER INVARIANT STILL BITES. Declare an open-weight model above the architect in a
     fixture and show load REFUSES. A third provider that quietly escapes G-17 is the one way this
     task can do real harm.
