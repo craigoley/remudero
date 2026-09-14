@@ -1,0 +1,53 @@
+- id: W1-T3574
+  title: "RECONCILE THE ACCEPTANCE-HEADER TRAILER-SHADOW REPORT — reproduce the claimed resolving-trailer/body-header contradiction at a real PR head before filing a source fix for a condition current code already appears to short-circuit"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: human
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 0.00
+  files:
+    - docs/recon/acceptance-trailer-shadow-reconciliation.md
+  origin: "operator-session#open-weight-resequence-2026-09-14"
+  plan_refs: ["W1-T3554", "W1-T1060", "W1-T2297", "W1-T2432"]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: main -> chore/file-acceptance-trailer-shadow-recon-1789389121907
+
+    The reported shape is important but unproven at current main. OBSERVED at
+    1aad6122: ACCEPTANCE_HEADER_RE deliberately accepts `Acceptance criteria:`
+    (src/lib/review.ts:4921), but acceptanceAuthorTimeCheck returns success before
+    parsing a body block when a supplied trailer resolves (5200-5206), and the
+    reviewer resolves plan criteria first and falls back to the body only when that
+    result is empty (src/run-task.ts:15754-15767). This task protects against a real
+    regression while refusing to spend a source change on a condition the present
+    code path does not reproduce.
+  rationale: |
+    A PR-body parser bug can block the queue repeatedly, so the report should not be
+    discarded. But changing acceptance precedence without a current failing fixture
+    risks breaking legitimate manual PRs and violates the repository's evidence
+    discipline. A stored PR body plus its exact head plan is the only meaningful
+    reproduction surface; a prose description or a stale status message is not.
+  design: |
+    Select the alleged live PRs and recreate their stored body, anchored last trailer,
+    plan visibility, author-time gate result, and review criteria source at each exact
+    head. Include three controls: a valid resolving trailer plus an empty-proof
+    `Acceptance criteria:` body; the same body with an unresolvable trailer; and no
+    trailer. Record file:line and command evidence. If a resolving trailer genuinely
+    allows body criteria to shadow non-empty task criteria, file one separate
+    implementation task with a failing test and narrow precedence fix. If the control
+    confirms current short-circuit behavior, close this as superseded with no source
+    patch. Do not edit review.ts, an acceptance task, or an existing PR body here.
+  acceptance:
+    - claim: "the report records exact-head results for resolving, unresolvable, and absent trailer controls against the same Acceptance criteria body"
+      proof: "grep: Resolving trailer control: in docs/recon/acceptance-trailer-shadow-reconciliation.md"
+    - claim: "the report ends in one reproduced-fix-task or superseded-no-patch disposition"
+      proof: "grep: Disposition: in docs/recon/acceptance-trailer-shadow-reconciliation.md"
+  falsifier: |
+    If the resolving-trailer control selects plan criteria and the gate reports the trailer source,
+    the alleged shadow defect is falsified and no implementation patch may be filed from this task.
+    If it instead selects the body while a non-empty task acceptance exists at that same head, the
+    report's superseded disposition is false and a separately scoped source-fix task is required.
