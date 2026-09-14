@@ -34,6 +34,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { parse as parseYaml } from "yaml";
 
 import {
   BRANCH_NAME_CONTRACT_PART,
@@ -382,7 +383,7 @@ test("W1-T3388: resolveHeadRef refuses when neither the flag nor the env is set,
 // refused by a REQUIRED check — which is precisely the class of PR that repairs a stuck one. Worse,
 // the obvious way past it is to add a `Remudero-Task:` trailer to an amendment, which would falsely
 // credit the task (the W1-T3414 defect).
-test("W1-T3388: the workflow checks out the PR's OWN head sha, so the subject and trailer routes are reachable", () => {
+test("W1-T3510 criterion 1: workflow pins checkout to the pull request head", () => {
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "head-identity-gate.yml"), "utf8");
   assert.match(
     workflow,
@@ -393,6 +394,26 @@ test("W1-T3388: the workflow checks out the PR's OWN head sha, so the subject an
   const gateStep = workflow.indexOf("head-identity-gate:check");
   const checkoutRef = workflow.indexOf("github.event.pull_request.head.sha");
   assert.ok(checkoutRef > -1 && checkoutRef < gateStep, "the pinned ref must precede the gate step it feeds");
+});
+
+test("W1-T3566 head identity checkout preserves first-parent history", () => {
+  const workflow = parseYaml(readFileSync(join(REPO_ROOT, ".github", "workflows", "head-identity-gate.yml"), "utf8")) as {
+    jobs?: Record<string, { steps?: Array<{ uses?: string; with?: Record<string, unknown> }> }>;
+  };
+  const steps = workflow.jobs?.["head-identity-gate"]?.steps ?? [];
+  const checkout = steps.find((step) => step.uses?.startsWith("actions/checkout"));
+
+  assert.ok(checkout, "the head-identity job must contain its checkout step");
+  assert.equal(
+    checkout.with?.ref,
+    "${{ github.event.pull_request.head.sha }}",
+    "the workflow must keep reading the real pull-request head rather than GitHub's synthetic merge ref",
+  );
+  assert.equal(
+    checkout.with?.["fetch-depth"],
+    0,
+    "the first-parent walk needs ancestry beyond a depth-one checkout when Update branch creates a merge head",
+  );
 });
 
 // ── an "Update branch" merge must not erase the head's declared identity ──────────────────────────
