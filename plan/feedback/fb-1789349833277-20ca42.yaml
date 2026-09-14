@@ -15,8 +15,24 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/5494
+summary:
+  headline: Remudero daemon shows stale plan after target updates
+  what_happened: When a target console plan updates in the repository (e.g., PR
+    merge), the daemon launched with that plan doesn't detect the change and
+    continues showing outdated dispatch status. The plan freshness checker only
+    monitors the Remudero engine checkout, not the target plan.
+  decision: Implement target plan freshness detection in remudero-console daemons
+  options:
+    - label: Bounded freshness path (proposed)
+      consequence: Daemons auto-detect plan updates between workers, gracefully
+        reload, preserves instance state and locks; requires new tested code
+    - label: Manual refresh mechanism
+      consequence: Operators manually trigger plan refresh when aware of target
+        changes; simpler but requires operator awareness and action
+    - label: Periodic plan re-validation
+      consequence: Background process periodically checks for plan updates and
+        auto-reloads; auto-recovery but adds polling overhead
 expansion: null
 submission_key: null
 thread_id: null
