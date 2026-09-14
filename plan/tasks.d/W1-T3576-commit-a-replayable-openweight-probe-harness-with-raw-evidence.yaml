@@ -1,0 +1,54 @@
+- id: W1-T3576
+  title: "COMMIT A REPLAYABLE OPENWEIGHT PROBE HARNESS WITH RAW EVIDENCE — a retained aggregate cannot distinguish prompt-contract failure from model failure, so make lane-shaped A/B probes reproducible without ever persisting an Azure key"
+  repo: remudero
+  depends_on: [W1-T3546]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 2.00
+  files:
+    - scripts/openweight-probe.mjs
+    - test/openweight-probe.test.ts
+  origin: "operator-session#open-weight-resequence-2026-09-14"
+  plan_refs: ["W1-T3545", "W1-T3567", "W1-T3569"]
+  status: queued
+  attempts: 0
+  note: |
+    RENUMBERED 2026-09-14: originally filed as W1-T3571, which task-id-existence found HELD
+    by a different reservation holder (chore/file-openweight-output-contract-1789389121907, a
+    concurrent mint for an unrelated task) rather than by this branch. Renumbered to a fresh
+    id this branch reserves itself (refs/rmd-id/W1-T3576) rather than record a hand-off, since
+    the prior holder was never this branch's own reservation to begin with.
+
+    OBSERVED 2026-09-14: the first openweight authoring recon retained only aggregate
+    outcomes, so a purported 0/5 YAML failure could not be independently attributed.
+    A later, secret-free state/recon artifact retained all ten responses and showed a
+    controlled quote-rule A/B of 3/5 versus 5/5. The harness owns repeatability, not
+    production routing, credential provisioning, or automatic model selection.
+  rationale: |
+    Prompt construction is part of the provider contract. A probe that only prints a
+    pass count cannot show whether the model, parser, field validator, prompt, or
+    transport caused a failure. Re-running an improvised request makes comparisons
+    non-identical and encourages a conclusion from an irrecoverable sample.
+  design: |
+    Add an operator-invoked script with explicit authoring and classification modes,
+    temperature zero, max_completion_tokens at least 5000, a named output directory,
+    and a schema-valid per-run record containing prompt text, raw model output, parsed
+    fields, validation verdict, endpoint identity, model id, and timestamps. Resolve
+    the API key only from RMD_OPENWEIGHT_API_KEY in process environment or the named
+    Azure key-retrieval command; reject any command-line key argument and redact
+    request headers/errors. The script writes no output inside the repository by
+    default, never commits generated evidence, and has a deterministic local-transport
+    test covering successful retention and every no-key/no-output-path refusal.
+  acceptance:
+    - claim: "the probe harness retains a prompt, raw output, and per-run validation verdict in a caller-selected evidence directory without serializing an API key"
+      proof: "unit test: openweight probe retains raw evidence without credentials"
+    - claim: "the harness rejects absent credentials and unsafe output targets before any transport call"
+      proof: "unit test: openweight probe refuses unsafe invocation before transport"
+  falsifier: |
+    Delete raw-output persistence and the evidence test must fail on a missing per-run field.
+    Mutate the no-key branch to invoke transport and the no-request assertion must fail. A test
+    that only snapshots aggregate pass counts does not meet this task because it cannot replay a
+    prompt-contract regression.
