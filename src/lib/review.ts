@@ -725,6 +725,7 @@ const SUITE_ROOTS = [
 /** remudero-site (DECISIONS.md "W12-T1: THE SITE IS A SEPARATE REPOSITORY") — its own `tests/`
  *  root under its own checkout-local pinned Vitest, no forced config path. */
 const REMUDERO_SITE_SUITE_ROOTS: readonly SuiteRoot[] = [{ root: "tests/", runner: "vitest" }] as const;
+const REMUDERO_CONSOLE_SUITE_ROOTS: readonly SuiteRoot[] = [{ root: "tests/", runner: "vitest" }] as const;
 
 /**
  * W1-T3525 — THE CLOSED SUITE REGISTRY, KEYED ON THE RESOLVED CANONICAL `owner/repo`. A third
@@ -735,6 +736,7 @@ const REMUDERO_SITE_SUITE_ROOTS: readonly SuiteRoot[] = [{ root: "tests/", runne
 const SUITE_REGISTRY: ReadonlyArray<SuiteRegistryTarget & { roots: readonly SuiteRoot[] }> = [
   { owner: "craigoley", repo: "remudero", roots: SUITE_ROOTS },
   { owner: "craigoley", repo: "remudero-site", roots: REMUDERO_SITE_SUITE_ROOTS },
+  { owner: "craigoley", repo: "remudero-console", roots: REMUDERO_CONSOLE_SUITE_ROOTS },
 ];
 
 const TEST_PATH_EXACT_RE = /^(?:test|apps\/dashboard\/src)\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
