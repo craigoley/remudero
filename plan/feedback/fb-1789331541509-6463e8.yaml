@@ -21,10 +21,28 @@ raw: "DRAFT IS AN OPERATOR HOLD, NOT A RETRYABLE AUTO-MERGE ERROR. Site daemon
   false."
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/5492
+summary:
+  headline: Add explicit draft-hold check before auto-merge
+  what_happened: "Daemon repeatedly attempts auto-merge on draft PR #14 despite
+    GitHub rejections. The code doesn't check draft status before calling
+    auto-merge, logs failures, but marks actions complete, creating endless
+    cycles."
+  decision: Implement held-draft disposition check, add draft-aware tests, verify
+    API fields, deploy to production, and validate fix
+  options:
+    - label: Full implementation
+      consequence: "Draft status checked before auto-merge; #14 stops merge attempts;
+        logs clean; test suite validates draft and non-draft behavior"
+    - label: Quick patch
+      consequence: Draft PRs skip auto-merge but API field verification and post-fix
+        reconciliation issues remain unaddressed
+    - label: Defer
+      consequence: "PR #14 continues generating failed-merge logs and wasting daemon
+        resources indefinitely"
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
