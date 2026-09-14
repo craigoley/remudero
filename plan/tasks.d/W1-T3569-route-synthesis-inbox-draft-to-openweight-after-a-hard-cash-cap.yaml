@@ -31,6 +31,18 @@
     its cap an atomic, ledger-visible pre-spawn refusal. The implementation PR must
     name the resulting trial cap, its source, and the maximum terminal drafts it can
     fund. A config value alone is not evidence of a bounded trial.
+
+    TRIAL OPERATOR HANDOFF — after this task and W1-T3575 are merged, and before
+    traffic: preserve the existing providers and add `openweight` to
+    `workerProviders.enabled`; set `workerProviders.openweightEndpoint` to
+    `https://synthwatch-foundry.cognitiveservices.azure.com/`; set `dailyCapUsd: 5`
+    only after W1-T3575's runtime reservation is deployed; and place
+    `RMD_OPENWEIGHT_API_KEY` in the daemon process environment only, never a
+    repository/config/state file. Retrieve the Azure key with the documented `az
+    cognitiveservices account keys list` command rather than recording its value.
+    Before enabling the mount, lower the gpt-oss-120b deployment throughput to 10K
+    TPM; restore the prior 50K TPM only after the bounded trial's measurement is
+    accepted. TPM limits request rate; it is defense in depth, not the cash guard.
   rationale: |
     The retained W1-T3094 measurement assigns inbox drafting 1,436 runs and 45% of
     metered spend. Its output is deterministically linted and relinted at most
@@ -52,7 +64,10 @@
     budget. Extend the existing capability-ladder test through the real mount parser
     and spawn argument builder, proving that only this synthesis row selects
     mount-affinity while triage remains non-openweight. No secret, endpoint, or
-    daemon configuration belongs in this repository change.
+    daemon configuration belongs in this repository change. The implementation PR
+    body must restate the four-value operator handoff (enabled provider, canonical
+    endpoint, USD 5 runtime cap, daemon-only key) and the 10K-TPM-before-traffic /
+    restore-after-acceptance sequence, without printing the key.
   acceptance:
     - claim: "only synthesis.inbox_draft declares provider openweight, after its Read/Grep/Glob surface is re-proven to be adapter-supported"
       proof: "unit test: inbox draft alone rides the openweight affinity path"
