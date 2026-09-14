@@ -371,7 +371,7 @@ test("W1-T3578: census annotation is opt-in and clean runs stay silent", () => {
   assert.ok(!clean.appended[0]!.text.includes("BLOCKED"), "a clean summary never says BLOCKED");
 });
 
-test("W1-T3578: the real workflow opts in only the expiring-fixture census", () => {
+test("W1-T3578 workflow opts in only the expiring-fixture census", () => {
   const workflow = parseYaml(readFileSync(joinPath(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
     jobs: Record<
       string,
