@@ -3987,6 +3987,57 @@ test("runFixRung: a stale failing verdict heals in ONE strike once the body edit
   assert.equal(issueCalls.length, 0, "no escalation — the fresh verdict is a PASS, never the stale one");
 });
 
+// ── W1-T3584 (the console PR #22 false ci.stalled/fix.ci_not_green strikes): a target's own
+// required checks going green (console-ci/ci-gate/Vercel — no context literally named `ci`) used
+// to still read as `ciGateFromRollup` returning "pending" forever, so `waitForCiGreen` stalled and
+// the rung logged `fix.ci_not_green` and spent a strike without a worker ever running or the PR
+// changing. `ciGateFromRollup`/`ciGatePreReviewView`'s fix (this task) makes the REAL waiter return
+// a target-green `CiGateOutcome` for that shape; this drives `runFixRung` with the stubbed
+// `waitForCiGreen` seam returning exactly that corrected verdict, proving the CONSEQUENCE: the
+// rung reaches its ordinary fresh review on strike one, with no false `fix.ci_not_green`. ──
+
+test("runFixRung: a target-green CI-gate verdict (console-shaped required checks, no context literally named ci) reaches its ordinary fresh semantic review without emitting fix.ci_not_green or spending a second strike (W1-T3584)", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      // The verdict the FIXED `waitForCiGreen` now returns for a console-shaped rollup —
+      // console-ci/ci-gate/Vercel required and SUCCESS, remudero-review still pending, no context
+      // named `ci` — carrying the sha it judged (CiGateOutcome, W1-T2804).
+      waitForCiGreen: async () => ({ state: "green" as const, sha: "consolesha1" }),
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => logged.push({ step, extra }),
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(outcome.outcome, "fixed", "the target-green verdict must let the rung reach its ordinary fresh review");
+  assert.equal(outcome.strikes, 1, "no second strike — CI was already green on the FIRST wait, never a stall");
+  assert.equal(spawnCalls.length, 1, "exactly one fix worker — no phantom second dispatch off a false ci-not-green");
+  assert.ok(
+    !logged.some((l) => l.step === "fix.ci_not_green"),
+    "a target-green verdict must never be misread as ci not green",
+  );
+  assert.ok(
+    !logged.some((l) => l.step === "ci.stalled"),
+    "a target-green verdict must never route through the stall/timeout path either",
+  );
+});
+
 // ── W1-T100 (the #170 fix): route blocked_ci to the ci-log fix path — fix
 // FIRST, ask after exhaustion. The intent-wiring W1-T93/W1-T94 left as a seam
 // (a checks-red/review-none PR carried NO reviewer unmet-criteria at all, so
