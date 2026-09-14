@@ -342,15 +342,34 @@ converge_host_units() {
     echo "rmd-relaunch: units -- checkout is DIRTY; not converging (an unreviewed tree must never become root config)."
     return 0
   fi
-  head_sha=\$(git -C "\$CHECKOUT" rev-parse HEAD 2>/dev/null || echo unknown)
-  main_sha=\$(git -C "\$CHECKOUT" rev-parse origin/main 2>/dev/null || echo unknown)
-  if [ "\$head_sha" = unknown ] || [ "\$head_sha" != "\$main_sha" ]; then
-    echo "rmd-relaunch: units -- checkout is not at origin/main (\$head_sha vs \$main_sha); not converging."
+
+  # W1-T3583 -- READABLE AND ON MAIN, BEFORE ANY UPDATE. A detached HEAD, a foreign branch or a
+  # corrupted .git is named here and left alone; nothing below this point may switch, rebase or
+  # reset it onto main -- only an ff-only merge of a checkout that is ALREADY on it.
+  branch=\$(git -C "\$CHECKOUT" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+  if [ "\$branch" != "main" ]; then
+    echo "rmd-relaunch: units -- checkout is unreadable or not on branch main (branch='\${branch:-none}'); not converging." >&2
+    return 0
+  fi
+
+  # W1-T3583 -- ADVANCE THE ALREADY-TRUSTED CHECKOUT WITHOUT A DAEMON RESTART. runDeployCycle's own
+  # fast-forward (deployer.ts's pullFf) runs only behind its restart-pressure decision, so a clean,
+  # below-threshold installer-only change never reaches it -- this checkout would otherwise sit
+  # fetched-but-unmerged, and the check below would refuse it on every tick forever. FETCH AND
+  # FF-ONLY MERGE ONLY, as the service user -- never a reset, a rebase or a clean -- so a genuine
+  # divergence is named here and never silently overwritten.
+  if ! git -C "\$CHECKOUT" fetch --quiet origin main 2>/dev/null; then
+    echo "rmd-relaunch: units -- fetch of origin/main FAILED; not converging." >&2
+    return 0
+  fi
+  if ! git -C "\$CHECKOUT" merge --ff-only --quiet origin/main 2>/dev/null; then
+    echo "rmd-relaunch: units -- checkout DIVERGED from origin/main (fast-forward refused); not converging." >&2
     return 0
   fi
 
   # CHECK BEFORE INSTALL, ALWAYS. The steady state is a silent no-op, which is what makes a converge
   # event rare enough to be worth a record.
+  head_sha=\$(git -C "\$CHECKOUT" rev-parse HEAD 2>/dev/null || echo unknown)
   INSTALLER_ARGS=()
   INSTALLER_ENV=(RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB")
   if [ -n "\$INSTANCE_NAME" ]; then
