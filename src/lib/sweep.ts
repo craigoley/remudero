@@ -781,7 +781,7 @@ export function rebaseDirtyFleetBranchViaGit(
   repoDir: string,
   worktreePath: string,
   pr: Pick<OpenPrView, "prNumber" | "headRefName" | "headSha">,
-  deps: { git?: DirtyFleetRebaseGit; worktreeRemoveImpl?: typeof worktreeRemove } = {},
+  deps: { git?: DirtyFleetRebaseGit; worktreeRemoveImpl?: typeof worktreeRemove; expectedMainSha?: string } = {},
 ): DirtyFleetRebaseOutcome {
   const branch = pr.headRefName;
   if (!branch) return { outcome: "error", reason: `PR #${pr.prNumber} has no headRefName to rebase` };
@@ -807,6 +807,15 @@ export function rebaseDirtyFleetBranchViaGit(
         outcome: "lease-mismatch",
         reason: `origin/${branch} moved from ${pr.headSha} to ${observedHead} before the rebase started`,
       };
+    }
+    if (deps.expectedMainSha !== undefined) {
+      const observedMain = run(repoDir, ["rev-parse", "refs/remotes/origin/main"]).trim();
+      if (observedMain !== deps.expectedMainSha) {
+        return {
+          outcome: "lease-mismatch",
+          reason: `origin/main moved from the locally verified repair ${deps.expectedMainSha} to ${observedMain} before the rebase started`,
+        };
+      }
     }
     run(repoDir, ["worktree", "add", "--detach", worktreePath, pr.headSha]);
     worktreeCreated = true;
@@ -2089,7 +2098,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // decision runFixRung already uses. This is deliberately not exposed through Serve.
     readRedBaseRefreshFacts: (pr) => redBaseRefreshFactsFromRest(owner, repo, pr.prNumber),
 
-    // W1-T3422 — reached only after `selectStaleRedRelease` admits the cheap candidate; it shares the daemon REST pacer and has no retry/wait loop.
+    // W1-T3422/W1-T3577 — reached only after `selectStaleRedRelease` admits the cheap candidate; it shares the daemon REST pacer and has no retry/wait loop.
     readStaleRedWorkflowRuns: (pr) =>
       paceGhEntry(pacer, isGhRateLimitError, () => fetchWorkflowRunObservationsForBuild(owner, repo, pr.headSha, ghJson)),
 
@@ -2101,19 +2110,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         route: target.route,
       }),
 
-    releaseStaleRed: (target) => {
-      if (!target.pr.headRefName) return undefined;
-      return pushEmptyCommit(
-        repoRoot,
-        target.pr.headRefName,
-        target.pr.headSha,
-        `chore(ci): re-trigger stale check on #${target.pr.prNumber}\n\n` +
-          `The required check ${target.failure.name} completed at ${target.failure.completedAt} before main repair ` +
-          `${target.main.sha} (${target.main.committedAt}). Its declared local route passed on an isolated merge. ` +
-          `This lease-protected empty commit mints a fresh head so GitHub recomputes the current check set. ` +
-          `Automated by W1-T3422.`,
-      );
-    },
+    releaseStaleRed: (target) =>
+      rebaseDirtyFleetBranchImpl
+        ? rebaseDirtyFleetBranchImpl(target.pr)
+        : rebaseDirtyFleetBranchViaGit(
+            repoDir,
+            join(worktreesDir(config), `stale-red-rebase-${target.pr.prNumber}-${nowMsImpl()}`),
+            target.pr,
+            {
+              expectedMainSha: target.main.sha,
+              worktreeRemoveImpl: worktreeRemoveForBuild,
+            },
+          ),
 
     // W1-T528 — the action half of W1-T520. `runSweep` calls this AT MOST ONCE per pass, on the
     // single PR `selectUpdateBranchTarget` chose — see `SweepDeps.updateBranch`'s own doc.
@@ -4323,8 +4331,8 @@ export interface StaleRedReleaseTarget {
 /** BACKSTOP: hard cap on live workflow reads after the timestamp-only filter. The same pass may inspect at most this many oldest stale candidates, then leaves the rest for its next scheduled run. */
 export const STALE_RED_WORKFLOW_READ_CAP = 4;
 
-/** Successful exact stale-red releases are keyed by every observation that authorised the empty
- * commit. A different check on the same head is deliberately a different decision. */
+/** Successful exact stale-red releases are keyed by every observation that authorised the leased
+ * rebase. A different check on the same head is deliberately a different decision. */
 export function staleRedReleaseKeysFromLedger(lines: readonly Record<string, unknown>[]): Set<string> {
   const keys = new Set<string>();
   for (const line of lines) {
@@ -6152,9 +6160,10 @@ export interface SweepDeps {
   /** W1-T3422 — materialise the observed head and main in an isolated merge, then run the
    * declared route. A non-pass result is ledgered as a stand-down and never reaches the push. */
   runStaleRedLocalRoute?: (target: StaleRedReleaseTarget) => IsolatedMergeRouteResult | Promise<IsolatedMergeRouteResult>;
-  /** W1-T3422 — the existing lease-protected new-head leaf, called at most once after the local
-   * route passed. Its return is the new observed head for the durable release receipt. */
-  releaseStaleRed?: (target: StaleRedReleaseTarget) => string | undefined | Promise<string | undefined>;
+  /** W1-T3422/W1-T3577 — after the local route passes, rebase the exact observed head onto the
+   * exact main repair. Every refusal remains structured so the caller can ledger the reason
+   * without minting a synthetic empty-commit event. */
+  releaseStaleRed?: (target: StaleRedReleaseTarget) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
   /** W1-T254 — when supplied, gates which disposition may actually act THIS pass; one that fails
    *  the predicate stands down, still ledgered, never silently skipped. The light-sweep ticker
    *  admits only `post-review`, the deterministic sha-pinned re-post safe alongside a running task. */
@@ -8378,39 +8387,53 @@ export async function runSweep(
                   standDownReason = `stale-red release declined: local route ${routeResult.outcome} (${routeResult.detail})`;
                   break;
                 }
+                let rebaseOutcome: DirtyFleetRebaseOutcome;
                 try {
-                  const newHead = await deps.releaseStaleRed!(target);
-                  if (!newHead) {
-                    acted = false;
-                    standDownReason = "stale-red release declined: lease-protected push did not mint a new head";
-                    break;
-                  }
+                  rebaseOutcome = await deps.releaseStaleRed!(target);
+                } catch (caught) {
+                  rebaseOutcome = { outcome: "error", reason: String((caught as Error)?.message ?? caught) };
+                }
+                if (rebaseOutcome.outcome !== "rebased") {
                   appendLine(deps.ledgerPath, {
                     run_id: deps.runId,
                     task_id: pr.taskId ?? "SWEEP",
-                    step: "sweep.stale_red_redrive.released",
+                    step: `sweep.stale_red_redrive.${rebaseOutcome.outcome}`,
                     pr_number: pr.prNumber,
                     pr_url: pr.prUrl,
                     head_sha: pr.headSha,
-                    new_head_sha: newHead,
                     main_sha: target.main.sha,
                     main_committed_at: target.main.committedAt,
                     check_name: target.failure.name,
                     failed_completed_at: target.failure.completedAt,
                     local_route: `${target.route.command} ${target.route.args.join(" ")}`,
                     local_route_outcome: routeResult.outcome,
+                    reason: rebaseOutcome.reason,
                   });
                   acted = false;
-                  standDownReason =
-                    `stale-red release: ${target.failure.name} completed before main repair and passed its declared isolated merge route; ` +
-                    `minted ${newHead}`;
-                  break;
-                } catch (caught) {
-                  const error = String((caught as Error)?.message ?? caught);
-                  acted = false;
-                  standDownReason = `stale-red release declined: lease-protected push failed (${error})`;
+                  standDownReason = `stale-red release declined: ${rebaseOutcome.outcome} (${rebaseOutcome.reason})`;
                   break;
                 }
+                const newHead = rebaseOutcome.newHeadSha;
+                appendLine(deps.ledgerPath, {
+                  run_id: deps.runId,
+                  task_id: pr.taskId ?? "SWEEP",
+                  step: "sweep.stale_red_redrive.released",
+                  pr_number: pr.prNumber,
+                  pr_url: pr.prUrl,
+                  head_sha: pr.headSha,
+                  new_head_sha: newHead,
+                  main_sha: target.main.sha,
+                  main_committed_at: target.main.committedAt,
+                  check_name: target.failure.name,
+                  failed_completed_at: target.failure.completedAt,
+                  local_route: `${target.route.command} ${target.route.args.join(" ")}`,
+                  local_route_outcome: routeResult.outcome,
+                });
+                acted = false;
+                standDownReason =
+                  `stale-red release: ${target.failure.name} completed before main repair and passed its declared isolated merge route; ` +
+                  `rebased ${rebaseOutcome.oldHeadSha} to ${newHead}`;
+                break;
               }
               // W1-T2789 — an exhausted checks-red PR cannot reach the fix rung's own pre-strike
               // base-gap check, because the table routes it here first. When the shared exact-path
