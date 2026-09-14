@@ -1,0 +1,29 @@
+id: fb-1789339526952-673d48
+ts: 2026-09-13T22:45:26.952Z
+raw: "PAUSE MUST CLOSE EVERY WORKER ADMISSION PATH, INCLUDING IN-FLIGHT LIGHT
+  SWEEPS. Observed on the core Azure daemon 2026-09-13: recycle-container.sh
+  wrote state/PAUSE at 22:32:35Z and reported new dispatch halted. Nevertheless,
+  W1-T3442 and W1-T3512 inflight locks were created at 22:35:40Z and 22:35:46Z.
+  Ledger shows light-sweep review and fix activity that began from an earlier
+  full sweep and admitted repair work after the pause marker. The guarded
+  recycle preserved it and eventually completed, but pause did not establish the
+  promised quiescent boundary and can keep extending its own drain. Trace every
+  full and light sweep review, fix, inbox, and continuation admission to a
+  shared current pause decision immediately before any worker process or
+  inflight lock is created. A pause observed after a sweep began must refuse the
+  new admission with a named held reason, not merely suppress future top-level
+  ticks. Add tests that begin a sweep, assert PAUSE before its delayed
+  admission, and prove no worker spawn, no inflight lock, no review or fix side
+  effect, and an observable hold ledger row; preserve behavior for an unpaused
+  sweep. Runtime acceptance: during a guarded recycle, worker counts may only
+  decrease after PAUSE is written; no lock startedAt or worker spawn event may
+  be newer than the pause requestedAt."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
