@@ -1238,6 +1238,7 @@
     "test/spiral-golden.test.ts": 1026,
     "test/stale-base-release-before-exhaustion.test.ts": 1527,
     "test/stale-ci-gate-wiring.test.ts": 1286,
+    "test/stale-escalation-rejudge.test.ts": 0,
     "test/stale-gate-discriminator-wiring.test.ts": 1300,
     "test/stale-git-config-lock.test.ts": 1771,
     "test/stale-green-direct-merge.test.ts": 1865,
