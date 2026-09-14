@@ -15,7 +15,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: main -> chore/file-openweight-bash-decision-1789389121907
+    reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-bash-decision-1789389121907
 
     OBSERVED at origin/main 1aad6122: OPENWEIGHT_FUNCTIONS declares Read, Write,
     Edit, Grep and Glob only (src/lib/worker-provider.ts:1778); the worker surface
