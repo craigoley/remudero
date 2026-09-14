@@ -1,0 +1,67 @@
+- id: W1-T3542
+  title: "CI-LEARNING MUST NEVER DIRTY AN OPERATOR CHECKOUT OR HIDE ITS LANDING RESULT"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  origin: "operator-session#daemon-ci-learning-recovery-2026-09-13"
+  note: "reservation hand-off: run-TRIAGE-fb-1789331541509-6463e8-1789343886960 -> run-W1-T3542-1789349693005"
+  plan_refs: ["W1-T12a", "W1-T143", "W1-T147", "W1-T151", "W1-T160", "W1-T2968", "W1-T3324", "W1-T3492"]
+  files:
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - test/ci-learning-safe-landing.test.ts
+    - test/the-daily-rung-only-fires-when-a-human-types-it.test.ts
+    - docs/cli-reference.md
+    - docs/operator-guide.md
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3492 removed the unattended daemon writer from its checkout, but deliberately
+    preserved `rmd ci-learning`'s direct writer. That boundary no longer holds in
+    production. On 2026-09-13 the Azure state marker recorded a CI-learning fire at
+    22:55 UTC and three valid, machine-authored shards appeared untracked under the
+    live daemon checkout: W1-T3539, W1-T3540, and W1-T3541. The complete available
+    ledger had no matching daemon fired/ran row, so it cannot attribute that fire to
+    one caller. The source's direct manual writer is the leading explanation, and
+    either caller must not be able to recreate the dirty-checkout failure. The ledger
+    file was readable and writable by the daemon account. Each file was parser/linter-
+    valid and absent from origin/main, then byte-checked and moved into
+    state/ci-learning-pending to restore a clean checkout.
+
+    Use the dedicated `landCiLearningShards` state-backed bridge for BOTH the manual
+    command and the scheduled runner. The command must render and linter-check the
+    same task bytes, stage them under the configured state root, and land or reuse the
+    dedicated gated PR without writing any plan/task path into its checkout. Retain
+    the machine-author/human-verify park, task-id reservation, idempotency, cadence
+    bound, corpus, and ordinary gated landing behavior. Do not add a direct push to
+    main, dispatch a machine-authored task, or make the command bypass the existing
+    landing transport.
+
+    The scheduled runner already returns filed/skipped/refused counts, but daemon.ts
+    drops those fields from `ci_learning_cadence.ran`; therefore the host ledger cannot
+    distinguish a drafted-only run from one that reached the landing queue. Include
+    those three counts in that row. Correct the command registry and generated operator
+    docs, which still falsely say CI-learning is default-off and report-only even though
+    policy enables the cadence and the current code files marked, parked shards.
+
+    This is narrower than the live tasks sharing `src/lib/daemon.ts` and `src/run-task.ts`:
+    it changes only CI-learning's manual writer and its cadence result projection. It does
+    not alter generic daemon polling, dispatch selection, stop/pause behavior, or any
+    unrelated command routing covered by W1-T12a, W1-T143, W1-T147, W1-T151, or W1-T160.
+  acceptance:
+    - claim: "a manual CI-learning run stages and lands the same linter-validated bytes through the dedicated queue while its supplied checkout remains clean"
+      proof: "unit test: W1-T3542 criterion 1"
+    - claim: "a fired CI-learning daemon row exposes drafted, filed, skipped, and refused counts so a host-ledger read can distinguish a landed lesson from an unlanded draft"
+      proof: "unit test: W1-T3542 criterion 2"
+    - claim: "the generated CLI reference and operator guide describe the current enabled, queue-backed CI-learning behavior"
+      proof: "unit test: W1-T3542 criterion 3"
+  falsifier: |
+    This task is wrong if a driven manual run creates or modifies a tracked or untracked
+    plan/task path under its supplied checkout, if a daemon run omits any landing result
+    count, or if the generated documentation still claims the command is report-only.
+    In that case keep the recovered host queue intact, do not delete its staged bytes,
+    and revise the boundary before changing live behavior.
