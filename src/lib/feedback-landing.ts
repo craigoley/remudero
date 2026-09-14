@@ -529,7 +529,7 @@ interface LandingTreeBuild {
  * `tipSha: undefined` means the branch has genuinely never been pushed — nothing pending there,
  * by construction. `ok: false` means the branch EXISTS but its content could not be read: that
  * must never collapse into "assume empty", or a transient read failure silently drops whatever
- * the branch was actually carrying — exactly the failure mode the old inline `catch { = [] }` in
+ * the branch was actually carrying — exactly the failure mode the old inline fallback-to-empty in
  * {@link landContent} could not distinguish from "no pending branch yet".
  * Why: docs/forensics/feedback-landing.md#readbranchpending.
  */
