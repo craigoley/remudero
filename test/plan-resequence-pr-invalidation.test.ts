@@ -128,7 +128,7 @@ function conflictDisposition(over: Partial<OpenPrView> = {}) {
   );
 }
 
-test("W1-T3585 criterion 1: a current-plan resequence closes an exact task-owned PR whose task has become non-runnable before ordinary review, repair, arm, refresh, or dirty-state handling", () => {
+test("W1-T3585 plan resequence closes the invalidated task-owned PR", () => {
   // (a) the exact #5545/W1-T3558 replay: an unmet dependency ADDED by the resequence.
   const unmet = projectedView({ readMainPlan: () => planWithUnmetDependency(), isMerged: NOTHING_MERGED });
   assert.equal(unmet.taskId, TASK_ID, "precondition: the exact trailer resolves to the invalidated task");
@@ -149,7 +149,7 @@ test("W1-T3585 criterion 1: a current-plan resequence closes an exact task-owned
   assert.match(blockedResult.reason, new RegExp(`task ${TASK_ID}.*blocked`));
 });
 
-test("W1-T3585 criterion 2: an unreadable or unproved plan state, a foreign or synthetic PR, and a still-runnable task retain the existing no-close behavior", () => {
+test("W1-T3585 plan invalidation fails closed and preserves eligible PRs", () => {
   // An otherwise identical, genuinely still-runnable task (no unmet dependency) closes nothing.
   const runnable = projectedView({ readMainPlan: () => planStillRunnable(), isMerged: NOTHING_MERGED });
   assert.equal(runnable.planResequenceIneligible, undefined, "a still-runnable task is never closure authority");
