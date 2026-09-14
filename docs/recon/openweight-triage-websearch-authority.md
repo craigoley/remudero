@@ -53,6 +53,25 @@ filed because the positive condition for one did not occur. Reconsider routing
 only after an Azure deployment/surface produces an actual web-search output with
 provider provenance and URL-citation evidence within the configured cash guard.
 
+## Addendum: an existing Azure Responses surface satisfies the authority condition
+
+After this report, one bounded probe against the existing `synthwatch-aoai`
+eastus2 Azure OpenAI resource's `gpt-5-mini` deployment returned the required
+surface: output item types `reasoning`, `web_search_call`, `reasoning`, and
+`message`, with two structured `url_citation` annotations. It used 8,569 input
+and 1,117 output tokens. The key was retrieved into process memory on the fleet
+host; neither the key nor response body was retained.
+
+This does not change the gpt-oss finding: its Chat Completions deployment still
+cannot supply WebSearch. It establishes that an existing Azure surface can serve
+as a search authority. Pending plan task `W1-T3558` therefore owns a separate,
+explicitly configured and cash-bounded bridge from a gpt-oss `WebSearch`
+function call to the Azure Responses API. The gpt-oss worker remains the triage
+author. The bridge must return only provider-issued URL-citation evidence and
+must fail closed on absent consent, credential, endpoint, allowance, or required
+provenance. Until it is implemented and proven, `W1-T3547` remains blocked and
+its mount stays on Claude.
+
 ## Falsifier
 
 This conclusion is false if a bounded request to the existing deployment returns
