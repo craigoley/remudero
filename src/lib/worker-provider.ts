@@ -1736,6 +1736,12 @@ export interface OpenWeightSpawnArgs {
   tools?: string[];
   runId?: string;
   taskId?: string;
+  /** Test-only override; production uses the global fetch implementation. */
+  fetchImpl?: typeof fetch;
+  /** Test-only override; production reads the daemon process environment. */
+  env?: NodeJS.ProcessEnv;
+  /** Test-only clock port; production records duration from the system clock. */
+  clock?: Pick<Clock, "now">;
 }
 
 export interface OpenWeightWorkerResult {
@@ -1764,13 +1770,6 @@ export interface OpenWeightWorkerResult {
   compactionConfigured: false;
   qualitySuspect: false;
   workerDurationMs: number;
-}
-
-export interface OpenWeightSpawnDeps {
-  fetchImpl?: typeof fetch;
-  env?: NodeJS.ProcessEnv;
-  /** One wall-clock port keeps the adapter's duration evidence deterministic in tests. */
-  clock?: Pick<Clock, "now">;
 }
 
 type OpenWeightMessage = Record<string, unknown>;
@@ -1938,9 +1937,8 @@ export async function spawnOpenWeightWorker(
   args: OpenWeightSpawnArgs,
   config: Config,
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
-  deps: OpenWeightSpawnDeps = {},
 ): Promise<OpenWeightWorkerResult> {
-  const clock = deps.clock ?? systemClock;
+  const clock = args.clock ?? systemClock;
   const startedAt = clock.now();
   let promptTokens = 0;
   let completionTokens = 0;
@@ -1949,7 +1947,7 @@ export async function spawnOpenWeightWorker(
   let text = "";
   try {
     const tools = openWeightTools(args.tools);
-    const key = (deps.env ?? process.env)[OPENWEIGHT_API_KEY_ENV];
+    const key = (args.env ?? process.env)[OPENWEIGHT_API_KEY_ENV];
     if (!key) throw new Error(`openweight provider requires ${OPENWEIGHT_API_KEY_ENV} in the daemon environment`);
     const declaredNames = new Set(tools.map((tool) => String((tool.function as { name?: unknown }).name)));
     const messages: OpenWeightMessage[] = [{ role: "user", content: args.prompt }];
@@ -1957,7 +1955,7 @@ export async function spawnOpenWeightWorker(
     if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error("openweight maxTurns must be a positive integer");
     for (;;) {
       turns += 1;
-      const response = await (deps.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
+      const response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
         method: "POST",
         headers: { "content-type": "application/json", "api-key": key },
         body: JSON.stringify({

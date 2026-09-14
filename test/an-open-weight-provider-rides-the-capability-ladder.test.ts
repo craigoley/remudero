@@ -333,10 +333,9 @@ test("the open-weight adapter contains tools and bounds their conversation", asy
   process.env.RMD_OPENWEIGHT_API_KEY = "test-only-daemon-secret";
   try {
     const result = await spawnOpenWeightWorker(
-      { cwd: root, workerHome: join(root, "worker-home"), prompt: "classify", tools: ["Read"], maxTurns: 2 },
+      { cwd: root, workerHome: join(root, "worker-home"), prompt: "classify", tools: ["Read"], maxTurns: 2, clock: fixedClock(1_700_000_000_000) },
       { claudeBin: "/unused/claude", root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
       { model: "gpt-oss-120b", effort: "low" },
-      { clock: fixedClock(1_700_000_000_000) },
     );
     assert.equal(result.isError, false);
     assert.equal(result.text, "PROPOSED");
@@ -357,27 +356,31 @@ test("the open-weight adapter contains tools and bounds their conversation", asy
     let richCall = 0;
     const richRequests: Array<{ messages?: unknown }> = [];
     const rich = await spawnOpenWeightWorker(
-      { cwd: root, workerHome: join(root, "worker-home-2"), prompt: "use only declared tools", tools: ["Read", "Write", "Edit", "Grep", "Glob"], maxTurns: 2 },
-      { claudeBin: "/unused/claude", root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
-      { model: "gpt-oss-120b", effort: "low" },
       {
+        cwd: root,
+        workerHome: join(root, "worker-home-2"),
+        prompt: "use only declared tools",
+        tools: ["Read", "Write", "Edit", "Grep", "Glob"],
+        maxTurns: 2,
         env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
         fetchImpl: async (_input, init) => {
           richCall += 1;
           richRequests.push(JSON.parse(String(init?.body)) as { messages?: unknown });
           const payload = richCall === 1
             ? { choices: [{ message: { tool_calls: [
-                { id: "write", type: "function", function: { name: "write_file", arguments: '{"path":"nested/new.txt","content":"new evidence"}' } },
-                { id: "edit", type: "function", function: { name: "edit_file", arguments: '{"path":"ground.txt","old_string":"bounded ground","new_string":"bounded revised"}' } },
-                { id: "bad-edit", type: "function", function: { name: "edit_file", arguments: '{"path":"ground.txt","old_string":"missing","new_string":"ignored"}' } },
-                { id: "grep", type: "function", function: { name: "grep_files", arguments: '{"query":"bounded"}' } },
-                { id: "glob", type: "function", function: { name: "glob_files", arguments: '{"pattern":"*.txt"}' } },
-                { id: "escape", type: "function", function: { name: "read_file", arguments: '{"path":"../outside.txt"}' } },
-              ] } }] }
+              { id: "write", type: "function", function: { name: "write_file", arguments: '{"path":"nested/new.txt","content":"new evidence"}' } },
+              { id: "edit", type: "function", function: { name: "edit_file", arguments: '{"path":"ground.txt","old_string":"bounded ground","new_string":"bounded revised"}' } },
+              { id: "bad-edit", type: "function", function: { name: "edit_file", arguments: '{"path":"ground.txt","old_string":"missing","new_string":"ignored"}' } },
+              { id: "grep", type: "function", function: { name: "grep_files", arguments: '{"query":"bounded"}' } },
+              { id: "glob", type: "function", function: { name: "glob_files", arguments: '{"pattern":"*.txt"}' } },
+              { id: "escape", type: "function", function: { name: "read_file", arguments: '{"path":"../outside.txt"}' } },
+            ] } }] }
             : { choices: [{ message: { content: "tools completed" } }] };
           return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
         },
       },
+      { claudeBin: "/unused/claude", root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+      { model: "gpt-oss-120b", effort: "low" },
     );
     assert.equal(rich.isError, false);
     assert.equal(rich.text, "tools completed");
@@ -393,10 +396,12 @@ test("the open-weight adapter contains tools and bounds their conversation", asy
 
   let loopCalls = 0;
   const loop = await spawnOpenWeightWorker(
-    { cwd: REPO_ROOT, workerHome: join(REPO_ROOT, "tmp", "openweight-loop"), prompt: "loop", tools: ["Read"], maxTurns: 1 },
-    { claudeBin: "/unused/claude", root: REPO_ROOT, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
-    { model: "gpt-oss-120b", effort: "low" },
     {
+      cwd: REPO_ROOT,
+      workerHome: join(REPO_ROOT, "tmp", "openweight-loop"),
+      prompt: "loop",
+      tools: ["Read"],
+      maxTurns: 1,
       env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
       fetchImpl: async () => {
         loopCalls += 1;
@@ -405,36 +410,46 @@ test("the open-weight adapter contains tools and bounds their conversation", asy
           : { choices: [{ message: { content: "would succeed without the bound" } }] }), { status: 200, headers: { "content-type": "application/json" } });
       },
     },
+    { claudeBin: "/unused/claude", root: REPO_ROOT, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+    { model: "gpt-oss-120b", effort: "low" },
   );
   assert.equal(loop.isError, true);
   assert.match(loop.stderr, /exceeded maxTurns=1/);
 
   const undeclared = await spawnOpenWeightWorker(
-    { cwd: REPO_ROOT, workerHome: join(REPO_ROOT, "tmp", "openweight-undeclared"), prompt: "read", tools: ["Read"], maxTurns: 2 },
-    { claudeBin: "/unused/claude", root: REPO_ROOT, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
-    { model: "gpt-oss-120b", effort: "low" },
     {
+      cwd: REPO_ROOT,
+      workerHome: join(REPO_ROOT, "tmp", "openweight-undeclared"),
+      prompt: "read",
+      tools: ["Read"],
+      maxTurns: 2,
       env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
       fetchImpl: async () => new Response(JSON.stringify({
         choices: [{ message: { tool_calls: [{ id: "write", type: "function", function: { name: "write_file", arguments: '{"path":"should-not-exist","content":"no"}' } }] } }],
       }), { status: 200, headers: { "content-type": "application/json" } }),
     },
+    { claudeBin: "/unused/claude", root: REPO_ROOT, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+    { model: "gpt-oss-120b", effort: "low" },
   );
   assert.equal(undeclared.isError, true);
   assert.match(undeclared.stderr, /undeclared tool/);
 
   let unsupportedFetches = 0;
   const unsupported = await spawnOpenWeightWorker(
-    { cwd: REPO_ROOT, workerHome: join(REPO_ROOT, "tmp", "openweight-unsupported"), prompt: "research", tools: ["WebSearch"], maxTurns: 2 },
-    { claudeBin: "/unused/claude", root: REPO_ROOT, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
-    { model: "gpt-oss-120b", effort: "low" },
     {
+      cwd: REPO_ROOT,
+      workerHome: join(REPO_ROOT, "tmp", "openweight-unsupported"),
+      prompt: "research",
+      tools: ["WebSearch"],
+      maxTurns: 2,
       env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
       fetchImpl: async () => {
         unsupportedFetches += 1;
         throw new Error("an unsupported declared tool must refuse before any Azure request");
       },
     },
+    { claudeBin: "/unused/claude", root: REPO_ROOT, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+    { model: "gpt-oss-120b", effort: "low" },
   );
   assert.equal(unsupported.isError, true);
   assert.match(unsupported.stderr, /does not implement declared tool\(s\): WebSearch/);
