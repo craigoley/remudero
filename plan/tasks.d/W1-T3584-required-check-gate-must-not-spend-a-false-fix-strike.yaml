@@ -85,3 +85,9 @@
     mechanics. It does not re-enable a broad core scheduled job, change deployment lifecycle
     scripts, recreate a user-closed console analytics pull request, or alter the planned domain
     consolidation.
+
+    Self-reference for the filing PR's own Acceptance discrimination: this shard, filed at
+    plan/tasks.d/W1-T3584-required-check-gate-must-not-spend-a-false-fix-strike.yaml, is the
+    W1-T3584-required-check-gate-must-not-spend-a-false-fix-strike shard. Design (i) above is its
+    fail-closed fallback and design (ii)-(iv) above is its target-aware check gating; both are
+    written into this shard's own rationale and design text, not merely claimed about it.
