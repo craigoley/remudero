@@ -1,0 +1,89 @@
+- id: W1-T3558
+  title: "ADD A BOUNDED AZURE RESPONSES WEBSEARCH BRIDGE FOR OPENWEIGHT TRIAGE — gpt-oss-120b's Chat Completions function loop cannot search the web itself, but the existing gpt-5-mini Responses deployment returns provider-issued search calls and URL citations"
+  repo: remudero
+  depends_on: [W1-T3546, W1-T3549]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files:
+    - src/lib/config.ts
+    - src/lib/worker-provider.ts
+    - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
+  origin: "operator-session#open-weight-routing-follow-up-2026-09-14"
+  plan_refs: ["W1-T3545", "W1-T3546", "W1-T3547", "W1-T3549", "W1-T3094"]
+  status: queued
+  attempts: 0
+  note: |
+    W1-T3549 correctly refused routing triage through gpt-oss-120b: the existing
+    Chat Completions endpoint accepts function declarations but supplies neither a usable
+    function exchange nor WebSearch. That report's explicit falsifier has now fired on a
+    different, already-provisioned Azure surface: a bounded `synthwatch-aoai` eastus2
+    `gpt-5-mini` Responses request returned a provider `web_search_call` and two
+    `url_citation` annotations. This task builds only the missing tool bridge. W1-T3547
+    remains the only mount-routing task and may not move until this lands.
+
+    The gpt-5-mini deployment is a search authority, not a substitute author for triage:
+    gpt-oss-120b still owns every triage decision and passes a tool query to the bridge only
+    when it calls its declared `WebSearch` function. The bridge must fail closed when the
+    configured Azure endpoint, daemon-only credential, response shape, URL provenance, explicit
+    consent, timeout, or bounded cash allowance is absent. It must never replace an unavailable
+    result with a model-authored answer, an empty success, a fabricated citation, or a local
+    search surrogate.
+  rationale: |
+    A mount declaration without this bridge would change triage's authority while claiming to
+    measure only provider quality. That would make Phase Three's acceptance-rate and
+    accepted-output-per-dollar measurements uninterpretable. Conversely, the Responses probe
+    establishes a concrete, already-paid Azure surface that returns the exact evidence required
+    by the tool contract; provisioning a new Bing resource or a second open-weight model is not
+    required.
+
+    Microsoft documents that Azure Responses `web_search` is paid and sends query data beyond
+    the normal compliance and geographic boundary. The operator must therefore opt in through
+    an explicit non-secret configuration switch, and the bridge must have its own bounded
+    per-run and daily accounting before it makes an outbound search request. The existing
+    `dailyCapUsd` guard for the open-weight model does not by itself prove that it counts
+    Responses-tool charges, so silently reusing it without attributable search metering is out
+    of scope and unsafe.
+  design: |
+    Extend the Phase Two OpenWeight adapter with an asynchronous `WebSearch` tool implementation.
+    It must use only a configured HTTPS Azure OpenAI Responses endpoint and a separate daemon
+    environment key; neither key may enter a worker environment, configuration file, ledger row,
+    test fixture, error text, or commit. The request must name the configured deployed search
+    model, use `tools: [{ type: "web_search" }]` (never the deprecated preview tool), apply a
+    short abortable timeout and a strict response-size limit, and accept a result only when the
+    response contains both a provider `web_search_call` and one or more structured
+    `url_citation` annotations. Return bounded query/result/citation data as the function result
+    in the same gpt-oss conversation; do not hand the search model's un-attributed prose to the
+    worker as evidence.
+
+    Parse and validate the new non-secret configuration fields in `Config`. The bridge stays
+    disabled by default and config validation must reject a configured search endpoint unless its
+    explicit data-boundary consent and a positive bounded search allowance are present. Meter
+    every attempted and accepted search separately from gpt-oss token use, attach that cost and
+    call count to the worker's durable outcome, and refuse before a new outbound call when the
+    per-run or daily allowance would be exceeded. Derive any price input from an observable,
+    versioned operator configuration or Azure usage result; do not invent a permanent price
+    constant for a paid platform tool.
+
+    Refactor only as necessary to make the existing local OpenWeight tools and this asynchronous
+    bridge share the same declared-tool, containment, and max-turn boundaries. Unit tests must
+    exercise the real default bridge parser/timeout path with a local fake transport, the complete
+    citation-positive path, every malformed or missing-evidence refusal path, the no-key/no-consent
+    preflight path proving zero HTTP calls, and the cash-limit refusal. This task changes no mount,
+    worker tier, provider auction, Azure resource, secret store, or deployed configuration.
+  acceptance:
+    - claim: "a declared OpenWeight WebSearch tool returns only a bounded provider-issued response containing a web_search_call and URL-citation provenance"
+      proof: "unit test: openweight WebSearch bridge returns provider-issued citations"
+    - claim: "missing consent, credential, endpoint, citation evidence, or remaining bounded allowance refuses before an unaccounted search can be treated as success"
+      proof: "unit test: openweight WebSearch bridge refuses every unproven authority"
+  falsifier: |
+    Delete the bridge registration for `WebSearch` and the citation-positive test must fail rather
+    than receiving a local or model-authored answer. Mutate a response by removing its
+    `web_search_call` or every `url_citation`; the refusal test must turn red while an HTTP 200
+    still exists. Mutate the cash guard to permit an exhausted allowance; the no-request assertion
+    must fail. A live, bounded post-merge probe must show the same provider call and citations;
+    otherwise keep W1-T3547 unrouted and report the bridge failure rather than falling back to
+    fabricated evidence.

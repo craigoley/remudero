@@ -1,7 +1,7 @@
 - id: W1-T3547
   title: "ROUTE ONLY SYNTHESIS.TRIAGE TO GPT-OSS-120B AND MEASURE ACCEPTED OUTPUTS PER DOLLAR — the adapter must prove itself on the smallest machine-checked lane before the 45%-of-spend inbox-draft lane moves"
   repo: remudero
-  depends_on: [W1-T3546, W1-T3549]
+  depends_on: [W1-T3546, W1-T3549, W1-T3558]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -40,7 +40,10 @@
     complete-tool finding are both merged. The dependency edges prevent concurrent dispatch.
   design: |
     After W1-T3549 proves the complete declared-tool surface, set only the `synthesis.triage`
-    worker mount's provider to `openweight` using the Phase One affinity seam. Add a regression
+    worker mount's provider to `openweight` using the Phase One affinity seam. W1-T3558 must
+    first land the bounded Azure Responses-API bridge that converts a real provider search result
+    into triage's declared WebSearch tool result; W1-T3549's negative result for gpt-oss itself
+    remains true and is not a substitute. Add a regression
     test that loads the real mounts table and proves triage alone receives the new provider among
     the listed machine-checked candidates. After merge, read the production ledger through its
     three-form rotation union until at least 20 terminal triage runs have an explicit
