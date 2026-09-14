@@ -1846,6 +1846,12 @@ export async function runDaemon(
   // projection reader has a chance to observe that row. Not a Task mutation, so plan reloads cannot
   // erase it.
   const independentFailureBlocksThisRun = new Set<string>();
+  // A zero-cost `blocked_illformed` verdict is a pre-dispatch admission refusal, not a durable
+  // independent failure. Exclude its unchanged task contract only for this process, so it cannot
+  // spin on the same immutable plan; a changed contract deliberately clears the entry below and is
+  // admitted through the normal lint path again. The serialised Task is local scheduling state, not
+  // a ledger identity: the historical refusal stays visible without surviving a correction.
+  const illformedAdmissionBlocksThisRun = new Map<string, string>();
   // A task can become non-runnable after this process loaded its selector snapshot but before its
   // worker reaches the current-plan admission gate. Keep that expected freshness race out of the
   // fatal-error path, and keep the stale snapshot from immediately offering the same id again.
@@ -2045,6 +2051,15 @@ export async function runDaemon(
       blockRetryStates.delete(task.id); // resolved one way or another below
 
       if (disposition.kind === "independent_failure") {
+        if (result.verdict === "blocked_illformed") {
+          illformedAdmissionBlocksThisRun.set(task.id, JSON.stringify(task));
+          log("daemon.block.illformed_admission", {
+            task: task.id,
+            verdict: result.verdict,
+            run_id: result.runId,
+          });
+          return { kind: "continue" };
+        }
         // Independent failure: nothing in the plan transitively depends on this task, so skipping it cannot
         // leave a dependent building on a gap. Record the block in the ledger, so a plan reload or daemon
         // restart derives the same skip instead of trusting this tick's Task object.
@@ -2890,7 +2905,19 @@ export async function runDaemon(
       isOpenPr: deps.isOpenPr,
       // A parked blocker is excluded before the open-PR check, so the existing idle census names it
       // as `continued-this-pass`. Its descendants remain excluded independently by `unmet-deps`.
-      excludeIds: new Set([...parkedBlockers.keys(), ...invalidatedAdmissionsThisRun]),
+      excludeIds: new Set([
+        ...parkedBlockers.keys(),
+        ...invalidatedAdmissionsThisRun,
+        ...[...illformedAdmissionBlocksThisRun].flatMap(([taskId, fingerprint]) => {
+          const currentTask = planForBatch.byId.get(taskId);
+          if (currentTask && JSON.stringify(currentTask) === fingerprint) return [taskId];
+          // A reload with a changed contract is precisely the signal that turns an immutable-plan
+          // refusal into a fresh admission attempt. Dropping an absent task keeps this process-local
+          // map bounded when a plan removes work.
+          illformedAdmissionBlocksThisRun.delete(taskId);
+          return [];
+        }),
+      ]),
       // The daemon's own target, threaded to the gate. The refusal it enables is counted by the row that
       // already carries every other decline — no new step and no new signal (W1-T988).
       targetRepo: deps.targetRepo,
