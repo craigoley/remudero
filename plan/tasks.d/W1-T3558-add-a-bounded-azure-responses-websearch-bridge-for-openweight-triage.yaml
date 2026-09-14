@@ -20,7 +20,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: main -> chore/file-openweight-websearch-bridge-1789379415000
+    reservation hand-off: main -> chore/file-openweight-websearch-bridge-1789387705684
 
     W1-T3549 correctly refused routing triage through gpt-oss-120b: the existing
     Chat Completions endpoint accepts function declarations but supplies neither a usable
