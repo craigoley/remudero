@@ -2304,7 +2304,11 @@ export type Disposition =
   | "dep-review"
   | "post-review"
   | "conflicted"
-  | "wait";
+  | "wait"
+  // W1-T3551: a draft PR that is otherwise checks-green/review-success. NEVER calls the arm
+  // effector — GitHub refuses auto-merge on a draft — and, like "wait", seeds no dedup key so an
+  // unchanged draft is held again on every later pass instead of silently promoting once.
+  | "held-draft";
 
 /** W1-T920 — {@link SupersessionStatus} is THREE-VALUED, and "unreadable" is never collapsed into
  *  "unique". Only `"superseded"` may gate a CLOSE, and only carrying {@link SupersessionEvidence};
@@ -5037,6 +5041,23 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `#${pr.prNumber} before auto-merge; one exact-input post refusal stops retries`,
   },
   {
+    // W1-T3551 — ORDERED STRICTLY BEFORE `mergeable`, matching that row's SAME checks-green/
+    // review-success predicate plus a POSITIVE `isDraft === true` read (never inferred from the
+    // absence of `false`, mirroring the mergeable row's own positive-match discipline directly
+    // below). GitHub refuses `gh pr merge --auto` (and any direct-merge fallback) on a draft PR,
+    // so arming was always going to be rejected — this names the hold instead of letting the
+    // sweep call the real effector and log a generic acted-on failure every pass. `acted: false`
+    // always (see the dedup switch below, which forces it the same way "wait" does): no dedup key
+    // is ever seeded, so an unchanged draft is held again next pass rather than silently promoted
+    // the moment it goes green. Never widens `mergeable`'s own `when` — a SEPARATE row, per the
+    // rejected alternative W1-T1000002 §(viii)(c) already on record.
+    disposition: "held-draft",
+    when: (pr) => pr.isDraft === true && pr.checksState === "green" && pr.reviewState === "success",
+    reason: () =>
+      "open pull request is a draft — GitHub refuses auto-merge on a draft; held until marked " +
+      "ready for review",
+  },
+  {
     // POSITIVE MATCH ONLY (W1-T93): mergeable is NEVER inferred from the mere absence of a
     // failure. It requires required-checks green AND review success, named explicitly — P22's own
     // words, "required contexts green, review success, unmerged".
@@ -5940,7 +5961,10 @@ export type ArmOutcomeName =
   | "irreversible-refused"
   // W1-T1000002: refused because an operator hold stands over this PR. A deliberate refusal,
   // never armed here or later, until the hold is released and a fresh pass re-derives whole.
-  | "hold-refused";
+  | "hold-refused"
+  // W1-T3551: refused because the PR is a draft — GitHub refuses auto-merge on a draft. A
+  // deliberate refusal, mirrored here for the same reason every other member is.
+  | "draft-refused";
 
 /** W1-T1117: `armFailureAction`'s return, mirrored here for the same reason
  *  {@link ArmOutcomeName} is. `"direct-merge"` is deliberately absent: that class never reaches an
@@ -6777,6 +6801,7 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
   "blocked-ambiguous": 0,
   conflicted: 0,
   wait: 0,
+  "held-draft": 0,
 });
 
 /** W1-T513 — THE CROSS-CALL REVIEW-KEY MUTEX. The claim set used to be declared FRESH INSIDE every
@@ -7774,6 +7799,14 @@ export async function runSweep(
         // W1-T1116 — the fourth silent guard. Forcing `alreadyDone` true is BY DESIGN, since there
         // is no refusal to distinguish, but the row still read `acted:false` with nothing saying
         // why. `reason` already narrates what is being waited on, reused verbatim.
+        dedupStandDownReason = reason;
+        break;
+      case "held-draft":
+        // W1-T3551 — SAME SHAPE AS "wait" directly above, deliberately: there is no effector call
+        // to dedup (the arm effector is never reached), so forcing `alreadyDone` true keeps `acted`
+        // false unconditionally and seeds no ledger key — a draft that stays a draft is re-derived
+        // and re-ledgered EVERY pass, never promoted by a stale dedup entry once it goes green.
+        alreadyDone = true;
         dedupStandDownReason = reason;
         break;
       default:
@@ -9201,6 +9234,7 @@ const DISPOSITION_RENDER_ORDER: readonly Disposition[] = [
   "dep-review",
   "post-review",
   "wait",
+  "held-draft",
 ];
 
 /** One-line human render of a sweep summary, for both callers' console output. */
