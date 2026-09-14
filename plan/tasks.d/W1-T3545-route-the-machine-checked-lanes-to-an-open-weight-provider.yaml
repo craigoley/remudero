@@ -20,7 +20,7 @@
     - .remudero/mounts.yaml
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
   origin: "operator-session#open-weight-research-2026-09-13"
-  plan_refs: ["W1-T2573", "W1-T3094", "W1-T2559", "W1-T258", "W1-T3095"]
+  plan_refs: ["W1-T62", "W1-T77", "W1-T78", "W1-T94", "W1-T100", "W1-T150", "W1-T168", "W1-T176", "W1-T2573", "W1-T3094", "W1-T2559", "W1-T258", "W1-T3095"]
   status: queued
   attempts: 0
   note: |
@@ -51,6 +51,13 @@
     subscription window — which is the entire point: the three subscriptions are the scarce
     resource, and this lane is 45% of what consumes them.
   rationale: |
+    THE DISPATCH-CHOKE-POINT OVERLAP IS DECLARED, NOT HIDDEN. W1-T62/W1-T77/W1-T78/W1-T94/
+    W1-T100/W1-T150/W1-T168/W1-T176 are the historical owners of integrity, sweep, and fix-rung
+    behavior that share `src/lib/worker.ts`, `src/lib/sweep.ts`, or `src/run-task.ts`. This task
+    does not reimplement any of their decisions: it carries an explicit provider-affinity value
+    through those existing dispatch boundaries so machine-checked mounts can bypass the capacity
+    auction without fabricated capacity telemetry.
+
     THIS IS NOT THE OVERFLOW VALVE, AND MUST NOT BE BUILT AS ONE. `config.overflow: "api_key"`
     (W1-T258) already exists and fires only when a window is exhausted. That leaves the 45% lane
     consuming subscription headroom every single run until the moment it runs out. The lever here is
