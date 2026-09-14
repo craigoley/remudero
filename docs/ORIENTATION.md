@@ -1,6 +1,6 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-14T04:31:46.753Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-14T04:47:17.681Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
@@ -70,7 +70,7 @@ not by re-deriving state from the full plan and ledger.
 - W1-T3472 → https://github.com/craigoley/remudero/pull/5443 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
 - W1-T3483 → https://github.com/craigoley/remudero/pull/5445 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
 - W1-T3492 → https://github.com/craigoley/remudero/pull/5446 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T3505 → https://github.com/craigoley/remudero/pull/5448 (gate-side merge; run ended blocked_ci)
+- W1-T3505 → https://github.com/craigoley/remudero/pull/5448 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
 - W1-T3506 → https://github.com/craigoley/remudero/pull/5454 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
 - W1-T3512 → https://github.com/craigoley/remudero/pull/5451 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
 - W1-T3523 → https://github.com/craigoley/remudero/pull/5456 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked)
