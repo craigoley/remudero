@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +14,7 @@ import {
 import { LiveSpawnBlockedError } from "../src/lib/spawn-guard.js";
 import { spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "../src/lib/worker.js";
 import { buildInboxDraftSpawnArgs, draftProposalBatch } from "../src/run-task.js";
+import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SETTINGS_FILE = join(REPO_ROOT, "settings", "worker.json");
@@ -64,30 +64,6 @@ function codexResult(): WorkerResult {
     compactionConfigured: false,
     qualitySuspect: false,
   };
-}
-
-function draftRepoFixture(root: string): string {
-  const origin = mkdtempSync(join(tmpdir(), "rmd-mount-affinity-origin-"));
-  const seed = mkdtempSync(join(tmpdir(), "rmd-mount-affinity-seed-"));
-  const repoDir = join(root, "repos", "repo");
-  try {
-    execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", origin]);
-    execFileSync("git", ["clone", "-q", origin, seed]);
-    execFileSync("git", ["-C", seed, "config", "user.email", "mount-affinity@example.invalid"]);
-    execFileSync("git", ["-C", seed, "config", "user.name", "mount-affinity-test"]);
-    mkdirSync(join(seed, "plan"), { recursive: true });
-    writeFileSync(join(seed, "plan", "tasks.yaml"), "tasks: []\n");
-    execFileSync("git", ["-C", seed, "add", "plan/tasks.yaml"]);
-    execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
-    execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
-    mkdirSync(join(root, "repos"), { recursive: true });
-    execFileSync("git", ["clone", "-q", origin, repoDir]);
-    execFileSync("git", ["-C", repoDir, "config", "user.email", "mount-affinity@example.invalid"]);
-    execFileSync("git", ["-C", repoDir, "config", "user.name", "mount-affinity-test"]);
-    return origin;
-  } finally {
-    rmSync(seed, { recursive: true, force: true });
-  }
 }
 
 test("mount provider affinity parses only known providers, and the Tier Invariant still rejects an under-ranked architect with a provider declared", () => {
@@ -240,8 +216,19 @@ test("the inbox-draft spawn derives its provider affinity from the synthesis mou
 
 test("draftProposalBatch reaches the mount-derived inbox args through an offline worktree and never starts a real worker", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-mount-affinity-draft-"));
-  const origin = draftRepoFixture(root);
+  const origin = gitRepo({ bare: true });
+  const seed = gitRepo({ cloneFrom: origin.dir });
+  let checkout: GitRepo | undefined;
   try {
+    mkdirSync(join(seed.dir, "plan"), { recursive: true });
+    writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "tasks: []\n");
+    seed.git("add", "plan/tasks.yaml");
+    seed.git("commit", "-m", "seed");
+    seed.git("push", "origin", "HEAD:main");
+    checkout = gitRepo({ cloneFrom: origin.dir });
+    mkdirSync(join(root, "repos"), { recursive: true });
+    symlinkSync(checkout.dir, join(root, "repos", "repo"), "dir");
+
     const outcomes = await draftProposalBatch(
       [{ id: "mount-affinity:offline", summary: "exercise the wiring", evidenceAnchors: [] }] as never,
       { claudeBin: "/bin/true", root },
@@ -253,7 +240,9 @@ test("draftProposalBatch reaches the mount-derived inbox args through an offline
     assert.equal(outcomes.length, 1);
     assert.equal(outcomes[0]?.ok, false, "the test-runner guard or preflight stops the default adapter without a process");
   } finally {
+    checkout?.cleanup();
+    seed.cleanup();
+    origin.cleanup();
     rmSync(root, { recursive: true, force: true });
-    rmSync(origin, { recursive: true, force: true });
   }
 });
