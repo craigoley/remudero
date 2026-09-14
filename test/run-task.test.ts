@@ -7661,6 +7661,82 @@ test("buildSweepLightHook: runs the restricted light sweep over an empty PR set 
   }
 });
 
+function ghStubForCancelledLightRequeue(callsFile: string): string {
+  return `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const command = args.join(" ");
+fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify(args) + "\\n");
+if (command.includes("required_status_checks")) {
+  process.stdout.write(JSON.stringify({ contexts: ["ci-gate", "remudero-review"] }));
+} else if (command.includes("pulls?state=open")) {
+  process.stdout.write(JSON.stringify([{
+    number: 902,
+    html_url: "https://github.com/o/r/pull/902",
+    state: "open",
+    body: "Remudero-Task: W1-T902\\n",
+    updated_at: "2026-09-14T00:00:00Z",
+    head: { ref: "run-W1-T902-1", sha: "cccc902000000000000000000000000000000c" },
+    auto_merge: null,
+  }]));
+} else if (command.includes("/pulls/902/files")) {
+  process.stdout.write(JSON.stringify([]));
+} else if (command.includes("/pulls/902")) {
+  process.stdout.write(JSON.stringify({
+    number: 902,
+    html_url: "https://github.com/o/r/pull/902",
+    state: "open",
+    merged_at: null,
+    head: { ref: "run-W1-T902-1", sha: "cccc902000000000000000000000000000000c" },
+  }));
+} else if (command.includes("cccc902") && command.includes("check-runs")) {
+  process.stdout.write(JSON.stringify({ check_runs: [
+    { name: "ci-gate", status: "completed", conclusion: "failure" },
+    { name: "coverage-ratchet", status: "completed", conclusion: "cancelled", details_url: "https://github.com/o/r/actions/runs/1/job/123456" },
+  ] }));
+} else if (command.includes("/status")) {
+  process.stdout.write(JSON.stringify({ statuses: [{ context: "remudero-review", state: "success" }] }));
+} else {
+  process.stdout.write("{}");
+}
+`;
+}
+
+test("buildSweepLightHook: a cancelled-only CI PR reaches its separate requeue batch and reruns only that job", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-lighthook-requeue-"));
+  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-lighthook-requeue-`));
+  const callsFile = join(root, "gh-calls.ndjson");
+  writeFileSync(join(bin, "gh"), ghStubForCancelledLightRequeue(callsFile), { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const recovery = { loadedCodeSha: "boot-loaded-sha", isLoadedCodeAtOrAfter: () => false };
+  try {
+    const hook = buildSweepLightHook(
+      "o", "r", { root } as never, join(root, "ledger.ndjson"), "RUN-LH-REQUEUE",
+      { tasks: [] } as never, (step, extra) => { logs.push({ step, extra }); }, recovery,
+    );
+    await hook();
+
+    assert.ok(!logs.some((l) => l.step === "sweep_light.error"), `the composition path completed: ${JSON.stringify(logs)}`);
+    assert.equal(logs.filter((l) => l.step === "sweep.summary").length, 2, "the ordinary and requeue-only batches each ran once");
+    assert.ok(
+      logs.some((l) => l.step === "sweep.check_requeue.dispatched" && l.extra?.job_id === "123456"),
+      `the requeue-only batch issued its one permitted job rerun; logs=${JSON.stringify(logs)}`,
+    );
+    const calls = readFileSync(callsFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as string[]);
+    assert.ok(
+      calls.some((args) => args.includes("repos/o/r/actions/jobs/123456/rerun")),
+      "the composition root targets the cancelled job, never the whole workflow run",
+    );
+    assert.ok(!logs.some((l) => l.step === "sweep.fix.dispatched"), "the cancelled-only batch never dispatches a worker");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── W1-T463 acceptance 3: "no second review lane ships until criterion one is answered" ──
 // The fix this task ships (`runSweepLightPass`, src/lib/sweep.ts) makes `buildSweepLightHook`
 // process every open PR's own `runSweep` call CONCURRENTLY instead of the whole snapshot

@@ -26972,6 +26972,52 @@ export function requeueActionsJob(
   }
 }
 
+/**
+ * W1-T3581: the recovery proof a sweep may use after a terminal review was withheld because
+ * the old daemon's reviewer code was stale. `loadedCodeSha` is captured once at daemon boot by
+ * the caller; this function never resolves a live checkout HEAD. Git ancestry failures return
+ * false, so an unreadable repository holds the existing bounded backoff instead of releasing a
+ * review from code we cannot identify.
+ */
+export function reviewerCodeRecoveryFromLoadedModule(
+  moduleRepoDir: string,
+  loadedCodeSha: string | undefined,
+  spawn: typeof spawnSync = spawnSync,
+): NonNullable<SweepDeps["reviewerCodeRecovery"]> {
+  let pendingAncestryFailure: string | undefined;
+  return {
+    loadedCodeSha,
+    isLoadedCodeAtOrAfter: (requiredOriginMainSha: string) => {
+      if (!loadedCodeSha || !requiredOriginMainSha) return false;
+      try {
+        return spawn(
+          "git",
+          ["-C", moduleRepoDir, "merge-base", "--is-ancestor", requiredOriginMainSha, loadedCodeSha],
+          { stdio: "ignore" },
+        ).status === 0;
+      } catch (error) {
+        const reason = error instanceof Error && error.name.length > 0 ? error.name : typeof error;
+        pendingAncestryFailure = reason;
+        return false;
+      }
+    },
+    takeAncestryFailure: () => {
+      const failure = pendingAncestryFailure;
+      pendingAncestryFailure = undefined;
+      return failure;
+    },
+  };
+}
+
+// Function declarations are initialized before module evaluation, so these retain the production
+// builders while `daemonCommand` may shadow their names with a test injection below. Keeping the
+// live calls as `buildSweepHook(...)`/`buildSweepLightHook(...)` preserves the composition-root
+// contract that existing daemon wiring tests inspect.
+const daemonDefaultBuildSweepHook = buildSweepHook;
+const daemonDefaultBuildSweepLightHook = buildSweepLightHook;
+type DaemonSweepHookBuilder = typeof buildSweepHook;
+type DaemonSweepLightHookBuilder = typeof buildSweepLightHook;
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -26994,6 +27040,11 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
+    /** Injectable sweep-hook builders for composition-root tests. Production keeps both real
+     * builders; the seam lets a test observe the immutable reviewer-code provenance handed to
+     * the full and light paths without reading this source file as text. */
+    buildSweepHook?: DaemonSweepHookBuilder;
+    buildSweepLightHook?: DaemonSweepLightHookBuilder;
     /** Injectable mutable boot routine. Tests use it to prove an already-held fleet does not
      * enter daemonBoot's sweeps or keychain work. */
     daemonBoot?: typeof daemonBoot;
@@ -27077,6 +27128,24 @@ export async function daemonCommand(
   const reposDir = join(config.root, "repos");
   // deps.repoRoot's doc (above, W1-T143) explains why this is injectable at all.
   const effectiveRepoRoot = deps.repoRoot ?? repoRoot;
+  // W1-T3581: capture the SHA of the source tree that loaded THIS daemon process once. The
+  // mutable checkout may advance while the process stays alive, so it cannot prove which review
+  // code is executing. This is intentionally the same module-relative source used for the
+  // daemon.boot `boot_head_sha` below, and is never refreshed from cwd or HEAD during a sweep.
+  const daemonModuleRepoDir = dirname(dirname(fileURLToPath(import.meta.url)));
+  const daemonLoadedCodeSha = (() => {
+    try {
+      return execFileSync("git", ["-C", daemonModuleRepoDir, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {
+      return undefined;
+    }
+  })();
+  const reviewerCodeRecovery = reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha);
+  const buildSweepHook: DaemonSweepHookBuilder = deps.buildSweepHook ?? daemonDefaultBuildSweepHook;
+  const buildSweepLightHook: DaemonSweepLightHookBuilder = deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook;
 
   // ── REPO TARGETING + self-target GUARD (fix/daemon-repo-targeting). The daemon must know
   // WHICH repo to drain, EXPLICITLY — the old code read the plan from its own checkout and
@@ -27564,16 +27633,7 @@ export async function daemonCommand(
     // comparison time would always match and reproduce the very bug this closes. Best-effort:
     // if git is unavailable the field is omitted and the supervisor fails eager (one extra
     // restart at an idle gap), which is strictly safer than recording a wrong sha.
-    (() => {
-      try {
-        return execFileSync("git", ["-C", dirname(dirname(fileURLToPath(import.meta.url))), "rev-parse", "HEAD"], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-        }).trim();
-      } catch {
-        return undefined;
-      }
-    })(),
+    daemonLoadedCodeSha,
     // W1-T530: the boot-time half of the feedback-landing sweep, wired at last (appended after
     // `bootHeadSha` per that param's own "no positional caller shifts" discipline) — see the
     // shared `sweepFeedbackLandingRung` closure defined above this call.
@@ -27603,7 +27663,7 @@ export async function daemonCommand(
     // keychain rung above); `rmd doctor`'s `checkout-depth` arm is where the FAIL verdict lives.
     // Appended LAST, after the node pin, per `daemonBoot`'s own "no positional caller shifts"
     // discipline.
-    readCheckoutDepth(dirname(dirname(fileURLToPath(import.meta.url)))),
+    readCheckoutDepth(daemonModuleRepoDir),
     );
   }
 
@@ -27892,12 +27952,22 @@ export async function daemonCommand(
           policy.values.workerStall,
           mainHealthRung,
           boardSnapshotFor(target.owner, target.repo),
+          reviewerCodeRecovery,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
         // flight, so a green PR whose review went absent re-posts within one poll
         // interval. Dangerous lanes (fix/close/arm/escalate) stay non-concurrent.
-        sweepLight: buildSweepLightHook(target.owner, target.repo, config, ledgerPath, runId, plan, log),
+        sweepLight: buildSweepLightHook(
+          target.owner,
+          target.repo,
+          config,
+          ledgerPath,
+          runId,
+          plan,
+          log,
+          reviewerCodeRecovery,
+        ),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
         // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
@@ -32846,6 +32916,10 @@ export function buildSweepHook(
   // liveness even when a test injection or future implementation accidentally throws.
   mainHealthRung?: () => Promise<void>,
   snapshotCache?: BoardSnapshotCache,
+  // W1-T3581: optional only for non-daemon callers. The production daemon supplies immutable
+  // module-loaded provenance; a missing value deliberately leaves stale-source refusals under
+  // their existing pending ceiling.
+  reviewerCodeRecovery?: SweepDeps["reviewerCodeRecovery"],
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
@@ -32943,6 +33017,7 @@ export function buildSweepHook(
           staleGateWorkflowsByPr,
           updatedForWorkflow,
           behindMainByPr,
+          reviewerCodeRecovery,
           // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
           // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
           // receive the true defaults above.
@@ -33192,6 +33267,7 @@ export function buildSweepLightHook(
   runId: string,
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  reviewerCodeRecovery?: SweepDeps["reviewerCodeRecovery"],
 ): () => Promise<void> {
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
@@ -33241,6 +33317,7 @@ export function buildSweepLightHook(
             ledgerPath,
             runId,
             log,
+            reviewerCodeRecovery,
             // W1-T1211: `post-review` always, and the fix rung TOO when every in-flight run is
             // demonstrably waiting rather than working — see `lightPassActionable` and
             // `runIsAwaitingExternal` above. Read once per tick, not per PR, so the whole fan-out
@@ -33277,6 +33354,7 @@ export function buildSweepLightHook(
               ledgerPath,
               runId,
               log,
+              reviewerCodeRecovery,
               // `requeueLaneOnly: true` — see `lightPassActionable`'s own doc for why this can
               // never admit a `dispatchFix` call for a PR `blockedFixableIsRequeueOnly` selected.
               actionable: (d) => lightPassActionable(d, fixRungAllowed, true),
