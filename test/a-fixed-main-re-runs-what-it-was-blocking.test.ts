@@ -214,6 +214,12 @@ test("W1-T3568: a verified stale-red release rebases the observed PR head onto m
   const savedGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
   const savedSystemConfig = process.env.GIT_CONFIG_SYSTEM;
   try {
+    // `rebaseDirtyFleetBranchViaGit`'s default spawn carries no GIT_AUTHOR/COMMITTER env of its
+    // own (test/helpers/dirty-fleet-repo.ts documents the same requirement) — with
+    // GIT_CONFIG_GLOBAL/SYSTEM stripped below, its rebase commit needs a repo-level identity or
+    // it fails "Committer identity unknown" on a runner with no global gitconfig.
+    source.git("config", "user.name", "Remudero Test");
+    source.git("config", "user.email", "remudero-test@example.invalid");
     writeFileSync(join(source.dir, "package.json"), JSON.stringify({ private: true, scripts: { "comment-load-signal": "node -e \"process.exit(0)\"" } }));
     writeFileSync(join(source.dir, "README.md"), "base\n");
     source.git("add", ".");
