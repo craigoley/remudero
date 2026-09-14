@@ -74,13 +74,13 @@
       - Cross-instance lock or state sharing of any kind.
   acceptance:
     - claim: "a non-self dedicated target's plan reload path is no longer unconditionally undefined — a bounded, tested reload-or-restart path exists for target.isSelf === false"
-      proof: "unit test: test/dedicated-target-plan-freshness.test.ts"
+      proof: "unit test: a NON-self target gets dedicatedTargetPlanReloader"
     - claim: "a merged non-self target plan change (origin/main moving past the tree sha read at boot) changes dispatch eligibility on the running daemon without a manual restart"
-      proof: "unit test: test/dedicated-target-plan-freshness.test.ts"
+      proof: "unit test: reload changes dispatch eligibility after target plan merge"
     - claim: "the reload/restart never fires mid-batch — only between workers — so an in-flight batch's plan snapshot stays consistent for its own lifetime"
-      proof: "unit test: test/dedicated-target-plan-freshness.test.ts"
-    - claim: "the fix does not touch how worker worktrees resolve the target's origin/main, preserving the already-correct worker fetch path named in the report"
-      proof: "grep: isSelf in src/run-task.ts"
+      proof: "unit test: reload is observed only BETWEEN workers"
+    - claim: "the dedicated reloader resolves target-plan changes from the target checkout rather than the daemon's working directory"
+      proof: "unit test: dedicated reloader defaults use target checkout"
   origin: "feedback#fb-1789349833277-20ca42"
   plan_refs: ["W1-T1062", "W1-T403", "W1-T340", "W1-T978"]
   files: [src/run-task.ts, test/dedicated-target-plan-freshness.test.ts]
