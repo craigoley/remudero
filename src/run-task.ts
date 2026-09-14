@@ -26797,6 +26797,23 @@ export function dedicatedTargetPlanReloader(
 }
 
 /**
+ * W1-T3554 — picks the reloader for a target that DID ask for reload (an explicit `--plan` has
+ * already been ruled out at the call site, `daemonCommand`'s own `reloadPlan` wiring): self gets
+ * {@link planReloader}, everyone else gets {@link dedicatedTargetPlanReloader}. Pulled out of that
+ * wiring's own ternary into its own named, directly-testable seam — both arms are ALREADY pinned
+ * by their own reloader's tests above (`planReloader REAL DEFAULT`,
+ * `dedicatedTargetPlanReloader: a SELF target gets no reloader`), so this function's own job is
+ * only the SELECTION, never the reload behaviour itself.
+ */
+export function resolveReloadPlan(
+  target: { isSelf: boolean; planPath: string },
+  allowStale: boolean,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): (() => Plan | null) | undefined {
+  return target.isSelf ? planReloader(target, allowStale, log) : dedicatedTargetPlanReloader(target, log);
+}
+
+/**
  * W1-T2509 — MEMOISE ONE {@link GitHub} GATEWAY PER `owner/repo`, so N dispatch lanes pay ONE cold
  * walk instead of N.
  *
@@ -27986,12 +28003,9 @@ export async function daemonCommand(
         // keeps ITS checkout's origin/main current between dispatches).
         // Mirrors the BOOT condition at the plan binding above (`target.isSelf && !--plan` /
         // `!target.isSelf && !--plan`) exactly, so the reload source can never diverge from the
-        // load source.
-        reloadPlan: flagValue(rest, "--plan")
-          ? undefined
-          : target.isSelf
-            ? planReloader(target, allowStale, log)
-            : dedicatedTargetPlanReloader(target, log),
+        // load source. Selection itself lives in `resolveReloadPlan` (its own doc, above) so this
+        // callsite stays a single reachable line regardless of which arm a given caller exercises.
+        reloadPlan: flagValue(rest, "--plan") ? undefined : resolveReloadPlan(target, allowStale, log),
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
         // consumes markers the write-token API drops, dispatching a kicked task
         // through its normal assertRunnable-gated path and honouring "drain now".

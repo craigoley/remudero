@@ -7,7 +7,7 @@ import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { daemonCommand, dedicatedTargetPlanReloader, planReloader } from "../src/run-task.js";
+import { daemonCommand, dedicatedTargetPlanReloader, planReloader, resolveReloadPlan } from "../src/run-task.js";
 
 // ── W1-T3554 ─────────────────────────────────────────────────────────────────────────────────
 //
@@ -132,6 +132,31 @@ test("dedicatedTargetPlanReloader: resets the WORKING TREE before parsing — a 
     order,
     ["fetch", "treeSha", "resetWorkingTree", "load"],
     "a genuine move fetches, detects it, resets the checkout to origin/main, THEN parses — in that order",
+  );
+});
+
+// ── W1-T3554: resolveReloadPlan — the wiring's SELECTION, pulled out of daemonCommand's own
+// ternary so the callsite stays a single reachable line whichever arm a caller takes. Both
+// reloaders' own behaviour is already pinned above/elsewhere (planReloader's tests,
+// dedicatedTargetPlanReloader's tests here); this function's only job is which one gets returned.
+
+test("resolveReloadPlan: a SELF target gets planReloader's reloader", () => {
+  const r = resolveReloadPlan({ isSelf: true, planPath: "/x" }, false, () => {});
+  assert.equal(typeof r, "function", "a self target still gets a reloader");
+  assert.equal(
+    planReloader({ isSelf: true, planPath: "/x" }, false, () => {}) === undefined,
+    false,
+    "sanity: planReloader itself does not refuse a self target",
+  );
+});
+
+test("resolveReloadPlan: a NON-self target gets dedicatedTargetPlanReloader's reloader, not planReloader's frozen-at-boot refusal", () => {
+  const r = resolveReloadPlan({ isSelf: false, planPath: "/x" }, false, () => {});
+  assert.equal(typeof r, "function", "a non-self target must NOT be frozen-at-boot");
+  assert.equal(
+    planReloader({ isSelf: false, planPath: "/x" }, false, () => {}),
+    undefined,
+    "sanity: planReloader alone still refuses a non-self target — resolveReloadPlan is what routes around that refusal",
   );
 });
 
