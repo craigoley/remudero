@@ -28099,8 +28099,9 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     uid,
     ledgerPath: ledgerPathFor(config),
   });
-  // W1-T3245: `--image-drift-only` is the WATCHDOG TICK's reading — recycle for a new image,
-  // never restart for mount staleness, which the daemon's own freshness exit already owns.
+  // `--image-drift-only` is an explicit narrow diagnostic/maintenance reading. The Azure watchdog
+  // invokes the full supervisor so its persistent change-and-risk pressure, rate ceiling, idle
+  // gate, health check, and rollback govern a host recycle (W1-T3199/W1-T3201).
   const result = runDeployCycle(deps, {
     dryRun: rest.includes("--dry-run"),
     imageDriftOnly: rest.includes("--image-drift-only"),

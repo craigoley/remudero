@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -444,7 +444,49 @@ test("W1-T2953: every guard the LIVE launcher carries is reproduced by the rende
   }
 });
 
-// ── W1-T3245: the recycle folds into the watchdog's tick, and is NOT a second timer ──────────
+test("W1-T3269: untracked runtime feedback does not block tracked unit convergence", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-untracked-"));
+  try {
+    const state = join(root, "state-root");
+    const checkout = join(state, "remudero");
+    const launcher = join(root, "rmd-relaunch.sh");
+    const rmdMark = join(root, "rmd-called");
+    const fakeBin = join(root, "fake-bin");
+    mkdirSync(join(checkout, "deploy"), { recursive: true });
+    mkdirSync(join(checkout, "bin"), { recursive: true });
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(join(checkout, "deploy", "install-host-units.sh"), "#!/usr/bin/env bash\nexit 0\n");
+    writeFileSync(join(checkout, "bin", "rmd"), "#!/usr/bin/env bash\nprintf called > \"${RMD_TEST_RMD_MARK:?}\"\n");
+    writeFileSync(join(fakeBin, "docker"), "#!/usr/bin/env bash\n[ \"${1:-}\" = ps ] && printf running\n");
+    chmodSync(join(checkout, "deploy", "install-host-units.sh"), 0o755);
+    chmodSync(join(checkout, "bin", "rmd"), 0o755);
+    chmodSync(join(fakeBin, "docker"), 0o755);
+    for (const args of [
+      ["init", "-b", "main", checkout],
+      ["-C", checkout, "add", "."],
+      ["-C", checkout, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "tracked baseline"],
+      ["-C", checkout, "update-ref", "refs/remotes/origin/main", "HEAD"],
+    ]) {
+      const out = spawnSync("git", args, { encoding: "utf8" });
+      assert.equal(out.status, 0, `git ${args.join(" ")} failed: ${out.stderr}`);
+    }
+    mkdirSync(join(checkout, "plan", "feedback"), { recursive: true });
+    writeFileSync(join(checkout, "plan", "feedback", "runtime-only.md"), "untracked feedback\n");
+
+    assert.equal(run(["--install"], { RMD_STATE_DIR: state, RMD_LAUNCHER_PATH: launcher }, root).status, 0);
+    const tick = spawnSync("bash", [launcher], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, RMD_TEST_RMD_MARK: rmdMark },
+    });
+    assert.equal(tick.status, 0, `healthy tick failed: ${tick.stderr}`);
+    assert.equal(readFileSync(rmdMark, "utf8"), "called", "the healthy tick must reach rmd despite untracked feedback");
+    assert.doesNotMatch(tick.stdout, /tracked changes/, "untracked feedback is not a tracked-change refusal");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T3245/W1-T3199/W1-T3201: one watchdog tick reaches the complete supervisor ───────────
 //
 // MEASURED 2026-09-09: acr-build published a new image at 11:14Z; the running container, created
 // by a watchdog revival at 10:15Z, still ran the 09-06 build. The commit it was missing was the
@@ -456,9 +498,8 @@ test("W1-T2953: every guard the LIVE launcher carries is reproduced by the rende
 // on a failed pull, but its only caller is `rmd deploy-run`, which nothing invoked.
 //
 // FOLDED RATHER THAN SCHEDULED SEPARATELY. Reconciliation is level-triggered: this loop already
-// reads observed state and converges, so "is the image current" is the same loop asking a second
-// question about the same desired state. A second timer would be a second reconciler over one
-// subject.
+// reads observed state and converges, so the score-gated deployment question belongs to this same
+// loop. A second timer would be a second reconciler over one subject.
 
 test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-fold-"));
@@ -466,9 +507,11 @@ test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists
     assert.equal(renderAsAzure(root).status, 0);
     const launcher = readFileSync(join(root, "rmd-relaunch.sh"), "utf8");
 
-    // The tick asks the SUPERVISOR, which owns the idle gate, health check and rollback and reaches
-    // recycle-container.sh. It must never shortcut to docker or to a bare restart.
-    assert.match(launcher, /bin\/rmd" deploy-run --image-drift-only/);
+    // The tick asks the COMPLETE supervisor, which owns pressure, the idle gate, health check and
+    // rollback and reaches recycle-container.sh. It must never shortcut to docker, a bare restart,
+    // or the image-only reading that bypasses weighted restart pressure.
+    assert.match(launcher, /bin\/rmd" deploy-run \|\|/);
+    assert.doesNotMatch(launcher, /deploy-run --image-drift-only/);
     assert.doesNotMatch(launcher, /docker pull/, "the launcher itself must never pull — that is the recycle's job");
 
     // NO SECOND RECONCILER. The whole point of folding is one loop over one subject.
@@ -484,10 +527,10 @@ test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists
   }
 });
 
-test("W1-T3245: the tick recycles for image drift and never for mount drift", () => {
-  // TWO DECISIONS, NOT ONE SCORE. Mount staleness is the daemon's own freshness exit (75), tens of
-  // times a day, in seconds; a second actor on that job would race it. `--image-drift-only` is what
-  // makes the tick blind to it — asserted on the DECISION, not just on the rendered flag.
+test("W1-T3199/W1-T3201: the watchdog's full reading waits for weighted restart pressure", () => {
+  // The daemon still owns its cheap in-container freshness exit, but a host recycle has a different
+  // interruption cost. The watchdog must therefore invoke the supervisor's full, score-gated
+  // reading rather than bypass it with `--image-drift-only`.
   const base = {
     markerPresent: false,
     autoMode: true,
@@ -498,23 +541,19 @@ test("W1-T3245: the tick recycles for image drift and never for mount drift", ()
     stopPresent: false,
   };
 
-  // Mount drift alone: the operator's full reading deploys; the tick's reading does NOT.
-  assert.equal(decideDeployTrigger({ ...base, imageBakedCommitsBehind: 0 }).deploy, true, "control: the full reading acts");
-  const tick = decideDeployTrigger({ ...base, imageBakedCommitsBehind: 0, imageDriftOnly: true });
-  assert.equal(tick.deploy, false, "the tick must leave mount staleness to the daemon");
-  assert.match(tick.reason, /up-to-date/);
+  const below = decideDeployTrigger({
+    ...base,
+    autoRestartPressure: { restart: false, reason: "restart pressure below threshold: total 17 < 18", total: 17, threshold: 18 },
+  });
+  assert.equal(below.deploy, false, "a below-threshold score must leave a healthy daemon alone");
+  assert.match(below.reason, /restart pressure below threshold/);
 
-  // Image drift: the tick DOES act, even though the checkout is also behind.
-  const drifted = decideDeployTrigger({ ...base, imageBakedCommitsBehind: 1, imageDriftOnly: true });
-  assert.equal(drifted.deploy, true, "a new image is the tick's own business");
-  assert.match(drifted.reason, /running image predates 1 baked-path commit/);
-
-  // And STOP still outranks it in the tick's reading too.
-  assert.equal(
-    decideDeployTrigger({ ...base, imageBakedCommitsBehind: 1, imageDriftOnly: true, autoMode: false, markerPresent: false }).deploy,
-    false,
-    "no marker and no auto mode is still human-gated",
-  );
+  const crossed = decideDeployTrigger({
+    ...base,
+    autoRestartPressure: { restart: true, reason: "restart pressure crossed threshold: total 18 >= 18", total: 18, threshold: 18 },
+  });
+  assert.equal(crossed.deploy, true, "a crossed score must reach the supervisor's deterministic safety gates");
+  assert.match(crossed.reason, /restart pressure crossed threshold/);
 });
 
 test("W1-T3245: a down daemon is revived from cache, not recycled", () => {

@@ -1164,16 +1164,17 @@ unfetched. MEASURED 2026-09-09: `acr-build` published at 11:14Z, the container (
 still ran the 09-06 build, and the commit it was missing was the repair for that morning's 7h32m
 outage.
 
-**Two decisions, one tick, and only one of them is new.** A *restart* for mount-side staleness is
-already the daemon's own job — it exits 75 and the entrypoint re-fetches, tens of times a day, in
-seconds. A *recycle* for a new image has no other actor, because nothing inside a container can
-replace the image it is running on. So on a healthy fleet the tick runs
-`rmd deploy-run --image-drift-only`, which is blind to mount staleness and awake to image drift.
+**One controller in one tick.** The daemon's own freshness exit still owns its cheap in-container
+source refresh. The healthy watchdog tick runs the complete `rmd deploy-run` supervisor because a
+host recycle is a separate, higher-cost action: with `DEPLOY_AUTO` commissioned, the supervisor
+persists weighted change pressure, applies its restart-rate ceiling, and only proceeds after the
+idle gate, health check, and rollback rules allow it. `--image-drift-only` deliberately bypasses
+that controller and is not the fleet schedule's invocation.
 
-It is **drift-driven, not clock-driven**: a tick with no image drift does nothing at all, and the
-five-minute cadence only sets how often the question is asked. The supervisor still owns the idle
-gate, the health check and the rollback, and reaches `recycle-container.sh` with its four refusals.
-A daemon that is **down** still falls through to the ordinary revive from cache.
+The tick is **change-and-risk-driven, not clock-driven**: five minutes only bounds how often it
+re-evaluates. A dedicated install checkout and `DEPLOY_AUTO` are prerequisites; until then
+`deploy-run` makes a named, fail-closed no-op. The supervisor reaches `recycle-container.sh` with
+its four refusals. A daemon that is **down** still falls through to the ordinary revive from cache.
 
 **Host-specific values are inputs, and an unresolvable one is refused rather than guessed** (exit 2).
 `RMD_STATE_DIR`, `RMD_IMAGE`, `RMD_SERVICE_USER`, `RMD_NODE_MAX_OLD_SPACE_MB`, the `RMD_GH_APP_*`

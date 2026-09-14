@@ -328,18 +328,19 @@ fi
 # The installer had NO automatic caller -- referenced only by its own test, the operator guide and a
 # size baseline -- so it converged when a person remembered. MEASURED 2026-09-09: check mode read
 # DRIFTED against a checkout clean and exactly at origin/main. The code had shipped that morning;
-# the rendered artifact had not. The tick already asks "is the daemon down" and, since W1-T3245,
-# "is the image behind"; this is the same question about a third artifact class on the same cadence.
-# THREE DECISION FUNCTIONS IN ONE TICK, NEVER ONE WEIGHTED SCORE -- the signals differ in frequency,
-# cost and blast radius, so a weighted sum is dominated by the cheapest and most frequent.
+# the rendered artifact had not. The tick already asks whether the daemon is down and whether a
+# change-and-risk-gated deployment is due; this is the independent unit-convergence question on
+# the same cadence. Unit integrity is not an input to deploy pressure, so it never shares that score.
 # THE REFUSALS ARE THE DELIVERABLE: a five-minute timer holding root write access to systemd units
 # is only safe because it declines in every case it cannot justify.
 converge_host_units() {
-  # A DIRTY OR OFF-MAIN CHECKOUT IS NEVER INSTALLED -- the whole safety argument. Without it a
-  # worktree experiment becomes root systemd configuration on the next tick.
+  # A TRACKED-DIRTY OR OFF-MAIN CHECKOUT IS NEVER INSTALLED -- the whole safety argument. Runtime
+  # feedback is intentionally untracked in this state checkout; it cannot alter this TRACKED
+  # installer and must not prevent the unit that fixes a later tracked defect from converging.
+  # \`-uno\` matches the daemon service-freshness guard's tracked-change policy.
   [ -d "\$CHECKOUT/.git" ] || { echo "rmd-relaunch: units -- \$CHECKOUT is not a checkout; not converging."; return 0; }
-  if [ -n "\$(git -C "\$CHECKOUT" status --porcelain 2>/dev/null)" ]; then
-    echo "rmd-relaunch: units -- checkout is DIRTY; not converging (an unreviewed tree must never become root config)."
+  if [ -n "\$(git -C "\$CHECKOUT" status --porcelain -uno 2>/dev/null)" ]; then
+    echo "rmd-relaunch: units -- checkout has tracked changes; not converging (an unreviewed tree must never become root config)."
     return 0
   fi
   head_sha=\$(git -C "\$CHECKOUT" rev-parse HEAD 2>/dev/null || echo unknown)
@@ -357,7 +358,14 @@ converge_host_units() {
     INSTALLER_ARGS=(--instance "\$INSTANCE_NAME")
     INSTALLER_ENV=(RMD_INSTANCE_REGISTRY="\$INSTANCE_REGISTRY")
   fi
-  if env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" "\${INSTALLER_ARGS[@]}" >/dev/null 2>&1; then
+  # Bash with \`set -u\` aborts on an empty array expansion. Core has no installer arguments, so
+  # keep that invocation separate from the instance form rather than making a healthy core tick
+  # fail before it can ask the supervisor.
+  if [ -n "\$INSTANCE_NAME" ]; then
+    if env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" "\${INSTALLER_ARGS[@]}" >/dev/null 2>&1; then
+      return 0
+    fi
+  elif env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -369,7 +377,13 @@ converge_host_units() {
   fi
 
   echo "rmd-relaunch: units DRIFTED at \$head_sha -- converging."
-  if sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install "\${INSTALLER_ARGS[@]}"; then
+  if [ -n "\$INSTANCE_NAME" ]; then
+    if sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install "\${INSTALLER_ARGS[@]}"; then
+      printf '%s units-converged sha=%s\\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$head_sha" >> "\$REVIVAL_LOG" 2>/dev/null || true
+    else
+      echo "rmd-relaunch: units -- converge FAILED; the next tick re-asks." >&2
+    fi
+  elif sudo -n env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --install; then
     printf '%s units-converged sha=%s\\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$head_sha" >> "\$REVIVAL_LOG" 2>/dev/null || true
   else
     echo "rmd-relaunch: units -- converge FAILED; the next tick re-asks." >&2
@@ -385,25 +399,21 @@ fi
 
 # IDEMPOTENT. A five-minute timer must never disturb a healthy daemon or its in-flight workers.
 #
-# W1-T3245 — AND THIS IS WHERE A RECYCLE IS CONSIDERED, IN THE SAME TICK. Reconciliation is
-# LEVEL-TRIGGERED: this loop already reads observed state ("is the daemon running") and converges,
-# so asking "is the image current" is the same loop asking a second question about the same desired
-# state. A separate timer would be a second reconciler over one subject.
+# W1-T3245 — THE WATCHDOG IS THE ONE HOST RECONCILER. Reconciliation is level-triggered: this loop
+# already reads observed state ("is the daemon running") and converges, so the healthy tick asks
+# the SAME supervisor whether deployment work is worth a controlled recycle. A second timer would
+# be a second reconciler over one subject.
 #
-# TWO DECISIONS, NOT ONE SCORE, and only ONE of them belongs here:
-#   RESTART (mount-side) is ALREADY HANDLED and is not this tick's business -- the daemon's own
-#           freshness check exits 75 and the entrypoint re-fetches, tens of times a day, in seconds.
-#           Acting on it here would put a second actor on the daemon's own job and race it.
-#   RECYCLE (image-side) has no other actor: nothing INSIDE a container can replace the image it is
-#           running on, and this script is the only thing outside it that runs on a cadence.
-# The --image-drift-only flag is what makes the tick blind to the first and awake to the second.
+# The daemon's own freshness exit still owns its cheap in-container source refresh. It does NOT
+# replace the host's deployment decision: only the supervisor has the persistent weighted-change
+# pressure, the restart-rate ceiling, the idle gate, health check, rollback, and the adaptive
+# \`recycle-container.sh\` backend. Passing --image-drift-only bypasses that pressure entirely and
+# turns a change-and-risk-gated controller into an image-only poll.
 #
-# THE DECISION IS NOT MADE HERE. The deploy-run supervisor owns it: the idle gate (no worker, no
-# in-flight task, bounded by DEPLOY_IDLE_DEFER_CEILING_MS), the drift reading, the health check and
-# the rollback -- and it reaches deploy/recycle-container.sh, whose four refusals are the
-# deliverable (no credential, workers still running, a failed pull, a digest mismatch). A tick with
-# no drift does nothing at all, so this is DRIFT-driven and not clock-driven; the clock only sets
-# how often the question is asked.
+# THE DECISION IS NOT MADE HERE. \`deploy-run\` fails closed until a dedicated install checkout and
+# DEPLOY_AUTO are commissioned, then it records the score and recycles only when the controller's
+# deterministic safety gates allow it. A daemon that is DOWN still takes the cached-image revival
+# path below; this healthy branch never pulls an unverified image itself.
 if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # W1-T3268 -- THE FLAG'S ONLY PATH BACK. The arm that cleared DAEMON_CRASH_LOOP sat on the
   # revival path below, after this very return, so a host that recovered stopped reviving and never
@@ -414,8 +424,8 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
   if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
-    echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
-    "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only || \\
+    echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a change-and-risk-gated deploy is due."
+    "\$STATE_DIR/remudero/bin/rmd" deploy-run || \\
       echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
   else
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."
