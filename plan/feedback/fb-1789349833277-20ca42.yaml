@@ -1,0 +1,22 @@
+id: fb-1789349833277-20ca42
+ts: 2026-09-14T01:37:13.277Z
+raw: "Dedicated-instance plan freshness gap: a daemon launched with --repo
+  remudero-console freezes that target plan at boot. In run-task.ts,
+  planReloader returns undefined when target.isSelf is false, while
+  checkFreshness watches only the Remudero engine checkout. Observed after
+  console plan PR #7 merged: the target origin/main moved to df1198a, but the
+  daemon status projection still showed CONSOLE-T1 verifyHumanPending from
+  canonical target HEAD 9d6ba1d. The worker worktree correctly uses target
+  origin/main, so do not fix this with a raw pull. Add a bounded, tested
+  non-self target-plan freshness path that reloads or gracefully restarts only
+  between workers, proves a merged target plan can change dispatch eligibility,
+  and preserves independent instance state and locks."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
