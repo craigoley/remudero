@@ -318,7 +318,11 @@ test("planCommitMessage: notes whole-plan scope when no brief was given", () => 
   assert.match(msg, /Brief: \(none — whole-plan scope\)/);
 });
 
-test("planCommitMessage: the production-length plan proposal is accepted by real commitlint", () => {
+// W1-T3483 acceptance criterion 3: the complete generated plan proposal message — header, mode,
+// LLM-authored detail, AND the wrapped brief paragraph together — must pass the REAL configured
+// `commitlint` invocation, not a helper-local length assertion standing in for it (the round-1
+// "semantic downgrade" failure mode this task's rationale explicitly forbids).
+test("planCommitMessage passes real configured commitlint", () => {
   const message = planCommitMessage({
     decision: {
       action: "propose",
@@ -330,6 +334,95 @@ test("planCommitMessage: the production-length plan proposal is accepted by real
       "Repair RMD triage claim execution when the canonical target clone has no node_modules. Live evidence: rmd triage created its worktree then refused its claim.",
   });
   for (const line of message.split("\n")) assert.ok(line.length <= 100, `over-long line: ${JSON.stringify(line)}`);
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const result = spawnSync(process.execPath, [join(root, "node_modules", ".bin", "commitlint")], {
+    cwd: root,
+    input: message,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+});
+
+// W1-T3483 acceptance criterion 2: an ORDINARY generated task-shard proposal — several real-shaped
+// `plan/tasks.d/W1-T<n>-<slug>.yaml` paths, the longest kind of value `decidePlanArchitect` ever
+// hands `planCommitMessage` via `decision.files` — must never blow commitlint's line-length budget,
+// and the harness's own `Remudero-Task:` trailer contract must hold. THE TRAILER CONTRACT HERE IS
+// "NEVER EMIT ONE, NOT EVER": plan-pr-emitter.ts's own module doc states the invariant this
+// function's caller relies on — "a plan-FILING PR ... must never carry a `Remudero-Task: <id>`
+// trailer" — because `findMergedByTrailer` (lib/status.ts) marks the trailered id DONE on merge,
+// and a `rmd plan --mode=create/clarify/expand` propose commit only FILES a task, it never BUILDS
+// one. So "the trailer is preserved" here means the pre-existing, load-bearing absence survives a
+// stress input unchanged — a naive future rewrite that re-joins `decision.files` into a raw
+// `Acceptance:` line (the exact pre-#5321 shape this task's rationale describes) is exactly the
+// regression both assertions below would catch: an over-long line, or a wrongly-added trailer.
+test("planCommitMessage wraps structured plan acceptance and preserves trailer", () => {
+  const files = [
+    "plan/tasks.d/W1-T3483-plan-proposal-commit-message-lines-can-fail-commitlint.yaml",
+    "plan/tasks.d/W1-T3484-a-second-ordinary-generated-task-shard-with-a-long-descriptive-slug.yaml",
+    "plan/tasks.d/W1-T3485-a-third-ordinary-generated-task-shard-with-an-equally-long-slug-too.yaml",
+  ];
+  const message = planCommitMessage({
+    decision: {
+      action: "propose",
+      detail: "add three related tasks filed together from one plan run, each with its own generated shard",
+      files,
+    } as Extract<PlanDecision, { action: "propose" }>,
+    mode: "expand",
+    brief: "file the follow-on shards a normal expand pass produces",
+  });
+
+  for (const line of message.split("\n")) assert.ok(line.length <= 100, `over-long line: ${JSON.stringify(line)}`);
+
+  // The load-bearing absence (see comment above): a filing commit is never mistaken for a
+  // completed build.
+  assert.doesNotMatch(message, /^Remudero-Task:/m, "a plan-filing commit must never carry the trailer");
+
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const result = spawnSync(process.execPath, [join(root, "node_modules", ".bin", "commitlint")], {
+    cwd: root,
+    input: message,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+});
+
+// W1-T3483 acceptance criterion 1: the actual incident — a real `rmd plan --mode=create` run on
+// 2026-09-13 passed a 738-character operator brief and commitlint rejected the resulting
+// message's unwrapped `Brief:` line (`footer-max-line-length`). This reproduces that magnitude
+// directly (628 chars, same order as the real one) rather than the ~140-char brief the test above
+// already covers, and additionally proves no word of the brief is lost in the wrap — only
+// re-flowed onto more lines.
+test("planCommitMessage wraps a long brief and preserves it", () => {
+  const brief =
+    "Repair the RMD plan lane so a long operator-supplied brief never blows commitlint line-length " +
+    "budget. Two real rmd plan --mode=create runs on 2026-09-13 reached PROPOSED, staged a plan-only " +
+    "shard, and then failed at the harness-owned git commit because the raw brief text was spliced " +
+    "into the message unwrapped and the worker proposal was discarded with its worktree before any " +
+    "PR could ever exist, even though the underlying task was well-formed and the failure was " +
+    "entirely in how the harness rendered its own commit message rather than in the substance of " +
+    "what was proposed to the plan lane for this repository going forward.";
+  assert.ok(brief.length > 600, `fixture brief is only ${brief.length} chars — widen it`);
+
+  const message = planCommitMessage({
+    decision: {
+      action: "propose",
+      detail: "add W1-T3483 wrapping",
+      files: ["plan/tasks.d/W1-T3483-x.yaml"],
+    } as Extract<PlanDecision, { action: "propose" }>,
+    mode: "create",
+    brief,
+  });
+
+  for (const line of message.split("\n")) assert.ok(line.length <= 100, `over-long line: ${JSON.stringify(line)}`);
+
+  // Provenance: the brief survives WHOLE — re-flowed across lines, never truncated or dropped.
+  // The message is `header\n\n<wrapped Brief paragraph>\n`; everything after the header is the
+  // one wrapped paragraph, so rejoining it with spaces must reproduce "Brief: " + the brief text.
+  const [, bodyBlock] = message.split("\n\n");
+  assert.ok(bodyBlock, "expected a wrapped body block after the header");
+  const reflowed = bodyBlock.trimEnd().split("\n").join(" ");
+  assert.equal(reflowed, `Brief: ${brief}`);
+
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const result = spawnSync(process.execPath, [join(root, "node_modules", ".bin", "commitlint")], {
     cwd: root,
