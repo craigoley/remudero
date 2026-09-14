@@ -79,8 +79,8 @@
       proof: "unit test: test/dedicated-target-plan-freshness.test.ts"
     - claim: "the reload/restart never fires mid-batch — only between workers — so an in-flight batch's plan snapshot stays consistent for its own lifetime"
       proof: "unit test: test/dedicated-target-plan-freshness.test.ts"
-    - claim: "the fix does not touch how worker worktrees resolve the target's origin/main, preserving the already-correct worker fetch path named in the report"
-      proof: "grep: isSelf in src/run-task.ts"
+    - claim: "the dedicated target reloader resolves origin/main against its own target checkout, without altering the worker-worktree resolution path"
+      proof: "unit test: W1-T3554: dedicated reloader defaults use target checkout"
   origin: "feedback#fb-1789349833277-20ca42"
   plan_refs: ["W1-T1062", "W1-T403", "W1-T340", "W1-T978"]
   files: [src/run-task.ts, test/dedicated-target-plan-freshness.test.ts]
