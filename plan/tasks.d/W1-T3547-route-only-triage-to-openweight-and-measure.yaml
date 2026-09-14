@@ -1,5 +1,5 @@
 - id: W1-T3547
-  title: "ROUTE ONLY SYNTHESIS.TRIAGE TO GPT-OSS-120B AND MEASURE ACCEPTED OUTPUTS PER DOLLAR — the adapter must prove itself on the smallest machine-checked lane before the 45%-of-spend inbox-draft lane moves"
+  title: "ROUTE ONLY SYNTHESIS.TRIAGE TO GPT-OSS-120B AFTER THE MEASURED INBOX-DRAFT TRIAL — the WebSearch bridge remains deferred until the already tool-compatible 45%-of-spend lane proves accepted outputs per dollar"
   repo: remudero
   depends_on: [W1-T3546, W1-T3549, W1-T3558]
   type: implement
@@ -16,6 +16,14 @@
   status: queued
   attempts: 0
   note: |
+    RESEQUENCED 2026-09-14: W1-T3558 now depends on W1-T3570, so this
+    triage route cannot dispatch before the measured inbox-draft trial. The old
+    smallest-lane-first premise was superseded by the observed tool surfaces:
+    triage requires WebSearch, while inbox draft requires only Read/Grep/Glob and
+    is already adapter-compatible. This task remains the triage-only route if the
+    trial's verdict says to widen; it must not re-route inbox draft or bypass the
+    bridge's consent/cash boundary.
+
     THIS IS PHASE THREE AND THE ONLY ROUTED LANE IS `synthesis.triage`. The 2026-09-13 probe
     classified five exact cases correctly, including a branch-name credit error, but five samples
     are not a production rate. Triage is the smallest suitable proving lane: 176 measured runs,
