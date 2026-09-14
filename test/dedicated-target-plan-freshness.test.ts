@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -255,35 +255,28 @@ test("W1-T3554 acceptance 3: the reload is observed only BETWEEN workers, never 
 // boot, never merely a working-tree edit.
 
 test("W1-T3554: dedicated reloader defaults use target checkout", () => {
-  const bareDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3554-bare-`));
-  const workDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3554-work-`));
-  const cloneDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3554-clone-`));
-  const g = (root: string, ...a: string[]) => execFileSync("git", ["-C", root, ...a], { encoding: "utf8" });
+  const bare = gitRepo({ bare: true, kind: "w1t3554-bare" });
+  const work = gitRepo({ kind: "w1t3554-work" });
+  let clone: GitRepo | undefined;
   const prevCwd = process.cwd();
   try {
     // The "origin": an independent bare repo, fetched over a real (local) transport — proving the
     // reloader's own `git fetch` is what picks up the change, not a shared working tree.
-    execFileSync("git", ["init", "-q", "--bare", "-b", "main", bareDir], { encoding: "utf8" });
-
-    g(workDir, "init", "-q", "-b", "main");
-    g(workDir, "config", "user.email", "t@t");
-    g(workDir, "config", "user.name", "t");
-    mkdirSync(join(workDir, "plan"), { recursive: true });
-    writeFileSync(join(workDir, "plan", "tasks.yaml"), "- id: A\n  title: a\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n");
-    g(workDir, "add", "-A");
-    g(workDir, "commit", "-q", "-m", "seed");
-    g(workDir, "remote", "add", "origin", bareDir);
-    g(workDir, "push", "-q", "origin", "main");
+    mkdirSync(join(work.dir, "plan"), { recursive: true });
+    writeFileSync(join(work.dir, "plan", "tasks.yaml"), "- id: A\n  title: a\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n");
+    work.git("add", "-A");
+    work.git("commit", "-q", "-m", "seed");
+    work.addRemote("origin", bare.dir);
+    work.git("push", "-q", "origin", "main");
 
     // The daemon's own checkout of the target — cloned from the SAME "origin" the test pushes to.
-    rmSync(cloneDir, { recursive: true, force: true });
-    execFileSync("git", ["clone", "-q", bareDir, cloneDir], { encoding: "utf8" });
+    clone = gitRepo({ cloneFrom: bare.dir, kind: "w1t3554-clone" });
 
     // Run from a directory that is NOT a git repo — exactly the daemon's situation.
     const outside = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3554-outside-`));
     process.chdir(outside);
 
-    const r = dedicatedTargetPlanReloader({ isSelf: false, planPath: join(cloneDir, "plan", "tasks.yaml") }, () => {})!;
+    const r = dedicatedTargetPlanReloader({ isSelf: false, planPath: join(clone.dir, "plan", "tasks.yaml") }, () => {})!;
     assert.ok(r, "a non-self dedicated target gets a reloader");
     assert.equal(r(), null, "first tick records the boot sha without reporting a reload");
     assert.equal(r(), null, "unchanged tree ⇒ still null, and crucially NO THROW");
@@ -291,12 +284,12 @@ test("W1-T3554: dedicated reloader defaults use target checkout", () => {
     // Push a plan change to the TARGET's origin/main from the SEPARATE working checkout — never
     // touching the daemon's own clone directly, exactly like a merged PR would.
     writeFileSync(
-      join(workDir, "plan", "tasks.yaml"),
+      join(work.dir, "plan", "tasks.yaml"),
       "- id: A\n  title: a\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n- id: B-NEW\n  title: b\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n",
     );
-    g(workDir, "add", "-A");
-    g(workDir, "commit", "-q", "-m", "filed");
-    g(workDir, "push", "-q", "origin", "main");
+    work.git("add", "-A");
+    work.git("commit", "-q", "-m", "filed");
+    work.git("push", "-q", "origin", "main");
 
     const fresh = r();
     assert.ok(fresh, "a moved target plan tree yields a reload, picked up by the reloader's OWN fetch");
@@ -304,9 +297,9 @@ test("W1-T3554: dedicated reloader defaults use target checkout", () => {
     rmSync(outside, { recursive: true, force: true });
   } finally {
     process.chdir(prevCwd);
-    rmSync(bareDir, { recursive: true, force: true });
-    rmSync(workDir, { recursive: true, force: true });
-    rmSync(cloneDir, { recursive: true, force: true });
+    clone?.cleanup();
+    work.cleanup();
+    bare.cleanup();
   }
 });
 
@@ -324,24 +317,18 @@ test("W1-T3554 REACHABILITY: daemonCommand wires dedicatedTargetPlanReloader (no
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   mkdirSync(join(root, "state"), { recursive: true });
 
-  const bareDir = join(home, "target-origin.git");
   const targetRepoDir = join(root, "repos", "dedicated-target-repo");
-  const g = (repoRoot: string, ...a: string[]) => execFileSync("git", ["-C", repoRoot, ...a], { encoding: "utf8" });
-  execFileSync("git", ["init", "-q", "--bare", "-b", "main", bareDir], { encoding: "utf8" });
-
-  const seedDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3554-seed-`));
-  g(seedDir, "init", "-q", "-b", "main");
-  g(seedDir, "config", "user.email", "t@t");
-  g(seedDir, "config", "user.name", "t");
-  mkdirSync(join(seedDir, "plan"), { recursive: true });
-  writeFileSync(join(seedDir, "plan", "tasks.yaml"), "[]\n");
-  g(seedDir, "add", "-A");
-  g(seedDir, "commit", "-q", "-m", "seed");
-  g(seedDir, "remote", "add", "origin", bareDir);
-  g(seedDir, "push", "-q", "origin", "main");
+  const bare = gitRepo({ bare: true, kind: "w1t3554-wiring-origin" });
+  const seed = gitRepo({ kind: "w1t3554-seed" });
+  mkdirSync(join(seed.dir, "plan"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "[]\n");
+  seed.git("add", "-A");
+  seed.git("commit", "-q", "-m", "seed");
+  seed.addRemote("origin", bare.dir);
+  seed.git("push", "-q", "origin", "main");
 
   mkdirSync(join(root, "repos"), { recursive: true });
-  execFileSync("git", ["clone", "-q", bareDir, targetRepoDir], { encoding: "utf8" });
+  seed.git("clone", "-q", bare.dir, targetRepoDir);
 
   const prevHome = process.env.HOME;
   process.env.HOME = home;
@@ -371,6 +358,6 @@ test("W1-T3554 REACHABILITY: daemonCommand wires dedicatedTargetPlanReloader (no
     "sanity: planReloader itself still refuses a non-self target",
   );
   rmSync(home, { recursive: true, force: true });
-  rmSync(bareDir, { recursive: true, force: true });
-  rmSync(seedDir, { recursive: true, force: true });
+  seed.cleanup();
+  bare.cleanup();
 });
