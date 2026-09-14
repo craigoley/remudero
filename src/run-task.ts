@@ -5264,6 +5264,7 @@ async function runReview(args: {
     model: args.reviewerMount.model,
     effort: args.reviewerMount.effort,
     maxTurns: args.reviewerMount.maxTurns,
+    provider: args.reviewerMount.provider,
   };
   let evaluatorProvenance: ReviewEvaluatorProvenance = {
     provider: null,
@@ -5315,6 +5316,7 @@ async function runReview(args: {
             // `error_max_turns` on every substantive code PR — a floor-only PASS silently masquerading
             // as a completed review (P10-a; reviewerOutcome below makes it legible).
             model: reviewerSpawnMount!.model,
+            mountProvider: reviewerSpawnMount!.provider,
             effort: reviewerSpawnMount!.effort,
             maxTurns: reviewerSpawnMount!.maxTurns,
             maxBudgetUsd: args.budgetUsd,
@@ -6954,6 +6956,7 @@ export function buildPrerequisitePrDispatchArgs(args: {
     permissionMode: "bypassPermissions",
     settingsFile: args.settingsFile,
     model: args.mount.model,
+    mountProvider: args.mount.provider,
     effort: args.mount.effort,
     maxTurns: args.mount.maxTurns,
     maxBudgetUsd: args.budgetUsd,
@@ -9180,6 +9183,7 @@ export async function runFixRung(opts: {
       permissionMode: "bypassPermissions",
       settingsFile: opts.settingsFile,
       model: opts.mount.model,
+      mountProvider: opts.mount.provider,
       effort: opts.mount.effort,
       maxTurns: opts.mount.maxTurns,
       maxBudgetUsd: opts.budgetUsd,
@@ -12915,6 +12919,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         permissionMode: "bypassPermissions",
         settingsFile,
         model: reconMount?.model,
+        mountProvider: reconMount?.provider,
         effort: reconMount?.effort,
         // maxTurns DELIBERATELY NOT taken from the mount, and the ROW agrees with this cap.
         // impl-BP flagged a 50x contradiction (rows said 400, this said 8); the operator ruled the
@@ -13271,6 +13276,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // are the real backstop. Recalibrated in mounts.yaml from OBSERVED runs (W1-T6
           // needed >61 turns — docs/archive/DIAGNOSIS.md), an order of magnitude above expected.
           model: implementMount.model,
+          mountProvider: implementMount.provider,
           effort: implementMount.effort,
           maxTurns: implementMount.maxTurns,
           maxBudgetUsd: budgetUsd,
@@ -13336,6 +13342,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
           model: diagnoseMount.model,
+          mountProvider: diagnoseMount.provider,
           effort: diagnoseMount.effort,
           maxTurns: diagnoseMount.maxTurns,
           maxBudgetUsd: budgetUsd,
@@ -13513,6 +13520,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           settingsFile,
           resumeSessionId: impl.sessionId,
           model: implementMount.model, // same mount as the initial implement spawn (§9).
+          mountProvider: implementMount.provider,
           effort: implementMount.effort,
           maxTurns: implementMount.maxTurns,
           maxBudgetUsd: budgetUsd,
@@ -23419,6 +23427,7 @@ export function buildPromotionJudgeSpawnArgs(opts: {
     settingsFile: opts.settingsFile,
     prompt: buildPromotionJudgePrompt(opts.entry),
     model: opts.mount.model,
+    mountProvider: opts.mount.provider,
     effort: opts.mount.effort,
     maxTurns: opts.mount.maxTurns,
     tools: PROMOTION_JUDGE_TOOLS,
@@ -24157,6 +24166,7 @@ async function retroCommand(
       permissionMode: "bypassPermissions",
       settingsFile,
       model: arch, // W1-T2559: retro's own `synthesis.retro` mount, not the Architect's
+      mountProvider: mountsTable.synthesis.retro.provider,
       effort: archEffort, // W1-T2559: this rung's own effort, now actually wired to the spawn
       maxTurns: mountsTable.synthesis.retro.maxTurns, // MOUNT-GOVERNED (W1-T64/W1-T2559) — never a hardcoded literal.
       maxBudgetUsd: DEFAULT_BUDGET_USD,
@@ -24282,6 +24292,7 @@ async function retroCommand(
           permissionMode: "bypassPermissions",
           settingsFile,
           model: arch,
+          mountProvider: mountsTable.synthesis.retro.provider,
           effort: archEffort,
           maxTurns: mountsTable.synthesis.retro.maxTurns,
           maxBudgetUsd: DEFAULT_BUDGET_USD,
@@ -34210,6 +34221,7 @@ async function triageCommandLocked(
           permissionMode: "bypassPermissions",
           settingsFile,
           model: arch, // W1-T2559: triage's own `synthesis.triage` mount, not the Architect's
+          mountProvider: mountsTable.synthesis.triage.provider,
           effort: archEffort, // W1-T2559: this rung's own effort, now actually wired to the spawn
           maxTurns: mountsTable.synthesis.triage.maxTurns, // MOUNT-GOVERNED (§9/W1-T2559) — never a hardcoded literal.
           maxBudgetUsd: DEFAULT_BUDGET_USD,
@@ -35052,6 +35064,7 @@ export async function draftProposalBatch(
             permissionMode: "bypassPermissions",
             settingsFile,
             model: arch, // W1-T2559: this rung's own `synthesis.inbox_draft` mount, not the Architect's
+            mountProvider: mountsTable.synthesis.inbox_draft.provider,
             effort: archEffort, // W1-T2559: this rung's own effort, now actually wired to the spawn
             maxTurns: mountsTable.synthesis.inbox_draft.maxTurns, // MOUNT-GOVERNED (W1-T2559) — never a hardcoded literal.
             // W1-T2591: the ONE worktree above is shared by every lane of `runDraftRung`'s pool
@@ -37284,6 +37297,7 @@ export async function dispatchAlertFixRun(
       permissionMode: "bypassPermissions",
       settingsFile,
       model: fixMount.model,
+      mountProvider: fixMount.provider,
       effort: fixMount.effort,
       maxTurns: fixMount.maxTurns,
       maxBudgetUsd: DEFAULT_BUDGET_USD,

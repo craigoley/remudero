@@ -7,7 +7,7 @@
  */
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { enabledWorkerProviders, type Config, type WorkerProviderId } from "./config.js";
+import { enabledWorkerProviders, isWorkerProviderId, WORKER_PROVIDER_IDS, type Config, type WorkerProviderId } from "./config.js";
 import {
   ProviderCapacityBlockedError,
   selectWorkerProvider,
@@ -129,7 +129,7 @@ function exactKeys(value: Record<string, unknown>, expected: readonly string[], 
 }
 
 function providerId(value: unknown): WorkerProviderId | undefined {
-  return value === "claude" || value === "codex" ? value : undefined;
+  return isWorkerProviderId(value) ? value : undefined;
 }
 
 function parseTime(value: unknown, field: string): number {
@@ -188,7 +188,9 @@ function validateInput(
   }
   const enabledProviders = value.enabledProviders.map(providerId);
   if (enabledProviders.some((provider) => !provider)) {
-    throw new ProviderRoutingPolicyError('enabledProviders accepts only "claude" and "codex"');
+    throw new ProviderRoutingPolicyError(
+      `enabledProviders accepts only ${WORKER_PROVIDER_IDS.map((provider) => JSON.stringify(provider)).join(", ")}`,
+    );
   }
   const closedEnabled = enabledProviders as WorkerProviderId[];
   if (new Set(closedEnabled).size !== closedEnabled.length) {
@@ -201,10 +203,13 @@ function validateInput(
   }
 
   const preference = value.preference;
-  if (preference !== "automatic" && preference !== "claude" && preference !== "codex") {
-    throw new ProviderRoutingPolicyError('preference must be "automatic", "claude" or "codex"');
+  const preferredProvider = providerId(preference);
+  if (preference !== "automatic" && !preferredProvider) {
+    throw new ProviderRoutingPolicyError(
+      `preference must be "automatic" or one of ${WORKER_PROVIDER_IDS.map((provider) => JSON.stringify(provider)).join(", ")}`,
+    );
   }
-  if (preference !== "automatic" && !closedEnabled.includes(preference)) {
+  if (preferredProvider && !closedEnabled.includes(preferredProvider)) {
     throw new ProviderRoutingPolicyError("preferred provider must be in enabledProviders");
   }
 
@@ -247,7 +252,7 @@ function validateInput(
   if (routableProviders.length === 0) {
     throw new ProviderRoutingPolicyError("policy cannot park every enabled provider");
   }
-  if (preference !== "automatic" && !routableProviders.includes(preference)) {
+  if (preferredProvider && !routableProviders.includes(preferredProvider)) {
     throw new ProviderRoutingPolicyError("preferred provider cannot be actively parked");
   }
 
@@ -275,7 +280,7 @@ function validateInput(
 
   return {
     enabledProviders: closedEnabled,
-    preference,
+    preference: preference === "automatic" ? preference : preferredProvider!,
     reservePercent,
     parks,
     codexModelPreference,
