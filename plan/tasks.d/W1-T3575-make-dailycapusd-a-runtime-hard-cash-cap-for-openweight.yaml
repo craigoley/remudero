@@ -1,0 +1,55 @@
+- id: W1-T3575
+  title: "MAKE DAILYCAPUSD A RUNTIME HARD CASH CAP FOR OPENWEIGHT — configuration validation alone cannot bound paid Azure calls, so reserve and settle a daily allowance atomically before every openweight transport request"
+  repo: remudero
+  depends_on: [W1-T3546]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 5.00
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
+  origin: "operator-session#open-weight-resequence-2026-09-14"
+  plan_refs: ["W1-T3545", "W1-T3546", "W1-T3569"]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: chore/file-openweight-output-contract-1789389121907 -> chore/file-openweight-resequence-1789389121907
+
+    OBSERVED at origin/main 1aad6122: `dailyCapUsd` occurs in source only in
+    config-schema/config validation and no provider or dispatch path reads it before
+    an OpenWeight HTTP request. The existing load-time refusal is necessary but does
+    not cap accumulated Azure spend. This task is deliberately a prerequisite to
+    W1-T3569, rather than representing a config declaration as a bounded trial.
+  rationale: |
+    A trial that can issue arbitrary concurrent requests after accepting a non-null
+    number is neither cost-bounded nor safely measurable. The enforcement must reserve
+    a conservative, attributable amount before an outbound request, settle against
+    provider-reported tokens after it returns, and keep the reservation charged if the
+    response becomes unreadable. Otherwise a crash or race can spend beyond the value
+    that was advertised as a cap.
+  design: |
+    Add an OpenWeight-only durable daily allowance with an atomic pre-request
+    reservation keyed by UTC day and provider request identity. Derive a conservative
+    reservation from the exact request's known token ceiling and the adapter's declared
+    versioned price constants; settle down only after a readable provider receipt.
+    Concurrent daemon workers and a restarted process must observe the same committed
+    reservation state. Ledger fields must name reservation, settlement, refusal, and
+    attributable cost without recording a secret or prompt. `dailyCapUsd` remains a
+    required configuration value, but an exhausted allowance must refuse before
+    `fetch`, with no paid request. Keep Claude and Codex behavior unchanged.
+  acceptance:
+    - claim: "an exhausted OpenWeight daily allowance refuses before the adapter transport is invoked"
+      proof: "unit test: openweight daily cap refuses before transport"
+    - claim: "concurrent and restarted reservations cannot spend the same daily allowance twice, and a failed response remains charged until a receipt can settle it"
+      proof: "unit test: openweight daily reservation remains charged across restart"
+    - claim: "each OpenWeight outcome exposes attributable reservation and settled-cost fields without a credential"
+      proof: "unit test: openweight daily cap ledger fields expose settled cost"
+  falsifier: |
+    Delete the pre-fetch reservation and the exhausted-cap test must make an HTTP call. Mutate
+    the reservation update into a non-atomic read-modify-write and the concurrent fixture must
+    oversubscribe its allowance. Delete the failed-response charge and the restart fixture must
+    observe budget that was already committed.
