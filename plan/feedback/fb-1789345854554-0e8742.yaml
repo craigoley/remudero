@@ -1,0 +1,23 @@
+id: fb-1789345854554-0e8742
+ts: 2026-09-14T00:30:54.554Z
+raw: "OBSERVED on 2026-09-14 while triaging fb-1789331541509-6463e8:
+  src/run-task.ts routes triage through runRelintLoop, whose run callback calls
+  parseTriageVerdict plus decideTriage directly. The initial pass proposed
+  W1-T3542/3543/3544, lint rejected status: pending, and the corrective re-lint
+  response had no verdict line. The lane returned terminal triage.error instead
+  of the bounded unparseable-verdict retry promised by W1-T2212.
+  src/lib/triage.ts runTriageWithRetry is referenced only in that module and its
+  tests, not production. Add the missing production path for an unparseable
+  re-lint repair response, with a bounded retry and ledgered cause; preserve
+  fail-closed behavior for parsed adverse or inconsistent verdicts. Test the
+  exact proposed -> relint violation -> unparseable repair sequence; no PR may
+  open until a parseable verdict and clean lint."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
