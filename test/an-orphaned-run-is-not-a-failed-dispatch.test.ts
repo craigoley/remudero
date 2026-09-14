@@ -70,7 +70,7 @@ const laterFleetActivity = () => runStart("noise-run", NEWER_TS, "W1-OTHER");
 
 // ── Acceptance (1): a run.start carrying no subsequent row reads as an orphan ──────────────────
 
-test("acceptance 1: a run.start with no subsequent row, stale relative to the ledger's own newer activity, reads as an orphan", () => {
+test("a run.start with no subsequent row reads as an orphan", () => {
   const lines = [runStart("r0", OLD_TS), laterFleetActivity()];
   assert.deepEqual([...orphanedRunIds(lines, T)], ["r0"]);
 });
@@ -109,9 +109,16 @@ test("a run_id this repo cannot name, or cannot age, is never orphaned — unkno
   assert.deepEqual([...orphanedRunIds([runStart("r0", OLD_TS)], T)], [], "with no later activity at all, nothing proves this stale yet");
 });
 
+test("the orphan read reflects a later row appended to the same ledger array", () => {
+  const lines = [runStart("r0", OLD_TS)];
+  assert.deepEqual([...orphanedRunIds(lines, T)], [], "a lone start supplies no later ledger clock");
+  lines.push(laterFleetActivity());
+  assert.deepEqual([...orphanedRunIds(lines, T)], ["r0"], "the exported reader must not retain an obsolete ledger clock");
+});
+
 // ── Acceptance (2): the streak breaker does not count an orphaned run ──────────────────────────
 
-test("acceptance 2 + falsifier (load-bearing): the exact measured shape — five solo run.start rows, one per run_id, nothing else — no longer trips the streak breaker once stale", () => {
+test("the streak breaker does not count an orphaned run", () => {
   const lines = [
     runStart("r0", OLD_TS),
     runStart("r1", OLD_TS),
@@ -155,7 +162,7 @@ test("acceptance 2: pr.opened still resets the streak exactly as before, orphans
 
 // ── Acceptance (3): the lifetime dispatch counter still counts an orphaned run ─────────────────
 
-test("acceptance 3: dispatchesEver counts every orphaned run.start exactly as it counts any other — a different failure, deliberately unaffected", () => {
+test("the lifetime counter still counts an orphaned run", () => {
   const lines = [0, 1, 2, 3, 4].map((i) => runStart(`r${i}`, OLD_TS)).concat([laterFleetActivity()]);
   assert.equal(dispatchesWithoutNewOwnedPr(lines, T), 0, "the streak breaker excuses all five");
   assert.equal(dispatchesEver(lines, T), 5, "the lifetime counter still saw all five");
@@ -175,7 +182,7 @@ test("acceptance 3: a task whose worker is reliably killed by its host still rea
 
 // ── Acceptance (4): repeated orphaning escalates as a host fault ───────────────────────────────
 
-test("acceptance 4: repeated orphaning trips its OWN bound, under a reason naming the host and the run_ids — never the task", () => {
+test("repeated orphaning escalates as a host fault", () => {
   const lines = [
     runStart("r0", OLD_TS),
     runStart("r1", OLD_TS),

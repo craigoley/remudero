@@ -1181,18 +1181,6 @@ export interface OrphanDetectionOpts {
   livenessBoundMs?: number;
 }
 
-/** Per-array-identity memo for {@link latestLedgerTsMs} — every UNINDEXED caller here
- *  (`status-board.ts`/`panel-graph.ts` call {@link dispatchesWithoutNewOwnedPr} once PER TASK over
- *  the SAME `lines` reference, with no {@link LedgerIndex} to short-circuit the scan — R-23's own
- *  memo only covers the indexed path) would otherwise re-walk the WHOLE ledger, `Date.parse`ing
- *  every `ts`, once per task. That answer cannot change between those calls: nothing mutates
- *  `lines` between them. MEASURED against the W1-T187 production-scale corpus (18,304 lines, 220
- *  tasks): uncached, 220 calls cost ~530ms; this cache brings the same 220 calls to ~40ms — the
- *  pre-existing (pre-W1-T3523) per-task cost, restoring the W1-T187 criterion-5 budget this task's
- *  own new scan had put at risk. A `WeakMap` retains `lines` no longer than the caller already
- *  does by holding the array itself. */
-const latestLedgerTsMsCache = new WeakMap<ReadonlyArray<Record<string, unknown>>, number | undefined>();
-
 /** THE LEDGER'S OWN "now": the newest parseable `ts` anywhere in `lines`, never the wall clock.
  *  DELIBERATE, not a shortcut — {@link orphanedRunIds} must stay a PURE function of the ledger it is
  *  handed (this file's whole-suite convention: every sibling counter here takes no clock at all),
@@ -1200,18 +1188,16 @@ const latestLedgerTsMsCache = new WeakMap<ReadonlyArray<Record<string, unknown>>
  *  activity has this ledger seen since this run started" is a self-contained, deterministic proxy
  *  for elapsed time — needing no injected clock in production and no wall-clock read in a test.
  *  Absent when NOTHING in `lines` carries a parseable `ts` — a caller with no notion of "now" gets
- *  no orphans, never a false one. MEMOIZED by `lines`' own identity (see {@link
- *  latestLedgerTsMsCache}) — the array is never mutated in place by anything in this file, so the
- *  memo cannot go stale against the very reference it is keyed on. */
+ *  no orphans, never a false one. Callers that evaluate multiple tasks over one ledger supply a
+ *  {@link LedgerIndex}; caching the array identity here would make a later appended ledger row
+ *  invisible to this exported pure reader. */
 function latestLedgerTsMs(lines: ReadonlyArray<Record<string, unknown>>): number | undefined {
-  if (latestLedgerTsMsCache.has(lines)) return latestLedgerTsMsCache.get(lines);
   let max: number | undefined;
   for (const line of lines) {
     if (typeof line.ts !== "string") continue;
     const ms = Date.parse(line.ts);
     if (Number.isFinite(ms) && (max === undefined || ms > max)) max = ms;
   }
-  latestLedgerTsMsCache.set(lines, max);
   return max;
 }
 

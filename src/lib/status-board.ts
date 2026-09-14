@@ -89,6 +89,7 @@ import {
 import { loadPlan, type MergedResolver, type Plan, type RetirementReason } from "./plan.js";
 import { automergeHoldFromLedger, type AutomergeHold } from "./review.js";
 import {
+  buildLedgerIndex,
   DEFAULT_MAX_TASK_DISPATCHES,
   dispatchesWithoutNewOwnedPr,
   isDispatchBreakerTripped,
@@ -1392,12 +1393,15 @@ export function deriveCircuitBrokenBlockers(
   projections: Map<string, StatusProjection> | undefined,
 ): CircuitBrokenBlocker[] {
   const out: CircuitBrokenBlocker[] = [];
+  // W1-T3523's orphan predicate needs the ledger's newest timestamp. Build the shared index once
+  // for this whole board section rather than re-scanning the complete ledger for each task.
+  const index = buildLedgerIndex(lines);
   for (const taskId of distinctDispatchedTaskIds(lines)) {
-    if (!isDispatchBreakerTripped(lines, taskId)) continue;
+    if (!isDispatchBreakerTripped(lines, taskId, DEFAULT_MAX_TASK_DISPATCHES, index)) continue;
     const planTask = plan?.tasks.find((t) => t.id === taskId);
     if (planTask?.status === "blocked") continue; // dispatch will never take it — plan already excludes it
     if (projections?.get(taskId)?.merged) continue; // landed since — no longer news (mirrors deriveIndeterminateBlockers)
-    const dispatchCount = dispatchesWithoutNewOwnedPr(lines, taskId);
+    const dispatchCount = dispatchesWithoutNewOwnedPr(lines, taskId, index);
     out.push({
       kind: "circuit_broken",
       taskId,
@@ -1594,9 +1598,13 @@ export function deriveQueueHead(
     section.nextAction = pickNextAction(QUEUE_HEAD_NEXT_ACTIONS, section);
     return section;
   }
+  // Keep the per-task breaker callbacks below O(task rows), including W1-T3523's
+  // ledger-derived orphan clock. Rebuilding this index inside each callback made /v1/status
+  // cross its production-corpus wall-clock bound.
+  const index = buildLedgerIndex(lines);
   const isMerged: MergedSet = (id) => projections.get(id)?.merged === true;
   const isIndeterminate = (id: string) => projections.get(id)?.indeterminate === true;
-  const isCircuitTripped = (id: string) => isDispatchBreakerTripped(lines, id);
+  const isCircuitTripped = (id: string) => isDispatchBreakerTripped(lines, id, DEFAULT_MAX_TASK_DISPATCHES, index);
   // W1-T1205 (design (i)): binds the SAME `hasPushedRunBranch` predicate the real dispatcher applies, so this
   // selector's eligible set can never drift wider than the dispatcher's own. `refused` names the exclusion rather than
   // letting the task vanish, capped exactly as `tallyDispatchFilters`'s buckets are.
@@ -1616,7 +1624,7 @@ export function deriveQueueHead(
     // `rows`, but the one surface built to EXPLAIN a refusal could not name it. Observation only — the eligible set is
     // byte-identical.
     onCircuitBreak: (task) => {
-      const dispatchCount = dispatchesWithoutNewOwnedPr(lines, task.id);
+      const dispatchCount = dispatchesWithoutNewOwnedPr(lines, task.id, index);
       pushRefused({
         taskId: task.id,
         title: task.title,
@@ -1637,7 +1645,7 @@ export function deriveQueueHead(
   });
   const refusedTruncated = Math.max(0, refusedTotal - refused.length);
   const rows: QueueHeadRow[] = candidates.map((t) => {
-    const attempts = dispatchesWithoutNewOwnedPr(lines, t.id);
+    const attempts = dispatchesWithoutNewOwnedPr(lines, t.id, index);
     const perpetual = attempts >= PERPETUAL_ATTEMPT_THRESHOLD;
     const row: QueueHeadRow = { taskId: t.id, title: t.title, attempts, perpetual };
     if (perpetual) {
