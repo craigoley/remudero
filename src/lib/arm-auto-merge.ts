@@ -389,7 +389,10 @@ export type ArmOutcome =
   // `attemptArm` at all.
   | "irreversible-refused"
   // W1-T1000002: {@link attemptArm} refused because an operator merge hold stands over this PR.
-  | "hold-refused";
+  | "hold-refused"
+  // W1-T3551: {@link attemptArm} refused because the PR was a draft — GitHub refuses auto-merge
+  // on a draft, so this is named distinctly rather than surfacing as a generic arm failure.
+  | "draft-refused";
 
 /**
  * W1-T1079: {@link attemptArm}'s outcome PLUS the raw failure text it captured, when there was
@@ -452,6 +455,9 @@ export function armAutoMergeDetailed(
   prUrl: string,
   taskId: string | undefined,
   deps: ArmDeps = realArmDeps(),
+  // W1-T3551: threaded straight through to {@link attemptArm}, the shared choke point — never
+  // consulted here, so this function's own ledger-gate logic is unchanged.
+  isDraft?: boolean,
 ): ArmAttemptResult {
   requireExplicitArmSeam("armAutoMergeDetailed", !isRealArmDepsObject(deps));
   if (!taskId) {
@@ -477,7 +483,7 @@ export function armAutoMergeDetailed(
     deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
     return { outcome: "ledger-refused" };
   }
-  return attemptArm(prUrl, deps, headSha);
+  return attemptArm(prUrl, deps, headSha, isDraft);
 }
 
 /**
@@ -613,7 +619,23 @@ export function attemptArm(
   deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
     Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "sleepSync">>,
   priorHeadSha?: string,
+  // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
+  // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
+  // arm, reached by both the sweep and `rmd review <pr>`/`armIfVerdictPermits`) and
+  // {@link armAutoMergeAtOpen} (the ungated at-open arm) both route through, mirroring the
+  // W1-T1000002 hold gate immediately below: gate WHERE ARMS ORIGINATE, not at every call site.
+  isDraft?: boolean,
 ): ArmAttemptResult {
+  // DRAFT (W1-T3551): checked FIRST, before the ledger-hold read, so a draft never depends on
+  // ledger I/O to stay unarmed. GitHub refuses `gh pr merge --auto` (and any direct-merge
+  // fallback) on a draft PR — this is a GitHub-owned signal, never a ledger row.
+  if (isDraft === true) {
+    deps.say(
+      `automerge.draft_refused (W1-T3551): pull request is a draft — GitHub refuses auto-merge on ` +
+        `a draft; held until marked ready for review: ${prUrl}`,
+    );
+    return { outcome: "draft-refused" };
+  }
   // MERGE (W1-T1000002 x W1-T1079): every caller reads one type.
   const holdLedgerLines = deps.ledgerLines?.();
   if (holdLedgerLines) {
@@ -749,6 +771,10 @@ export function armAutoMergeAtOpen(
   deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
     Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "sleepSync">>) = realArmDeps(),
   irreversible = false,
+  // W1-T3551: threaded straight through to {@link attemptArm}'s shared gate — see that function's
+  // own doc. Defaults false, so every existing call site (which predates this parameter and never
+  // passes it) keeps arming exactly as before.
+  isDraft = false,
 ): ArmOutcome {
   requireExplicitArmSeam("armAutoMergeAtOpen", !isRealArmDepsObject(deps));
   if (irreversible) {
@@ -758,7 +784,7 @@ export function armAutoMergeAtOpen(
     );
     return "irreversible-refused";
   }
-  return attemptArm(prUrl, deps).outcome;
+  return attemptArm(prUrl, deps, undefined, isDraft).outcome;
 }
 
 /**
@@ -898,6 +924,11 @@ export function armIfVerdictPermits(
     headSha: string;
     ledgerPath: string;
     headRefName?: string;
+    // W1-T3551: `OpenPrView.isDraft`, POSITIVE match only — `undefined`/`false` change nothing.
+    // Lets a manual `rmd review <pr>` (this function's own call site — see authority.ts) hold a
+    // draft the exact same way the sweep's `held-draft` disposition does, without ever reaching
+    // `deps.arm` below.
+    isDraft?: boolean;
     log: (step: string, extra?: Record<string, unknown>) => void;
   },
   deps: {
@@ -907,6 +938,16 @@ export function armIfVerdictPermits(
 ): ArmOutcome | "skipped" {
   if (ctx.headRefName?.startsWith("dependabot/")) {
     ctx.log("automerge.arm_skipped", { reason: "dependabot PR — the dep-review lane owns arming for these", head_sha: ctx.headSha });
+    return "skipped";
+  }
+  // W1-T3551 — checked BEFORE `deps.arm` is ever touched (real or injected): GitHub refuses
+  // auto-merge on a draft, so a manual review must never reach the effector regardless of what
+  // `deps.arm` resolves to. Mirrors the dependabot stand-down immediately above.
+  if (ctx.isDraft === true) {
+    ctx.log("automerge.arm_skipped", {
+      reason: "open pull request is a draft — GitHub refuses auto-merge on a draft; held until marked ready for review",
+      head_sha: ctx.headSha,
+    });
     return "skipped";
   }
   const override = verdict.capped
@@ -983,6 +1024,8 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
       return "the diff was classified IRREVERSIBLE (W1-T919/W1-T947) — auto-merge refuses regardless of verdict; an operator must arm this manually";
     case "hold-refused":
       return "an operator merge hold (W1-T1000002) stands over this PR — auto-merge refuses regardless of verdict; only an explicit release lifts it";
+    case "draft-refused":
+      return "the pull request is a draft (W1-T3551) — GitHub refuses auto-merge on a draft regardless of verdict; held until marked ready for review";
     case "skipped":
       return "the semantic gate refused before any arm was attempted";
   }

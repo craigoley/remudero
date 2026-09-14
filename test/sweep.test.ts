@@ -1605,6 +1605,7 @@ test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), 
     "post-review": 0,
     conflicted: 0,
     wait: 0,
+    "held-draft": 0,
   });
   assert.equal(summary.total, 4);
   assert.equal(summary.actionsTaken, 4);
@@ -2201,6 +2202,7 @@ test("renderSweepSummary is a single legible line", () => {
       "post-review": 0,
       conflicted: 0,
       wait: 0,
+      "held-draft": 0,
     },
     actionsTaken: 4,
     actionsFailed: 0,
@@ -2223,6 +2225,7 @@ test("renderSweepSummary calls out failed actions distinctly (W1-T99)", () => {
       "post-review": 1,
       conflicted: 0,
       wait: 0,
+      "held-draft": 0,
     },
     actionsTaken: 2,
     actionsFailed: 1,
@@ -4747,6 +4750,7 @@ test("W1-T3027: the summary names every disposition, so the counts sum to the op
         "dep-review": 0,
         "post-review": 9,
         wait: 0,
+        "held-draft": 0,
       },
       11,
     ),
@@ -4773,6 +4777,7 @@ test("W1-T3027: a residual is called out rather than left for the reader to subt
         "dep-review": 0,
         "post-review": 0,
         wait: 0,
+        "held-draft": 0,
       },
       11,
     ),
@@ -4792,6 +4797,7 @@ test("W1-T3027: every Disposition the union declares appears in the rendered lin
     "post-review",
     "conflicted",
     "wait",
+    "held-draft",
   ];
   const zeroes = Object.fromEntries(all.map((d) => [d, 0])) as Record<Disposition, number>;
   const line = renderSweepSummary(summaryWith(zeroes, 0));

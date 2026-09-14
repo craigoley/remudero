@@ -145,6 +145,7 @@ test("acceptance 1 — at the limit: checkQueueGovernor defers, a dispatch_defer
     "post-review": 0,
     conflicted: 0,
     wait: 0,
+    "held-draft": 0,
   });
   assert.equal(summary.actionsTaken, 4, "all four dispositions acted — drainage is ungated at any depth");
   assert.equal(deps.armed.length, 1, "merge-eligible PR still armed");
