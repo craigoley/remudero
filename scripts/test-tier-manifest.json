@@ -583,6 +583,7 @@
     "test/downgrade-names-the-remedy.test.ts": 1235,
     "test/downstream-gate-failure-filter.test.ts": 670,
     "test/draft-batches-cannot-overlap.test.ts": 1693,
+    "test/draft-pr-merge-hold.test.ts": 0,
     "test/drafting-prompts-require-scope.test.ts": 1267,
     "test/drain-already-merged-halt.test.ts": 1399,
     "test/drain-continue-on-blocked-ci.test.ts": 640,
