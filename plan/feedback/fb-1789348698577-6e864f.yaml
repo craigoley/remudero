@@ -1,0 +1,21 @@
+id: fb-1789348698577-6e864f
+ts: 2026-09-14T01:18:18.578Z
+raw: "Instance registry bootstrap gap: recycle-container.sh --instance validates
+  gh_app_id, gh_app_installation_id, gh_app_private_key_path, and
+  max_old_space_mb but discards all four while deriving runtime settings. On a
+  new instance with no outgoing container, first boot therefore refuses without
+  manually supplied GH_APP_* values; after that bridge it launches with
+  NODE_OPTIONS unset despite the registry heap. Make registry-selected first
+  boot carry and validate those App settings and the heap into
+  recycle-container, with tests proving a fresh instance needs no GH_TOKEN and
+  gets its configured NODE_OPTIONS. Observed on console instance 2026-09-14; no
+  personal token was used."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
