@@ -1,0 +1,74 @@
+- id: W1-T3611
+  title: "A DEAD PID'S LOCK IN THE LIVE CONTAINER DEADLOCKS EVERY RECYCLE — the reclaim exception only covers a container that is GONE, but the daemon process restarts IN PLACE and orphans its inflight locks"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 5.00
+  files:
+    - deploy/recycle-container.sh
+    - test/recycle-container.test.ts
+  origin: "operator-session#openweight-trial-2026-09-15"
+  plan_refs: ["W1-T2556", "W1-T978", "W1-T3603"]
+  status: queued
+  attempts: 0
+  note: |
+    OBSERVED TWICE on the live Azure host 2026-09-15 while placing the openweight key.
+
+    `deploy/recycle-container.sh` waits out in-flight work and then refuses. Its ONE narrow
+    reclaim exception (W1-T2556) moves aside an `state/inflight/*.lock` whose `host` is
+    container-id-shaped AND which docker reports as absent or not running. That exception could
+    not fire here, because the container named in the lock WAS running -- it is the current one.
+
+    THE DAEMON PROCESS RESTARTS WITHOUT THE CONTAINER RESTARTING. Measured state at the refusal:
+
+        container 376f1b205ffa   up 2609s      (never restarted)
+        daemon node process      pid 66734, up 401s   (restarted ~37 min into the container's life)
+        two locks held by        pid 73, host 376f1b205ffa
+        /proc/73 inside that container -> ABSENT;  `ps -p 73` -> no row
+
+    So the locks name a LIVE container and a DEAD pid. Nothing reclaims that: the daemon's own
+    `reclaimStaleLock` ran at its next in-container boot and cleared `drain.lock`, but left
+    `inflight/*.lock` alone. The recycle then waits its full window and refuses, every time,
+    forever -- and a recycle is the only way to change a container's ENVIRONMENT, which is the
+    one thing source self-sync cannot deliver (W1-T3603).
+
+    A SECOND COST, WORSE THAN THE FIRST: the two stranded locks were
+    `fix-branch--craigoley--remudero--run-W1-T3599-*` and `...-run-W1-T3608-*`. A fix-branch lock
+    is the sweep's claim on a PR, so while it stands the sweep believes a worker is already on
+    that branch and will not re-dispatch. One of the two was the openweight adapter fix itself.
+    A stale lock therefore stalls the very PR the fleet needs, silently.
+
+    MANUAL RECOVERY USED (recorded so the fix can be judged against it): for each lock, read its
+    `pid` and `host`, confirm `host` names the RUNNING container AND `/proc/<pid>` is absent
+    inside it, then MOVE the file into `state/inflight/reclaimed/` with a UTC stamp. Never delete.
+    Both locks satisfied that test; the recycle succeeded on its next poll.
+  rationale: |
+    The existing exception's premise is "a container-shaped holder whose container is gone is
+    provably not running". There is a second, equally provable case on the same evidence class: a
+    holder whose container IS this one and whose pid is absent from that container's own
+    `/proc`. That is not a staleness HEURISTIC -- it is a fact docker and the container's
+    procfs state jointly, exactly the standard W1-T978 sets for when a host-side script may judge.
+  design: |
+    Widen the reclaim to the second provable case ONLY: `host` equals the RUNNING target
+    container's id AND `/proc/<pid>` does not exist inside that container (`docker exec`). Both
+    conditions must hold; either alone must still refuse. MOVE ASIDE, NEVER DELETE, to the
+    existing `state/inflight/reclaimed/` directory, matching W1-T2556's own discipline, and print
+    each reclaimed lock in full so the action is auditable.
+
+    DO NOT generalise this into a staleness judgement. A lock whose host is a DIFFERENT running
+    container, or whose pid cannot be probed because the container is unreachable, must still be
+    refused -- the whole safety argument is that the script only acts on facts it can state.
+  acceptance:
+    - claim: "a lock naming the running target container and a pid absent from that container is reclaimed rather than refused"
+      proof: "unit test: a dead pid in the live container is reclaimed, not refused"
+    - claim: "a lock whose pid is still alive in that container still refuses the recycle"
+      proof: "unit test: a live pid in the live container still refuses the recycle"
+  falsifier: |
+    Make the reclaim fire on host-match alone and the second test must fail with a live worker's
+    lock swept aside. Make it fire on pid-absence alone and a foreign container's lock must be
+    reclaimed, which the same test must catch. Remove the reclaim entirely and the first test must
+    return to the refusal that motivated this task.
