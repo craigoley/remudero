@@ -1028,6 +1028,11 @@ export type GenericRouteLane = keyof typeof GENERIC_ROUTE_TOOL_BOUNDS;
 /**
  * The four spawns W1-T3573 left unbounded, each list DERIVED FROM THAT LANE'S OWN PROMPT (W1-T3616).
  *
+ * PRIMARY CONTROL (W1-T1266). This is what actually bounds each lane's tool surface on every
+ * spawn, not a backstop that fires after something else has already failed: with no entry here a
+ * lane inherits SpawnWorkerArgs' UNRESTRICTED default, which is the defect this closes. The
+ * container remains the containment; this is the declared boundary a reviewer can read.
+ *
  * EVERY ONE OF THEM DECLARES `Bash`, AND THAT IS THE MEASUREMENT, NOT A CONCESSION. The task that
  * filed this work forbids narrowing a lane to make it routable — "if recon genuinely shells out, it
  * declares Bash and stays premium until W1-T3615's check-runner can replace that use" — so these
