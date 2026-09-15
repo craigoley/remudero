@@ -2143,7 +2143,7 @@ const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: string; 
   Edit: { name: "edit_file", description: "Replace one exact UTF-8 string in a file under the worker cwd.", required: ["path", "old_string", "new_string"] },
   Grep: { name: "grep_files", description: "Find a literal string in UTF-8 files under the worker cwd.", required: ["query"] },
   Glob: { name: "glob_files", description: "List files under the worker cwd by a suffix-like pattern.", required: ["pattern"] },
-  RunCheck: { name: "run_check", description: "Run ONE permitted repository check (unit_test, typecheck) over optional paths under the worker cwd. No shell; no network.", required: ["check"] },
+  RunCheck: { name: "run_check", description: "Run ONE permitted repository check by name (unit_test, typecheck). Fixed argv: it takes no paths or flags. No shell; no network.", required: ["check"] },
 };
 
 /** Checks an open-weight worker may run, as fixed argv — never a command string (W1-T3617).
@@ -2182,17 +2182,32 @@ export class OpenWeightUnlistedCheckError extends RmdError {
   }
 }
 
-/** Argv for one permitted check. Extra arguments are CONTAINED PATHS only ({@link
- *  openWeightContainedPath}), so no flag, metacharacter or second command can be smuggled in. */
-export function openWeightCheckArgv(check: unknown, paths: unknown, cwd: string): string[] {
+/**
+ * Argv for one permitted check. EVERY ARGUMENT IS A CONSTANT — the caller chooses a check by NAME
+ * and contributes nothing else to the command line.
+ *
+ * WHY FIXED RATHER THAN SANITIZED. An earlier revision appended model-supplied paths through
+ * {@link openWeightContainedPath}, which is real containment: a flag-shaped argument resolves to a
+ * file under the worktree and is inert. CodeQL flagged it anyway — "this command line depends on a
+ * user-provided value" — and it was right to. Every other `execFileSync` in this repo passes
+ * internally-derived arguments; that revision was the FIRST model-derived value to reach a command
+ * line, and `.github/codeql/codeql-config.yml` excludes only `test/`, so the repo has no
+ * suppression precedent to lean on. A sanitizer the analyser cannot see is a sanitizer the next
+ * reader cannot see either.
+ *
+ * THE COST, STATED: a lane cannot scope `unit_test` to one file, so it runs the whole suite.
+ * That is the read-only lanes' actual need (git status/diff/log and typecheck take no path), and
+ * re-admitting caller arguments is a separate, deliberate decision rather than a default. */
+export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
   if (typeof check !== "string" || !Object.prototype.hasOwnProperty.call(OPENWEIGHT_CHECKS, check)) {
     throw new OpenWeightUnlistedCheckError(typeof check === "string" ? check : String(check));
   }
-  const base = [...OPENWEIGHT_CHECKS[check]];
-  if (paths === undefined) return base;
-  if (!Array.isArray(paths)) throw new Error("run_check paths must be an array of paths under the worker cwd");
-  // Containment reused, never re-derived, so this surface cannot drift from W1-T2's proven one.
-  return [...base, ...paths.map((candidate) => openWeightContainedPath(cwd, candidate))];
+  // REFUSED, NOT IGNORED. A model told its scoped check ran, when the whole suite ran instead,
+  // would read the wrong result off a green — so an unusable argument is an error, never a no-op.
+  if (paths !== undefined) {
+    throw new OpenWeightUnlistedCheckError(`${check} with caller arguments — every check runs a FIXED argv`);
+  }
+  return [...OPENWEIGHT_CHECKS[check]];
 }
 
 function openWeightTools(declared: readonly string[] | undefined): Array<Record<string, unknown>> {
@@ -2277,7 +2292,7 @@ function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd:
     case "run_check": {
       // W1-T3617. Argv BUILT FIRST, so an unlisted check refuses before anything spawns; execFileSync
       // takes an array and never a shell, so metacharacters are inert rather than discouraged.
-      const argv = openWeightCheckArgv(args.check, args.paths, cwd);
+      const argv = openWeightCheckArgv(args.check, args.paths);
       const [command, ...rest] = argv;
       try {
         const stdout = execFileSync(command, rest, {

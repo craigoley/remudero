@@ -819,10 +819,20 @@ test("an unlisted openweight check refuses before it executes", async () => {
   }
 
   // And the builder refuses the same name with the typed error, before any argv exists to spawn.
-  assert.throws(() => openWeightCheckArgv("git", undefined, REPO_ROOT), OpenWeightUnlistedCheckError);
-  assert.throws(() => openWeightCheckArgv("curl", undefined, REPO_ROOT), OpenWeightUnlistedCheckError);
-  // A path argument cannot smuggle a flag or escape the cwd: arguments are contained PATHS only.
-  assert.throws(() => openWeightCheckArgv("unit_test", ["../../etc/passwd"], REPO_ROOT), /escapes the worker cwd/);
+  assert.throws(() => openWeightCheckArgv("git", undefined), OpenWeightUnlistedCheckError);
+  assert.throws(() => openWeightCheckArgv("curl", undefined), OpenWeightUnlistedCheckError);
+
+  // CALLER ARGUMENTS ARE REFUSED, NOT SANITIZED (W1-T3617). An escaping path was already
+  // impossible under containment, so asserting only that proves little. The LOAD-BEARING half is
+  // the second line: a perfectly legitimate in-cwd path is refused too. That is what makes the
+  // argv FIXED rather than merely contained, and it is what keeps model output off the command
+  // line entirely — the taint CodeQL flagged at the execFileSync call site.
+  assert.throws(() => openWeightCheckArgv("unit_test", ["../../etc/passwd"]), /FIXED argv/);
+  assert.throws(() => openWeightCheckArgv("unit_test", ["test/an-open-weight-provider-rides-the-capability-ladder.test.ts"]), /FIXED argv/);
+  assert.throws(() => openWeightCheckArgv("unit_test", []), /FIXED argv/);
+  // A bare permitted check still returns its constant argv, so the refusals above are not simply
+  // "this function always throws".
+  assert.deepEqual(openWeightCheckArgv("typecheck", undefined), [...OPENWEIGHT_CHECKS["typecheck"]!]);
 });
 
 test("no permitted openweight check can reach the network or the forge", () => {
