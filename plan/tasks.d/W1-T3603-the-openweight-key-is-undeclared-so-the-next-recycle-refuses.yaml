@@ -43,6 +43,13 @@
     shell, so once the name is declared an operator exports it once, runs the recycle, and
     every later recycle captures it from the container. No value is ever written to disk.
   rationale: |
+    SHARES A SURFACE WITH W1-T3454 DELIBERATELY, and does not supersede it: W1-T3454 closed a
+    DROP -- the Git author identity was declared nowhere, so a recycle silently lost it. This task
+    closes the opposite failure, an ADD -- a name that is about to exist on a container and is not
+    yet declared, which makes the recycle REFUSE rather than lose anything. Same four files,
+    because the four files ARE the declaration surface; different defect, different direction, and
+    W1-T3454 is merged, so there is no live dispatch to collide with.
+
     The trial cannot begin without the key on the daemon, and the key cannot go on the daemon
     without this declaration -- so this is a strict, unavoidable prerequisite of W1-T3569's
     routed lane, not an improvement to it. It is also the cheapest possible closure of a

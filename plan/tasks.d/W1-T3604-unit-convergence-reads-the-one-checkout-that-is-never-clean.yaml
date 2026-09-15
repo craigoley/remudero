@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
   band_meaning: blast-radius
   budget_usd: 4.00
   files:
