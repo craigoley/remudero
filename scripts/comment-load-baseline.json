@@ -345,7 +345,7 @@
   "src/lib/wipe-test.ts": 156,
   "src/lib/worker-containment.ts": 214,
   "src/lib/worker-home.ts": 500,
-  "src/lib/worker-provider.ts": 504,
+  "src/lib/worker-provider.ts": 508,
   "src/lib/worker-scratch.ts": 96,
   "src/lib/worker.ts": 1500,
   "src/lib/workflow-run.ts": 23,

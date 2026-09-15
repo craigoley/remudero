@@ -24,6 +24,7 @@ import {
   OPENWEIGHT_TEMPERATURE,
   OPENWEIGHT_CHECKS,
   OpenWeightUnlistedCheckError,
+  OPENWEIGHT_READONLY_GIT_SUBCOMMANDS,
   openWeightCheckArgv,
   OpenWeightUnshapedDeploymentError,
   openWeightTemperatureField,
@@ -830,17 +831,31 @@ test("no permitted openweight check can reach the network or the forge", () => {
   const entries = Object.entries(OPENWEIGHT_CHECKS);
   assert.ok(entries.length > 0, "the table must be non-empty, or this census compares nothing");
 
-  const forbidden = ["git", "gh", "curl", "wget", "ssh", "scp", "npm", "npx", "pnpm", "yarn", "pip", "docker", "nc", "sh", "bash", "zsh", "env", "eval"];
+  const forbidden = ["gh", "curl", "wget", "ssh", "scp", "npm", "npx", "pnpm", "yarn", "pip", "docker", "nc", "sh", "bash", "zsh", "env", "eval"];
+  let sawGit = false;
   for (const [check, argv] of entries) {
     assert.ok(Array.isArray(argv) && argv.length > 0, `${check} must declare a non-empty argv`);
     const command = argv[0]!.split("/").pop()!;
     assert.ok(!forbidden.includes(command), `${check} runs '${command}', which can reach the network, the forge or a shell`);
+    // `git` IS permitted, but only with a PINNED READ-ONLY SUBCOMMAND. The W1-T3572 ruling's "no
+    // git" meant no forge authority; `git log`/`status`/`diff`/`remote -v` carry no push and no
+    // network. This is the assertion that keeps `git push` absent rather than one entry away.
+    if (command === "git") {
+      sawGit = true;
+      assert.ok(
+        OPENWEIGHT_READONLY_GIT_SUBCOMMANDS.includes(argv[1] ?? ""),
+        `${check} runs 'git ${argv[1]}', which is not one of the read-only subcommands this table permits`,
+      );
+    }
     for (const arg of argv) {
       assert.doesNotMatch(arg, /:\/\/|^https?:|^git@/, `${check} must not carry a URL in its argv`);
       // No shell metacharacters anywhere: the argv is spawned directly, and this keeps it true.
       assert.doesNotMatch(arg, /[;&|`$><]/, `${check} must not carry shell metacharacters`);
     }
   }
+  // POSITIVE CONTROL for the git arm: if no entry used git at all, the subcommand assertion above
+  // would be vacuous and would keep passing after someone added `git push`.
+  assert.ok(sawGit, "the table must contain at least one git entry, or its subcommand check proves nothing");
 });
 
 test("openweight configuration requires a daily cash cap and keeps its key outside worker env", async () => {

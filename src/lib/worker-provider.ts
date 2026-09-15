@@ -2152,7 +2152,17 @@ const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: string; 
 export const OPENWEIGHT_CHECKS: Readonly<Record<string, readonly string[]>> = {
   unit_test: ["node", "--import", "tsx", "--test"],
   typecheck: ["node_modules/.bin/tsc", "-p", "tsconfig.json", "--noEmit"],
+  // READ-ONLY git, SUBCOMMAND PINNED. W1-T3572's "no git" meant no FORGE authority; these carry no
+  // push and no network, and are what the recon/diagnose prompts name. `git push` is absent, not
+  // one entry away. Caller args are contained PATHS, which resolve absolute and cannot be flags.
+  git_log: ["git", "log", "--oneline", "-20"],
+  git_status: ["git", "status", "--porcelain"],
+  git_diff: ["git", "diff"],
+  git_remote: ["git", "remote", "-v"],
 };
+
+/** Read-only git subcommands the table may use. Enforced over the table by test. */
+export const OPENWEIGHT_READONLY_GIT_SUBCOMMANDS: readonly string[] = ["log", "status", "diff", "remote", "show"];
 
 /** Wall-clock bound on one check: the cash cap bounds spend, this bounds time. */
 export const OPENWEIGHT_CHECK_TIMEOUT_MS = 10 * 60_000;
