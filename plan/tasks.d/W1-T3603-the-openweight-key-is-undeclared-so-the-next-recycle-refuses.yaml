@@ -1,0 +1,75 @@
+- id: W1-T3603
+  title: "THE OPENWEIGHT KEY IS UNDECLARED, SO PLACING IT REFUSES THE NEXT RECYCLE — RMD_OPENWEIGHT_API_KEY must join RMD_DAEMON_RUNTIME_ENV_VARS before an operator can put it on the daemon"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 4.00
+  files:
+    - deploy/runtime-env-vars.sh
+    - deploy/recycle-container.sh
+    - deploy/host-update.sh
+    - test/recycle-container.test.ts
+  origin: "operator-session#openweight-trial-2026-09-15"
+  plan_refs: ["W1-T3569", "W1-T1069", "W1-T2553", "W1-T2932", "W1-T3454"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED on the live Azure host 2026-09-15: `docker inspect remudero-daemon` carries
+    eleven runtime names and RMD_OPENWEIGHT_API_KEY is NOT among them, so the openweight
+    adapter's endpoint check (OPENWEIGHT_API_KEY_ENV, src/lib/worker-provider.ts) would
+    throw on every spawn the moment a mount routes to it.
+
+    W1-T3569's own `note:` instructs the operator to "place RMD_OPENWEIGHT_API_KEY in the
+    daemon process environment". CARRYING OUT THAT INSTRUCTION TODAY ARMS A FLEET-WIDE
+    REFUSAL. deploy/recycle-container.sh's drift check subtracts the image env from the
+    container env and refuses outright -- `exit 1`, nothing touched -- on any runtime NAME
+    absent from RMD_DAEMON_RUNTIME_ENV_VARS. The refusal text names the remedy
+    ("Add it to RMD_DAEMON_RUNTIME_ENV_VARS in deploy/runtime-env-vars.sh") but nothing
+    performs it, and the refusal fires on EVERY later recycle, including the supervisor's
+    own -- the automated path that is the only remedy for a stuck container.
+
+    THIS IS THE FOURTH INSTANCE OF ONE DEFECT CLASS, not a new surprise: W1-T1069 (the list
+    existed only as two scripts' local knowledge), W1-T2932 (the heap ceiling was a runtime
+    var no list declared), W1-T3454 (recycle dropped the Git author identity). Each was found
+    AFTER a name was already live. This one is being closed BEFORE the name is placed, which
+    is the only reason it costs nothing.
+
+    THE SHELL FALLBACK IS THE DELIVERY MECHANISM, and it already exists (W1-T2553): the
+    capture loop prefers a non-empty CONTAINER value and falls back to the operator's own
+    shell, so once the name is declared an operator exports it once, runs the recycle, and
+    every later recycle captures it from the container. No value is ever written to disk.
+  rationale: |
+    SHARES A SURFACE WITH W1-T3454 DELIBERATELY, and does not supersede it: W1-T3454 closed a
+    DROP -- the Git author identity was declared nowhere, so a recycle silently lost it. This task
+    closes the opposite failure, an ADD -- a name that is about to exist on a container and is not
+    yet declared, which makes the recycle REFUSE rather than lose anything. Same four files,
+    because the four files ARE the declaration surface; different defect, different direction, and
+    W1-T3454 is merged, so there is no live dispatch to collide with.
+
+    The trial cannot begin without the key on the daemon, and the key cannot go on the daemon
+    without this declaration -- so this is a strict, unavoidable prerequisite of W1-T3569's
+    routed lane, not an improvement to it. It is also the cheapest possible closure of a
+    recurring class: the name list is one array, read by two scripts and asserted by one test.
+  design: |
+    Add RMD_OPENWEIGHT_API_KEY to RMD_DAEMON_RUNTIME_ENV_VARS in deploy/runtime-env-vars.sh and
+    to the SAME array in each script's inline fallback (deploy/recycle-container.sh,
+    deploy/host-update.sh) -- test/recycle-container.test.ts already asserts all three agree, so
+    a partial edit reddens. Add the matching `-e` passthrough to host-update.sh's
+    `--print-daemon-run` block; that test also asserts the printed names equal the declared list
+    exactly. Update the suite's DECLARED_RUNTIME_FIXTURE and the MUTANT fixture's literal array,
+    both of which spell the list out. NAME ONLY, NEVER A VALUE: deploy/runtime-env-vars.sh's own
+    header forbids a token or a path to one, and this change must keep that true.
+  acceptance:
+    - claim: "the openweight key is declared on every surface a recycle reads, so placing it on the daemon can no longer refuse the next replacement"
+      proof: "unit test: the openweight API key is declared on every recycle surface"
+    - claim: "a recycle carries the key across a container replacement without ever printing its value"
+      proof: "unit test: the openweight API key value never reaches recycle output"
+  falsifier: |
+    Delete the name from deploy/runtime-env-vars.sh alone and the three-copy agreement test must
+    fail; delete it from host-update.sh's printed passthrough alone and the printed-names test
+    must fail. Echo the captured value to stdout in the recycle and the no-print test must fail.
+    If any of those still passes, the assertion is not load-bearing and the task is unmet.

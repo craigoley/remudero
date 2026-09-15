@@ -23,6 +23,7 @@ import {
   OpenWeightAllowanceExhaustedError,
   openWeightCommittedUsd,
   openWeightReservationUsd,
+  openWeightUsageUsd,
   openWeightUtcDay,
   reserveOpenWeightBudget,
   selectOpenWeightModel,
@@ -422,9 +423,16 @@ function openWeightResult(): WorkerResult {
 test("the capability ladder resolves an open-weight provider by table lookup", () => {
   const capabilities = loadMounts(join(REPO_ROOT, ".remudero", "mounts.yaml")).capabilities;
   const selected = selectOpenWeightModel(capabilities, "sonnet", "low");
-  assert.deepEqual(capabilities?.openweight?.balanced.low, ["gpt-oss-120b"], "the declared openweight row, not fallback data, is the capability source");
+  // W1-T3598 led this row with gpt-5-nano and DEMOTED gpt-oss-120b rather than removing it. Both
+  // halves are asserted: the order (cheaper first) and the fallback's continued presence, so a
+  // later edit that deletes the trailing entry fails here rather than silently killing the lane.
+  assert.deepEqual(
+    capabilities?.openweight?.balanced.low,
+    ["gpt-5-nano", "gpt-oss-120b"],
+    "the declared openweight row, not fallback data, is the capability source",
+  );
   assert.equal(selected.capability, "balanced");
-  assert.equal(selected.model, "gpt-oss-120b");
+  assert.equal(selected.model, "gpt-5-nano", "the ladder's LEADING candidate is what resolves");
   assert.equal(selected.effort, "low");
 
   const renamed = selectOpenWeightModel({
@@ -659,13 +667,14 @@ test("openweight configuration requires a daily cash cap and keeps its key outsi
       config: { ...uncapped, dailyCapUsd: 1 },
       providerRouting: {
         spawnOpenWeight: async (_args, _config, selection) => {
-          assert.equal(selection.model, "gpt-oss-120b");
+          // Resolves through the ladder, which W1-T3598 leads with the cheaper deployment.
+          assert.equal(selection.model, "gpt-5-nano");
           return openWeightResult();
         },
       },
     });
     assert.equal(result.provider, "openweight");
-    assert.equal(result.routedModel, "gpt-oss-120b");
+    assert.equal(result.routedModel, "gpt-5-nano");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -799,7 +808,7 @@ test("openweight daily reservation remains charged across restart and cannot be 
         `import { reserveOpenWeightBudget, openWeightCommittedUsd } from ${JSON.stringify(join(REPO_ROOT, "src", "lib", "worker-provider.ts"))};`,
         `import { readFileSync } from "node:fs";`,
         `const config = ${JSON.stringify(allowanceConfig(root, 5))};`,
-        `reserveOpenWeightBudget(config, { requestId: "child-request", requestBodyBytes: 1024, atIso: ${JSON.stringify(atIso)} });`,
+        `reserveOpenWeightBudget(config, { requestId: "child-request", deployment: "gpt-oss-120b", requestBodyBytes: 1024, atIso: ${JSON.stringify(atIso)} });`,
         `process.stdout.write(String(openWeightCommittedUsd(JSON.parse(readFileSync(${JSON.stringify(join(root, "state", OPENWEIGHT_ALLOWANCE_FILENAME))}, "utf8")))));`,
       ].join("\n"),
       "utf8",
@@ -818,12 +827,12 @@ test("openweight daily reservation remains charged across restart and cannot be 
       const capUsd = 0.02;
       const drainConfig = allowanceConfig(drainRoot, capUsd);
       const bodyBytes = 4096;
-      const perRequest = openWeightReservationUsd(bodyBytes);
+      const perRequest = openWeightReservationUsd("gpt-oss-120b", bodyBytes);
       let granted = 0;
       let refused = 0;
       for (let i = 0; i < 40; i++) {
         try {
-          reserveOpenWeightBudget(drainConfig, { requestId: `drain-${i}`, requestBodyBytes: bodyBytes, atIso });
+          reserveOpenWeightBudget(drainConfig, { requestId: `drain-${i}`, deployment: "gpt-oss-120b", requestBodyBytes: bodyBytes, atIso });
           granted += 1;
         } catch (error) {
           assert.ok(error instanceof OpenWeightAllowanceExhaustedError);
@@ -849,13 +858,13 @@ test("openweight daily reservation remains charged across restart and cannot be 
     const raceRoot = mkdtempSync(join(tmpdir(), "rmd-openweight-race-"));
     try {
       const bodyBytes = 4096;
-      const perRequest = openWeightReservationUsd(bodyBytes);
+      const perRequest = openWeightReservationUsd("gpt-oss-120b", bodyBytes);
       const capUsd = perRequest * 2; // the day affords EXACTLY two requests
       const raceConfig = allowanceConfig(raceRoot, capUsd);
       let granted = 0;
       const attempt = (requestId: string, beforeCommit?: () => void) => {
         try {
-          reserveOpenWeightBudget(raceConfig, { requestId, requestBodyBytes: bodyBytes, atIso, beforeCommit });
+          reserveOpenWeightBudget(raceConfig, { requestId, deployment: "gpt-oss-120b", requestBodyBytes: bodyBytes, atIso, beforeCommit });
           granted += 1;
         } catch (error) {
           assert.ok(error instanceof OpenWeightAllowanceExhaustedError);
@@ -889,17 +898,17 @@ test("openweight daily reservation remains charged across restart and cannot be 
     try {
       const corruptConfig = allowanceConfig(corruptRoot, 5);
       // Absent file: spends normally.
-      assert.ok(reserveOpenWeightBudget(corruptConfig, { requestId: "before", requestBodyBytes: 512, atIso }).reservedUsd > 0);
+      assert.ok(reserveOpenWeightBudget(corruptConfig, { requestId: "before", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso }).reservedUsd > 0);
       mkdirSync(join(corruptRoot, "state"), { recursive: true });
       writeFileSync(join(corruptRoot, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "{ truncated", "utf8");
       assert.throws(
-        () => reserveOpenWeightBudget(corruptConfig, { requestId: "after", requestBodyBytes: 512, atIso }),
+        () => reserveOpenWeightBudget(corruptConfig, { requestId: "after", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso }),
         /unreadable|no readable utcDay/,
         "a damaged allowance file refuses to spend rather than resetting the day's committed total to zero",
       );
       // And a well-formed file missing its fields is refused for the same reason.
       writeFileSync(join(corruptRoot, "state", OPENWEIGHT_ALLOWANCE_FILENAME), JSON.stringify({ nothing: true }), "utf8");
-      assert.throws(() => reserveOpenWeightBudget(corruptConfig, { requestId: "after2", requestBodyBytes: 512, atIso }), /no readable utcDay/);
+      assert.throws(() => reserveOpenWeightBudget(corruptConfig, { requestId: "after2", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso }), /no readable utcDay/);
     } finally {
       rmSync(corruptRoot, { recursive: true, force: true });
     }
@@ -907,6 +916,7 @@ test("openweight daily reservation remains charged across restart and cannot be 
     // A NEW UTC DAY starts a fresh allowance rather than inheriting yesterday's committed spend.
     const nextDay = reserveOpenWeightBudget(config, {
       requestId: "tomorrow",
+      deployment: "gpt-oss-120b",
       requestBodyBytes: 1024,
       atIso: "2026-09-16T00:00:00.000Z",
     });
@@ -985,7 +995,16 @@ test("openweight daily cap ledger fields expose settled cost without a credentia
             ),
         },
       });
-      assert.equal(routed.budgetSettledUsd, expectedSettled, "the settled cash figure survives the router onto the worker row");
+      // Priced against the deployment the ROUTER actually chose, not a hardcoded one: this fixture
+      // is about settlement surviving onto the worker row, and pinning a deployment here would make
+      // it fail every time the ladder's leading candidate changes — which is a routing decision,
+      // not a settlement regression. W1-T3598 moved that candidate and this is why it still holds.
+      assert.ok(routed.routedModel, "the routed worker row names the deployment it billed against");
+      assert.equal(
+        routed.budgetSettledUsd,
+        openWeightUsageUsd(routed.routedModel, 1_000, 200),
+        "the settled cash figure survives the router onto the worker row, at the routed deployment's own rate",
+      );
       assert.ok((routed.budgetReservedUsd ?? 0) > (routed.budgetSettledUsd ?? 0));
       assert.equal(routed.budgetRefused, false);
       assert.doesNotMatch(JSON.stringify(routed), /test-only-daemon-secret/, "the routed worker row carries no credential");
@@ -1031,7 +1050,7 @@ test("openweight daily cap refuses to spend when no dailyCapUsd is configured at
         workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
       } as unknown as Config;
       assert.throws(
-        () => reserveOpenWeightBudget(config, { requestId: "no-cap", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }),
+        () => reserveOpenWeightBudget(config, { requestId: "no-cap", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }),
         /requires a dailyCapUsd before any paid request/,
         `dailyCapUsd: ${String(capUsd)} must refuse, not default to unlimited`,
       );
@@ -1044,7 +1063,7 @@ test("openweight daily cap refuses to spend when no dailyCapUsd is configured at
       dailyCapUsd: 5,
       workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
     } as Config;
-    assert.ok(reserveOpenWeightBudget(capped, { requestId: "capped", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }).reservedUsd > 0);
+    assert.ok(reserveOpenWeightBudget(capped, { requestId: "capped", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }).reservedUsd > 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1069,11 +1088,12 @@ test("openweight daily cap refuses rather than spending when compare-and-swap co
       () =>
         reserveOpenWeightBudget(config, {
           requestId: "never-wins",
+          deployment: "gpt-oss-120b",
           requestBodyBytes: 512,
           atIso,
           beforeCommit: () => {
             peer += 1;
-            reserveOpenWeightBudget(config, { requestId: `peer-${peer}`, requestBodyBytes: 16, atIso });
+            reserveOpenWeightBudget(config, { requestId: `peer-${peer}`, deployment: "gpt-oss-120b", requestBodyBytes: 16, atIso });
           },
         }),
       /allowance contention: \d+ compare-and-swap attempts lost/,

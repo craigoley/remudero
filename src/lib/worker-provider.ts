@@ -606,9 +606,22 @@ export function codexCandidatesForCapability(
 
 /** Last-resort data for a missing capability table. Real open-weight routing resolves the table
  * below; this keeps a malformed optional table from changing the existing fail-soft contract. */
+/**
+ * The code-side default when mounts declares no `capabilities.openweight` table. It must name the
+ * SAME leading deployment as that table (W1-T3598): if the two disagreed, a checkout with no table
+ * would silently route the DEARER deployment while the configured fleet routed the cheaper one, and
+ * nothing would report the divergence. test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
+ * asserts the two agree.
+ *
+ * FRONTIER STAYS ON gpt-oss-120b DELIBERATELY. A nano-class model is not a frontier substitute, and
+ * before this every tier named one deployment — a ladder expressing no choice at all. gpt-oss-120b
+ * TRAILS rather than being deleted from the rows nano now leads, the same shape the `codex` table
+ * uses for a demoted model, so a deployment that stops answering falls back instead of failing the
+ * lane.
+ */
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
-  economy: ["gpt-oss-120b"],
-  balanced: ["gpt-oss-120b"],
+  economy: ["gpt-5-nano", "gpt-oss-120b"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b"],
   frontier: ["gpt-oss-120b"],
 };
 
@@ -1736,8 +1749,73 @@ export const OPENWEIGHT_OUTPUT_CONTRACT = [
   "- When the request names a closed enum, emit exactly one listed literal; choose the nearest listed value rather than inventing `unknown` or `ambiguous`.",
   "- When the request asks for a raw document, emit that document without Markdown fences.",
 ].join("\n");
-const OPENWEIGHT_INPUT_USD_PER_MILLION = 0.15;
-const OPENWEIGHT_OUTPUT_USD_PER_MILLION = 0.6;
+/**
+ * PRICE IS A PROPERTY OF THE DEPLOYMENT, NOT OF THE PROVIDER.
+ *
+ * `openWeightCandidatesForCapability` already resolves a whole LADDER of deployments out of
+ * mounts, and that table's own comment calls model additions "a mounts-data edit". The routing
+ * layer has therefore been multi-deployment since W1-T3546 while the pricing layer was a single
+ * pair of module constants — every deployment billed at gpt-oss-120b's rate.
+ *
+ * THE ASYMMETRY IS WHY THIS IS A TABLE AND NOT A TIDY-UP. A CHEAPER deployment priced at these
+ * numbers over-reserves: wasteful, but safe. A DEARER one UNDER-reserves, which re-opens exactly
+ * the hole {@link reserveOpenWeightBudget} exists to close — the cap would admit requests it
+ * cannot afford and the day's true spend would pass `dailyCapUsd`. So a deployment with no row
+ * here is refused rather than priced by a neighbour.
+ *
+ * Each row carries the date its figures were read, because published prices move and a number
+ * with no as-of is unauditable.
+ */
+export interface OpenWeightPrice {
+  inputUsdPerMillion: number;
+  outputUsdPerMillion: number;
+  /** ISO date the published figures were last read. Not decorative: it is what lets a later
+   *  reader tell a stale row from a current one without diffing against the vendor's page. */
+  readAt: string;
+}
+
+export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
+  // Azure serverless published rate. These are the two numbers this adapter has always used;
+  // they are unchanged, and are now this deployment's ROW rather than the provider's default.
+  "gpt-oss-120b": { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6, readAt: "2026-09-14" },
+  // W1-T3598: cheaper than gpt-oss-120b on BOTH axes (3x on input, 1.5x on output) and an
+  // Azure-OpenAI-family deployment, so it rides `openWeightEndpoint`'s existing
+  // `openai/deployments/...` route with no second endpoint shape.
+  "gpt-5-nano": { inputUsdPerMillion: 0.05, outputUsdPerMillion: 0.4, readAt: "2026-09-15" },
+};
+
+/** Raised INSTEAD of pricing a deployment by a neighbour's row. Thrown before the transport, so a
+ *  caller seeing it knows no paid request was made against an unknown price. */
+export class OpenWeightUnpricedDeploymentError extends RmdError {
+  readonly deployment: string;
+  constructor(deployment: string) {
+    // Kind "usage", the discriminant every refusal-of-a-call in this file carries.
+    super(
+      "usage",
+      1,
+      `openweight deployment ${JSON.stringify(deployment)} has no price row: refusing to spend against an unknown rate. ` +
+        `Priced deployments: ${Object.keys(OPENWEIGHT_PRICES).sort().join(", ")}`,
+      { deployment, priced: Object.keys(OPENWEIGHT_PRICES).sort() },
+    );
+    this.name = "OpenWeightUnpricedDeploymentError";
+    this.deployment = deployment;
+  }
+}
+
+/** The one lookup. Every consumer of a price — the ledger's cost, the cap's reservation, its
+ *  settlement — resolves through here, so none of them can quietly disagree about what a
+ *  deployment costs. An absent row FAILS CLOSED; it never falls back to another row. */
+export function openWeightPriceFor(deployment: string): OpenWeightPrice {
+  const row = OPENWEIGHT_PRICES[deployment];
+  if (row === undefined) throw new OpenWeightUnpricedDeploymentError(deployment);
+  return row;
+}
+
+/** Dollars for one request's measured usage, at that deployment's own rate. */
+export function openWeightUsageUsd(deployment: string, promptTokens: number, completionTokens: number): number {
+  const price = openWeightPriceFor(deployment);
+  return (promptTokens * price.inputUsdPerMillion + completionTokens * price.outputUsdPerMillion) / 1_000_000;
+}
 
 /** The allowance file, a pure function of `config.root` the way {@link
  *  import("./ledger-path.js").ledgerPathFor} is — one canonical path, never inlined at a call site. */
@@ -1788,8 +1866,9 @@ export function openWeightCommittedUsd(state: OpenWeightAllowanceState): number 
  * over-estimate: no tokenizer emits more tokens than the UTF-8 bytes it consumed, so this can never
  * under-reserve. Over-reserving is the safe direction for a cap — settlement corrects it downward.
  */
-export function openWeightReservationUsd(requestBodyBytes: number): number {
-  return (requestBodyBytes * OPENWEIGHT_INPUT_USD_PER_MILLION + OPENWEIGHT_MAX_COMPLETION_TOKENS * OPENWEIGHT_OUTPUT_USD_PER_MILLION) / 1_000_000;
+export function openWeightReservationUsd(deployment: string, requestBodyBytes: number): number {
+  const price = openWeightPriceFor(deployment);
+  return (requestBodyBytes * price.inputUsdPerMillion + OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
 }
 
 /** Raised INSTEAD of sending a paid request. It is thrown before the transport, never after, so a
@@ -1896,7 +1975,7 @@ function mutateOpenWeightAllowance<T>(
  */
 export function reserveOpenWeightBudget(
   config: Config,
-  input: { requestId: string; requestBodyBytes: number; atIso: string; beforeCommit?: () => void },
+  input: { requestId: string; deployment: string; requestBodyBytes: number; atIso: string; beforeCommit?: () => void },
 ): { reservedUsd: number; committedUsd: number; capUsd: number } {
   const capUsd = config.dailyCapUsd;
   // validateConfig already refuses an enabled openweight provider with no dailyCapUsd. This is the
@@ -1906,7 +1985,7 @@ export function reserveOpenWeightBudget(
     throw new Error("openweight provider requires a dailyCapUsd before any paid request");
   }
   const utcDay = openWeightUtcDay(input.atIso);
-  const wantUsd = openWeightReservationUsd(input.requestBodyBytes);
+  const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes);
   return mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
     const committedUsd = openWeightCommittedUsd(state);
     if (committedUsd + wantUsd > capUsd) {
@@ -2139,7 +2218,17 @@ function openWeightResult(input: {
   return {
     provider: "openweight",
     sessionId: input.sessionId ?? "",
-    costUsd: (input.promptTokens * OPENWEIGHT_INPUT_USD_PER_MILLION + input.completionTokens * OPENWEIGHT_OUTPUT_USD_PER_MILLION) / 1_000_000,
+    // ZERO USAGE COSTS ZERO AT ANY RATE, so it needs no price row. That is not a convenience: this
+    // result is also built on the ERROR path, and one way to get here is the refusal raised when a
+    // deployment has NO row. Pricing unconditionally would throw a second time out of the catch
+    // that is meant to turn a failure into a reportable result, so the refusal would escape
+    // `spawnOpenWeightWorker` instead of being returned — collapsing the very contract the catch
+    // exists to hold. A run that never reached the transport has no tokens, hence no cost, and
+    // saying so requires no rate.
+    costUsd:
+      input.promptTokens === 0 && input.completionTokens === 0
+        ? 0
+        : openWeightUsageUsd(input.model, input.promptTokens, input.completionTokens),
     numTurns: input.turns,
     maxTurns: undefined,
     text,
@@ -2212,6 +2301,7 @@ export async function spawnOpenWeightWorker(
       const requestId = `${runRequestPrefix}-${turns}`;
       const reservation = reserveOpenWeightBudget(config, {
         requestId,
+        deployment: selection.model,
         requestBodyBytes: Buffer.byteLength(body, "utf8"),
         atIso: clock.iso(),
       });
@@ -2236,7 +2326,7 @@ export async function spawnOpenWeightWorker(
       // settles at 0 tokens, which would silently hand the allowance back for a request that really
       // was billed — so an absent receipt leaves the conservative reservation standing instead.
       if (typeof payload.usage?.prompt_tokens === "number" || typeof payload.usage?.completion_tokens === "number") {
-        const actualUsd = (turnPromptTokens * OPENWEIGHT_INPUT_USD_PER_MILLION + turnCompletionTokens * OPENWEIGHT_OUTPUT_USD_PER_MILLION) / 1_000_000;
+        const actualUsd = openWeightUsageUsd(selection.model, turnPromptTokens, turnCompletionTokens);
         settleOpenWeightBudget(config, { requestId, actualUsd, atIso: clock.iso() });
         budgetSettledUsd += actualUsd;
       } else {
