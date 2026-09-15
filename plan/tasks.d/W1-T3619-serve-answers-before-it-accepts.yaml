@@ -1,4 +1,4 @@
-- id: W1-T3618
+- id: W1-T3619
   title: "rmd serve BINDS ITS PORT 99 SECONDS BEFORE IT CAN ANSWER — the listener opens, then the first /v1/status pays the whole cold projection synchronously, so a freshly recycled daemon ACCEPTS every connection and answers none; measured on the live daemon, not in a harness"
   repo: remudero
   depends_on: []
