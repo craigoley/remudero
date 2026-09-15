@@ -5,11 +5,13 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
+  band_meaning: span
   budget_usd: 25.00
   files: [src/lib/daemon.ts, src/run-task.ts, test/review-freshness-stops-before-it-spends.test.ts]
   origin: oper#queue-throughput-2026-09-15
   plan_refs: ["W1-T228", "W1-T2965", "W1-T126", "W1-T2964"]
+  note: "reservation hand-off: main -> chore/file-review-freshness-waste-1789496306"
   status: queued
   attempts: 0
   rationale: |
@@ -85,6 +87,12 @@
     DO NOT WEAKEN W1-T228. The publication guard keeps its current behaviour and its current
     predicate. Nothing here makes a stale reviewer publish a terminal verdict; this task only stops
     it from PAYING for one it will throw away.
+
+    SIZING (Rule 19, band_meaning: span). This spans daemon.ts and run-task.ts because the fix is
+    ONE cross-file invariant — freshness read once, before the sweep, gating both dispatch-vs-review
+    and the daemon's stop signal — that the falsifier above asserts as a single behaviour across
+    both files together; it is not satisfiable piecewise, so it is raised to risk:high (the #588
+    merits test) rather than decomposed.
 
   acceptance:
     - claim: "a stale reviewer reads freshness once per cycle and materializes no worktree, so nothing is executed or spawned for a verdict that cannot be published"
