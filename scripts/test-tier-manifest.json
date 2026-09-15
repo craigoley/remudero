@@ -191,6 +191,7 @@
     "test/a-rule-15-split-is-known-before-the-push.test.ts": 6667,
     "test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts": 883,
     "test/a-rule-body-loads-only-when-its-headline-is-taken.test.ts": 1311,
+    "test/a-run-branch-for-an-ineligible-task-refuses-before-its-first-push.test.ts": 0,
     "test/a-runaway-worker-is-visible-before-it-finishes.test.ts": 1422,
     "test/a-second-openweight-deployment-is-priced-by-its-own-row.test.ts": 0,
     "test/a-self-certifying-proof-warns-at-filing-time.test.ts": 1319,
