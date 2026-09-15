@@ -12,6 +12,22 @@ import {
 } from "../src/lib/escalate.js";
 import { buildSweepEffects, renderClarificationQuestion, type OpenPrView } from "../src/lib/sweep.js";
 
+const NOW = Date.now();
+
+/** Every `lastActivityAt` in this suite is an OFFSET FROM `NOW`, never a calendar date.
+ *
+ *  Nothing here asserts on AGE — each test turns on the ledgered escalation history and the head
+ *  the ask was recorded against, never on `sweep.staleDays`. But `deriveDisposition` compares
+ *  `lastActivityAt` against the real wall clock, so a fixed literal silently crosses `staleDays`
+ *  on a date no diff touches and flips these dispositions to "stale": `expiring-fixture-census`
+ *  measured all three stamps here going red on 2026-09-22. This is the same remedy
+ *  test/a-permanent-diff-refusal-is-not-retried-forever.test.ts already carries, and the reason
+ *  the census's own recorded population for this file drops to 0 in the same change — a stamp
+ *  behind a helper is no longer a literal the gate can see, so the count must move with it. */
+function isoBefore(hours: number): string {
+  return new Date(NOW - hours * 60 * 60 * 1000).toISOString();
+}
+
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-head-independent-dedup-")), "ledger.ndjson");
 }
@@ -163,7 +179,7 @@ test("the contradictory clarification producer marks its ask head-independent", 
     unmetCriteria: [],
     criteriaRecoverable: true,
     priorStrikes: 2,
-    lastActivityAt: "2026-09-08T12:00:00Z",
+    lastActivityAt: isoBefore(168),
     headSha: "feed3179",
     autoMergeArmed: false,
   };
@@ -250,7 +266,7 @@ test("the terminal non-fleet-head producer marks its ask head-independent", asyn
       checksState: "green",
       unmetCriteria: [],
       priorStrikes: 1,
-      lastActivityAt: "2026-09-08T12:00:00Z",
+      lastActivityAt: isoBefore(168),
       headSha: "bad3179",
       autoMergeArmed: false,
     },
@@ -265,7 +281,7 @@ test("the terminal non-fleet-head producer marks its ask head-independent", asyn
       checksState: "green",
       unmetCriteria: [],
       priorStrikes: 1,
-      lastActivityAt: "2026-09-08T12:00:00Z",
+      lastActivityAt: isoBefore(168),
       headSha: "bad3180",
       autoMergeArmed: false,
     },
