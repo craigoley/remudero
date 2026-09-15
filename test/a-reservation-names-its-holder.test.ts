@@ -436,9 +436,23 @@ test("W1-T3100 (gate copy): main reports differing and unreadable reservation ho
     "rmd-id holder branch=%zz",
   );
   repo.git("push", "--quiet", "origin", "HEAD:refs/rmd-id/W1-T9101");
+  // A THIRD holder shape, the one the fleet daemon actually mints: reserved from a detached HEAD,
+  // so `currentBranch` recorded the literal `unknown`. It is unreadable AS A CLAIM like W1-T9101
+  // above, but unlike it there IS a recorded value to hand off from — so this row, and only this
+  // row, must carry the exact remedy line an author can paste into the shard note.
+  repo.git(
+    "commit",
+    "--quiet",
+    "--allow-empty",
+    "-m",
+    "rmd-id reservation 456@holder-host 2026-09-11T00:00:00.000Z",
+    "-m",
+    "rmd-id holder branch=unknown pid=456 host=holder-host source=automatic",
+  );
+  repo.git("push", "--quiet", "origin", "HEAD:refs/rmd-id/W1-T9102");
   writeFileSync(
     join(repo.dir, "plan", "tasks.yaml"),
-    ["- id: W1-T9100", "  title: held", "- id: W1-T9101", "  title: corrupt", ""].join("\n"),
+    ["- id: W1-T9100", "  title: held", "- id: W1-T9101", "  title: corrupt", "- id: W1-T9102", "  title: detached-mint", ""].join("\n"),
   );
 
   const r = runGateMain([
@@ -460,6 +474,16 @@ test("W1-T3100 (gate copy): main reports differing and unreadable reservation ho
   assert.equal(r.exitCode, 1);
   assert.match(r.err, /W1-T9100 -- reserved by run-W1-T3100-holder, while this filing is run-W1-T3100-filer/);
   assert.match(r.err, /W1-T9101 -- holder unreadable \(malformed value for branch\)/);
+  assert.match(r.err, /W1-T9102 -- holder unreadable \(missing branch\)/);
+  // The detached-mint row prints the line that CLEARS it, verbatim and pasteable. The other two
+  // rows must not: W1-T9100 has a real holder branch (so the generic remedy below already names
+  // it), and W1-T9101's holder could not be read at all, so there is nothing to hand off FROM.
+  assert.match(r.err, /remedy: note: "reservation hand-off: unknown -> run-W1-T3100-filer"/);
+  assert.equal(
+    (r.err.match(/remedy: note:/g) ?? []).length,
+    1,
+    "exactly one row earns a pasteable remedy — the one whose reservation recorded a value",
+  );
   assert.match(r.err, /reservation hand-off: <holder> -> <filer>/);
   assert.doesNotMatch(r.out, /open-PR collision check SKIPPED/);
 });
