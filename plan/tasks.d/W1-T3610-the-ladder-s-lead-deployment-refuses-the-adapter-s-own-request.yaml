@@ -1,4 +1,4 @@
-- id: W1-T3608
+- id: W1-T3610
   title: "THE LADDER'S LEAD DEPLOYMENT REFUSES THE ADAPTER'S OWN REQUEST — gpt-5-nano 400s on the hardcoded temperature 0, and selectOpenWeightModel has no fallback, so the first candidate failing means the lane fails"
   repo: remudero
   depends_on: []
