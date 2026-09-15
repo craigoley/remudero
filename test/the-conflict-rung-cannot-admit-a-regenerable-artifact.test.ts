@@ -33,7 +33,7 @@ const NOW = Date.parse("2026-08-31T00:00:00.000Z");
 /** A green, review-passing, dirty PR carrying the given conflict-file evidence — mirrors
  *  `reconstructedConflict` (test/sweep-conflicted-disposition.test.ts), reused as a bare fixture
  *  here so this file stays self-contained per its own declared scope. */
-function dirtyPr(files: ConflictFileDiff[]): OpenPrView {
+function dirtyPr(files: ConflictFileDiff[], over: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: 2548,
     prUrl: "https://github.com/craigoley/remudero/pull/2548",
@@ -45,10 +45,12 @@ function dirtyPr(files: ConflictFileDiff[]): OpenPrView {
     strikeHistory: [],
     lastActivityAt: "2026-08-30T23:55:00.000Z", // expiring-fixture: exempt -- aged 10d past the rung, nothing failed; this case ignores the disposition
     headSha: "cafef00d",
+    headRefName: "run-W1-T2548-1789430000000",
     autoMergeArmed: false,
     isDependabot: false,
     mergeState: "dirty",
     mergeConflict: { files, oursLog: "abc1234 (reconstructed)", theirsLog: "def5678 (reconstructed)" },
+    ...over,
   } as OpenPrView;
 }
 
@@ -109,42 +111,42 @@ test("acceptance 2 — the dispatch reason names the declared generator and says
   assert.match(r.reason, /never either side's recorded value/, "explicitly rules out picking ours/theirs — the generator's output is authoritative");
 });
 
-// ── acceptance 3: a conflicted path with NO declared generator is still refused ──────────────
+// ── acceptance 3: a conflicted rmd-owned path without a generator gets bounded semantic repair ─
 
-test("acceptance 3 — a same-key value conflict on a path with no declared generator is still refused, so admission is bounded by a written list, not an inference", () => {
+test("acceptance 3 — a same-key value conflict on an rmd-owned hand-written path dispatches bounded hunk-level repair, never a generator or side-take", () => {
   const pr = dirtyPr([{ path: HAND_WRITTEN_PATH, oursDeleted: 1, theirsDeleted: 1 }]);
   const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(r.disposition, "blocked-ambiguous");
-  assert.notEqual(r.disposition, "conflicted", "no entry in REGENERABLE_ARTIFACT_GENERATORS for this path -> never auto-resolved");
+  assert.equal(r.disposition, "conflicted");
+  assert.match(r.reason, /bounded merge-conflict fix worker/);
+  assert.match(r.reason, /actual hunks/);
   assert.equal(HAND_WRITTEN_PATH in REGENERABLE_ARTIFACT_GENERATORS, false, "sanity: this path really is undeclared");
 });
 
-// ── acceptance 4: hand-written + regenerable mixed -> refused WHOLE ─────────────────────────
+// ── acceptance 4: hand-written + regenerable mixed remains a worker-owned semantic repair ───
 
-test("acceptance 4 — a conflict touching hand-written source alongside a regenerable path is refused WHOLE, never partially admitted", () => {
+test("acceptance 4 — a conflict touching hand-written source alongside a regenerable path is a semantic repair, never partial generator resolution", () => {
   const pr = dirtyPr([sameKeyValueChange(), { path: HAND_WRITTEN_PATH, oursDeleted: 1, theirsDeleted: 1 }]);
   const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(r.disposition, "blocked-ambiguous", "one undeclared path in the conflict refuses the ENTIRE conflict, including its declared sibling");
-  assert.notEqual(r.disposition, "conflicted");
+  assert.equal(r.disposition, "conflicted");
+  assert.match(r.reason, /bounded merge-conflict fix worker/);
+  assert.doesNotMatch(r.reason, /RE-RUN the generator/);
 });
 
-// ── acceptance 5: the refusal cause names which condition failed ────────────────────────────
+// ── acceptance 5: a non-rmd branch remains blocked ──────────────────────────────────────────
 
-test("acceptance 5 — the refusal cause names WHICH path lacks a declared generator in a mixed conflict, so a refusal is diagnosable without re-deriving it", () => {
+test("acceptance 5 — a contributor branch with the same mixed conflict is blocked without an unattended write", () => {
   const files: ConflictFileDiff[] = [sameKeyValueChange(), { path: HAND_WRITTEN_PATH, oursDeleted: 1, theirsDeleted: 1 }];
-  const cause = conflictRefusalCause(files, DEFAULT_SWEEP_POLICY);
-  assert.match(cause, /involves a deletion/);
-  assert.match(cause, new RegExp(HAND_WRITTEN_PATH.replace(/[/.]/g, "\\$&")), "names the SPECIFIC undeclared path, not a generic refusal");
-  assert.doesNotMatch(cause, new RegExp(REGISTERED_PATH.replace(/[/.]/g, "\\$&")), "the DECLARED sibling is not named as a problem — only the undeclared one is");
-
-  // The full escalation reason (what actually posts) carries the same diagnosis.
-  const pr = dirtyPr(files);
+  const pr = dirtyPr(files, { headRefName: "feature/contributor-change" });
   const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(r.disposition, "blocked-ambiguous");
-  assert.match(r.reason, /no declared generator/);
+  assert.match(r.reason, /not this PR task's rmd-owned run branch/);
+  assert.match(r.reason, /not dispatched/);
 });
 
-test("acceptance 5 (contrast) — an all-hand-written deletion conflict keeps the plain 'involves a deletion' cause, since the registry has nothing to say about it", () => {
-  const cause = conflictRefusalCause([{ path: HAND_WRITTEN_PATH, oursDeleted: 1, theirsDeleted: 1 }], DEFAULT_SWEEP_POLICY);
-  assert.equal(cause, "involves a deletion");
+test("acceptance 5 (contrast) — the explicit policy switch still refuses valid evidence", () => {
+  const cause = conflictRefusalCause(
+    [{ path: HAND_WRITTEN_PATH, oursDeleted: 1, theirsDeleted: 1 }],
+    { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: false },
+  );
+  assert.match(cause, /admission is disabled/);
 });

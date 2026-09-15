@@ -3279,7 +3279,8 @@ test("renderFixPrompt: merge-conflict mode names the mode, the conflicting file(
   assert.match(prompt, /UNION/i, "states the union-toward-both-sides discipline");
   assert.match(prompt, /merge-base/i, "states the merge-base analysis it must be gated on");
   assert.match(prompt, /PURE CONCURRENT ADDITION/i, "names the safe-to-resolve condition");
-  assert.match(prompt, /REFUSE/i, "states the refuse-into-escalate discipline for a deletion/semantic conflict");
+  assert.match(prompt, /ACTUAL conflict hunks/i, "requires hunk-level reasoning for deletion/semantic conflicts");
+  assert.match(prompt, /Never mechanically take an entire side/i, "forbids an automatic ours/theirs side-take");
   assert.match(prompt, /never rebase/i, "states merge, never rebase-force");
   assert.match(prompt, /add entry A/, "carries OUR side's log since merge-base");
   assert.match(prompt, /add entry B/, "carries THEIR side's log since merge-base");
@@ -3323,9 +3324,7 @@ test("W1-T2540: the prompt carries the measurement, so the rule is not merely as
   assert.match(prompt, /or the larger of the two, would have shipped a false ceiling/);
 });
 
-test("W1-T2540: the pre-existing merge discipline is PRESERVED, not replaced by the carve-out", () => {
-  // The regression lock. This adds an exception for one file class; ordinary source must still be
-  // resolved toward the union, and a deletion or semantic conflict must still refuse into escalate.
+test("W1-T2540: merge discipline preserves union-only pure additions and requires semantic hunk-level repair otherwise", () => {
   const prompt = renderFixPrompt({
     task: { id: "W1-TX", title: "T" },
     round: 1,
@@ -3333,7 +3332,9 @@ test("W1-T2540: the pre-existing merge discipline is PRESERVED, not replaced by 
     evidence: { mergeConflict: mergeConflictFixture() },
   });
   assert.match(prompt, /PURE CONCURRENT ADDITION/i, "the union condition survives");
-  assert.match(prompt, /REFUSE to resolve it yourself and escalate/i, "the refuse-into-escalate arm survives");
+  assert.match(prompt, /ACTUAL conflict hunks/i, "semantic conflicts require real-hunk inspection");
+  assert.match(prompt, /Never mechanically take an entire side/i, "semantic conflicts cannot mechanically take ours/theirs");
+  assert.match(prompt, /leave the branch unchanged/i, "an indefensible resolution must stand down without inventing a change");
   assert.match(prompt, /never rebase, never force-push/i, "the merge-not-rebase discipline survives");
   // and the carve-out must come AFTER the general rule, so a worker reads the default first.
   assert.ok(

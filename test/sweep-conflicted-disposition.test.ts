@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SWEEP_POLICY, conflictRefusalCause, deriveDisposition, isPureConcurrentAddition, type ConflictFileDiff, type OpenPrView } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, conflictRefusalCause, deriveDisposition, hasCapturedMergeConflictEvidence, isPureConcurrentAddition, type ConflictFileDiff, type OpenPrView } from "../src/lib/sweep.js";
 import { hydrateMergeStates, mergeStateFromRest, MERGE_STATE_HYDRATION_CAP } from "../src/lib/open-prs-rest.js";
 
 /**
@@ -216,6 +216,7 @@ test("buildOpenPrViews WIRES the hydrator: a dirty PR arrives at the sweep carry
  *  as it stood at each escalation's own timestamp. */
 function reconstructedConflict(files: ConflictFileDiff[]): OpenPrView {
   return greenPr({
+    headRefName: "run-W1-T287-1789430000000",
     mergeState: "dirty",
     mergeConflict: { files, oursLog: "abc1234 (reconstructed)", theirsLog: "def5678 (reconstructed)" },
   });
@@ -290,7 +291,7 @@ test("W1-T2536 — a zero-deletion conflict with captured evidence is ADMITTED t
   for (const pr of cases) {
     const d = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
     assert.equal(d.disposition, "conflicted", `${pr.mergeConflict?.files.map((f) => f.path).join(",")} must dispatch, not escalate`);
-    assert.match(d.reason, /dispatching the merge-conflict fix mode/);
+    assert.match(d.reason, /dispatching the bounded merge-conflict fix worker/);
   }
 });
 
@@ -307,9 +308,9 @@ test("W1-T2536 — THE REAL SHAPE THIS WAS COSTING: two PRs each adding a differ
   assert.equal(deriveDisposition(pr, off, NOW).disposition, "blocked-ambiguous", "the gate is real in BOTH directions");
 });
 
-test("W1-T2536 — a conflict involving a deletion is still REFUSED and says so", () => {
-  // The three reconstructed cases that read FALSE stay refused at the NEW default — turning
-  // admission on must not widen what `isPureConcurrentAddition` admits, only whether it is asked.
+test("an rmd-owned conflict involving a deletion is admitted to the bounded semantic repair worker", () => {
+  // Deletion counts are evidence for the worker's hunk-level analysis, not permission for a
+  // mechanical ours/theirs choice. The branch is explicitly a fleet run branch.
   const cases: OpenPrView[] = [
     reconstructedConflict([{ path: "test/daemon.test.ts", oursDeleted: 0, theirsDeleted: 5 }]),
     reconstructedConflict([
@@ -320,12 +321,14 @@ test("W1-T2536 — a conflict involving a deletion is still REFUSED and says so"
   ];
   for (const pr of cases) {
     const d = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
-    assert.equal(d.disposition, "blocked-ambiguous", "a deletion is never auto-resolved, flag or no flag");
-    assert.match(d.reason, /involves a deletion/);
+    assert.equal(d.disposition, "conflicted");
+    assert.match(d.reason, /deletion evidence/);
+    assert.match(d.reason, /bounded merge-conflict fix worker/);
+    assert.match(d.reason, /actual hunks/);
   }
 });
 
-test("W1-T2536 — a refusal never claims a deletion the evidence does not show", () => {
+test("a contributor branch, a foreign rmd run branch, or malformed evidence is never admitted to the bounded repair worker", () => {
   // THE SECOND DEFECT. The refusal row said "involves a deletion (or no file evidence was
   // captured)" UNCONDITIONALLY, so a zero-deletion, fully-evidenced conflict was refused by a
   // sentence in which BOTH disjuncts were false — sending every reader to hunt a deletion that
@@ -336,27 +339,34 @@ test("W1-T2536 — a refusal never claims a deletion the evidence does not show"
   const on = DEFAULT_SWEEP_POLICY;
   const off = { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: false };
 
-  assert.equal(conflictRefusalCause(noEvidence, on), "no file evidence was captured");
-  assert.equal(conflictRefusalCause(withDeletion, on), "involves a deletion");
+  assert.equal(conflictRefusalCause(noEvidence, on), "no valid conflicting-file evidence was captured");
   assert.match(conflictRefusalCause(zeroDeletions, off), /admission is disabled/);
-  assert.equal(conflictRefusalCause(zeroDeletions, on), "not classifiable as a pure concurrent addition");
+  assert.equal(hasCapturedMergeConflictEvidence({ files: [{ path: " ", oursDeleted: 0, theirsDeleted: 0 }], oursLog: "", theirsLog: "" }), false);
 
-  // ORDER MATTERS: a file list carrying a deletion must read as a deletion even with admission
-  // off, never as "admission is disabled" — the deletion is the more fundamental refusal.
-  assert.equal(conflictRefusalCause(withDeletion, off), "involves a deletion");
+  const contributor = reconstructedConflict(withDeletion);
+  contributor.headRefName = "feature/contributor-change";
+  const contributorDisposition = deriveDisposition(contributor, on, NOW);
+  assert.equal(contributorDisposition.disposition, "blocked-ambiguous");
+  assert.match(contributorDisposition.reason, /not this PR task's rmd-owned run branch/);
 
-  // And the rendered reason for an absent-evidence PR no longer asserts a deletion.
-  const d = deriveDisposition(greenPr({ mergeState: "dirty" }), on, NOW);
+  const foreignRun = reconstructedConflict(withDeletion);
+  foreignRun.headRefName = "run-W1-T999-1789430000002";
+  const foreignDisposition = deriveDisposition(foreignRun, on, NOW);
+  assert.equal(foreignDisposition.disposition, "blocked-ambiguous");
+  assert.match(foreignDisposition.reason, /not this PR task's rmd-owned run branch/);
+
+  // An absent-evidence PR must name absence, never invent a deletion.
+  const d = deriveDisposition(greenPr({ mergeState: "dirty", headRefName: "run-W1-T287-1789430000001" }), on, NOW);
   assert.doesNotMatch(d.reason, /involves a deletion/, "no evidence was read — a deletion is not something we observed");
-  assert.match(d.reason, /no file evidence was captured/);
+  assert.match(d.reason, /no valid conflicting-file evidence was captured/);
 });
-test("W1-T984 acceptance 4 — a dirty PR escalation names the real conflicting paths and per-side deletion counts, never 'none captured'", () => {
+test("an rmd-owned deletion conflict dispatch reason names real paths and per-side deletion counts", () => {
   const seeded = reconstructedConflict([
     { path: "deploy/entrypoint.sh", oursDeleted: 0, theirsDeleted: 26 },
     { path: "src/lib/daemon.ts", oursDeleted: 6, theirsDeleted: 1 },
   ]);
   const d = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(d.disposition, "blocked-ambiguous");
+  assert.equal(d.disposition, "conflicted");
   assert.doesNotMatch(d.reason, /none captured/, "real evidence flowed — this must not lie about it being absent");
   assert.match(d.reason, /deploy\/entrypoint\.sh \(ours -0, theirs -26\)/, "names the first path AND its per-side deletion counts");
   assert.match(d.reason, /src\/lib\/daemon\.ts \(ours -6, theirs -1\)/, "names the second path AND its per-side deletion counts");
