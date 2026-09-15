@@ -5254,7 +5254,19 @@ test("routeFix: a conflicted PR (mergeState dirty, pure concurrent addition) dis
     oursLog: "abc1234 add entry A",
     theirsLog: "def5678 add entry B",
   };
-  const pr = fixPr({ reviewState: "success", checksState: "green", mergeState: "dirty", mergeConflict });
+  // W1-T3602: the `conflicted` row's admission now also requires the PR to be on the fleet's OWN
+  // run branch for its task (`fixHeadAcceptable`) — a bounded repair worker may push to a branch
+  // rmd created, never to a human's or a foreign one. `fixPr`'s default head is undefined, which
+  // that conjunct correctly refuses, so name the run branch its own `taskId` implies. This test's
+  // subject is the row's DISPATCH mechanics, unchanged by W1-T3602; the ownership narrowing has
+  // its own proofs in test/sweep-conflicted-disposition.test.ts.
+  const pr = fixPr({
+    reviewState: "success",
+    checksState: "green",
+    mergeState: "dirty",
+    mergeConflict,
+    headRefName: "run-W1-TX-1789468055864",
+  });
 
   // W1-T984: the `conflicted` row now carries a `mergeConflictAdmissionEnabled` conjunct (default
   // FALSE — a real REST evidence producer landed alongside the flag, and the predicate cannot
