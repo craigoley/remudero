@@ -5255,11 +5255,11 @@ test("routeFix: a conflicted PR (mergeState dirty, pure concurrent addition) dis
     theirsLog: "def5678 add entry B",
   };
   // W1-T3602: the `conflicted` row's admission now also requires the PR to be on the fleet's OWN
-  // run branch for its task (`fixHeadAcceptable`) — a bounded repair worker may push to a branch
-  // rmd created, never to a human's or a foreign one. `fixPr`'s default head is undefined, which
-  // that conjunct correctly refuses, so name the run branch its own `taskId` implies. This test's
-  // subject is the row's DISPATCH mechanics, unchanged by W1-T3602; the ownership narrowing has
-  // its own proofs in test/sweep-conflicted-disposition.test.ts.
+  // run branch for its task (the head-ownership predicate) — a bounded repair worker may push to
+  // a branch rmd created, never to a human's or a foreign one. `fixPr`'s default head is
+  // undefined, which that conjunct correctly refuses, so name the run branch its own `taskId`
+  // implies. This test's subject is the row's DISPATCH mechanics, unchanged by W1-T3602; the
+  // ownership narrowing has its own proofs in test/sweep-conflicted-disposition.test.ts.
   const pr = fixPr({
     reviewState: "success",
     checksState: "green",

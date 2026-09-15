@@ -16,6 +16,14 @@ function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-head-independent-dedup-")), "ledger.ndjson");
 }
 
+// Stamped from the wall clock, not a fixed literal — same discipline as
+// test/stale-ci-gate-wiring.test.ts. Nothing in this suite asserts on the VALUE of
+// `lastActivityAt` (only headSha dedup keys matter), so a relative, always-recent stamp proves
+// the same thing without ever crossing expiring-fixture-census's staleness threshold.
+function recentActivityIso(): string {
+  return new Date(Date.now() - 60 * 60 * 1000).toISOString();
+}
+
 function fakeIssueStore(): IssueGateway & {
   calls: Array<{ title: string; body: string; labels: string[] }>;
   comments: Array<{ url: string; body: string }>;
@@ -163,7 +171,7 @@ test("the contradictory clarification producer marks its ask head-independent", 
     unmetCriteria: [],
     criteriaRecoverable: true,
     priorStrikes: 2,
-    lastActivityAt: "2026-09-08T12:00:00Z",
+    lastActivityAt: recentActivityIso(),
     headSha: "feed3179",
     autoMergeArmed: false,
   };
@@ -250,7 +258,7 @@ test("the terminal non-fleet-head producer marks its ask head-independent", asyn
       checksState: "green",
       unmetCriteria: [],
       priorStrikes: 1,
-      lastActivityAt: "2026-09-08T12:00:00Z",
+      lastActivityAt: recentActivityIso(),
       headSha: "bad3179",
       autoMergeArmed: false,
     },
@@ -265,7 +273,7 @@ test("the terminal non-fleet-head producer marks its ask head-independent", asyn
       checksState: "green",
       unmetCriteria: [],
       priorStrikes: 1,
-      lastActivityAt: "2026-09-08T12:00:00Z",
+      lastActivityAt: recentActivityIso(),
       headSha: "bad3180",
       autoMergeArmed: false,
     },

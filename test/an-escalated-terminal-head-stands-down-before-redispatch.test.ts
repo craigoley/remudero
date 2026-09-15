@@ -99,10 +99,10 @@ function conflictedPr(over: Partial<OpenPrView> = {}): OpenPrView {
     // W1-T3602: the "conflicted" row now admits on TWO conjuncts, and this fixture must satisfy
     // both or it falls through to "blocked-ambiguous". (1) CAPTURED EVIDENCE — a non-empty,
     // well-formed `files` array; an empty `files: []` still falls through. (2) RMD OWNERSHIP —
-    // `fixHeadAcceptable(headRefName, taskId, ...)`, because a repair worker pushes to the branch,
-    // so it may only run on one the fleet itself created for THIS task. That is why the head ref
-    // is named here rather than left undefined: this suite's subject is the terminal stand-down
-    // seam, not the admission narrowing, which has its own proofs in
+    // the head-ownership predicate over (headRefName, taskId, ...), because a repair worker pushes
+    // to the branch, so it may only run on one the fleet itself created for THIS task. That is why
+    // the head ref is named here rather than left undefined: this suite's subject is the terminal
+    // stand-down seam, not the admission narrowing, which has its own proofs in
     // test/sweep-conflicted-disposition.test.ts.
     headRefName: "run-W1-C-1789468055864",
     mergeConflict: {
