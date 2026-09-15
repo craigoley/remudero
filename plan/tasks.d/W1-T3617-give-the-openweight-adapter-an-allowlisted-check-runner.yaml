@@ -1,4 +1,4 @@
-- id: W1-T3615
+- id: W1-T3617
   title: "GIVE THE OPENWEIGHT ADAPTER AN ALLOWLISTED CHECK-RUNNER — the one missing tool excludes 93% of worker spend, and the lanes need to run their own checks, not a shell"
   repo: remudero
   depends_on: [W1-T3613]
