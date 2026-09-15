@@ -1449,6 +1449,7 @@ import {
   removeRunLock,
   renderWorkerSettings,
   resolveGenericRouteToolBound,
+  resolveDispatchLaneToolBound,
   resolveClaudeExecutable,
   claudeExecutableCache,
   runAdhocLaneReapRung,
@@ -13131,6 +13132,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       spawn({
         cwd: worktreePath,
         permissionMode: "bypassPermissions",
+        // W1-T3616: recon's prompt names `git remote -v`, `git log --oneline -5` and `ls`, so its
+        // honest bound includes Bash. Read-only, so no Write/Edit.
+        tools: [...resolveDispatchLaneToolBound("recon")],
         settingsFile,
         model: reconMount?.model,
         mountProvider: reconMount?.provider,
@@ -13558,6 +13562,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         await spawn({
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
+          // W1-T3616: diagnose inspects `git diff`/`git status` and re-runs whatever failed, so it
+          // declares Bash. "Do NOT modify, commit, or push ANYTHING" — hence no Write/Edit.
+          tools: [...resolveDispatchLaneToolBound("diagnose")],
           model: diagnoseMount.model,
           mountProvider: diagnoseMount.provider,
           effort: diagnoseMount.effort,
@@ -24436,6 +24443,8 @@ async function retroCommand(
     const worker = await spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
+      // W1-T3616: retro edits ONLY MASTER-PLAN.md then `git add` + commits it — Edit, never Write.
+      tools: [...resolveDispatchLaneToolBound("retro")],
       settingsFile,
       model: arch, // W1-T2559: retro's own `synthesis.retro` mount, not the Architect's
       mountProvider: mountsTable.synthesis.retro.provider,
@@ -24564,6 +24573,9 @@ async function retroCommand(
         const repaired = await spawn({
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
+          // W1-T3616: the repair pass is the SAME lane as the retro spawn above, so it resolves the
+          // same bound rather than carrying a second copy that could drift.
+          tools: [...resolveDispatchLaneToolBound("retro")],
           settingsFile,
           model: arch,
           mountProvider: mountsTable.synthesis.retro.provider,
@@ -37999,6 +38011,9 @@ export async function dispatchAlertFixRun(
     const worker = await deps.spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
+      // W1-T3616: an alert fix commits and pushes, so it takes the fix lane's own list rather than
+      // a narrower second copy.
+      tools: [...resolveDispatchLaneToolBound("alert_fix")],
       settingsFile,
       model: fixMount.model,
       mountProvider: fixMount.provider,

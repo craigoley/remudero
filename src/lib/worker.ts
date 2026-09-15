@@ -123,6 +123,7 @@ import {
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
+import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 
 /** Aggregate token usage off the SDK result envelope's `usage` field (SDK 0.3.209 `sdk.d.ts`: `NonNullableUsage`, snake_case
  * Anthropic-API names, all fields non-nullable). Zeroed when no result envelope was ever seen — a genuine transport failure. */
@@ -1024,12 +1025,58 @@ export const GENERIC_ROUTE_TOOL_BOUNDS = {
 
 export type GenericRouteLane = keyof typeof GENERIC_ROUTE_TOOL_BOUNDS;
 
+/**
+ * The four spawns W1-T3573 left unbounded, each list DERIVED FROM THAT LANE'S OWN PROMPT (W1-T3616).
+ *
+ * EVERY ONE OF THEM DECLARES `Bash`, AND THAT IS THE MEASUREMENT, NOT A CONCESSION. The task that
+ * filed this work forbids narrowing a lane to make it routable — "if recon genuinely shells out, it
+ * declares Bash and stays premium until W1-T3615's check-runner can replace that use" — so these
+ * lists say what the prompts actually ask for:
+ *
+ *   recon      renderReconPrompt: "Do NOT modify anything. Inspect the current git repository
+ *              read-only (git remote -v, git log --oneline -5, ls)". Three shell commands, named
+ *              verbatim. Read-only, so no Write/Edit.
+ *   diagnose   "Do NOT modify, commit, or push ANYTHING — this is a read-only investigation",
+ *              inspecting `git diff`/`git status` and re-running whatever failed. Read-only.
+ *   retro      retroPrompt: "edit ONLY MASTER-PLAN.md" then "git add MASTER-PLAN.md && commit".
+ *              Edit (one existing file, never Write), plus Bash for the commit.
+ *   alert_fix  alertFixPrompt: "git add the changed files && commit", "git push origin HEAD".
+ *              A fix rung, so it takes the fix lane's own list rather than a second copy.
+ *
+ * CONSEQUENCE, STATED PLAINLY: declaring these honestly proves NONE of the four is openweight-
+ * eligible today, because `Bash` is not in OPENWEIGHT_FUNCTIONS. That is the point of bounding them
+ * — the exclusion becomes a measured fact with a named blocker instead of silence. Routing remains
+ * a separate decision (W1-T3616 design: "ROUTE NOTHING HERE").
+ */
+export const DISPATCH_LANE_TOOL_BOUNDS = {
+  recon: ["Read", "Grep", "Glob", "Bash"],
+  diagnose: ["Read", "Grep", "Glob", "Bash"],
+  retro: ["Read", "Grep", "Glob", "Edit", "Bash"],
+  alert_fix: FIX_WORKER_TOOLS,
+} as const satisfies Record<string, readonly string[]>;
+
+export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
+
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
  * deleting a declared bound must make its own lookup refuse, not silently resume unrestricted). */
 export function resolveGenericRouteToolBound(lane: string): readonly string[] {
   if (lane === "review" || lane === "manual") return GENERIC_ROUTE_TOOL_BOUNDS[lane];
   throw new Error(
     `no declared tool bound for generic route '${lane}' — refusing rather than defaulting to unrestricted tools (W1-T3573)`,
+  );
+}
+
+/**
+ * The same fail-closed contract for the dispatch lanes, and deliberately a SECOND resolver rather
+ * than a widened first one: `resolveGenericRouteToolBound` answers for `task.type` values the
+ * generic route dispatches, while these are named rungs inside the pipeline. Merging them would
+ * let a typo'd task type silently resolve a rung's bound.
+ */
+export function resolveDispatchLaneToolBound(lane: string): readonly string[] {
+  const bound = (DISPATCH_LANE_TOOL_BOUNDS as Record<string, readonly string[]>)[lane];
+  if (bound !== undefined) return bound;
+  throw new Error(
+    `no declared tool bound for dispatch lane '${lane}' — refusing rather than defaulting to unrestricted tools (W1-T3616)`,
   );
 }
 

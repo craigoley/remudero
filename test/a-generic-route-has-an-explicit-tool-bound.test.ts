@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,6 +14,8 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   GENERIC_ROUTE_TOOL_BOUNDS,
   resolveGenericRouteToolBound,
+  resolveDispatchLaneToolBound,
+  DISPATCH_LANE_TOOL_BOUNDS,
   type SpawnWorkerArgs,
   type WorkerResult,
   type spawnWorker,
@@ -233,4 +235,68 @@ test("BEHAVIORAL: a real runTask implement dispatch's generic spawn is untouched
   const spawnCalls = await runGenericRouteFixture("T-GENERIC-IMPLEMENT", "implement");
   assert.equal(spawnCalls.length, 2, "recon then the one generic implement spawn under test");
   assert.equal(spawnCalls[1]!.tools, undefined, "implement keeps the unrestricted default — never collateral-shrunk by this task");
+});
+
+test("every worker spawn declares an explicit tool bound", () => {
+  // W1-T3616. A CENSUS OVER THE SOURCE, because this is a property no single execution can show:
+  // the claim is about EVERY spawn site, including ones no test happens to drive. W1-T3573 closed
+  // this for review/manual and left five sites behind, which is exactly the shape a census catches
+  // and a per-lane test does not.
+  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const lines = src.split("\n");
+  const spawnSites = lines
+    .map((line, index) => ({ line, index }))
+    .filter((row) => row.line.includes("permissionMode:"));
+
+  // POSITIVE CONTROL: a census that found nothing would pass vacuously forever, including after
+  // someone deleted every spawn or renamed the option.
+  assert.ok(spawnSites.length >= 10, `expected the dispatch path's spawn sites, found ${spawnSites.length}`);
+
+  const unbounded: number[] = [];
+  for (const site of spawnSites) {
+    // The spawn's own object literal, read generously in both directions: `tools:` may precede or
+    // follow `permissionMode:` depending on the call site's field order.
+    const window = lines.slice(Math.max(0, site.index - 45), site.index + 25).join("\n");
+    if (!/\btools:/.test(window)) unbounded.push(site.index + 1);
+  }
+  assert.deepEqual(
+    unbounded,
+    [],
+    `these spawn sites inherit SpawnWorkerArgs' unrestricted default instead of declaring a bound: ${unbounded.join(", ")}`,
+  );
+});
+
+test("an undeclared lane refuses rather than inheriting unrestricted tools", () => {
+  // W1-T3616. FAIL-CLOSED, the same contract resolveGenericRouteToolBound already carries: a lane
+  // nobody declared must REFUSE, because the alternative — returning undefined — is precisely the
+  // silent unrestricted default this task exists to remove.
+  assert.throws(() => resolveDispatchLaneToolBound("not-a-lane"), /no declared tool bound for dispatch lane/);
+  assert.throws(() => resolveDispatchLaneToolBound(""), /no declared tool bound for dispatch lane/);
+  // A near-miss must refuse too, or a typo'd lane would quietly resolve someone else's bound.
+  assert.throws(() => resolveDispatchLaneToolBound("Recon"), /no declared tool bound for dispatch lane/);
+  assert.throws(() => resolveDispatchLaneToolBound("alert-fix"), /no declared tool bound for dispatch lane/);
+
+  // And the declared lanes resolve, so the refusals above are not "this function always throws".
+  for (const lane of Object.keys(DISPATCH_LANE_TOOL_BOUNDS)) {
+    const bound = resolveDispatchLaneToolBound(lane);
+    assert.ok(Array.isArray(bound) && bound.length > 0, `${lane} must declare a non-empty bound`);
+    assert.ok(bound.includes("Read"), `${lane} must at least be able to read`);
+  }
+
+  // THE HONEST CONSEQUENCE, PINNED SO IT CANNOT BE QUIETLY NARROWED LATER. Every one of these four
+  // lanes shells out per its own prompt, so each declares Bash — which is NOT in
+  // OPENWEIGHT_FUNCTIONS. Bounding them proves they are ineligible today rather than making them
+  // eligible; W1-T3616 forbids narrowing a lane to fit a cheaper provider.
+  for (const lane of ["recon", "diagnose", "retro", "alert_fix"]) {
+    assert.ok(
+      resolveDispatchLaneToolBound(lane).includes("Bash"),
+      `${lane}'s prompt shells out, so removing Bash would trade an audit gap for a runtime failure`,
+    );
+  }
+  // recon and diagnose are read-only by their prompts' own words.
+  for (const lane of ["recon", "diagnose"]) {
+    const bound = resolveDispatchLaneToolBound(lane);
+    assert.ok(!bound.includes("Write"), `${lane} is read-only ("Do NOT modify"), so it must not declare Write`);
+    assert.ok(!bound.includes("Edit"), `${lane} is read-only ("Do NOT modify"), so it must not declare Edit`);
+  }
 });
