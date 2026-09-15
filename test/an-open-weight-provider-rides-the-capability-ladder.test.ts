@@ -341,6 +341,14 @@ test("openweight daily cap refuses the inbox draft spawn before transport", asyn
     });
 
     let fetchCalls = 0;
+    // W1-T3597 priced every deployment by its OWN row, keyed by deployment id — never by the
+    // mount's Claude-facing `model`/`effort` fields directly. The real production path
+    // (`spawnWorker`, src/lib/worker.ts) resolves `args.model`/`args.effort` through
+    // `selectOpenWeightModel` before it ever reaches `spawnOpenWeightWorker`; this test must
+    // resolve the SAME way rather than hand the mount's raw "sonnet" through as if it were a
+    // priced Azure deployment id, or the reservation throws `OpenWeightUnpricedDeploymentError`
+    // instead of exercising the daily-cap refusal this test is actually proving.
+    const selection = selectOpenWeightModel(undefined, args.model as string, args.effort as string);
     const result = await spawnOpenWeightWorker(
       {
         cwd: root,
@@ -356,7 +364,7 @@ test("openweight daily cap refuses the inbox draft spawn before transport", asyn
         },
       },
       config,
-      { model: args.model as string, effort: args.effort as string },
+      { model: selection.model, effort: selection.effort },
     );
 
     assert.equal(fetchCalls, 0, "no paid request left the process for the routed inbox-draft lane");
