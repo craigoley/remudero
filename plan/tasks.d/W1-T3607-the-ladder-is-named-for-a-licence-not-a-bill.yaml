@@ -18,7 +18,7 @@
     - deploy/runtime-env-vars.sh
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
   origin: "operator-ruling#non-subscription-ladder-2026-09-15"
-  plan_refs: ["W1-T3546", "W1-T3569", "W1-T3598", "W1-T3603", "W1-T2573"]
+  plan_refs: ["W1-T3546", "W1-T3569", "W1-T3598", "W1-T3603", "W1-T3608", "W1-T2573"]
   status: queued
   attempts: 0
   note: |
@@ -38,6 +38,11 @@
     not prompts"; W1-T3575 shipped as "make dailyCapUsd a runtime hard cash cap".
     `metered` was CONSIDERED AND REJECTED: worker.ts already says "the run is metered against the
     subscription", so metered is ambiguous in exactly the distinction this rename exists to draw.
+
+    W1-T3608 IS THE SECOND PER-DEPLOYMENT TABLE on this surface: it declares request temperature
+    the way OPENWEIGHT_PRICES declares price, both keyed by deployment id. The rename must carry
+    BOTH tables to the new spelling, and must not let one keep the old key while the other moves --
+    they are read for the same deployment in the same request path.
 
     THE CATEGORY DEFINITION IS PART OF THE DELIVERABLE, not just the identifier. A one-paragraph
     statement of what qualifies a deployment for this ladder must land beside the block, so the
