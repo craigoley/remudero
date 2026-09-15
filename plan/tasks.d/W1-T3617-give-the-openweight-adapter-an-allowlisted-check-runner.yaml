@@ -16,6 +16,8 @@
   status: queued
   attempts: 0
   note: |
+    reservation hand-off: main -> chore/file-openweight-checkrunner-1789493010
+
     OPERATOR RULING 2026-09-15, recorded in DECISIONS.md: an allowlisted CHECK-RUNNER, not a `Bash`
     function. This task builds only that; it routes no lane.
 
