@@ -22,6 +22,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, test } from "node:test";
 
 import type { Plan, Task } from "../src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "run-branch-eligibility-check.mjs");
@@ -142,7 +143,7 @@ const GIT_ENV = {
 /** A real git repo whose `plan/tasks.yaml` declares exactly `tasks`, committed and pinned at
  *  `refs/remotes/origin/main` so `loadPlanAtRef`'s own `git show` runs for real. */
 function repoWithTasks(tasks: { id: string; dependsOn?: string[]; status?: string }[]): string {
-  const dir = mkdtempSync(join(tmpdir(), "w1t3600-main-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3600-main-`));
   MADE.push(dir);
   const g = (args: string[]) =>
     execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe", env: { ...process.env, ...GIT_ENV } });
@@ -173,7 +174,7 @@ function repoWithTasks(tasks: { id: string; dependsOn?: string[]; status?: strin
 /** Prepend a stub `gh` to PATH so `ghReachable`'s probe is decided HERE rather than by whether the
  *  machine running the suite happens to have gh installed and authenticated. */
 function withStubGh(exitCode: number, fn: () => void) {
-  const dir = mkdtempSync(join(tmpdir(), "w1t3600-gh-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t3600-gh-`));
   MADE.push(dir);
   writeFileSync(join(dir, "gh"), `#!/usr/bin/env bash\nexit ${exitCode}\n`);
   chmodSync(join(dir, "gh"), 0o755);
