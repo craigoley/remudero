@@ -2515,10 +2515,43 @@ export const RECYCLE_PATIENCE_BASE_MS = 60 * 60_000;
  * An `undefined` commitsBehind is "no evidence", and no evidence must not read as pressure —
  * it yields {@link Number.POSITIVE_INFINITY}, i.e. wait for a genuinely free moment.
  */
-export function consoleRecyclePatienceMs(clients: number, commitsBehind: number | undefined): number {
-  if (clients === 0) return RECYCLE_PATIENCE_FREE_MS;
+/**
+ * HOW MUCH ATTENTION A READ IS STILL WORTH, decaying by half every minute.
+ *
+ * The recycle gate asked "is anyone SUBSCRIBED", counting SSE clients on
+ * /v1/status/stream. That was the right question when the only console was the shell this
+ * daemon serves itself. It is the wrong question now: the product console is a separate Next.js
+ * application that POLLS /v1/status over HTTP every 3s and never opens a stream, so an operator
+ * reading it is invisible to the gate, patience reads as zero, and the daemon recycles out from
+ * under him.
+ *
+ * MEASURED 2026-09-15: the boot window after a recycle is 86.5s, during which cloudflared logs
+ * "connection refused" and then "connection reset by peer" against remudero-serve:4317 and the
+ * console reports every surface unavailable. The operator hit exactly that.
+ *
+ * A HALF-LIFE RATHER THAN A WINDOW, because a window is a cliff and this is a question of
+ * degree: a surface polled seconds ago is being watched, one last read ten minutes ago is not,
+ * and there is no instant in between where the answer flips. No reads at all is exactly zero,
+ * which keeps an unwatched daemon recycling as freely as it does today.
+ */
+export const READ_ATTENTION_HALF_LIFE_MS = 60_000;
+
+export function readAttention(msSinceLastRead: number | undefined): number {
+  if (msSinceLastRead === undefined || !Number.isFinite(msSinceLastRead) || msSinceLastRead < 0) return 0;
+  return Math.pow(0.5, msSinceLastRead / READ_ATTENTION_HALF_LIFE_MS);
+}
+
+export function consoleRecyclePatienceMs(
+  clients: number,
+  commitsBehind: number | undefined,
+  msSinceLastRead?: number,
+): number {
+  // ATTENTION, not subscription: an SSE client counts as one watcher, and a recent read counts
+  // as a fraction of one that decays. Both zero is the genuinely free moment.
+  const attention = clients + readAttention(msSinceLastRead);
+  if (attention <= 0) return RECYCLE_PATIENCE_FREE_MS;
   if (commitsBehind === undefined || commitsBehind <= 0) return Number.POSITIVE_INFINITY;
-  return RECYCLE_PATIENCE_BASE_MS / commitsBehind;
+  return (RECYCLE_PATIENCE_BASE_MS * attention) / commitsBehind;
 }
 
 /** How often the gate re-asks the question while somebody is watching. Slow on purpose: this is
@@ -2548,6 +2581,10 @@ export interface StaleCodeExitDeps {
   /** Starts the slow re-check while somebody is watching, and returns its stop function.
    *  Injectable so a suite steps the cadence by hand rather than waiting on a real interval. */
   scheduleRecheck?: (run: () => void, ms: number) => () => void;
+  /** When a read-scoped request was last served, so a POLLING console counts as watched — see
+   *  {@link readAttention}. Absent means no read has been observed and the gate behaves exactly
+   *  as it did before this seam existed. */
+  lastReadAt?: () => number | undefined;
   /** One ledger line naming the decision, mirroring {@link ServiceOptions.log}. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Synchronous cleanup immediately before the process exit. The analytics cache supplies its
@@ -2590,6 +2627,25 @@ export interface StaleCodeExitGate {
  * must also wait on such a handoff is the one genuinely open question design (iv) names and this
  * shard does not settle — this gate covers exactly the in-flight HTTP request, nothing broader.
  */
+/**
+ * Records that a read-scoped route was served, for {@link readAttention}.
+ *
+ * READ SCOPE ONLY, AND DELIBERATELY NOT EVERY ROUTE. A webhook delivery is not an operator
+ * watching — `/v1/hooks/github` carried 1341 of the 1423 requests reaching the tunnel on
+ * 2026-09-15 — so counting it would report constant attention and the gate would never recycle.
+ * What the gate needs to know is whether a HUMAN surface is being read.
+ */
+export function stampReadWith(route: Route, stamp: () => void): Route {
+  if (route.scope !== "read") return route;
+  return {
+    ...route,
+    handler: (req, res, ctx) => {
+      stamp();
+      return route.handler(req, res, ctx);
+    },
+  };
+}
+
 export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   const resolveCurrentSha = deps.resolveCurrentSha ?? resolveConsoleSha;
   const exit = deps.exit ?? ((code: number) => process.exit(code));
@@ -2620,13 +2676,15 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     }
     staleSince ??= clock.now();
     const commitsBehind = commitsBehindOf(deps.bootSha);
-    const patienceMs = consoleRecyclePatienceMs(clients, commitsBehind);
+    const lastRead = deps.lastReadAt?.();
+    const msSinceLastRead = lastRead === undefined ? undefined : Math.max(0, clock.now() - lastRead);
+    const patienceMs = consoleRecyclePatienceMs(clients, commitsBehind, msSinceLastRead);
     const staleForMs = clock.now() - staleSince;
     // Somebody is watching and the backlog has not yet earned the interruption. The re-check
     // below keeps asking, and the backlog grows on its own — which is what turns a watched
     // console from "never" into "soon enough" without ever reading a threshold.
     if (staleForMs < patienceMs) return;
-    log("serve.stale_code_exit", { bootSha: deps.bootSha, currentSha, clients, inFlightWrites, commitsBehind, staleForMs, patienceMs });
+    log("serve.stale_code_exit", { bootSha: deps.bootSha, currentSha, clients, inFlightWrites, commitsBehind, staleForMs, patienceMs, msSinceLastRead });
     stopRecheck();
     deps.beforeExit?.();
     exit(0);
@@ -3655,7 +3713,18 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // sha {@link gateStaleCodeExit} is comparing against — never a second independent resolution
   // that could drift from the one the exit decision uses.
   const consoleSha = deps.consoleSha ?? resolveConsoleSha();
-  const staleExit = gateStaleCodeExit({ bootSha: consoleSha, log: deps.log, beforeExit: analyticsCache.stop });
+  // WHEN A READER WAS LAST SERVED — the signal that makes a POLLING console visible to the
+  // recycle gate. The product console never opens an SSE stream, so subscriber count alone
+  // reported nobody watching and the daemon recycled out from under an operator mid-read. See
+  // {@link readAttention}.
+  let lastReadAt: number | undefined;
+  const staleExit = gateStaleCodeExit({
+    bootSha: consoleSha,
+    log: deps.log,
+    beforeExit: analyticsCache.stop,
+    lastReadAt: () => lastReadAt,
+  });
+  const stampRead = (route: Route): Route => stampReadWith(route, () => { lastReadAt = Date.now(); });
   const routeAssembly = assembleServeRoutes({ ...deps, consoleSha, confirmNonces }, analyticsCache.current);
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
@@ -3663,7 +3732,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // `/v1/skills/run`) `HIGH_TIER_WRITE_PATHS` names client-side, read here off the route table's
     // own declared `tier` (already asserted complete, above in `buildServeRoutes`) rather than a
     // second hard-coded path list that could drift from it.
-    route.tier === "high" ? staleExit.wrapWrite(route) : route,
+    route.tier === "high" ? staleExit.wrapWrite(route) : stampRead(route),
   );
   // W1-T3176 — VERIFY BEFORE MOUNTING. Installed ONLY when the entry document is really there, so
   // an absent build cannot half-render: `/console/*` 404s, `/` and every `/v1` route are untouched.
