@@ -65,6 +65,7 @@
     "agents-md:check": "tsx scripts/generate-agents-md.mjs --check",
     "rule15-precheck": "tsx scripts/rule15-precheck.mjs",
     "rule25-precheck": "tsx scripts/rule25-precheck.mjs",
+    "run-branch-eligibility-precheck": "tsx scripts/run-branch-eligibility-check.mjs",
     "cli-reference:check": "tsx scripts/generate-cli-reference.mjs --check",
     "proof-dialect": "tsx scripts/generate-proof-dialect.mjs",
     "macro-skills": "node --import tsx scripts/generate-macro-skills.mjs",
