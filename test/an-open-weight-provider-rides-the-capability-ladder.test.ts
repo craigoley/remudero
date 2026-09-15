@@ -23,6 +23,7 @@ import {
   OpenWeightAllowanceExhaustedError,
   openWeightCommittedUsd,
   openWeightReservationUsd,
+  openWeightUsageUsd,
   openWeightUtcDay,
   reserveOpenWeightBudget,
   selectOpenWeightModel,
@@ -296,9 +297,16 @@ function openWeightResult(): WorkerResult {
 test("the capability ladder resolves an open-weight provider by table lookup", () => {
   const capabilities = loadMounts(join(REPO_ROOT, ".remudero", "mounts.yaml")).capabilities;
   const selected = selectOpenWeightModel(capabilities, "sonnet", "low");
-  assert.deepEqual(capabilities?.openweight?.balanced.low, ["gpt-oss-120b"], "the declared openweight row, not fallback data, is the capability source");
+  // W1-T3598 led this row with gpt-5-nano and DEMOTED gpt-oss-120b rather than removing it. Both
+  // halves are asserted: the order (cheaper first) and the fallback's continued presence, so a
+  // later edit that deletes the trailing entry fails here rather than silently killing the lane.
+  assert.deepEqual(
+    capabilities?.openweight?.balanced.low,
+    ["gpt-5-nano", "gpt-oss-120b"],
+    "the declared openweight row, not fallback data, is the capability source",
+  );
   assert.equal(selected.capability, "balanced");
-  assert.equal(selected.model, "gpt-oss-120b");
+  assert.equal(selected.model, "gpt-5-nano", "the ladder's LEADING candidate is what resolves");
   assert.equal(selected.effort, "low");
 
   const renamed = selectOpenWeightModel({
@@ -531,13 +539,14 @@ test("openweight configuration requires a daily cash cap and keeps its key outsi
       config: { ...uncapped, dailyCapUsd: 1 },
       providerRouting: {
         spawnOpenWeight: async (_args, _config, selection) => {
-          assert.equal(selection.model, "gpt-oss-120b");
+          // Resolves through the ladder, which W1-T3598 leads with the cheaper deployment.
+          assert.equal(selection.model, "gpt-5-nano");
           return openWeightResult();
         },
       },
     });
     assert.equal(result.provider, "openweight");
-    assert.equal(result.routedModel, "gpt-oss-120b");
+    assert.equal(result.routedModel, "gpt-5-nano");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -858,7 +867,16 @@ test("openweight daily cap ledger fields expose settled cost without a credentia
             ),
         },
       });
-      assert.equal(routed.budgetSettledUsd, expectedSettled, "the settled cash figure survives the router onto the worker row");
+      // Priced against the deployment the ROUTER actually chose, not a hardcoded one: this fixture
+      // is about settlement surviving onto the worker row, and pinning a deployment here would make
+      // it fail every time the ladder's leading candidate changes — which is a routing decision,
+      // not a settlement regression. W1-T3598 moved that candidate and this is why it still holds.
+      assert.ok(routed.routedModel, "the routed worker row names the deployment it billed against");
+      assert.equal(
+        routed.budgetSettledUsd,
+        openWeightUsageUsd(routed.routedModel, 1_000, 200),
+        "the settled cash figure survives the router onto the worker row, at the routed deployment's own rate",
+      );
       assert.ok((routed.budgetReservedUsd ?? 0) > (routed.budgetSettledUsd ?? 0));
       assert.equal(routed.budgetRefused, false);
       assert.doesNotMatch(JSON.stringify(routed), /test-only-daemon-secret/, "the routed worker row carries no credential");

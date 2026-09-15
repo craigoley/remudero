@@ -129,15 +129,20 @@ capabilities:
       high:   [gpt-5.6-sol, gpt-5.5]
   # W1-T3546: a pay-per-token deployment is selected by explicit mount affinity, never capacity.
   # The data shape mirrors `codex`: capability -> effort -> ordered deployment identifiers.
+  # W1-T3598: gpt-5-nano LEADS economy and balanced — cheaper than gpt-oss-120b on both token axes
+  # ($0.05/$0.40 vs $0.15/$0.60) and Azure-OpenAI-family, so it needs no second endpoint shape.
+  # gpt-oss-120b TRAILS rather than being removed, the same demotion shape the `codex` block above
+  # uses: a deployment that stops answering falls back instead of failing the lane. FRONTIER is left
+  # on gpt-oss-120b — a nano-class model is not a frontier substitute.
   openweight:
     economy:
-      low:    [gpt-oss-120b]
-      medium: [gpt-oss-120b]
-      high:   [gpt-oss-120b]
+      low:    [gpt-5-nano, gpt-oss-120b]
+      medium: [gpt-5-nano, gpt-oss-120b]
+      high:   [gpt-5-nano, gpt-oss-120b]
     balanced:
-      low:    [gpt-oss-120b]
-      medium: [gpt-oss-120b]
-      high:   [gpt-oss-120b]
+      low:    [gpt-5-nano, gpt-oss-120b]
+      medium: [gpt-5-nano, gpt-oss-120b]
+      high:   [gpt-5-nano, gpt-oss-120b]
     frontier:
       low:    [gpt-oss-120b]
       medium: [gpt-oss-120b]
