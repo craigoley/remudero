@@ -8,6 +8,44 @@ decision reversible.
 
 <!-- Entries below are appended verbatim by the runner. -->
 
+## 2026-09-15 — OPERATOR DECISION: W1-T3572 — a bounded CHECK-RUNNER, not a Bash function
+
+*Operator-authored, recorded by hand at the operator's instruction on 2026-09-15 ("go with your
+recommendation"), resolving W1-T3572, which was parked at `verify: human` because it asks whether
+every shell-capable lane stays premium or warrants a bounded execution surface.*
+
+**WHY THE QUESTION IS WORTH MONEY.** Measured over the ledger union, deduped per distinct run:
+`implement` is $4,081 across 728 runs ($5.61 each), `fix` $769 across 274, `recon` $302 across 739.
+That is ~93% of worker spend, and all three are excluded from the open-weight adapter by ONE
+missing tool. Meanwhile Codex sits at 95% of its weekly window and reads `readable:false`, so every
+worker lands on Claude — the squeeze is two subscriptions collapsing into one.
+
+- **CHOSEN: AN ALLOWLISTED CHECK-RUNNER, NOT `Bash`.** The reason these lanes need a shell is to RUN
+  THEIR OWN CHECKS — the test runner, the typechecker, the lint scripts. That set is small and
+  enumerable, so the adapter should implement a function that takes a CHOSEN CHECK plus arguments
+  from a fixed table, never a command string. No shell, no metacharacters, no interpolation. This
+  is the same discipline `OPENWEIGHT_PRICES` and `OPENWEIGHT_TEMPERATURE` already use: a table
+  lookup that REFUSES an unlisted entry rather than guessing.
+- **NO GIT AND NO NETWORK AUTHORITY.** Not `git push`, not `gh`, not `curl`. The worker produces a
+  diff; the orchestrator pushes and merges. That is the boundary `hooks/deny-floor.sh` already
+  enforces against every worker ("a worker may author or repair a PR, but only the orchestrator may
+  merge or arm it"), and a shell-capable open-weight worker must not be the hole in it.
+- **STAGE ON `recon` FIRST, NEVER `implement`.** recon is $0.41 a run across 739 runs — high count,
+  low value at risk, and nothing it produces ships. `implement` follows only behind a measured
+  verdict on recon, for the same reason W1-T3569 routed the narrowest eligible lane first.
+- **THE NEW SURFACE GETS ITS OWN CONTAINMENT PROOF.** W1-T2's probe proves an outside-cwd WRITE is
+  OS-denied for a spawn; a command surface needs the equivalent proven THROUGH ITSELF, per run, or
+  the containment argument is inherited rather than demonstrated.
+- **REJECTED: A GENERAL `Bash` FUNCTION**, and the reason is scope rather than fear. The container
+  already hosts a `bypassPermissions` Claude worker, so a shell would not widen the security
+  boundary — it would add a less predictable occupant inside one that already exists. What it WOULD
+  add is authority the lane does not need: an allowlisted runner buys the same capability with a
+  surface small enough to enumerate in a test.
+
+**A CONSTRAINT THE BUILD MUST CARRY:** `implement.high` runs at `context_budget: 200000` and
+gpt-oss-120b's context window is 131,072 (W1-T3613), so the shell-capable lanes ride `gpt-5-nano`
+whenever their prompt exceeds that. The operator has accepted nano for this purpose.
+
 ## 2026-09-09 — OPERATOR DECISION: W1-T3076 chosen bound — (a) first, then (c); NOT (b)
 
 *Operator-authored, not a machine auto-choose resolution. Recorded by hand at the operator's
