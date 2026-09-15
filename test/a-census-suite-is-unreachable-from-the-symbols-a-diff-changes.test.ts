@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fsDefault from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -151,6 +152,75 @@ test("W1-T2680 (acceptance 4): a census suite ADDED to the tree is found, with n
       censusSuiteFiles(["src/lib/thing.ts"], root),
       ["test/brand-new-census.test.ts"],
       "AFTER: found by the run that adds it — and the ordinary suite beside it still is not",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test(
+  "W1-T3602: a listed entry that ENOENTs on read — torn down by a concurrent suite between " +
+    "readdirSync and readFileSync — is skipped, never a crash, and a real sibling is still found",
+  (t) => {
+    // MEASURED, not hypothetical: a full un-sharded local suite run reproduced exactly this —
+    // test/a-ci-skip-guard-can-fire-unconditionally.test.ts's "UNSTAGED suite" acceptance writes
+    // and then removes a real, untracked `test/zz-w1t3220-untracked-probe.test.ts`, and node's
+    // test runner executes files in parallel by default, so this loop's own `readdirSync` snapshot
+    // can list that probe a moment before a concurrent test unlinks it. Driven here as a fixture
+    // (mocking the read this loop makes) rather than relying on timing, so the arm is asserted on
+    // every run instead of one lucky/unlucky interleaving.
+    const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}census-race-`));
+    try {
+      mkdirSync(join(root, "test"), { recursive: true });
+      const survivor = join(root, "test", "survivor-census.test.ts");
+      const vanishing = join(root, "test", "zz-vanishing-census.test.ts");
+      const body = 'import { readdirSync } from "node:fs";\nreaddirSync(join(REPO_ROOT, "src/lib/"));\ntest("x", () => {});\n';
+      writeFileSync(survivor, body);
+      writeFileSync(vanishing, body);
+
+      const real = fsDefault.readFileSync;
+      t.mock.method(fsDefault, "readFileSync", (path: unknown, ...rest: unknown[]) => {
+        if (typeof path === "string" && path.endsWith("zz-vanishing-census.test.ts")) {
+          const err = new Error(`ENOENT: no such file or directory, open '${path}'`) as NodeJS.ErrnoException;
+          err.code = "ENOENT";
+          throw err;
+        }
+        // @ts-expect-error -- forwarding the mocked call's real args to the real implementation.
+        return real(path, ...rest);
+      });
+
+      assert.deepEqual(
+        censusSuiteFiles(["src/lib/thing.ts"], root),
+        ["test/survivor-census.test.ts"],
+        "the torn-down entry is skipped; the real, still-present sibling is still listed — never an uncaught throw",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test("W1-T3602: a NON-ENOENT read failure (a genuinely unreadable file, not a torn-down one) still throws — this is a narrow TOCTOU tolerance, not a blanket swallow", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}census-race-`));
+  try {
+    mkdirSync(join(root, "test"), { recursive: true });
+    writeFileSync(join(root, "test", "broken-census.test.ts"), "x");
+
+    const real = fsDefault.readFileSync;
+    t.mock.method(fsDefault, "readFileSync", (path: unknown, ...rest: unknown[]) => {
+      if (typeof path === "string" && path.endsWith("broken-census.test.ts")) {
+        const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+        err.code = "EACCES";
+        throw err;
+      }
+      // @ts-expect-error -- forwarding the mocked call's real args to the real implementation.
+      return real(path, ...rest);
+    });
+
+    assert.throws(
+      () => censusSuiteFiles(["src/lib/thing.ts"], root),
+      /EACCES/,
+      "a real read failure must still fail closed, never be silently skipped like a torn-down file",
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

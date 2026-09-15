@@ -35,7 +35,7 @@
     TRIAL OPERATOR HANDOFF — after this task and W1-T3575 are merged, and before
     traffic: preserve the existing providers and add `openweight` to
     `workerProviders.enabled`; set `workerProviders.openweightEndpoint` to
-    `https://synthwatch-foundry.cognitiveservices.azure.com/`; set `dailyCapUsd: 5`
+    `https://synthwatch-foundry.cognitiveservices.azure.com/`; set `dailyCapUsd: 10` (operator ruling 2026-09-15; was 5)
     only after W1-T3575's runtime reservation is deployed; and place
     `RMD_OPENWEIGHT_API_KEY` in the daemon process environment only, never a
     repository/config/state file. Retrieve the Azure key with the documented `az
@@ -66,11 +66,11 @@
     mount-affinity while triage remains non-openweight. No secret, endpoint, or
     daemon configuration belongs in this repository change. The implementation PR
     body must restate the four-value operator handoff (enabled provider, canonical
-    endpoint, USD 5 runtime cap, daemon-only key) and the 10K-TPM-before-traffic /
+    endpoint, USD 10 runtime cap, daemon-only key) and the 10K-TPM-before-traffic /
     restore-after-acceptance sequence, without printing the key.
   acceptance:
     - claim: "only synthesis.inbox_draft declares provider openweight, after its Read/Grep/Glob surface is re-proven to be adapter-supported"
-      proof: "unit test: inbox draft alone rides the openweight affinity path"
+      proof: "unit test: only synthesis.inbox_draft declares provider openweight"
     - claim: "the routed trial cannot begin until a runtime-enforced, ledger-visible cash reservation rejects an exhausted daily allowance before an Azure call"
       proof: "unit test: openweight daily cap refuses the inbox draft spawn before transport"
   falsifier: |

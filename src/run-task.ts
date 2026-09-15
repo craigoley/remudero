@@ -30250,6 +30250,32 @@ function resolveOpenPrTaskId(pr: RawOpenPr, planOnlyFiling: boolean): string | u
   return resolveReviewTaskId(pr.body ?? "", pr.headRefName, planOnlyFiling);
 }
 
+/**
+ * MAY THIS ID ESTABLISH DUPLICATE-WORK OWNERSHIP? (W1-T3535)
+ *
+ * `unfiled` is a BRANCH-SHAPE SENTINEL, not a task. W1-T3388 made `run-unfiled-<epochMs>`
+ * ({@link RUN_BRANCH_UNFILED_FORM}) the canonical head ref for an ad-hoc repair with no filed
+ * task — `scripts/head-identity-gate.mjs` REFUSES a PR that does not use it — and
+ * {@link resolveOpenPrTaskId} then recovers the literal `unfiled` from every such branch, because
+ * `taskIdFromRunBranch`'s `namesATask` check (lib/status.ts) only rejects an id with a suffix
+ * STAPLED ON and `unfiled` has none.
+ *
+ * So `buildOpenPrViews`'s supersession arithmetic grouped every ad-hoc PR in the repo under ONE
+ * key and marked all but the highest-numbered `supersededBy`, and the sweep's `stale` row closed
+ * them. OBSERVED TWICE: #5411 closed by #5412 (2026-09-13, this task's filing evidence) and again
+ * on 2026-09-15, when #5632 — a `/v1/status` change sharing NOT ONE changed path — closed #5630
+ * and #5631. The two gates contradicted each other: one mandates the name, the other punishes it.
+ *
+ * SCOPE IS DELIBERATELY ONE PREDICATE AT ONE CONCERN. `unfiled` stays a perfectly good REVIEW and
+ * LEDGER attribution fallback — `resolveOpenPrTaskId` is untouched, `reviewLedgerKey` still reads
+ * it, `criteriaRecoverable` is unchanged — because attributing a review to a branch is not the
+ * same act as asserting two PRs are the same work. Only ownership is narrowed, and a real id from
+ * a trailer or a `run-<taskId>-<epochMs>` branch still groups exactly as before.
+ */
+function isSupersessionOwnerTaskId(taskId: string | undefined): taskId is string {
+  return taskId !== undefined && taskId !== "unfiled";
+}
+
 /** Recover refusal metadata from a review's structured decision verdict. It is deliberately not
  * inferred from `reason`: that field is presentation prose, while this read needs a closed class
  * before the sweep may skip a strike. */
@@ -30748,7 +30774,10 @@ export function buildOpenPrViews(
     // `isPlanFiling`/`planFilingSource` below — never `isPlanOnlyFilingPr` re-derived narrower,
     // which only sees the emitter-ledger receipt and misses a `github-files`-sourced filing.
     const t = resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false);
-    if (!t) continue;
+    // W1-T3535: the SENTINEL IS NOT AN OWNER — see isSupersessionOwnerTaskId. `!t` alone admitted
+    // the literal `unfiled`, which every ad-hoc PR's conforming branch yields, so all of them
+    // grouped together here and the highest-numbered one superseded the rest.
+    if (!isSupersessionOwnerTaskId(t)) continue;
     (byTask.get(t) ?? byTask.set(t, []).get(t)!).push(pr.number);
   }
 
@@ -30762,7 +30791,10 @@ export function buildOpenPrViews(
   for (const pr of raw) {
     // W1-T3505: see the `byTask` loop above — the classified boolean, not the emitter-only one.
     const t = resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false);
-    if (!t) continue;
+    // W1-T3535: the same exclusion as the `byTask` loop, restated rather than inferred from the
+    // map being empty — an unfiled PR must never reach `hydrateSupersessionVerdicts` either, and
+    // a lookup that happened to miss is not the same statement as an id that cannot own.
+    if (!isSupersessionOwnerTaskId(t)) continue;
     const peers = byTask.get(t) ?? [];
     const newest = peers.length ? Math.max(...peers) : pr.number;
     if (newest > pr.number) supersededPrs.push({ number: pr.number, supersededBy: newest, taskId: t });
@@ -30789,7 +30821,7 @@ export function buildOpenPrViews(
     const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
     const reviewLedgerKey = taskId ?? `PR-${pr.number}`;
     const inputDigest = reviewInputDigest(pr.headRefOid, pr.body ?? "");
-    const peers = taskId ? (byTask.get(taskId) ?? []) : [];
+    const peers = isSupersessionOwnerTaskId(taskId) ? (byTask.get(taskId) ?? []) : [];
     const newest = peers.length ? Math.max(...peers) : pr.number;
     const supersededBy = newest > pr.number ? newest : undefined;
     const reviewState = reviewStateFromRollup(pr.statusCheckRollup);
@@ -33657,10 +33689,10 @@ export async function routeFix(
     return { outcome: "fixed", reason };
   }
   if (disposition === "conflicted") {
-    // W1-T106: DISPOSITION_RULES already gated this on isPureConcurrentAddition
-    // — reaching "conflicted" here means it's safe to dispatch. The
-    // deletion-involved / unclassifiable case derives "blocked-ambiguous"
-    // instead (falls through below), never this branch.
+    // DISPOSITION_RULES admitted only an rmd-shaped run branch with captured
+    // evidence. The production dispatch implementation repeats the stricter
+    // task-specific head check before it writes; this routing seam carries the
+    // evidence to that bounded worker and never attempts a textual side-take.
     await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
     return { outcome: "fixed", reason };
   }

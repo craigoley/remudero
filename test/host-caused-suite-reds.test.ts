@@ -85,19 +85,19 @@ test("HOST_CAUSED_SUITE_REDS: the registry's per-cluster counts sum correctly �
   // measured count, a removed registry entry still fails the length check — while letting the
   // registry say the true thing about a cluster that spans files.
   const expected: Record<string, { cause: string; count: number }> = {
-    // The W1-T2234 census figure, deliberately NOT rebased to today's measured 18 — see the
-    // note beside the entry in src/lib/ci-parity.ts. This row is the evidence trail the test's
-    // own header paragraph is about.
-    "test/recycle-container.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 17 },
-    // W1-T2776: measured 2026-09-03, one `node --test` run per file on the mini. Every one of
-    // these spawns deploy/recycle-container.sh through the PATH `bash` (3.2 on darwin).
-    "test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 8 },
-    "test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 5 },
-    "test/app-auth-satisfies-the-recycle-credential-refusal.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 6 },
-    "test/daemon-default-credential.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 1 },
-    "test/recycle-capture-falls-back-to-the-shell.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 3 },
-    "test/the-recovery-path-merges-into-a-shared-checkout.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 8 },
-    "test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts": { cause: "bash-3.2-no-associative-arrays", count: 5 },
+    // W1-T3595 DELETED THE WHOLE `bash-3.2-no-associative-arrays` CLUSTER — eight files, 53
+    // measured reds — and this table loses those eight rows with it. This is the one direction in
+    // which removing a row is correct rather than a weakening: the rows were not a baseline to be
+    // lowered, they were a MEASUREMENT of what `declare -A` in deploy/recycle-container.sh cost on
+    // a bash-3.2 host, and that script no longer contains bash-4-only syntax. A registry row that
+    // outlived its cause would absorb a REAL future red on those files as "the machine's fault",
+    // which is the exact failure mode the cluster's own W1-T2776 note warns about.
+    //
+    // The cluster's absence is asserted, not merely un-stated — below in this file, and
+    // independently in test/host-parity-azure-pole.test.ts, whose empty-corpus branch requires
+    // `HOST_CAUSED_SUITE_REDS.filter((e) => e.cause === "bash-3.2-no-associative-arrays")` to be
+    // empty. The portability itself has its own suite,
+    // test/recycle-container-bash3-portability.test.ts.
     "test/worker-credential-preflight.test.ts": { cause: "darwin-keychain-unprovisioned", count: 2 },
     "test/fleet-heartbeat.test.ts": { cause: "bsd-date-control-arm", count: 2 },
     // W1-T2785: measured 2026-09-04 on the mini — `node --test` on this file reports
@@ -134,8 +134,14 @@ test("HOST_CAUSED_SUITE_REDS: the registry's per-cluster counts sum correctly �
     "one row per FILE — a duplicated file would let two rows disagree about the same measurement",
   );
 
-  const bash = HOST_CAUSED_SUITE_REDS.find((e) => e.cause === "bash-3.2-no-associative-arrays");
-  assert.equal(bash?.file, "test/recycle-container.test.ts");
+  // W1-T3595: the cluster is GONE, and its absence is the assertion now. Re-introducing a
+  // bash-4-only construct into deploy/recycle-container.sh would have to re-register its reds
+  // here to be honest about them, and this line is what refuses the quiet version of that.
+  assert.deepEqual(
+    HOST_CAUSED_SUITE_REDS.filter((e) => e.cause === "bash-3.2-no-associative-arrays").map((e) => e.file),
+    [],
+    "deploy/recycle-container.sh is bash-3.2 portable — no file may still claim a red caused by its `declare -A`",
+  );
 });
 
 // W1-T2785 round 2: the table row above is DATA an unrelated bug could still leave unread — this
@@ -170,9 +176,13 @@ test("hostCausedSuiteRedsStep: on a full-house darwin/bash-3.2/node-drift host, 
   const allAxes: HostFacts = { ...DARWIN_BASH_3_2, nodeVersion: "22.23.2", pinnedNodeVersion: "22.22.3" };
   const step = hostCausedSuiteRedsStep(allAxes);
   assert.equal(step.ok, true, "informational — never its own verdict");
-  assert.match(step.detail, /test\/recycle-container\.test\.ts/);
-  assert.match(step.detail, /bash-3\.2-no-associative-arrays/);
-  assert.match(step.detail, /~17 test\(s\)/);
+  // TWO clusters on two independent axes, so this still proves the step names file, cause AND
+  // count rather than happening to print one row. W1-T3595 retired the bash-3.2 cluster this
+  // assertion used to read, so it moves to the darwin-keychain one, which keys off the same
+  // platform axis the retired cluster did.
+  assert.match(step.detail, /test\/worker-credential-preflight\.test\.ts/);
+  assert.match(step.detail, /darwin-keychain-unprovisioned/);
+  assert.match(step.detail, /~2 test\(s\)/);
   assert.match(step.detail, /test\/merge-lcov\.test\.ts/);
   assert.match(step.detail, /node-version-drift-from-pin/);
   // The banner reports "N of M" where M is the registry size — matched loosely on the numbers

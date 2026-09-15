@@ -129,15 +129,38 @@ capabilities:
       high:   [gpt-5.6-sol, gpt-5.5]
   # W1-T3546: a pay-per-token deployment is selected by explicit mount affinity, never capacity.
   # The data shape mirrors `codex`: capability -> effort -> ordered deployment identifiers.
+  # W1-T3598: gpt-5-nano LEADS economy and balanced — cheaper than gpt-oss-120b on both token axes
+  # ($0.05/$0.40 vs $0.15/$0.60) and Azure-OpenAI-family, so it needs no second endpoint shape.
+  # gpt-oss-120b TRAILS rather than being removed, the same demotion shape the `codex` block above
+  # uses: a deployment that stops answering falls back instead of failing the lane. FRONTIER is left
+  # on gpt-oss-120b — a nano-class model is not a frontier substitute.
   openweight:
+    # W1-T3614 — THE TWO ROWS LEAD WITH DIFFERENT DEPLOYMENTS, AND THAT IS THE POINT. Neither model
+    # wins outright; the winner is decided by the INPUT:OUTPUT ratio of the lane, measured against
+    # the live account with the adapter's own URL, api-version and body on 2026-09-15:
+    #
+    #     lane                input    gpt-oss out   nano out   cheaper
+    #     inbox_draft       259,181        452         2,207     nano,    2.83x
+    #     escalation judge      446        177           993     gpt-oss, 2.40x
+    #
+    # gpt-5-nano is cheaper PER TOKEN on both axes ($0.05/$0.40 vs $0.15/$0.60) and DEARER PER TASK
+    # on short prompts, because it spends ~5x the completion tokens on reasoning. Solving for the
+    # crossover with r = nano_out/oss_out gives `input > (4r - 6) x output`, i.e. roughly
+    # INPUT > 15x OUTPUT. Do not "correct" economy back to the per-token-cheaper row: that reads
+    # the price table and ignores the token counts, which is how this was wrong the first time.
+    #
+    # AND A HARD CEILING ABOVE THE COST ARGUMENT (W1-T3613): gpt-oss-120b's context window is
+    # 131,072 tokens, and inbox_draft really sends 259,181 (it embeds the whole plan/tasks.yaml).
+    # So `balanced` leading with nano is not a preference, it is the only thing that can run; the
+    # trailing gpt-oss there is unreachable for that lane and is kept only for a smaller caller.
     economy:
-      low:    [gpt-oss-120b]
-      medium: [gpt-oss-120b]
-      high:   [gpt-oss-120b]
+      low:    [gpt-oss-120b, gpt-5-nano]
+      medium: [gpt-oss-120b, gpt-5-nano]
+      high:   [gpt-oss-120b, gpt-5-nano]
     balanced:
-      low:    [gpt-oss-120b]
-      medium: [gpt-oss-120b]
-      high:   [gpt-oss-120b]
+      low:    [gpt-5-nano, gpt-oss-120b]
+      medium: [gpt-5-nano, gpt-oss-120b]
+      high:   [gpt-5-nano, gpt-oss-120b]
     frontier:
       low:    [gpt-oss-120b]
       medium: [gpt-oss-120b]
@@ -226,10 +249,23 @@ architect:
 # measured reason to — model is the THIRD lever, not the first, and effort is now genuinely WIRED
 # to the spawn for all three (previously declared here but never passed to `spawnWorker`, so
 # `architect.effort: high` silently governed nothing for these lanes).
+# W1-T3569: `inbox_draft` alone gains `provider: openweight`. Its tool surface (Read/Grep/Glob,
+# INBOX_DRAFT_WORKER_TOOLS, src/run-task.ts) is a strict subset of OPENWEIGHT_FUNCTIONS
+# (src/lib/worker-provider.ts) — re-verified at this row's own commit — so this is the narrowest
+# eligible lane to test accepted-output-per-dollar before the triage WebSearch bridge, which
+# `openWeightTools` refuses outright (WebSearch is absent from the adapter). `triage`/`retro`
+# stay OFF this lane on purpose: triage's declared WebSearch is not adapter-eligible, and retro's
+# output is acted on directly rather than machine-linted. Model/effort/max_turns/context_budget
+# are UNCHANGED from the prior row — only the provider affinity is new. The routed trial cannot
+# begin until an operator applies the four-value TRIAL OPERATOR HANDOFF above this file's `note:`
+# (plan/tasks.d/W1-T3569-...yaml): enable the provider, set the Azure endpoint, set
+# `dailyCapUsd: 5`, and place the daemon-only key — none of which this row performs by itself, and
+# W1-T3575's runtime cap (src/lib/worker-provider.ts) refuses any paid request before transport
+# until `dailyCapUsd` is configured.
 synthesis:
   retro:       { model: claude-opus-5, effort: high, max_turns: 400, context_budget: 180000 }
   triage:      { model: sonnet,        effort: low,  max_turns: 400, context_budget: 180000 }
-  inbox_draft: { model: sonnet,        effort: high, max_turns: 400, context_budget: 180000 }
+  inbox_draft: { model: sonnet,        effort: high, max_turns: 400, context_budget: 180000, provider: openweight }
 
 # ── The flight-judge mount (Layer 2, W1-T21 — MASTER-PLAN §4B) ─────────────────
 # The advisory process-judge a Layer-1 trip (flight-signals.ts, W1-T20) spawns
@@ -244,6 +280,34 @@ judge:
   effort: high
   max_turns: 400
   context_budget: 150000
+
+# ── The escalation judge (W1-T3614) ───────────────────────────────────────────
+# THE HIGHEST-VOLUME ZERO-TOOL LANE IN THE FLEET, AND IT HAD NO ROW OF ITS OWN. Measured over the
+# ledger union: `escalation.judged` is 29,834 rows across 72 tasks in 6.9 days and RISING (6,026 on
+# 2026-09-14) -- roughly 50x the ~120/day of `inbox.draft_synthesized`, the lane W1-T3094 calls the
+# largest in the fleet. Its dedup is not the cause: `lookupDuplicateEscalation` runs BEFORE
+# `judgeEscalation`, so these are genuinely distinct escalations.
+#
+# ELIGIBLE BY CONSTRUCTION, NOT BY ARGUMENT. `ESCALATION_JUDGE_TOOLS` is `[]` -- the empty list is
+# trivially a subset of `OPENWEIGHT_FUNCTIONS`, and src/lib/escalate.ts says why that is safe:
+# "everything it needs is baked into the prompt, so it has no ability to explore the worktree or
+# take any action".
+#
+# haiku/low RESOLVES TO `economy`, which leads with gpt-oss-120b -- the deployment MEASURED cheaper
+# for this lane's short prompts (446 in / 177 out). The model and effort are unchanged from what
+# `resolveRiskJudgeMount` was already returning; only the provider is new.
+#
+# SAFE TO ROUTE BECAUSE FAILING OPEN IS ALREADY THE CONTRACT: `judgeEscalation` returns `deliver`
+# on ANY spawn error, so a bad deployment shows the operator MORE, never less. This row is
+# deliberately NOT the `judge:` mount above -- that one is bound by the Tier Invariant (G-17),
+# which compares tier and capability rank against every worker it supervises, and openweight sits
+# outside the `tiers` table those checks read.
+escalation_judge:
+  model: haiku
+  effort: low
+  max_turns: 400
+  context_budget: 60000
+  provider: openweight
 
 # ── max_turns is a RUNAWAY CLIFF, not a work limit (§9 tripwire re-base) ────────
 # The implement/reviewer/fix/diagnose worker lanes stay at a FLAT 400 — a tripwire

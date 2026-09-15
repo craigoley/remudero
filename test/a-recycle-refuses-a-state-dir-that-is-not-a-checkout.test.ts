@@ -120,6 +120,14 @@ function runRecycle(opts: RunOpts): Run {
     // container" guard does not fire merely because the TEST RUNNER itself is sandboxed.
     RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "a-recycle-checkout-no-such-dockerenv-marker"),
   };
+  // W1-T3596 ships `.remudero/daemon-instances.yaml`, and an unscoped recycle with no explicit
+  // RMD_STATE_DIR now refuses on THAT ("no --instance given while ... declares instances") before
+  // the STATE_DIR predicate this suite exists to measure. The bare default is still reachable
+  // wherever no registry is readable — the compatibility arm W1-T3596 preserves byte-for-byte —
+  // so point the registry at an absent file and keep this suite measuring its own subject. The
+  // tests that pass `stateDir` have already named a target and never reach that refusal either
+  // way; `extraEnv` below still overrides this for anything that wants the registry present.
+  env.RMD_INSTANCE_REGISTRY = join(tmpdir(), "a-recycle-checkout-no-such-instance-registry.yaml");
   delete env.RMD_STATE_DIR;
   delete env.RMD_RECYCLE_FIRST_BOOT;
   if (opts.stateDir !== undefined) env.RMD_STATE_DIR = opts.stateDir;

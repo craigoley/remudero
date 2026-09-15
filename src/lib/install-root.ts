@@ -114,7 +114,7 @@ export type InstallState =
   | { status: "absent" }
   | { status: "not-a-repo" }
   | { status: "healthy"; headSha: string }
-  | { status: "unfit"; reason: "dirty" | "diverged" | "off-main"; detail: string };
+  | { status: "unfit"; reason: "dirty" | "diverged" | "off-main" | "fetch-failed"; detail: string };
 
 /** The branch HEAD points at, or `undefined` for a detached HEAD — same read as
  *  self-sync.ts's `currentBranch` (`symbolic-ref -q` exits 1 and prints nothing on detached,
@@ -132,12 +132,12 @@ function currentBranch(git: (args: string[]) => string): string | undefined {
  *   ABSENT      — does not exist, or exists as an empty directory (a valid clone target).
  *   NOT-A-REPO  — exists, non-empty, holds no `.git` — never rm -rf'd, only ever refused.
  *   HEALTHY     — a clean checkout on `main` whose HEAD is an ancestor of origin/main.
- *   UNFIT       — dirty, off-main/detached, or carrying a commit origin/main does not have
- *                 (diverged); "name the state" — the `reason` distinguishes which.
+ *   UNFIT       — dirty, off-main/detached, diverged, or fetch-failed; "name the state" — the
+ *                 `reason` distinguishes which.
  *
- * Fetches `origin` once (so HEALTHY/UNFIT are judged against current refs); NEVER mutates the
- * working tree or any branch — that is exclusively {@link provisionInstallRoot}'s job, and only
- * on the HEALTHY/ABSENT branches.
+ * Fetches `origin` once, best-effort (a failed fetch is UNFIT(fetch-failed), never a throw);
+ * NEVER mutates the working tree or any branch — that is exclusively {@link
+ * provisionInstallRoot}'s job, and only on the HEALTHY/ABSENT branches.
  */
 export function inspectInstallRoot(path: string, deps: InstallRootDeps = {}): InstallState {
   const execFile = deps.execFile ?? defaultExecFile;
@@ -152,7 +152,16 @@ export function inspectInstallRoot(path: string, deps: InstallRootDeps = {}): In
   }
 
   const git = (args: string[]) => execFile("git", ["-C", path, ...args]);
-  git(["fetch", "--quiet", "origin"]);
+  try {
+    git(["fetch", "--quiet", "origin"]);
+  } catch (err) {
+    const message = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").trim();
+    return {
+      status: "unfit",
+      reason: "fetch-failed",
+      detail: `git fetch origin failed (${message}) — no-opping this tick rather than deploying against refs that could not be confirmed fresh`,
+    };
+  }
   const headSha = git(["rev-parse", "HEAD"]).trim();
 
   const porcelain = git(["status", "--porcelain"]).trim();
@@ -207,7 +216,11 @@ export type ProvisionOutcome =
   | { action: "cloned"; headSha: string }
   | { action: "fast-forwarded"; fromSha: string; toSha: string }
   | { action: "up-to-date"; headSha: string }
-  | { action: "refused"; reason: "not-a-repo" | "dirty" | "diverged" | "off-main"; detail: string };
+  | {
+      action: "refused";
+      reason: "not-a-repo" | "dirty" | "diverged" | "off-main" | "fetch-failed";
+      detail: string;
+    };
 
 /**
  * PROVISION-OR-REFUSE (design note iii) — the only function in this module that mutates

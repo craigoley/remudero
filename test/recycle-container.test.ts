@@ -54,6 +54,10 @@ const DECLARED_RUNTIME_FIXTURE: Record<string, string> = {
   // W1-T2932: the heap ceiling. Its VALUE is a host sizing decision and deliberately not declared
   // anywhere in this repo; only the NAME is, so a recycle carries whatever the live container holds.
   NODE_OPTIONS: "--max-old-space-size=8192",
+  // W1-T3603: the open-weight adapter's credential. The fixture value is deliberately
+  // distinctive so the never-printed assertion below can search for it verbatim rather than
+  // matching a substring some unrelated output happens to contain.
+  RMD_OPENWEIGHT_API_KEY: "openweight-key-fixture-3f9c1d",
 };
 
 /** The image env plus every declared runtime var at its fixture value, one override or drop applied. */
@@ -784,11 +788,47 @@ test("Git author override values never reach recycle output", () => {
   assert.doesNotMatch(run.stderr, new RegExp(authorEmail));
 });
 
+test("the openweight API key is declared on every recycle surface", () => {
+  // W1-T3603. The name must reach ALL FOUR surfaces or an operator who follows W1-T3569's
+  // handoff arms recycle-container.sh's undeclared-runtime-variable refusal — `exit 1`, nothing
+  // touched — on every subsequent recycle, the supervisor's own included. Asserted per-surface
+  // rather than by whole-list equality so a failure names which surface was missed.
+  const sharedSrc = readFileSync(SHARED_RUNTIME_VARS_FILE, "utf8");
+  const recycleSrc = readFileSync(SCRIPT, "utf8");
+  const hostUpdateSrc = readFileSync(HOST_UPDATE_SCRIPT, "utf8");
+  const name = "RMD_OPENWEIGHT_API_KEY";
+
+  assert.ok(extractBashArray(sharedSrc, "RMD_DAEMON_RUNTIME_ENV_VARS").includes(name), `deploy/runtime-env-vars.sh must declare ${name}`);
+  assert.ok(extractBashArray(recycleSrc, "RMD_DAEMON_RUNTIME_ENV_VARS").includes(name), `recycle-container.sh's fallback must declare ${name}`);
+  assert.ok(extractBashArray(hostUpdateSrc, "RMD_DAEMON_RUNTIME_ENV_VARS").includes(name), `host-update.sh's fallback must declare ${name}`);
+  assert.ok(printDaemonRunEnvNames().includes(name), `--print-daemon-run must pass ${name} through`);
+
+  // NAME ONLY — deploy/runtime-env-vars.sh's own header forbids a token or a path to one living
+  // in this repo, and that property is what makes declaring a CREDENTIAL here safe at all.
+  assert.doesNotMatch(sharedSrc, /RMD_OPENWEIGHT_API_KEY\s*=/, "the shared list must name the key, never assign it a value");
+});
+
+test("the openweight API key value never reaches recycle output", () => {
+  // W1-T3603. The capture loop must carry the credential into the replacement container while
+  // never printing it: a recycle runs in an operator's scrollback and in journald. The fixture
+  // value is distinctive (DECLARED_RUNTIME_FIXTURE) so this searches for it verbatim.
+  const secret = DECLARED_RUNTIME_FIXTURE.RMD_OPENWEIGHT_API_KEY;
+  const run = runRecycle("happy");
+
+  assert.equal(run.status, 0, `expected success, got ${run.status}: ${run.stderr}`);
+  const runCall = run.calls.filter(isRun)[0];
+  assert.ok(runCall, "a docker run call must have happened");
+  assert.ok(runCall.argv.includes(`RMD_OPENWEIGHT_API_KEY=${secret}`), "the key must be carried into the replacement container");
+
+  assert.doesNotMatch(run.stdout, new RegExp(secret), "the key value must never reach stdout");
+  assert.doesNotMatch(run.stderr, new RegExp(secret), "the key value must never reach stderr");
+});
+
 test("W1-T1069: MUTANT: a fallback array edited out of sync with deploy/runtime-env-vars.sh is caught", () => {
   // Proves the consistency test above actually discriminates, rather than passing on any six names.
   const recycleSrc = readFileSync(SCRIPT, "utf8");
   const mutated = recycleSrc.replace(
-    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS)",
+    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY)",
     "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S)",
   );
   assert.notEqual(mutated, recycleSrc, "the mutation target must actually be present and unique");
