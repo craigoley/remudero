@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import { assessInstallForDeploy, inspectInstallRoot } from "../src/lib/install-root.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 // ── W1-T3605: A CONCURRENT FETCH RACE CRASHES THE SUPERVISOR TICK ──────────────────────────
 //
@@ -20,38 +21,26 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // discriminated from an unrelated failure kind (a genuinely unreadable install root) rather than
 // collapsed into the same reason.
 //
-// Real, throwaway git repos throughout — same discipline as test/install-root.test.ts's own
-// fixtures (gitFixture()-style, no stubbing of git itself). Only the `fetch` subcommand is
-// faked, via the module's existing `execFile` injection point (`InstallRootDeps.execFile`);
-// every other git invocation in a test below (rev-parse, status, merge-base, symbolic-ref,
-// clone) hits the real `git` binary against a real checkout.
+// Real, throwaway git repos throughout — built via the shared `gitRepo()` fixture
+// (test/helpers/git-repo.ts, W1-T2903) rather than a hand-rolled `git init`/`git clone`, so this
+// file never grows the `fixture-copy-census` baseline on its own account. Only the `fetch`
+// subcommand is faked, via the module's existing `execFile` injection point
+// (`InstallRootDeps.execFile`); every other git invocation below (rev-parse, status, merge-base,
+// symbolic-ref, clone) hits the real `git` binary against a real checkout.
 
-function git(dir: string, args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
+/** A bare `origin` on `main` with one commit pushed to it from a throwaway seed checkout. */
+function buildOrigin(): { originDir: string } {
+  const origin = gitRepo({ bare: true, branch: "main", kind: "install-root-fetch-race-origin" });
+  const seed = gitRepo({ branch: "main", kind: "install-root-fetch-race-seed" });
+  seed.addRemote("origin", origin.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  return { originDir: origin.dir };
 }
 
-function buildOrigin(dir: string): { originDir: string } {
-  const originDir = join(dir, "origin.git");
-  const seedDir = join(dir, "seed");
-  // `-b main` on the bare side too, matching test/install-root.test.ts's own buildOrigin — else
-  // the bare repo's HEAD symref stays on whatever `init.defaultBranch` the host configures.
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", originDir]);
-  execFileSync("git", ["init", "--quiet", "-b", "main", seedDir]);
-  git(seedDir, ["config", "user.email", "t@example.invalid"]);
-  git(seedDir, ["config", "user.name", "Test"]);
-  git(seedDir, ["remote", "add", "origin", originDir]);
-  writeFileSync(join(seedDir, "marker.txt"), "v1\n");
-  git(seedDir, ["add", "."]);
-  git(seedDir, ["commit", "--quiet", "-m", "v1"]);
-  git(seedDir, ["push", "--quiet", "origin", "main"]);
-  return { originDir };
-}
-
-/** A real clone of `originDir`, with user.* configured so commits inside it can succeed. */
-function cloneFrom(originDir: string, dest: string): void {
-  execFileSync("git", ["clone", "--quiet", originDir, dest]);
-  git(dest, ["config", "user.email", "t@example.invalid"]);
-  git(dest, ["config", "user.name", "Test"]);
+/** A real clone of `originDir` — install roots are read-only in every test below, so no
+ *  identity configuration is needed inside the clone itself. */
+function cloneInstall(originDir: string): string {
+  return gitRepo({ cloneFrom: originDir, kind: "install-root-fetch-race-install" }).dir;
 }
 
 function withTmp<T>(body: (dir: string) => T): T {
@@ -76,28 +65,24 @@ function execFileFailingFetch(cmd: string, args: string[]): string {
 // ── Acceptance 1: a non-zero fetch yields a named unfit assessment, not an uncaught error ──
 
 test("inspectInstallRoot: a failing fetch is a named no-op (unfit: fetch-failed), never an uncaught throw", () => {
-  withTmp((dir) => {
-    const { originDir } = buildOrigin(dir);
-    const installDir = join(dir, "install");
-    cloneFrom(originDir, installDir);
+  const { originDir } = buildOrigin();
+  const installDir = cloneInstall(originDir);
 
-    // Falsifier check embedded: absent the fix's try/catch, this call throws instead of
-    // returning — `assert.doesNotThrow` would be redundant since a throw fails the test anyway,
-    // so the state shape itself is the proof.
-    const state = inspectInstallRoot(installDir, { execFile: execFileFailingFetch });
+  // Falsifier check embedded: absent the fix's try/catch, this call throws instead of
+  // returning — `assert.doesNotThrow` would be redundant since a throw fails the test anyway,
+  // so the state shape itself is the proof.
+  const state = inspectInstallRoot(installDir, { execFile: execFileFailingFetch });
 
-    assert.equal(state.status, "unfit");
-    assert.equal(state.status === "unfit" && state.reason, "fetch-failed");
-    assert.match(state.status === "unfit" ? state.detail : "", /cannot lock ref|concurrent/);
-  });
+  assert.equal(state.status, "unfit");
+  assert.equal(state.status === "unfit" && state.reason, "fetch-failed");
+  assert.match(state.status === "unfit" ? state.detail : "", /cannot lock ref|concurrent/);
 });
 
 test("assessInstallForDeploy: a failing fetch no-ops with a named reason instead of throwing out of the deploy gate", () => {
   withTmp((dir) => {
-    const { originDir } = buildOrigin(dir);
-    const installDir = join(dir, "install");
+    const { originDir } = buildOrigin();
+    const installDir = cloneInstall(originDir);
     const operatorDir = join(dir, "operator");
-    cloneFrom(originDir, installDir);
     mkdirSync(operatorDir, { recursive: true });
 
     const assessment = assessInstallForDeploy(installDir, {
@@ -142,9 +127,8 @@ test("assessInstallForDeploy: an unreadable install root and a transient fetch r
       stateRoot: join(dir, "state"),
     });
 
-    const { originDir } = buildOrigin(dir);
-    const installDir = join(dir, "install");
-    cloneFrom(originDir, installDir);
+    const { originDir } = buildOrigin();
+    const installDir = cloneInstall(originDir);
     const fetchRace = assessInstallForDeploy(installDir, {
       operatorRepoRoot: operatorDir,
       stateRoot: join(dir, "state"),
