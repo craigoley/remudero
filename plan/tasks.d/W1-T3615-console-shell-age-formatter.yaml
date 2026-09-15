@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: low
   budget_usd: 20.00
-  files: [src/lib/console-shell-client.ts, test/console-freshness.test.ts]
+  files: [src/lib/console-shell-client.ts, test/console-shell-age-formatter.test.ts]
   origin: oper#console-is-its-own-repo-2026-09-15
   plan_refs: ["W1-T3173", "W1-T2902", "W1-T189"]
   status: queued
