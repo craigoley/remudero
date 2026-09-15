@@ -57,11 +57,6 @@ function dirtyFleetPr(over: Partial<OpenPrView> = {}): OpenPrView {
     mergeState: "dirty",
     mergeable: false,
     mergeableState: "dirty",
-    mergeConflict: {
-      files: [{ path: "src/lib/sweep.ts", oursDeleted: 1, theirsDeleted: 0 }],
-      oursLog: "branch changed sweep.ts",
-      theirsLog: "main changed sweep.ts too",
-    },
     ...over,
   };
 }
@@ -193,7 +188,7 @@ test("W1-T2999: a conflicting rebase still escalates", async () => {
   assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
   assert.equal(deps.escalated.length, 1, "a rebase conflict falls through to the existing escalation");
   assert.match(deps.escalated[0].reason, /merge conflict \(mergeState dirty\)/);
-  assert.match(deps.escalated[0].reason, /never auto-resolved/);
+  assert.match(deps.escalated[0].reason, /not dispatched/);
   const attempts = readLedgerLines(deps.ledgerPath).filter((line) => line.step === "sweep.dirty_fleet_rebase.conflict");
   assert.equal(attempts.length, 1);
 });

@@ -21,6 +21,14 @@
 // Why: docs/forensics/diff-class.md#module-header (CI-spend measurement, scope-predicate rationale).
 
 import { readFileSync, readdirSync } from "node:fs";
+// W1-T3602: a SECOND, namespace-style import of the same built-in, used only inside
+// `censusSuiteFiles`'s per-file read below. A named `import { readFileSync }` binding cannot be
+// intercepted by `t.mock.method` (verified: it still calls the real implementation), while the
+// SAME underlying function reached via this default-export object can -- the same pattern
+// `src/lib/status-board.ts` already uses for `fs.statSync`. That is what makes the ENOENT-skip
+// arm below a real, driven fixture (test/a-census-suite-is-unreachable-from-the-symbols-a-diff-
+// changes.test.ts) instead of an untested comment.
+import fs from "node:fs";
 import { join, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 // `plan-scope.ts` is the canonical predicate's dependency-free leaf. Node 22.22.3 can strip its
@@ -233,7 +241,24 @@ export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
     if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
     const rel = relative(root, join(testDir, entry.name)).split(sep).join("/");
     if (changed.has(rel)) continue; // a suite the diff itself edits is already in hand
-    const content = readFileSync(join(testDir, entry.name), "utf8");
+    let content;
+    try {
+      content = fs.readFileSync(join(testDir, entry.name), "utf8");
+    } catch (err) {
+      // W1-T3602: `readdirSync` above is a SNAPSHOT; a concurrently-run suite (e.g.
+      // test/a-ci-skip-guard-can-fire-unconditionally.test.ts's "UNSTAGED suite" probe) can write
+      // and then remove a real, untracked `test/*.test.ts` file WHILE this loop is still walking
+      // the directory it listed a moment earlier — node's test runner executes files in parallel by
+      // default, so this snapshot-then-read TOCTOU is a genuine, measured race (reproduced under a
+      // full, un-sharded local suite run), never a synthetic one. A file that vanished between the
+      // two syscalls was never a real member of the population this run enumerates over, so
+      // skipping it changes no census answer for a real, present file. Only ENOENT is swallowed —
+      // any OTHER read failure (permissions, a genuinely corrupt tree) still propagates and fails
+      // this call closed, exactly as the CLI's own `--plan-reading-root`-driven test demands for a
+      // missing DIRECTORY.
+      if ((err && /** @type {{code?: string}} */ (err).code) === "ENOENT") continue;
+      throw err;
+    }
     const bare = withoutRelativePathLiterals(content);
     const walksAnArea = enumeratesPopulation(content) && [...areas].some((a) => bare.includes(a));
     const readsAChangedFile = [...sourceTextPathsRead(content)].some((p) => changed.has(p));

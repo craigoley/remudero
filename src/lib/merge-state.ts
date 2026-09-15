@@ -61,9 +61,11 @@ export interface RedundantRefixEvidence {
  * The merge-conflict fix mode's ONLY input (W1-T94's mode table gains
  * merge-conflict, design note iii): the conflicting file list plus BOTH
  * sides' log since the merge-base, so the dispatched fix worker can perform
- * the SAME hand-resolution procedure the #170 incident demonstrated — merge
- * (never rebase-force), union ONLY where the diffs below show pure
- * concurrent addition, refuse into escalate otherwise.
+ * a bounded hand-resolution procedure — merge (never rebase-force), union
+ * only where the diffs show a pure concurrent addition, and otherwise inspect
+ * the actual hunks and surrounding behavior before making a semantic repair.
+ * Captured REST deltas identify the candidate paths; they are not themselves a
+ * license to choose an entire side of a conflict mechanically.
  */
 export interface MergeConflictEvidence {
   files: ConflictFileDiff[];

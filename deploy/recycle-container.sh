@@ -82,6 +82,23 @@
 
 set -euo pipefail
 
+# ── BASH 3.2 PORTABILITY (W1-T3595) ─────────────────────────────────────────────────────────────
+# The macOS worker host's `/bin/bash` is 3.2 (Apple has shipped nothing newer since the GPLv3
+# relicense), which rejects `readarray`/`mapfile` outright ("command not found") and rejects
+# `declare -A` outright ("invalid option") — both are Bash-4-only. A shebang change is not a fix:
+# this file already uses `#!/usr/bin/env bash`, and that resolves to the same Bash 3.2 on that
+# host. So every line array this script built with `readarray -t NAME < <(cmd)` below is now filled
+# by an equivalent `while IFS= read -r line || [ -n "${line}" ]; do NAME+=("${line}"); done <
+# <(cmd)` loop instead — the trailing `|| [ -n "${line}" ]` keeps a final, unterminated line (one
+# with no trailing newline) exactly as `readarray -t` would have kept it. And the two name/value
+# maps this script used to hold in `declare -A` (CAPTURED, CAPTURED_SOURCE) are emulated below with
+# per-key indirect variables instead — see `CAPTURED_set`/`CAPTURED_get` where CAPTURED used to be
+# declared. Both replacements use only ordinary indexed arrays, `printf -v` (Bash 3.1+) and `${!var}`
+# indirection (Bash 2+), all portable to Bash 3.2, and neither changes an empty-value or
+# duplicate-key outcome: a value that was empty before is still stored (and read back) as empty, and
+# setting the same key twice still overwrites rather than appending, exactly like an associative
+# array would.
+
 # ── THE DECLARED RUNTIME VARIABLE NAMES — ONE LIST, READ HERE AND BY host-update.sh (W1-T1069) ──
 # `deploy/runtime-env-vars.sh` is the single source of truth for which environment variable NAMES
 # the daemon container carries at runtime; see that file's header for the full rationale. Sourced,
@@ -480,9 +497,15 @@ fi
 DAEMON_TREE="${STATE_DIR}/remudero"
 if [ -e "${DAEMON_TREE}/.git" ]; then
   if git -C "${DAEMON_TREE}" fetch --quiet origin >/dev/null 2>&1; then
-    readarray -t DIRTY_TRACKED_PATHS < <(git -C "${DAEMON_TREE}" diff --name-only HEAD 2>/dev/null | sed '/^$/d')
+    DIRTY_TRACKED_PATHS=()
+    while IFS= read -r line || [ -n "${line}" ]; do
+      DIRTY_TRACKED_PATHS+=("${line}")
+    done < <(git -C "${DAEMON_TREE}" diff --name-only HEAD 2>/dev/null | sed '/^$/d')
     if [ "${#DIRTY_TRACKED_PATHS[@]}" -gt 0 ]; then
-      readarray -t INCOMING_PATHS < <(git -C "${DAEMON_TREE}" diff --name-only HEAD..origin/main 2>/dev/null | sed '/^$/d')
+      INCOMING_PATHS=()
+      while IFS= read -r line || [ -n "${line}" ]; do
+        INCOMING_PATHS+=("${line}")
+      done < <(git -C "${DAEMON_TREE}" diff --name-only HEAD..origin/main 2>/dev/null | sed '/^$/d')
       BLOCKING_PATHS=()
       for dirty_path in "${DIRTY_TRACKED_PATHS[@]}"; do
         for incoming_path in "${INCOMING_PATHS[@]}"; do
@@ -555,11 +578,17 @@ print_blocking_locks
 # because a pull is reversible (re-run it) and a removed container's only copy of a runtime
 # variable is not.
 CONTAINER_EXISTS=0
-declare -A CAPTURED=()
+# W1-T3595: `declare -A CAPTURED=()` / `declare -A CAPTURED_SOURCE=()` were Bash-4-only — see the
+# BASH 3.2 PORTABILITY note near the top of this file. Every key ever stored here is one of the
+# fixed, already-validated identifiers in RMD_DAEMON_RUNTIME_ENV_VARS, so a per-key indirect
+# variable is exactly equivalent to an associative-array lookup by that key.
+CAPTURED_set() { printf -v "CAPTURED__$1" '%s' "$2"; }
+CAPTURED_get() { local ref="CAPTURED__$1"; printf '%s' "${!ref-}"; }
 # W1-T2553: which source each captured value actually came from — "container", "shell" or
 # "neither". Exists so the refusal below can NAME what it consulted rather than assert it; the old
 # message claimed the shell had nothing without ever having read it.
-declare -A CAPTURED_SOURCE=()
+CAPTURED_SOURCE_set() { printf -v "CAPTURED_SOURCE__$1" '%s' "$2"; }
+CAPTURED_SOURCE_get() { local ref="CAPTURED_SOURCE__$1"; printf '%s' "${!ref-}"; }
 
 is_declared_runtime_var() {
   local needle="$1" candidate
@@ -576,7 +605,10 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   # trailing empty element (a real blind spot, named rather than assumed away — deploy/runtime-env-vars.sh
   # and W1-T1069's rationale), dropped here by the blank-line filter.
   CONTAINER_ENV_RAW="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
-  readarray -t CONTAINER_ENV_LINES < <(printf '%s\n' "${CONTAINER_ENV_RAW}" | sed '/^$/d')
+  CONTAINER_ENV_LINES=()
+  while IFS= read -r line || [ -n "${line}" ]; do
+    CONTAINER_ENV_LINES+=("${line}")
+  done < <(printf '%s\n' "${CONTAINER_ENV_RAW}" | sed '/^$/d')
 
   # The container's OWN image env — subtracted below to find what is genuinely runtime-set. Read via
   # `.Config.Image` (the reference this container was started FROM), never `.Image` (the resolved
@@ -588,7 +620,9 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   if [ -n "${CONTAINER_IMAGE_REF}" ]; then
     if IMAGE_ENV_RAW="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_IMAGE_REF}" 2>/dev/null)"; then
       IMAGE_ENV_KNOWN=1
-      readarray -t IMAGE_ENV_LINES < <(printf '%s\n' "${IMAGE_ENV_RAW}" | sed '/^$/d')
+      while IFS= read -r line || [ -n "${line}" ]; do
+        IMAGE_ENV_LINES+=("${line}")
+      done < <(printf '%s\n' "${IMAGE_ENV_RAW}" | sed '/^$/d')
     fi
   fi
 
@@ -651,27 +685,27 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
       esac
     done
     if [ -n "${val}" ]; then
-      CAPTURED_SOURCE["${name}"]="container"
+      CAPTURED_SOURCE_set "${name}" "container"
     else
       val="${!name-}"
       if [ -n "${val}" ]; then
-        CAPTURED_SOURCE["${name}"]="shell"
+        CAPTURED_SOURCE_set "${name}" "shell"
       else
-        CAPTURED_SOURCE["${name}"]="neither"
+        CAPTURED_SOURCE_set "${name}" "neither"
       fi
     fi
-    CAPTURED["${name}"]="${val}"
+    CAPTURED_set "${name}" "${val}"
   done
 else
   # No container by this name yet (first-ever run on a fresh host) — the only place a declared
   # runtime variable can come from is this shell's own environment.
   for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
-    CAPTURED["${name}"]="${!name-}"
-    CAPTURED_SOURCE["${name}"]="$([ -n "${!name-}" ] && echo shell || echo neither)"
+    CAPTURED_set "${name}" "${!name-}"
+    CAPTURED_SOURCE_set "${name}" "$([ -n "${!name-}" ] && echo shell || echo neither)"
   done
 fi
 
-CAPTURED_TOKEN="${CAPTURED[GH_TOKEN]-}"
+CAPTURED_TOKEN="$(CAPTURED_get GH_TOKEN)"
 
 # ── APP AUTH IS A DURABLE CREDENTIAL, SO THE GH_TOKEN REFUSAL DOES NOT APPLY TO IT ──────────────
 # The refusal below exists for exactly ONE reason, stated in its own text: GH_TOKEN lives only in
@@ -712,21 +746,23 @@ app_auth_host_path() {
 APP_AUTH_MISSING=""
 APP_KEY_HOST=""
 app_auth_note() { APP_AUTH_MISSING="${APP_AUTH_MISSING}${APP_AUTH_MISSING:+; }$1"; }
-[ -n "${CAPTURED[GH_APP_ID]-}" ] || app_auth_note "GH_APP_ID is not set"
-[ -n "${CAPTURED[GH_APP_INSTALLATION_ID]-}" ] || app_auth_note "GH_APP_INSTALLATION_ID is not set"
-if [ -z "${CAPTURED[GH_APP_PRIVATE_KEY_PATH]-}" ]; then
+[ -n "$(CAPTURED_get GH_APP_ID)" ] || app_auth_note "GH_APP_ID is not set"
+[ -n "$(CAPTURED_get GH_APP_INSTALLATION_ID)" ] || app_auth_note "GH_APP_INSTALLATION_ID is not set"
+CAPTURED_APP_KEY_PATH="$(CAPTURED_get GH_APP_PRIVATE_KEY_PATH)"
+if [ -z "${CAPTURED_APP_KEY_PATH}" ]; then
   app_auth_note "GH_APP_PRIVATE_KEY_PATH is not set"
 else
-  APP_KEY_HOST="$(app_auth_host_path "${CAPTURED[GH_APP_PRIVATE_KEY_PATH]}")"
+  APP_KEY_HOST="$(app_auth_host_path "${CAPTURED_APP_KEY_PATH}")"
   if [ -z "${APP_KEY_HOST}" ]; then
-    app_auth_note "GH_APP_PRIVATE_KEY_PATH (${CAPTURED[GH_APP_PRIVATE_KEY_PATH]}) is under neither bind mount, so this shell cannot verify the key exists"
+    app_auth_note "GH_APP_PRIVATE_KEY_PATH (${CAPTURED_APP_KEY_PATH}) is under neither bind mount, so this shell cannot verify the key exists"
   elif [ ! -s "${APP_KEY_HOST}" ]; then
     app_auth_note "the App private key is missing or empty on this host at ${APP_KEY_HOST}"
   fi
 fi
 
 if [ -n "${CAPTURED_TOKEN}" ]; then
-  echo "recycle-container: GH_TOKEN captured from ${CAPTURED_SOURCE[GH_TOKEN]-unknown}"
+  GH_TOKEN_SOURCE="$(CAPTURED_SOURCE_get GH_TOKEN)"
+  echo "recycle-container: GH_TOKEN captured from ${GH_TOKEN_SOURCE:-unknown}"
 elif [ -z "${APP_AUTH_MISSING}" ]; then
   echo "recycle-container: no GH_TOKEN captured, and NONE IS NEEDED — App auth is fully configured."
   echo "recycle-container:   GH_APP_ID and GH_APP_INSTALLATION_ID carried across; private key readable at ${APP_KEY_HOST}."
@@ -778,7 +814,7 @@ fi
 OTHER_CAPTURED_NAMES=""
 for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
   [ "${name}" = "GH_TOKEN" ] && continue
-  [ -n "${CAPTURED[${name}]-}" ] || continue
+  [ -n "$(CAPTURED_get "${name}")" ] || continue
   OTHER_CAPTURED_NAMES="${OTHER_CAPTURED_NAMES}${OTHER_CAPTURED_NAMES:+, }${name}"
 done
 if [ -n "${OTHER_CAPTURED_NAMES}" ]; then
@@ -801,7 +837,7 @@ for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
   if [ "${name}" = "GH_TOKEN" ]; then
     RUN_ENV_ARGS+=(-e "GH_TOKEN=")
   else
-    RUN_ENV_ARGS+=(-e "${name}=${CAPTURED[${name}]-}")
+    RUN_ENV_ARGS+=(-e "${name}=$(CAPTURED_get "${name}")")
   fi
 done
 

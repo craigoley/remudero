@@ -1,0 +1,53 @@
+- id: W1-T3615
+  title: "THE CONSOLE HEADER'S AGE FORMATTER IS A SECOND, DRIFTING COPY — console-freshness.ts exports a tested four-tier formatAge and its own header claims the shell mirrors it, but the browser copy is one tier, so an idle console renders `updated 3600s ago` where the tested function says `1h ago`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 20.00
+  files: [src/lib/console-shell-client.ts, test/console-shell-age-formatter.test.ts]
+  origin: oper#console-is-its-own-repo-2026-09-15
+  plan_refs: ["W1-T3173", "W1-T2902", "W1-T189"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-FILED FROM W1-T3173, RETIRED THE SAME DAY, AND RE-MEASURED ON main RATHER THAN INHERITED.
+    That shard's ruling — the console stays in this repo, bundle it as a React SPA — was reversed by
+    operator ruling 2026-09-15. This half of its diagnosis was not, and it is the falsifiable half.
+
+    THE DRIFT DID NOT GET FIXED; IT MOVED. W1-T3173 cited serve.ts:4936. W1-T2902 then lifted the
+    browser code out of renderShellHtml's template literal into src/lib/console-shell-client.ts —
+    a real improvement, since eslint and coverage can see it now — and carried the defect across
+    unchanged. The line is console-shell-client.ts:3678:
+      el.textContent = secs < 2 ? "updated just now" : `updated ${secs}s ago`;
+
+    MEASURED 2026-09-15, the tested formatAge against what the browser actually renders:
+         1s  tested=just now    browser=updated just now
+        45s  tested=45s ago     browser=updated 45s ago
+      3600s  tested=1h ago      browser=updated 3600s ago
+      90000s tested=1d ago      browser=updated 90000s ago
+    They agree below a minute and diverge above it — which is exactly the range an idle console
+    sits in, so this is invisible in the case somebody is watching and present in the case nobody
+    is.
+
+    AND console-freshness.ts's OWN HEADER ALREADY CLAIMS OTHERWISE: formatAge is documented as
+    "ONE formatter, so every '… ago' on the header reads identically". That claim is false today.
+    Either the copy calls the tested function or the claim comes out; a header asserting a shared
+    formatter over two drifting ones is worse than no claim at all.
+
+    NOT IN SCOPE, NAMED SO IT IS NOT SILENTLY ABSORBED: console-shell-client.ts carries @ts-nocheck
+    by stated necessity, since its body must ship as plain browser JS. That is a separate,
+    documented condition and this task neither fixes nor endorses it.
+  design: |
+    Make the browser render the tested formatter instead of a second implementation of it. The
+    binding constraint is the file's own: the client body must stay plain, unannotated browser JS,
+    so whatever carries formatAge across has to satisfy that. Inlining the tested source is
+    acceptable; a second hand-written copy is not; and the suite must go red when the two disagree,
+    which is what stops this from moving a third time.
+  acceptance:
+    - claim: "the console header renders the tested four-tier age, so an hour-old reading says 1h ago rather than 3600s ago"
+      proof: "unit test: the console header renders the tested four-tier age, never a second one-tier copy"
+    - claim: "a future second copy of the age formatter is caught by the suite rather than by an operator screenshot"
+      proof: "unit test: a seconds-only age formatter in the shell client is refused"

@@ -2646,32 +2646,51 @@ function undeclaredGeneratorPaths(
   return files.filter((f) => !Object.hasOwn(generators, f.path)).map((f) => f.path);
 }
 
-/** W1-T2536/W1-T2548 — WHICH refusal disjunct fired, as a phrase for the row's `reason`: a
- *  deletion, no captured evidence, admission disabled, or the MIXED case straddling
- *  {@link REGENERABLE_ARTIFACT_GENERATORS}. The disabled arm is unreachable at the shipped default
- *  and written anyway, because the flag is policy DATA an operator may set false. */
+/** A conflict-repair worker needs an observed, non-empty file set. The REST producer owns the
+ * shape, but this boundary still validates it: a malformed external response must not turn a
+ * dirty PR into a write to its branch. It deliberately does NOT classify semantics from deletion
+ * counts; the worker obtains the real hunks after merging main into the fleet-owned branch. */
+export function hasCapturedMergeConflictEvidence(evidence: MergeConflictEvidence | undefined): boolean {
+  return (
+    evidence !== undefined &&
+    evidence.files.length > 0 &&
+    evidence.files.every(
+      (file) =>
+        typeof file.path === "string" &&
+        file.path.trim().length > 0 &&
+        typeof file.oursDeleted === "number" &&
+        Number.isSafeInteger(file.oursDeleted) &&
+        file.oursDeleted >= 0 &&
+        typeof file.theirsDeleted === "number" &&
+        Number.isSafeInteger(file.theirsDeleted) &&
+        file.theirsDeleted >= 0,
+    )
+  );
+}
+
+/** WHICH refusal disjunct fired when a dirty PR cannot enter the bounded repair worker: absent
+ * evidence or the explicit policy switch. A deletion is no longer a refusal on an rmd-owned
+ * branch: it is evidence the worker must inspect the real hunk rather than union text. */
 export function conflictRefusalCause(
   files: readonly ConflictFileDiff[],
   policy: Pick<SweepPolicy, "mergeConflictAdmissionEnabled">,
   generators: Readonly<Record<string, string>> = REGENERABLE_ARTIFACT_GENERATORS,
   evidence?: MergeConflictEvidence,
 ): string {
-  if (files.length === 0) return "no file evidence was captured";
-  const redundantDecline = redundantRefixConflictDeclineCause(evidence);
-  if (redundantDecline) return redundantDecline;
-  if (files.some((f) => f.oursDeleted > 0 || f.theirsDeleted > 0)) {
-    const undeclared = undeclaredGeneratorPaths(files, generators);
-    // Name the offending path(s) only when the conflict STRADDLES the registry: where no path is
-    // declared — the dominant hand-written shape — "involves a deletion" already says it all.
-    if (undeclared.length > 0 && undeclared.length < files.length) {
-      return `involves a deletion, and ${undeclared.join(", ")} ${undeclared.length === 1 ? "has" : "have"} no declared generator`;
-    }
-    return "involves a deletion";
+  if (!hasCapturedMergeConflictEvidence(evidence ?? { files: [...files], oursLog: "", theirsLog: "" })) {
+    return "no valid conflicting-file evidence was captured";
   }
   if (policy.mergeConflictAdmissionEnabled !== true) {
-    return "auto-resolution admission is disabled (mergeConflictAdmissionEnabled)";
+    return "conflict-repair admission is disabled (mergeConflictAdmissionEnabled)";
   }
-  return "not classifiable as a pure concurrent addition";
+  // This function is consumed only by the blocked row below. Keep the older semantic diagnostics
+  // available to direct callers, but do not make them a reason to suppress a bounded fleet repair.
+  const redundantDecline = redundantRefixConflictDeclineCause(evidence);
+  if (redundantDecline) return redundantDecline;
+  const undeclared = undeclaredGeneratorPaths(files, generators);
+  return undeclared.length > 0
+    ? `conflict repair was not admitted for ${undeclared.join(", ")}`
+    : "conflict repair was not admitted";
 }
 
 /** W1-T78 policy (rule 2) — how many strikes a fix-rung RE-DISPATCH gets once an operator answers a
@@ -2755,10 +2774,10 @@ export interface SweepPolicy {
    *  `status === "unique"` and FAILS CLOSED. // Why: a SEPARATE flag from
    *  {@link supersessionDisposalEnabled} — the blast radii differ. */
   conceptCoexistenceEnabled: boolean;
-  /** W1-T984/W1-T2536 — GATES THE `conflicted` ROW. Shipped OFF awaiting a semantic predicate; turned
-   *  ON because that predicate cannot live here — GitHub's COMPARE API never carries a HUNK. WHAT
-   *  MAKES ADMITTING SAFE IS THE FENCE DOWNSTREAM: a wrong resolution mints a NEW HEAD and
-   *  `remudero-review` is a required per-sha status, so the worst case is a red PR that escalates. */
+  /** GATES THE `conflicted` ROW for rmd-owned run branches with captured file evidence. GitHub's
+   *  COMPARE API never carries a HUNK, so it cannot make the semantic resolution; it only admits
+   *  the bounded worker that inspects one. A repair mints a NEW HEAD, which must receive a fresh
+   *  `remudero-review` and CI result before auto-merge can proceed. */
   mergeConflictAdmissionEnabled: boolean;
   /** W1-T2998 — may a red ratchet whose remedy is a RECORDED NUMBER be repaired deterministically
    *  instead of spending an LLM fix round? DEFAULT FALSE, and deliberately the same shape as
@@ -5034,22 +5053,21 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           : "review failing with no actionable unmet criteria (contradictory) — escalating",
   },
   {
-    // W1-T106 — CONFLICTED is a POSITIVE disposition, ABOVE mergeable: a dirty PR is NEVER armed
-    // however green. None of rows 3-7 reference `mergeState`, so this placement changes no
-    // precedence; it only guarantees row 8 never sees a dirty PR. Deterministically fixable (rule
-    // 2, never an LLM judgment) ONLY when {@link isPureConcurrentAddition},
-    // {@link isRegenerableArtifactConflict}, or {@link isRedundantRefixConflict} clears EVERY file;
-    // a conflict satisfying none of those arms falls to the next row. Why: the flag's history and
-    // the #170 incident — docs/forensics/sweep.md.
+    // CONFLICTED is above mergeable: a dirty PR is NEVER armed however green. The old policy
+    // admitted only zero-deletion/deterministic cases and stranded fleet PRs whenever main had
+    // deleted code. The repair worker already has a strike cap, lease-protected same-branch push,
+    // and a fresh review+CI fence; its prompt now requires hunk-level semantic reasoning. That is
+    // sufficient for the PR task's OWN rmd run branch, not for a human/contributor or foreign
+    // run branch we do not own.
     disposition: "conflicted",
     when: (pr, policy) => {
       if (policy.mergeConflictAdmissionEnabled !== true || pr.mergeState !== "dirty") return false;
-      const evidence = pr.mergeConflict;
-      const files = evidence?.files ?? [];
-      // W1-T2548: a SECOND, independent admission arm — either clears this row alone, never both
-      // required. The registry arm is checked first only because its reason is the more specific
-      // of the two when both happen to hold.
-      return isRegenerableArtifactConflict(files) || isRedundantRefixConflict(evidence) || isPureConcurrentAddition(files);
+      const taskId = pr.taskId;
+      return (
+        taskId !== undefined &&
+        fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId)) &&
+        hasCapturedMergeConflictEvidence(pr.mergeConflict)
+      );
     },
     reason: (pr) => {
       const evidence = pr.mergeConflict;
@@ -5071,29 +5089,38 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           `take main for the redundant hunk(s)`
         );
       }
+      if (files.some((file) => file.oursDeleted > 0 || file.theirsDeleted > 0)) {
+        return (
+          `merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on ` +
+          `${files.map((file) => `${file.path} (ours -${file.oursDeleted}, theirs -${file.theirsDeleted})`).join(", ")} — dispatching the bounded merge-conflict fix worker ` +
+          `to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head`
+        );
+      }
       return (
-        `merge conflict (mergeState dirty) — pure concurrent addition on ` +
-        `${files.map((f) => f.path).join(", ")} — dispatching the merge-conflict fix mode`
+        `merge conflict (mergeState dirty) — captured file evidence on ` +
+        `${files.map((f) => `${f.path} (ours -${f.oursDeleted}, theirs -${f.theirsDeleted})`).join(", ")} — dispatching the bounded merge-conflict fix worker; ` +
+        `it must inspect actual hunks and a fresh review and CI gate the new head`
       );
     },
   },
   {
-    // W1-T106 — the OTHER half of the same strand: a dirty PR whose conflict involves a DELETION
-    // on either side, or whose evidence could not be captured, is NEVER auto-resolved. "A wrong
-    // auto-resolution is worse than a strand" (design note iii, verbatim). REFUSE into escalate,
-    // the SAME blocked-ambiguous rung every other ambiguous block routes through, naming the
-    // conflicting files so an operator need not re-derive them.
-    //
-    // W1-T984: this escalation names the real paths AND each side's deletion count, so
-    // `files: none captured` now means evidence genuinely could not be read.
+    // A dirty contributor, foreign-run branch, an explicit policy disable, or missing evidence
+    // must still never receive an unattended write. A deletion by itself is not a refusal for
+    // the PR task's own rmd run branch; it is handled by the bounded worker above.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.mergeState === "dirty",
     reason: (pr, policy) => {
       const evidence = pr.mergeConflict;
       const files = evidence?.files ?? [];
       const fileList = files.map((f) => `${f.path} (ours -${f.oursDeleted}, theirs -${f.theirsDeleted})`).join(", ");
+      const taskId = pr.taskId;
+      const ownsExactRunBranch =
+        taskId !== undefined && fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId));
+      const cause = !ownsExactRunBranch
+        ? "head is not this PR task's rmd-owned run branch"
+        : conflictRefusalCause(files, policy, REGENERABLE_ARTIFACT_GENERATORS, evidence);
       return (
-        `merge conflict (mergeState dirty) — ${conflictRefusalCause(files, policy, REGENERABLE_ARTIFACT_GENERATORS, evidence)} — never auto-resolved — ` +
+        `merge conflict (mergeState dirty) — ${cause} — not dispatched — ` +
         `files: ${files.length > 0 ? fileList : "none captured"} — escalating`
       );
     },
