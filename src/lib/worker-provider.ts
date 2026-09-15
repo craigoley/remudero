@@ -619,8 +619,14 @@ export function codexCandidatesForCapability(
  * uses for a demoted model, so a deployment that stops answering falls back instead of failing the
  * lane.
  */
+// W1-T3614: economy leads with gpt-oss-120b and balanced with gpt-5-nano, MIRRORING
+// .remudero/mounts.yaml exactly -- a checkout with no mounts table must not silently prefer a
+// different deployment from one with it, which test/the-trial-deployment-is-the-cheaper-compliant-one
+// asserts directly. The leads differ because the cheaper deployment differs by prompt shape:
+// measured 2026-09-15, a 259,181-token inbox_draft favours nano 2.83x while a 446-token escalation
+// judgement favours gpt-oss 2.40x, since nano spends ~5x the completion tokens on reasoning.
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
-  economy: ["gpt-5-nano", "gpt-oss-120b"],
+  economy: ["gpt-oss-120b", "gpt-5-nano"],
   balanced: ["gpt-5-nano", "gpt-oss-120b"],
   frontier: ["gpt-oss-120b"],
 };
