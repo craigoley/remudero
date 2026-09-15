@@ -2333,12 +2333,20 @@ export async function spawnOpenWeightWorker(
     ];
     const maxTurns = args.maxTurns ?? 1;
     if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error("openweight maxTurns must be a positive integer");
+    // BOTH PER-DEPLOYMENT LOOKUPS ARE RESOLVED ONCE, HERE, AND PRICE GOES FIRST. They are
+    // loop-invariant -- `selection.model` cannot change between turns -- but the ORDER is the
+    // load-bearing part, not the hoist: an unknown deployment must refuse on its missing PRICE
+    // row (W1-T3597's contract, "refuses before transport rather than borrowing a rate"), not on
+    // its missing request-shape row. Building the body first put the shape lookup ahead of the
+    // reservation and silently changed that refusal's message. W1-T3608.
+    openWeightPriceFor(selection.model);
+    const temperatureField = openWeightTemperatureField(selection.model);
     for (;;) {
       turns += 1;
       const body = JSON.stringify({
         model: selection.model,
         messages,
-        ...openWeightTemperatureField(selection.model),
+        ...temperatureField,
         max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
         ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
       });

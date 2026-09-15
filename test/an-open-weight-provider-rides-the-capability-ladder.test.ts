@@ -554,6 +554,41 @@ test("a deployment that refuses a non-default temperature gets no temperature fi
   assert.throws(() => openWeightTemperatureField("gpt-9-unmeasured"), OpenWeightUnshapedDeploymentError);
 });
 
+test("an unpriced openweight deployment refuses on price before request shape", async () => {
+  // W1-T3608 ORDERING. Both per-deployment lookups refuse an unknown deployment, so WHICH refusal
+  // surfaces is a real contract: W1-T3597 pins "refuses before transport rather than borrowing a
+  // rate", and its fixture matches on /has no price row/. Resolving the request shape while
+  // building the body put the temperature lookup ahead of the reservation and silently rewrote
+  // that message — caught only because that fixture lives in a different test file, and a
+  // different CI shard.
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-order-"));
+  try {
+    const unknown = "a-deployment-in-neither-table";
+    assert.equal(unknown in OPENWEIGHT_PRICES, false, "the fixture must be absent from BOTH tables, or this proves nothing");
+    assert.equal(unknown in OPENWEIGHT_TEMPERATURE, false, "the fixture must be absent from BOTH tables, or this proves nothing");
+
+    let fetchCalls = 0;
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: "classify",
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async () => { fetchCalls += 1; throw new Error("an unknown deployment must never reach the transport"); },
+      },
+      { claudeBin: "/unused/claude", root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+      { model: unknown, effort: "low" },
+    );
+
+    assert.equal(fetchCalls, 0, "no request is made against a deployment in neither table");
+    assert.equal(result.isError, true);
+    assert.match(result.stderr, /has no price row/, "the PRICE refusal must surface first");
+    assert.doesNotMatch(result.stderr, /has no request-temperature row/, "the request-shape refusal must not pre-empt it");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("every priced openweight deployment declares a request temperature", async () => {
   // W1-T3608 census. A deployment reachable enough to be PRICED is reachable enough to be SENT a
   // request, so the two tables must cover the same keys. Without this, adding a deployment to the
