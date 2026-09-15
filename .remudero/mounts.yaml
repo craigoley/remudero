@@ -316,6 +316,32 @@ escalation_judge:
   context_budget: 60000
   provider: cash
 
+# ── The verify-human judge ─────────────────────────────────────────────────────
+# ROUTED FOR CONTAINMENT, NOT FOR VOLUME -- and the distinction is the whole reason. Measured over
+# the ledger union 2026-09-15: `verify_human.judged` is 42,448 rows but its most recent is
+# 2026-09-09, and ALL of them fall inside ONE 30-MINUTE WINDOW with 20,776 marked `judge_failed`.
+# It is dormant today. Routing a dormant lane saves nothing, so the argument is the other one:
+#
+#   ON THE SUBSCRIPTION A RUNAWAY IS UNBOUNDED. 42,448 spawns in half an hour is a proven shape for
+#   this lane, and nothing in the Claude path stops it. On openweight the SAME runaway meets
+#   `dailyCapUsd` and is REFUSED before transport (reserveOpenWeightBudget) -- at ~$0.0002 a
+#   judgement it would exhaust the $10 day and then stop, instead of eating a 5-hour window.
+#
+# Same tool-less contract as the escalation row above (VERIFY_HUMAN_JUDGE_TOOLS is []), and the
+# same FAIL-OPEN default: src/lib/verify-human-judge.ts resolves a spawn error, a timeout or an
+# unparseable verdict to the permissive verdict, so a bad deployment cannot hide work.
+#
+# `risk_judge` and `ruling_judge` are DELIBERATELY NOT here despite being equally tool-less: both
+# fail CLOSED (risk-judge.ts escalates to `high`; ruling-judge.ts has FAIL_CLOSED_RULING_VERDICT),
+# so a flaky deployment would convert into escalations and refused rulings rather than into
+# permissive defaults. They move only behind a measured reliability record for the rows above.
+verify_human_judge:
+  model: haiku
+  effort: low
+  max_turns: 400
+  context_budget: 60000
+  provider: openweight
+
 # ── max_turns is a RUNAWAY CLIFF, not a work limit (§9 tripwire re-base) ────────
 # The implement/reviewer/fix/diagnose worker lanes stay at a FLAT 400 — a tripwire
 # set WAY above any real run, whose only job is to kill a genuinely runaway loop.

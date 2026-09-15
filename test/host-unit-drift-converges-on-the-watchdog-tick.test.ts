@@ -28,7 +28,13 @@ type World = { root: string; launcher: string; calls: string; revivals: string; 
 function world(opts: { drift: boolean; daemonUp?: boolean }): World {
   const root = mkdtempSync(join(tmpdir(), "rmd-unitdrift-"));
   const bin = join(root, "bin");
-  const checkout = join(root, "remudero");
+  // W1-T3604: the launcher converges FROM ${STATE_DIR}/daemon-install, not ${STATE_DIR}/remudero,
+  // so this fixture names the same directory the rendered CHECKOUT= line does. MEASURED at the old
+  // name against this branch: the four cases that expect a call read 0 and FAILED loudly, while the
+  // refusal case still passed -- on "there is no checkout" rather than on the guard it names. That
+  // asymmetry is why this path must track the script: a refusal-shaped assertion cannot tell the two
+  // apart, and only the positive cases were left to notice.
+  const checkout = join(root, "daemon-install");
   mkdirSync(bin, { recursive: true });
   mkdirSync(join(checkout, "deploy"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });

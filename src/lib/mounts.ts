@@ -159,6 +159,8 @@ export interface Mounts {
   judge: Mount;
   /** OPTIONAL (W1-T3614) — the escalation judge's own mount, so that zero-tool lane can carry a `provider`; absent = {@link resolveRiskJudgeMount}'s cell. NOT `judge`, which G-17 binds. */
   escalation_judge?: Mount;
+  /** OPTIONAL — same shape and reason as {@link Mounts.escalation_judge}, for the verify-human judge. */
+  verify_human_judge?: Mount;
   synthesis: Record<SynthesisRole, Mount>; // the three synthesis rungs' OWN mounts (W1-T2559) — never the Architect's; REQUIRED
   /** Worker routing: task_type → risk band → class (W1-T167) → mount. Every
    *  risk band carries at least a {@link DEFAULT_TASK_CLASS} row. */
@@ -499,6 +501,8 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   const judge = parseMount(raw.judge, "judge", tiers, efforts);
   const escalationJudge =
     raw.escalation_judge === undefined ? undefined : parseMount(raw.escalation_judge, "escalation_judge", tiers, efforts);
+  const verifyHumanJudge =
+    raw.verify_human_judge === undefined ? undefined : parseMount(raw.verify_human_judge, "verify_human_judge", tiers, efforts);
 
   // W1-T2559: synthesis rungs — each REQUIRED, validated like architect/judge, never a fallback.
   if (!isObject(raw.synthesis)) throw new MountsError(`'synthesis' must be a mapping of role → mount (${SYNTHESIS_ROLES.join(", ")}).`);
@@ -523,7 +527,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), synthesis, routes };
+  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), synthesis, routes };
   enforceTierInvariant(mounts, opts.thinkingDefault);
   return mounts;
 }

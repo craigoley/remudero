@@ -522,3 +522,73 @@ Removed from lines 1331-1338.
       // fixture reproduced by the fix rung's OWN status-changing ledger lines. Enrich the SAME
       // way `computeBoardSnapshot` does, off the SAME already-read `lines` this tick already has.
 ```
+
+## The board re-derived 1,792 tasks to reflect a change in one
+
+Measured 2026-09-15 on the live daemon. This section is where `TaskFingerprints`' one-line
+`// Why:` pointer resolves to.
+
+`computeBoardSnapshot` calls `projectPlan`, which re-derives every task in the plan on every call,
+and its one board caller runs on the console's 3s poll (`console-shell-client.ts`'s
+`POLL_INTERVAL_MS`). Against the live plan and the real gateway:
+
+| pass | cost |
+| --- | --- |
+| first, cold gateway | 123538ms |
+| warm, whole-plan | 1455ms / 1478ms / 1440ms |
+
+The 1.44s matched `GET /v1/status` measured end to end (1.4–1.8s on 7 of 8 requests, with an SSE
+client attached so `gatePrewarmOnClients` was active). It runs synchronously on node's single
+event-loop thread, so it does not slow one response — it stops every concurrent reader.
+
+The memo above it did not help, because its key changes constantly. `BOARD_IRRELEVANT_STEPS` holds
+two entries, and 803 of 831 ledger rows in a 20-minute window read as decision-relevant: **one
+cache-key change every 1.5s**, against a 3s poll.
+
+### The ratio that named the fix
+
+How much of that 1.44s was work anyone asked for:
+
+```
+window    3s:    1 rows |   1 distinct task ids touched
+window   60s:   86 rows |   2 distinct task ids touched
+window 1200s: 1358 rows |  17 distinct task ids touched
+```
+
+1,792 tasks re-derived to reflect a change in one. Not a scheduling problem — a granularity one.
+Splitting the fold by task (`foldTaskFingerprints`) and reusing any projection whose own stamp
+held takes the same corpus to **~70ms a pass**.
+
+Note what this is NOT: narrowing `BOARD_IRRELEVANT_STEPS` was the obvious first move and the
+measurement rules it out. Every row in the window is task-scoped, so a step-based allowlist still
+invalidates everything; only a per-task key helps.
+
+### Two wrong turns, recorded because both looked right
+
+**Deferring the whole snapshot** — serve the cached one, refresh on the next macrotask — was the
+first attempt. `test/serve.live-state.ts` refused it: at a 3s poll, serving stale-then-refreshing
+means a recovering gateway needs TWO poll intervals to clear its outage banner. Measured recomputes
+landed at t+0.0s and t+3.3s against that test's 5s bound, with the next poll at t+6.3s.
+
+**Moving `listOpenHeadBranches()` off the request path** was the second, on the theory that the
+synchronous `gh` subprocess behind `paceGhEntry` was the cost. Measured against a real
+`buildBatchedGithub` carrying serve's own `pacer` and `ttlMs`:
+
+```
+cold listOpenHeadBranches: 319ms rows=9
+warm  #1..#5:                0ms
+spaced 6s apart #1..#3:      0ms
+```
+
+Nine open PRs, zero milliseconds warm. `prewarmBoardGithub` / `gatePrewarmOnClients` already keep
+that index warm, and an eager read at construction additionally breaks the invariant
+`test/task-card.test.ts` pins — "with no console connected, constructing the server must not warm"
+— which exists for W1-T154's measured zero-viewer burn.
+
+### And a third, inside the fix itself
+
+The first per-task key was one string per task, carrying the gateway fingerprint as a prefix.
+`prQueueIndexFingerprint` serialises every open PR **including its body**, so that prefix runs to
+kilobytes and was rebuilt twice per task: 110ms a pass spent concatenating an identical prefix
+1,792 times. The gateway half is shared by every task by construction, so it is compared once per
+pass (`heldGatewayKey`) and the per-task stamp is three integers.

@@ -502,6 +502,11 @@ import {
   recordRuling,
   sweepFeedbackLanding,
 } from "./lib/feedback-landing.js";
+import {
+  reconcileFeedbackLanding,
+  type FeedbackReconcileRoot,
+  type ReconcileFeedbackLandingResult,
+} from "./lib/feedback-reconcile.js";
 // renderTraceChain/traceForward/traceReverse: only traceCommand read them, and it moved to
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
@@ -34170,11 +34175,17 @@ export async function awayCommand(rest: string[]): Promise<number> {
  */
 export function mergeHoldCommand(
   rest: string[],
-  deps: { config?: Config; ledgerPath?: string; now?: () => number } = {},
+  deps: { config?: Config; ledgerPath?: string; now?: () => number; isInteractive?: () => boolean } = {},
 ): number {
   const parsed = parseOperatorMergeHoldArgs(rest);
   if (!parsed.ok) {
     console.error(`rmd merge-hold: ${parsed.error} — usage: ${commandSyntax("merge-hold")}\n` + USAGE);
+    return 2;
+  }
+  if (!(deps.isInteractive ?? (() => process.stdin.isTTY === true))()) {
+    console.error(
+      `rmd merge-hold: refusing a non-interactive hold writer — use the confirmed console control instead.\n` + USAGE,
+    );
     return 2;
   }
   const ledgerPath = deps.ledgerPath ?? ledgerPathFor(deps.config ?? loadConfig());
@@ -34401,6 +34412,101 @@ async function feedbackCommand(rest: string[]): Promise<number> {
     }
     throw err;
   }
+}
+
+/** Every value token immediately following a `--root` flag, in argv order — repeats accumulate
+ *  (design iv's explicit, multi-root enrolment), unlike {@link flagValue}'s single lookup. */
+function parseReconcileRootArgs(rest: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < rest.length; i++) if (rest[i] === "--root") out.push(rest[i + 1] ?? "");
+  return out;
+}
+
+/** The operator-facing render for `rmd feedback-reconcile` — names the mode FIRST (dry run vs
+ *  apply), same convention as {@link renderPlanReconcile}, so a preview can never be misread as
+ *  having written anything. */
+export function renderFeedbackReconcile(result: ReconcileFeedbackLandingResult, apply: boolean): string {
+  const { manifest } = result;
+  const counts = new Map<string, number>();
+  for (const e of manifest.entries) counts.set(e.classification, (counts.get(e.classification) ?? 0) + 1);
+  const countLine = [...counts.entries()].map(([k, n]) => `${k}=${n}`).join(" · ") || "nothing to reconcile";
+  const lines = [
+    `### rmd feedback-reconcile${apply ? " --apply" : " (dry run — nothing written)"}`,
+    `scanned: ${manifest.scannedRoots.join(", ")} — ${manifest.recordCount} record(s), ${manifest.byteCount} byte(s)` +
+      (manifest.truncated ? " (TRUNCATED — a source held more than the bounded scan cap)" : ""),
+    countLine,
+    ...manifest.entries.map((e) => {
+      const origin = e.originStatus ? `origin=${e.originStatus}` : "origin=<none>";
+      const best = e.bestStatus ? `, best=${e.bestStatus}` : "";
+      const reason = e.reason ? ` — ${e.reason}` : "";
+      return `- ${e.id}: ${e.classification} (found in ${e.foundIn.join(", ")}, ${origin}${best})${reason}`;
+    }),
+  ];
+  if (apply) {
+    lines.push(
+      result.landed.length > 0
+        ? `landed ${result.landed.length} record(s)${result.prUrl ? ` — ${result.prUrl}` : ""}`
+        : "nothing landed (already up to date, or every candidate was refused)",
+    );
+    if (result.refused.length > 0) {
+      lines.push(`refused ${result.refused.length} record(s) rather than force a backward move:`);
+      lines.push(...result.refused.map((r) => `  - ${r.path}: ${r.reason}`));
+    }
+  } else if (manifest.entries.some((e) => e.classification !== "present-everywhere")) {
+    lines.push("re-run with --apply to re-land the union through the ordinary gated PR path");
+  }
+  return lines.join("\n");
+}
+
+/**
+ * `rmd feedback-reconcile --root <name>=<path> [--root <name>=<path> ...] [--checkout <path>]
+ *   [--apply]` — the cross-root feedback reconciliation manifest and repair (W1-T3562). Dry-run by
+ * default: reports which records an enrolled root or the shared landing branch holds that
+ * origin/main does not, or already sits at an earlier §7B position than, and writes nothing.
+ * `--apply` re-lands the union through the ordinary gated PR path
+ * ({@link reconcileFeedbackLanding}, lib/feedback-reconcile.ts) — this hub does no scanning or
+ * classification of its own; it only parses argv and calls the library's one entry point.
+ */
+export async function feedbackReconcileCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("feedback-reconcile", rest, ["--root", "--checkout"], ["--apply"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const rawRoots = parseReconcileRootArgs(rest);
+  if (rawRoots.length === 0) {
+    console.error(
+      "rmd feedback-reconcile: at least one --root <name>=<path> is required — an explicit enrolment, " +
+        "never discovered by globbing the host's filesystem (design iv)\n" + USAGE,
+    );
+    return 2;
+  }
+  const roots: FeedbackReconcileRoot[] = [];
+  for (const raw of rawRoots) {
+    const eq = raw.indexOf("=");
+    if (eq <= 0) {
+      console.error(`rmd feedback-reconcile: malformed --root "${raw}" — expected <name>=<path>`);
+      return 2;
+    }
+    roots.push({ name: raw.slice(0, eq), path: resolve(raw.slice(eq + 1)) });
+  }
+  const checkoutArg = flagValue(rest, "--checkout");
+  const checkoutRoot = checkoutArg !== undefined ? resolve(checkoutArg) : repoRoot;
+  const apply = rest.includes("--apply");
+
+  const ledgerPath = ledgerPathFor(loadConfig());
+  const result = reconcileFeedbackLanding({
+    roots,
+    checkoutRoot,
+    apply,
+    ledgerLines: () => readLedgerLines(ledgerPath),
+  });
+  console.log(renderFeedbackReconcile(result, apply));
+  if (result.error) {
+    console.error(`### rmd feedback-reconcile: ${result.error}`);
+    return 1;
+  }
+  return 0;
 }
 
 /**
@@ -39188,9 +39294,15 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "merge-hold",
-    syntax: "rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text>",
+    syntax: "rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text> --confirm",
     summary: "Engage or release an attributable, durable PR or fleet auto-merge hold.",
-    detail: "operator writer for the durable auto-merge refusal: engage/release requires --by and --reason; --pr scopes the decision to one pull request, while omitting it scopes the decision to the whole fleet; --task is optional PR-only board enrichment and must be a W1-T<n> id; a hold survives pushes, restarts, and ledger rotation and clears only on an explicit release; while held, the daemon withdraws an existing auto-merge arm and refuses every new arm, leaving the operator free to inspect or manually squash the PR",
+    detail: "confirmed human writer for the durable auto-merge refusal: engage/release requires --by, --reason and --confirm from an interactive terminal; a non-interactive process cannot impersonate an operator by supplying --by. --pr scopes the decision to one pull request, while omitting it scopes the decision to the whole fleet; --task is optional PR-only board enrichment and must be a W1-T<n> id; while held, the daemon withdraws existing auto-merge and refuses new arms.",
+  },
+  {
+    name: "feedback-reconcile",
+    syntax: "rmd feedback-reconcile --root <name>=<path> [--root <name>=<path> ...] [--checkout <path>] [--apply]",
+    summary: "Report (or repair) feedback records an enrolled root holds that origin/main lacks.",
+    detail: "cross-root feedback reconciliation manifest and repair (W1-T3562): dry-run by default, classifying every candidate id as present-everywhere, missing-upstream, regressed (origin/main sits at an earlier §7B position than a root's copy, W1-T3561's predicate), or differs; --apply re-lands the union through the ordinary gated PR path (landFeedbackStatusContent), never pushing to main or merging anything itself; roots are an explicit, validated enrolment — never discovered by globbing the host's filesystem",
   },
   {
     name: "dep-review",
@@ -40141,6 +40253,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     },
   ],
   ["merge-hold", (rest) => mergeHoldCommand(rest)],
+  ["feedback-reconcile", async (rest) => await feedbackReconcileCommand(rest)],
   [
     "dep-review",
     async (rest) => {
