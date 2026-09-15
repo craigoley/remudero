@@ -149,6 +149,17 @@ read_instance_registry() {
   ' "$registry_file"
 }
 
+# W1-T3596: the DECLARED instance names, for the no-instance refusal below. Same grammar as
+# `read_instance_registry` above — a name is a 2-space-indented key — so the two cannot disagree
+# about what counts as an instance.
+list_instance_names() {
+  awk '
+    { sub(/[[:space:]]+#.*/, "") }
+    /^[[:space:]]*$/ { next }
+    $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { name=$1; sub(/:$/, "", name); print name }
+  ' "$1"
+}
+
 if [ -n "$INSTANCE_NAME" ]; then
   validate_instance_name "$INSTANCE_NAME"
   INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY:-$DEFAULT_INSTANCE_REGISTRY}"
@@ -200,6 +211,32 @@ EOF
   RMD_CODEX_DIR="$codex_dir"
   RMD_CONTAINER_CONFIG_DIR="$container_config_dir"
   RMD_DAEMON_REPO="$repo"
+else
+  # W1-T3596: WITH A REGISTRY PRESENT, AN UNSCOPED RECYCLE IS A WRONG-TARGET HAZARD, NOT A DEFAULT.
+  # The legacy path below resolves CONTAINER_NAME `remudero-daemon`, STATE_DIR `${HOME}/rmd-state`
+  # and DAEMON_REPO `remudero`. With site and console daemons live, an operator meaning either of
+  # them would have recycled CORE — and against `rmd-state`, which is not even core's own state dir
+  # (it runs on `rmd-state2`). So once instances are declared, name one.
+  #
+  # DELIBERATELY SCOPED TO "REGISTRY PRESENT AND NON-EMPTY": an absent or instance-less registry
+  # leaves the legacy default byte-for-byte, so an older checkout and the pre-registry host are
+  # both unaffected. This refuses a choice the operator did not make; it does not remove a path.
+  # AND ONLY WHEN THE TARGET WOULD COME FROM THE BARE DEFAULT. An explicit RMD_STATE_DIR is itself
+  # a named target — the operator HAS said which state directory to act on, just not via a registry
+  # name — and refusing it would break every caller that scopes by environment instead of by flag
+  # (test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts is five such calls).
+  # The hazard this refuses is the UNNAMED default, not the absence of a flag.
+  _unscoped_registry="${RMD_INSTANCE_REGISTRY:-$DEFAULT_INSTANCE_REGISTRY}"
+  if [ -r "$_unscoped_registry" ] && [ -z "${RMD_STATE_DIR:-}" ]; then
+    _declared="$(list_instance_names "$_unscoped_registry" | tr '\n' ' ')"
+    if [ -n "${_declared// /}" ]; then
+      echo "recycle-container: REFUSING -- no --instance given while ${_unscoped_registry} declares instances." >&2
+      echo "  Declared: ${_declared}" >&2
+      echo "  Pass one explicitly, e.g. --instance core (the unscoped default would target" >&2
+      echo "  container 'remudero-daemon' with STATE_DIR '${HOME:-/root}/rmd-state')." >&2
+      exit 2
+    fi
+  fi
 fi
 
 # The HOST side of the state bind mount — same derivation and same default as deploy/host-update.sh,
