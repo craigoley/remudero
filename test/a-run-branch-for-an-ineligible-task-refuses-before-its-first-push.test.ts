@@ -66,7 +66,7 @@ function planWith(depends_on: string[]): Plan {
 
 const BRANCH = `run-${TASK_ID}-1789232400000`;
 
-test("W1-T3600: a first push to a run-branch whose task has an unmet dependency is refused, naming it", () => {
+test("W1-T3600: a run branch for a task with an unmet dependency refuses and names it, on its FIRST push", () => {
   const plan = planWith([DEP_ID]);
   const verdict = evaluateRunBranchEligibility({ headRef: BRANCH, plan, projectionsById: new Map(), reachable: true });
 
@@ -75,7 +75,7 @@ test("W1-T3600: a first push to a run-branch whose task has an unmet dependency 
   assert.match(verdict.reason ?? "", /unmet dependency in the current plan: W1-T9000/);
 });
 
-test("W1-T3600: a run-branch for a fully eligible task is admitted", () => {
+test("W1-T3600: a run branch for a fully eligible task is admitted", () => {
   // FALSIFIER: this arm must be able to fail. If the check refused every run-branch it would pass
   // this assertion trivially only by refusing — asserting admitted===true against a task with NO
   // dependency at all is what a blanket-refuse implementation cannot satisfy.
@@ -87,7 +87,7 @@ test("W1-T3600: a run-branch for a fully eligible task is admitted", () => {
   assert.equal(verdict.reason, undefined);
 });
 
-test("W1-T3600: a dependency merged by head branch alone (no trailer) still counts as merged", () => {
+test("W1-T3600: a dependency merged by head branch alone still counts as merged, with no trailer anywhere", () => {
   // FALSIFIER: the fixture credits ONLY via `source: "head-branch"` — no trailer entry exists for
   // this dependency anywhere — so a resolver that reads trailers alone must fail this assertion.
   const plan = planWith([DEP_ID]);
