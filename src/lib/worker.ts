@@ -25,6 +25,7 @@ import { query, type Options, type PermissionMode, type SettingSource } from "@a
 import { detectUsageLimitRefusal } from "./classify.js";
 import {
   loadConfig,
+  canonicalWorkerProviderId,
   enabledWorkerProviders,
   workerHomeDir,
   workerShell,
@@ -192,8 +193,10 @@ export interface WorkerResult {
   /** Concrete provider model selected after health/capability routing. */
   routedModel?: string;
   /** W1-T3575 — CASH ATTRIBUTION FOR A CAPPED PROVIDER, declared here so a ledger consumer reads a
-   * typed field rather than an untyped passenger on the openweight adapter's own result. Present
-   * only for `provider: "openweight"`, the one backend billed per request against `dailyCapUsd`.
+   * typed field rather than an untyped passenger on the cash adapter's own result. Present
+   * only for `provider: "cash"` (W1-T3607 renamed the "openweight" id, which mis-sorted a proprietary
+   * candidate like gpt-5-nano — the category is how a deployment is billed, not its licence), the one
+   * backend billed per request against `dailyCapUsd`.
    * `budgetReservedUsd` is what was committed BEFORE the requests were sent (conservative, derived
    * from the adapter's price constants and its exact request ceiling); `budgetSettledUsd` is what
    * the provider's own receipts settled it down to. They differ whenever a receipt came back, and
@@ -1455,6 +1458,13 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // here is inert; each branch materializes and reaps it (W1-T2800, W1-T170, W1-T2463).
   const workerHomeRoot = workerHomeDir(config);
   const workerHome = perRunWorkerHomeDir(workerHomeRoot, args.runId, { perSpawn: true });
+  // W1-T3607: normalise the caller's requested provider id ONCE, at this entry point, so every
+  // comparison below (and the routing branch further down) sees only the canonical spelling —
+  // whether `args.mountProvider` came from a parsed `Mount.provider` (already canonical, mounts.ts)
+  // or a caller passing the deprecated "openweight" id directly.
+  if (args.mountProvider !== undefined) {
+    args.mountProvider = canonicalWorkerProviderId(args.mountProvider) as WorkerProviderId;
+  }
   if (args.mountProvider && !enabledWorkerProviders(config).includes(args.mountProvider)) {
     throw new Error(`mount provider '${args.mountProvider}' is not enabled by the committed host config`);
   }
@@ -1468,11 +1478,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       reason: routingPolicy.fallback.reason,
     }));
   }
-  // `openweight` is a mount-affinity-only cash provider. It has no subscription window and is
-  // deliberately excluded from the auction instead of being represented by fabricated capacity.
+  // `cash` (W1-T3607; formerly "openweight") is a mount-affinity-only, non-subscription provider. It
+  // has no subscription window and is deliberately excluded from the auction instead of being
+  // represented by fabricated capacity.
   const providers = args.mountProvider
     ? [args.mountProvider]
-    : routingPolicy.routableProviders.filter((provider) => provider !== "openweight");
+    : routingPolicy.routableProviders.filter((provider) => provider !== "cash");
   const capabilities = resolveWorkerCapabilities(args.cwd);
   const claudeHealthRoute = providers.includes("claude")
     ? await resolveWorkerClaudeHealth(args, capabilities)
@@ -1720,7 +1731,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       reapWorkerHome(workerHomeRoot, workerHome);
     }
   }
-  if (args.mountProvider === "openweight") {
+  if (args.mountProvider === "cash") {
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
     if (args.providerRouting?.spawnOpenWeight === undefined) {
       assertLiveSpawnAllowed(`spawnOpenWeightWorker for task ${args.taskId ?? "<no taskId>"}`);
@@ -1729,7 +1740,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // capability table. No capacity record exists or is fabricated for a cash-billed endpoint.
     const openWeight = selectOpenWeightModel(capabilities, args.model, args.effort);
     const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
-      provider: "openweight",
+      provider: "cash",
       model: openWeight.model,
       effort: openWeight.effort,
       mode: "mount-affinity",

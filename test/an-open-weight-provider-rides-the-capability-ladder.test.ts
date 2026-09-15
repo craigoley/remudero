@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
-import { ConfigValidationError, validateConfig, type Config } from "../src/lib/config.js";
+import { canonicalWorkerProviderId, ConfigValidationError, enabledWorkerProviders, validateConfig, type Config } from "../src/lib/config.js";
 import { loadMounts, mountsPath, MountsError, TierInvariantError, validateMounts } from "../src/lib/mounts.js";
 import {
   ProviderRoutingPolicyError,
@@ -258,6 +258,23 @@ test("the inbox-draft spawn derives its provider affinity from the synthesis mou
   assert.deepEqual(args.tools, ["Read", "Grep", "Glob"]);
 });
 
+// ── W1-T3607: THE LADDER IS NAMED FOR A LICENCE, NOT FOR A BILL ─────────────────────────────
+// "openweight" mis-sorted a proprietary, cash-billed candidate like gpt-5-nano. The canonical id
+// is now "cash"; "openweight" is a deprecated ALIAS so an already-deployed host's config.json
+// (never committed to git) keeps loading without a hand edit at the next boot.
+test("a legacy openweight config spelling still resolves to the canonical cash provider", () => {
+  assert.equal(canonicalWorkerProviderId("openweight"), "cash", "the one read-boundary alias function");
+  assert.equal(canonicalWorkerProviderId("cash"), "cash", "the canonical spelling passes through unchanged");
+  assert.equal(canonicalWorkerProviderId("claude"), "claude", "an unrelated id is never touched");
+
+  const legacyConfig: Pick<Config, "workerProviders"> = { workerProviders: { enabled: ["openweight"] } };
+  assert.deepEqual(
+    enabledWorkerProviders(legacyConfig),
+    ["cash"],
+    "a config.json written with the pre-rename spelling still loads and resolves to the canonical id",
+  );
+});
+
 // ── W1-T3569: route synthesis.inbox_draft to openweight after a hard cash cap ──────────────────
 // The 964-line generic wiring above proves affinity works with a SYNTHETIC mount table
 // (`validMounts()`). These two tests instead read the REAL `.remudero/mounts.yaml` this repo
@@ -267,13 +284,13 @@ test("the inbox-draft spawn derives its provider affinity from the synthesis mou
 test("only synthesis.inbox_draft declares provider openweight, after its Read/Grep/Glob surface is re-proven to be adapter-supported", async () => {
   const mountsTable = loadMounts(mountsPath(REPO_ROOT));
   const inboxDraftMount = mountsTable.synthesis.inbox_draft;
-  assert.equal(inboxDraftMount.provider, "openweight", "the one row this task routes");
+  assert.equal(inboxDraftMount.provider, "cash", "the one row this task routes (W1-T3607 renamed \"openweight\" to \"cash\")");
   assert.equal(mountsTable.synthesis.triage.provider, undefined, "triage stays off this lane: its declared WebSearch is not adapter-eligible");
   assert.equal(mountsTable.synthesis.retro.provider, undefined, "retro's output is acted on directly, never machine-linted");
   for (const [type, byRisk] of Object.entries(mountsTable.routes)) {
     for (const [risk, byClass] of Object.entries(byRisk)) {
       for (const [cls, mount] of Object.entries(byClass)) {
-        assert.notEqual(mount.provider, "openweight", `routes.${type}.${risk}.${cls} must not ride the trial lane`);
+        assert.notEqual(mount.provider, "cash", `routes.${type}.${risk}.${cls} must not ride the trial lane`);
       }
     }
   }
@@ -292,7 +309,7 @@ test("only synthesis.inbox_draft declares provider openweight, after its Read/Gr
     config,
     disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
   });
-  assert.equal(args.mountProvider, "openweight");
+  assert.equal(args.mountProvider, "cash");
   assert.deepEqual(args.tools, ["Read", "Grep", "Glob"], "the exact declared surface this row is eligible on");
 
   // Re-prove the surface against the REAL adapter (not just the mount table): declaring
@@ -326,7 +343,7 @@ test("only synthesis.inbox_draft declares provider openweight, after its Read/Gr
 test("openweight daily cap refuses the inbox draft spawn before transport", async () => {
   const mountsTable = loadMounts(mountsPath(REPO_ROOT));
   const inboxDraftMount = mountsTable.synthesis.inbox_draft;
-  assert.equal(inboxDraftMount.provider, "openweight", "this test must exercise the real routed row, not a synthetic one");
+  assert.equal(inboxDraftMount.provider, "cash", "this test must exercise the real routed row, not a synthetic one");
 
   const root = mkdtempSync(join(tmpdir(), "rmd-openweight-inbox-cap-"));
   try {
@@ -420,7 +437,7 @@ test("draftProposalBatch reaches the mount-derived inbox args through an offline
 function openWeightResult(): WorkerResult {
   return {
     ...codexResult(),
-    provider: "openweight",
+    provider: "cash",
     model: "gpt-oss-120b",
     effort: "low",
   };
@@ -433,7 +450,7 @@ test("the capability ladder resolves an open-weight provider by table lookup", (
   // halves are asserted: the order (cheaper first) and the fallback's continued presence, so a
   // later edit that deletes the trailing entry fails here rather than silently killing the lane.
   assert.deepEqual(
-    capabilities?.openweight?.balanced.low,
+    capabilities?.cash?.balanced.low,
     ["gpt-5-nano", "gpt-oss-120b"],
     "the declared openweight row, not fallback data, is the capability source",
   );
@@ -451,16 +468,16 @@ test("the capability ladder resolves an open-weight provider by table lookup", (
 
   const raw = parseYaml(readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8")) as Record<string, unknown>;
   const notMapping = structuredClone(raw);
-  (notMapping.capabilities as Record<string, unknown>).openweight = "not-a-mapping";
-  assert.throws(() => validateMounts(notMapping), /capabilities\.openweight.*mapping/);
+  (notMapping.capabilities as Record<string, unknown>).cash = "not-a-mapping";
+  assert.throws(() => validateMounts(notMapping), /capabilities\.cash.*mapping/);
 
   const missingCapability = structuredClone(raw);
-  delete ((missingCapability.capabilities as Record<string, unknown>).openweight as Record<string, unknown>).balanced;
-  assert.throws(() => validateMounts(missingCapability), /capabilities\.openweight\.balanced.*mapping/);
+  delete ((missingCapability.capabilities as Record<string, unknown>).cash as Record<string, unknown>).balanced;
+  assert.throws(() => validateMounts(missingCapability), /capabilities\.cash\.balanced.*mapping/);
 
   const malformedModels = structuredClone(raw);
-  (((malformedModels.capabilities as Record<string, unknown>).openweight as Record<string, unknown>).economy as Record<string, unknown>).low = [];
-  assert.throws(() => validateMounts(malformedModels), /capabilities\.openweight\.economy\.low.*non-empty/);
+  (((malformedModels.capabilities as Record<string, unknown>).cash as Record<string, unknown>).economy as Record<string, unknown>).low = [];
+  assert.throws(() => validateMounts(malformedModels), /capabilities\.cash\.economy\.low.*non-empty/);
 });
 
 test("the openweight adapter prepends its output contract to every request and contains tools and bounds their conversation", async (t) => {
@@ -741,7 +758,7 @@ test("the escalation judge rides openweight on the short-prompt deployment", () 
   const mounts = loadMounts(join(REPO_ROOT, ".remudero", "mounts.yaml"));
   const mount = mounts.escalation_judge;
   assert.ok(mount, ".remudero/mounts.yaml must declare an escalation_judge mount");
-  assert.equal(mount!.provider, "openweight", "the escalation judge must carry openweight mount affinity");
+  assert.equal(mount!.provider, "cash", "the escalation judge must carry cash mount affinity (W1-T3607)");
 
   const selected = selectOpenWeightModel(mounts.capabilities, mount!.model, mount!.effort);
   assert.equal(selected.model, "gpt-oss-120b", "a short-prompt lane must select the deployment measured cheaper for short prompts");
@@ -754,7 +771,7 @@ test("the escalation judge rides openweight on the short-prompt deployment", () 
     cwd: REPO_ROOT,
     settingsFile: SETTINGS_FILE,
   });
-  assert.equal(args.mountProvider, "openweight", "the mount's provider must reach SpawnWorkerArgs");
+  assert.equal(args.mountProvider, "cash", "the mount's provider must reach SpawnWorkerArgs");
   assert.deepEqual(args.tools, [], "the escalation judge stays tool-less, which is what makes it adapter-eligible at all");
 });
 
@@ -767,7 +784,9 @@ test("the verify-human judge rides openweight, and the fail-closed judges delibe
 
   const vh = mounts.verify_human_judge;
   assert.ok(vh, ".remudero/mounts.yaml must declare a verify_human_judge mount");
-  assert.equal(vh!.provider, "openweight");
+  // W1-T3607: `loadMounts` normalises at the read boundary, so a parsed mount carries the
+  // canonical `cash` whichever spelling the table on disk used.
+  assert.equal(vh!.provider, "cash");
   assert.equal(selectOpenWeightModel(mounts.capabilities, vh!.model, vh!.effort).model, "gpt-oss-120b");
 
   const args = buildVerifyHumanJudgeSpawnArgs({
@@ -776,7 +795,7 @@ test("the verify-human judge rides openweight, and the fail-closed judges delibe
     cwd: REPO_ROOT,
     settingsFile: SETTINGS_FILE,
   });
-  assert.equal(args.mountProvider, "openweight", "the mount's provider must reach SpawnWorkerArgs");
+  assert.equal(args.mountProvider, "cash", "the mount's provider must reach SpawnWorkerArgs");
   assert.deepEqual(args.tools, VERIFY_HUMAN_JUDGE_TOOLS, "it stays tool-less, which is what makes it adapter-eligible");
   assert.deepEqual(VERIFY_HUMAN_JUDGE_TOOLS, [], "and that list is empty by construction");
 
@@ -859,7 +878,7 @@ test("openweight configuration requires a daily cash cap and keeps its key outsi
         },
       },
     });
-    assert.equal(result.provider, "openweight");
+    assert.equal(result.provider, "cash");
     assert.equal(result.routedModel, "gpt-5-nano");
   } finally {
     rmSync(root, { recursive: true, force: true });
