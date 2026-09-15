@@ -2,29 +2,23 @@
  * lib/feedback-record-merge.ts — the §7B lifecycle-monotonic record predicate (W1-T3561).
  *
  * THE DEFECT THIS CLOSES. `feedback-landing.ts`'s writers used to decide what to stage by blob
- * INEQUALITY alone (`remoteSha !== localSha` in `landPending`, `remoteSha === blobSha` in
- * `landContent`) — "mine differs, therefore mine wins", with no notion of which copy was further
- * along the lifecycle. A stale local capture landing after origin/main had already advanced past
- * it silently reverted the transition (measured: PR #5383 reset `fb-…2f0b7d` from `grilling` back
- * to `new`, which broke `POST /v1/feedback`'s `replyTo` route — see the task's own rationale).
+ * INEQUALITY alone (`remoteSha !== localSha`/`remoteSha === blobSha`) — "mine differs, therefore
+ * mine wins", with no notion of which copy was further along the lifecycle. Measured: PR #5383
+ * landed a stale local copy over an entry origin/main had already advanced to `grilling`, erasing
+ * the transition and breaking `POST /v1/feedback`'s `replyTo` route (docs/forensics has the trace).
  *
  * PURE, ON PURPOSE. This module reads two byte strings and returns a decision — no git, no
- * network, no filesystem (the `yaml` parser it calls has none of its own either) — so the whole
- * §7B status table (`new | grilling | proposed | accepted | rejected | answered`) is exhaustively
- * testable without a repository fixture. The landing module calls {@link mergeFeedbackRecord}; it
- * does not re-decide inline (feedback-landing.ts's own `decideFeedbackStage` is the one call site
- * both its writers share).
+ * network, no filesystem — so the whole §7B status table (`new | grilling | proposed | accepted |
+ * rejected | answered`) is exhaustively testable without a repository fixture. The landing module
+ * calls {@link mergeFeedbackRecord} rather than re-deciding inline (feedback-landing.ts's own
+ * `decideFeedbackStage` is the one call site both its writers share).
  *
- * WHY THE LIFECYCLE IS DUPLICATED HERE, NOT IMPORTED. `feedback.ts` imports `landFeedback`/
- * `landFeedbackStatusContent` from `feedback-landing.ts`, which is the one call site for this
- * module — importing `feedback.ts`'s `FeedbackStatus`/`FEEDBACK_STATUSES` back from here would
- * close `feedback.ts -> feedback-landing.ts -> feedback-record-merge.ts -> feedback.ts` into the
- * cycle `.dependency-cruiser.cjs`'s `no-circular` rule holds at zero — the same reasoning
- * `feedback-landing.ts` already documents on its own locally-mirrored `CiLearningShardDraft`.
- * Structural typing (an index signature, not a class) keeps every real record compatible with no
- * cast at the call site; {@link FEEDBACK_RECORD_STATUSES}'s order is the single source of truth
- * for "earlier" here and must be changed in lockstep with `feedback.ts`'s own `FEEDBACK_STATUSES`
- * if §7B's status set ever does (out of THIS task's scope — see the task's design point (vi)).
+ * WHY THE LIFECYCLE IS DUPLICATED HERE, NOT IMPORTED. `feedback.ts` imports from
+ * `feedback-landing.ts`, which is this module's one call site — importing `feedback.ts`'s
+ * `FEEDBACK_STATUSES` back from here would close a cycle `.dependency-cruiser.cjs`'s
+ * `no-circular` rule holds at zero (the same reasoning `feedback-landing.ts` already documents on
+ * its locally-mirrored `CiLearningShardDraft`). {@link FEEDBACK_RECORD_STATUSES}'s order is the
+ * single source of truth for "earlier" here and must move in lockstep with `FEEDBACK_STATUSES`.
  */
 
 import { parse as parseYaml } from "yaml";
