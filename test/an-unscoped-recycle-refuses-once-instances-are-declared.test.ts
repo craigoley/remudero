@@ -75,8 +75,16 @@ test("W1-T3596: an absent registry leaves the legacy unscoped path intact", () =
   // DELIBERATELY SCOPED. This change refuses a choice the operator did not make; it must not
   // remove a path. With no registry there are no instances to name, so the legacy default stands
   // and the run proceeds to whatever the PRE-EXISTING guards say.
-  const err = `${run([], { RMD_INSTANCE_REGISTRY: join(tmpdir(), "w1t3596-absent-registry.yaml") }).stderr ?? ""}`;
-  assert.doesNotMatch(err, /no --instance given/, "an absent registry must not trigger the new refusal");
+  const absent = `${run([], { RMD_INSTANCE_REGISTRY: join(tmpdir(), "w1t3596-absent-registry.yaml") }).stderr ?? ""}`;
+  assert.doesNotMatch(absent, /no --instance given/, "an absent registry must not trigger the new refusal");
+
+  // ...AND ITS POSITIVE CONTROL, IN THIS SAME TEST. A lone `doesNotMatch` is satisfied by a script
+  // that cannot refuse AT ALL — it reads green on the checkout before this task, which is the
+  // definition of proving nothing (and is what `proof-discrimination` names executed_stale). The
+  // declared-registry arm is what turns the absent-registry arm into evidence of a NARROWING
+  // rather than of an absence: only the registry's readability differs between these two runs.
+  const declared = `${run([]).stderr ?? ""}`;
+  assert.match(declared, /REFUSING -- no --instance given/, "the same invocation must refuse once the registry declares instances");
 });
 
 test("W1-T3596: a declared instance resolves its own container and state dir", () => {
@@ -136,6 +144,13 @@ test("W1-T3596: an explicit RMD_STATE_DIR is a named target and is not refused",
   // RMD_STATE_DIR has said which state directory to act on, so refusing it would break scoping by
   // environment — which existing suites rely on. Asserted because it is a deliberate boundary, not
   // an accident of the condition's shape.
-  const err = `${run([], { RMD_STATE_DIR: join(tmpdir(), "w1t3596-explicit-state") }).stderr ?? ""}`;
-  assert.doesNotMatch(err, /no --instance given/, "an explicitly named state dir must not be refused");
+  const named = `${run([], { RMD_STATE_DIR: join(tmpdir(), "w1t3596-explicit-state") }).stderr ?? ""}`;
+  assert.doesNotMatch(named, /no --instance given/, "an explicitly named state dir must not be refused");
+
+  // The control the boundary needs, for the same reason the absent-registry test carries one: the
+  // SAME invocation with the state dir UNNAMED (empty reads as unset to the script's `-z` test).
+  // One side refuses and the other does not, and nothing but RMD_STATE_DIR differs — that pair is
+  // the boundary; either half alone is a statement about a script that might refuse nothing.
+  const unnamed = `${run([], { RMD_STATE_DIR: "" }).stderr ?? ""}`;
+  assert.match(unnamed, /REFUSING -- no --instance given/, "the unnamed default is the case the refusal is aimed at");
 });
