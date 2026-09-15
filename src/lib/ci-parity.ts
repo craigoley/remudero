@@ -1389,13 +1389,6 @@ export interface HostCausedSuiteRedEntry {
 }
 
 export const HOST_CAUSED_SUITE_REDS: HostCausedSuiteRedEntry[] = [
-  {
-    file: "test/recycle-container.test.ts",
-    cause: "bash-3.2-no-associative-arrays",
-    count: 17,
-    note: "deploy/recycle-container.sh:198 `declare -A CAPTURED=()` is bash-4 syntax; this host's /bin/bash has no associative-array support",
-    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
-  },
   // ── W1-T2776: SEVEN MORE FILES IN THE SAME CLUSTER, all measured 2026-09-03 on the mini ──────
   // The entry above is not the whole cluster and never was. `deploy/recycle-container.sh` is the
   // repo's ONLY bash-4-only script (`declare -A`), and TEN tracked tests reference it in code;
@@ -1418,55 +1411,6 @@ export const HOST_CAUSED_SUITE_REDS: HostCausedSuiteRedEntry[] = [
   // rebased, and the drift errs in the SAFE direction (a registry that under-counts leaves one
   // red unexplained and loud; one that over-counts absorbs a real failure). Filed as an
   // observation rather than fixed in passing.
-  {
-    file: "test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts",
-    cause: "bash-3.2-no-associative-arrays",
-    count: 8,
-    note: "spawns deploy/recycle-container.sh via the PATH `bash`; same `declare -A` refusal and same error text as test/recycle-container.test.ts — measured 8 of 9",
-    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
-  },
-  {
-    file: "test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts",
-    cause: "bash-3.2-no-associative-arrays",
-    count: 5,
-    note: "same script, same PATH `bash`, same refusal — measured 5",
-    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
-  },
-  {
-    file: "test/app-auth-satisfies-the-recycle-credential-refusal.test.ts",
-    cause: "bash-3.2-no-associative-arrays",
-    count: 6,
-    note: "same script, same PATH `bash`, same refusal — measured 6 of 6 (every test in the file)",
-    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
-  },
-  {
-    file: "test/daemon-default-credential.test.ts",
-    cause: "bash-3.2-no-associative-arrays",
-    count: 1,
-    note: "only its one spawning test reds; its readFileSync source-assertions over the same script pass — measured 1",
-    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
-  },
-  {
-    file: "test/recycle-capture-falls-back-to-the-shell.test.ts",
-    cause: "bash-3.2-no-associative-arrays",
-    count: 3,
-    note: "same script, same PATH `bash`, same refusal — measured 3",
-    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
-  },
-  {
-    file: "test/the-recovery-path-merges-into-a-shared-checkout.test.ts",
-    cause: "bash-3.2-no-associative-arrays",
-    count: 8,
-    note: "same script, same PATH `bash`, same refusal — measured 8",
-    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
-  },
-  {
-    file: "test/the-recycle-wait-is-sized-under-the-run-it-waits-on.test.ts",
-    cause: "bash-3.2-no-associative-arrays",
-    count: 5,
-    note: "same script, same PATH `bash`, same refusal — measured 5",
-    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
-  },
   {
     file: "test/worker-credential-preflight.test.ts",
     cause: "darwin-keychain-unprovisioned",

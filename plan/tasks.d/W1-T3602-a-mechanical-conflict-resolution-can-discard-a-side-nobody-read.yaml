@@ -1,0 +1,58 @@
+- id: W1-T3602
+  title: "A MECHANICAL CONFLICT RESOLUTION CAN DISCARD A SIDE NOBODY READ — the sweep's conflicted-PR disposition admits an rmd-owned branch to automatic resolution on evidence it never checks byte-for-byte, so a 'redundant re-fix' that is only partially redundant, a deletion conflict, or a hunk that differs from main is resolved unattended instead of being sent to a bounded semantic repair worker"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/sweep-conflicted-disposition.test.ts
+    - test/a-redundant-refix-is-not-an-ambiguous-conflict.test.ts
+  origin: "retro-filing#5587-unfiled-2026-09-15"
+  note: |
+    reservation hand-off: unknown -> run-W1-T3601-1789467506441
+
+    WHY A HAND-OFF LINE IS HERE AT ALL. `refs/rmd-id/W1-T3602` exists on origin and its
+    anchor records `rmd-id holder branch=unknown pid=... source=automatic`: the fleet daemon
+    minted the id from a detached HEAD, before any run branch existed, so `currentBranch`
+    wrote its `"unknown"` sentinel. No branch ever held this reservation, and this filing is
+    the successor that takes it. `task-id-existence` refuses an added id whose reservation
+    names a holder other than the filer, and names this note as the alternative to
+    renumbering — which is not available here, because the PR that BUILDS this task is
+    already open on `run-W1-T3602-*` and a head ref cannot be renamed after creation.
+  rationale: |
+    FILED AFTER THE FACT, AND THAT IS STATED RATHER THAN HIDDEN. PR #5587 was opened 2026-09-15
+    on branch `fix/bounded-conflict-repair` with no plan record, no `Remudero-Task:` trailer and
+    no acceptance block, so `head-identity-gate` and `acceptance-author-gate` both refused it and
+    it sat red and untouched for nine hours. The CHANGE already carried fifteen-plus falsifiers of
+    its own, all passing. What it lacked was a record. This shard is that record, written FROM the
+    diff and the tests that were already there, never from a guess about intent.
+
+    THE DEFECT. Conflict disposition decided "this is safely resolvable" from claims it did not
+    verify against bytes. Three shapes slipped through: a re-fix that is redundant in part and
+    novel in the rest, a conflict involving a DELETION on one side, and a hunk that differs from
+    main at all. Each was mechanically resolved, which silently discards one side.
+
+    THE REMEDY, as built: those shapes are ADMITTED TO A BOUNDED SEMANTIC REPAIR WORKER instead of
+    being resolved in place, and admission is gated on ownership — a contributor branch, a foreign
+    rmd run branch, or malformed evidence is never admitted and never written to unattended.
+  acceptance:
+    - claim: a dirty rmd-owned PR whose hunk differs from main goes to bounded semantic repair
+      proof: "unit test: a dirty rmd-owned PR whose hunk differs from main is sent to the bounded semantic repair worker"
+    - claim: an rmd-owned branch whose non-conflicting files fail to apply goes to hunk-level repair
+      proof: "unit test: an rmd-owned branch whose non-conflicting files fail to apply is sent to hunk-level repair"
+    - claim: a redundant re-fix claim with no byte evidence goes to hunk-level repair
+      proof: "unit test: an rmd-owned redundant re-fix claim not backed by byte evidence is sent to hunk-level repair"
+    - claim: an rmd-owned deletion conflict is admitted to the bounded semantic repair worker
+      proof: "unit test: an rmd-owned conflict involving a deletion is admitted to the bounded semantic repair worker"
+  falsifier: |
+    THE OWNERSHIP CONTRAST IS THE LOAD-BEARING CONTROL. Admitting an rmd-owned conflict to an
+    unattended repair worker is only safe because a NON-owned one is refused; if the ownership
+    check regressed, this change would widen unattended writes onto contributor branches rather
+    than narrowing them. `sweep-conflicted-disposition` covers that direction explicitly.

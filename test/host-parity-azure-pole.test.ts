@@ -160,12 +160,34 @@ function trackedFiles(pattern: string): string[] {
 }
 
 test("W1-T2776 DISCOVERY: every tracked test that spawns a bash-4-only deploy script through the system bash is registered in HOST_CAUSED_SUITE_REDS", () => {
-  const scripts = trackedFiles("deploy/*.sh").filter((s) =>
-    BASH4_ONLY_SYNTAX.test(readFileSync(join(REPO_ROOT, s), "utf8")),
-  );
-  // POSITIVE CONTROL, both halves. A zero on either walk would make the assertion below pass
-  // over an empty set — the vacuous pass this whole test exists to prevent elsewhere.
-  assert.ok(scripts.length > 0, "no deploy script uses bash-4-only syntax — the walk, the pattern or the corpus is wrong, not the repo");
+  const deployScripts = trackedFiles("deploy/*.sh");
+  // POSITIVE CONTROL, SPLIT IN TWO (W1-T3595). It used to read `scripts.length > 0` — a single
+  // assertion standing for two different things: "the instrument works" and "the corpus is
+  // non-empty". Those came apart the moment the corpus was legitimately EMPTIED: this PR makes
+  // deploy/recycle-container.sh bash-3 portable, removing the repo's last bash-4-only script, and
+  // the control then reported the success as "the walk, the pattern or the corpus is wrong".
+  //
+  // So the two halves are asserted separately. The WALK is checked against the real tree, and the
+  // PATTERN against fixtures rather than the repo — a pattern proven on a corpus that may be empty
+  // proves nothing, which is exactly the trap the original wording named and then fell into.
+  assert.ok(deployScripts.length > 5, `the deploy/*.sh walk found only ${deployScripts.length} — git ls-files is not seeing the scripts`);
+  assert.ok(BASH4_ONLY_SYNTAX.test("  declare -A CAPTURED=()"), "pattern control: it must still match the declare form it exists to find");
+  assert.ok(BASH4_ONLY_SYNTAX.test("local -A byName"), "pattern control: and the local form");
+  assert.ok(!BASH4_ONLY_SYNTAX.test("CAPTURED_KEYS=()"), "pattern control: and must NOT match the bash-3 replacement, or an empty corpus would be unreachable");
+
+  const scripts = deployScripts.filter((s) => BASH4_ONLY_SYNTAX.test(readFileSync(join(REPO_ROOT, s), "utf8")));
+  if (scripts.length === 0) {
+    // THE SUCCESS STATE, not a defect: no tracked deploy script uses bash-4-only syntax any more.
+    // What must be checked NOW is that nothing is still registered against a cause that no longer
+    // exists — this registry's own header says an entry for a file that does not fail "would let a
+    // real break there read as expected", so a stale entry is worse than a missing one.
+    assert.deepEqual(
+      HOST_CAUSED_SUITE_REDS.filter((e) => e.cause === "bash-3.2-no-associative-arrays").map((e) => e.file),
+      [],
+      "the last bash-4-only deploy script is gone, so every entry blaming bash-3.2 associative arrays is stale and must be retired with it",
+    );
+    return;
+  }
   const testFiles = trackedFiles("test/*.test.ts");
   assert.ok(testFiles.length > 100, `the test corpus walk found only ${testFiles.length} files — git ls-files is not seeing the suite`);
 
