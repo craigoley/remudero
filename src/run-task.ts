@@ -4516,6 +4516,15 @@ export interface PollDeps {
   readJson?: (args: string[]) => Promise<unknown>;
   /** Defaults to {@link yieldingSleep}. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * W1-T3584: the target repo's own required-status-check contexts — the SAME seam shape
+   * `ghRequiredStatusCheckContexts` already exposes and the sweep's `deps.requiredContexts`
+   * (line ~30372) already takes, so no new contract is invented. `waitForCiGreen` calls this
+   * ONCE per wait (never per poll — see its own call site) and defaults to
+   * {@link ghRequiredStatusCheckContexts}. `undefined` (unreadable protection or a genuinely
+   * unprotected branch) takes `ciGateFromRollup` down its unchanged fail-closed fallback.
+   */
+  requiredContexts?: (owner: string, repo: string) => string[] | undefined;
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
@@ -4607,6 +4616,33 @@ export async function pollToGate(
  * is judged FRESH by `runReview` every strike, never trusted from the
  * rollup here.
  */
+/**
+ * W1-T3584 — the PRE-REVIEW VIEW `ciGateFromRollup` judges from, factored out so
+ * `waitForCiGreen` can feed the IDENTICAL view to `checkWaitStalled`'s timeout/pending evidence
+ * instead of the raw rollup: `remudero-review` (this rung's own judge, about to run fresh once
+ * CI goes green) is excluded UNCONDITIONALLY, never merely when the required-context list
+ * happens to be readable — a review that has not been given a chance to run yet is never
+ * evidence that CI itself has stalled. Deduped to the latest attempt per check
+ * ({@link dedupeRollupByLatestAttempt}), and — only when the target's required contexts are
+ * READABLE (`requiredContexts` non-empty) — narrowed to just that set, mirroring
+ * `checksStateFromRollup`'s own `knownRequired` narrowing. An empty/absent list answers the
+ * full (review-excluded, deduped) rollup, unchanged from before this task.
+ */
+export function ciGatePreReviewView(
+  rollup: RollupEntry[] | undefined,
+  requiredContexts: Iterable<string> | undefined = undefined,
+): RollupEntry[] {
+  const roll = dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX));
+  // `remudero-review` is branch protection's own name for THIS rung's judge, so it can appear
+  // inside the required-contexts list itself — excluded here too, the same as it is excluded from
+  // `roll` just above, so a required list of exactly `["remudero-review"]` narrows to nothing
+  // rather than matching a rollup entry this function already stripped.
+  const required = new Set([...(requiredContexts ?? [])].filter((name) => name !== REVIEW_CTX));
+  return required.size > 0
+    ? roll.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? ""))
+    : roll;
+}
+
 export function ciGateFromRollup(
   rollup: RollupEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined = undefined,
@@ -4614,20 +4650,32 @@ export function ciGateFromRollup(
   // W1-T2804: DEDUPE BEFORE JUDGING, by CALLING the rule the siblings call. A sha accumulates one
   // entry PER ATTEMPT, so without this a superseded CANCELLED/FAILURE attempt outvotes its own
   // green successor and the run books `blocked_ci` while GitHub is merging the PR.
-  const roll = dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX));
+  //
   // W1-T2804: the RED vote is cast only by REQUIRED contexts when the list is readable. The degrade
   // is READ FROM the sibling (`checksStateFromRollup`), not re-decided: an empty/absent list means
   // every reported context counts, because an unreadable protection rule (the container PAT's 403,
-  // the common case on this fleet) must never manufacture a false green. The GREEN verdict is
-  // deliberately unchanged and still requires a check named `ci` reporting SUCCESS — sharing the
-  // RULES with `checksStateFromRollup` must not collapse the two distinct VERDICTS.
-  const required = new Set(requiredContexts ?? []);
-  const voters = required.size > 0
-    ? roll.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? ""))
-    : roll;
+  // the common case on this fleet) must never manufacture a false green.
+  const required = new Set([...(requiredContexts ?? [])].filter((name) => name !== REVIEW_CTX));
+  const voters = ciGatePreReviewView(rollup, requiredContexts);
   const red = voters.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
   if (red) return "red";
-  const ci = roll.find((c) => (c.name ?? c.context) === "ci");
+  if (required.size > 0) {
+    // W1-T3584: the GREEN verdict, when the target's required contexts are READABLE, is derived
+    // from THAT set alone — never a check literally named `ci`, which a target whose protection
+    // names console-ci/ci-gate/Vercel (or any other names) never reports at all. Every required
+    // context (remudero-review already excluded above) must be PRESENT on this head with a
+    // REQUIRED_CHECK_OK conclusion (the same ok-set `checksStateFromRollup` reads); an absent,
+    // queued, cancelled, or otherwise-pending required context falls through to "pending" below —
+    // it can never manufacture a green.
+    const allOk = [...required].every((name) => {
+      const entry = voters.find((c) => (c.name ?? "") === name || (c.context ?? "") === name);
+      return entry !== undefined && REQUIRED_CHECK_OK.has(String(entry.conclusion ?? entry.state ?? ""));
+    });
+    return allOk ? "green" : "pending";
+  }
+  // Fail-closed fallback (W1-T176 design (i), unchanged): required contexts unreadable or empty —
+  // GREEN still requires a check literally named `ci` reporting SUCCESS.
+  const ci = voters.find((c) => (c.name ?? c.context) === "ci");
   if (ci && String(ci.conclusion ?? ci.state ?? "") === "SUCCESS") return "green";
   return "pending";
 }
@@ -4841,25 +4889,34 @@ async function waitForCiGreen(
   const sleep = deps.sleep ?? yieldingSleep;
   // W1-T2268: REST, never GraphQL — see the block above `restRollupFor`.
   const { owner, repo, number } = pollRestTarget(prUrl, "waitForCiGreen");
+  // W1-T3584: resolved ONCE per wait, never per poll — branch protection does not change
+  // mid-wait, and a repeated read is only a repeated chance for a rate-limited or 403'd token to
+  // flip an already-resolved answer under the SAME wait. Passed to EVERY poll's verdict below
+  // (`ciGateFromRollup`) and to the pre-review view fed to `checkWaitStalled`, so the two never
+  // judge against a different notion of "required" mid-wait.
+  const requiredContexts = (deps.requiredContexts ?? ghRequiredStatusCheckContexts)(owner, repo);
   const readings: (RollupEntry[] | undefined)[] = [];
   let sha = "";
   for (let i = 0; ; i++) {
     const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
     sha = mapRestPr(row).headRefOid;
     const roll = await restRollupFor(owner, repo, sha, read);
-    const state = ciGateFromRollup(roll);
+    const state = ciGateFromRollup(roll, requiredContexts);
     // W1-T2804: the sha this iteration RESOLVED and judged rides out with the verdict. It is the
     // already-resolved head, never a second read — a second read is a second chance to skew.
     if (state === "red") {
       const red = boundedCiGateChecks(
-        dedupeRollupByLatestAttempt((roll ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX))
+        ciGatePreReviewView(roll, requiredContexts)
           .filter((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")))
           .map((c) => c.name ?? c.context ?? "unknown"),
       );
       return { state: "red", sha, ...red };
     }
     if (state === "green") return { state: "green", sha };
-    readings.push(roll);
+    // W1-T3584: the SAME pre-review view `ciGateFromRollup` just judged — never the raw rollup —
+    // so a still-PENDING `remudero-review` entry can never be recorded by `checkWaitStalled` as a
+    // stalled CI dependency (the console PR #22 false `ci.stalled` this task exists to fix).
+    readings.push(ciGatePreReviewView(roll, requiredContexts));
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
     const ci = roll.find((c) => (c.name ?? c.context) === "ci");
@@ -26718,6 +26775,103 @@ export function planReloader(
 }
 
 /**
+ * W1-T3554 — the NON-self counterpart to {@link planReloader}. A `--repo <target>` daemon (a
+ * non-self target, no explicit `--plan`) used to freeze that target's plan at boot forever:
+ * `planReloader` refuses whenever `target.isSelf` is false, and `checkFreshness` watches only the
+ * daemon's OWN engine checkout — reported as fb-1789349833277-20ca42 (the CONSOLE-T1 incident this
+ * closes). A NEW function, not a modified `planReloader`: that function's self arm, and its
+ * documented non-self refusal (test/daemon-plan-freshness.test.ts), are untouched; only the
+ * wiring below now also reaches this second reloader.
+ *
+ * Same shape, same `deps.reloadPlan` placement, same "never mid-batch" guarantee as
+ * `planReloader` — inherited from the SAME caller (`runDaemon`'s top-of-tick call, lib/daemon.ts),
+ * not reimplemented here. See the inline comments below for why this arm fetches and resets the
+ * working tree where `planReloader`'s self arm needs neither.
+ *
+ * Returns a closure holding the last-seen plan tree sha: `null` while unchanged, a fresh
+ * `Plan` only when the target's own origin/main genuinely moved.
+ */
+export function dedicatedTargetPlanReloader(
+  target: { isSelf: boolean; planPath: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    fetch?: () => void;
+    treeSha?: () => string;
+    resetWorkingTree?: () => void;
+    load?: (planPath: string) => Plan;
+  } = {},
+): (() => Plan | null) | undefined {
+  // Mirrors `planReloader`'s own early return, inverted: THIS reloader exists only for the arm
+  // `planReloader` refuses. Wiring (below) never hands a self target here, but the guard keeps
+  // this function correct in isolation, not merely correct-by-caller-discipline.
+  if (target.isSelf) return undefined;
+  const repoDirForGit = dirname(target.planPath);
+  // FETCHES, UNLIKE `planReloader`'s self arm: self rides `checkFreshness`'s own per-tick fetch of
+  // the SAME engine checkout (wired a few lines below this function's call site); nothing fetches
+  // a non-self TARGET's checkout between dispatches (`worktreeAdd`, lib/worker.ts, only fetches it
+  // WHILE a worker runs) — an idle dedicated daemon would otherwise never see a merged change.
+  const fetch =
+    deps.fetch ??
+    (() => execFileSync("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"], { stdio: "pipe" }));
+  const treeSha =
+    deps.treeSha ??
+    (() =>
+      execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
+        encoding: "utf8",
+      }).trim());
+  // RESETS THE WORKING TREE, UNLIKE `planReloader`: `load` below is a plain filesystem read, never
+  // a `git show <ref>:<path>`, so a fetched ref alone leaves it reading whatever boot's own
+  // `git reset --hard origin/main` (the `!target.isSelf` branch above) last checked out. Self gets
+  // away with the same plain read only because the deploy supervisor restarts the WHOLE process on
+  // any main move; a dedicated non-self daemon has no such restart (that gap is this task), so a
+  // genuine sha move must reset this checkout itself — the SAME command boot already runs once,
+  // deferred to fire again exactly when due — or the "reload" would silently re-parse stale
+  // content forever, which is worse than never reloading: it would look fixed.
+  const resetWorkingTree =
+    deps.resetWorkingTree ??
+    (() => execFileSync("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" }));
+  const load = deps.load ?? ((pp: string) => loadPlan(pp));
+  let lastSha: string | undefined;
+  return () => {
+    // A failed fetch propagates — caught by `runDaemon`'s own `daemon.plan_reload_failed` wrapper
+    // (the SAME generic catch `planReloader`'s own treeSha throw already relies on), never
+    // swallowed here. Keeping the plan we already have is the correct degrade either way.
+    fetch();
+    const sha = treeSha();
+    if (lastSha === undefined) {
+      // First tick: record the boot's sha without reloading — see `planReloader`'s identical
+      // comment for why reporting a reload here would be a lie. The working tree already matches
+      // this sha (boot's own reset put it there), so no reset is needed on this arm either.
+      lastSha = sha;
+      log("daemon.target_plan_unchanged", { tree_sha: sha.slice(0, 12), first_tick: true });
+      return null;
+    }
+    if (sha === lastSha) return null;
+    lastSha = sha;
+    resetWorkingTree();
+    log("daemon.target_plan_changed", { tree_sha: sha.slice(0, 12) });
+    return load(target.planPath);
+  };
+}
+
+/**
+ * W1-T3554 — picks the reloader for a target that DID ask for reload (an explicit `--plan` has
+ * already been ruled out at the call site, `daemonCommand`'s own `reloadPlan` wiring): self gets
+ * {@link planReloader}, everyone else gets {@link dedicatedTargetPlanReloader}. Pulled out of that
+ * wiring's own ternary into its own named, directly-testable seam — both arms are ALREADY pinned
+ * by their own reloader's tests above (`planReloader REAL DEFAULT`,
+ * `dedicatedTargetPlanReloader: a SELF target gets no reloader`), so this function's own job is
+ * only the SELECTION, never the reload behaviour itself.
+ */
+export function resolveReloadPlan(
+  target: { isSelf: boolean; planPath: string },
+  allowStale: boolean,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): (() => Plan | null) | undefined {
+  return target.isSelf ? planReloader(target, allowStale, log) : dedicatedTargetPlanReloader(target, log);
+}
+
+/**
  * W1-T2509 — MEMOISE ONE {@link GitHub} GATEWAY PER `owner/repo`, so N dispatch lanes pay ONE cold
  * walk instead of N.
  *
@@ -26973,6 +27127,52 @@ export function requeueActionsJob(
   }
 }
 
+/**
+ * W1-T3581: the recovery proof a sweep may use after a terminal review was withheld because
+ * the old daemon's reviewer code was stale. `loadedCodeSha` is captured once at daemon boot by
+ * the caller; this function never resolves a live checkout HEAD. Git ancestry failures return
+ * false, so an unreadable repository holds the existing bounded backoff instead of releasing a
+ * review from code we cannot identify.
+ */
+export function reviewerCodeRecoveryFromLoadedModule(
+  moduleRepoDir: string,
+  loadedCodeSha: string | undefined,
+  spawn: typeof spawnSync = spawnSync,
+): NonNullable<SweepDeps["reviewerCodeRecovery"]> {
+  let pendingAncestryFailure: string | undefined;
+  return {
+    loadedCodeSha,
+    isLoadedCodeAtOrAfter: (requiredOriginMainSha: string) => {
+      if (!loadedCodeSha || !requiredOriginMainSha) return false;
+      try {
+        return spawn(
+          "git",
+          ["-C", moduleRepoDir, "merge-base", "--is-ancestor", requiredOriginMainSha, loadedCodeSha],
+          { stdio: "ignore" },
+        ).status === 0;
+      } catch (error) {
+        const reason = error instanceof Error && error.name.length > 0 ? error.name : typeof error;
+        pendingAncestryFailure = reason;
+        return false;
+      }
+    },
+    takeAncestryFailure: () => {
+      const failure = pendingAncestryFailure;
+      pendingAncestryFailure = undefined;
+      return failure;
+    },
+  };
+}
+
+// Function declarations are initialized before module evaluation, so these retain the production
+// builders while `daemonCommand` may shadow their names with a test injection below. Keeping the
+// live calls as `buildSweepHook(...)`/`buildSweepLightHook(...)` preserves the composition-root
+// contract that existing daemon wiring tests inspect.
+const daemonDefaultBuildSweepHook = buildSweepHook;
+const daemonDefaultBuildSweepLightHook = buildSweepLightHook;
+type DaemonSweepHookBuilder = typeof buildSweepHook;
+type DaemonSweepLightHookBuilder = typeof buildSweepLightHook;
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -26995,6 +27195,11 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
+    /** Injectable sweep-hook builders for composition-root tests. Production keeps both real
+     * builders; the seam lets a test observe the immutable reviewer-code provenance handed to
+     * the full and light paths without reading this source file as text. */
+    buildSweepHook?: DaemonSweepHookBuilder;
+    buildSweepLightHook?: DaemonSweepLightHookBuilder;
     /** Injectable mutable boot routine. Tests use it to prove an already-held fleet does not
      * enter daemonBoot's sweeps or keychain work. */
     daemonBoot?: typeof daemonBoot;
@@ -27078,6 +27283,24 @@ export async function daemonCommand(
   const reposDir = join(config.root, "repos");
   // deps.repoRoot's doc (above, W1-T143) explains why this is injectable at all.
   const effectiveRepoRoot = deps.repoRoot ?? repoRoot;
+  // W1-T3581: capture the SHA of the source tree that loaded THIS daemon process once. The
+  // mutable checkout may advance while the process stays alive, so it cannot prove which review
+  // code is executing. This is intentionally the same module-relative source used for the
+  // daemon.boot `boot_head_sha` below, and is never refreshed from cwd or HEAD during a sweep.
+  const daemonModuleRepoDir = dirname(dirname(fileURLToPath(import.meta.url)));
+  const daemonLoadedCodeSha = (() => {
+    try {
+      return execFileSync("git", ["-C", daemonModuleRepoDir, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {
+      return undefined;
+    }
+  })();
+  const reviewerCodeRecovery = reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha);
+  const buildSweepHook: DaemonSweepHookBuilder = deps.buildSweepHook ?? daemonDefaultBuildSweepHook;
+  const buildSweepLightHook: DaemonSweepLightHookBuilder = deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook;
 
   // ── REPO TARGETING + self-target GUARD (fix/daemon-repo-targeting). The daemon must know
   // WHICH repo to drain, EXPLICITLY — the old code read the plan from its own checkout and
@@ -27565,16 +27788,7 @@ export async function daemonCommand(
     // comparison time would always match and reproduce the very bug this closes. Best-effort:
     // if git is unavailable the field is omitted and the supervisor fails eager (one extra
     // restart at an idle gap), which is strictly safer than recording a wrong sha.
-    (() => {
-      try {
-        return execFileSync("git", ["-C", dirname(dirname(fileURLToPath(import.meta.url))), "rev-parse", "HEAD"], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-        }).trim();
-      } catch {
-        return undefined;
-      }
-    })(),
+    daemonLoadedCodeSha,
     // W1-T530: the boot-time half of the feedback-landing sweep, wired at last (appended after
     // `bootHeadSha` per that param's own "no positional caller shifts" discipline) — see the
     // shared `sweepFeedbackLandingRung` closure defined above this call.
@@ -27604,7 +27818,7 @@ export async function daemonCommand(
     // keychain rung above); `rmd doctor`'s `checkout-depth` arm is where the FAIL verdict lives.
     // Appended LAST, after the node pin, per `daemonBoot`'s own "no positional caller shifts"
     // discipline.
-    readCheckoutDepth(dirname(dirname(fileURLToPath(import.meta.url)))),
+    readCheckoutDepth(daemonModuleRepoDir),
     );
   }
 
@@ -27833,19 +28047,23 @@ export async function daemonCommand(
         // dispatch runs to its verdict first, which is also what bounds the restart rate (measured:
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
         checkFreshness: () => daemonFreshnessFromService(checkServiceFreshness(repoRoot, process.env)),
-        // impl-FZ — PLAN FRESHNESS. Wired ONLY on the git-synced self-target path, so the reload
-        // reads the SAME source the boot did (origin/main, never the working tree). An explicit
-        // `--plan` keeps the frozen-at-boot behaviour, because that caller asked for a literal file.
+        // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
+        // paths, so the reload always reads the SAME source the boot did (origin/main, never the
+        // working tree). An explicit `--plan` keeps the frozen-at-boot behaviour for BOTH, because
+        // that caller asked for a literal file.
         //
         // Change detection is a TREE SHA, not a timestamp: `origin/main:plan` covers the monolith
         // AND all 45 shards in one ~8ms call, and only when it moves do we pay the ~60ms parse of
-        // a ~1MB plan. Unchanged ticks therefore cost 8ms, not 60. The sha is read from the
-        // already-fetched origin/main ref rather than fetching here — the deploy supervisor keeps
-        // that ref current on its own ~2-minute cadence, and adding a per-tick fetch to the
-        // dispatch path would be new network I/O for no extra freshness.
-        // Mirrors the BOOT condition at the plan binding above (`target.isSelf && !--plan`)
-        // exactly, so the reload source can never diverge from the load source.
-        reloadPlan: flagValue(rest, "--plan") ? undefined : planReloader(target, allowStale, log),
+        // a ~1MB plan. Unchanged ticks therefore cost 8ms, not 60. The self-target sha is read from
+        // the already-fetched origin/main ref rather than fetching here — `checkFreshness` above
+        // already fetches this SAME checkout every tick — while the dedicated non-self target
+        // fetches for itself (see `dedicatedTargetPlanReloader`'s own doc for why: nothing else
+        // keeps ITS checkout's origin/main current between dispatches).
+        // Mirrors the BOOT condition at the plan binding above (`target.isSelf && !--plan` /
+        // `!target.isSelf && !--plan`) exactly, so the reload source can never diverge from the
+        // load source. Selection itself lives in `resolveReloadPlan` (its own doc, above) so this
+        // callsite stays a single reachable line regardless of which arm a given caller exercises.
+        reloadPlan: flagValue(rest, "--plan") ? undefined : resolveReloadPlan(target, allowStale, log),
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
         // consumes markers the write-token API drops, dispatching a kicked task
         // through its normal assertRunnable-gated path and honouring "drain now".
@@ -27893,12 +28111,14 @@ export async function daemonCommand(
           policy.values.workerStall,
           mainHealthRung,
           boardSnapshotFor(target.owner, target.repo),
+          reviewerCodeRecovery,
           // W1-T3585 — the SAME `lastProj` snapshot `isOpenPr`/`isCreditIndeterminate` above already
           // read, never a second GitHub walk: `refreshMerged()` runs once at the top of THIS tick
           // (runDaemon's loop body, lib/daemon.ts) and this hook's own closure runs later in the
           // same tick, so by the time it calls `buildOpenPrViews`, `lastProj` is already this tick's
           // fresh dispatch projection.
-          (t) => lastProj?.get(t.id)?.merged ?? false,
+          (t: Task) => lastProj?.get(t.id)?.merged ?? false,
+          undefined,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -27912,10 +28132,12 @@ export async function daemonCommand(
           runId,
           plan,
           log,
+          reviewerCodeRecovery,
           // W1-T3585 — the SAME accessor `sweep:` above threads, off the SAME `lastProj` tick
           // snapshot: both daemon sweep paths must reconcile the identical current-plan
           // eligibility predicate, never two independently-derived ones.
-          (t) => lastProj?.get(t.id)?.merged ?? false,
+          (t: Task) => lastProj?.get(t.id)?.merged ?? false,
+          undefined,
         ),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
@@ -32881,18 +33103,22 @@ export function buildSweepHook(
   // liveness even when a test injection or future implementation accidentally throws.
   mainHealthRung?: () => Promise<void>,
   snapshotCache?: BoardSnapshotCache,
-  // W1-T3585 — the SAME freshly-derived merged-task set `daemonCommand`'s own `refreshMerged()`
-  // projection already computes once per poll tick, threaded through so `buildOpenPrViews` can
-  // resolve `planResequenceIneligible` off the CURRENT dispatch snapshot rather than a second,
-  // independently-derived GitHub walk. Trailing and optional, the same convention every other seam
-  // on this function follows; omitted ⇒ `planResequenceIneligible` stays `undefined` everywhere
-  // (fail closed), exactly today's behavior for every caller/fixture that predates this task.
-  isMerged?: MergedResolver,
-  // W1-T3585 — injectable ONLY for a test to pin the current plan this closure's own eligibility
-  // read resolves against; real callers omit it and `buildOpenPrViews` falls through to its own
-  // `loadPlan` default, unchanged.
+  // W1-T3581 and W1-T3585 independently appended optional positional seams here. Preserve both
+  // already-shipped call shapes: a recovery object first (then isMerged/readMainPlan), or the
+  // earlier isMerged/readMainPlan pair. The discriminator is structural and fail-closed: a merged
+  // resolver is a function, while reviewer provenance is an object.
+  reviewerCodeRecoveryOrIsMerged?: SweepDeps["reviewerCodeRecovery"] | MergedResolver,
+  isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<void> {
+  const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
+  const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
+  const isMerged = legacyResequenceShape
+    ? reviewerCodeRecoveryOrIsMerged
+    : (isMergedOrReadMainPlan as MergedResolver | undefined);
+  const resolvedReadMainPlan = legacyResequenceShape
+    ? (isMergedOrReadMainPlan as ((root: string) => Plan) | undefined)
+    : readMainPlan;
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
@@ -32945,7 +33171,7 @@ export function buildSweepHook(
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
         isMerged,
-        readMainPlan,
+          readMainPlan: resolvedReadMainPlan,
       });
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
@@ -32991,6 +33217,7 @@ export function buildSweepHook(
           staleGateWorkflowsByPr,
           updatedForWorkflow,
           behindMainByPr,
+          reviewerCodeRecovery,
           // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
           // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
           // receive the true defaults above.
@@ -33240,12 +33467,20 @@ export function buildSweepLightHook(
   runId: string,
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  // W1-T3585 — the SAME two seams `buildSweepHook` accepts, for the SAME reason: the light pass
-  // must resolve `planResequenceIneligible` off the identical current-plan eligibility predicate
-  // the full sweep uses, never a second one. Trailing and optional; omitted ⇒ today's behavior.
-  isMerged?: MergedResolver,
+  // Same compatibility adapter as buildSweepHook: recovery-first is the current daemon shape;
+  // isMerged/readMainPlan first remains valid for W1-T3585 callers already on the branch.
+  reviewerCodeRecoveryOrIsMerged?: SweepDeps["reviewerCodeRecovery"] | MergedResolver,
+  isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
 ): () => Promise<void> {
+  const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
+  const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
+  const isMerged = legacyResequenceShape
+    ? reviewerCodeRecoveryOrIsMerged
+    : (isMergedOrReadMainPlan as MergedResolver | undefined);
+  const resolvedReadMainPlan = legacyResequenceShape
+    ? (isMergedOrReadMainPlan as ((root: string) => Plan) | undefined)
+    : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   return async () => {
@@ -33254,7 +33489,7 @@ export function buildSweepLightHook(
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
         isMerged,
-        readMainPlan,
+        readMainPlan: resolvedReadMainPlan,
       });
       const effects = buildSweepEffects({
         owner: owner,
@@ -33296,6 +33531,7 @@ export function buildSweepLightHook(
             ledgerPath,
             runId,
             log,
+            reviewerCodeRecovery,
             // W1-T1211: `post-review` always, and the fix rung TOO when every in-flight run is
             // demonstrably waiting rather than working — see `lightPassActionable` and
             // `runIsAwaitingExternal` above. Read once per tick, not per PR, so the whole fan-out
@@ -33332,6 +33568,7 @@ export function buildSweepLightHook(
               ledgerPath,
               runId,
               log,
+              reviewerCodeRecovery,
               // `requeueLaneOnly: true` — see `lightPassActionable`'s own doc for why this can
               // never admit a `dispatchFix` call for a PR `blockedFixableIsRequeueOnly` selected.
               actionable: (d) => lightPassActionable(d, fixRungAllowed, true),

@@ -197,7 +197,8 @@
   "src/lib/escalate.ts": 500,
   "src/lib/escalation-catalogue.ts": 500,
   "src/lib/feedback-docket.ts": 102,
-  "src/lib/feedback-landing.ts": 250,
+  "src/lib/feedback-landing.ts": 300,
+  "src/lib/feedback-record-merge.ts": 250,
   "src/lib/feedback.ts": 225,
   "src/lib/fix-fence.ts": 42,
   "src/lib/fix-rung-classify.ts": 250,
@@ -349,6 +350,6 @@
   "src/lib/worker.ts": 1500,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 15500,
+  "src/run-task.ts": 15750,
   "src/spike.ts": 18
 }

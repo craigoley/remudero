@@ -1,0 +1,28 @@
+id: fb-1789380844302-0f01fc
+ts: 2026-09-14T10:14:04.302Z
+raw: "OBSERVED 2026-09-14: W1-T3554 / PR #5505 cannot pass the current
+  acceptance and coverage gates without correcting the task contract/test
+  design. proof-discrimination on head 966f29d reports the fourth W1-T3554
+  proof, grep: isSelf in src/run-task.ts, passes at both PR head (36 hits) and
+  merge base 0f7afa89 (30 hits), so it establishes nothing. The task shard
+  plan/tasks.d/W1-T3554-dedicated-instance-target-plans-freeze-at-boot.yaml
+  contains that stale proof. Replace it with a narrow proof that names behavior
+  introduced by this task and verify it against both head and base through the
+  real executor before filing. Separately, coverage-shard (2/4) reports
+  gitInitSites 223 > baseline 222 and gitInitFiles 146 > baseline 145 from the
+  newly added dedicated-target-plan-freshness test. Determine whether the
+  real-git fixture can reuse an existing accepted helper; if not, make the
+  baseline change explicit, scoped, and justified by a test that demonstrates
+  the count/allowance rather than hiding the fixture cost. Do not paper over
+  either failure with a no-op push or a body-only edit. Once the contract
+  correction lands, the normal fix rung should rebase/reconcile #5505 and
+  restore its automated path."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -36,11 +36,10 @@
 # inside a job that then continues, so it is done well before ci.yml's long-running jobs finish —
 # the same "standalone job, not a step" shape ci.yml's own comments describe for its fast gates.
 #
-# NOT YET WIRED into ci-gate.yml's REQUIRED aggregator list or branch protection — this PR adds the
-# check and makes it observable on every PR; whether/when to make it a MERGE-BLOCKING required
-# check is deliberately left as a follow-up (ci-gate.yml and branch protection admin config are
-# outside this task's declared files, the same "declare it before widening into it" discipline
-# this task's own filing note applies to src/lib/review.ts).
+# REQUIRED THROUGH `ci-gate`: main branch protection requires `ci-gate`, and ci-gate.yml's
+# unconditional REQUIRED list includes this exact job name. The standalone job is therefore a
+# merge-blocking gate without adding a second direct branch-protection context; ci-gate waits for
+# it before publishing its own required verdict.
 name: Acceptance author gate
 
 on:

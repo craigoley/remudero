@@ -7661,6 +7661,82 @@ test("buildSweepLightHook: runs the restricted light sweep over an empty PR set 
   }
 });
 
+function ghStubForCancelledLightRequeue(callsFile: string): string {
+  return `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const command = args.join(" ");
+fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify(args) + "\\n");
+if (command.includes("required_status_checks")) {
+  process.stdout.write(JSON.stringify({ contexts: ["ci-gate", "remudero-review"] }));
+} else if (command.includes("pulls?state=open")) {
+  process.stdout.write(JSON.stringify([{
+    number: 902,
+    html_url: "https://github.com/o/r/pull/902",
+    state: "open",
+    body: "Remudero-Task: W1-T902\\n",
+    updated_at: "2026-09-14T00:00:00Z",
+    head: { ref: "run-W1-T902-1", sha: "cccc902000000000000000000000000000000c" },
+    auto_merge: null,
+  }]));
+} else if (command.includes("/pulls/902/files")) {
+  process.stdout.write(JSON.stringify([]));
+} else if (command.includes("/pulls/902")) {
+  process.stdout.write(JSON.stringify({
+    number: 902,
+    html_url: "https://github.com/o/r/pull/902",
+    state: "open",
+    merged_at: null,
+    head: { ref: "run-W1-T902-1", sha: "cccc902000000000000000000000000000000c" },
+  }));
+} else if (command.includes("cccc902") && command.includes("check-runs")) {
+  process.stdout.write(JSON.stringify({ check_runs: [
+    { name: "ci-gate", status: "completed", conclusion: "failure" },
+    { name: "coverage-ratchet", status: "completed", conclusion: "cancelled", details_url: "https://github.com/o/r/actions/runs/1/job/123456" },
+  ] }));
+} else if (command.includes("/status")) {
+  process.stdout.write(JSON.stringify({ statuses: [{ context: "remudero-review", state: "success" }] }));
+} else {
+  process.stdout.write("{}");
+}
+`;
+}
+
+test("buildSweepLightHook: a cancelled-only CI PR reaches its separate requeue batch and reruns only that job", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-lighthook-requeue-"));
+  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-lighthook-requeue-`));
+  const callsFile = join(root, "gh-calls.ndjson");
+  writeFileSync(join(bin, "gh"), ghStubForCancelledLightRequeue(callsFile), { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const recovery = { loadedCodeSha: "boot-loaded-sha", isLoadedCodeAtOrAfter: () => false };
+  try {
+    const hook = buildSweepLightHook(
+      "o", "r", { root } as never, join(root, "ledger.ndjson"), "RUN-LH-REQUEUE",
+      { tasks: [] } as never, (step, extra) => { logs.push({ step, extra }); }, recovery,
+    );
+    await hook();
+
+    assert.ok(!logs.some((l) => l.step === "sweep_light.error"), `the composition path completed: ${JSON.stringify(logs)}`);
+    assert.equal(logs.filter((l) => l.step === "sweep.summary").length, 2, "the ordinary and requeue-only batches each ran once");
+    assert.ok(
+      logs.some((l) => l.step === "sweep.check_requeue.dispatched" && l.extra?.job_id === "123456"),
+      `the requeue-only batch issued its one permitted job rerun; logs=${JSON.stringify(logs)}`,
+    );
+    const calls = readFileSync(callsFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as string[]);
+    assert.ok(
+      calls.some((args) => args.includes("repos/o/r/actions/jobs/123456/rerun")),
+      "the composition root targets the cancelled job, never the whole workflow run",
+    );
+    assert.ok(!logs.some((l) => l.step === "sweep.fix.dispatched"), "the cancelled-only batch never dispatches a worker");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── W1-T463 acceptance 3: "no second review lane ships until criterion one is answered" ──
 // The fix this task ships (`runSweepLightPass`, src/lib/sweep.ts) makes `buildSweepLightHook`
 // process every open PR's own `runSweep` call CONCURRENTLY instead of the whole snapshot
@@ -8692,4 +8768,59 @@ test("W1-T2564: the attempt-key migration runs ONCE per daemon start, not per po
     "re-running the migration each poll would evict the key just written and re-attempt forever — one extra attempt per boot, not per poll",
   );
   assert.equal(logs.filter((l) => l.step === "inbox.draft_attempts_reopened").length, 1, "and it reports itself exactly once");
+});
+
+// ── W1-T3584 (the console PR #22 false ci.stalled/fix.ci_not_green strikes): a target's own
+// required checks going green (console-ci/ci-gate/Vercel — no context literally named `ci`) used
+// to still read as `ciGateFromRollup` returning "pending" forever, so `waitForCiGreen` stalled and
+// the rung logged `fix.ci_not_green` and spent a strike without a worker ever running or the PR
+// changing. `ciGateFromRollup`/`ciGatePreReviewView`'s fix (this task) makes the REAL waiter return
+// a target-green `CiGateOutcome` for that shape; this drives `runFixRung` with the stubbed
+// `waitForCiGreen` seam returning exactly that corrected verdict, proving the CONSEQUENCE: the
+// rung reaches its ordinary fresh review on strike one, with no false `fix.ci_not_green`. Placed
+// at the END of the file (not beside its nearest sibling test above) so this addition never
+// re-numbers an EARLIER line a pinned-line-number census (test/operator-gated-default-
+// reachability.test.ts's armIfVerdictPermits/ledgerLines call-site list) reads elsewhere in this
+// same file — the #5571 coverage-shard break this placement exists to avoid repeating. ──
+
+test("W1-T3584 target-green fix rung does not spend a false strike: runFixRung reaches its ordinary fresh semantic review without emitting fix.ci_not_green or spending a second strike", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      // The verdict the FIXED `waitForCiGreen` now returns for a console-shaped rollup —
+      // console-ci/ci-gate/Vercel required and SUCCESS, remudero-review still pending, no context
+      // named `ci` — carrying the sha it judged (CiGateOutcome, W1-T2804).
+      waitForCiGreen: async () => ({ state: "green" as const, sha: "consolesha1" }),
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => logged.push({ step, extra }),
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(outcome.outcome, "fixed", "the target-green verdict must let the rung reach its ordinary fresh review");
+  assert.equal(outcome.strikes, 1, "no second strike — CI was already green on the FIRST wait, never a stall");
+  assert.equal(spawnCalls.length, 1, "exactly one fix worker — no phantom second dispatch off a false ci-not-green");
+  assert.ok(
+    !logged.some((l) => l.step === "fix.ci_not_green"),
+    "a target-green verdict must never be misread as ci not green",
+  );
+  assert.ok(
+    !logged.some((l) => l.step === "ci.stalled"),
+    "a target-green verdict must never route through the stall/timeout path either",
+  );
 });
