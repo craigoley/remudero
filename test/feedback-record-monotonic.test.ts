@@ -350,3 +350,48 @@ test("W1-T3561: sweepFeedbackLanding's own ledger line (feedback.landing_sweep) 
   assert.equal(refused![0].path, `plan/feedback/${id}.yaml`);
   assert.match(refused![0].reason, /earlier/i);
 });
+
+// ── decideFeedbackStage's own defensive arm: an upstream blob that resolves at `rev-parse` but ──
+// ── fails to read at `cat-file -p` (race, corrupt object, shallow clone) refuses rather than ──
+// ── guessing a winner — the same posture as unparseable YAML, never a thrown exception. ─────────
+
+/** Wraps a real `git` (same shape as `defaultGit`, feedback-landing.ts) but forces the ONE
+ *  `cat-file -p <sha>` call {@link decideFeedbackStage} makes to fail, standing in for a transient
+ *  read failure on an upstream blob that `rev-parse` itself already resolved successfully. */
+function gitWithUnreadableUpstreamBlob(root: string): (args: string[], opts?: { env?: NodeJS.ProcessEnv }) => string {
+  return (args, opts) => {
+    if (args[0] === "cat-file" && args[1] === "-p") {
+      throw new Error(`simulated: object ${args[2]} unreadable`);
+    }
+    return execFileSync("git", ["-C", root, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: opts?.env ?? process.env,
+    });
+  };
+}
+
+test("W1-T3561: an upstream blob that fails to read (not merely absent) refuses rather than guessing a winner", () => {
+  const bareOrigin = gitRepo({ bare: true, kind: "monotonic-unreadable-origin" });
+  const seed = gitRepo({ kind: "monotonic-unreadable-seed" });
+  const id = "fb-1789300000005-unreadable";
+  mkdirSync(join(seed.dir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "feedback", `${id}.yaml`), entryYaml({ id, status: "proposed" }));
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: seed a proposed entry");
+  seed.addRemote("origin", bareOrigin.dir);
+  seed.git("push", "--quiet", "origin", "main");
+
+  const root = gitRepo({ cloneFrom: bareOrigin.dir, kind: "monotonic-unreadable-root" });
+  writeEntry(root.dir, id, { status: "new" }); // differs from upstream's bytes either way
+
+  const { gh, calls } = fakeGh("https://github.com/o/r/pull/609");
+  const result = withLiveWritesAllowed(() => landFeedback(root.dir, { gh, git: gitWithUnreadableUpstreamBlob(root.dir) }));
+
+  assert.equal(result.landed, false, "an unreadable upstream blob must never be reported as landed");
+  assert.ok(result.refused && result.refused.length === 1, `expected one refused record, got: ${JSON.stringify(result.refused)}`);
+  assert.equal(result.refused![0].path, `plan/feedback/${id}.yaml`);
+  assert.match(result.refused![0].reason, /unreadable/i);
+  assert.equal(calls.length, 0, "a read failure must never reach gh either");
+  assert.match(readOnBranch(bareOrigin.dir, "main", `plan/feedback/${id}.yaml`), /status: proposed/, "origin/main is untouched");
+});
