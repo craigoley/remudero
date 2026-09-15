@@ -24,6 +24,26 @@ const TRANSCRIPT = [
   "Failed to FinalizeArtifact: (403) Forbidden: Error from intermediary",
 ].join("\n");
 
+/**
+ * THE INCIDENT'S OWN TEN-MINUTE WINDOW, STAMPED FROM THE WALL CLOCK.
+ *
+ * These two were a pair of calendar dates — activity at 2026-09-08T15:30:00Z and a sweep clock
+ * pinned ten minutes later. `expiring-fixture-census` flagged the pair as crossing
+ * `sweep.staleDays` on 2026-09-22, and it was right rather than merely cautious: aging the stamp
+ * 60 days past the rung and re-running turns 5 of this file's 7 tests red, so the fixture's
+ * FRESHNESS is load-bearing and not incidental. The frozen `now` below does not protect it,
+ * because the staleness rung this suite exercises reads the real clock.
+ *
+ * A fixed date compared against a real `Date.now()` is a time bomb whose signature is a red
+ * beginning at a calendar boundary with no diff involved, which makes whatever merged nearby look
+ * like the cause — the same failure test/stale-ci-gate-wiring.test.ts's `recentActivityIso`
+ * already exists to prevent. Moving the constant forward would only re-arm it on a later date, so
+ * the window is derived instead: the gap between the two stays exactly ten minutes, forever, and
+ * the stamp is always recent to any reader of the real clock.
+ */
+const SWEEP_NOW_MS = Date.now();
+const ACTIVITY_ISO = new Date(SWEEP_NOW_MS - 10 * 60_000).toISOString();
+
 function infra(name = "ci-shard (2/4)"): CiFailure {
   return { name, conclusion: "FAILURE", jobId: "34249290033", logTail: TRANSCRIPT };
 }
@@ -37,7 +57,7 @@ function subject(overrides: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "red",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-08T15:30:00Z",
+    lastActivityAt: ACTIVITY_ISO,
     headSha: "e0838eb6e0702ff1a35bd5d9c240e8c7bbf6fd25",
     headRefName: "run-W1-T3140-1788886671767",
     autoMergeArmed: false,
@@ -73,7 +93,7 @@ function deps(ledgerPath: string) {
     },
     ledgerPath,
     runId: "SWEEP-INFRA-TEST",
-    now: () => Date.parse("2026-09-08T15:40:00Z"),
+    now: () => SWEEP_NOW_MS,
   };
   return { d, escalated, fixed, requeued };
 }
