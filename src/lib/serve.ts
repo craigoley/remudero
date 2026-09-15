@@ -134,7 +134,7 @@ import {
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 
 /**
  * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
@@ -2535,8 +2535,10 @@ export interface StaleCodeExitDeps {
   exit?: (code: number) => void;
   /** The backlog behind {@link bootSha} — defaults to {@link resolveCommitsBehind}. */
   resolveCommitsBehind?: (bootSha: string) => number | undefined;
-  /** Milliseconds since the code first read stale. Defaults to a real clock. */
-  now?: () => number;
+  /** The clock patience is measured against — src/lib/clock.ts's port, never a bare
+   *  millis-function field: clock-signature-census ratchets that legacy signature per file, and
+   *  this port is what it ratchets toward. Defaults to {@link systemClock}. */
+  clock?: Clock;
   /** Starts the slow re-check while somebody is watching, and returns its stop function.
    *  Injectable so a suite steps the cadence by hand rather than waiting on a real interval. */
   scheduleRecheck?: (run: () => void, ms: number) => () => void;
@@ -2587,7 +2589,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   const exit = deps.exit ?? ((code: number) => process.exit(code));
   const log = deps.log ?? (() => {});
   const commitsBehindOf = deps.resolveCommitsBehind ?? resolveCommitsBehind;
-  const now = deps.now ?? (() => Date.now());
+  const clock = deps.clock ?? systemClock;
   const scheduleRecheck =
     deps.scheduleRecheck ??
     ((run, ms) => {
@@ -2610,10 +2612,10 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
       staleSince = undefined;
       return;
     }
-    staleSince ??= now();
+    staleSince ??= clock.now();
     const commitsBehind = commitsBehindOf(deps.bootSha);
     const patienceMs = consoleRecyclePatienceMs(clients, commitsBehind);
-    const staleForMs = now() - staleSince;
+    const staleForMs = clock.now() - staleSince;
     // Somebody is watching and the backlog has not yet earned the interruption. The re-check
     // below keeps asking, and the backlog grows on its own — which is what turns a watched
     // console from "never" into "soon enough" without ever reading a threshold.

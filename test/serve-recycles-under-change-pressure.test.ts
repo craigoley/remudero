@@ -10,6 +10,7 @@ import {
   RECYCLE_RECHECK_MS,
   type StaleCodeExitDeps,
 } from "../src/lib/serve.js";
+import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { SseRoute, SseSend } from "../src/lib/service.js";
 
 // ── A merged fix reaches a WATCHED console too ───────────────────────────────────────────────
@@ -51,7 +52,7 @@ function harness(over: Partial<StaleCodeExitDeps> & { commitsBehind?: number | u
     bootSha: BOOT,
     resolveCurrentSha: () => NEW,
     resolveCommitsBehind: () => ("commitsBehind" in over ? over.commitsBehind : 1),
-    now: () => clock,
+    clock: clockFromMillisFn(() => clock),
     exit: (code) => exits.push(code),
     scheduleRecheck: (run, ms) => {
       assert.equal(ms, RECYCLE_RECHECK_MS, "the cadence is the module's own constant, never a per-caller number");
@@ -143,7 +144,7 @@ test("pressure never buys an in-flight write: the largest backlog imaginable sti
     bootSha: BOOT,
     resolveCurrentSha: () => NEW,
     resolveCommitsBehind: () => 100_000,
-    now: () => 0,
+    clock: clockFromMillisFn(() => 0),
     exit: (code) => exits.push(code),
     scheduleRecheck: (run) => {
       recheck = run;
@@ -183,7 +184,7 @@ test("code that reads fresh again clears the stale clock rather than banking the
     bootSha: BOOT,
     resolveCurrentSha: () => sha,
     resolveCommitsBehind: () => 2,
-    now: () => clock,
+    clock: clockFromMillisFn(() => clock),
     exit: (code) => exits.push(code),
     scheduleRecheck: (run) => {
       recheck = run;
