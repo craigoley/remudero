@@ -2405,7 +2405,7 @@ every class closing, ratify (a) alone and re-file the governor question with the
 **Rollback:** delete this entry. No code was written, no shard was retired and no filing was
 refused; W1-T3076 returns to `status: queued` with its question open.
 
-## 2026-09-08 — OPERATOR RULING (W1-T3173): the operator console is a BUNDLED REACT SPA in `apps/dashboard`, served by `rmd serve` (SUPERSEDED BY OPERATOR RULING 2026-09-15)
+## 2026-09-08 — OPERATOR RULING (W1-T3173): the operator console is a BUNDLED REACT SPA in `apps/dashboard`, served by `rmd serve` (OPERATOR-RULED) (SUPERSEDED BY OPERATOR RULING 2026-09-15)
 
 *Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. The ruling is
 his ("I am good with all of your recommendations", 2026-09-08, on a recommendation that named this
