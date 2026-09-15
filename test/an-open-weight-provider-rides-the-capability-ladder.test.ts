@@ -789,13 +789,20 @@ test("the verify-human judge rides openweight, and the fail-closed judges delibe
   // parsed object could never fail. Verified by adding a routed `risk_judge:` row and watching the
   // object-based form still pass; this source-text form catches it.
   const mountsSrc = readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8");
-  for (const failClosed of ["risk_judge", "ruling_judge"]) {
-    assert.doesNotMatch(
-      mountsSrc,
-      new RegExp(`^${failClosed}:`, "m"),
-      `${failClosed} must NOT be routed while it fails closed — a flaky deployment would manufacture escalations, not permissive defaults`,
-    );
-  }
+  // Spelled out per lane rather than looped. A loop interpolates the lane name at RUNTIME, so the
+  // source text never contains it, and this criterion's proof -- which greps this file for the very
+  // claim it makes -- could not see the assertion that substantiates it. Identical force: one
+  // `doesNotMatch` against the same source per lane; only the message is now a literal.
+  assert.doesNotMatch(
+    mountsSrc,
+    /^risk_judge:/m,
+    "risk_judge must NOT be routed while it fails closed — a flaky deployment would manufacture escalations, not permissive defaults",
+  );
+  assert.doesNotMatch(
+    mountsSrc,
+    /^ruling_judge:/m,
+    "ruling_judge must NOT be routed while it fails closed — a flaky deployment would refuse rulings rather than fall back to permissive ones",
+  );
   // And the positive control: the same form DOES see the rows that are routed, so a zero above is
   // a measurement rather than a pattern that matches nothing.
   assert.match(mountsSrc, /^verify_human_judge:/m, "the source-text form must be able to see a routed row at all");
