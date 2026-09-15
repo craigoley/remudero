@@ -4472,8 +4472,11 @@ export interface AutomergeHold {
 }
 
 /** Recover the current auto-merge hold for `prNumber`, last one wins, over the WHOLE ledger rather than a sha-bound
- * window (see {@link AutomergeHold}). Written by an operator verb as `automerge.hold_engaged`/`automerge.hold_released`,
- * each carrying `by`/`reason`; a hold missing either is refused at write time, the row being the only notification
+ * window (see {@link AutomergeHold}). Written by a confirmed human path as `automerge.hold_engaged`/
+ * `automerge.hold_released`, each carrying `by`/`reason`/`authority`; `actor: "operator"` alone is
+ * intentionally insufficient because an unattended process can supply any `--by` value to the CLI.
+ * A hold missing a trusted authority is ignored rather than allowed to strand a successful automated PR. The row is
+ * still retained for audit and a human can re-engage it from the confirmed console or an interactive CLI.
  * anyone gets. PR-SCOPED OR FLEET-SCOPED: a row with no `pr_number` is FLEET-WIDE, one with a number applies only to
  * that PR, and both fold into the SAME chronological scan. Consulted by sweep.ts's `alreadyDone` for `disposition:
  * "mergeable"` — a held PR is refused, never armed, never a dedup key — and by run-task.ts's `attemptArm`, the ONE
@@ -4482,17 +4485,19 @@ export function automergeHoldFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   prNumber: number,
 ): AutomergeHold | undefined {
+  const isConfirmedHumanAuthority = (line: Record<string, unknown>) =>
+    line.authority === "interactive-cli" || line.authority === "console-confirmed";
   let held: AutomergeHold | undefined;
   for (const line of lines) {
     const scopedToThisPr = typeof line.pr_number !== "number" || line.pr_number === prNumber;
     if (!scopedToThisPr) continue;
-    if (line.step === "automerge.hold_engaged") {
+    if (line.step === "automerge.hold_engaged" && isConfirmedHumanAuthority(line)) {
       if (typeof line.by === "string" && typeof line.reason === "string" && line.by && line.reason) {
         held = { by: line.by, reason: line.reason };
       }
       continue;
     }
-    if (line.step === "automerge.hold_released") {
+    if (line.step === "automerge.hold_released" && isConfirmedHumanAuthority(line)) {
       held = undefined;
     }
   }
