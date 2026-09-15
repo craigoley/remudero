@@ -74,5 +74,5 @@
       proof: "unit test: openweight selection picks the cheapest deployment whose window holds the request"
     - claim: "a request no listed deployment can hold is refused BEFORE it reserves, so an impossible request costs nothing against the daily cap instead of a full inflated reservation"
       proof: "unit test: a request larger than every context window refuses before it reserves"
-    - claim: "the byte-length input bound is unchanged, because it is correct and must not be divided down"
-      proof: "grep: no tokenizer emits more tokens than the UTF-8 bytes in src/lib/worker-provider.ts"
+    - claim: "the reservation still prices input by BYTE length and is never computed from the router's token estimate, so the fit gate's approximation cannot leak into the cash cap"
+      proof: "unit test: the openweight reservation still bounds input by byte length"
