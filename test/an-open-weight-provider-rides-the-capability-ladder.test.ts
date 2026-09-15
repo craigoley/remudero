@@ -35,6 +35,7 @@ import {
   type OpenWeightAllowanceState,
 } from "../src/lib/worker-provider.js";
 import { inboxDraftPrompt, INBOX_DRAFT_DISALLOWED_TOOLS } from "../src/lib/inbox.js";
+import { buildEscalationJudgeSpawnArgs, judgeEscalation, type Escalation } from "../src/lib/escalate.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { buildInboxDraftSpawnArgs, draftProposalBatch } from "../src/run-task.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
@@ -729,6 +730,48 @@ test("every priced openweight deployment declares a request temperature", async 
     const value = OPENWEIGHT_TEMPERATURE[deployment];
     assert.equal("temperature" in field, value !== null, `${deployment}: the field is present exactly when its row is not null`);
   }
+});
+
+test("the escalation judge rides openweight on the short-prompt deployment", () => {
+  // W1-T3614. `escalation.judged` is the highest-volume zero-tool lane in the fleet -- 29,834 rows
+  // across 72 tasks in 6.9 days and RISING -- and it rode the Claude subscription because it had no
+  // mount of its own. It now has one, and it must resolve to the deployment MEASURED cheaper for
+  // ITS prompt shape (gpt-oss-120b at 446 in / 177 out), NOT the per-token-cheaper row.
+  const mounts = loadMounts(join(REPO_ROOT, ".remudero", "mounts.yaml"));
+  const mount = mounts.escalation_judge;
+  assert.ok(mount, ".remudero/mounts.yaml must declare an escalation_judge mount");
+  assert.equal(mount!.provider, "openweight", "the escalation judge must carry openweight mount affinity");
+
+  const selected = selectOpenWeightModel(mounts.capabilities, mount!.model, mount!.effort);
+  assert.equal(selected.model, "gpt-oss-120b", "a short-prompt lane must select the deployment measured cheaper for short prompts");
+
+  // AND THE AFFINITY MUST REACH THE SPAWN. A mount declaring a provider that the spawn args drop is
+  // exactly the silent no-op this routing path exists to prevent.
+  const args = buildEscalationJudgeSpawnArgs({
+    escalation: { taskId: "W1-T1", class: "BLOCKED", reason: "r", options: [{ label: "l", detail: "d" }] } as unknown as Escalation,
+    mount: mount!,
+    cwd: REPO_ROOT,
+    settingsFile: SETTINGS_FILE,
+  });
+  assert.equal(args.mountProvider, "openweight", "the mount's provider must reach SpawnWorkerArgs");
+  assert.deepEqual(args.tools, [], "the escalation judge stays tool-less, which is what makes it adapter-eligible at all");
+});
+
+test("a failed openweight judge spawn fails open to deliver", async () => {
+  // W1-T3614. Routing this lane is only safe BECAUSE failing open is already the contract: a judge
+  // that cannot run must show the operator MORE, never less. If it ever demoted on error, a bad
+  // deployment would silently hide escalations -- the one outcome worse than paying for Claude.
+  const escalation = {
+    taskId: "W1-T3614", class: "BLOCKED", reason: "ci red with no actionable criteria",
+    options: [{ label: "Merge as-is", detail: "accept" }, { label: "Close", detail: "reject" }],
+  } as unknown as Escalation;
+
+  const verdict = await judgeEscalation(escalation, {
+    judge: async () => { throw new Error("openweight deployment unreachable"); },
+  });
+
+  assert.equal(verdict.decision, "deliver", "a judge that cannot run must deliver, never demote");
+  assert.match(verdict.reason, /judge unavailable/, "the reason must name the failure rather than inventing a judgement");
 });
 
 test("openweight configuration requires a daily cash cap and keeps its key outside worker env", async () => {

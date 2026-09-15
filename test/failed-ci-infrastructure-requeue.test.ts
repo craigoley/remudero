@@ -37,7 +37,7 @@ function subject(overrides: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "red",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-08T15:30:00Z",
+    lastActivityAt: "2026-09-08T15:30:00Z", // expiring-fixture: exempt -- this suite injects `now` (deps(), pinned 2026-09-08T15:40:00Z) and the staleness comparison takes it as a parameter with no wall-clock fallback (absentAgeMinutes(pr, now), src/lib/sweep.ts), so this sits a fixed 10 minutes inside a fixed clock; NOT proven by aging it, which breaks 5 of 7 tests by changing the pinned relationship they assert rather than by detonating
     headSha: "e0838eb6e0702ff1a35bd5d9c240e8c7bbf6fd25",
     headRefName: "run-W1-T3140-1788886671767",
     autoMergeArmed: false,

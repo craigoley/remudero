@@ -33689,10 +33689,10 @@ export async function routeFix(
     return { outcome: "fixed", reason };
   }
   if (disposition === "conflicted") {
-    // W1-T106: DISPOSITION_RULES already gated this on isPureConcurrentAddition
-    // — reaching "conflicted" here means it's safe to dispatch. The
-    // deletion-involved / unclassifiable case derives "blocked-ambiguous"
-    // instead (falls through below), never this branch.
+    // DISPOSITION_RULES admitted only an rmd-shaped run branch with captured
+    // evidence. The production dispatch implementation repeats the stricter
+    // task-specific head check before it writes; this routing seam carries the
+    // evidence to that bounded worker and never attempts a textual side-take.
     await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
     return { outcome: "fixed", reason };
   }

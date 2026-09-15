@@ -7684,8 +7684,28 @@
       proof: "demonstration: a clean-machine run following ONLY the site quickstart reaches a first auto-merged PR — paste the transcript/recording (the WS-4 acceptance bar)"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
+  note: "RETIRED 2026-09-15 on operator authorization. WITHDRAWN, not `retired`: the outcome this task
+    asks for EXISTS — `craigoley/remudero-site` is a live repository deployed on Vercel, carrying its own
+    `plan/tasks.yaml` (7 tasks, PORTAL-T1..T7) and its own CI aggregator, and it governs itself. What is
+    dead is this RECORD of the work, not the work.
+
+    THE SPECIFICATION IS ALSO OBSOLETE ON ITS FACE: `Astro Starlight` names a stack the site does not use
+    and never shipped — it is a Next.js application. Leaving the record queued would keep offering a
+    worker a stack decision that was already made differently.
+
+    AND IT WAS NEVER CREDITABLE FROM HERE, which W1-T1029 established rather than this ruling asserting
+    it: W12-T1 is one of four structurally uncreditable records, reading FALSE on every credit path —
+    anchored `Remudero-Task:` trailer, `run-<id>-<epoch>` head, and non-filing subject suffix — across
+    1,642 merged PRs, because `ghGateway(owner, repo, …)` is constructed per repository and its work
+    lands in one this scanner does not read. No amount of waiting could have closed it.
+
+    W1-T49 UNPARKS AS A CONSEQUENCE, BY MECHANISM AND NOT BY A HAND-EDITED EDGE. `unmetDependencies`
+    (src/lib/plan.ts) drops a `retirement:`-carrying dependency from the unmet set, so the
+    `depends_on: [W1-T47, W12-T1]` edge stops blocking without anyone editing it — the workaround Rule 15
+    and W1-T1029 both refuse. W1-T49 now waits on W1-T47 alone."
 
 # ── SELF-DOCUMENTATION QUEUE (retro RETRO-1784058021334 + this plan PR). The harness writes knowledge but
 # nothing READS or VERIFIES it; the plan drifts silently from the system. These close the read/verify side. ─
