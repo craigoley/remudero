@@ -78,7 +78,7 @@ test("inspectInstallRoot: a failing fetch is a named no-op (unfit: fetch-failed)
   assert.match(state.status === "unfit" ? state.detail : "", /cannot lock ref|concurrent/);
 });
 
-test("assessInstallForDeploy: a failing fetch no-ops with a named reason instead of throwing out of the deploy gate", () => {
+test("a failing install-root fetch is a named no-op", () => {
   withTmp((dir) => {
     const { originDir } = buildOrigin();
     const installDir = cloneInstall(originDir);
@@ -114,7 +114,7 @@ test("inspectInstallRoot: a non-repo directory (NOT-A-REPO) is a different state
   });
 });
 
-test("assessInstallForDeploy: an unreadable install root and a transient fetch race are discriminated, not the same reason string", () => {
+test("an unreadable install root is named apart from a fetch race", () => {
   withTmp((dir) => {
     const operatorDir = join(dir, "operator");
     mkdirSync(operatorDir, { recursive: true });
