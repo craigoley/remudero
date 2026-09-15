@@ -819,6 +819,7 @@ export function buildMergeHoldRoute(deps: Pick<PanelActionDeps, "ledgerPath">): 
       const result = applyOperatorMergeHold(deps.ledgerPath, {
         ...input,
         by,
+        authority: "console-confirmed",
       });
       sendJson(res, 200, result);
     }),

@@ -1,0 +1,79 @@
+- id: W1-T3616
+  title: "FOUR SPAWNS STILL DECLARE NO TOOL BOUND — recon, retro, one route lane and the alert-fix rung inherit UNRESTRICTED, which is both an unbounded bypassPermissions surface and the reason they can never be routed anywhere cheaper"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 6.00
+  files:
+    - src/run-task.ts
+    - src/lib/worker.ts
+    - test/a-generic-route-has-an-explicit-tool-bound.test.ts
+  origin: "operator-question#subscription-offload-sweep-2026-09-15"
+  plan_refs: ["W1-T3573", "W1-T2591", "W1-T3615", "W1-T3614", "W1-T3569"]
+  status: queued
+  attempts: 0
+  note: |
+    FOUND BY ENUMERATING EVERY SPAWN, not by reading the mount table. Auditing all 30
+    `permissionMode:` constructions in src/ and reading each one's `tools:` within its own object:
+
+        src/run-task.ts:13128  recon lane        (reconMount, RECON_MAX_TURNS)   NO tools:
+        src/run-task.ts:13555  a route lane                                      NO tools:
+        src/run-task.ts:24433  retro             (synthesis.retro -- opus)       NO tools:
+        src/run-task.ts:24561  retro, second     (same mount)                    NO tools:
+        src/run-task.ts:37895  alert-fix rung    (fixMount)                      NO tools:
+
+    Every other site declares one: FIX_WORKER_TOOLS, SPECIALIST_TOOLS, TRIAGE_WORKER_TOOLS,
+    PLAN_WORKER_TOOLS, INBOX_DRAFT_WORKER_TOOLS, PROMOTION_JUDGE_TOOLS, genericRouteTools, or the
+    empty list the zero-tool judges share.
+
+    W1-T3573 CLOSED THIS FOR TWO LANES AND LEFT THESE. Its own header states the defect exactly --
+    "before this task that spawn passed no `tools`/`disallowedTools` at all, so a review or manual
+    task inherited SpawnWorkerArgs' documented UNRESTRICTED default with no declared boundary" --
+    and `resolveGenericRouteToolBound` fails closed for any lane but `review` and `manual`. These
+    four never went through that resolver, so the gap survived the task that names it.
+
+    IT IS TWO PROBLEMS, AND THE SECOND IS WHY IT MATTERS NOW.
+      1. An unbounded `bypassPermissions` spawn has no declared boundary to audit against. The
+         container is the real containment, but a tool list is the thing a reviewer can read.
+      2. YOU CANNOT ROUTE WHAT YOU CANNOT BOUND. `openWeightTools` refuses any tool the adapter does
+         not implement, so a lane with no declared list can never be assessed for eligibility at
+         all -- it is excluded by silence rather than by a measured decision.
+
+    MEASURED STAKES, deduped per distinct run over the ledger union: `recon` is $302 across 739
+    runs and `retro` $740 across 89. recon is also the lane the W1-T3572 ruling names for staging
+    the check-runner (W1-T3615) -- so its missing bound is the thing standing between that ruling
+    and its first measured lane.
+  rationale: |
+    Every cheap-model route so far had to start by proving a lane's tool surface was a subset of
+    OPENWEIGHT_FUNCTIONS. Four lanes cannot answer that question at all. Declaring their real tool
+    needs is the prerequisite for any routing decision about them, and it closes an unbounded
+    spawn surface on the way -- the same two-for-one W1-T3573 already banked for review/manual.
+  design: |
+    Give each of the four an EXPLICIT tool list naming what it actually uses, derived from its own
+    prompt rather than assumed: `renderReconPrompt`, `retroPrompt` and `alertFixPrompt` each state
+    what the worker is asked to do. Route them through a fail-closed resolver the way
+    `resolveGenericRouteToolBound` already does, so a NEW lane added later refuses rather than
+    silently inheriting unrestricted.
+
+    DO NOT NARROW A LANE TO MAKE IT ELIGIBLE. The bound must describe what the lane needs today; if
+    recon genuinely shells out, it declares Bash and stays premium until W1-T3615's check-runner
+    can replace that use. Declaring a smaller list than the lane uses would trade an audit gap for
+    a runtime failure, which is worse.
+
+    ROUTE NOTHING HERE. Whether any of the four then becomes openweight-eligible is a separate
+    decision with its own measurement, exactly as W1-T3569 kept routing separate from capability.
+  acceptance:
+    - claim: "every spawn in the dispatch path declares a tool bound, so none inherits the unrestricted default"
+      proof: "unit test: every worker spawn declares an explicit tool bound"
+    - claim: "a lane with no declared bound refuses rather than silently running unrestricted"
+      proof: "unit test: an undeclared lane refuses rather than inheriting unrestricted tools"
+  falsifier: |
+    Delete one lane's declared list and the census must name that site rather than passing on the
+    other three -- if it still passes it is sampling rather than enumerating, and proves nothing.
+    Make the resolver fall back to unrestricted instead of throwing and the second test must fail.
+    Narrow a lane below what its prompt asks for and its own suite must redden, which is what stops
+    this task being "solved" by declaring an empty list everywhere.

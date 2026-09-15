@@ -134,7 +134,7 @@ import {
 } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 
 /**
  * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
@@ -2454,6 +2454,79 @@ export function renderConsoleCodeStalenessHtml(input: { bootSha: string; current
     `${esc(input.currentSha.slice(0, 12))}. Restart remudero-serve to pick it up.</span>`
   );
 }
+/**
+ * How far behind the running code is, as a count of commits — the "how much" half of change
+ * pressure, against {@link consoleRecyclePatienceMs}'s "how long".
+ *
+ * NEVER FATAL, and never a network read: the on-disk checkout is already advanced by the daemon's
+ * own sync, so this is a local `rev-list`. Every failure mode returns `undefined`, which
+ * {@link consoleRecyclePatienceMs} reads as "no pressure evidence" and therefore as maximum
+ * patience — an unreadable backlog must never become a reason to interrupt an operator.
+ */
+export function resolveCommitsBehind(
+  bootSha: string,
+  exec: (dir: string, range: string) => string = (dir, range) =>
+    execFileSync("git", ["-C", dir, "rev-list", "--count", range], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).toString(),
+): number | undefined {
+  if (bootSha === CONSOLE_SHA_UNKNOWN) return undefined;
+  try {
+    const moduleDir = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+    const n = Number(exec(moduleDir, `${bootSha}..HEAD`).trim());
+    return Number.isInteger(n) && n >= 0 ? n : undefined;
+  } catch (error) {
+    // Best-effort only, per this function's own contract above: a missing git, a detached
+    // worktree, or a boot sha the checkout has since lost (rebase, shallow clone) all read as "no
+    // evidence" to consoleRecyclePatienceMs, never as a caller-visible failure. Recorded so a
+    // persistently unreadable backlog is diagnosable instead of silently maximal patience forever.
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`resolveCommitsBehind: ${reason}`);
+    return undefined;
+  }
+}
+
+/** The patience a console with NOBODY watching would need. It has none: a free moment is free. */
+export const RECYCLE_PATIENCE_FREE_MS = 0;
+
+/** The patience at one commit behind — the longest this gate will ever make a merged fix wait
+ *  while somebody is watching. Not a threshold: {@link consoleRecyclePatienceMs} divides it, so
+ *  every backlog size gets its own budget and none of them is a cliff. */
+export const RECYCLE_PATIENCE_BASE_MS = 60 * 60_000;
+
+// Why: the 3h25m of stale service the edge-only trigger actually produced —
+// docs/forensics/serve.md#change-pressure-as-a-shrinking-budget
+/**
+ * CHANGE PRESSURE, AS A SHRINKING BUDGET RATHER THAN A THRESHOLD.
+ *
+ * W1-T2229 built this gate to exit at "a moment that costs nothing" — zero SSE subscribers and
+ * zero in-flight writes — and explicitly never on a schedule. That is right whenever such a
+ * moment arrives, and on a watched console it does not arrive: a tab left open never produces
+ * the zero-client edge, and between edges nothing re-asks the question at all.
+ *
+ * So patience is a function of the backlog instead: zero with nobody watching, and otherwise
+ * {@link RECYCLE_PATIENCE_BASE_MS} DIVIDED by the backlog — an hour at one commit behind, ~70s
+ * at fifty. No cliff anywhere on that curve and no reading of "too stale", only a budget that
+ * shrinks as the reason to recycle grows. Self-healing: a recycle resets the backlog to zero.
+ *
+ * WHAT PRESSURE NEVER BUYS: an in-flight write. That stays absolute in
+ * {@link gateStaleCodeExit} — this module drains nothing, so exiting mid-write drops the request
+ * and orphans whatever it spawned. Pressure decides whether to interrupt a READER, and the cost
+ * of being wrong there is a reconnect the shell's last-snapshot cache repaints through.
+ *
+ * An `undefined` commitsBehind is "no evidence", and no evidence must not read as pressure —
+ * it yields {@link Number.POSITIVE_INFINITY}, i.e. wait for a genuinely free moment.
+ */
+export function consoleRecyclePatienceMs(clients: number, commitsBehind: number | undefined): number {
+  if (clients === 0) return RECYCLE_PATIENCE_FREE_MS;
+  if (commitsBehind === undefined || commitsBehind <= 0) return Number.POSITIVE_INFINITY;
+  return RECYCLE_PATIENCE_BASE_MS / commitsBehind;
+}
+
+/** How often the gate re-asks the question while somebody is watching. Slow on purpose: this is
+ *  the ONE thing W1-T2229 refused, and the refusal's reason was cost — a `git rev-parse` per
+ *  check. At this cadence that is one cheap local command a minute, and only while the process is
+ *  up, against the 3h25m of stale service the edge-only trigger actually produced. */
+export const RECYCLE_RECHECK_MS = 60_000;
+
 /** {@link gateStaleCodeExit}'s constructor deps — every side effect injectable, same discipline
  *  {@link gatePrewarmOnClients} already follows for this module's other refcount gate. */
 export interface StaleCodeExitDeps {
@@ -2466,6 +2539,15 @@ export interface StaleCodeExitDeps {
   /** Ends the process — defaults to `process.exit`. Injectable so a test observes the call
    *  instead of the test runner actually dying under it. */
   exit?: (code: number) => void;
+  /** The backlog behind {@link bootSha} — defaults to {@link resolveCommitsBehind}. */
+  resolveCommitsBehind?: (bootSha: string) => number | undefined;
+  /** The clock patience is measured against — src/lib/clock.ts's port, never a bare
+   *  millis-function field: clock-signature-census ratchets that legacy signature per file, and
+   *  this port is what it ratchets toward. Defaults to {@link systemClock}. */
+  clock?: Clock;
+  /** Starts the slow re-check while somebody is watching, and returns its stop function.
+   *  Injectable so a suite steps the cadence by hand rather than waiting on a real interval. */
+  scheduleRecheck?: (run: () => void, ms: number) => () => void;
   /** One ledger line naming the decision, mirroring {@link ServiceOptions.log}. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Synchronous cleanup immediately before the process exit. The analytics cache supplies its
@@ -2512,16 +2594,47 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   const resolveCurrentSha = deps.resolveCurrentSha ?? resolveConsoleSha;
   const exit = deps.exit ?? ((code: number) => process.exit(code));
   const log = deps.log ?? (() => {});
+  const commitsBehindOf = deps.resolveCommitsBehind ?? resolveCommitsBehind;
+  const clock = deps.clock ?? systemClock;
+  const scheduleRecheck =
+    deps.scheduleRecheck ??
+    ((run, ms) => {
+      const timer = setInterval(run, ms);
+      timer.unref?.();
+      return () => clearInterval(timer);
+    });
   let clients = 0;
   let inFlightWrites = 0;
+  /** When the code FIRST read stale, so patience is measured from the change landing rather than
+   *  from whenever a re-check happened to notice it. Cleared if it somehow reads fresh again. */
+  let staleSince: number | undefined;
+
   const maybeExit = (): void => {
-    if (clients !== 0 || inFlightWrites !== 0) return;
+    // NEVER NEGOTIABLE, AND NOT SUBJECT TO PRESSURE: this module drains nothing, so an exit
+    // mid-write drops the request and orphans whatever it handed off.
+    if (inFlightWrites !== 0) return;
     const currentSha = resolveCurrentSha();
-    if (!isConsoleCodeStale(deps.bootSha, currentSha)) return;
-    log("serve.stale_code_exit", { bootSha: deps.bootSha, currentSha, clients, inFlightWrites });
+    if (!isConsoleCodeStale(deps.bootSha, currentSha)) {
+      staleSince = undefined;
+      return;
+    }
+    staleSince ??= clock.now();
+    const commitsBehind = commitsBehindOf(deps.bootSha);
+    const patienceMs = consoleRecyclePatienceMs(clients, commitsBehind);
+    const staleForMs = clock.now() - staleSince;
+    // Somebody is watching and the backlog has not yet earned the interruption. The re-check
+    // below keeps asking, and the backlog grows on its own — which is what turns a watched
+    // console from "never" into "soon enough" without ever reading a threshold.
+    if (staleForMs < patienceMs) return;
+    log("serve.stale_code_exit", { bootSha: deps.bootSha, currentSha, clients, inFlightWrites, commitsBehind, staleForMs, patienceMs });
+    stopRecheck();
     deps.beforeExit?.();
     exit(0);
   };
+  // STARTED HERE, NOT FROM INSIDE AN EDGE. Starting it lazily from `maybeExit` would reproduce
+  // the exact defect this fixes: a console with a tab left open fires no edge at all, so the
+  // re-check that is supposed to notice that would itself never be scheduled.
+  const stopRecheck = scheduleRecheck(maybeExit, RECYCLE_RECHECK_MS);
   return {
     wrapSse(route) {
       return {
