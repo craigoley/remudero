@@ -23,7 +23,7 @@ raw: "Priority site-review integration after PR #5410: OBSERVED at origin/main
   integration and #5410 have actually merged."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/5416
 summary:
