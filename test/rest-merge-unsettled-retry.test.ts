@@ -213,7 +213,7 @@ test("arming is attempted FIRST even on a settleable head — the retry never re
 test("an operator hold still refuses before either transport — including the retry's own read (acceptance 7)", () => {
   const facts = factsQueue([{ mergeable: "MERGEABLE" }]);
   const { d, calls } = deps({
-    ledgerLines: () => [{ step: "automerge.hold_engaged", pr_number: 2605, by: "craig", reason: "held for review" }],
+    ledgerLines: () => [{ step: "automerge.hold_engaged", pr_number: 2605, by: "craig", reason: "held for review", authority: "interactive-cli" }],
     readMergeFacts: facts.fn,
   });
   const r = attemptArm(PR, d);

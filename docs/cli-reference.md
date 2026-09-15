@@ -17,7 +17,8 @@ Every `rmd <command>` this binary dispatches, rendered from the same `COMMANDS` 
 usage:
   rmd run-task <task-id> [--allow-stale] [--rerun]   # Dispatch one task from the origin/main plan blob, fetching first.
   rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # Post remudero-review on a hand-opened PR, materializing a worktree at its head.
-  rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text>   # Engage or release an attributable, durable PR or fleet auto-merge hold.
+  rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text> --confirm   # Engage or release an attributable, durable PR or fleet auto-merge hold.
+  rmd feedback-reconcile --root <name>=<path> [--root <name>=<path> ...] [--checkout <path>] [--apply]   # Report (or repair) feedback records an enrolled root holds that origin/main lacks.
   rmd dep-review <pr-number> [--repo <name>]   # Deterministic Dependabot-PR review lane: auto-arm minor/patch, escalate major.
   rmd lint-plan [--plan <path>] [--base <git-ref>]   # Deterministic task linter: sizing, headless-fitness, proof-shape, provenance.
   rmd plan-reconcile [--plan <path>] [--write]   # Flip status: queued to merged on shards the credit projection reports merged.
@@ -132,10 +133,20 @@ post remudero-review on a hand-opened PR; materializes a worktree at the PR head
 Engage or release an attributable, durable PR or fleet auto-merge hold.
 
 ```
-rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text>
+rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text> --confirm
 ```
 
-operator writer for the durable auto-merge refusal: engage/release requires --by and --reason; --pr scopes the decision to one pull request, while omitting it scopes the decision to the whole fleet; --task is optional PR-only board enrichment and must be a W1-T<n> id; a hold survives pushes, restarts, and ledger rotation and clears only on an explicit release; while held, the daemon withdraws an existing auto-merge arm and refuses every new arm, leaving the operator free to inspect or manually squash the PR
+confirmed human writer for the durable auto-merge refusal: engage/release requires --by, --reason and --confirm from an interactive terminal; a non-interactive process cannot impersonate an operator by supplying --by. --pr scopes the decision to one pull request, while omitting it scopes the decision to the whole fleet; --task is optional PR-only board enrichment and must be a W1-T<n> id; while held, the daemon withdraws existing auto-merge and refuses new arms.
+
+### `rmd feedback-reconcile`
+
+Report (or repair) feedback records an enrolled root holds that origin/main lacks.
+
+```
+rmd feedback-reconcile --root <name>=<path> [--root <name>=<path> ...] [--checkout <path>] [--apply]
+```
+
+cross-root feedback reconciliation manifest and repair (W1-T3562): dry-run by default, classifying every candidate id as present-everywhere, missing-upstream, regressed (origin/main sits at an earlier §7B position than a root's copy, W1-T3561's predicate), or differs; --apply re-lands the union through the ordinary gated PR path (landFeedbackStatusContent), never pushing to main or merging anything itself; roots are an explicit, validated enrolment — never discovered by globbing the host's filesystem
 
 ### `rmd dep-review`
 
