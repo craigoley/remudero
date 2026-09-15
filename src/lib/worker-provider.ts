@@ -1784,6 +1784,55 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   "gpt-5-nano": { inputUsdPerMillion: 0.05, outputUsdPerMillion: 0.4, readAt: "2026-09-15" },
 };
 
+/**
+ * Per-deployment request TEMPERATURE, because a deployment may REFUSE a value rather than clamp it.
+ * MEASURED 2026-09-15 against the live account with the adapter's own URL and api-version:
+ * `gpt-oss-120b` answers `temperature: 0` with 200; `gpt-5-nano` answers it with HTTP 400
+ * ("does not support 0 with this model. Only the default (1) value is supported").
+ *
+ * `null` means OMIT THE FIELD ENTIRELY -- not "send 1". The adapter must never assert a
+ * temperature it has not measured, and an omitted field is the only way to say "whatever this
+ * deployment's default is". W1-T3608.
+ *
+ * KEYED EXACTLY AS {@link OPENWEIGHT_PRICES}, and read by TABLE LOOKUP -- never a prefix or
+ * substring match on the model id (W1-T2573): `gpt-5-nano` and `gpt-5.4-nano` are different
+ * deployments with no guarantee of shared behaviour.
+ */
+export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
+  "gpt-oss-120b": 0,
+  "gpt-5-nano": null,
+};
+
+/** Raised INSTEAD of guessing a request shape. Thrown before the transport, like its pricing
+ *  sibling, so a caller seeing it knows no request was built against an unmeasured deployment. */
+export class OpenWeightUnshapedDeploymentError extends RmdError {
+  readonly deployment: string;
+  constructor(deployment: string) {
+    super(
+      "usage",
+      1,
+      `openweight deployment ${JSON.stringify(deployment)} has no request-temperature row: refusing to guess a request shape. ` +
+        `Shaped deployments: ${Object.keys(OPENWEIGHT_TEMPERATURE).sort().join(", ")}`,
+      { deployment, shaped: Object.keys(OPENWEIGHT_TEMPERATURE).sort() },
+    );
+    this.deployment = deployment;
+  }
+}
+
+/**
+ * The `temperature` fragment of a request body for one deployment: `{ temperature: n }` when the
+ * deployment accepts an explicit value, and `{}` when it accepts only its own default. Spread into
+ * the body so "omit" is expressible at all -- a deployment that refuses the field is not satisfied
+ * by a null, and `temperature: undefined` still reads as an asserted key at some call sites.
+ */
+export function openWeightTemperatureField(deployment: string): { temperature?: number } {
+  if (!Object.prototype.hasOwnProperty.call(OPENWEIGHT_TEMPERATURE, deployment)) {
+    throw new OpenWeightUnshapedDeploymentError(deployment);
+  }
+  const value = OPENWEIGHT_TEMPERATURE[deployment];
+  return value === null ? {} : { temperature: value };
+}
+
 /** Raised INSTEAD of pricing a deployment by a neighbour's row. Thrown before the transport, so a
  *  caller seeing it knows no paid request was made against an unknown price. */
 export class OpenWeightUnpricedDeploymentError extends RmdError {
@@ -2289,7 +2338,7 @@ export async function spawnOpenWeightWorker(
       const body = JSON.stringify({
         model: selection.model,
         messages,
-        temperature: 0,
+        ...openWeightTemperatureField(selection.model),
         max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
         ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
       });
