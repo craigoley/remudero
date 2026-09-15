@@ -1,0 +1,78 @@
+- id: W1-T3619
+  title: "THE LADDER CANNOT SEE THE PROMPT IT IS ROUTING — selectOpenWeightModel takes the request's MODEL and EFFORT but never its SIZE, and no deployment declares a context window, so the adapter picks a model that cannot hold the request and pays a full inflated reservation to find out"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 25.00
+  files: [src/lib/worker-provider.ts, test/an-open-weight-provider-rides-the-capability-ladder.test.ts]
+  origin: oper#smart-routing-audit-2026-09-15
+  plan_refs: ["W1-T3546", "W1-T3569", "W1-T3575", "W1-T3613"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ADAPTER ALREADY KEEPS A PER-DEPLOYMENT TABLE FOR EVERY PROPERTY THAT VARIES — except the
+    one that decides whether the request can succeed at all.
+
+      OPENWEIGHT_PRICES       per-deployment, refuses an unlisted deployment rather than pricing
+                              it by a neighbour ("PRICE IS A PROPERTY OF THE DEPLOYMENT")
+      OPENWEIGHT_TEMPERATURE  per-deployment, because gpt-5-nano answers temperature:0 with 400
+      context window          ABSENT. No table, no constant, no check.
+
+    And the selector cannot compensate, because it is never given the prompt:
+
+      selectOpenWeightModel(capabilities, requestedModel, requestedEffort)
+        -> candidates.find((c) => SAFE_OPENWEIGHT_MODEL_ID.test(c))
+
+    It takes the FIRST SYNTACTICALLY VALID id. Not the first that fits the request — size is not a
+    parameter, so it cannot be.
+
+    MEASURED 2026-09-15 from the live allowance file (state/openweight-allowance.json, 104 requests
+    on the $10 cap):
+
+      requests                     104   (96 large nano, 7 small nano, 1 gpt-oss)
+      unsettled                     32   = 31% overall
+      unsettled, LARGE nano only    32 of 96  = EXACTLY 33%
+      unsettled, small/gpt-oss       0 of  8  = 0%
+
+    The failures are exclusive to the large requests, and uniformly distributed within each
+    concurrency cluster (null at position 1/2/3 of a triple: 12/10/10) — random at the edge, not a
+    structural always-the-third-one bug.
+
+    HOW LARGE. Inverting openWeightReservationUsd on the observed $0.0547 reservation at nano's
+    $0.05/1M input and the fixed 5,000-token output ceiling gives ~1.05 MB of request body, ~263,500
+    tokens at 4 bytes/token. That figure is independently corroborated: gpt-oss-120b was measured
+    refusing this same lane with
+      HTTP 400: The input (259242 tokens) is longer than the model's context length (131072)
+    which is WHY the economy row could not lead with gpt-oss and the balanced row leads with nano.
+    The lane runs at ~260K tokens against nano's ~272K window — a ~4% margin, and 1 in 3 lose.
+
+    THE COST OF NOT KNOWING IS PAID TWICE. openWeightReservationUsd deliberately bounds input by
+    BYTE length, and its own doc defends this correctly: "no tokenizer emits more tokens than the
+    UTF-8 bytes it consumed, so this can never under-reserve... settlement corrects it downward."
+    The reasoning is sound and the estimate should NOT simply be divided by four.
+
+    THE DEFECT IS THAT THE STATED CORRECTIVE NEVER RUNS ON THE FAILURE PATH. settleOpenWeightBudget
+    is reached only after a usage block is parsed off a 200 response. A request that fails
+    pre-response keeps the full conservative figure forever. Measured on the same file:
+
+      reserved total                     $5.2696
+      settled total (72 settled)         $0.9270
+      effective charge against the cap   $2.6771
+      charge if every request settled    $1.3389
+
+    So a 33% failure rate makes the $10/day cap behave like roughly $5, and the over-reservation is
+    ~3.9x on exactly the requests that never get corrected. Widening routing under this arithmetic
+    hits OpenWeightAllowanceExhaustedError while true spend is a third of the cap.
+
+  acceptance:
+    - claim: "every priced deployment also declares a context window, and a deployment with no window row is refused rather than assumed to fit — the same discipline OPENWEIGHT_PRICES already applies"
+      proof: "unit test: every priced openweight deployment declares a context window"
+    - claim: "selection takes the request size and picks the cheapest deployment whose window holds it, so a prompt that gpt-oss cannot hold routes to nano by measurement rather than by a hand-written row order"
+      proof: "unit test: openweight selection picks the cheapest deployment whose window holds the request"
+    - claim: "a request no listed deployment can hold is refused BEFORE it reserves, so an impossible request costs nothing against the daily cap instead of a full inflated reservation"
+      proof: "unit test: a request larger than every context window refuses before it reserves"
+    - claim: "the byte-length input bound is unchanged, because it is correct and must not be divided down"
+      proof: "grep: no tokenizer emits more tokens than the UTF-8 bytes in src/lib/worker-provider.ts"
