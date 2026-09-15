@@ -57,14 +57,21 @@ export type FeedbackRecordMergeDecision =
    *  all) — never staged, and `reason` is the one line a caller surfaces rather than swallows. */
   | { readonly kind: "refuse"; readonly reason: string };
 
-function parseRecord(bytes: string): RecordShape | undefined {
+type ParsedRecord = { readonly ok: true; readonly record: RecordShape } | { readonly ok: false; readonly reason: string };
+
+/** Never erases WHY a side is unusable: a thrown parse error and a well-formed-but-non-mapping
+ *  document (e.g. a bare YAML scalar) both fail closed, but each carries its OWN reason string
+ *  rather than collapsing to the same `undefined`. */
+function parseRecord(bytes: string): ParsedRecord {
   let parsed: unknown;
   try {
     parsed = parseYaml(bytes);
-  } catch {
-    return undefined;
+  } catch (e) {
+    return { ok: false, reason: `invalid YAML (${String((e as Error)?.message ?? e)})` };
   }
-  return parsed !== null && typeof parsed === "object" ? (parsed as RecordShape) : undefined;
+  return parsed !== null && typeof parsed === "object"
+    ? { ok: true, record: parsed as RecordShape }
+    : { ok: false, reason: `YAML parsed to a non-mapping value (${JSON.stringify(parsed)})` };
 }
 
 function hasHistory(record: RecordShape, field: (typeof HISTORY_FIELDS)[number]): boolean {
@@ -91,14 +98,20 @@ export function mergeFeedbackRecord(upstreamBytes: string | undefined, localByte
   if (upstreamBytes === undefined) return { kind: "take-local" };
   if (upstreamBytes === localBytes) return { kind: "keep-upstream" };
 
-  const upstream = parseRecord(upstreamBytes);
-  const local = parseRecord(localBytes);
-  if (!upstream || !local) {
+  const upstreamParsed = parseRecord(upstreamBytes);
+  const localParsed = parseRecord(localBytes);
+  if (!upstreamParsed.ok || !localParsed.ok) {
+    const reasons = [
+      !upstreamParsed.ok ? `upstream: ${upstreamParsed.reason}` : undefined,
+      !localParsed.ok ? `local: ${localParsed.reason}` : undefined,
+    ].filter((line): line is string => line !== undefined);
     return {
       kind: "refuse",
-      reason: "one side of the record is not a readable YAML mapping — refusing to guess which copy is authoritative",
+      reason: `refusing to guess which copy is authoritative — ${reasons.join("; ")}`,
     };
   }
+  const upstream = upstreamParsed.record;
+  const local = localParsed.record;
 
   const upstreamRank = typeof upstream.status === "string" ? STATUS_RANK.get(upstream.status) : undefined;
   const localRank = typeof local.status === "string" ? STATUS_RANK.get(local.status) : undefined;
