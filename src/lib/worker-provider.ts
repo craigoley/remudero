@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { systemClock, type Clock } from "./clock.js";
+import { RmdError } from "./errors.js";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
@@ -604,9 +606,22 @@ export function codexCandidatesForCapability(
 
 /** Last-resort data for a missing capability table. Real open-weight routing resolves the table
  * below; this keeps a malformed optional table from changing the existing fail-soft contract. */
+/**
+ * The code-side default when mounts declares no `capabilities.openweight` table. It must name the
+ * SAME leading deployment as that table (W1-T3598): if the two disagreed, a checkout with no table
+ * would silently route the DEARER deployment while the configured fleet routed the cheaper one, and
+ * nothing would report the divergence. test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
+ * asserts the two agree.
+ *
+ * FRONTIER STAYS ON gpt-oss-120b DELIBERATELY. A nano-class model is not a frontier substitute, and
+ * before this every tier named one deployment — a ladder expressing no choice at all. gpt-oss-120b
+ * TRAILS rather than being deleted from the rows nano now leads, the same shape the `codex` table
+ * uses for a demoted model, so a deployment that stops answering falls back instead of failing the
+ * lane.
+ */
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
-  economy: ["gpt-oss-120b"],
-  balanced: ["gpt-oss-120b"],
+  economy: ["gpt-5-nano", "gpt-oss-120b"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b"],
   frontier: ["gpt-oss-120b"],
 };
 
@@ -1734,8 +1749,282 @@ export const OPENWEIGHT_OUTPUT_CONTRACT = [
   "- When the request names a closed enum, emit exactly one listed literal; choose the nearest listed value rather than inventing `unknown` or `ambiguous`.",
   "- When the request asks for a raw document, emit that document without Markdown fences.",
 ].join("\n");
-const OPENWEIGHT_INPUT_USD_PER_MILLION = 0.15;
-const OPENWEIGHT_OUTPUT_USD_PER_MILLION = 0.6;
+/**
+ * PRICE IS A PROPERTY OF THE DEPLOYMENT, NOT OF THE PROVIDER.
+ *
+ * `openWeightCandidatesForCapability` already resolves a whole LADDER of deployments out of
+ * mounts, and that table's own comment calls model additions "a mounts-data edit". The routing
+ * layer has therefore been multi-deployment since W1-T3546 while the pricing layer was a single
+ * pair of module constants — every deployment billed at gpt-oss-120b's rate.
+ *
+ * THE ASYMMETRY IS WHY THIS IS A TABLE AND NOT A TIDY-UP. A CHEAPER deployment priced at these
+ * numbers over-reserves: wasteful, but safe. A DEARER one UNDER-reserves, which re-opens exactly
+ * the hole {@link reserveOpenWeightBudget} exists to close — the cap would admit requests it
+ * cannot afford and the day's true spend would pass `dailyCapUsd`. So a deployment with no row
+ * here is refused rather than priced by a neighbour.
+ *
+ * Each row carries the date its figures were read, because published prices move and a number
+ * with no as-of is unauditable.
+ */
+export interface OpenWeightPrice {
+  inputUsdPerMillion: number;
+  outputUsdPerMillion: number;
+  /** ISO date the published figures were last read. Not decorative: it is what lets a later
+   *  reader tell a stale row from a current one without diffing against the vendor's page. */
+  readAt: string;
+}
+
+export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
+  // Azure serverless published rate. These are the two numbers this adapter has always used;
+  // they are unchanged, and are now this deployment's ROW rather than the provider's default.
+  "gpt-oss-120b": { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6, readAt: "2026-09-14" },
+  // W1-T3598: cheaper than gpt-oss-120b on BOTH axes (3x on input, 1.5x on output) and an
+  // Azure-OpenAI-family deployment, so it rides `openWeightEndpoint`'s existing
+  // `openai/deployments/...` route with no second endpoint shape.
+  "gpt-5-nano": { inputUsdPerMillion: 0.05, outputUsdPerMillion: 0.4, readAt: "2026-09-15" },
+};
+
+/** Raised INSTEAD of pricing a deployment by a neighbour's row. Thrown before the transport, so a
+ *  caller seeing it knows no paid request was made against an unknown price. */
+export class OpenWeightUnpricedDeploymentError extends RmdError {
+  readonly deployment: string;
+  constructor(deployment: string) {
+    // Kind "usage", the discriminant every refusal-of-a-call in this file carries.
+    super(
+      "usage",
+      1,
+      `openweight deployment ${JSON.stringify(deployment)} has no price row: refusing to spend against an unknown rate. ` +
+        `Priced deployments: ${Object.keys(OPENWEIGHT_PRICES).sort().join(", ")}`,
+      { deployment, priced: Object.keys(OPENWEIGHT_PRICES).sort() },
+    );
+    this.name = "OpenWeightUnpricedDeploymentError";
+    this.deployment = deployment;
+  }
+}
+
+/** The one lookup. Every consumer of a price — the ledger's cost, the cap's reservation, its
+ *  settlement — resolves through here, so none of them can quietly disagree about what a
+ *  deployment costs. An absent row FAILS CLOSED; it never falls back to another row. */
+export function openWeightPriceFor(deployment: string): OpenWeightPrice {
+  const row = OPENWEIGHT_PRICES[deployment];
+  if (row === undefined) throw new OpenWeightUnpricedDeploymentError(deployment);
+  return row;
+}
+
+/** Dollars for one request's measured usage, at that deployment's own rate. */
+export function openWeightUsageUsd(deployment: string, promptTokens: number, completionTokens: number): number {
+  const price = openWeightPriceFor(deployment);
+  return (promptTokens * price.inputUsdPerMillion + completionTokens * price.outputUsdPerMillion) / 1_000_000;
+}
+
+/** The allowance file, a pure function of `config.root` the way {@link
+ *  import("./ledger-path.js").ledgerPathFor} is — one canonical path, never inlined at a call site. */
+export const OPENWEIGHT_ALLOWANCE_FILENAME = "openweight-allowance.json";
+export function openWeightAllowancePath(config: Config): string {
+  return join(config.root, "state", OPENWEIGHT_ALLOWANCE_FILENAME);
+}
+
+/**
+ * UTC day key, taken from the {@link Clock} port's own ISO reading rather than from a raw Date
+ * constructor.
+ *
+ * The cap is a CALENDAR-day allowance, so the boundary must not follow the host timezone: two
+ * daemons in different zones would otherwise disagree on which day a request spends. Reading the
+ * day off `clock.iso()` gets that for free — an ISO-8601 instant is UTC by construction — and keeps
+ * this file off the legacy date-construction shape `test/clock-signature-census.test.ts` ratchets
+ * down — that census counts the TEXT, so even a comment naming the old shape would raise the row.
+ */
+export function openWeightUtcDay(atIso: string): string {
+  const day = atIso.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    throw new Error(`openweight allowance needs an ISO-8601 instant to derive its UTC day, got ${JSON.stringify(atIso)}`);
+  }
+  return day;
+}
+
+/**
+ * One day's committed allowance. `reservations` is keyed by request identity so a settlement can
+ * find the row it is settling; a row whose `settledUsd` is still null counts at its CONSERVATIVE
+ * `reservedUsd`, which is what keeps a failed, unreadable or crashed request charged.
+ */
+export interface OpenWeightAllowanceState {
+  utcDay: string;
+  reservations: Record<string, { reservedUsd: number; settledUsd: number | null }>;
+}
+
+/** Committed spend = the settled figure where one was read back, the conservative reservation
+ *  everywhere else. Never the optimistic sum of settlements alone. */
+export function openWeightCommittedUsd(state: OpenWeightAllowanceState): number {
+  return Object.values(state.reservations).reduce((total, row) => total + (row.settledUsd ?? row.reservedUsd), 0);
+}
+
+/**
+ * A conservative upper bound on what one request can cost, in dollars, BEFORE it is sent.
+ *
+ * Output is bounded exactly: {@link OPENWEIGHT_MAX_COMPLETION_TOKENS} is the ceiling the adapter
+ * itself puts on the wire. Input is bounded by the serialized body's BYTE length, which is a strict
+ * over-estimate: no tokenizer emits more tokens than the UTF-8 bytes it consumed, so this can never
+ * under-reserve. Over-reserving is the safe direction for a cap — settlement corrects it downward.
+ */
+export function openWeightReservationUsd(deployment: string, requestBodyBytes: number): number {
+  const price = openWeightPriceFor(deployment);
+  return (requestBodyBytes * price.inputUsdPerMillion + OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
+}
+
+/** Raised INSTEAD of sending a paid request. It is thrown before the transport, never after, so a
+ *  caller that sees it knows no money was spent on the refused attempt. */
+export class OpenWeightAllowanceExhaustedError extends RmdError {
+  readonly committedUsd: number;
+  readonly capUsd: number;
+  readonly wantUsd: number;
+  constructor(detail: { committedUsd: number; capUsd: number; wantUsd: number; utcDay: string }) {
+    // Kind "usage", the same discriminant `GhReadCadenceRefusal` carries: both are a LIMIT refusing
+    // a call that was otherwise well-formed, not a malformed request. Adopting the shared envelope
+    // rather than extending `Error` directly is what `test/error-subclass-census.test.ts` asks a new
+    // class to do — its ceiling is a ratchet, so a new direct subclass would have to raise it.
+    super(
+      "usage",
+      1,
+      `openweight daily allowance exhausted for ${detail.utcDay}: committed $${detail.committedUsd.toFixed(6)} + ` +
+        `$${detail.wantUsd.toFixed(6)} would exceed the $${detail.capUsd.toFixed(2)} dailyCapUsd`,
+      { committedUsd: detail.committedUsd, capUsd: detail.capUsd, wantUsd: detail.wantUsd, utcDay: detail.utcDay },
+    );
+    this.name = "OpenWeightAllowanceExhaustedError";
+    this.committedUsd = detail.committedUsd;
+    this.capUsd = detail.capUsd;
+    this.wantUsd = detail.wantUsd;
+  }
+}
+
+/** How many times a compare-and-swap may lose its race before the reservation gives up. A loss
+ *  needs a PEER to have committed between this call's read and its rename, so a handful of retries
+ *  covers any realistic interleaving; the bound only stops a pathological peer spinning us forever. */
+export const OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS = 12;
+
+/**
+ * Read-modify-write the allowance file atomically ACROSS PROCESSES.
+ *
+ * `writeAtomic`'s `beforeRename` is the compare-and-swap: the new state is staged in the same
+ * directory, then, immediately before the rename commits it, the live file is re-read and compared
+ * to the exact bytes this attempt planned from. A peer that committed in that window changes those
+ * bytes, the stage is withdrawn, and the whole read-modify-write retries against the peer's
+ * committed state. That is what makes two concurrent daemon workers unable to spend the same
+ * allowance twice — a plain read-then-write would lose one of the two updates.
+ *
+ * Durability across a restart is the file itself: every committed reservation is on disk before the
+ * request it pays for is sent, so a process that dies mid-request comes back to a state that still
+ * counts that reservation.
+ */
+function mutateOpenWeightAllowance<T>(
+  path: string,
+  utcDay: string,
+  mutate: (state: OpenWeightAllowanceState) => { next: OpenWeightAllowanceState; result: T },
+  beforeCommit?: () => void,
+): T {
+  for (let attempt = 1; ; attempt++) {
+    const snapshot = readFileIfExists(path);
+    let state: OpenWeightAllowanceState | undefined;
+    if (snapshot !== undefined) {
+      // FAIL CLOSED ON AN UNREADABLE ALLOWANCE. A corrupt or truncated file is the one case where
+      // "start fresh" is actively dangerous: it hands the whole day's cap back, so a single bad
+      // write — or anything that can damage this file — silently uncaps paid spend. An ABSENT file
+      // is a genuine "nothing spent yet"; a PRESENT file we cannot read is unknown spend, and
+      // unknown spend is refused rather than assumed to be zero. Clearing it is an operator act.
+      let parsed: Partial<OpenWeightAllowanceState>;
+      try {
+        parsed = JSON.parse(snapshot) as Partial<OpenWeightAllowanceState>;
+      } catch (error) {
+        throw new Error(
+          `openweight allowance file is unreadable at ${path}; refusing to spend against an unknown committed total ` +
+            `(${error instanceof Error ? error.message : String(error)})`,
+        );
+      }
+      if (typeof parsed.utcDay !== "string" || parsed.reservations === null || typeof parsed.reservations !== "object") {
+        throw new Error(`openweight allowance file at ${path} has no readable utcDay/reservations; refusing to spend against an unknown committed total`);
+      }
+      state = { utcDay: parsed.utcDay, reservations: parsed.reservations as OpenWeightAllowanceState["reservations"] };
+    }
+    // A different UTC day starts a fresh allowance: yesterday's committed spend must not consume
+    // today's cap, and must not be carried forward as credit either. This is the ONLY reset.
+    if (state === undefined || state.utcDay !== utcDay) state = { utcDay, reservations: {} };
+
+    const { next, result } = mutate(state);
+    // TEST-ONLY seam, in the shape {@link import("./fs-race-safe.js").reclaimStaleLock}'s own
+    // `beforeDelete` already uses: a test runs a PEER's entire reservation here, inside this
+    // attempt's read-to-rename window, so the compare-and-swap below is exercised deterministically
+    // rather than by hoping two real processes happen to interleave.
+    beforeCommit?.();
+    const committed = writeAtomic(path, `${JSON.stringify(next)}\n`, {
+      tmpTag: "openweight-allowance",
+      // THE COMPARE-AND-SWAP. Re-read the live file and refuse to commit unless it is still the
+      // exact bytes this attempt planned from.
+      beforeRename: () => readFileIfExists(path) === snapshot,
+    });
+    if (committed) return result;
+    if (attempt >= OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS) {
+      throw new Error(`openweight allowance contention: ${OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS} compare-and-swap attempts lost at ${path}`);
+    }
+  }
+}
+
+/**
+ * Commit a conservative reservation for ONE outbound request, or refuse it.
+ *
+ * Called before the transport, never after. On refusal nothing is committed and {@link
+ * OpenWeightAllowanceExhaustedError} is thrown by the caller, so no paid request is made.
+ */
+export function reserveOpenWeightBudget(
+  config: Config,
+  input: { requestId: string; deployment: string; requestBodyBytes: number; atIso: string; beforeCommit?: () => void },
+): { reservedUsd: number; committedUsd: number; capUsd: number } {
+  const capUsd = config.dailyCapUsd;
+  // validateConfig already refuses an enabled openweight provider with no dailyCapUsd. This is the
+  // runtime half of that same rule: an absent cap here means the transport must not run at all,
+  // rather than defaulting to unlimited.
+  if (capUsd === undefined || capUsd === null) {
+    throw new Error("openweight provider requires a dailyCapUsd before any paid request");
+  }
+  const utcDay = openWeightUtcDay(input.atIso);
+  const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes);
+  return mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
+    const committedUsd = openWeightCommittedUsd(state);
+    if (committedUsd + wantUsd > capUsd) {
+      throw new OpenWeightAllowanceExhaustedError({ committedUsd, capUsd, wantUsd, utcDay });
+    }
+    return {
+      next: { ...state, reservations: { ...state.reservations, [input.requestId]: { reservedUsd: wantUsd, settledUsd: null } } },
+      result: { reservedUsd: wantUsd, committedUsd: committedUsd + wantUsd, capUsd },
+    };
+  }, input.beforeCommit);
+}
+
+/**
+ * Settle a committed reservation DOWN to the provider's own reported usage.
+ *
+ * Only ever called with a receipt that was actually read off a response. A request that failed, or
+ * whose response could not be parsed, never reaches this — its reservation stays at the
+ * conservative figure, which is the whole point: unreadable spend is assumed to have happened.
+ * Settlement never raises a reservation above what was reserved; the reservation is a ceiling.
+ */
+export function settleOpenWeightBudget(
+  config: Config,
+  input: { requestId: string; actualUsd: number; atIso: string },
+): void {
+  const utcDay = openWeightUtcDay(input.atIso);
+  mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
+    const row = state.reservations[input.requestId];
+    // A reservation that is no longer present (a UTC-day rollover between reserve and settle)
+    // must not be re-created here: doing so would charge today's cap for yesterday's request.
+    if (row === undefined) return { next: state, result: undefined };
+    return {
+      next: {
+        ...state,
+        reservations: { ...state.reservations, [input.requestId]: { ...row, settledUsd: Math.min(input.actualUsd, row.reservedUsd) } },
+      },
+      result: undefined,
+    };
+  });
+}
 
 export interface OpenWeightSpawnArgs {
   cwd: string;
@@ -1750,8 +2039,10 @@ export interface OpenWeightSpawnArgs {
   fetchImpl?: typeof fetch;
   /** Test-only override; production reads the daemon process environment. */
   env?: NodeJS.ProcessEnv;
-  /** Test-only clock port; production records duration from the system clock. */
-  clock?: Pick<Clock, "now">;
+  /** Test-only clock port; production records duration from the system clock. `iso` rides beside
+   *  `now` because the daily allowance keys on a UTC calendar day, which is read off the ISO
+   *  instant rather than re-derived from milliseconds. */
+  clock?: Pick<Clock, "now" | "iso">;
 }
 
 export interface OpenWeightWorkerResult {
@@ -1780,6 +2071,12 @@ export interface OpenWeightWorkerResult {
   compactionConfigured: false;
   qualitySuspect: false;
   workerDurationMs: number;
+  /** Attributable cash fields for the ledger. Money, not prompts: no request body, no response
+   *  text and no credential is carried here. `budgetRefused` is true only when the daily allowance
+   *  refused this run BEFORE any paid request was made. */
+  budgetReservedUsd: number;
+  budgetSettledUsd: number;
+  budgetRefused: boolean;
 }
 
 type OpenWeightMessage = Record<string, unknown>;
@@ -1905,20 +2202,33 @@ function openWeightResult(input: {
   model: string;
   effort: string;
   startedAt: number;
-  clock: Pick<Clock, "now">;
+  clock: Pick<Clock, "now" | "iso">;
   text?: string;
   sessionId?: string;
   turns: number;
   promptTokens: number;
   completionTokens: number;
   error?: unknown;
+  budgetReservedUsd?: number;
+  budgetSettledUsd?: number;
+  budgetRefused?: boolean;
 }): OpenWeightWorkerResult {
   const text = input.text ?? "";
   const error = input.error instanceof Error ? input.error.message : input.error === undefined ? undefined : String(input.error);
   return {
     provider: "openweight",
     sessionId: input.sessionId ?? "",
-    costUsd: (input.promptTokens * OPENWEIGHT_INPUT_USD_PER_MILLION + input.completionTokens * OPENWEIGHT_OUTPUT_USD_PER_MILLION) / 1_000_000,
+    // ZERO USAGE COSTS ZERO AT ANY RATE, so it needs no price row. That is not a convenience: this
+    // result is also built on the ERROR path, and one way to get here is the refusal raised when a
+    // deployment has NO row. Pricing unconditionally would throw a second time out of the catch
+    // that is meant to turn a failure into a reportable result, so the refusal would escape
+    // `spawnOpenWeightWorker` instead of being returned — collapsing the very contract the catch
+    // exists to hold. A run that never reached the transport has no tokens, hence no cost, and
+    // saying so requires no rate.
+    costUsd:
+      input.promptTokens === 0 && input.completionTokens === 0
+        ? 0
+        : openWeightUsageUsd(input.model, input.promptTokens, input.completionTokens),
     numTurns: input.turns,
     maxTurns: undefined,
     text,
@@ -1938,6 +2248,9 @@ function openWeightResult(input: {
     compactionConfigured: false,
     qualitySuspect: false,
     workerDurationMs: input.clock.now() - input.startedAt,
+    budgetReservedUsd: input.budgetReservedUsd ?? 0,
+    budgetSettledUsd: input.budgetSettledUsd ?? 0,
+    budgetRefused: input.budgetRefused ?? false,
   };
 }
 
@@ -1955,6 +2268,11 @@ export async function spawnOpenWeightWorker(
   let turns = 0;
   let sessionId = "";
   let text = "";
+  let budgetReservedUsd = 0;
+  let budgetSettledUsd = 0;
+  // Identity for this run's reservations. The run id is not sufficient on its own: the tool loop
+  // sends one paid request PER TURN, and each needs its own settleable row.
+  const runRequestPrefix = `${args.runId ?? args.taskId ?? "openweight"}-${startedAt}-${Math.random().toString(36).slice(2, 10)}`;
   try {
     const tools = openWeightTools(args.tools);
     const key = (args.env ?? process.env)[OPENWEIGHT_API_KEY_ENV];
@@ -1968,16 +2286,30 @@ export async function spawnOpenWeightWorker(
     if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error("openweight maxTurns must be a positive integer");
     for (;;) {
       turns += 1;
+      const body = JSON.stringify({
+        model: selection.model,
+        messages,
+        temperature: 0,
+        max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
+        ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
+      });
+      // THE CAP IS ENFORCED HERE, NOT IN CONFIGURATION. Every turn of the tool loop is its own paid
+      // Azure request, so each one reserves before it is sent. A refusal throws out of this loop
+      // with no `fetch` performed, which is what makes `dailyCapUsd` a spend bound rather than a
+      // declared intention. Reserve FIRST, then send: the reservation is committed to disk before
+      // the money can be spent, so a crash between the two leaves the allowance charged, never free.
+      const requestId = `${runRequestPrefix}-${turns}`;
+      const reservation = reserveOpenWeightBudget(config, {
+        requestId,
+        deployment: selection.model,
+        requestBodyBytes: Buffer.byteLength(body, "utf8"),
+        atIso: clock.iso(),
+      });
+      budgetReservedUsd += reservation.reservedUsd;
       const response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
         method: "POST",
         headers: { "content-type": "application/json", "api-key": key },
-        body: JSON.stringify({
-          model: selection.model,
-          messages,
-          temperature: 0,
-          max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
-          ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
-        }),
+        body,
       });
       if (!response.ok) throw new Error(`openweight request failed with HTTP ${response.status}`);
       const payload = await response.json() as {
@@ -1986,13 +2318,25 @@ export async function spawnOpenWeightWorker(
         choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
-      promptTokens += typeof payload.usage?.prompt_tokens === "number" ? payload.usage.prompt_tokens : 0;
-      completionTokens += typeof payload.usage?.completion_tokens === "number" ? payload.usage.completion_tokens : 0;
+      const turnPromptTokens = typeof payload.usage?.prompt_tokens === "number" ? payload.usage.prompt_tokens : 0;
+      const turnCompletionTokens = typeof payload.usage?.completion_tokens === "number" ? payload.usage.completion_tokens : 0;
+      promptTokens += turnPromptTokens;
+      completionTokens += turnCompletionTokens;
+      // SETTLE DOWN ONLY FROM A RECEIPT WE COULD ACTUALLY READ. A response carrying no usage block
+      // settles at 0 tokens, which would silently hand the allowance back for a request that really
+      // was billed — so an absent receipt leaves the conservative reservation standing instead.
+      if (typeof payload.usage?.prompt_tokens === "number" || typeof payload.usage?.completion_tokens === "number") {
+        const actualUsd = openWeightUsageUsd(selection.model, turnPromptTokens, turnCompletionTokens);
+        settleOpenWeightBudget(config, { requestId, actualUsd, atIso: clock.iso() });
+        budgetSettledUsd += actualUsd;
+      } else {
+        budgetSettledUsd += reservation.reservedUsd;
+      }
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
       const calls = Array.isArray(message.tool_calls) ? message.tool_calls as OpenWeightToolCall[] : [];
       text = typeof message.content === "string" ? message.content : text;
-      if (calls.length === 0) return openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens });
+      if (calls.length === 0) return openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, budgetReservedUsd, budgetSettledUsd });
       if (turns >= maxTurns) throw new Error(`openweight tool loop exceeded maxTurns=${maxTurns}`);
       messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls });
       for (const call of calls) {
@@ -2024,6 +2368,11 @@ export async function spawnOpenWeightWorker(
       promptTokens,
       completionTokens,
       error: error instanceof Error ? error.message : String(error),
+      budgetReservedUsd,
+      budgetSettledUsd,
+      // A refusal is a distinct outcome from a transport failure: no paid request was made, so the
+      // operator reading the ledger can tell "we declined to spend" from "we spent and it failed".
+      budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
     });
   }
 }
