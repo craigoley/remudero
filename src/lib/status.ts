@@ -326,6 +326,22 @@ export interface DeriveDeps {
    *  when this cycle's read failed and no rung resolved anything fresh, so a fetch failure never
    *  regresses a credited task to `queued`. Omitted ⇒ pre-W1-T179 behaviour. */
   previousProjection?: (taskId: string) => StatusProjection | undefined;
+  /**
+   * OPT-IN INCREMENTAL PASS: return a prior projection for a task whose inputs cannot have moved
+   * since it was derived, and {@link projectPlan} reuses it instead of re-deriving.
+   *
+   * WHY IT EXISTS. `projectPlan` re-derives EVERY task on every call, and its one board caller
+   * runs on a 3s console poll. MEASURED 2026-09-15 on the live plan: 1,792 tasks, 1.44s a pass
+   * warm — while the ledger touched 1 distinct task id in a 3s window, 2 in 60s and 17 in 20
+   * minutes. The pass was re-deriving 1,792 tasks to reflect a change in one.
+   *
+   * WHOLLY THE CALLER'S RISK TO TAKE, WHICH IS WHY IT IS OPTIONAL AND ABSENT BY DEFAULT: only a
+   * caller that can name what a projection depends on may answer this, and returning a
+   * projection whose inputs DID move is a silently stale board — the failure this whole module
+   * is written to avoid. `undefined` always means "derive it", so a caller that cannot decide
+   * says nothing and pays the full pass, exactly as every caller does today.
+   */
+  reuseProjection?: (task: Task) => StatusProjection | undefined;
   /** BATCHED rung (c2) corroboration (W1-T257): a per-task lookup into the index
    *  {@link projectPlan} fetches ONCE and shares. [] when the batch succeeded with no such branch,
    *  `null` when the BATCH FAILED — then the per-task method runs, and if that fails too, W1-T119
@@ -3099,6 +3115,13 @@ export function projectPlan(
   }
   const byId = new Map<string, StatusProjection>();
   for (const task of plan.tasks) {
+    // {@link DeriveDeps.reuseProjection} — absent by default, so this is a no-op for every
+    // caller that does not opt in.
+    const reused = effectiveDeps.reuseProjection?.(task);
+    if (reused !== undefined) {
+      byId.set(task.id, reused);
+      continue;
+    }
     const p = deriveStatus(task, effectiveDeps);
     // W1-T2397: computed HERE rather than inside `deriveStatus` so it can never be mistaken for a precedence
     // input — attached after the projection is decided, and read only by a log.
