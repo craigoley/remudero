@@ -1,0 +1,93 @@
+- id: W1-T3596
+  title: "`--instance` SHIPPED WITHOUT THE REGISTRY IT READS, SO EVERY SCOPED RECYCLE REFUSED AND THE ONLY WORKING PATH SILENTLY TARGETED CORE — three daemons are live (core, site, console), `.remudero/daemon-instances.yaml` does not exist in the repo OR on the host, and the legacy unscoped path resolves container `remudero-daemon` with `STATE_DIR ${HOME}/rmd-state`, which is not even core's own state dir"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 16.00
+  files: [.remudero/daemon-instances.yaml, deploy/recycle-container.sh, test/an-unscoped-recycle-refuses-once-instances-are-declared.test.ts]
+  origin: "operator-session#dedicated-daemon-lifecycle-2026-09-15"
+  plan_refs: ["W1-T1010", "W1-T2555", "W1-T3554"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED ON THE LIVE HOST 2026-09-15 by `docker inspect` on each running container — every value
+    transcribed from a running mount or its `Config.Cmd`, never assumed:
+
+      remudero-daemon          --repo remudero          /home/craigoleyagent/rmd-state2
+      remudero-site-daemon     --repo remudero-site     /home/craigoleyagent/rmd-site-state
+      remudero-console-daemon  --repo remudero-console  /mnt/rmd/remudero-console-state
+
+    AND THE REGISTRY THOSE NAMES COME FROM DOES NOT EXIST. `deploy/recycle-container.sh` reads
+    `${SCRIPT_DIR%/deploy}/.remudero/daemon-instances.yaml`; that path is absent from the repo and
+    absent from both host locations checked. So `--instance site` REFUSES ("instance registry is not
+    readable") and the only path that runs is the legacy unscoped one, which resolves
+    `CONTAINER_NAME` `remudero-daemon`, `STATE_DIR` `${HOME:-/root}/rmd-state` and `DAEMON_REPO`
+    `remudero`.
+
+    THE HAZARD IS A WRONG-TARGET RECYCLE, AND BOTH HALVES ARE WRONG. An operator intending the site
+    or console daemon would have recycled CORE; and `rmd-state` is not core's state directory either
+    — core runs on `rmd-state2`, and BOTH directories exist on the host, so the mistake does not even
+    fail loudly on a missing path.
+  rationale: |
+    W1-T1010 ALREADY DECIDED THAT THIS SCRIPT'S REFUSALS ARE THE DELIVERABLE, and its own header says
+    so: a recycle that omits a step took the fleet down twice. This task applies that to the newest
+    step — naming WHICH fleet is being recycled — now that there is more than one.
+
+    THE REFUSAL MUST BE AIMED AT THE UNNAMED DEFAULT, NOT AT THE ABSENCE OF A FLAG. An explicit
+    `RMD_STATE_DIR` is itself a named target: the caller has said which state directory to act on,
+    just not via a registry name. Refusing that would break scoping by environment, which existing
+    suites depend on — `test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts` is
+    five such invocations. So the condition is "registry declares instances AND no `--instance` AND
+    no explicit `RMD_STATE_DIR`".
+
+    AND AN ABSENT REGISTRY MUST CHANGE NOTHING. A checkout without the file, and the host before it
+    is deployed, must behave byte-for-byte as today. This task refuses a choice the operator did not
+    make; it does not remove a path.
+  design: |
+    (i) DERIVE THE REGISTRY FROM THE RUNNING CONTAINERS, never from intent. Each instance needs all
+    seven fields `read_instance_registry` requires (`repo`, `state_dir`, `container_name`, `image`,
+    `claude_dir`, `codex_dir`, `container_config_dir`), and the parser's grammar is a 2-space
+    instance name with 4-space fields.
+    (ii) DECLARE `core` TOO, so recycling it is an explicit act of the same shape as the others
+    rather than the thing that happens when you forget a flag.
+    (iii) ENUMERATE WITH THE SAME GRAMMAR THE READER USES. The no-instance refusal must list the
+    declared names, and its lister must share `read_instance_registry`'s definition of a name, or
+    the two can disagree about what counts as an instance.
+    (iv) THE REFUSAL MUST NAME THE HAZARD IT PREVENTED — the container and state dir the unscoped
+    default WOULD have resolved. A refusal that only says "no" teaches the operator nothing about
+    why the flag matters.
+    (v) RECORD THE SHARED CREDENTIAL MOUNTS AS FACT, NOT ENDORSEMENT. All three daemons currently
+    share `.claude`, `.codex` and `.config/remudero-container`. That is the live arrangement; an
+    instance that should hold its own provider credentials declares its own paths in this file, and
+    saying so in the record is what makes that a decision rather than a discovery.
+  acceptance:
+    - claim: "an unscoped recycle refuses once instances are declared, and names them"
+      proof: "unit test: an unscoped recycle refuses once instances are declared"
+    - claim: "the refusal states the container and state dir the unscoped default would have targeted"
+      proof: "unit test: the refusal states what the unscoped default would have targeted"
+    - claim: "an absent registry leaves the legacy unscoped path byte-for-byte, so an older checkout is unaffected"
+      proof: "unit test: an absent registry leaves the legacy unscoped path intact"
+    - claim: "an explicitly named state dir is a named target and is not refused"
+      proof: "unit test: an explicit RMD_STATE_DIR is a named target and is not refused"
+    - claim: "a declared instance resolves its own container and state dir, never core's"
+      proof: "unit test: a declared instance resolves its own container and state dir"
+    - claim: "every declared instance carries all seven required fields, checked as a census"
+      proof: "unit test: every declared instance carries all seven required fields"
+  falsifier: |
+    RE-READ THE LIVE CONTAINERS BEFORE TRUSTING THE REGISTRY. The three rows are a 2026-09-15
+    `docker inspect` reading. If a container has been renamed, re-mounted or retired since, the
+    registry is wrong in the most dangerous possible way — it would point a confident `--instance`
+    at the wrong target. Re-derive, do not copy.
+    PROVE THE REFUSAL AND THE COMPATIBILITY ARM SEPARATELY. Deleting the refusal must redden the
+    unscoped tests; removing the `RMD_STATE_DIR` narrowing must redden the explicit-target test.
+    A change that only satisfies one of those has not asserted the boundary, it has moved it.
+    DO NOT MAKE `--instance` MANDATORY. That is a different, larger decision: it breaks every
+    env-scoped caller at once, and this task deliberately refuses only the UNNAMED default.
+    ATTRIBUTE ANY RED BEFORE BLAMING THIS CHANGE.
+    `test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts` fails 5/5 on CLEAN main
+    on darwin — verified by stashing this work and re-running. It is a pre-existing host artifact,
+    not evidence against the refusal, and CI on ubuntu is the authoritative verdict.
