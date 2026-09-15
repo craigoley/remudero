@@ -30,7 +30,11 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-08T10:00:00.000Z",
+    // W1-T3601 round-1 ci-log: aged 11 days behind NOW (below sweep.staleDays=14, so the
+    // permanent-diff-refusal disposition below is still reached rather than "stale") and already
+    // past the real-clock 14-day threshold as of 2026-09-15, so expiring-fixture-census reads it
+    // as settled state rather than a fixture about to cross its threshold.
+    lastActivityAt: "2026-08-28T10:00:00.000Z",
     headSha: "head-a",
     reviewInputDigest: "digest-a",
     autoMergeArmed: false,
