@@ -52,13 +52,13 @@
     restore their signal, not to replace them with one synthetic happy path.
   acceptance:
     - claim: "the shipped recycle script contains no Bash-4-only collection primitive and its portability proof executes through the host's normal bash"
-      proof: "unit test: recycle-container Bash 3 portability: no unsupported collection primitive survives"
+      proof: "unit test: test/recycle-container-bash3-portability.test.ts"
     - claim: "the portable replacement preserves runtime environment capture and the source distinction that decides what is forwarded"
-      proof: "unit test: recycle-container Bash 3 portability: captured runtime values preserve their source"
+      proof: "unit test: test/recycle-container-bash3-portability.test.ts"
     - claim: "a shared-checkout preflight reaches its named refusal rather than an unsupported Bash builtin failure"
-      proof: "unit test: recycle-container Bash 3 portability: shared checkout refusal reaches its safety gate"
+      proof: "unit test: test/recycle-container-bash3-portability.test.ts"
     - claim: "restoring an unsupported collection primitive makes the portability proof fail"
-      proof: "unit test: recycle-container Bash 3 portability: restoring readarray is rejected"
+      proof: "unit test: test/recycle-container-bash3-portability.test.ts"
   falsifier: |
     Close without implementation if the current `deploy/recycle-container.sh`, executed by the
     host's normal Bash 3.2, reaches both the shared-checkout refusal and runtime-environment capture
