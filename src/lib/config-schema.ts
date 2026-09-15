@@ -7,7 +7,10 @@ export const CONFIG_SCHEMA_VERSION = 1;
  * to conclude either that it is open-weight (false) or that it does not belong on this ladder (a decision
  * NOT to save money). "cash" is the CANONICAL id from here on: this is the non-subscription, pay-per-token
  * lane, billed per request against `dailyCapUsd`, outside the Claude/Codex subscriptions — see the
- * `capabilities.cash` block in `.remudero/mounts.yaml` for the written admission rule.
+ * `capabilities.cash` block of the mounts file that {@link loadMounts} (src/lib/mounts.ts) reads for
+ * the written admission rule. The path itself is deliberately NOT re-spelled here: mounts.ts resolves
+ * it, and a second src file naming the house layout inline is exactly what test/repo-layout.ts's
+ * W1-T2922 ratchet counts.
  * "openweight" is kept as a DEPRECATED ALIAS ONLY: an already-deployed host's `~/.config/remudero/config.json`
  * (never committed to git) may still carry the old spelling, and a rename that refuses it takes the fleet
  * down at the next boot. {@link canonicalWorkerProviderId} is the ONE read-boundary function that maps it
