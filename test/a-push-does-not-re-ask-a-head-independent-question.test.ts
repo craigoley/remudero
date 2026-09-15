@@ -12,24 +12,17 @@ import {
 } from "../src/lib/escalate.js";
 import { buildSweepEffects, renderClarificationQuestion, type OpenPrView } from "../src/lib/sweep.js";
 
-/**
- * `lastActivityAt` is compared against the sweep's LIVE staleness threshold, so a hardcoded date
- * here is a time bomb: it goes red on a calendar boundary with no diff involved, and it did —
- * expiring-fixture-census (W1-T3272) reported these three stamps as crossing `sweep.staleDays` on
- * 2026-09-22. That job is `pull_request`-only, so `main` never showed it while every open PR did.
- *
- * Derived from the clock instead of exempted: these fixtures do NOT inject a clock, so the stamp
- * really is compared against `Date.now()` and an exemption marker would be a false claim that it
- * cannot detonate. One hour ago is unambiguously recent activity, on any day.
- */
-const HOUR_MS = 60 * 60 * 1000;
-
-function recentActivityIso(hoursAgo = 1): string {
-  return new Date(Date.now() - hoursAgo * HOUR_MS).toISOString();
-}
-
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-head-independent-dedup-")), "ledger.ndjson");
+}
+
+/** W1-T3608 — STAMPED FROM THE CLOCK, NOT A CONSTANT (see test/stale-ci-gate-wiring.test.ts's
+ *  `recentActivityIso`). This file's dedup assertions never depend on `lastActivityAt`'s value, so
+ *  a fixed ISO string is a time bomb against `sweep.staleDays`, not a real fixture: past
+ *  expiring-fixture-census's warning margin it drifted toward crossing that threshold with no diff
+ *  involved. Re-deriving it from `Date.now()` every run keeps it always-recent instead. */
+function recentActivityIso(): string {
+  return new Date(Date.now() - 60 * 60 * 1000).toISOString();
 }
 
 function fakeIssueStore(): IssueGateway & {

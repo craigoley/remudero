@@ -1,0 +1,53 @@
+# Remudero — .remudero/daemon-instances.yaml (dedicated-daemon instance registry)
+#
+# W1-T3596. `deploy/recycle-container.sh --instance <name>` reads this file to derive a recycle
+# target's container, state mount, credential mounts and image. Until this file existed the
+# `--instance` path REFUSED every invocation ("instance registry is not readable"), so the only
+# working path was the legacy no-instance one — and that path defaults to `CONTAINER_NAME`
+# `remudero-daemon`, `STATE_DIR` `${HOME}/rmd-state` and `DAEMON_REPO` `remudero`. With three
+# daemons live (core, site, console) that default meant an operator intending to recycle the site
+# or console daemon would have recycled CORE instead, and against a state directory that is not
+# even the core daemon's own (`rmd-state`, while core actually runs on `rmd-state2`).
+#
+# MEASURED FROM THE LIVE HOST 2026-09-15, via `docker inspect` on each running container — every
+# value below is transcribed from a running mount or its `Config.Cmd`, never assumed:
+#
+#   remudero-daemon          --repo remudero          /home/craigoleyagent/rmd-state2
+#   remudero-site-daemon     --repo remudero-site     /home/craigoleyagent/rmd-site-state
+#   remudero-console-daemon  --repo remudero-console  /mnt/rmd/remudero-console-state
+#
+# The three credential mounts are SHARED by all three daemons today (`.claude`, `.codex`,
+# `.config/remudero-container`). That is the live arrangement, recorded here as fact rather than
+# endorsed: an instance that should hold its own provider credentials would declare its own paths
+# here, and this file is where that change belongs.
+#
+# NOTE ON `core`: it is declared so that recycling the core daemon is an EXPLICIT act with the same
+# shape as the others. Once this file is present, `recycle-container.sh` with no `--instance`
+# REFUSES and names these instances rather than silently defaulting — see that script's own
+# no-instance refusal. The registry being absent keeps the legacy default byte-for-byte, so an
+# older checkout is unaffected.
+instances:
+  core:
+    repo: remudero
+    container_name: remudero-daemon
+    state_dir: /home/craigoleyagent/rmd-state2
+    claude_dir: /home/craigoleyagent/.claude
+    codex_dir: /home/craigoleyagent/.codex
+    container_config_dir: /home/craigoleyagent/.config/remudero-container
+    image: synthwatcholey0620.azurecr.io/remudero:latest
+  site:
+    repo: remudero-site
+    container_name: remudero-site-daemon
+    state_dir: /home/craigoleyagent/rmd-site-state
+    claude_dir: /home/craigoleyagent/.claude
+    codex_dir: /home/craigoleyagent/.codex
+    container_config_dir: /home/craigoleyagent/.config/remudero-container
+    image: synthwatcholey0620.azurecr.io/remudero:latest
+  console:
+    repo: remudero-console
+    container_name: remudero-console-daemon
+    state_dir: /mnt/rmd/remudero-console-state
+    claude_dir: /home/craigoleyagent/.claude
+    codex_dir: /home/craigoleyagent/.codex
+    container_config_dir: /home/craigoleyagent/.config/remudero-container
+    image: synthwatcholey0620.azurecr.io/remudero:latest
