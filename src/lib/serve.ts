@@ -3724,7 +3724,11 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     beforeExit: analyticsCache.stop,
     lastReadAt: () => lastReadAt,
   });
-  const stampRead = (route: Route): Route => stampReadWith(route, () => { lastReadAt = Date.now(); });
+  // THE CLOCK PORT, never the legacy signature. clock-signature-census ratchets that shape per
+  // file and this line pushed src/lib/serve.ts from 2 to 3; `systemClock` is the target the
+  // census names, and it is the SAME default `gateStaleCodeExit` reads patience against above, so
+  // the stamp and the decision that consumes it cannot disagree about what time it is.
+  const stampRead = (route: Route): Route => stampReadWith(route, () => { lastReadAt = systemClock.now(); });
   const routeAssembly = assembleServeRoutes({ ...deps, consoleSha, confirmNonces }, analyticsCache.current);
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
