@@ -784,7 +784,9 @@ test("the verify-human judge rides openweight, and the fail-closed judges delibe
 
   const vh = mounts.verify_human_judge;
   assert.ok(vh, ".remudero/mounts.yaml must declare a verify_human_judge mount");
-  assert.equal(vh!.provider, "openweight");
+  // W1-T3607: `loadMounts` normalises at the read boundary, so a parsed mount carries the
+  // canonical `cash` whichever spelling the table on disk used.
+  assert.equal(vh!.provider, "cash");
   assert.equal(selectOpenWeightModel(mounts.capabilities, vh!.model, vh!.effort).model, "gpt-oss-120b");
 
   const args = buildVerifyHumanJudgeSpawnArgs({
@@ -793,7 +795,7 @@ test("the verify-human judge rides openweight, and the fail-closed judges delibe
     cwd: REPO_ROOT,
     settingsFile: SETTINGS_FILE,
   });
-  assert.equal(args.mountProvider, "openweight", "the mount's provider must reach SpawnWorkerArgs");
+  assert.equal(args.mountProvider, "cash", "the mount's provider must reach SpawnWorkerArgs");
   assert.deepEqual(args.tools, VERIFY_HUMAN_JUDGE_TOOLS, "it stays tool-less, which is what makes it adapter-eligible");
   assert.deepEqual(VERIFY_HUMAN_JUDGE_TOOLS, [], "and that list is empty by construction");
 
