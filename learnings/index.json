@@ -138,7 +138,6 @@
         "askuserquestion-auto-resolves-empty-headless",
         "askuserquestion-headless-unverified",
         "bashrc-accident",
-        "board-status-pacer-blocks-the-event-loop",
         "browser-egress-needs-dedicated-profile",
         "canonical-checkout-lags-by-design",
         "claude-json-tier-keys",
@@ -159,17 +158,14 @@
       ],
       "globs": [
         "settings/worker.json",
-        "src/lib/board.ts",
         "src/lib/containment.ts",
         "src/lib/daemon.ts",
         "src/lib/env.ts",
         "src/lib/escalate.ts",
-        "src/lib/github-transport.ts",
         "src/lib/headroom.ts",
         "src/lib/init.ts",
         "src/lib/launchd.ts",
         "src/lib/ledger.ts",
-        "src/lib/serve.ts",
         "src/lib/settings.ts",
         "src/lib/tier.ts",
         "src/lib/triage.ts",
@@ -177,13 +173,7 @@
         "src/lib/worker.ts",
         "src/run-task.ts"
       ],
-      "symbols": [
-        "GhCallPacer",
-        "buildStatusRoute",
-        "listOpenHeadBranches",
-        "paceGhEntry",
-        "readPrQueueIndex"
-      ],
+      "symbols": [],
       "error_signatures": []
     },
     "testing.yaml": {
@@ -301,9 +291,6 @@
       "failures.yaml"
     ],
     "sdk-tools": [
-      "platform.yaml"
-    ],
-    "serve": [
       "platform.yaml"
     ],
     "settings": [

@@ -522,3 +522,42 @@ Removed from lines 1331-1338.
       // fixture reproduced by the fix rung's OWN status-changing ledger lines. Enrich the SAME
       // way `computeBoardSnapshot` does, off the SAME already-read `lines` this tick already has.
 ```
+
+## createTimedPrQueueIndex — the request-path measurement
+
+Measured 2026-09-15 on the live daemon, not removed from the source: this page is where
+`createTimedPrQueueIndex`'s one-line `// Why:` pointer resolves to.
+
+`readPrQueueIndex` built the `/v1/status` memo's cache KEY by calling
+`github.listOpenHeadBranches()` from inside the request handler. Every production gateway answers
+that with an `execFileSync("gh", …)` routed through `paceGhEntry`, and the pacer enforces its gap
+with `Atomics.wait` on a `SharedArrayBuffer` (`defaultBlockingSleepSync`, github-transport.ts) —
+a hard stop of node's single event-loop thread. The cost was therefore never one slow response; it
+was every concurrent reader frozen alongside it.
+
+Forty sequential `curl -w %{time_total}` calls against a warm listener:
+
+| call | latency |
+| --- | --- |
+| cold — first after boot | 6.80s |
+| gap-enforced call — 8 of 40 | 1.30s |
+| memo hit — the other 32 | 0.02s |
+
+The 1.30s is not network time. `DEFAULT_GH_PACE_MIN_GAP_MS` is 1,500ms; on a rate-limited read the
+same call site switches to `DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS` = 10,000ms, and `paceGhEntry`'s
+retry arm sleeps again on top. The worst case was the HTTP server frozen for ten-plus seconds
+inside a GET, against a console gateway whose own timeout is 5s. W1-T999 had already stretched the
+board gateway's TTL to `DEFAULT_BOARD_POLL_TTL_MS` = 150s, which made this RARE; it could not make
+it SAFE, because the sleep was still on the request path.
+
+### Why only the index moved
+
+The first attempt deferred the WHOLE snapshot — serve the cached one, refresh on the next
+macrotask — and `test/serve.live-state.ts` refused it. The console polls `/v1/status` every
+3,000ms (`console-shell-client.ts`'s `POLL_INTERVAL_MS`), so serving stale-then-refreshing meant a
+recovering gateway needed TWO poll intervals to clear its outage banner: measured recomputes at
+t+0.0s and t+3.3s against that test's 5s bound, with the next poll at t+6.3s.
+
+So only `listOpenHeadBranches()` moved. The ledger fold, the gateway's observable health
+(`readFailed()` — a flag read, not a call out to GitHub) and the projection all stay inline, and a
+ledger append or a gateway recovery is still reflected by the very next request.

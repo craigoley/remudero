@@ -285,7 +285,7 @@ export interface TimedPrQueueIndex {
 }
 
 // Why: the measured latencies, and why a longer gateway TTL cannot fix this —
-// [src: learnings#board-status-pacer-blocks-the-event-loop]
+// docs/forensics/board.md#createtimedprqueueindex--the-request-path-measurement
 /**
  * THE OPEN-INDEX READ, ON A TIMER INSTEAD OF ON A REQUEST.
  *

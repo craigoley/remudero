@@ -304,24 +304,3 @@
     observed and all harmless.
   src: operator-session#14-day-retro-replay-2026-09-09
   cited: "2026-09-09"
-- id: board-status-pacer-blocks-the-event-loop
-  subsystem: serve
-  lifecycle: active
-  files: [ src/lib/board.ts, src/lib/github-transport.ts, src/lib/serve.ts ]
-  symbols: [ readPrQueueIndex, listOpenHeadBranches, GhCallPacer, paceGhEntry, buildStatusRoute ]
-  fact: >-
-    A synchronous `gh` read on an HTTP handler's path freezes the WHOLE daemon,
-    not merely that one response. `GhCallPacer.wait()` enforces its gap with
-    `Atomics.wait` on a SharedArrayBuffer (`defaultBlockingSleepSync`,
-    github-transport.ts), which stops node's single event-loop thread outright:
-    DEFAULT_GH_PACE_MIN_GAP_MS is 1500ms and DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS is
-    10000ms, and paceGhEntry's retry arm sleeps again on top of that. MEASURED
-    2026-09-15 on the live daemon, GET /v1/status against a warm listener: 6.80s
-    cold, 1.30s on a gap-enforced call (8 of 40 in a 40s window), 0.02s on a memo
-    hit — against a console gateway whose own timeout is 5s. Stretching the
-    gateway TTL makes this RARE, never SAFE. Build the answer off the request path
-    and serve the last snapshot with its own `generated_at` instead.
-  assertion: >-
-    grep -q 'Atomics.wait' src/lib/github-transport.ts && grep -q 'DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS = 10_000' src/lib/github-transport.ts
-  src: operator-session#serve-listener-starvation-2026-09-15
-  cited: "2026-09-15"
