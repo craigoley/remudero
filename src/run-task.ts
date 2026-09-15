@@ -24534,7 +24534,16 @@ async function retroCommand(
     const provenance: RetroPrepublishProvenance = {
       // Retro is deliberately Claude/Codex-only. Keep its historical provenance vocabulary
       // narrow even after the worker union gains a mount-affine open-weight provider.
-      ...(worker.provider && worker.provider !== "openweight" ? { provider: worker.provider } : {}),
+      //
+      // ALLOW-LIST, NOT A DENY-LIST, and W1-T3607 is why. This read used to EXCLUDE the open-weight
+      // lane by name (`!== "openweight"`), which silently stopped narrowing the moment that lane's
+      // canonical id was renamed to `cash` — and excluding `cash` instead would have been wrong too,
+      // because `WorkerProviderId` deliberately retains `openweight` as a deprecated wire spelling,
+      // so BOTH are in the type. A deny-list here has to be edited every time the worker union
+      // grows, and the compiler only catches the omission when the new id happens to be
+      // unassignable. Naming the two providers retro provenance actually accepts cannot drift:
+      // a future provider is excluded by construction rather than by remembering to exclude it.
+      ...(worker.provider === "claude" || worker.provider === "codex" ? { provider: worker.provider } : {}),
       model: worker.model,
       servedModel: worker.servedModel ?? null,
       effort: worker.effort,

@@ -607,7 +607,7 @@ export function codexCandidatesForCapability(
 /** Last-resort data for a missing capability table. Real open-weight routing resolves the table
  * below; this keeps a malformed optional table from changing the existing fail-soft contract. */
 /**
- * The code-side default when mounts declares no `capabilities.openweight` table. It must name the
+ * The code-side default when mounts declares no `capabilities.cash` table. It must name the
  * SAME leading deployment as that table (W1-T3598): if the two disagreed, a checkout with no table
  * would silently route the DEARER deployment while the configured fleet routed the cheaper one, and
  * nothing would report the divergence. test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
