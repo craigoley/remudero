@@ -16,6 +16,15 @@ function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-head-independent-dedup-")), "ledger.ndjson");
 }
 
+/** W1-T3608 — STAMPED FROM THE CLOCK, NOT A CONSTANT (see test/stale-ci-gate-wiring.test.ts's
+ *  `recentActivityIso`). This file's dedup assertions never depend on `lastActivityAt`'s value, so
+ *  a fixed ISO string is a time bomb against `sweep.staleDays`, not a real fixture: past
+ *  expiring-fixture-census's warning margin it drifted toward crossing that threshold with no diff
+ *  involved. Re-deriving it from `Date.now()` every run keeps it always-recent instead. */
+function recentActivityIso(): string {
+  return new Date(Date.now() - 60 * 60 * 1000).toISOString();
+}
+
 function fakeIssueStore(): IssueGateway & {
   calls: Array<{ title: string; body: string; labels: string[] }>;
   comments: Array<{ url: string; body: string }>;
@@ -163,7 +172,7 @@ test("the contradictory clarification producer marks its ask head-independent", 
     unmetCriteria: [],
     criteriaRecoverable: true,
     priorStrikes: 2,
-    lastActivityAt: "2026-09-08T12:00:00Z",
+    lastActivityAt: recentActivityIso(),
     headSha: "feed3179",
     autoMergeArmed: false,
   };
@@ -250,7 +259,7 @@ test("the terminal non-fleet-head producer marks its ask head-independent", asyn
       checksState: "green",
       unmetCriteria: [],
       priorStrikes: 1,
-      lastActivityAt: "2026-09-08T12:00:00Z",
+      lastActivityAt: recentActivityIso(),
       headSha: "bad3179",
       autoMergeArmed: false,
     },
@@ -265,7 +274,7 @@ test("the terminal non-fleet-head producer marks its ask head-independent", asyn
       checksState: "green",
       unmetCriteria: [],
       priorStrikes: 1,
-      lastActivityAt: "2026-09-08T12:00:00Z",
+      lastActivityAt: recentActivityIso(),
       headSha: "bad3180",
       autoMergeArmed: false,
     },
