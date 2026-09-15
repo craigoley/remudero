@@ -83,7 +83,8 @@ export const RECORDED_POPULATION_BY_FILE = Object.freeze({
   "test/daemon-freshness.test.ts": 0,
   "test/daemon.test.ts": 2,
   "test/entanglement-split-sweep-reachability.test.ts": 1,
-  "test/failed-ci-infrastructure-requeue.test.ts": 1,
+  // Stamped from Date.now() (W1-T3270 shape), not a literal -- see the fixture's own comment.
+  "test/failed-ci-infrastructure-requeue.test.ts": 0,
   "test/filing-forward-reference.test.ts": 1,
   "test/fix-mode-gate-failures.test.ts": 1,
   "test/open-prs-rest.test.ts": 1,

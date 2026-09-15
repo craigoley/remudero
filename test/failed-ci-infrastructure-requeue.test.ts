@@ -24,6 +24,15 @@ const TRANSCRIPT = [
   "Failed to FinalizeArtifact: (403) Forbidden: Error from intermediary",
 ].join("\n");
 
+// STAMPED FROM THE CLOCK, NEVER A CONSTANT (W1-T3270 / expiring-fixture-census). This used to read
+// a fixed `"2026-09-08T15:30:00Z"` compared against a fixed `now` ten minutes later — a gap that
+// says nothing about "recent" once the wall clock moves on, only about the two literals' distance
+// from each other. `sweep.staleDays` ages `lastActivityAt` against the REAL clock in production, so
+// a fixture this test needs to read as fresh has to be derived from `Date.now()`, exactly like
+// test/stale-ci-gate-wiring.test.ts's `recentActivityIso()`.
+const NOW_MS = Date.now();
+const LAST_ACTIVITY_ISO = new Date(NOW_MS - 10 * 60 * 1000).toISOString();
+
 function infra(name = "ci-shard (2/4)"): CiFailure {
   return { name, conclusion: "FAILURE", jobId: "34249290033", logTail: TRANSCRIPT };
 }
@@ -37,7 +46,7 @@ function subject(overrides: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "red",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-08T15:30:00Z",
+    lastActivityAt: LAST_ACTIVITY_ISO,
     headSha: "e0838eb6e0702ff1a35bd5d9c240e8c7bbf6fd25",
     headRefName: "run-W1-T3140-1788886671767",
     autoMergeArmed: false,
@@ -73,7 +82,7 @@ function deps(ledgerPath: string) {
     },
     ledgerPath,
     runId: "SWEEP-INFRA-TEST",
-    now: () => Date.parse("2026-09-08T15:40:00Z"),
+    now: () => NOW_MS,
   };
   return { d, escalated, fixed, requeued };
 }

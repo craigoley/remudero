@@ -2473,7 +2473,13 @@ export function resolveCommitsBehind(
     const moduleDir = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
     const n = Number(exec(moduleDir, `${bootSha}..HEAD`).trim());
     return Number.isInteger(n) && n >= 0 ? n : undefined;
-  } catch {
+  } catch (error) {
+    // Best-effort only, per this function's own contract above: a missing git, a detached
+    // worktree, or a boot sha the checkout has since lost (rebase, shallow clone) all read as "no
+    // evidence" to consoleRecyclePatienceMs, never as a caller-visible failure. Recorded so a
+    // persistently unreadable backlog is diagnosable instead of silently maximal patience forever.
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`resolveCommitsBehind: ${reason}`);
     return undefined;
   }
 }
