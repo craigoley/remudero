@@ -54,6 +54,7 @@ import {
   parseWhitelistedProof,
   wrappedGrepPattern,
 } from "../src/lib/review.ts";
+import { rule15SplitViolation } from "../src/lib/ci-parity.ts";
 import { loadPlan } from "../src/lib/plan.ts";
 import { isInPlanScope } from "../src/lib/plan-scope.ts";
 import { execFileSync } from "node:child_process";
@@ -176,6 +177,32 @@ export function changedPathsAtRange({ baseSha, headSha, root = REPO_ROOT, git } 
   try {
     const output = run(["diff", "--name-only", "-z", "--no-renames", `${baseSha}...${headSha}`]);
     return [...new Set(String(output).split("\0").filter(Boolean))];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Standing rule 15's shared author-time verdict for the pull request's merge-base diff.
+ *
+ * The pre-push hook and `rmd preflight` already call `rule15SplitViolation`; this required,
+ * event-driven check must use that same predicate so a worker cannot reach semantic review with a
+ * known mixed criterion-and-implementation diff merely because its local hook was unavailable.
+ *
+ * Missing SHAs or an unreadable local range preserve the gate's prior behaviour (`undefined`),
+ * rather than manufacturing a refusal from absent evidence. The workflow checks out full history,
+ * so a normal pull_request event supplies both SHAs and the diff without a GitHub API call.
+ *
+ * @param {{ baseSha?: string, headSha?: string, root?: string, git?: (args: string[]) => string }} opts
+ * @returns {import("../src/lib/ci-parity.ts").Rule15SplitVerdict | undefined}
+ */
+export function rule15SplitAtRange({ baseSha, headSha, root = REPO_ROOT, git } = {}) {
+  if (!baseSha || !headSha) return undefined;
+  const run =
+    git ??
+    ((args) => execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }));
+  try {
+    return rule15SplitViolation(String(run(["diff", "--no-ext-diff", `${baseSha}...${headSha}`])));
   } catch {
     return undefined;
   }
@@ -336,7 +363,7 @@ export function followupCommitImplementationTrailerRefusal({ trailerCommits, cha
 }
 
 /**
- * The gate's own verdict: the bot exemption first, then the two structural refusals, then
+ * The gate's own verdict: the bot exemption first, then Rule 15 and the two structural refusals, then
  * `acceptanceAuthorTimeCheck` (no `expectedTaskId` — this job has no PR-to-task binding of its
  * own, the same general-case call shape `rmd check-acceptance` itself uses), then proof shape.
  *
@@ -344,13 +371,20 @@ export function followupCommitImplementationTrailerRefusal({ trailerCommits, cha
  * caller is what supplies it, so a `Remudero-Task:` trailer naming an id the plan does not declare
  * stops buying an exemption. `trailerResolves` OMITTED — which is what a caller with an unreadable
  * plan passes — leaves the verdict byte for byte what it was before this wiring.
- * @param {{ body: string, authorLogin?: string, trailerResolves?: (taskId: string) => boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined }} input
+ * @param {{ body: string, authorLogin?: string, trailerResolves?: (taskId: string) => boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict }} input
  */
-export function evaluateGate({ body, authorLogin, trailerResolves, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId }) {
+export function evaluateGate({ body, authorLogin, trailerResolves, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, rule15Verdict }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
       message: `author "${authorLogin}" is exempt — the dep-review lane owns arming for these (W1-T1060 rationale (5))`,
+    };
+  }
+  if (rule15Verdict?.refused) {
+    return {
+      ok: false,
+      defect: "rule-15-split",
+      message: rule15Verdict.reason ?? "Standing rule 15 refuses this mixed plan-and-implementation diff",
     };
   }
   // W1-T3231 runs BEFORE the acceptance check, not after: a filing PR carrying its own trailer
@@ -446,6 +480,7 @@ export function main(argv) {
     trailerCommits: commitTaskTrailersAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
     changedPaths: changedPathsAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
     taskFilesForId: planTaskFilesResolver(),
+    rule15Verdict: rule15SplitAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
   });
   if (!result.ok) {
     console.error(`acceptance-author-gate: REFUSED (${result.defect}) — ${result.message}`);

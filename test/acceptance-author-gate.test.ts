@@ -40,6 +40,7 @@ type GateInput = {
   trailerCommits?: Array<{ sha: string; subject: string; taskId: string }>;
   changedPaths?: readonly string[];
   taskFilesForId?: TaskFilesForId;
+  rule15Verdict?: { refused: boolean; reason?: string };
 };
 type GateVerdict = { ok: boolean; defect?: string; message: string };
 const mod = (await import(GATE_URL)) as {
@@ -56,6 +57,12 @@ const mod = (await import(GATE_URL)) as {
     root?: string;
     git?: (args: string[]) => string;
   }) => string[] | undefined;
+  rule15SplitAtRange: (input?: {
+    baseSha?: string;
+    headSha?: string;
+    root?: string;
+    git?: (args: string[]) => string;
+  }) => { refused: boolean; reason?: string } | undefined;
   planTaskFilesResolver: (root?: string) => TaskFilesForId | undefined;
   readEventPayload: (eventPath: string) => { readable: boolean; body?: string; authorLogin?: string; reason?: string };
   evaluateGate: (input: GateInput) => GateVerdict;
@@ -65,7 +72,7 @@ const mod = (await import(GATE_URL)) as {
     env?: Record<string, string | undefined>,
   ) => { ok: boolean; eventPath?: string; message?: string };
 };
-const { EXEMPT_BOT_LOGINS, changedPathsAtRange, commitTaskTrailersAtRange, evaluateGate, main, planTaskFilesResolver, readEventPayload, resolveEventPath } = mod;
+const { EXEMPT_BOT_LOGINS, changedPathsAtRange, commitTaskTrailersAtRange, evaluateGate, main, planTaskFilesResolver, readEventPayload, resolveEventPath, rule15SplitAtRange } = mod;
 
 /** Byte-identical in shape to test/acceptance-block-diagnostics.test.ts's own WRAPPED fixture —
  *  a claim long enough that an author wrapped it onto a second line. `parseAcceptanceBlock`
@@ -114,6 +121,7 @@ async function structuralPredicateMutant(): Promise<{ evaluateGate: (input: Gate
   const imports = [
     ["./lib/argv.mjs", join(REPO_ROOT, "scripts", "lib", "argv.mjs")],
     ["../src/lib/review.ts", join(REPO_ROOT, "src", "lib", "review.ts")],
+    ["../src/lib/ci-parity.ts", join(REPO_ROOT, "src", "lib", "ci-parity.ts")],
     ["../src/lib/plan.ts", join(REPO_ROOT, "src", "lib", "plan.ts")],
     ["../src/lib/plan-scope.ts", join(REPO_ROOT, "src", "lib", "plan-scope.ts")],
     ["./lib/repo-root.mjs", join(REPO_ROOT, "scripts", "lib", "repo-root.mjs")],
@@ -140,6 +148,72 @@ const IMPLEMENTATION_FILES = [
 ];
 const IMPLEMENTATION_BODY = `This PR changes planning only.\n\nRemudero-Task: ${IMPLEMENTATION_TASK}\n`;
 const implementationTaskFiles: TaskFilesForId = (taskId) => (taskId === IMPLEMENTATION_TASK ? IMPLEMENTATION_FILES : undefined);
+
+const RULE_15_CRITERION_HUNK = [
+  "diff --git a/plan/tasks.d/W1-T1-x.yaml b/plan/tasks.d/W1-T1-x.yaml",
+  "--- a/plan/tasks.d/W1-T1-x.yaml",
+  "+++ b/plan/tasks.d/W1-T1-x.yaml",
+  "@@ -1,2 +1,4 @@",
+  "     acceptance:",
+  '+      - claim: "a thing this task must do"',
+  '+        proof: "unit test: a real title"',
+].join("\n");
+const RULE_15_MIXED_DIFF = [
+  RULE_15_CRITERION_HUNK,
+  "diff --git a/src/lib/x.ts b/src/lib/x.ts",
+  "--- a/src/lib/x.ts",
+  "+++ b/src/lib/x.ts",
+  "@@ -1 +1,2 @@",
+  "+const a = 1;",
+].join("\n");
+
+test("acceptance gate: Rule 15 mixed diff refuses before review", () => {
+  const calls: string[][] = [];
+  const rule15Verdict = rule15SplitAtRange({
+    baseSha: "base",
+    headSha: "head",
+    git(args) {
+      calls.push(args);
+      return RULE_15_MIXED_DIFF;
+    },
+  });
+  assert.deepEqual(calls, [["diff", "--no-ext-diff", "base...head"]]);
+  assert.equal(rule15Verdict?.refused, true, "the shared predicate sees the same mixed diff as review");
+
+  const result = evaluateGate({
+    body: "## Acceptance\n\n- claim: a valid body\n  proof: unit test: a real title\n",
+    authorLogin: "a-human",
+    rule15Verdict,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.defect, "rule-15-split");
+  assert.match(result.message, /REMEDY: file the shard in its own plan-only PR/);
+});
+
+test("acceptance gate: Rule 15 plan-only and unreadable ranges preserve the existing verdict", () => {
+  const planOnly = rule15SplitAtRange({ baseSha: "base", headSha: "head", git: () => RULE_15_CRITERION_HUNK });
+  const missing = rule15SplitAtRange({ headSha: "head", git: () => "unexpected" });
+  const unreadable = rule15SplitAtRange({
+    baseSha: "base",
+    headSha: "head",
+    git: () => {
+      throw new Error("unknown revision");
+    },
+  });
+  assert.equal(planOnly?.refused, false, "a criterion amendment in a plan-only PR is allowed");
+  assert.equal(missing, undefined);
+  assert.equal(unreadable, undefined);
+
+  const input: GateInput = {
+    body: "## Acceptance\n\n- claim: a valid body\n  proof: unit test: a real title\n",
+    authorLogin: "a-human",
+  };
+  const existing = evaluateGate(input);
+  assert.equal(existing.ok, true, existing.message);
+  for (const rule15Verdict of [planOnly, missing, unreadable]) {
+    assert.deepEqual(evaluateGate({ ...input, rule15Verdict }), existing);
+  }
+});
 
 test("a plan-only diff cannot credit a task that declares source files", () => {
   const calls: string[][] = [];
