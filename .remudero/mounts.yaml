@@ -134,7 +134,14 @@ capabilities:
   # gpt-oss-120b TRAILS rather than being removed, the same demotion shape the `codex` block above
   # uses: a deployment that stops answering falls back instead of failing the lane. FRONTIER is left
   # on gpt-oss-120b — a nano-class model is not a frontier substitute.
-  openweight:
+  # W1-T3607: CANONICAL KEY IS `cash`, NOT `openweight`. THE CATEGORY IS HOW A DEPLOYMENT IS PAID
+  # FOR, NEVER WHAT LICENCE IT SHIPS UNDER: this is the non-subscription, pay-per-token ladder,
+  # billed per request against `dailyCapUsd`, outside the Claude/Codex subscriptions. A deployment
+  # is admissible here by that billing property alone — gpt-5-nano (led below) is PROPRIETARY, not
+  # open-weight, and belongs on this ladder anyway because it is cash-billed the same as every other
+  # row. `src/lib/mounts.ts`'s `parseCapabilities` still accepts the deprecated `openweight:` key as
+  # an alias for an already-deployed host's table; remove that alias once none remain.
+  cash:
     # W1-T3614 — THE TWO ROWS LEAD WITH DIFFERENT DEPLOYMENTS, AND THAT IS THE POINT. Neither model
     # wins outright; the winner is decided by the INPUT:OUTPUT ratio of the lane, measured against
     # the live account with the adapter's own URL, api-version and body on 2026-09-15:
@@ -265,7 +272,7 @@ architect:
 synthesis:
   retro:       { model: claude-opus-5, effort: high, max_turns: 400, context_budget: 180000 }
   triage:      { model: sonnet,        effort: low,  max_turns: 400, context_budget: 180000 }
-  inbox_draft: { model: sonnet,        effort: high, max_turns: 400, context_budget: 180000, provider: openweight }
+  inbox_draft: { model: sonnet,        effort: high, max_turns: 400, context_budget: 180000, provider: cash }
 
 # ── The flight-judge mount (Layer 2, W1-T21 — MASTER-PLAN §4B) ─────────────────
 # The advisory process-judge a Layer-1 trip (flight-signals.ts, W1-T20) spawns
@@ -307,7 +314,7 @@ escalation_judge:
   effort: low
   max_turns: 400
   context_budget: 60000
-  provider: openweight
+  provider: cash
 
 # ── max_turns is a RUNAWAY CLIFF, not a work limit (§9 tripwire re-base) ────────
 # The implement/reviewer/fix/diagnose worker lanes stay at a FLAT 400 — a tripwire

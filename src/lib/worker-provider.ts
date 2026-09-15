@@ -647,7 +647,10 @@ export function openWeightCandidatesForCapability(
   tier: CodexModelTier,
   requestedEffort: string | undefined,
 ): string[] {
-  const byEffort = capabilities?.openweight?.[tier];
+  // W1-T3607: `cash` is canonical; `openweight` is read only as a fallback for a caller that built a
+  // CapabilityLadder-shaped object directly (mounts.ts's loader already mirrors both, so this only
+  // matters for a table that bypassed it).
+  const byEffort = capabilities?.cash?.[tier] ?? capabilities?.openweight?.[tier];
   if (!byEffort) return FALLBACK_OPENWEIGHT_MODELS[tier];
   return (requestedEffort && byEffort[requestedEffort]) || byEffort.medium || FALLBACK_OPENWEIGHT_MODELS[tier];
 }
@@ -2033,11 +2036,11 @@ export function reserveOpenWeightBudget(
   input: { requestId: string; deployment: string; requestBodyBytes: number; atIso: string; beforeCommit?: () => void },
 ): { reservedUsd: number; committedUsd: number; capUsd: number } {
   const capUsd = config.dailyCapUsd;
-  // validateConfig already refuses an enabled openweight provider with no dailyCapUsd. This is the
-  // runtime half of that same rule: an absent cap here means the transport must not run at all,
-  // rather than defaulting to unlimited.
+  // validateConfig already refuses an enabled cash provider (W1-T3607: canonical id, "openweight"
+  // accepted as a deprecated alias) with no dailyCapUsd. This is the runtime half of that same rule:
+  // an absent cap here means the transport must not run at all, rather than defaulting to unlimited.
   if (capUsd === undefined || capUsd === null) {
-    throw new Error("openweight provider requires a dailyCapUsd before any paid request");
+    throw new Error("cash provider requires a dailyCapUsd before any paid request");
   }
   const utcDay = openWeightUtcDay(input.atIso);
   const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes);
@@ -2101,7 +2104,10 @@ export interface OpenWeightSpawnArgs {
 }
 
 export interface OpenWeightWorkerResult {
-  provider: "openweight";
+  // W1-T3607: the canonical runtime provider id — "cash", never the deprecated "openweight" config
+  // spelling. No out-of-scope caller asserts this literal value (only import symbol names, which stay
+  // unchanged; see this task's PR body for the deliberate scoping).
+  provider: "cash";
   sessionId: string;
   costUsd: number;
   numTurns: number;
@@ -2246,10 +2252,12 @@ function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd:
 }
 
 function openWeightEndpoint(config: Config, model: string): string {
-  const raw = config.workerProviders?.openweightEndpoint;
-  if (typeof raw !== "string" || raw.trim() === "") throw new Error("openweight provider requires workerProviders.openweightEndpoint");
+  // W1-T3607: canonical `cashEndpoint` first, falling back to the deprecated `openweightEndpoint`
+  // spelling so an already-deployed host's config.json need not be hand-edited the moment this ships.
+  const raw = config.workerProviders?.cashEndpoint ?? config.workerProviders?.openweightEndpoint;
+  if (typeof raw !== "string" || raw.trim() === "") throw new Error("cash provider requires workerProviders.cashEndpoint");
   const endpoint = new URL(raw.endsWith("/") ? raw : `${raw}/`);
-  if (endpoint.protocol !== "https:") throw new Error("openweight endpoint must use https");
+  if (endpoint.protocol !== "https:") throw new Error("cash endpoint must use https");
   return new URL(`openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=2024-10-21`, endpoint).toString();
 }
 
@@ -2271,7 +2279,7 @@ function openWeightResult(input: {
   const text = input.text ?? "";
   const error = input.error instanceof Error ? input.error.message : input.error === undefined ? undefined : String(input.error);
   return {
-    provider: "openweight",
+    provider: "cash",
     sessionId: input.sessionId ?? "",
     // ZERO USAGE COSTS ZERO AT ANY RATE, so it needs no price row. That is not a convenience: this
     // result is also built on the ERROR path, and one way to get here is the refusal raised when a

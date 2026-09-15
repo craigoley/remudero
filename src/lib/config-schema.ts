@@ -1,8 +1,37 @@
 export const CONFIG_SCHEMA_VERSION = 1;
 
-/** The shared provider identity; config re-exports it for existing consumers. */
-export const WORKER_PROVIDER_IDS = ["claude", "codex", "openweight"] as const;
+/** The shared provider identity; config re-exports it for existing consumers.
+ *
+ * W1-T3607: THE CATEGORY IS HOW A DEPLOYMENT IS PAID FOR, NOT WHAT LICENCE IT SHIPS UNDER. "openweight"
+ * mis-sorted a candidate like gpt-5-nano (proprietary, cash-billed) — a reader trusting the key name had
+ * to conclude either that it is open-weight (false) or that it does not belong on this ladder (a decision
+ * NOT to save money). "cash" is the CANONICAL id from here on: this is the non-subscription, pay-per-token
+ * lane, billed per request against `dailyCapUsd`, outside the Claude/Codex subscriptions — see the
+ * `capabilities.cash` block in `.remudero/mounts.yaml` for the written admission rule.
+ * "openweight" is kept as a DEPRECATED ALIAS ONLY: an already-deployed host's `~/.config/remudero/config.json`
+ * (never committed to git) may still carry the old spelling, and a rename that refuses it takes the fleet
+ * down at the next boot. {@link canonicalWorkerProviderId} is the ONE read-boundary function that maps it
+ * to "cash" — REMOVE "openweight" from this list once no live host config carries it any longer. */
+export const WORKER_PROVIDER_IDS = ["claude", "codex", "cash", "openweight"] as const;
 export type WorkerProviderId = (typeof WORKER_PROVIDER_IDS)[number];
+
+/** Deprecated provider-id spellings mapped to their canonical replacement (W1-T3607). Read ONLY by
+ *  {@link canonicalWorkerProviderId} — never compared against directly, so the alias set has exactly one
+ *  place to grow or shrink. */
+export const WORKER_PROVIDER_ID_ALIASES: Readonly<Record<string, WorkerProviderId>> = {
+  openweight: "cash",
+};
+
+/**
+ * The ONE function that maps a raw provider-id spelling (however it was written in a config file, a
+ * mounts.yaml `provider:` row, or a caller's `mountProvider` argument) to the canonical id everything
+ * downstream must compare against. Never sprinkle `|| "openweight"` at a call site — normalise here,
+ * once, at the read boundary (W1-T3607 design). An id absent from {@link WORKER_PROVIDER_ID_ALIASES}
+ * passes through unchanged (it is already canonical, or it is invalid and some other check will refuse it).
+ */
+export function canonicalWorkerProviderId(id: string): string {
+  return WORKER_PROVIDER_ID_ALIASES[id] ?? id;
+}
 
 export interface Config {
   claudeBin: string;
@@ -36,8 +65,13 @@ export interface Config {
       balanced?: string[];
       frontier?: string[];
     };
-    /** Azure OpenAI-compatible endpoint for the bounded open-weight adapter. The API key is
-     * intentionally environment-only and is never a config field. */
+    /** Azure OpenAI-compatible endpoint for the bounded cash (non-subscription) adapter. The API key is
+     * intentionally environment-only and is never a config field.
+     * W1-T3607: canonical field — read before the deprecated {@link openweightEndpoint} alias. */
+    cashEndpoint?: string;
+    /** DEPRECATED (W1-T3607): the pre-rename spelling of {@link cashEndpoint}, read as a fallback so an
+     *  already-deployed host's config.json need not be hand-edited the moment this ships. Remove once no
+     *  live host config carries it. */
     openweightEndpoint?: string;
   };
   learningsHomes?: { userOverall?: string; global?: string };
@@ -97,11 +131,11 @@ const workerProvidersShape: ValueSchema = {
   fields: [
     configField(
       "enabled",
-      '"claude" | "codex" | "openweight"[]',
+      '"claude" | "codex" | "cash" | "openweight"[]',
       true,
       ["claude"],
       "config.json",
-      "Worker backends the dispatcher may use.",
+      'Worker backends the dispatcher may use. "openweight" is a deprecated alias for "cash" (W1-T3607).',
       stringArrayShape,
     ),
     configField("reservePercent", "number", true, 5, "config.json", "Provider capacity held in reserve.", numberShape),
@@ -110,7 +144,16 @@ const workerProvidersShape: ValueSchema = {
     configField("codexHome", "string", true, undefined, "config.json", "Codex state/auth home.", stringShape),
     configField("codexModel", "string", true, undefined, "config.json", "Hard Codex model override.", stringShape),
     configField("codexModels", "object", true, undefined, "config.json", "Codex model preferences per mount tier.", codexModelsShape),
-    configField("openweightEndpoint", "string", true, undefined, "config.json", "Azure OpenAI-compatible endpoint for the open-weight worker adapter.", stringShape),
+    configField("cashEndpoint", "string", true, undefined, "config.json", "Azure OpenAI-compatible endpoint for the cash (non-subscription) worker adapter.", stringShape),
+    configField(
+      "openweightEndpoint",
+      "string",
+      true,
+      undefined,
+      "config.json",
+      "DEPRECATED (W1-T3607): alias for cashEndpoint, read as a fallback for an already-deployed host config.",
+      stringShape,
+    ),
   ],
 };
 
