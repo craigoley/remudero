@@ -66,3 +66,20 @@
     AND THE UNPRICED ARM MUST BE ABLE TO FAIL. Drive a model id that the ladder yields but the table
     omits, and assert NO fetch is attempted. An arm asserting only "an error was thrown" would pass
     if the adapter refused it earlier for an unrelated reason.
+  note: |
+    FILED 2026-09-15 alongside W1-T3598, which depends on this one. Ids swept against three
+    surfaces before use: reservation refs (highest held W1-T3595, 1611 refs read as the positive
+    control), origin/main's shards (highest W1-T3596), and every open PR's title/body/head.
+    `rmd next-task-id` returned this id but DEGRADED — it could not enumerate open PRs in the
+    filing container — so that half was swept by hand rather than taken on its word.
+
+    WHY THIS IS SEPARATE FROM THE TASK THAT ADDS A MODEL. The two could be one change, and keeping
+    them apart is deliberate: this one must be judgeable on its own evidence, which is that
+    gpt-oss-120b's figures are unchanged and an unpriced deployment refuses. Folding a new
+    deployment in would let a reviewer read a passing suite as proof of both, when only the second
+    had been exercised. The prerequisite is also the half that carries the cap-integrity argument,
+    and that argument should not have to be re-litigated inside a model-choice discussion.
+
+    verify:auto. Every criterion is mechanical and drives the real adapter; the operator ruling
+    standing since 2026-09-08 is that a record is parked on a person only when a judge deems the
+    change risky, not on its author's caution.
