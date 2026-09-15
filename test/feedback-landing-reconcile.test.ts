@@ -28,7 +28,7 @@ import {
   type FeedbackReconcileRoot,
 } from "../src/lib/feedback-reconcile.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { HANDLERS } from "../src/run-task.js";
+import { feedbackReconcileCommand, HANDLERS, renderFeedbackReconcile } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 function entryYaml(fields: { status: FeedbackStatus; id?: string; raw?: string } & Record<string, unknown>): string {
@@ -263,6 +263,101 @@ test("W1-T3562: an empty roots array is refused rather than silently reporting a
   assert.deepEqual(result.manifest.entries, []);
 });
 
+test("W1-T3562: a malformed root name is refused before any git call", () => {
+  const rootDir = seededOrigin("bad-root-name").clone();
+  const spyGit = (args: string[]): string => {
+    throw new Error(`git must never be called when root name validation refuses: ${JSON.stringify(args)}`);
+  };
+  const result = reconcileFeedbackLanding({
+    roots: [{ name: "Core", path: rootDir }],
+    checkoutRoot: rootDir,
+    git: spyGit,
+  });
+
+  assert.match(result.error ?? "", /malformed root name/);
+  assert.equal(result.applied, false);
+  assert.deepEqual(result.manifest.entries, []);
+});
+
+test("W1-T3562: a fetch failure refuses the whole reconciliation with the git reason", () => {
+  const rootDir = seededOrigin("fetch-failure").clone();
+  const result = reconcileFeedbackLanding({
+    roots: [{ name: "core", path: rootDir }],
+    checkoutRoot: rootDir,
+    git: () => {
+      throw new Error("network is unavailable");
+    },
+  });
+
+  assert.match(result.error ?? "", /cannot fetch origin: network is unavailable/);
+  assert.deepEqual(result.manifest.entries, []);
+});
+
+test("W1-T3562: an unreadable landing-branch file is skipped rather than treated as fatal", () => {
+  const rootDir = seededOrigin("branch-race").clone();
+  const git = (args: string[]): string => {
+    if (args[0] === "fetch") return "";
+    if (args[0] === "ls-tree") return "plan/feedback/fb-raced-away.yaml\n";
+    if (args[0] === "show") throw new Error("branch moved during scan");
+    throw new Error(`unexpected git call: ${JSON.stringify(args)}`);
+  };
+
+  const manifest = buildFeedbackReconcileManifest({
+    roots: [{ name: "core", path: rootDir }],
+    checkoutRoot: rootDir,
+    git,
+  });
+
+  assert.ok(manifest.ok);
+  if (manifest.ok) {
+    assert.deepEqual(manifest.manifest.scannedRoots, ["core", "feedback-landing"]);
+    assert.deepEqual(manifest.manifest.entries, []);
+  }
+});
+
+test("W1-T3562: invalid YAML in a root record is still reported as missing-upstream with no display status", () => {
+  const rootDir = seededOrigin("invalid-local-status").clone();
+  mkdirSync(join(rootDir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(rootDir, "plan", "feedback", "fb-invalid-local.yaml"), "status: [\n");
+
+  const manifest = buildFeedbackReconcileManifest({
+    roots: [{ name: "core", path: rootDir }],
+    checkoutRoot: rootDir,
+  });
+
+  assert.ok(manifest.ok);
+  if (!manifest.ok) return;
+  const entry = manifest.manifest.entries.find((e) => e.id === "fb-invalid-local");
+  assert.equal(entry?.classification, "missing-upstream");
+  assert.equal(entry?.bestStatus, undefined);
+});
+
+test("W1-T3562: an unparseable origin/main copy is classified as a surfaced difference", () => {
+  const rootDir = seededOrigin("invalid-origin-status").clone();
+  writeEntry(rootDir, "fb-invalid-origin", { status: "new" });
+  const git = (args: string[]): string => {
+    if (args[0] === "fetch") return "";
+    if (args[0] === "ls-tree") return "";
+    if (args[0] === "show" && args[1] === "origin/main:plan/feedback/fb-invalid-origin.yaml") {
+      return "status: [\n";
+    }
+    throw new Error(`unexpected git call: ${JSON.stringify(args)}`);
+  };
+
+  const manifest = buildFeedbackReconcileManifest({
+    roots: [{ name: "core", path: rootDir }],
+    checkoutRoot: rootDir,
+    git,
+  });
+
+  assert.ok(manifest.ok);
+  if (!manifest.ok) return;
+  const entry = manifest.manifest.entries.find((e) => e.id === "fb-invalid-origin");
+  assert.equal(entry?.classification, "differs");
+  assert.match(entry?.reason ?? "", /invalid YAML/);
+  assert.equal(entry?.originStatus, undefined);
+});
+
 // ── Acceptance 6: refuses rather than forces when applying would regress a record ───────────────
 
 test("W1-T3562: applying propagates (never bypasses) a refusal the ordinary bridge itself returns", () => {
@@ -290,6 +385,68 @@ test("W1-T3562: applying propagates (never bypasses) a refusal the ordinary brid
   assert.deepEqual(result.landed, []);
   assert.deepEqual(result.refused, [refusal]);
   assert.equal(result.error, undefined, "a per-record refusal is reported on `refused`, never escalated to a hard call error");
+});
+
+test("W1-T3562: applying reports a bridge error when nothing was landed", () => {
+  const rootDir = seededOrigin("land-error").clone();
+  writeEntry(rootDir, "fb-error-1", { status: "new" });
+  const roots: FeedbackReconcileRoot[] = [{ name: "core", path: rootDir }];
+
+  const result = withLiveWritesAllowed(() =>
+    reconcileFeedbackLanding({
+      roots,
+      checkoutRoot: rootDir,
+      apply: true,
+      land: () => ({ landed: false, files: [], error: "simulated landing failure" }),
+    }),
+  );
+
+  assert.equal(result.applied, false);
+  assert.deepEqual(result.landed, []);
+  assert.match(result.error ?? "", /simulated landing failure/);
+});
+
+test("W1-T3562: renderFeedbackReconcile names apply results, PR URLs, and refusals", () => {
+  const rendered = renderFeedbackReconcile(
+    {
+      manifest: {
+        scannedRoots: ["core", "feedback-landing"],
+        recordCount: 1,
+        byteCount: 123,
+        truncated: true,
+        entries: [
+          {
+            id: "fb-render-1",
+            classification: "regressed",
+            foundIn: ["core"],
+            originStatus: "new",
+            bestStatus: "grilling",
+            reason: "origin sat earlier",
+          },
+        ],
+      },
+      applied: true,
+      landed: ["plan/feedback/fb-render-1.yaml"],
+      refused: [{ path: "plan/feedback/fb-render-2.yaml", reason: "would move backward" }],
+      prUrl: "https://github.com/o/r/pull/706",
+    },
+    true,
+  );
+
+  assert.match(rendered, /landed 1 record\(s\) — https:\/\/github\.com\/o\/r\/pull\/706/);
+  assert.match(rendered, /refused 1 record\(s\) rather than force a backward move/);
+  assert.match(rendered, /TRUNCATED/);
+
+  const nothing = renderFeedbackReconcile(
+    {
+      manifest: { scannedRoots: ["core"], recordCount: 0, byteCount: 0, truncated: false, entries: [] },
+      applied: false,
+      landed: [],
+      refused: [],
+    },
+    true,
+  );
+  assert.match(nothing, /nothing landed/);
 });
 
 // ── Acceptance 7 & 8: the CLI verb reaches the library builder, not a second copy of the scan ──
@@ -341,6 +498,54 @@ test("W1-T3562: `rmd feedback-reconcile`, dispatched through the real CLI regist
   assert.match(out, /fb-cli-1/);
   assert.match(out, /missing-upstream/);
   assert.match(out, /dry run — nothing written/);
+});
+
+test("W1-T3562: feedback-reconcile rejects unknown, missing, and malformed root arguments before scanning", async () => {
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = (msg?: unknown) => {
+    errors.push(String(msg));
+  };
+  try {
+    assert.equal(await feedbackReconcileCommand(["--bogus"]), 2);
+    assert.equal(await feedbackReconcileCommand([]), 2);
+    assert.equal(await feedbackReconcileCommand(["--root", "not-a-pair"]), 2);
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.match(errors.join("\n"), /unexpected argument.*--bogus/s);
+  assert.match(errors.join("\n"), /at least one --root/);
+  assert.match(errors.join("\n"), /malformed --root "not-a-pair"/);
+});
+
+test("W1-T3562: feedback-reconcile returns 1 when the library refuses a parsed root", async () => {
+  const { clone } = seededOrigin("cli-error");
+  const rootDir = clone();
+  const { home } = setupFakeHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  const originalLog = console.log;
+  const originalError = console.error;
+  const printed: string[] = [];
+  const errors: string[] = [];
+  console.log = (msg?: unknown) => {
+    printed.push(String(msg));
+  };
+  console.error = (msg?: unknown) => {
+    errors.push(String(msg));
+  };
+  try {
+    assert.equal(await feedbackReconcileCommand(["--root", `Bad=${rootDir}`, "--checkout", rootDir]), 1);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
+
+  assert.match(printed.join("\n"), /nothing to reconcile/);
+  assert.match(errors.join("\n"), /malformed root name/);
 });
 
 // Acceptance 8 (hub reaches the library, not a second scan) is proved BEHAVIOURALLY above by the
