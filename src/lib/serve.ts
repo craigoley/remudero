@@ -2486,28 +2486,25 @@ export const RECYCLE_PATIENCE_FREE_MS = 0;
  *  every backlog size gets its own budget and none of them is a cliff. */
 export const RECYCLE_PATIENCE_BASE_MS = 60 * 60_000;
 
+// Why: the 3h25m of stale service the edge-only trigger actually produced —
+// docs/forensics/serve.md#change-pressure-as-a-shrinking-budget
 /**
  * CHANGE PRESSURE, AS A SHRINKING BUDGET RATHER THAN A THRESHOLD.
  *
  * W1-T2229 built this gate to exit at "a moment that costs nothing" — zero SSE subscribers and
  * zero in-flight writes — and explicitly never on a schedule. That is right whenever such a
- * moment arrives. MEASURED 2026-09-15: it does not reliably arrive. The live console had been
- * serving code 8 commits behind main for 12,332 seconds — 3h25m — with this gate wired and
- * working, because a console tab left open never produces the zero-client edge the gate waits on,
- * and between edges nothing re-asks the question at all.
+ * moment arrives, and on a watched console it does not arrive: a tab left open never produces
+ * the zero-client edge, and between edges nothing re-asks the question at all.
  *
- * So patience becomes a function of the backlog instead of a constant wait for a coincidence:
- * with nobody watching it is zero, exactly as today; with somebody watching it starts at
- * {@link RECYCLE_PATIENCE_BASE_MS} and DIVIDES by the backlog, so one commit behind waits an hour,
- * ten commits wait ~5.5 minutes, fifty wait ~70 seconds. There is no cliff anywhere on that curve
- * and no reading of "too stale" — only a budget that gets smaller as the reason to recycle gets
- * larger. It is self-healing by construction: a recycle resets the backlog to zero and patience
- * to its maximum.
+ * So patience is a function of the backlog instead: zero with nobody watching, and otherwise
+ * {@link RECYCLE_PATIENCE_BASE_MS} DIVIDED by the backlog — an hour at one commit behind, ~70s
+ * at fifty. No cliff anywhere on that curve and no reading of "too stale", only a budget that
+ * shrinks as the reason to recycle grows. Self-healing: a recycle resets the backlog to zero.
  *
- * WHAT PRESSURE NEVER BUYS: an in-flight write. That condition stays absolute in
+ * WHAT PRESSURE NEVER BUYS: an in-flight write. That stays absolute in
  * {@link gateStaleCodeExit} — this module drains nothing, so exiting mid-write drops the request
- * and orphans whatever it spawned. Pressure decides whether to interrupt a READER, which costs a
- * reconnect the shell's own last-snapshot cache repaints through, and nothing else.
+ * and orphans whatever it spawned. Pressure decides whether to interrupt a READER, and the cost
+ * of being wrong there is a reconnect the shell's last-snapshot cache repaints through.
  *
  * An `undefined` commitsBehind is "no evidence", and no evidence must not read as pressure —
  * it yields {@link Number.POSITIVE_INFINITY}, i.e. wait for a genuinely free moment.
