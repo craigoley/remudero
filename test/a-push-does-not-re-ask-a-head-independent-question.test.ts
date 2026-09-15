@@ -16,10 +16,11 @@ function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-head-independent-dedup-")), "ledger.ndjson");
 }
 
-// Stamped from the wall clock, not a fixed literal — same discipline as
-// test/stale-ci-gate-wiring.test.ts. Nothing in this suite asserts on the VALUE of
-// `lastActivityAt` (only headSha dedup keys matter), so a relative, always-recent stamp proves
-// the same thing without ever crossing expiring-fixture-census's staleness threshold.
+/** W1-T3608 — STAMPED FROM THE CLOCK, NOT A CONSTANT (see test/stale-ci-gate-wiring.test.ts's
+ *  `recentActivityIso`). This file's dedup assertions never depend on `lastActivityAt`'s value, so
+ *  a fixed ISO string is a time bomb against `sweep.staleDays`, not a real fixture: past
+ *  expiring-fixture-census's warning margin it drifted toward crossing that threshold with no diff
+ *  involved. Re-deriving it from `Date.now()` every run keeps it always-recent instead. */
 function recentActivityIso(): string {
   return new Date(Date.now() - 60 * 60 * 1000).toISOString();
 }
