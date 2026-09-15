@@ -665,15 +665,29 @@ function runLauncherHealthy(launcher: string, stubDir: string): { status: number
   });
 }
 
+/** W1-T3604 split what used to be one fixture directory into two: `converge_host_units` now reads
+ *  `${STATE_DIR}/daemon-install` (below, via `controlFixture`), while the healthy tick separately
+ *  still asks the DAEMON's own working tree (`${STATE_DIR}/remudero/bin/rmd`) whether a recycle is
+ *  due — that read is untouched by this task. This stub gives that second, unrelated read
+ *  something to invoke, logging to its own file so the two never share evidence. */
+function daemonRmdStub(stateDir: string): string {
+  const deployRunLog = join(stateDir, "daemon-tree-deploy-run.log");
+  const binDir = join(stateDir, "remudero", "bin");
+  mkdirSync(binDir, { recursive: true });
+  writeExecutable(join(binDir, "rmd"), `#!/usr/bin/env bash\necho "$@" >> "${deployRunLog}"\nexit 0\n`);
+  return deployRunLog;
+}
+
 test("W1-T3583: clean control checkout fast-forwards before unit drift check", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-checkout-ff-"));
   try {
     const stateDir = join(root, "state-root");
     mkdirSync(stateDir, { recursive: true });
-    const checkoutDir = join(stateDir, "remudero");
-    const { markerPath, deployRunLog, v2Sha } = controlFixture(join(root, "scratch"), checkoutDir, {
+    const checkoutDir = join(stateDir, "daemon-install");
+    const { markerPath, v2Sha } = controlFixture(join(root, "scratch"), checkoutDir, {
       cloneAtV1: true,
     });
+    const deployRunLog = daemonRmdStub(stateDir);
     const { stubDir, dockerLog } = buildStubBin(root);
     const launcher = renderLauncher(root, stateDir, "ff");
 
@@ -724,7 +738,7 @@ test("W1-T3583: unit checkout advance refuses unfit control state", () => {
     {
       const stateDir = join(root, "dirty-state");
       mkdirSync(stateDir, { recursive: true });
-      const checkoutDir = join(stateDir, "remudero");
+      const checkoutDir = join(stateDir, "daemon-install");
       const { markerPath } = controlFixture(join(root, "dirty-scratch"), checkoutDir);
       writeFileSync(join(checkoutDir, "bin", "rmd"), "#!/usr/bin/env bash\nexit 0\n# tampered, uncommitted\n");
       const dirtyBefore = git(checkoutDir, ["status", "--porcelain"]);
@@ -742,7 +756,7 @@ test("W1-T3583: unit checkout advance refuses unfit control state", () => {
     {
       const stateDir = join(root, "offmain-state");
       mkdirSync(stateDir, { recursive: true });
-      const checkoutDir = join(stateDir, "remudero");
+      const checkoutDir = join(stateDir, "daemon-install");
       const { markerPath } = controlFixture(join(root, "offmain-scratch"), checkoutDir);
       git(checkoutDir, ["checkout", "--quiet", "-b", "other-branch"]);
 
@@ -763,7 +777,7 @@ test("W1-T3583: unit checkout advance refuses unfit control state", () => {
     {
       const stateDir = join(root, "diverged-state");
       mkdirSync(stateDir, { recursive: true });
-      const checkoutDir = join(stateDir, "remudero");
+      const checkoutDir = join(stateDir, "daemon-install");
       const { markerPath } = controlFixture(join(root, "diverged-scratch"), checkoutDir, { cloneAtV1: true });
       writeFileSync(join(checkoutDir, "local-only.txt"), "local\n");
       git(checkoutDir, ["add", "."]);
@@ -786,7 +800,7 @@ test("W1-T3583: unit checkout advance refuses unfit control state", () => {
     {
       const stateDir = join(root, "unreadable-state");
       mkdirSync(stateDir, { recursive: true });
-      const checkoutDir = join(stateDir, "remudero");
+      const checkoutDir = join(stateDir, "daemon-install");
       const { markerPath } = controlFixture(join(root, "unreadable-scratch"), checkoutDir);
       rmSync(join(checkoutDir, ".git", "HEAD"));
 
@@ -806,8 +820,9 @@ test("W1-T3583: advance failure preserves healthy daemon path", () => {
   try {
     const stateDir = join(root, "state");
     mkdirSync(stateDir, { recursive: true });
-    const checkoutDir = join(stateDir, "remudero");
-    const { deployRunLog } = controlFixture(join(root, "scratch"), checkoutDir, { cloneAtV1: true });
+    const checkoutDir = join(stateDir, "daemon-install");
+    controlFixture(join(root, "scratch"), checkoutDir, { cloneAtV1: true });
+    const deployRunLog = daemonRmdStub(stateDir);
     // Diverge it so the advance refuses.
     writeFileSync(join(checkoutDir, "local-only.txt"), "local\n");
     git(checkoutDir, ["add", "."]);
@@ -831,6 +846,100 @@ test("W1-T3583: advance failure preserves healthy daemon path", () => {
     const dockerCalls = readFileSync(dockerLog, "utf8");
     assert.doesNotMatch(dockerCalls, /^run /m, "a failed checkout advance must never restart the daemon");
     assert.doesNotMatch(dockerCalls, /^rm /m, "a failed checkout advance must never recycle the daemon");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T3604: unit convergence reads the install root, not the daemon's live working tree ─────
+//
+// MEASURED on the live Azure host 2026-09-15: `converge_host_units` read `${STATE_DIR}/remudero`
+// -- the tree the DAEMON ITSELF works in, moved by the freshness sync's `git checkout <sha>` and
+// kept dirty by worker exhaust -- and refused 464 of 464 watchdog ticks across 7 days without ever
+// once converging. `${STATE_DIR}/daemon-install` is the checkout the deploy supervisor already
+// keeps clean and on main (`assessInstallForDeploy`, src/lib/install-root.ts). These two cases
+// prove the rendered CHECKOUT now names that tree, and that its own guards still hold.
+
+/** Makes a real, throwaway git repo at `dir` that is BOTH on a detached HEAD and dirty -- the two
+ *  conditions journalctl attributed 436 of the 464 refusals to, reproduced directly rather than
+ *  via `controlFixture` since this tree must never be read by the guard under test. */
+function unfitDaemonTree(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  execFileSync("git", ["init", "--quiet", dir]);
+  writeFileSync(join(dir, "seed.txt"), "seed\n");
+  git(dir, ["add", "."]);
+  git(dir, ["commit", "--quiet", "-m", "seed"]);
+  git(dir, ["checkout", "--quiet", "--detach"]);
+  writeFileSync(join(dir, "worker-exhaust.txt"), "uncommitted\n"); // dirty, on top of detached
+}
+
+test("W1-T3604: unit convergence reads the install root, not the daemon's working tree", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-installroot-converge-"));
+  try {
+    const stateDir = join(root, "state-root");
+    mkdirSync(stateDir, { recursive: true });
+
+    // THE DAEMON'S OWN WORKING TREE -- dirty and detached, exactly as the live host's is by
+    // construction. If CHECKOUT still pointed here, every guard below would refuse and no
+    // convergence could ever happen: that is the defect this task closes.
+    const daemonTree = join(stateDir, "remudero");
+    unfitDaemonTree(daemonTree);
+    assert.notEqual(git(daemonTree, ["status", "--porcelain"]), "", "fixture sanity: the daemon tree must be dirty");
+
+    // THE INSTALL ROOT -- clean, on main, already at origin/main's v2 tip, whose install reports
+    // DRIFTED (v1's `install-host-units.sh` stub always exits 0/no-drift; v2's exits 1 and writes
+    // the marker on `--install`).
+    const installRootDir = join(stateDir, "daemon-install");
+    const { markerPath } = controlFixture(join(root, "scratch"), installRootDir, { cloneAtV1: false });
+
+    const { stubDir } = buildStubBin(root);
+    const launcher = renderLauncher(root, stateDir, "converge");
+    const result = runLauncherHealthy(launcher, stubDir);
+    assert.equal(result.status, 0, `launcher failed: ${result.stderr}`);
+
+    assert.match(result.stdout, /units DRIFTED at/, "the install root must be read as drifted and converged");
+    assert.equal(
+      readFileSync(markerPath, "utf8"),
+      "v2\n",
+      "convergence must run against the install root's content, proving CHECKOUT names it",
+    );
+
+    // AND THE DAEMON'S OWN TREE WAS NEVER TOUCHED BY THE CONVERGE STEP.
+    assert.notEqual(
+      git(daemonTree, ["status", "--porcelain"]),
+      "",
+      "the daemon's own dirty working tree must be left exactly as it was",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T3604: a dirty install root still refuses to converge units", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-installroot-dirty-"));
+  try {
+    const stateDir = join(root, "state-root");
+    mkdirSync(stateDir, { recursive: true });
+    const installRootDir = join(stateDir, "daemon-install");
+    const { markerPath } = controlFixture(join(root, "scratch"), installRootDir, { cloneAtV1: false });
+
+    // An uncommitted, tracked-file edit on the INSTALL ROOT -- not the daemon's own tree, which
+    // does not exist at all in this fixture, proving the refusal below is about the install root.
+    writeFileSync(join(installRootDir, "bin", "rmd"), "#!/usr/bin/env bash\nexit 0\n# tampered, uncommitted\n");
+    const dirtyBefore = git(installRootDir, ["status", "--porcelain"]);
+    assert.notEqual(dirtyBefore, "", "fixture sanity: the install root must actually be dirty");
+
+    const { stubDir } = buildStubBin(root);
+    const launcher = renderLauncher(root, stateDir, "installroot-dirty");
+    const result = runLauncherHealthy(launcher, stubDir);
+    assert.equal(result.status, 0);
+    assert.match(result.stdout + result.stderr, /checkout is DIRTY/);
+    assert.equal(
+      git(installRootDir, ["status", "--porcelain"]),
+      dirtyBefore,
+      "a dirty install root must never be cleaned",
+    );
+    assert.ok(!existsSync(markerPath), "never installs from a dirty install root");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
