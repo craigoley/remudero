@@ -1,0 +1,73 @@
+- id: W1-T3595
+  title: "`deploy/recycle-container.sh` uses Bash-4-only `readarray` and associative arrays even though the macOS worker host runs Bash 3.2 — its portability failure aborts before the recycle safety gates, turning 41 local fast-suite reds into undifferentiated noise and preventing workers from validating the host-recycle path they are meant to improve"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [deploy/recycle-container.sh, test/recycle-container-bash3-portability.test.ts]
+  origin: "operator-session#pr-automation-and-daemon-recon-2026-09-14"
+  plan_refs: ["W1-T2234", "W1-T2555", "W1-T2588", "W1-T2598", "W1-T3200"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED ON THE macOS worker host, 2026-09-14, by a full `npm run --silent test:fast` run:
+    15,357 tests passed and 41 failed. The largest repeated cluster does not reach the test's
+    intended recycle assertion. `deploy/recycle-container.sh:446`, `:448`, `:542`, and `:554` use
+    `readarray`; `:521` and `:525` use `declare -A`. macOS's `/bin/bash` is 3.2, which rejects
+    those constructs with `readarray: command not found` or `declare: -A: invalid option` before
+    the shared-checkout, worker-idle, credential, and runtime-environment safeguards execute.
+
+    The failures are real portability defects, not a request to hide tests. The merged W1-T2234
+    host-parity reporter records the symptom so a local worker does not misattribute every red to
+    its diff, but that reporter deliberately leaves the script unrepaired. Its own rationale says
+    the repair deserves a separate task. A shebang change is not a remedy: this script already uses
+    `#!/usr/bin/env bash`, and that resolves to Bash 3.2 on this host. The Azure fleet's Bash 5 can
+    run the current script, but local workers cannot validate the same production recycle contract.
+
+    ONE CONCERN: replace only the Bash-4-only collection and key/value bookkeeping in this script
+    with Bash-3.2-compatible equivalents. Preserve every existing decision, runtime environment
+    source distinction, Docker command, idle bound, credential refusal, and output wording unless a
+    compatibility change makes one impossible. Do not add a macOS CI lane, relax the local gate,
+    change deployment policy, or update the host-caused-red registry; those are separate concerns.
+  design: |
+    (i) Use indexed arrays and explicit lookup helpers, or line-oriented loops, in place of
+    `readarray` and associative arrays. Each helper must preserve empty-value and duplicate-key
+    behaviour deliberately; a replacement that drops an explicitly empty runtime variable or
+    silently changes whether image-provided values are forwarded is not equivalent.
+
+    (ii) Add one focused portability suite. It must first prove that the shipped script contains no
+    Bash-4-only collection primitive (`readarray`, `mapfile`, or associative-array declaration),
+    then execute the relevant fixture paths through the host's normal `bash`. On a Darwin host this
+    is the real Bash 3.2 interpreter; on other hosts the source census plus the same behavioural
+    fixture prevents a future reintroduction from reading as a pass merely because CI has Bash 5.
+
+    (iii) The tests must show that a shared-checkout refusal and a runtime-environment capture path
+    reach their named intended outcomes. The falsifier is to restore one banned primitive: the
+    source census must fail, and on macOS the fixture must again stop before its intended outcome.
+
+    (iv) Run the existing focused recycle suites after the new portability proof. The purpose is to
+    restore their signal, not to replace them with one synthetic happy path.
+  acceptance:
+    - claim: "the shipped recycle script contains no Bash-4-only collection primitive and its portability proof executes through the host's normal bash"
+      proof: "unit test: test/recycle-container-bash3-portability.test.ts"
+    - claim: "the portable replacement preserves runtime environment capture and the source distinction that decides what is forwarded"
+      proof: "unit test: test/recycle-container-bash3-portability.test.ts"
+    - claim: "a shared-checkout preflight reaches its named refusal rather than an unsupported Bash builtin failure"
+      proof: "unit test: test/recycle-container-bash3-portability.test.ts"
+    - claim: "restoring an unsupported collection primitive makes the portability proof fail"
+      proof: "unit test: test/recycle-container-bash3-portability.test.ts"
+  falsifier: |
+    Close without implementation if the current `deploy/recycle-container.sh`, executed by the
+    host's normal Bash 3.2, reaches both the shared-checkout refusal and runtime-environment capture
+    outcomes without a `readarray` or associative-array error. The observed full-suite output
+    falsifies that today: both error strings occur before those outcomes.
+  note: |
+    reservation hand-off: plan-w1-t3245-supervisor-amendment-1789440400000 -> plan-w1-t3595-bash3-recycle-portability-1789444200000
+    The W1-T3595 reservation ref was minted at 2026-09-14T23:43:18.965Z under the
+    plan-w1-t3245-supervisor-amendment-1789440400000 process, which never declared W1-T3595 and
+    merged as #5578 filing only W1-T3245. This filing is the sole branch that declares W1-T3595's
+    plan record, so the orphaned reservation is handed off here per task-id-existence-check.mjs's
+    documented remedy (a same-host process reserving an id it never consumes, not a live rival).
