@@ -80,6 +80,11 @@ export const CLI_ONLY = {
       "dep-review",
       "lint-plan",
       "plan-reconcile",
+      // W1-T3562: the same class as `plan-reconcile` directly above it — it walks MULTIPLE enrolled
+      // checkouts on the local filesystem and drives git in each, which the console's remote HTTP
+      // client cannot do. Its `--apply` then goes through the ordinary gated PR path, so there is
+      // nothing for a console route to trigger that a PR does not already carry.
+      "feedback-reconcile",
       "proof-queue-audit",
       "preflight",
       "next-task-id",
