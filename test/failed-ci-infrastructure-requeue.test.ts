@@ -37,6 +37,11 @@ function subject(overrides: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "red",
     unmetCriteria: [],
     priorStrikes: 0,
+    // This suite pins NOW (`now:` in deps, below) and runSweep threads it, so the wall clock is not
+    // an input. Measured: 7/7 pass with Date.now pinned to 2027-06-01, eight months past the date
+    // the census predicts this stamp goes red. Clock-deriving it would invert the arithmetic
+    // against the fixed injected now -- 5 of 7 fail when the stamp is re-aged.
+    // expiring-fixture: exempt -- the injected clock, not the wall clock, decides this fixture
     lastActivityAt: "2026-09-08T15:30:00Z",
     headSha: "e0838eb6e0702ff1a35bd5d9c240e8c7bbf6fd25",
     headRefName: "run-W1-T3140-1788886671767",
