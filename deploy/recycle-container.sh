@@ -1023,32 +1023,22 @@ lock_pid_field() {
 
 # ── W1-T3611: THE SECOND PROVABLE CASE — A DEAD PID INSIDE THE STILL-RUNNING TARGET CONTAINER ────
 #
-# W1-T2556 (just above) covers "the container this lock names is gone" — the daemon PROCESS died
-# WITH its container. It does not cover the daemon process restarting IN PLACE while the SAME
-# container keeps running: `docker inspect` on `host` then answers `true`, so the W1-T2556 branch
-# never fires, and a lock naming a pid that no longer exists blocks every recycle forever. MEASURED
-# 2026-09-15: container `376f1b205ffa` up 2609s, never restarted; the daemon node process (pid
-# 66734) up only 401s; two `state/inflight/*.lock` files held by pid 73 on that same host; `docker
-# exec 376f1b205ffa sh -c '[ -e /proc/73 ]'` false, `ps -p 73` no row. The recycle waited its full
-# window and refused, every time, until an operator moved both files by hand.
+# W1-T2556 (just above) covers "the container this lock names is gone". It does not cover the
+# daemon PROCESS restarting IN PLACE while its SAME container keeps running — `docker inspect` on
+# `host` then answers `true`, so that branch never fires and an orphaned lock blocks every recycle
+# forever. Incident measured and detailed in this task's own plan record (W1-T3611).
 #
-# BOTH of the following must hold, exactly as W1-T2556 requires ONE definitive fact rather than a
-# heuristic — see the note above `reclaim_dead_inflight_locks` for what "definitive" means here:
-#   1. `host` is the RUNNING TARGET container's OWN id — the one this recycle is about to replace,
-#      resolved via `docker inspect --format '{{.Id}}' "${CONTAINER_NAME}"`. A `host` naming any
-#      OTHER running container (this recycle has no standing to interrogate a container it does not
-#      own) is left exactly as unresolved as before this task.
-#   2. `docker exec "${host}" sh -c '[ -e /proc/<pid> ]'` gives a DEFINITIVE dead answer for the
-#      pid the LOCK ITSELF names — printed `ABSENT`, from inside the container's own kernel. Any
-#      other outcome — the pid is present, or the probe cannot be run at all (docker unavailable,
-#      `sh` missing, the exec fails outright) — is read as "still alive or unknown" and left alone,
-#      the same fail-closed direction W1-T2556 already takes on an unparsable `docker inspect`.
-#
-# DO NOT widen this to "host is any running container" or "pid is absent from anywhere" alone —
-# either one, on its own, is a staleness HEURISTIC and this task's own falsifier catches it: the
-# first sweeps aside a live worker's lock merely because it shares a host; the second reclaims a
-# FOREIGN container's lock on a pid collision that means nothing about the container this recycle
-# owns.
+# BOTH of the following must hold — either alone is a staleness HEURISTIC, not a fact, and this
+# task's own falsifier catches it: host-match alone sweeps aside a live worker's lock; pid-absence
+# alone reclaims a FOREIGN container's lock on a collision that means nothing about the container
+# this recycle owns.
+#   1. `host` is the RUNNING TARGET container's OWN id — resolved via `docker inspect --format
+#      '{{.Id}}' "${CONTAINER_NAME}"`. A `host` naming any OTHER running container stays exactly as
+#      unresolved as before this task.
+#   2. `docker exec "${host}" sh -c '[ -e /proc/<pid> ]'` gives a DEFINITIVE dead answer — printed
+#      `ABSENT`, from the container's OWN kernel, for the pid the LOCK ITSELF names. Anything else
+#      (pid present, or the probe cannot run at all) is read as "still alive or unknown" and left
+#      alone — the same fail-closed direction W1-T2556 already takes on an unparsable inspect.
 reclaim_dead_inflight_locks() {
   [ -d "${INFLIGHT_DIR}" ] || return 0
   local f host verdict running reclaimed_dir reclaimed_path pid probe target_id
