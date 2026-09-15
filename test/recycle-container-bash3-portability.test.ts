@@ -22,6 +22,15 @@
 // below, which reads the shipped script text and needs no particular bash to answer; the
 // behavioural fixtures run through whatever `bash` this host provides and prove the REPLACEMENT
 // logic is correct, which a Darwin host's real 3.2 interpreter then also exercises for free.
+//
+// KNOWN, OUT-OF-SCOPE COUPLING: `test/host-parity-azure-pole.test.ts`'s "W1-T2776 DISCOVERY" test
+// carries a positive control asserting at least one tracked `deploy/*.sh` script still matches
+// `BASH4_ONLY_SYNTAX`. This script was the only one that did, so once the removal above ships that
+// control goes red until a SEPARATE task retunes it (and, coupled to the same change, the
+// host-caused-red registry in `src/lib/ci-parity.ts`'s `HOST_CAUSED_SUITE_REDS`, whose entries for
+// this script's bash3 failures become stale at the same time). This task's own record says not to
+// touch either ("do not ... update the host-caused-red registry; those are separate concerns"), so
+// this comment records the coupling rather than papering over it from inside the declared scope.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
