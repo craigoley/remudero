@@ -172,6 +172,23 @@ test("W1-T2769: an explicit opts.env passed by a caller does not resurrect the g
   }
 });
 
+test("W1-T3609 spawn creates only explicit guard", () => {
+  const prior = process.env.RMD_SELF_SYNC_DONE;
+  delete process.env.RMD_SELF_SYNC_DONE;
+  try {
+    const r = defaultPreflightSpawn(
+      "node",
+      ["-e", "process.stdout.write(process.env.RMD_SELF_SYNC_DONE === '1' ? 'PRESENT' : 'ABSENT')"],
+      { allowSelfSyncGuard: true },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim(), "PRESENT", "the ci-parity leaf must create its own one-process guard");
+  } finally {
+    if (prior === undefined) delete process.env.RMD_SELF_SYNC_DONE;
+    else process.env.RMD_SELF_SYNC_DONE = prior;
+  }
+});
+
 test("W1-T2769: unrelated environment (PATH) is unaffected by the scrub — only the one key is removed", () => {
   const r = defaultPreflightSpawn("node", ["-e", "process.stdout.write(process.env.PATH ? 'HAS_PATH' : 'NO_PATH')"]);
   assert.equal(r.status, 0, r.stderr);

@@ -346,6 +346,8 @@ export type PreflightSpawn = (
      * root disk); `NODE_V8_COVERAGE` looks like the fix and is NOT. Why: docs/forensics/commit-message.md.
      */
     env?: NodeJS.ProcessEnv;
+    /** Explicit opt-in for a preflight leaf that re-enters `rmd` on the branch under test. */
+    allowSelfSyncGuard?: boolean;
     /**
      * Stream this child's output to the operator's terminal instead of capturing it — otherwise
      * `spawnSync` buffers it until exit, making a long step look hung. OPT-IN per call: callers
@@ -382,14 +384,13 @@ const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
 export function defaultPreflightSpawn(
   file: string,
   args: string[],
-  opts: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv } = {},
+  opts: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv; allowSelfSyncGuard?: boolean } = {},
 ): { status: number | null; stdout: string; stderr: string; error?: string; signal?: string } {
   // Merged OVER `process.env`, never replacing it: a bare `env` would drop PATH, HOME and toolchain pins.
   const env = { ...process.env, ...opts.env };
-  // Unconditionally scrubbed: every child here is a build/test process, never a re-exec of
-  // `rmd` itself, so an inherited `RMD_SELF_SYNC_DONE` has no meaning and once crossed into a
-  // spawned child, turning 45 unrelated tests red. Why: archived in docs/forensics/commit-message.md.
-  delete env[SELF_SYNC_GUARD_ENV_NAME];
+  // Scrub by default; ci-parity's nested lint-plan child gets its own one-process guard (W1-T3609).
+  if (opts.allowSelfSyncGuard === true) env[SELF_SYNC_GUARD_ENV_NAME] = "1";
+  else delete env[SELF_SYNC_GUARD_ENV_NAME];
   const res = spawnSync(file, args, {
     cwd: opts.cwd,
     input: opts.input,

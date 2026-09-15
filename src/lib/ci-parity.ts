@@ -530,7 +530,14 @@ export function shellOut(
   label: string,
   file: string,
   args: string[],
-  opts?: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv; retainSuccessOutput?: boolean },
+  opts?: {
+    cwd?: string;
+    input?: string;
+    stream?: boolean;
+    env?: NodeJS.ProcessEnv;
+    allowSelfSyncGuard?: boolean;
+    retainSuccessOutput?: boolean;
+  },
 ): CiParityLeafResult {
   const res = spawn(file, args, opts);
   // TRAP: a child with NO exit status is not an ordinary failure. DELEGATED to
@@ -1746,7 +1753,15 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       // runStep would leave the top-level arm covered by nothing.
       const base = requirePinnedBase(repoRoot, spawn);
       const lint = runStep("lint-plan:ci-parity", () =>
-        shellOut(spawn, "npm run --silent lint-plan -- --base <pinned origin/main>", "npm", ["run", "--silent", "lint-plan", "--", "--base", base], { cwd: repoRoot }),
+        shellOut(
+          spawn,
+          "npm run --silent lint-plan -- --base <pinned origin/main>",
+          "npm",
+          ["run", "--silent", "lint-plan", "--", "--base", base],
+          // The package script re-enters `rmd lint-plan`. It must validate this feature branch,
+          // not refuse at the outer self-sync gate before it reaches the linter (W1-T3609).
+          { cwd: repoRoot, allowSelfSyncGuard: true },
+        ),
       );
       return [refresh, lint];
     },

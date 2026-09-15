@@ -29,7 +29,7 @@ const REPO_ROOT = join(__dirname, "..");
  *  fakeSpawn does (that suite's fixtures name every call up front; this one would be unreadably
  *  long if it had to). Duplicated locally per that suite's own file-scoping convention. */
 function recordingSpawn(map: Record<string, { status: number; stdout?: string; stderr?: string }> = {}) {
-  const calls: { file: string; args: string[]; opts?: { cwd?: string; input?: string } }[] = [];
+  const calls: { file: string; args: string[]; opts?: Parameters<PreflightSpawn>[2] }[] = [];
   const spawn: PreflightSpawn = (file, args, opts) => {
     calls.push({ file, args, opts });
     const key = [file, ...args].join(" ");
@@ -52,6 +52,20 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
   };
   return { spawn, calls };
 }
+
+test("W1-T3609 ci parity permits only its lint child", () => {
+  const { calls, spawn } = recordingSpawn();
+  runCiParity(REPO_ROOT, { spawn });
+
+  const lint = calls.find((call) => call.file === "npm" && call.args.includes("lint-plan"));
+  assert.ok(lint, "ci-parity must invoke its declared lint-plan mirror");
+  assert.equal(lint.opts?.allowSelfSyncGuard, true, "the nested rmd lint-plan invocation needs the explicit guard");
+
+  const otherOptIns = calls.filter(
+    (call) => call !== lint && call.opts?.allowSelfSyncGuard === true,
+  );
+  assert.equal(otherOptIns.length, 0, "no unrelated preflight child may inherit the self-sync guard");
+});
 
 /** The sha {@link recordingSpawn} resolves `origin/main` to — arbitrary but SHA-SHAPED, because
  *  `pinnedBase` refuses anything that is not 40 hex characters rather than diffing against it. */

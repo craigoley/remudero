@@ -1,0 +1,55 @@
+- id: W1-T3609
+  title: "CI PARITY'S NESTED LINT-PLAN CHILD IS REFUSED ON EVERY FEATURE BRANCH — preflight itself is freshness-exempt, but its npm lint-plan leaf re-enters the ordinary CLI gate after defaultPreflightSpawn deliberately strips RMD_SELF_SYNC_DONE"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  priority: 1
+  files:
+    - src/lib/commit-message.ts
+    - src/lib/ci-parity.ts
+    - test/preflight-ci-parity.test.ts
+    - test/preflight-is-freshness-exempt-and-scrubs-the-guard-from-children.test.ts
+  origin: "operator-session#shift-left-pr-board-repair-2026-09-15"
+  plan_refs: ["W1-T2769", "W1-T3418"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on run-W1-T3608-1789468855000: `./bin/rmd preflight --ci-parity` completed 50
+    checks but its lint-plan mirror refused before linting: `rmd has diverged from origin/main`.
+    `preflight` is correctly exempt in src/run-task.ts, while CI_PARITY_TABLE's lint-plan leaf
+    runs `npm run --silent lint-plan -- --base <sha>`. That package script re-enters the CLI as
+    the `lint-plan` verb, which correctly remains non-exempt. defaultPreflightSpawn also
+    correctly strips the ordinary self-sync guard from every child, so the nested leaf cannot run
+    on the feature branch it was asked to validate. The reported preflight result is therefore red
+    for a control-flow refusal, not for a lint-plan verdict, delaying first pushes and worker
+    repair loops.
+
+    The falsifier is a ci-parity lint-plan child that receives a narrowly opt-in guard, reaches
+    lintPlanCommand on a divergent branch, and still leaves every ordinary preflight child and a
+    direct `rmd lint-plan` invocation subject to the existing freshness safety.
+  design: |
+    Add one explicit, typed `allowSelfSyncGuard` option to defaultPreflightSpawn. Its default
+    remains fail-closed: scrub RMD_SELF_SYNC_DONE after env merge exactly as today. The ci-parity
+    lint-plan leaf alone opts in, forwarding a one-process self-sync guard solely so its nested
+    CLI invocation validates this checkout. No broad verb exemption is added; direct lint-plan,
+    test children, and every other parity leaf still run with the guard absent. Prove both sides
+    with the existing CI-parity call recorder and real child-environment test harness.
+  acceptance:
+    - claim: "the ci-parity lint-plan leaf can re-enter rmd lint-plan on the feature branch being validated instead of failing at freshness before it reads the plan"
+      proof: "unit test: W1-T3609 ci parity permits only its lint child"
+    - claim: "a caller must explicitly opt in before defaultPreflightSpawn creates a one-process self-sync guard; the default continues to scrub it"
+      proof: "unit test: W1-T3609 spawn creates only explicit guard"
+    - claim: "a direct lint-plan invocation remains freshness-gated outside ci-parity"
+      proof: "unit test: W1-T2769 REGRESSION LOCK: a plan-reading verb still refuses on the same off-main shape"
+  falsifier: |
+    Close without code if CI_PARITY_TABLE's lint-plan leaf already passes a child-specific guard
+    through defaultPreflightSpawn and a real divergent branch reaches lintPlanCommand without
+    exporting RMD_SELF_SYNC_DONE from the caller's shell.
+  note: |
+    reservation hand-off: run-W1-T3608-1789468855000 -> run-W1-T3609-1789470375000
+    The W1-T3609 ref was reserved before the local branch was created; no push occurred between
+    reservation and this filing.
