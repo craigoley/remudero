@@ -463,3 +463,73 @@ test("W1-T3100 (gate copy): main reports differing and unreadable reservation ho
   assert.match(r.err, /reservation hand-off: <holder> -> <filer>/);
   assert.doesNotMatch(r.out, /open-PR collision check SKIPPED/);
 });
+
+// ── A reservation minted from a detached HEAD records `branch=unknown` ───────────────────────────
+//
+// `currentBranch` (src/lib/task-id-reservation.ts) falls through to the literal `"unknown"` when
+// HEAD is detached and `GITHUB_HEAD_REF` is unset, which is how the fleet daemon reserves: it takes
+// the id BEFORE the run branch exists. The gate read that as an unreadable holder AND refused
+// without consulting the shard note, while printing "record the operator hand-off" as the
+// alternative to renumbering — so the remedy it named could not be applied and every
+// daemon-minted id was unfileable by anyone. MEASURED on origin's refs 2026-09-15: W1-T3601 and
+// W1-T3602 both carry `branch=unknown pid=... source=automatic`, and #5612 (their filing) was
+// refused with exactly this row.
+
+test("a reservation that recorded `branch=unknown` is unreadable AS A CLAIM but carries the value to hand off from", () => {
+  assert.deepEqual(gate.parseReservationHolderLine("rmd-id holder branch=unknown pid=7 host=h source=automatic"), {
+    status: "unreadable",
+    reason: "missing branch",
+    recordedBranch: "unknown",
+  });
+  // A line with NO branch key at all recorded nothing, so it gets no `recordedBranch` and keeps
+  // the older, escape-less shape. The two cases must stay distinguishable.
+  assert.deepEqual(gate.parseReservationHolderLine("rmd-id holder pid=7 host=h"), {
+    status: "unreadable",
+    reason: "missing branch",
+  });
+});
+
+test("a recorded hand-off FROM `unknown` clears it, and the same note cannot clear a holder that was never read", () => {
+  const root = scratch();
+  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  const shard = "plan/tasks.d/W1-T9100.yaml";
+  const shardPath = join(root, shard);
+  const detachedMint = {
+    reachable: true,
+    ids: new Set(["W1-T9100"]),
+    holders: new Map([["W1-T9100", { status: "unreadable", reason: "missing branch", recordedBranch: "unknown" }]]),
+  };
+
+  // Without the note the refusal stands — this is the row #5612 hit.
+  writeFileSync(shardPath, '- id: W1-T9100\n  title: "held"\n');
+  const refused = gate.evaluateReservationHolderConflicts(["W1-T9100"], occurrencesFor(shard), detachedMint, "run-W1-T3100-filer", root);
+  assert.equal(refused.length, 1);
+  assert.equal(refused[0].holderBranch, undefined, "there is still no holder branch to name");
+  assert.equal(refused[0].recordedBranch, "unknown", "but the value to hand off FROM rides the row, so the remedy can be printed");
+
+  // With it, the gate's own documented remedy now applies.
+  writeFileSync(shardPath, '- id: W1-T9100\n  title: "held"\n  note: "reservation hand-off: unknown -> run-W1-T3100-filer"\n');
+  assert.deepEqual(
+    gate.evaluateReservationHolderConflicts(["W1-T9100"], occurrencesFor(shard), detachedMint, "run-W1-T3100-filer", root),
+    [],
+  );
+
+  // FAIL-CLOSED IS UNCHANGED where the reservation recorded nothing: an unfetchable ref or a
+  // malformed token has no `recordedBranch`, so the identical note must NOT clear it.
+  const neverRead = {
+    reachable: true,
+    ids: new Set(["W1-T9100"]),
+    holders: new Map([["W1-T9100", { status: "unreadable", reason: "could not fetch refs/rmd-id/W1-T9100" }]]),
+  };
+  const stillRefused = gate.evaluateReservationHolderConflicts(["W1-T9100"], occurrencesFor(shard), neverRead, "run-W1-T3100-filer", root);
+  assert.equal(stillRefused.length, 1, "a holder that was never read has nothing to hand off and still refuses");
+  assert.equal(stillRefused[0].reason, "could not fetch refs/rmd-id/W1-T9100");
+
+  // And a note naming the WRONG left-hand side does not clear the detached-mint row either — the
+  // hand-off is a specific claim about this reservation, not a blanket opt-out.
+  writeFileSync(shardPath, '- id: W1-T9100\n  title: "held"\n  note: "reservation hand-off: some-other-branch -> run-W1-T3100-filer"\n');
+  assert.equal(
+    gate.evaluateReservationHolderConflicts(["W1-T9100"], occurrencesFor(shard), detachedMint, "run-W1-T3100-filer", root).length,
+    1,
+  );
+});
