@@ -521,6 +521,58 @@ export interface BoardSnapshotCache {
   get(deps: BoardDeps): BoardSnapshot;
 }
 
+/**
+ * THE REFRESH IS A CALLBACK, NOT A CALL — and that is the whole point of {@link RefreshSchedule}.
+ *
+ * The memo above collapses repeat work, but its KEY is not free: `readPrQueueIndex` calls
+ * `github.listOpenHeadBranches()`, and every production gateway answers that with a SYNCHRONOUS
+ * `gh api` subprocess behind a 15s TTL. So on the request path, one poll in every TTL window pays
+ * a real GitHub round-trip — and because node's HTTP server is single-threaded, that round-trip
+ * does not merely slow THAT response, it stops the event loop and every other in-flight request
+ * with it.
+ *
+ * MEASURED on the live daemon, 2026-09-15, `GET /v1/status` against a warm listener:
+ *   cold (first call after boot)  6.80s
+ *   TTL-expiry call               1.30s   (8 of 40 calls in a 40s window)
+ *   memo hit                      0.02s
+ * The console's own gateway times out at 5s, so the cold call was an outright failure and the
+ * 1.3s calls froze every concurrent reader. That is the "listener accepts but never answers"
+ * symptom, and it is a scheduling defect, not a projection defect.
+ *
+ * So the recompute moves OFF the request path: a caller that already has a snapshot is handed
+ * that snapshot immediately and a refresh is scheduled for the next macrotask. Nothing is
+ * fabricated by doing so — a {@link BoardSnapshot} carries its own `generated_at`, and the PR
+ * queue carries `complete`/`lastGoodAt`, so a reader can always see exactly how old the answer
+ * it is holding is. What changes is only WHEN the cost is paid, never what is claimed.
+ *
+ * The FIRST call still computes inline, because there is nothing honest to return instead — a
+ * cache with no snapshot has no stale answer to be honest about. {@link buildStatusRoute}
+ * therefore schedules that first computation at construction, so the cost lands at boot rather
+ * than on whichever reader happens to arrive first.
+ */
+export type RefreshSchedule = (run: () => void) => void;
+
+export interface BoardSnapshotCacheOptions {
+  /** How a refresh is scheduled.
+   *
+   *  DEFAULTS TO {@link refreshNow} — SYNCHRONOUS — because that is the honest default for a bare
+   *  memo: a caller holding the cache directly asked for the current projection and has no
+   *  listener to protect. Deferral is a SERVING decision, so the party that owns the listener
+   *  opts into it: {@link buildStatusRoute} passes {@link deferRefresh}. */
+  schedule?: RefreshSchedule;
+}
+
+/** The bare memo's default: recompute inline, so `get` returns the projection it just built. */
+export const refreshNow: RefreshSchedule = (run) => run();
+
+/** {@link buildStatusRoute}'s scheduler: the next macrotask, `unref`'d so a refresh still
+ *  pending at shutdown can never hold the process open. This is the one that takes the
+ *  synchronous `gh` round-trip off the event loop's request path. */
+export const deferRefresh: RefreshSchedule = (run) => {
+  const timer = setTimeout(run, 0);
+  timer.unref?.();
+};
+
 /** `github.readFailed?.()` guarded (W1-T184): a gateway that THROWS from `readFailed()` itself
  *  (not merely fails soft) would otherwise blow up the cache-key computation and 500 the whole
  *  /v1/status request. Fails closed — an unreadable health signal reads as an outage, never a
@@ -637,7 +689,11 @@ export function decisionKey(fp: DecisionFingerprint): string {
   return `${fp.count}:${(fp.hash >>> 0).toString(16)}`;
 }
 
-export function createBoardSnapshotCache(): BoardSnapshotCache {
+export function createBoardSnapshotCache(options: BoardSnapshotCacheOptions = {}): BoardSnapshotCache {
+  const schedule = options.schedule ?? refreshNow;
+  // One refresh in flight at a time. A burst of polls schedules ONE recompute, not one each —
+  // the same collapsing the memo used to get for free from being inline.
+  let refreshPending = false;
   let cached: { decisionKey: string; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
   let lastGoodPrQueueAt: string | undefined;
   // Folded across requests (W1-T2919), so a cache hit costs one pass over the lines appended
@@ -646,8 +702,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
   // One persistent tail cursor for this route's whole lifetime, never reconstructed per request —
   // otherwise a cache hit would still pay a full ledger re-read just to compute the line count.
   const tail = createLedgerTailCache();
-  return {
-    get(deps: BoardDeps): BoardSnapshot {
+  const recompute = (deps: BoardDeps): BoardSnapshot => {
       const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
       fingerprint = foldDecisionFingerprint(readLedger(deps.ledgerPath), fingerprint);
       const key = decisionKey(fingerprint);
@@ -669,6 +724,25 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
       if (snapshot.prQueue.complete) lastGoodPrQueueAt = snapshot.generated_at;
       cached = { decisionKey: key, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
       return snapshot;
+  };
+  return {
+    get(deps: BoardDeps): BoardSnapshot {
+      // No snapshot yet ⇒ nothing honest to serve, so this one caller pays the walk.
+      if (!cached) return recompute(deps);
+      if (!refreshPending) {
+        refreshPending = true;
+        schedule(() => {
+          refreshPending = false;
+          try {
+            recompute(deps);
+          } catch {
+            // NOT AN ERASING CATCH: the last good snapshot stays served, exactly as a failed
+            // gateway read already degrades `prQueue` rather than 500-ing the route. A refresh
+            // that throws must never take down the reader that scheduled it.
+          }
+        });
+      }
+      return cached.snapshot;
     },
   };
 }
@@ -709,8 +783,20 @@ export function requestAcknowledgesRecap(headerValue: string | string[] | undefi
  * evening to an effectively permanent few-second recap window.
  */
 // Why: the recap-window incident this ack gate fixes — docs/forensics/board.md#buildstatusroute
-export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Route {
-  const cache = createBoardSnapshotCache();
+export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore, options: BoardSnapshotCacheOptions = {}): Route {
+  const schedule = options.schedule ?? deferRefresh;
+  const cache = createBoardSnapshotCache({ schedule });
+  // The cold projection is paid HERE, at construction, off any request — see
+  // {@link BoardSnapshotCacheOptions}. Measured cold cost on the live daemon is 6.8s, which is
+  // past the console gateway's own 5s timeout, so the first reader must not be the one to pay it.
+  schedule(() => {
+    try {
+      cache.get(deps);
+    } catch {
+      // A cold walk that throws leaves the cache empty; the first real reader then pays it and
+      // sees the same error it would have seen anyway. Warming must never fail a boot.
+    }
+  });
   return {
     method: "GET",
     path: "/v1/status",
