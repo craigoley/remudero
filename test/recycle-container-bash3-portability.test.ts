@@ -31,6 +31,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
@@ -112,10 +113,6 @@ test("W1-T3595: MUTANT: reinstating declare -A anywhere in the script fails the 
 // ── (ii)/(iii) BEHAVIOURAL FIXTURES: the two rewritten code paths reach their documented outcome,
 //     executed through the host's normal `bash` (real Bash 3.2 on Darwin) ──────────────────────
 
-function git(dir: string, args: string[]): string {
-  return execFileSync("git", args, { cwd: dir, encoding: "utf8" });
-}
-
 /** A points-nowhere marker path, so this suite never trips section 1's "running INSIDE a
  *  container" refusal merely because the test runner itself is sandboxed inside one. */
 function noDockerenvMarker(): string {
@@ -135,36 +132,31 @@ const NEUTRAL_CREDENTIAL_ENV = {
 // ── Group A: the shared-checkout guard (section 1.6) — was built from `readarray -t
 //    DIRTY_TRACKED_PATHS`/`readarray -t INCOMING_PATHS` (deploy/recycle-container.sh:446,448) ──
 
-/** A real "origin" repo plus a real clone at `<root>/remudero` — the exact layout section 1.5's
- *  checkout marker AND section 1.6's shared-checkout guard both read. `state/` is also created so
- *  this fixture is a real checkout by every marker this script tests for, with no need for the
- *  --first-boot override. */
-function checkoutFixture(): { stateDir: string; daemonTree: string } {
+/** A real "origin" repo (built by the shared {@link gitRepo} fixture, so this file carries no
+ *  raw `git init` call site of its own) plus a real clone at `<root>/remudero` — the exact
+ *  layout section 1.5's checkout marker AND section 1.6's shared-checkout guard both read.
+ *  `state/` is also created so this fixture is a real checkout by every marker this script tests
+ *  for, with no need for the --first-boot override. */
+function checkoutFixture(): { stateDir: string; daemonTree: string; origin: ReturnType<typeof gitRepo> } {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-bash3-checkout-`));
-  const originDir = join(root, "origin");
   const daemonTree = join(root, "remudero");
-  mkdirSync(originDir, { recursive: true });
-  git(originDir, ["init", "--quiet", "-b", "main"]);
-  git(originDir, ["config", "user.email", "test@example.com"]);
-  git(originDir, ["config", "user.name", "Test"]);
-  writeFileSync(join(originDir, "shared.txt"), "A\n", "utf8");
-  writeFileSync(join(originDir, "untouched.txt"), "U\n", "utf8");
-  git(originDir, ["add", "."]);
-  git(originDir, ["commit", "--quiet", "-m", "init"]);
-  execFileSync("git", ["clone", "--quiet", originDir, daemonTree], { encoding: "utf8" });
-  git(daemonTree, ["config", "user.email", "test@example.com"]);
-  git(daemonTree, ["config", "user.name", "Test"]);
+  const origin = gitRepo({ kind: "recycle-bash3-origin", seedCommit: false });
+  writeFileSync(join(origin.dir, "shared.txt"), "A\n", "utf8");
+  writeFileSync(join(origin.dir, "untouched.txt"), "U\n", "utf8");
+  origin.git("add", ".");
+  origin.git("commit", "--quiet", "-m", "init");
+  execFileSync("git", ["clone", "--quiet", origin.dir, daemonTree], { encoding: "utf8" });
   mkdirSync(join(root, "state"), { recursive: true });
-  return { stateDir: root, daemonTree };
+  return { stateDir: root, daemonTree, origin };
 }
 
-function publish(originDir: string, relPath: string, content: string): void {
-  writeFileSync(join(originDir, relPath), content, "utf8");
-  git(originDir, ["add", "."]);
-  git(originDir, ["commit", "--quiet", "-m", `update ${relPath}`]);
+function publish(origin: ReturnType<typeof gitRepo>, relPath: string, content: string): void {
+  writeFileSync(join(origin.dir, relPath), content, "utf8");
+  origin.git("add", ".");
+  origin.git("commit", "--quiet", "-m", `update ${relPath}`);
 }
 
-function runRecycleAgainstCheckout(stateDir: string): { status: number; stdout: string; stderr: string } {
+function runRecycleOnStateDir(stateDir: string): { status: number; stdout: string; stderr: string } {
   const r = spawnSync("bash", [SCRIPT], {
     encoding: "utf8",
     timeout: 60000,
@@ -180,14 +172,13 @@ function runRecycleAgainstCheckout(stateDir: string): { status: number; stdout: 
 }
 
 test("W1-T3595: a shared-checkout collision reaches the named refusal, not an unsupported Bash builtin failure", () => {
-  const { stateDir, daemonTree } = checkoutFixture();
-  const originDir = join(stateDir, "origin");
+  const { stateDir, daemonTree, origin } = checkoutFixture();
   // Local, uncommitted edit to a TRACKED file...
   writeFileSync(join(daemonTree, "shared.txt"), "LOCAL EDIT\n", "utf8");
   // ...and origin/main also moves that SAME file — the exact overlap section 1.6 exists to catch.
-  publish(originDir, "shared.txt", "ORIGIN EDIT\n");
+  publish(origin, "shared.txt", "ORIGIN EDIT\n");
 
-  const run = runRecycleAgainstCheckout(stateDir);
+  const run = runRecycleOnStateDir(stateDir);
   assert.notEqual(run.status, 0, "an overlapping dirty tracked path must refuse the recycle");
   assert.match(
     run.stderr,
@@ -202,15 +193,14 @@ test("W1-T3595: a shared-checkout collision reaches the named refusal, not an un
 });
 
 test("W1-T3595: a dirty path OUTSIDE the incoming diff does not block the recycle — the negative control for the same arrays", () => {
-  const { stateDir, daemonTree } = checkoutFixture();
-  const originDir = join(stateDir, "origin");
+  const { stateDir, daemonTree, origin } = checkoutFixture();
   // Local, uncommitted edit to a tracked file...
   writeFileSync(join(daemonTree, "shared.txt"), "LOCAL EDIT, NEVER PUBLISHED\n", "utf8");
   // ...but origin/main moves a DIFFERENT file — no overlap, so DIRTY_TRACKED_PATHS and
   // INCOMING_PATHS (both built by the replacement `while read` loops) must correctly disjoint.
-  publish(originDir, "untouched.txt", "ORIGIN EDIT TO A DIFFERENT FILE\n");
+  publish(origin, "untouched.txt", "ORIGIN EDIT TO A DIFFERENT FILE\n");
 
-  const run = runRecycleAgainstCheckout(stateDir);
+  const run = runRecycleOnStateDir(stateDir);
   assert.doesNotMatch(
     run.stderr,
     /REFUSING — .*has local changes that origin\/main's own/,
