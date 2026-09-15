@@ -37,6 +37,7 @@ function dirtyPr(over: Partial<OpenPrView> = {}): OpenPrView {
     priorStrikes: 0,
     lastActivityAt: RECENT,
     headSha: "8eaeb95c0",
+    headRefName: "run-W1-T3273-1789430000000",
     autoMergeArmed: false,
     mergeState: "dirty",
     mergeConflict: {
@@ -82,7 +83,7 @@ test("a dirty PR whose conflicting hunk resolves byte-identically to main is adm
   assert.doesNotMatch(result.reason, /pure concurrent addition/);
 });
 
-test("a dirty PR whose conflicting hunk resolves to something different from main keeps the ambiguous refusal", () => {
+test("a dirty rmd-owned PR whose hunk differs from main is sent to the bounded semantic repair worker", () => {
   const result = deriveDisposition(
     dirtyPr({
       prNumber: 4848,
@@ -102,12 +103,12 @@ test("a dirty PR whose conflicting hunk resolves to something different from mai
     NOW,
   );
 
-  assert.equal(result.disposition, "blocked-ambiguous");
-  assert.match(result.reason, /redundant re-fix byte comparison differed from main/);
-  assert.match(result.reason, /never auto-resolved/);
+  assert.equal(result.disposition, "conflicted");
+  assert.match(result.reason, /deletion evidence/);
+  assert.match(result.reason, /actual hunks/);
 });
 
-test("a branch whose non-conflicting files fail to apply is declined despite a redundant hunk", () => {
+test("an rmd-owned branch whose non-conflicting files fail to apply is sent to hunk-level repair, not mechanically resolved", () => {
   const result = deriveDisposition(
     dirtyPr({
       prNumber: 4849,
@@ -127,12 +128,12 @@ test("a branch whose non-conflicting files fail to apply is declined despite a r
     NOW,
   );
 
-  assert.equal(result.disposition, "blocked-ambiguous");
-  assert.match(result.reason, /non-conflicting files failed to apply: src\/lib\/sweep.ts/);
-  assert.match(result.reason, /never auto-resolved/);
+  assert.equal(result.disposition, "conflicted");
+  assert.match(result.reason, /deletion evidence/);
+  assert.match(result.reason, /actual hunks/);
 });
 
-test("a redundant re-fix claim not backed by byte evidence keeps the ambiguous refusal", () => {
+test("an rmd-owned redundant re-fix claim not backed by byte evidence is sent to hunk-level repair", () => {
   const result = deriveDisposition(
     dirtyPr({
       prNumber: 4850,
@@ -151,12 +152,12 @@ test("a redundant re-fix claim not backed by byte evidence keeps the ambiguous r
     NOW,
   );
 
-  assert.equal(result.disposition, "blocked-ambiguous");
-  assert.match(result.reason, /redundant re-fix evidence was not a byte comparison/);
-  assert.match(result.reason, /never auto-resolved/);
+  assert.equal(result.disposition, "conflicted");
+  assert.match(result.reason, /deletion evidence/);
+  assert.match(result.reason, /actual hunks/);
 });
 
-test("a redundant re-fix byte comparison must cover every conflicting path", () => {
+test("an rmd-owned partial redundant re-fix comparison is sent to hunk-level repair", () => {
   const result = deriveDisposition(
     dirtyPr({
       prNumber: 4851,
@@ -178,9 +179,9 @@ test("a redundant re-fix byte comparison must cover every conflicting path", () 
     NOW,
   );
 
-  assert.equal(result.disposition, "blocked-ambiguous");
-  assert.match(result.reason, /redundant re-fix byte comparison did not cover every conflicting path/);
-  assert.match(result.reason, /never auto-resolved/);
+  assert.equal(result.disposition, "conflicted");
+  assert.match(result.reason, /deletion evidence/);
+  assert.match(result.reason, /actual hunks/);
 });
 
 test("the predicate reads byte evidence, not commit subjects or task ids", () => {
@@ -202,11 +203,11 @@ test("the predicate reads byte evidence, not commit subjects or task ids", () =>
 
   const result = deriveDisposition(sameWordsDifferentBytes, DEFAULT_SWEEP_POLICY, NOW);
 
-  assert.equal(result.disposition, "blocked-ambiguous");
-  assert.match(result.reason, /byte comparison differed from main/);
+  assert.equal(result.disposition, "conflicted");
+  assert.match(result.reason, /deletion evidence/);
 });
 
-test("both admission and decline write a ledger row naming the byte comparison that decided it", async () => {
+test("a byte-identical conflict gets the specialized worker instruction while a non-identical rmd-owned conflict still receives one bounded repair worker", async () => {
   const path = ledgerPath();
   const fixed: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }> = [];
   const admitted = dirtyPr({ prNumber: 4832, headSha: "admitted-head" });
@@ -228,7 +229,7 @@ test("both admission and decline write a ledger row naming the byte comparison t
 
   await runSweep([admitted, declined], deps(path, fixed), DEFAULT_SWEEP_POLICY);
 
-  assert.equal(fixed.length, 1, "only the byte-identical redundant re-fix dispatches");
+  assert.equal(fixed.length, 2, "both rmd-owned branches dispatch; only one may take main mechanically");
   assert.equal(fixed[0].evidence.mergeConflict?.redundantRefix?.verdict, "main-byte-identical");
 
   const admittedRow = disposed(path, 4832);
@@ -237,10 +238,10 @@ test("both admission and decline write a ledger row naming the byte comparison t
   assert.match(String(admittedRow.reason), /redundant re-fix byte comparison matched main/);
 
   const declinedRow = disposed(path, 4848);
-  assert.equal(declinedRow.disposition, "blocked-ambiguous");
+  assert.equal(declinedRow.disposition, "conflicted");
   assert.equal(declinedRow.acted, true);
-  assert.match(String(declinedRow.reason), /redundant re-fix byte comparison differed from main/);
-  assert.match(String(declinedRow.reason), /never auto-resolved/);
+  assert.match(String(declinedRow.reason), /deletion evidence/);
+  assert.match(String(declinedRow.reason), /actual hunks/);
 });
 
 // -- The DECLINE causes: why a redundant-refix claim was NOT honoured --------------------------

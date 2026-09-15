@@ -245,7 +245,7 @@
   "src/lib/main-health-rung.ts": 10,
   "src/lib/managed-repos.ts": 20,
   "src/lib/measurement-cadence.ts": 750,
-  "src/lib/merge-state.ts": 52,
+  "src/lib/merge-state.ts": 250,
   "src/lib/mount-exploration.ts": 250,
   "src/lib/mount-recommender.ts": 195,
   "src/lib/mounts.ts": 195,
