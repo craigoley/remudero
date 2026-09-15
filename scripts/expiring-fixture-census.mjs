@@ -69,7 +69,7 @@ export const RECORDED_POPULATION_BY_FILE = Object.freeze({
   "test/a-capped-verdict-stalls-a-pr-with-no-actor.test.ts": 1,
   "test/a-disposition-is-logged-on-change-not-on-every-poll.test.ts": 1,
   "test/a-permanent-diff-refusal-is-not-retried-forever.test.ts": 0,
-  "test/a-push-does-not-re-ask-a-head-independent-question.test.ts": 3,
+  "test/a-push-does-not-re-ask-a-head-independent-question.test.ts": 0,
   "test/a-refusal-is-a-verdict-not-a-strike.test.ts": 1,
   "test/a-remedy-that-changed-nothing-is-dispatched-again.test.ts": 1,
   "test/a-stale-fleet-branch-is-rebased-before-it-is-escalated.test.ts": 0,

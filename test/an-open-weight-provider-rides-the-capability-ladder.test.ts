@@ -20,6 +20,10 @@ import {
   OPENWEIGHT_ALLOWANCE_FILENAME,
   OPENWEIGHT_MAX_COMPLETION_TOKENS,
   OPENWEIGHT_OUTPUT_CONTRACT,
+  OPENWEIGHT_PRICES,
+  OPENWEIGHT_TEMPERATURE,
+  OpenWeightUnshapedDeploymentError,
+  openWeightTemperatureField,
   OpenWeightAllowanceExhaustedError,
   openWeightCommittedUsd,
   openWeightReservationUsd,
@@ -512,6 +516,93 @@ test("the openweight adapter sends no response format after adding its output co
     { role: "system", content: OPENWEIGHT_OUTPUT_CONTRACT },
     { role: "user", content: "Return a raw document." },
   ]);
+});
+
+test("a deployment that refuses a non-default temperature gets no temperature field", async () => {
+  // W1-T3608. MEASURED on the live account: gpt-5-nano answers `temperature: 0` with HTTP 400
+  // ("does not support 0 with this model"), while gpt-oss-120b answers it with 200. W1-T3598 put
+  // gpt-5-nano FIRST in every ladder row and selectOpenWeightModel takes the first candidate with
+  // no fallback, so this is the model the routed lane actually selects.
+  //
+  // THE CLAIM IS ABSENCE, NOT A DIFFERENT VALUE: `temperature: 1` would still be the adapter
+  // asserting a number it has not measured, and is exactly as wrong as 0 for a deployment that
+  // accepts only its own default.
+  const bodies: Record<string, Record<string, unknown>> = {};
+  for (const model of ["gpt-5-nano", "gpt-oss-120b"]) {
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: REPO_ROOT,
+        workerHome: join(REPO_ROOT, "tmp", `openweight-temperature-${model}`),
+        prompt: "Return a raw document.",
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async (_input, init) => {
+          bodies[model] = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(JSON.stringify({ choices: [{ message: { content: "raw document" } }] }), { status: 200 });
+        },
+      },
+      { claudeBin: "/unused/claude", root: REPO_ROOT, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+      { model, effort: "low" },
+    );
+    assert.equal(result.isError, false, `${model} spawn must succeed`);
+  }
+
+  assert.equal("temperature" in bodies["gpt-5-nano"], false, "gpt-5-nano refuses any explicit temperature, so the field must be absent entirely");
+  assert.equal(bodies["gpt-oss-120b"].temperature, 0, "gpt-oss-120b accepts 0 and must still receive it");
+
+  // And an undeclared deployment REFUSES rather than defaulting to 0 — defaulting is what produced
+  // the defect, so the absence of a row must be loud.
+  assert.throws(() => openWeightTemperatureField("gpt-9-unmeasured"), OpenWeightUnshapedDeploymentError);
+});
+
+test("an unpriced openweight deployment refuses on price before request shape", async () => {
+  // W1-T3608 ORDERING. Both per-deployment lookups refuse an unknown deployment, so WHICH refusal
+  // surfaces is a real contract: W1-T3597 pins "refuses before transport rather than borrowing a
+  // rate", and its fixture matches on /has no price row/. Resolving the request shape while
+  // building the body put the temperature lookup ahead of the reservation and silently rewrote
+  // that message — caught only because that fixture lives in a different test file, and a
+  // different CI shard.
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-order-"));
+  try {
+    const unknown = "a-deployment-in-neither-table";
+    assert.equal(unknown in OPENWEIGHT_PRICES, false, "the fixture must be absent from BOTH tables, or this proves nothing");
+    assert.equal(unknown in OPENWEIGHT_TEMPERATURE, false, "the fixture must be absent from BOTH tables, or this proves nothing");
+
+    let fetchCalls = 0;
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: "classify",
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async () => { fetchCalls += 1; throw new Error("an unknown deployment must never reach the transport"); },
+      },
+      { claudeBin: "/unused/claude", root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+      { model: unknown, effort: "low" },
+    );
+
+    assert.equal(fetchCalls, 0, "no request is made against a deployment in neither table");
+    assert.equal(result.isError, true);
+    assert.match(result.stderr, /has no price row/, "the PRICE refusal must surface first");
+    assert.doesNotMatch(result.stderr, /has no request-temperature row/, "the request-shape refusal must not pre-empt it");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("every priced openweight deployment declares a request temperature", async () => {
+  // W1-T3608 census. A deployment reachable enough to be PRICED is reachable enough to be SENT a
+  // request, so the two tables must cover the same keys. Without this, adding a deployment to the
+  // ladder and its price row still leaves the request shape a guess — discovered in production as
+  // an HTTP 400, which is how this task was found.
+  const priced = Object.keys(OPENWEIGHT_PRICES).sort();
+  const shaped = Object.keys(OPENWEIGHT_TEMPERATURE).sort();
+  assert.ok(priced.length > 0, "the price table must be non-empty, or this census compares nothing");
+  assert.deepEqual(shaped, priced, "every priced deployment needs a temperature row, and vice versa");
+  for (const deployment of priced) {
+    const field = openWeightTemperatureField(deployment);
+    const value = OPENWEIGHT_TEMPERATURE[deployment];
+    assert.equal("temperature" in field, value !== null, `${deployment}: the field is present exactly when its row is not null`);
+  }
 });
 
 test("openweight configuration requires a daily cash cap and keeps its key outside worker env", async () => {
