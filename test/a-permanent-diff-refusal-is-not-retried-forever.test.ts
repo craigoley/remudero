@@ -21,6 +21,14 @@ function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-permanent-diff-refusal-")), "ledger.ndjson");
 }
 
+/** Nothing in this suite asserts on the age this produces — every disposition here turns on the
+ *  ledgered post-review-throw history, never on `staleDays`. A hardcoded ISO literal here is
+ *  exactly the time bomb `expiring-fixture-census` exists to catch (W1-T3272): stamp it from the
+ *  wall clock instead, the same fix `test/stale-ci-gate-wiring.test.ts` already applies. */
+function recentActivityIso(): string {
+  return new Date(Date.now() - 60 * 60 * 1000).toISOString();
+}
+
 function pr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: 4510,
@@ -30,7 +38,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-08T10:00:00.000Z",
+    lastActivityAt: recentActivityIso(),
     headSha: "head-a",
     reviewInputDigest: "digest-a",
     autoMergeArmed: false,
