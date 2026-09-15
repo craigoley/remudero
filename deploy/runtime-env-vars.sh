@@ -30,20 +30,7 @@
 # test/recycle-container.test.ts asserts all three copies of the list — this one and each script's
 # fallback — never disagree, so the fallback cannot go stale unnoticed either.
 #
-# W1-T3603 ADDED RMD_OPENWEIGHT_API_KEY, the open-weight adapter's credential —
-# OPENWEIGHT_API_KEY_ENV in src/lib/worker-provider.ts. It was declared BEFORE the name was ever
-# placed on a container, which is the only reason it cost nothing: deploy/recycle-container.sh's
-# drift check refuses outright — exit 1, nothing touched — on any runtime name this list does not
-# carry, and it fires on EVERY later recycle, the supervisor's own included. W1-T1069, W1-T2932
-# and W1-T3454 were each found AFTER their name was already live on a container. The value itself
-# reaches the daemon from the operator's own shell via the W1-T2553 capture fallback, so this stays
-# a NAME, exactly as the header above requires.
-#
-# NOTHING BUT NAMES MAY GO INSIDE THE ARRAY BELOW — not even a comment. test/recycle-container.test.ts
-# reads it by whitespace-splitting everything between the parentheses, so a comment line inside the
-# array is parsed as a run of variable names and the three-copy agreement check fails with a
-# baffling diff. Rationale belongs here, above the array. Learned by breaking it.
-# ORDER IS NOT SIGNIFICANT — this is read as a set.
+# ORDER IS NOT SIGNIFICANT — read as a set, and NAMES ONLY: a comment inside the array is read as a run of variable names (W1-T3603).
 RMD_DAEMON_RUNTIME_ENV_VARS=(
   GH_TOKEN
   RMD_RESTART_THROTTLE_S
