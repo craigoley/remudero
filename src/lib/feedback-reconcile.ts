@@ -119,7 +119,11 @@ export interface ReconcileFeedbackLandingResult {
   error?: string;
 }
 
-const ROOT_NAME_RE = /^[a-z][a-z0-9-]*$/;
+/** A root's `name` must be a stable slug — never a path, never mixed case, never a separator a
+ *  shell or a manifest line could misparse. Exported so its accept/reject arms are each directly
+ *  testable (test/feedback-landing-reconcile.test.ts) rather than only reachable through
+ *  {@link validateRoots}'s combined refusal message. */
+export const ROOT_NAME_RE = /^[a-z][a-z0-9-]*$/;
 
 /** Refuses the WHOLE batch, before any `plan/feedback/**` read, on the first malformed root
  *  (design iv) — a partial validation pass could still read an unvalidated sibling entry. */

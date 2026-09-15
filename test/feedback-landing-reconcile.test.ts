@@ -24,6 +24,7 @@ import { LANDING_BRANCH, landFeedback } from "../src/lib/feedback-landing.js";
 import {
   reconcileFeedbackLanding,
   buildFeedbackReconcileManifest,
+  ROOT_NAME_RE,
   type FeedbackReconcileRoot,
 } from "../src/lib/feedback-reconcile.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -245,6 +246,14 @@ test("W1-T3562: an enrolled root pointing at a nonexistent directory is refused 
   assert.ok(result.error);
   assert.match(result.error ?? "", /does not exist/);
   assert.deepEqual(result.manifest.entries, []);
+});
+
+test("W1-T3562: ROOT_NAME_RE accepts a stable slug and rejects a path-shaped or mixed-case name", () => {
+  assert.equal(ROOT_NAME_RE.test("core"), true);
+  assert.equal(ROOT_NAME_RE.test("site-2"), true);
+  assert.equal(ROOT_NAME_RE.test("Core"), false, "mixed case must never pass as a root name");
+  assert.equal(ROOT_NAME_RE.test("core/site"), false, "a path separator must never pass as a root name");
+  assert.equal(ROOT_NAME_RE.test(""), false, "an empty string must never pass as a root name");
 });
 
 test("W1-T3562: an empty roots array is refused rather than silently reporting an empty manifest", () => {
