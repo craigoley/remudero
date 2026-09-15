@@ -14,7 +14,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -334,10 +334,10 @@ test("W1-T3562: `rmd feedback-reconcile`, dispatched through the real CLI regist
   assert.match(out, /dry run — nothing written/);
 });
 
-test("W1-T3562: grep — src/run-task.ts calls reconcileFeedbackLanding( rather than holding a second copy of the scan", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  assert.match(source, /reconcileFeedbackLanding\(/);
-});
+// Acceptance 8 (hub reaches the library, not a second scan) is proved BEHAVIOURALLY above by the
+// CLI-dispatch test — it drives the real HANDLERS entry through to reconcileFeedbackLanding's own
+// manifest, rather than reading src/run-task.ts as text to grep for the call site (which the PR's
+// own `grep: reconcileFeedbackLanding( in src/run-task.ts` proof already covers directly).
 
 // Sanity: FEEDBACK_STATUSES is imported only to keep this file's fixture shape honest against the
 // real lifecycle table (mirrors test/feedback-record-monotonic.test.ts's own convention).

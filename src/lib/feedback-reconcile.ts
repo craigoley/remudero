@@ -185,6 +185,8 @@ function listBranchFeedbackIds(git: GitExec): { ids: Map<string, string>; byteCo
       .filter((f) => !f.slice(FEEDBACK_REL_DIR.length + 1).includes("/"))
       .sort();
   } catch {
+    // The branch has never been pushed, or the ref is otherwise unreadable — reads as empty,
+    // never fatal (the same "no pending content" posture a first-ever landing call takes).
     return { ids, byteCount, truncated: false };
   }
   const truncated = relPaths.length > MAX_RECORDS_PER_SOURCE;
@@ -211,6 +213,9 @@ function readStatus(bytes: string | undefined): string | undefined {
       ? status
       : undefined;
   } catch {
+    // Unparseable YAML or an unrecognised status both read as "no status to report" here —
+    // classify() itself calls mergeFeedbackRecord for the authoritative refuse/take decision;
+    // this is display-only, so it never needs to distinguish the two failure shapes.
     return undefined;
   }
 }
