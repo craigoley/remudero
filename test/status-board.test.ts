@@ -1310,6 +1310,7 @@ test("buildStatusBoard/renderStatusBoardText: with a hold engaged the board rend
       pr_number: 800,
       by: "craig",
       reason: "freezing this PR pending a manual read",
+      authority: "console-confirmed",
     }),
   ]);
   const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
@@ -1341,8 +1342,8 @@ test("buildStatusBoard: with no hold engaged the board renders no hold row at al
 
 test("buildStatusBoard: a released hold disappears from the next render with no acknowledgement step", () => {
   const ledgerPath = writeLedger([
-    ledgerLine({ step: "automerge.hold_engaged", task_id: "W1-T800", pr_number: 800, by: "craig", reason: "freezing pending a manual read" }),
-    ledgerLine({ step: "automerge.hold_released", task_id: "W1-T800", pr_number: 800, by: "craig", reason: "read done, releasing" }),
+    ledgerLine({ step: "automerge.hold_engaged", task_id: "W1-T800", pr_number: 800, by: "craig", reason: "freezing pending a manual read", authority: "console-confirmed" }),
+    ledgerLine({ step: "automerge.hold_released", task_id: "W1-T800", pr_number: 800, by: "craig", reason: "read done, releasing", authority: "console-confirmed" }),
   ]);
   const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
 
@@ -1352,7 +1353,7 @@ test("buildStatusBoard: a released hold disappears from the next render with no 
 
 test("buildStatusBoard: a FLEET-scoped hold (no pr_number) with no PR-scoped row ever recorded renders as one row naming no PR", () => {
   const ledgerPath = writeLedger([
-    ledgerLine({ step: "automerge.hold_engaged", by: "craig", reason: "fleet freeze pending an incident review" }),
+    ledgerLine({ step: "automerge.hold_engaged", by: "craig", reason: "fleet freeze pending an incident review", authority: "console-confirmed" }),
   ]);
   const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
 
