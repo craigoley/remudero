@@ -23,7 +23,7 @@ import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
 import { FEEDBACK_STATUSES, type FeedbackStatus } from "../src/lib/feedback.js";
 import { mergeFeedbackRecord } from "../src/lib/feedback-record-merge.js";
-import { LANDING_BRANCH, landFeedback, landFeedbackStatusContent } from "../src/lib/feedback-landing.js";
+import { LANDING_BRANCH, landFeedback, landFeedbackStatusContent, sweepFeedbackLanding } from "../src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
@@ -316,4 +316,37 @@ test("W1-T3561: landFeedbackStatusContent (the console POST /v1/feedback/decisio
   assert.equal(forward.landed, true, "a forward console write must still land normally");
   assert.equal(forward.refused, undefined);
   assert.match(readOnBranch(bareOrigin2.dir, LANDING_BRANCH, relPath2), /status: accepted/);
+});
+
+// ── Acceptance criterion 3, the OTHER half: the LEDGER line names the refusal too ────────────
+
+test("W1-T3561: sweepFeedbackLanding's own ledger line (feedback.landing_sweep) names a refused record, never just a quiet zero", () => {
+  const bareOrigin = gitRepo({ bare: true, kind: "monotonic-ledger-origin" });
+  const seed = gitRepo({ kind: "monotonic-ledger-seed" });
+  const id = "fb-1789300000004-ledger";
+  mkdirSync(join(seed.dir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "feedback", `${id}.yaml`), entryYaml({ id, status: "proposed" }));
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "-m", "chore: seed a proposed entry");
+  seed.addRemote("origin", bareOrigin.dir);
+  seed.git("push", "--quiet", "origin", "main");
+
+  const root = gitRepo({ cloneFrom: bareOrigin.dir, kind: "monotonic-ledger-root" });
+  writeEntry(root.dir, id, { status: "new" }); // stale local copy, behind upstream's `proposed`
+
+  const lines: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const { gh, calls } = fakeGh("https://github.com/o/r/pull/608");
+  const result = withLiveWritesAllowed(() =>
+    sweepFeedbackLanding(root.dir, { gh, log: (step, extra) => lines.push({ step, extra }) }),
+  );
+
+  assert.equal(result.landed, false);
+  assert.equal(calls.length, 0, "a wholly-refused sweep pass must never reach gh");
+  const line = lines.find((l) => l.step === "feedback.landing_sweep");
+  assert.ok(line, "the sweep must still ledger a line even when nothing landed");
+  assert.equal(line?.extra?.pushed, false);
+  const refused = line?.extra?.refused as Array<{ path: string; reason: string }> | undefined;
+  assert.ok(refused && refused.length === 1, `expected the ledger line to name the refused record, got: ${JSON.stringify(line?.extra)}`);
+  assert.equal(refused![0].path, `plan/feedback/${id}.yaml`);
+  assert.match(refused![0].reason, /earlier/i);
 });
