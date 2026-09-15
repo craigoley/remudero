@@ -117,12 +117,17 @@ test("W1-T2749: acknowledgement preserves differing, absent-upstream, unreadable
   const absent = "plan/feedback/fb-absent.yaml";
   const unreadable = "plan/feedback/fb-unreadable.yaml";
   writeRel(root, identical, "id: fb-identical\nstatus: new\n");
-  writeRel(root, different, "id: fb-different\nstatus: local\n");
+  // W1-T3561: a top-level `plan/feedback/<id>.yaml` path is now read as a real §7B record, so
+  // "differing" content must actually be a legitimate ADVANCE (local `grilling`, later-pushed
+  // remote `new`) for the assertion below to still exercise "differs, still lands" rather than
+  // tripping the new lifecycle-regression refusal this task adds — the fixture used to use the
+  // arbitrary, non-§7B markers "local"/"remote" purely to distinguish the two copies' bytes.
+  writeRel(root, different, "id: fb-different\nstatus: grilling\n");
   writeRel(root, absent, "id: fb-absent\nstatus: local\n");
   writeRel(root, unreadable, "id: fb-unreadable\nstatus: new\n");
   advanceMain(bareOrigin, {
     [identical]: "id: fb-identical\nstatus: new\n",
-    [different]: "id: fb-different\nstatus: remote\n",
+    [different]: "id: fb-different\nstatus: new\n",
     [unreadable]: "id: fb-unreadable\nstatus: new\n",
   });
 
@@ -152,8 +157,8 @@ test("W1-T2749: acknowledgement preserves differing, absent-upstream, unreadable
   assert.equal(git(root, "ls-files", "--error-unmatch", tracked).trim(), tracked, "the tracked control is genuinely tracked");
   assert.equal(
     execFileSync("git", ["--git-dir", bareOrigin, "show", `${LANDING_BRANCH}:${different}`], { encoding: "utf8" }),
-    "id: fb-different\nstatus: local\n",
-    "a differing queue file retains the existing landing behavior",
+    "id: fb-different\nstatus: grilling\n",
+    "a differing queue file that genuinely ADVANCES the §7B lifecycle still lands, unchanged by W1-T3561",
   );
   assert.equal(
     execFileSync("git", ["--git-dir", bareOrigin, "show", `${LANDING_BRANCH}:${absent}`], { encoding: "utf8" }),

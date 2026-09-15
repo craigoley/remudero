@@ -58,8 +58,16 @@ function git(dir: string, ...args: string[]): string {
   return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GIT_ENV });
 }
 
-/** A throwaway repo with a local bare origin and one `proposed` feedback entry, committed. */
-function fixtureRepo(id = "fb-1700000000000-aaaaaa"): { root: string; bare: string; id: string; cleanup: () => void } {
+/** A throwaway repo with a local bare origin and one feedback entry, committed. Defaults to
+ *  `proposed` (every writer here except WRITER 2 exercises a `proposed -> accepted/rejected`
+ *  reconcile) — `status` is overridable so a caller driving a DIFFERENT real transition (W1-T3561:
+ *  a landing may only ADVANCE a record through the §7B lifecycle, so a fixture exercising
+ *  `grilling` must actually start earlier than `grilling`, never at `proposed`) seeds one that
+ *  transition can legitimately reach. */
+function fixtureRepo(
+  id = "fb-1700000000000-aaaaaa",
+  status = "proposed",
+): { root: string; bare: string; id: string; cleanup: () => void } {
   const bare = mkdtempSync(join(tmpdir(), "rmd-ep-origin-"));
   execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
   const root = mkdtempSync(join(tmpdir(), "rmd-ep-root-"));
@@ -67,7 +75,7 @@ function fixtureRepo(id = "fb-1700000000000-aaaaaa"): { root: string; bare: stri
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
   writeFileSync(
     join(root, "plan", "feedback", `${id}.yaml`),
-    [`id: ${id}`, "ts: '2026-08-01T00:00:00.000Z'", "raw: a fixture proposal", "attachments: []", "origin: cli", "status: proposed", "proposal_pr: 'https://github.com/o/r/pull/7'", ""].join("\n"),
+    [`id: ${id}`, "ts: '2026-08-01T00:00:00.000Z'", "raw: a fixture proposal", "attachments: []", "origin: cli", `status: ${status}`, "proposal_pr: 'https://github.com/o/r/pull/7'", ""].join("\n"),
   );
   git(root, "add", "-A");
   git(root, "commit", "--quiet", "-m", "seed");
@@ -139,7 +147,10 @@ test("WRITER 1: with NO land option the local write is unchanged, so worktree ca
 // ── WRITER 2: the grilling flip ──────────────────────────────────────────────────────
 
 test("WRITER 2: the grilling flip leaves the working tree CLEAN when landed", () => {
-  const f = fixtureRepo();
+  // `status: new`, matching the ONE real call site (panel-skill-run.ts's clarify grill): it
+  // always flips a just-captured `new` entry to `grilling`, never a `proposed` one — W1-T3561
+  // made that the only transition a landing may actually carry out.
+  const f = fixtureRepo("fb-1700000000000-aaaaaa", "new");
   try {
     assert.equal(porcelain(f.root), "");
     const entry = withLiveWritesAllowed(() => setFeedbackStatus(f.root, f.id, "grilling", { land: { gh: fakeGh() } }));
