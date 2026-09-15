@@ -1,0 +1,76 @@
+- id: W1-T3615
+  title: "GIVE THE OPENWEIGHT ADAPTER AN ALLOWLISTED CHECK-RUNNER — the one missing tool excludes 93% of worker spend, and the lanes need to run their own checks, not a shell"
+  repo: remudero
+  depends_on: [W1-T3613]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 8.00
+  files:
+    - src/lib/worker-provider.ts
+    - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
+  origin: "operator-ruling#W1-T3572-check-runner-2026-09-15"
+  plan_refs: ["W1-T3572", "W1-T3613", "W1-T3608", "W1-T3569", "W1-T2"]
+  status: queued
+  attempts: 0
+  note: |
+    OPERATOR RULING 2026-09-15, recorded in DECISIONS.md: an allowlisted CHECK-RUNNER, not a `Bash`
+    function. This task builds only that; it routes no lane.
+
+    THE MONEY, measured over the ledger union deduped per distinct run:
+
+        implement  $4,081  728 runs  $5.61 each
+        fix        $  769  274 runs  $2.81
+        recon      $  302  739 runs  $0.41
+
+    ~93% of worker spend, all three excluded from the adapter by ONE missing tool, while Codex sits
+    at 95% of its weekly window and reads `readable:false` so everything lands on Claude.
+
+    WHAT THE LANES ACTUALLY NEED IT FOR is running their own checks -- the test runner, the
+    typechecker, the lint scripts. That set is small and enumerable, which is what makes a bounded
+    surface possible at all.
+
+    THE SHAPE IS ALREADY IN THIS FILE, TWICE: `OPENWEIGHT_PRICES` and `OPENWEIGHT_TEMPERATURE` are
+    per-deployment tables read by lookup, refusing an absent row rather than guessing
+    (`OpenWeightUnpricedDeploymentError`, `OpenWeightUnshapedDeploymentError`). The check-runner is
+    the same discipline applied to commands.
+  rationale: |
+    Every cheap-model lane routed so far is real but small: `inbox_draft` and the zero-tool judges
+    are pennies against $5,000 of worker spend. The subscriptions are the binding constraint and
+    nothing moves the number until a shell-capable lane can run somewhere that is not a
+    subscription. A general shell would buy that with authority the lane does not need; an
+    allowlisted runner buys the same capability with a surface small enough to enumerate in a test.
+  design: |
+    Add ONE function to `OPENWEIGHT_FUNCTIONS` that takes a CHECK NAME from a fixed table plus
+    arguments, and NEVER a command string. No shell, no metacharacters, no interpolation into a
+    shell -- spawn the argv directly. An unlisted check REFUSES before execution, carrying the list
+    of permitted names, exactly as the two pricing/shape tables already refuse.
+
+    FORBIDDEN IN THE TABLE, and this is the load-bearing half: nothing that reaches the network or
+    the forge. No `git push`, no `gh`, no `curl`, no package installation. The worker produces a
+    diff; the orchestrator pushes and merges -- the boundary `hooks/deny-floor.sh` already enforces
+    against every worker, which a shell-capable open-weight worker must not become the hole in.
+
+    BOUND EVERY EXECUTION: a wall-clock timeout, captured stdout/stderr returned as tool output
+    rather than streamed, and the worker cwd as the working directory. The daily cash cap already
+    bounds spend; this bounds time.
+
+    PROVE CONTAINMENT THROUGH THE NEW SURFACE ITSELF. W1-T2's probe proves an outside-cwd write is
+    OS-denied for a spawn; a check-runner needs the equivalent demonstrated through its own path,
+    or the containment argument is inherited rather than shown.
+
+    ROUTE NOTHING HERE. Staging on `recon` first is a SEPARATE task behind a measured verdict, per
+    the ruling -- this one adds the capability and its refusals, and leaves every mount untouched.
+  acceptance:
+    - claim: "an unlisted check refuses before execution and names what is permitted"
+      proof: "unit test: an unlisted openweight check refuses before it executes"
+    - claim: "the permitted table reaches neither the network nor the forge, asserted over the table itself rather than a sample"
+      proof: "unit test: no permitted openweight check can reach the network or the forge"
+  falsifier: |
+    Remove the refusal and the first test must reach execution with an unlisted name. Add `git` or
+    `curl` to the permitted table and the second must fail; if it still passes it is sampling
+    rather than enumerating the table, and proves nothing. Accept a command STRING anywhere in the
+    signature and the first test must fail -- the absence of a shell is the property, not a
+    convention.
