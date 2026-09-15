@@ -1,0 +1,77 @@
+- id: W1-T3605
+  title: "A CONCURRENT FETCH RACE CRASHES THE SUPERVISOR TICK — assessInstallForDeploy promises a named no-op but lets a fetch error escape, killing 124 of 275 watchdog ticks in one day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 4.00
+  files:
+    - src/lib/install-root.ts
+    - test/install-root-deploy-assessment.test.ts
+  origin: "operator-session#openweight-trial-2026-09-15"
+  plan_refs: ["W1-T924", "W1-T3245", "W1-T3269"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED on the live Azure host 2026-09-15 over the preceding 24 hours:
+
+        275  watchdog ticks started
+        124  ended in `### RUN-TASK ERROR` + "deploy-run reported a problem"
+        149  reached a real deploy-run verdict
+
+    45% of ticks die. The stack is identical every time:
+
+        Error: Command failed: git -C <state>/daemon-install fetch --quiet origin
+          error: cannot lock ref 'refs/remotes/origin/heartbeat-azure':
+                 is at 153f6189... but expected 2e28d2f8...
+          at defaultExecFile (src/lib/install-root.ts:110)
+          at git (src/lib/install-root.ts:154)
+          at inspectInstallRoot (src/lib/install-root.ts:155)
+          at assessInstallForDeploy (src/lib/install-root.ts:276)
+          at deployRunCommand (src/run-task.ts:28426)
+
+    THE REF NAMES IDENTIFY THIS AS A RACE, NOT CORRUPTION. Grouping the 24h failures by ref:
+    heartbeat-azure 244, origin/main 32, the two feedback-landing-* refs 32 each, then a long
+    tail of `run-*` branches the fleet is actively pushing. heartbeat-azure is FORCE-PUSHED by
+    a `*/5 * * * *` cron -- the same cadence as the watchdog timer -- so the ref the fetch was
+    advertised moves before the update lands. "is at A but expected B" is git reporting a
+    concurrent writer, and there were no `.lock` files left behind on inspection.
+
+    THE CONTRACT THIS BREAKS IS WRITTEN DOWN. deployRunCommand's own doc comment says
+    assessInstallForDeploy is "FAIL SAFE, NOT FAIL FAST (design note vi): an unresolvable or
+    unfit install root (absent, dirty, off-main/detached, diverged, or a separation-invariant
+    violation) makes this a no-op with a NAMED reason, leaving the running daemon untouched".
+    Five unfitness kinds are enumerated and each yields a reason string. A FETCH THAT FAILS IS
+    A SIXTH KIND THAT WAS NEVER ENUMERATED, so it escapes as an uncaught exception instead.
+
+    THE COST IS NOT THE MISSED DEPLOY. The watchdog's PRIMARY job is reviving a daemon docker
+    has given up on; the deploy question is asked in the same tick. A tick that throws at the
+    assessment does neither. So an ordinary, expected ref race disarms the fleet's revival
+    path 45% of the time, and the rate is set by how busy the fleet is -- highest exactly when
+    a revival is most likely to be needed.
+  rationale: |
+    A supervisor that dies on a routine race is worse than one that declines, because the
+    decline is legible and the death also drops the unrelated duty sharing the tick. The
+    remedy is small and entirely inside the assessment's existing vocabulary: one more named
+    unfitness kind.
+  design: |
+    Catch the fetch failure inside inspectInstallRoot / assessInstallForDeploy and return an
+    unfit assessment with its own named reason (the fetch is best-effort: a stale remote ref
+    only makes the comparison conservative, never wrong in the unsafe direction). DO NOT
+    WIDEN THE CATCH to cover the whole assessment -- a genuinely unreadable install root must
+    still be distinguishable from a transient fetch race, so the reason string must name which
+    one occurred. The deploy decision that follows must then be taken on the refs already on
+    disk, exactly as it is when the fetch succeeds but returns nothing new. A test must drive
+    a fetch that exits non-zero and assert a named no-op rather than a throw.
+  acceptance:
+    - claim: "a non-zero fetch in the install root yields a named unfit assessment instead of an uncaught error"
+      proof: "unit test: a failing install-root fetch is a named no-op"
+    - claim: "a genuinely unreadable install root is still reported distinctly from a transient fetch race"
+      proof: "unit test: an unreadable install root is named apart from a fetch race"
+  falsifier: |
+    Remove the catch and the first test must throw rather than assert. Collapse both reasons
+    into one string and the second must fail. If the second passes while both paths report the
+    same reason, it is not discriminating and the task is unmet.

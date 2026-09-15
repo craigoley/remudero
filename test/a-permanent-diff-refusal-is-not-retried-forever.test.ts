@@ -14,7 +14,20 @@ import {
   type SweepPolicy,
 } from "../src/lib/sweep.js";
 
-const NOW = Date.parse("2026-09-08T12:00:00.000Z");
+const NOW = Date.now();
+
+/** Every stamp in this suite is an OFFSET FROM `NOW`, never a calendar date.
+ *
+ *  `deriveDisposition`'s `now` parameter DEFAULTS to `Date.now()`, and one call site
+ *  (the post-fix redrive rung) takes that default rather than the injected clock — so a fixed
+ *  `lastActivityAt` here ages against the real wall clock no matter what `deps.now` returns.
+ *  MEASURED: shifting this suite's stamps 30 days earlier, preserving every relative offset,
+ *  turned it red — the absolute date was load-bearing, and `expiring-fixture-census` was right
+ *  that it crossed `sweep.staleDays` on 2026-09-22. Offsets keep the timeline identical while
+ *  leaving no calendar date for a clock boundary to cross. */
+function isoBefore(minutes: number): string {
+  return new Date(NOW - minutes * 60_000).toISOString();
+}
 const POLICY: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, strikeCap: 2, pendingCeilingMinutes: 60 };
 
 function ledgerPath(): string {
@@ -30,7 +43,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-08T10:00:00.000Z",
+    lastActivityAt: isoBefore(120),
     headSha: "head-a",
     reviewInputDigest: "digest-a",
     autoMergeArmed: false,
@@ -79,7 +92,7 @@ function diffCeilingError(): string {
 test("a 300-file GitHub diff refusal becomes a visible terminal disposition for the same head", async () => {
   const path = ledgerPath();
   const candidate = pr();
-  appendPostReviewThrow(path, candidate, diffCeilingError(), "2026-09-08T10:00:00.000Z");
+  appendPostReviewThrow(path, candidate, diffCeilingError(), isoBefore(120));
 
   const posted: number[] = [];
   const escalated: string[] = [];
@@ -99,9 +112,9 @@ test("an unrecognised post-review throw retries under a bounded count and then s
   const path = ledgerPath();
   const candidate = pr({ prNumber: 4511, prUrl: "https://github.com/craigoley/remudero/pull/4511" });
   for (const ts of [
-    "2026-09-08T08:00:00.000Z",
-    "2026-09-08T09:01:00.000Z",
-    "2026-09-08T10:02:00.000Z",
+    isoBefore(240),
+    isoBefore(179),
+    isoBefore(118),
   ]) {
     appendPostReviewThrow(path, candidate, "gh: connection reset by peer", ts);
   }
@@ -118,7 +131,7 @@ test("an unrecognised post-review throw retries under a bounded count and then s
 test("permanent and counted post-review failures reset when the head sha changes", async () => {
   const path = ledgerPath();
   const permanent = pr({ prNumber: 4512, prUrl: "https://github.com/craigoley/remudero/pull/4512" });
-  appendPostReviewThrow(path, permanent, diffCeilingError(), "2026-09-08T08:00:00.000Z");
+  appendPostReviewThrow(path, permanent, diffCeilingError(), isoBefore(240));
 
   const counted = pr({
     prNumber: 4513,
@@ -126,9 +139,9 @@ test("permanent and counted post-review failures reset when the head sha changes
     headSha: "counted-old",
     reviewInputDigest: "digest-counted",
   });
-  appendPostReviewThrow(path, counted, "gh: connection reset by peer", "2026-09-08T08:00:00.000Z");
-  appendPostReviewThrow(path, counted, "gh: connection reset by peer", "2026-09-08T09:01:00.000Z");
-  appendPostReviewThrow(path, counted, "gh: connection reset by peer", "2026-09-08T10:02:00.000Z");
+  appendPostReviewThrow(path, counted, "gh: connection reset by peer", isoBefore(240));
+  appendPostReviewThrow(path, counted, "gh: connection reset by peer", isoBefore(179));
+  appendPostReviewThrow(path, counted, "gh: connection reset by peer", isoBefore(118));
 
   const posted: number[] = [];
   await runSweep(
@@ -146,7 +159,7 @@ test("permanent and counted post-review failures reset when the head sha changes
 test("a transient post-review throw still re-dispatches when it is under the bound and past backoff", async () => {
   const path = ledgerPath();
   const candidate = pr({ prNumber: 4514, prUrl: "https://github.com/craigoley/remudero/pull/4514" });
-  appendPostReviewThrow(path, candidate, "gh: connection reset by peer", "2026-09-08T10:59:00.000Z");
+  appendPostReviewThrow(path, candidate, "gh: connection reset by peer", isoBefore(61));
 
   const posted: number[] = [];
   const summary = await runSweep([candidate], deps(path, posted), POLICY);
