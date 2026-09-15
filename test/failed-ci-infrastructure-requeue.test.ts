@@ -24,15 +24,6 @@ const TRANSCRIPT = [
   "Failed to FinalizeArtifact: (403) Forbidden: Error from intermediary",
 ].join("\n");
 
-// STAMPED FROM THE CLOCK, NEVER A CONSTANT (W1-T3270 / expiring-fixture-census). This used to read
-// a fixed `"2026-09-08T15:30:00Z"` compared against a fixed `now` ten minutes later — a gap that
-// says nothing about "recent" once the wall clock moves on, only about the two literals' distance
-// from each other. `sweep.staleDays` ages `lastActivityAt` against the REAL clock in production, so
-// a fixture this test needs to read as fresh has to be derived from `Date.now()`, exactly like
-// test/stale-ci-gate-wiring.test.ts's `recentActivityIso()`.
-const NOW_MS = Date.now();
-const LAST_ACTIVITY_ISO = new Date(NOW_MS - 10 * 60 * 1000).toISOString();
-
 function infra(name = "ci-shard (2/4)"): CiFailure {
   return { name, conclusion: "FAILURE", jobId: "34249290033", logTail: TRANSCRIPT };
 }
@@ -46,7 +37,7 @@ function subject(overrides: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "red",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: LAST_ACTIVITY_ISO,
+    lastActivityAt: "2026-09-08T15:30:00Z", // expiring-fixture: exempt -- this suite injects `now` (deps(), pinned 2026-09-08T15:40:00Z) and the staleness comparison takes it as a parameter with no wall-clock fallback (absentAgeMinutes(pr, now), src/lib/sweep.ts), so this sits a fixed 10 minutes inside a fixed clock; NOT proven by aging it, which breaks 5 of 7 tests by changing the pinned relationship they assert rather than by detonating
     headSha: "e0838eb6e0702ff1a35bd5d9c240e8c7bbf6fd25",
     headRefName: "run-W1-T3140-1788886671767",
     autoMergeArmed: false,
@@ -82,7 +73,7 @@ function deps(ledgerPath: string) {
     },
     ledgerPath,
     runId: "SWEEP-INFRA-TEST",
-    now: () => NOW_MS,
+    now: () => Date.parse("2026-09-08T15:40:00Z"),
   };
   return { d, escalated, fixed, requeued };
 }

@@ -767,11 +767,15 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // then added 75 net lines ahead of both while covering assignment routing telemetry, moving them
   // to :6040/:6101. The THIRD witness (arm-ordering.test.ts) is untouched by every one of these
   // edits and unmoved, which is what keeps this case a census over the real tree rather than three
-  // moving literals.
+  // moving literals. W1-T3602 then added THIRTEEN lines ahead of both — a `headRefName` on the
+  // `routeFix` conflicted-PR fixture, which the `conflicted` row's new rmd-ownership conjunct
+  // requires — and they moved by exactly thirteen, to :6053/:6114. The SEVENTH re-derivation, and
+  // the cleanest illustration yet of this note's own claim: the witnesses are the SAME two call
+  // sites, still omitting `ledgerLines` while supplying `arm`; only their coordinates moved.
   const expectedKeys = [
     "armIfVerdictPermits:test/arm-ordering.test.ts:63:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6040:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6101:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6053:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6114:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(

@@ -228,6 +228,7 @@ function conflictedPurePr(): OpenPrView {
     prNumber: 1700,
     prUrl: "url/1700",
     taskId: "W1-CONFLICT",
+    headRefName: "run-W1-CONFLICT-1789430000000",
     reviewState: "success",
     checksState: "green",
     mergeState: "dirty",
@@ -243,6 +244,7 @@ function conflictedDeletionPr(): OpenPrView {
     prNumber: 1701,
     prUrl: "url/1701",
     taskId: "W1-CONFLICT-DEL",
+    headRefName: "run-W1-CONFLICT-DEL-1789430000001",
     reviewState: "success",
     checksState: "green",
     mergeState: "dirty",
@@ -1547,25 +1549,26 @@ test("runSweep acceptance 2 — a pure-concurrent-addition conflict dispatches O
   assert.equal(deps.fixed[0].evidence.ciFailures, undefined, "never a mix with the ci-log shape");
 });
 
-test("deriveDisposition acceptance 3 — a deletion-involved conflict refuses into escalate (blocked-ambiguous), naming the files, never the conflicted/fixable row", () => {
+test("deriveDisposition acceptance 3 — an rmd-owned deletion conflict dispatches the bounded semantic repair worker, naming the files and per-side counts", () => {
   const seeded = conflictedDeletionPr();
   const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(r.disposition, "blocked-ambiguous");
-  assert.notEqual(r.disposition, "conflicted", "a deletion is never auto-resolved");
+  assert.equal(r.disposition, "conflicted");
   assert.match(r.reason, /deletion/);
   assert.match(r.reason, /src\/config\.ts/, "names the conflicting file(s)");
+  assert.match(r.reason, /ours -0, theirs -3/);
+  assert.match(r.reason, /actual hunks/);
 });
 
-test("runSweep acceptance 3 — a deletion-involved conflict: NO resolution attempt (zero fix-worker spawns), escalate fires instead, naming the files", async () => {
+test("runSweep acceptance 3 — an rmd-owned deletion conflict dispatches one bounded repair worker instead of escalating", async () => {
   const deps = fakeDeps();
   const seeded = conflictedDeletionPr();
 
   const summary = await runSweep([seeded], deps);
 
-  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
-  assert.equal(deps.fixed.length, 0, "no resolution attempt — never dispatched");
-  assert.equal(deps.escalated.length, 1, "refuses into escalate instead");
-  assert.match(deps.escalated[0].reason, /src\/config\.ts/, "the escalation names the conflicting file(s)");
+  assert.equal(summary.byDisposition.conflicted, 1);
+  assert.equal(deps.fixed.length, 1, "one bounded repair dispatch");
+  assert.equal(deps.escalated.length, 0, "the owned branch does not escalate before repair");
+  assert.equal(deps.fixed[0].evidence.mergeConflict?.files[0]?.path, "src/config.ts");
 });
 
 // ── ACCEPTANCE 1: the P22 golden, verbatim ────────────────────────────────────
