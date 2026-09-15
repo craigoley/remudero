@@ -887,6 +887,48 @@ test("an unlisted openweight check refuses before it executes", async () => {
   assert.deepEqual(openWeightCheckArgv("typecheck", undefined), [...OPENWEIGHT_CHECKS["typecheck"]!]);
 });
 
+test("a permitted openweight check that exits non-zero is fed back as a result, not a crash", async () => {
+  // W1-T3617. The refusal test above never spawns a process at all; this drives the OTHER branch
+  // of run_check's try/catch — a PERMITTED check whose own process exits non-zero. `git_log` run
+  // outside a git repository is a real, deterministic failure (git always exits 128 there), so this
+  // exercises execFileSync's actual throw path rather than a stand-in. "A FAILING CHECK IS A
+  // RESULT, NOT AN ERROR" — the loop must survive and hand the model the real exit code and output.
+  const root = mkdtempSync(join(tmpdir(), "rmd-ow-check-fail-"));
+  try {
+    let turn = 0;
+    const bodies: string[] = [];
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "wh"),
+        prompt: "run a check",
+        tools: ["Read", "RunCheck"],
+        maxTurns: 3,
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async (_input, init) => {
+          bodies.push(String(init?.body ?? ""));
+          turn += 1;
+          const body = turn === 1
+            ? { choices: [{ message: { tool_calls: [{ id: "c1", type: "function", function: { name: "run_check", arguments: JSON.stringify({ check: "git_log" }) } }] } }] }
+            : { choices: [{ message: { content: "done" } }] };
+          return new Response(JSON.stringify(body), { status: 200 });
+        },
+      },
+      { claudeBin: "/unused/claude", root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+      { model: "gpt-oss-120b", effort: "low" },
+    );
+
+    // THE NON-ZERO EXIT IS FED BACK AS A TOOL RESULT, so the evidence is the NEXT request's
+    // messages, same as the refusal test — but here the process actually ran and actually failed.
+    assert.equal(result.isError, false, "a failing check's own exit code must not crash the worker loop");
+    assert.ok(bodies.length >= 2, "the loop must have taken a second turn carrying the tool result");
+    assert.match(bodies[1]!, /\\"exitCode\\":128/, "the real, non-zero exit code must reach the model as data");
+    assert.match(bodies[1]!, /not a git repository/, "the process's own stderr must be carried through as output");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("no permitted openweight check can reach the network or the forge", () => {
   // W1-T3617. ENUMERATES THE TABLE, never a sample: the failure this guards is someone ADDING a row,
   // and a test that checked two known-good entries would pass identically after `git` was added.
