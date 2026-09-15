@@ -70,7 +70,7 @@
     restore-after-acceptance sequence, without printing the key.
   acceptance:
     - claim: "only synthesis.inbox_draft declares provider openweight, after its Read/Grep/Glob surface is re-proven to be adapter-supported"
-      proof: "unit test: inbox draft alone rides the openweight affinity path"
+      proof: "unit test: only synthesis.inbox_draft declares provider openweight"
     - claim: "the routed trial cannot begin until a runtime-enforced, ledger-visible cash reservation rejects an exhausted daily allowance before an Azure call"
       proof: "unit test: openweight daily cap refuses the inbox draft spawn before transport"
   falsifier: |
