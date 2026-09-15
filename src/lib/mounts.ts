@@ -153,6 +153,8 @@ export interface Mounts {
   architect: Mount;
   /** The Layer-2 flight-judge mount (W1-T21) — strictly above every worker below. */
   judge: Mount;
+  /** OPTIONAL (W1-T3614) — the escalation judge's own mount, so that zero-tool lane can carry a `provider`; absent = {@link resolveRiskJudgeMount}'s cell. NOT `judge`, which G-17 binds. */
+  escalation_judge?: Mount;
   synthesis: Record<SynthesisRole, Mount>; // the three synthesis rungs' OWN mounts (W1-T2559) — never the Architect's; REQUIRED
   /** Worker routing: task_type → risk band → class (W1-T167) → mount. Every
    *  risk band carries at least a {@link DEFAULT_TASK_CLASS} row. */
@@ -477,6 +479,8 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   const capabilities = raw.capabilities === undefined ? undefined : parseCapabilities(raw.capabilities, tiers, efforts);
   const architect = parseMount(raw.architect, "architect", tiers, efforts);
   const judge = parseMount(raw.judge, "judge", tiers, efforts);
+  const escalationJudge =
+    raw.escalation_judge === undefined ? undefined : parseMount(raw.escalation_judge, "escalation_judge", tiers, efforts);
 
   // W1-T2559: synthesis rungs — each REQUIRED, validated like architect/judge, never a fallback.
   if (!isObject(raw.synthesis)) throw new MountsError(`'synthesis' must be a mapping of role → mount (${SYNTHESIS_ROLES.join(", ")}).`);
@@ -501,7 +505,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, synthesis, routes };
+  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), synthesis, routes };
   enforceTierInvariant(mounts, opts.thinkingDefault);
   return mounts;
 }

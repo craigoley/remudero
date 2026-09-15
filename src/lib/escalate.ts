@@ -615,6 +615,9 @@ export function buildEscalationJudgeSpawnArgs(opts: {
     effort: opts.mount.effort,
     maxTurns: opts.mount.maxTurns,
     tools: ESCALATION_JUDGE_TOOLS,
+    // W1-T3614: mount affinity, the same field every other routed spawn passes. Undefined leaves
+    // the capacity auction untouched, so an unrouted table behaves exactly as it always did.
+    ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
   };
 }
 
@@ -640,7 +643,10 @@ export function realEscalationJudge(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): (e: Escalation) => Promise<EscalationJudgeVerdict> {
-  const mount = resolveRiskJudgeMount(opts.mounts);
+  // W1-T3614: the table's OWN escalation-judge row wins when present, so this lane can carry a
+  // `provider` without moving the workers `resolveRiskJudgeMount` scans. Absent, behaviour is
+  // byte-identical to before: the cheapest routed cell.
+  const mount = opts.mounts.escalation_judge ?? resolveRiskJudgeMount(opts.mounts);
   return async (e: Escalation) => {
     const result = await spawnEscalationJudgeWorker({
       escalation: e,
