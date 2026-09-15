@@ -1448,3 +1448,31 @@ test("a request larger than every context window refuses before it reserves", ()
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the openweight reservation still bounds input by byte length", () => {
+  // W1-T3619. THE ROUTER'S TOKEN ESTIMATE MUST NOT LEAK INTO THE RESERVATION. They answer different
+  // questions: `openWeightEstimatedTokens` decides which deployment can HOLD a request and is
+  // allowed to be approximate, while `openWeightReservationUsd` decides what the request may COST
+  // and must never under-reserve. Dividing the reservation by the same ratio would silently reopen
+  // the cap hole reserveOpenWeightBudget exists to close.
+  //
+  // Asserted as ARITHMETIC against the published rate, not by grepping the comment that explains
+  // it: a comment cannot fail, and "this bound is unchanged" is exactly the claim a grep cannot
+  // evidence, because the text it looks for is present before and after.
+  const bytes = 400_000;
+  const price = OPENWEIGHT_PRICES["gpt-5-nano"]!;
+  const expected = (bytes * price.inputUsdPerMillion + OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
+  assert.equal(openWeightReservationUsd("gpt-5-nano", bytes), expected, "the reservation must price input by BYTES");
+
+  // And the discriminating half: the estimate is meaningfully smaller than the byte count, so the
+  // equality above could not hold by accident if the two were wired together.
+  const estimated = openWeightEstimatedTokens(bytes);
+  assert.ok(estimated < bytes / 2, `the token estimate (${estimated}) must be far below the byte count (${bytes})`);
+  const ifEstimateLeaked =
+    (estimated * price.inputUsdPerMillion + OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
+  assert.notEqual(
+    openWeightReservationUsd("gpt-5-nano", bytes),
+    ifEstimateLeaked,
+    "the reservation must NOT be computed from the router's token estimate",
+  );
+});
