@@ -23,6 +23,7 @@ import {
   readLedgerLines,
   readLedgerTail,
   type BoardDeps,
+  type DeriveDeps,
   type LedgerTailCache,
   type StatusProjection,
   type PrRef,
@@ -148,6 +149,12 @@ interface BoardComputeOptions {
   lastGoodPrQueueAt?: string;
   /** A cache-key read handed into the projection so one snapshot uses one immutable open index. */
   prQueueIndex?: PrQueueIndexRead;
+  /** {@link DeriveDeps.reuseProjection}, threaded through to `projectPlan`. Absent by default. */
+  reuseProjection?: DeriveDeps["reuseProjection"];
+  /** Hands back the projection map this snapshot was built from, so a caller memoizing per task
+   *  stores CLEAN projections rather than the {@link BoardRow}s below, which carry pass-scoped
+   *  joins (`lastActivityAt`, `liveSpendUsd`) that must be re-derived each pass, never carried. */
+  captureProjections?: (byId: ReadonlyMap<string, StatusProjection>) => void;
 }
 
 interface PrQueueIndexRead {
@@ -382,8 +389,14 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
     prQueueIndex.open === undefined
       ? deps.github
       : { ...deps.github, listOpenHeadBranches: () => prQueueIndex.open ?? null };
-  const effectiveDeps: BoardDeps = { ...deps, github: snapshotGithub, readLedger: () => lines };
+  const effectiveDeps: BoardDeps = {
+    ...deps,
+    github: snapshotGithub,
+    readLedger: () => lines,
+    ...(options.reuseProjection ? { reuseProjection: options.reuseProjection } : {}),
+  };
   const byId = projectPlan(deps.plan, effectiveDeps);
+  options.captureProjections?.(byId);
   const lastActivity = lastActivityByTask(lines);
   const tasks: BoardRow[] = [...byId.values()].map((p) => {
     // A task-less escalation's own row (W1-T283) owns no plan Task to join title/risk from.
@@ -598,6 +611,131 @@ export interface DecisionFingerprint {
   readonly count: number;
 }
 
+/**
+ * THE SAME FOLD, SPLIT BY TASK — the input to a per-task projection memo.
+ *
+ * {@link DecisionFingerprint} answers "did ANYTHING change", which is the right question for a
+ * whole-snapshot memo and the wrong one for a per-task memo: on a live daemon it says yes every
+ * 1.5s, so a board keyed on it re-derives all 1,792 tasks to reflect a change in one (MEASURED
+ * 2026-09-15 — docs/forensics/board.md#the-board-re-derived-1792-tasks-to-reflect-a-change-in-one).
+ * This fold answers "did THIS task change".
+ *
+ * A ROW NAMING NO TASK INVALIDATES EVERY TASK. That is the fail-safe direction and not merely
+ * prudence: this module cannot know which projections an unattributable row bears on, and the
+ * cost of guessing wrong is a board showing a stale answer confidently. {@link globalHash}
+ * therefore rides in every per-task key, so such a row degrades this to exactly today's
+ * all-or-nothing behaviour rather than to a quiet miss.
+ */
+export interface TaskFingerprints {
+  /** Rows folded so far — the read cursor, same shape as {@link DecisionFingerprint}. */
+  readonly foldedUpTo: number;
+  /** The first row's identity, so a rotation restarts the fold rather than continuing it. */
+  readonly head: string | undefined;
+  /** taskId -> that task's own running hash. */
+  readonly byTask: ReadonlyMap<string, number>;
+  /** The fold of every row naming no task, and how many there were. */
+  readonly globalHash: number;
+  readonly globalCount: number;
+}
+
+export const EMPTY_TASK_FINGERPRINTS: TaskFingerprints = {
+  foldedUpTo: 0,
+  head: undefined,
+  byTask: new Map(),
+  globalHash: 0x811c9dc5,
+  globalCount: 0,
+};
+
+/** The task a row is about, by the two field names the ledger actually uses. */
+export function ledgerTaskOf(row: Record<string, unknown>): string | undefined {
+  const id = row.task_id ?? row.task;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+/** FNV-1a, the same mixing {@link foldDecisionFingerprint} uses, over one row identity. */
+function foldInto(hash: number, id: string): number {
+  let h = hash;
+  for (let c = 0; c < id.length; c += 1) {
+    h ^= id.charCodeAt(c);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/** Fold `rows` into `prior`, walking only what is new — the same incremental contract, and the
+ *  same rotation restart, as {@link foldDecisionFingerprint}. */
+export function foldTaskFingerprints(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  prior: TaskFingerprints,
+): TaskFingerprints {
+  const head = rows.length > 0 ? rowIdentity(rows[0]!) : undefined;
+  const rotated = rows.length < prior.foldedUpTo || (prior.foldedUpTo > 0 && head !== prior.head);
+  const from = rotated ? 0 : prior.foldedUpTo;
+  const byTask = new Map<string, number>(rotated ? [] : prior.byTask);
+  let globalHash = rotated ? EMPTY_TASK_FINGERPRINTS.globalHash : prior.globalHash;
+  let globalCount = rotated ? 0 : prior.globalCount;
+  for (let i = from; i < rows.length; i += 1) {
+    const row = rows[i]!;
+    if (!isDecisionRelevantRow(row)) continue;
+    const id = rowIdentity(row);
+    const taskId = ledgerTaskOf(row);
+    if (taskId === undefined) {
+      globalHash = foldInto(globalHash, id);
+      globalCount += 1;
+      continue;
+    }
+    byTask.set(taskId, foldInto(byTask.get(taskId) ?? EMPTY_TASK_FINGERPRINTS.globalHash, id));
+  }
+  return { foldedUpTo: rows.length, head, byTask, globalHash, globalCount };
+}
+
+/**
+ * One task's memo stamp: every unattributable row, plus this task's own rows. An identical stamp
+ * means the projection cannot have moved.
+ *
+ * NUMBERS, NOT A STRING, AND THE GATEWAY HALF DELIBERATELY ABSENT. The obvious shape is one
+ * string key per task carrying the gateway fingerprint too — and it costs more than the work it
+ * saves: `prQueueIndexFingerprint` serialises every open PR INCLUDING ITS BODY, so that key runs
+ * to kilobytes, and building it twice per task over a 1,792-task plan spent 110ms a pass doing
+ * nothing but concatenating the same prefix (MEASURED 2026-09-15). The gateway half is shared by
+ * every task by construction, so it is compared ONCE per pass — see the cache's own
+ * `heldGatewayKey` — and what remains per task is three integer comparisons.
+ */
+export interface TaskProjectionStamp {
+  readonly globalCount: number;
+  readonly globalHash: number;
+  readonly taskHash: number;
+}
+
+export function taskProjectionStamp(fp: TaskFingerprints, taskId: string): TaskProjectionStamp {
+  return { globalCount: fp.globalCount, globalHash: fp.globalHash, taskHash: fp.byTask.get(taskId) ?? 0 };
+}
+
+export function sameTaskProjectionStamp(a: TaskProjectionStamp, b: TaskProjectionStamp): boolean {
+  return a.globalCount === b.globalCount && a.globalHash === b.globalHash && a.taskHash === b.taskHash;
+}
+
+/**
+ * THE ONE PROJECTION A STAMP CANNOT SPEAK FOR: an in-flight run, which moves with the CLOCK and
+ * not with the ledger.
+ *
+ * A stamp says "no row about this task arrived since I was made". For a settled task that is the
+ * whole story. For a running one it is not: `deriveStatus` recomputes `elapsedMs` from `now()`
+ * every derivation ({@link StatusProjection.elapsedMs} — "re-derived fresh, never cached"), and
+ * its liveness test —
+ * `now() - Date.parse(runState.lastActivityTs) <= DEFAULT_LIVENESS_BOUND_MS` — flips a task out
+ * of "running" after 30 quiet minutes WITHOUT any new ledger line to change the stamp. Reusing
+ * such a projection would pin a dead run "running" forever and freeze its elapsed clock: exactly
+ * the silently-stale board this memo must not create.
+ *
+ * So anything in flight is re-derived every pass, unconditionally. It costs almost nothing —
+ * MEASURED 2026-09-15, the live ledger touched 1 distinct task in a 3s window and 17 in 20
+ * minutes — and it is the difference between a memo that is fast and one that is also honest.
+ */
+export function projectionAgesWithTheClock(projection: StatusProjection): boolean {
+  return projection.phase !== undefined || projection.elapsedMs !== undefined;
+}
+
 export const EMPTY_DECISION_FINGERPRINT: DecisionFingerprint = { foldedUpTo: 0, head: undefined, hash: 0x811c9dc5, count: 0 };
 
 /** A row's cheap identity for folding: its step and timestamp, not the whole row — re-serialising
@@ -643,13 +781,21 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
   // Folded across requests (W1-T2919), so a cache hit costs one pass over the lines appended
   // since the last one, never a re-walk of the whole ledger.
   let fingerprint: DecisionFingerprint = EMPTY_DECISION_FINGERPRINT;
+  // The per-task half of the same fold, plus what each task's projection was when its key last
+  // held. See {@link TaskFingerprints} for why this exists and what keeps it honest.
+  let taskFingerprints: TaskFingerprints = EMPTY_TASK_FINGERPRINTS;
+  // Compared ONCE per pass, not once per task: every task shares it. A change here means every
+  // projection may have moved, so the memo is dropped whole.
+  let heldGatewayKey: string | undefined;
+  const projectionByTask = new Map<string, { stamp: TaskProjectionStamp; projection: StatusProjection }>();
   // One persistent tail cursor for this route's whole lifetime, never reconstructed per request —
   // otherwise a cache hit would still pay a full ledger re-read just to compute the line count.
   const tail = createLedgerTailCache();
   return {
     get(deps: BoardDeps): BoardSnapshot {
       const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
-      fingerprint = foldDecisionFingerprint(readLedger(deps.ledgerPath), fingerprint);
+      const lines = readLedger(deps.ledgerPath);
+      fingerprint = foldDecisionFingerprint(lines, fingerprint);
       const key = decisionKey(fingerprint);
       // The queue's live identity can change before sweep appends anything. Read the batched
       // open half once for the cache key, then hand this same capture to the recompute below.
@@ -664,8 +810,38 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
         cached.ghTruncated === ghTruncated &&
         cached.prQueueIndexKey === prQueueIndexKey
       ) return cached.snapshot;
+      // ── THE INCREMENTAL PASS ─────────────────────────────────────────────────────────────
+      // Everything GitHub-visible about this pass, shared by every task's key: an index change, a
+      // gateway that started or stopped failing, or a truncated read each re-derive the whole
+      // plan, exactly as they do today.
+      const gatewayKey = prQueueIndexKey + "|" + ghFailed + "|" + ghTruncated;
+      taskFingerprints = foldTaskFingerprints(lines, taskFingerprints);
+      if (heldGatewayKey !== gatewayKey) {
+        // An index change, or a gateway that started or stopped failing, can move ANY task's
+        // projection — so nothing is reused this pass. Identical to today's behaviour.
+        projectionByTask.clear();
+        heldGatewayKey = gatewayKey;
+      }
+      const fp = taskFingerprints;
       // Hand computeBoardSnapshot this same already-resolved reader — one read, not two.
-      const snapshot = computeBoardSnapshot({ ...deps, readLedger }, { lastGoodPrQueueAt, prQueueIndex });
+      const snapshot = computeBoardSnapshot(
+        { ...deps, readLedger },
+        {
+          lastGoodPrQueueAt,
+          prQueueIndex,
+          reuseProjection: (task: Task) => {
+            const held = projectionByTask.get(task.id);
+            if (!held || projectionAgesWithTheClock(held.projection)) return undefined;
+            return sameTaskProjectionStamp(held.stamp, taskProjectionStamp(fp, task.id)) ? held.projection : undefined;
+          },
+          captureProjections: (byId) => {
+            // Rebuilt, not merged, so a task that left the plan leaves the memo with it rather
+            // than accumulating forever.
+            projectionByTask.clear();
+            for (const [taskId, projection] of byId) projectionByTask.set(taskId, { stamp: taskProjectionStamp(fp, taskId), projection });
+          },
+        },
+      );
       if (snapshot.prQueue.complete) lastGoodPrQueueAt = snapshot.generated_at;
       cached = { decisionKey: key, ghFailed, ghTruncated, prQueueIndexKey, snapshot };
       return snapshot;
