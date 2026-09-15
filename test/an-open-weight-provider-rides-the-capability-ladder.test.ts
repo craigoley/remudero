@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { ConfigValidationError, validateConfig, type Config } from "../src/lib/config.js";
-import { loadMounts, MountsError, TierInvariantError, validateMounts } from "../src/lib/mounts.js";
+import { loadMounts, mountsPath, MountsError, TierInvariantError, validateMounts } from "../src/lib/mounts.js";
 import {
   ProviderRoutingPolicyError,
   writeProviderRoutingPolicyOverride,
@@ -34,7 +34,7 @@ import {
   spawnOpenWeightWorker,
   type OpenWeightAllowanceState,
 } from "../src/lib/worker-provider.js";
-import { inboxDraftPrompt } from "../src/lib/inbox.js";
+import { inboxDraftPrompt, INBOX_DRAFT_DISALLOWED_TOOLS } from "../src/lib/inbox.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { buildInboxDraftSpawnArgs, draftProposalBatch } from "../src/run-task.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
@@ -254,6 +254,132 @@ test("the inbox-draft spawn derives its provider affinity from the synthesis mou
   assert.equal(args.mountProvider, "codex", "the provider comes from the mounted row, not capacity policy");
   assert.deepEqual(args.disallowedTools, ["Write", "Edit", "NotebookEdit", "Bash"]);
   assert.deepEqual(args.tools, ["Read", "Grep", "Glob"]);
+});
+
+// ── W1-T3569: route synthesis.inbox_draft to openweight after a hard cash cap ──────────────────
+// The 964-line generic wiring above proves affinity works with a SYNTHETIC mount table
+// (`validMounts()`). These two tests instead read the REAL `.remudero/mounts.yaml` this repo
+// ships, proving the two acceptance claims this task exists for: exactly one row is routed, and
+// that row cannot spend past an exhausted daily allowance.
+
+test("only synthesis.inbox_draft declares provider openweight, after its Read/Grep/Glob surface is re-proven to be adapter-supported", async () => {
+  const mountsTable = loadMounts(mountsPath(REPO_ROOT));
+  const inboxDraftMount = mountsTable.synthesis.inbox_draft;
+  assert.equal(inboxDraftMount.provider, "openweight", "the one row this task routes");
+  assert.equal(mountsTable.synthesis.triage.provider, undefined, "triage stays off this lane: its declared WebSearch is not adapter-eligible");
+  assert.equal(mountsTable.synthesis.retro.provider, undefined, "retro's output is acted on directly, never machine-linted");
+  for (const [type, byRisk] of Object.entries(mountsTable.routes)) {
+    for (const [risk, byClass] of Object.entries(byRisk)) {
+      for (const [cls, mount] of Object.entries(byClass)) {
+        assert.notEqual(mount.provider, "openweight", `routes.${type}.${risk}.${cls} must not ride the trial lane`);
+      }
+    }
+  }
+
+  const config: Config = {
+    claudeBin: "/unused/claude",
+    root: "/tmp/rmd-mount-affinity-inbox-real",
+    dailyCapUsd: 1,
+    workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+  };
+  const args = buildInboxDraftSpawnArgs({
+    cwd: "/tmp/rmd-mount-affinity-inbox-real/worktree",
+    settingsFile: SETTINGS_FILE,
+    prompt: "draft this task",
+    mount: inboxDraftMount,
+    config,
+    disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+  });
+  assert.equal(args.mountProvider, "openweight");
+  assert.deepEqual(args.tools, ["Read", "Grep", "Glob"], "the exact declared surface this row is eligible on");
+
+  // Re-prove the surface against the REAL adapter (not just the mount table): declaring
+  // Read/Grep/Glob must not throw the "does not implement declared tool(s)" refusal the adapter
+  // raises for triage's WebSearch (see the "undeclared tool" test above).
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-inbox-surface-"));
+  try {
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: args.prompt,
+        tools: args.tools,
+        maxTurns: 2,
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async () => new Response(JSON.stringify({ choices: [{ message: { content: "PROPOSED" } }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      },
+      config,
+      { model: "gpt-oss-120b", effort: "low" },
+    );
+    assert.equal(result.isError, false);
+    assert.equal(result.text, "PROPOSED");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("openweight daily cap refuses the inbox draft spawn before transport", async () => {
+  const mountsTable = loadMounts(mountsPath(REPO_ROOT));
+  const inboxDraftMount = mountsTable.synthesis.inbox_draft;
+  assert.equal(inboxDraftMount.provider, "openweight", "this test must exercise the real routed row, not a synthetic one");
+
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-inbox-cap-"));
+  try {
+    // A cap smaller than ONE conservative reservation: the inbox draft's very first request must
+    // be refused, and no request may leave the process.
+    const config: Config = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: 0.000_001,
+      workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+    };
+    const args = buildInboxDraftSpawnArgs({
+      cwd: root,
+      settingsFile: SETTINGS_FILE,
+      prompt: "draft this proposal",
+      mount: inboxDraftMount,
+      config,
+      disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+    });
+
+    let fetchCalls = 0;
+    // W1-T3597 priced every deployment by its OWN row, keyed by deployment id — never by the
+    // mount's Claude-facing `model`/`effort` fields directly. The real production path
+    // (`spawnWorker`, src/lib/worker.ts) resolves `args.model`/`args.effort` through
+    // `selectOpenWeightModel` before it ever reaches `spawnOpenWeightWorker`; this test must
+    // resolve the SAME way rather than hand the mount's raw "sonnet" through as if it were a
+    // priced Azure deployment id, or the reservation throws `OpenWeightUnpricedDeploymentError`
+    // instead of exercising the daily-cap refusal this test is actually proving.
+    const selection = selectOpenWeightModel(undefined, args.model as string, args.effort as string);
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: args.prompt,
+        tools: args.tools,
+        maxTurns: args.maxTurns,
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        clock: fixedClock(Date.parse("2026-09-15T12:00:00Z")),
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          throw new Error("the inbox draft's own exhausted allowance must refuse before the adapter transport is invoked");
+        },
+      },
+      config,
+      { model: selection.model, effort: selection.effort },
+    );
+
+    assert.equal(fetchCalls, 0, "no paid request left the process for the routed inbox-draft lane");
+    assert.equal(result.isError, true);
+    assert.equal(result.budgetRefused, true, "a refusal is distinguishable from a transport failure");
+    assert.equal(result.budgetReservedUsd, 0, "a refused request commits nothing");
+    assert.match(result.stderr, /openweight daily allowance exhausted/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("draftProposalBatch reaches the mount-derived inbox args through an offline worktree and never starts a real worker", async () => {
@@ -616,7 +742,9 @@ test("openweight configuration requires a daily cash cap and keeps its key outsi
     assert.throws(() => validateConfig(uncapped), ConfigValidationError);
     assert.doesNotThrow(() => validateConfig({ ...uncapped, dailyCapUsd: 1 }));
     assert.doesNotMatch(JSON.stringify(uncapped), /api.?key|secret/i, "configuration contains an endpoint, never a credential");
-    assert.doesNotMatch(readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8"), /provider:\s*openweight/, "the adapter is wired but no lane is routed in Phase 2");
+    // W1-T3569 routed exactly one lane onto this adapter — see "only synthesis.inbox_draft
+    // declares provider openweight" below for the one-row invariant this file's own mounts.yaml
+    // now has to hold, now that Phase 2 is live for this single measured lane.
 
     const result = await spawnWorker({
       cwd: REPO_ROOT,
