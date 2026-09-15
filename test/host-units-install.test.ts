@@ -7,12 +7,13 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   writeFileSync,
   mkdirSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { decideDeployTrigger } from "../src/lib/deployer.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
@@ -862,10 +863,14 @@ test("W1-T3583: advance failure preserves healthy daemon path", () => {
 
 /** Makes a real, throwaway git repo at `dir` that is BOTH on a detached HEAD and dirty -- the two
  *  conditions journalctl attributed 436 of the 464 refusals to, reproduced directly rather than
- *  via `controlFixture` since this tree must never be read by the guard under test. */
+ *  via `controlFixture` since this tree must never be read by the guard under test. Built via the
+ *  shared `gitRepo()` fixture (never a raw `git init` call site here) and relocated to the exact
+ *  `dir` the test needs -- `test/fixture-copy-census.test.ts` tracks raw init sites across
+ *  `test/*.test.ts` precisely so a new one migrates through the shared helper instead. */
 function unfitDaemonTree(dir: string): void {
-  mkdirSync(dir, { recursive: true });
-  execFileSync("git", ["init", "--quiet", dir]);
+  const repo = gitRepo({ seedCommit: false, kind: "unfit-daemon-tree" });
+  mkdirSync(dirname(dir), { recursive: true });
+  renameSync(repo.dir, dir);
   writeFileSync(join(dir, "seed.txt"), "seed\n");
   git(dir, ["add", "."]);
   git(dir, ["commit", "--quiet", "-m", "seed"]);
