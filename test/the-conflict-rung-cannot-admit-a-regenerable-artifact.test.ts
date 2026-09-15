@@ -150,3 +150,34 @@ test("acceptance 5 (contrast) — the explicit policy switch still refuses valid
   );
   assert.match(cause, /admission is disabled/);
 });
+
+// ── the fall-through arm: admitted evidence, enabled policy, no redundant-refix decline ──────
+//
+// Every other call site returns at one of the THREE earlier disjuncts -- absent evidence, the
+// policy switch, or a redundant-refix decline -- so before this pair nothing reached the final
+// return at all, and neither of its two arms had a falsifier. The pair below is what makes the
+// registry half of the refusal text load-bearing: one arm must NAME the undeclared path, the
+// other must not, and each asserts the other's text is absent so a single constant string
+// cannot satisfy both.
+
+test("a refusal that reaches the registry check names the path the registry declares no generator for", () => {
+  const cause = conflictRefusalCause(
+    [{ path: HAND_WRITTEN_PATH, oursDeleted: 1, theirsDeleted: 1 }],
+    { mergeConflictAdmissionEnabled: true },
+  );
+  assert.equal(cause, `conflict repair was not admitted for ${HAND_WRITTEN_PATH}`);
+  // It reached the FINAL return, not one of the three earlier disjuncts.
+  assert.doesNotMatch(cause, /evidence was captured|admission is disabled|redundant re-fix/);
+});
+
+test("the same refusal names no path when every conflicting path has a declared generator", () => {
+  const cause = conflictRefusalCause(
+    [{ path: REGISTERED_PATH, oursDeleted: 1, theirsDeleted: 1 }],
+    { mergeConflictAdmissionEnabled: true },
+  );
+  assert.equal(cause, "conflict repair was not admitted");
+  // The discriminator: the registered path is NOT named, so the arm above is genuinely reached
+  // by the undeclared case alone rather than by a constant that happens to contain a path.
+  assert.doesNotMatch(cause, new RegExp(REGISTERED_PATH.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.ok(REGENERABLE_ARTIFACT_GENERATORS[REGISTERED_PATH], "the fixture path must really be registered");
+});
