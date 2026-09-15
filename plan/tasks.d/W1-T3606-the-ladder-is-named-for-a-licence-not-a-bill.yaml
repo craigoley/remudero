@@ -43,6 +43,14 @@
     statement of what qualifies a deployment for this ladder must land beside the block, so the
     next gpt-5-nano question is answered by a written rule instead of by a name.
   rationale: |
+    THE FOUR DUPLICATE-SURFACE ADVISORIES ARE RULED, NOT IGNORED. This record declares a superset
+    of W1-T3547, W1-T3567, W1-T3569 and W1-T3575 because the rename crosses every file the
+    open-weight arc built. Three of those four cannot collide: W1-T3567 shipped in #5544 and
+    W1-T3575 in #5599, so neither is dispatch-eligible, and W1-T3547 (the triage WebSearch bridge)
+    is deliberately deferred until the routed lane has a measured verdict. The ONE live overlap is
+    W1-T3569, and `depends_on: [W1-T3569]` orders it -- this task cannot dispatch until that route
+    has merged. Narrowing `files:` would hide the overlap rather than rule on it.
+
     Cheap capacity only gets used if the routing table says plainly what it is for. A misnamed
     category silently narrows the candidate set to models that satisfy the NAME rather than the
     billing property the fleet actually cares about, which is the opposite of the subscription
