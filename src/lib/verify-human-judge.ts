@@ -260,6 +260,7 @@ export function buildVerifyHumanJudgeSpawnArgs(opts: {
     effort: opts.mount.effort,
     maxTurns: opts.mount.maxTurns,
     tools: VERIFY_HUMAN_JUDGE_TOOLS,
+    ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
   };
 }
 
@@ -287,7 +288,7 @@ export function realVerifyHumanJudge(opts: {
   settingsFile: string;
   spawn?: typeof spawnWorker;
 }): (shard: ShardUnderJudgement) => Promise<VerifyHumanVerdict> {
-  const mount = resolveRiskJudgeMount(opts.mounts);
+  const mount = opts.mounts.verify_human_judge ?? resolveRiskJudgeMount(opts.mounts);
   return async (shard: ShardUnderJudgement) => {
     const result = await spawnVerifyHumanJudgeWorker({
       shard, mount, cwd: opts.cwd, settingsFile: opts.settingsFile, spawn: opts.spawn,
