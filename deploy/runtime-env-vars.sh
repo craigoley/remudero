@@ -30,7 +30,7 @@
 # test/recycle-container.test.ts asserts all three copies of the list — this one and each script's
 # fallback — never disagree, so the fallback cannot go stale unnoticed either.
 #
-# ORDER IS NOT SIGNIFICANT — this is read as a set.
+# ORDER IS NOT SIGNIFICANT — read as a set, and NAMES ONLY: a comment inside the array is read as a run of variable names (W1-T3603).
 RMD_DAEMON_RUNTIME_ENV_VARS=(
   GH_TOKEN
   RMD_RESTART_THROTTLE_S
@@ -41,6 +41,7 @@ RMD_DAEMON_RUNTIME_ENV_VARS=(
   RMD_GIT_AUTHOR_NAME
   RMD_GIT_AUTHOR_EMAIL
   NODE_OPTIONS
+  RMD_OPENWEIGHT_API_KEY
 )
 
 # W1-T1222: the console's own runtime names, read by `resolveServeHosts` in src/lib/serve.ts, NOT
