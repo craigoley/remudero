@@ -1,13 +1,22 @@
 /**
  * W1-T3598 — THE BOUNDED TRIAL SHOULD RIDE THE CHEAPER, MORE COMPLIANT DEPLOYMENT.
+ * W1-T3614 — AND "CHEAPER" IS PER TASK, NOT PER TOKEN, SO THE TWO ROWS DIVERGE.
  *
- * gpt-5-nano is cheaper than gpt-oss-120b on both token axes and is Azure-OpenAI-family, so it
- * rides the route the adapter already builds. These fixtures pin PRICE and ROUTING only: whether
- * its OUTPUT is better is W1-T3570's measured trial to decide, not this suite's.
+ * gpt-5-nano is cheaper than gpt-oss-120b on both token axes, which is why W1-T3598 led every row
+ * with it. Measured per TASK on 2026-09-15 that holds only where the prompt is large, because nano
+ * spends ~5x the completion tokens on reasoning:
  *
- * The fallback assertions matter as much as the leading ones. gpt-oss-120b trails rather than being
- * deleted, so a deployment that stops answering degrades the lane instead of killing it — and a
- * test that only checked the leading entry would pass identically if the fallback had been dropped.
+ *     lane                input    gpt-oss out   nano out   cheaper
+ *     inbox_draft       259,181        452         2,207     nano,    2.83x
+ *     escalation judge      446        177           993     gpt-oss, 2.40x
+ *
+ * So `balanced` (large-context lanes) still leads with nano and `economy` (short-prompt, high-volume
+ * lanes such as the zero-tool judges) now leads with gpt-oss. Whether either model's OUTPUT is
+ * better remains W1-T3570's measured trial to decide, not this suite's.
+ *
+ * The fallback assertions matter as much as the leading ones: each row keeps BOTH deployments, so a
+ * deployment that stops answering degrades the lane instead of killing it — and a test that only
+ * checked the leading entry would pass identically if the fallback had been dropped.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -41,20 +50,30 @@ function ladder(): Record<string, Record<string, string[]>> {
   return rows;
 }
 
-test("the openweight ladder leads with gpt-5-nano and keeps gpt-oss reachable", () => {
+test("the openweight ladder leads each row with the deployment measured cheaper for its prompt shape", () => {
   const rows = ladder();
+
+  // W1-T3614: the LEAD differs by capability because the winner differs by input:output ratio.
+  // economy = short-prompt, high-volume (the zero-tool judges); balanced = large-context lanes.
+  const leadFor = { economy: OSS, balanced: NANO } as const;
 
   for (const capability of ["economy", "balanced"] as const) {
     for (const effort of ["low", "medium", "high"] as const) {
       const row = rows[capability]?.[effort];
+      const lead = leadFor[capability];
+      const trail = lead === NANO ? OSS : NANO;
       assert.ok(Array.isArray(row), `${capability}.${effort} must be an ordered candidate list`);
-      assert.equal(row[0], NANO, `${capability}.${effort} must LEAD with the cheaper deployment`);
-      // THE FALLBACK ARM. Without this, deleting gpt-oss-120b from these rows would pass — and that
-      // is the regression that turns a bad deployment day into a dead lane rather than a degraded one.
-      assert.ok(row.includes(OSS), `${capability}.${effort} must keep ${OSS} reachable as a fallback`);
-      assert.ok(row.indexOf(NANO) < row.indexOf(OSS), "the cheaper deployment must be preferred, not merely present");
+      assert.equal(row[0], lead, `${capability}.${effort} must LEAD with the deployment measured cheaper for its prompt shape`);
+      // THE FALLBACK ARM. Without this, deleting the trailing deployment would pass — and that is
+      // the regression that turns a bad deployment day into a dead lane rather than a degraded one.
+      assert.ok(row.includes(trail), `${capability}.${effort} must keep ${trail} reachable as a fallback`);
+      assert.ok(row.indexOf(lead) < row.indexOf(trail), "the measured-cheaper deployment must be preferred, not merely present");
     }
   }
+
+  // AND THE TWO ROWS MUST GENUINELY DIVERGE, or this test would pass on a table that had collapsed
+  // back to one lead everywhere — the exact regression the measurement above argues against.
+  assert.notEqual(rows.economy?.low?.[0], rows.balanced?.low?.[0], "economy and balanced must not share a lead");
 
   // FRONTIER IS DELIBERATELY UNCHANGED: a nano-class model is not a frontier substitute. Asserting
   // this is what stops the ladder collapsing back into one deployment for every tier.
@@ -66,7 +85,7 @@ test("the openweight ladder leads with gpt-5-nano and keeps gpt-oss reachable", 
   // And the real resolver agrees with the file, so this is about what the fleet SELECTS rather than
   // about YAML that nothing reads.
   const capabilities = { openweight: rows } as never;
-  assert.equal(openWeightCandidatesForCapability(capabilities, "economy", "low")[0], NANO);
+  assert.equal(openWeightCandidatesForCapability(capabilities, "economy", "low")[0], OSS);
   assert.equal(openWeightCandidatesForCapability(capabilities, "balanced", "high")[0], NANO);
   assert.deepEqual(openWeightCandidatesForCapability(capabilities, "frontier", "medium"), [OSS]);
 });
@@ -164,7 +183,10 @@ test("the code fallback and the mounts ladder name one leading deployment", () =
 
   // The divergence this guards is DIRECTIONAL: if they disagreed, the tableless checkout would route
   // the DEARER deployment while the configured fleet routed the cheaper, and nothing would say so.
-  assert.equal(openWeightCandidatesForCapability(undefined, "economy", "low")[0], NANO);
-  assert.ok(openWeightCandidatesForCapability(undefined, "economy", "low").includes(OSS), "the fallback keeps gpt-oss reachable too");
+  // W1-T3614: economy's lead is gpt-oss (short prompts), balanced's is nano (large context). Both
+  // are pinned here so a tableless checkout cannot quietly adopt a single lead for every capability.
+  assert.equal(openWeightCandidatesForCapability(undefined, "economy", "low")[0], OSS);
+  assert.ok(openWeightCandidatesForCapability(undefined, "economy", "low").includes(NANO), "the fallback keeps gpt-5-nano reachable too");
+  assert.equal(openWeightCandidatesForCapability(undefined, "balanced", "high")[0], NANO);
   assert.deepEqual(openWeightCandidatesForCapability(undefined, "frontier", "high"), [OSS]);
 });
