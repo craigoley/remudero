@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,10 +16,19 @@ import {
 import { LiveSpawnBlockedError } from "../src/lib/spawn-guard.js";
 import { spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "../src/lib/worker.js";
 import {
+  OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS,
+  OPENWEIGHT_ALLOWANCE_FILENAME,
   OPENWEIGHT_MAX_COMPLETION_TOKENS,
   OPENWEIGHT_OUTPUT_CONTRACT,
+  OpenWeightAllowanceExhaustedError,
+  openWeightCommittedUsd,
+  openWeightReservationUsd,
+  openWeightUsageUsd,
+  openWeightUtcDay,
+  reserveOpenWeightBudget,
   selectOpenWeightModel,
   spawnOpenWeightWorker,
+  type OpenWeightAllowanceState,
 } from "../src/lib/worker-provider.js";
 import { inboxDraftPrompt } from "../src/lib/inbox.js";
 import { fixedClock } from "../src/lib/clock.js";
@@ -287,9 +297,16 @@ function openWeightResult(): WorkerResult {
 test("the capability ladder resolves an open-weight provider by table lookup", () => {
   const capabilities = loadMounts(join(REPO_ROOT, ".remudero", "mounts.yaml")).capabilities;
   const selected = selectOpenWeightModel(capabilities, "sonnet", "low");
-  assert.deepEqual(capabilities?.openweight?.balanced.low, ["gpt-oss-120b"], "the declared openweight row, not fallback data, is the capability source");
+  // W1-T3598 led this row with gpt-5-nano and DEMOTED gpt-oss-120b rather than removing it. Both
+  // halves are asserted: the order (cheaper first) and the fallback's continued presence, so a
+  // later edit that deletes the trailing entry fails here rather than silently killing the lane.
+  assert.deepEqual(
+    capabilities?.openweight?.balanced.low,
+    ["gpt-5-nano", "gpt-oss-120b"],
+    "the declared openweight row, not fallback data, is the capability source",
+  );
   assert.equal(selected.capability, "balanced");
-  assert.equal(selected.model, "gpt-oss-120b");
+  assert.equal(selected.model, "gpt-5-nano", "the ladder's LEADING candidate is what resolves");
   assert.equal(selected.effort, "low");
 
   const renamed = selectOpenWeightModel({
@@ -522,13 +539,14 @@ test("openweight configuration requires a daily cash cap and keeps its key outsi
       config: { ...uncapped, dailyCapUsd: 1 },
       providerRouting: {
         spawnOpenWeight: async (_args, _config, selection) => {
-          assert.equal(selection.model, "gpt-oss-120b");
+          // Resolves through the ladder, which W1-T3598 leads with the cheaper deployment.
+          assert.equal(selection.model, "gpt-5-nano");
           return openWeightResult();
         },
       },
     });
     assert.equal(result.provider, "openweight");
-    assert.equal(result.routedModel, "gpt-oss-120b");
+    assert.equal(result.routedModel, "gpt-5-nano");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -538,4 +556,429 @@ test("inbox draft prompts require double-quoted proof values", () => {
   const prompt = inboxDraftPrompt({ id: "proposal:proof", summary: "quote proof values" } as never, "tasks: []\n", "OPENWEIGHT-PROOF");
   assert.match(prompt, /proof: "grep: symbol in src\/file\.ts"/);
   assert.match(prompt, /MUST be double-quoted/);
+});
+
+// ── W1-T3575: dailyCapUsd as a RUNTIME hard cash cap ────────────────────────────────────────────
+// Configuration validation already refuses an enabled openweight provider with no `dailyCapUsd`.
+// These three fixtures cover the half that validation cannot reach: that an exhausted allowance
+// stops a PAID request from being sent, that the committed state survives a restart and cannot be
+// spent twice, and that what reaches the ledger is attributable money and not a credential.
+
+function allowanceConfig(root: string, dailyCapUsd: number): Config {
+  return {
+    claudeBin: "/unused/claude",
+    root,
+    dailyCapUsd,
+    workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+  } as Config;
+}
+
+function readAllowance(root: string): OpenWeightAllowanceState {
+  return JSON.parse(readFileSync(join(root, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "utf8")) as OpenWeightAllowanceState;
+}
+
+test("openweight daily cap refuses before transport when the allowance is exhausted", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-cap-"));
+  try {
+    // A cap smaller than ONE conservative reservation: the very first request must be refused.
+    const config = allowanceConfig(root, 0.000_001);
+    let fetchCalls = 0;
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: "classify",
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        clock: fixedClock(Date.parse("2026-09-15T12:00:00Z")),
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          throw new Error("the transport must never be reached once the allowance is exhausted");
+        },
+      },
+      config,
+      { model: "gpt-oss-120b", effort: "low" },
+    );
+
+    // THE LOAD-BEARING ASSERTION: no paid request left the process.
+    assert.equal(fetchCalls, 0, "an exhausted allowance must refuse BEFORE the adapter transport is invoked");
+    assert.equal(result.isError, true);
+    assert.equal(result.budgetRefused, true, "a refusal is distinguishable from a transport failure");
+    assert.equal(result.budgetReservedUsd, 0, "a refused request commits nothing");
+    assert.match(result.stderr, /openweight daily allowance exhausted/);
+    assert.match(result.stderr, /2026-09-15/, "the refusal names the UTC day whose allowance ran out");
+
+    // DISCRIMINATION: the same call under a cap that can afford it does reach the transport, so the
+    // assertion above is about the CAP and not about some unrelated refusal earlier in the adapter.
+    const affordable = mkdtempSync(join(tmpdir(), "rmd-openweight-cap-ok-"));
+    try {
+      let okCalls = 0;
+      await spawnOpenWeightWorker(
+        {
+          cwd: affordable,
+          workerHome: join(affordable, "worker-home"),
+          prompt: "classify",
+          env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+          clock: fixedClock(Date.parse("2026-09-15T12:00:00Z")),
+          fetchImpl: async () => {
+            okCalls += 1;
+            return new Response(
+              JSON.stringify({ id: "ok", usage: { prompt_tokens: 10, completion_tokens: 5 }, choices: [{ message: { content: "DONE" } }] }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          },
+        },
+        allowanceConfig(affordable, 5),
+        { model: "gpt-oss-120b", effort: "low" },
+      );
+      assert.equal(okCalls, 1, "the very same request is sent when the day's allowance can afford it");
+    } finally {
+      rmSync(affordable, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("openweight daily reservation remains charged across restart and cannot be spent twice", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-restart-"));
+  try {
+    const atIso = "2026-09-15T08:00:00.000Z";
+    const atMs = Date.parse(atIso);
+    const config = allowanceConfig(root, 5);
+
+    // A FAILED response stays charged. The request was sent and Azure may well have billed it, so
+    // the reservation must NOT be handed back just because the reply was unusable.
+    const failed = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: "classify",
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        clock: fixedClock(atMs),
+        fetchImpl: async () => new Response("upstream exploded", { status: 500 }),
+      },
+      config,
+      { model: "gpt-oss-120b", effort: "low" },
+    );
+    assert.equal(failed.isError, true);
+    assert.equal(failed.budgetRefused, false, "a 500 is a spend that failed, not a refusal to spend");
+    const afterFailure = readAllowance(root);
+    const chargedAfterFailure = openWeightCommittedUsd(afterFailure);
+    assert.ok(chargedAfterFailure > 0, "a failed response leaves its conservative reservation committed");
+    assert.equal(
+      Object.values(afterFailure.reservations).every((row) => row.settledUsd === null),
+      true,
+      "nothing settles a request whose receipt was never readable",
+    );
+
+    // RESTART: a brand-new process reads the SAME committed file. This is real cross-process
+    // evidence, not a same-process cache — the child has its own module state and its own heap.
+    const probe = join(root, "probe.mjs");
+    writeFileSync(
+      probe,
+      [
+        `import { reserveOpenWeightBudget, openWeightCommittedUsd } from ${JSON.stringify(join(REPO_ROOT, "src", "lib", "worker-provider.ts"))};`,
+        `import { readFileSync } from "node:fs";`,
+        `const config = ${JSON.stringify(allowanceConfig(root, 5))};`,
+        `reserveOpenWeightBudget(config, { requestId: "child-request", deployment: "gpt-oss-120b", requestBodyBytes: 1024, atIso: ${JSON.stringify(atIso)} });`,
+        `process.stdout.write(String(openWeightCommittedUsd(JSON.parse(readFileSync(${JSON.stringify(join(root, "state", OPENWEIGHT_ALLOWANCE_FILENAME))}, "utf8")))));`,
+      ].join("\n"),
+      "utf8",
+    );
+    const childTotal = Number(execFileSync(process.execPath, ["--import", "tsx", probe], { encoding: "utf8" }));
+    assert.ok(
+      childTotal > chargedAfterFailure,
+      "a restarted process observes the committed reservation and adds to it rather than starting from zero",
+    );
+    assert.equal(openWeightCommittedUsd(readAllowance(root)), childTotal, "the parent reads back exactly what the child committed");
+
+    // CANNOT OVERSUBSCRIBE. Drain a small cap and assert the committed total never crosses it, and
+    // that the refusals begin exactly when the next conservative reservation would not fit.
+    const drainRoot = mkdtempSync(join(tmpdir(), "rmd-openweight-drain-"));
+    try {
+      const capUsd = 0.02;
+      const drainConfig = allowanceConfig(drainRoot, capUsd);
+      const bodyBytes = 4096;
+      const perRequest = openWeightReservationUsd("gpt-oss-120b", bodyBytes);
+      let granted = 0;
+      let refused = 0;
+      for (let i = 0; i < 40; i++) {
+        try {
+          reserveOpenWeightBudget(drainConfig, { requestId: `drain-${i}`, deployment: "gpt-oss-120b", requestBodyBytes: bodyBytes, atIso });
+          granted += 1;
+        } catch (error) {
+          assert.ok(error instanceof OpenWeightAllowanceExhaustedError);
+          refused += 1;
+        }
+      }
+      assert.equal(granted, Math.floor(capUsd / perRequest), "exactly the number of requests the cap can afford are granted");
+      assert.ok(refused > 0, "the remaining requests are refused rather than silently granted");
+      const committed = openWeightCommittedUsd(readAllowance(drainRoot));
+      assert.ok(committed <= capUsd, `committed $${committed} must never exceed the $${capUsd} cap`);
+      assert.equal(Object.keys(readAllowance(drainRoot).reservations).length, granted, "a refused request commits no row");
+    } finally {
+      rmSync(drainRoot, { recursive: true, force: true });
+    }
+
+    // A LOST UPDATE IS THE FAILURE THIS GUARDS, and it must be provoked deterministically. A
+    // sequential drain cannot tell an atomic compare-and-swap from a plain read-then-write: each
+    // iteration reads what the previous one already committed, so no window exists. Spawning real
+    // peer processes does not reliably help either — MEASURED: eight of them serialise behind their
+    // own interpreter startup and never overlap, so that shape passes with the CAS removed. The
+    // `beforeCommit` seam runs a peer's ENTIRE reservation inside this attempt's read-to-rename
+    // window, which is the same idiom `reclaimStaleLock`'s `beforeDelete` uses for its own race.
+    const raceRoot = mkdtempSync(join(tmpdir(), "rmd-openweight-race-"));
+    try {
+      const bodyBytes = 4096;
+      const perRequest = openWeightReservationUsd("gpt-oss-120b", bodyBytes);
+      const capUsd = perRequest * 2; // the day affords EXACTLY two requests
+      const raceConfig = allowanceConfig(raceRoot, capUsd);
+      let granted = 0;
+      const attempt = (requestId: string, beforeCommit?: () => void) => {
+        try {
+          reserveOpenWeightBudget(raceConfig, { requestId, deployment: "gpt-oss-120b", requestBodyBytes: bodyBytes, atIso, beforeCommit });
+          granted += 1;
+        } catch (error) {
+          assert.ok(error instanceof OpenWeightAllowanceExhaustedError);
+        }
+      };
+
+      attempt("first");
+      // "second" reads the file, then the peer commits the LAST affordable slot inside its window.
+      attempt("second", () => attempt("peer-inside-the-window"));
+
+      // THE FALSIFIER'S TARGET. With the compare-and-swap intact, "second" finds the file changed,
+      // withdraws, retries against the peer's committed state and is correctly refused: two grants
+      // for a two-request cap. With a non-atomic read-modify-write it overwrites the peer's row and
+      // three requests are authorised against an allowance that affords two.
+      assert.ok(
+        granted * perRequest <= capUsd,
+        `${granted} reservations were granted against a cap affording ${Math.floor(capUsd / perRequest)} — the allowance is oversubscribed`,
+      );
+      assert.equal(granted, 2, "exactly the two requests the cap affords are granted");
+      const raced = readAllowance(raceRoot);
+      assert.equal(Object.keys(raced.reservations).length, granted, "every granted reservation is committed, and none is overwritten by a peer");
+      assert.ok(openWeightCommittedUsd(raced) <= capUsd);
+    } finally {
+      rmSync(raceRoot, { recursive: true, force: true });
+    }
+
+    // A CORRUPT ALLOWANCE FILE FAILS CLOSED. "Start fresh" would hand the whole day's cap back, so
+    // a damaged file must refuse to spend rather than silently uncap. An ABSENT file is different
+    // and legitimately means nothing has been spent yet — the two must not be conflated.
+    const corruptRoot = mkdtempSync(join(tmpdir(), "rmd-openweight-corrupt-"));
+    try {
+      const corruptConfig = allowanceConfig(corruptRoot, 5);
+      // Absent file: spends normally.
+      assert.ok(reserveOpenWeightBudget(corruptConfig, { requestId: "before", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso }).reservedUsd > 0);
+      mkdirSync(join(corruptRoot, "state"), { recursive: true });
+      writeFileSync(join(corruptRoot, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "{ truncated", "utf8");
+      assert.throws(
+        () => reserveOpenWeightBudget(corruptConfig, { requestId: "after", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso }),
+        /unreadable|no readable utcDay/,
+        "a damaged allowance file refuses to spend rather than resetting the day's committed total to zero",
+      );
+      // And a well-formed file missing its fields is refused for the same reason.
+      writeFileSync(join(corruptRoot, "state", OPENWEIGHT_ALLOWANCE_FILENAME), JSON.stringify({ nothing: true }), "utf8");
+      assert.throws(() => reserveOpenWeightBudget(corruptConfig, { requestId: "after2", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso }), /no readable utcDay/);
+    } finally {
+      rmSync(corruptRoot, { recursive: true, force: true });
+    }
+
+    // A NEW UTC DAY starts a fresh allowance rather than inheriting yesterday's committed spend.
+    const nextDay = reserveOpenWeightBudget(config, {
+      requestId: "tomorrow",
+      deployment: "gpt-oss-120b",
+      requestBodyBytes: 1024,
+      atIso: "2026-09-16T00:00:00.000Z",
+    });
+    assert.equal(readAllowance(root).utcDay, "2026-09-16");
+    assert.equal(nextDay.committedUsd, nextDay.reservedUsd, "yesterday's spend does not consume today's cap");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("openweight daily cap ledger fields expose settled cost without a credential", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-settle-"));
+  const SECRET = "test-only-daemon-secret-value";
+  try {
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: "a prompt that must not reach the allowance file",
+        env: { RMD_OPENWEIGHT_API_KEY: SECRET },
+        clock: fixedClock(Date.parse("2026-09-15T09:00:00Z")),
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({ id: "settled", usage: { prompt_tokens: 1_000, completion_tokens: 200 }, choices: [{ message: { content: "DRAFTED" } }] }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      },
+      allowanceConfig(root, 5),
+      { model: "gpt-oss-120b", effort: "low" },
+    );
+
+    assert.equal(result.isError, false);
+    assert.equal(result.budgetRefused, false);
+    // ATTRIBUTABLE COST: the reservation was conservative, the settlement is the real receipt, and
+    // settling moved the committed figure DOWN rather than up.
+    const expectedSettled = (1_000 * 0.15 + 200 * 0.6) / 1_000_000;
+    assert.equal(result.budgetSettledUsd, expectedSettled);
+    assert.equal(result.costUsd, expectedSettled, "the ledger's cost and the settled allowance agree");
+    assert.ok(result.budgetReservedUsd > result.budgetSettledUsd, "the pre-request reservation is conservative and settles downward");
+    const state = readAllowance(root);
+    assert.equal(openWeightCommittedUsd(state), expectedSettled, "the committed allowance is the settled figure once a receipt is read");
+
+    // NO CREDENTIAL AND NO PROMPT anywhere in what is persisted or returned.
+    const persisted = readFileSync(join(root, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "utf8");
+    assert.doesNotMatch(persisted, /test-only-daemon-secret/, "the allowance file never records the Azure key");
+    assert.doesNotMatch(persisted, /must not reach the allowance file/, "the allowance file never records a prompt");
+    assert.doesNotMatch(JSON.stringify(result), /test-only-daemon-secret/, "no result field carries the Azure key");
+    assert.deepEqual(result.childEnvKeys, []);
+
+    // THE FIELDS MUST REACH A WORKER ROW, not just the adapter's own return value: the ledger reads
+    // `WorkerResult`, so a field that survives only inside worker-provider.ts is unledgerable.
+    const routedRoot = mkdtempSync(join(tmpdir(), "rmd-openweight-routed-"));
+    try {
+      const routed: WorkerResult = await spawnWorker({
+        cwd: REPO_ROOT,
+        permissionMode: "bypassPermissions",
+        settingsFile: SETTINGS_FILE,
+        prompt: "drafted through the router",
+        mountProvider: "openweight",
+        config: allowanceConfig(routedRoot, 5),
+        providerRouting: {
+          spawnOpenWeight: async (spawnArgs, spawnConfig, selection) =>
+            spawnOpenWeightWorker(
+              {
+                ...spawnArgs,
+                env: { RMD_OPENWEIGHT_API_KEY: SECRET },
+                clock: fixedClock(Date.parse("2026-09-15T09:00:00Z")),
+                fetchImpl: async () =>
+                  new Response(
+                    JSON.stringify({ id: "routed", usage: { prompt_tokens: 1_000, completion_tokens: 200 }, choices: [{ message: { content: "DRAFTED" } }] }),
+                    { status: 200, headers: { "content-type": "application/json" } },
+                  ),
+              },
+              spawnConfig,
+              selection,
+            ),
+        },
+      });
+      // Priced against the deployment the ROUTER actually chose, not a hardcoded one: this fixture
+      // is about settlement surviving onto the worker row, and pinning a deployment here would make
+      // it fail every time the ladder's leading candidate changes — which is a routing decision,
+      // not a settlement regression. W1-T3598 moved that candidate and this is why it still holds.
+      assert.ok(routed.routedModel, "the routed worker row names the deployment it billed against");
+      assert.equal(
+        routed.budgetSettledUsd,
+        openWeightUsageUsd(routed.routedModel, 1_000, 200),
+        "the settled cash figure survives the router onto the worker row, at the routed deployment's own rate",
+      );
+      assert.ok((routed.budgetReservedUsd ?? 0) > (routed.budgetSettledUsd ?? 0));
+      assert.equal(routed.budgetRefused, false);
+      assert.doesNotMatch(JSON.stringify(routed), /test-only-daemon-secret/, "the routed worker row carries no credential");
+    } finally {
+      rmSync(routedRoot, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T3575: the three fail-closed guards, each exercised ───────────────────────────────────────
+// Every one of these is a REFUSAL. An untested refusal is the "unreachable default" this repo's
+// coverage doctrine names: it reads as protection while never having run, and the first time it
+// fires is in production against real money.
+
+test("openweight daily cap refuses a clock reading it cannot derive a UTC day from", () => {
+  // The allowance is keyed by CALENDAR day, so a reading that is not an ISO-8601 instant cannot be
+  // bucketed at all. Guessing a day would silently charge the wrong one — or reset a day's spend.
+  assert.equal(openWeightUtcDay("2026-09-15T08:00:00.000Z"), "2026-09-15");
+  assert.equal(openWeightUtcDay("2026-09-15"), "2026-09-15", "a bare ISO date is still a readable day");
+
+  for (const bad of ["", "not-an-iso", "15/09/2026", "2026-9-5T08:00:00Z", String(Date.now())]) {
+    assert.throws(
+      () => openWeightUtcDay(bad),
+      /needs an ISO-8601 instant/,
+      `${JSON.stringify(bad)} must be refused rather than bucketed into some day`,
+    );
+  }
+});
+
+test("openweight daily cap refuses to spend when no dailyCapUsd is configured at runtime", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-nocap-"));
+  try {
+    // validateConfig already refuses this pairing at LOAD. This is the runtime half of the same
+    // rule: reached by any path that did not go through that validation, an absent cap must mean
+    // "do not spend", never "spend without a bound".
+    for (const capUsd of [undefined, null]) {
+      const config = {
+        claudeBin: "/unused/claude",
+        root,
+        dailyCapUsd: capUsd,
+        workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+      } as unknown as Config;
+      assert.throws(
+        () => reserveOpenWeightBudget(config, { requestId: "no-cap", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }),
+        /requires a dailyCapUsd before any paid request/,
+        `dailyCapUsd: ${String(capUsd)} must refuse, not default to unlimited`,
+      );
+    }
+    // DISCRIMINATION: the identical call with a cap present commits normally, so the refusal is
+    // about the missing cap and not about anything else in the reservation path.
+    const capped = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: 5,
+      workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+    } as Config;
+    assert.ok(reserveOpenWeightBudget(capped, { requestId: "capped", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }).reservedUsd > 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("openweight daily cap refuses rather than spending when compare-and-swap contention never clears", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-contention-"));
+  try {
+    const config = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: 5,
+      workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+    } as Config;
+    const atIso = "2026-09-15T08:00:00.000Z";
+
+    // A peer that commits inside EVERY attempt's read-to-rename window, so the compare-and-swap
+    // loses every time. This is the pathological case the retry bound exists for: the alternative
+    // to giving up is spinning forever while a paid request waits behind it.
+    let peer = 0;
+    assert.throws(
+      () =>
+        reserveOpenWeightBudget(config, {
+          requestId: "never-wins",
+          deployment: "gpt-oss-120b",
+          requestBodyBytes: 512,
+          atIso,
+          beforeCommit: () => {
+            peer += 1;
+            reserveOpenWeightBudget(config, { requestId: `peer-${peer}`, deployment: "gpt-oss-120b", requestBodyBytes: 16, atIso });
+          },
+        }),
+      /allowance contention: \d+ compare-and-swap attempts lost/,
+      "unbounded contention must REFUSE, never fall through and spend",
+    );
+    assert.equal(peer, OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS, "the bound is what stops the loop, and it is the declared one");
+
+    // THE REFUSED RESERVATION COMMITTED NOTHING — the peers' rows are all that landed. A refusal
+    // that left its own row behind would charge the day for a request that was never sent.
+    const state = JSON.parse(readFileSync(join(root, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "utf8")) as OpenWeightAllowanceState;
+    assert.equal("never-wins" in state.reservations, false, "a refused reservation commits no row");
+    assert.equal(Object.keys(state.reservations).length, peer, "exactly the peers' rows are committed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

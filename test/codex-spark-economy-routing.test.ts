@@ -81,16 +81,27 @@ test("an absent, unsupported, or below-reserve Spark is bypassed for eligible Lu
 });
 
 test("Spark stays in economy and every non-economy candidate row remains unchanged", () => {
+  // gpt-5.5 is being decommissioned (2026-09-14), so it is a TRAILING fallback in every row and
+  // leads none. `frontier.low` no longer names it alone: a single-candidate row whose only model
+  // stops being offered makes Codex read `readable:false`, which silently migrates that lane onto
+  // Claude rather than failing loudly. Spark's economy containment below is unchanged.
   assert.deepEqual(CAPABILITIES.codex.balanced, {
     low: ["gpt-5.4"],
-    medium: ["gpt-5.6-terra", "gpt-5.5", "gpt-5.4"],
-    high: ["gpt-5.5", "gpt-5.6-terra", "gpt-5.4"],
+    medium: ["gpt-5.6-terra", "gpt-5.4", "gpt-5.5"],
+    high: ["gpt-5.6-terra", "gpt-5.4", "gpt-5.5"],
   });
   assert.deepEqual(CAPABILITIES.codex.frontier, {
-    low: ["gpt-5.5"],
+    low: ["gpt-5.6-sol", "gpt-5.5"],
     medium: ["gpt-5.6-sol", "gpt-5.5"],
     high: ["gpt-5.6-sol", "gpt-5.5"],
   });
+  // A decommissioning model must never LEAD a row, and no row may be single-candidate.
+  for (const rows of [CAPABILITIES.codex.balanced, CAPABILITIES.codex.frontier]) {
+    for (const [effort, models] of Object.entries(rows)) {
+      assert.notEqual(models[0], "gpt-5.5", `gpt-5.5 must not lead ${effort}`);
+      if (models.includes("gpt-5.5")) assert.ok(models.length > 1, `${effort} needs a non-5.5 candidate`);
+    }
+  }
   for (const rows of [CAPABILITIES.codex.balanced, CAPABILITIES.codex.frontier]) {
     for (const models of Object.values(rows)) assert.ok(!models.includes("gpt-5.3-codex-spark"));
   }

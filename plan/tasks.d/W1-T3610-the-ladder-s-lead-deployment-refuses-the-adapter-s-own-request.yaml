@@ -1,0 +1,83 @@
+- id: W1-T3610
+  title: "THE LADDER'S LEAD DEPLOYMENT REFUSES THE ADAPTER'S OWN REQUEST — gpt-5-nano 400s on the hardcoded temperature 0, and selectOpenWeightModel has no fallback, so the first candidate failing means the lane fails"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 5.00
+  files:
+    - src/lib/worker-provider.ts
+    - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
+  origin: "operator-session#openweight-trial-2026-09-15"
+  plan_refs: ["W1-T3598", "W1-T3569", "W1-T3597", "W1-T3546"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED against the live Foundry account 2026-09-15, after W1-T3598 (#5610) merged and put
+    `gpt-5-nano` FIRST in every openweight ladder row.
+
+    `spawnOpenWeightWorker` hardcodes `temperature: 0` in its request body. Probed with the
+    adapter's own URL, api-version and body shape:
+
+        POST .../openai/deployments/gpt-5-nano/chat/completions?api-version=2024-10-21
+        {"temperature":0, ...}
+          -> HTTP 400 "Unsupported value: 'temperature' does not support 0 with this model.
+                       Only the default (1) value is supported."
+
+        same request against gpt-oss-120b -> HTTP 200
+
+    AND THERE IS NO FALLBACK. `selectOpenWeightModel` returns
+    `candidates.find(SAFE_OPENWEIGHT_MODEL_ID.test)` -- the first SYNTACTICALLY valid id. It never
+    asks whether that deployment exists, never asks whether it will accept the request, and never
+    tries the second candidate. So the ladder's lead entry failing is not a degradation to the
+    next one; it is the whole lane failing.
+
+    THE LANE THIS BREAKS IS THE ONE THE WHOLE ARC EXISTS FOR: W1-T3569 routes
+    `synthesis.inbox_draft` here -- 1,436 runs, 45% of metered spend. Repeated spawn failures are
+    also the shape that trips a per-task circuit breaker, so the outcome is not "falls back to
+    Claude", it is "the task stops being dispatched".
+
+    A SECOND, ALREADY-CLOSED HALF: gpt-5-nano had no deployment on the account at all when
+    W1-T3598 merged -- only gpt-oss-120b existed. An operator deployed it (GlobalStandard, 200
+    units) on 2026-09-15 and it now answers 200 through the adapter's exact URL. That half needed
+    no code; this half does.
+
+    NOT A REVERT OF W1-T3598. gpt-5-nano is cheaper than gpt-oss-120b on both axes and its price
+    row is already correct. The defect is that the adapter's request shape is a single hardcoded
+    constant while the deployments it may select do not agree on one.
+  rationale: |
+    `OPENWEIGHT_PRICES` already established the right shape for this class: one ROW PER
+    DEPLOYMENT, and a refusal rather than a guess when a deployment has no row
+    (`OpenWeightUnpricedDeploymentError`). Request shape is the same kind of fact as price -- it
+    varies per deployment, it cannot be inferred from the model name, and getting it wrong spends
+    or wastes real money. It therefore belongs in the same per-deployment discipline, not in a
+    literal inside the request builder.
+  design: |
+    Declare the temperature per deployment in a table keyed exactly as `OPENWEIGHT_PRICES` is,
+    with an explicit "omit the field" state distinct from "send 0" -- a deployment that accepts
+    only its default must have NO `temperature` key in the body, not `temperature: 1`, so the
+    adapter never asserts a value it has not measured. A deployment absent from the table must
+    REFUSE before transport, exactly as an unpriced one does; silently defaulting to 0 is what
+    produced this defect.
+
+    TABLE LOOKUP, NEVER A SUBSTRING OR PREFIX MATCH on the model id (W1-T2573) -- `gpt-5-nano` and
+    `gpt-5.4-nano` are different deployments with no guarantee of shared behaviour.
+
+    DO NOT "fix" this by reordering the ladder or by adding a fallback that retries the next
+    candidate on a 400: reordering hides the defect behind a lucky order, and a blind retry spends
+    a second request to discover a fact the table can state. A fallback across candidates is a
+    separate, larger question and is explicitly out of scope here.
+  acceptance:
+    - claim: "a deployment that refuses a non-default temperature receives a request body carrying no temperature field at all"
+      proof: "unit test: a deployment that refuses a non-default temperature gets no temperature field"
+    - claim: "every priced openweight deployment declares its request temperature, so adding one without declaring it reddens rather than 400s in production"
+      proof: "unit test: every priced openweight deployment declares a request temperature"
+  falsifier: |
+    Restore the hardcoded `temperature: 0` and the first test must fail with gpt-5-nano's body
+    carrying the field. Delete one deployment's row from the temperature table and the census test
+    must fail; if it still passes, it is not reading the price table's keys and proves nothing.
+    Send `temperature: 1` instead of omitting the field and the first test must still fail -- the
+    claim is absence, not a different value.

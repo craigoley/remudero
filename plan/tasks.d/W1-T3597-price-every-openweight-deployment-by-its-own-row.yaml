@@ -1,0 +1,85 @@
+- id: W1-T3597
+  title: "ONE PRICE PAIR SERVES EVERY OPENWEIGHT DEPLOYMENT — `OPENWEIGHT_INPUT_USD_PER_MILLION`/`OPENWEIGHT_OUTPUT_USD_PER_MILLION` are two module constants read by the ledger's cost, the cap's reservation and its settlement, so a second deployment mis-prices all three and a DEARER one under-reserves, defeating the hard cap"
+  repo: remudero
+  depends_on: [W1-T3575]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 6.00
+  files: [src/lib/worker-provider.ts, test/a-second-openweight-deployment-is-priced-by-its-own-row.test.ts]
+  origin: "operator-session#openweight-model-economics-2026-09-15"
+  plan_refs: ["W1-T3546", "W1-T3575", "W1-T3569"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED at origin/main 2bd54f6a. `OPENWEIGHT_INPUT_USD_PER_MILLION = 0.15` and
+    `OPENWEIGHT_OUTPUT_USD_PER_MILLION = 0.6` are module-level constants in
+    src/lib/worker-provider.ts with THREE consumers: `openWeightResult`'s `costUsd`, and — once
+    W1-T3575 lands — `openWeightReservationUsd` and the per-turn settlement. All three hardcode
+    gpt-oss-120b's published price.
+
+    `openWeightCandidatesForCapability` already reads `capabilities.openweight[tier][effort]` from
+    mounts, and that table's own comment says model additions are "a mounts-data edit". So the
+    ROUTING layer is already multi-model while the PRICING layer is single-model. Adding any second
+    deployment silently mis-prices the ledger.
+
+    THE ASYMMETRY IS WHAT MAKES THIS A PREREQUISITE RATHER THAN A TIDY-UP. A cheaper second model
+    over-reserves: wasteful, safe. A DEARER one under-reserves, and an under-reservation is exactly
+    the hole W1-T3575 exists to close — the cap would admit requests it cannot afford and the
+    day's true spend would exceed `dailyCapUsd`. So no second deployment may be added before the
+    price becomes a property of the deployment.
+  design: |
+    (i) A PRICE TABLE KEYED BY DEPLOYMENT ID, versioned the way the existing constants are, with
+    each row carrying its published input/output dollars-per-million and the date it was read. The
+    two existing constants become the gpt-oss-120b row rather than a parallel source of truth.
+
+    (ii) EVERY CONSUMER RESOLVES BY THE SELECTED MODEL, not by a module default. `openWeightResult`,
+    the reservation and the settlement all take the deployment they are pricing. A caller that
+    cannot name one is a bug, not a default.
+
+    (iii) AN UNPRICED DEPLOYMENT FAILS CLOSED. A model present in the mounts ladder but absent from
+    the price table must REFUSE before the transport, with its own message, rather than fall back to
+    any other row's price. An unknown price is unknown spend, and the cap already refuses unknown
+    spend (W1-T3575's unreadable-allowance arm) — this is the same rule one step earlier.
+
+    (iv) OUT OF SCOPE: adding any model, the mounts ladder's contents, the endpoint shape, and
+    `dailyCapUsd`'s value. This task only makes price a per-deployment fact.
+  acceptance:
+    - claim: "each openweight deployment is priced from its own table row, so two deployments with different published prices produce different reserved and settled figures for an identical request"
+      proof: "unit test: openweight price resolves from the deployment's own row"
+    - claim: "a deployment the mounts ladder can select but the price table does not price refuses before the transport rather than borrowing another row's price"
+      proof: "unit test: an unpriced openweight deployment refuses before transport"
+    - claim: "the gpt-oss-120b figures are unchanged by the refactor, so the existing ledger and cap behaviour is byte-identical for the only deployment in use today"
+      proof: "unit test: the gpt-oss-120b price row preserves today's figures"
+  falsifier: |
+    CLOSE WITHOUT IMPLEMENTATION IF THE PRICE IS ALREADY PER-DEPLOYMENT. Re-run before building:
+    `grep -n 'USD_PER_MILLION' src/lib/worker-provider.ts` must still show two module-level
+    constants with no deployment key.
+
+    AND THE PRICE TEST MUST DISCRIMINATE ON THE ROW, NOT ON THE ARITHMETIC. Drive two deployments
+    whose published prices DIFFER and assert the two results differ in the direction the rows
+    predict. A fixture that prices one model and asserts the number it just supplied is a
+    tautology — the vacuous-pass family this repo has shipped before.
+
+    AND THE UNPRICED ARM MUST BE ABLE TO FAIL. Drive a model id that the ladder yields but the table
+    omits, and assert NO fetch is attempted. An arm asserting only "an error was thrown" would pass
+    if the adapter refused it earlier for an unrelated reason.
+  note: |
+    FILED 2026-09-15 alongside W1-T3598, which depends on this one. Ids swept against three
+    surfaces before use: reservation refs (highest held W1-T3595, 1611 refs read as the positive
+    control), origin/main's shards (highest W1-T3596), and every open PR's title/body/head.
+    `rmd next-task-id` returned this id but DEGRADED — it could not enumerate open PRs in the
+    filing container — so that half was swept by hand rather than taken on its word.
+
+    WHY THIS IS SEPARATE FROM THE TASK THAT ADDS A MODEL. The two could be one change, and keeping
+    them apart is deliberate: this one must be judgeable on its own evidence, which is that
+    gpt-oss-120b's figures are unchanged and an unpriced deployment refuses. Folding a new
+    deployment in would let a reviewer read a passing suite as proof of both, when only the second
+    had been exercised. The prerequisite is also the half that carries the cap-integrity argument,
+    and that argument should not have to be re-litigated inside a model-choice discussion.
+
+    verify:auto. Every criterion is mechanical and drives the real adapter; the operator ruling
+    standing since 2026-09-08 is that a record is parked on a person only when a judge deems the
+    change risky, not on its author's caution.

@@ -1266,6 +1266,7 @@ import {
   ABSENT_REPUSH_CAP,
   DEFAULT_FIX_CLASSES,
   buildSweepEffects as buildSweepEffectsFromLib,
+  currentPlanIneligibilityReason,
   defaultSweepGhRun,
   dispatchFixCatchOutcome,
   escalationTaskIdFor,
@@ -28116,6 +28117,13 @@ export async function daemonCommand(
           mainHealthRung,
           boardSnapshotFor(target.owner, target.repo),
           reviewerCodeRecovery,
+          // W1-T3585 — the SAME `lastProj` snapshot `isOpenPr`/`isCreditIndeterminate` above already
+          // read, never a second GitHub walk: `refreshMerged()` runs once at the top of THIS tick
+          // (runDaemon's loop body, lib/daemon.ts) and this hook's own closure runs later in the
+          // same tick, so by the time it calls `buildOpenPrViews`, `lastProj` is already this tick's
+          // fresh dispatch projection.
+          (t: Task) => lastProj?.get(t.id)?.merged ?? false,
+          undefined,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -28130,6 +28138,11 @@ export async function daemonCommand(
           plan,
           log,
           reviewerCodeRecovery,
+          // W1-T3585 — the SAME accessor `sweep:` above threads, off the SAME `lastProj` tick
+          // snapshot: both daemon sweep paths must reconcile the identical current-plan
+          // eligibility predicate, never two independently-derived ones.
+          (t: Task) => lastProj?.get(t.id)?.merged ?? false,
+          undefined,
         ),
         // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
@@ -30627,6 +30640,12 @@ export function buildOpenPrViews(
      *  parameter, so without a seam no test can reach the unreadable-plan arm below — the checkout
      *  a test runs in always has a readable plan. Omitted, it is `loadPlan` on the real path. */
     readMainPlan?: (root: string) => Plan;
+    /** W1-T3585 — the SAME freshly-derived merged-task set daemon dispatch consults (the daemon's
+     *  own `refreshMerged()` projection, never a second GitHub walk this producer invents), threaded
+     *  through so {@link currentPlanIneligibilityReason} can resolve an unmet dependency exactly as
+     *  drain.ts's `isDispatchEligible` would. Omitted ⇒ `planResequenceIneligible` stays `undefined`
+     *  for every PR — fail closed, exactly today's behavior for every existing caller/fixture. */
+    isMerged?: MergedResolver;
   } = {},
 ): ClassifiedOpenPrView[] {
   const fetch = deps.fetch ?? ghJson;
@@ -30762,6 +30781,15 @@ export function buildOpenPrViews(
     // like an emitter-ledger-classified one already does — see resolveOpenPrTaskId's own doc.
     const taskId = resolveOpenPrTaskId(pr, planFiling.isPlanFiling);
     const taskRecord = taskId ? mainPlan?.byId.get(taskId) : undefined;
+    // W1-T3585 — fail-closed on EVERY input this needs: an exact trailer-owned `taskId` (above), a
+    // readable current plan that resolves it (`taskRecord`/`mainPlan`), AND a freshly-derived
+    // merged-task set (`deps.isMerged`). Any one absent leaves `planResequenceIneligible`
+    // `undefined` — never inferred from `taskId`/`headRefName` alone. See
+    // `currentPlanIneligibilityReason`'s own doc (lib/sweep.ts) for the reason it can return.
+    const planResequenceIneligible =
+      mainPlan && taskRecord && deps.isMerged
+        ? currentPlanIneligibilityReason(mainPlan, taskRecord, deps.isMerged)
+        : undefined;
     const fileObservation = planFilingFiles.get(pr.number);
     const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
     const reviewLedgerKey = taskId ?? `PR-${pr.number}`;
@@ -30851,6 +30879,7 @@ export function buildOpenPrViews(
       isPlanFiling: planFiling.isPlanFiling,
       planFilingSource: planFiling.source,
       taskRetirement: taskRecord?.retirement,
+      planResequenceIneligible,
       // W1-T923: a SIBLING read, off the SAME `review.posted` ledger line `unmetCriteria` above
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
@@ -33079,11 +33108,22 @@ export function buildSweepHook(
   // liveness even when a test injection or future implementation accidentally throws.
   mainHealthRung?: () => Promise<void>,
   snapshotCache?: BoardSnapshotCache,
-  // W1-T3581: optional only for non-daemon callers. The production daemon supplies immutable
-  // module-loaded provenance; a missing value deliberately leaves stale-source refusals under
-  // their existing pending ceiling.
-  reviewerCodeRecovery?: SweepDeps["reviewerCodeRecovery"],
+  // W1-T3581 and W1-T3585 independently appended optional positional seams here. Preserve both
+  // already-shipped call shapes: a recovery object first (then isMerged/readMainPlan), or the
+  // earlier isMerged/readMainPlan pair. The discriminator is structural and fail-closed: a merged
+  // resolver is a function, while reviewer provenance is an object.
+  reviewerCodeRecoveryOrIsMerged?: SweepDeps["reviewerCodeRecovery"] | MergedResolver,
+  isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
+  readMainPlan?: (root: string) => Plan,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<void> {
+  const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
+  const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
+  const isMerged = legacyResequenceShape
+    ? reviewerCodeRecoveryOrIsMerged
+    : (isMergedOrReadMainPlan as MergedResolver | undefined);
+  const resolvedReadMainPlan = legacyResequenceShape
+    ? (isMergedOrReadMainPlan as ((root: string) => Plan) | undefined)
+    : readMainPlan;
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
@@ -33135,6 +33175,8 @@ export function buildSweepHook(
         pacer,
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
+        isMerged,
+          readMainPlan: resolvedReadMainPlan,
       });
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
@@ -33430,8 +33472,20 @@ export function buildSweepLightHook(
   runId: string,
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  reviewerCodeRecovery?: SweepDeps["reviewerCodeRecovery"],
+  // Same compatibility adapter as buildSweepHook: recovery-first is the current daemon shape;
+  // isMerged/readMainPlan first remains valid for W1-T3585 callers already on the branch.
+  reviewerCodeRecoveryOrIsMerged?: SweepDeps["reviewerCodeRecovery"] | MergedResolver,
+  isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
+  readMainPlan?: (root: string) => Plan,
 ): () => Promise<void> {
+  const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
+  const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
+  const isMerged = legacyResequenceShape
+    ? reviewerCodeRecoveryOrIsMerged
+    : (isMergedOrReadMainPlan as MergedResolver | undefined);
+  const resolvedReadMainPlan = legacyResequenceShape
+    ? (isMergedOrReadMainPlan as ((root: string) => Plan) | undefined)
+    : readMainPlan;
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   return async () => {
@@ -33439,6 +33493,8 @@ export function buildSweepLightHook(
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
         planFilingFileCache,
         onPlanFilingClassification: reportPlanFilingClassification,
+        isMerged,
+        readMainPlan: resolvedReadMainPlan,
       });
       const effects = buildSweepEffects({
         owner: owner,
@@ -33726,6 +33782,11 @@ export async function fixCommand(
     // UNKNOWN, leaving every disposition it feeds untouched.
     taskMergedBy: undefined,
     taskRetirement: undefined,
+    // W1-T3585 — same reasoning as `taskMergedBy` directly above: `currentPlanIneligibilityReason`
+    // needs a freshly-derived merged-task set this single-PR, operator-invoked bootstrap has no
+    // board-wide projection to supply. `undefined` is the field's own defined "not proven
+    // ineligible" state, so every disposition it feeds stays exactly what it was before this task.
+    planResequenceIneligible: undefined,
     planFilingSource: undefined,
     lastActivityAt: raw.updatedAt,
     // W1-T1201: same age-clamp projection as buildOpenPrViews above — see RawOpenPr.createdAt's
