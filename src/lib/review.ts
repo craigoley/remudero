@@ -6036,6 +6036,15 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "`detectInstrumentEntanglement`, exemptions and carve-outs included, rather than re-deriving " +
     "them — so a diff touching it cannot change what any gate MEASURES. Same claim, same reason, as " +
     "scripts/rule15-precheck.mjs above.",
+  "scripts/run-branch-eligibility-check.mjs":
+    "VERIFIED NON-INSTRUMENT (W1-T3600) — an author-time precheck exposed as the " +
+    "`run-branch-eligibility-precheck` package.json script; no workflow `run:` step invokes it, and " +
+    "by construction none can: it refuses a push BEFORE it happens, which is upstream of every CI " +
+    "job. It RESTATES NO RULE: it imports the reviewer's own `currentPlanIneligibilityReason` " +
+    "(src/lib/sweep.ts) and `alreadyMergedCreditFromProjection` (src/lib/drain.ts) rather than " +
+    "re-deriving either, so a diff touching it cannot change what any gate MEASURES — the same " +
+    "claim, for the same reason, as scripts/rule25-precheck.mjs above. It also FAILS OPEN on an " +
+    "unreadable merged surface, so it cannot manufacture a refusal CI would not already reach.",
   "scripts/clock-shift.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/clock-sweep.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/flake-retry-aggregate.mjs":

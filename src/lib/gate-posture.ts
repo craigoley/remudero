@@ -474,6 +474,14 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "script:scripts/learnings-assert-check.mjs": repair(true, "learning assertion drift is a computable source/data repair"),
   "script:scripts/mkdtemp-callsite-check.mjs": repair(true, "mkdtemp callsites either move to the helper or declare an allowance"),
   "script:scripts/no-hand-rolled-fetch-check.mjs": repair(true, "raw fetch callsites move to the transport seam"),
+  // W1-T3600: refuses a run-branch push whose task has an unmet dependency. ROUTE, not REPAIR:
+  // the refusal names a PLANNING fact, and no edit to the diff clears it -- the author builds the
+  // dependency first or picks another task. complies=true because it fires BEFORE the build is
+  // spent, so the judgement it routes to is available immediately rather than parking finished work.
+  "script:scripts/run-branch-eligibility-check.mjs": route(
+    true,
+    "an unmet dependency is a planning fact, not a computable edit: build the dependency or pick another task",
+  ),
   "script:scripts/state-citation-check.mjs": repair(true, "state citations are repaired by anchoring or deleting stale citations"),
   "script:scripts/task-id-existence-check.mjs": repair(true, "task-id mismatches name the shard or id to repair"),
   "script:scripts/tracked-source-write-check.mjs": repair(true, "tracked source writes are moved behind reviewed writers"),
