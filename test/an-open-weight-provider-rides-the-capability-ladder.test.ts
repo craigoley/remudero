@@ -904,7 +904,7 @@ test("openweight daily cap refuses to spend when no dailyCapUsd is configured at
         workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
       } as unknown as Config;
       assert.throws(
-        () => reserveOpenWeightBudget(config, { requestId: "no-cap", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }),
+        () => reserveOpenWeightBudget(config, { requestId: "no-cap", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }),
         /requires a dailyCapUsd before any paid request/,
         `dailyCapUsd: ${String(capUsd)} must refuse, not default to unlimited`,
       );
@@ -917,7 +917,7 @@ test("openweight daily cap refuses to spend when no dailyCapUsd is configured at
       dailyCapUsd: 5,
       workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
     } as Config;
-    assert.ok(reserveOpenWeightBudget(capped, { requestId: "capped", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }).reservedUsd > 0);
+    assert.ok(reserveOpenWeightBudget(capped, { requestId: "capped", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }).reservedUsd > 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -942,11 +942,12 @@ test("openweight daily cap refuses rather than spending when compare-and-swap co
       () =>
         reserveOpenWeightBudget(config, {
           requestId: "never-wins",
+          deployment: "gpt-oss-120b",
           requestBodyBytes: 512,
           atIso,
           beforeCommit: () => {
             peer += 1;
-            reserveOpenWeightBudget(config, { requestId: `peer-${peer}`, requestBodyBytes: 16, atIso });
+            reserveOpenWeightBudget(config, { requestId: `peer-${peer}`, deployment: "gpt-oss-120b", requestBodyBytes: 16, atIso });
           },
         }),
       /allowance contention: \d+ compare-and-swap attempts lost/,
