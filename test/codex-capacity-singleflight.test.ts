@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   clearCodexCapacityCache,
   readCodexCapacity,
@@ -374,7 +376,13 @@ test("failure backoff is capped at ten seconds even when the success cache is lo
     }, () => { kills += 1; }) as never;
   };
   const cfg = config("/tmp/codex-singleflight-ten-second-cap", 60_000);
-  const deps = { now: () => now, timeoutMs: 5, capabilities: CAPABILITIES, spawn };
+  // timeoutMs is 200, not 5: the ten-second BACKOFF CAP under test is driven entirely by the
+  // injected `now` below, not by this value, so raising it changes no assertion. It exists only to
+  // bound each exchange's own abort, and at 5 the hedge (codexCapacityHedgeDelay(5) === 3ms) had a
+  // 2ms margin from that abort — inside real timer jitter under coverage instrumentation, so a late
+  // hedge timer could lose the race and drop a spawn the assertions below count (W1-T3599). 200
+  // clears the margin the property test below enforces (hedge 120ms, margin 80ms) with headroom.
+  const deps = { now: () => now, timeoutMs: 200, capabilities: CAPABILITIES, spawn };
 
   assert.equal((await readCodexCapacity(cfg, deps)).readable, false);
   now = 9_999;
@@ -560,4 +568,94 @@ test("RPC errors, process errors, exits, and pagination each tear down their app
     assert.match(result.detail ?? "", item.expected, item.name);
     assert.equal(kills, 1, `${item.name}: the child must be killed exactly once`);
   }
+});
+
+// @source-text-subject — the next test's SUBJECT genuinely IS this very suite's own text: it reads
+// every `timeoutMs` literal this file schedules a hedged app-server exchange with and asserts a
+// margin property about them, rather than exercising a runtime race (W1-T3599).
+
+// Duplicated from `codexCapacityHedgeDelay`/`CODEX_CAPACITY_HEDGE_DELAY_MS` in
+// src/lib/worker-provider.ts, which are not exported. Exporting them for reuse here would be a
+// larger, unbounded change to production code than this task's one concern (a fixture whose
+// timeout left too little margin for its own hedge) — see W1-T3599's design note (iv). If the
+// production formula ever changes, this duplicate drifts, and CAN ONLY drift towards this test
+// failing loud (a smaller computed margin), never towards silently passing a race it should catch.
+const CODEX_CAPACITY_HEDGE_DELAY_MS_DUPLICATE = 6_000;
+function codexCapacityHedgeDelayDuplicate(timeoutMs: number): number {
+  return Math.min(CODEX_CAPACITY_HEDGE_DELAY_MS_DUPLICATE, Math.max(1, Math.floor(timeoutMs * 0.6)));
+}
+
+// The margin every OTHER fixture in this suite is already trusted to clear: the W1-T3435 hedge
+// tests have run `timeoutMs: 20` (hedge 12ms, margin 8ms) in CI without the race this task fixes.
+// A fixture at or above this margin is safe by the same standing evidence; the raised fixture
+// (200ms, margin 80ms) clears it with 10x headroom, matching the measured 0/20 safe arm.
+const SAFE_HEDGE_MARGIN_MS = 8;
+
+// Two fixtures carry the SAME race as the one this task fixes — a `timeoutMs` whose hedge margin
+// is thin, feeding a `spawns` count with no companion duration text to catch a dropped hedge any
+// other way — but were never the one CI observed failing, and fixing them is a second, unmeasured
+// fixture change this task's single-literal scope (see its falsifier) does not cover. Naming them
+// here means a THIRD such fixture cannot join unnoticed: this property test still reads every
+// `timeoutMs` in the file, and any new offender not on this list fails loud. Tracked as a follow-up
+// in W1-T3599's report, not silently carried.
+const KNOWN_RESIDUAL_THIN_MARGIN_FIXTURES = new Set([
+  "ordinary failures back off without reviving stale headroom, then one post-expiry caller retries",
+  "forceRefresh bypasses success, failure-backoff, and an ordinary in-flight exchange",
+]);
+
+test("every singleflight capacity fixture leaves its hedge a margin outside timer jitter", () => {
+  const selfPath = fileURLToPath(import.meta.url);
+  const source = readFileSync(selfPath, "utf8");
+
+  const testStarts: Array<{ title: string; index: number }> = [];
+  const TEST_HEADER = /^test\(\s*"((?:[^"\\]|\\.)*)"/gm;
+  for (let m = TEST_HEADER.exec(source); m; m = TEST_HEADER.exec(source)) {
+    testStarts.push({ title: m[1], index: m.index });
+  }
+  assert.ok(testStarts.length >= 12, "positive control: the scan must find this file's own tests");
+
+  const titleAt = (index: number): string => {
+    let title = "(module scope)";
+    for (const t of testStarts) {
+      if (t.index > index) break;
+      title = t.title;
+    }
+    return title;
+  };
+  const bodyFor = (title: string): string => {
+    const start = testStarts.find((t) => t.title === title)!.index;
+    const next = testStarts.find((t) => t.index > start)?.index ?? source.length;
+    return source.slice(start, next);
+  };
+
+  const TIMEOUT_LITERAL = /timeoutMs:\s*(\d+)/g;
+  let occurrences = 0;
+  const seenByTitle = new Set<string>();
+  for (let m = TIMEOUT_LITERAL.exec(source); m; m = TIMEOUT_LITERAL.exec(source)) {
+    occurrences += 1;
+    const title = titleAt(m.index);
+    seenByTitle.add(title);
+    const timeoutMs = Number(m[1]);
+    const hedgeDelayMs = codexCapacityHedgeDelayDuplicate(timeoutMs);
+    const margin = timeoutMs - hedgeDelayMs;
+    if (margin >= SAFE_HEDGE_MARGIN_MS) continue;
+
+    const body = title === "(module scope)" ? "" : bodyFor(title);
+    const pinnedByDurationText = new RegExp(`after ${hedgeDelayMs}ms|after ${timeoutMs}ms`).test(body);
+    const hedgeCountUnneeded = !/assert\.equal\(spawns, [2-9]/.test(body);
+    const knownResidual = KNOWN_RESIDUAL_THIN_MARGIN_FIXTURES.has(title);
+
+    assert.ok(
+      pinnedByDurationText || hedgeCountUnneeded || knownResidual,
+      `"${title}": timeoutMs ${timeoutMs} leaves only a ${margin}ms hedge margin, which is inside ` +
+        "timer jitter (W1-T3599), and the fixture is neither pinned to the exact duration in its " +
+        "own assertions, nor independent of the hedge firing, nor a tracked residual — either widen " +
+        "its timeoutMs or add it to KNOWN_RESIDUAL_THIN_MARGIN_FIXTURES with a reason.",
+    );
+  }
+  assert.ok(occurrences >= 14, "positive control: the scan must find this file's own timeoutMs literals");
+  assert.ok(
+    seenByTitle.has("failure backoff is capped at ten seconds even when the success cache is longer"),
+    "positive control: the raised fixture must be among the literals this scan actually inspects",
+  );
 });

@@ -176,7 +176,15 @@ export function parseReservationHolderLine(message) {
     }
   }
   const branch = values.get("branch");
-  if (!branch || branch === "unknown") return { status: "unreadable", reason: "missing branch" };
+  // A holder line that PARSED and says `branch=unknown` is still unreadable as a CLAIM -- there is
+  // no branch to compare a filer against -- but it is not the same fact as a line that could not be
+  // read at all. `currentBranch` (src/lib/task-id-reservation.ts) writes that literal whenever it
+  // mints from a detached HEAD, which is how the fleet daemon reserves: it takes the id BEFORE the
+  // run branch exists. So `recordedBranch` carries what the reservation itself recorded, and ONLY
+  // this arm sets it -- a malformed token or an unfetchable ref stays a bare unreadable with no
+  // recorded value and therefore no hand-off to honour. See evaluateReservationHolderConflicts.
+  if (!branch) return { status: "unreadable", reason: "missing branch" };
+  if (branch === "unknown") return { status: "unreadable", reason: "missing branch", recordedBranch: "unknown" };
   return { status: "known", branch };
 }
 
@@ -223,7 +231,22 @@ export function evaluateReservationHolderConflicts(addedIds, occurrencesById, re
     if (holder.status === "legacy") continue;
     const occurrences = occurrencesById.get(id) ?? [];
     if (holder.status === "unreadable") {
-      conflicts.push({ id, reason: holder.reason, holderBranch: undefined, occurrences });
+      // THE GATE'S OWN REMEDY HAS TO BE REACHABLE. This arm used to refuse WITHOUT consulting
+      // `hasRecordedHandoff`, while printing "record the operator hand-off in the shard note" as
+      // the alternative to renumbering -- so for an unreadable holder the message named a remedy
+      // the code could not honour, and renumbering was the only exit. That is not a stricter
+      // gate, it is a dead end, and it bites the ordinary case: the fleet daemon mints from a
+      // detached HEAD, recording `branch=unknown`, so EVERY id it reserves was unfileable by
+      // anyone -- W1-T3601 and W1-T3602 (#5612) are two live examples.
+      //
+      // The escape is granted ONLY where the reservation itself recorded a value to hand off
+      // FROM (`recordedBranch`, set only by the `branch=unknown` arm of
+      // parseReservationHolderLine). A ref that could not be fetched, or a holder line with a
+      // malformed token, still carries no recorded value and still refuses with no way out --
+      // fail-closed exactly as before. And the note must name that value on its left-hand side,
+      // so it is a specific, falsifiable claim about THIS reservation, not a blanket opt-out.
+      if (holder.recordedBranch !== undefined && hasRecordedHandoff(cwd, occurrences, holder.recordedBranch, filerBranch)) continue;
+      conflicts.push({ id, reason: holder.reason, holderBranch: undefined, recordedBranch: holder.recordedBranch, filerBranch, occurrences });
       continue;
     }
     if (holder.branch === filerBranch) continue;
@@ -712,10 +735,18 @@ export function main(argv) {
         : `holder unreadable (${c.reason})`;
       console.error(`  ${c.id} -- ${holder}`);
       for (const occ of c.occurrences) console.error(`    ${occ.file}:${occ.line}`);
+      // Print the EXACT line that clears this row when there is one, rather than a shape the
+      // author has to guess the left-hand side of -- an unreadable holder has no branch name to
+      // read off the failure, which is precisely why this remedy used to look inapplicable.
+      if (c.recordedBranch !== undefined && c.filerBranch) {
+        console.error(`    remedy: note: "reservation hand-off: ${c.recordedBranch} -> ${c.filerBranch}"`);
+      }
     }
     console.error(
       "\nRenumber to a fresh reserved id, or record the operator hand-off in the shard note as " +
-        "`reservation hand-off: <holder> -> <filer>`.\n",
+        "`reservation hand-off: <holder> -> <filer>`. A holder the reservation itself recorded as " +
+        "`unknown` (minted from a detached HEAD) is handed off FROM the literal `unknown`; a holder " +
+        "that could not be read at all has nothing to hand off and must renumber.\n",
     );
     process.exitCode = 1;
   }
