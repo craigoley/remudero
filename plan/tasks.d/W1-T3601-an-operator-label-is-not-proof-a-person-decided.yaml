@@ -15,6 +15,17 @@
     - test/operator-merge-hold-command.test.ts
     - test/automerge-hold.test.ts
   origin: "retro-filing#5586-unfiled-2026-09-15"
+  note: |
+    reservation hand-off: unknown -> run-W1-T3601-1789467506441
+
+    WHY A HAND-OFF LINE IS HERE AT ALL. `refs/rmd-id/W1-T3601` exists on origin and its
+    anchor records `rmd-id holder branch=unknown pid=... source=automatic`: the fleet daemon
+    minted the id from a detached HEAD, before any run branch existed, so `currentBranch`
+    wrote its `"unknown"` sentinel. No branch ever held this reservation, and this filing is
+    the successor that takes it. `task-id-existence` refuses an added id whose reservation
+    names a holder other than the filer, and names this note as the alternative to
+    renumbering — which is not available here, because the PR that BUILDS this task is
+    already open on `run-W1-T3601-*` and a head ref cannot be renamed after creation.
   rationale: |
     FILED AFTER THE FACT, AND THAT IS STATED RATHER THAN HIDDEN. PR #5586 was opened 2026-09-15
     on branch `fix/verified-human-merge-holds` with no plan record, no `Remudero-Task:` trailer
