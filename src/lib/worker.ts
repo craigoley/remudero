@@ -1028,34 +1028,21 @@ export type GenericRouteLane = keyof typeof GENERIC_ROUTE_TOOL_BOUNDS;
 /**
  * W1-T3616, PRIMARY CONTROL (test/bound-kind-declared.test.ts): the declaration below IS what
  * stops recon/diagnose/retro/alert_fix from reaching the SDK unrestricted — the same shape
- * GENERIC_ROUTE_TOOL_BOUNDS above already carries for review/manual, nothing else backstops it.
+ * GENERIC_ROUTE_TOOL_BOUNDS above carries for review/manual. With no entry here a lane inherits
+ * SpawnWorkerArgs' UNRESTRICTED default, which is the defect this closes; the container remains
+ * the containment, this is the declared boundary a reviewer can read.
  *
- * The four spawns W1-T3573 left unbounded, each list DERIVED FROM THAT LANE'S OWN PROMPT (W1-T3616).
+ * Each list is DERIVED FROM THAT LANE'S OWN PROMPT, never narrowed to fit a cheaper provider (the
+ * task forbids that):
  *
- * PRIMARY CONTROL (W1-T1266). This is what actually bounds each lane's tool surface on every
- * spawn, not a backstop that fires after something else has already failed: with no entry here a
- * lane inherits SpawnWorkerArgs' UNRESTRICTED default, which is the defect this closes. The
- * container remains the containment; this is the declared boundary a reviewer can read.
+ *   recon      read-only inspect (`git remote -v`, `git log --oneline -5`, `ls`). No Write/Edit.
+ *   diagnose   read-only investigation (`git diff`/`git status`, re-runs the failure). No Write/Edit.
+ *   retro      "edit ONLY MASTER-PLAN.md" then commit. Edit (one file, never Write) plus Bash.
+ *   alert_fix  commits and pushes (`git push origin HEAD`); takes the fix lane's own list.
  *
- * EVERY ONE OF THEM DECLARES `Bash`, AND THAT IS THE MEASUREMENT, NOT A CONCESSION. The task that
- * filed this work forbids narrowing a lane to make it routable — "if recon genuinely shells out, it
- * declares Bash and stays premium until W1-T3615's check-runner can replace that use" — so these
- * lists say what the prompts actually ask for:
- *
- *   recon      renderReconPrompt: "Do NOT modify anything. Inspect the current git repository
- *              read-only (git remote -v, git log --oneline -5, ls)". Three shell commands, named
- *              verbatim. Read-only, so no Write/Edit.
- *   diagnose   "Do NOT modify, commit, or push ANYTHING — this is a read-only investigation",
- *              inspecting `git diff`/`git status` and re-running whatever failed. Read-only.
- *   retro      retroPrompt: "edit ONLY MASTER-PLAN.md" then "git add MASTER-PLAN.md && commit".
- *              Edit (one existing file, never Write), plus Bash for the commit.
- *   alert_fix  alertFixPrompt: "git add the changed files && commit", "git push origin HEAD".
- *              A fix rung, so it takes the fix lane's own list rather than a second copy.
- *
- * CONSEQUENCE, STATED PLAINLY: declaring these honestly proves NONE of the four is openweight-
- * eligible today, because `Bash` is not in OPENWEIGHT_FUNCTIONS. That is the point of bounding them
- * — the exclusion becomes a measured fact with a named blocker instead of silence. Routing remains
- * a separate decision (W1-T3616 design: "ROUTE NOTHING HERE").
+ * EVERY ONE DECLARES `Bash`, which IS the measurement, not a concession: none of the four is
+ * openweight-eligible today (`Bash` is not in OPENWEIGHT_FUNCTIONS) until W1-T3615's check-runner
+ * replaces that use. Routing remains a separate decision (W1-T3616 design: "ROUTE NOTHING HERE").
  */
 export const DISPATCH_LANE_TOOL_BOUNDS = {
   recon: ["Read", "Grep", "Glob", "Bash"],
