@@ -256,7 +256,7 @@ test("legacy fixtures may omit the optional preflight seam, but guards and ordin
   assert.deepEqual(legacyCalls, ["mergeDirect"], "old deliberately narrow fixtures keep their pre-W1-T2855 behavior");
 
   const guarded = harness({
-    ledgerLines: () => [{ step: "automerge.hold_engaged", pr_number: 3997, by: "craig", reason: "manual gate" }],
+    ledgerLines: () => [{ step: "automerge.hold_engaged", pr_number: 3997, by: "craig", reason: "manual gate", authority: "interactive-cli" }],
   });
   assert.equal(attemptArm(PR, guarded.deps, HEAD).outcome, "hold-refused");
   assert.deepEqual(guarded.calls, [], "an operator hold refuses before any preflight or write");

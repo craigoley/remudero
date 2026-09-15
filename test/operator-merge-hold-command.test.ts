@@ -11,6 +11,8 @@ import { automergeHoldFromLedger } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { mergeHoldCommand } from "../src/run-task.js";
 
+const CLI_AUTHORITY = { authority: "interactive-cli" as const };
+
 function fixture(): { dir: string; ledgerPath: string } {
   const dir = mkdtempSync(join(tmpdir(), "rmd-operator-merge-hold-"));
   return { dir, ledgerPath: join(dir, "ledger.ndjson") };
@@ -35,6 +37,7 @@ test("parseOperatorMergeHoldArgs accepts an attributable PR-scoped engage", () =
       "craig",
       "--reason",
       "manual review before squash",
+      "--confirm",
     ]),
     {
       ok: true,
@@ -44,15 +47,16 @@ test("parseOperatorMergeHoldArgs accepts an attributable PR-scoped engage", () =
         taskId: "W1-T2564",
         by: "craig",
         reason: "manual review before squash",
+        ...CLI_AUTHORITY,
       },
     },
   );
 });
 
-test("parseOperatorMergeHoldArgs accepts a fleet release and refuses unattributed or ambiguous input", () => {
-  assert.deepEqual(parseOperatorMergeHoldArgs(["release", "--by", "craig", "--reason", "incident cleared"]), {
+test("parseOperatorMergeHoldArgs accepts a confirmed fleet release and refuses unattributed or ambiguous input", () => {
+  assert.deepEqual(parseOperatorMergeHoldArgs(["release", "--by", "craig", "--reason", "incident cleared", "--confirm"]), {
     ok: true,
-    input: { action: "release", by: "craig", reason: "incident cleared" },
+    input: { action: "release", by: "craig", reason: "incident cleared", ...CLI_AUTHORITY },
   });
   assert.match(parseError(["engage", "--reason", "missing author"]), /--by/);
   assert.match(parseError(["release", "--by", "craig"]), /--reason/);
@@ -68,6 +72,7 @@ test("parseOperatorMergeHoldArgs accepts a fleet release and refuses unattribute
     parseError(["engage", "--by", "craig", "--reason", "x", "--surprise"]),
     /unexpected argument/,
   );
+  assert.match(parseError(["engage", "--by", "craig", "--reason", "x"]), /--confirm/);
 });
 
 test("applyOperatorMergeHold writes a PR hold that the production reader immediately observes", () => {
@@ -81,6 +86,7 @@ test("applyOperatorMergeHold writes a PR hold that the production reader immedia
         taskId: "W1-T2564",
         by: "craig",
         reason: "manual review before squash",
+        ...CLI_AUTHORITY,
       },
       { now: () => 1234 },
     );
@@ -105,7 +111,7 @@ test("a fleet hold applies to every PR, then an explicit PR release carves out o
   try {
     applyOperatorMergeHold(
       ledgerPath,
-      { action: "engage", by: "craig", reason: "freeze unattended merges" },
+      { action: "engage", by: "craig", reason: "freeze unattended merges", ...CLI_AUTHORITY },
       { now: () => 1 },
     );
     assert.deepEqual(automergeHoldFromLedger(readLedgerLines(ledgerPath), 1), {
@@ -119,7 +125,7 @@ test("a fleet hold applies to every PR, then an explicit PR release carves out o
 
     applyOperatorMergeHold(
       ledgerPath,
-      { action: "release", prNumber: 1, by: "craig", reason: "PR 1 manually cleared" },
+      { action: "release", prNumber: 1, by: "craig", reason: "PR 1 manually cleared", ...CLI_AUTHORITY },
       { now: () => 2 },
     );
     const lines = readLedgerLines(ledgerPath);
@@ -138,7 +144,7 @@ test("releasing an already-clear scope is idempotent and appends no misleading r
   try {
     const result = applyOperatorMergeHold(
       ledgerPath,
-      { action: "release", prNumber: 3511, by: "craig", reason: "already done" },
+      { action: "release", prNumber: 3511, by: "craig", reason: "already done", ...CLI_AUTHORITY },
       { now: () => 9 },
     );
     assert.equal(result.written, false);
@@ -155,8 +161,8 @@ test("mergeHoldCommand routes parsed CLI input to the durable writer and reports
   console.log = (...args: unknown[]) => output.push(args.join(" "));
   try {
     const exit = mergeHoldCommand(
-      ["engage", "--pr", "3511", "--by", "craig", "--reason", "manual squash override"],
-      { ledgerPath, now: () => 44 },
+      ["engage", "--pr", "3511", "--by", "craig", "--reason", "manual squash override", "--confirm"],
+      { ledgerPath, now: () => 44, isInteractive: () => true },
     );
     assert.equal(exit, 0);
     assert.deepEqual(automergeHoldFromLedger(readLedgerLines(ledgerPath), 3511), {
@@ -185,8 +191,8 @@ test("parseOperatorMergeHoldArgs refuses an action that is neither engage nor re
   assert.match(parseError(["--pr", "7", "--by", "craig", "--reason", "x"]), /must be `engage` or `release`/);
   // CONTROL: the two legal verbs are NOT refused by this arm, so the assertions above are the
   // action check talking and not a fixture that fails for some unrelated reason.
-  assert.equal(parseOperatorMergeHoldArgs(["engage", "--by", "c", "--reason", "r"]).ok, true);
-  assert.equal(parseOperatorMergeHoldArgs(["release", "--by", "c", "--reason", "r"]).ok, true);
+  assert.equal(parseOperatorMergeHoldArgs(["engage", "--by", "c", "--reason", "r", "--confirm"]).ok, true);
+  assert.equal(parseOperatorMergeHoldArgs(["release", "--by", "c", "--reason", "r", "--confirm"]).ok, true);
 });
 
 test("parseOperatorMergeHoldArgs refuses --task on a fleet-wide hold, which has no PR to scope it to", () => {
@@ -198,7 +204,7 @@ test("parseOperatorMergeHoldArgs refuses --task on a fleet-wide hold, which has 
   // not about --task itself being rejected outright.
   assert.equal(
     parseOperatorMergeHoldArgs([
-      "engage", "--pr", "3511", "--task", "W1-T2564", "--by", "craig", "--reason", "no pr scope",
+      "engage", "--pr", "3511", "--task", "W1-T2564", "--by", "craig", "--reason", "no pr scope", "--confirm",
     ]).ok,
     true,
   );
@@ -214,7 +220,7 @@ test("applyOperatorMergeHold THROWS when the appended decision does not read bac
       () =>
         applyOperatorMergeHold(
           ledgerPath,
-          { action: "engage", prNumber: 3511, by: "craig", reason: "write is dropped" },
+          { action: "engage", prNumber: 3511, by: "craig", reason: "write is dropped", ...CLI_AUTHORITY },
           {
             readLedger: () => [],
             appendLedger: (_path, line) => void appended.push(line),
@@ -231,7 +237,7 @@ test("applyOperatorMergeHold THROWS when the appended decision does not read bac
     const rows: Array<Record<string, unknown>> = [];
     const result = applyOperatorMergeHold(
       ledgerPath,
-      { action: "engage", prNumber: 3511, by: "craig", reason: "write lands" },
+      { action: "engage", prNumber: 3511, by: "craig", reason: "write lands", ...CLI_AUTHORITY },
       {
         readLedger: () => rows,
         appendLedger: (_path, line) => void rows.push(line as Record<string, unknown>),
@@ -266,15 +272,35 @@ test("mergeHoldCommand reports a parse refusal on stderr with exit 2, and writes
   }
 });
 
+test("mergeHoldCommand refuses a confirmed-looking request from a non-interactive process", () => {
+  const { dir, ledgerPath } = fixture();
+  const errs: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => void errs.push(args.join(" "));
+  try {
+    const exit = mergeHoldCommand(
+      ["engage", "--pr", "3511", "--by", "craig", "--reason", "scripted", "--confirm"],
+      { ledgerPath, isInteractive: () => false },
+    );
+    assert.equal(exit, 2);
+    assert.match(errs.join("\n"), /non-interactive hold writer/);
+    assert.equal(readLedgerLines(ledgerPath).length, 0);
+  } finally {
+    console.error = originalError;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("mergeHoldCommand releasing an already-clear scope exits 0 and says so, rather than writing a misleading row", () => {
   const { dir, ledgerPath } = fixture();
   const output: string[] = [];
   const originalLog = console.log;
   console.log = (...args: unknown[]) => void output.push(args.join(" "));
   try {
-    const exit = mergeHoldCommand(["release", "--pr", "3511", "--by", "craig", "--reason", "nothing held"], {
+    const exit = mergeHoldCommand(["release", "--pr", "3511", "--by", "craig", "--reason", "nothing held", "--confirm"], {
       ledgerPath,
       now: () => 44,
+      isInteractive: () => true,
     });
     assert.equal(exit, 0, "an idempotent no-op is success, not a refusal");
     assert.match(output.join("\n"), /already released; no ledger row written/);
@@ -282,8 +308,8 @@ test("mergeHoldCommand releasing an already-clear scope exits 0 and says so, rat
 
     // CONTROL: the same release AFTER a real engage does write, so the assertions above are the
     // already-clear arm talking and not a release that never works at all.
-    assert.equal(mergeHoldCommand(["engage", "--pr", "3511", "--by", "craig", "--reason", "hold"], { ledgerPath, now: () => 45 }), 0);
-    assert.equal(mergeHoldCommand(["release", "--pr", "3511", "--by", "craig", "--reason", "cleared"], { ledgerPath, now: () => 46 }), 0);
+    assert.equal(mergeHoldCommand(["engage", "--pr", "3511", "--by", "craig", "--reason", "hold", "--confirm"], { ledgerPath, now: () => 45, isInteractive: () => true }), 0);
+    assert.equal(mergeHoldCommand(["release", "--pr", "3511", "--by", "craig", "--reason", "cleared", "--confirm"], { ledgerPath, now: () => 46, isInteractive: () => true }), 0);
     assert.equal(readLedgerLines(ledgerPath).length, 2, "engage + release both landed");
     assert.equal(automergeHoldFromLedger(readLedgerLines(ledgerPath), 3511), undefined, "and the scope reads clear again");
   } finally {

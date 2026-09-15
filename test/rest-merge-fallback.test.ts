@@ -162,7 +162,7 @@ test("the clean-status branch is preserved exactly — it still merges, and is n
 test("an operator hold refuses the arm before either transport is reached", () => {
   const { d, calls } = deps({
     ledgerLines: () => [
-      { step: "automerge.hold_engaged", pr_number: 2598, by: "craig", reason: "held for review" },
+      { step: "automerge.hold_engaged", pr_number: 2598, by: "craig", reason: "held for review", authority: "interactive-cli" },
     ],
   });
   const r = attemptArm(PR, d);

@@ -197,7 +197,7 @@ test("queue order is actionable, active, ready or held, waiting, then unknown; n
     disposed(70, "head-70", "wait", "checks", "2026-09-02T10:00:00.000Z"),
     disposed(61, "head-61", "mergeable", "ready", "2026-09-02T10:00:00.000Z"),
     disposed(60, "head-60", "mergeable", "ready", "2026-09-02T10:00:00.000Z"),
-    { step: "automerge.hold_engaged", task_id: "W1-T62", pr_number: 62, by: "craig", reason: "manual inspection" },
+    { step: "automerge.hold_engaged", task_id: "W1-T62", pr_number: 62, by: "craig", reason: "manual inspection", authority: "console-confirmed" },
     disposed(51, "head-51", "post-review", "reviewing", "2026-09-02T10:00:00.000Z"),
     disposed(50, "head-50", "post-review", "reviewing", "2026-09-02T10:00:00.000Z"),
     disposed(40, "head-40", "conflicted", "conflict", "2026-09-02T10:00:00.000Z"),

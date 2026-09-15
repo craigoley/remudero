@@ -10,7 +10,8 @@
   files: [DECISIONS.md]
   origin: "operator-session#console-architecture-2026-09-08"
   plan_refs: ["W3-T2", "W1-T139", "W1-T153", "W1-T3159"]
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   rationale: |
     OPERATOR DIRECTION 2026-09-08, verbatim: "the console should be built using react ... I'm worried
@@ -116,3 +117,33 @@
     rebuild will meet the operator's bar — "beautiful" is not testable and no criterion here claims
     it. What is measured is that the current shape cannot be typechecked, and that its one
     hand-copied function has already drifted from the tested original.
+
+    ── RETIRED 2026-09-15 ON OPERATOR RULING ────────────────────────────────────────────────
+    Verbatim: "I want console to be its own repo, like we built. Retire or rewrite that old
+    decision." The reversal is recorded in DECISIONS.md as its own dated entry, and both rulings
+    this shard rests on now carry a supersession marker in their headings.
+
+    THIS SHARD'S OWN FALSIFIER IS THE CLEANEST EVIDENCE THAT IT IS NOW CONTRADICTED. It reads:
+    "DO NOT let this ruling widen into 'the console moves to its own repository'. DECISIONS.md
+    already refuses that and this shard re-affirms it; a reader who takes the bundler reversal as
+    licence to split the repo has inverted the ruling." The operator has ruled the split. A shard
+    that forbids the standing decision cannot stay queued.
+
+    WITHDRAWN, NOT `retired`: the deliverable was to RECORD a ruling in DECISIONS.md, and that
+    record exists — it is the 2026-09-08 entry this shard itself flags as "ALREADY RECORDED, WHICH
+    THE BAND HID". No unbuilt work is being abandoned. What changed is that the ruling it recorded
+    is no longer the ruling.
+
+    THE RULING DIED; THE MEASUREMENT DID NOT, and the halves are separated here so the next reader
+    need not re-derive which is which. Reversed: "THE CONSOLE STAYS IN THIS REPO" and "bundle it
+    as a React SPA in apps/dashboard". craigoley/remudero-console is a private Next.js application
+    on Vercel with its own plan, doctrine, CI aggregator and rmd mount-routing policy, and eleven
+    of its tasks have shipped.
+
+    ONE HALF OF THE DIAGNOSIS SURVIVED AND IS RE-FILED AS W1-T3615, re-measured on main rather
+    than inherited. The extraction this shard asked for did happen, via W1-T2902: the browser code
+    now lives in src/lib/console-shell-client.ts, a real file eslint and coverage can see. The
+    DRIFT it named did NOT get fixed — it MOVED, from serve.ts:4936 to
+    console-shell-client.ts:3678, and still renders "updated 3600s ago" where the tested formatAge
+    says "1h ago". Retiring this shard without re-filing that would have dropped a live, verified
+    defect on the floor.

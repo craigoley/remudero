@@ -5,10 +5,20 @@ import { readLedgerLines } from "./status.js";
 
 export type OperatorMergeHoldAction = "engage" | "release";
 
+/**
+ * The only two paths that can create a durable human merge hold.  `operator` is
+ * an execution-context label, not proof that a person made a decision: a
+ * worker or a scheduled shell command can invoke the CLI with any `--by`
+ * string.  The authority is therefore written with the decision and consumed
+ * by the production hold reader before it can block an unattended merge.
+ */
+export type OperatorMergeHoldAuthority = "interactive-cli" | "console-confirmed";
+
 export interface OperatorMergeHoldInput {
   action: OperatorMergeHoldAction;
   by: string;
   reason: string;
+  authority: OperatorMergeHoldAuthority;
   /** Omitted means the whole fleet. */
   prNumber?: number;
   /** Optional board enrichment. The hold decision itself is scoped by prNumber, never this id. */
@@ -32,7 +42,7 @@ export function parseOperatorMergeHoldArgs(args: string[]): ParsedOperatorMergeH
   }
 
   const tail = args.slice(1);
-  const unknown = unknownArgError("merge-hold", tail, ["--pr", "--task", "--by", "--reason"]);
+  const unknown = unknownArgError("merge-hold", tail, ["--pr", "--task", "--by", "--reason"], ["--confirm"]);
   if (unknown) return { ok: false, error: unknown };
 
   const by = flagValue(tail, "--by")?.trim();
@@ -56,6 +66,9 @@ export function parseOperatorMergeHoldArgs(args: string[]): ParsedOperatorMergeH
   if (taskId && prNumber === undefined) {
     return { ok: false, error: "--task is valid only with a PR-scoped hold (`--pr <n>`)" };
   }
+  if (!tail.includes("--confirm")) {
+    return { ok: false, error: "--confirm is required; an unattended process cannot create a human merge hold" };
+  }
 
   return {
     ok: true,
@@ -63,6 +76,7 @@ export function parseOperatorMergeHoldArgs(args: string[]): ParsedOperatorMergeH
       action,
       by,
       reason,
+      authority: "interactive-cli",
       ...(prNumber !== undefined ? { prNumber } : {}),
       ...(taskId ? { taskId } : {}),
     },
@@ -110,6 +124,7 @@ export function applyOperatorMergeHold(
     lane: "operator",
     by: input.by,
     reason: input.reason,
+    authority: input.authority,
     ...(input.prNumber !== undefined ? { pr_number: input.prNumber } : {}),
   });
 

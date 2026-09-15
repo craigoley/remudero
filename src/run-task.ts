@@ -34166,11 +34166,17 @@ export async function awayCommand(rest: string[]): Promise<number> {
  */
 export function mergeHoldCommand(
   rest: string[],
-  deps: { config?: Config; ledgerPath?: string; now?: () => number } = {},
+  deps: { config?: Config; ledgerPath?: string; now?: () => number; isInteractive?: () => boolean } = {},
 ): number {
   const parsed = parseOperatorMergeHoldArgs(rest);
   if (!parsed.ok) {
     console.error(`rmd merge-hold: ${parsed.error} — usage: ${commandSyntax("merge-hold")}\n` + USAGE);
+    return 2;
+  }
+  if (!(deps.isInteractive ?? (() => process.stdin.isTTY === true))()) {
+    console.error(
+      `rmd merge-hold: refusing a non-interactive hold writer — use the confirmed console control instead.\n` + USAGE,
+    );
     return 2;
   }
   const ledgerPath = deps.ledgerPath ?? ledgerPathFor(deps.config ?? loadConfig());
@@ -39279,9 +39285,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "merge-hold",
-    syntax: "rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text>",
+    syntax: "rmd merge-hold <engage|release> [--pr <n> [--task <id>]] --by <name> --reason <text> --confirm",
     summary: "Engage or release an attributable, durable PR or fleet auto-merge hold.",
-    detail: "operator writer for the durable auto-merge refusal: engage/release requires --by and --reason; --pr scopes the decision to one pull request, while omitting it scopes the decision to the whole fleet; --task is optional PR-only board enrichment and must be a W1-T<n> id; a hold survives pushes, restarts, and ledger rotation and clears only on an explicit release; while held, the daemon withdraws an existing auto-merge arm and refuses every new arm, leaving the operator free to inspect or manually squash the PR",
+    detail: "confirmed human writer for the durable auto-merge refusal: engage/release requires --by, --reason and --confirm from an interactive terminal; a non-interactive process cannot impersonate an operator by supplying --by. --pr scopes the decision to one pull request, while omitting it scopes the decision to the whole fleet; --task is optional PR-only board enrichment and must be a W1-T<n> id; while held, the daemon withdraws existing auto-merge and refuses new arms.",
   },
   {
     name: "feedback-reconcile",
