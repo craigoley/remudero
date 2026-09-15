@@ -1,53 +1,25 @@
 /**
  * lib/feedback-reconcile.ts — the cross-root feedback reconciliation manifest and repair
- * (W1-T3562).
+ * (W1-T3562). W1-T3560/W1-T3561 stop the NEXT landing clobber; nothing repairs a record one
+ * ALREADY regressed (PR #5383, feedback#fb-1789304804534-e29e68) or captured on a root whose
+ * sweep wasn't running (feedback#fb-1789311638612-56d5bd) — `sweepFeedbackLanding` (W1-T530)
+ * reads only ONE root's own disk. This is that missing cross-root read, plus the repair.
  *
- * THE GAP THIS CLOSES. W1-T3560 (union-and-lease the landing push) and W1-T3561 (refuse a
- * backward landing) both act at the MOMENT of a landing — they stop the NEXT clobber. Neither
- * repairs a record a landing has ALREADY regressed (the measured PR #5383 reset,
- * feedback#fb-1789304804534-e29e68), and neither can see a record captured on a root whose sweep
- * was not running at the time (feedback#fb-1789311638612-56d5bd: the site daemon down
- * 2026-09-13T00:43:01Z). `sweepFeedbackLanding` (W1-T530) only ever reads ONE root's own disk, so
- * nothing anywhere answers "which records does some enrolled root, or the landing branch, hold
- * that origin/main does not — or holds at an earlier §7B position than origin/main already does".
- * This module is that read, plus the repair, through the ordinary gated door.
- *
- * DRY-RUN FIRST (design i). {@link reconcileFeedbackLanding} defaults to a manifest-only pass —
- * `apply` must be explicitly `true` before anything is staged. The manifest classifies every
- * candidate id (present in an enrolled root or on the shared landing branch, keyed off
- * `LANDING_BRANCH`) as `present-everywhere`, `missing-upstream`, `regressed` (origin/main sits at
- * an earlier §7B lifecycle position than the best copy found), or `differs` (bytes disagree for a
- * reason other than a lifecycle rank gap — an unparseable side, or a same-rank metadata gap).
- *
- * ORDERING IS NEVER RE-DERIVED HERE. Every rank comparison is made by calling
- * {@link mergeFeedbackRecord} (W1-T3561) — once to find the best copy among several local sources
- * (folding pairwise), once (or twice, to distinguish a strict rank gap from a same-rank metadata
- * gap) to compare that best copy against origin/main. This module holds no second copy of the
- * six-status §7B ordering.
- *
- * APPLY GOES THROUGH THE ORDINARY DOOR (design ii). Repair re-lands each out-of-date record via
- * {@link landFeedbackStatusContent} — the SAME gated bridge every other feedback write already
- * uses: a compare-and-swap push to the one shared landing branch, an opened-or-reused PR, the same
- * `automergeHoldFromLedger` consult (via `ledgerLines`), the same `ci + remudero-review` protected
- * statuses. This module never pushes to main and never merges anything itself — `landFeedback*`'s
- * own arm site only ARMS auto-merge, gated behind those checks, exactly as it already does for
- * every other feedback write. And because that bridge re-validates the record against a FRESH
- * `origin/main` read at push time (not this scan's read), a record whose upstream copy has moved
- * on since the manifest was built is refused there, not forced — defense in depth beyond the
- * manifest's own classification.
- *
- * BOUNDED (design iii). Each source is scanned up to {@link MAX_RECORDS_PER_SOURCE} top-level
- * `plan/feedback/<id>.yaml` entries; a source at the cap sets `manifest.truncated` rather than
- * growing unbounded. `manifest.byteCount` is the sum of every byte actually read, for the PR body
- * to state per design (iii).
- *
- * EXPLICIT ENROLMENT ONLY (design iv). {@link ReconcileFeedbackLandingOpts.roots} is read exactly
- * as given — never discovered by globbing the host's filesystem. {@link validateRoots} refuses the
- * WHOLE call, before a single `plan/feedback/**` read, on an unknown-shaped or malformed root: a
- * non-slug name, a non-absolute path, or a path that does not exist as a directory.
- *
- * ONE ENTRY POINT (design vi). `src/run-task.ts`'s `feedback-reconcile` verb only parses argv and
- * calls {@link reconcileFeedbackLanding} — every classification and repair decision lives here.
+ * Design, one line each (plan/tasks.d/W1-T3562-*.yaml has the full rationale):
+ * (i) dry-run default — {@link reconcileFeedbackLanding} only builds the manifest unless
+ *     `apply: true`; classifications are present-everywhere / missing-upstream / regressed
+ *     (origin/main sits at an earlier §7B position) / differs (a non-rank byte gap).
+ * (ii) ordering is never re-derived — every rank question is a call to
+ *      {@link mergeFeedbackRecord} (W1-T3561), never a second copy of the six-status table.
+ * (iii) apply re-lands via {@link landFeedbackStatusContent} — the ordinary gated bridge (same
+ *       compare-and-swap push, opened-or-reused PR, `automergeHoldFromLedger` consult); it never
+ *       pushes to main or merges, and its own fresh-read refusal is defense in depth beyond this
+ *       scan's classification.
+ * (iv) bounded — each source caps at {@link MAX_RECORDS_PER_SOURCE}, else `truncated: true`.
+ * (v) explicit enrolment only — {@link validateRoots} refuses the WHOLE call, before any read, on
+ *     a malformed root; roots are never discovered by globbing.
+ * (vi) one entry point — `run-task.ts`'s verb only parses argv and calls
+ *      {@link reconcileFeedbackLanding}; every decision lives here.
  */
 
 import { execFileSync } from "node:child_process";
