@@ -872,7 +872,16 @@ test("openweight configuration requires a daily cash cap and keeps its key outsi
 });
 
 test("inbox draft prompts require double-quoted proof values", () => {
-  const prompt = inboxDraftPrompt({ id: "proposal:proof", summary: "quote proof values" } as never, "tasks: []\n", "OPENWEIGHT-PROOF");
+  // W1-T3621 fixture repair: a real plan/tasks.yaml is a top-level LIST of task mappings, and this
+  // fixture was `tasks: []` — a mapping. It never mattered while the text was pasted verbatim; the
+  // prompt now PROJECTS the plan, so a wrong-shaped fixture refuses. The subject of this test is
+  // the double-quoting contract, not the plan, so the fixture is corrected rather than the
+  // projection loosened.
+  const prompt = inboxDraftPrompt(
+    { id: "proposal:proof", summary: "quote proof values" } as never,
+    "- id: W1-T1\n  title: a task the projection can name\n",
+    "OPENWEIGHT-PROOF",
+  );
   assert.match(prompt, /proof: "grep: symbol in src\/file\.ts"/);
   assert.match(prompt, /MUST be double-quoted/);
 });
