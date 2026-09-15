@@ -8,6 +8,44 @@ decision reversible.
 
 <!-- Entries below are appended verbatim by the runner. -->
 
+## 2026-09-15 — OPERATOR DECISION: W1-T3572 — a bounded CHECK-RUNNER, not a Bash function
+
+*Operator-authored, recorded by hand at the operator's instruction on 2026-09-15 ("go with your
+recommendation"), resolving W1-T3572, which was parked at `verify: human` because it asks whether
+every shell-capable lane stays premium or warrants a bounded execution surface.*
+
+**WHY THE QUESTION IS WORTH MONEY.** Measured over the ledger union, deduped per distinct run:
+`implement` is $4,081 across 728 runs ($5.61 each), `fix` $769 across 274, `recon` $302 across 739.
+That is ~93% of worker spend, and all three are excluded from the open-weight adapter by ONE
+missing tool. Meanwhile Codex sits at 95% of its weekly window and reads `readable:false`, so every
+worker lands on Claude — the squeeze is two subscriptions collapsing into one.
+
+- **CHOSEN: AN ALLOWLISTED CHECK-RUNNER, NOT `Bash`.** The reason these lanes need a shell is to RUN
+  THEIR OWN CHECKS — the test runner, the typechecker, the lint scripts. That set is small and
+  enumerable, so the adapter should implement a function that takes a CHOSEN CHECK plus arguments
+  from a fixed table, never a command string. No shell, no metacharacters, no interpolation. This
+  is the same discipline `OPENWEIGHT_PRICES` and `OPENWEIGHT_TEMPERATURE` already use: a table
+  lookup that REFUSES an unlisted entry rather than guessing.
+- **NO GIT AND NO NETWORK AUTHORITY.** Not `git push`, not `gh`, not `curl`. The worker produces a
+  diff; the orchestrator pushes and merges. That is the boundary `hooks/deny-floor.sh` already
+  enforces against every worker ("a worker may author or repair a PR, but only the orchestrator may
+  merge or arm it"), and a shell-capable open-weight worker must not be the hole in it.
+- **STAGE ON `recon` FIRST, NEVER `implement`.** recon is $0.41 a run across 739 runs — high count,
+  low value at risk, and nothing it produces ships. `implement` follows only behind a measured
+  verdict on recon, for the same reason W1-T3569 routed the narrowest eligible lane first.
+- **THE NEW SURFACE GETS ITS OWN CONTAINMENT PROOF.** W1-T2's probe proves an outside-cwd WRITE is
+  OS-denied for a spawn; a command surface needs the equivalent proven THROUGH ITSELF, per run, or
+  the containment argument is inherited rather than demonstrated.
+- **REJECTED: A GENERAL `Bash` FUNCTION**, and the reason is scope rather than fear. The container
+  already hosts a `bypassPermissions` Claude worker, so a shell would not widen the security
+  boundary — it would add a less predictable occupant inside one that already exists. What it WOULD
+  add is authority the lane does not need: an allowlisted runner buys the same capability with a
+  surface small enough to enumerate in a test.
+
+**A CONSTRAINT THE BUILD MUST CARRY:** `implement.high` runs at `context_budget: 200000` and
+gpt-oss-120b's context window is 131,072 (W1-T3613), so the shell-capable lanes ride `gpt-5-nano`
+whenever their prompt exceeds that. The operator has accepted nano for this purpose.
+
 ## 2026-09-09 — OPERATOR DECISION: W1-T3076 chosen bound — (a) first, then (c); NOT (b)
 
 *Operator-authored, not a machine auto-choose resolution. Recorded by hand at the operator's
@@ -1772,7 +1810,7 @@ three of roughly fifteen dispatchable tasks parked on a paperwork gap rather tha
 as an observation and a candidate shard; whether manual completion should be assertable is its own
 concern and is not decided here.
 
-## 2026-08-19 — RULING: W1-T472 and W1-T446 take the efficient option WITH telemetry; the site splits, the console does not (OPERATOR-RULED)
+## 2026-08-19 — RULING: W1-T472 and W1-T446 take the efficient option WITH telemetry; the site splits, the console does not (OPERATOR-RULED) (ITS CONSOLE CLAUSE SUPERSEDED BY OPERATOR RULING 2026-09-15)
 
 *Operator-ruled record, recorded at the operator's instruction.* The three rulings are the operator's;
 the measurements were taken to serve them, not to make them. `W1-T472` and `W1-T446` are re-banded to
@@ -2405,7 +2443,7 @@ every class closing, ratify (a) alone and re-file the governor question with the
 **Rollback:** delete this entry. No code was written, no shard was retired and no filing was
 refused; W1-T3076 returns to `status: queued` with its question open.
 
-## 2026-09-08 — OPERATOR RULING (W1-T3173): the operator console is a BUNDLED REACT SPA in `apps/dashboard`, served by `rmd serve`
+## 2026-09-08 — OPERATOR RULING (W1-T3173): the operator console is a BUNDLED REACT SPA in `apps/dashboard`, served by `rmd serve` (OPERATOR-RULED) (SUPERSEDED BY OPERATOR RULING 2026-09-15)
 
 *Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. The ruling is
 his ("I am good with all of your recommendations", 2026-09-08, on a recommendation that named this
@@ -2606,3 +2644,46 @@ reviewable implementation.
 
 **Rollback:** revert this entry. Gate behaviour is unchanged; W1-T3318 returns to queued and its
 dependent conversions lose this settled policy reference.
+
+## 2026-09-15 — OPERATOR RULING: THE CONSOLE IS ITS OWN REPOSITORY
+
+*Operator-authored, recorded by hand at the operator's instruction on 2026-09-15: "I want console to
+be its own repo, like we built. Retire or rewrite that old decision."*
+
+**REVERSED.** The 2026-08-19 ruling's console clause — "**W12-T1: THE SITE IS A SEPARATE
+REPOSITORY. THE CONSOLE IS NOT.** The console stays in `remudero` because it is not a website — it
+is `rmd serve`, a verb of the harness" — is reversed. So is the 2026-09-08 W1-T3173 ruling that
+re-affirmed it and ruled the console should become a bundled React SPA in `apps/dashboard`.
+
+**THE RULING WAS OVERTAKEN BY THE BUILD, WHICH IS WHY THIS IS A RECORD AND NOT A PROPOSAL.**
+`craigoley/remudero-console` exists: a private Next.js application deployed on Vercel, carrying its
+own `plan/tasks.yaml` (11 tasks, `CONSOLE-T1..T11`), its own `AGENTS.md` and `DESIGN-DOCTRINE.md`,
+its own CI aggregator, and — since PR #28 — its own `rmd` mount-routing policy, so its isolated
+daemon reviews and repairs its own pull requests. Eleven of its tasks have shipped. The question the
+old ruling answers is closed by fact.
+
+**WHAT THE OLD RULING GOT RIGHT, AND WHY IT STILL READ WRONG.** Its argument was real: splitting the
+console would make the daemon depend on another repository's build, and a worker changing
+`src/lib/service.ts` could not see the routes that consume it. That cost was PAID rather than
+avoided — the console repo reaches the daemon through the `/v1/*` HTTP contract and a
+server-only gateway, not through a shared build, so there is no build-time dependency to break. The
+coupling the ruling feared is the one thing the split does not have.
+
+**WHAT IS NOT REVERSED.** `rmd serve` keeps its own console surface. It is the daemon's LOCAL
+diagnostic — reachable on the private network, no external identity provider, no deploy step — and
+nothing here asks for it to be removed, rebuilt in React, or bundled. `apps/dashboard` is untouched
+by this entry.
+
+**AND THE TWO CONSOLES MUST NOT BOTH BE THE PRODUCT.** `remudero-site` still serves a complete
+second admin console at `app/console/` (376 lines, its own Clerk chain and summary route) whose
+`lib/rmd-control.ts` is 185 lines against the console repo's 1,043 and carries NONE of the
+Cloudflare Access work — measured 2026-09-15: zero occurrences of `accessServiceToken`,
+`upstreamHeaders`, `gateway_rejected` or `controlDiagnostics`. It therefore sends no service token,
+is redirected by Access, and reports the daemon unreachable — a confident wrong answer about
+infrastructure state. Retiring it is `CONSOLE-T4`'s parallel-domain cutover, in the console repo's
+own plan, and it is named here so this ruling cannot be read as blessing the duplicate.
+
+**Rollback:** revert this entry. The supersession markers on the two earlier headings revert with
+it, and both prior rulings read as current again. No gate, predicate or build changes either way —
+this entry records a decision, and the repository split it describes already exists independently
+of it.

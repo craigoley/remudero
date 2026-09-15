@@ -1,0 +1,64 @@
+- id: W1-T3620
+  title: "A SHARED PAUSE WHOSE ANCHOR COMMIT IS UNREACHABLE HOLDS THE FLEET ANONYMOUSLY AND RE-PAYS A GITHUB 404 EVERY TICK — readSharedPauseAnchor cat-files a sha that may never have been pushed, so the attribution W1-T2262 added is lost exactly when an operator most needs it, and nothing ever re-attempts or reports the cost"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 50.00
+  files: [src/lib/fleet-control.ts, test/shared-pause-unreachable-anchor.test.ts]
+  origin: oper#console-daemon-paused-eight-hours-2026-09-15
+  plan_refs: ["W1-T2262"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON THE LIVE CONSOLE DAEMON, 2026-09-15. It logged `daemon.pause` 33 times between
+    11:29:03Z and 19:16:36Z — seven hours forty-seven minutes — with this detail every tick:
+
+      PAUSE held on refs/rmd-pause/hold
+      (setter unrecoverable — anchor 271a760b2e49d842dc272e9b41ab0edf3fb6a027 unreadable)
+
+    That sha does not exist. Locally: `fatal: Not a valid object name`. On GitHub:
+    `422 No commit found for SHA`. The container logs carry 63 `gh: Not Found (HTTP 404)` lines
+    from the fallback read behind it — one local git failure plus one GitHub call per tick, paid
+    forever, for an answer that cannot change.
+
+    THE HOLD IS CORRECT; THE HANDLING OF IT IS NOT. `checkSharedPause` is right to hold — an
+    unverifiable pause must never be read as clear, and `lsRemoteSharedPause` returning a sha
+    means the ref genuinely exists. What is wrong is everything after that verdict.
+
+    (1) IT RE-CREATES THE DEFECT W1-T2262 CLOSED. That task exists so a fleet-wide halt is not
+    ANONYMOUS: a held read recovers the anchor and names pid, host and timestamp. When the anchor
+    is unreachable the operator is back to an unattributed halt — and an anchor is unreachable in
+    the ordinary case, not a rare one: `writeSharedPause` is documented BEST-EFFORT, so a mint
+    whose push failed leaves a ref pointing at an object no other host can fetch.
+
+    (2) THE COST IS UNBOUNDED AND UNREPORTED. `readSharedPauseAnchor` returns null on any
+    non-zero status and the caller retries it every tick with no memo, no backoff, and no ledger
+    line naming the waste. Eight hours of a daemon's dispatch went missing today and the only
+    evidence was a repeated string in a log nobody was reading.
+
+    (3) THE ONLY EXIT IS A HUMAN WHO ALREADY KNOWS. The detail says "run `rmd resume` to clear",
+    which is correct and useless to an operator who does not know a pause was ever set, cannot
+    see who set it, and is looking at a console that simply never advances.
+  design: |
+    Distinguish an anchor that is MISSING from one that is merely unreadable this instant, and
+    stop paying for the distinction on every tick: resolve once, remember the verdict against the
+    ref's sha, and re-attempt only when that sha changes.
+
+    An unreachable anchor should be reported as its own condition rather than folded into the
+    generic held string — it means the pause cannot be attributed AND cannot be re-attributed by
+    waiting, which is a different operator instruction from "someone paused this".
+
+    NOT IN SCOPE, AND NOT TO BE SOLVED BY WEAKENING THE HOLD: an unverifiable pause still holds.
+    Any change that lets a daemon dispatch because it could not read the anchor inverts the
+    safety property this function exists for, and W1-T2262's own doc says the attribution
+    degrades, never the verdict.
+  acceptance:
+    - claim: "an unreachable anchor is resolved once per ref sha rather than re-read on every tick"
+      proof: "unit test: an unreachable pause anchor is read once per ref sha, not once per tick"
+    - claim: "an unreachable anchor reports that the pause cannot be attributed, distinctly from an ordinary held read"
+      proof: "unit test: an unreachable anchor names itself as unattributable rather than as a plain hold"
+    - claim: "an unverifiable pause still holds, so the safety property survives the fix"
+      proof: "unit test: a pause whose anchor cannot be read still refuses to dispatch"
