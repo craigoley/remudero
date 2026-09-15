@@ -1,0 +1,61 @@
+- id: W1-T3612
+  title: "A gc.log STRANDS A GIGABYTE ON THE PARTITION THAT TAKES THE FLEET DOWN — git declines automatic cleanup forever once it exists, and the nightly reclaim only prunes Docker, on a different volume"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 4.00
+  files:
+    - deploy/host-update.sh
+    - test/host-update-reclaim.test.ts
+  origin: "operator-session#openweight-trial-2026-09-15"
+  plan_refs: ["W1-T2725", "W1-T2847", "W1-T3090", "W1-T411"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED on the live Azure host 2026-09-15, root filesystem at 85% (4.3G free of 29G):
+
+        /home/craigoleyagent/rmd-state2/remudero/.git   1.1G   53,380 loose objects   985 MiB   gc.log PRESENT
+        /home/craigoleyagent/rmd-op/.git                275M   13,819 loose objects    92 MiB   gc.log PRESENT
+
+    Once `.git/gc.log` exists git DECLINES automatic gc indefinitely and does not retry, so the
+    loose-object set only grows. `deploy/entrypoint.sh` already detects this and prints the exact
+    remedy on every boot -- deliberately without acting, because it cannot know whether a lane is
+    running. Nothing else acts either.
+
+    THE NIGHTLY RECLAIM DOES NOT COVER THIS. `deploy/host-update.sh --reclaim-only` (W1-T2725,
+    04:17 UTC) prunes Docker images and build cache ONLY, and Docker lives on `/mnt/rmd` --
+    a DIFFERENT filesystem, at 48%. So the job that runs nightly cannot reach the partition that
+    is actually tight, and its success is not evidence the root disk was attended to. A recycle
+    reclaimed 842MB on this same day, all of it on /mnt/rmd.
+
+    WHY THIS IS THE FLEET'S RECURRING OUTAGE CLASS and not housekeeping: the root filesystem is
+    where the daemon's checkout, its worktrees and its state live. ~1.05 GB stranded against 4.3 GB
+    free is a quarter of the remaining headroom, held by a file whose only effect is to tell git
+    not to clean up.
+  rationale: |
+    An existing rung already runs nightly with the right privileges and the right shape; it simply
+    measures the wrong volume and prunes the wrong object class. Extending it is far cheaper than
+    a new timer, and keeps one reclaim story rather than two.
+  design: |
+    Reclaim git objects in the checkouts the fleet owns, from the SAME nightly `--reclaim-only`
+    path, and only when it is safe: refuse outright if any worker process is live, then remove
+    `.git/gc.log` and run `git gc` in each owned checkout. REPORT BYTES RECLAIMED PER VOLUME, not
+    one total -- the current job's "reclaimed 0B" against /mnt/rmd reads as "nothing to do" when
+    the truth is "nothing to do HERE, and a gigabyte to do elsewhere".
+
+    NEVER run gc against a checkout with a live lane, and never against a repo the fleet does not
+    own. A refusal that names the live worker is the correct outcome; silently skipping is not.
+  acceptance:
+    - claim: "the nightly reclaim refuses to gc a checkout while a worker is live, naming the holder"
+      proof: "unit test: a live worker refuses the git reclaim and names the holder"
+    - claim: "reclaimed bytes are reported per volume, so a zero on one cannot read as a zero on both"
+      proof: "unit test: the reclaim reports bytes per volume"
+  falsifier: |
+    Remove the live-worker refusal and the first test must fail with gc running beside a worker.
+    Collapse the per-volume report back into one total and the second must fail. If the second
+    passes with a single total, it is asserting the presence of a number rather than its split,
+    and the task is unmet.
