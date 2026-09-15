@@ -14,7 +14,8 @@ import {
   type BoardDeps,
 } from "../src/lib/board.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
+import type { PrRef } from "../src/lib/status.js";
+import { fakeGitHub, type FakeGitHub } from "./helpers/fake-github.js";
 
 // ── The board pass re-derives what MOVED, not the corpus ─────────────────────────────────────
 //
@@ -65,85 +66,79 @@ function append(ledgerPath: string, row: Record<string, unknown>): void {
   appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), ...row }) + "\n");
 }
 
-interface Counted {
-  github: GitHub;
-  derivations: () => number;
-  setOpen: (rows: PrRef[]) => void;
+/**
+ * The derivation counter. W1-T2903's shared gateway records EVERY call, and `prByRef` is rung
+ * (b) — every task below carries `pr`, so it fires exactly once per task actually re-derived and
+ * zero times for one served from the memo. Counting off `.calls` rather than a closure of my own
+ * is also what keeps this file out of `fixture-copy-census`'s fake-GitHub-builder population.
+ */
+function derivations(github: FakeGitHub): number {
+  return github.calls.filter((call) => call.method === "prByRef").length;
 }
 
-function countingGitHub(): Counted {
-  let calls = 0;
-  let open: PrRef[] = [];
-  return {
-    derivations: () => calls,
-    setOpen: (rows) => {
-      open = rows;
-    },
-    github: {
-      prByRef: () => {
-        calls += 1;
-        return null;
-      },
-      findMergedByTrailer: () => null,
-      headRefName: () => undefined,
-      prBody: () => undefined,
-      listOpenHeadBranches: () => open,
-    },
-  };
+interface Fixture {
+  deps: BoardDeps;
+  github: FakeGitHub;
+  ledgerPath: string;
+  state: { failed: boolean; open: PrRef[] };
 }
 
-function threeTaskDeps(): { deps: BoardDeps; counted: Counted; ledgerPath: string } {
+function threeTasks(): Fixture {
   const ledgerPath = tmpLedgerPath();
-  const counted = countingGitHub();
+  const state = { failed: false, open: [] as PrRef[] };
+  const github = fakeGitHub({
+    readFailed: () => state.failed,
+    listOpenHeadBranches: () => state.open,
+  });
   const plan = planOf([
     task({ id: "W1-T1", pr: 1 }),
     task({ id: "W1-T2", pr: 2 }),
     task({ id: "W1-T3", pr: 3 }),
   ]);
-  return { deps: { plan, ledgerPath, github: counted.github }, counted, ledgerPath };
+  return { deps: { plan, ledgerPath, github }, github, ledgerPath, state };
 }
 
 test("a ledger line naming one task re-derives that task alone, not the whole plan", () => {
-  const { deps, counted, ledgerPath } = threeTaskDeps();
+  const { deps, github, ledgerPath } = threeTasks();
   const cache = createBoardSnapshotCache();
 
   cache.get(deps);
-  assert.equal(counted.derivations(), 3, "the first pass has nothing to reuse and derives all three");
+  assert.equal(derivations(github), 3, "the first pass has nothing to reuse and derives all three");
 
   append(ledgerPath, { run_id: "r1", task_id: "W1-T2", step: "run.start" });
   cache.get(deps);
   assert.equal(
-    counted.derivations(),
+    derivations(github),
     4,
     "one task moved, so exactly ONE more derivation — restore the whole-plan pass and this reads 6",
   );
 
   append(ledgerPath, { run_id: "r1", task_id: "W1-T2", step: "verdict", verdict: "pass" });
   cache.get(deps);
-  assert.equal(counted.derivations(), 5, "and again: the two untouched tasks are never re-derived");
+  assert.equal(derivations(github), 5, "and again: the two untouched tasks are never re-derived");
 });
 
 test("a ledger row naming no task re-derives EVERY task, because nothing can say which it bears on", () => {
-  const { deps, counted, ledgerPath } = threeTaskDeps();
+  const { deps, github, ledgerPath } = threeTasks();
   const cache = createBoardSnapshotCache();
   cache.get(deps);
-  assert.equal(counted.derivations(), 3);
+  assert.equal(derivations(github), 3);
 
   // No `task_id`, no `task` — unattributable. The memo must fail SAFE, not quietly reuse.
   append(ledgerPath, { run_id: "r9", step: "policy.changed" });
   cache.get(deps);
-  assert.equal(counted.derivations(), 6, "all three re-derived — this is today's behaviour, preserved for the case the memo cannot reason about");
+  assert.equal(derivations(github), 6, "all three re-derived — this is today's behaviour, preserved for the case the memo cannot reason about");
 });
 
 test("an in-flight run is re-derived every pass, because it ages with the clock and not with the ledger", () => {
-  const { deps, counted, ledgerPath } = threeTaskDeps();
+  const { deps, github, ledgerPath } = threeTasks();
   const cache = createBoardSnapshotCache();
 
   append(ledgerPath, { run_id: "r1", task_id: "W1-T1", step: "run.start" });
   const first = cache.get(deps);
   const running = first.tasks.find((row) => row.taskId === "W1-T1");
   assert.ok(running && projectionAgesWithTheClock(running), "W1-T1 is in flight, so its projection moves with now() — the premise of this test");
-  const afterFirst = counted.derivations();
+  const afterFirst = derivations(github);
 
   // A line about a DIFFERENT task. W1-T1's own stamp is unchanged, so a stamp-only memo would
   // reuse it — pinning a dead run "running" past the liveness bound and freezing its elapsed
@@ -151,24 +146,24 @@ test("an in-flight run is re-derived every pass, because it ages with the clock 
   append(ledgerPath, { run_id: "r2", task_id: "W1-T3", step: "run.start" });
   cache.get(deps);
   assert.equal(
-    counted.derivations(),
+    derivations(github),
     afterFirst + 2,
     "the task that moved AND the in-flight one — never just the one the ledger named",
   );
 });
 
 test("a change in the GitHub half re-derives every task, since one open index is shared by all of them", () => {
-  const { deps, counted } = threeTaskDeps();
+  const { deps, github, state } = threeTasks();
   const cache = createBoardSnapshotCache();
   cache.get(deps);
-  assert.equal(counted.derivations(), 3);
+  assert.equal(derivations(github), 3);
 
   cache.get(deps);
-  assert.equal(counted.derivations(), 3, "an unchanged index and an unchanged ledger reuse everything");
+  assert.equal(derivations(github), 3, "an unchanged index and an unchanged ledger reuse everything");
 
-  counted.setOpen([{ number: 7, url: "https://github.com/o/r/pull/7", state: "OPEN", headRefName: "run-W1-T9-1" }]);
+  state.open = [{ number: 7, url: "https://github.com/o/r/pull/7", state: "OPEN", headRefName: "run-W1-T9-1" }];
   cache.get(deps);
-  assert.equal(counted.derivations(), 6, "the open index moved, so no projection is assumed to have held");
+  assert.equal(derivations(github), 6, "the open index moved, so no projection is assumed to have held");
 });
 
 test("foldTaskFingerprints walks only what is new, and restarts from zero when the ledger rotated", () => {
