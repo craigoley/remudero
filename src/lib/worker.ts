@@ -191,6 +191,19 @@ export interface WorkerResult {
   model: string;
   /** Concrete provider model selected after health/capability routing. */
   routedModel?: string;
+  /** W1-T3575 — CASH ATTRIBUTION FOR A CAPPED PROVIDER, declared here so a ledger consumer reads a
+   * typed field rather than an untyped passenger on the openweight adapter's own result. Present
+   * only for `provider: "openweight"`, the one backend billed per request against `dailyCapUsd`.
+   * `budgetReservedUsd` is what was committed BEFORE the requests were sent (conservative, derived
+   * from the adapter's price constants and its exact request ceiling); `budgetSettledUsd` is what
+   * the provider's own receipts settled it down to. They differ whenever a receipt came back, and
+   * a row where they are EQUAL on a failed run is the signal that spend could not be read back and
+   * was deliberately left charged. `budgetRefused` marks a run the daily allowance declined before
+   * any paid request — money not spent, which is a different outcome from a request that failed.
+   * Never a prompt, never a credential: these are dollars only. */
+  budgetReservedUsd?: number;
+  budgetSettledUsd?: number;
+  budgetRefused?: boolean;
   /** Opaque join key for the immutable, pre-execution routing assignment. A terminal worker row
    * carries this only after its assignment event was emitted; the ID does NOT imply that a provider
    * reported serving the selected model. */
