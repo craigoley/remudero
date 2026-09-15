@@ -36,6 +36,7 @@ import { automergeHoldFromLedger } from "./review.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
+import { mergeFeedbackRecord } from "./feedback-record-merge.js";
 
 /**
  * Mirrors measurement-cadence.ts's `CiLearningShardDraft`/`CiLearningFiledShard`/
@@ -176,6 +177,11 @@ export interface LandFeedbackResult {
     paths: string[];
     truncated: boolean;
   };
+  /** Present only when this call REFUSED to stage one or more feedback records because the local
+   *  copy sat at an earlier §7B lifecycle position than `origin/main`'s (W1-T3561) — never
+   *  silently dropped. A refused record is excluded from `files`/the pushed tree entirely, so it
+   *  can never ride into an armed auto-merge PR by construction. */
+  refused?: FeedbackRefusal[];
 }
 
 const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
@@ -518,6 +524,51 @@ interface LandingTreeBuild {
   /** This call's OWN new content only (never the carried-forward records) — what the commit
    *  message/PR body describe. */
   unlanded: string[];
+  /** Feedback records this build refused to stage (W1-T3561) — a local copy that sat at an
+   *  earlier §7B lifecycle position than `origin/main`'s. Always `[]` for the `decisions`/
+   *  `ci-learning` families, which carry no status lifecycle. Never included in `unlanded`/the
+   *  tree, so a refusal can never ride into an armed auto-merge PR by construction. */
+  refused: FeedbackRefusal[];
+}
+
+/** One landing-time refusal (W1-T3561) — surfaced on {@link LandFeedbackResult.refused} and, for
+ *  {@link sweepFeedbackLanding}, on its own ledger line, rather than being silently swallowed. */
+export interface FeedbackRefusal {
+  /** Repo-relative, forward-slash path of the refused record. */
+  path: string;
+  /** One line naming why — {@link import("./feedback-record-merge.js").FeedbackRecordMergeDecision}'s own `reason`. */
+  reason: string;
+}
+
+/** True only for a TOP-LEVEL `plan/feedback/<id>.yaml` entry — never a nested attachment
+ *  (`plan/feedback/attachments/**`), a stray non-yaml file, or any path outside the `feedback`
+ *  family's own directory. Those keep the pre-existing byte-inequality behaviour: they carry no
+ *  §7B status lifecycle for {@link mergeFeedbackRecord} to reason about. */
+function isFeedbackRecordPath(kind: LandingKind, relPath: string): boolean {
+  if (kind.family !== "feedback") return false;
+  const prefix = `${kind.ownedDir}/`;
+  if (!relPath.startsWith(prefix)) return false;
+  const rest = relPath.slice(prefix.length);
+  return rest.length > 0 && !rest.includes("/") && rest.endsWith(".yaml");
+}
+
+/**
+ * The one call site {@link mergeFeedbackRecord} has in this module (task acceptance criterion 7)
+ * — both {@link landPending} and {@link landContent} route every feedback-record path through
+ * this, rather than re-deciding the ordering inline the way the pre-fix `remoteSha !== localSha`/
+ * `remoteSha === blobSha` checks did. `remoteSha` is only ever passed non-null (a null remote
+ * means "nothing upstream yet", handled by the caller before this is reached — see both call
+ * sites). Never throws: an unreadable upstream blob refuses rather than guesses a winner, the
+ * same posture {@link mergeFeedbackRecord} itself takes on unparseable YAML.
+ */
+function decideFeedbackStage(git: GitExec, remoteSha: string, localBytes: string) {
+  let upstreamBytes: string;
+  try {
+    upstreamBytes = git(["cat-file", "-p", remoteSha]);
+  } catch (e) {
+    return { kind: "refuse" as const, reason: `upstream record ${remoteSha} unreadable: ${String((e as Error)?.message ?? e)}` };
+  }
+  return mergeFeedbackRecord(upstreamBytes, localBytes);
 }
 
 /**
@@ -661,13 +712,18 @@ function finishLanding(
   env: NodeJS.ProcessEnv,
   ledgerLines?: () => Array<Record<string, unknown>>,
 ): LandFeedbackResult {
+  // W1-T3561: fold a build's refusals onto a result — never onto the tree/files it names, so a
+  // refused record can never ride into an armed auto-merge PR by construction (criterion 4).
+  const withRefused = (result: LandFeedbackResult, refused: FeedbackRefusal[]): LandFeedbackResult =>
+    refused.length > 0 ? { ...result, refused } : result;
+
   // Push only when the tree differs from what's already on the branch: the tree is deterministic
   // for unchanged content but `commit-tree` stamps the time, so comparing commits instead
   // force-pushed every call and once deadlocked a PR's CI (racing cancellations, no settled sha).
   // Why: docs/forensics/feedback-landing.md#finishlanding_shortcircuit.
   if (remoteBranchTree(git, kind.branch) === build.treeSha) {
     const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, ledgerLines);
-    return { landed: true, files: build.unlanded, prUrl, error, pushed: false };
+    return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build.refused);
   }
 
   const pushOnce = (b: LandingTreeBuild): void => {
@@ -713,7 +769,7 @@ function finishLanding(
     }
     if (remoteBranchTree(git, kind.branch) === retried.treeSha) {
       const { prUrl, error } = ensurePrOpen(kind, gh, retried.unlanded, ledgerLines);
-      return { landed: true, files: retried.unlanded, prUrl, error, pushed: false };
+      return withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused);
     }
     try {
       pushOnce(retried);
@@ -721,14 +777,17 @@ function finishLanding(
       // The ref moved again even under the retry (a third writer squeezed in) — refuse rather
       // than force-replacing a tip this call never actually read. Surfaced via `error`, never
       // swallowed, and `ensurePrOpen` is never reached — auto-merge is never armed on a refusal.
-      return {
-        landed: false,
-        files: [],
-        error:
-          `refused to force-replace ${kind.branch}: its tip moved again after re-deriving the ` +
-          `union once (${String((secondErr as Error)?.message ?? secondErr)}); original failure: ` +
-          `${String((firstErr as Error)?.message ?? firstErr)}`,
-      };
+      return withRefused(
+        {
+          landed: false,
+          files: [],
+          error:
+            `refused to force-replace ${kind.branch}: its tip moved again after re-deriving the ` +
+            `union once (${String((secondErr as Error)?.message ?? secondErr)}); original failure: ` +
+            `${String((firstErr as Error)?.message ?? firstErr)}`,
+        },
+        retried.refused,
+      );
     }
     build = retried;
   }
@@ -736,9 +795,12 @@ function finishLanding(
   const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, ledgerLines);
   if (error) {
     // Pushed fine; only the PR failed to open — pushed: true because the branch content did move.
-    return { landed: true, files: build.unlanded, error: `pushed to ${kind.branch} but ${error}`, pushed: true };
+    return withRefused(
+      { landed: true, files: build.unlanded, error: `pushed to ${kind.branch} but ${error}`, pushed: true },
+      build.refused,
+    );
   }
-  return { landed: true, files: build.unlanded, prUrl, pushed: true };
+  return withRefused({ landed: true, files: build.unlanded, prUrl, pushed: true }, build.refused);
 }
 
 /** Acknowledge any byte-identical, untracked queue copy already on fetched origin/main, then land
@@ -762,8 +824,17 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
     git(["fetch", "origin", "--quiet"]);
     acknowledgement = acknowledgeLandedQueueCopies(root, kind, git);
 
-    const localUnlanded = (): string[] =>
-      listRelFiles(root, kind.ownedDir).filter((rel) => {
+    // W1-T3561: a byte inequality alone no longer decides a feedback record's fate. `new
+    // remoteSha => local wins trivially (nothing upstream yet); identical bytes => nothing to
+    // stage; otherwise a top-level `plan/feedback/<id>.yaml` entry is routed through
+    // {@link mergeFeedbackRecord} (via {@link decideFeedbackStage}), which may also REFUSE a
+    // local copy that sits at an earlier §7B lifecycle position — reported below, never dropped
+    // in the caller's tree. Every other path (attachments, a stray non-yaml file, and every
+    // `decisions`/`ci-learning` family) keeps the exact pre-fix inequality behaviour.
+    const scanLocalUnlanded = (): { files: string[]; refused: FeedbackRefusal[] } => {
+      const files: string[] = [];
+      const refused: FeedbackRefusal[] = [];
+      for (const rel of listRelFiles(root, kind.ownedDir)) {
         const localSha = git(["hash-object", join(root, rel)]).trim();
         let remoteSha: string | null;
         try {
@@ -771,9 +842,27 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
         } catch {
           remoteSha = null; // not on origin/main at all yet
         }
-        return remoteSha !== localSha;
-      });
-    if (localUnlanded().length === 0) return withAcknowledgement({ landed: false, files: [] });
+        if (remoteSha === localSha) continue;
+        if (remoteSha !== null && isFeedbackRecordPath(kind, rel)) {
+          const decision = decideFeedbackStage(git, remoteSha, readFileSync(join(root, rel), "utf8"));
+          if (decision.kind === "refuse") {
+            refused.push({ path: rel, reason: decision.reason });
+            continue;
+          }
+          if (decision.kind === "keep-upstream") continue;
+        }
+        files.push(rel);
+      }
+      return { files, refused };
+    };
+    const initialScan = scanLocalUnlanded();
+    if (initialScan.files.length === 0) {
+      return withAcknowledgement(
+        initialScan.refused.length > 0
+          ? { landed: false, files: [], refused: initialScan.refused }
+          : { landed: false, files: [] },
+      );
+    }
 
     // Commit built against a SCRATCH index, never the caller's real one — the acknowledgement
     // above is the sole narrow working-tree mutation; this stays under W1-T60's isolation.
@@ -790,13 +879,13 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
       if (!pending.ok) throw new Error(pending.reason);
       git(["read-tree", "origin/main"], { env });
       if (pending.tipSha) stageBranchPending(git, kind, pending.files, env);
-      const unlanded = localUnlanded();
+      const { files: unlanded, refused } = scanLocalUnlanded();
       for (const rel of unlanded) {
         const blobSha = git(["hash-object", "-w", join(root, rel)], { env }).trim();
         git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${rel}`], { env });
       }
       const treeSha = git(["write-tree"], { env }).trim();
-      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded };
+      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded, refused };
     };
 
     const initialMainSha = git(["rev-parse", "origin/main"]).trim();
@@ -860,6 +949,10 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
           acknowledged_paths_truncated: acknowledgement.truncated,
         }
       : { acknowledged_count: 0 };
+    // W1-T3561: a refused, backward-moving feedback record rides along on EITHER branch below —
+    // never swallowed into just `acknowledgementEvidence`'s silence, regardless of whether this
+    // pass also happened to push something else.
+    const refusalEvidence = result.refused && result.refused.length > 0 ? { refused: result.refused } : {};
     if (result.pushed) {
       log("feedback.landing_sweep", {
         pushed: true,
@@ -868,6 +961,7 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
         pr_url: result.prUrl,
         error: result.error,
         ...acknowledgementEvidence,
+        ...refusalEvidence,
       });
     } else {
       // W1-T3560: a refusal (the ref moved twice under a lost lease, or its pending content
@@ -880,6 +974,7 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
         file_count: result.files.length,
         error: result.error,
         ...acknowledgementEvidence,
+        ...refusalEvidence,
       });
     }
   }
@@ -929,6 +1024,13 @@ function landContent(
       if (pending.tipSha) stageBranchPending(git, kind, pending.files, env);
 
       const unlanded: string[] = [];
+      // W1-T3561: `landFeedbackStatusContent` (the console's `POST /v1/feedback/decision` write
+      // path) is the one `landContent` caller whose paths carry a §7B status lifecycle
+      // (`recordDecision`/`recordRuling` use the `decisions` family, out of scope — see
+      // `isFeedbackRecordPath`) — it must obey the same monotonic predicate {@link landPending}'s
+      // disk scan does, per the task's design point (v), rather than the bare
+      // `remoteSha === blobSha` identity check this loop used before.
+      const refused: FeedbackRefusal[] = [];
       let i = 0;
       for (const { relPath, content } of inputs) {
         // A scratch tmp file, never inside root — hash-object just needs a path to read from.
@@ -942,16 +1044,28 @@ function landContent(
           remoteSha = null; // not on origin/main at all yet
         }
         if (remoteSha === blobSha) continue; // already identical upstream — nothing to land
+        if (remoteSha !== null && isFeedbackRecordPath(kind, relPath)) {
+          const decision = decideFeedbackStage(git, remoteSha, content);
+          if (decision.kind === "refuse") {
+            refused.push({ path: relPath, reason: decision.reason });
+            continue;
+          }
+          if (decision.kind === "keep-upstream") continue;
+        }
         git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${relPath}`], { env });
         unlanded.push(relPath);
       }
       const treeSha = git(["write-tree"], { env }).trim();
-      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded };
+      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded, refused };
     };
 
     git(["fetch", "origin", "--quiet"]);
     const initialBuild = buildTree(git(["rev-parse", "origin/main"]).trim());
-    if (initialBuild.unlanded.length === 0) return { landed: false, files: [] };
+    if (initialBuild.unlanded.length === 0) {
+      return initialBuild.refused.length > 0
+        ? { landed: false, files: [], refused: initialBuild.refused }
+        : { landed: false, files: [] };
+    }
 
     const rebuild = (): LandingTreeBuild => {
       git(["fetch", "origin", "--quiet"]);
