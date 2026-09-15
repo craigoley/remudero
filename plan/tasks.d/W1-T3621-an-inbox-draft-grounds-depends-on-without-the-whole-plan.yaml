@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: medium
   budget_usd: 20.00
-  files: [src/lib/inbox.ts, src/run-task.ts, test/an-inbox-draft-grounds-depends-on-without-the-whole-plan.test.ts]
+  files: [src/lib/inbox.ts, test/an-inbox-draft-grounds-depends-on-without-the-whole-plan.test.ts]
   origin: oper#smart-routing-audit-2026-09-15
   plan_refs: ["W1-T3619", "W1-T3569", "W1-T3614", "W1-T3350"]
   status: queued
