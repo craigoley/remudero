@@ -8783,7 +8783,7 @@ test("W1-T2564: the attempt-key migration runs ONCE per daemon start, not per po
 // reachability.test.ts's armIfVerdictPermits/ledgerLines call-site list) reads elsewhere in this
 // same file — the #5571 coverage-shard break this placement exists to avoid repeating. ──
 
-test("runFixRung: a target-green CI-gate verdict (console-shaped required checks, no context literally named ci) reaches its ordinary fresh semantic review without emitting fix.ci_not_green or spending a second strike (W1-T3584)", async () => {
+test("W1-T3584 target-green fix rung does not spend a false strike: runFixRung reaches its ordinary fresh semantic review without emitting fix.ci_not_green or spending a second strike", async () => {
   const spawnCalls: SpawnWorkerArgs[] = [];
   const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
   const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
