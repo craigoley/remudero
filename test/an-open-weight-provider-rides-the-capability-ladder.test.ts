@@ -16,12 +16,14 @@ import {
 import { LiveSpawnBlockedError } from "../src/lib/spawn-guard.js";
 import { spawnWorker, type WorkerResult, type WorkerSelectionAssignment } from "../src/lib/worker.js";
 import {
+  OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS,
   OPENWEIGHT_ALLOWANCE_FILENAME,
   OPENWEIGHT_MAX_COMPLETION_TOKENS,
   OPENWEIGHT_OUTPUT_CONTRACT,
   OpenWeightAllowanceExhaustedError,
   openWeightCommittedUsd,
   openWeightReservationUsd,
+  openWeightUtcDay,
   reserveOpenWeightBudget,
   selectOpenWeightModel,
   spawnOpenWeightWorker,
@@ -862,6 +864,100 @@ test("openweight daily cap ledger fields expose settled cost without a credentia
     } finally {
       rmSync(routedRoot, { recursive: true, force: true });
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T3575: the three fail-closed guards, each exercised ───────────────────────────────────────
+// Every one of these is a REFUSAL. An untested refusal is the "unreachable default" this repo's
+// coverage doctrine names: it reads as protection while never having run, and the first time it
+// fires is in production against real money.
+
+test("openweight daily cap refuses a clock reading it cannot derive a UTC day from", () => {
+  // The allowance is keyed by CALENDAR day, so a reading that is not an ISO-8601 instant cannot be
+  // bucketed at all. Guessing a day would silently charge the wrong one — or reset a day's spend.
+  assert.equal(openWeightUtcDay("2026-09-15T08:00:00.000Z"), "2026-09-15");
+  assert.equal(openWeightUtcDay("2026-09-15"), "2026-09-15", "a bare ISO date is still a readable day");
+
+  for (const bad of ["", "not-an-iso", "15/09/2026", "2026-9-5T08:00:00Z", String(Date.now())]) {
+    assert.throws(
+      () => openWeightUtcDay(bad),
+      /needs an ISO-8601 instant/,
+      `${JSON.stringify(bad)} must be refused rather than bucketed into some day`,
+    );
+  }
+});
+
+test("openweight daily cap refuses to spend when no dailyCapUsd is configured at runtime", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-nocap-"));
+  try {
+    // validateConfig already refuses this pairing at LOAD. This is the runtime half of the same
+    // rule: reached by any path that did not go through that validation, an absent cap must mean
+    // "do not spend", never "spend without a bound".
+    for (const capUsd of [undefined, null]) {
+      const config = {
+        claudeBin: "/unused/claude",
+        root,
+        dailyCapUsd: capUsd,
+        workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+      } as unknown as Config;
+      assert.throws(
+        () => reserveOpenWeightBudget(config, { requestId: "no-cap", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }),
+        /requires a dailyCapUsd before any paid request/,
+        `dailyCapUsd: ${String(capUsd)} must refuse, not default to unlimited`,
+      );
+    }
+    // DISCRIMINATION: the identical call with a cap present commits normally, so the refusal is
+    // about the missing cap and not about anything else in the reservation path.
+    const capped = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: 5,
+      workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+    } as Config;
+    assert.ok(reserveOpenWeightBudget(capped, { requestId: "capped", requestBodyBytes: 512, atIso: "2026-09-15T08:00:00.000Z" }).reservedUsd > 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("openweight daily cap refuses rather than spending when compare-and-swap contention never clears", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-contention-"));
+  try {
+    const config = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: 5,
+      workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+    } as Config;
+    const atIso = "2026-09-15T08:00:00.000Z";
+
+    // A peer that commits inside EVERY attempt's read-to-rename window, so the compare-and-swap
+    // loses every time. This is the pathological case the retry bound exists for: the alternative
+    // to giving up is spinning forever while a paid request waits behind it.
+    let peer = 0;
+    assert.throws(
+      () =>
+        reserveOpenWeightBudget(config, {
+          requestId: "never-wins",
+          requestBodyBytes: 512,
+          atIso,
+          beforeCommit: () => {
+            peer += 1;
+            reserveOpenWeightBudget(config, { requestId: `peer-${peer}`, requestBodyBytes: 16, atIso });
+          },
+        }),
+      /allowance contention: \d+ compare-and-swap attempts lost/,
+      "unbounded contention must REFUSE, never fall through and spend",
+    );
+    assert.equal(peer, OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS, "the bound is what stops the loop, and it is the declared one");
+
+    // THE REFUSED RESERVATION COMMITTED NOTHING — the peers' rows are all that landed. A refusal
+    // that left its own row behind would charge the day for a request that was never sent.
+    const state = JSON.parse(readFileSync(join(root, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "utf8")) as OpenWeightAllowanceState;
+    assert.equal("never-wins" in state.reservations, false, "a refused reservation commits no row");
+    assert.equal(Object.keys(state.reservations).length, peer, "exactly the peers' rows are committed");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -1820,7 +1820,7 @@ export class OpenWeightAllowanceExhaustedError extends RmdError {
 /** How many times a compare-and-swap may lose its race before the reservation gives up. A loss
  *  needs a PEER to have committed between this call's read and its rename, so a handful of retries
  *  covers any realistic interleaving; the bound only stops a pathological peer spinning us forever. */
-const OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS = 12;
+export const OPENWEIGHT_ALLOWANCE_CAS_ATTEMPTS = 12;
 
 /**
  * Read-modify-write the allowance file atomically ACROSS PROCESSES.
