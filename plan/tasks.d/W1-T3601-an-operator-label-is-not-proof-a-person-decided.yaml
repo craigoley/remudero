@@ -1,0 +1,49 @@
+- id: W1-T3601
+  title: "AN `operator` LABEL IS NOT PROOF A PERSON DECIDED — a worker or a scheduled shell command can invoke `rmd merge-hold --by <anything>` and create a durable human merge hold that strands an automated PR, because the hold reader trusts the label the writer chose rather than any evidence of human presence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/operator-merge-hold.ts
+    - src/run-task.ts
+    - test/operator-merge-hold-command.test.ts
+    - test/automerge-hold.test.ts
+  origin: "retro-filing#5586-unfiled-2026-09-15"
+  rationale: |
+    FILED AFTER THE FACT, AND THAT IS STATED RATHER THAN HIDDEN. PR #5586 was opened 2026-09-15
+    on branch `fix/verified-human-merge-holds` with no plan record, no `Remudero-Task:` trailer
+    and no acceptance block, so `head-identity-gate` and `acceptance-author-gate` both refused it
+    and it sat red and untouched for nine hours. The CHANGE is sound and already carries its own
+    falsifiers; what it lacked was a record. This shard is that record, written from the diff and
+    the tests that were already there — never from a guess about intent.
+
+    THE DEFECT. `OperatorMergeHoldInput.by` is an execution-context label, not evidence. Nothing
+    stopped a worker, a cron entry or any non-interactive shell from invoking the merge-hold CLI
+    with an arbitrary `--by` string and writing a hold the production reader then honours. A hold
+    is durable and blocks unattended merges, so a fabricated one strands an automated PR until a
+    human notices — the failure mode is silent and open-ended.
+
+    THE REMEDY, as built: an explicit `authority` field (`interactive-cli` | `console-confirmed`)
+    written WITH the decision and consumed by the hold reader, plus a required `--confirm` flag
+    and a refusal when the invoking process is not interactive. The authority travels with the
+    row rather than being re-derived at read time, so an older row missing it cannot be read as
+    confirmed by a newer reader.
+  acceptance:
+    - claim: an unconfirmed CLI-shaped ledger row cannot strand an automated PR
+      proof: "unit test: automergeHoldFromLedger: an unconfirmed CLI-shaped row cannot strand an automated PR"
+    - claim: the argument parser accepts a confirmed fleet release and refuses unattributed or ambiguous input
+      proof: "unit test: parseOperatorMergeHoldArgs accepts a confirmed fleet release"
+    - claim: a confirmed-looking request from a non-interactive process is refused
+      proof: "unit test: mergeHoldCommand refuses a confirmed-looking request from a non-interactive process"
+  falsifier: |
+    THE CONTROL THAT MATTERS IS THE LEGACY ROW. A hold written before this change carries no
+    `authority` field at all. If the reader treated an absent field as confirmed, every
+    pre-existing fabricated hold would survive the fix and the gate would be theatre; if it
+    treated absent as unconfirmed for OPERATOR holds too, a real human hold would be dropped on
+    upgrade. `automergeHoldFromLedger`'s test covers the first direction explicitly.
