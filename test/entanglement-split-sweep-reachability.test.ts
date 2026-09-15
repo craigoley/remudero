@@ -327,6 +327,8 @@ test("ordinary unmet and Rule-15 review routes remain unchanged", () => {
     checksState: "green",
     unmetCriteria: [{ claim: "still unmet", proof: "", met: false, reason: "missing", proof_exec: "not_executable" }],
     priorStrikes: 0,
+    // deriveDisposition is judged against the pinned JUDGED_AT_MS above.
+    // expiring-fixture: exempt -- the file's date-literal guard proves this stays inside that fixed staleness rung.
     lastActivityAt: "2026-09-08T00:00:00.000Z",
     headSha: "abc",
     autoMergeArmed: false,

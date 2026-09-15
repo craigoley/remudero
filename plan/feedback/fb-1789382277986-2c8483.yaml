@@ -1,0 +1,25 @@
+id: fb-1789382277986-2c8483
+ts: 2026-09-14T10:37:57.989Z
+raw: "Root incident: two RMD instances are force-updating the shared Remudero
+  feedback-landing PR #5508 with disjoint batches. Observed heads: one carried
+  the seven core feedback files including fb-1789380725522-726d15; another
+  carried only fb-1789364933974-18dfc1 plus site feedback
+  fb-1789382055450-2b1a3c and fb-1789382125003-abdb87. The branch oscillated, so
+  a green auto-merge could silently lose durable inbox records. Design a
+  repository-scoped landing identity and ownership model for every daemon
+  instance: each target repo lands only its own feedback to its own repository
+  and branch, or an explicitly serialized central writer produces a monotonic
+  union. Never force-update a landing head so it removes any still-unlanded
+  record. Add an integration test with two independent state roots and disjoint
+  inboxes proving no record is lost, and an invariant that a landing PR can be
+  auto-armed only when its head equals the complete pending union for its owner.
+  Reconcile all nine observed records before releasing PR #5508 hold."
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

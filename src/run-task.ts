@@ -4515,6 +4515,15 @@ export interface PollDeps {
   readJson?: (args: string[]) => Promise<unknown>;
   /** Defaults to {@link yieldingSleep}. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * W1-T3584: the target repo's own required-status-check contexts — the SAME seam shape
+   * `ghRequiredStatusCheckContexts` already exposes and the sweep's `deps.requiredContexts`
+   * (line ~30372) already takes, so no new contract is invented. `waitForCiGreen` calls this
+   * ONCE per wait (never per poll — see its own call site) and defaults to
+   * {@link ghRequiredStatusCheckContexts}. `undefined` (unreadable protection or a genuinely
+   * unprotected branch) takes `ciGateFromRollup` down its unchanged fail-closed fallback.
+   */
+  requiredContexts?: (owner: string, repo: string) => string[] | undefined;
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
@@ -4606,6 +4615,33 @@ export async function pollToGate(
  * is judged FRESH by `runReview` every strike, never trusted from the
  * rollup here.
  */
+/**
+ * W1-T3584 — the PRE-REVIEW VIEW `ciGateFromRollup` judges from, factored out so
+ * `waitForCiGreen` can feed the IDENTICAL view to `checkWaitStalled`'s timeout/pending evidence
+ * instead of the raw rollup: `remudero-review` (this rung's own judge, about to run fresh once
+ * CI goes green) is excluded UNCONDITIONALLY, never merely when the required-context list
+ * happens to be readable — a review that has not been given a chance to run yet is never
+ * evidence that CI itself has stalled. Deduped to the latest attempt per check
+ * ({@link dedupeRollupByLatestAttempt}), and — only when the target's required contexts are
+ * READABLE (`requiredContexts` non-empty) — narrowed to just that set, mirroring
+ * `checksStateFromRollup`'s own `knownRequired` narrowing. An empty/absent list answers the
+ * full (review-excluded, deduped) rollup, unchanged from before this task.
+ */
+export function ciGatePreReviewView(
+  rollup: RollupEntry[] | undefined,
+  requiredContexts: Iterable<string> | undefined = undefined,
+): RollupEntry[] {
+  const roll = dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX));
+  // `remudero-review` is branch protection's own name for THIS rung's judge, so it can appear
+  // inside the required-contexts list itself — excluded here too, the same as it is excluded from
+  // `roll` just above, so a required list of exactly `["remudero-review"]` narrows to nothing
+  // rather than matching a rollup entry this function already stripped.
+  const required = new Set([...(requiredContexts ?? [])].filter((name) => name !== REVIEW_CTX));
+  return required.size > 0
+    ? roll.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? ""))
+    : roll;
+}
+
 export function ciGateFromRollup(
   rollup: RollupEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined = undefined,
@@ -4613,20 +4649,32 @@ export function ciGateFromRollup(
   // W1-T2804: DEDUPE BEFORE JUDGING, by CALLING the rule the siblings call. A sha accumulates one
   // entry PER ATTEMPT, so without this a superseded CANCELLED/FAILURE attempt outvotes its own
   // green successor and the run books `blocked_ci` while GitHub is merging the PR.
-  const roll = dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX));
+  //
   // W1-T2804: the RED vote is cast only by REQUIRED contexts when the list is readable. The degrade
   // is READ FROM the sibling (`checksStateFromRollup`), not re-decided: an empty/absent list means
   // every reported context counts, because an unreadable protection rule (the container PAT's 403,
-  // the common case on this fleet) must never manufacture a false green. The GREEN verdict is
-  // deliberately unchanged and still requires a check named `ci` reporting SUCCESS — sharing the
-  // RULES with `checksStateFromRollup` must not collapse the two distinct VERDICTS.
-  const required = new Set(requiredContexts ?? []);
-  const voters = required.size > 0
-    ? roll.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? ""))
-    : roll;
+  // the common case on this fleet) must never manufacture a false green.
+  const required = new Set([...(requiredContexts ?? [])].filter((name) => name !== REVIEW_CTX));
+  const voters = ciGatePreReviewView(rollup, requiredContexts);
   const red = voters.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
   if (red) return "red";
-  const ci = roll.find((c) => (c.name ?? c.context) === "ci");
+  if (required.size > 0) {
+    // W1-T3584: the GREEN verdict, when the target's required contexts are READABLE, is derived
+    // from THAT set alone — never a check literally named `ci`, which a target whose protection
+    // names console-ci/ci-gate/Vercel (or any other names) never reports at all. Every required
+    // context (remudero-review already excluded above) must be PRESENT on this head with a
+    // REQUIRED_CHECK_OK conclusion (the same ok-set `checksStateFromRollup` reads); an absent,
+    // queued, cancelled, or otherwise-pending required context falls through to "pending" below —
+    // it can never manufacture a green.
+    const allOk = [...required].every((name) => {
+      const entry = voters.find((c) => (c.name ?? "") === name || (c.context ?? "") === name);
+      return entry !== undefined && REQUIRED_CHECK_OK.has(String(entry.conclusion ?? entry.state ?? ""));
+    });
+    return allOk ? "green" : "pending";
+  }
+  // Fail-closed fallback (W1-T176 design (i), unchanged): required contexts unreadable or empty —
+  // GREEN still requires a check literally named `ci` reporting SUCCESS.
+  const ci = voters.find((c) => (c.name ?? c.context) === "ci");
   if (ci && String(ci.conclusion ?? ci.state ?? "") === "SUCCESS") return "green";
   return "pending";
 }
@@ -4840,25 +4888,34 @@ async function waitForCiGreen(
   const sleep = deps.sleep ?? yieldingSleep;
   // W1-T2268: REST, never GraphQL — see the block above `restRollupFor`.
   const { owner, repo, number } = pollRestTarget(prUrl, "waitForCiGreen");
+  // W1-T3584: resolved ONCE per wait, never per poll — branch protection does not change
+  // mid-wait, and a repeated read is only a repeated chance for a rate-limited or 403'd token to
+  // flip an already-resolved answer under the SAME wait. Passed to EVERY poll's verdict below
+  // (`ciGateFromRollup`) and to the pre-review view fed to `checkWaitStalled`, so the two never
+  // judge against a different notion of "required" mid-wait.
+  const requiredContexts = (deps.requiredContexts ?? ghRequiredStatusCheckContexts)(owner, repo);
   const readings: (RollupEntry[] | undefined)[] = [];
   let sha = "";
   for (let i = 0; ; i++) {
     const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
     sha = mapRestPr(row).headRefOid;
     const roll = await restRollupFor(owner, repo, sha, read);
-    const state = ciGateFromRollup(roll);
+    const state = ciGateFromRollup(roll, requiredContexts);
     // W1-T2804: the sha this iteration RESOLVED and judged rides out with the verdict. It is the
     // already-resolved head, never a second read — a second read is a second chance to skew.
     if (state === "red") {
       const red = boundedCiGateChecks(
-        dedupeRollupByLatestAttempt((roll ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX))
+        ciGatePreReviewView(roll, requiredContexts)
           .filter((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")))
           .map((c) => c.name ?? c.context ?? "unknown"),
       );
       return { state: "red", sha, ...red };
     }
     if (state === "green") return { state: "green", sha };
-    readings.push(roll);
+    // W1-T3584: the SAME pre-review view `ciGateFromRollup` just judged — never the raw rollup —
+    // so a still-PENDING `remudero-review` entry can never be recorded by `checkWaitStalled` as a
+    // stalled CI dependency (the console PR #22 false `ci.stalled` this task exists to fix).
+    readings.push(ciGatePreReviewView(roll, requiredContexts));
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
     const ci = roll.find((c) => (c.name ?? c.context) === "ci");
@@ -26717,6 +26774,103 @@ export function planReloader(
 }
 
 /**
+ * W1-T3554 — the NON-self counterpart to {@link planReloader}. A `--repo <target>` daemon (a
+ * non-self target, no explicit `--plan`) used to freeze that target's plan at boot forever:
+ * `planReloader` refuses whenever `target.isSelf` is false, and `checkFreshness` watches only the
+ * daemon's OWN engine checkout — reported as fb-1789349833277-20ca42 (the CONSOLE-T1 incident this
+ * closes). A NEW function, not a modified `planReloader`: that function's self arm, and its
+ * documented non-self refusal (test/daemon-plan-freshness.test.ts), are untouched; only the
+ * wiring below now also reaches this second reloader.
+ *
+ * Same shape, same `deps.reloadPlan` placement, same "never mid-batch" guarantee as
+ * `planReloader` — inherited from the SAME caller (`runDaemon`'s top-of-tick call, lib/daemon.ts),
+ * not reimplemented here. See the inline comments below for why this arm fetches and resets the
+ * working tree where `planReloader`'s self arm needs neither.
+ *
+ * Returns a closure holding the last-seen plan tree sha: `null` while unchanged, a fresh
+ * `Plan` only when the target's own origin/main genuinely moved.
+ */
+export function dedicatedTargetPlanReloader(
+  target: { isSelf: boolean; planPath: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    fetch?: () => void;
+    treeSha?: () => string;
+    resetWorkingTree?: () => void;
+    load?: (planPath: string) => Plan;
+  } = {},
+): (() => Plan | null) | undefined {
+  // Mirrors `planReloader`'s own early return, inverted: THIS reloader exists only for the arm
+  // `planReloader` refuses. Wiring (below) never hands a self target here, but the guard keeps
+  // this function correct in isolation, not merely correct-by-caller-discipline.
+  if (target.isSelf) return undefined;
+  const repoDirForGit = dirname(target.planPath);
+  // FETCHES, UNLIKE `planReloader`'s self arm: self rides `checkFreshness`'s own per-tick fetch of
+  // the SAME engine checkout (wired a few lines below this function's call site); nothing fetches
+  // a non-self TARGET's checkout between dispatches (`worktreeAdd`, lib/worker.ts, only fetches it
+  // WHILE a worker runs) — an idle dedicated daemon would otherwise never see a merged change.
+  const fetch =
+    deps.fetch ??
+    (() => execFileSync("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"], { stdio: "pipe" }));
+  const treeSha =
+    deps.treeSha ??
+    (() =>
+      execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
+        encoding: "utf8",
+      }).trim());
+  // RESETS THE WORKING TREE, UNLIKE `planReloader`: `load` below is a plain filesystem read, never
+  // a `git show <ref>:<path>`, so a fetched ref alone leaves it reading whatever boot's own
+  // `git reset --hard origin/main` (the `!target.isSelf` branch above) last checked out. Self gets
+  // away with the same plain read only because the deploy supervisor restarts the WHOLE process on
+  // any main move; a dedicated non-self daemon has no such restart (that gap is this task), so a
+  // genuine sha move must reset this checkout itself — the SAME command boot already runs once,
+  // deferred to fire again exactly when due — or the "reload" would silently re-parse stale
+  // content forever, which is worse than never reloading: it would look fixed.
+  const resetWorkingTree =
+    deps.resetWorkingTree ??
+    (() => execFileSync("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" }));
+  const load = deps.load ?? ((pp: string) => loadPlan(pp));
+  let lastSha: string | undefined;
+  return () => {
+    // A failed fetch propagates — caught by `runDaemon`'s own `daemon.plan_reload_failed` wrapper
+    // (the SAME generic catch `planReloader`'s own treeSha throw already relies on), never
+    // swallowed here. Keeping the plan we already have is the correct degrade either way.
+    fetch();
+    const sha = treeSha();
+    if (lastSha === undefined) {
+      // First tick: record the boot's sha without reloading — see `planReloader`'s identical
+      // comment for why reporting a reload here would be a lie. The working tree already matches
+      // this sha (boot's own reset put it there), so no reset is needed on this arm either.
+      lastSha = sha;
+      log("daemon.target_plan_unchanged", { tree_sha: sha.slice(0, 12), first_tick: true });
+      return null;
+    }
+    if (sha === lastSha) return null;
+    lastSha = sha;
+    resetWorkingTree();
+    log("daemon.target_plan_changed", { tree_sha: sha.slice(0, 12) });
+    return load(target.planPath);
+  };
+}
+
+/**
+ * W1-T3554 — picks the reloader for a target that DID ask for reload (an explicit `--plan` has
+ * already been ruled out at the call site, `daemonCommand`'s own `reloadPlan` wiring): self gets
+ * {@link planReloader}, everyone else gets {@link dedicatedTargetPlanReloader}. Pulled out of that
+ * wiring's own ternary into its own named, directly-testable seam — both arms are ALREADY pinned
+ * by their own reloader's tests above (`planReloader REAL DEFAULT`,
+ * `dedicatedTargetPlanReloader: a SELF target gets no reloader`), so this function's own job is
+ * only the SELECTION, never the reload behaviour itself.
+ */
+export function resolveReloadPlan(
+  target: { isSelf: boolean; planPath: string },
+  allowStale: boolean,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): (() => Plan | null) | undefined {
+  return target.isSelf ? planReloader(target, allowStale, log) : dedicatedTargetPlanReloader(target, log);
+}
+
+/**
  * W1-T2509 — MEMOISE ONE {@link GitHub} GATEWAY PER `owner/repo`, so N dispatch lanes pay ONE cold
  * walk instead of N.
  *
@@ -27892,19 +28046,23 @@ export async function daemonCommand(
         // dispatch runs to its verdict first, which is also what bounds the restart rate (measured:
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
         checkFreshness: () => daemonFreshnessFromService(checkServiceFreshness(repoRoot, process.env)),
-        // impl-FZ — PLAN FRESHNESS. Wired ONLY on the git-synced self-target path, so the reload
-        // reads the SAME source the boot did (origin/main, never the working tree). An explicit
-        // `--plan` keeps the frozen-at-boot behaviour, because that caller asked for a literal file.
+        // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
+        // paths, so the reload always reads the SAME source the boot did (origin/main, never the
+        // working tree). An explicit `--plan` keeps the frozen-at-boot behaviour for BOTH, because
+        // that caller asked for a literal file.
         //
         // Change detection is a TREE SHA, not a timestamp: `origin/main:plan` covers the monolith
         // AND all 45 shards in one ~8ms call, and only when it moves do we pay the ~60ms parse of
-        // a ~1MB plan. Unchanged ticks therefore cost 8ms, not 60. The sha is read from the
-        // already-fetched origin/main ref rather than fetching here — the deploy supervisor keeps
-        // that ref current on its own ~2-minute cadence, and adding a per-tick fetch to the
-        // dispatch path would be new network I/O for no extra freshness.
-        // Mirrors the BOOT condition at the plan binding above (`target.isSelf && !--plan`)
-        // exactly, so the reload source can never diverge from the load source.
-        reloadPlan: flagValue(rest, "--plan") ? undefined : planReloader(target, allowStale, log),
+        // a ~1MB plan. Unchanged ticks therefore cost 8ms, not 60. The self-target sha is read from
+        // the already-fetched origin/main ref rather than fetching here — `checkFreshness` above
+        // already fetches this SAME checkout every tick — while the dedicated non-self target
+        // fetches for itself (see `dedicatedTargetPlanReloader`'s own doc for why: nothing else
+        // keeps ITS checkout's origin/main current between dispatches).
+        // Mirrors the BOOT condition at the plan binding above (`target.isSelf && !--plan` /
+        // `!target.isSelf && !--plan`) exactly, so the reload source can never diverge from the
+        // load source. Selection itself lives in `resolveReloadPlan` (its own doc, above) so this
+        // callsite stays a single reachable line regardless of which arm a given caller exercises.
+        reloadPlan: flagValue(rest, "--plan") ? undefined : resolveReloadPlan(target, allowStale, log),
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
         // consumes markers the write-token API drops, dispatching a kicked task
         // through its normal assertRunnable-gated path and honouring "drain now".

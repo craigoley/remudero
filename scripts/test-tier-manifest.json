@@ -535,6 +535,7 @@
     "test/declared-guard-drift.test.ts": 7156,
     "test/declared-scope-exempts-what-dispatch-cannot-reach.test.ts": 1200,
     "test/declared-scope-unreachable-task.test.ts": 873,
+    "test/dedicated-target-plan-freshness.test.ts": 0,
     "test/dedup-stand-downs-name-themselves.test.ts": 1088,
     "test/degraded-retention.test.ts": 247,
     "test/demonstration-proof-kind.test.ts": 1313,
