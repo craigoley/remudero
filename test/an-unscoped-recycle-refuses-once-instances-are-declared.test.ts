@@ -13,13 +13,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
 const REGISTRY = join(REPO_ROOT, ".remudero", "daemon-instances.yaml");
+
+// W1-T2776 (test/host-parity-azure-pole.test.ts's census): this script uses bash-4-only
+// `declare -A`, so spawning it through the PATH `bash` resolves to 3.2 on darwin and fails there.
+// Resolve a real bash 4 binary first, the same remedy test/container-config-mount.test.ts's own
+// `BASH_BIN` already uses, so this suite needs no host-parity registry entry at all.
+const BASH_BIN =
+  ["/opt/homebrew/opt/bash/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"].find(existsSync) ?? "bash";
 
 /** The seven fields `read_instance_registry` requires of every declared instance. */
 const REQUIRED_FIELDS = [
@@ -33,7 +40,7 @@ const REQUIRED_FIELDS = [
 ] as const;
 
 function run(args: string[], env: Record<string, string> = {}) {
-  return spawnSync("bash", [SCRIPT, ...args], {
+  return spawnSync(BASH_BIN, [SCRIPT, ...args], {
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
