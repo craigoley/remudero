@@ -237,6 +237,11 @@ test("BEHAVIORAL: a real runTask implement dispatch's generic spawn is untouched
   assert.equal(spawnCalls[1]!.tools, undefined, "implement keeps the unrestricted default — never collateral-shrunk by this task");
 });
 
+// @source-text-subject — this test's SUBJECT genuinely IS src/run-task.ts's own text, not a stand-in
+// for behaviour it could exercise instead (test/source-text-assertion-census.test.ts's remedy (2)).
+// The claim under test is "every spawn call site in the file declares a tool bound", a property
+// about every occurrence in the source, including ones no single execution reaches or drives — the
+// same shape as the size/budget ratchets and docs-claims suites that census already excludes.
 test("every worker spawn declares an explicit tool bound", () => {
   // W1-T3616. A CENSUS OVER THE SOURCE, because this is a property no single execution can show:
   // the claim is about EVERY spawn site, including ones no test happens to drive. W1-T3573 closed

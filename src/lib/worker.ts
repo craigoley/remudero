@@ -1026,6 +1026,10 @@ export const GENERIC_ROUTE_TOOL_BOUNDS = {
 export type GenericRouteLane = keyof typeof GENERIC_ROUTE_TOOL_BOUNDS;
 
 /**
+ * W1-T3616, PRIMARY CONTROL (test/bound-kind-declared.test.ts): the declaration below IS what
+ * stops recon/diagnose/retro/alert_fix from reaching the SDK unrestricted — the same shape
+ * GENERIC_ROUTE_TOOL_BOUNDS above already carries for review/manual, nothing else backstops it.
+ *
  * The four spawns W1-T3573 left unbounded, each list DERIVED FROM THAT LANE'S OWN PROMPT (W1-T3616).
  *
  * EVERY ONE OF THEM DECLARES `Bash`, AND THAT IS THE MEASUREMENT, NOT A CONCESSION. The task that
