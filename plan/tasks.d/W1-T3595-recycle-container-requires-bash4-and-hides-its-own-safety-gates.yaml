@@ -64,3 +64,10 @@
     host's normal Bash 3.2, reaches both the shared-checkout refusal and runtime-environment capture
     outcomes without a `readarray` or associative-array error. The observed full-suite output
     falsifies that today: both error strings occur before those outcomes.
+  note: |
+    reservation hand-off: plan-w1-t3245-supervisor-amendment-1789440400000 -> plan-w1-t3595-bash3-recycle-portability-1789444200000
+    The W1-T3595 reservation ref was minted at 2026-09-14T23:43:18.965Z under the
+    plan-w1-t3245-supervisor-amendment-1789440400000 process, which never declared W1-T3595 and
+    merged as #5578 filing only W1-T3245. This filing is the sole branch that declares W1-T3595's
+    plan record, so the orphaned reservation is handed off here per task-id-existence-check.mjs's
+    documented remedy (a same-host process reserving an id it never consumes, not a live rival).
