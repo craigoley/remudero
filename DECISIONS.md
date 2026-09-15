@@ -1772,7 +1772,7 @@ three of roughly fifteen dispatchable tasks parked on a paperwork gap rather tha
 as an observation and a candidate shard; whether manual completion should be assertable is its own
 concern and is not decided here.
 
-## 2026-08-19 — RULING: W1-T472 and W1-T446 take the efficient option WITH telemetry; the site splits, the console does not (OPERATOR-RULED)
+## 2026-08-19 — RULING: W1-T472 and W1-T446 take the efficient option WITH telemetry; the site splits, the console does not (OPERATOR-RULED) (ITS CONSOLE CLAUSE SUPERSEDED BY OPERATOR RULING 2026-09-15)
 
 *Operator-ruled record, recorded at the operator's instruction.* The three rulings are the operator's;
 the measurements were taken to serve them, not to make them. `W1-T472` and `W1-T446` are re-banded to
@@ -2405,7 +2405,7 @@ every class closing, ratify (a) alone and re-file the governor question with the
 **Rollback:** delete this entry. No code was written, no shard was retired and no filing was
 refused; W1-T3076 returns to `status: queued` with its question open.
 
-## 2026-09-08 — OPERATOR RULING (W1-T3173): the operator console is a BUNDLED REACT SPA in `apps/dashboard`, served by `rmd serve`
+## 2026-09-08 — OPERATOR RULING (W1-T3173): the operator console is a BUNDLED REACT SPA in `apps/dashboard`, served by `rmd serve` (OPERATOR-RULED) (SUPERSEDED BY OPERATOR RULING 2026-09-15)
 
 *Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. The ruling is
 his ("I am good with all of your recommendations", 2026-09-08, on a recommendation that named this
@@ -2606,3 +2606,46 @@ reviewable implementation.
 
 **Rollback:** revert this entry. Gate behaviour is unchanged; W1-T3318 returns to queued and its
 dependent conversions lose this settled policy reference.
+
+## 2026-09-15 — OPERATOR RULING: THE CONSOLE IS ITS OWN REPOSITORY
+
+*Operator-authored, recorded by hand at the operator's instruction on 2026-09-15: "I want console to
+be its own repo, like we built. Retire or rewrite that old decision."*
+
+**REVERSED.** The 2026-08-19 ruling's console clause — "**W12-T1: THE SITE IS A SEPARATE
+REPOSITORY. THE CONSOLE IS NOT.** The console stays in `remudero` because it is not a website — it
+is `rmd serve`, a verb of the harness" — is reversed. So is the 2026-09-08 W1-T3173 ruling that
+re-affirmed it and ruled the console should become a bundled React SPA in `apps/dashboard`.
+
+**THE RULING WAS OVERTAKEN BY THE BUILD, WHICH IS WHY THIS IS A RECORD AND NOT A PROPOSAL.**
+`craigoley/remudero-console` exists: a private Next.js application deployed on Vercel, carrying its
+own `plan/tasks.yaml` (11 tasks, `CONSOLE-T1..T11`), its own `AGENTS.md` and `DESIGN-DOCTRINE.md`,
+its own CI aggregator, and — since PR #28 — its own `rmd` mount-routing policy, so its isolated
+daemon reviews and repairs its own pull requests. Eleven of its tasks have shipped. The question the
+old ruling answers is closed by fact.
+
+**WHAT THE OLD RULING GOT RIGHT, AND WHY IT STILL READ WRONG.** Its argument was real: splitting the
+console would make the daemon depend on another repository's build, and a worker changing
+`src/lib/service.ts` could not see the routes that consume it. That cost was PAID rather than
+avoided — the console repo reaches the daemon through the `/v1/*` HTTP contract and a
+server-only gateway, not through a shared build, so there is no build-time dependency to break. The
+coupling the ruling feared is the one thing the split does not have.
+
+**WHAT IS NOT REVERSED.** `rmd serve` keeps its own console surface. It is the daemon's LOCAL
+diagnostic — reachable on the private network, no external identity provider, no deploy step — and
+nothing here asks for it to be removed, rebuilt in React, or bundled. `apps/dashboard` is untouched
+by this entry.
+
+**AND THE TWO CONSOLES MUST NOT BOTH BE THE PRODUCT.** `remudero-site` still serves a complete
+second admin console at `app/console/` (376 lines, its own Clerk chain and summary route) whose
+`lib/rmd-control.ts` is 185 lines against the console repo's 1,043 and carries NONE of the
+Cloudflare Access work — measured 2026-09-15: zero occurrences of `accessServiceToken`,
+`upstreamHeaders`, `gateway_rejected` or `controlDiagnostics`. It therefore sends no service token,
+is redirected by Access, and reports the daemon unreachable — a confident wrong answer about
+infrastructure state. Retiring it is `CONSOLE-T4`'s parallel-domain cutover, in the console repo's
+own plan, and it is named here so this ruling cannot be read as blessing the duplicate.
+
+**Rollback:** revert this entry. The supersession markers on the two earlier headings revert with
+it, and both prior rulings read as current again. No gate, predicate or build changes either way —
+this entry records a decision, and the repository split it describes already exists independently
+of it.
