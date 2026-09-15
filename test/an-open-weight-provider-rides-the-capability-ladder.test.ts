@@ -20,8 +20,13 @@ import {
   OPENWEIGHT_ALLOWANCE_FILENAME,
   OPENWEIGHT_MAX_COMPLETION_TOKENS,
   OPENWEIGHT_OUTPUT_CONTRACT,
+  OPENWEIGHT_CONTEXT_WINDOWS,
+  OPENWEIGHT_BYTES_PER_TOKEN,
   OPENWEIGHT_PRICES,
   OPENWEIGHT_TEMPERATURE,
+  OpenWeightRequestTooLargeError,
+  openWeightDeploymentHolds,
+  openWeightEstimatedTokens,
   OpenWeightUnshapedDeploymentError,
   openWeightTemperatureField,
   OpenWeightAllowanceExhaustedError,
@@ -1292,6 +1297,153 @@ test("openweight daily cap refuses rather than spending when compare-and-swap co
     const state = JSON.parse(readFileSync(join(root, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "utf8")) as OpenWeightAllowanceState;
     assert.equal("never-wins" in state.reservations, false, "a refused reservation commits no row");
     assert.equal(Object.keys(state.reservations).length, peer, "exactly the peers' rows are committed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("every priced openweight deployment declares a context window", () => {
+  // W1-T3619. THE CENSUS IS THE POINT: price, temperature and window are three rows of ONE table
+  // discipline, and the failure this guards is someone adding a deployment to the ladder with a
+  // price but no window -- which would route silently and fail only on the large requests.
+  const priced = Object.keys(OPENWEIGHT_PRICES);
+  assert.ok(priced.length > 0, "there must be priced deployments, or this census compares nothing");
+
+  for (const deployment of priced) {
+    const window = OPENWEIGHT_CONTEXT_WINDOWS[deployment];
+    assert.ok(window !== undefined, `${deployment} is priced but declares no context window`);
+    assert.ok(Number.isInteger(window.totalTokens) && window.totalTokens > 0, `${deployment} window must be a positive integer`);
+    // An as-of date, for the same reason a price carries one: a published limit moves, and a
+    // number with no reading date cannot be audited against the vendor's current page.
+    assert.match(window.readAt, /^\d{4}-\d{2}-\d{2}$/, `${deployment} window needs a readAt date`);
+    // The window must leave room for the completion the adapter itself puts on the wire, or no
+    // request could ever fit and the deployment is misconfigured rather than merely small.
+    assert.ok(window.totalTokens > OPENWEIGHT_MAX_COMPLETION_TOKENS, `${deployment} window cannot even hold its own completion ceiling`);
+  }
+
+  // And the reverse direction: a window row for a deployment nothing prices is dead data that would
+  // let an unpriced deployment look routable.
+  for (const deployment of Object.keys(OPENWEIGHT_CONTEXT_WINDOWS)) {
+    assert.ok(OPENWEIGHT_PRICES[deployment] !== undefined, `${deployment} declares a window but has no price row`);
+  }
+
+  // AN UNLISTED DEPLOYMENT HOLDS NOTHING. Without this, `openWeightDeploymentHolds` could return
+  // true for an absent row and every assertion above would still pass -- the census would prove the
+  // table's CONTENTS while the lookup silently admitted anything missing from it. (Caught by a
+  // falsifier: flipping that default to `true` reddened no test until this arm existed.)
+  assert.equal(OPENWEIGHT_CONTEXT_WINDOWS["gpt-9-imaginary"], undefined, "fixture guard: this id must not be a real row");
+  assert.equal(openWeightDeploymentHolds("gpt-9-imaginary", 1), false, "an undeclared deployment must never be assumed to hold a request");
+
+  // And selection must act on that: a ladder naming only an undeclared deployment refuses rather
+  // than routing to it and discovering the window on the wire.
+  const undeclaredLadder = {
+    ladder: { economy: 1, balanced: 2, frontier: 3 },
+    claude: { haiku: "economy" },
+    codex: { economy: { medium: ["codex-economy"] }, balanced: { medium: ["codex-balanced"] }, frontier: { medium: ["codex-frontier"] } },
+    openweight: {
+      economy: { medium: ["gpt-9-imaginary"] },
+      balanced: { medium: ["gpt-5-nano"] },
+      frontier: { medium: ["gpt-oss-120b"] },
+    },
+  };
+  assert.throws(
+    () => selectOpenWeightModel(undeclaredLadder, "haiku", "medium", 1_000),
+    OpenWeightRequestTooLargeError,
+    "a ladder of undeclared deployments must refuse, not route blind",
+  );
+});
+
+test("openweight selection picks the cheapest deployment whose window holds the request", () => {
+  // W1-T3619. "Cheapest" is the LADDER'S OWN ORDER, not a rate comparison re-derived here. The
+  // FALLBACK_OPENWEIGHT_MODELS comment records the operator's measurement -- a 259,181-token
+  // inbox_draft favours nano 2.83x, a 446-token escalation favours gpt-oss 2.40x -- so row order
+  // already encodes measured cost per tier. This test asserts selection never SKIPS a cheaper
+  // candidate that would have fitted, which is what makes "first surviving" mean "cheapest that fits".
+  const ladder = {
+    ladder: { economy: 1, balanced: 2, frontier: 3 },
+    claude: { haiku: "economy" },
+    codex: { economy: { medium: ["codex-economy"] }, balanced: { medium: ["codex-balanced"] }, frontier: { medium: ["codex-frontier"] } },
+    openweight: {
+      economy: { medium: ["gpt-oss-120b", "gpt-5-nano"] },
+      balanced: { medium: ["gpt-5-nano", "gpt-oss-120b"] },
+      frontier: { medium: ["gpt-oss-120b"] },
+    },
+  };
+
+  // A SMALL request: the economy lead holds it, so the lead is what routes. Without this arm the
+  // test would pass on an implementation that always picked the last candidate.
+  const small = selectOpenWeightModel(ladder, "haiku", "medium", 4_000);
+  assert.equal(small.model, "gpt-oss-120b", "a small request must take the tier's leading deployment");
+
+  // A LARGE one: the lead provably cannot hold it, so it is skipped rather than attempted.
+  const bigBytes = 1_054_000; // the measured inbox_draft body
+  const big = selectOpenWeightModel(ladder, "haiku", "medium", bigBytes);
+  assert.equal(big.model, "gpt-5-nano", "a request past the lead's window must fall to the next that fits");
+  assert.ok(!openWeightDeploymentHolds("gpt-oss-120b", openWeightEstimatedTokens(bigBytes)), "the skipped lead must genuinely not fit");
+
+  // THE INVARIANT, stated directly: nothing ordered BEFORE the selection could have held it.
+  const estimated = openWeightEstimatedTokens(bigBytes);
+  for (const candidate of ["gpt-oss-120b", "gpt-5-nano"]) {
+    if (candidate === big.model) break;
+    assert.ok(!openWeightDeploymentHolds(candidate, estimated), `${candidate} is cheaper and fitted, so selection skipped a cheaper option`);
+  }
+  assert.equal(big.estimatedTokens, estimated, "the selection must carry its estimate so a ledger row can show what was judged");
+
+  // THE GATE'S RELIABLE CLAIM IS COARSE SEPARATION, AND THIS IS THE ASSERTION THAT STATES IT.
+  // The exclusion of gpt-oss-120b for this body must not depend on the exact divisor we chose: it
+  // has to hold across the whole MEASURED band (3.71-4.32 bytes/token), or the routing decision is
+  // an artifact of one constant rather than a property of a 2x window gap.
+  const oss = OPENWEIGHT_CONTEXT_WINDOWS["gpt-oss-120b"]!.totalTokens;
+  for (const ratio of [3.5, 3.71, 4.0, 4.32, 4.5]) {
+    const tokensAtRatio = Math.ceil(bigBytes / ratio);
+    assert.ok(
+      tokensAtRatio + OPENWEIGHT_MAX_COMPLETION_TOKENS > oss,
+      `at ${ratio} bytes/token the measured inbox_draft body would look like it fits gpt-oss-120b, so the exclusion is a divisor artifact`,
+    );
+  }
+});
+
+test("a request larger than every context window refuses before it reserves", () => {
+  // W1-T3619. The refusal must cost NOTHING. Selection runs before spawnOpenWeightWorker, so the
+  // evidence is that no allowance file exists after the throw -- not merely that a throw happened.
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-toolarge-"));
+  try {
+    const config = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: 10,
+      workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+    } as unknown as Config;
+
+    const ladder = {
+      ladder: { economy: 1, balanced: 2, frontier: 3 },
+      claude: { haiku: "economy" },
+      codex: { economy: { medium: ["codex-economy"] }, balanced: { medium: ["codex-balanced"] }, frontier: { medium: ["codex-frontier"] } },
+      openweight: {
+        economy: { medium: ["gpt-oss-120b", "gpt-5-nano"] },
+        balanced: { medium: ["gpt-5-nano"] },
+        frontier: { medium: ["gpt-oss-120b"] },
+      },
+    };
+
+    // Larger than the biggest declared window, by construction rather than by a hard-coded number.
+    const biggest = Math.max(...Object.values(OPENWEIGHT_CONTEXT_WINDOWS).map((w) => w.totalTokens));
+    const tooManyBytes = Math.ceil((biggest + 1) * OPENWEIGHT_BYTES_PER_TOKEN) + 1;
+
+    assert.throws(
+      () => selectOpenWeightModel(ladder, "haiku", "medium", tooManyBytes),
+      OpenWeightRequestTooLargeError,
+      "a request no deployment can hold must refuse, not pick one and find out on the wire",
+    );
+
+    // THE COST ASSERTION. An allowance file written here would mean the refusal still charged the
+    // day -- the exact waste this task exists to remove (32 of 96 unsettled reservations).
+    assert.throws(
+      () => readFileSync(join(root, OPENWEIGHT_ALLOWANCE_FILENAME), "utf8"),
+      /ENOENT/,
+      "the refusal must not have reserved anything against the daily cap",
+    );
+    void config;
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
