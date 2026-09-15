@@ -65,7 +65,15 @@ test("W1-T2562: the chosen disposition names what it costs in dropped console co
 test("W1-T2562: the already-shipped idle exit is not removed or weakened by this disposition", () => {
   const src = SERVE_SRC();
   assert.match(src, /export function gateStaleCodeExit/, "W1-T2229's gate stays — a banner replaces nothing");
-  assert.match(src, /if \(clients !== 0 \|\| inFlightWrites !== 0\) return;/, "and its refcount condition is untouched");
+  // SUPERSEDED LINE, NOT A WEAKENED ONE. This used to pin the literal
+  // `if (clients !== 0 || inFlightWrites !== 0) return;`. The client half of that condition was
+  // deliberately replaced by a backlog-scaled budget — see `consoleRecyclePatienceMs` and
+  // test/serve-recycles-under-change-pressure.test.ts — because the edge-only trigger left the
+  // live console 8 commits behind for 3h25m (MEASURED 2026-09-15). What this criterion was
+  // actually protecting is that the gate never exits out from under work, and THAT half is
+  // absolute and still pinned here, as a line pressure can never reach past.
+  assert.match(src, /if \(inFlightWrites !== 0\) return;/, "an in-flight write is still an unconditional refusal");
+  assert.match(src, /if \(clients === 0\) return RECYCLE_PATIENCE_FREE_MS;/, "and a free moment still costs nothing to take");
 });
 
 // ── criterion 3: observable without shelling in and comparing inodes ─────────────────────────

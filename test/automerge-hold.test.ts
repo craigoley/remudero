@@ -69,6 +69,7 @@ function holdEngagedLine(over: Record<string, unknown> = {}): Record<string, unk
     step: "automerge.hold_engaged",
     by: "craig",
     reason: "freezing this PR pending a manual read",
+    authority: "interactive-cli",
     pr_number: PR_NUMBER,
     ...over,
   };
@@ -83,6 +84,7 @@ function holdReleasedLine(over: Record<string, unknown> = {}): Record<string, un
     step: "automerge.hold_released",
     by: "craig",
     reason: "read complete — clear to arm",
+    authority: "interactive-cli",
     pr_number: PR_NUMBER,
     ...over,
   };
@@ -134,6 +136,17 @@ test("automergeHoldFromLedger: a FLEET-scoped row (no pr_number) applies to ever
 test("automergeHoldFromLedger: an engage row missing `by` or `reason` is never honoured", () => {
   assert.equal(automergeHoldFromLedger([{ ...holdEngagedLine(), by: undefined }], PR_NUMBER), undefined);
   assert.equal(automergeHoldFromLedger([{ ...holdEngagedLine(), reason: "" }], PR_NUMBER), undefined);
+});
+
+test("automergeHoldFromLedger: an unconfirmed CLI-shaped row cannot strand an automated PR", () => {
+  const untrusted = { ...holdEngagedLine(), authority: undefined, actor: "operator", by: "craigoley" };
+  assert.equal(automergeHoldFromLedger([untrusted], PR_NUMBER), undefined);
+
+  const trusted = { ...holdEngagedLine(), authority: "console-confirmed" };
+  assert.deepEqual(automergeHoldFromLedger([trusted], PR_NUMBER), {
+    by: "craig",
+    reason: "freezing this PR pending a manual read",
+  });
 });
 
 // ── Acceptance 1: a held PR is not armed, and the pass records the refusal ─────────────────
@@ -329,7 +342,7 @@ test("a landing call that arms auto-merge inline honours the same hold reader as
         // A FLEET-scoped hold (no pr_number) — this call's PR number is not known in
         // advance (gh mints it), so a fleet-wide hold is the shape a real operator freeze
         // would take here.
-        ledgerLines: () => [{ step: "automerge.hold_engaged", by: "craig", reason: "fleet freeze" }],
+        ledgerLines: () => [{ step: "automerge.hold_engaged", by: "craig", reason: "fleet freeze", authority: "interactive-cli" }],
       },
     }),
   );

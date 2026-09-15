@@ -248,7 +248,19 @@ IMAGE=${IMAGE}
 REVIVAL_LOG=${REVIVAL_LOG}
 # W1-T3269 — the checkout this host converges FROM, and the heap the installer requires. Rendered
 # in rather than re-derived, so the converge below uses the same inputs this file was rendered with.
-CHECKOUT=${STATE_DIR}/remudero
+#
+# W1-T3604 — NOT ${STATE_DIR}/remudero. That is the DAEMON's own working tree (the checkout
+# deploy/entrypoint.sh's freshness sync moves with a detached git checkout, and worker exhaust
+# keeps dirty): journalctl on the live host read 464 refusals in 7 days and zero convergences,
+# because the tree this guard interrogated could never itself satisfy the guard.
+# ${STATE_DIR}/daemon-install is the SAME literal src/lib/install-root.ts's resolveInstallRoot
+# defaults to (config.installRoot, falling back to config.root plus "daemon-install", with
+# STATE_DIR being this script's config.root) — the checkout the deploy supervisor already keeps
+# clean and on main. Spelled out here rather than imported (this is bash, that module is
+# TypeScript) so it MUST be re-read, not re-typed, if that default ever moves. NO BACKTICKS AND NO
+# DOLLAR-PAREN IN THIS COMMENT — W1-T2953 already found that an unquoted heredoc EXECUTES both
+# while rendering.
+CHECKOUT=${STATE_DIR}/daemon-install
 UNITS_HEAP_MB=${MAX_OLD_SPACE_MB}
 INSTANCE_NAME=${INSTANCE_NAME:-}
 INSTANCE_REGISTRY=${REGISTRY_FILE:-}

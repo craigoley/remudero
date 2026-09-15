@@ -36,6 +36,7 @@ import {
 } from "../src/lib/worker-provider.js";
 import { inboxDraftPrompt, INBOX_DRAFT_DISALLOWED_TOOLS } from "../src/lib/inbox.js";
 import { buildEscalationJudgeSpawnArgs, judgeEscalation, type Escalation } from "../src/lib/escalate.js";
+import { buildVerifyHumanJudgeSpawnArgs, VERIFY_HUMAN_JUDGE_TOOLS } from "../src/lib/verify-human-judge.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { buildInboxDraftSpawnArgs, draftProposalBatch } from "../src/run-task.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
@@ -755,6 +756,57 @@ test("the escalation judge rides openweight on the short-prompt deployment", () 
   });
   assert.equal(args.mountProvider, "openweight", "the mount's provider must reach SpawnWorkerArgs");
   assert.deepEqual(args.tools, [], "the escalation judge stays tool-less, which is what makes it adapter-eligible at all");
+});
+
+test("the verify-human judge rides openweight, and the fail-closed judges deliberately do not", () => {
+  // Routed for CONTAINMENT, not volume: `verify_human.judged` is dormant (42,448 rows, all inside
+  // one 30-minute window ending 2026-09-09), but that runaway shape is unbounded on a subscription
+  // and REFUSED by dailyCapUsd on openweight. The negative half is the load-bearing one -- it is
+  // what stops a later change sweeping the fail-CLOSED judges along with the fail-open ones.
+  const mounts = loadMounts(join(REPO_ROOT, ".remudero", "mounts.yaml"));
+
+  const vh = mounts.verify_human_judge;
+  assert.ok(vh, ".remudero/mounts.yaml must declare a verify_human_judge mount");
+  assert.equal(vh!.provider, "openweight");
+  assert.equal(selectOpenWeightModel(mounts.capabilities, vh!.model, vh!.effort).model, "gpt-oss-120b");
+
+  const args = buildVerifyHumanJudgeSpawnArgs({
+    shard: { id: "W1-T1", title: "t", rationale: "r", acceptance: ["a"], ageDays: 3, depsAllMerged: true, citedInSrc: false },
+    mount: vh!,
+    cwd: REPO_ROOT,
+    settingsFile: SETTINGS_FILE,
+  });
+  assert.equal(args.mountProvider, "openweight", "the mount's provider must reach SpawnWorkerArgs");
+  assert.deepEqual(args.tools, VERIFY_HUMAN_JUDGE_TOOLS, "it stays tool-less, which is what makes it adapter-eligible");
+  assert.deepEqual(VERIFY_HUMAN_JUDGE_TOOLS, [], "and that list is empty by construction");
+
+  // THE FAIL-CLOSED PAIR STAY ON THE SUBSCRIPTION. risk-judge escalates to `high` on a spawn error
+  // and ruling-judge has FAIL_CLOSED_RULING_VERDICT, so a flaky deployment would manufacture
+  // escalations and refused rulings instead of permissive defaults.
+  //
+  // READ THE YAML, NOT THE PARSED OBJECT: `loadMounts` ignores keys it does not declare, so
+  // `mounts.risk_judge` is `undefined` whether or not the table routes one — an assertion on the
+  // parsed object could never fail. Verified by adding a routed `risk_judge:` row and watching the
+  // object-based form still pass; this source-text form catches it.
+  const mountsSrc = readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8");
+  // Spelled out per lane rather than looped. A loop interpolates the lane name at RUNTIME, so the
+  // source text never contains it, and this criterion's proof -- which greps this file for the very
+  // claim it makes -- could not see the assertion that substantiates it. Identical force: one
+  // `doesNotMatch` against the same source per lane; only the message is now a literal.
+  assert.doesNotMatch(
+    mountsSrc,
+    /^risk_judge:/m,
+    "risk_judge must NOT be routed while it fails closed — a flaky deployment would manufacture escalations, not permissive defaults",
+  );
+  assert.doesNotMatch(
+    mountsSrc,
+    /^ruling_judge:/m,
+    "ruling_judge must NOT be routed while it fails closed — a flaky deployment would refuse rulings rather than fall back to permissive ones",
+  );
+  // And the positive control: the same form DOES see the rows that are routed, so a zero above is
+  // a measurement rather than a pattern that matches nothing.
+  assert.match(mountsSrc, /^verify_human_judge:/m, "the source-text form must be able to see a routed row at all");
+  assert.match(mountsSrc, /^escalation_judge:/m);
 });
 
 test("a failed openweight judge spawn fails open to deliver", async () => {

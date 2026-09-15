@@ -42,7 +42,7 @@ function boardDeps(lines: Array<Record<string, unknown>>): BoardDeps & { reads: 
 
 test("standing fleet and PR holds ride the one atomic board snapshot and disappear after release", () => {
   const prLines = [
-    { step: "automerge.hold_engaged", task_id: "W1-T2719", pr_number: 3708, by: "craig", reason: "read this head manually" },
+    { step: "automerge.hold_engaged", task_id: "W1-T2719", pr_number: 3708, by: "craig", reason: "read this head manually", authority: "console-confirmed" },
   ];
   const prDeps = boardDeps(prLines);
   const held = computeBoardSnapshot(prDeps);
@@ -53,13 +53,13 @@ test("standing fleet and PR holds ride the one atomic board snapshot and disappe
 
   const releasedDeps = boardDeps([
     ...prLines,
-    { step: "automerge.hold_released", task_id: "W1-T2719", pr_number: 3708, by: "craig", reason: "manual read complete" },
+    { step: "automerge.hold_released", task_id: "W1-T2719", pr_number: 3708, by: "craig", reason: "manual read complete", authority: "console-confirmed" },
   ]);
   assert.deepEqual(computeBoardSnapshot(releasedDeps).mergeHeld, []);
   assert.equal(releasedDeps.reads.count, 1);
 
   const fleetDeps = boardDeps([
-    { step: "automerge.hold_engaged", task_id: "FLEET", by: "craig", reason: "incident freeze" },
+    { step: "automerge.hold_engaged", task_id: "FLEET", by: "craig", reason: "incident freeze", authority: "console-confirmed" },
   ]);
   assert.deepEqual(computeBoardSnapshot(fleetDeps).mergeHeld, [{ by: "craig", reason: "incident freeze" }]);
 });
