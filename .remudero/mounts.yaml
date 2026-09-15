@@ -226,10 +226,23 @@ architect:
 # measured reason to — model is the THIRD lever, not the first, and effort is now genuinely WIRED
 # to the spawn for all three (previously declared here but never passed to `spawnWorker`, so
 # `architect.effort: high` silently governed nothing for these lanes).
+# W1-T3569: `inbox_draft` alone gains `provider: openweight`. Its tool surface (Read/Grep/Glob,
+# INBOX_DRAFT_WORKER_TOOLS, src/run-task.ts) is a strict subset of OPENWEIGHT_FUNCTIONS
+# (src/lib/worker-provider.ts) — re-verified at this row's own commit — so this is the narrowest
+# eligible lane to test accepted-output-per-dollar before the triage WebSearch bridge, which
+# `openWeightTools` refuses outright (WebSearch is absent from the adapter). `triage`/`retro`
+# stay OFF this lane on purpose: triage's declared WebSearch is not adapter-eligible, and retro's
+# output is acted on directly rather than machine-linted. Model/effort/max_turns/context_budget
+# are UNCHANGED from the prior row — only the provider affinity is new. The routed trial cannot
+# begin until an operator applies the four-value TRIAL OPERATOR HANDOFF above this file's `note:`
+# (plan/tasks.d/W1-T3569-...yaml): enable the provider, set the Azure endpoint, set
+# `dailyCapUsd: 5`, and place the daemon-only key — none of which this row performs by itself, and
+# W1-T3575's runtime cap (src/lib/worker-provider.ts) refuses any paid request before transport
+# until `dailyCapUsd` is configured.
 synthesis:
   retro:       { model: claude-opus-5, effort: high, max_turns: 400, context_budget: 180000 }
   triage:      { model: sonnet,        effort: low,  max_turns: 400, context_budget: 180000 }
-  inbox_draft: { model: sonnet,        effort: high, max_turns: 400, context_budget: 180000 }
+  inbox_draft: { model: sonnet,        effort: high, max_turns: 400, context_budget: 180000, provider: openweight }
 
 # ── The flight-judge mount (Layer 2, W1-T21 — MASTER-PLAN §4B) ─────────────────
 # The advisory process-judge a Layer-1 trip (flight-signals.ts, W1-T20) spawns
