@@ -1,0 +1,78 @@
+- id: W1-T3621
+  title: "THE DRAFT PROMPT INLINES THE WHOLE PLAN TO GROUND ONE FIELD — plan/tasks.yaml is 97.9% of every inbox_draft request, which is why the lane runs at ~258K tokens, cannot fit gpt-oss-120b at all, and loses a third of its requests at nano's window edge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files: [src/lib/inbox.ts, src/run-task.ts, test/an-inbox-draft-grounds-depends-on-without-the-whole-plan.test.ts]
+  origin: oper#smart-routing-audit-2026-09-15
+  plan_refs: ["W1-T3619", "W1-T3569", "W1-T3614", "W1-T3350"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ONE LINE CAUSES IT. `inboxDraftPrompt(proposal, currentPlanText, runId)` inlines
+    `currentPlanText` verbatim under the heading
+
+        === plan/tasks.yaml (current, for depends_on grounding) ===
+
+    and `runInboxDraftLane` fills it with `readFileSync(join(worktreePath, "plan", "tasks.yaml"))`
+    -- the entire file, every field of every task.
+
+    MEASURED 2026-09-15 on origin/main:
+
+        plan/tasks.yaml                 1,031,510 bytes   ~257,877 tokens   269 tasks
+        measured inbox_draft body       1,054,000 bytes   (inverted from the live reservation)
+        the plan file's share                97.9%
+
+    The prompt is the plan file. Everything else -- the proposal, the operator feedback, the output
+    contract, the fragment markers -- is the remaining 2%.
+
+    WHAT IT COSTS, ALL THREE WAYS.
+
+    1. THE LANE CANNOT REACH THE CHEAPER DEPLOYMENT AT ALL. gpt-oss-120b's context is 131,072
+       tokens, so a 258K-token prompt is refused outright:
+         HTTP 400: The input (259242 tokens) is longer than the model's context length (131072)
+       That single fact is why `FALLBACK_OPENWEIGHT_MODELS` had to hand-write divergent leads per
+       tier (W1-T3614) -- the lane was pinned to nano by prompt size, not by preference.
+
+    2. A THIRD OF THE REQUESTS DIE AT NANO'S EDGE. 32 of 96 large nano requests never settled --
+       exactly 33% -- against a ~272K window with the prompt at ~258K. Each failure keeps its FULL
+       reservation (settlement only runs after a 200), so failures are also the most expensive
+       requests the lane makes.
+
+    3. IT IS ~6x THE PRICE IT NEEDS TO BE. At nano's $0.05/1M input and the 5,000-token output
+       ceiling, the full plan costs $0.01489 a draft.
+
+    THE FIELD IT GROUNDS NEEDS ALMOST NONE OF IT. The heading says what the text is for:
+    `depends_on` grounding. Picking a dependency needs to know WHICH TASKS EXIST, what each is
+    about, whether it is still open, and what it already depends on. It does not need `rationale`,
+    `design`, `acceptance`, `files`, `note` or `plan_refs` -- which are 94% of the bytes.
+
+    MEASURED PROJECTIONS over the same 269 tasks, full titles, nothing truncated:
+
+        fields kept                          bytes     tokens    share   fits gpt-oss?   nano $/draft
+        id+title                            45,773     11,443     4.4%        YES          $0.00257
+        id+title+status                     50,144     12,536     4.9%        YES          $0.00263
+        id+title+status+type                54,976     13,744     5.3%        YES          $0.00269
+        id+title+status+type+depends_on     61,303     15,325     5.9%        YES          $0.00277
+        (full file, today)               1,031,510    257,877   100.0%        NO           $0.01489
+
+    The richest projection is still 5.9% of the file, fits gpt-oss-120b with ~8x headroom, and is
+    5.4x cheaper per draft on nano.
+
+    TITLES ARE NOT TRUNCATED, DELIBERATELY. This repo's titles ARE the finding -- they are long
+    sentences carrying the defect, not labels -- so clipping them to save a further 1% would
+    degrade exactly the signal a dependency choice reads.
+
+  acceptance:
+    - claim: "the draft prompt carries a projection of the plan, not the file, and the projection keeps id, title, status, type and depends_on for every task"
+      proof: "unit test: the inbox draft prompt grounds depends_on from a projection, not the whole plan"
+    - claim: "the projection is small enough for the smaller deployment's context window, measured against the real plan rather than a fixture"
+      proof: "unit test: the plan projection fits the smallest priced openweight context window"
+    - claim: "no task is dropped from the projection, so a dependency that exists can always be named"
+      proof: "unit test: the plan projection names every task in the plan"
+    - claim: "titles reach the worker whole, because a clipped title loses the finding a dependency choice reads"
+      proof: "grep: never a clipped title in src/lib/inbox.ts"

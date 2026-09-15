@@ -1,0 +1,70 @@
+- id: W1-T3620
+  title: "rmd serve BINDS ITS PORT 99 SECONDS BEFORE IT CAN ANSWER — the listener opens, then the first /v1/status pays the whole cold projection synchronously, so a freshly recycled daemon ACCEPTS every connection and answers none; measured on the live daemon, not in a harness"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 60.00
+  files: [src/run-task.ts, test/serve-answers-before-it-accepts.test.ts]
+  origin: oper#graceful-recycle-measurement-2026-09-15
+  plan_refs: ["W1-T2229", "W1-T154", "W1-T3207"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON THE LIVE DAEMON 2026-09-15, after a graceful recycle taken at a moment with zero
+    in-flight locks:
+
+      BOOT_TO_FIRST_ANSWER=99s
+      status:200 0.025s      <- the first answer, once the projection existed
+      status:200 1.497s      <- steady state at that sha
+      status:200 1.514s
+
+    Ninety-nine seconds during which the port ACCEPTS and never answers. `serveCommand` binds at
+    run-task.ts's `target.listen(port, h, resolve)` and prints its banner immediately; the first
+    `/v1/status` then builds the whole board projection synchronously on the one event-loop
+    thread, so every other route queues behind it too.
+
+    THIS IS NOT W1-T3615's DEFECT AND IS NOT FIXED BY IT. The per-task memo makes SUBSEQUENT
+    passes ~70ms, but the FIRST pass has nothing to reuse by construction, so the cold walk is
+    untouched. The two costs are independent: one is per-request, this one is once-per-boot.
+
+    AND IT MATTERS MORE NOW THAN IT DID, which is why this is filed rather than tolerated. The
+    change-pressure recycle makes recycles FREQUENT by design — patience is one hour divided by
+    the backlog — so a 99s unanswerable window that used to appear every few days now appears
+    every time the backlog earns a restart.
+
+    WHERE THE TIME GOES, from the same session's harness readings, so a fix is not aimed blind:
+      cold listMergedHeadBranches   36985ms   4309 rows
+      cold listOpenHeadBranches       319ms      9 rows
+      first computeBoardSnapshot    86.5s with the production disk seed, 123s without
+    Roughly 40s is the gateway's own cold walk and the remainder is per-task derivation.
+
+    ONE APPROACH IS ALREADY RULED OUT BY A TEST, and re-deriving that would waste a run:
+    serving a STALE snapshot while a refresh runs was tried on 2026-09-15 and
+    test/serve.live-state.ts refused it — the console polls every 3s, so stale-then-refresh makes
+    a recovering gateway need TWO poll intervals to clear its outage banner, against that test's
+    5s bound. Whatever this task does, it must not answer with a snapshot it cannot date.
+  design: |
+    The honest shapes are (a) do not accept until the first projection exists, so a cold daemon
+    presents a closed port rather than an open one that never answers, or (b) accept and answer
+    an explicit, dated not-ready refusal on the board route while the first projection builds off
+    the request path — leaving the cheap routes (`/v1/version`, the GitHub webhook) answering
+    throughout, which (a) does not.
+
+    (b) is the better shape and the harder one: the projection is synchronous, so deferring it to
+    a macrotask still blocks the loop. It only works if the cold GATEWAY walk moves to the
+    existing prewarm worker (`runPrewarmWorker`, status.ts) so the main thread is not the thing
+    doing the waiting. Decide between them on measurement, and state which cheap routes stay
+    answerable either way.
+
+    NOT IN SCOPE: the steady-state per-request cost, which is W1-T3615's, and the prewarm's
+    client-gating (W1-T154), which must not be weakened to make boot faster — an unwatched daemon
+    burning GitHub quota is the defect that gating exists to prevent.
+  acceptance:
+    - claim: "a daemon whose first projection has not yet been built does not answer the board route with a snapshot it cannot date"
+      proof: "unit test: the board route refuses rather than inventing a snapshot before the first projection exists"
+    - claim: "the cheap routes stay answerable while the first projection is still building"
+      proof: "unit test: a cold daemon still answers the routes that need no projection"
