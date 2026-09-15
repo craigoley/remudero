@@ -1,0 +1,75 @@
+- id: W1-T3604
+  title: "UNIT CONVERGENCE READS THE ONE CHECKOUT THAT IS NEVER CLEAN — converge_host_units guards on the daemon's live working tree, so it refused 464 of 464 ticks in seven days and has never once converged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  band_meaning: blast-radius
+  budget_usd: 4.00
+  files:
+    - deploy/install-host-units.sh
+    - test/install-host-units.test.ts
+  origin: "operator-session#openweight-trial-2026-09-15"
+  plan_refs: ["W1-T3269", "W1-T3583", "W1-T924"]
+  status: queued
+  attempts: 0
+  note: |
+    MEASURED on the live Azure host 2026-09-15, `journalctl -u rmd-fleet-watchdog.service
+    --since "7 days ago"`, grouping every `units -- ` line the rendered launcher emits:
+
+        327  units -- checkout is DIRTY; not converging
+        109  units -- checkout is unreadable or not on branch main (branch='none')
+         28  units -- checkout is not at origin/main (<sha> vs <sha>)
+          0  units DRIFTED at <sha> -- converging
+
+    464 refusals, ZERO convergences. Every refusal is individually correct; the rung is dead
+    anyway, because the checkout it guards CANNOT satisfy the guard.
+
+    THE CAUSE IS ONE ASSIGNMENT. deploy/install-host-units.sh renders
+    `CHECKOUT=${STATE_DIR}/remudero` -- the tree the DAEMON ITSELF works in. That tree is
+    dirty and on a detached HEAD by construction: the daemon's freshness sync advances it with
+    `git checkout <sha>` (eight detached moves in the last twelve hours of reflog), and worker
+    exhaust keeps `git status --porcelain` non-empty. So `symbolic-ref --short HEAD` returns
+    nothing, the branch test reads `branch='none'`, and the rung stands down forever.
+
+    THE HOST ALREADY MAINTAINS A CHECKOUT THAT MEETS THE GUARD. `assessInstallForDeploy`
+    (src/lib/install-root.ts) uses `${STATE_DIR}/daemon-install`, which is exactly what the
+    guard describes -- clean, on branch main, fast-forwardable. Verified on the same host the
+    same day: `symbolic-ref --short HEAD` = main, `status --porcelain` = empty, and an
+    ff-only merge to origin/main succeeded. The convergence rung and the deploy supervisor
+    disagree about which checkout is the trustworthy one, and only the supervisor is right.
+
+    THE CONSEQUENCE IS LATENT, NOT CURRENT. Run from an up-to-date install root the same day,
+    `install-host-units.sh --check` reported ALL SEVEN artifacts `ok`, so the host is not
+    drifted today. The defect is that NOTHING WOULD CONVERGE IT IF IT WERE -- and the first
+    reading of that check, taken from an install root six commits behind, reported
+    `rmd-relaunch.sh` DRIFTED. A gate run from a behind checkout answers about a file that
+    moved, so the honest severity is "the safety net has never been armed", not "the host is
+    broken".
+  rationale: |
+    W1-T3269 added this rung precisely so the units could not sit stale until a person
+    remembered, and its refusals were designed as the deliverable. A refusal that fires on
+    100% of a population it was meant to filter is not a safety property; it is an off switch
+    that reports as caution. This repo has a named recurring defect for exactly this shape --
+    a bound that fires on a healthy condition -- and this is its inverse: a bound whose
+    passing condition never occurs.
+  design: |
+    Point the rendered CHECKOUT (or a new, separately named variable the converge path alone
+    reads) at the install root the deploy supervisor already keeps clean and on main, rather
+    than at the daemon's working tree. KEEP EVERY EXISTING REFUSAL EXACTLY AS IT IS: dirty,
+    off-main, unreadable and not-at-origin/main must all still stand down -- the fix is which
+    tree they interrogate, never how strict they are. Re-read src/lib/install-root.ts for the
+    canonical resolution rather than hard-coding a second spelling of the path, so the two
+    rungs cannot drift apart again. A test must prove the rendered launcher names the install
+    root and NOT ${STATE_DIR}/remudero, and that a dirty install root still refuses.
+  acceptance:
+    - claim: "the rendered launcher converges units from the install root, never from the daemon's own working tree"
+      proof: "unit test: unit convergence reads the install root, not the daemon working tree"
+    - claim: "every existing safety refusal survives the change, so a dirty or off-main install root still stands down"
+      proof: "unit test: a dirty install root still refuses to converge units"
+  falsifier: |
+    Restore CHECKOUT to ${STATE_DIR}/remudero and the first test must fail. Delete the dirty
+    guard and the second must fail. If the second passes with the guard removed, it is asserting
+    chrome rather than the refusal, and the task is unmet.
