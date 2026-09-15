@@ -606,9 +606,22 @@ export function codexCandidatesForCapability(
 
 /** Last-resort data for a missing capability table. Real open-weight routing resolves the table
  * below; this keeps a malformed optional table from changing the existing fail-soft contract. */
+/**
+ * The code-side default when mounts declares no `capabilities.openweight` table. It must name the
+ * SAME leading deployment as that table (W1-T3598): if the two disagreed, a checkout with no table
+ * would silently route the DEARER deployment while the configured fleet routed the cheaper one, and
+ * nothing would report the divergence. test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
+ * asserts the two agree.
+ *
+ * FRONTIER STAYS ON gpt-oss-120b DELIBERATELY. A nano-class model is not a frontier substitute, and
+ * before this every tier named one deployment — a ladder expressing no choice at all. gpt-oss-120b
+ * TRAILS rather than being deleted from the rows nano now leads, the same shape the `codex` table
+ * uses for a demoted model, so a deployment that stops answering falls back instead of failing the
+ * lane.
+ */
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
-  economy: ["gpt-oss-120b"],
-  balanced: ["gpt-oss-120b"],
+  economy: ["gpt-5-nano", "gpt-oss-120b"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b"],
   frontier: ["gpt-oss-120b"],
 };
 
@@ -1765,7 +1778,60 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   // Azure serverless published rate. These are the two numbers this adapter has always used;
   // they are unchanged, and are now this deployment's ROW rather than the provider's default.
   "gpt-oss-120b": { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6, readAt: "2026-09-14" },
+  // W1-T3598: cheaper than gpt-oss-120b on BOTH axes (3x on input, 1.5x on output) and an
+  // Azure-OpenAI-family deployment, so it rides `openWeightEndpoint`'s existing
+  // `openai/deployments/...` route with no second endpoint shape.
+  "gpt-5-nano": { inputUsdPerMillion: 0.05, outputUsdPerMillion: 0.4, readAt: "2026-09-15" },
 };
+
+/**
+ * Per-deployment request TEMPERATURE, because a deployment may REFUSE a value rather than clamp it.
+ * MEASURED 2026-09-15 against the live account with the adapter's own URL and api-version:
+ * `gpt-oss-120b` answers `temperature: 0` with 200; `gpt-5-nano` answers it with HTTP 400
+ * ("does not support 0 with this model. Only the default (1) value is supported").
+ *
+ * `null` means OMIT THE FIELD ENTIRELY -- not "send 1". The adapter must never assert a
+ * temperature it has not measured, and an omitted field is the only way to say "whatever this
+ * deployment's default is". W1-T3608.
+ *
+ * KEYED EXACTLY AS {@link OPENWEIGHT_PRICES}, and read by TABLE LOOKUP -- never a prefix or
+ * substring match on the model id (W1-T2573): `gpt-5-nano` and `gpt-5.4-nano` are different
+ * deployments with no guarantee of shared behaviour.
+ */
+export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
+  "gpt-oss-120b": 0,
+  "gpt-5-nano": null,
+};
+
+/** Raised INSTEAD of guessing a request shape. Thrown before the transport, like its pricing
+ *  sibling, so a caller seeing it knows no request was built against an unmeasured deployment. */
+export class OpenWeightUnshapedDeploymentError extends RmdError {
+  readonly deployment: string;
+  constructor(deployment: string) {
+    super(
+      "usage",
+      1,
+      `openweight deployment ${JSON.stringify(deployment)} has no request-temperature row: refusing to guess a request shape. ` +
+        `Shaped deployments: ${Object.keys(OPENWEIGHT_TEMPERATURE).sort().join(", ")}`,
+      { deployment, shaped: Object.keys(OPENWEIGHT_TEMPERATURE).sort() },
+    );
+    this.deployment = deployment;
+  }
+}
+
+/**
+ * The `temperature` fragment of a request body for one deployment: `{ temperature: n }` when the
+ * deployment accepts an explicit value, and `{}` when it accepts only its own default. Spread into
+ * the body so "omit" is expressible at all -- a deployment that refuses the field is not satisfied
+ * by a null, and `temperature: undefined` still reads as an asserted key at some call sites.
+ */
+export function openWeightTemperatureField(deployment: string): { temperature?: number } {
+  if (!Object.prototype.hasOwnProperty.call(OPENWEIGHT_TEMPERATURE, deployment)) {
+    throw new OpenWeightUnshapedDeploymentError(deployment);
+  }
+  const value = OPENWEIGHT_TEMPERATURE[deployment];
+  return value === null ? {} : { temperature: value };
+}
 
 /** Raised INSTEAD of pricing a deployment by a neighbour's row. Thrown before the transport, so a
  *  caller seeing it knows no paid request was made against an unknown price. */
@@ -2267,12 +2333,20 @@ export async function spawnOpenWeightWorker(
     ];
     const maxTurns = args.maxTurns ?? 1;
     if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error("openweight maxTurns must be a positive integer");
+    // BOTH PER-DEPLOYMENT LOOKUPS ARE RESOLVED ONCE, HERE, AND PRICE GOES FIRST. They are
+    // loop-invariant -- `selection.model` cannot change between turns -- but the ORDER is the
+    // load-bearing part, not the hoist: an unknown deployment must refuse on its missing PRICE
+    // row (W1-T3597's contract, "refuses before transport rather than borrowing a rate"), not on
+    // its missing request-shape row. Building the body first put the shape lookup ahead of the
+    // reservation and silently changed that refusal's message. W1-T3608.
+    openWeightPriceFor(selection.model);
+    const temperatureField = openWeightTemperatureField(selection.model);
     for (;;) {
       turns += 1;
       const body = JSON.stringify({
         model: selection.model,
         messages,
-        temperature: 0,
+        ...temperatureField,
         max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
         ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
       });

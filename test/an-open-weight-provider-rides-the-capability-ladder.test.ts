@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { ConfigValidationError, validateConfig, type Config } from "../src/lib/config.js";
-import { loadMounts, MountsError, TierInvariantError, validateMounts } from "../src/lib/mounts.js";
+import { loadMounts, mountsPath, MountsError, TierInvariantError, validateMounts } from "../src/lib/mounts.js";
 import {
   ProviderRoutingPolicyError,
   writeProviderRoutingPolicyOverride,
@@ -20,16 +20,21 @@ import {
   OPENWEIGHT_ALLOWANCE_FILENAME,
   OPENWEIGHT_MAX_COMPLETION_TOKENS,
   OPENWEIGHT_OUTPUT_CONTRACT,
+  OPENWEIGHT_PRICES,
+  OPENWEIGHT_TEMPERATURE,
+  OpenWeightUnshapedDeploymentError,
+  openWeightTemperatureField,
   OpenWeightAllowanceExhaustedError,
   openWeightCommittedUsd,
   openWeightReservationUsd,
+  openWeightUsageUsd,
   openWeightUtcDay,
   reserveOpenWeightBudget,
   selectOpenWeightModel,
   spawnOpenWeightWorker,
   type OpenWeightAllowanceState,
 } from "../src/lib/worker-provider.js";
-import { inboxDraftPrompt } from "../src/lib/inbox.js";
+import { inboxDraftPrompt, INBOX_DRAFT_DISALLOWED_TOOLS } from "../src/lib/inbox.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { buildInboxDraftSpawnArgs, draftProposalBatch } from "../src/run-task.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
@@ -251,6 +256,132 @@ test("the inbox-draft spawn derives its provider affinity from the synthesis mou
   assert.deepEqual(args.tools, ["Read", "Grep", "Glob"]);
 });
 
+// ── W1-T3569: route synthesis.inbox_draft to openweight after a hard cash cap ──────────────────
+// The 964-line generic wiring above proves affinity works with a SYNTHETIC mount table
+// (`validMounts()`). These two tests instead read the REAL `.remudero/mounts.yaml` this repo
+// ships, proving the two acceptance claims this task exists for: exactly one row is routed, and
+// that row cannot spend past an exhausted daily allowance.
+
+test("only synthesis.inbox_draft declares provider openweight, after its Read/Grep/Glob surface is re-proven to be adapter-supported", async () => {
+  const mountsTable = loadMounts(mountsPath(REPO_ROOT));
+  const inboxDraftMount = mountsTable.synthesis.inbox_draft;
+  assert.equal(inboxDraftMount.provider, "openweight", "the one row this task routes");
+  assert.equal(mountsTable.synthesis.triage.provider, undefined, "triage stays off this lane: its declared WebSearch is not adapter-eligible");
+  assert.equal(mountsTable.synthesis.retro.provider, undefined, "retro's output is acted on directly, never machine-linted");
+  for (const [type, byRisk] of Object.entries(mountsTable.routes)) {
+    for (const [risk, byClass] of Object.entries(byRisk)) {
+      for (const [cls, mount] of Object.entries(byClass)) {
+        assert.notEqual(mount.provider, "openweight", `routes.${type}.${risk}.${cls} must not ride the trial lane`);
+      }
+    }
+  }
+
+  const config: Config = {
+    claudeBin: "/unused/claude",
+    root: "/tmp/rmd-mount-affinity-inbox-real",
+    dailyCapUsd: 1,
+    workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+  };
+  const args = buildInboxDraftSpawnArgs({
+    cwd: "/tmp/rmd-mount-affinity-inbox-real/worktree",
+    settingsFile: SETTINGS_FILE,
+    prompt: "draft this task",
+    mount: inboxDraftMount,
+    config,
+    disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+  });
+  assert.equal(args.mountProvider, "openweight");
+  assert.deepEqual(args.tools, ["Read", "Grep", "Glob"], "the exact declared surface this row is eligible on");
+
+  // Re-prove the surface against the REAL adapter (not just the mount table): declaring
+  // Read/Grep/Glob must not throw the "does not implement declared tool(s)" refusal the adapter
+  // raises for triage's WebSearch (see the "undeclared tool" test above).
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-inbox-surface-"));
+  try {
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: args.prompt,
+        tools: args.tools,
+        maxTurns: 2,
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async () => new Response(JSON.stringify({ choices: [{ message: { content: "PROPOSED" } }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      },
+      config,
+      { model: "gpt-oss-120b", effort: "low" },
+    );
+    assert.equal(result.isError, false);
+    assert.equal(result.text, "PROPOSED");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("openweight daily cap refuses the inbox draft spawn before transport", async () => {
+  const mountsTable = loadMounts(mountsPath(REPO_ROOT));
+  const inboxDraftMount = mountsTable.synthesis.inbox_draft;
+  assert.equal(inboxDraftMount.provider, "openweight", "this test must exercise the real routed row, not a synthetic one");
+
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-inbox-cap-"));
+  try {
+    // A cap smaller than ONE conservative reservation: the inbox draft's very first request must
+    // be refused, and no request may leave the process.
+    const config: Config = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: 0.000_001,
+      workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+    };
+    const args = buildInboxDraftSpawnArgs({
+      cwd: root,
+      settingsFile: SETTINGS_FILE,
+      prompt: "draft this proposal",
+      mount: inboxDraftMount,
+      config,
+      disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+    });
+
+    let fetchCalls = 0;
+    // W1-T3597 priced every deployment by its OWN row, keyed by deployment id — never by the
+    // mount's Claude-facing `model`/`effort` fields directly. The real production path
+    // (`spawnWorker`, src/lib/worker.ts) resolves `args.model`/`args.effort` through
+    // `selectOpenWeightModel` before it ever reaches `spawnOpenWeightWorker`; this test must
+    // resolve the SAME way rather than hand the mount's raw "sonnet" through as if it were a
+    // priced Azure deployment id, or the reservation throws `OpenWeightUnpricedDeploymentError`
+    // instead of exercising the daily-cap refusal this test is actually proving.
+    const selection = selectOpenWeightModel(undefined, args.model as string, args.effort as string);
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: args.prompt,
+        tools: args.tools,
+        maxTurns: args.maxTurns,
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        clock: fixedClock(Date.parse("2026-09-15T12:00:00Z")),
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          throw new Error("the inbox draft's own exhausted allowance must refuse before the adapter transport is invoked");
+        },
+      },
+      config,
+      { model: selection.model, effort: selection.effort },
+    );
+
+    assert.equal(fetchCalls, 0, "no paid request left the process for the routed inbox-draft lane");
+    assert.equal(result.isError, true);
+    assert.equal(result.budgetRefused, true, "a refusal is distinguishable from a transport failure");
+    assert.equal(result.budgetReservedUsd, 0, "a refused request commits nothing");
+    assert.match(result.stderr, /openweight daily allowance exhausted/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("draftProposalBatch reaches the mount-derived inbox args through an offline worktree and never starts a real worker", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-mount-affinity-draft-"));
   const origin = gitRepo({ bare: true });
@@ -296,9 +427,16 @@ function openWeightResult(): WorkerResult {
 test("the capability ladder resolves an open-weight provider by table lookup", () => {
   const capabilities = loadMounts(join(REPO_ROOT, ".remudero", "mounts.yaml")).capabilities;
   const selected = selectOpenWeightModel(capabilities, "sonnet", "low");
-  assert.deepEqual(capabilities?.openweight?.balanced.low, ["gpt-oss-120b"], "the declared openweight row, not fallback data, is the capability source");
+  // W1-T3598 led this row with gpt-5-nano and DEMOTED gpt-oss-120b rather than removing it. Both
+  // halves are asserted: the order (cheaper first) and the fallback's continued presence, so a
+  // later edit that deletes the trailing entry fails here rather than silently killing the lane.
+  assert.deepEqual(
+    capabilities?.openweight?.balanced.low,
+    ["gpt-5-nano", "gpt-oss-120b"],
+    "the declared openweight row, not fallback data, is the capability source",
+  );
   assert.equal(selected.capability, "balanced");
-  assert.equal(selected.model, "gpt-oss-120b");
+  assert.equal(selected.model, "gpt-5-nano", "the ladder's LEADING candidate is what resolves");
   assert.equal(selected.effort, "low");
 
   const renamed = selectOpenWeightModel({
@@ -506,6 +644,93 @@ test("the openweight adapter sends no response format after adding its output co
   ]);
 });
 
+test("a deployment that refuses a non-default temperature gets no temperature field", async () => {
+  // W1-T3608. MEASURED on the live account: gpt-5-nano answers `temperature: 0` with HTTP 400
+  // ("does not support 0 with this model"), while gpt-oss-120b answers it with 200. W1-T3598 put
+  // gpt-5-nano FIRST in every ladder row and selectOpenWeightModel takes the first candidate with
+  // no fallback, so this is the model the routed lane actually selects.
+  //
+  // THE CLAIM IS ABSENCE, NOT A DIFFERENT VALUE: `temperature: 1` would still be the adapter
+  // asserting a number it has not measured, and is exactly as wrong as 0 for a deployment that
+  // accepts only its own default.
+  const bodies: Record<string, Record<string, unknown>> = {};
+  for (const model of ["gpt-5-nano", "gpt-oss-120b"]) {
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: REPO_ROOT,
+        workerHome: join(REPO_ROOT, "tmp", `openweight-temperature-${model}`),
+        prompt: "Return a raw document.",
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async (_input, init) => {
+          bodies[model] = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(JSON.stringify({ choices: [{ message: { content: "raw document" } }] }), { status: 200 });
+        },
+      },
+      { claudeBin: "/unused/claude", root: REPO_ROOT, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+      { model, effort: "low" },
+    );
+    assert.equal(result.isError, false, `${model} spawn must succeed`);
+  }
+
+  assert.equal("temperature" in bodies["gpt-5-nano"], false, "gpt-5-nano refuses any explicit temperature, so the field must be absent entirely");
+  assert.equal(bodies["gpt-oss-120b"].temperature, 0, "gpt-oss-120b accepts 0 and must still receive it");
+
+  // And an undeclared deployment REFUSES rather than defaulting to 0 — defaulting is what produced
+  // the defect, so the absence of a row must be loud.
+  assert.throws(() => openWeightTemperatureField("gpt-9-unmeasured"), OpenWeightUnshapedDeploymentError);
+});
+
+test("an unpriced openweight deployment refuses on price before request shape", async () => {
+  // W1-T3608 ORDERING. Both per-deployment lookups refuse an unknown deployment, so WHICH refusal
+  // surfaces is a real contract: W1-T3597 pins "refuses before transport rather than borrowing a
+  // rate", and its fixture matches on /has no price row/. Resolving the request shape while
+  // building the body put the temperature lookup ahead of the reservation and silently rewrote
+  // that message — caught only because that fixture lives in a different test file, and a
+  // different CI shard.
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-order-"));
+  try {
+    const unknown = "a-deployment-in-neither-table";
+    assert.equal(unknown in OPENWEIGHT_PRICES, false, "the fixture must be absent from BOTH tables, or this proves nothing");
+    assert.equal(unknown in OPENWEIGHT_TEMPERATURE, false, "the fixture must be absent from BOTH tables, or this proves nothing");
+
+    let fetchCalls = 0;
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "worker-home"),
+        prompt: "classify",
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async () => { fetchCalls += 1; throw new Error("an unknown deployment must never reach the transport"); },
+      },
+      { claudeBin: "/unused/claude", root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+      { model: unknown, effort: "low" },
+    );
+
+    assert.equal(fetchCalls, 0, "no request is made against a deployment in neither table");
+    assert.equal(result.isError, true);
+    assert.match(result.stderr, /has no price row/, "the PRICE refusal must surface first");
+    assert.doesNotMatch(result.stderr, /has no request-temperature row/, "the request-shape refusal must not pre-empt it");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("every priced openweight deployment declares a request temperature", async () => {
+  // W1-T3608 census. A deployment reachable enough to be PRICED is reachable enough to be SENT a
+  // request, so the two tables must cover the same keys. Without this, adding a deployment to the
+  // ladder and its price row still leaves the request shape a guess — discovered in production as
+  // an HTTP 400, which is how this task was found.
+  const priced = Object.keys(OPENWEIGHT_PRICES).sort();
+  const shaped = Object.keys(OPENWEIGHT_TEMPERATURE).sort();
+  assert.ok(priced.length > 0, "the price table must be non-empty, or this census compares nothing");
+  assert.deepEqual(shaped, priced, "every priced deployment needs a temperature row, and vice versa");
+  for (const deployment of priced) {
+    const field = openWeightTemperatureField(deployment);
+    const value = OPENWEIGHT_TEMPERATURE[deployment];
+    assert.equal("temperature" in field, value !== null, `${deployment}: the field is present exactly when its row is not null`);
+  }
+});
+
 test("openweight configuration requires a daily cash cap and keeps its key outside worker env", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-openweight-config-"));
   try {
@@ -517,7 +742,9 @@ test("openweight configuration requires a daily cash cap and keeps its key outsi
     assert.throws(() => validateConfig(uncapped), ConfigValidationError);
     assert.doesNotThrow(() => validateConfig({ ...uncapped, dailyCapUsd: 1 }));
     assert.doesNotMatch(JSON.stringify(uncapped), /api.?key|secret/i, "configuration contains an endpoint, never a credential");
-    assert.doesNotMatch(readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8"), /provider:\s*openweight/, "the adapter is wired but no lane is routed in Phase 2");
+    // W1-T3569 routed exactly one lane onto this adapter — see "only synthesis.inbox_draft
+    // declares provider openweight" below for the one-row invariant this file's own mounts.yaml
+    // now has to hold, now that Phase 2 is live for this single measured lane.
 
     const result = await spawnWorker({
       cwd: REPO_ROOT,
@@ -531,13 +758,14 @@ test("openweight configuration requires a daily cash cap and keeps its key outsi
       config: { ...uncapped, dailyCapUsd: 1 },
       providerRouting: {
         spawnOpenWeight: async (_args, _config, selection) => {
-          assert.equal(selection.model, "gpt-oss-120b");
+          // Resolves through the ladder, which W1-T3598 leads with the cheaper deployment.
+          assert.equal(selection.model, "gpt-5-nano");
           return openWeightResult();
         },
       },
     });
     assert.equal(result.provider, "openweight");
-    assert.equal(result.routedModel, "gpt-oss-120b");
+    assert.equal(result.routedModel, "gpt-5-nano");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -858,7 +1086,16 @@ test("openweight daily cap ledger fields expose settled cost without a credentia
             ),
         },
       });
-      assert.equal(routed.budgetSettledUsd, expectedSettled, "the settled cash figure survives the router onto the worker row");
+      // Priced against the deployment the ROUTER actually chose, not a hardcoded one: this fixture
+      // is about settlement surviving onto the worker row, and pinning a deployment here would make
+      // it fail every time the ladder's leading candidate changes — which is a routing decision,
+      // not a settlement regression. W1-T3598 moved that candidate and this is why it still holds.
+      assert.ok(routed.routedModel, "the routed worker row names the deployment it billed against");
+      assert.equal(
+        routed.budgetSettledUsd,
+        openWeightUsageUsd(routed.routedModel, 1_000, 200),
+        "the settled cash figure survives the router onto the worker row, at the routed deployment's own rate",
+      );
       assert.ok((routed.budgetReservedUsd ?? 0) > (routed.budgetSettledUsd ?? 0));
       assert.equal(routed.budgetRefused, false);
       assert.doesNotMatch(JSON.stringify(routed), /test-only-daemon-secret/, "the routed worker row carries no credential");

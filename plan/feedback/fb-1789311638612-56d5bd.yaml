@@ -24,7 +24,7 @@ raw: "Multi-instance daemon availability: OBSERVED on the Azure host 2026-09-13:
   per-repo was not a real dimension."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/5417
 summary:
