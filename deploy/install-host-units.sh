@@ -421,25 +421,20 @@ fi
 
 # IDEMPOTENT. A five-minute timer must never disturb a healthy daemon or its in-flight workers.
 #
-# W1-T3245 — AND THIS IS WHERE A RECYCLE IS CONSIDERED, IN THE SAME TICK. Reconciliation is
-# LEVEL-TRIGGERED: this loop already reads observed state ("is the daemon running") and converges,
-# so asking "is the image current" is the same loop asking a second question about the same desired
-# state. A separate timer would be a second reconciler over one subject.
+# W1-T3245 — THE WATCHDOG IS THE ONE HOST RECONCILER. Reconciliation is level-triggered: this loop
+# already reads observed state ("is the daemon running") and converges, so the healthy tick asks the
+# SAME supervisor whether deployment work is worth a controlled recycle. A second timer would be a
+# second reconciler over one subject.
 #
-# TWO DECISIONS, NOT ONE SCORE, and only ONE of them belongs here:
-#   RESTART (mount-side) is ALREADY HANDLED and is not this tick's business -- the daemon's own
-#           freshness check exits 75 and the entrypoint re-fetches, tens of times a day, in seconds.
-#           Acting on it here would put a second actor on the daemon's own job and race it.
-#   RECYCLE (image-side) has no other actor: nothing INSIDE a container can replace the image it is
-#           running on, and this script is the only thing outside it that runs on a cadence.
-# The --image-drift-only flag is what makes the tick blind to the first and awake to the second.
+# The daemon's own freshness exit still owns its cheap in-container source refresh. It does NOT
+# replace the host's deployment decision: only the full supervisor has the persistent weighted
+# change pressure, restart-rate ceiling, idle gate, health check, rollback, and adaptive
+# recycle-container.sh backend. Passing --image-drift-only bypasses that pressure entirely and turns
+# a change-and-risk-gated controller into an image-only poll.
 #
-# THE DECISION IS NOT MADE HERE. The deploy-run supervisor owns it: the idle gate (no worker, no
-# in-flight task, bounded by DEPLOY_IDLE_DEFER_CEILING_MS), the drift reading, the health check and
-# the rollback -- and it reaches deploy/recycle-container.sh, whose four refusals are the
-# deliverable (no credential, workers still running, a failed pull, a digest mismatch). A tick with
-# no drift does nothing at all, so this is DRIFT-driven and not clock-driven; the clock only sets
-# how often the question is asked.
+# THE DECISION IS NOT MADE HERE. deploy-run fails closed until a deploy marker or DEPLOY_AUTO is
+# commissioned, then recycles only when its deterministic safety gates allow it. A daemon that is
+# DOWN still takes the cached-image revival path below; this healthy branch never pulls an image.
 if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # W1-T3268 -- THE FLAG'S ONLY PATH BACK. The arm that cleared DAEMON_CRASH_LOOP sat on the
   # revival path below, after this very return, so a host that recovered stopped reviving and never
@@ -450,8 +445,8 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
   if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
-    echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
-    "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only || \\
+    echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a change-and-risk-gated deploy is due."
+    "\$STATE_DIR/remudero/bin/rmd" deploy-run || \\
       echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
   else
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."

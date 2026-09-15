@@ -454,7 +454,7 @@ test("W1-T2953: every guard the LIVE launcher carries is reproduced by the rende
   }
 });
 
-// ── W1-T3245: the recycle folds into the watchdog's tick, and is NOT a second timer ──────────
+// ── W1-T3245: one watchdog tick reaches the complete supervisor, not a second timer ──────────
 //
 // MEASURED 2026-09-09: acr-build published a new image at 11:14Z; the running container, created
 // by a watchdog revival at 10:15Z, still ran the 09-06 build. The commit it was missing was the
@@ -466,19 +466,20 @@ test("W1-T2953: every guard the LIVE launcher carries is reproduced by the rende
 // on a failed pull, but its only caller is `rmd deploy-run`, which nothing invoked.
 //
 // FOLDED RATHER THAN SCHEDULED SEPARATELY. Reconciliation is level-triggered: this loop already
-// reads observed state and converges, so "is the image current" is the same loop asking a second
-// question about the same desired state. A second timer would be a second reconciler over one
-// subject.
+// reads observed state and converges, so the score-gated deployment question belongs to this same
+// loop. A second timer would be a second reconciler over one subject.
 
-test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists", () => {
+test("W1-T3245: the watchdog invokes the complete supervisor and renders no second timer", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-fold-"));
   try {
     assert.equal(renderAsAzure(root).status, 0);
     const launcher = readFileSync(join(root, "rmd-relaunch.sh"), "utf8");
 
-    // The tick asks the SUPERVISOR, which owns the idle gate, health check and rollback and reaches
-    // recycle-container.sh. It must never shortcut to docker or to a bare restart.
-    assert.match(launcher, /bin\/rmd" deploy-run --image-drift-only/);
+    // The tick asks the COMPLETE supervisor, which owns weighted pressure, the idle gate, health
+    // check and rollback and reaches recycle-container.sh. It must never shortcut to docker, a
+    // bare restart, or the image-only reading that bypasses weighted restart pressure.
+    assert.match(launcher, /bin\/rmd" deploy-run \|\|/);
+    assert.doesNotMatch(launcher, /deploy-run --image-drift-only/);
     assert.doesNotMatch(launcher, /docker pull/, "the launcher itself must never pull — that is the recycle's job");
 
     // NO SECOND RECONCILER. The whole point of folding is one loop over one subject.
@@ -494,10 +495,10 @@ test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists
   }
 });
 
-test("W1-T3245: the tick recycles for image drift and never for mount drift", () => {
-  // TWO DECISIONS, NOT ONE SCORE. Mount staleness is the daemon's own freshness exit (75), tens of
-  // times a day, in seconds; a second actor on that job would race it. `--image-drift-only` is what
-  // makes the tick blind to it — asserted on the DECISION, not just on the rendered flag.
+test("W1-T3245: the full watchdog reading waits for weighted restart pressure", () => {
+  // The daemon still owns its cheap in-container freshness exit, but a host recycle has a different
+  // interruption cost. The watchdog must invoke the supervisor's full, score-gated reading rather
+  // than bypass it with --image-drift-only.
   const base = {
     markerPresent: false,
     autoMode: true,
@@ -508,23 +509,19 @@ test("W1-T3245: the tick recycles for image drift and never for mount drift", ()
     stopPresent: false,
   };
 
-  // Mount drift alone: the operator's full reading deploys; the tick's reading does NOT.
-  assert.equal(decideDeployTrigger({ ...base, imageBakedCommitsBehind: 0 }).deploy, true, "control: the full reading acts");
-  const tick = decideDeployTrigger({ ...base, imageBakedCommitsBehind: 0, imageDriftOnly: true });
-  assert.equal(tick.deploy, false, "the tick must leave mount staleness to the daemon");
-  assert.match(tick.reason, /up-to-date/);
+  const below = decideDeployTrigger({
+    ...base,
+    autoRestartPressure: { restart: false, reason: "restart pressure below threshold: total 17 < 18", total: 17, threshold: 18 },
+  });
+  assert.equal(below.deploy, false, "a below-threshold score must leave a healthy daemon alone");
+  assert.match(below.reason, /restart pressure below threshold/);
 
-  // Image drift: the tick DOES act, even though the checkout is also behind.
-  const drifted = decideDeployTrigger({ ...base, imageBakedCommitsBehind: 1, imageDriftOnly: true });
-  assert.equal(drifted.deploy, true, "a new image is the tick's own business");
-  assert.match(drifted.reason, /running image predates 1 baked-path commit/);
-
-  // And STOP still outranks it in the tick's reading too.
-  assert.equal(
-    decideDeployTrigger({ ...base, imageBakedCommitsBehind: 1, imageDriftOnly: true, autoMode: false, markerPresent: false }).deploy,
-    false,
-    "no marker and no auto mode is still human-gated",
-  );
+  const crossed = decideDeployTrigger({
+    ...base,
+    autoRestartPressure: { restart: true, reason: "restart pressure crossed threshold: total 18 >= 18", total: 18, threshold: 18 },
+  });
+  assert.equal(crossed.deploy, true, "a crossed score must reach the supervisor's deterministic safety gates");
+  assert.match(crossed.reason, /restart pressure crossed threshold/);
 });
 
 test("W1-T3245: a down daemon is revived from cache, not recycled", () => {
@@ -697,8 +694,10 @@ test("W1-T3583: clean control checkout fast-forwards before unit drift check", (
     assert.doesNotMatch(dockerCalls, /^run /m, "the checkout advance must never restart the daemon");
     assert.doesNotMatch(dockerCalls, /^rm /m, "the checkout advance must never recreate the daemon");
 
-    // The same tick's full deploy-supervisor reading still happens.
-    assert.match(readFileSync(deployRunLog, "utf8"), /deploy-run --image-drift-only/);
+    // The same tick's full deploy-supervisor reading still happens, without bypassing pressure.
+    const deployRun = readFileSync(deployRunLog, "utf8");
+    assert.match(deployRun, /^deploy-run$/m);
+    assert.doesNotMatch(deployRun, /image-drift-only/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -821,11 +820,9 @@ test("W1-T3583: advance failure preserves healthy daemon path", () => {
     assert.match(result.stdout + result.stderr, /DIVERGED|fast-forward refused/);
 
     // THE FULL DEPLOY-SUPERVISOR READING STILL HAPPENS THE SAME TICK.
-    assert.match(
-      readFileSync(deployRunLog, "utf8"),
-      /deploy-run --image-drift-only/,
-      "the healthy daemon's deploy-supervisor reading must stay reachable despite the refused advance",
-    );
+    const deployRun = readFileSync(deployRunLog, "utf8");
+    assert.match(deployRun, /^deploy-run$/m, "the healthy daemon's full deploy-supervisor reading must stay reachable despite the refused advance");
+    assert.doesNotMatch(deployRun, /image-drift-only/);
 
     // AND THE DAEMON ITSELF IS NEVER TOUCHED BY THE FAILED ADVANCE.
     const dockerCalls = readFileSync(dockerLog, "utf8");
