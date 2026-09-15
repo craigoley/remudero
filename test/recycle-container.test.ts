@@ -594,7 +594,7 @@ test("W1-T1046: a hung fix-rung worker alone is passed, printed before clearing,
 // modes) — only the in-container `/proc/<pid>` probe differs, which is the ONE thing that may
 // decide the outcome.
 
-test("W1-T3611: a lock naming the live target container with a pid absent from its /proc is reclaimed, not refused", () => {
+test("W1-T3611: a dead pid in the live container is reclaimed, not refused — the lock names the running target container and its /proc lacks that pid", () => {
   const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
   const inflightDir = join(state, "state", "inflight");
   mkdirSync(inflightDir, { recursive: true });
@@ -616,7 +616,7 @@ test("W1-T3611: a lock naming the live target container with a pid absent from i
   );
 });
 
-test("W1-T3611: a lock naming the live target container with a pid still present in its /proc still refuses the recycle", () => {
+test("W1-T3611: a live pid in the live container still refuses the recycle — the same host/target match, but /proc still holds that pid", () => {
   const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
   const inflightDir = join(state, "state", "inflight");
   mkdirSync(inflightDir, { recursive: true });
