@@ -22,6 +22,10 @@ import {
   OPENWEIGHT_OUTPUT_CONTRACT,
   OPENWEIGHT_PRICES,
   OPENWEIGHT_TEMPERATURE,
+  OPENWEIGHT_CHECKS,
+  OpenWeightUnlistedCheckError,
+  OPENWEIGHT_READONLY_GIT_SUBCOMMANDS,
+  openWeightCheckArgv,
   OpenWeightUnshapedDeploymentError,
   openWeightTemperatureField,
   OpenWeightAllowanceExhaustedError,
@@ -772,6 +776,86 @@ test("a failed openweight judge spawn fails open to deliver", async () => {
 
   assert.equal(verdict.decision, "deliver", "a judge that cannot run must deliver, never demote");
   assert.match(verdict.reason, /judge unavailable/, "the reason must name the failure rather than inventing a judgement");
+});
+
+test("an unlisted openweight check refuses before it executes", async () => {
+  // W1-T3617. The refusal must happen BEFORE a process is spawned, so a caller that sees it knows
+  // nothing ran. Driven through the REAL adapter tool loop rather than the pure builder alone,
+  // because "refuses before it executes" is a property of the executor, not of a helper.
+  const root = mkdtempSync(join(tmpdir(), "rmd-ow-check-"));
+  try {
+    let turn = 0;
+    const bodies: string[] = [];
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "wh"),
+        prompt: "run a check",
+        tools: ["Read", "RunCheck"],
+        maxTurns: 3,
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async (_input, init) => {
+          bodies.push(String(init?.body ?? ""));
+          turn += 1;
+          const body = turn === 1
+            ? { choices: [{ message: { tool_calls: [{ id: "c1", type: "function", function: { name: "run_check", arguments: JSON.stringify({ check: "git", paths: ["."] }) } }] } }] }
+            : { choices: [{ message: { content: "done" } }] };
+          return new Response(JSON.stringify(body), { status: 200 });
+        },
+      },
+      { claudeBin: "/unused/claude", root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+      { model: "gpt-oss-120b", effort: "low" },
+    );
+
+    // THE REFUSAL IS FED BACK AS A TOOL RESULT, so the evidence is the NEXT request's messages, not
+    // the final text. A refused tool is a result rather than a crash: the loop survives and the
+    // model's next turn can correct itself, which is why the message must name what IS permitted.
+    assert.equal(result.isError, false, "a refused check must not crash the worker loop");
+    assert.ok(bodies.length >= 2, "the loop must have taken a second turn carrying the tool result");
+    assert.match(bodies[1]!, /not permitted/, "the refusal must reach the model as a tool result");
+    assert.match(bodies[1]!, /unit_test/, "and must name the permitted checks so the next turn can correct itself");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // And the builder refuses the same name with the typed error, before any argv exists to spawn.
+  assert.throws(() => openWeightCheckArgv("git", undefined, REPO_ROOT), OpenWeightUnlistedCheckError);
+  assert.throws(() => openWeightCheckArgv("curl", undefined, REPO_ROOT), OpenWeightUnlistedCheckError);
+  // A path argument cannot smuggle a flag or escape the cwd: arguments are contained PATHS only.
+  assert.throws(() => openWeightCheckArgv("unit_test", ["../../etc/passwd"], REPO_ROOT), /escapes the worker cwd/);
+});
+
+test("no permitted openweight check can reach the network or the forge", () => {
+  // W1-T3617. ENUMERATES THE TABLE, never a sample: the failure this guards is someone ADDING a row,
+  // and a test that checked two known-good entries would pass identically after `git` was added.
+  const entries = Object.entries(OPENWEIGHT_CHECKS);
+  assert.ok(entries.length > 0, "the table must be non-empty, or this census compares nothing");
+
+  const forbidden = ["gh", "curl", "wget", "ssh", "scp", "npm", "npx", "pnpm", "yarn", "pip", "docker", "nc", "sh", "bash", "zsh", "env", "eval"];
+  let sawGit = false;
+  for (const [check, argv] of entries) {
+    assert.ok(Array.isArray(argv) && argv.length > 0, `${check} must declare a non-empty argv`);
+    const command = argv[0]!.split("/").pop()!;
+    assert.ok(!forbidden.includes(command), `${check} runs '${command}', which can reach the network, the forge or a shell`);
+    // `git` IS permitted, but only with a PINNED READ-ONLY SUBCOMMAND. The W1-T3572 ruling's "no
+    // git" meant no forge authority; `git log`/`status`/`diff`/`remote -v` carry no push and no
+    // network. This is the assertion that keeps `git push` absent rather than one entry away.
+    if (command === "git") {
+      sawGit = true;
+      assert.ok(
+        OPENWEIGHT_READONLY_GIT_SUBCOMMANDS.includes(argv[1] ?? ""),
+        `${check} runs 'git ${argv[1]}', which is not one of the read-only subcommands this table permits`,
+      );
+    }
+    for (const arg of argv) {
+      assert.doesNotMatch(arg, /:\/\/|^https?:|^git@/, `${check} must not carry a URL in its argv`);
+      // No shell metacharacters anywhere: the argv is spawned directly, and this keeps it true.
+      assert.doesNotMatch(arg, /[;&|`$><]/, `${check} must not carry shell metacharacters`);
+    }
+  }
+  // POSITIVE CONTROL for the git arm: if no entry used git at all, the subcommand assertion above
+  // would be vacuous and would keep passing after someone added `git push`.
+  assert.ok(sawGit, "the table must contain at least one git entry, or its subcommand check proves nothing");
 });
 
 test("openweight configuration requires a daily cash cap and keeps its key outside worker env", async () => {
