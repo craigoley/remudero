@@ -671,7 +671,7 @@ test("openweight daily reservation remains charged across restart and cannot be 
         `import { reserveOpenWeightBudget, openWeightCommittedUsd } from ${JSON.stringify(join(REPO_ROOT, "src", "lib", "worker-provider.ts"))};`,
         `import { readFileSync } from "node:fs";`,
         `const config = ${JSON.stringify(allowanceConfig(root, 5))};`,
-        `reserveOpenWeightBudget(config, { requestId: "child-request", requestBodyBytes: 1024, atIso: ${JSON.stringify(atIso)} });`,
+        `reserveOpenWeightBudget(config, { requestId: "child-request", deployment: "gpt-oss-120b", requestBodyBytes: 1024, atIso: ${JSON.stringify(atIso)} });`,
         `process.stdout.write(String(openWeightCommittedUsd(JSON.parse(readFileSync(${JSON.stringify(join(root, "state", OPENWEIGHT_ALLOWANCE_FILENAME))}, "utf8")))));`,
       ].join("\n"),
       "utf8",
@@ -690,12 +690,12 @@ test("openweight daily reservation remains charged across restart and cannot be 
       const capUsd = 0.02;
       const drainConfig = allowanceConfig(drainRoot, capUsd);
       const bodyBytes = 4096;
-      const perRequest = openWeightReservationUsd(bodyBytes);
+      const perRequest = openWeightReservationUsd("gpt-oss-120b", bodyBytes);
       let granted = 0;
       let refused = 0;
       for (let i = 0; i < 40; i++) {
         try {
-          reserveOpenWeightBudget(drainConfig, { requestId: `drain-${i}`, requestBodyBytes: bodyBytes, atIso });
+          reserveOpenWeightBudget(drainConfig, { requestId: `drain-${i}`, deployment: "gpt-oss-120b", requestBodyBytes: bodyBytes, atIso });
           granted += 1;
         } catch (error) {
           assert.ok(error instanceof OpenWeightAllowanceExhaustedError);
@@ -721,13 +721,13 @@ test("openweight daily reservation remains charged across restart and cannot be 
     const raceRoot = mkdtempSync(join(tmpdir(), "rmd-openweight-race-"));
     try {
       const bodyBytes = 4096;
-      const perRequest = openWeightReservationUsd(bodyBytes);
+      const perRequest = openWeightReservationUsd("gpt-oss-120b", bodyBytes);
       const capUsd = perRequest * 2; // the day affords EXACTLY two requests
       const raceConfig = allowanceConfig(raceRoot, capUsd);
       let granted = 0;
       const attempt = (requestId: string, beforeCommit?: () => void) => {
         try {
-          reserveOpenWeightBudget(raceConfig, { requestId, requestBodyBytes: bodyBytes, atIso, beforeCommit });
+          reserveOpenWeightBudget(raceConfig, { requestId, deployment: "gpt-oss-120b", requestBodyBytes: bodyBytes, atIso, beforeCommit });
           granted += 1;
         } catch (error) {
           assert.ok(error instanceof OpenWeightAllowanceExhaustedError);
@@ -761,17 +761,17 @@ test("openweight daily reservation remains charged across restart and cannot be 
     try {
       const corruptConfig = allowanceConfig(corruptRoot, 5);
       // Absent file: spends normally.
-      assert.ok(reserveOpenWeightBudget(corruptConfig, { requestId: "before", requestBodyBytes: 512, atIso }).reservedUsd > 0);
+      assert.ok(reserveOpenWeightBudget(corruptConfig, { requestId: "before", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso }).reservedUsd > 0);
       mkdirSync(join(corruptRoot, "state"), { recursive: true });
       writeFileSync(join(corruptRoot, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "{ truncated", "utf8");
       assert.throws(
-        () => reserveOpenWeightBudget(corruptConfig, { requestId: "after", requestBodyBytes: 512, atIso }),
+        () => reserveOpenWeightBudget(corruptConfig, { requestId: "after", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso }),
         /unreadable|no readable utcDay/,
         "a damaged allowance file refuses to spend rather than resetting the day's committed total to zero",
       );
       // And a well-formed file missing its fields is refused for the same reason.
       writeFileSync(join(corruptRoot, "state", OPENWEIGHT_ALLOWANCE_FILENAME), JSON.stringify({ nothing: true }), "utf8");
-      assert.throws(() => reserveOpenWeightBudget(corruptConfig, { requestId: "after2", requestBodyBytes: 512, atIso }), /no readable utcDay/);
+      assert.throws(() => reserveOpenWeightBudget(corruptConfig, { requestId: "after2", deployment: "gpt-oss-120b", requestBodyBytes: 512, atIso }), /no readable utcDay/);
     } finally {
       rmSync(corruptRoot, { recursive: true, force: true });
     }
@@ -779,6 +779,7 @@ test("openweight daily reservation remains charged across restart and cannot be 
     // A NEW UTC DAY starts a fresh allowance rather than inheriting yesterday's committed spend.
     const nextDay = reserveOpenWeightBudget(config, {
       requestId: "tomorrow",
+      deployment: "gpt-oss-120b",
       requestBodyBytes: 1024,
       atIso: "2026-09-16T00:00:00.000Z",
     });
