@@ -5,7 +5,7 @@
  * sweep wasn't running (feedback#fb-1789311638612-56d5bd) — `sweepFeedbackLanding` (W1-T530)
  * reads only ONE root's own disk. This is that missing cross-root read, plus the repair.
  *
- * Design, one line each (plan/tasks.d/W1-T3562-*.yaml has the full rationale):
+ * Design, one line each (this task's own plan shard, W1-T3562, has the full rationale):
  * (i) dry-run default — {@link reconcileFeedbackLanding} only builds the manifest unless
  *     `apply: true`; classifications are present-everywhere / missing-upstream / regressed
  *     (origin/main sits at an earlier §7B position) / differs (a non-rank byte gap).
