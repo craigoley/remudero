@@ -2164,7 +2164,9 @@ export const OPENWEIGHT_CHECKS: Readonly<Record<string, readonly string[]>> = {
 /** Read-only git subcommands the table may use. Enforced over the table by test. */
 export const OPENWEIGHT_READONLY_GIT_SUBCOMMANDS: readonly string[] = ["log", "status", "diff", "remote", "show"];
 
-/** Wall-clock bound on one check: the cash cap bounds spend, this bounds time. */
+/** PRIMARY CONTROL: wall-clock bound on one check. Nothing else stops a hung check process — the
+ *  cash cap bounds spend, this bounds time — so this is what normally ends the loop, not a
+ *  fallback behind some other limit. */
 export const OPENWEIGHT_CHECK_TIMEOUT_MS = 10 * 60_000;
 
 /** Raised INSTEAD of executing an unlisted check, before any process spawns. */
