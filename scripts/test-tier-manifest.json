@@ -342,6 +342,7 @@
     "test/board-snapshot-cache-ignores-heartbeats.test.ts": 1022,
     "test/board-snapshot-cache.test.ts": 2481,
     "test/board-status-per-row.test.ts": 716,
+    "test/board-status-route-projects-off-the-request-path.test.ts": 0,
     "test/board-terminal-review-state.test.ts": 1225,
     "test/board.test.ts": 5827,
     "test/body-claim-recognition.test.ts": 1631,

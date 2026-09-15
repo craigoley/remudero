@@ -268,6 +268,71 @@ function readPrQueueIndex(github: BoardDeps["github"]): PrQueueIndexRead {
 }
 
 /** Stable material fingerprint for GitHub-only queue changes; body is included because anchored task attribution is a queue field. */
+/** Where the snapshot cache gets its open-PR index. Defaults to {@link readPrQueueIndex} — a
+ *  read of the live gateway, on whatever thread asked. */
+export type PrQueueIndexSource = (github: BoardDeps["github"]) => PrQueueIndexRead;
+
+/** {@link createTimedPrQueueIndex}'s tick. Well under the board gateway's own TTL
+ *  (`DEFAULT_BOARD_POLL_TTL_MS`, 150s) so the TIMER is always what pays that TTL's refresh and a
+ *  request never can; and well under the console's 3s poll so a GitHub-only change — a gateway
+ *  recovering, a PR opening — still surfaces on the operator's very next poll. */
+export const DEFAULT_PR_QUEUE_INDEX_REFRESH_MS = 1_000;
+
+export interface TimedPrQueueIndex {
+  /** The most recent read. Never reads the gateway itself — that is the timer's job. */
+  read(): PrQueueIndexRead;
+  stop(): void;
+}
+
+// Why: the measured latencies, and why a longer gateway TTL cannot fix this —
+// [src: learnings#board-status-pacer-blocks-the-event-loop]
+/**
+ * THE OPEN-INDEX READ, ON A TIMER INSTEAD OF ON A REQUEST.
+ *
+ * `github.listOpenHeadBranches()` is the one input here that costs a real GitHub call, and every
+ * production gateway answers it with a synchronous `gh` subprocess routed through `paceGhEntry`
+ * — which enforces its gap with `Atomics.wait` (`defaultBlockingSleepSync`, github-transport.ts),
+ * a hard stop of node's one event-loop thread. On the request path that does not slow one
+ * response; it freezes every concurrent reader, and the console's own gateway gives up at 5s.
+ *
+ * So the gateway is read HERE, on an unref'd interval, and {@link read} hands back whatever the
+ * last tick resolved. Because the tick is far shorter than the gateway's TTL, the timer is also
+ * what pays that TTL's refresh, so the per-task reads inside `computeBoardSnapshot` find a warm
+ * index rather than triggering the walk themselves.
+ *
+ * NOTHING IS FABRICATED: a failed read is carried through as the `failed`/`failureReason` this
+ * type already models, and `derivePrQueue` withholds the queue rather than shortening it. A tick
+ * that THROWS leaves the previous read standing — the one thing worse than a stale index is an
+ * invented one.
+ */
+export function createTimedPrQueueIndex(
+  github: BoardDeps["github"],
+  opts: { refreshMs?: number; schedule?: (run: () => void, ms: number) => () => void } = {},
+): TimedPrQueueIndex {
+  const refreshMs = opts.refreshMs ?? DEFAULT_PR_QUEUE_INDEX_REFRESH_MS;
+  // EAGER, INLINE, AT CONSTRUCTION — not on the first tick. `buildStatusRoute` is built during
+  // serve boot, before the listener binds, so the cold walk lands there: the port is not yet open
+  // rather than open-and-unanswering, which is the honest shape of "not ready".
+  let latest: PrQueueIndexRead = readPrQueueIndex(github);
+  const tick = (): void => {
+    try {
+      latest = readPrQueueIndex(github);
+    } catch {
+      // The previous read stands. `readPrQueueIndex` already converts a THROWING gateway into a
+      // `failed` reading, so reaching here means the failure was outside that contract.
+    }
+  };
+  const schedule =
+    opts.schedule ??
+    ((run, ms) => {
+      const timer = setInterval(run, ms);
+      timer.unref?.();
+      return () => clearInterval(timer);
+    });
+  const stop = schedule(tick, refreshMs);
+  return { read: () => latest, stop };
+}
+
 function prQueueIndexFingerprint(index: PrQueueIndexRead): string {
   const rows = index.open === undefined
     ? "method-unavailable"
@@ -637,7 +702,16 @@ export function decisionKey(fp: DecisionFingerprint): string {
   return `${fp.count}:${(fp.hash >>> 0).toString(16)}`;
 }
 
-export function createBoardSnapshotCache(): BoardSnapshotCache {
+export interface BoardSnapshotCacheOptions {
+  /** Where the open-PR index comes from. Defaults to reading the live gateway inline, which is
+   *  what a caller holding this cache directly wants: it asked for the current projection and
+   *  has no HTTP listener to protect. {@link buildStatusRoute}, which does, passes a
+   *  {@link TimedPrQueueIndex}'s `read`. */
+  indexSource?: PrQueueIndexSource;
+}
+
+export function createBoardSnapshotCache(options: BoardSnapshotCacheOptions = {}): BoardSnapshotCache {
+  const indexSource = options.indexSource ?? readPrQueueIndex;
   let cached: { decisionKey: string; ghFailed: boolean; ghTruncated: boolean; prQueueIndexKey: string; snapshot: BoardSnapshot } | undefined;
   let lastGoodPrQueueAt: string | undefined;
   // Folded across requests (W1-T2919), so a cache hit costs one pass over the lines appended
@@ -653,7 +727,7 @@ export function createBoardSnapshotCache(): BoardSnapshotCache {
       const key = decisionKey(fingerprint);
       // The queue's live identity can change before sweep appends anything. Read the batched
       // open half once for the cache key, then hand this same capture to the recompute below.
-      const prQueueIndex = readPrQueueIndex(deps.github);
+      const prQueueIndex = indexSource(deps.github);
       const prQueueIndexKey = prQueueIndexFingerprint(prQueueIndex);
       const ghFailed = safeReadFailed(deps.github);
       const ghTruncated = safeQueueTruncated(deps.github);
@@ -709,8 +783,17 @@ export function requestAcknowledgesRecap(headerValue: string | string[] | undefi
  * evening to an effectively permanent few-second recap window.
  */
 // Why: the recap-window incident this ack gate fixes — docs/forensics/board.md#buildstatusroute
-export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Route {
-  const cache = createBoardSnapshotCache();
+export interface StatusRouteOptions {
+  /** Injectable so a suite drives the index refresh by hand instead of racing a real interval. */
+  index?: TimedPrQueueIndex;
+}
+
+export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore, options: StatusRouteOptions = {}): Route {
+  // The ONE expensive input moves to a timer; everything else — the ledger fold, the projection
+  // — stays inline, so a ledger append is still reflected by the very next request. See
+  // {@link createTimedPrQueueIndex} for why that split is the whole fix.
+  const index = options.index ?? createTimedPrQueueIndex(deps.github);
+  const cache = createBoardSnapshotCache({ indexSource: () => index.read() });
   return {
     method: "GET",
     path: "/v1/status",
