@@ -37,9 +37,10 @@ import {
 
 const FEEDBACK_REL_DIR = "plan/feedback";
 
-/** A scan is bounded (design iii) — a misconfigured root's runaway directory must not hang an
- *  interactive verb. Past this many top-level entries, a source stops reading and the manifest
- *  says so via `truncated` rather than silently reporting a partial answer as a complete one. */
+/** BACKSTOP (never the primary control on an ordinary run — a healthy `plan/feedback/` sits far
+ *  under this): a misconfigured root's runaway directory must not hang an interactive verb. Past
+ *  this many top-level entries, a source stops reading and the manifest says so via `truncated`
+ *  rather than silently reporting a partial answer as a complete one. */
 export const MAX_RECORDS_PER_SOURCE = 2000;
 
 type GitExec = (args: string[]) => string;
