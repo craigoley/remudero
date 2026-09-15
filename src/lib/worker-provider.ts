@@ -606,9 +606,22 @@ export function codexCandidatesForCapability(
 
 /** Last-resort data for a missing capability table. Real open-weight routing resolves the table
  * below; this keeps a malformed optional table from changing the existing fail-soft contract. */
+/**
+ * The code-side default when mounts declares no `capabilities.openweight` table. It must name the
+ * SAME leading deployment as that table (W1-T3598): if the two disagreed, a checkout with no table
+ * would silently route the DEARER deployment while the configured fleet routed the cheaper one, and
+ * nothing would report the divergence. test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
+ * asserts the two agree.
+ *
+ * FRONTIER STAYS ON gpt-oss-120b DELIBERATELY. A nano-class model is not a frontier substitute, and
+ * before this every tier named one deployment — a ladder expressing no choice at all. gpt-oss-120b
+ * TRAILS rather than being deleted from the rows nano now leads, the same shape the `codex` table
+ * uses for a demoted model, so a deployment that stops answering falls back instead of failing the
+ * lane.
+ */
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
-  economy: ["gpt-oss-120b"],
-  balanced: ["gpt-oss-120b"],
+  economy: ["gpt-5-nano", "gpt-oss-120b"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b"],
   frontier: ["gpt-oss-120b"],
 };
 
@@ -1765,6 +1778,10 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   // Azure serverless published rate. These are the two numbers this adapter has always used;
   // they are unchanged, and are now this deployment's ROW rather than the provider's default.
   "gpt-oss-120b": { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6, readAt: "2026-09-14" },
+  // W1-T3598: cheaper than gpt-oss-120b on BOTH axes (3x on input, 1.5x on output) and an
+  // Azure-OpenAI-family deployment, so it rides `openWeightEndpoint`'s existing
+  // `openai/deployments/...` route with no second endpoint shape.
+  "gpt-5-nano": { inputUsdPerMillion: 0.05, outputUsdPerMillion: 0.4, readAt: "2026-09-15" },
 };
 
 /** Raised INSTEAD of pricing a deployment by a neighbour's row. Thrown before the transport, so a
