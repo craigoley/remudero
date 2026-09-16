@@ -28,24 +28,20 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { boardColdStartGate, serveCommand } from "../src/run-task.js";
-import type { GitHub } from "../src/lib/status.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 
-/** A `GitHub` gateway that answers every call in-memory and never shells `gh` — real callers get
- *  `buildBatchedGithub`, which is a real, possibly-slow (and, off this sandbox's network,
- *  possibly network-timing-out) subprocess. `computeBoardSnapshot`'s cost this task is actually
- *  about is the per-task DERIVATION, not the gateway walk (see this task's own rationale), so a
- *  fixture gateway isolates that from an unrelated `gh` dependency the SAME way every other
- *  `serveCommand` test in this repo already does. */
-function fakeGithub(): GitHub {
-  return {
-    prByRef: () => null,
-    findMergedByTrailer: () => null,
-    headRefName: () => undefined,
-    prBody: () => undefined,
-    listMergedHeadBranches: () => [],
-    listOpenHeadBranches: () => [],
-  };
-}
+// This file's `buildBatchedGithub` fake answers every call in-memory and never shells `gh` —
+// real callers get the real `buildBatchedGithub`, which is a real, possibly-slow (and, off this
+// sandbox's network, possibly network-timing-out) subprocess. `computeBoardSnapshot`'s cost this
+// task is actually about is the per-task DERIVATION, not the gateway walk (see this task's own
+// rationale), so a fixture gateway isolates that from an unrelated `gh` dependency the SAME way
+// every other `serveCommand` test in this repo already does. `test/helpers/fake-github.ts`
+// (W1-T2903) is the SHARED fixture every other suite in this repo already builds from — called
+// directly at each site below (never wrapped in a second file-local `...Github(...)`-named
+// function, which would just be one more entry in the exact per-file duplication count that
+// helper exists to end, see `fixture-copy-census.test.ts`), passing only the two extra optional
+// members this file's own scenarios read as overrides.
+const BOARD_GATEWAY_EXTRA_METHODS = { listMergedHeadBranches: () => [], listOpenHeadBranches: () => [] };
 
 // ── PART 1 — `boardColdStartGate`, a pure unit, no server involved ─────────────────────────────
 
@@ -189,7 +185,7 @@ test("a cold daemon (first board projection still building) refuses the board ro
   let buildInitialBoardSnapshotCalls = 0;
   const running = serveCommand([], {
     branch: () => "main",
-    buildBatchedGithub: () => fakeGithub(),
+    buildBatchedGithub: () => fakeGitHub(BOARD_GATEWAY_EXTRA_METHODS),
     buildInitialBoardSnapshot: async () => {
       buildInitialBoardSnapshotCalls += 1;
       await held;
@@ -254,7 +250,7 @@ test("a daemon whose first projection FAILED still opens the gate rather than re
 
   const running = serveCommand([], {
     branch: () => "main",
-    buildBatchedGithub: () => fakeGithub(),
+    buildBatchedGithub: () => fakeGitHub(BOARD_GATEWAY_EXTRA_METHODS),
     buildInitialBoardSnapshot: async () => {
       throw new Error("simulated first-pass failure");
     },

@@ -29281,9 +29281,9 @@ export interface BoardColdStartGate {
   isReady(): boolean;
 }
 
-export function boardColdStartGate(boardPath: string, now: () => string = () => new Date().toISOString()): BoardColdStartGate {
+export function boardColdStartGate(boardPath: string, clock: Clock = systemClock): BoardColdStartGate {
   let ready = false;
-  const buildStartedAt = now();
+  const buildStartedAt = clock.iso();
   return {
     isReady: () => ready,
     markReady() {
@@ -29304,7 +29304,7 @@ export function boardColdStartGate(boardPath: string, now: () => string = () => 
             error: "board_not_ready",
             message: "the board's first projection has not finished building yet",
             buildStartedAt,
-            checkedAt: now(),
+            checkedAt: clock.iso(),
           }),
         );
       };
