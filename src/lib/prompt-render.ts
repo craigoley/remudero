@@ -893,6 +893,9 @@ export function implementPromptParts(
   // W1-T3101: approved, opted-in skills for this task class. Appended LAST so no positional caller
   // shifts — the convention ruleHeadlinesPart above already follows. "" for every existing caller.
   skillsPart = "",
+  // W1-T3696: the worker has no shell, so the harness owns git. Appended LAST so no positional
+  // caller shifts — the same convention `ruleHeadlinesPart` and `skillsPart` above follow.
+  harnessCommits = false,
 ): Array<{ name: string; value: string }> {
   const contextClaims = (task.context ?? [])
     .map((c) => `- ${c.claim} ${citation(c.src)}`)
@@ -942,8 +945,9 @@ export function renderImplementPromptWithParts(
   operatorNotesBlock = "",
   ruleHeadlinesPart = "",
   skillsPart = "",
+  harnessCommits = false,
 ): { prompt: string; parts: Array<{ name: string; value: string }> } {
-  const parts = implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart);
+  const parts = implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart, harnessCommits);
   const partValue = (name: string) => parts.find((p) => p.name === name)!.value;
 
   const prompt = [
@@ -973,7 +977,7 @@ export function renderImplementPromptWithParts(
     // MASTER-PLAN §8B / W1-T36) — ONE source of literal text so the anchor
     // re-injected after a compaction is provably byte-identical to what the
     // worker was told at turn 0, never a re-derived/paraphrased copy.
-    ...outputContractLines(task.id),
+    ...outputContractLines(task.id, harnessCommits),
   ].join("\n");
   return { prompt, parts };
 }
@@ -989,8 +993,9 @@ export function renderImplementPrompt(
   operatorNotesBlock = "",
   ruleHeadlinesPart = "",
   skillsPart = "",
+  harnessCommits = false,
 ): string {
   return renderImplementPromptWithParts(
-    task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart,
+    task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart, harnessCommits,
   ).prompt;
 }
