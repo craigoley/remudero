@@ -1,0 +1,68 @@
+- id: W1-T3651
+  title: "A `unit test:` TITLE PROOF READS `pass` ON A BASE THAT HAS NO SUCH TEST — a zero name-pattern match still prints `ok 1 - <file>` and exits 0, so the proof passes on both trees and the reviewer grades it executed_stale one CI round later"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/lib/task-linter.ts, test/a-title-proof-that-passes-on-an-empty-base-is-refused.test.ts]
+  origin: oper#pr-queue-sweep-2026-09-16
+  plan_refs: ["W1-T3639", "W1-T2339"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON #5739, 2026-09-16, on a PR whose own subject was gate repair.
+
+    Its acceptance named two `unit test:` TITLE proofs against a test file the diff ADDED. Both read
+    `pass` at head AND at the merge base, and proof-discrimination graded one `executed_stale`:
+
+        verdict: pass / base: pass
+        discrimination: executed_stale -- this proof matches BOTH head and base
+
+    The cause is the wrapper, reproduced directly rather than inferred:
+
+        node --test --test-name-pattern "<no match>" -> ok 1 - test/<file>.test.ts / # pass 1 / exit 0
+        node --test <same file, absent at base>      -> exit 1, "Could not find '<path>'"
+
+    At the base the file does not exist, the pattern matches nothing, and node still exits 0. So the
+    proof reports PASS on a tree where the behaviour is absent -- the single most misleading result
+    a proof can produce, because it reads as evidence of exactly the thing it disproves.
+
+    THIS IS NOT W1-T3639. That task refuses a title resolving to zero tests AT HEAD, where the suite
+    ships in the diff. This is the BASE reading: the title resolves fine at head, and the defect is
+    that its base reading is a false pass. proof-base-discrimination warns only when the named file
+    ALREADY EXISTS at the base -- precisely the opposite case -- so a NEW file's title proof passes
+    every lint check and fails at review.
+  design: |
+    lint-plan can decide this WITHOUT running anything: a `unit test:` proof in TITLE form, whose
+    task ships the file that carries the title, cannot discriminate at a base where that file is
+    absent. The path form of the same proof can, because a missing path exits non-zero.
+
+    So the check is a shape rule, not an execution: title form + the title's only home is a file
+    this diff adds => the base reading is structurally a false pass. The remedy is printed, and it
+    is the one that works: name the FILE, or use a `grep:` on a line the diff introduces.
+
+    DO NOT SOLVE IT BY MAKING THE EXECUTOR REFUSE A ZERO MATCH. The wrapper's `ok 1 - <relative
+    path>` is already load-bearing elsewhere (CLAUDE.md's ledger section names how to exclude it),
+    and changing the runner's contract to fix a proof-shape problem moves the blast radius into
+    every suite. The linter is where the claim is written and where it should be refused.
+
+    SEVERITY IS BLOCK, not warn: unlike a forward reference, there is no tree on which this proof is
+    honest, and the author is holding the file in the same diff.
+  acceptance:
+    - claim: "a title-form proof whose title lives only in a file this diff adds is refused, because its base reading is a false pass"
+      proof: "unit test: test/a-title-proof-that-passes-on-an-empty-base-is-refused.test.ts"
+    - claim: "the same claim proved by the file's PATH is accepted, since a missing path exits non-zero at the base"
+      proof: "unit test: the path form of the same proof is accepted"
+    - claim: "a title-form proof against a file that already exists at the base is untouched, so the existing forward-reference and repair cases keep working"
+      proof: "unit test: a title in a file the base already has is not refused here"
+    - claim: "the refusal is a named predicate rather than an inline condition"
+      proof: "grep: proofUnitTestBaseWrapper in src/lib/task-linter.ts"
+  falsifier: |
+    Take #5739's original block verbatim -- two title proofs against a file the diff adds -- and the
+    check must refuse it, naming the path form as the remedy. Rewrite the same criteria in path form
+    and it must pass. Point a title proof at a file present on the base and it must NOT be refused,
+    which is the arm that keeps a legitimate repair-a-failing-test task working; break that arm and
+    the third test fails.
