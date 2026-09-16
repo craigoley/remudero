@@ -697,37 +697,25 @@ else
 fi
 
 # ── 4a. GIT OBJECT RECLAIM (W1-T3612) — the OTHER filesystem the disk actually fills on ─────────
-# Everything above prunes docker, and docker lives on `/mnt/rmd`. The checkouts the fleet owns — the
-# daemon's own checkout and the operator's — live on the ROOT filesystem, and nothing above touches
-# it. MEASURED on the Azure host 2026-09-15, root at 85% (4.3G free of 29G): one checkout alone held
-# 985 MiB across 53,380 LOOSE objects, behind a `.git/gc.log` that git will never clear on its own —
-# per git-gc(1), once that file exists automatic gc declines FOREVER and does not retry.
-# `deploy/entrypoint.sh` already detects this on every boot and PRINTS the remedy without running it,
-# because (that file's own words) it "cannot tell a stale log from one a maintenance run is still
-# writing". This rung is the actor entrypoint.sh deliberately is not: it runs on the SAME schedule as
-# the docker reclaim above, not on every boot, so "is a maintenance run still writing this" reduces
-# to "is the fleet running at all" — which section 1 already answered, as `LIVE`.
+# Everything above prunes docker, which lives on `/mnt/rmd`. The checkouts the fleet owns live on the
+# ROOT filesystem and nothing above touches it.
 #
-# THIS IS GIT OBJECT RECLAIM, NOT STATE CLEANING — the header's "DO NOT ADD STATE CLEANING HERE" is
-# scoped to the ledger/state BIND MOUNT (${STATE_DIR}/state/...: ledger.ndjson, run locks,
-# service-tokens.json), which this section never reads, writes or measures. A checkout's `.git`
-# object store is a different thing entirely, and reclaiming it is this task's whole point.
+# TRAP: a `.git/gc.log` makes git decline automatic gc FOREVER (git-gc(1)) — it never retries, so the
+# objects behind it are never reclaimed by anything except this rung.
 #
-# REFUSE OUTRIGHT WHILE THE FLEET IS UP, NAMING THE HOLDER. `git gc` repacks and can prune objects a
-# live lane still needs, which is a SHARPER hazard than the docker image/build prune above — that
-# prune cannot reach a running container's own image or cache at all, which is why it is allowed to
-# proceed under --reclaim-only. `git gc` has no such immunity: it operates on the checkout directly.
-# So this reuses section 1's `LIVE` detection rather than the docker prune's carve-out.
+# INVARIANT: refuse outright while any fleet container is LIVE, naming the holder. `git gc` can prune
+# objects a live lane still needs; the docker prune above has no such hazard, which is why it may run
+# while up and this may not. Report bytes per checkout, never one sum — a combined "0B" cannot
+# distinguish "nothing to do" from "nothing to do HERE, and a gigabyte elsewhere".
 #
-# EACH CHECKOUT IS REPORTED SEPARATELY, NEVER SUMMED. A single combined total makes "0B reclaimed"
-# ambiguous — nothing to do, or nothing to do on THIS volume while a gigabyte sits on another? That
-# ambiguity is exactly what let the docker-only reclaim above read as "disk attended to" while the
-# root filesystem — where this section runs — went untouched for a full 04:17 UTC cycle every night.
+# NEVER STATE CLEANING: this reads, writes and measures nothing under `${STATE_DIR}/state` — the
+# ledger, run locks and service tokens the file header protects are untouched.
 #
-# THE CHECKOUT LIST IS OVERRIDABLE, NOT A GROWING SET OF LITERALS. The two defaults below are the
-# checkouts MEASURED on the live host; RMD_GIT_RECLAIM_DIRS (colon-separated) replaces the pair
-# entirely for a host whose fleet owns a different set, so a third checkout appearing later is a
-# configuration change here, never a code change.
+# FALSIFIER: remove the live-worker refusal and the fixture's gc.log is cleared beside a live
+# container; collapse the per-checkout report into one total and the split assertion fails.
+#
+# Why: docs/forensics/host-update.md — the 2026-09-15 measurement (985 MiB, 53,380 loose objects,
+# root at 85%), the 2026-09-16 outage it corroborates, and the rejected alternatives.
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
   if [ -n "${LIVE}" ]; then
