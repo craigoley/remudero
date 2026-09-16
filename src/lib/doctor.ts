@@ -497,17 +497,30 @@ export function parseWorkerProcesses(psOutput: string): WorkerProcessReading {
   return oldest === undefined ? { count, processes } : { count, oldestEtimeS: oldest, processes };
 }
 
-/** procps first, BSD second. A keyword error is not a read failure — only BOTH failing is. */
-function defaultPs(): string {
-  const opts = { encoding: "utf8" as const, maxBuffer: 8 * 1024 * 1024 };
+/** The one shape `defaultPs` needs from `execFileSync` — narrow enough that a test can inject a
+ *  fake and record exactly what it was called with, without stubbing `node:child_process` itself. */
+export type PsSpawn = (cmd: string, args: string[]) => string;
+
+/** The real spawn, with the fixed options `defaultPs`'s two dialect attempts both need. Extracted
+ *  so the injection point below is the bare command/args pair a test can assert on. */
+function realPsSpawn(cmd: string, args: string[]): string {
+  return execFileSync(cmd, args, { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+}
+
+/** procps first, BSD second. A keyword error is not a read failure — only BOTH failing is.
+ *  `spawn` is injectable (defaulted to the real one) so the BSD-fallback branch and the exact
+ *  two attempted commands are assertable from a test, not just exercised by the live host's own
+ *  `ps` dialect (W1-T3628 coverage-ratchet: an external-tool spawn cannot be process-boundary
+ *  exempted — it must be covered by injecting the boundary itself). */
+export function defaultPs(spawn: PsSpawn = realPsSpawn): string {
   try {
-    return execFileSync("ps", ["-eo", "pid=,ppid=,etimes=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
+    return spawn("ps", ["-eo", "pid=,ppid=,etimes=,args="]);
   } catch {
     // BSD `ps` rejects the procps `etimes=` keyword outright rather than returning empty output,
     // so this falls back to `etime=`, its own dialect. A REAL read failure (no `ps` binary at
     // all, EACCES, etc.) surfaces from THIS second call instead -- into readWorkerProcesses's own
     // catch below, never swallowed here.
-    return execFileSync("ps", ["-eo", "pid=,ppid=,etime=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
+    return spawn("ps", ["-eo", "pid=,ppid=,etime=,args="]);
   }
 }
 

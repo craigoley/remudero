@@ -25,6 +25,8 @@ import {
   parseEtime,
   parseWorkerProcesses,
   readWorkerProcesses,
+  defaultPs,
+  type PsSpawn,
 } from "../src/lib/doctor.js";
 
 function fakeConfig(root: string): Config {
@@ -131,6 +133,45 @@ test("a dispatched worker is counted but an operator's own claude session is not
     "nor is a grep for the flag",
   );
   assert.equal(matchesWorkerPattern("/usr/local/bin/claude"), false, "nor an interactive session");
+});
+
+test("readWorkerProcesses classifies a real run failure instead of throwing or returning zero", () => {
+  // THE BOUNDARY ITSELF, not a fabricated reading — `run` is invoked for real here, so this drives
+  // readWorkerProcesses's own catch (the arm no earlier test in this file reaches, since every test
+  // above hands doctorCommand a fake reader that stands in for readWorkerProcesses entirely rather
+  // than calling through it).
+  const eacces = Object.assign(new Error("permission denied"), { code: "EACCES" });
+  assert.deepEqual(readWorkerProcesses(() => { throw eacces; }), { unreadableReason: "EACCES" });
+
+  // A failure with no `.code` still carries a reason — classifyReadFailure's message fallback.
+  assert.deepEqual(readWorkerProcesses(() => { throw new Error("no ps on this box"); }), {
+    unreadableReason: "no ps on this box",
+  });
+});
+
+test("defaultPs falls back to the BSD `etime=` dialect only after the procps `etimes=` attempt fails", () => {
+  // THE INJECTED BOUNDARY IS THE SPAWN ITSELF, not `ps`'s output — so both attempted commands are
+  // recorded and assertable, and the fallback branch runs for real rather than only on a BSD host.
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  const rejectFirst: PsSpawn = (cmd, args) => {
+    calls.push({ cmd, args });
+    if (args.includes("pid=,ppid=,etimes=,args=")) throw new Error("etimes: unknown keyword");
+    return "  4242 1  90 npm ci";
+  };
+  assert.equal(defaultPs(rejectFirst), "  4242 1  90 npm ci");
+  assert.deepEqual(calls, [
+    { cmd: "ps", args: ["-eo", "pid=,ppid=,etimes=,args="] },
+    { cmd: "ps", args: ["-eo", "pid=,ppid=,etime=,args="] },
+  ]);
+
+  // And the procps path never falls through when the FIRST attempt already succeeds.
+  const acceptFirst: PsSpawn = (cmd, args) => {
+    calls.push({ cmd, args });
+    return "  4243 1  91 npm ci";
+  };
+  calls.length = 0;
+  assert.equal(defaultPs(acceptFirst), "  4243 1  91 npm ci");
+  assert.deepEqual(calls, [{ cmd: "ps", args: ["-eo", "pid=,ppid=,etimes=,args="] }]);
 });
 
 test("elapsed time parses from both ps dialects, so the arm is not UNKNOWN on every mac", () => {
