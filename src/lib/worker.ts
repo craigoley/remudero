@@ -113,6 +113,7 @@ import {
   type CodexCapacityDeps,
   type CodexModelTier,
   type ProviderCapacity,
+  OPENWEIGHT_FUNCTIONS,
   ProviderCapacityBlockedError,
   type ProviderSelection,
   type ProviderWindowConsumption,
@@ -1082,6 +1083,44 @@ export const DISPATCH_LANE_TOOL_BOUNDS = {
 
 export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
 
+/**
+ * W1-T3692: can the cash adapter actually RUN this spawn's tool surface?
+ *
+ * THE PREDICATE IS THE REAL CONSTRAINT, NOT A PROXY FOR IT. `openWeightTools` THROWS on a tool it
+ * does not implement, so a fallback that guessed from the lane name would convert a clean capacity
+ * block into an opaque tool-surface crash. This asks the question the adapter itself will ask.
+ *
+ * AN UNBOUNDED SPAWN IS NEVER ELIGIBLE. `SpawnWorkerArgs.tools` undefined means the worker inherits
+ * the unrestricted surface, which includes Bash -- the one capability the check-runner deliberately
+ * does not have (no git write, no forge). Absent bound => refuse, never "probably fine".
+ */
+export function cashCanServeToolSurface(tools: readonly string[] | undefined): boolean {
+  if (tools === undefined || tools.length === 0) return false;
+  return tools.every((tool) => OPENWEIGHT_FUNCTIONS[tool] !== undefined);
+}
+
+/**
+ * W1-T3692: why a blocked auction may (or may not) hand this spawn to cash. Returns the refusal
+ * REASON rather than a bare boolean so the ledger can say which condition failed -- a silent
+ * `false` here reads, in the logs, exactly like the stall it was meant to explain.
+ */
+export function cashFallbackRefusal(
+  config: Config,
+  tools: readonly string[] | undefined,
+): string | undefined {
+  if (config.workerProviders?.cashFallbackWhenBlocked !== true) {
+    return "operator has not enabled workerProviders.cashFallbackWhenBlocked";
+  }
+  if (!enabledWorkerProviders(config).includes("cash")) return "cash is not an enabled worker provider";
+  if (config.dailyCapUsd === undefined || config.dailyCapUsd === null) {
+    return "dailyCapUsd is unset, so cash spend would be unbounded";
+  }
+  if (!cashCanServeToolSurface(tools)) {
+    return `this spawn's tool surface is not implementable by cash (${tools ? tools.join(", ") : "unbounded"})`;
+  }
+  return undefined;
+}
+
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
  * deleting a declared bound must make its own lookup refuse, not silently resume unrestricted). */
 export function resolveGenericRouteToolBound(lane: string): readonly string[] {
@@ -1666,6 +1705,33 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       selection = routed.selection;
       preferenceBypass = routed.preferenceBypass;
     } catch (error) {
+      // W1-T3692: A BLOCKED AUCTION IS THE MOMENT CASH SHOULD CARRY THE WORK, NOT A DEAD END.
+      // This fires ONLY where dispatch would otherwise stall, so its worst case is spending
+      // bounded money instead of stalling -- and `cash` still never enters the auction, which is
+      // what keeps it from being represented by a fabricated capacity window.
+      // `args.mountProvider === undefined` BOUNDS THE RECURSION STRUCTURALLY. The retry below sets
+      // it, and a spawn that already carries one never reached this auction in the first place --
+      // so the fallback can fire at most once per spawn, by construction rather than by a counter.
+      if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined) {
+        const refusal = cashFallbackRefusal(config, args.tools);
+        if (refusal === undefined) {
+          console.error(JSON.stringify({
+            event: "worker.provider.cash_fallback",
+            reason: "no subscription had readable headroom",
+            tools: args.tools,
+            blocked: capacities.map((c) => `${c.provider}=${c.readable ? "readable" : c.detail ?? "unreadable"}`),
+          }));
+          // NO routing status is written here. The auction really did block, and there is no
+          // ProviderSelection to report -- inventing one to satisfy the "selected" shape would be
+          // the fabricated telemetry this whole design refuses. The cash spawn below publishes its
+          // own status through the mount-affinity path.
+          return await spawnWorker({ ...args, mountProvider: "cash" as WorkerProviderId });
+        }
+        console.error(JSON.stringify({
+          event: "worker.provider.cash_fallback_refused",
+          refusal,
+        }));
+      }
       publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
       throw error;
     }

@@ -1,0 +1,94 @@
+- id: W1-T3692
+  title: "AN EXHAUSTED SUBSCRIPTION BLOCKS DISPATCH INSTEAD OF FALLING BACK TO CASH — ProviderCapacityBlockedError stalls the queue at the exact moment a pay-per-token deployment should carry it, and only three lanes could accept the hand-off anyway"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 12.00
+  files:
+    - src/lib/worker.ts
+    - src/lib/config-schema.ts
+  origin: "operator-session#subscription-squeeze-2026-09-16"
+  plan_refs: ["W1-T3607", "W1-T3656", "W1-T3575"]
+  status: queued
+  priority: 0
+  note: |
+    OPERATOR INTENT, STATED 2026-09-16: subscription headroom is expected to run out this week
+    (Thursday or Friday). The instruction was to raise `dailyCapUsd` to $20 at that point and
+    "leverage mini more to accomplish tasks".
+
+    THE CAP RAISE ALONE MOVES NOTHING, for three measured reasons:
+
+      1. `cash` is EXCLUDED FROM THE AUCTION BY DESIGN (src/lib/worker.ts): "a
+         mount-affinity-only, non-subscription provider ... deliberately excluded from the auction
+         instead of being represented by fabricated capacity". That exclusion is CORRECT and must
+         not be reversed -- a pay-per-token provider has no subscription window, and inventing one
+         to enter a headroom auction would manufacture telemetry.
+      2. `config.headroom.enabled` is OFF on this host (explicit opt-out), so headroom is
+         read+ledger telemetry and gates no dispatch today.
+      3. Only `synthesis.inbox_draft` and `verify_human_judge` carry `provider: cash` at all.
+  rationale: |
+    THE HOOK POINT ALREADY EXISTS AND IS THE RIGHT ONE. When no subscription has usable headroom
+    the auction throws `ProviderCapacityBlockedError` ("no configured worker subscription has
+    readable headroom") and the queue STALLS. That is precisely the moment a cash deployment
+    should carry the work, and a fallback triggered by the ABSENCE of subscription headroom
+    fabricates nothing -- it never competes in the auction, it replaces a refusal.
+
+    THE FAILURE MODE IS SAFE BY CONSTRUCTION: the fallback can only fire where dispatch would
+    otherwise BLOCK, so its worst case is spending bounded money instead of stalling, and
+    `reserveOpenWeightBudget` already bounds that against `dailyCapUsd`.
+
+    AND THE HARD LIMIT THE OPERATOR MUST KNOW BEFORE THE SQUEEZE, MEASURED ON origin/main:
+
+        FIX_WORKER_TOOLS = ["Read","Write","Edit","Grep","Glob","Bash"]   (src/lib/fix-fence.ts)
+        cash tools       =  Read, Write, Edit, Grep, Glob, RunCheck       (OPENWEIGHT_FUNCTIONS)
+
+    Bash has no cash equivalent, and `DISPATCH_LANE_TOOL_BOUNDS` says so in data: `alert_fix` is
+    `{ claude: FIX_WORKER_TOOLS }` with NO openweight row, commented "commits and pushes, which
+    the check-runner deliberately cannot do (no git write, no forge)".
+
+    SO CASH CANNOT ABSORB BUILD WORK. The lanes that can accept a hand-off are exactly the three
+    that declare an openweight bound -- `recon`, `diagnose`, `retro` -- plus the two already
+    routed by mount affinity. Raising the cap will NOT move task-building onto mini, and planning
+    the squeeze on the belief that it will is the thing this record exists to prevent.
+  design: |
+    A LAST-RESORT FALLBACK, NOT AN AUCTION ARM.
+
+    At the `selectWorkerProviderForPolicy` call site (src/lib/worker.ts), catch
+    `ProviderCapacityBlockedError` and fall back to `cash` when ALL of these hold:
+
+      - the operator opted in (a new `workerProviders.cashFallbackWhenBlocked` boolean, default
+        FALSE -- this spends real money and must never arrive by upgrade)
+      - `cash` is in `enabledWorkerProviders(config)`
+      - `dailyCapUsd` is non-null (config load already refuses cash without it)
+      - the lane DECLARES an openweight tool bound, i.e.
+        `DISPATCH_LANE_TOOL_BOUNDS[lane].openweight !== undefined`
+
+    The last condition is the load-bearing one: `openWeightTools` THROWS on an undeclared tool, so
+    a blanket fallback would convert a clean capacity block into an opaque tool-surface crash for
+    every build lane. Eligibility is already encoded as data by W1-T3656; read it, never re-derive
+    it from a tool list.
+
+    Ledger `worker.provider.cash_fallback` naming the lane, the deployment and the blocked
+    capacities, so a fallback is never silent and the spend is attributable. When any condition
+    fails, rethrow unchanged -- a blocked dispatch stays blocked and says why.
+
+    DO NOT: add cash to `routableProviders`, synthesise a capacity window for it, widen
+    OPENWEIGHT_FUNCTIONS to include Bash, or give `alert_fix` an openweight row.
+  acceptance:
+    - claim: "a blocked capacity auction falls back to cash for a lane that declares an openweight tool bound, instead of stalling the queue"
+      proof: "unit test: a blocked auction falls back to cash for an openweight-capable lane"
+    - claim: "a lane with no openweight tool bound still blocks, so a build lane cannot be handed to a provider that cannot run it"
+      proof: "unit test: a lane with no openweight bound still blocks rather than falling back"
+    - claim: "the fallback is off unless the operator opted in, so it can never arrive by upgrade"
+      proof: "unit test: the cash fallback is refused when the operator has not opted in"
+    - claim: "every fallback is ledgered with the lane and deployment, so the spend is attributable"
+      proof: 'grep: worker\.provider\.cash_fallback in src/lib/worker.ts'
+  falsifier: |
+    Close without implementing if `cash` turns out to be reachable from the auction already, or if
+    a measured run shows `recon`/`diagnose`/`retro` cannot complete on the check-runner tool
+    surface -- in which case the fallback has no eligible lane and the honest answer is that cash
+    cannot relieve a subscription squeeze at all.

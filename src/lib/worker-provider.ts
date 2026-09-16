@@ -1086,8 +1086,24 @@ interface CodexRuntimeReading {
 
 interface CodexRuntimeFailure extends ProviderCapacity {
   /** Internal retry classification; stripped before a capacity leaves this module. */
-  failureKind: "timeout" | "terminal";
+  failureKind: "timeout" | "terminal" | "starved";
 }
+
+/**
+ * How late a deadline may fire before it is read as THIS PROCESS stalling rather than the
+ * app-server being slow. A healthy loop delivers a timer within milliseconds of its deadline.
+ *
+ * WHY THE DISTINCTION IS LOAD-BEARING (W1-T3690). Node runs timers in the timers phase, which
+ * precedes the poll phase that delivers a child's stdout. If the main thread is blocked when the
+ * deadline passes, the timer callback runs on the NEXT free tick BEFORE any queued stdout is
+ * read -- so a child that answered in 300ms is recorded as "timed out after 10000ms; unfinished:
+ * initialize". MEASURED on the fleet 2026-09-16 inside the daemon's own container: a free loop
+ * replies in 366ms; a loop blocked 12s produces that exact string with a WALL TIME of 12000ms
+ * against a 10000ms deadline. The overrun is the only signal that separates the two, and the
+ * consequence of confusing them is severe: codex reads unreadable, the capacity auction gives it
+ * zero allocation, and every lane silently migrates onto the Claude subscription.
+ */
+const CODEX_DEADLINE_OVERRUN_MS = 1_000;
 
 type CodexRuntimeResult = CodexRuntimeReading | CodexRuntimeFailure;
 
@@ -1144,10 +1160,14 @@ export async function readCodexRuntime(
   deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & {
     signal?: AbortSignal;
     onHedgeEligibility?: (eligible: boolean) => void;
+    /** Real-time source for the deadline-overrun check. Injected ONLY by tests: a fake clock in
+     *  production would defeat the very stall this measurement exists to detect. */
+    monotonicNow?: () => number;
   },
 ): Promise<CodexRuntimeResult> {
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
   const timeoutMs = deps.timeoutMs ?? 10_000;
+  const monotonicNow = deps.monotonicNow ?? Date.now;
   let child: ChildProcessWithoutNullStreams;
   try {
     child = spawn(bin, ["app-server", "--listen", "stdio://"], { env: codexControlEnv(config) });
@@ -1182,8 +1202,21 @@ export async function readCodexRuntime(
       if (!modelsReceived) pending.push("model/list");
       return pending;
     };
+    const deadlineSetAt = monotonicNow();
     const timer = setTimeout(() => {
       const malformed = malformedStdoutLines > 0 ? `; malformed app-server stdout: ${malformedStdoutLines} line(s)` : "";
+      // THE DEADLINE OVERRAN => WE STALLED, NOT THE APP-SERVER. See CODEX_DEADLINE_OVERRUN_MS.
+      // The child's reply may be sitting unread in the poll queue right now; this exchange
+      // observed nothing about Codex and must not be reported as evidence against it.
+      const elapsedMs = monotonicNow() - deadlineSetAt;
+      if (malformedStdoutLines === 0 && elapsedMs >= timeoutMs + CODEX_DEADLINE_OVERRUN_MS) {
+        finish(codexRuntimeFailure(
+          `app-server deadline overran: ${timeoutMs}ms budget fired after ${elapsedMs}ms, so this process was stalled ` +
+            `and the child was never given a readable turn; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
+          "starved",
+        ));
+        return;
+      }
       finish(codexRuntimeFailure(
         `app-server timed out after ${timeoutMs}ms${malformed}; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
         // Protocol noise is not the fleet-observed transient RPC stall and must not be retried.
@@ -1433,9 +1466,15 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     }
   }
   if ("provider" in value) {
-    const { failureKind: _failureKind, ...capacity } = value;
+    const { failureKind, ...capacity } = value;
     codexCapacityCache.delete(cacheKey);
-    if (!deps.forceRefresh) codexCapacityFailureCache.set(cacheKey, { at: now(), value: capacity });
+    // A STARVED READ IS NOT EVIDENCE ABOUT CODEX, so it must not buy a failure backoff. Caching it
+    // would suppress the next read for up to CODEX_CAPACITY_FAILURE_BACKOFF_MAX_MS on the strength
+    // of an exchange that observed nothing -- turning one blocked tick into a window in which the
+    // provider is declared unreadable and every lane routes to the subscription instead.
+    if (!deps.forceRefresh && failureKind !== "starved") {
+      codexCapacityFailureCache.set(cacheKey, { at: now(), value: capacity });
+    }
     return capacity;
   }
   codexCapacityCache.set(cacheKey, { at: now(), value });
@@ -1887,6 +1926,9 @@ export const OPENWEIGHT_OUTPUT_CONTRACT = [
   "- When emitting YAML, double-quote every scalar value containing a colon (`:`), especially a `proof:` value.",
   "- When the request names a closed enum, emit exactly one listed literal; choose the nearest listed value rather than inventing `unknown` or `ambiguous`.",
   "- When the request asks for a raw document, emit that document without Markdown fences.",
+  "- When the request names literal output markers or delimiters (for example a fixed START/END " +
+    "line or a STAMP line), emit those markers verbatim and print the requested artifact between " +
+    "or after them instead of describing it in prose.",
 ].join("\n");
 /**
  * PRICE IS A PROPERTY OF THE DEPLOYMENT, NOT OF THE PROVIDER.
@@ -1943,6 +1985,56 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
  * substring match on the model id (W1-T2573): `gpt-5-nano` and `gpt-5.4-nano` are different
  * deployments with no guarantee of shared behaviour.
  */
+/**
+ * Which structured-output modes each deployment can actually honour.
+ *
+ * MEASURED, NOT ASSUMED, with the adapter's own URL and api-version:
+ *   gpt-5-mini     `response_format: {type:"json_object"}` -> HTTP 200, clean `{"ok":true,"n":7}`
+ *   gpt-oss-120b   returns MALFORMED JSON under the same field (the measurement that put
+ *                  "Do not add `response_format` here" on spawnOpenWeightWorker)
+ *   gpt-5-nano     unmeasured, so it declares nothing and may not be asked
+ *
+ * A DEPLOYMENT WITH NO ROW SUPPORTS NOTHING, and an unmeasured one is exactly that: the refusal
+ * below is what stops a lane silently receiving prose where it required JSON, which is the failure
+ * gpt-oss-120b already demonstrated.
+ */
+export const OPENWEIGHT_RESPONSE_FORMATS: Readonly<Record<string, readonly string[]>> = {
+  "gpt-5-mini": ["json_object"],
+};
+
+/** Raised INSTEAD of sending a structured-output request a deployment cannot honour. Thrown before
+ *  transport, like its pricing and temperature siblings, so no reservation is spent proving it. */
+export class OpenWeightUnsupportedResponseFormatError extends RmdError {
+  readonly deployment: string;
+  readonly requested: string;
+  constructor(deployment: string, requested: string) {
+    const supported = OPENWEIGHT_RESPONSE_FORMATS[deployment] ?? [];
+    super(
+      "usage",
+      1,
+      `openweight deployment ${JSON.stringify(deployment)} cannot honour response_format ` +
+        `${JSON.stringify(requested)}: ${supported.length ? `supports ${supported.join(", ")}` : "declares no structured-output support"}. ` +
+        `Route this lane to a deployment that declares it, or ask for prose and parse defensively.`,
+      { deployment, requested },
+    );
+    this.deployment = deployment;
+    this.requested = requested;
+  }
+}
+
+/** The `response_format` field for one request, or nothing. REFUSES rather than silently dropping
+ *  an unsupported request: a caller that asked for JSON and quietly got prose is the exact failure
+ *  gpt-oss-120b produced under json_object. */
+export function openWeightResponseFormatField(
+  deployment: string,
+  requested: string | undefined,
+): { response_format: { type: string } } | Record<string, never> {
+  if (requested === undefined) return {};
+  const supported = OPENWEIGHT_RESPONSE_FORMATS[deployment] ?? [];
+  if (!supported.includes(requested)) throw new OpenWeightUnsupportedResponseFormatError(deployment, requested);
+  return { response_format: { type: requested } };
+}
+
 export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
   "gpt-oss-120b": 0,
   "gpt-5-nano": null,
@@ -2233,6 +2325,12 @@ export interface OpenWeightSpawnArgs {
   tools?: string[];
   runId?: string;
   taskId?: string;
+  /** Opt-in structured output, e.g. "json_object". Honoured only by a deployment that
+   *  DECLARES it (OPENWEIGHT_RESPONSE_FORMATS); asking an undeclared one REFUSES before transport
+   *  rather than sending a field it mishandles. Absent means prose, which is every lane's default
+   *  and must stay so -- forcing JSON on a prose lane is the mistake OPENWEIGHT_OUTPUT_CONTRACT
+   *  already warns about. */
+  responseFormat?: string;
   /** Test-only override; production uses the global fetch implementation. */
   fetchImpl?: typeof fetch;
   /** Test-only override; production reads the daemon process environment. */
@@ -2548,8 +2646,12 @@ function openWeightResult(input: {
   };
 }
 
-/** Run one bounded OpenAI-compatible Azure conversation. Do not add `response_format` here:
- * gpt-oss-120b returned malformed JSON under json_object in the measured probe. */
+/** Run one bounded OpenAI-compatible Azure conversation.
+ *
+ * `response_format` is now PER DEPLOYMENT, not forbidden outright. The original
+ * prohibition was measured against gpt-oss-120b, which returns malformed JSON under json_object --
+ * that deployment still declares no support and still refuses. gpt-5-mini answers it correctly, so
+ * it declares it and a caller may opt in through `args.responseFormat`. */
 export async function spawnOpenWeightWorker(
   args: OpenWeightSpawnArgs,
   config: Config,
@@ -2586,12 +2688,16 @@ export async function spawnOpenWeightWorker(
     // reservation and silently changed that refusal's message. W1-T3608.
     openWeightPriceFor(selection.model);
     const temperatureField = openWeightTemperatureField(selection.model);
+    // Resolved ONCE, beside the temperature field and before the turn loop, so an unsupported
+    // request refuses before the first reservation rather than once per turn.
+    const responseFormatField = openWeightResponseFormatField(selection.model, args.responseFormat);
     for (;;) {
       turns += 1;
       const body = JSON.stringify({
         model: selection.model,
         messages,
         ...temperatureField,
+        ...responseFormatField,
         max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
         ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
       });
