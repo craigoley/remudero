@@ -1,0 +1,65 @@
+- id: W1-T3676
+  title: "THE AGENT-HISTORY RECLAIM CANNOT REACH 99.6% OF WHAT IT WAS FILED TO RECLAIM — 3.72 GiB sits in two always-current SQLite files, an mtime sweep can never match them, and the 14-day tier frees 29.6 MiB of 6.5 GiB"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 60.00
+  files: [deploy/host-update.sh, test/agent-history-reclaim-reaches-the-bulk.test.ts]
+  origin: oper#disk-verification-2026-09-16
+  plan_refs: ["W1-T3626"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-16, after W1-T3626's reclaim merged (#5732, 08:06 UTC):
+
+        .codex                                        5.2 GiB
+        .claude                                       1.3 GiB
+          thread_history_1.sqlite   1,994,915,840 B   mtime TODAY 10:37
+          state_5.sqlite            1,803,948,032 B   mtime TODAY 11:55
+        older than the 14-day tier   29.6 MiB across 781 files
+
+    Two files hold 3.72 GiB and BOTH carry today's mtime, because they are live databases written
+    on every run. An age-of-FILE sweep cannot match them at any threshold — not 14 days, not 1 —
+    since their mtime is current by definition. Lowering the tier would delete more sessions and
+    still leave every byte that matters.
+
+    So the rung frees 29.6 MiB of 6.5 GiB: 0.4% of the problem it was filed for.
+
+    I FILED W1-T3626 AND THIS IS ITS CORRECTION. That shard measured the directory sizes and
+    specified "age-tiered reclaim, oldest first" without checking WHERE the bytes were. The
+    directories were right and the mechanism was wrong for them, which a size-per-file reading
+    would have caught before the work was dispatched.
+
+    A SECOND REASON IT MAY NEVER RUN AT ALL. `--reclaim-only` refuses both the git and the agent
+    history reclaim while any fleet container is live, and this fleet is live continuously. Checked
+    2026-09-16 12:xx: "REFUSING agent history reclaim — a fleet container is RUNNING." The refusal
+    is correct — a running lane may be writing the very file it would remove — but on an
+    always-running fleet it makes the rung unreachable, so the nightly at 04:17 can report success
+    having reclaimed nothing for reasons it never names as a problem.
+
+    WHAT THE FIX MUST NOT BE. Not deleting a live database, and not lowering the age tier to make
+    the numbers move: the first risks corrupting an in-flight session, the second destroys more
+    history while freeing nothing. The bytes are INSIDE those files, so reaching them means the
+    owning tool's own retention or compaction, taken when that tool is not running — which is the
+    same window the live-container refusal already identifies as the safe one.
+
+    AND THE RUNG MUST SAY WHEN IT RECLAIMED NOTHING AND WHY. A nightly that refuses on a live
+    container, frees 0 bytes and exits 0 is indistinguishable from one with nothing to do. That
+    ambiguity is exactly what W1-T3612 already fixed for the per-volume report, and it is back here
+    in a different place.
+  acceptance:
+    - claim: "the reclaim reports, per tree, how many bytes it could not reach and why, so a nightly that frees nothing says which reason applies"
+      proof: "unit test: the reclaim reports bytes it could not reach and the reason"
+    - claim: "a refusal on a live fleet container is reported as a refusal rather than as a completed run that reclaimed nothing"
+      proof: "unit test: a refused reclaim is not reported as a clean nothing-to-do run"
+    - claim: "reclaim reaches bytes held inside an always-current file, measured against a fixture whose mtime never ages"
+      proof: "unit test: reclaim reaches bytes inside an always-current file"
+  falsifier: |
+    Report only bytes freed and the first test fails with an unreachable gigabyte invisible. Exit 0
+    silently on the live-container refusal and the second fails. Sweep by mtime alone and the third
+    fails against a fixture whose mtime is always current — which is the live condition this task
+    exists for.
