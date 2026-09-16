@@ -25,6 +25,7 @@ import { query, type Options, type PermissionMode, type SettingSource } from "@a
 import { detectUsageLimitRefusal } from "./classify.js";
 import {
   loadConfig,
+  canonicalWorkerProviderId,
   enabledWorkerProviders,
   workerHomeDir,
   workerShell,
@@ -123,6 +124,7 @@ import {
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
+import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 
 /** Aggregate token usage off the SDK result envelope's `usage` field (SDK 0.3.209 `sdk.d.ts`: `NonNullableUsage`, snake_case
  * Anthropic-API names, all fields non-nullable). Zeroed when no result envelope was ever seen — a genuine transport failure. */
@@ -192,8 +194,10 @@ export interface WorkerResult {
   /** Concrete provider model selected after health/capability routing. */
   routedModel?: string;
   /** W1-T3575 — CASH ATTRIBUTION FOR A CAPPED PROVIDER, declared here so a ledger consumer reads a
-   * typed field rather than an untyped passenger on the openweight adapter's own result. Present
-   * only for `provider: "openweight"`, the one backend billed per request against `dailyCapUsd`.
+   * typed field rather than an untyped passenger on the cash adapter's own result. Present
+   * only for `provider: "cash"` (W1-T3607 renamed the "openweight" id, which mis-sorted a proprietary
+   * candidate like gpt-5-nano — the category is how a deployment is billed, not its licence), the one
+   * backend billed per request against `dailyCapUsd`.
    * `budgetReservedUsd` is what was committed BEFORE the requests were sent (conservative, derived
    * from the adapter's price constants and its exact request ceiling); `budgetSettledUsd` is what
    * the provider's own receipts settled it down to. They differ whenever a receipt came back, and
@@ -1024,12 +1028,54 @@ export const GENERIC_ROUTE_TOOL_BOUNDS = {
 
 export type GenericRouteLane = keyof typeof GENERIC_ROUTE_TOOL_BOUNDS;
 
+/**
+ * W1-T3616, PRIMARY CONTROL (test/bound-kind-declared.test.ts): the declaration below IS what
+ * stops recon/diagnose/retro/alert_fix from reaching the SDK unrestricted — the same shape
+ * GENERIC_ROUTE_TOOL_BOUNDS above carries for review/manual. With no entry here a lane inherits
+ * SpawnWorkerArgs' UNRESTRICTED default, which is the defect this closes; the container remains
+ * the containment, this is the declared boundary a reviewer can read.
+ *
+ * Each list is DERIVED FROM THAT LANE'S OWN PROMPT, never narrowed to fit a cheaper provider (the
+ * task forbids that):
+ *
+ *   recon      read-only inspect (`git remote -v`, `git log --oneline -5`, `ls`). No Write/Edit.
+ *   diagnose   read-only investigation (`git diff`/`git status`, re-runs the failure). No Write/Edit.
+ *   retro      retroPrompt edits ONE existing plan file, then commits. Edit (never Write) plus Bash.
+ *   alert_fix  commits and pushes (`git push origin HEAD`); takes the fix lane's own list.
+ *
+ * EVERY ONE DECLARES `Bash`, which IS the measurement, not a concession: none of the four is
+ * openweight-eligible today (`Bash` is not in OPENWEIGHT_FUNCTIONS) until W1-T3615's check-runner
+ * replaces that use. Routing remains a separate decision (W1-T3616 design: "ROUTE NOTHING HERE").
+ */
+export const DISPATCH_LANE_TOOL_BOUNDS = {
+  recon: ["Read", "Grep", "Glob", "Bash"],
+  diagnose: ["Read", "Grep", "Glob", "Bash"],
+  retro: ["Read", "Grep", "Glob", "Edit", "Bash"],
+  alert_fix: FIX_WORKER_TOOLS,
+} as const satisfies Record<string, readonly string[]>;
+
+export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
+
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
  * deleting a declared bound must make its own lookup refuse, not silently resume unrestricted). */
 export function resolveGenericRouteToolBound(lane: string): readonly string[] {
   if (lane === "review" || lane === "manual") return GENERIC_ROUTE_TOOL_BOUNDS[lane];
   throw new Error(
     `no declared tool bound for generic route '${lane}' — refusing rather than defaulting to unrestricted tools (W1-T3573)`,
+  );
+}
+
+/**
+ * The same fail-closed contract for the dispatch lanes, and deliberately a SECOND resolver rather
+ * than a widened first one: `resolveGenericRouteToolBound` answers for `task.type` values the
+ * generic route dispatches, while these are named rungs inside the pipeline. Merging them would
+ * let a typo'd task type silently resolve a rung's bound.
+ */
+export function resolveDispatchLaneToolBound(lane: string): readonly string[] {
+  const bound = (DISPATCH_LANE_TOOL_BOUNDS as Record<string, readonly string[]>)[lane];
+  if (bound !== undefined) return bound;
+  throw new Error(
+    `no declared tool bound for dispatch lane '${lane}' — refusing rather than defaulting to unrestricted tools (W1-T3616)`,
   );
 }
 
@@ -1455,6 +1501,13 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // here is inert; each branch materializes and reaps it (W1-T2800, W1-T170, W1-T2463).
   const workerHomeRoot = workerHomeDir(config);
   const workerHome = perRunWorkerHomeDir(workerHomeRoot, args.runId, { perSpawn: true });
+  // W1-T3607: normalise the caller's requested provider id ONCE, at this entry point, so every
+  // comparison below (and the routing branch further down) sees only the canonical spelling —
+  // whether `args.mountProvider` came from a parsed `Mount.provider` (already canonical, mounts.ts)
+  // or a caller passing the deprecated "openweight" id directly.
+  if (args.mountProvider !== undefined) {
+    args.mountProvider = canonicalWorkerProviderId(args.mountProvider) as WorkerProviderId;
+  }
   if (args.mountProvider && !enabledWorkerProviders(config).includes(args.mountProvider)) {
     throw new Error(`mount provider '${args.mountProvider}' is not enabled by the committed host config`);
   }
@@ -1468,11 +1521,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       reason: routingPolicy.fallback.reason,
     }));
   }
-  // `openweight` is a mount-affinity-only cash provider. It has no subscription window and is
-  // deliberately excluded from the auction instead of being represented by fabricated capacity.
+  // `cash` (W1-T3607; formerly "openweight") is a mount-affinity-only, non-subscription provider. It
+  // has no subscription window and is deliberately excluded from the auction instead of being
+  // represented by fabricated capacity.
   const providers = args.mountProvider
     ? [args.mountProvider]
-    : routingPolicy.routableProviders.filter((provider) => provider !== "openweight");
+    : routingPolicy.routableProviders.filter((provider) => provider !== "cash");
   const capabilities = resolveWorkerCapabilities(args.cwd);
   const claudeHealthRoute = providers.includes("claude")
     ? await resolveWorkerClaudeHealth(args, capabilities)
@@ -1720,16 +1774,28 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       reapWorkerHome(workerHomeRoot, workerHome);
     }
   }
-  if (args.mountProvider === "openweight") {
+  if (args.mountProvider === "cash") {
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
     if (args.providerRouting?.spawnOpenWeight === undefined) {
       assertLiveSpawnAllowed(`spawnOpenWeightWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
     // This lookup is the provider's authority: a Claude mount model/effort resolves through the
     // capability table. No capacity record exists or is fabricated for a cash-billed endpoint.
-    const openWeight = selectOpenWeightModel(capabilities, args.model, args.effort);
+    //
+    // THE PROMPT'S SIZE IS PART OF THAT AUTHORITY (W1-T3619). Passing it here is what lets the
+    // selector skip a deployment whose context window cannot hold the request, instead of paying a
+    // full reservation to be told so by an HTTP 400. The prompt is the dominant term in the request
+    // body -- the tool schemas and the output contract add a bounded preamble -- and the estimate
+    // deliberately OVER-states tokens, so using it rather than the fully serialized body can only
+    // make the gate stricter.
+    const openWeight = selectOpenWeightModel(
+      capabilities,
+      args.model,
+      args.effort,
+      Buffer.byteLength(args.prompt ?? "", "utf8"),
+    );
     const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
-      provider: "openweight",
+      provider: "cash",
       model: openWeight.model,
       effort: openWeight.effort,
       mode: "mount-affinity",

@@ -51,4 +51,7 @@
     - claim: "the opt-out is named in the command's own syntax rather than only in prose"
       proof: "grep: --no-reserve in docs/cli-reference.md"
   files: [src/run-task.ts, test/a-mint-that-does-not-claim-is-a-collision-waiting.test.ts, docs/cli-reference.md]
+  # W1-T3091: absent priority sorts LAST (drain.ts compareDispatch: `priority ?? +Infinity`),
+  # so an incident-causing task queues behind every other. an unclaimed mint is a collision waiting: took main's plan out of load twice in nine days
+  priority: 1
   status: queued
