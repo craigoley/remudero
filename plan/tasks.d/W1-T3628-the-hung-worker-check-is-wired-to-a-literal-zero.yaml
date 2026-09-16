@@ -8,7 +8,7 @@
   risk: high
   band_meaning: blast-radius
   budget_usd: 20.00
-  files: [src/lib/report-commands.ts, test/the-hung-worker-check-counts-real-processes.test.ts]
+  files: [src/lib/doctor.ts, src/lib/report-commands.ts, test/the-hung-worker-check-counts-real-processes.test.ts]
   origin: oper#fleet-outage-2026-09-16
   plan_refs: ["W1-T3627", "W1-T2251"]
   status: queued
