@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { readDiskFreeBytes, readDiskTotalBytes, deriveLastPoll } from "./daemon-health.js";
 import { pauseFilePath } from "./fleet-control.js";
+import { execFileSync } from "node:child_process";
 
 // Why: the day-long outage and ninety-minute API lockout behind these constraints — docs/forensics/doctor.md#module-header.
 /**
@@ -385,8 +386,177 @@ export function classifyReadFailure(e: unknown): { absent: boolean; reason: stri
  *  PR states its own derivation. */
 export const HUNG_WORKER_AGE_S = 7200;
 
-export function judgeLaneLessWorkers(oldestEtimeS: number | undefined, count: number): Check {
+/**
+ * The live worker process table, read the same injected way every other doctor input is.
+ *
+ * WHY THIS EXISTS (W1-T3628). `buildDoctorReport`'s only caller passed `workerCount: 0` as a
+ * LITERAL and never assigned `oldestWorkerEtimeS` at all, so {@link judgeLaneLessWorkers} always
+ * took its `count === 0` branch and HUNG_WORKER_AGE_S was compared against nothing. The judge was
+ * exported, correct and well unit-tested the whole time; the defect was the one line feeding it,
+ * which is precisely the seam a pure-function test cannot reach.
+ *
+ * WHAT COUNTS AS A WORKER, and why it is a NARROW list. `claude` is the worker binary the adapter
+ * spawns, and `npm ci` is the worktree install a lane runs before it; those are the two shapes the
+ * 2026-09-16 outage actually held for 80 minutes. Anything broader would sweep in the daemon's own
+ * long-lived `node` and report a permanently wedged host.
+ *
+ * `undefined` means the table COULD NOT BE READ, which the judge renders as UNKNOWN rather than as
+ * zero — a failed read must never look like a healthy host.
+ */
+export interface WorkerProcess {
+  pid: number;
+  /** Parent pid. A worker whose parent is gone has been reparented to init — the ORPHAN test the
+   *  reaper uses (W1-T3629), because age alone is evidence of duration and not of death. */
+  ppid: number;
+  etimeS: number;
+  args: string;
+}
+
+export interface WorkerProcessReading {
+  count: number;
+  oldestEtimeS?: number;
+  /** The processes themselves, so a reaper acts on the SAME reading the doctor judges (W1-T3629). */
+  processes: WorkerProcess[];
+}
+
+/**
+ * A DISPATCHED WORKER, not any `claude` on the box. The daemon spawns workers with
+ * `--output-format stream-json`; an operator's interactive session never does. Matching `claude`
+ * alone counted THIS developer's own session as a hung worker — measured while writing this, a
+ * live reading returned `oldest 11.5 days`, which was the editor running the change.
+ *
+ * `npm ci` is the worktree install a lane runs before its worker, and is the shape that actually
+ * sat for 80 minutes during the 2026-09-16 outage.
+ */
+export interface WorkerPattern {
+  /** Basename of argv[0]. Matched EXACTLY, never as a substring of the whole command line. */
+  readonly exe: string;
+  /** Flags that must also appear, to separate a dispatched worker from an interactive one. */
+  readonly needs: readonly string[];
+}
+
+/**
+ * A DISPATCHED WORKER, matched on its EXECUTABLE rather than anywhere in its command line.
+ *
+ * TWO FALSE POSITIVES WERE MEASURED WHILE WRITING THIS, and the second is why this anchors on
+ * argv[0]:
+ *
+ *   1. Matching `claude` anywhere counted the OPERATOR'S OWN interactive session — a live reading
+ *      returned `oldest 11.5 days`, which was the editor running this change.
+ *   2. Matching `--output-format stream-json` anywhere then counted a SHELL COMMAND that merely
+ *      CONTAINED that text: this file was being edited by a `zsh -c` whose argv quoted the flag,
+ *      and the reading picked up the shell itself.
+ *
+ * The second one is the dangerous shape. For a counter it is an over-count; for W1-T3629's reaper
+ * it would mean sending a signal to an operator's shell. So the executable's BASENAME must match
+ * exactly, and the flags are an additional condition rather than the whole test.
+ */
+export const WORKER_PROCESS_PATTERNS: readonly WorkerPattern[] = [
+  { exe: "claude", needs: ["--output-format stream-json"] },
+  { exe: "npm", needs: ["ci"] },
+];
+
+/** argv[0]'s basename, or "" when the line has no command — never a substring search. */
+export function commandBasename(args: string): string {
+  const first = args.trim().split(/\s+/)[0] ?? "";
+  return first.split("/").pop() ?? "";
+}
+
+export function matchesWorkerPattern(args: string): boolean {
+  const exe = commandBasename(args);
+  return WORKER_PROCESS_PATTERNS.some((p) => p.exe === exe && p.needs.every((n) => args.includes(n)));
+}
+
+export function parseEtime(field: string): number | undefined {
+  const raw = field.trim();
+  if (/^\d+$/.test(raw)) return Number(raw); // procps `etimes`
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d{1,2}):(\d{2})$/.exec(raw); // BSD `etime`
+  if (!m) return undefined;
+  const [, d, h, mm, ss] = m;
+  return Number(d ?? 0) * 86_400 + Number(h ?? 0) * 3_600 + Number(mm) * 60 + Number(ss);
+}
+
+export function parseWorkerProcesses(psOutput: string): WorkerProcessReading {
+  const processes: WorkerProcess[] = [];
+  let oldest: number | undefined;
+  for (const line of psOutput.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const match = /^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(trimmed);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    const etime = parseEtime(match[3] ?? "");
+    const args = match[4] ?? "";
+    if (!Number.isFinite(pid) || !Number.isFinite(ppid) || etime === undefined) continue;
+    if (!matchesWorkerPattern(args)) continue;
+    processes.push({ pid, ppid, etimeS: etime, args });
+    if (oldest === undefined || etime > oldest) oldest = etime;
+  }
+  const count = processes.length;
+  return oldest === undefined ? { count, processes } : { count, oldestEtimeS: oldest, processes };
+}
+
+/** The one shape `defaultPs` needs from `execFileSync` — narrow enough that a test can inject a
+ *  fake and record exactly what it was called with, without stubbing `node:child_process` itself. */
+export type PsSpawn = (cmd: string, args: string[]) => string;
+
+/** The real spawn, with the fixed options `defaultPs`'s two dialect attempts both need. Extracted
+ *  so the injection point below is the bare command/args pair a test can assert on. */
+function realPsSpawn(cmd: string, args: string[]): string {
+  return execFileSync(cmd, args, { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+}
+
+/** procps first, BSD second. A keyword error is not a read failure — only BOTH failing is.
+ *  `spawn` is injectable (defaulted to the real one) so the BSD-fallback branch and the exact
+ *  two attempted commands are assertable from a test, not just exercised by the live host's own
+ *  `ps` dialect (W1-T3628 coverage-ratchet: an external-tool spawn cannot be process-boundary
+ *  exempted — it must be covered by injecting the boundary itself). */
+export function defaultPs(spawn: PsSpawn = realPsSpawn): string {
+  try {
+    return spawn("ps", ["-eo", "pid=,ppid=,etimes=,args="]);
+  } catch {
+    // BSD `ps` rejects the procps `etimes=` keyword outright rather than returning empty output,
+    // so this falls back to `etime=`, its own dialect. A REAL read failure (no `ps` binary at
+    // all, EACCES, etc.) surfaces from THIS second call instead -- into readWorkerProcesses's own
+    // catch below, never swallowed here.
+    return spawn("ps", ["-eo", "pid=,ppid=,etime=,args="]);
+  }
+}
+
+export function readWorkerProcesses(
+  run: () => string = defaultPs,
+): WorkerProcessReading | { unreadableReason: string } {
+  try {
+    return parseWorkerProcesses(run());
+  } catch (error) {
+    // Neither `ps` dialect could run (missing binary, EACCES, ...) -- classifyReadFailure gives
+    // the same reason vocabulary judgeCheckoutDepth and judgeLockDivergence already read, carried
+    // in `unreadableReason` for judgeLaneLessWorkers to render as UNKNOWN rather than a healthy
+    // zero (W1-T3628 design note above).
+    return { unreadableReason: classifyReadFailure(error).reason };
+  }
+}
+
+export function judgeLaneLessWorkers(
+  oldestEtimeS: number | undefined,
+  count: number,
+  unreadableReason?: string,
+): Check {
   const threshold = `<= ${humanMs(HUNG_WORKER_AGE_S * 1000)} (#2251 HUNG_WORKER_AGE_S, reused not re-derived)`;
+  // AN UNREADABLE PROCESS TABLE IS NOT AN EMPTY ONE (W1-T3628). Before this arm had a third state
+  // the only caller passed a literal 0, so every host read as "0 worker process(es)" -- including
+  // one carrying two `npm ci` stuck 80 minutes. A read that failed must say so, never borrow the
+  // healthy answer, exactly as judgeCheckoutDepth's "unreadable" arm does.
+  if (unreadableReason !== undefined) {
+    return {
+      name: "lane-less-workers",
+      verdict: "WARN",
+      measured: `worker count UNKNOWN — ${unreadableReason}`,
+      threshold,
+      detail: "the process table could not be read — do not read this as a host with no workers",
+    };
+  }
   if (count === 0 || oldestEtimeS === undefined) {
     return { name: "lane-less-workers", verdict: "OK", measured: "0 worker process(es)", threshold };
   }
@@ -738,6 +908,8 @@ export interface DoctorInputs {
   gitLocks: ReadonlyArray<{ path: string; ageMs: number }>;
   workerCount: number;
   oldestWorkerEtimeS?: number;
+  /** Set only when the process table could not be read — renders UNKNOWN, never zero (W1-T3628). */
+  workersUnreadableReason?: string;
   /** W1-T2332 — the checkout's history horizon, measured by the caller. `undefined` means the
    *  read failed; `judgeCheckoutDepth` reports that as unreadable, never a healthy full checkout. */
   checkoutDepth?: { shallow: boolean; commitCount: number };
@@ -903,7 +1075,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     judgeSweepLiveness(sweepRows.passesMs, sweepRows.summariesMs, inputs.nowMs),
     judgePauseHonoured(inputs.pauseAgeMs, lastDispatchAgeMs),
     judgeLockDivergence(inputs.totalLocks, inputs.deadLocks, inputs.locksUnreadableReason),
-    judgeLaneLessWorkers(inputs.oldestWorkerEtimeS, inputs.workerCount),
+    judgeLaneLessWorkers(inputs.oldestWorkerEtimeS, inputs.workerCount, inputs.workersUnreadableReason),
     judgeStaleGitLocks(inputs.gitLocks),
     judgeCheckoutDepth(inputs.checkoutDepth),
     judgeWorktreeBases(inputs.worktreeBases ?? []),
