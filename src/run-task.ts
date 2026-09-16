@@ -32140,6 +32140,94 @@ function preserveFixHead(repoDir: string, branch: string, localSha: string): str
   return recoveryRef;
 }
 
+/** W1-T3696 A1. What {@link commitWorkerEdits} did, and what it refused to touch. */
+export interface WorkerEditCommit {
+  /** True only when a commit object was actually created. */
+  readonly committed: boolean;
+  /** The new HEAD sha, present only when `committed`. */
+  readonly sha?: string;
+  /** Paths the worker changed that its task did NOT declare. Reported, never staged. */
+  readonly undeclared: readonly string[];
+  /** Why nothing was committed, when `committed` is false. */
+  readonly reason?: string;
+}
+
+/**
+ * W1-T3696 A1: COMMIT A WORKER'S EDITS FROM THE HARNESS, so the worker never needs a git tool.
+ *
+ * This is the one verb missing beside {@link publishAbandonedFixOwnerAhead}'s CAS-guarded push.
+ * With it, an implement lane can be bounded to Read/Write/Edit/Grep/Glob plus checks -- no Bash,
+ * no forge authority -- and the same bound then constrains every provider identically rather than
+ * being a per-provider exception.
+ *
+ * STAGES BY EXPLICIT DECLARED PATH, NEVER `git add -A` BARE. `declaredPaths` is the task's own
+ * `files:` surface. Anything the worker changed outside it is REPORTED in `undeclared` and left
+ * uncommitted -- so a worker cannot widen its own blast radius by writing somewhere it never
+ * declared, and the caller can escalate loudly instead of discovering it in a diff later. This
+ * mirrors plan-architect.ts's existing `add -A -- plan/ MASTER-PLAN.md`, which is already
+ * path-scoped for the same reason.
+ *
+ * THE MESSAGE IS DATA, NOT A COMMAND. It reaches git as a single argv element through
+ * `execFileSync` -- there is no shell anywhere on this path, so a message cannot become a command
+ * however it is written. That is the whole point of doing this here rather than handing a cheap
+ * model a shell to run `git commit` with.
+ */
+export function commitWorkerEdits(
+  repoDir: string,
+  declaredPaths: readonly string[],
+  message: string,
+  // Reuses PublishAbandonedFixOwnerAheadDeps: the identical `{ runGit? }` seam its sibling
+  // already declares. A second interface of the same shape is what the Deps-count ratchet
+  // exists to prevent, and there is nothing this verb needs that the push verb did not.
+  deps: PublishAbandonedFixOwnerAheadDeps = {},
+): WorkerEditCommit {
+  const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
+    "git",
+    ["-C", repoDir, ...args],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ));
+  if (message.trim().length === 0) {
+    return { committed: false, undeclared: [], reason: "refusing to commit with an empty message" };
+  }
+  if (declaredPaths.length === 0) {
+    return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
+  }
+
+  const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z"]));
+  if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+
+  const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths));
+  const undeclared = changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths));
+  if (declared.length === 0) {
+    return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
+  }
+
+  runGit(["add", "-A", "--", ...declared]);
+  runGit(["commit", "-m", message]);
+  return { committed: true, sha: runGit(["rev-parse", "HEAD"]).trim(), undeclared };
+}
+
+/** Paths from `git status --porcelain -z`. NUL-delimited so a path with a space or a quote is
+ *  read literally rather than through porcelain's quoting rules. */
+export function workerChangedPaths(raw: string): string[] {
+  const out: string[] = [];
+  for (const entry of raw.split("\0")) {
+    if (entry.length < 4) continue;          // "XY " + at least one character of path
+    out.push(entry.slice(3));
+  }
+  return out;
+}
+
+/** Is `path` inside the declared surface? A declared entry is either the path itself or a
+ *  directory prefix of it -- `src/lib/` covers `src/lib/a.ts`, and `src/lib` does NOT cover
+ *  `src/libel.ts`, which a bare `startsWith` would wrongly admit. */
+export function pathIsUnderDeclaredSurface(path: string, declaredPaths: readonly string[]): boolean {
+  return declaredPaths.some((declared) => {
+    const d = declared.endsWith("/") ? declared.slice(0, -1) : declared;
+    return path === d || path.startsWith(`${d}/`);
+  });
+}
+
 export interface PublishAbandonedFixOwnerAheadDeps {
   runGit?: (args: string[]) => string;
 }
