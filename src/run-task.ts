@@ -32142,10 +32142,6 @@ export interface WorkerEditCommit {
   readonly reason?: string;
 }
 
-export interface CommitWorkerEditsDeps {
-  runGit?: (args: string[]) => string;
-}
-
 /**
  * W1-T3696 A1: COMMIT A WORKER'S EDITS FROM THE HARNESS, so the worker never needs a git tool.
  *
@@ -32170,7 +32166,10 @@ export function commitWorkerEdits(
   repoDir: string,
   declaredPaths: readonly string[],
   message: string,
-  deps: CommitWorkerEditsDeps = {},
+  // Reuses PublishAbandonedFixOwnerAheadDeps: the identical `{ runGit? }` seam its sibling
+  // already declares. A second interface of the same shape is what the Deps-count ratchet
+  // exists to prevent, and there is nothing this verb needs that the push verb did not.
+  deps: PublishAbandonedFixOwnerAheadDeps = {},
 ): WorkerEditCommit {
   const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
     "git",
