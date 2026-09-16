@@ -35,6 +35,7 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
     worktreePath: string,
     baseRef: string | undefined,
     run?: (args: string[], opts: { cwd: string }) => { error?: unknown; status: number; stdout: string },
+    env?: Record<string, string | undefined>,
   ) => string[] | undefined;
 };
 const { evaluateHeadIdentityGate, isDependencyBumpHead, isDependencyManifestPath, changedPathsAtHead } = mod;
