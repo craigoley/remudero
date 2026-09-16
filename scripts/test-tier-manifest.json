@@ -278,6 +278,7 @@
     "test/an-operator-stop-is-undone-by-the-restart-policy.test.ts": 23135,
     "test/an-operator-verdict-releases-a-parked-task.test.ts": 0,
     "test/an-orphaned-run-is-not-a-failed-dispatch.test.ts": 0,
+    "test/an-orphaned-worker-process-is-reaped.test.ts": 0,
     "test/an-outcome-metric-reports-per-repo.test.ts": 1275,
     "test/an-unanswered-duplicate-title-match-blocks.test.ts": 1276,
     "test/an-unaudited-sibling-call-site-is-named.test.ts": 0,
