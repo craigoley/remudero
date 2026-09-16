@@ -636,6 +636,147 @@ export interface RegisteredFixOwnerRecoveryDeps {
   preserveDiverged?: SweepRuntimeFn;
 }
 
+// ── W1-T3691 — STALE-REVIEWER-CODE SKIP RECURRENCE. A `review.skipped_stale_reviewer_code` skip
+// (`buildReviewerCodeFreshnessGate`, src/run-task.ts) is re-derived every sweep and, on its own, is
+// silent and terminal: this tracks whether the SAME code sha keeps recurring across sweeps and
+// turns that into a tiered response -- silent, held-and-visible, restart, or (if a restart already
+// happened and the sha still has not moved) needs-human. A COUNTER, NOT A TIMER: sweep cadence
+// varies with load, so a wall-clock floor tuned on an idle fleet would be wrong on a busy one --
+// see this task's own plan record for the incident this closes. FALSIFIER:
+// test/a-repeated-stale-reviewer-skip-asks-for-a-restart.test.ts ─────────────────────────────
+
+/** How many consecutive sweep passes must observe the SAME stale code sha before the daemon asks
+ *  for its own freshness restart (the SAME exit `daemon.stale_code` already uses, daemon.ts's
+ *  `stopForFreshness`). A single skip is ordinary -- the daemon may already be seconds from a
+ *  restart it planned for an unrelated reason -- and must change nothing, so this floor is never 1. */
+export const STALE_REVIEWER_SKIP_RESTART_STREAK = 3;
+
+/** One sweep pass's own stale-reviewer-code reading, as `buildReviewerCodeFreshnessGate`'s
+ *  `staleThisPass()` (src/run-task.ts) reports it via `SweepCycleOutcome.reviewerCodeStale`
+ *  (daemon.ts). `prNumbers` is the pull requests this pass skipped review for at `codeSha` --
+ *  omitted where a caller does not yet carry that attribution, in which case a rendered blocker
+ *  names none rather than guessing. */
+export interface StaleReviewerSkipObservation {
+  codeSha: string;
+  originMainSha: string;
+  prNumbers?: readonly number[];
+}
+
+/** Carried by the daemon's own tick loop across sweep passes (never rebuilt per call), and
+ *  reconstructed at boot from the ledger's own history (`priorStaleReviewerRecurrenceState`,
+ *  daemon.ts) so a real process restart cannot forget it already asked once -- design (v)'s
+ *  falsifier: "restart again on an unchanged sha and the fourth test fails." */
+export interface StaleReviewerRecurrenceState {
+  /** The code sha the most recent observation was at. */
+  codeSha: string;
+  /** Consecutive sweep passes this sha has now been observed at, including the first sighting. */
+  streak: number;
+  /** True once a freshness restart has ACTUALLY been requested for this exact sha. Set by the
+   *  CALLER at the point it really acts on a `"restart"` action (daemon.ts), never by
+   *  `trackStaleReviewerSkipRecurrence` itself: a `"restart"` action the caller declines to act on
+   *  this tick (dispatch is mid-admission, see daemon.ts's `daemon.freshness_deferred`) must be
+   *  asked for again next tick, not silently believed already granted. */
+  restartRequested: boolean;
+}
+
+export type StaleReviewerRecurrenceAction =
+  | { kind: "silent" }
+  | { kind: "held"; codeSha: string; originMainSha: string; streak: number }
+  | { kind: "restart"; codeSha: string; originMainSha: string; streak: number }
+  | { kind: "needs_human"; codeSha: string; originMainSha: string; reason: string };
+
+export interface StaleReviewerRecurrenceResult {
+  /** The state to carry into the NEXT observation. `undefined` only when this pass had no stale
+   *  reading at all -- the daemon moved (or nothing needed review), so there is nothing left to
+   *  track. */
+  state: StaleReviewerRecurrenceState | undefined;
+  action: StaleReviewerRecurrenceAction;
+}
+
+/**
+ * W1-T3691 (design i, ii, iv, v) — the pure decision at the heart of the fix.
+ *
+ *  - No observation this pass ⇒ silent, state reset (iv: the daemon moved).
+ *  - A NEW sha ⇒ silent, streak resets to 1 (iii: a daemon that did move is not stuck).
+ *  - The SAME sha recurring, below the restart streak ⇒ "held" -- visible before it is acted on
+ *    (iii), but nothing else changes (iv: only the FIRST sighting of a sha is a single skip, but a
+ *    second one is still below the acted-on floor here).
+ *  - The SAME sha at or past the restart streak, no restart requested yet ⇒ "restart" (ii).
+ *  - The SAME sha with a restart already requested ⇒ "needs_human" (v) -- the pin looks
+ *    deliberate, so this never asks for another restart.
+ */
+export function trackStaleReviewerSkipRecurrence(
+  observation: StaleReviewerSkipObservation | undefined,
+  prior: StaleReviewerRecurrenceState | undefined,
+  restartStreak: number = STALE_REVIEWER_SKIP_RESTART_STREAK,
+): StaleReviewerRecurrenceResult {
+  if (!observation) {
+    return { state: undefined, action: { kind: "silent" } };
+  }
+  const sameSha = prior !== undefined && prior.codeSha === observation.codeSha;
+  if (!sameSha) {
+    return {
+      state: { codeSha: observation.codeSha, streak: 1, restartRequested: false },
+      action: { kind: "silent" },
+    };
+  }
+  const streak = prior!.streak + 1;
+  const state: StaleReviewerRecurrenceState = {
+    codeSha: observation.codeSha,
+    streak,
+    restartRequested: prior!.restartRequested,
+  };
+  if (prior!.restartRequested) {
+    return {
+      state,
+      action: {
+        kind: "needs_human",
+        codeSha: observation.codeSha,
+        originMainSha: observation.originMainSha,
+        reason:
+          `daemon requested a freshness restart over stale reviewer code at ${observation.codeSha.slice(0, 7)} ` +
+          `and came back on the SAME sha -- looks pinned behind origin/main ` +
+          `(${observation.originMainSha.slice(0, 7)}) rather than transiently behind it, not retrying`,
+      },
+    };
+  }
+  if (streak < restartStreak) {
+    return {
+      state,
+      action: { kind: "held", codeSha: observation.codeSha, originMainSha: observation.originMainSha, streak },
+    };
+  }
+  return {
+    state,
+    action: { kind: "restart", codeSha: observation.codeSha, originMainSha: observation.originMainSha, streak },
+  };
+}
+
+/** (design iii) — the BLOCKERS BY CLASS row a held review queue renders as once the daemon has
+ *  recorded the recurrence. Wiring this into the status board's own `BlockerRow` union
+ *  (status-board.ts) is out of this task's declared file scope (`src/lib/sweep.ts`,
+ *  `src/lib/daemon.ts` only) -- see this PR's Follow-ups. `renderHeldReviewQueueBlocker` is the
+ *  text an operator reads today, off the `review.stale_reviewer_held` /
+ *  `review.stale_reviewer_restart_requested` ledger lines the daemon writes for a
+ *  `"held"`/`"restart"` action. */
+export interface HeldReviewQueueBlocker {
+  kind: "held_review_queue";
+  codeSha: string;
+  originMainSha: string;
+  prNumbers: readonly number[];
+  streak: number;
+}
+
+export function renderHeldReviewQueueBlocker(blocker: HeldReviewQueueBlocker): string {
+  const prList =
+    blocker.prNumbers.length > 0 ? blocker.prNumbers.map((n) => `#${n}`).join(", ") : "no pull requests attributed yet";
+  return (
+    `held review queue: code ${blocker.codeSha.slice(0, 7)} has lagged origin/main ` +
+    `${blocker.originMainSha.slice(0, 7)} for ${blocker.streak} consecutive sweep${blocker.streak === 1 ? "" : "s"} ` +
+    `-- holding ${prList}`
+  );
+}
+
 export interface BuildSweepEffectsDeps {
   owner: string;
   repo: string;

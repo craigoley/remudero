@@ -67,6 +67,11 @@ export interface Config {
   headroom?: { enabled?: boolean };
   workerProviders?: {
     enabled?: WorkerProviderId[];
+    /** Operator consent for OUTBOUND WEB ACCESS on behalf of cash workers (W1-T3558). Default false,
+     * and deliberately separate from enabling the cash provider: enabling a provider authorises
+     * spending on inference, this authorises fetching arbitrary public pages on a worker's
+     * instruction. The search credential is environment-only, never a config field. */
+    cashWebSearch?: boolean;
     reservePercent?: number;
     capacityCacheMs?: number;
     codexBin?: string;
@@ -164,6 +169,7 @@ const workerProvidersShape: ValueSchema = {
       stringArrayShape,
     ),
     configField("reservePercent", "number", true, 5, "config.json", "Provider capacity held in reserve.", numberShape),
+    configField("cashWebSearch", "boolean", true, false, "config.json", "Consent for daemon-brokered web search on behalf of cash workers.", booleanShape),
     configField("capacityCacheMs", "number", true, 60_000, "config.json", "Provider capacity cache lifetime.", numberShape),
     configField("codexBin", "string", true, undefined, "config.json", "Absolute Codex CLI path.", stringShape),
     configField("codexHome", "string", true, undefined, "config.json", "Codex state/auth home.", stringShape),
@@ -273,6 +279,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_ALLOW_LIVE_SPAWN", "Opt-in guard for live worker spawn boundaries.", ["src/lib/spawn-guard.ts"]),
   envEntry("RMD_ALLOW_LIVE_WRITES", "Opt-in guard for live write boundaries under tests.", ["src/lib/live-write-guard.ts", "src/run-task.ts"]),
   envEntry("RMD_AUTOMATED_RETRO_DECISION", "Carries an automated retro decision into retro subprocess handling.", ["src/lib/retro-subprocess.ts", "src/run-task.ts"]),
+  envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),
   envEntry("RMD_FRESHNESS_RESTART_MAX", "Deploy entrypoint knob documented by the containment restart discipline.", ["src/lib/containment.ts"]),
   envEntry("RMD_GITHUB_WEBHOOK_SECRET_FILE", "Names the file holding the GitHub webhook secret.", ["src/lib/github-event-wake.ts", "src/lib/serve.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),

@@ -27,6 +27,7 @@ import {
   loadConfig,
   canonicalWorkerProviderId,
   enabledWorkerProviders,
+  overflowFallbackRefusal,
   workerHomeDir,
   workerShell,
   workerZdotdir,
@@ -1110,6 +1111,21 @@ export const DISPATCH_LANE_TOOL_BOUNDS = {
 export const IMPLEMENT_CASH_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"];
 
 /**
+ * W1-T3696 step (2) for the CLAUDE side: implement's declared surface, closing W1-T2591's
+ * unrestricted default on the highest-risk lane. Shape-identical to `alert_fix`/`FIX_WORKER_TOOLS`.
+ *
+ * MEASURED, NOT GUESSED — the three readings are in this change's PR body: implement's rendered
+ * prompt names npm/git/gh and zero web or subagent tools; every bounded BUILD lane already carries
+ * no web access (only review/manual, a different task type, were granted it); and W1-T210 bounded
+ * the fix rung for exactly this reason, so an untrusted prompt payload could not reach the network.
+ * `Task` is dropped deliberately: a subagent multiplies a run's cost with no ceiling.
+ *
+ * THE FALSIFIER NEEDS NO NEW CODE: `WorkerResult.permissionDenials` names a tool a worker asked for
+ * and was refused. Widen this list from a denial that actually happened, never from a worry.
+ */
+export const IMPLEMENT_CLAUDE_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"];
+
+/**
  * Choose implement's tool surface from WHAT IS RUNNING IT (W1-T3696 step 2). A cash-billed mount
  * gets the bounded shell-less surface; every other provider keeps what it has today, `undefined`
  * for unrestricted included.
@@ -1118,7 +1134,12 @@ export function implementToolBound(
   provider: string | undefined,
   fallback: readonly string[] | undefined,
 ): readonly string[] | undefined {
-  return canonicalWorkerProviderId(provider ?? "") === "cash" ? IMPLEMENT_CASH_TOOLS : fallback;
+  if (canonicalWorkerProviderId(provider ?? "") === "cash") return IMPLEMENT_CASH_TOOLS;
+  // `fallback` is the generic-route bound for `review`/`manual` -- a DIFFERENT task type that was
+  // deliberately granted WebSearch+WebFetch. Only the implement lane's own `undefined` (W1-T2591's
+  // unrestricted default) becomes the declared bound here; a lane that already names its tools
+  // keeps them.
+  return fallback ?? IMPLEMENT_CLAUDE_TOOLS;
 }
 
 export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
@@ -1156,39 +1177,10 @@ export function cashCanServeToolSurface(tools: readonly string[] | undefined): b
  * REASON rather than a bare boolean so the ledger can say which condition failed -- a silent
  * `false` here reads, in the logs, exactly like the stall it was meant to explain.
  */
-/**
- * W1-T3705: why a blocked auction may (or may not) RETRY this spawn on Claude billed to API credits.
- *
- * THE VALVE EXISTS FOR THIS MOMENT AND COULD NOT REACH IT. `config.overflow: "api_key"` is there to
- * keep working when the subscription is exhausted, but the auction refuses ON an exhausted
- * subscription and had no knowledge the valve was armed — measured on origin/main, `overflow`
- * appeared nowhere in worker-provider.ts or provider-routing-policy.ts. Armed and unreachable at the
- * one moment it exists for, on any host with more than one provider enabled.
- *
- * A SECOND FALLBACK ARM, NOT WIDER AUCTION ELIGIBILITY. The auction allocates SUBSCRIPTION headroom
- * and an API-billed spawn is not competing for it; loosening its filter would quietly turn a
- * capacity bound into a spend decision. A sibling arm beside the cash fallback keeps the auction's
- * meaning intact and puts the spend behind the same shape of switch.
- *
- * Returns the REASON, like {@link cashFallbackRefusal}: a bare `false` reads, in the logs, exactly
- * like the stall it is meant to explain.
- */
-export function overflowFallbackRefusal(
-  config: Config,
-  env: NodeJS.ProcessEnv = process.env,
-): string | undefined {
-  if (config.overflow !== "api_key") return 'operator has not set config.overflow to "api_key"';
-  // BOTH FACTORS, the two-factor rule `buildWorkerEnv` already enforces: the config switch alone
-  // must not bill the fleet to API, and a key sitting in a shell must not either.
-  if (!env.ANTHROPIC_API_KEY) return "ANTHROPIC_API_KEY is absent from the daemon environment";
-  if (config.dailyCapUsd === undefined || config.dailyCapUsd === null) {
-    return "dailyCapUsd is unset, so API-billed spend would be unbounded";
-  }
-  // The retry rides the claude mount-affinity path, which throws on a provider the committed host
-  // config does not enable. Naming it here reports the cause instead of throwing out of the retry.
-  if (!enabledWorkerProviders(config).includes("claude")) return "claude is not an enabled worker provider";
-  return undefined;
-}
+/** Re-exported from config.ts, where it lives so {@link providerRoutingOwnsHeadroom} can read the
+ *  SAME rule rather than a second copy of it (W1-T3705). */
+export { overflowFallbackRefusal };
+
 
 export function cashFallbackRefusal(
   config: Config,

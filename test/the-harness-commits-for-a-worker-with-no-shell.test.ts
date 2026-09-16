@@ -25,15 +25,18 @@ import { test } from "node:test";
 
 import {
   IMPLEMENT_CASH_TOOLS,
+  IMPLEMENT_CLAUDE_TOOLS,
   anchoredCommitMessage,
   cashCanServeToolSurface,
   cashFallbackRefusal,
+  DISPATCH_LANE_TOOL_BOUNDS,
   harnessOwnsGitFor,
   implementToolBound,
   parseReport,
   spawnWorker,
 } from "../src/lib/worker.js";
 import { outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
+import { FIX_WORKER_TOOLS } from "../src/lib/fix-fence.js";
 import {
   implementPromptParts,
   renderImplementPrompt,
@@ -138,10 +141,13 @@ test("the harness commits only the declared surface, and refuses when there is n
 });
 
 test("implement chooses its surface from what is running it, and the chain reaches harness-owned git", () => {
-  // CLAUDE IS UNTOUCHED, both shapes. Implement passes `undefined` (unrestricted) today, and
-  // review/manual pass their declared bound — neither may change because a cash row now exists.
-  assert.equal(implementToolBound(undefined, undefined), undefined, "a claude implement stays unrestricted");
-  assert.equal(implementToolBound("claude", undefined), undefined);
+  // A CLAUDE IMPLEMENT NOW DECLARES A BOUND rather than inheriting W1-T2591's unrestricted default.
+  assert.deepEqual(implementToolBound(undefined, undefined), IMPLEMENT_CLAUDE_TOOLS);
+  assert.deepEqual(implementToolBound("claude", undefined), IMPLEMENT_CLAUDE_TOOLS);
+  // It KEEPS its shell: this is a declaration, not a migration to the check-runner.
+  assert.equal(IMPLEMENT_CLAUDE_TOOLS.includes("Bash"), true, "a Claude implement still runs the suite and the local gate");
+  // review/manual are a DIFFERENT task type that was deliberately granted web access, and they
+  // already name their own tools — declaring implement's bound must not reach them.
   const generic = ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"];
   assert.deepEqual(implementToolBound("claude", generic), generic, "review/manual keep their declared bound");
   assert.deepEqual(implementToolBound("codex", generic), generic, "and so does every non-cash provider");
@@ -159,6 +165,8 @@ test("implement chooses its surface from what is running it, and the chain reach
   // AND THE CHAIN CLOSES: a cash mount yields a bound with no shell, which is exactly the
   // condition that makes the harness commit. Asserting the composition, not just the parts.
   assert.equal(harnessOwnsGitFor(implementToolBound("cash", undefined)), true);
+  // The Claude bound keeps Bash, so the harness does NOT take its git: a Claude implement commits
+  // for itself exactly as it always has.
   assert.equal(harnessOwnsGitFor(implementToolBound("claude", undefined)), false);
 });
 
@@ -355,4 +363,33 @@ test("the harness commit step declines outright for a worker that had its own sh
   );
   assert.equal(already, 3);
   assert.equal(called, false);
+});
+
+test("the declared implement bound drops only what no build lane was ever granted", () => {
+  // THE EVIDENCE THIS BOUND WAS CHOSEN FROM, kept as an assertion so a later widening has to argue
+  // with it rather than around it.
+  //
+  // (a) It is shape-identical to the fix/alert_fix surface — the closest lane by job.
+  assert.deepEqual([...IMPLEMENT_CLAUDE_TOOLS].sort(), [...FIX_WORKER_TOOLS].sort());
+
+  // (b) No BUILD lane in this fleet carries web access. Only review/manual do, and they are a
+  //     different task type. If that ever stops being true, this assertion is the thing that
+  //     notices — the bound was justified by it.
+  for (const [lane, bound] of Object.entries(DISPATCH_LANE_TOOL_BOUNDS)) {
+    for (const tool of bound.claude) {
+      assert.ok(tool !== "WebSearch" && tool !== "WebFetch", `${lane} must not carry web access`);
+    }
+  }
+  assert.equal(IMPLEMENT_CLAUDE_TOOLS.includes("WebSearch"), false);
+  assert.equal(IMPLEMENT_CLAUDE_TOOLS.includes("WebFetch"), false);
+
+  // (c) `Task` is dropped deliberately: a subagent multiplies a run's cost with no ceiling the
+  //     harness can see, and no implement prompt asks for one.
+  assert.equal(IMPLEMENT_CLAUDE_TOOLS.includes("Task"), false);
+
+  // (d) And the lane keeps everything its own prompt actually directs — the prompt names npm, git
+  //     and gh, all of which are Bash, plus file editing.
+  for (const needed of ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]) {
+    assert.ok(IMPLEMENT_CLAUDE_TOOLS.includes(needed), `implement must keep ${needed}`);
+  }
 });
