@@ -2143,7 +2143,74 @@ const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: string; 
   Edit: { name: "edit_file", description: "Replace one exact UTF-8 string in a file under the worker cwd.", required: ["path", "old_string", "new_string"] },
   Grep: { name: "grep_files", description: "Find a literal string in UTF-8 files under the worker cwd.", required: ["query"] },
   Glob: { name: "glob_files", description: "List files under the worker cwd by a suffix-like pattern.", required: ["pattern"] },
+  RunCheck: { name: "run_check", description: "Run ONE permitted repository check by name (unit_test, typecheck). Fixed argv: it takes no paths or flags. No shell; no network.", required: ["check"] },
 };
+
+/** Checks an open-weight worker may run, as fixed argv — never a command string (W1-T3617).
+ *  NOTHING HERE MAY REACH THE NETWORK OR THE FORGE (no git/gh/curl/install): the worker produces a
+ *  diff and the ORCHESTRATOR pushes, the boundary hooks/deny-floor.sh already enforces. */
+export const OPENWEIGHT_CHECKS: Readonly<Record<string, readonly string[]>> = {
+  unit_test: ["node", "--import", "tsx", "--test"],
+  typecheck: ["node_modules/.bin/tsc", "-p", "tsconfig.json", "--noEmit"],
+  // READ-ONLY git, SUBCOMMAND PINNED. W1-T3572's "no git" meant no FORGE authority; these carry no
+  // push and no network, and are what the recon/diagnose prompts name. `git push` is absent, not
+  // one entry away. Caller args are contained PATHS, which resolve absolute and cannot be flags.
+  git_log: ["git", "log", "--oneline", "-20"],
+  git_status: ["git", "status", "--porcelain"],
+  git_diff: ["git", "diff"],
+  git_remote: ["git", "remote", "-v"],
+};
+
+/** Read-only git subcommands the table may use. Enforced over the table by test. */
+export const OPENWEIGHT_READONLY_GIT_SUBCOMMANDS: readonly string[] = ["log", "status", "diff", "remote", "show"];
+
+/** PRIMARY CONTROL: wall-clock bound on one check. Nothing else stops a hung check process — the
+ *  cash cap bounds spend, this bounds time — so this is what normally ends the loop, not a
+ *  fallback behind some other limit. */
+export const OPENWEIGHT_CHECK_TIMEOUT_MS = 10 * 60_000;
+
+/** Raised INSTEAD of executing an unlisted check, before any process spawns. */
+export class OpenWeightUnlistedCheckError extends RmdError {
+  readonly check: string;
+  constructor(check: string) {
+    super(
+      "usage",
+      1,
+      `openweight check ${JSON.stringify(check)} is not permitted: refusing to run a command this adapter does not declare. ` +
+        `Permitted checks: ${Object.keys(OPENWEIGHT_CHECKS).sort().join(", ")}`,
+      { check, permitted: Object.keys(OPENWEIGHT_CHECKS).sort() },
+    );
+    this.check = check;
+  }
+}
+
+/**
+ * Argv for one permitted check. EVERY ARGUMENT IS A CONSTANT — the caller chooses a check by NAME
+ * and contributes nothing else to the command line.
+ *
+ * WHY FIXED RATHER THAN SANITIZED. An earlier revision appended model-supplied paths through
+ * {@link openWeightContainedPath}, which is real containment: a flag-shaped argument resolves to a
+ * file under the worktree and is inert. CodeQL flagged it anyway — "this command line depends on a
+ * user-provided value" — and it was right to. Every other `execFileSync` in this repo passes
+ * internally-derived arguments; that revision was the FIRST model-derived value to reach a command
+ * line, and `.github/codeql/codeql-config.yml` excludes only `test/`, so the repo has no
+ * suppression precedent to lean on. A sanitizer the analyser cannot see is a sanitizer the next
+ * reader cannot see either.
+ *
+ * THE COST, STATED: a lane cannot scope `unit_test` to one file, so it runs the whole suite.
+ * That is the read-only lanes' actual need (git status/diff/log and typecheck take no path), and
+ * re-admitting caller arguments is a separate, deliberate decision rather than a default. */
+export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
+  if (typeof check !== "string" || !Object.prototype.hasOwnProperty.call(OPENWEIGHT_CHECKS, check)) {
+    throw new OpenWeightUnlistedCheckError(typeof check === "string" ? check : String(check));
+  }
+  // REFUSED, NOT IGNORED. A model told its scoped check ran, when the whole suite ran instead,
+  // would read the wrong result off a green — so an unusable argument is an error, never a no-op.
+  if (paths !== undefined) {
+    throw new OpenWeightUnlistedCheckError(`${check} with caller arguments — every check runs a FIXED argv`);
+  }
+  return [...OPENWEIGHT_CHECKS[check]];
+}
 
 function openWeightTools(declared: readonly string[] | undefined): Array<Record<string, unknown>> {
   const requested = [...new Set(declared ?? [])];
@@ -2223,6 +2290,28 @@ function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd:
       }
       writeFileSync(path, `${before.slice(0, at)}${args.new_string}${before.slice(at + args.old_string.length)}`, "utf8");
       return { edited: relative(realpathSync(cwd), path) };
+    }
+    case "run_check": {
+      // W1-T3617. Argv BUILT FIRST, so an unlisted check refuses before anything spawns; execFileSync
+      // takes an array and never a shell, so metacharacters are inert rather than discouraged.
+      const argv = openWeightCheckArgv(args.check, args.paths);
+      const [command, ...rest] = argv;
+      try {
+        const stdout = execFileSync(command, rest, {
+          cwd: realpathSync(cwd),
+          encoding: "utf8",
+          timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
+          maxBuffer: 8 * 1024 * 1024,
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        return { check: args.check, exitCode: 0, output: stdout.slice(-20_000) };
+      } catch (err) {
+        // A FAILING CHECK IS A RESULT, NOT AN ERROR — the lane must read its own red. A refusal above
+        // still throws, because that is not a result.
+        const e = err as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer };
+        const out = `${String(e.stdout ?? "")}${String(e.stderr ?? "")}`;
+        return { check: args.check, exitCode: typeof e.status === "number" ? e.status : 1, output: out.slice(-20_000) };
+      }
     }
     case "grep_files": {
       if (typeof args.query !== "string" || args.query.length === 0) throw new Error("grep_files query must be a non-empty string");
