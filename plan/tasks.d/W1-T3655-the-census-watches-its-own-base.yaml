@@ -1,4 +1,4 @@
-- id: W1-T3650
+- id: W1-T3655
   title: "AN EXPIRING FIXTURE ON MAIN BLOCKS EVERY OPEN PR AND NOTHING EVER OBSERVES MAIN ITSELF — expiring-fixture-census is `pull_request`-only, so a stamp sitting on the base reddens every branch beside it while no run is ever charged with fixing it"
   repo: remudero
   depends_on: []
