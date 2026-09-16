@@ -1,0 +1,59 @@
+- id: W1-T3628
+  title: "THE HUNG-WORKER CHECK IS WIRED TO A LITERAL ZERO — judgeLaneLessWorkers has exactly one caller, it passes workerCount: 0 and never assigns oldestWorkerEtimeS at all, so the arm that exists to catch a wedged worker has reported OK since the day it was written and did so while two npm ci sat stuck for eighty minutes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files: [src/lib/doctor.ts, src/lib/report-commands.ts, test/the-hung-worker-check-counts-real-processes.test.ts]
+  origin: oper#fleet-outage-2026-09-16
+  plan_refs: ["W1-T3627", "W1-T2251"]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: main -> chore/file-inert-worker-check-1789521545
+  rationale: |
+    THIS IS THE REPO'S OWN NAMED DEFECT, IN ITS OWN HEALTH COMMAND. CLAUDE.md states it directly:
+    "A check that passes while comparing nothing is the most dangerous failure mode."
+
+    THE WIRING, END TO END. `buildDoctorReport` has exactly ONE call site in src/:
+
+        src/lib/report-commands.ts:568   buildDoctorReport({ ... workerCount: 0, ... })
+
+    `workerCount` is a LITERAL ZERO there, and `oldestWorkerEtimeS` -- the other half of the
+    judgement -- is declared on DoctorInputs and read at doctor.ts:906 but NEVER ASSIGNED anywhere
+    in the tree. So the arm always evaluates `judgeLaneLessWorkers(undefined, 0)`, whose first
+    branch is:
+
+        if (count === 0 || oldestEtimeS === undefined)
+          return { verdict: "OK", measured: "0 worker process(es)" }
+
+    It cannot return anything else. HUNG_WORKER_AGE_S = 7200 is compared against nothing.
+
+    MEASURED CONSEQUENCE, 2026-09-16. During the 75-minute outage W1-T3627 diagnoses, the host held
+    two `npm ci` processes with ELAPSED 4846s and 4295s -- 80 and 71 minutes -- at 527MB and 385MB
+    RSS, alongside 71 node and 66 git processes and a load average of 221 on 8 cores. `rmd doctor`
+    read `[OK] lane-less-workers  measured: 0 worker process(es)` throughout, and again immediately
+    after recovery. The one arm designed to surface exactly this condition was structurally unable
+    to see it.
+
+    WHY IT SURVIVED REVIEW. The check is not dead code -- `judgeLaneLessWorkers` is exported,
+    unit-tested, and its thresholds are correct. Every test drives the PURE judge directly with
+    fabricated counts, so the judge is well covered while its INPUT is a constant. The gap is
+    between a tested pure function and the one line that feeds it, which is precisely the seam a
+    pure-function test cannot reach.
+
+    SCOPE: THIS TASK MAKES THE CHECK SEE. It does not reap. Every neighbouring arm in doctor.ts
+    states the same division in its own comment -- "W1-T978 owns reclamation, doctor only reports",
+    "W1-T1036 owns reclamation" -- and reaping is filed separately so that idiom is not broken here.
+
+  acceptance:
+    - claim: "the worker reading is collected from the live process table and injected like every other doctor input, so the arm judges a real number instead of a constant"
+      proof: "unit test: the doctor collects worker processes instead of passing a literal zero"
+    - claim: "a worker older than HUNG_WORKER_AGE_S makes the arm WARN, which it could never do before"
+      proof: "unit test: a worker past the hung-worker age makes lane-less-workers WARN"
+    - claim: "an unreadable process table reads as UNKNOWN rather than as zero workers, because a failed read must never look like a healthy host"
+      proof: "unit test: an unreadable process table does not read as zero workers"
