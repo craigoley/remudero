@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   commitWorkerEdits,
@@ -99,4 +103,31 @@ test("W1-T3696: the message reaches git as ONE argv element, so it cannot become
   commitWorkerEdits("/w", ["src/lib/a.ts"], hostile, { runGit: run });
   const commit = calls.find((c) => c[0] === "commit")!;
   assert.deepEqual(commit, ["commit", "-m", hostile], "passed whole, never split or interpolated");
+});
+
+test("W1-T3696: with NO runGit override, the default seam really shells out to git on a real repo", () => {
+  // Every test above injects a fake `runGit`, so the default `deps.runGit ?? execFileSync(...)`
+  // arrow is never actually invoked. This one omits `deps` entirely, driving the real seam
+  // end-to-end against a throwaway repo -- the only way to cover the real git invocation itself.
+  const repoDir = mkdtempSync(join(tmpdir(), "rmd-harness-commit-real-"));
+  try {
+    execFileSync("git", ["-C", repoDir, "init", "--quiet", "--initial-branch", "main"]);
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "probe@example.invalid"]);
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "probe"]);
+    writeFileSync(join(repoDir, "seed.txt"), "seed\n");
+    execFileSync("git", ["-C", repoDir, "add", "-A"]);
+    execFileSync("git", ["-C", repoDir, "commit", "--no-verify", "--quiet", "-m", "chore: seed"]);
+
+    writeFileSync(join(repoDir, "a.ts"), "export const a = 1;\n");
+    const result = commitWorkerEdits(repoDir, ["a.ts"], "feat: a real worker edit");
+
+    assert.equal(result.committed, true);
+    assert.deepEqual(result.undeclared, []);
+    const headSha = execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    assert.equal(result.sha, headSha, "the reported sha is the REAL new HEAD, read back independently");
+    const log = execFileSync("git", ["-C", repoDir, "log", "-1", "--pretty=%s"], { encoding: "utf8" }).trim();
+    assert.equal(log, "feat: a real worker edit");
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
 });
