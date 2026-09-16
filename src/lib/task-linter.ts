@@ -3193,7 +3193,15 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
  *  thing every caller already holds -- unless `optsFor` sets one itself, including `[]` to opt
  *  out. So `lintPlan(merged, () => ({}))` (inbox.ts) and `lintPlan(plan)` (onboard/synthesize.ts)
  *  both see a real duplicate-surface finding today, no call-site change needed. */
-export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => ({})): Map<string, LintResult> {
+export function lintPlan(
+  plan: Plan,
+  optsFor: (task: Task) => LintOpts = () => ({}),
+  only?: ReadonlySet<string>,
+): Map<string, LintResult> {
+  // THE CORPUS IS ALWAYS THE WHOLE PLAN, never the filtered subset — `duplicateSurfaceViolations`
+  // asks "does any OTHER task already own this surface", so narrowing the corpus to the tasks being
+  // linted would stop it seeing the tasks a duplicate collides with. `only` narrows which results
+  // are COMPUTED; it must never narrow what they are computed AGAINST.
   const surfaceCorpus: DuplicateSurfaceCorpusEntry[] = plan.tasks.map((t) => ({
     id: t.id,
     files: t.files,
@@ -3201,6 +3209,7 @@ export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => (
   }));
   const out = new Map<string, LintResult>();
   for (const task of plan.tasks) {
+    if (only !== undefined && !only.has(task.id)) continue;
     const opts = optsFor(task);
     const withSurfaces = opts.openTaskSurfaces !== undefined ? opts : { ...opts, openTaskSurfaces: surfaceCorpus };
     out.set(task.id, lintTask(task, withSurfaces));
