@@ -34,10 +34,11 @@ const {
       now: number;
       thresholdDays: number;
       marginDays?: number;
+      readBaseFile?: (p: string) => string | undefined;
     }) => {
       population: number;
       populationByFile: Record<string, number>;
-      reported: Array<{ file: string; line: number; daysLeft: number; expiresAt: number }>;
+      reported: Array<{ file: string; line: number; daysLeft: number; expiresAt: number; inherited?: boolean }>;
       exempt: unknown[];
       alreadyExpired: unknown[];
     };
@@ -183,9 +184,15 @@ test("W1-T3272: main reads the real test-file population and sweep staleDays pol
   });
 
   assert.equal(code, 0, "fresh fixtures should let the CLI pass");
+  // W1-T3388 added a THIRD seam call: the base-ref probe behind attribution. It is pinned here
+  // rather than exempted, because this test's subject is that `main` reaches the world ONLY through
+  // the injected seam — and the probe honours that, which is the property worth keeping. The
+  // follow-on `git show <base>:<file>` is absent because it runs per REPORTED file and this fixture
+  // is fresh, so nothing is reported.
   assert.deepEqual(calls, [
     "git ls-files test/*.test.ts",
     "node --import tsx -e import {loadDefaultPolicy} from './src/lib/policy.ts'; console.log(JSON.stringify(loadDefaultPolicy().values.sweep));",
+    "git rev-parse --verify origin/main^{commit}",
   ]);
   assert.match(output.join("\n"), /OK -- 1 fixture stamp/);
 });
@@ -408,4 +415,62 @@ test("W1-T3578 workflow opts in only the expiring-fixture census", () => {
       `sibling step "${sibling.name}" in the census's own job must not receive the opt-in`,
     );
   }
+});
+
+// ── W1-T3388: base attribution ──────────────────────────────────────────────────────────────────
+// MEASURED 2026-09-16: one stamp on origin/main put six open PRs (#5725, #5733, #5734, #5736,
+// #5738, #5739) into the same red, and the report gave no way to tell it from a bomb the branch had
+// planted itself — so the diagnosis was paid once per PR. Attribution is the fix; it names the
+// owner and deliberately does NOT move the gate.
+
+test("W1-T3388: a crossing already present at the base is marked inherited, not charged to the diff", () => {
+  const stamp = at(-13 * DAY);
+  const line = `  lastActivityAt: "${stamp}",\n`;
+  const r = censusExpiringFixtures({ ...tree({ "test/a.test.ts": line }), readBaseFile: () => line });
+
+  assert.equal(r.reported.length, 1, "it is still REPORTED — attribution never hides a crossing");
+  assert.equal(r.reported[0].inherited, true);
+  assert.match(formatReport(r), /\[inherited from the base -- NOT this diff\]/);
+  assert.match(formatReport(r), /fix it THERE, in one change/, "the remedy must point at the base");
+});
+
+test("W1-T3388: a crossing this diff introduced is NOT excused by an unrelated stamp at the base", () => {
+  // The base carries a DIFFERENT, already-expired stamp in the same file. Matching on the file
+  // alone would call this inherited; the attribution keys on the stamp itself.
+  const introduced = `  lastActivityAt: "${at(-13 * DAY)}",\n`;
+  const atBase = `  lastActivityAt: "${at(-400 * DAY)}",\n`;
+  const r = censusExpiringFixtures({ ...tree({ "test/a.test.ts": introduced }), readBaseFile: () => atBase });
+
+  assert.equal(r.reported.length, 1);
+  assert.notEqual(r.reported[0].inherited, true, "this diff planted it, so it is the diff's");
+  assert.doesNotMatch(formatReport(r), /inherited from the base/);
+});
+
+test("W1-T3388: a file absent at the base is entirely this diff's", () => {
+  const r = censusExpiringFixtures({
+    ...tree({ "test/new.test.ts": `  lastActivityAt: "${at(-13 * DAY)}",\n` }),
+    readBaseFile: () => undefined,
+  });
+  assert.notEqual(r.reported[0].inherited, true);
+});
+
+test("W1-T3388: with no base reader the strict, un-attributed reading is unchanged", () => {
+  // A bare local run has no base. Nothing may be silently excused by the absence of evidence.
+  const r = censusExpiringFixtures(tree({ "test/a.test.ts": `  lastActivityAt: "${at(-13 * DAY)}",\n` }));
+  assert.equal(r.reported[0].inherited, undefined);
+  assert.doesNotMatch(formatReport(r), /inherited from the base/);
+});
+
+test("W1-T3388: attribution names the owner and does NOT move the gate — an inherited crossing still BLOCKS", () => {
+  // THE ANTI-WEAKENING PIN. Letting an inherited crossing pass is the obvious next step and is not
+  // taken: this census runs on pull_request only, so nothing else would ever observe a stamp
+  // sitting on main, and a warning no gate enforces is how the bomb reaches its own red date
+  // unfixed. If that ever changes, it must change WITH a main-branch run, and this test must be
+  // the thing that is deliberately rewritten to allow it.
+  const line = `  lastActivityAt: "${at(-13 * DAY)}",\n`;
+  const r = censusExpiringFixtures({ ...tree({ "test/a.test.ts": line }), readBaseFile: () => line });
+
+  assert.equal(r.reported[0].inherited, true);
+  assert.match(formatReport(r), /expiring-fixture-census: BLOCKED/, "the verdict word must stay BLOCKED");
+  assert.ok(r.reported.length > 0, "and the crossing must remain in `reported`, which decides the exit code");
 });
