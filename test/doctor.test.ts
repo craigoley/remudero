@@ -201,14 +201,15 @@ test("W1-T1209: the existing doctor arms are unchanged", () => {
   assert.equal(report.worst, "OK");
   assert.equal(report.exitCode, 0);
   // +5, not +3: W1-T1236 lands a SECOND new arm (sweep-liveness) after this test's own baseline,
-  // W1-T2332 a THIRD (checkout-depth), W1-T2627 a FOURTH (worktree-base), and R-49 a FIFTH
-  // (node-version-pin) later still — this file's own baseInputs() carries a healthy
-  // sweep.pass/sweep.summary pair, a full checkoutDepth, no live worktrees and a matching node
-  // pin, so all five read OK.
+  // W1-T2332 a THIRD (checkout-depth), W1-T2627 a FOURTH (worktree-base), R-49 a FIFTH
+  // (node-version-pin), and W1-T3665 a SIXTH (provider-capacity) later still — this file's own
+  // baseInputs() carries a healthy sweep.pass/sweep.summary pair, a full checkoutDepth, no live
+  // worktrees, a matching node pin and no provider capacity reading at all, so all six read OK.
   assert.equal(
     report.checks.length,
-    preExisting.length + 6,
-    "repair-stall, sweep-liveness, checkout-depth, worktree-base, node-version-pin and capture-surfaces all joined the report",
+    preExisting.length + 7,
+    "repair-stall, sweep-liveness, checkout-depth, worktree-base, node-version-pin, capture-surfaces and " +
+      "provider-capacity all joined the report",
   );
 });
 
@@ -355,13 +356,15 @@ test("W1-T1236: the existing doctor arms are unchanged", () => {
   assert.equal(report.worst, "OK");
   assert.equal(report.exitCode, 0);
   // +4, not +1: W1-T2332 lands a further new arm (checkout-depth) after this test's own baseline,
-  // W1-T2627 a further one still (worktree-base), and R-49 one more (node-version-pin) — this
-  // file's own baseInputs() carries a healthy, full checkoutDepth, no live worktrees and a
-  // matching node pin, so all three read OK.
+  // W1-T2627 a further one still (worktree-base), R-49 one more (node-version-pin), and W1-T3665
+  // one more still (provider-capacity) — this file's own baseInputs() carries a healthy, full
+  // checkoutDepth, no live worktrees, a matching node pin and no provider capacity reading at all,
+  // so all four read OK.
   assert.equal(
     report.checks.length,
-    preExisting.length + 5,
-    "sweep-liveness, checkout-depth, worktree-base, node-version-pin and capture-surfaces all joined the report",
+    preExisting.length + 6,
+    "sweep-liveness, checkout-depth, worktree-base, node-version-pin, capture-surfaces and provider-capacity " +
+      "all joined the report",
   );
 });
 
