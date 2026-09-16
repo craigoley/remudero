@@ -67,4 +67,4 @@
     - claim: "a dependabot-NAMED head carrying a src/ change is still refused, so the exemption cannot become a credit hole"
       proof: "unit test: a dependabot-named head touching src is still refused"
     - claim: "the refusal text for a non-exempt head is unchanged, so this adds an admitted form rather than relaxing the gate"
-      proof: "grep: matches neither conforming form in scripts/head-identity-gate.mjs"
+      proof: "unit test: the refusal text for a non-exempt head is unchanged"
