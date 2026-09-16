@@ -397,10 +397,36 @@ export function evaluateGate({ body, authorLogin, trailerResolves, introducedTas
   const followupRefusal = followupCommitImplementationTrailerRefusal({ trailerCommits, changedPaths, taskFilesForId });
   if (followupRefusal !== undefined) return followupRefusal;
   const result = acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
-  return result.ok ? authorTimeProofShapeRefusal(body, result) : result;
+  // JUDGE THE SOURCE THE CRITERIA ACTUALLY CAME FROM. The predicate above returns OK early on the
+  // trailer arm precisely because "criteria come from the plan record rather than the body" — and
+  // the proof-shape check below then re-parsed the BODY anyway, undoing the exemption the same
+  // call had just granted one line earlier. Recomputed here with the predicate's OWN condition, not
+  // by string-matching its message, so the two cannot disagree about which arm fired.
+  const trailerId = extractTaskTrailerId(body);
+  const criteriaCameFromPlan = trailerId !== undefined && (trailerResolves === undefined || trailerResolves(trailerId));
+  return result.ok ? authorTimeProofShapeRefusal(body, result, criteriaCameFromPlan) : result;
 }
 
-function authorTimeProofShapeRefusal(body, result) {
+/**
+ * Refuse a body whose Acceptance bullets carry proofs review cannot execute.
+ *
+ * SKIPPED ENTIRELY when the criteria resolve from the plan (`criteriaCameFromPlan`). On that arm the
+ * body's block is NOT the source of truth and review never reads it, so parsing it here judged prose
+ * the author wrote as explanation. MEASURED on #5687: a body carrying a valid
+ * `Remudero-Task: W1-T3612` trailer — whose shard declares two proofs that both parse — was refused
+ * "criterion 1 cannot execute: empty proof", because a prose section headed `## Acceptance criteria`
+ * parsed to one claim with no `proof:` line. The shard was fine; the gate was reading the wrong file.
+ * #5680 had already been refused the same way and rewritten its body to get past it.
+ *
+ * NOT A COVERAGE HOLE: a shard's proofs are held to the same dialect by `lint-plan` (which refuses a
+ * criterion review cannot execute) and by `proof-discrimination`. Re-deriving that judgement here
+ * would be a second implementation of it, which this script's own header rules out.
+ * @param {string} body
+ * @param {{ ok: true, message: string }} result
+ * @param {boolean} [criteriaCameFromPlan]
+ */
+function authorTimeProofShapeRefusal(body, result, criteriaCameFromPlan = false) {
+  if (criteriaCameFromPlan) return result;
   const criteria = parseAcceptanceBlock(body);
   const defects = [];
   criteria.forEach((criterion, index) => {

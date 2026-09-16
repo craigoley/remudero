@@ -73,7 +73,19 @@ test("W1-T2562: the already-shipped idle exit is not removed or weakened by this
   // actually protecting is that the gate never exits out from under work, and THAT half is
   // absolute and still pinned here, as a line pressure can never reach past.
   assert.match(src, /if \(inFlightWrites !== 0\) return;/, "an in-flight write is still an unconditional refusal");
-  assert.match(src, /if \(clients === 0\) return RECYCLE_PATIENCE_FREE_MS;/, "and a free moment still costs nothing to take");
+  // SUPERSEDED A SECOND TIME, SAME REASON. The free-moment line was `clients === 0`; it is now
+  // `attention <= 0`, because counting only SSE SUBSCRIBERS reported "nobody watching" while an
+  // operator was reading the polling console, and the daemon recycled out from under him
+  // (MEASURED 2026-09-15: an 86.5s boot window, cloudflared logging connection refused and then
+  // connection reset by peer against remudero-serve:4317). The invariant this criterion protects
+  // is that a GENUINELY free moment still costs nothing, and that is what is pinned — over the
+  // broader signal rather than the narrower one.
+  assert.match(src, /if \(attention <= 0\) return RECYCLE_PATIENCE_FREE_MS;/, "a genuinely unwatched moment still costs nothing to take");
+  assert.match(
+    src,
+    /const attention = clients \+ readAttention\(msSinceLastRead\);/,
+    "and 'watched' means read OR subscribed, so a polling console is not invisible to the gate",
+  );
 });
 
 // ── criterion 3: observable without shelling in and comparing inodes ─────────────────────────

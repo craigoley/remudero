@@ -652,23 +652,138 @@ export function openWeightCandidatesForCapability(
   return (requestedEffort && byEffort[requestedEffort]) || byEffort.medium || FALLBACK_OPENWEIGHT_MODELS[tier];
 }
 
+/**
+ * THE CONTEXT WINDOW IS A PROPERTY OF THE DEPLOYMENT, exactly as price and temperature are.
+ *
+ * It is the third row of the same table discipline, and it arrived last for a measurable reason:
+ * price and temperature announce themselves with an HTTP 400 on the FIRST request, while an
+ * oversized prompt fails only on the requests that happen to be large, so the gap read as
+ * flakiness rather than as a missing lookup.
+ *
+ * MEASURED 2026-09-15 from state/openweight-allowance.json: 32 of 96 LARGE nano requests never
+ * settled -- exactly 33% -- while all 8 small requests settled, with the failures spread uniformly
+ * across each concurrency triple (12/10/10) rather than clustered. That is a window edge, not a
+ * transport fault. gpt-oss-120b announces the same wall outright:
+ *   HTTP 400: The input (259242 tokens) is longer than the model's context length (131072)
+ *
+ * TREATED AS A TOTAL, AND COMPARED AGAINST PROMPT + {@link OPENWEIGHT_MAX_COMPLETION_TOKENS}.
+ * gpt-oss-120b's 131,072 is a total context; gpt-5-nano publishes 272,000 as an INPUT ceiling.
+ * Requiring room for the completion in both cases can only refuse a request that would have fit,
+ * never admit one that would not -- the safe direction, and the same asymmetry
+ * {@link OPENWEIGHT_PRICES} reasons about.
+ *
+ * A deployment with no row here is REFUSED rather than assumed to fit, because the alternative is
+ * to discover the answer by spending a full reservation on a request that cannot succeed.
+ */
+export interface OpenWeightContextWindow {
+  readonly totalTokens: number;
+  readonly readAt: string;
+}
+
+export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightContextWindow>> = {
+  "gpt-oss-120b": { totalTokens: 131_072, readAt: "2026-09-15" },
+  "gpt-5-nano": { totalTokens: 272_000, readAt: "2026-09-15" },
+};
+
+/**
+ * Bytes per token, used ONLY to decide which deployment can hold a request -- never to price one.
+ *
+ * DERIVED, NOT ASSUMED. Inverting the live allowance file on nano's $0.05/1M input and the fixed
+ * 5,000-token output ceiling: a $0.0547 reservation is 1,054,000 request bytes, and the $0.0142 it
+ * settled to bounds the real prompt between 244,000 tokens (if the completion used the full
+ * ceiling) and 284,000 (if it used none) -- so 3.71 to 4.32 bytes per token over this corpus. 4.0
+ * is the middle of that measured band and the usual English/code heuristic.
+ *
+ * THIS GATE IS COARSE, AND SAYING SO IS THE POINT. Its reliable job is separating deployments that
+ * differ by MULTIPLES: gpt-oss-120b's 131,072 against gpt-5-nano's 272,000 is a 2x gap, and no
+ * plausible ratio confuses a 260K-token prompt for one that fits gpt-oss. It CANNOT resolve a thin
+ * margin. inbox_draft runs at ~4% under nano's window, which is inside this constant's own error
+ * band, so the residual edge failures there are not something a better divisor fixes -- the fix for
+ * that lane is a smaller prompt, not a sharper estimate.
+ *
+ * A DELIBERATELY CONSERVATIVE RATIO WAS TRIED AND REJECTED, on measurement. At 3.5 the estimate for
+ * the same body is 301,143 tokens, which exceeds every declared window, so the gate refused the
+ * WHOLE inbox_draft lane -- turning a 33% wire failure into a 100% local refusal and pushing the
+ * lane back onto the subscription. Over-refusing is not the safe direction when the safe-looking
+ * error deletes the routing this exists to enable.
+ */
+export const OPENWEIGHT_BYTES_PER_TOKEN = 4.0;
+
+/** The conservative token estimate the fit gate reasons about. */
+export function openWeightEstimatedTokens(requestBodyBytes: number): number {
+  return Math.ceil(requestBodyBytes / OPENWEIGHT_BYTES_PER_TOKEN);
+}
+
+/** Raised INSTEAD of selecting a deployment that cannot hold the request. Thrown before any
+ *  reservation exists, so an impossible request costs nothing against the daily cap. */
+export class OpenWeightRequestTooLargeError extends RmdError {
+  readonly estimatedTokens: number;
+  constructor(detail: { estimatedTokens: number; capability: string; considered: readonly string[] }) {
+    super(
+      "usage",
+      1,
+      `openweight request is ~${detail.estimatedTokens} tokens and no '${detail.capability}' deployment can hold it ` +
+        `(considered: ${detail.considered.join(", ") || "none"}). Refusing before the request reserves, so it costs nothing. ` +
+        `Shrink the prompt or declare a deployment with a larger context window.`,
+      { estimatedTokens: detail.estimatedTokens, capability: detail.capability, considered: [...detail.considered] },
+    );
+    this.estimatedTokens = detail.estimatedTokens;
+  }
+}
+
+/** Does this deployment hold a prompt of `estimatedTokens`, leaving room for the completion the
+ *  adapter itself puts on the wire? An UNLISTED deployment holds nothing -- it is refused, never
+ *  assumed, for the same reason an unpriced one is. */
+export function openWeightDeploymentHolds(deployment: string, estimatedTokens: number): boolean {
+  const window = OPENWEIGHT_CONTEXT_WINDOWS[deployment];
+  if (window === undefined) return false;
+  return estimatedTokens + OPENWEIGHT_MAX_COMPLETION_TOKENS <= window.totalTokens;
+}
+
 export interface OpenWeightModelSelection {
   model: string;
   effort: string;
   capability: CodexModelTier;
+  /** Present only when the fit gate ran, so a ledger row can distinguish "held" from "not checked". */
+  estimatedTokens?: number;
 }
 
-/** Resolve and validate the first configured deployment before it can enter an Azure URL. */
+/**
+ * Resolve and validate a deployment before it can enter an Azure URL.
+ *
+ * WHAT CHANGED, AND WHY IT IS THE SAME RULE THE LADDER ALREADY ENCODED. This used to take the
+ * FIRST SYNTACTICALLY VALID id and find out on the wire whether it could hold the request. The
+ * ladder compensated by hand: `economy` leads gpt-oss-120b and `balanced` leads gpt-5-nano, and
+ * the comment on {@link FALLBACK_OPENWEIGHT_MODELS} says exactly why -- "a 259,181-token
+ * inbox_draft favours nano 2.83x while a 446-token escalation judgement favours gpt-oss 2.40x".
+ * That is a SIZE-DEPENDENT routing decision written into two static row orders, because the
+ * selector could not see the prompt.
+ *
+ * So `promptBytes` is not a new policy; it is the input that policy always needed. Row order still
+ * expresses the operator's MEASURED cost ranking within a tier -- it is not re-derived here, and
+ * this function never reorders it. The window check only SKIPS a candidate that provably cannot
+ * hold the request, which makes the first surviving candidate the cheapest one that fits.
+ *
+ * `promptBytes: undefined` means the caller genuinely does not know the size. The gate is then
+ * SKIPPED rather than guessed, and selection behaves exactly as it did before.
+ */
 export function selectOpenWeightModel(
   capabilities: CapabilityLadder | undefined,
   requestedModel: string | undefined,
   requestedEffort: string | undefined,
+  promptBytes?: number,
 ): OpenWeightModelSelection {
   const capability = openWeightCapabilityForRequestedModel(capabilities, requestedModel);
   const candidates = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
-  const model = candidates.find((candidate) => SAFE_OPENWEIGHT_MODEL_ID.test(candidate));
-  if (!model) throw new Error(`openweight capability '${capability}' has no safe deployment id`);
-  return { model, effort: requestedEffort ?? "default", capability };
+  const safe = candidates.filter((candidate) => SAFE_OPENWEIGHT_MODEL_ID.test(candidate));
+  if (safe.length === 0) throw new Error(`openweight capability '${capability}' has no safe deployment id`);
+  if (promptBytes === undefined) {
+    return { model: safe[0]!, effort: requestedEffort ?? "default", capability };
+  }
+  const estimatedTokens = openWeightEstimatedTokens(promptBytes);
+  const model = safe.find((candidate) => openWeightDeploymentHolds(candidate, estimatedTokens));
+  if (!model) throw new OpenWeightRequestTooLargeError({ estimatedTokens, capability, considered: safe });
+  return { model, effort: requestedEffort ?? "default", capability, estimatedTokens };
 }
 
 function codexBucketForModel(result: CodexRateLimitResult, model: CodexModelInfo): CodexRateLimitBucket | undefined {
@@ -2143,7 +2258,74 @@ const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: string; 
   Edit: { name: "edit_file", description: "Replace one exact UTF-8 string in a file under the worker cwd.", required: ["path", "old_string", "new_string"] },
   Grep: { name: "grep_files", description: "Find a literal string in UTF-8 files under the worker cwd.", required: ["query"] },
   Glob: { name: "glob_files", description: "List files under the worker cwd by a suffix-like pattern.", required: ["pattern"] },
+  RunCheck: { name: "run_check", description: "Run ONE permitted repository check by name (unit_test, typecheck). Fixed argv: it takes no paths or flags. No shell; no network.", required: ["check"] },
 };
+
+/** Checks an open-weight worker may run, as fixed argv — never a command string (W1-T3617).
+ *  NOTHING HERE MAY REACH THE NETWORK OR THE FORGE (no git/gh/curl/install): the worker produces a
+ *  diff and the ORCHESTRATOR pushes, the boundary hooks/deny-floor.sh already enforces. */
+export const OPENWEIGHT_CHECKS: Readonly<Record<string, readonly string[]>> = {
+  unit_test: ["node", "--import", "tsx", "--test"],
+  typecheck: ["node_modules/.bin/tsc", "-p", "tsconfig.json", "--noEmit"],
+  // READ-ONLY git, SUBCOMMAND PINNED. W1-T3572's "no git" meant no FORGE authority; these carry no
+  // push and no network, and are what the recon/diagnose prompts name. `git push` is absent, not
+  // one entry away. Caller args are contained PATHS, which resolve absolute and cannot be flags.
+  git_log: ["git", "log", "--oneline", "-20"],
+  git_status: ["git", "status", "--porcelain"],
+  git_diff: ["git", "diff"],
+  git_remote: ["git", "remote", "-v"],
+};
+
+/** Read-only git subcommands the table may use. Enforced over the table by test. */
+export const OPENWEIGHT_READONLY_GIT_SUBCOMMANDS: readonly string[] = ["log", "status", "diff", "remote", "show"];
+
+/** PRIMARY CONTROL: wall-clock bound on one check. Nothing else stops a hung check process — the
+ *  cash cap bounds spend, this bounds time — so this is what normally ends the loop, not a
+ *  fallback behind some other limit. */
+export const OPENWEIGHT_CHECK_TIMEOUT_MS = 10 * 60_000;
+
+/** Raised INSTEAD of executing an unlisted check, before any process spawns. */
+export class OpenWeightUnlistedCheckError extends RmdError {
+  readonly check: string;
+  constructor(check: string) {
+    super(
+      "usage",
+      1,
+      `openweight check ${JSON.stringify(check)} is not permitted: refusing to run a command this adapter does not declare. ` +
+        `Permitted checks: ${Object.keys(OPENWEIGHT_CHECKS).sort().join(", ")}`,
+      { check, permitted: Object.keys(OPENWEIGHT_CHECKS).sort() },
+    );
+    this.check = check;
+  }
+}
+
+/**
+ * Argv for one permitted check. EVERY ARGUMENT IS A CONSTANT — the caller chooses a check by NAME
+ * and contributes nothing else to the command line.
+ *
+ * WHY FIXED RATHER THAN SANITIZED. An earlier revision appended model-supplied paths through
+ * {@link openWeightContainedPath}, which is real containment: a flag-shaped argument resolves to a
+ * file under the worktree and is inert. CodeQL flagged it anyway — "this command line depends on a
+ * user-provided value" — and it was right to. Every other `execFileSync` in this repo passes
+ * internally-derived arguments; that revision was the FIRST model-derived value to reach a command
+ * line, and `.github/codeql/codeql-config.yml` excludes only `test/`, so the repo has no
+ * suppression precedent to lean on. A sanitizer the analyser cannot see is a sanitizer the next
+ * reader cannot see either.
+ *
+ * THE COST, STATED: a lane cannot scope `unit_test` to one file, so it runs the whole suite.
+ * That is the read-only lanes' actual need (git status/diff/log and typecheck take no path), and
+ * re-admitting caller arguments is a separate, deliberate decision rather than a default. */
+export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
+  if (typeof check !== "string" || !Object.prototype.hasOwnProperty.call(OPENWEIGHT_CHECKS, check)) {
+    throw new OpenWeightUnlistedCheckError(typeof check === "string" ? check : String(check));
+  }
+  // REFUSED, NOT IGNORED. A model told its scoped check ran, when the whole suite ran instead,
+  // would read the wrong result off a green — so an unusable argument is an error, never a no-op.
+  if (paths !== undefined) {
+    throw new OpenWeightUnlistedCheckError(`${check} with caller arguments — every check runs a FIXED argv`);
+  }
+  return [...OPENWEIGHT_CHECKS[check]];
+}
 
 function openWeightTools(declared: readonly string[] | undefined): Array<Record<string, unknown>> {
   const requested = [...new Set(declared ?? [])];
@@ -2223,6 +2405,28 @@ function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd:
       }
       writeFileSync(path, `${before.slice(0, at)}${args.new_string}${before.slice(at + args.old_string.length)}`, "utf8");
       return { edited: relative(realpathSync(cwd), path) };
+    }
+    case "run_check": {
+      // W1-T3617. Argv BUILT FIRST, so an unlisted check refuses before anything spawns; execFileSync
+      // takes an array and never a shell, so metacharacters are inert rather than discouraged.
+      const argv = openWeightCheckArgv(args.check, args.paths);
+      const [command, ...rest] = argv;
+      try {
+        const stdout = execFileSync(command, rest, {
+          cwd: realpathSync(cwd),
+          encoding: "utf8",
+          timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
+          maxBuffer: 8 * 1024 * 1024,
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        return { check: args.check, exitCode: 0, output: stdout.slice(-20_000) };
+      } catch (err) {
+        // A FAILING CHECK IS A RESULT, NOT AN ERROR — the lane must read its own red. A refusal above
+        // still throws, because that is not a result.
+        const e = err as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer };
+        const out = `${String(e.stdout ?? "")}${String(e.stderr ?? "")}`;
+        return { check: args.check, exitCode: typeof e.status === "number" ? e.status : 1, output: out.slice(-20_000) };
+      }
     }
     case "grep_files": {
       if (typeof args.query !== "string" || args.query.length === 0) throw new Error("grep_files query must be a non-empty string");

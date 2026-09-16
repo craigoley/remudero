@@ -674,3 +674,64 @@ test("W1-T1060: main gets past the event-path refusal when a path IS resolvable"
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── W1-T1060: the proof-shape check must judge the source the criteria came from ─────────────
+//
+// MEASURED on #5687. Its body carried a valid `Remudero-Task: W1-T3612` trailer, and that shard
+// declares two criteria whose proofs both parse. The gate refused it anyway:
+//
+//     REFUSED (proof-shape) — Remudero-Task: W1-T3612 trailer present — criteria resolve from
+//     plan/tasks.yaml. criterion 1 cannot execute: empty proof.
+//
+// Both halves of that sentence are in it: the criteria resolve FROM THE PLAN, and then a criterion
+// parsed OUT OF THE BODY is held against them. A prose section headed `## Acceptance criteria`,
+// written as explanation, parsed to one claim with no `proof:` line. The shard was fine; the gate
+// was reading the wrong file. #5680 had already been refused this way and rewrote its body to pass.
+
+test("W1-T1060: a resolvable trailer is not refused for prose under an Acceptance heading it never meant as criteria", () => {
+  const body = [
+    "## Summary",
+    "",
+    "Reclaims stranded git objects nightly.",
+    "",
+    "## Acceptance criteria",
+    "",
+    '1. **"the nightly reclaim refuses to gc while a worker is live"** — proven by the suite below,',
+    "   which asserts stderr names the live container.",
+    "",
+    `Remudero-Task: ${IMPLEMENTATION_TASK}`,
+  ].join("\n");
+
+  const verdict = evaluateGate({ body, trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK });
+
+  assert.equal(verdict.ok, true, `expected OK, got: ${"message" in verdict ? verdict.message : ""}`);
+  assert.match(verdict.message, /criteria resolve from plan\/tasks\.yaml/);
+});
+
+test("W1-T1060: a body with NO resolvable trailer is still held to its own proofs", () => {
+  // The other side of the same seam. Without a trailer the body IS the source of truth, so an
+  // unexecutable proof must still refuse — otherwise this change would have removed the check
+  // rather than pointed it at the right file.
+  const body = ["## Acceptance", "", "- claim: the thing holds", "  proof: trust me", ""].join("\n");
+
+  const verdict = evaluateGate({ body, trailerResolves: () => false });
+
+  assert.equal(verdict.ok, false);
+});
+
+test("W1-T1060: a trailer the plan does NOT declare buys no exemption from the body's proofs", () => {
+  // W1-T2297's warrant is that the criteria really are in the plan. A trailer naming an id the
+  // plan never declared falls back to the body, so the body's proofs are judged exactly as before.
+  const body = [
+    "## Acceptance",
+    "",
+    "- claim: the thing holds",
+    "  proof: trust me",
+    "",
+    "Remudero-Task: W1-TNOTINPLAN",
+  ].join("\n");
+
+  const verdict = evaluateGate({ body, trailerResolves: (taskId) => taskId === IMPLEMENTATION_TASK });
+
+  assert.equal(verdict.ok, false);
+});
