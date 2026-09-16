@@ -1012,9 +1012,40 @@ lock_started_at_field() {
     | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/' || true
 }
 
+lock_pid_field() {
+  # Same discipline as lock_host_field and lock_started_at_field above: grep/cut, not jq. Unlike
+  # those two, `pid` is a bare JSON NUMBER (`{"pid":57,"host":"..."}`), never a quoted string, so
+  # there is no closing quote to anchor on — the match simply ends at the first non-digit.
+  grep -ao '"pid"[[:space:]]*:[[:space:]]*[0-9]*' "$1" 2>/dev/null \
+    | head -1 \
+    | sed -E 's/.*:[[:space:]]*([0-9]*)$/\1/' || true
+}
+
+# ── W1-T3611: THE SECOND PROVABLE CASE — A DEAD PID INSIDE THE STILL-RUNNING TARGET CONTAINER ────
+#
+# W1-T2556 (just above) covers "the container this lock names is gone". It does not cover the
+# daemon PROCESS restarting IN PLACE while its SAME container keeps running — `docker inspect` on
+# `host` then answers `true`, so that branch never fires and an orphaned lock blocks every recycle
+# forever. Incident measured and detailed in this task's own plan record (W1-T3611).
+#
+# BOTH of the following must hold — either alone is a staleness HEURISTIC, not a fact, and this
+# task's own falsifier catches it: host-match alone sweeps aside a live worker's lock; pid-absence
+# alone reclaims a FOREIGN container's lock on a collision that means nothing about the container
+# this recycle owns.
+#   1. `host` is the RUNNING TARGET container's OWN id — resolved via `docker inspect --format
+#      '{{.Id}}' "${CONTAINER_NAME}"`. A `host` naming any OTHER running container stays exactly as
+#      unresolved as before this task.
+#   2. `docker exec "${host}" sh -c '[ -e /proc/<pid> ]'` gives a DEFINITIVE dead answer — printed
+#      `ABSENT`, from the container's OWN kernel, for the pid the LOCK ITSELF names. Anything else
+#      (pid present, or the probe cannot run at all) is read as "still alive or unknown" and left
+#      alone — the same fail-closed direction W1-T2556 already takes on an unparsable inspect.
 reclaim_dead_inflight_locks() {
   [ -d "${INFLIGHT_DIR}" ] || return 0
-  local f host verdict running reclaimed_dir reclaimed_path
+  local f host verdict running reclaimed_dir reclaimed_path pid probe target_id
+  # Resolved ONCE per sweep, not per lock — the RUNNING target container's own id never changes
+  # mid-sweep. Empty when `${CONTAINER_NAME}` cannot be resolved at all (e.g. no container yet on a
+  # first-ever run), which the branch below treats as "cannot judge" and leaves every lock alone.
+  target_id="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
   for f in "${INFLIGHT_DIR}"/*.lock; do
     [ -e "${f}" ] || continue
     host="$(lock_host_field "${f}")"
@@ -1023,11 +1054,25 @@ reclaim_dead_inflight_locks() {
 
     verdict=""
     if running="$(docker inspect --format '{{.State.Running}}' "${host}" 2>/dev/null)"; then
-      [ "${running}" = "false" ] && verdict="NOT RUNNING (docker inspect: State.Running=false)"
+      if [ "${running}" = "false" ]; then
+        verdict="NOT RUNNING (docker inspect: State.Running=false)"
+      elif [ "${running}" = "true" ] && [ -n "${target_id}" ]; then
+        # `host` names a container that IS running — the W1-T978 deferral applies UNLESS this is
+        # the recycle's own target and its own procfs disowns the pid (W1-T3611, see above).
+        case "${target_id}" in
+          "${host}"*)
+            pid="$(lock_pid_field "${f}")"
+            if printf '%s' "${pid}" | grep -Eq '^[0-9]+$'; then
+              probe="$(docker exec "${host}" sh -c "[ -e /proc/${pid} ] && echo PRESENT || echo ABSENT" 2>/dev/null || true)"
+              [ "${probe}" = "ABSENT" ] && verdict="LIVE TARGET CONTAINER, DEAD PID (docker exec ${host}: /proc/${pid} ABSENT)"
+            fi
+            ;;
+        esac
+      fi
     else
       verdict="ABSENT (docker inspect: no such container)"
     fi
-    [ -n "${verdict}" ] || continue # running, or an answer this script cannot parse — leave alone
+    [ -n "${verdict}" ] || continue # running elsewhere, unprobeable, or pid still alive — leave alone
 
     echo "recycle-container: ${f} names host ${host}, which docker reports ${verdict}." >&2
     echo "  RECLAIMING — printed in full below before anything acts on it, never deleted:" >&2
@@ -1037,7 +1082,7 @@ reclaim_dead_inflight_locks() {
     mkdir -p "${reclaimed_dir}"
     reclaimed_path="${reclaimed_dir}/$(basename "${f}").recycle-$$"
     mv "${f}" "${reclaimed_path}"
-    printf 'reclaimed by recycle-container.sh (W1-T2556) pid %s at %s\nhost: %s\nverdict: %s\n' \
+    printf 'reclaimed by recycle-container.sh (W1-T2556/W1-T3611) pid %s at %s\nhost: %s\nverdict: %s\n' \
       "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${host}" "${verdict}" > "${reclaimed_path}.reason"
     echo "  moved aside to ${reclaimed_path} (reason recorded alongside it) — recycle proceeds" >&2
   done
