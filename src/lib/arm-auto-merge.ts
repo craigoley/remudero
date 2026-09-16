@@ -84,6 +84,11 @@ function prNumberFromRef(ref: string): number | undefined {
 interface ArmMergeFacts {
   mergeable?: string;
   behindBy?: number;
+  /** GitHub's own `mergeable_state`. W1-T3694 reads it to decide whether being BEHIND actually
+   *  blocks this merge: GitHub reports `behind` only when the base branch requires branches to be
+   *  up to date. With that requirement off, a behind PR is `clean`/`blocked`/`unstable` and the
+   *  merge would succeed as-is. */
+  mergeableState?: string;
 }
 
 /** Private mirror of run-task.ts's `mergeFactsFromRest`. */
@@ -99,6 +104,7 @@ function mergeFactsFromRest(pr: unknown, compare: unknown): ArmMergeFacts {
   return {
     mergeable,
     behindBy: typeof c.behind_by === "number" ? c.behind_by : undefined,
+    ...(typeof p.mergeable_state === "string" ? { mergeableState: p.mergeable_state } : {}),
   };
 }
 
@@ -563,7 +569,23 @@ function directMergePreflight(
     };
   }
 
-  if (facts.behindBy === 0) {
+  // W1-T3694: BEING BEHIND IS NOT, BY ITSELF, A REASON TO REWRITE THE HEAD.
+  //
+  // Every update costs a full CI cycle AND strands the `remudero-review` status the merge needs:
+  // the arm runs before the review is posted, so the status lands on the sha this update just
+  // replaced and the PR goes back to "review is not success". That refusal is the single largest
+  // automerge class on this repo, and an update the merge never needed is a self-inflicted share
+  // of it.
+  //
+  // GitHub ALREADY COMPUTED THE ANSWER. `mergeable_state` is `behind` only when the base branch
+  // requires branches to be up to date; with that requirement off, a behind PR reads `clean`,
+  // `blocked` or `unstable` and merges as-is. `mergeable !== "MERGEABLE"` (conflicts) has already
+  // returned above, so the only case left here is a mergeable PR that is merely behind.
+  //
+  // FALLS BACK TO THE OLD BEHAVIOUR WHEN THE STATE IS UNREADABLE: an absent `mergeableState`
+  // still updates, so an unknown answer never newly SKIPS an update that was required.
+  const behindBlocksThisMerge = facts.mergeableState === undefined || facts.mergeableState === "behind";
+  if (facts.behindBy === 0 || !behindBlocksThisMerge) {
     return { proceed: true, evidence: { ...baseEvidence, remedy: "direct-merge" } };
   }
 
