@@ -15,6 +15,11 @@
   priority: 2
   attempts: 0
   note: |
+    reservation hand-off: plan/verb-audit-1789573000 -> plan/dup-dispatch-1789576000
+    The id was minted with `rmd next-task-id` from a lane whose branch was plan/verb-audit-1789573000,
+    then filed from plan/dup-dispatch-1789576000. Same operator, same session; the holder anchor simply
+    recorded the lane the mint ran in rather than the lane the filing landed on.
+
     MEASURED 2026-09-16 on remudero-site. Timestamps are from the run-branch epochs and the REST
     record, not inferred:
 
