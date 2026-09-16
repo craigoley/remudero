@@ -759,6 +759,35 @@ test("every priced openweight deployment declares a request temperature", async 
   }
 });
 
+test("a request-temperature lookup refuses a deployment id that only shares a prefix or suffix with a shaped row", () => {
+  // W1-T3610. The design for OPENWEIGHT_TEMPERATURE (W1-T3608) requires TABLE LOOKUP, NEVER A
+  // SUBSTRING OR PREFIX MATCH (W1-T2573): "gpt-5-nano" and "gpt-5.4-nano" are different
+  // deployments with no guarantee of shared behaviour. openWeightTemperatureField already uses
+  // Object.prototype.hasOwnProperty for exact-key lookup, but nothing before this test pinned
+  // that a near-miss id -- one that merely CONTAINS a shaped row as a prefix, or that a shaped
+  // row's own prefix -- is rejected rather than silently matched. Without this, a future change
+  // to a substring/`startsWith` lookup would pass every other test in this file and still be
+  // wrong: this is the fixture that would catch it.
+  for (const deployment of Object.keys(OPENWEIGHT_TEMPERATURE)) {
+    const superset = `${deployment}-v2`;
+    assert.equal(superset in OPENWEIGHT_TEMPERATURE, false, `${superset} must not itself be a table key, or this proves nothing`);
+    assert.throws(
+      () => openWeightTemperatureField(superset),
+      OpenWeightUnshapedDeploymentError,
+      `${superset} shares a prefix with a shaped row and must still refuse`,
+    );
+
+    const truncated = deployment.slice(0, -1);
+    if (truncated.length > 0 && !Object.prototype.hasOwnProperty.call(OPENWEIGHT_TEMPERATURE, truncated)) {
+      assert.throws(
+        () => openWeightTemperatureField(truncated),
+        OpenWeightUnshapedDeploymentError,
+        `${truncated} is a prefix of a shaped row and must still refuse`,
+      );
+    }
+  }
+});
+
 test("the escalation judge rides openweight on the short-prompt deployment", () => {
   // W1-T3614. `escalation.judged` is the highest-volume zero-tool lane in the fleet -- 29,834 rows
   // across 72 tasks in 6.9 days and RISING -- and it rode the Claude subscription because it had no

@@ -1,0 +1,72 @@
+- id: W1-T3656
+  title: "A FLAT TOOL LIST CANNOT SERVE TWO PROVIDERS, SO THE CHECK-RUNNER SHIPPED UNUSED — openweight REFUSES a declared Bash and Claude has no RunCheck, so every lane that runs a command is pinned to Claude by its own tool bound no matter what the adapter implements"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  priority: 1
+  budget_usd: 25.00
+  files:
+    - src/lib/worker.ts
+    - src/lib/prompt-render.ts
+    - src/run-task.ts
+    - test/a-tool-bound-resolves-per-provider.test.ts
+  origin: oper#subscription-offload-2026-09-16
+  plan_refs: ["W1-T3617", "W1-T3616", "W1-T3572", "W1-T3569"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CAPABILITY IS ON MAIN AND NOTHING USES IT. `OPENWEIGHT_CHECKS` ships five entries --
+    unit_test, typecheck, git_log, git_status, git_diff, git_remote -- and W1-T3572's operator
+    ruling asked for exactly that surface so the shell-capable lanes could leave the subscription.
+    MEASURED on origin/main: `grep -rn '"RunCheck"' src/` outside the adapter returns ZERO. Not one
+    lane declares it. The check-runner was built, reviewed, merged, and is dead code.
+
+    THE REASON IS A TYPE MISMATCH NOBODY HAD TO STATE UNTIL NOW.
+
+        openweight implements  Read, Write, Edit, Grep, Glob, RunCheck
+        Claude implements      Read, Write, Edit, Grep, Glob, Bash, WebSearch, WebFetch, ...
+
+    There is NO overlap for "run a command": Claude has Bash and no RunCheck; openweight has
+    RunCheck and refuses Bash outright -- `openWeightTools` throws "openweight adapter does not
+    implement declared tool(s)" rather than dropping it, deliberately, so a lane never silently
+    loses a capability its prompt relies on.
+
+    W1-T3616 GAVE EVERY LANE ONE FLAT LIST, and that is the trap. recon declares
+    [Read, Grep, Glob, Bash] because its prompt names three shell commands, and that declaration
+    is HONEST -- W1-T3616 forbids narrowing a lane to make it eligible. But a flat list is a single
+    value, so the same declaration that is correct for Claude makes the openweight spawn THROW.
+    Every command-running lane is therefore pinned to the subscription BY ITS OWN BOUND, whatever
+    the adapter can do.
+
+    THE STAKES ARE THE WHOLE OFFLOAD. recon is $302 across 739 runs and is the lane W1-T3572 names
+    for staging; `implement` is $4,081 across 728 and `fix` $769 across 274. All three run
+    commands. None can move while a bound is one list.
+
+    NOT A NARROWING, AND THE DISTINCTION IS THE WHOLE DESIGN. This does not shrink recon's surface
+    to fit a cheaper provider -- W1-T3616's guard against that stays, and its test still reddens if
+    recon drops Bash on the Claude path. It gives the SAME lane the equivalent capability on each
+    provider: Bash where Bash exists, the allowlisted check-runner where it does not.
+
+    THE PROMPT MUST STOP NAMING A MECHANISM. renderReconPrompt currently says "Inspect the current
+    git repository read-only (git remote -v, git log --oneline -5, ls)" -- three shell commands, by
+    name. A worker holding run_check cannot follow that literally. The instruction becomes what to
+    OBSERVE (the remote, recent history, the tree) rather than which binary to invoke, so each
+    provider satisfies it with the tools it has. `ls` needs nothing new: the lane already declares
+    Glob.
+
+    ROUTING IS STILL A SEPARATE DECISION. This makes recon ELIGIBLE. Whether it routes, and behind
+    what measurement, is W1-T3572's staged call and is not made here.
+
+  acceptance:
+    - claim: "a lane's tool bound resolves per provider, so the same lane gets Bash on Claude and the allowlisted check-runner on openweight"
+      proof: "unit test: a command-running lane resolves Bash on claude and RunCheck on openweight"
+    - claim: "every bound an openweight lane resolves is implemented by the adapter, so no routed lane can throw on an undeclared tool"
+      proof: "unit test: every openweight lane bound is a subset of what the adapter implements"
+    - claim: "an unknown provider refuses rather than falling back to a default list, the same fail-closed contract the lane lookup already carries"
+      proof: "unit test: an unknown provider refuses rather than inheriting a default bound"
+    - claim: "the recon prompt names what to observe rather than which binary to run, so a worker holding only the check-runner can satisfy it"
+      proof: "unit test: the recon prompt names no shell binary"

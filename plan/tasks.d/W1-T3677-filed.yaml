@@ -1,0 +1,65 @@
+- id: W1-T3677
+  title: "THE STATE BACKUP IS BUILT, TESTED, MARKED MERGED AND HAS NEVER RUN — snapshotState and restoreState have ZERO callers outside their own test, no timer invokes them, and no snapshot exists on the host, so the irreplaceable artifact W1-T234 was filed to protect is unprotected"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 70.00
+  files: [deploy/host-update.sh, test/the-state-snapshot-actually-runs-on-this-host.test.ts]
+  origin: oper#gap-sweep-2026-09-16
+  plan_refs: ["W1-T234"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-16 on the live host and in the tree:
+
+        snapshotState / restoreState      exist in src/lib/ledger.ts
+        test/state-backup.test.ts         passes, against fixtures
+        callers outside that test          ZERO
+        deploy/ or scripts/ invocations    NONE (the only match is the test-tier manifest)
+        systemd timers matching backup     none beyond Ubuntu's own dpkg-db-backup
+        snapshots on disk                  none
+
+    W1-T234 is `status: merged`. Its three criteria are all mechanism-level -- "a snapshot exists
+    after the scheduled run", "restore round-trips a seeded state directory", "a snapshot failure
+    escalates loudly" -- and every one is proved against a TEMPORARY FIXTURE. All three can pass
+    forever on a host that has never taken a snapshot, because none of them asserts that anything
+    schedules the call.
+
+    SO THIS IS NOT A BUG IN W1-T234'S CODE. The code is correct and tested. The task is complete by
+    its own criteria and the outcome it existed for did not happen: MASTER-PLAN WS-7 asks for a
+    nightly state backup with a drilled restore, and the fleet has neither.
+
+    WHAT IS UNPROTECTED. `state/` holds the ledger (every run, verdict, cost and escalation this
+    fleet has recorded), the proposals register, the run locks and service-tokens.json. The plan is
+    in git; the ledger is not. It exists on one Azure VM whose root disk filled and kernel-panicked
+    on 2026-09-16, and whose recovery that night was a reboot rather than a restore, because there
+    was nothing to restore from.
+
+    THE PATTERN IS NAMED AND RECURRING. A module built, tested and never reached is the same shape
+    as W1-T281 (the console's freshness model, zero callers), W1-T284 (panel-skills, never
+    registered) and W1-T996 (the Access JWT provider, zero production call sites). This instance
+    guards the one artifact that cannot be rebuilt from source.
+
+    THE RUNG ALREADY EXISTS. `deploy/host-update.sh --reclaim-only` runs nightly with the right
+    privileges and already refuses while a fleet container is live. A snapshot belongs on that same
+    rung for the same reason the git reclaim does (W1-T3612): one maintenance story, not two.
+
+    THE CRITERIA MUST BIND TO THIS HOST, NOT TO A FIXTURE. That is the whole lesson of W1-T234
+    passing while nothing ran, so the falsifier below is about the invocation, never the archive
+    format.
+  acceptance:
+    - claim: "the nightly rung invokes the snapshot, so a host that runs the rung has a snapshot it did not have before"
+      proof: "unit test: the nightly rung invokes the state snapshot"
+    - claim: "a snapshot that fails escalates loudly on the rung rather than letting the nightly run report success"
+      proof: "unit test: a failed snapshot fails the nightly rung loudly"
+    - claim: "the rung refuses to snapshot while a fleet container is live, so it never archives a half-written ledger"
+      proof: "unit test: the snapshot refuses while a fleet container is live"
+  falsifier: |
+    Remove the invocation from the rung and the first test must fail while
+    test/state-backup.test.ts still passes -- which is precisely the condition this task exists to
+    make impossible. Swallow a snapshot error and the second fails. Snapshot under a live container
+    and the third fails.

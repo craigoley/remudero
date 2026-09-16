@@ -1,0 +1,47 @@
+- id: W1-T3666
+  title: "A FAILED OPEN-WEIGHT REQUEST KEEPS ITS WHOLE RESERVATION, SO THE DAILY CAP IS CONSUMED AT TWICE THE REAL SPEND — settlement is reached only after a 200, and the reservation it would have corrected is the conservative one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/lib/worker-provider.ts, test/a-failed-openweight-request-settles-its-reservation.test.ts]
+  origin: oper#smart-routing-audit-2026-09-15
+  plan_refs: ["W1-T3619", "W1-T3575"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED from state/openweight-allowance.json on 2026-09-15, 104 requests against the $10 cap:
+
+        reserved total                     $5.2696
+        settled total (72 of 104)          $0.9270
+        effective charge against the cap   $2.6771
+        charge if every request settled    $1.3389
+
+    32 of 104 never settled, so the day was charged roughly TWICE its real spend and the $10 cap
+    behaved like $5.
+
+    THE RESERVATION FORMULA IS CORRECT AND MUST NOT BE DIVIDED DOWN. openWeightReservationUsd
+    bounds input by BYTE length and its own doc defends that precisely: "no tokenizer emits more
+    tokens than the UTF-8 bytes it consumed, so this can never under-reserve... settlement corrects
+    it downward." W1-T3619 already pinned that with a test.
+
+    THE DEFECT IS THAT THE STATED CORRECTIVE NEVER RUNS ON THE FAILURE PATH.
+    settleOpenWeightBudget is reached only after a usage block is parsed off a 200 response. A
+    request that fails before that keeps the full conservative figure forever -- and the figure
+    assumes OPENWEIGHT_MAX_COMPLETION_TOKENS of output that a failed request never produced.
+
+    W1-T3619 REMOVED THE LARGEST SOURCE, NOT THE MECHANISM. Refusing a request no deployment can
+    hold means it never reserves at all, which deletes the window-edge failures. Any OTHER failure
+    -- a 429, a transport fault, an unparseable body -- still strands its full reservation, and the
+    arithmetic above returns as routing widens.
+
+  acceptance:
+    - claim: "a request that fails after reserving is settled down rather than stranding the conservative figure, and the ledger says which failure settled it"
+      proof: "unit test: a failed openweight request settles rather than stranding its reservation"
+    - claim: "a failure that produced no completion is never charged for completion tokens it did not generate"
+      proof: "unit test: a failed request is not charged for completion tokens it never produced"
+    - claim: "the byte-length input bound is unchanged, because over-reserving is the safe direction and only the failure path is corrected"
+      proof: "unit test: the openweight reservation still bounds input by byte length"

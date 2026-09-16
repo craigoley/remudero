@@ -1,0 +1,67 @@
+- id: W1-T3655
+  title: "AN EXPIRING FIXTURE ON MAIN BLOCKS EVERY OPEN PR AND NOTHING EVER OBSERVES MAIN ITSELF — expiring-fixture-census is `pull_request`-only, so a stamp sitting on the base reddens every branch beside it while no run is ever charged with fixing it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20.00
+  files: [.github/workflows/ci.yml, scripts/expiring-fixture-census.mjs, test/the-census-watches-its-own-base.test.ts]
+  origin: oper#pr-queue-sweep-2026-09-16
+  plan_refs: ["W1-T3272", "W1-T1033", "W1-T2339"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-16. Three `lastActivityAt` stamps in
+    test/an-open-pr-does-not-rot-while-it-waits.test.ts crossed into the census's 7-day margin on
+    clean origin/main. Within ninety minutes SIX open pull requests were red on it -- #5725, #5733,
+    #5734, #5736, #5738, #5739 -- every one with byte-identical output and no diff of its own
+    involved. It was also ROLLING: 3 stamps at 09:00, 5 by 10:20, all six due before 2026-09-23.
+
+    NOT ONE OF THOSE RUNS WAS ABLE TO FIX IT IN SCOPE. The repair belongs to the base, so each
+    branch either widened itself to carry a fix it did not own or stayed blocked. Six PRs, one
+    stamp, and the only route to green was to port the same patch six times -- which is what
+    actually happened.
+
+    THE GATE CANNOT SEE MAIN. ci.yml runs on `push: branches: [main]`, but the comment-load-ratchet
+    job that hosts the census carries `if: github.event_name == 'pull_request'` (W1-T1033). So the
+    one branch that OWNS the fixture is the one branch the census never reads. The bomb is visible
+    only from the PRs it is punishing.
+
+    W1-T3388 added base ATTRIBUTION -- each crossing now says whether it was inherited -- and
+    deliberately did not act on it, because letting an inherited crossing pass with nothing watching
+    main converts a gate into a comment nobody is answerable for.
+  design: |
+    GIVE THE CENSUS A RUN THAT OWNS MAIN, THEN STOP CHARGING BRANCHES FOR WHAT THEY INHERITED. The
+    two halves must land together: either alone is worse than today. Attribution without a main run
+    is a warning no gate enforces; a main run without attribution leaves every PR still red.
+
+    The job is PR-only for a reason W1-T1033 recorded, and the census rides it as a STEP rather than
+    a job because a new ci.yml job must be registered in ci-gate.yml AND in src/lib/ci-parity.ts,
+    and a diff touching a workflow beside a `src/` product path is Standing rule 25 entanglement.
+    Whatever route is taken must respect both -- relaxing one step's guard inside the existing job
+    is likely cheaper than a new job, and does not touch the required-check set.
+
+    ON MAIN THERE IS NO BASE TO INHERIT FROM, so attribution must not silently excuse everything
+    there: when the base ref resolves to the commit under test, the census reads STRICT, exactly as
+    it does when no base is readable at all. That arm is the one most likely to be got wrong, since
+    it fails open and looks green.
+
+    THE PR-SIDE CHANGE IS ONE LINE OF POLICY: a crossing marked `inherited` is reported and not
+    counted toward the exit code. W1-T3388's test/expiring-fixture-census.test.ts already carries a
+    test whose only purpose is to hold that line, and it names itself as the thing to rewrite here.
+  acceptance:
+    - claim: "the census observes the base branch itself, so a stamp on main is caught by a run that owns it rather than only by the PRs beside it"
+      proof: "unit test: test/the-census-watches-its-own-base.test.ts"
+    - claim: "on the base branch the census reads STRICT — with no earlier base to inherit from, nothing is excused as inherited"
+      proof: "grep: CENSUS_MAIN_BRANCH_RUN in scripts/expiring-fixture-census.mjs"
+    - claim: "a crossing a PR inherited from its base is reported but no longer decides that PR's exit code"
+      proof: "unit test: an inherited crossing is reported and does not block the pull request"
+  falsifier: |
+    Reconstruct 2026-09-16: one stamp inside the margin on the base, a PR that touches nothing near
+    it. The PR must go green with the crossing NAMED, and the base's own run must go red for the
+    same stamp. Then delete the base run and the second assertion must fail -- that is the arm that
+    turns this from attribution into an excuse. Point the base ref at the commit under test and the
+    strict-reading arm must refuse, or a main run excuses its own bomb.
