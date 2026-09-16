@@ -642,7 +642,7 @@ export interface RegisteredFixOwnerRecoveryDeps {
 // turns that into a tiered response -- silent, held-and-visible, restart, or (if a restart already
 // happened and the sha still has not moved) needs-human. A COUNTER, NOT A TIMER: sweep cadence
 // varies with load, so a wall-clock floor tuned on an idle fleet would be wrong on a busy one --
-// see plan/tasks.d/W1-T3691-*.yaml's rationale for the incident this closes. FALSIFIER:
+// see this task's own plan record for the incident this closes. FALSIFIER:
 // test/a-repeated-stale-reviewer-skip-asks-for-a-restart.test.ts ─────────────────────────────
 
 /** How many consecutive sweep passes must observe the SAME stale code sha before the daemon asks
