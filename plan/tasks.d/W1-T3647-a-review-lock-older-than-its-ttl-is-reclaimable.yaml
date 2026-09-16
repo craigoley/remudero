@@ -54,8 +54,8 @@
       proof: "unit test: a claim older than the ttl is taken over by the next reviewer"
     - claim: "a claim whose age cannot be read is treated as live, so an unreadable clock never causes two reviewers to judge one head"
       proof: "unit test: a claim with an unreadable age is treated as live"
-    - claim: "the TTL is set from measured review durations rather than a round guess, so it cannot fire on a slow but living review"
-      proof: "grep: measured in src/lib/review.ts"
+    - claim: "the TTL is a NAMED CONSTANT derived from measured review durations rather than a round guess, so it cannot fire on a slow but living review"
+      proof: "grep: REVIEW_LOCK_TTL_MS in src/lib/review.ts"
   falsifier: |
     Reconstruct #5672's lock -- taken at 23:42, read at 01:42, holder's run gone -- and the next
     reviewer must take it over. Set the age inside the TTL and it must defer, which is today's
