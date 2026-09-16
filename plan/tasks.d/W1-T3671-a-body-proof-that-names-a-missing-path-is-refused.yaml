@@ -1,0 +1,71 @@
+- id: W1-T3671
+  title: "A PULL REQUEST BODY'S `grep:` PROOF NAMES A FILE BY PATH AND IS SILENTLY INVALIDATED BY A RENAME — nothing reads the path until review executes it, a full CI round after the rename that broke it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files: [scripts/acceptance-author-gate.mjs, test/a-body-proof-that-names-a-missing-path-is-refused.test.ts]
+  origin: oper#pr-queue-sweep-2026-09-16
+  plan_refs: ["W1-T3651", "W1-T3653"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED THREE TIMES IN ONE EVENING, 2026-09-16, on two pull requests:
+
+      #5742  a filed shard was renumbered W1-T3650 -> W1-T3655 after losing an id race. The body's
+             criterion greps `plan/tasks.d/W1-T3650-....yaml`, which no longer existed. Caught by
+             hand while fixing something else.
+
+      #5718  the same shard renumbered W1-T3631 -> W1-T3656 to clear a reservation-holder refusal.
+             Same break, same file, caught by hand again.
+
+      #5718  then renumbered a second time, W1-T3656 -> W1-T3659, by a different lane. That lane
+             updated the FILE and not the BODY, so the proof pointed at a path that had existed for
+             about twenty minutes.
+
+    IN NONE OF THE THREE DID A GATE SAY ANYTHING. `acceptance-author-gate` parses the block and
+    judges whether it is JUDGEABLE -- dialect present, one physical line, a path-shaped target -- and
+    a path that is well-formed but absent passes every one of those tests. The proof is not executed
+    until `remudero-review` runs it, which is a full CI round later, and it then reads as a failed
+    criterion rather than as a stale path, so the author debugs the claim instead of the filename.
+
+    RENAMES ARE NOT RARE HERE, which is what makes this worth closing: an id race, a
+    reservation-holder refusal and a Rule 19 slug-match remedy ALL rename a shard, and the last is
+    something the linter itself prints as a remedy. A gate that prints "rename this file" while
+    another gate silently depends on the old name is the W1-T3648 shape one layer up.
+  design: |
+    THE GATE ALREADY HAS THE DIFF AND THE PATH; IT SIMPLY NEVER COMPARES THEM. `acceptance-author-gate`
+    reads the body's criteria and runs in CI with a checkout, so for a `grep:` proof whose target is
+    a repository path it can ask whether that path EXISTS at the head being judged, and refuse with
+    the one fact the author needs: the path, and that nothing is there.
+
+    REFUSE, DO NOT REPAIR. Guessing that `W1-T3650-foo.yaml` "means" `W1-T3655-foo.yaml` is a rename
+    detector, and a wrong guess silently re-points a proof at a file the author did not choose. The
+    remedy is to name the path; the gate's job is to say it is not there.
+
+    SCOPE IT TO PATHS THE GATE CAN CHECK. A `unit test:` TITLE proof has no path, and a `grep:` whose
+    target is outside the repository is not this gate's business; both must pass through untouched.
+    W1-T3653 separately fixes which paths the dialect may name at all, and the two must agree: a
+    path this check calls present must be one that check calls nameable.
+
+    WHERE IT RUNS MATTERS. `acceptance-author-gate` already re-runs on `edited`, so a body-only
+    repair clears it without a new sha -- which is exactly the loop an author hits here, and the
+    reason this belongs in that gate rather than in the reviewer.
+  acceptance:
+    - claim: "a grep proof naming a repository path that does not exist at this head is refused, naming the path"
+      proof: "unit test: test/a-body-proof-that-names-a-missing-path-is-refused.test.ts"
+    - claim: "the refusal states that the path is absent rather than that the criterion failed, so the author fixes the filename and not the claim"
+      proof: "unit test: the refusal names an absent path, not a failed criterion"
+    - claim: "a title-form proof carries no path and is passed through untouched"
+      proof: "unit test: a title proof is not path-checked"
+    - claim: "the absent-path refusal is a named predicate the gate reports by name"
+      proof: "grep: bodyProofTargetMissing in scripts/acceptance-author-gate.mjs"
+  falsifier: |
+    Replay #5718's third break verbatim: a body greppping `plan/tasks.d/W1-T3656-....yaml` against a
+    head where the file is `W1-T3659-....yaml`. The gate must refuse and name the missing path.
+    Point the same proof at the file that does exist and it must pass. Give it a `unit test:` title
+    proof and it must pass untouched -- delete that arm and the third test fails, because that is
+    the arm that would refuse every title proof for having no path.
