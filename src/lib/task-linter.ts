@@ -3078,6 +3078,66 @@ export interface LintOpts {
  *  proof-unit-test-unresolvable.
  *  Dispatch-priority, advisory-routing, deferred-follow-up and blocked-record-unruled always run
  *  with no `opts` field at all, and the last three can never block. */
+/** The checks whose SUBJECT is how a task will be verified WHEN IT IS BUILT — the proof families
+ *  and the criterion/proof bindings that grade them. They are the only ones {@link
+ *  downgradeBuildVerificationForRetired} touches.
+ *
+ *  Everything NOT in this set stays blocking on a retired record, deliberately: the retirement
+ *  DISCIPLINE checks (`blocked-task-disposition`, `blocked-record-unruled`) exist precisely to
+ *  police this transition and must keep refusing it, and provenance/rule15/duplicate-title govern
+ *  the record as a filed artifact rather than as future work. */
+const BUILD_VERIFICATION_CHECKS = new Set<LintCheck>([
+  "proof-shape",
+  "proof-dialect",
+  "proof-resolvability",
+  "proof-grep-safety",
+  "proof-grep-unmatchable",
+  "proof-grep-self-certifying",
+  "proof-engine-divergence",
+  "proof-scope",
+  "proof-name-resolution",
+  "proof-base-discrimination",
+  "shared-proof",
+  "unbound-criterion",
+]);
+
+/**
+ * A RETIRED RECORD IS NOT GRADED ON PROOFS IT WILL NEVER RUN — the build-verification checks above
+ * are downgraded to `warn` on a record whose status is non-open AND which names a legal
+ * `retirement:` disposition. They are still REPORTED, every one of them; they simply stop deciding
+ * the exit code, because `ok` is false only on a blocking violation.
+ *
+ * WHY, MEASURED: #5718 retires 25 console tasks written before the proof dialect existed. Ten of
+ * them carry 66 `proof-dialect` violations between them, every one annotated by the report itself as
+ * `pre-existing on base` — and the retirement edit is what drags them into the changed-tasks scope.
+ * So the gate refused the cleanup because of debt the cleanup was removing, and the only way to land
+ * it was to invent executable proofs for work nobody will ever do. That is not proof discipline; it
+ * is the gate holding its own cleanup hostage.
+ *
+ * WHY NOT THE EXISTING CARVE. W1-T3274's {@link STATUS_FLIP_CARVE_TARGETS} already subtracts a
+ * status-flip-only id from `scope`, but deliberately EXCLUDES `blocked` and proves why: carving it
+ * removes the id from the changed-tasks loop entirely, so `blockedDispositionViolations` — which
+ * fires only on the TRANSITION into `blocked` — never runs and its refusal silently vanishes. This
+ * keeps the id in scope for exactly that reason. Nothing is carved; one severity is lowered, and
+ * the transition check still runs and still refuses.
+ *
+ * It also cannot be reached by a flip ALONE: `blockedDispositionViolations` refuses a move into
+ * `blocked` that names no disposition, so the very field this predicate requires is the field that
+ * check mandates. The two rules now agree instead of being jointly unsatisfiable.
+ */
+export function downgradeBuildVerificationForRetired(task: Task, violations: LintViolation[]): LintViolation[] {
+  const retiring =
+    NON_OPEN_FILING_STATUSES.has(task.status) &&
+    task.retirement !== undefined &&
+    (RETIREMENT_REASONS as readonly string[]).includes(task.retirement);
+  if (!retiring) return violations;
+  return violations.map((v) =>
+    v.severity === "block" && BUILD_VERIFICATION_CHECKS.has(v.check)
+      ? { ...v, severity: "warn" as const, message: `${v.message} — DOWNGRADED: this record is retired (${task.retirement}), so it will never be built and this proof will never run` }
+      : v,
+  );
+}
+
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task, opts);
@@ -3120,7 +3180,10 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   }
   const declaredBudget = declaredBudgetSanityWarning(task, opts.declaredBudgetCalibration);
   if (declaredBudget) violations.push(declaredBudget);
-  return { ok: violations.every((v) => v.severity !== "block"), violations };
+  // LAST, so it sees every violation this function produced: a retired record keeps its report and
+  // loses only the BLOCKING severity of the build-verification families. See the function's doc.
+  const graded = downgradeBuildVerificationForRetired(task, violations);
+  return { ok: graded.every((v) => v.severity !== "block"), violations: graded };
 }
 
 /** Lint every task in a loaded plan. Deterministic order (plan declaration order).

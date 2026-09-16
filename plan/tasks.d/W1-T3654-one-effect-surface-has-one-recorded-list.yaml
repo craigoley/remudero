@@ -1,0 +1,64 @@
+- id: W1-T3654
+  title: "ONE EFFECT SURFACE IS PINNED BY TWO HAND-WRITTEN COPIES — buildSweepEffects' member list is duplicated across two suites that must be edited in step by hand, and a diff that updates one passes the check the other exists to run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 15.00
+  files: [src/lib/sweep.ts, test/build-sweep-effects-takes-one-deps-object.test.ts, test/sweep-orchestration-lives-in-lib.test.ts, test/one-effect-surface-has-one-recorded-list.test.ts]
+  origin: oper#pr-queue-sweep-2026-09-16
+  plan_refs: ["W1-T2890", "W1-T3618"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON #5725, 2026-09-16. It added one member, `reviewerCodeStaleThisPass`, to the sweep
+    effect surface and updated NEITHER of the two hand-maintained lists that pin it:
+
+        test/build-sweep-effects-takes-one-deps-object.test.ts   EFFECT_KEYS  (entrypoint surface)
+        test/sweep-orchestration-lives-in-lib.test.ts            EFFECT_KEYS  (lib surface)
+
+    Two constants, the same name, different orderings, no link between them. The failing job named
+    only the first. Updating it turned the visible failure green while the second stayed red for a
+    DIFFERENT reason -- and that second failure was the real one: W1-T2890's invariant that the
+    lib-built and entrypoint-built surfaces expose the same keys had genuinely been broken.
+
+    So the duplication did not merely cost an edit. It hid a real regression behind a bookkeeping
+    one, and the only reason the second list was found at all was a sweep of every suite naming a
+    member of the surface -- not the failure report, which never mentioned it.
+
+    A CENSUS WHOSE POPULATION IS TRANSCRIBED BY HAND IN TWO PLACES IS TWO CENSUSES THAT CAN
+    DISAGREE, and the disagreement is exactly what neither can detect.
+  design: |
+    ONE RECORDED LIST, READ BY BOTH SUITES. The surface is already derivable -- both tests obtain it
+    by calling a builder and reading `Object.keys` -- so the recorded list exists to catch an
+    UNDECLARED change, and one copy of it does that for both.
+
+    WHERE IT LIVES MATTERS. It is test-fixture data about a production surface, so it belongs beside
+    the surface's own contract rather than in whichever suite happens to import it first; both
+    suites then read the same export and a member added to one surface and not the other fails on
+    the comparison rather than on a transcription mismatch.
+
+    KEEP BOTH ASSERTIONS. W1-T2890 asserts two distinct things -- lib-vs-recorded and
+    lib-vs-entrypoint -- and collapsing them would lose the second, which is the one that caught
+    #5725's real defect. The duplication to remove is the LIST, not the comparison.
+
+    A THIRD SUITE PINS THE SINGLE-SOURCE PROPERTY ITSELF, because the failure mode this task
+    addresses is a future author re-introducing a local copy, which nothing would otherwise refuse.
+  acceptance:
+    - claim: "both surface suites read one recorded member list, so a member can no longer be declared in one and missed in the other"
+      proof: "unit test: test/one-effect-surface-has-one-recorded-list.test.ts"
+    - claim: "the lib-vs-entrypoint comparison survives unchanged, since that is the assertion that caught the real regression"
+      proof: "unit test: the lib and entrypoint surfaces are still compared to each other"
+    - claim: "a member present on one builder and absent from the other still fails, and names which side is missing it"
+      proof: "unit test: a member on one builder and not the other names the side that lacks it"
+    - claim: "the recorded list is exported from one place rather than transcribed per suite"
+      proof: "grep: SWEEP_EFFECT_SURFACE in src/lib/sweep.ts"
+  falsifier: |
+    Replay #5725: add a member to the entrypoint builder only. Exactly one assertion must fail, and
+    its message must name the lib side as the one missing it -- today two suites fail for two
+    unrelated-looking reasons. Re-introduce a second local copy of the list and the single-source
+    test must refuse it. Delete the lib-vs-entrypoint comparison and the second test must fail,
+    which is the guard against "simplifying" this into one weaker check.

@@ -119,13 +119,21 @@ function scratch(): string {
   return dir;
 }
 
-function runHook(cwd: string, env: Record<string, string>): { status: number; stderr: string } {
+function runHook(
+  cwd: string,
+  env: Record<string, string>,
+  // W1-T3388: git feeds pre-push "<local ref> <local sha> <remote ref> <remote sha>" per line on
+  // stdin. Omitted, stdin is empty — which is also how the hook runs when invoked by hand, and the
+  // fallback path that case exercises is asserted below.
+  stdin = "",
+): { status: number; stderr: string } {
   // spawnSync, NOT execFileSync: the latter RETURNS stdout and surfaces stderr only by throwing, so
   // a hook that exits 0 while naming a skip on stderr would read here as having said nothing — the
   // exact case two of these tests exist to pin.
   const res = spawnSync("sh", [HOOK], {
     cwd,
     encoding: "utf8",
+    input: stdin,
     env: { PATH: process.env.PATH ?? "", HOME: cwd, ...env },
   });
   assert.equal(res.error, undefined, `the hook itself failed to launch: ${String(res.error)}`);
@@ -208,4 +216,81 @@ test("rule25-precheck is wired into the hook, with the same loader and exit-2 di
   assert.match(invocation[0], /--import tsx/, `bare node cannot load it: ${invocation[0]}`);
   assert.match(hook, /rule25-precheck could not read the diff/, "exit 2 must be named, not counted as a violation");
   assert.match(hook, /rule25-precheck\.mjs absent — skipped, NOT passed/, "a missing check is skipped, never cleared");
+});
+
+// ── W1-T3388: the head-identity admission ───────────────────────────────────────────────────────
+// MEASURED: head-identity-gate is REQUIRED in CI and had no local route, so #5737 and #5739 each
+// burned a CI round on it within an hour and then needed a trailer-only repair commit.
+
+/** A stub standing in for scripts/head-identity-gate.mjs: records its argv, exits with `code`. */
+function stubGate(dir: string, code: number): string {
+  const argvLog = join(dir, "gate-argv.txt");
+  mkdirSync(join(dir, "scripts"), { recursive: true });
+  writeFileSync(
+    join(dir, "scripts", "head-identity-gate.mjs"),
+    `import { writeFileSync } from "node:fs";\n` +
+      `writeFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(" "));\n` +
+      `process.exit(${code});\n`,
+  );
+  return argvLog;
+}
+
+test("W1-T3388: a head the gate would REFUSE is named at push time, and the push still goes", () => {
+  // ADVISORY BY DESIGN, and this is the test that holds it there. An ad-hoc PR's trailer cites the
+  // PR's own number, which does not exist until the PR does, so the FIRST push of such a branch
+  // cannot satisfy the gate — refusing would make that route impossible rather than early. This
+  // hook also reaches every worker worktree, where a wrong refusal stops the fleet pushing.
+  const dir = scratch();
+  stubGate(dir, 1);
+  const { status, stderr } = runHook(dir, { RMD_PREPUSH_GATES: "1" }, "refs/heads/local abc123 refs/heads/some-branch def456\n");
+
+  assert.equal(status, 0, "the head-identity advisory must never block a push");
+  assert.match(stderr, /head-identity-gate would REFUSE this head in CI/);
+  assert.match(stderr, /Remudero-Task: <id>/, "the remedy must be named, not just the failure");
+  assert.match(stderr, /run-<taskId>-<epochMs>/, "and both conforming forms, not one");
+});
+
+test("W1-T3388: a head the gate accepts says nothing and blocks nothing", () => {
+  const dir = scratch();
+  stubGate(dir, 0);
+  const { status, stderr } = runHook(dir, { RMD_PREPUSH_GATES: "1" }, "refs/heads/local abc123 refs/heads/some-branch def456\n");
+
+  assert.equal(status, 0);
+  assert.doesNotMatch(stderr, /head-identity-gate would REFUSE/, "a passing gate must stay quiet");
+});
+
+test("W1-T3388: the ref judged is the one being PUSHED, not the branch checked out", () => {
+  // `git push origin HEAD:run-W1-T3618-<ms>` carries a local branch that is NOT what the PR shows,
+  // and the gate judges the branch NAME's shape — so reading the checkout would judge the wrong
+  // string. git supplies the real one on stdin; this pins that it is what reaches the gate.
+  const dir = scratch();
+  const argvLog = stubGate(dir, 0);
+  runHook(
+    dir,
+    { RMD_PREPUSH_GATES: "1" },
+    "refs/heads/local-name abc123 refs/heads/run-W1-T3618-1789528173134 def456\n",
+  );
+
+  assert.match(readFileSync(argvLog, "utf8"), /--head-ref run-W1-T3618-1789528173134/);
+});
+
+test("W1-T3388: an absent gate script is skipped and SAID, never silently cleared", () => {
+  const dir = scratch();
+  mkdirSync(join(dir, "scripts"), { recursive: true });
+  const { status, stderr } = runHook(dir, { RMD_PREPUSH_GATES: "1" });
+
+  assert.equal(status, 0);
+  assert.match(stderr, /head-identity-gate\.mjs absent — skipped, NOT passed/);
+});
+
+test("W1-T3388: a push with no resolvable ref is skipped and SAID, never counted as a pass", () => {
+  // No stdin and no git checkout to fall back to. The gate judges a branch NAME, so with no name
+  // there is nothing to judge — and a check that cannot run must never read as one that passed.
+  const dir = scratch();
+  stubGate(dir, 1);
+  const { status, stderr } = runHook(dir, { RMD_PREPUSH_GATES: "1" });
+
+  assert.equal(status, 0);
+  assert.match(stderr, /head-identity-gate — no pushable ref resolved, skipped, NOT passed/);
+  assert.doesNotMatch(stderr, /would REFUSE/, "an unrun check must not report a verdict it never got");
 });
