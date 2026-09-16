@@ -1541,7 +1541,8 @@
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/serve.ts, apps/dashboard/src]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "Operator is the design judge; expect a taste iteration loop — structure CSS/layout for cheap revision.
     Mechanical proxies (sections+order, distinct state colors, responsive no-hscroll, a11y>=90) are the auto gate;
@@ -1745,7 +1746,8 @@
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/serve.ts, apps/dashboard/src]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "UI+TRUST half of layer 1; DATA half is W1-T155. Liveness-honesty is the W1-T130 polarity family (never lie
     about your own state). Sibling of the overhaul (W1-T153)."
@@ -2696,7 +2698,8 @@
   origin: architect
   plan_refs: ["§7"]
   files: [src/lib/serve.ts, test/serve.live-state.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "PROOFS REWRITTEN 2026-07-22 from prose to the executable dialect (the W1-T183/#541 chore, same
     class): every proof now names test/serve.live-state.test.ts — the file this task's own files: list
@@ -4527,7 +4530,8 @@
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/serve.ts, src/lib/panel-actions.ts, test/serve.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "FILED 2026-07-21 from the operator question 'why do I need to run the inbox command?'. Companion to
     W1-T192 (autonomous drafting): that one makes a draft EXIST without a human pull, this one makes the decision
@@ -4608,7 +4612,8 @@
   origin: architect
   plan_refs: ["§7"]
   files: [src/lib/serve.ts, test/serve.live-state.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "CONSOLE DESIGN PASS v2, task 1 of 2 filed together (sibling W1-T184, ledger-first rendering). Applies
     the CLAIMED-vs-EVIDENCED doctrine (standing rule 22) at the LIST layer: a dense row shows what is claimed,
@@ -4674,7 +4679,8 @@
   origin: architect
   plan_refs: ["§7"]
   files: [src/lib/serve.ts, test/serve.live-state.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "RULE 21 FOLLOW-UP to the merged W1-T154, which shipped the skeleton but whose acceptance covered
     first-paint SPEED rather than the skeleton's RETIREMENT.
@@ -4756,7 +4762,8 @@
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/serve.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "FILED 2026-07-21 from operator feedback plus a research pass. VERIFIED FIRST, per the operator's
     instruction: W1-T183 is IN FLIGHT (PR 466 open), so this is filed as a coordinated FOLLOW-ON behind it
@@ -4827,7 +4834,8 @@
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/serve.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "FILED 2026-07-21 from operator feedback plus a research pass. VERIFIED FIRST, per the operator's
     instruction: W1-T183 is IN FLIGHT (PR 466 open), so this is a coordinated FOLLOW-ON behind it rather than
@@ -4913,7 +4921,8 @@
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/serve.ts, src/lib/board.ts, test/serve.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "AMENDED 2026-07-20 with the RECENT ROW CONTENT spec (verb, task id + title, PR link with PR title, relative timestamp, spend where present, row as a W1-T158 drill target) after a second operator report: an id-and-PR-number row names what changed but not what it was. RECEIVED 2026-07-20 the two RECOMPUTE-CADENCE criteria (unchanged-ledger-no-reprojection, and coalesce-concurrent-recomputes) redistributed from W1-T187 per rule 16 — nothing dropped, only moved. W1-T187 stays a pure per-request hoist with no cross-request cache, because a cache there would mask staleness the way the old empty-array catch masked failure; the cadence belongs with this task's SSE work. CONSOLE DESIGN PASS v2, task 2 of 2 filed together (sibling W1-T183, density/IA). Directly applies the
     CLAIMED-vs-EVIDENCED doctrine (standing rule 22): the ledger is the fleet's own RECEIPT of what it did, and
@@ -5061,7 +5070,8 @@
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/serve.ts, src/lib/board.ts, src/lib/digest.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "Per-token last-seen marker; recap rows drill into T158 cards; digest (W1-T112/W1-T144) marker-aware so push
     and pull are one story. Falsifiers: a pre-marker event in the recap fails; view-then-reload yields empty recap."
@@ -5104,7 +5114,8 @@
   origin: architect
   plan_refs: ["§7", "§9"]
   files: [src/lib/serve.ts, apps/dashboard/src]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "The GLANCE layer (interaction layer 4). spend-today is governor-aware once W1-T148 lands (a dep). Counts
     from W1-T155's taxonomy. Every number traceable to a source — no decorative estimates."
@@ -5227,7 +5238,8 @@
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/serve.ts, apps/dashboard/src]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "The FIND layer (interaction layer 2). Needs W1-T155's taxonomy for the status facet + W1-T153's shell. URL
     state = shareable/bookmarkable/survives-reload."
@@ -5266,7 +5278,8 @@
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/serve.ts, apps/dashboard/src]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "The DETAIL+JOURNEY layer (interaction layer 3). Journey = rmd trace (W1-T43). Card is O(0) extra GitHub
     calls (batched gateway) — the board-fix invariant."
@@ -5594,7 +5607,8 @@
   origin: architect
   plan_refs: ["§7B", "§7"]
   files: [src/run-task.ts, src/lib/serve.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "board.ts:20-24 explicitly defers this wiring; it is now due. AMENDED 2026-07-20 (web-only console decision):
     this is THE console for every surface — responsive + PWA-installable + authenticated even on localhost, no
@@ -5634,7 +5648,8 @@
   origin: architect
   plan_refs: ["§7B", "§7"]
   files: [src/lib/drain.ts, src/lib/panel-graph.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "Directly answers Craig's pain (can't see the drain without hand cross-referencing). Second leg of the
     operator-console arc; builds on W1-T139 (the served panel) and reuses drain.ts's plannedSequence + panel-graph's
@@ -12214,7 +12229,8 @@
   origin: architect
   plan_refs: ["§8B", "§7"]
   files: [src/run-task.ts, src/lib/serve.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "operator_note = console-editable, provenance-stamped (author+timestamp), injected into recon/implement under
     the provenance rule (W1-T19 discipline). Complements W1-T141 (verdicts AFTER) with feedback BEFORE. Falsifiers:

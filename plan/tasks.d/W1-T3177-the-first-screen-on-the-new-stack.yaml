@@ -11,7 +11,8 @@
   files: [apps/dashboard/package.json, apps/dashboard/tsconfig.json, apps/dashboard/vite.config.ts, apps/dashboard/src, tsconfig.json, package.json, .github/workflows/ci.yml, test/the-dashboard-has-its-own-toolchain.test.ts]
   origin: "operator-session#console-architecture-2026-09-08"
   plan_refs: ["W1-T3173", "W1-T3174", "W1-T3175", "W1-T3176", "W1-T3178", "W1-T3159", "W1-T3158"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   rationale: |
     OPERATOR DECISIONS, 2026-09-08, all six approved and recorded here so a builder does not

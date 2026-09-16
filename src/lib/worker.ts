@@ -4493,6 +4493,161 @@ function defaultLaneListGit(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", maxBuffer: 1 << 24 });
 }
 
+// ── Orphaned worker-process reaper (W1-T3629) ──────────────────────────────
+//
+// THREE RECLAIMERS EXIST AND NONE OF THEM OWNS THE PROCESS: pruneStaleRuns force-removes a DEAD
+// run's WORKTREE; rmd-reap-stray.timer sweeps stray rmd-* CONTAINERS; reclaimStaleLock reclaims a
+// LOCK whose holder is gone. A `claude` or `npm ci` worker whose run is long gone keeps its memory
+// until the host dies. MEASURED 2026-09-16: two `npm ci` sat at 80 and 71 minutes (527MB/385MB
+// RSS) next to load 221 on 8 cores and 0.9GiB free for 75 minutes; an operator restarted the VM.
+//
+// AGE ALONE IS NEVER SUFFICIENT. pruneStaleRuns' own doc records the scar this repeats if done
+// wrong: force-removing a worktree by age once destroyed a successful 65-turn implement mid-run
+// (W1-T208), and `implement.high` runs at max_turns 400 — legitimately over two hours. So the
+// bound is ORPHANHOOD — doctor.ts's own `lane-less-workers` check has meant lane-LESS since #2251
+// — and age is only the SECOND condition: a worker is reapable only when no LIVE run lock's pid
+// names its parent AND it is past the age bound. A worker still held by a live lane is never a
+// candidate however old it is.
+//
+// NOT IMPORTED FROM doctor.ts, ON PURPOSE: doctor.ts -> daemon-health.ts -> status.ts ->
+// plan-architect.ts -> escalate.ts -> feedback.ts -> risk-judge.ts -> worker.ts is an existing
+// import chain, so a worker.ts -> doctor.ts edge closes a cycle `.dependency-cruiser.cjs`'s
+// `no-circular` rule holds at zero (W1-T2895) — depcruise caught exactly this on this task's first
+// round. `HUNG_WORKER_AGE_S` and the `WorkerProcess` shape below are therefore a deliberate,
+// by-hand mirror of doctor.ts's own (#2251's derivation), not a re-derivation: keep the value and
+// the four fields in sync with doctor.ts if either changes.
+
+/** #2251's own derivation, mirrored here (not imported — see the note above this section). */
+export const HUNG_WORKER_AGE_S = 7200;
+
+/** Mirrors doctor.ts's `WorkerProcess` shape exactly — the SAME reading doctor.ts's
+ *  judgeLaneLessWorkers judges, so this reaper acts on what the doctor reported rather than a
+ *  second, possibly-diverging process-table read (not imported — see the note above). */
+export interface WorkerProcess {
+  pid: number;
+  /** Parent pid. A worker whose parent is gone has been reparented to init — the ORPHAN test this
+   *  reaper uses, because age alone is evidence of duration and not of death. */
+  ppid: number;
+  etimeS: number;
+  args: string;
+}
+
+/** Why {@link reapOrphanedWorkerProcesses} left a worker running. */
+export type WorkerKeepReason =
+  /** Its parent pid is named by a run.lock whose holder is still alive — a live run owns it. */
+  | "live-run"
+  /** Still inside the age bound — orphanhood alone is not sufficient (W1-T208's lesson). */
+  | "within-age-bound"
+  /** The owning run's lock could not be read. A destructive action must fail closed: an unreadable
+   *  reading is treated as POSSIBLY LIVE, never as proof of death — pruneStaleRuns treats a corrupt
+   *  lock the same as an absent one because its action reclaims a directory; inverted here because
+   *  this action destroys a process. */
+  | "owner-unreadable";
+
+/** One worker process reaped this pass, carrying exactly what the acceptance criterion asks the
+ *  ledger row to carry: the pid, the age and the reason. */
+export interface WorkerReapAction {
+  pid: number;
+  ageS: number;
+  args: string;
+  reason: "orphan-past-age-bound";
+}
+
+export interface WorkerKeepAction {
+  pid: number;
+  ageS: number;
+  reason: WorkerKeepReason;
+}
+
+export interface WorkerReapSummary {
+  reaped: WorkerReapAction[];
+  kept: WorkerKeepAction[];
+}
+
+export interface WorkerReapOpts {
+  /** Age bound (s) below which a worker is protected regardless of orphanhood. Default {@link
+   *  HUNG_WORKER_AGE_S} (#2251, reused not re-derived). */
+  ageBoundS?: number;
+  /** Resolve the {@link RunLockRead} for the run.lock that names `ppid` as ITS OWN pid — i.e.
+   *  whether some run currently claims this worker as its child. Linking a worker to its owning run
+   *  needs a cross-reference (ppid against every registered worktree's run.lock), not a direct pid
+   *  match, so this is required rather than defaulted: the real cross-reference is the cadence
+   *  caller's to wire from {@link listRegisteredWorktrees} and {@link readRunLock}, not a scan this
+   *  pure decision should assume the shape of. */
+  ownerLockForPpid: (ppid: number) => RunLockRead;
+  /** Injectable liveness probe for a `live` owner lock's pid (tests). Defaults to {@link
+   *  defaultIsPidAlive}. */
+  isPidAlive?: (pid: number) => boolean;
+  /** Terminate the process. Defaults to `process.kill`. W1-T3266's measured lesson applies again
+   *  here because `npm ci` is one of the two shapes this reaper targets: SIGTERM once let a wedged
+   *  `npm ci` survive for six hours where SIGKILL returned in 3s, so this signals SIGKILL, never the
+   *  SIGTERM default. */
+  kill?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Ledger sink, called with the pid, the age and the reason BEFORE the kill is sent, never after —
+   *  the same before-not-after discipline {@link reclaimStaleConfigLock} keeps. Defaults to
+   *  `console.error`. */
+  ledger?: (message: string, extra?: Record<string, unknown>) => void;
+  /** SURVEY ONLY when true: a reapable worker is still recorded in `reaped` and still ledgered, but
+   *  no signal is sent. Default false, mirroring {@link WorktreeReapOpts.dryRun}. */
+  dryRun?: boolean;
+}
+
+/**
+ * Reap every ORPHANED worker process past the age bound: not claimed by any live run's lock, and
+ * older than `ageBoundS`. Both conditions are required — orphanhood alone would repeat W1-T208's
+ * age-alone defect on a process instead of a worktree, and age alone would leave the 2026-09-16
+ * outage's `npm ci` running for as long as the host stays up.
+ *
+ * FAILS CLOSED ON AN UNREADABLE OWNER LOCK: a `corrupt` reading is treated as POSSIBLY LIVE and the
+ * worker is SPARED, never as proof the owning run is gone (see {@link WorkerKeepReason}).
+ */
+export function reapOrphanedWorkerProcesses(
+  processes: readonly WorkerProcess[],
+  opts: WorkerReapOpts,
+): WorkerReapSummary {
+  const ageBoundS = opts.ageBoundS ?? HUNG_WORKER_AGE_S;
+  const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const kill = opts.kill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
+  const ledger = opts.ledger ?? ((message: string, extra?: Record<string, unknown>) => console.error(message, extra));
+  const reaped: WorkerReapAction[] = [];
+  const kept: WorkerKeepAction[] = [];
+
+  for (const w of processes) {
+    // AGE GATE FIRST: orphanhood alone is not sufficient (a fresh, still-legitimate worker is not a
+    // candidate), so this never even asks who owns it until it is past the bound.
+    if (w.etimeS <= ageBoundS) {
+      kept.push({ pid: w.pid, ageS: w.etimeS, reason: "within-age-bound" });
+      continue;
+    }
+    const ownerLock = opts.ownerLockForPpid(w.ppid);
+    if (ownerLock.kind === "corrupt") {
+      kept.push({ pid: w.pid, ageS: w.etimeS, reason: "owner-unreadable" });
+      continue;
+    }
+    if (ownerLock.kind === "live" && isPidAlive(ownerLock.info.pid)) {
+      kept.push({ pid: w.pid, ageS: w.etimeS, reason: "live-run" });
+      continue;
+    }
+    // `absent`, or a `live` lock naming a pid that is no longer alive: no live run claims this
+    // worker's parent, so the owning run is gone.
+    ledger(
+      `worker.orphan_reap: pid=${w.pid} age=${w.etimeS}s reason=orphan-past-age-bound ` +
+        `(no live run claims parent pid ${w.ppid}, W1-T3629)`,
+      { pid: w.pid, ageS: w.etimeS, ppid: w.ppid, reason: "orphan-past-age-bound" },
+    );
+    if (!opts.dryRun) {
+      try {
+        kill(w.pid, "SIGKILL");
+      } catch {
+        // Already gone between the read and the kill — the ledger row above already recorded the
+        // decision, so this is not silently lost.
+      }
+    }
+    reaped.push({ pid: w.pid, ageS: w.etimeS, args: w.args, reason: "orphan-past-age-bound" });
+  }
+  return { reaped, kept };
+}
+
 export function ghPrView(prUrl: string): { state: string; mergeable: string; url: string } {
   return ghJson(["pr", "view", prUrl, "--json", "state,mergeable,url"]) as {
     state: string;
