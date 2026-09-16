@@ -1,0 +1,70 @@
+- id: W1-T3673
+  title: "ONE OF THREE FLEET STATE DIRECTORIES SITS ON THE 29 GiB OS DISK THAT FILLED AND PANICKED THE HOST — core and console bind onto the persistent managed data disk, site does not, and no single root exists that a backup could copy"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 55.00
+  files: [deploy/host-update.sh, test/every-instance-state-root-is-on-the-persistent-disk.test.ts]
+  origin: oper#ledger-durability-2026-09-16
+  plan_refs: ["W1-T3670", "W1-T3626"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-16 on the live host, per instance:
+
+        core     ~/rmd-state2/state          /dev/nvme0n1p1  128 GiB  52%   <- data disk (bind)
+        console  /mnt/rmd/…-console-state    /dev/nvme0n1p1  128 GiB  52%   <- data disk
+        site     ~/rmd-site-state/state      /dev/root        29 GiB  70%   <- OS DISK
+
+    Sizes: core 278 MiB, site 25 MiB, console 25 MiB.
+
+    THE OS DISK IS THE ONE THAT FAILED. On 2026-09-16 it reached No space left on device: sshd
+    stopped forking, the Cloudflare tunnel dropped, the Azure guest agent stopped reporting and the
+    kernel panicked after 4h27m. 89 minutes of fleet downtime. `systemd-journald: Failed to create
+    new system journal: No space left on device` appears in the serial log across THREE separate
+    boots, so it is the recurring failure of this host, not one incident.
+
+    Site's ledger is on that disk. It is small today, and that is not the argument: the argument is
+    that it shares a 29 GiB partition with the OS, the journal, /home and every agent transcript
+    (~/.codex was 5.3 GiB on the day it filled), and it is the disk that has already run out three
+    times.
+
+    THE DESTINATION IS ESTABLISHED AND VERIFIED PERSISTENT. `/mnt/rmd` is `remudero-data`, a
+    managed StandardSSD_LRS data disk at LUN 0 — it survives restart, deallocation and host
+    migration, and `az vm show` confirms it is a real data disk rather than local storage. Core
+    already binds onto it through /etc/fstab (`/mnt/rmd/state2 → ~/rmd-state2`), so the pattern to
+    copy exists and is proven across the reboots this host has taken.
+
+    NOT /mnt/scratch, AND THIS TRAP IS WHY THE TASK NAMES IT. That mount is 440 GiB and 1% used,
+    which makes it the obvious choice and the wrong one: it is the Azure EPHEMERAL resource disk
+    (the `d` in Standard_D8alds_v7), absent from the VM's dataDisks list and from /etc/fstab
+    because waagent mounts it. Its contents do not survive deallocation or host migration. A ledger
+    there would read as durable and vanish on the first resize.
+
+    THE SECOND HALF IS ONE ROOT, NOT THREE. AWS's Pizza Bot keeps every thread, checkpoint and log
+    under a single user-controlled folder specifically so it can be copied whole — "copy it with
+    the server stopped". Ours is three roots across two filesystems, which is a large part of why
+    W1-T3670's snapshot was never wired to anything: there is no one thing to snapshot. Bringing
+    every instance under one persistent root makes that task mechanical instead of a design
+    question.
+
+    THIS IS NOT A BACKUP AND MUST NOT BE SOLD AS ONE. A managed disk is three replicas inside one
+    datacentre: it covers hardware failure and covers nothing about an accidental delete, a bad
+    migration or ledger corruption. W1-T3670 remains the durability fix; this removes one failure
+    mode (the OS disk filling takes the host AND a ledger down together) and makes that fix
+    tractable.
+  acceptance:
+    - claim: "every instance's state root resolves to the persistent data disk, and the check names any instance that does not rather than reporting a count"
+      proof: "unit test: every instance state root resolves to the persistent data disk"
+    - claim: "a state root placed on the ephemeral resource disk is refused, not merely reported, because it reads as durable and is not"
+      proof: "unit test: an ephemeral resource disk is refused as a state root"
+    - claim: "the move preserves the ledger byte-identically, so no run, verdict or cost row is lost in relocating it"
+      proof: "unit test: relocating a state root preserves the ledger byte-identically"
+  falsifier: |
+    Leave one instance on the OS disk and the first test must fail NAMING that instance. Accept a
+    path under the ephemeral mount and the second fails. Copy with anything that rewrites line
+    endings or drops the trailing newline and the third fails.
