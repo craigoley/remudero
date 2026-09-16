@@ -405,6 +405,9 @@ export const HUNG_WORKER_AGE_S = 7200;
  */
 export interface WorkerProcess {
   pid: number;
+  /** Parent pid. A worker whose parent is gone has been reparented to init — the ORPHAN test the
+   *  reaper uses (W1-T3629), because age alone is evidence of duration and not of death. */
+  ppid: number;
   etimeS: number;
   args: string;
 }
@@ -425,19 +428,45 @@ export interface WorkerProcessReading {
  * `npm ci` is the worktree install a lane runs before its worker, and is the shape that actually
  * sat for 80 minutes during the 2026-09-16 outage.
  */
-export const WORKER_PROCESS_PATTERNS: ReadonlyArray<readonly string[]> = [
-  ["claude", "--output-format stream-json"],
-  ["npm ci"],
-];
+export interface WorkerPattern {
+  /** Basename of argv[0]. Matched EXACTLY, never as a substring of the whole command line. */
+  readonly exe: string;
+  /** Flags that must also appear, to separate a dispatched worker from an interactive one. */
+  readonly needs: readonly string[];
+}
 
 /**
- * `ps` ELAPSED TIME IS NOT PORTABLE, and the difference is a keyword error rather than a wrong
- * number. procps (Linux, the fleet host) has `etimes`, plain seconds. BSD `ps` (macOS, every
- * developer machine here) does NOT — it rejects the keyword outright — and offers `etime`,
- * formatted `[[DD-]HH:]MM:SS`. Reading only `etimes` would make this arm UNKNOWN on every mac,
- * and a check that always warns is a check everyone learns to ignore, which is the failure mode
- * this whole task exists to remove.
+ * A DISPATCHED WORKER, matched on its EXECUTABLE rather than anywhere in its command line.
+ *
+ * TWO FALSE POSITIVES WERE MEASURED WHILE WRITING THIS, and the second is why this anchors on
+ * argv[0]:
+ *
+ *   1. Matching `claude` anywhere counted the OPERATOR'S OWN interactive session — a live reading
+ *      returned `oldest 11.5 days`, which was the editor running this change.
+ *   2. Matching `--output-format stream-json` anywhere then counted a SHELL COMMAND that merely
+ *      CONTAINED that text: this file was being edited by a `zsh -c` whose argv quoted the flag,
+ *      and the reading picked up the shell itself.
+ *
+ * The second one is the dangerous shape. For a counter it is an over-count; for W1-T3629's reaper
+ * it would mean sending a signal to an operator's shell. So the executable's BASENAME must match
+ * exactly, and the flags are an additional condition rather than the whole test.
  */
+export const WORKER_PROCESS_PATTERNS: readonly WorkerPattern[] = [
+  { exe: "claude", needs: ["--output-format stream-json"] },
+  { exe: "npm", needs: ["ci"] },
+];
+
+/** argv[0]'s basename, or "" when the line has no command — never a substring search. */
+export function commandBasename(args: string): string {
+  const first = args.trim().split(/\s+/)[0] ?? "";
+  return first.split("/").pop() ?? "";
+}
+
+export function matchesWorkerPattern(args: string): boolean {
+  const exe = commandBasename(args);
+  return WORKER_PROCESS_PATTERNS.some((p) => p.exe === exe && p.needs.every((n) => args.includes(n)));
+}
+
 export function parseEtime(field: string): number | undefined {
   const raw = field.trim();
   if (/^\d+$/.test(raw)) return Number(raw); // procps `etimes`
@@ -453,16 +482,15 @@ export function parseWorkerProcesses(psOutput: string): WorkerProcessReading {
   for (const line of psOutput.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
-    const match = /^(\d+)\s+(\S+)\s+(.*)$/.exec(trimmed);
+    const match = /^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(trimmed);
     if (!match) continue;
     const pid = Number(match[1]);
-    const etime = parseEtime(match[2] ?? "");
-    const args = match[3] ?? "";
-    if (!Number.isFinite(pid) || etime === undefined) continue;
-    if (!WORKER_PROCESS_PATTERNS.some((all) => all.every((needle) => args.includes(needle)))) continue;
-    // `ps` lists this very `ps`, and a grep for the pattern would match its own argv.
-    if (args.includes("ps -eo")) continue;
-    processes.push({ pid, etimeS: etime, args });
+    const ppid = Number(match[2]);
+    const etime = parseEtime(match[3] ?? "");
+    const args = match[4] ?? "";
+    if (!Number.isFinite(pid) || !Number.isFinite(ppid) || etime === undefined) continue;
+    if (!matchesWorkerPattern(args)) continue;
+    processes.push({ pid, ppid, etimeS: etime, args });
     if (oldest === undefined || etime > oldest) oldest = etime;
   }
   const count = processes.length;
@@ -473,9 +501,9 @@ export function parseWorkerProcesses(psOutput: string): WorkerProcessReading {
 function defaultPs(): string {
   const opts = { encoding: "utf8" as const, maxBuffer: 8 * 1024 * 1024 };
   try {
-    return execFileSync("ps", ["-eo", "pid=,etimes=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
+    return execFileSync("ps", ["-eo", "pid=,ppid=,etimes=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
   } catch {
-    return execFileSync("ps", ["-eo", "pid=,etime=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
+    return execFileSync("ps", ["-eo", "pid=,ppid=,etime=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
   }
 }
 

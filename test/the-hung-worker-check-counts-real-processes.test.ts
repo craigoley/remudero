@@ -20,6 +20,7 @@ import type { Config } from "../src/lib/config.js";
 import { doctorCommand } from "../src/lib/report-commands.js";
 import {
   HUNG_WORKER_AGE_S,
+  matchesWorkerPattern,
   judgeLaneLessWorkers,
   parseEtime,
   parseWorkerProcesses,
@@ -99,20 +100,37 @@ test("a dispatched worker is counted but an operator's own claude session is not
   // MEASURED WHILE WRITING THIS: matching `claude` alone returned `oldest 11.5 days` on the
   // developer machine — the editor running the change. The daemon spawns workers with
   // `--output-format stream-json`; an interactive session never does.
-  const fleet = parseWorkerProcesses("  4242  8884 /usr/local/bin/claude --output-format stream-json --verbose --effort high");
+  const fleet = parseWorkerProcesses("  4242 900  8884 /usr/local/bin/claude --output-format stream-json --verbose --effort high");
   assert.equal(fleet.count, 1, "a dispatched worker must be counted");
   assert.equal(fleet.oldestEtimeS, 8884);
   // The PID reaches the reading, because the reaper (W1-T3629) must act on the SAME reading the
   // doctor judges rather than shelling out to `ps` a second time and racing it.
   assert.deepEqual(fleet.processes, [
-    { pid: 4242, etimeS: 8884, args: "/usr/local/bin/claude --output-format stream-json --verbose --effort high" },
+    { pid: 4242, ppid: 900, etimeS: 8884, args: "/usr/local/bin/claude --output-format stream-json --verbose --effort high" },
   ]);
 
-  const interactive = parseWorkerProcesses("  4243  999254 /usr/local/bin/claude");
+  const interactive = parseWorkerProcesses("  4243 900  999254 /usr/local/bin/claude");
   assert.equal(interactive.count, 0, "an operator's own session is not a hung worker");
 
-  const install = parseWorkerProcesses("  4244  4846 npm ci");
+  const install = parseWorkerProcesses("  4244 1  4846 npm ci");
   assert.equal(install.count, 1, "the worktree install is the shape that actually wedged");
+
+  // MATCHING IS ANCHORED ON argv[0]'s BASENAME, not a substring of the command line. Both of these
+  // were measured as real false positives while writing this, and the second is the dangerous one:
+  // for a counter it over-counts, but W1-T3629's reaper sends a SIGNAL, and this shell was the
+  // editor making this very change.
+  assert.equal(matchesWorkerPattern("/usr/local/bin/claude --output-format stream-json"), true);
+  assert.equal(
+    matchesWorkerPattern("/bin/zsh -c \"...--output-format stream-json...\""),
+    false,
+    "a shell whose argv merely CONTAINS the flag is not a worker — signalling it would hit an operator",
+  );
+  assert.equal(
+    matchesWorkerPattern("grep --output-format stream-json src/"),
+    false,
+    "nor is a grep for the flag",
+  );
+  assert.equal(matchesWorkerPattern("/usr/local/bin/claude"), false, "nor an interactive session");
 });
 
 test("elapsed time parses from both ps dialects, so the arm is not UNKNOWN on every mac", () => {
