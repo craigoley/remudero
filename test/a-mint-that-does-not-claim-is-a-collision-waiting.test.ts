@@ -1,0 +1,86 @@
+/**
+ * `rmd next-task-id` — RESERVING IS THE DEFAULT (W1-T3091).
+ *
+ * WHY THIS FILE EXISTS. The old default printed an id and claimed NOTHING, so two lanes minting in
+ * one window took the same number and one renumbered after its PR was open. `ci.yml`'s own
+ * task-id-existence job already recorded the defect in prose before the task was filed: "The hand
+ * lane's only id source, `rmd next-task-id`, prints an id and reserves NOTHING by design, so a
+ * later mint handed the same number out as free and nothing noticed until an open PR had to be
+ * renumbered."
+ *
+ * MEASURED: five id incidents in one session on 2026-09-07, and again on 2026-09-15 when two
+ * shards reached main under W1-T3620 and `loadPlan` threw — main's own plan would not load, so
+ * every PR's required `ci` failed until a human renumbered the loser. Second time in nine days.
+ *
+ * THE SUBJECT IS THE ARGUMENT CONTRACT, driven as a pure decision rather than by pushing refs to a
+ * real origin: `reservingByDefault` is the predicate the command applies, and `validateReserveArgs`
+ * is the refusal it applies first.
+ */
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+import { validateReserveArgs } from "../src/run-task.js";
+
+const CLI_SOURCE = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+const DOCS = readFileSync(new URL("../docs/cli-reference.md", import.meta.url), "utf8");
+
+/** The predicate the command computes, read from the committed source so the test cannot drift. */
+function reservingFor(rest: string[]): boolean {
+  return !rest.includes("--no-reserve") && !rest.includes("--offline") && !rest.includes("--audit");
+}
+
+test("a bare mint claims the id rather than printing a number anyone may take", () => {
+  // THE WHOLE POINT. Before this task a bare invocation reserved nothing.
+  assert.equal(reservingFor([]), true, "a bare mint must CLAIM");
+
+  // And the committed source must actually compute it that way — not merely this test's model.
+  assert.match(
+    CLI_SOURCE,
+    /const reserving = !rest\.includes\("--no-reserve"\) && !offline && !rest\.includes\("--audit"\);/,
+    "the command must reserve by default, with the opt-outs named",
+  );
+  assert.doesNotMatch(
+    CLI_SOURCE,
+    /const reserving = rest\.includes\("--reserve"\);/,
+    "the old opt-IN default must be gone, or a bare mint still claims nothing",
+  );
+
+  // The opt-out works, and `--reserve` stays valid and redundant so existing callers are unbroken.
+  assert.equal(reservingFor(["--no-reserve"]), false, "--no-reserve must opt out");
+  assert.equal(reservingFor(["--reserve"]), true, "--reserve remains valid and redundant");
+});
+
+test("an offline mint declines to claim rather than refusing the invocation", () => {
+  // `--offline` declines to READ origin, so it cannot PUSH to it either. It implies the opt-out
+  // instead of erroring, because refusing would break a legitimate offline query.
+  assert.equal(reservingFor(["--offline"]), false, "--offline must imply the opt-out");
+  assert.equal(validateReserveArgs(["--offline"]), undefined, "a bare --offline must NOT be refused");
+
+  // Only asking for BOTH by name stays a refusal — that is two incompatible things requested
+  // explicitly, which is different from one implying the other.
+  assert.match(
+    String(validateReserveArgs(["--reserve", "--offline"])),
+    /contradictory/,
+    "an explicit --reserve beside --offline is still refused",
+  );
+  assert.match(
+    String(validateReserveArgs(["--reserve", "--no-reserve"])),
+    /contradictory/,
+    "claiming and not claiming in one invocation is refused by name, never silently resolved",
+  );
+
+  // `--audit` is a read-only report and must never claim.
+  assert.equal(reservingFor(["--audit"]), false, "--audit is read-only and must not reserve");
+});
+
+test("the opt-out is named in the command's own syntax rather than only in prose", () => {
+  // An operator reading `--help` or the reference must SEE the opt-out. A default that can only be
+  // discovered by reading source is a default nobody can turn off.
+  assert.match(DOCS, /--no-reserve/, "the reference must name the opt-out");
+  assert.match(
+    DOCS,
+    /rmd next-task-id \[--plan <path>\] \[--offline\] \[--no-reserve\]/,
+    "and it must appear in the SYNOPSIS, not only in the prose below it",
+  );
+  assert.match(CLI_SOURCE, /"--no-reserve"/, "the flag must be a known argument, or it errors as unknown");
+});
