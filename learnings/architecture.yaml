@@ -118,19 +118,18 @@
   lifecycle: active
   files: [ src/run-task.ts, src/lib/launchd.ts ]
   fact: >-
-    `rmd daemon` originally read its plan from the CHECKOUT it ran in
-    (join(repoRoot, plan/tasks.yaml)) and hardcoded the status gateway to
-    ghGateway(owner, "remudero") — so an unattended run could only drain the
-    main repo and would SILENTLY self-target. The daemon now takes an EXPLICIT
-    target: --repo <name> scopes the gateway to <owner>/<name> and reads the
-    plan from a synced clone (<root>/repos/<name>/plan/tasks.yaml, reset --hard
-    to origin/main so it's current); --plan <path> overrides; --dry-run previews
-    (spawns nothing, logs daemon.target). A SELF-TARGET GUARD refuses to drain
-    the daemon's own source repo unattended without --allow-self-target. `rmd
-    daemon-plist --repo <name>` bakes --repo into the launchd unit's
-    ProgramArguments so the unit drains the intended repo, not an implicit
-    default. (Task EXECUTION already derives its repo from task.repo via runTask
-    — only the daemon's PLAN SOURCE + gateway were pinned.)
+    `rmd daemon` takes an EXPLICIT target: `--repo <name>` scopes the gateway and reads the plan
+    from a synced clone, `--plan <path>` overrides, `--dry-run` previews. A SELF-TARGET GUARD
+    refuses to drain the daemon's own source repo unattended without `--allow-self-target`. Use
+    `rmd daemon-plist --repo <name>` so the launchd unit drains the intended repo, not an implicit
+    default.
+  evidence: >-
+    It originally read its plan from the CHECKOUT it ran in (`join(repoRoot, plan/tasks.yaml)`)
+    and hardcoded the status gateway to `ghGateway(owner, "remudero")` — so an unattended run
+    could only drain the main repo and would SILENTLY self-target. The synced clone is
+    `<root>/repos/<name>/plan/tasks.yaml`, `reset --hard` to origin/main so it is current; `--dry-
+    run` spawns nothing and logs `daemon.target`. Task EXECUTION already derived its repo from
+    `task.repo` via `runTask` — only the daemon's PLAN SOURCE and gateway were pinned.
   src: fix/daemon-repo-targeting (W1-T12d)
   cited: "2026-07-15"
 
@@ -194,19 +193,17 @@
   lifecycle: active
   files: [ src/lib/review.ts ]
   fact: >-
-    Verify every PR-body claim about your own diff against `git diff --numstat`,
-    and re-verify after each follow-up commit: `bodyContradictsDiff`
-    (`src/lib/review.ts`) opens the diff and fails the PR. Never assert scope
-    membership from memory — run the predicate:
-    `isInPlanScope("docs/ORIENTATION.md")` returns TRUE (run, not read), and any
-    claim about it goes stale the moment `plan-architect.ts` moves. The detector
-    also has a SHORTHAND arm: scope-shorthand phrases (the plan-only/data-only
-    family) fire when ANCHORED — as a label with a colon, a copular claim ("this
-    PR is ...-only"), or attributive before a changeset noun — while bare
-    mentions, quoted regions and file paths stay silent
-    (`shorthandIsAboutChangeset`). If the diff carries any file outside the
-    claimed scope, the anchored phrase fails the PR — so do not write the
-    shorthand in a body unless the predicate agrees.
+    Verify every PR-body claim about your own diff against `git diff --numstat`, and re-verify
+    after each follow-up commit — `bodyContradictsDiff` (`src/lib/review.ts`) opens the diff and
+    fails the PR. Never assert scope membership from memory: RUN the predicate. Do not write a
+    scope-shorthand phrase (the plan-only/data-only family) unless the predicate agrees —
+    anchored, it fails the PR if any file falls outside the claimed scope.
+  evidence: >-
+    `isInPlanScope("docs/ORIENTATION.md")` returns TRUE (run it, do not read it), and any claim
+    about it goes stale the moment `plan-architect.ts` moves. The detector's SHORTHAND arm fires
+    when ANCHORED — as a label with a colon, a copular claim ("this PR is ...-only"), or
+    attributive before a changeset noun — while bare mentions, quoted regions and file paths stay
+    silent (`shorthandIsAboutChangeset`).
   src: 'W1-T274, W1-T413, #974, #984, #1685; migrated from CLAUDE.md''s
     Before-you-push section, W1-T2507'
   cited: "2026-08-31"
@@ -215,20 +212,19 @@
   lifecycle: active
   files: [ src/lib/task-linter.ts, src/lib/review.ts ]
   fact: >-
-    Keep a `unit test:` body under 100 characters with at most one comma and no
-    `"; "`; a `grep:` pattern MAY contain `" in "` provided an explicit path
-    follows it. `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) fails
-    `proof-resolvability` at 2+ commas, or `"; "` plus a comma, or over 100
-    chars. `DIALECT_GREP_PATH_RE` (`src/lib/review.ts`) is
-    `/^(.*?)\s+in\s+(\S*[./*]\S*)$/i` — lazy, with the path group `\S`-only
-    against `$`, so the split always lands before the final token and an
-    embedded `" in "` survives intact: `grep: always succeeds in one call in
-    src/lib/ledger.ts` reads `verdict: pass`. The real hazard is a STOLEN
-    TRAILING TOKEN — a pattern ending in a path-like token with no explicit path
-    has that token taken as the path: `grep: the convergence invariant fires in
-    ledger.ts` greps `ledger.ts` and reads `verdict: exec_error`. The check is
-    `captured path == declared path`. Forward-referencing a PATH is safe (the
-    named test may not exist yet); forward-referencing a SYMBOL NAME is a guess.
+    Keep a `unit test:` body under 100 characters with at most one comma and no `"; "`. A `grep:`
+    pattern MAY contain `" in "` provided an explicit path follows it — the hazard is a STOLEN
+    TRAILING TOKEN: a pattern ending in a path-like token with NO explicit path has that token
+    taken as the path. The check is `captured path == declared path`. Forward-referencing a PATH
+    is safe; forward-referencing a SYMBOL NAME is a guess.
+  evidence: >-
+    `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) fails `proof-resolvability` at 2+
+    commas, or `"; "` plus a comma, or over 100 chars. `DIALECT_GREP_PATH_RE`
+    (`src/lib/review.ts`) is `/^(.*?)\s+in\s+(\S*[./*]\S*)$/i` — lazy, with the path group
+    `\S`-only against `$`, so the split always lands before the final token and an embedded `" in
+    "` survives intact: `grep: always succeeds in one call in src/lib/ledger.ts` reads `verdict:
+    pass`. The stolen-token case: `grep: the convergence invariant fires in ledger.ts` greps
+    `ledger.ts` and reads `verdict: exec_error`.
   src: '#982, #984, #920, #921, #943; corrected 2026-08-28; migrated from
     CLAUDE.md''s Writing-proofs section, W1-T2507'
   cited: "2026-08-31"
@@ -250,20 +246,18 @@
   lifecycle: active
   files: [ src/lib/drain.ts, src/lib/task-linter.ts, src/lib/review.ts ]
   fact: >-
-    Do not rewrite proofs on `verify: human` tasks. `isDispatchEligible`
-    (`src/lib/drain.ts`) returns false at `t.verify !== "auto"` before the
-    linter is consulted, so they do not dispatch; the linter still blocks
-    invalid dialects because `proofDialectViolations` defaults to block in CI.
-    Use the existing `demonstration:` dialect for live/operator proof text:
-    `isDemonstrationProof` permits it only on `verify: human` and blocks it on
-    `verify: auto`.
-    Forcing chaos drills, device recordings and live deploys into `unit test:`
-    yields proofs that parse, match zero tests, and cap the review — the exact
-    theatre the dialect gate exists to stop. Before treating a `verify: human`
-    shard's questions as live, check whether a `verify: auto` sibling already
-    merged their substance — measured twice in two days. The check: grep
-    the shard's load-bearing symbols across merged trailers/subjects before
-    escalating its questions.
+    Do not rewrite proofs on `verify: human` tasks — they do not dispatch, and the linter still
+    blocks invalid dialects. Use the `demonstration:` dialect for live/operator proof text; it is
+    permitted only on `verify: human`. Before treating such a shard's questions as live, grep its
+    load-bearing symbols across merged trailers/subjects — a `verify: auto` sibling may already
+    have merged their substance.
+  evidence: >-
+    `isDispatchEligible` (`src/lib/drain.ts`) returns false at `t.verify !== "auto"` before the
+    linter is consulted; `proofDialectViolations` defaults to block in CI. `isDemonstrationProof`
+    permits `demonstration:` only on `verify: human` and blocks it on `verify: auto`. Forcing
+    chaos drills, device recordings and live deploys into `unit test:` yields proofs that parse,
+    match zero tests, and cap the review — the exact theatre the dialect gate exists to stop. The
+    sibling-merge case was measured twice in two days.
   src: '#984; siblings 2026-08-13/14; migrated from CLAUDE.md''s Writing-proofs
     section, W1-T2507'
   cited: "2026-08-31"
@@ -386,21 +380,19 @@
   lifecycle: active
   files: [ src/lib/task-id-reservation.ts ]
   fact: >-
-    Hand-mint with the PLAIN refspec — `git push origin
-    <orphan-sha>:refs/rmd-id/<id>` — never `+` and never `--force-with-lease`:
-    `+` silently defeats the lease, so a push that looks gated has no gate at
-    all. The CAS is a property of the payload, not the namespace: an orphan
-    `commit-tree` over the empty tree with no `-p` gives every writer a unique
-    sha, so a second push is structurally a non-fast-forward — the form
-    `gitRemoteRefReserver.attempt` (`src/lib/task-id-reservation.ts`) already
-    uses. `reserveTaskIdRemote` has ONE call site, the triage mint, so a
-    hand-filed shard bypasses it entirely. MEASURED on the real remote: plain
-    onto an absent ref succeeds; plain onto an existing ref holding an unrelated
-    orphan is rejected (non-fast-forward); `+` forces the update; a deliberately
-    wrong `--force-with-lease` combined with `+` still forces it, the lease
-    ignored outright; that same lease without `+` is rejected (stale info). Read
-    the exit code into a variable — non-zero means the id is TAKEN; renumber,
+    Hand-mint with the PLAIN refspec — `git push origin <orphan-sha>:refs/rmd-id/<id>` — never `+`
+    and never `--force-with-lease`: `+` silently defeats the lease, so a push that looks gated has
+    no gate at all. Read the exit code into a variable — non-zero means the id is TAKEN; renumber,
     never re-push.
+  evidence: >-
+    The CAS is a property of the payload, not the namespace: an orphan `commit-tree` over the
+    empty tree with no `-p` gives every writer a unique sha, so a second push is structurally a
+    non-fast-forward — the form `gitRemoteRefReserver.attempt` (`src/lib/task-id-reservation.ts`)
+    already uses. `reserveTaskIdRemote` has ONE call site, the triage mint, so a hand-filed shard
+    bypasses it entirely. MEASURED on the real remote: plain onto an absent ref succeeds; plain
+    onto an existing ref holding an unrelated orphan is rejected (non-fast-forward); `+` forces
+    the update; a deliberately wrong `--force-with-lease` combined with `+` still forces it, the
+    lease ignored outright; that same lease without `+` is rejected (stale info).
   src: 'W1-T509; migrated from CLAUDE.md''s Plan-and-task-hygiene section, W1-T2507'
   cited: "2026-08-31"
 - id: rule19-span-and-never-file-empty-files-list
@@ -442,27 +434,22 @@
   lifecycle: active
   files: [ plan/policy.yaml, src/lib/auto-triage.ts, src/run-task.ts ]
   fact: >-
-    Treat a step NAME as a claim, not evidence — check what the function that
-    wrote it can actually return. `armAutoMerge` returns one of seven outcomes
-    and never throws; five arm nothing, yet five Architect lanes logged
-    `automerge.armed` unconditionally. Measured over the unioned ledger: 176
-    rows; 135 blind, 17 provably false, 119 undecidable (overlapping categories)
-    — the blind rows recorded no `head_sha`, so they can never be adjudicated.
-    And the lanes are not equally gated, the obvious reading is backwards: `grep
-    -n 'return attemptArm' src/run-task.ts` prints them side by side.
-    `triageCommand` arms only after `waitForCiGreen` returns green, and
-    `armAutoMerge` then reads `priorReviewVerdictFromLedger` and gates on
-    `decideArmFromLedgerVerdict` — TWO gates; it never branches on
-    `reviewCommand`'s exit code. `armAutoMergeAtOpen` is `return
-    attemptArm(prUrl, deps);` — no verdict gate and no ci gate — and the
-    implement lane calls it at PR-open, before any review. So implementation
-    PRs, which change source, self-merge earlier and with fewer checks than
-    triage PRs, which only add plan text (operator ruling on W1-T489:
-    documented, not changed). The unattended rate is real now that W1-T469 fires
-    the rung on `partition.serialized.length > 0` rather than idleness, bounded
-    by `autoTriage.maxPerDay`/`minIntervalMinutes` (`plan/policy.yaml`). Cost
-    per run is a QUERY, not a number to carry — re-derive it over the ledger
-    union rather than quoting `src/lib/auto-triage.ts`'s figure.
+    Treat a step NAME as a claim, not evidence — check what the function that wrote it can
+    actually return before believing the row. A lane that logs `x.done` unconditionally records a
+    claim its own code cannot support, and a blind row can never be adjudicated afterwards.
+  evidence: >-
+    `armAutoMerge` returns one of seven outcomes and never throws; five arm nothing, yet five
+    Architect lanes logged `automerge.armed` unconditionally. Measured over the unioned ledger:
+    176 rows; 135 blind, 17 provably false, 119 undecidable (overlapping) — the blind rows
+    recorded no `head_sha`. The lanes are not equally gated and the obvious reading is backwards:
+    `grep -n 'return attemptArm' src/run-task.ts` prints them side by side. `triageCommand` arms
+    only after `waitForCiGreen` is green, then reads `priorReviewVerdictFromLedger` and gates on
+    `decideArmFromLedgerVerdict` — TWO gates, never `reviewCommand`'s exit code.
+    `armAutoMergeAtOpen` is `return attemptArm(prUrl, deps);` — no verdict gate, no ci gate — and
+    the implement lane calls it at PR-open, before any review. So implementation PRs self-merge
+    earlier and with fewer checks than triage PRs, which only add plan text (operator ruling on
+    W1-T489: documented, not changed). Cost per run is a QUERY, not a number to carry — re-derive
+    it over the ledger union.
   src: '#981; the lane-asymmetry half W1-T489, 2026-08-14; migrated from
     CLAUDE.md''s Ledger-and-evidence-discipline section, W1-T2507'
   cited: "2026-08-31"
@@ -471,25 +458,20 @@
   lifecycle: active
   files: [ plan/feedback, src/lib/feedback-landing.ts ]
   fact: >-
-    A report written to `state/` is SCRATCH, not a record — land the finding in
-    a TRACKED artifact in the same session, and never let a tracked artifact
-    rest its evidence on a `state/` path. `.gitignore`'s `state/` entry is
-    correct and load-bearing (the daemon writes runtime exhaust into its own
-    tree every run; un-ignored it reads as dirt in `git status --porcelain`,
-    which crash-looped the daemon on restart), and that directory also holds
-    `state/service-tokens.json` — so this is a PLACEMENT defect, not a gitignore
-    one; do not propose un-ignoring it. On the mini a report there is merely
-    local; in a cloud container it is destruction, because nothing syncs it and
-    the container is reclaimed. MEASURED: 29 distinct `state/*.md` paths cited
-    across 43 tracked files, and all 29 absent from a fresh checkout — every one
-    is a pointer no worker can follow; a session re-derived a whole finding from
-    scratch after `state/recon-retro-test-github-calls.md` turned out not to
-    exist. The durable homes: the PR body, the shard's own `rationale`/`note`,
-    and `plan/feedback/` — tracked AND landed by `landFeedback`
-    (`src/lib/feedback-landing.ts`), which rebuilds from origin/main and pushes,
-    so it survives the container by construction. Nothing in this repo tells a
-    session where to write a report; the convention lives only in the operator's
-    briefs, which is why the rule lives here.
+    A report written to `state/` is SCRATCH, not a record — land the finding in a TRACKED artifact
+    in the same session, and never let a tracked artifact rest its evidence on a `state/` path.
+    The durable homes: the PR body, the shard's own `rationale`/`note`, and `plan/feedback/`.
+  evidence: >-
+    `.gitignore`'s `state/` entry is correct and load-bearing (the daemon writes runtime exhaust
+    into its own tree every run; un-ignored it reads as dirt in `git status --porcelain`, which
+    crash-looped the daemon on restart), and that directory also holds `state/service-tokens.json`
+    — so this is a PLACEMENT defect, not a gitignore one; do not propose un-ignoring it. On the
+    mini a report there is merely local; in a cloud container it is destruction, because nothing
+    syncs it and the container is reclaimed. MEASURED: 29 distinct `state/*.md` paths cited across
+    43 tracked files, all 29 absent from a fresh checkout — a session re-derived a whole finding
+    from scratch after `state/recon-retro-test-github-calls.md` turned out not to exist.
+    `plan/feedback/` is landed by `landFeedback` (`src/lib/feedback-landing.ts`), which rebuilds
+    from origin/main and pushes, so it survives the container by construction.
   src: 'established 2026-08-11; migrated from CLAUDE.md''s
     Ledger-and-evidence-discipline section, W1-T2507'
   cited: "2026-08-31"
@@ -498,20 +480,19 @@
   lifecycle: active
   files: [ .remudero/mounts.yaml ]
   fact: >-
-    Before editing the config file you were TOLD to change, trace from source
-    where the runtime value is actually read. The named declarative source may
-    be inert while a code-level default governs live behavior: the
-    `.remudero/mounts.yaml` `architect:` row looked authoritative, but spawns
-    resolved from `architectModel(config)`'s `?? "opus"` default, so a row-only
-    edit would have shipped green and changed nothing observable (required
-    wiring `architectModel(config, mounts)`). MIRROR — before filing a NEW
-    signal, `git grep` the producer's own type for consumers: the fact is
-    usually ALREADY COMPUTED AND DISCARDED. Measured: `parseGhRateLimitHeaders`
-    reads `X-Ratelimit-Reset` and `X-Ratelimit-Resource`, consumers `worker.ts`
-    plus one test; the plan-state scanner destructures only `ids` off a result
-    carrying `examinedLines` and `proposalOnlyLines`; `disarmAutoMerge`'s
-    `DisarmOutcome` is dropped at two of three call sites. Carrying a value that
-    already exists is the cheapest fix class here; measuring a new one is not.
+    Before editing the config file you were TOLD to change, trace from source where the runtime
+    value is actually read — the named declarative source may be inert while a code-level default
+    governs live behaviour. MIRROR: before filing a NEW signal, `git grep` the producer's own type
+    for consumers; the fact is usually ALREADY COMPUTED AND DISCARDED.
+  evidence: >-
+    The `.remudero/mounts.yaml` `architect:` row looked authoritative, but spawns resolved from
+    `architectModel(config)`'s `?? "opus"` default, so a row-only edit would have shipped green
+    and changed nothing observable (the required wiring was `architectModel(config, mounts)`).
+    Measured discards: `parseGhRateLimitHeaders` reads `X-Ratelimit-Reset` and `X-Ratelimit-
+    Resource` with consumers `worker.ts` plus one test; the plan-state scanner destructures only
+    `ids` off a result carrying `examinedLines` and `proposalOnlyLines`; `disarmAutoMerge`'s
+    `DisarmOutcome` is dropped at two of three call sites. Carrying a value that already exists is
+    the cheapest fix class here.
   src: '#781; 2026-08-22/23; migrated from CLAUDE.md''s Investigation-discipline
     section, W1-T2507'
   cited: "2026-08-31"

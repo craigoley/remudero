@@ -52,6 +52,14 @@
 #                      in task/recon text rank ahead of symbol and file-only matches.
 #   fact:              one line — the thing a worker inherits
 #   src:               provenance of the fact (recorded lineage)
+#   evidence:          (W1-T3709, optional) the measurement, run or PR that EARNED the fact.
+#                      NEVER INJECTED — `renderLearningLine` renders `fact` alone, so this costs a
+#                      worker nothing and is invisible to the corpus ratchet. It is RETRIEVED, not
+#                      injected: `[src: learnings#<id>]` already tells a reader where to look, and
+#                      this is what they find. Same two-tier model CLAUDE.md has with doctrine/ and
+#                      MASTER-PLAN has with plan-index.json (W1-T2282, "RETRIEVED, not INJECTED").
+#                      KEEP `fact` ACTIONABLE ALONE: a fact that cannot be obeyed without opening
+#                      `evidence` has been split in the wrong place.
 #   cited:             optional ISO date last cited (recent entries win a budget tie)
 
 - id: shell-isolation
@@ -256,15 +264,17 @@
   lifecycle: active
   files: [src/lib/launchd.ts, src/lib/daemon.ts]
   fact: >-
-    The launchd unit runs the daemon with KeepAlive, so launchd restarts it on ANY exit — a kill-9
-    (this is the crash-recovery path: restart re-derives merged state from GitHub and goes idle,
-    reconstructOrphan W1-T12c handles a real in-flight orphan, NO duplicate task run) AND a clean
-    exit. GOTCHA: a `--max N`-bounded daemon under KeepAlive RESTART-LOOPS — it drains N tasks,
-    exits max_reached, launchd restarts it, it finds nothing runnable and logs daemon.idle, exits,
-    restarts… (observed in commissioning: 3 daemon.start lines, the 2nd/3rd immediately idle). For a
-    real unattended daemon run WITHOUT --max (persistent poll loop); use --max/--dry-run only for a
-    bounded manual drill, and expect KeepAlive to bring it back. Plist path:
-    ~/Library/LaunchAgents/com.remudero.daemon.plist; commission with `launchctl load <path>`.
+    The launchd unit runs the daemon with KeepAlive, so launchd restarts it on ANY exit —
+    including a clean one. GOTCHA: a `--max N`-bounded daemon under KeepAlive RESTART-LOOPS. Run a
+    real unattended daemon WITHOUT `--max` (persistent poll loop); use `--max`/`--dry-run` only
+    for a bounded manual drill, and expect KeepAlive to bring it back.
+  evidence: >-
+    A kill-9 is the crash-recovery path: restart re-derives merged state from GitHub and goes
+    idle, `reconstructOrphan` (W1-T12c) handles a real in-flight orphan, and there is NO duplicate
+    task run. The restart loop was observed in commissioning: it drains N tasks, exits
+    `max_reached`, launchd restarts it, it finds nothing runnable and logs `daemon.idle`, exits,
+    restarts — 3 `daemon.start` lines, the 2nd and 3rd immediately idle. Plist path:
+    `~/Library/LaunchAgents/com.remudero.daemon.plist`; commission with `launchctl load <path>`.
   src: chore/t12d-commissioning-record (W1-T12d, 2026-07-15)
   cited: "2026-07-15"
 - id: proc-environ-is-an-exec-time-snapshot
