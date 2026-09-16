@@ -271,7 +271,14 @@ export function declaredWorkspaceGlobs(readRootManifest: () => string): string[]
   let parsed: unknown;
   try {
     parsed = JSON.parse(readRootManifest());
-  } catch {
+  } catch (error) {
+    // W1-T3707: bind and record the failure instead of erasing it into the same `undefined` an
+    // honest "no workspaces declared" root manifest also returns — both degrade to the safe
+    // ROOT-ONLY direction (see the doc comment above), but only this one is a defect worth a
+    // diagnosing reader's attention, so it is not silenced.
+    console.error(
+      `dep-review: root manifest unreadable or not valid JSON (${String((error as Error)?.message ?? error)}) — degrading to root-only manifest matching`,
+    );
     return undefined;
   }
   const ws = (parsed as { workspaces?: unknown } | null)?.workspaces;
