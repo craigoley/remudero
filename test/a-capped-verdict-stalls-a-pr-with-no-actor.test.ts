@@ -410,7 +410,7 @@ function cappedPosted5683(proofExec: CriterionVerdict["proof_exec"] = "exec_erro
   };
 }
 
-test("W1-T3669: the capped routing block names WHICH precondition blocked #5683's real shape, and confirms it now fires", () => {
+test("W1-T3669: the capped routing block names which precondition blocked it — #5683's real shape, and confirms it now fires", () => {
   // Precondition 1 — disposition. A refused-escalate PR never reads the capped route at all.
   const notMergeable = diagnoseCappedRoutingBlock(pr5683(), "blocked-ambiguous", [cappedPosted5683()]);
   assert.equal(notMergeable.blocked, true);
@@ -448,7 +448,7 @@ test("W1-T3669: the capped routing block names WHICH precondition blocked #5683'
   }
 });
 
-test("W1-T3669: a capped-green PR shaped exactly like #5683 reaches the fix rung instead of standing down", async () => {
+test("W1-T3669: a capped green PR reaches a rung instead of standing down — #5683's exact shape, reaching the fix rung", async () => {
   // ACCEPTANCE 3 — the count that was zero becomes non-zero: `runSweep` dispatches the existing fix
   // rung for #5683's exact captured shape, never leaving it parked on `mergeable`.
   for (const proofExec of ["exec_error", "base_unreadable", "not_yet_built"] as const) {
@@ -463,7 +463,7 @@ test("W1-T3669: a capped-green PR shaped exactly like #5683 reaches the fix rung
   }
 });
 
-test("W1-T3669: the arm refusal is unmoved — a capped verdict shaped like #5683 still refuses to arm after the route fires", async () => {
+test("W1-T3669: the arm refusal is unmoved — a capped verdict still refuses to arm after the capped route fires, in #5683's shape", async () => {
   // ACCEPTANCE 2 — the control. A fixture that would redden if the capped-route fix ever relaxed
   // the arm gate itself: `decideSweepArm` must still refuse, `deps.arm` must never be called, and
   // disposition must never resolve to the armable `mergeable` lane.
