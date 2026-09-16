@@ -10,6 +10,10 @@
   origin: "operator-session#pr-5096-capped-direct-merge-2026-09-11"
   plan_refs: ["W1-T1028", "W1-T3306", "W1-T3390"]
   files: [src/lib/sweep.ts, test/an-absent-verdict-is-not-permission-to-merge.test.ts]
+  # W1-T3669: named as a candidate cause of the capped route never firing (98 refusals, 0
+  # dispatches). decideSweepArm reads the live ledger alone, which holds 211 review.posted
+  # rows against 82,574 in the union. Absent priority sorts LAST, which is why it has waited.
+  priority: 1
   status: queued
   attempts: 0
   rationale: |
