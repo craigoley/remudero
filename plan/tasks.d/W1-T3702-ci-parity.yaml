@@ -1,0 +1,104 @@
+- id: W1-T3702
+  title: "THE MOST COMMON PULL REQUEST SHAPE IN THIS REPOSITORY HAS NO FAST LOCAL CHECK — lint-plan is absent from FAST_GATE_STEPS, and the bare `rmd lint-plan` lints the WHOLE plan while CI lints `--base HEAD^1`, so a filing can pass locally and fail the gate on a scope difference that costs a full CI round to discover"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files:
+    - src/lib/ci-parity.ts
+    - test/ci-parity.test.ts
+  origin: "operator-session#a-filing-passed-locally-and-failed-the-gate-2026-09-16"
+  plan_refs: ["W1-T373", "W1-T294", "W1-T3699"]
+  status: queued
+  priority: 1
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16, twice, on the operator's own filings.
+
+    THE TWO INVOCATIONS DISAGREE, AND ONLY ONE OF THEM IS THE GATE:
+
+      CI (.github/workflows/ci.yml, the `lint-plan` job):
+        npm run --silent lint-plan -- --base HEAD^1        <- diff-scoped, PR-changed tasks only
+      What an operator types:
+        rmd lint-plan                                       <- whole plan, open tasks only
+
+    On W1-T3701's shard the bare verb reported 0 failing. The CI form on the SAME tree reported:
+
+      ✗ W1-T3701: 5 violation(s) (0 pre-existing on base HEAD^1)
+        [proof-unit-test-unresolvable] criterion 1 ... resolves to ZERO tests in the head tree
+
+    The scopes are not merely different sizes -- the diff-scoped run applies rules the plan-wide
+    run does not reach, so a clean bare run is not evidence of anything about the gate.
+
+    AND NO FAST PATH REACHES IT AT ALL:
+
+      rmd preflight            commitlint, tsc --noEmit, emitter-checks      -- no lint-plan
+      rmd preflight --fast     FAST_GATE_STEPS                               -- no lint-plan
+      rmd preflight --ci-parity  includes it, but shells the FULL test:ci suite (minutes)
+
+    `grep -c lint-plan` over the 30 lines following FAST_GATE_STEPS returns 0, while the file
+    mentions `lint-plan` 7 times elsewhere. The membership is simply missing.
+  rationale: |
+    THE SHAPE THIS MISSES IS THE DOMINANT ONE. A plan filing -- a diff touching only
+    `plan/tasks.d/*.yaml` -- is the most common pull request in this repository, and `lint-plan` is
+    the ONLY gate that judges it. Every other fast-gate member guards code this shape does not
+    touch. So the fastest feedback available to the commonest change is a full CI round.
+
+    THE COST IS A ROUND-TRIP, NOT A RED. The gate is correct and its messages are excellent: each
+    refusal names the rule, the criterion and the remedy, and one of them explicitly warns against
+    gaming Rule 19 by renaming. None of that reaches the author until CI has run. On 2026-09-16 the
+    operator needed THREE local rounds to satisfy it, and would have needed three CI rounds without
+    running the diff-scoped form by hand -- which required reading ci.yml to discover.
+
+    WHY THE DEFAULT SCOPE IS THE DEEPER HALF. Adding `lint-plan` to `--fast` alone would leave the
+    bare verb still answering a different question from the gate. An operator who runs
+    `rmd lint-plan`, sees "0 failing" and pushes has done the reasonable thing and been misled.
+    A verb whose default disagrees with the gate that shares its name is the "check that passes
+    while comparing nothing" shape, one level up.
+
+    NOT A NEW CHECK. Everything needed exists: the rules, the diff scope, the fast-gate table. This
+    wires them together.
+  design: |
+    (i) `lint-plan` JOINS FAST_GATE_STEPS, diff-scoped, so `rmd preflight --fast` runs the same
+        question CI asks. It is network-free and reads only the plan and the diff, which is what
+        that table admits.
+
+    (ii) THE BARE VERB DEFAULTS TO THE GATE'S SCOPE. `rmd lint-plan` with no `--base` uses
+         `origin/main` -- the same comparison CI makes -- and PRINTS the scope it used on every
+         run. Whole-plan remains available explicitly (`--all`, or the existing flag), because
+         auditing the whole plan is a real and different task; it simply stops being the silent
+         default.
+
+    (iii) THE SCOPE IS NAMED IN THE OUTPUT EITHER WAY. Today's summary line already says
+          "1 task(s) checked (1 new/changed vs HEAD^1)" in one mode and "633 task(s) checked (open
+          tasks only)" in the other; both must state which question was asked, so two runs that
+          disagree are legibly different rather than apparently contradictory.
+
+    (iv) A REPOSITORY WITH NO PLAN DIRECTORY SKIPS THE STEP rather than failing it, so the fast
+         gate stays usable in the site and console repositories, which have plans of their own
+         shape.
+
+    NO THRESHOLD AND NO NEW RULE. Not one lint rule changes; this changes WHEN and WITH WHAT SCOPE
+    the existing ones run.
+
+    THE SUITE IS DECLARED IN files: AND THE PROOFS USE THE PURE-PATH FORM, for the reason
+    W1-T1071 records: a filing ships no test titles, and a `unit test: test/<file>.test.ts` path
+    resolves through W1-T456's forward-reference carve-out.
+  acceptance:
+    - claim: "the fast gate runs lint-plan, so the commonest pull request shape has a local check that costs seconds"
+      proof: "unit test: test/ci-parity.test.ts"
+    - claim: "the bare verb defaults to the gate's own diff scope, so a clean local run is evidence about the gate rather than about a different question"
+      proof: "unit test: test/ci-parity.test.ts"
+    - claim: "every run names the scope it used, so two runs that disagree are legibly asking different questions"
+      proof: "unit test: test/ci-parity.test.ts"
+    - claim: "whole-plan auditing stays available explicitly, so widening the default removes no capability"
+      proof: "unit test: test/ci-parity.test.ts"
+    - claim: "a repository with no plan directory skips the step rather than failing it"
+      proof: "unit test: test/ci-parity.test.ts"
+  falsifier: |
+    Leave lint-plan out of the fast gate and the first test fails. Default the bare verb to the
+    whole plan and the second fails. Print no scope line and the third fails. Drop whole-plan
+    auditing and the fourth fails. Fail rather than skip where no plan exists and the fifth fails.

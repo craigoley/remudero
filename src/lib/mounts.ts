@@ -89,6 +89,16 @@ export interface Mount {
   /** Context budget (tokens) this mount plans against. */
   contextBudget: number;
   provider?: WorkerProviderId;
+  /**
+   * the model this seat falls back to when its ordinary provider has NO readable
+   * headroom. Parsed from `squeeze_model`. SUBSCRIPTION FIRST, ALWAYS -- this is never preferred,
+   * never cheaper-first, and never consulted while the primary can run; it exists so a maxed
+   * subscription leaves the seat filled instead of empty.
+   *
+   * Held to the SAME Tier Invariant as `model`: a squeeze must not silently demote a seat below
+   * the workers it supervises, which would be a worse outcome than stalling.
+   */
+  squeezeModel?: string;
 }
 
 /** The three synthesis rungs (W1-T2559), exempt from the Tier Invariant — see this file's header. */
@@ -203,7 +213,7 @@ function parseMount(
   efforts: Record<string, number>,
 ): Mount {
   if (!isObject(raw)) throw new MountsError(`mount ${where} must be a mapping.`);
-  const { model, effort, max_turns, context_budget, provider } = raw;
+  const { model, effort, max_turns, context_budget, provider, squeeze_model } = raw;
   if (typeof model !== "string" || !(model in tiers)) {
     throw new MountsError(`mount ${where}: 'model' must be one of ${Object.keys(tiers).join(", ")}, got ${JSON.stringify(model)}.`);
   }
@@ -216,6 +226,13 @@ function parseMount(
   if (typeof context_budget !== "number" || !Number.isInteger(context_budget) || context_budget <= 0) {
     throw new MountsError(`mount ${where}: 'context_budget' must be a positive integer, got ${JSON.stringify(context_budget)}.`);
   }
+  // Same membership rule as `model`: a squeeze seat must be a RANKED model, so the invariant below
+  // can compare it. An unranked fallback would be a seat nobody can prove dominates its workers.
+  if (squeeze_model !== undefined && (typeof squeeze_model !== "string" || !(squeeze_model in tiers))) {
+    throw new MountsError(
+      `mount ${where}: 'squeeze_model' must be one of ${Object.keys(tiers).join(", ")}, got ${JSON.stringify(squeeze_model)}.`,
+    );
+  }
   if (provider !== undefined && !isWorkerProviderId(provider)) {
     throw new MountsError(`mount ${where}: 'provider' must be one of ${JSON.stringify(WORKER_PROVIDER_IDS)}, got ${JSON.stringify(provider)}.`);
   }
@@ -223,7 +240,14 @@ function parseMount(
   // 5 of the deprecation design) resolves to the canonical `cash` id here, once, so every consumer
   // of a parsed Mount sees only the canonical spelling.
   const normalizedProvider = provider === undefined ? undefined : (canonicalWorkerProviderId(provider) as WorkerProviderId);
-  return { model, effort, maxTurns: max_turns, contextBudget: context_budget, ...(normalizedProvider === undefined ? {} : { provider: normalizedProvider }) };
+  return {
+    model,
+    effort,
+    maxTurns: max_turns,
+    contextBudget: context_budget,
+    ...(squeeze_model === undefined ? {} : { squeezeModel: squeeze_model as string }),
+    ...(normalizedProvider === undefined ? {} : { provider: normalizedProvider }),
+  };
 }
 
 /**
@@ -250,6 +274,15 @@ function capabilityRank(capabilities: CapabilityLadder, model: string): number {
 function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
   const architectTier = m.tiers[m.architect.model];
   const judgeTier = m.tiers[m.judge.model];
+  // A SQUEEZE SEAT FACES THE SAME BAR. The fallback is reached exactly when the fleet is
+  // most constrained, which is the worst moment to discover the Architect now ranks at or below
+  // the workers it supervises. Taking the MINIMUM of the seat and its fallback means the table
+  // cannot load unless BOTH dominate -- a squeeze can change which model holds a seat, never
+  // whether that seat outranks the floor beneath it.
+  const architectSqueezeTier = m.architect.squeezeModel === undefined ? undefined : m.tiers[m.architect.squeezeModel];
+  const judgeSqueezeTier = m.judge.squeezeModel === undefined ? undefined : m.tiers[m.judge.squeezeModel];
+  const architectFloor = architectSqueezeTier === undefined ? architectTier : Math.min(architectTier, architectSqueezeTier);
+  const judgeFloor = judgeSqueezeTier === undefined ? judgeTier : Math.min(judgeTier, judgeSqueezeTier);
   // W1-T2573: when the table declares a `capabilities` axis, the SAME invariant is ALSO
   // enforced on capability RANK — the provider-neutral generalisation (rationale point 3):
   // capability rank is what a worker riding a different vendor would be compared on, since
@@ -268,12 +301,12 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
     for (const [risk, byClass] of Object.entries(byRisk)) {
       for (const [cls, mount] of Object.entries(byClass)) {
         const workerTier = m.tiers[mount.model];
-        if (workerTier >= architectTier) {
+        if (workerTier >= architectFloor) {
           throw new TierInvariantError(
             `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' (tier ${workerTier}) which is not strictly below the Architect '${m.architect.model}' (tier ${architectTier}). The Architect must ride a higher tier than every worker.`,
           );
         }
-        if (workerTier >= judgeTier) {
+        if (workerTier >= judgeFloor) {
           throw new TierInvariantError(
             `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' (tier ${workerTier}) which is not strictly below the flight judge '${m.judge.model}' (tier ${judgeTier}). The Layer-2 judge must ride a higher tier than every worker it supervises.`,
           );
