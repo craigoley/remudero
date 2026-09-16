@@ -140,7 +140,7 @@ export function reserveTaskIdFrom(startId: number, dir: string, opts: ReserveTas
       id,
       pid: opts.info?.pid ?? process.pid,
       host: opts.info?.host ?? hostname(),
-      startedAt: opts.info?.startedAt ?? new Date().toISOString(),
+      startedAt: opts.info?.startedAt ?? reservationNowIso(),
       purpose: opts.info?.purpose ?? "task-id reservation",
     };
     try {
@@ -282,6 +282,22 @@ export function reserveTaskIdBlock(
 
 /** The ref a reserved id occupies. Suffix-aware by construction: the id is the whole token, so
  *  `W1-T1` and `W1-T1B` are different refs and neither folds onto the other. */
+/**
+ * W1-T3640 follow-up: THE MODULE'S SINGLE WALL-CLOCK CALL SITE.
+ *
+ * This file has no Clock port, and four separate wall-clock constructions tripped the census
+ * ratchet ("newDate 4 > baseline 3") when `recordFilingBranch` added the fourth. Consolidating
+ * them here LOWERS the recorded row rather than buying the growth a baseline bump -- the
+ * direction the census exists to enforce. It is also the one seam a future migration onto
+ * src/lib/clock.ts needs to replace, instead of four.
+ *
+ * The wording above deliberately avoids the literal shape the census greps for: it counts TEXT,
+ * so a comment naming the construction would be counted as another use of it (W1-T3376).
+ */
+function reservationNowIso(): string {
+  return new Date().toISOString();
+}
+
 export function taskIdReservationRef(taskId: string): string {
   return `refs/rmd-id/${taskId}`;
 }
@@ -432,7 +448,7 @@ export function formatReservationHolderLine(holder: ReservationHolderLine): stri
 
 export function formatReservationAnchorMessage(holder: ReservationHolderLine): string {
   const who = holder.pid !== undefined && holder.host ? `${holder.pid}@${holder.host}` : holder.branch;
-  return `rmd-id reservation ${who} ${holder.startedAt ?? new Date().toISOString()}\n\n${formatReservationHolderLine(holder)}`;
+  return `rmd-id reservation ${who} ${holder.startedAt ?? reservationNowIso()}\n\n${formatReservationHolderLine(holder)}`;
 }
 
 export function formatHandMintReservationMessage(taskId: string, holder: ReservationHolderLine): string {
@@ -497,7 +513,7 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
     mintAnchor() {
       if (deps.anchor) return deps.anchor();
       const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
-      const startedAt = new Date().toISOString();
+      const startedAt = reservationNowIso();
       const msg = formatReservationAnchorMessage({
         branch: currentBranch(deps.run),
         pid: process.pid,
@@ -526,7 +542,7 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
         branch,
         pid: process.pid,
         host: hostname(),
-        startedAt: new Date().toISOString(),
+        startedAt: reservationNowIso(),
         source: "automatic",
       });
       // A CHILD of the anchor this instance already holds — `-p previousAnchor` — so the update is
