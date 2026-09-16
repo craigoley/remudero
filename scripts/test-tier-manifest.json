@@ -4,6 +4,7 @@
     "test/a-bare-flagged-worktree-stops-the-whole-fleet.test.ts": 0,
     "test/a-behind-head-is-only-updated-when-behind-blocks-the-merge.test.ts": 0,
     "test/a-blind-id-collision-gate-is-not-a-clean-one.test.ts": 621,
+    "test/a-blocked-auction-falls-back-to-cash.test.ts": 0,
     "test/a-blocked-ci-verdict-names-the-check-that-went-red.test.ts": 0,
     "test/a-blocked-task-must-name-its-disposition.test.ts": 3261,
     "test/a-body-repair-proof-safety-is-enforced-at-the-write-boundary.test.ts": 0,
