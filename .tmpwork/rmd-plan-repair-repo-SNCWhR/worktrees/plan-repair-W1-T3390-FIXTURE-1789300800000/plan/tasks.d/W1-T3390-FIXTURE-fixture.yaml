@@ -1,0 +1,5 @@
+id: W1-T3390-FIXTURE
+acceptance:
+  - claim: the offending proof lives in a shard outside this PR's diff
+    # sweep-flagged proof (not_executable) — an Architect must correct this criterion's proof; W1-T3390 plan-only repair rung, PR #3390, 2026-09-13T12:00:00.000Z
+    proof: unit test: test/stale.test.ts
