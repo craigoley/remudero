@@ -5962,7 +5962,7 @@ export function proofDiscriminationEvidenceFromCriteria(
 }
 
 /** One of the four preconditions {@link diagnoseCappedRoutingBlock} names — matched to this
- *  task's own rationale (`plan/tasks.d/W1-T3669-*.yaml`), in the SAME order the routing block in
+ *  task's own filed rationale (W1-T3669), in the SAME order the routing block in
  *  {@link runSweep} reads them. */
 export type CappedRoutingPrecondition = "not-mergeable" | "held" | "no-proof-discrimination" | "arm-not-refused";
 
