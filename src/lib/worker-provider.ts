@@ -615,9 +615,11 @@ export function codexCandidatesForCapability(
  *
  * FRONTIER NO LONGER NAMES ONE DEPLOYMENT (W1-T3689). gpt-oss-120b alone left frontier
  * single-candidate -- the same shape that had already gone wrong for `codex.balanced.low` -- so
- * gpt-5-mini now LEADS it on capability (its 272,000-token ceiling clears gpt-oss-120b's 131,072,
- * and it is the only cash deployment that answers `response_format: json_object` correctly), never
- * on price: it is 5x gpt-5-nano on both cost axes. gpt-oss-120b TRAILS rather than being deleted,
+ * gpt-5.6-luna now leads it (W1-T3699), taking gpt-5-mini's place outright: cheaper on both axes
+ * and 0 reasoning tokens where mini spent 64 of 76. gpt-5.6-terra TRAILS as the escalation, at 10x
+ * luna, reached only when luna is unavailable. ECONOMY AND BALANCED ARE UNTOUCHED: nano is cheaper
+ * than luna per token, and W1-T3614 fixed those leads from measured PER-TASK cost, which luna has
+ * not yet been measured against. gpt-oss-120b TRAILS rather than being deleted,
  * the same demotion shape the `codex` table uses for a demoted model, so a deployment that stops
  * answering falls back instead of failing the lane.
  */
@@ -630,7 +632,7 @@ export function codexCandidatesForCapability(
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-oss-120b", "gpt-5-nano"],
   balanced: ["gpt-5-nano", "gpt-oss-120b"],
-  frontier: ["gpt-5-mini", "gpt-oss-120b"],
+  frontier: ["gpt-5.6-luna", "gpt-5.6-terra"],
 };
 
 /** The provider-neutral Claude-model -> capability lookup is shared with Codex: both adapters
@@ -688,10 +690,14 @@ export interface OpenWeightContextWindow {
 export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightContextWindow>> = {
   "gpt-oss-120b": { totalTokens: 131_072, readAt: "2026-09-15" },
   "gpt-5-nano": { totalTokens: 272_000, readAt: "2026-09-15" },
-  // Same gpt-5 family shape as nano: 400,000 total context of which 272,000 may be INPUT. The
-  // recorded figure is the INPUT ceiling, not the total, which is the conservative direction --
-  // openWeightDeploymentHolds adds OPENWEIGHT_MAX_COMPLETION_TOKENS on top before comparing.
-  "gpt-5-mini": { totalTokens: 272_000, readAt: "2026-09-16" },
+  // W1-T3699: A DELIBERATE FLOOR, NOT A MEASURED CEILING. Microsoft's published gpt-5.6 rates are
+  // labelled "short context" and disclose neither the window nor a long-context rate, and the
+  // account's per-request TPM ceiling refuses an oversized probe before the model can answer one.
+  // So the window is recorded LOW on purpose: a request above it refuses pre-transport rather than
+  // silently entering a tier whose price is unknown, which is the direction that keeps
+  // `dailyCapUsd` honest. Raise it only when a long-context rate has been read AND priced.
+  "gpt-5.6-luna": { totalTokens: 128_000, readAt: "2026-09-16" },
+  "gpt-5.6-terra": { totalTokens: 128_000, readAt: "2026-09-16" },
 };
 
 /**
@@ -1963,12 +1969,19 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   // Azure-OpenAI-family deployment, so it rides `openWeightEndpoint`'s existing
   // `openai/deployments/...` route with no second endpoint shape.
   "gpt-5-nano": { inputUsdPerMillion: 0.05, outputUsdPerMillion: 0.4, readAt: "2026-09-15" },
-  // W1-T3689: DEARER THAN BOTH SIBLINGS ON BOTH AXES -- 5x nano on input and 5x on output. It is
-  // on this ladder for CAPABILITY, never for price: it is the only cash deployment that answers
-  // `response_format: {type:"json_object"}` correctly (measured below), and its 272,000-token
-  // input ceiling clears gpt-oss-120b's 131,072. Do not "optimise" a lane onto it to save money;
-  // there is no lane where it is the cheaper row.
-  "gpt-5-mini": { inputUsdPerMillion: 0.25, outputUsdPerMillion: 2.0, readAt: "2026-09-16" },
+  // W1-T3699: gpt-5-mini was REMOVED, not demoted. Luna is cheaper on BOTH axes ($0.20/$1.20 vs
+  // $0.25/$2.00) and measurably more efficient -- on an identical trivial prompt Luna spent 0
+  // reasoning tokens where mini spent 64 of 76 -- so mini had no lane left where it was the right
+  // row. Keeping it trailing would have implied a fallback worth reaching; there is none.
+  //
+  // PUBLISHED SHORT-CONTEXT RATES, read 2026-09-16 from Microsoft's GPT-5.6 Foundry announcement.
+  // These are the SAME models the Codex subscription already routes (`gpt-5.6-luna`/`-terra` lead
+  // the codex economy and balanced rows), so a squeeze diverts a lane to identical intelligence on
+  // a different bill rather than to a cheaper substitute of unknown quality.
+  "gpt-5.6-luna": { inputUsdPerMillion: 0.2, outputUsdPerMillion: 1.2, readAt: "2026-09-16" },
+  // TERRA IS 10x LUNA ON BOTH AXES. It exists for the frontier band alone; nothing else may lead
+  // with it. Sol ($5.00/$30.00) is deliberately NOT here -- 2.5x terra for the same band.
+  "gpt-5.6-terra": { inputUsdPerMillion: 2.0, outputUsdPerMillion: 12.0, readAt: "2026-09-16" },
 };
 
 /**
@@ -1989,7 +2002,8 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
  * Which structured-output modes each deployment can actually honour.
  *
  * MEASURED, NOT ASSUMED, with the adapter's own URL and api-version:
- *   gpt-5-mini     `response_format: {type:"json_object"}` -> HTTP 200, clean `{"ok":true,"n":7}`
+ *   gpt-5.6-luna   `response_format: {type:"json_object"}` -> HTTP 200, clean `{"ok":true}`
+ *   gpt-5.6-terra  same, HTTP 200
  *   gpt-oss-120b   returns MALFORMED JSON under the same field (the measurement that put
  *                  "Do not add `response_format` here" on spawnOpenWeightWorker)
  *   gpt-5-nano     unmeasured, so it declares nothing and may not be asked
@@ -1999,7 +2013,8 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
  * gpt-oss-120b already demonstrated.
  */
 export const OPENWEIGHT_RESPONSE_FORMATS: Readonly<Record<string, readonly string[]>> = {
-  "gpt-5-mini": ["json_object"],
+  "gpt-5.6-luna": ["json_object"],
+  "gpt-5.6-terra": ["json_object"],
 };
 
 /** Raised INSTEAD of sending a structured-output request a deployment cannot honour. Thrown before
@@ -2041,7 +2056,10 @@ export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
   // MEASURED 2026-09-16 with the adapter's own URL and api-version: `temperature: 0` returns
   // HTTP 400 ("does not support 0 with this model. Only the default (1) value is supported"),
   // byte-identical to nano's refusal. So the field is OMITTED, never sent as 0.
-  "gpt-5-mini": null,
+  // Both refuse `temperature: 0` with HTTP 400 ("only the default (1) value is supported"),
+  // measured 2026-09-16 -- the same refusal nano gives, so the field is omitted rather than sent.
+  "gpt-5.6-luna": null,
+  "gpt-5.6-terra": null,
 };
 
 /** Raised INSTEAD of guessing a request shape. Thrown before the transport, like its pricing
@@ -2650,8 +2668,8 @@ function openWeightResult(input: {
  *
  * `response_format` is now PER DEPLOYMENT, not forbidden outright. The original
  * prohibition was measured against gpt-oss-120b, which returns malformed JSON under json_object --
- * that deployment still declares no support and still refuses. gpt-5-mini answers it correctly, so
- * it declares it and a caller may opt in through `args.responseFormat`. */
+ * that deployment still declares no support and still refuses. The gpt-5.6 deployments answer it
+ * correctly, so they declare it and a caller may opt in through `args.responseFormat`. */
 export async function spawnOpenWeightWorker(
   args: OpenWeightSpawnArgs,
   config: Config,
