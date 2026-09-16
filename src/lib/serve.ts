@@ -1236,6 +1236,7 @@ export const DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS: Record<string, number> = {
 export function prewarmBoardGithub(
   github: GitHub,
   refreshMs: number = DEFAULT_BOARD_PREWARM_MS,
+  opts: { immediate?: boolean } = {},
 ): () => void {
   const warm = (): void => {
     try {
@@ -1244,12 +1245,21 @@ export function prewarmBoardGithub(
       // The gateway records its own failure state; prewarming must never break stream open.
     }
   };
-  const first = setTimeout(warm, 0);
-  first.unref?.();
+  // `immediate` DEFAULTS TRUE, so every existing caller is unchanged byte for byte.
+  //
+  // THE READ PATH PASSES FALSE, and the reason is measured. `warm()` is a blocking `gh pr list`;
+  // on the SSE path it runs once per connection, but a read happens on every poll, so an immediate
+  // warm there lands inside the very request that triggered it. Turning it on for reads without
+  // this took test/serve.test.ts's 183-task first-paint from under its 2,000ms budget to 8,693ms —
+  // the exact hazard W1-T3192 already scheduled this timeout to avoid, reintroduced on a hotter
+  // path. The reader that starts the walk still pays its own cold read, exactly as today; every
+  // poll after it finds the gateway warm.
+  const first = opts.immediate === false ? undefined : setTimeout(warm, 0);
+  first?.unref?.();
   const timer = setInterval(warm, refreshMs);
   timer.unref?.();
   return () => {
-    clearTimeout(first);
+    if (first !== undefined) clearTimeout(first);
     clearInterval(timer);
   };
 }
@@ -1296,25 +1306,73 @@ export function gatePrewarmOnClients(
   route: SseRoute,
   github: GitHub,
   refreshMs: number = DEFAULT_BOARD_PREWARM_MS,
-): { route: SseRoute; stop: () => void } {
+  deps: { clock?: Clock; setInterval?: typeof setInterval; clearInterval?: typeof clearInterval } = {},
+): { route: SseRoute; stop: () => void; noteRead: () => void } {
   let clients = 0;
   let stopPrewarm: (() => void) | undefined;
+  const clock = deps.clock ?? systemClock;
+  const setTimer = deps.setInterval ?? setInterval;
+  const clearTimer = deps.clearInterval ?? clearInterval;
+  let lastRead: number | undefined;
+  let idleCheck: ReturnType<typeof setInterval> | undefined;
 
   const stop = (): void => {
     stopPrewarm?.();
     stopPrewarm = undefined;
+    if (idleCheck !== undefined) {
+      clearTimer(idleCheck);
+      idleCheck = undefined;
+    }
+  };
+
+  const start = (immediate: boolean): void => {
+    if (stopPrewarm === undefined) stopPrewarm = prewarmBoardGithub(github, refreshMs, { immediate });
+  };
+
+  /**
+   * A POLLING READER IS A VIEWER. The product console reads `GET /v1/status` on a timer and never
+   * opens the SSE stream, so `clients` was 0 forever and the warm walk never started — every
+   * request paid the cold GitHub walk synchronously on the main thread. MEASURED 2026-09-16 on the
+   * live daemon, 39 minutes after boot, so this is not a cold-start effect:
+   *
+   *     /v1/status         66-80s
+   *     /v1/inbox          64-100s (one timed out)
+   *     /v1/daemon-health  64.5s   <- 296 bytes, queued behind the above
+   *
+   * This is the SAME blind spot W1-T3610 fixed for the recycle gate, which also counted only
+   * subscribers and also concluded nobody was watching while an operator sat reading.
+   *
+   * NOT A WEAKENING OF W1-T154's GATE. Its purpose is that an UNWATCHED daemon must not burn
+   * GitHub quota on a timer for nobody, and that still holds exactly: no subscriber and no recent
+   * read means no prewarm. A reader is simply not "nobody".
+   */
+  const noteRead = (): void => {
+    lastRead = clock.now();
+    start(false);
+    if (idleCheck !== undefined) return;
+    // THE IDLE BOUND IS DERIVED, NOT INVENTED: if nobody has read within one refresh cycle, the
+    // next refresh would be for nobody, which is precisely what the gate exists to prevent. Tying
+    // it to `refreshMs` means there is no second number to keep in step with the first.
+    idleCheck = setTimer(() => {
+      if (clients > 0) return;
+      if (lastRead !== undefined && clock.now() - lastRead <= refreshMs) return;
+      stop();
+    }, refreshMs);
+    idleCheck.unref?.();
   };
 
   return {
     stop,
+    noteRead,
     route: {
       ...route,
       subscribe: (send) => {
         const unsubscribe = route.subscribe(send);
         clients += 1;
         // 0 -> 1 ONLY. A second viewer must not start a second timer (which would double the
-        // very call rate this exists to bound) and must not re-warm off-cadence.
-        if (clients === 1) stopPrewarm = prewarmBoardGithub(github, refreshMs);
+        // very call rate this exists to bound) and must not re-warm off-cadence. `start` is
+        // idempotent, so a subscriber arriving while a reader already warmed it changes nothing.
+        if (clients === 1) start(true);
         let released = false;
         return () => {
           // service.ts invokes this exactly once per connection, but a defensive latch keeps a
@@ -1324,7 +1382,9 @@ export function gatePrewarmOnClients(
           released = true;
           unsubscribe();
           clients -= 1;
-          if (clients === 0) stop();
+          // A READER MAY STILL BE WATCHING. Stopping on the last subscriber alone would undo the
+          // warm walk under a polling console that never subscribed in the first place.
+          if (clients === 0 && (lastRead === undefined || clock.now() - lastRead > refreshMs)) stop();
         };
       },
     },
@@ -3728,7 +3788,14 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // file and this line pushed src/lib/serve.ts from 2 to 3; `systemClock` is the target the
   // census names, and it is the SAME default `gateStaleCodeExit` reads patience against above, so
   // the stamp and the decision that consumes it cannot disagree about what time it is.
-  const stampRead = (route: Route): Route => stampReadWith(route, () => { lastReadAt = systemClock.now(); });
+  // ONE STAMP, TWO CONSUMERS: the recycle gate's patience (W1-T3610) and the prewarm gate above.
+  // Both were blind to a polling console in exactly the same way, so both read the same signal
+  // rather than growing a second notion of "someone is watching".
+  const stampRead = (route: Route): Route =>
+    stampReadWith(route, () => {
+      lastReadAt = systemClock.now();
+      prewarm.noteRead();
+    });
   const routeAssembly = assembleServeRoutes({ ...deps, consoleSha, confirmNonces }, analyticsCache.current);
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
