@@ -118,6 +118,24 @@ export interface LearningEntry {
   /** (contested only, W1-T88/P14) the id of the other entry this one opposes. Set on BOTH members
    *  of a pair, so a reader of either finds its counterpart. */
   contestedWith?: string;
+  /**
+   * (W1-T3709) The EVIDENCE behind `fact` — the measurement, the run, the PR that earned it.
+   *
+   * NEVER INJECTED. `renderLearningLine` renders `fact` alone, so this costs a worker nothing and
+   * is invisible to {@link entryBudgetWeight} and the corpus ratchet. It is RETRIEVED, not
+   * injected: the citation `[src: learnings#<id>]` already tells a reader where to look, and this
+   * is what they find when they do.
+   *
+   * THIS IS THE TREATMENT CLAUDE.md ALREADY HAS. Its headline is the whole rule and `doctrine/`
+   * holds the proof; MEASURED here, the actionable rule was 7-19% of an injected line on the
+   * longest entries, so the other 80-93% was forensics every matching task paid for and no worker
+   * needed in order to act. Same model `plan-index.json` applies to MASTER-PLAN (W1-T2282's
+   * "RETRIEVED, not INJECTED").
+   *
+   * KEEP `fact` ACTIONABLE ON ITS OWN. A fact that cannot be obeyed without opening this field has
+   * been split in the wrong place.
+   */
+  evidence?: string;
   /** (W1-T34) Optional `sh -c` command that must exit 0 for this `fact` to still be true. Run by
    *  `scripts/learnings-assert-check.mjs`, never by this module. */
   assertion?: string;
@@ -375,6 +393,12 @@ function parseLearningsDoc(
       throw new LearningsError(`learnings '${id}': 'drill_obligating' must be a boolean (${sourceLabel}).`);
     }
     const drillObligating = e.drill_obligating === true;
+    // W1-T3709: provenance that is READ, never injected. Validated like any other field so a typo
+    // fails loud rather than silently dropping the evidence behind a rule.
+    if (e.evidence !== undefined && typeof e.evidence !== "string") {
+      throw new LearningsError(`learnings '${id}': 'evidence' must be a string (${sourceLabel}).`);
+    }
+    const evidence = typeof e.evidence === "string" && e.evidence.length > 0 ? e.evidence : undefined;
     let layer: Layer | undefined;
     if (e.layer !== undefined) {
       if (e.layer !== "project" && e.layer !== "user-overall" && e.layer !== "global") {
@@ -416,6 +440,7 @@ function parseLearningsDoc(
       symbols,
       errorSignatures,
       fact: e.fact,
+      evidence,
       src: e.src,
       cited: typeof e.cited === "string" ? e.cited : undefined,
       citedCount,
