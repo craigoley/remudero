@@ -91,6 +91,13 @@ export interface Config {
      *  operator decision and must never arrive by upgrade. Bounded by `dailyCapUsd`, which the
      *  cash adapter already refuses to run without. */
     cashFallbackWhenBlocked?: boolean;
+    /** Hand the implement lane's git effects to the HARNESS on EVERY provider, not only where the
+     * worker has no shell (W1-T3696). Default false. Turning it on is what makes a Claude implement
+     * run DIVERTIBLE: its prompt then already says the harness commits, so a blocked auction may
+     * retry it on the shell-less cash surface without the prompt and the tools disagreeing. It is
+     * also the security direction W1-T3572 asked for — forge authority leaves every worker, not
+     * only the cheap ones. */
+    harnessCommitsImplement?: boolean;
   };
   learningsHomes?: { userOverall?: string; global?: string };
 }
@@ -163,6 +170,15 @@ const workerProvidersShape: ValueSchema = {
     configField("codexModel", "string", true, undefined, "config.json", "Hard Codex model override.", stringShape),
     configField("codexModels", "object", true, undefined, "config.json", "Codex model preferences per mount tier.", codexModelsShape),
     configField("cashEndpoint", "string", true, undefined, "config.json", "Azure OpenAI-compatible endpoint for the cash (non-subscription) worker adapter.", stringShape),
+    configField(
+      "harnessCommitsImplement",
+      "boolean",
+      true,
+      false,
+      "config.json",
+      "Harness owns implement's git effects on every provider, which is what makes the lane divertible to cash (W1-T3696).",
+      booleanShape,
+    ),
     configField(
       "cashFallbackWhenBlocked",
       "boolean",
