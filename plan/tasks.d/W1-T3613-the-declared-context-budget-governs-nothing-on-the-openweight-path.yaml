@@ -72,9 +72,9 @@
     deployments can serve the lane.
   acceptance:
     - claim: "a request larger than the selected deployment's declared context window refuses before transport, naming both figures"
-      proof: "unit test: an oversized request refuses before transport and names the context window"
-    - claim: "every openweight deployment declares its context window, so adding one without declaring it reddens rather than 400s in production"
-      proof: "unit test: every priced openweight deployment declares a context window"
+      proof: "unit test: a request larger than every context window refuses before it reserves"
+    - claim: "a considered deployment with no declared context window is named as undeclared in the refusal, so the gap is readable from the error text alone rather than only from the source"
+      proof: "grep: no declared context window in src/lib/worker-provider.ts"
   falsifier: |
     Remove the pre-transport refusal and the first test must reach the fake transport with an
     oversized body. Drop one deployment's context row and the census test must fail; if it still
