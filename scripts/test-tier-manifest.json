@@ -176,6 +176,7 @@
     "test/a-required-comment-must-not-cost-a-relocation.test.ts": 0,
     "test/a-required-gate-can-be-demoted-in-silence.test.ts": 0,
     "test/a-reservation-names-its-holder.test.ts": 0,
+    "test/a-reservation-records-the-branch-that-files-it.test.ts": 0,
     "test/a-reservation-says-whether-anything-still-holds-it.test.ts": 0,
     "test/a-reservation-seeds-from-the-namespace-it-owns.test.ts": 1544,
     "test/a-restart-budget-that-runs-out-says-so.test.ts": 0,
