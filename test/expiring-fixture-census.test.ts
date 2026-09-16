@@ -474,3 +474,51 @@ test("W1-T3388: attribution names the owner and does NOT move the gate — an in
   assert.match(formatReport(r), /expiring-fixture-census: BLOCKED/, "the verdict word must stay BLOCKED");
   assert.ok(r.reported.length > 0, "and the crossing must remain in `reported`, which decides the exit code");
 });
+
+test("W1-T3388: a file absent at the base is read as this diff's own, not as an error", () => {
+  // COVERS THE INNER CATCH. `git show <base>:<path>` exits non-zero when the file does not exist at
+  // the base — which is not a failure, it is the answer: the file is new, so every stamp in it is
+  // this diff's. Every other test here injects a readBaseFile directly and can never reach this arm.
+  const output: string[] = [];
+  const code = main({
+    execFile: (cmd, args) => {
+      if (cmd === "node") return JSON.stringify({ staleDays: THRESHOLD });
+      if (args[0] === "ls-files") return "test/a.test.ts\n";
+      if (args[0] === "rev-parse") return "deadbeef\n";
+      if (args[0] === "show") throw new Error("fatal: path 'test/a.test.ts' does not exist in 'origin/main'");
+      throw new Error(`unexpected: ${cmd} ${args.join(" ")}`);
+    },
+    readFile: () => `  lastActivityAt: "${at(-13 * DAY)}",\n`,
+    now: () => NOW,
+    log: (message) => output.push(message),
+    assertAged: () => undefined,
+    recordedPopulationByFile: { "test/a.test.ts": 1 },
+  });
+
+  assert.equal(code, 1, "the crossing is still this diff's, so it still blocks");
+  assert.doesNotMatch(output.join("\n"), /inherited from the base/, "absent at base is not inherited");
+});
+
+test("W1-T3388: an unreadable base ref turns attribution off rather than refusing everything", () => {
+  // COVERS THE OUTER CATCH. A shallow clone or a fresh local repo has no origin/main. The gate must
+  // then behave exactly as it did before attribution existed — strict, and silent about ownership —
+  // rather than either crashing or excusing every crossing for lack of evidence.
+  const output: string[] = [];
+  const code = main({
+    execFile: (cmd, args) => {
+      if (cmd === "node") return JSON.stringify({ staleDays: THRESHOLD });
+      if (args[0] === "ls-files") return "test/a.test.ts\n";
+      if (args[0] === "rev-parse") throw new Error("fatal: Needed a single revision");
+      throw new Error(`base probe failed, so nothing else should be called: ${args.join(" ")}`);
+    },
+    readFile: () => `  lastActivityAt: "${at(-13 * DAY)}",\n`,
+    now: () => NOW,
+    log: (message) => output.push(message),
+    assertAged: () => undefined,
+    recordedPopulationByFile: { "test/a.test.ts": 1 },
+  });
+
+  assert.equal(code, 1, "the strict, un-attributed reading still blocks");
+  assert.match(output.join("\n"), /BLOCKED/);
+  assert.doesNotMatch(output.join("\n"), /inherited from the base/, "no base ⇒ no ownership claim");
+});
