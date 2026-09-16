@@ -120,8 +120,9 @@ test("console-v1 projection: once a corpus has real data, the previously-uncolle
 });
 
 // ── acceptance (iii): every emitted metric names its measurement class ─────────────────────────
+// (test title below is quoted verbatim by the PR body's proof for this criterion; keep in sync)
 
-test("console-v1 projection: every emitted metric names its own measurement class", () => {
+test("console-v1 projection: every emitted metric names its measurement class", () => {
   const VALID: ConsoleV1MeasurementClass[] = ["observed", "provider_reported", "modeled"];
   const snapshot = deriveAnalyticsSnapshot(TWO_RUN_CORPUS, "2026-08-14T00:10:00.000Z");
   for (const metric of snapshot.consoleV1.metrics) {
