@@ -1091,10 +1091,11 @@ export interface ProviderCapacityReading {
   reason?: string;
 }
 
-/** How long a provider's capacity read may report unreadable before doctor alarms it, for a
- *  caller that DOES track the duration (`rmd doctor` itself does not — see
- *  {@link ProviderCapacityReading.unreadableForMs}). MEASURED (W1-T3665): codex's `auth.json`
- *  `id_token` expired about an hour after a 2026-09-11 refresh, and every capacity read returned
+/** PRIMARY CONTROL: how long a provider's capacity read may report unreadable before doctor
+ *  alarms it, for a caller that DOES track the duration (`rmd doctor` itself does not — see
+ *  {@link ProviderCapacityReading.unreadableForMs}, whose own missing-duration default is the
+ *  actual backstop for doctor's own read). MEASURED (W1-T3665): codex's `auth.json` `id_token`
+ *  expired about an hour after a 2026-09-11 refresh, and every capacity read returned
  *  `readable: false` for the next FIVE DAYS with nothing saying so — the fleet routed 100% of
  *  balanced work to Claude and Claude's weekly reached 44%. Bounded above one bad poll (a network
  *  blip the next poll clears on its own) and far below even one day. */
