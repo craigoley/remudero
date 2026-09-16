@@ -26,6 +26,7 @@ import {
   CASH_WEB_SEARCH_KEY_ENV,
   CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
   cashWebSearchEnabled,
+  cashWebSearchEndpoint,
   cashWebSearchGrounding,
   performCashWebSearch,
 } from "../src/lib/cash-web-bridge.js";
@@ -392,4 +393,46 @@ test("openweight WebSearch bridge refuses every unproven authority — allowance
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("every refusal arm is reachable, and each names its own cause rather than a generic failure", async () => {
+  // THE ARMS A HAPPY-PATH FIXTURE NEVER REACHES. Each one is the difference between an operator
+  // reading "the endpoint is misconfigured" and reading "something went wrong" — and an untested
+  // refusal is how a refusal quietly stops refusing.
+  const call = (over: Partial<Parameters<typeof performCashWebSearch>[0]>) =>
+    performCashWebSearch({
+      query: "anything",
+      endpoint: "https://example.test/openai/responses",
+      apiKey: SEARCH_KEY,
+      model: MODEL,
+      ...over,
+    } as Parameters<typeof performCashWebSearch>[0]);
+
+  // (a) CONFIGURATION, raised before any request: these are programming/config errors, not search
+  //     outcomes, so they THROW rather than returning a refusal the model would see as "no result".
+  assert.throws(() => cashWebSearchEndpoint("", MODEL), /requires workerProviders\.cashEndpoint/);
+  assert.throws(() => cashWebSearchEndpoint("http://example.test/", MODEL), /must use https/);
+  await assert.rejects(() => call({ query: "   " }), /non-empty query/);
+  await assert.rejects(() => call({ apiKey: "" }), new RegExp(CASH_WEB_SEARCH_KEY_ENV));
+
+  // (b) A TRANSPORT FAILURE THAT IS NOT THE DEADLINE keeps its own message, so a DNS or TLS fault
+  //     is never reported as a timeout. `usageRead: false` keeps the conservative reservation.
+  const broken = await call({ fetchImpl: (async () => { throw new Error("ECONNREFUSED example.test"); }) as never });
+  assert.equal(broken.outcome, "refused");
+  assert.equal(broken.outcome === "refused" && broken.reason, "unreadable");
+  assert.match(broken.outcome === "refused" ? broken.detail : "", /ECONNREFUSED/);
+  assert.equal(broken.usageRead, false);
+
+  // (c) A NON-2xx STATUS is its own reason, carrying the code.
+  const http = await call({ fetchImpl: (async () => new Response("nope", { status: 503 })) as never });
+  assert.equal(http.outcome === "refused" && http.reason, "http");
+  assert.match(http.outcome === "refused" ? http.detail : "", /503/);
+
+  // (d) A 2xx THAT IS NOT JSON — an upstream returning an HTML error page must not crash the tool
+  //     loop, and must be distinguishable from a search that legitimately found nothing.
+  const garbage = await call({
+    fetchImpl: (async () => new Response("<html>gateway</html>", { status: 200 })) as never,
+  });
+  assert.equal(garbage.outcome === "refused" && garbage.reason, "unreadable");
+  assert.match(garbage.outcome === "refused" ? garbage.detail : "", /not JSON/);
 });
