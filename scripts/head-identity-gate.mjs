@@ -22,6 +22,20 @@
 // a plan-only filing legitimately carries neither a trailer nor a fleet-dispatched head, by design
 // (W1-T1004), and refusing it here would be the credit-surface incident's mistake repeated.
 //
+// A DEPENDENCY BUMP IS THE FOURTH ADMITTED FORM (W1-T3680), and it is deliberately the narrowest.
+// A bump builds no task, so a `Remudero-Task` trailer would be a FALSE credit and a run-shaped
+// branch would be a lie about its origin — it can satisfy none of the three forms above, for any
+// bump, on any schedule, which made every dependabot pull request structurally unmergeable. The
+// exemption therefore requires ALL THREE of: a `dependabot/` head ref, a `chore(deps)`/
+// `chore(deps-dev)` subject, and a diff in which EVERY changed path is a dependency manifest.
+//
+// THE PATH CONSTRAINT IS THE POINT AND MUST NOT BE DROPPED. Branch name and subject are both
+// forgeable by any pusher, so name-only matching would turn this gate into a hole: a source change
+// on a `dependabot/`-prefixed branch would merge unattributed — precisely the credit-surface
+// incident W1-T1004's comment warns against repeating. Requiring a manifest-only diff makes the
+// exemption self-limiting: a head that touches src/ is refused however it is named. An UNREADABLE
+// diff is not a manifest-only diff, so it refuses too — the exemption fails closed.
+//
 // Usage: node --import tsx scripts/head-identity-gate.mjs --head-ref <ref>
 // [--worktree-path <path>] (ref falls back to $GITHUB_HEAD_REF; path defaults to cwd).
 
@@ -58,12 +72,45 @@ export function hasValidTaskTrailer(commitMessage) {
 }
 
 /**
+ * Is `path` a dependency manifest — a file whose change is a version bump and nothing else?
+ *
+ * Matched by BASENAME for the two npm manifests rather than by a repo-root literal, because this
+ * repository has workspaces under `apps/` whose own `package.json` a grouped npm bump touches;
+ * a root-only test would refuse exactly the bumps it is meant to admit. The class is unchanged
+ * either way — a manifest is a manifest at any depth — and nothing outside the class is added.
+ * @param {string} path
+ */
+export function isDependencyManifestPath(path) {
+  const p = String(path ?? "");
+  if (p.length === 0) return false;
+  const base = p.slice(p.lastIndexOf("/") + 1);
+  if (base === "package.json" || base === "package-lock.json") return true;
+  return p.startsWith(".github/workflows/") && (p.endsWith(".yml") || p.endsWith(".yaml"));
+}
+
+/**
+ * Is this head a dependency bump with nothing else in it? ALL THREE limbs are required — see this
+ * file's header for why dropping the path constraint turns the gate into a credit hole.
+ *
+ * `changedPaths` absent, unreadable or EMPTY returns `false`: the exemption fails closed, so an
+ * unreadable diff is refused exactly as an unidentified head already was, never admitted on the
+ * strength of a forgeable branch name.
+ * @param {{ headRef: string | undefined, subject: string, changedPaths: readonly string[] | undefined }} input
+ */
+export function isDependencyBumpHead({ headRef, subject, changedPaths }) {
+  if (!String(headRef ?? "").startsWith("dependabot/")) return false;
+  if (!/^chore\(deps(?:-dev)?\)/i.test(String(subject ?? "").trim())) return false;
+  if (!Array.isArray(changedPaths) || changedPaths.length === 0) return false;
+  return changedPaths.every((path) => isDependencyManifestPath(path));
+}
+
+/**
  * The gate's predicate: a filing-shaped subject is exempt outright; otherwise a conforming
  * identity requires the run-branch shape (either named form) or the trailer — either is enough —
  * and a refusal names BOTH conforming forms plus the trailer route.
  * @param {{ headCommitMessage: string, headRef: string | undefined }} input
  */
-export function evaluateHeadIdentityGate({ headCommitMessage, headRef }) {
+export function evaluateHeadIdentityGate({ headCommitMessage, headRef, changedPaths }) {
   const message = headCommitMessage ?? "";
   const subject = message.split("\n")[0] ?? "";
 
@@ -87,6 +134,17 @@ export function evaluateHeadIdentityGate({ headCommitMessage, headRef }) {
   }
   if (runShaped) {
     return { ok: true, message: `identified via its run-shaped head ref (${headRef})` };
+  }
+
+  // W1-T3680: asked LAST, so it can only ever ADMIT a head the three forms above already
+  // refused — the refusal text below stays byte-identical and no existing form is relaxed.
+  if (isDependencyBumpHead({ headRef, subject, changedPaths })) {
+    return {
+      ok: true,
+      message:
+        `dependency-bump head (${headRef}) whose diff touches only dependency manifests — admitted ` +
+        "without a task credit, because a bump builds no task to credit (W1-T3680)",
+    };
   }
 
   return {
@@ -145,6 +203,29 @@ export function readHeadCommitMessage(worktreePath) {
 }
 
 /**
+ * The paths this head changes against its merge-base with the pull request's base branch.
+ *
+ * Best-effort in the same sense {@link readHeadCommitMessage} is: `undefined` on any git failure
+ * or a missing base ref, never a throw. `undefined` is SAFE here because
+ * {@link isDependencyBumpHead} treats it as "not a manifest-only diff" and refuses — the one
+ * direction an unreadable diff may take.
+ *
+ * The workflow checks out with `fetch-depth: 0`, so the merge-base resolves without an API call.
+ * @param {string} worktreePath
+ * @param {string | undefined} baseRef
+ */
+export function changedPathsAtHead(worktreePath, baseRef = process.env.GITHUB_BASE_REF) {
+  if (!baseRef || baseRef.length === 0) return undefined;
+  const mergeBase = git(["merge-base", `origin/${baseRef}`, "HEAD"], { cwd: worktreePath });
+  if (mergeBase.error || mergeBase.status !== 0) return undefined;
+  const base = mergeBase.stdout.trim();
+  if (base === "") return undefined;
+  const diff = git(["diff", "--name-only", "-z", "--no-renames", `${base}...HEAD`], { cwd: worktreePath });
+  if (diff.error || diff.status !== 0) return undefined;
+  return [...new Set(diff.stdout.split("\0").filter(Boolean))];
+}
+
+/**
  * Resolve the head ref from the flag, falling back to `$GITHUB_HEAD_REF` (set automatically on a
  * `pull_request`-triggered job, so this costs no event-payload parse and no API call). Extracted
  * and pure so its refusal arm is reachable from a test.
@@ -185,7 +266,11 @@ export function main(argv) {
     return;
   }
 
-  const result = evaluateHeadIdentityGate({ headCommitMessage, headRef: resolvedRef.headRef });
+  const result = evaluateHeadIdentityGate({
+    headCommitMessage,
+    headRef: resolvedRef.headRef,
+    changedPaths: changedPathsAtHead(worktreePath),
+  });
   if (!result.ok) {
     console.error(`head-identity-gate: ${result.message}`);
     process.exitCode = 1;
