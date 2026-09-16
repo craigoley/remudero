@@ -1,0 +1,100 @@
+- id: W1-T3682
+  title: "The git-object reclaim's DEFAULT names a checkout that does not exist on the host it runs on, skips it silently, and exits 0 — the live daemon repo has carried a stranded gc.log since 8 September and no run has ever touched it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 8.00
+  files:
+    - deploy/host-update.sh
+  origin: "operator-session#first-reclaim-run-2026-09-16"
+  plan_refs: ["W1-T2725", "W1-T3676"]
+  status: queued
+  priority: 2
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16 on the Azure host, from the first real reclaim run this fleet has had:
+
+      host-update: git reclaim -- /home/craigoleyagent/rmd-state/remudero: no .git here, skipping
+      host-update: git reclaim -- /home/craigoleyagent/rmd-op: freed 202.0MB (gc.log present)
+
+    The skipped path does not exist:
+
+      $ ls -d ~/rmd-state/remudero
+      ls: cannot access '/home/craigoleyagent/rmd-state/remudero': No such file or directory
+      $ ls ~/rmd-state
+      state
+
+    The LIVE checkout is `~/rmd-state2/remudero`, and it still carries the artifact the reclaim
+    exists to clear:
+
+      $ ls -la ~/rmd-state2/remudero/.git/gc.log
+      -rw-r--r-- 1 craigoleyagent craigoleyagent 87 Sep 8 05:19 .../gc.log
+
+    Line 727 is the whole defect:
+
+      IFS=':' read -r -a GIT_RECLAIM_DIRS <<<"${RMD_GIT_RECLAIM_DIRS:-${STATE_DIR}/remudero:${RMD_OP_DIR}}"
+
+    with `STATE_DIR="${RMD_STATE_DIR:-${HOME:-/root}/rmd-state}"` at line 85. Half the default pair
+    points at a directory that has never existed on this host; the other half is the only reason
+    the run freed anything at all.
+  rationale: |
+    THE DRIFT IS ALREADY KNOWN AND THE CHECK IS IN THE WRONG BRANCH. This script ALREADY carries a
+    sibling-drift detector -- lines 181-239, added 2026-08-12 for this exact rename, which warns
+    when `${STATE_DIR}` holds a stale ledger while `${STATE_DIR}*` has a live sibling. It runs only
+    under `--print-daemon-run`. Section 4a, which consumes the same `STATE_DIR`, never asks.
+
+    THE SKIP IS SILENT BY DESIGN AND THAT IS THE SECOND HALF. "no .git here, skipping" is printed at
+    NORMAL level and the loop continues; the script exits 0. A reclaim that reaches none of its
+    targets and a reclaim that had nothing to free are indistinguishable from the exit code and
+    nearly indistinguishable from the output. W1-T3676 is separately measuring why the agent-history
+    reclaim reaches 0.4% of its target -- this is the same class of failure, one directory over, and
+    it has been running clean-looking for as long as the rename has existed.
+
+    A SECOND, INDEPENDENT SILENCER. Running this script under `sudo` resolves `${HOME}` to `/root`,
+    so EVERY path above derives from `/root`, every section reports "no such directory, skipping",
+    and the script exits 0 having done nothing. That was hit by hand on 2026-09-16 and only caught
+    because the operator re-ran it as the owning user and saw different output.
+  design: |
+    (i) THE EXISTING DRIFT CHECK MOVES TO WHERE IT IS CONSUMED. Lift the `${STATE_DIR}*` sibling
+        scan out of the `--print-daemon-run` branch into a function, and call it from section 4a as
+        well. This is not a new heuristic -- it is the one already written, reused. Do not
+        reimplement it.
+
+    (ii) A NAMED RECLAIM TARGET THAT DOES NOT RESOLVE IS A WARNING, NOT A NOTE. When a directory in
+         `GIT_RECLAIM_DIRS` is absent or holds no `.git`, print to stderr, and when a sibling of it
+         DOES hold one, name that sibling in the same line:
+
+           host-update: WARNING -- git reclaim target ~/rmd-state/remudero has no .git, but
+             ~/rmd-state2/remudero does. Set RMD_GIT_RECLAIM_DIRS if that is the volume you mean.
+
+    (iii) A RUN THAT REACHES NO TARGET AT ALL DOES NOT EXIT 0. If every entry in `GIT_RECLAIM_DIRS`
+          was skipped, the reclaim section exits non-zero. One target reached is enough to succeed
+          -- this is about reaching NOTHING, not about freeing nothing.
+
+    (iv) THE SUDO CASE IS REFUSED RATHER THAN SILENTLY REDIRECTED. When the script runs with an
+         effective uid of 0 AND `SUDO_USER` is set AND no `RMD_*_DIR` override is given, refuse
+         with exit 2 naming the owning user's home and the invocation to use. A deliberate root-owned
+         fleet stays supported through the explicit overrides, so this refuses the accident, not the
+         configuration.
+
+    NO THRESHOLD IS ADDED. The response is tiered on what the run could REACH, not on how many bytes
+    it freed: a reclaim that frees 0 bytes from a real checkout is a normal outcome and stays exit 0.
+
+    THE SUITE GOES IN test/the-git-reclaim-warns-when-its-target-has-a-live-sibling.test.ts, kept out
+    of files: for the reason W1-T3680 records.
+  acceptance:
+    - claim: "a reclaim target with no .git whose sibling does have one is warned about by name rather than skipped quietly"
+      proof: "unit test: a reclaim target with a live sibling is named in the warning"
+    - claim: "a reclaim run that reached none of its targets exits non-zero, so an all-miss is distinguishable from a clean run"
+      proof: "unit test: a reclaim reaching no target exits non-zero"
+    - claim: "a reclaim that reaches a real checkout and frees nothing still succeeds, so the failure is about reach and never about bytes"
+      proof: "unit test: a reclaim freeing nothing from a real checkout succeeds"
+    - claim: "an accidental sudo invocation with no explicit override is refused rather than silently rederiving every path from root"
+      proof: "unit test: sudo with no override is refused rather than redirected"
+  falsifier: |
+    Keep the absent-target skip on stdout with no sibling named and the first test fails. Exit 0
+    after reaching no target and the second fails. Fail a run that reached a real checkout and freed
+    nothing and the third fails. Let a SUDO_USER invocation rederive from /root and the fourth fails.

@@ -1,0 +1,100 @@
+- id: W1-T3683
+  title: "The hand-run census reads step and DISCARDS the verb field that sits on the same row, so the detector built to name a verb sequence an operator keeps re-running reports cli.invoked to cli.invoked, 166 sessions deep, and can never name anything"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 8.00
+  files:
+    - src/lib/hand-run-census.ts
+  origin: "operator-session#why-did-nothing-notice-the-hand-rolling-2026-09-16"
+  plan_refs: ["W1-T3687"]
+  status: queued
+  priority: 2
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16 against the live ledger corpus (288,789 operator rows, 27 recurrences).
+    EVERY recurrence this verb reports is opaque, and the top four are entirely so:
+
+      sequence: cli.invoked -> cli.invoked                          sessions: 166
+      sequence: cli.invoked x4                                      sessions:  56
+      sequence: cli.invoked x14                                     sessions:  62
+      sequence: cli.invoked x11                                     sessions:  55
+
+    THE VERB IS ALREADY ON THE ROW. `logCliInvocation` (src/run-task.ts:40075) writes:
+
+      step: "cli.invoked",
+      verb: cmd ?? "(none)",
+      argv_shape: argv.map(...)
+
+    THE CENSUS THROWS IT AWAY. src/lib/hand-run-census.ts:58 keeps three fields:
+
+      out.push({ ts: line.ts, actorPid: line.actor_pid, step: line.step });
+
+    and line 76 documents the result as though it were the intent:
+
+      /** The session's rows' `step` values, IN ORDER, duplicates kept — this IS the verb sequence. */
+
+    It is not the verb sequence. `cli.invoked` is a CONSTANT emitted for every verb, so the
+    "sequence" is a run-length count of how many times the operator typed `rmd` — a signal that
+    cannot distinguish `rmd status` repeated twice from `check-acceptance` followed by `merge`.
+  rationale: |
+    THE PURPOSE THE VERB CANNOT SERVE. `hand-runs` exists to print which verb sequence the operator
+    keeps hand-running, so a recurring sequence can become a rung. Reporting a constant means it
+    can never surface the thing it was built for, and in particular it can never surface an
+    operator RE-IMPLEMENTING A VERB THAT ALREADY EXISTS.
+
+    MEASURED COST, THE SAME SESSION. An operator hand-rolled scripts duplicating `check-acceptance`,
+    `check-proof`, `down`/`up` and `ci-failures` across multiple days on this host. All four are
+    declared verbs. `hand-runs` had 166 sessions of evidence and named none of them, because the
+    only thing it could see was that `rmd` had been typed.
+
+    THE PROPOSAL TEXT IS ALREADY WRITTEN FOR A NAMED SEQUENCE. Line 263 renders "Consider a
+    routine: a rung that fires this same step sequence on the cadence the operator ..." — advice
+    that is actionable for `check-acceptance -> check-proof -> merge` and meaningless for
+    `cli.invoked -> cli.invoked`. The renderer already assumes the fix.
+
+    THIS IS NOT THE SAME GAP `rmd emissions` REPORTS. That verb's 56-of-80 "unauditable" count asks
+    whether a verb leaves a SEMANTIC trace — whether `review` did review work — and answers it
+    honestly ("unauditable is not unused"). This task is narrower and fully determined: the
+    invocation record already carries the verb, and one reader drops it.
+  design: |
+    (i) `HandRunRow` gains `verb`, read from the same row `step` is read from. A row whose `step`
+        is `cli.invoked` and which carries no `verb` is skipped for the same reason a row missing
+        `ts`/`actor_pid`/`step` is skipped today — SKIPPED, never guessed at, which is this
+        module's existing rule and must not be weakened.
+
+    (ii) THE SEQUENCE KEY BECOMES THE VERB WHERE ONE EXISTS. For a `cli.invoked` row the sequence
+         element is the verb; for every other step it stays the step, unchanged. So a mixed session
+         reads `check-acceptance -> review.posted -> merge` rather than collapsing either half.
+
+    (iii) THE PRIMARY KEY STAYS A PLAIN JOIN of the ordered elements, never a hash — line 128's
+          existing rule, unchanged, so a signature stays readable in a ledger row.
+
+    (iv) HISTORY DOES NOT SILENTLY RE-KEY. Sequences recorded under the old constant-based
+         signature are not comparable to the new ones. `hand_run.census_proposed` rows carrying a
+         pre-change signature must not be matched against post-change signatures as though they
+         were the same routine; the existing signature read (line 241) gains that discrimination so
+         a stale proposal is treated as absent rather than as agreement.
+
+    NO THRESHOLD CHANGES. Recurrence counting, the session window and the proposal cadence are all
+    untouched — this task changes WHAT is counted, never HOW MANY are needed.
+
+    THE SUITE GOES IN test/the-hand-run-census-names-the-verb-not-the-step.test.ts, kept out of
+    files: for the reason W1-T3680 records.
+  acceptance:
+    - claim: "a session of CLI invocations reports the verbs that were run rather than a repeated constant"
+      proof: "unit test: a session of cli invocations reports its verbs"
+    - claim: "two sessions running different verbs produce different signatures, so a recurrence counts a routine and not a keystroke count"
+      proof: "unit test: different verbs produce different signatures"
+    - claim: "a cli.invoked row carrying no verb is skipped rather than guessed at, keeping this module's existing rule"
+      proof: "unit test: a cli row with no verb is skipped"
+    - claim: "a proposal recorded under a pre-change signature is treated as absent rather than as agreement with a new one"
+      proof: "unit test: a pre-change proposal signature is not read as agreement"
+  falsifier: |
+    Keep collecting step for cli.invoked rows and the first test must fail. Produce one signature
+    for two different verb sequences and the second must fail. Substitute a placeholder for a
+    missing verb and the third must fail. Match an old signature against a new one and the fourth
+    must fail.

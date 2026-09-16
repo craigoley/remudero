@@ -528,8 +528,18 @@ test("the retro call site uses the SHARED predicate, not its own `=== 0` copy", 
   // meant widening the function alone would have left this guard still declining to fire — the
   // defect intact at the only place it fires in production. Same shape and same reason as
   // test/preexisting-proof-hits-wiring.test.ts's own wiring pin.
+  //
+  // WIDENED, NOT DUPLICATED (#5769 class): the guard now ALSO fires when the body's only criterion
+  // is the generic PR-open-time fallback (`bodyCarriesGenericAcceptanceFallback`) — a shape
+  // `bodyNeedsAcceptanceRepair` alone reads as healthy but whose proof is stale by construction, so
+  // `proof-discrimination` refused the retro that installed it (#5769). The shared predicate is
+  // still the FIRST half of the `&&`, never re-derived.
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "run-task.ts"), "utf8");
-  assert.match(src, /if \(!bodyNeedsAcceptanceRepair\(body\)\) return "healthy";/, "the caller must use the shared predicate");
+  assert.match(
+    src,
+    /if \(!bodyNeedsAcceptanceRepair\(body\) && !bodyCarriesGenericAcceptanceFallback\(body\)\) return "healthy";/,
+    "the caller must use the shared predicate, widened by `&&` rather than replaced",
+  );
   assert.doesNotMatch(
     src,
     /if \(parseAcceptanceBlock\(body\)\.length === 0\) \{/,
