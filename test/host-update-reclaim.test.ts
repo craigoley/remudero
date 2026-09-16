@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "host-update.sh");
@@ -128,7 +138,12 @@ function writeStubs(dir: string): void {
   chmodSync(join(dir, "az"), 0o755);
 }
 
-function runHostUpdate(mode: string, args: string[] = [], scriptPath = SCRIPT): Run {
+function runHostUpdate(
+  mode: string,
+  args: string[] = [],
+  scriptPath = SCRIPT,
+  extraEnv: NodeJS.ProcessEnv = {},
+): Run {
   const dir = mkdtempSync(join(tmpdir(), "host-update-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "host-update-rec-"));
   const state = mkdtempSync(join(tmpdir(), "host-update-state-"));
@@ -142,6 +157,7 @@ function runHostUpdate(mode: string, args: string[] = [], scriptPath = SCRIPT): 
       STUB_REC: rec,
       STUB_MODE: mode,
       RMD_STATE_DIR: state,
+      ...extraEnv,
     },
   });
   let calls: Call[] = [];
@@ -244,6 +260,135 @@ test("--dry-run ISSUES NOTHING: no prune, no pull, no registry login", () => {
   assert.equal(firstIndex(run.calls, isPrune), -1, "a dry run must reclaim nothing");
   assert.equal(firstIndex(run.calls, isPull), -1, "a dry run must pull nothing");
   assert.equal(firstIndex(run.calls, isAzLogin), -1, "a dry run must not even authenticate");
+});
+
+// ── GIT OBJECT RECLAIM (W1-T3612) — the OTHER filesystem the disk actually fills on ────────────
+//
+// `docker system df` above answers only for docker, which lives on `/mnt/rmd`; the checkouts the
+// fleet owns live on the ROOT filesystem. A `.git/gc.log` left behind by an aborted/losing gc makes
+// git decline automatic cleanup FOREVER (git-gc(1)) — nothing else in this repo acts on it, only
+// `deploy/entrypoint.sh`'s boot-time detector, which deliberately only PRINTS the remedy.
+
+/** A real git checkout with one commit, and a stranded `.git/gc.log` the way a losing background
+ *  gc leaves one — exactly the state section 4a exists to clear.
+ *
+ *  BUILT ON test/helpers/git-repo.ts, NOT a hand-rolled `git init`. The first version of this
+ *  fixture rolled its own mkdtemp/init/identity and `fixture-copy-census` refused it:
+ *  `gitInitFiles: 146 > baseline 145`. That census exists because the same missing-identity bug
+ *  had to be found TWICE (#1964, #1971) across copies of these three steps — the shared helper
+ *  carries an explicit identity on every invocation, so it cannot regress that way. */
+function gcLogFixture(): string {
+  const repo = gitRepo({ kind: "host-update-git" });
+  writeFileSync(join(repo.dir, "a.txt"), "x".repeat(4096));
+  repo.git("add", "a.txt");
+  repo.git("commit", "--quiet", "-m", "init");
+  writeFileSync(join(repo.dir, ".git", "gc.log"), "warning: There are too many unreachable loose objects\n");
+  return repo.dir;
+}
+
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+test("the reclaim reports bytes per volume — --reclaim-only clears a stranded gc.log, runs git gc, and never sums them", () => {
+  const repoA = gcLogFixture();
+  const repoB = gcLogFixture();
+  assert.ok(existsSync(join(repoA, ".git", "gc.log")) && existsSync(join(repoB, ".git", "gc.log")));
+  const run = runHostUpdate("good", ["--reclaim-only"], SCRIPT, {
+    RMD_GIT_RECLAIM_DIRS: `${repoA}:${repoB}`,
+  });
+  assert.equal(run.status, 0);
+  assert.ok(!existsSync(join(repoA, ".git", "gc.log")), "the stale gc.log must be removed in A");
+  assert.ok(!existsSync(join(repoB, ".git", "gc.log")), "the stale gc.log must be removed in B");
+  // Each checkout gets its OWN report line, naming its own path — never one combined total, so a
+  // zero on one checkout can never be misread as a zero on both.
+  assert.match(run.stdout, new RegExp(`git reclaim — ${esc(repoA)}: freed`));
+  assert.match(run.stdout, new RegExp(`git reclaim — ${esc(repoB)}: freed`));
+});
+
+test("a live worker refuses the git reclaim and names the holder — a live fleet container, and nothing is touched", () => {
+  const repo = gcLogFixture();
+  const run = runHostUpdate("live-mount", ["--reclaim-only"], SCRIPT, { RMD_GIT_RECLAIM_DIRS: repo });
+  assert.match(run.stderr, /REFUSING git object reclaim/);
+  assert.match(run.stderr, /rmd-local:latest/, "the refusal must name the live holder");
+  assert.ok(existsSync(join(repo, ".git", "gc.log")), "the gc.log must survive the refusal untouched");
+  assert.doesNotMatch(run.stdout, /git reclaim —.*: freed/, "no checkout may report a reclaim while live");
+});
+
+test("a checkout with no .git is skipped, not an error", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-nogit-`));
+  const run = runHostUpdate("good", ["--reclaim-only"], SCRIPT, { RMD_GIT_RECLAIM_DIRS: dir });
+  assert.equal(run.status, 0);
+  assert.match(run.stdout, /no \.git here, skipping/);
+});
+
+test("--dry-run --reclaim-only reports what it would do without touching the gc.log", () => {
+  const repo = gcLogFixture();
+  const run = runHostUpdate("good", ["--reclaim-only", "--dry-run"], SCRIPT, { RMD_GIT_RECLAIM_DIRS: repo });
+  assert.equal(run.status, 0);
+  assert.match(run.stdout, /git reclaim \(DRY RUN\)/);
+  assert.ok(existsSync(join(repo, ".git", "gc.log")), "a dry run must not remove the gc.log");
+});
+
+test("MUTANT: dropping the live-worker refusal lets git gc run beside a live fleet container", () => {
+  const mutant = mutate(
+    '  if [ -n "${LIVE}" ]; then\n    echo "host-update: REFUSING git object reclaim',
+    '  if [ -n "${LIVE}" ] && false; then\n    echo "host-update: REFUSING git object reclaim',
+  );
+  const repo = gcLogFixture();
+  const runMutant = runHostUpdate("live-mount", ["--reclaim-only"], mutant, { RMD_GIT_RECLAIM_DIRS: repo });
+  assert.ok(
+    !existsSync(join(repo, ".git", "gc.log")),
+    "the mutant must actually reach git gc and clear the log — otherwise this proves nothing about the guard",
+  );
+  // …and the real script must not: the assertion the refusal test above makes, restated here so the
+  // pair reads as one claim.
+  const repoReal = gcLogFixture();
+  const real = runHostUpdate("live-mount", ["--reclaim-only"], SCRIPT, { RMD_GIT_RECLAIM_DIRS: repoReal });
+  assert.ok(existsSync(join(repoReal, ".git", "gc.log")));
+});
+
+test("MUTANT: collapsing the per-checkout report into one combined total is caught by the per-volume test", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  const loopHeader = '    for gdir in "${GIT_RECLAIM_DIRS[@]}"; do\n';
+  const perCheckoutLine = '        echo "host-update: git reclaim — ${gdir}: freed $(human_kb "${freed_kb}") ${had_gc_log}"\n';
+  const doneMarker = "    done\n  fi\nfi\n\n# ── 4b.";
+  for (const [name, needle] of [
+    ["loop header", loopHeader],
+    ["per-checkout report line", perCheckoutLine],
+    ["loop close", doneMarker],
+  ] as const) {
+    assert.equal(src.split(needle).length - 1, 1, `the ${name} must be locatable and unique, or this proves nothing`);
+  }
+  let mutated = src.replace(loopHeader, `TOTAL_FREED_KB=0\n${loopHeader}`);
+  mutated = mutated.replace(perCheckoutLine, '        TOTAL_FREED_KB=$((TOTAL_FREED_KB + freed_kb))\n');
+  mutated = mutated.replace(
+    doneMarker,
+    '    done\n    echo "host-update: git reclaim — freed $(human_kb "${TOTAL_FREED_KB}") total"\n  fi\nfi\n\n# ── 4b.',
+  );
+  assert.notEqual(mutated, src, "the mutation must actually change the script");
+  const dir = mkdtempSync(join(tmpdir(), "host-update-mutant-vol-"));
+  const mutant = join(dir, "host-update.sh");
+  writeFileSync(mutant, mutated, { mode: 0o755 });
+  chmodSync(mutant, 0o755);
+
+  const repoA = gcLogFixture();
+  const repoB = gcLogFixture();
+  const runMutant = runHostUpdate("good", ["--reclaim-only"], mutant, {
+    RMD_GIT_RECLAIM_DIRS: `${repoA}:${repoB}`,
+  });
+  assert.equal(runMutant.status, 0);
+  assert.doesNotMatch(
+    runMutant.stdout,
+    new RegExp(`git reclaim — ${esc(repoA)}: freed`),
+    "the mutant collapses the per-checkout line away",
+  );
+  assert.match(runMutant.stdout, /git reclaim — freed .* total/, "the mutant reports one combined total instead");
+
+  // …and the real script must still report per checkout, or this proves nothing about the guard.
+  const repoC = gcLogFixture();
+  const repoD = gcLogFixture();
+  const real = runHostUpdate("good", ["--reclaim-only"], SCRIPT, { RMD_GIT_RECLAIM_DIRS: `${repoC}:${repoD}` });
+  assert.match(real.stdout, new RegExp(`git reclaim — ${esc(repoC)}: freed`));
+  assert.match(real.stdout, new RegExp(`git reclaim — ${esc(repoD)}: freed`));
 });
 
 // ── THE REPORT MUST NOT CLAIM MORE THAN THE RUN SUPPORTS ────────────────────────────────────

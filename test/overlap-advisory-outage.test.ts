@@ -132,7 +132,7 @@ test("W1-T2606: the printed id, reservation notice and exit code are identical w
       let code: number;
       try {
         code = await nextTaskIdCommand(
-          ["--plan", planPath, "--files", "src/lib/plan.ts"],
+          ["--no-reserve", "--plan", planPath, "--files", "src/lib/plan.ts"],
           { plan: () => planFixture(), scopes },
           { openPrTexts: NO_OPEN_PRS },
         );

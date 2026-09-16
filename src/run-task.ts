@@ -19812,9 +19812,15 @@ export function describeReservationRefusal(outcome: string | undefined, message:
  * silently resolved, the same posture `unknownArgError` already takes on an unknown flag.
  */
 export function validateReserveArgs(rest: readonly string[]): string | undefined {
-  return rest.includes("--reserve") && rest.includes("--offline")
-    ? "### rmd next-task-id: --reserve and --offline are contradictory — --reserve must push to origin, --offline declines to read it"
-    : undefined;
+  if (rest.includes("--reserve") && rest.includes("--offline")) {
+    return "### rmd next-task-id: --reserve and --offline are contradictory — --reserve must push to origin, --offline declines to read it";
+  }
+  // Asking to claim and not to claim in one invocation is the same shape: refuse by name rather
+  // than pick a winner, because either silent resolution is a surprise (W1-T3091).
+  if (rest.includes("--reserve") && rest.includes("--no-reserve")) {
+    return "### rmd next-task-id: --reserve and --no-reserve are contradictory — reserving is the default, so pass neither or exactly one";
+  }
+  return undefined;
 }
 
 /**
@@ -20214,7 +20220,7 @@ export async function nextTaskIdCommand(
   overlapDeps: OverlapWarningDeps = {},
   deps: NextTaskIdReserveDeps = {},
 ): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days"], ["--offline", "--reserve", "--audit"]);
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days"], ["--offline", "--reserve", "--no-reserve", "--audit"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -20256,7 +20262,27 @@ export async function nextTaskIdCommand(
     console.error(`### rmd next-task-id: ${(e as Error).message}`);
     return 2;
   }
-  const reserving = rest.includes("--reserve");
+  // RESERVE BY DEFAULT; NOT CLAIMING IS THE OPT-OUT (W1-T3091).
+  //
+  // The previous default printed a number and claimed nothing, and ci.yml's task-id-existence job
+  // already recorded why that is wrong in its own comment: "The hand lane's only id source, `rmd
+  // next-task-id`, prints an id and reserves NOTHING by design, so a later mint handed the same
+  // number out as free and nothing noticed until an open PR had to be renumbered."
+  //
+  // MEASURED FIVE TIMES IN ONE SESSION on 2026-09-07, and again on 2026-09-15 when two shards
+  // reached main under W1-T3620 and `loadPlan` threw — main's own plan would not load, so every
+  // PR's required `ci` failed until a human renumbered the loser. That is the second time this
+  // class took main down in nine days.
+  //
+  // THE PRICE IS AN INTEGER AND IT IS THE CHEAP SIDE. A reserved id nobody files is HELD rather
+  // than free, and reclaiming one is an operator decision -- which `--audit` already reports on.
+  // Renumbering an OPEN pull request means rewriting its shard, every citation of it, and its
+  // branch name, which is a credit path in its own right. Ids are unbounded; open PRs are not.
+  //
+  // `--offline` IMPLIES the opt-out rather than erroring: it declines to read origin, so it cannot
+  // push to it either. An EXPLICIT `--reserve` beside `--offline` stays a refusal, because that
+  // asks for two incompatible things BY NAME. `--audit` never reserves -- it is a read-only report.
+  const reserving = !rest.includes("--no-reserve") && !offline && !rest.includes("--audit");
   if (!reserving) console.log(describeMintWithHistory(mint));
   if (!reserving) {
     // READS reservations, never TAKES one. This verb is advisory and spawns nothing, so an operator
@@ -39354,9 +39380,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "next-task-id",
-    syntax: "rmd next-task-id [--plan <path>] [--offline] [--reserve] [--audit] [--audit-age-days <days>]",
-    summary: "Print (or --reserve atomically claim) the next free W1-T<n> task id.",
-    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.",
+    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>]",
+    summary: "Atomically CLAIM the next free W1-T<n> task id. `--no-reserve` prints one without claiming it.",
+    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.",
   },
   {
     name: "emissions",

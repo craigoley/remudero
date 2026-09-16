@@ -344,6 +344,37 @@ export function clearSharedPause(deps: SharedPauseGitDeps): boolean {
 }
 
 /**
+ * Per-`deps`, per-sha memo of {@link readSharedPauseAnchor}'s verdict (W1-T3622). Keyed on the
+ * `SharedPauseGitDeps` instance rather than global to the module: production wires exactly one
+ * live instance for the process's whole lifetime (`run-task.ts`'s `realDeps()` memoizes
+ * `composeRealDeps`'s `ComposedRealGraph` behind a module-level `??=`), so this still resolves an
+ * unreachable anchor ONCE per sha for real — but a WeakMap keyed on `deps` also means two
+ * unrelated test fixtures that happen to mint the same literal sha string never share a verdict,
+ * with no manual reset required between tests. A `null` (unreadable) verdict is memoized exactly
+ * like a resolved one — the sha that failed to resolve cannot start resolving later on its own,
+ * so there is nothing to gain by re-paying the read, only the cost of stopping.
+ */
+const sharedPauseAnchorMemos = new WeakMap<SharedPauseGitDeps, Map<string, SharedPauseAnchorInfo | null>>();
+
+/**
+ * {@link readSharedPauseAnchor}, memoized per {@link sharedPauseAnchorMemos}. Design: "resolve
+ * once, remember the verdict against the ref's sha, and re-attempt only when that sha changes" —
+ * a hold's anchor sha is immutable once minted, so a verdict for a given sha can never go stale;
+ * only a NEW hold (a new sha, from a fresh `writeSharedPause`) is worth reading again.
+ */
+function resolveSharedPauseAnchor(sha: string, deps: SharedPauseGitDeps): SharedPauseAnchorInfo | null {
+  let memo = sharedPauseAnchorMemos.get(deps);
+  if (!memo) {
+    memo = new Map();
+    sharedPauseAnchorMemos.set(deps, memo);
+  }
+  if (memo.has(sha)) return memo.get(sha)!;
+  const info = readSharedPauseAnchor(sha, deps);
+  memo.set(sha, info);
+  return info;
+}
+
+/**
  * THE DAEMON'S PER-TICK SUPPLIER — wired at BOTH `checkPause` call sites in `src/run-task.ts`
  * (the task shard's own note on why the flag and its only reader are declared apart: the flag
  * lives here, its only reader lives there).
@@ -358,19 +389,26 @@ export function clearSharedPause(deps: SharedPauseGitDeps): boolean {
  * scored free. Nothing here compares the anchor's timestamp against the clock, either — a hold
  * never expires on elapsed time alone; `resumeFleet` is the only thing that clears it.
  *
- * NAMES THE SETTER (W1-T2262): a `"held"` read now recovers {@link readSharedPauseAnchor} off the
- * same sha `ls-remote` just returned and, when that recovers, renders WHO set the hold (pid, host,
- * timestamp) instead of the old "(set from another host)" — an anonymous fleet-wide halt is what
- * this closes. An anchor that fails to recover (unreachable, GC'd, minted by something that didn't
- * use the expected message shape) still renders a HELD detail — it degrades the ATTRIBUTION, never
- * the VERDICT.
+ * NAMES THE SETTER (W1-T2262): a `"held"` read now recovers {@link readSharedPauseAnchor} (via
+ * the {@link resolveSharedPauseAnchor} memo, W1-T3622) off the same sha `ls-remote` just returned
+ * and, when that recovers, renders WHO set the hold (pid, host, timestamp) instead of the old
+ * "(set from another host)" — an anonymous fleet-wide halt is what this closes.
+ *
+ * UNATTRIBUTABLE IS ITS OWN CONDITION (W1-T3622): an anchor that fails to recover (unreachable,
+ * GC'd, minted by something that didn't use the expected message shape) still renders a HELD
+ * detail — it degrades the ATTRIBUTION, never the VERDICT — but the detail names itself
+ * "UNATTRIBUTABLE" rather than reusing the ordinary "set by pid ..." phrasing, because "someone
+ * paused this and I can tell you who" and "something is holding the fleet and nobody can say who"
+ * are different operator instructions. The read behind that verdict pays the `cat-file` round
+ * trip (and whatever fallback follows a local miss) exactly ONCE per sha, not once per tick — see
+ * {@link resolveSharedPauseAnchor}.
  */
 export function checkSharedPause(root: string, deps: SharedPauseGitDeps): string | undefined {
   const local = pauseDetail(root);
   if (local) return local;
   const ls = lsRemoteSharedPause(deps);
   if (ls.status === 0 && ls.sha) {
-    const anchor = readSharedPauseAnchor(ls.sha, deps);
+    const anchor = resolveSharedPauseAnchor(ls.sha, deps);
     if (anchor) {
       return (
         `PAUSE held on ${sharedPauseRef()} — set by pid ${anchor.pid}@${anchor.host} at ` +
@@ -378,8 +416,8 @@ export function checkSharedPause(root: string, deps: SharedPauseGitDeps): string
       );
     }
     return (
-      `PAUSE held on ${sharedPauseRef()} (setter unrecoverable — anchor ${ls.sha} unreadable) — ` +
-      "run `rmd resume` to clear"
+      `PAUSE held on ${sharedPauseRef()} — UNATTRIBUTABLE (anchor ${ls.sha} unreadable, setter ` +
+      "cannot be recovered) — run `rmd resume` to clear"
     );
   }
   if (ls.status !== 0) {
