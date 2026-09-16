@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, Plan, Task, TaskStatus } from "./plan.js";
-import { RETIREMENT_REASONS } from "./plan.js";
+import { RETIREMENT_REASONS, unmetDependencies } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
@@ -68,6 +68,7 @@ export type LintCheck =
   | "machine-author-verify"
   | "blocked-task-disposition"
   | "blocked-record-unruled"
+  | "blocked-without-disposition"
   | "provenance"
   | "call-site"
   | "monolith-filing"
@@ -1787,6 +1788,70 @@ export function blockedRecordUnruledViolations(task: Task): LintViolation[] {
   ];
 }
 
+// ── BLOCKED-WITHOUT-DISPOSITION CENSUS (W1-T3686) ───────────────────────────────────────────────
+// {@link blockedRecordUnruledViolations} above (W1-T2634) names every `status: blocked` task with
+// no legal `retirement:`, unconditionally — but it never asks whether `depends_on` is WHY the task
+// is blocked, so an ORDINARILY blocked task (one a real, unmet dependency explains) is reported
+// identically to one parked by NOTHING at all. This closes that gap: a task is named here only
+// when BOTH mechanisms this repo already has for moving a blocked task past it — dispatch's
+// `status: queued` gate, and W1-T1287's `retirement:` unparking — pass through it untouched. It
+// reads {@link unmetDependencies} (`plan.ts`), the SAME predicate the runner's own admission gate
+// (`assertRunnable`) uses, so "unmet" here means exactly what it means everywhere else in this
+// repo: not merged, not retired. WARN-ONLY BY CONSTRUCTION, like its sibling above — refusing here
+// would fail `lint-plan` over a task the contributor's diff never touched.
+// Why: plan/tasks.d/W1-T3686-a-task-blocked-by-nothing-and-retired-by-nothing-has-no-path-back.yaml.
+
+/** A prose fragment that READS like a retirement ruling, used ONLY to pick which message
+ *  {@link blockedWithoutDispositionViolations} emits below — NEVER to decide whether the task is
+ *  reported. Design point (i) of the task record: prose is not parsed to determine disposition, so
+ *  a task carrying this language is reported exactly as one carrying none; only the wording of the
+ *  report differs, distinguishing "no disposition at all" from "a disposition no mechanism can
+ *  read" (design point (iv)). */
+function proseReadsLikeRetirement(task: Task): boolean {
+  const prose = `${task.title}\n${task.note ?? ""}\n${task.rationale ?? ""}`;
+  return /\bretir(?:e|ed|ement|ing)\b|\bsupersede[ds]?\b|\bsuperseded\b|\bwithdraw(?:n)?\b/i.test(prose);
+}
+
+/** A `status: "blocked"` task carrying no LEGAL `retirement:` value AND no unmet `depends_on`
+ *  entry is NAMED — a park with no exit: dispatch skips it (its `status` is not `queued`) and
+ *  W1-T1287's retirement machinery never touches it (nothing depends on it needing to unpark).
+ *  A task blocked by a GENUINELY unmet dependency stays silent, deliberately — that is what
+ *  `status: blocked` means when a real dependency explains it, and reporting it would be the false
+ *  positive design point (ii) of the task record forbids. Length is always 0 or 1. WARN-ONLY BY
+ *  CONSTRUCTION: this function never returns `severity: "block"`, so it can never fail `lint-plan`
+ *  over a task the running diff did not touch. */
+export function blockedWithoutDispositionViolations(task: Task, plan: Plan): LintViolation[] {
+  if (task.status !== "blocked") return [];
+  const hasLegalDisposition = task.retirement !== undefined && (RETIREMENT_REASONS as readonly string[]).includes(task.retirement);
+  if (hasLegalDisposition) return [];
+  if (unmetDependencies(plan, task).length > 0) return []; // an ordinary block — a real dependency explains it
+  const legalValues = RETIREMENT_REASONS.join("|");
+  if (proseReadsLikeRetirement(task)) {
+    return [
+      {
+        check: "blocked-without-disposition",
+        severity: "warn",
+        message:
+          `task ${task.id} is status: blocked with no unmet dependency, and its retirement is recorded ` +
+          `only in prose — reported as UNREADABLE, not accepted: W1-T1287 made \`retirement:\` (one of ` +
+          `${legalValues}) the machine-readable field, and prose is not a second spelling of it. Move ` +
+          "the ruling into that field so it stops being invisible to every mechanical pass.",
+      },
+    ];
+  }
+  return [
+    {
+      check: "blocked-without-disposition",
+      severity: "warn",
+      message:
+        `task ${task.id} is status: blocked with no unmet dependency and no \`retirement:\` at all — ` +
+        "parked by nothing, reachable by nothing: dispatch skips it because its status is not " +
+        `queued, and retirement review never sees it because nothing depends on it needing to ` +
+        `unpark. Record a \`retirement:\` ruling (one of ${legalValues}), or return it to \`status: queued\`.`,
+    },
+  ];
+}
+
 /** Context the CALLER resolves via I/O and injects through {@link LintOpts} — see the section
  *  comment above for why it cannot be fetched here. */
 export interface PostMergeAmendmentContext {
@@ -3192,7 +3257,13 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
  *  repo supplies one (W1-T2676): `lintPlan` derives it FOR FREE from `plan.tasks` -- the one
  *  thing every caller already holds -- unless `optsFor` sets one itself, including `[]` to opt
  *  out. So `lintPlan(merged, () => ({}))` (inbox.ts) and `lintPlan(plan)` (onboard/synthesize.ts)
- *  both see a real duplicate-surface finding today, no call-site change needed. */
+ *  both see a real duplicate-surface finding today, no call-site change needed.
+ *
+ *  `blockedWithoutDispositionViolations` (W1-T3686) is folded in here rather than into `lintTask`
+ *  for the same reason: it is the only check in this file that needs the WHOLE `Plan` (to resolve
+ *  `depends_on` against every other task's status), and `lintTask` takes a single `Task` and never
+ *  a `Plan` — a contract worth keeping so every other check stays testable in isolation. Appending
+ *  its (always warn-only) violations here and re-deriving `ok` cannot turn a passing task failing. */
 export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => ({})): Map<string, LintResult> {
   const surfaceCorpus: DuplicateSurfaceCorpusEntry[] = plan.tasks.map((t) => ({
     id: t.id,
@@ -3203,7 +3274,10 @@ export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => (
   for (const task of plan.tasks) {
     const opts = optsFor(task);
     const withSurfaces = opts.openTaskSurfaces !== undefined ? opts : { ...opts, openTaskSurfaces: surfaceCorpus };
-    out.set(task.id, lintTask(task, withSurfaces));
+    const base = lintTask(task, withSurfaces);
+    const blockedWithoutDisposition = blockedWithoutDispositionViolations(task, plan);
+    const violations = blockedWithoutDisposition.length > 0 ? [...base.violations, ...blockedWithoutDisposition] : base.violations;
+    out.set(task.id, { ok: base.ok && violations.every((v) => v.severity !== "block"), violations });
   }
   return out;
 }
