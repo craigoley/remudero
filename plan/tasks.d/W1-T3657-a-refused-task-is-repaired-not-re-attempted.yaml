@@ -1,0 +1,73 @@
+- id: W1-T3657
+  title: "A TASK THE PRE-DISPATCH LINTER REFUSES IS RE-ATTEMPTED FOREVER AND NOTHING REPAIRS IT — measured 1,232 refusals of one already-shipped task in 10.4 hours, and a second fleet with ZERO dispatchable tasks for the same reason, while the linter names the exact remedy in every refusal it prints"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 90.00
+  files: [src/lib/dispatch-repair.ts, src/run-task.ts, test/a-refused-task-is-repaired-not-re-attempted.test.ts]
+  origin: oper#dispatch-refusal-audit-2026-09-16
+  plan_refs: ["W1-T1287", "W1-T2503"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR, 2026-09-16: "if rmd doesn't like how those tasks are structured, why didn't it create
+    a worker to recon and restructure them? That is a good automation fix."
+
+    MEASURED THE SAME DAY, across the three live instances:
+
+        remudero-console   1,232 refusals of CONSOLE-T12   since 00:14  (~2/min for 10.4h)
+        remudero-site         30 refusals of T8/T10/T11    since 00:14
+        remudero (core)        0
+
+    The console's task had ALREADY SHIPPED. The site's three were unbuildable as filed, and
+    `rmd lint-plan` reported 4 OPEN FAILING OF 5 CHECKED — that fleet could dispatch NOTHING AT
+    ALL. It read as idle. It was blocked.
+
+    THE REFUSAL IS DETERMINISTIC, WHICH IS WHAT MAKES THE LOOP POINTLESS. The same task, the same
+    verdict, every tick, forever. No strike is spent, no escalation is raised, no operator is told,
+    and the record is never touched. Only a human reading container stdout finds it — and stdout is
+    where the 404 noise lives, so nobody reads it.
+
+    AND THE REMEDY IS ALREADY IN THE REFUSAL. Every one of these printed its own fix:
+
+        [sizing] spans 3 distinct subsystems/concerns (canonical-docs, learnings-publication, page)
+        at risk:medium — Rule 19: raise to risk:high or decompose into one task per concern
+
+    The fleet has a recon lane, a linter that names remedies, and a plan it is allowed to edit. It
+    has every part of the repair except the wiring between them.
+
+    WHAT THE REPAIR MUST NOT BE.
+
+    Not an auto-rewrite of the plan. A worker that silently raises a risk band to make a task
+    dispatch is the gaming Rule 19 exists to prevent, and the operator's own ruling is that a band
+    raise is the WRONG first exit — the site tasks' real defect was three records creating one
+    absent shared module, which decomposition fixed and a band raise would have buried.
+
+    Not an unbounded lane either. A recon that cannot restructure a task must escalate to the
+    operator rather than re-reconning, or this trades a cheap loop for an expensive one.
+
+    THE SHAPE. On a refusal, spend a strike; dispatch ONE recon lane carrying the linter's own
+    verdict text; that lane proposes a restructured record through the ordinary review path, never
+    a direct write. On the second refusal of the same task with the same verdict, escalate to the
+    operator naming the task, the verdict and the attempts. A task whose verdict CHANGES is
+    progress and starts a fresh count.
+  acceptance:
+    - claim: "a task refused by the pre-dispatch linter dispatches a repair lane instead of being re-attempted on the next tick"
+      proof: "unit test: a refused task dispatches one repair lane, not another attempt"
+    - claim: "the repair lane receives the linter's own verdict text, so it repairs the stated defect rather than guessing"
+      proof: "unit test: the repair lane carries the refusal verdict verbatim"
+    - claim: "a second refusal carrying the same verdict escalates to the operator rather than starting a second repair"
+      proof: "unit test: an unchanged verdict escalates rather than re-reconning"
+    - claim: "a task whose verdict changes counts as progress and is not treated as a repeat"
+      proof: "unit test: a changed verdict is progress, not a repeat"
+    - claim: "the repair is reached from the dispatch path that prints the refusal today, not only from its own tests"
+      proof: "grep: repairRefusedTask( in src/run-task.ts"
+  falsifier: |
+    Remove the repair dispatch and the first test must fail with the task re-attempted. Pass the
+    lane a generic prompt instead of the verdict and the second must fail. Let an unchanged verdict
+    start a second recon and the third must fail. Treat a changed verdict as a repeat and the
+    fourth must fail.
