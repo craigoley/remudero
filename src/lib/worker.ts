@@ -1037,7 +1037,7 @@ export type GenericRouteLane = keyof typeof GENERIC_ROUTE_TOOL_BOUNDS;
  *
  *   recon      read-only inspect (`git remote -v`, `git log --oneline -5`, `ls`). No Write/Edit.
  *   diagnose   read-only investigation (`git diff`/`git status`, re-runs the failure). No Write/Edit.
- *   retro      "edit ONLY MASTER-PLAN.md" then commit. Edit (one file, never Write) plus Bash.
+ *   retro      retroPrompt edits ONE existing plan file, then commits. Edit (never Write) plus Bash.
  *   alert_fix  commits and pushes (`git push origin HEAD`); takes the fix lane's own list.
  *
  * EVERY ONE DECLARES `Bash`, which IS the measurement, not a concession: none of the four is
