@@ -13,6 +13,13 @@
   plan_refs: ["W1-T3628", "W1-T3627", "W1-T208", "W1-T2251"]
   status: queued
   attempts: 0
+  note: |
+    reservation hand-off: main -> chore/file-orphan-worker-reaper-1789522145
+
+    The id was minted by the fleet's automatic reservation while checked out on `main`
+    (rmd-id holder branch=main, 2026-09-16T01:28:33Z) before this filing branch existed, so
+    task-id-existence's holder check sees a mismatch. This note is the recorded hand-off from
+    that holder to the branch that actually files the shard.
   rationale: |
     ORDERING, CARRIED IN PROSE BECAUSE depends_on CANNOT NAME IT YET. This must land AFTER
     W1-T3628, which is the task that makes the worker reading exist at all -- until then there is
