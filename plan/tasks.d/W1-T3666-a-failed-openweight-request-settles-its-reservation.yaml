@@ -1,4 +1,4 @@
-- id: W1-T3662
+- id: W1-T3666
   title: "A FAILED OPEN-WEIGHT REQUEST KEEPS ITS WHOLE RESERVATION, SO THE DAILY CAP IS CONSUMED AT TWICE THE REAL SPEND — settlement is reached only after a 200, and the reservation it would have corrected is the conservative one"
   repo: remudero
   depends_on: []

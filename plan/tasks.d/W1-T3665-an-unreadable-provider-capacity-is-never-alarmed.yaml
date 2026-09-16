@@ -1,4 +1,4 @@
-- id: W1-T3661
+- id: W1-T3665
   title: "AN UNREADABLE PROVIDER CAPACITY IS NEVER ALARMED, SO THE FLEET ROUTED 100% TO ONE SUBSCRIPTION FOR FIVE DAYS AND NOTHING SAID SO — codex read `readable: false` from 2026-09-11 to 2026-09-16 while `codex login status` reported Logged in"
   repo: remudero
   depends_on: []

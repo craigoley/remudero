@@ -1,4 +1,4 @@
-- id: W1-T3660
+- id: W1-T3664
   title: "HALF OF EVERY ROUTED DRAFT IS THROWN AWAY BECAUSE THE ADAPTER CONTRACT HAS NO RULE FOR LITERAL OUTPUT MARKERS — 100 of 100 failures today are one reason, the worker answering in prose instead of emitting the fragment delimiters, and the 16.8x smaller prompt did not change it"
   repo: remudero
   depends_on: []
