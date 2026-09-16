@@ -5912,12 +5912,21 @@ export interface FixDispatchEvidence {
   proofDiscrimination?: ProofDiscriminationEvidence;
 }
 
-/** The only proof grades that establish the capped-green repair has a mechanical body remedy. */
+/** The only proof grades that establish the capped-green repair has a mechanical body remedy —
+ *  every {@link CriterionVerdict.proof_exec} outcome EXCEPT the two that mean "this DID execute"
+ *  (`executed_pass`/`executed_fail`) and `stale_self_path` (a PROVEN-bad proof, `met: false`,
+ *  which fails the verdict rather than capping it — see {@link cappedProofDiscriminationFromLedger}'s
+ *  own met-check, which never lets one reach here). */
+export type NonExecutedProofExecOutcome = Exclude<
+  CriterionVerdict["proof_exec"],
+  "executed_pass" | "executed_fail" | "stale_self_path"
+>;
+
 export interface ProofDiscriminationEvidence {
   readonly proofs: ReadonlyArray<{
     readonly claim: string;
     readonly proof: string;
-    readonly proofExec: "executed_stale" | "not_executable";
+    readonly proofExec: NonExecutedProofExecOutcome;
   }>;
 }
 
@@ -5925,16 +5934,98 @@ export interface ProofDiscriminationEvidence {
  * Extract the only proof rows a capped-green repair worker may act on. This is
  * deliberately structural: a reason string is rendered prose and must never
  * decide whether a strike is spent.
+ *
+ * W1-T3669: `capped` (review.ts) is defined as `executedCount === 0` over EXACTLY the two
+ * `executed_pass`/`executed_fail` grades — so ANY OTHER grade on a capped verdict's criterion is,
+ * by that same definition, "never executed", not only the two this function used to accept
+ * (`executed_stale`, `not_executable`). The narrower allowlist silently dropped `exec_error`,
+ * `base_unreadable` and `not_yet_built` — real, declared outcomes (see `isProofExecOutcome`) that
+ * a capped-but-all-criteria-met verdict can legitimately carry. MEASURED: PR #5683 (W1-T3610)
+ * posted `CAPPED — 0/2 proofs executed; not certified` and never reached this rung because one of
+ * those three excluded grades landed on both its criteria — the 98-refusals/0-dispatches gap this
+ * task diagnoses. `stale_self_path` is excluded deliberately: it always carries `met: false`, so
+ * a caller that pre-filters to all-met criteria (every caller does — see
+ * {@link cappedProofDiscriminationFromLedger} and run-task.ts's two call sites) never offers it
+ * here regardless.
  */
 export function proofDiscriminationEvidenceFromCriteria(
   criteria: readonly CriterionVerdict[],
 ): ProofDiscriminationEvidence | undefined {
   const proofs = criteria.flatMap((criterion) =>
-    criterion.proof_exec === "executed_stale" || criterion.proof_exec === "not_executable"
+    criterion.proof_exec !== "executed_pass" &&
+    criterion.proof_exec !== "executed_fail" &&
+    criterion.proof_exec !== "stale_self_path"
       ? [{ claim: criterion.claim, proof: criterion.proof, proofExec: criterion.proof_exec }]
       : [],
   );
   return proofs.length > 0 ? { proofs } : undefined;
+}
+
+/** One of the four preconditions {@link diagnoseCappedRoutingBlock} names — matched to this
+ *  task's own filed rationale (W1-T3669), in the SAME order the routing block in
+ *  {@link runSweep} reads them. */
+export type CappedRoutingPrecondition = "not-mergeable" | "held" | "no-proof-discrimination" | "arm-not-refused";
+
+export interface CappedRoutingDiagnosis {
+  /** `false` only when every precondition holds and the capped route would actually fire. */
+  blocked: boolean;
+  /** Which gate is false — absent when `blocked` is `false`. */
+  precondition?: CappedRoutingPrecondition;
+  /** A human-legible reading naming the fact this diagnosis rests on. */
+  detail: string;
+}
+
+/**
+ * W1-T3669 — LEGIBILITY FOR A ROUTE THAT SHIPPED SILENT. `runSweep`'s capped-routing block (W1-T3306)
+ * has four preconditions and, until this task, standing down on any of them looked identical to
+ * standing down on all of them: a `mergeable` disposition and nothing else. Mirrors the block's own
+ * four reads, in the SAME order, over the SAME functions — never a second implementation of any of
+ * them — so a PR the ledger already shows as capped-green for its own head can be probed directly,
+ * live or from a test fixture, for WHICH gate is refusing it. `disposition` is the caller's own
+ * already-derived value (from `postReviewFailureHistoryDisposition(...) ?? deriveDisposition(...)`),
+ * never re-derived here, so this stays a pure reader over the same inputs the block itself sees.
+ */
+export function diagnoseCappedRoutingBlock(
+  pr: OpenPrView,
+  disposition: Disposition,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): CappedRoutingDiagnosis {
+  if (disposition !== "mergeable") {
+    return {
+      blocked: true,
+      precondition: "not-mergeable",
+      detail: `disposition is "${disposition}", not "mergeable" — the capped route never reads a non-mergeable disposition`,
+    };
+  }
+  const hold = automergeHoldFromLedger(ledgerLines, pr.prNumber);
+  if (hold !== undefined) {
+    return {
+      blocked: true,
+      precondition: "held",
+      detail: `an automerge hold stands over PR #${pr.prNumber} (engaged by ${hold.by}: ${hold.reason})`,
+    };
+  }
+  const proofDiscrimination = cappedProofDiscriminationFromLedger(pr, ledgerLines);
+  if (proofDiscrimination === undefined) {
+    return {
+      blocked: true,
+      precondition: "no-proof-discrimination",
+      detail:
+        "cappedProofDiscriminationFromLedger returned no evidence for this exact task/PR/head — either no " +
+        "capped review.posted row binds to it, or its criteria carried no repairable proof_exec grade",
+    };
+  }
+  if (decideSweepArm(pr, ledgerLines).arm) {
+    return {
+      blocked: true,
+      precondition: "arm-not-refused",
+      detail: "decideSweepArm reports arm:true for this head — the capped route only fires when the arm predicate itself refuses",
+    };
+  }
+  return {
+    blocked: false,
+    detail: "every precondition holds: an unheld capped-green PR has recoverable proof-discrimination evidence and the arm predicate refuses — the capped route fires",
+  };
 }
 
 function isProofExecOutcome(value: unknown): value is CriterionVerdict["proof_exec"] {
