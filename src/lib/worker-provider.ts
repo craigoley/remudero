@@ -613,11 +613,13 @@ export function codexCandidatesForCapability(
  * nothing would report the divergence. test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
  * asserts the two agree.
  *
- * FRONTIER STAYS ON gpt-oss-120b DELIBERATELY. A nano-class model is not a frontier substitute, and
- * before this every tier named one deployment — a ladder expressing no choice at all. gpt-oss-120b
- * TRAILS rather than being deleted from the rows nano now leads, the same shape the `codex` table
- * uses for a demoted model, so a deployment that stops answering falls back instead of failing the
- * lane.
+ * FRONTIER NO LONGER NAMES ONE DEPLOYMENT (W1-T3689). gpt-oss-120b alone left frontier
+ * single-candidate -- the same shape that had already gone wrong for `codex.balanced.low` -- so
+ * gpt-5-mini now LEADS it on capability (its 272,000-token ceiling clears gpt-oss-120b's 131,072,
+ * and it is the only cash deployment that answers `response_format: json_object` correctly), never
+ * on price: it is 5x gpt-5-nano on both cost axes. gpt-oss-120b TRAILS rather than being deleted,
+ * the same demotion shape the `codex` table uses for a demoted model, so a deployment that stops
+ * answering falls back instead of failing the lane.
  */
 // W1-T3614: economy leads with gpt-oss-120b and balanced with gpt-5-nano, MIRRORING
 // .remudero/mounts.yaml exactly -- a checkout with no mounts table must not silently prefer a
@@ -628,7 +630,7 @@ export function codexCandidatesForCapability(
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-oss-120b", "gpt-5-nano"],
   balanced: ["gpt-5-nano", "gpt-oss-120b"],
-  frontier: ["gpt-oss-120b"],
+  frontier: ["gpt-5-mini", "gpt-oss-120b"],
 };
 
 /** The provider-neutral Claude-model -> capability lookup is shared with Codex: both adapters
