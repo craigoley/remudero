@@ -1,0 +1,62 @@
+- id: W1-T3678
+  title: "SITE AND CONSOLE HAVE NO CONTROL GATEWAY, SO THE BOARD CAN ONLY EVER SHOW CORE — three daemons run, one rmd serve exists and it is mounted on core's state alone, while the console's analytics side already carries a full multi-instance model nobody can populate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 80.00
+  files: [deploy/serve-container.sh, test/a-second-instance-serves-its-own-gateway.test.ts]
+  origin: oper#instance-scope-audit-2026-09-16
+  plan_refs: ["W1-T3623"]
+  status: queued
+  attempts: 0
+  rationale: |
+    OPERATOR, 2026-09-16: "It would also be good to have more information in the dashboard about
+    how the different instances are running against core, site, and console."
+
+    MEASURED THE SAME DAY:
+
+        remudero-daemon          daemon --repo remudero           state ~/rmd-state2
+        remudero-site-daemon     daemon --repo remudero-site      state ~/rmd-site-state
+        remudero-console-daemon  daemon --repo remudero-console   state /mnt/rmd/remudero-console-state
+        remudero-serve           serve --host 0.0.0.0             mounted on ~/rmd-state2 ONLY
+
+    One gateway, core's state. `/v1/status` returns core's tasks and nothing else, so site and
+    console are not filtered out of the board -- there is no data for them to filter.
+
+    THE MULTI-INSTANCE MODEL IS ALREADY BUILT, ON THE OTHER SIDE. The console's
+    lib/analytics-contract.ts carries `AnalyticsScopeLevel` ("instance" | "repository" | "fleet"),
+    filter keys for `repository` and `instanceId`, and RMD_CONTROL_ANALYTICS_INSTANCES holding N
+    entries of {repository, instanceId, baseUrl, readToken}. It fans out to N gateways and
+    aggregates, and it already refuses the aggregation that cannot be summed
+    (`invalid_cross_instance_aggregation`: "provider account windows remain per instance").
+
+    Exactly ONE instance is configured, because exactly one gateway exists to point it at. The
+    console asks for N and the deployment can supply 1.
+
+    WHAT IS MISSING IS DEPLOYMENT, NOT DESIGN. `rmd-fleet.service` brings up core's daemon AND its
+    serve; `rmd-site-fleet.service` and `rmd-console-fleet.service` bring up only daemons. A second
+    and third gateway need a port, a tunnel route and a token pair each.
+
+    WHY IT IS SEQUENCED AFTER THE COLD-START WORK. Measured 2026-09-16, a cold /v1/status took
+    66-80s and blocked every other route behind it on a single-threaded loop. Standing up two more
+    gateways before that is fixed would triple how often an operator sees "unavailable", so this
+    depends on the board route answering rather than blocking.
+
+    HOST-LEVEL AND INSTANCE-LEVEL ARE DIFFERENT FACTS. All three daemons share one VM: disk free
+    and GitHub rate limit are the HOST's, while queues, spend and lanes are each instance's. A
+    board that renders three copies of one disk figure would be stating something false three
+    times.
+  acceptance:
+    - claim: "a second instance serves its own gateway on its own port, reading its own state directory and never core's"
+      proof: "unit test: a second instance serves its own gateway from its own state directory"
+    - claim: "each gateway answers only for its own instance, so no reader can mistake one fleet's queue for another's"
+      proof: "unit test: a gateway answers only for the instance it was launched for"
+    - claim: "a host-level figure is reported once for the host rather than repeated per instance as though it were per-instance"
+      proof: "unit test: a host-level figure is not repeated per instance"
+  falsifier: |
+    Point the second gateway at core's state and the first test must fail. Let it answer for every
+    instance and the second fails. Report disk free per instance and the third fails.
