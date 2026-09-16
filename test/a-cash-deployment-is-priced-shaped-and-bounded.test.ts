@@ -62,7 +62,7 @@ test("W1-T3699: terra is recorded as dearer than luna on both axes, so nothing r
 
 test("W1-T3699: terra leads NOTHING — it is the escalation behind luna, never a lane's first choice", () => {
   const mounts = loadMounts(".remudero/mounts.yaml");
-  const cash = (mounts.capabilities as Record<string, Record<string, Record<string, string[]>>>).cash;
+  const cash = (mounts.capabilities as unknown as Record<string, Record<string, Record<string, string[]>>>).cash;
   let frontierRows = 0;
   for (const [capability, efforts] of Object.entries(cash)) {
     for (const [effort, row] of Object.entries(efforts)) {
