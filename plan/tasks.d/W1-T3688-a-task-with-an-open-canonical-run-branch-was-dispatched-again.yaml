@@ -1,0 +1,94 @@
+- id: W1-T3688
+  title: "PORTAL-T12 was dispatched a SECOND time while its first pull request was open on a canonical run-branch — the head form projectPlan indexes was present and correct, two lanes built the same module independently, and one of the two had to be closed by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files:
+    - src/lib/drain.ts
+  origin: "operator-session#two-lanes-one-task-2026-09-16"
+  plan_refs: ["W1-T2429", "W1-T3219"]
+  status: queued
+  priority: 2
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16 on remudero-site. Timestamps are from the run-branch epochs and the REST
+    record, not inferred:
+
+      13:46:37  run-PORTAL-T12-1789566397746 dispatched
+      13:50:38  PR #43 opened from it
+      13:55:25  run-PORTAL-T12-1789566925521 dispatched  <-- #43 open for 4m47s at this point
+      13:58:01  #43 merged (remudero-review=success)
+      13:58:24  PR #46 opened from the second run
+
+    BOTH heads match `/^run-(.+)-\d+$/` exactly, which is the form W1-T2429 established that
+    `projectPlan` attributes an open PR by. The signal dispatch needs was present, canonical, and
+    four minutes old.
+
+    THE TWO PULL REQUESTS ARE INDEPENDENT IMPLEMENTATIONS OF THE SAME TWO FILES:
+
+      #43  added lib/canonical-docs.ts (+63)  tests/unit/canonical-docs.test.ts (+60)  MERGED
+      #46  added lib/canonical-docs.ts (+52)  tests/unit/canonical-docs.test.ts (+71)  closed by hand
+
+    #46 also failed its own review (criterion 1 matched 0 tests, fell to the keyword floor, judged
+    non-responsive), so the duplicate was the WORSE of the two — but that is luck, not a mechanism.
+  rationale: |
+    THIS IS NOT THE GAP W1-T3219 DESCRIBES, AND THE DISTINCTION IS THE WHOLE POINT. That task
+    (queued) covers a PR whose task identity is carried by a TRAILER rather than by a run-shaped
+    head, which `projectPlan` does not index -- so the daemon cannot see it and rebuilds. Here the
+    head was run-shaped. The identity was in the one place the projection already reads.
+
+    NOR IS IT THE INFLIGHT LATCH. `status-board.ts` holds `inflight:<taskId>` and refuses a second
+    dispatch of the same task while a run is live. That latch guards a live PROCESS. The first run
+    had already exited -- it exited the moment it opened #43 -- so the latch had correctly released
+    while the WORK it produced was still unmerged. An open pull request is the state that must
+    hold dispatch off, and nothing holds it.
+
+    THE COST IS PAID TWICE AND ONE PAYMENT IS ALWAYS WASTED. Two lanes each spent a budgeted run on
+    the same module. Worse than redundancy: they produced CONFLICTING files. `PORTAL-T12` exists at
+    all because three tasks each creating `lib/canonical-docs.ts` would conflict -- and the fix for
+    that hazard was itself built twice, by this one.
+
+    WHY IT MUST NOT BE FIXED BY WIDENING THE LATCH. Holding `inflight:<taskId>` until merge would
+    park a task behind a PR that is abandoned, refused or waiting on a human -- an unbounded hold
+    with no release, which is the opposite failure and worse. The eligibility read is the right
+    place: an OPEN PR is a fact with an end, and a closed-unmerged PR releases it immediately.
+  design: |
+    (i) DISPATCH ELIGIBILITY READS OPEN PULL REQUESTS, NOT ONLY LIVE RUNS. A task with an OPEN,
+        unmerged PR whose head matches `/^run-<taskId>-\d+$/` is INELIGIBLE. It uses the existing
+        `projectPlan` attribution -- no second matcher and no new branch convention.
+
+    (ii) CLOSED-UNMERGED RELEASES IMMEDIATELY. A PR closed without merging frees the task on the
+         next tick. This is what keeps (i) from becoming an unbounded park: the release condition
+         is "no open PR", never "merged".
+
+    (iii) THE REFUSAL IS NAMED AND NUMBERED. When dispatch declines on this ground it says which PR
+          holds the task -- `PORTAL-T12: held by open #43` -- because a task that silently stops
+          being dispatched is indistinguishable from a broken queue, which is the failure W1-T2923
+          and the cadence rungs already demonstrate.
+
+    (iv) A TASK WITH NO OPEN PR IS UNAFFECTED, so the ordinary path emits no new line and takes no
+         new read beyond the projection dispatch already builds.
+
+    NO THRESHOLD AND NO TIMEOUT. There is no age above which an open PR stops holding its task; the
+    hold ends when the PR does. A stale open PR is a separate problem with its own mechanisms
+    (sweep, merge-hold, strike counts) and must not be re-solved here.
+
+    THE SUITE GOES IN test/an-open-run-branch-pr-holds-its-task.test.ts, kept out of files: for the
+    reason W1-T3680 records.
+  acceptance:
+    - claim: "a task whose run-shaped pull request is open and unmerged is not dispatched again, so two lanes cannot build one module"
+      proof: "unit test: a task with an open run branch pr is not dispatched"
+    - claim: "a pull request closed without merging releases its task on the next tick, so the hold ends when the pull request does"
+      proof: "unit test: a closed unmerged pr releases its task"
+    - claim: "a refusal on this ground names the pull request holding the task, so a held task is distinguishable from a broken queue"
+      proof: "unit test: the hold refusal names the pull request"
+    - claim: "a task with no open pull request dispatches exactly as it does today, with no added read"
+      proof: "unit test: a task with no open pr is unaffected"
+  falsifier: |
+    Dispatch a task whose run-branch PR is open and the first test must fail. Keep holding after the
+    PR is closed unmerged and the second must fail. Refuse without naming the PR and the third must
+    fail. Change the no-open-PR path and the fourth must fail.
