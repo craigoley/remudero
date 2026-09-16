@@ -652,23 +652,138 @@ export function openWeightCandidatesForCapability(
   return (requestedEffort && byEffort[requestedEffort]) || byEffort.medium || FALLBACK_OPENWEIGHT_MODELS[tier];
 }
 
+/**
+ * THE CONTEXT WINDOW IS A PROPERTY OF THE DEPLOYMENT, exactly as price and temperature are.
+ *
+ * It is the third row of the same table discipline, and it arrived last for a measurable reason:
+ * price and temperature announce themselves with an HTTP 400 on the FIRST request, while an
+ * oversized prompt fails only on the requests that happen to be large, so the gap read as
+ * flakiness rather than as a missing lookup.
+ *
+ * MEASURED 2026-09-15 from state/openweight-allowance.json: 32 of 96 LARGE nano requests never
+ * settled -- exactly 33% -- while all 8 small requests settled, with the failures spread uniformly
+ * across each concurrency triple (12/10/10) rather than clustered. That is a window edge, not a
+ * transport fault. gpt-oss-120b announces the same wall outright:
+ *   HTTP 400: The input (259242 tokens) is longer than the model's context length (131072)
+ *
+ * TREATED AS A TOTAL, AND COMPARED AGAINST PROMPT + {@link OPENWEIGHT_MAX_COMPLETION_TOKENS}.
+ * gpt-oss-120b's 131,072 is a total context; gpt-5-nano publishes 272,000 as an INPUT ceiling.
+ * Requiring room for the completion in both cases can only refuse a request that would have fit,
+ * never admit one that would not -- the safe direction, and the same asymmetry
+ * {@link OPENWEIGHT_PRICES} reasons about.
+ *
+ * A deployment with no row here is REFUSED rather than assumed to fit, because the alternative is
+ * to discover the answer by spending a full reservation on a request that cannot succeed.
+ */
+export interface OpenWeightContextWindow {
+  readonly totalTokens: number;
+  readonly readAt: string;
+}
+
+export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightContextWindow>> = {
+  "gpt-oss-120b": { totalTokens: 131_072, readAt: "2026-09-15" },
+  "gpt-5-nano": { totalTokens: 272_000, readAt: "2026-09-15" },
+};
+
+/**
+ * Bytes per token, used ONLY to decide which deployment can hold a request -- never to price one.
+ *
+ * DERIVED, NOT ASSUMED. Inverting the live allowance file on nano's $0.05/1M input and the fixed
+ * 5,000-token output ceiling: a $0.0547 reservation is 1,054,000 request bytes, and the $0.0142 it
+ * settled to bounds the real prompt between 244,000 tokens (if the completion used the full
+ * ceiling) and 284,000 (if it used none) -- so 3.71 to 4.32 bytes per token over this corpus. 4.0
+ * is the middle of that measured band and the usual English/code heuristic.
+ *
+ * THIS GATE IS COARSE, AND SAYING SO IS THE POINT. Its reliable job is separating deployments that
+ * differ by MULTIPLES: gpt-oss-120b's 131,072 against gpt-5-nano's 272,000 is a 2x gap, and no
+ * plausible ratio confuses a 260K-token prompt for one that fits gpt-oss. It CANNOT resolve a thin
+ * margin. inbox_draft runs at ~4% under nano's window, which is inside this constant's own error
+ * band, so the residual edge failures there are not something a better divisor fixes -- the fix for
+ * that lane is a smaller prompt, not a sharper estimate.
+ *
+ * A DELIBERATELY CONSERVATIVE RATIO WAS TRIED AND REJECTED, on measurement. At 3.5 the estimate for
+ * the same body is 301,143 tokens, which exceeds every declared window, so the gate refused the
+ * WHOLE inbox_draft lane -- turning a 33% wire failure into a 100% local refusal and pushing the
+ * lane back onto the subscription. Over-refusing is not the safe direction when the safe-looking
+ * error deletes the routing this exists to enable.
+ */
+export const OPENWEIGHT_BYTES_PER_TOKEN = 4.0;
+
+/** The conservative token estimate the fit gate reasons about. */
+export function openWeightEstimatedTokens(requestBodyBytes: number): number {
+  return Math.ceil(requestBodyBytes / OPENWEIGHT_BYTES_PER_TOKEN);
+}
+
+/** Raised INSTEAD of selecting a deployment that cannot hold the request. Thrown before any
+ *  reservation exists, so an impossible request costs nothing against the daily cap. */
+export class OpenWeightRequestTooLargeError extends RmdError {
+  readonly estimatedTokens: number;
+  constructor(detail: { estimatedTokens: number; capability: string; considered: readonly string[] }) {
+    super(
+      "usage",
+      1,
+      `openweight request is ~${detail.estimatedTokens} tokens and no '${detail.capability}' deployment can hold it ` +
+        `(considered: ${detail.considered.join(", ") || "none"}). Refusing before the request reserves, so it costs nothing. ` +
+        `Shrink the prompt or declare a deployment with a larger context window.`,
+      { estimatedTokens: detail.estimatedTokens, capability: detail.capability, considered: [...detail.considered] },
+    );
+    this.estimatedTokens = detail.estimatedTokens;
+  }
+}
+
+/** Does this deployment hold a prompt of `estimatedTokens`, leaving room for the completion the
+ *  adapter itself puts on the wire? An UNLISTED deployment holds nothing -- it is refused, never
+ *  assumed, for the same reason an unpriced one is. */
+export function openWeightDeploymentHolds(deployment: string, estimatedTokens: number): boolean {
+  const window = OPENWEIGHT_CONTEXT_WINDOWS[deployment];
+  if (window === undefined) return false;
+  return estimatedTokens + OPENWEIGHT_MAX_COMPLETION_TOKENS <= window.totalTokens;
+}
+
 export interface OpenWeightModelSelection {
   model: string;
   effort: string;
   capability: CodexModelTier;
+  /** Present only when the fit gate ran, so a ledger row can distinguish "held" from "not checked". */
+  estimatedTokens?: number;
 }
 
-/** Resolve and validate the first configured deployment before it can enter an Azure URL. */
+/**
+ * Resolve and validate a deployment before it can enter an Azure URL.
+ *
+ * WHAT CHANGED, AND WHY IT IS THE SAME RULE THE LADDER ALREADY ENCODED. This used to take the
+ * FIRST SYNTACTICALLY VALID id and find out on the wire whether it could hold the request. The
+ * ladder compensated by hand: `economy` leads gpt-oss-120b and `balanced` leads gpt-5-nano, and
+ * the comment on {@link FALLBACK_OPENWEIGHT_MODELS} says exactly why -- "a 259,181-token
+ * inbox_draft favours nano 2.83x while a 446-token escalation judgement favours gpt-oss 2.40x".
+ * That is a SIZE-DEPENDENT routing decision written into two static row orders, because the
+ * selector could not see the prompt.
+ *
+ * So `promptBytes` is not a new policy; it is the input that policy always needed. Row order still
+ * expresses the operator's MEASURED cost ranking within a tier -- it is not re-derived here, and
+ * this function never reorders it. The window check only SKIPS a candidate that provably cannot
+ * hold the request, which makes the first surviving candidate the cheapest one that fits.
+ *
+ * `promptBytes: undefined` means the caller genuinely does not know the size. The gate is then
+ * SKIPPED rather than guessed, and selection behaves exactly as it did before.
+ */
 export function selectOpenWeightModel(
   capabilities: CapabilityLadder | undefined,
   requestedModel: string | undefined,
   requestedEffort: string | undefined,
+  promptBytes?: number,
 ): OpenWeightModelSelection {
   const capability = openWeightCapabilityForRequestedModel(capabilities, requestedModel);
   const candidates = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
-  const model = candidates.find((candidate) => SAFE_OPENWEIGHT_MODEL_ID.test(candidate));
-  if (!model) throw new Error(`openweight capability '${capability}' has no safe deployment id`);
-  return { model, effort: requestedEffort ?? "default", capability };
+  const safe = candidates.filter((candidate) => SAFE_OPENWEIGHT_MODEL_ID.test(candidate));
+  if (safe.length === 0) throw new Error(`openweight capability '${capability}' has no safe deployment id`);
+  if (promptBytes === undefined) {
+    return { model: safe[0]!, effort: requestedEffort ?? "default", capability };
+  }
+  const estimatedTokens = openWeightEstimatedTokens(promptBytes);
+  const model = safe.find((candidate) => openWeightDeploymentHolds(candidate, estimatedTokens));
+  if (!model) throw new OpenWeightRequestTooLargeError({ estimatedTokens, capability, considered: safe });
+  return { model, effort: requestedEffort ?? "default", capability, estimatedTokens };
 }
 
 function codexBucketForModel(result: CodexRateLimitResult, model: CodexModelInfo): CodexRateLimitBucket | undefined {
