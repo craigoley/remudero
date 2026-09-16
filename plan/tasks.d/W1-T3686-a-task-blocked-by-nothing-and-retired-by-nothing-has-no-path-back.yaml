@@ -1,0 +1,93 @@
+- id: W1-T3686
+  title: "Four tasks are status:blocked with NO retirement record and NO unmet dependency, so dispatch skips them and retirement review never sees them — a task parked by nothing has no path back, and one of the four explains an id collision hit three times in a single session"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 8.00
+  files:
+    - src/lib/task-linter.ts
+  origin: "operator-session#nothing-dropped-sweep-2026-09-16"
+  plan_refs: ["W1-T1287", "W1-T1070"]
+  status: queued
+  priority: 2
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16 over plan/tasks.d at a64dc7ff5. Eleven shards carry `status: blocked`.
+    SEVEN of them record a retirement in prose ("RETIREMENT RECORD", "superseded by", "retired by
+    operator ruling") and are correctly out of the queue. FOUR record nothing at all, and all four
+    declare `depends_on: []`:
+
+      W1-T1261  a crashed run cannot re-supply its own session id
+      W1-T1285  nothing ends a live run because its task became ineligible mid-flight
+      W1-T2203  the id reservation namespace is unreadable by the minter
+      W1-T2242  a proof verifies what it names, so a defect nobody named survives
+
+    NOT HYPOTHETICAL DEBT. W1-T2203 describes `next-task-id` reserving into `refs/rmd-id/*` and
+    never reading it back. On 2026-09-16 a single operator session hit THREE id-reservation
+    collisions -- W1-T3631, W1-T3649 and W1-T3670/3671 -- and renumbered by hand each time. The
+    shard that explains it has been parked, reachable by nothing, the whole while.
+  rationale: |
+    THE TWO MECHANISMS BOTH PASS THIS STATE THROUGH. Dispatch selects on `status: queued`, so a
+    blocked task is invisible to it -- correctly, that is what the status means. W1-T1287 (merged)
+    made retirement machine-readable as `retirement: retired` so a retirement-carrying dependency
+    could be dropped and its dependents unparked. Neither asks the remaining question: what moves a
+    task that is blocked by NO dependency and retired by NO record?
+
+    THE ANSWER TODAY IS NOTHING, AND NOTHING REPORTS IT. `rmd lint-plan` checks OPEN tasks only, so
+    these four are excluded from the 633 it counts. `rmd status` renders retirements under BLOCKERS
+    BY CLASS and these carry no retirement to render. The state is legible only by reading eleven
+    YAML files by hand, which is how it was found.
+
+    WHY THIS IS NOT "JUST SET THEM TO QUEUED". Three of the four are substantial and may well
+    deserve building; one may deserve retiring. That is a RULING, and the point of this task is that
+    no ruling was ever recorded -- not that the wrong one was. A fix that silently re-queued them
+    would manufacture four dispatches nobody asked for, which is the opposite failure.
+
+    NO NEW STATUS AND NO THRESHOLD. This adds no lifecycle state and no count above which something
+    fires. It makes an existing state that has no exit VISIBLE, and routes it to the one mechanism
+    this repo already has for getting a ruling.
+  design: |
+    (i) A `lint-plan` rule, `blocked-without-disposition`: a task whose `status` is `blocked`, whose
+        `retirement:` key is absent, and whose `depends_on` contains no unmet entry, is REPORTED by
+        name. It reads the same `retirement:` key W1-T1287 introduced -- no second spelling of
+        "retired", and prose is NOT parsed for retirement language.
+
+    (ii) IT IS A WARNING, NEVER A REFUSAL. Refusing here would fail `lint-plan` over tasks a
+         contributor's diff did not touch and cannot fix, which is the shape of gate that gets
+         routed around. The line names the task, that it is blocked by nothing, and the two
+         dispositions available: record a `retirement:`, or return it to `queued`.
+
+    (iii) THE RULE RUNS OVER BLOCKED TASKS SPECIFICALLY. `lint-plan` scopes to open tasks today and
+          would skip every one of these; this rule must read the blocked population deliberately
+          rather than inherit that scope.
+
+    (iv) A PROSE-ONLY RETIREMENT IS STILL REPORTED, and the message says so. The seven shards that
+         recorded a retirement in prose are correct in intent and unreadable by machine -- exactly
+         the defect W1-T1287 was filed to end. Naming them is the migration path, not a false
+         positive, and the message must distinguish "no disposition at all" from "a disposition no
+         mechanism can read".
+
+    THE SUITE GOES IN test/a-blocked-task-with-no-disposition-is-reported.test.ts, kept out of files:
+    for the reason W1-T3680 records.
+
+    NOTE FOR THE BUILDER: W1-T1070 (queued) also declares src/lib/task-linter.ts. It adds a
+    self-path-proof rule and touches nothing this rule reads; whichever lands second rebases.
+  acceptance:
+    - claim: "a task blocked with no retirement record and no unmet dependency is reported by name, so a park with no exit is visible"
+      proof: "unit test: a task blocked by nothing is reported by name"
+    - claim: "a blocked task whose dependency is genuinely unmet is not reported, so ordinary blocking stays silent"
+      proof: "unit test: a blocked task with an unmet dependency is not reported"
+    - claim: "a blocked task carrying a machine-readable retirement is not reported, so a recorded disposition ends the matter"
+      proof: "unit test: a retired blocked task is not reported"
+    - claim: "a retirement written only in prose is reported as unreadable rather than accepted, so the migration W1-T1287 began is finishable"
+      proof: "unit test: a prose-only retirement is reported as unreadable"
+    - claim: "the rule reports and never refuses, so lint-plan does not fail over tasks the contributor's diff never touched"
+      proof: "unit test: the blocked-without-disposition rule warns and does not refuse"
+  falsifier: |
+    Stay silent on a task blocked by nothing and the first test must fail. Report an ordinarily
+    blocked task and the second must fail. Report a properly retired one and the third must fail.
+    Accept prose as a retirement and the fourth must fail. Refuse the lint run and the fifth must
+    fail.
