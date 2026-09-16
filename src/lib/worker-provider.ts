@@ -1931,10 +1931,13 @@ export const OPENWEIGHT_API_KEY_ENV = "RMD_OPENWEIGHT_API_KEY";
 /** PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the live probe. */
 export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 5_000;
 /**
- * Wall-clock bound on ONE cash request. Generous on purpose: a reasoning model on a large prompt is
- * legitimately slow, and a deadline that fires early would refuse work the cap already paid to
- * reserve. Before this, the `fetch` carried no `signal` at all -- a hung Azure request stalled the
- * tool loop for as long as the socket stayed open, holding a reservation the whole time.
+ * PRIMARY CONTROL (W1-T1266): the wall-clock bound on ONE cash request. Nothing else bounds a hung
+ * one -- before this the `fetch` carried no `signal` at all, so a stalled Azure request held the
+ * tool loop and its reservation for as long as the socket stayed open. It is not a backstop firing
+ * after some other guard failed; it IS the guard.
+ *
+ * Generous on purpose: a reasoning model on a large prompt is legitimately slow, and a deadline
+ * that fires early would refuse work the cap has already paid to reserve.
  */
 export const OPENWEIGHT_REQUEST_TIMEOUT_MS = 180_000;
 
