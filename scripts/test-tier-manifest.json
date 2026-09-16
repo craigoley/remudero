@@ -648,6 +648,7 @@
     "test/escalation-options-are-executable.test.ts": 1530,
     "test/escalation-reconcile-intake.test.ts": 4100,
     "test/escalation-retirability.test.ts": 1066,
+    "test/escaping-one-headroom-gate-no-longer-arms-the-other.test.ts": 0,
     "test/event-driven-semantic-review.test.ts": 6161,
     "test/event-review-backlog-drain.test.ts": 1515,
     "test/event-review-clock-all-phases.test.ts": 856,
