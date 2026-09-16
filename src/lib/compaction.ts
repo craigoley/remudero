@@ -361,7 +361,20 @@ export const WORKER_PR_AUTHORITY_LINES: readonly string[] = [
   "  that decision after CI and semantic review; stop after reporting the PR URL.",
 ];
 
-export function outputContractLines(taskId: string): string[] {
+/**
+ * W1-T3696 step (2), per-provider: the contract a worker gets when the HARNESS owns git.
+ *
+ * A worker whose tool bound carries no shell cannot run `git commit`, `git push` or `gh pr create`,
+ * and telling it to would spend its whole turn budget failing at them. It edits files and names a
+ * commit subject; the harness commits, and the fallback push and PR creation that already exist
+ * carry the run home.
+ *
+ * NOT A WEAKER CONTRACT, A DIFFERENT ONE. The worker still reports, still declares follow-ups and
+ * learnings, and still gets the ALREADY_SATISFIED exit. What changes is who performs the git
+ * effects — which is the security direction W1-T3572 asked for anyway: forge authority leaves the
+ * worker rather than being granted to a cheaper one.
+ */
+export function outputContractLines(taskId: string, harnessCommits = false): string[] {
   return [
     "# OUTPUT CONTRACT",
     "- Make ONLY the change described in TASK; one concern.",
@@ -407,7 +420,17 @@ export function outputContractLines(taskId: string): string[] {
     "  `ALREADY_SATISFIED: <the PR number or url that already merged and satisfies this task>`.",
     `  That PR must actually be MERGED and its body must carry \`Remudero-Task: ${taskId}\` for`,
     "  THIS task, or the claim is refused and treated as if you had opened no PR at all.",
-    "- Otherwise: stage the changed file(s) and commit.",
+    ...(harnessCommits
+      ? [
+        "- Otherwise: just SAVE YOUR EDITS TO THE FILES. Do NOT run git or gh — you have no shell,",
+        "  and attempting one wastes a turn. The harness commits your edits, pushes the branch and",
+        "  opens the pull request for you.",
+        "- Name the commit subject on its own line, anchored exactly like PR_URL:",
+        "  `COMMIT_MESSAGE: <type>(<scope>): <subject>`. Conventional Commits, lower-case subject,",
+        "  at most 100 CHARACTERS total — a longer or missing line is refused and your edits are",
+        "  NOT committed, so the run produces nothing.",
+      ]
+      : ["- Otherwise: stage the changed file(s) and commit."]),
     // W1-T465: THE MECHANISM, NOT JUST THE PROHIBITION. Five runs on the mini and three on Azure
     // backgrounded a long job (`--ci-parity` is 15-17 minutes) and ENDED THE TURN expecting a
     // wake-up; all eight produced `no_pr` with `commits_ahead: 0` and `subtype: "success"`, and the
@@ -458,7 +481,10 @@ export function outputContractLines(taskId: string): string[] {
     "  silent report must be distinguishable from one that explicitly claims none. Only cite an id",
     "  that was actually injected into your CONTEXT above — an id you were never shown is refused",
     "  by name and never counted as used.",
-    "- End with a REPORT whose LAST line is exactly: PR_URL: <the pull request url>",
+    ...(harnessCommits
+      ? ["- End with a REPORT. Do NOT write a PR_URL line: you opened no pull request, and the",
+         "  harness reads the url back from the one it creates."]
+      : ["- End with a REPORT whose LAST line is exactly: PR_URL: <the pull request url>"]),
   ];
 }
 
@@ -487,6 +513,11 @@ export function renderAnchorBlock(
   task: Pick<Task, "id" | "title" | "prompt" | "acceptance">,
   runId: string,
   ruleHeadlinesPart = "",
+  // W1-T3696: MUST match the value the initial prompt was built with. The anchor is re-injected
+  // VERBATIM after every compaction, so a shell-less run whose anchor carried the shell contract
+  // would be told to `git commit` again the moment its context compacted — the one point where a
+  // worker is most likely to act on the re-injected text rather than what it was first told.
+  harnessCommits = false,
 ): string {
   const goal = (task.prompt ?? task.title).split("${RUN_ID}").join(runId).split("${TASK_ID}").join(task.id);
   const criteria = visibleCriteria(task.acceptance ?? [])
@@ -506,7 +537,7 @@ export function renderAnchorBlock(
     "## ACCEPTANCE CRITERIA",
     criteria || "(none declared)",
     "",
-    ...outputContractLines(task.id),
+    ...outputContractLines(task.id, harnessCommits),
   ].join("\n");
 }
 
