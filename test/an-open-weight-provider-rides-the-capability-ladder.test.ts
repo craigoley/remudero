@@ -1008,7 +1008,7 @@ test("openweight configuration requires a daily cash cap and keeps its key outsi
 });
 
 test("inbox draft prompts require double-quoted proof values", () => {
-  const prompt = inboxDraftPrompt({ id: "proposal:proof", summary: "quote proof values" } as never, "tasks: []\n", "OPENWEIGHT-PROOF");
+  const prompt = inboxDraftPrompt({ id: "proposal:proof", summary: "quote proof values" } as never, "- id: W1-T1\n", "OPENWEIGHT-PROOF");
   assert.match(prompt, /proof: "grep: symbol in src\/file\.ts"/);
   assert.match(prompt, /MUST be double-quoted/);
 });
