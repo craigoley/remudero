@@ -1591,6 +1591,30 @@ test("a request larger than every context window refuses before it reserves", ()
       "a request no deployment can hold must refuse, not pick one and find out on the wire",
     );
 
+    // NAMING BOTH FIGURES: the acceptance is not merely "some error was thrown" but that the
+    // refusal names the request's own estimated size AND every considered deployment's declared
+    // window, so an operator reading the message alone can see the gap without a debugger.
+    const estimatedTokens = openWeightEstimatedTokens(tooManyBytes);
+    let caught: unknown;
+    try {
+      selectOpenWeightModel(ladder, "haiku", "medium", tooManyBytes);
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof OpenWeightRequestTooLargeError, "must throw the too-large error");
+    const message = (caught as OpenWeightRequestTooLargeError).message;
+    assert.match(message, new RegExp(`~${estimatedTokens} tokens`), "message must name the request's estimated size");
+    assert.match(
+      message,
+      new RegExp(String(OPENWEIGHT_CONTEXT_WINDOWS["gpt-oss-120b"]!.totalTokens)),
+      "message must name gpt-oss-120b's declared context window",
+    );
+    assert.match(
+      message,
+      new RegExp(String(OPENWEIGHT_CONTEXT_WINDOWS["gpt-5-nano"]!.totalTokens)),
+      "message must name gpt-5-nano's declared context window",
+    );
+
     // THE COST ASSERTION. An allowance file written here would mean the refusal still charged the
     // day -- the exact waste this task exists to remove (32 of 96 unsettled reservations).
     assert.throws(
