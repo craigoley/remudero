@@ -1,0 +1,47 @@
+- id: W1-T3665
+  title: "AN UNREADABLE PROVIDER CAPACITY IS NEVER ALARMED, SO THE FLEET ROUTED 100% TO ONE SUBSCRIPTION FOR FIVE DAYS AND NOTHING SAID SO — codex read `readable: false` from 2026-09-11 to 2026-09-16 while `codex login status` reported Logged in"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  priority: 1
+  budget_usd: 15.00
+  files: [src/lib/doctor.ts, src/lib/report-commands.ts, test/an-unreadable-provider-capacity-is-alarmed.test.ts]
+  origin: oper#codex-telemetry-2026-09-16
+  plan_refs: ["W1-T3628", "W1-T3618"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED. `auth.json` last refreshed 2026-09-11T13:27:57Z; its `id_token` expired one hour
+    later. From then until an operator re-authenticated on 2026-09-16T10:35:39Z, every capacity
+    read returned `"provider":"codex","readable":false` and the auction gave codex no headroom, so
+    100% of balanced work went to Claude. Claude's weekly reached 44% in that window.
+
+    NOTHING ANYWHERE SAID SO. `rmd doctor` has no provider-capacity arm at all. The condition is
+    visible in a daemon log line nobody greps, and the fleet's only outward signal -- the heartbeat
+    -- reports `daemon live | build STALLED | rmd ok` and says nothing about providers.
+
+    THE FAILURE PRESENTS AS HEALTH, WHICH IS WHY FIVE DAYS PASSED. `codex login status` printed
+    "Logged in using ChatGPT" throughout, because the ACCESS token stays valid for ten days while
+    the ID token the rate-limit read needs lives one hour. A `codex exec` request succeeded on
+    2026-09-16 while the capacity read still failed. Every cheap check an operator would reach for
+    said healthy.
+
+    A PERCENTAGE WITH NO DIRECTION IS PART OF THE DEFECT. The reading is `used_percent: 95`, and an
+    operator reading it cold took it for 95% REMAINING and acted on that. Whatever this arm prints
+    must name the direction and the reset: "95% consumed, 5% left, resets 2026-09-19".
+
+    SCOPE: REPORT, NEVER REPAIR. Re-authentication is an interactive device-auth flow and is the
+    operator's. This arm's whole job is to make the condition impossible to miss, the same division
+    every neighbouring doctor arm states -- "W1-T978 owns reclamation, doctor only reports".
+
+  acceptance:
+    - claim: "a provider whose capacity has been unreadable beyond a stated bound raises a doctor arm rather than being visible only in a log line"
+      proof: "unit test: a provider unreadable beyond the bound raises the capacity arm"
+    - claim: "a readable provider does not raise it, so the arm discriminates rather than always firing"
+      proof: "unit test: a readable provider capacity does not raise the arm"
+    - claim: "the arm names the direction and the reset rather than a bare percentage, because a bare 95 was read as 95 remaining"
+      proof: "unit test: the capacity arm names consumed, remaining and the reset"
