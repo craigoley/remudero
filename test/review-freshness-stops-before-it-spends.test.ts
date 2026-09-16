@@ -186,7 +186,7 @@ test("W1-T3618: a stale review cycle still dispatches work — W1-T2965 is prese
   assert.ok(sweepCalls >= 1, "the sweep really ran and really returned the stale signal this test asserts on");
 });
 
-test("W1-T3618: a stale reviewer signals the daemon to stop for freshness, with NO checkFreshness dependency at all", async () => {
+test("W1-T3618/W1-T3691: a SUSTAINED stale reviewer signal (not a single one) stops the daemon for freshness, with NO checkFreshness dependency at all", async () => {
   const plan = fixturePlan();
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
 
@@ -201,11 +201,40 @@ test("W1-T3618: a stale reviewer signals the daemon to stop for freshness, with 
     sweep: async () => ({ reviewerCodeStale: { oldSha: OLD_SHA, newSha: NEW_SHA } }),
   });
 
-  assert.equal(s.stopReason, "stale", "a mid-pass reviewer-code discovery ends the cycle through the freshness-stop path");
+  assert.equal(s.stopReason, "stale", "sustained recurrence still ends the cycle through the freshness-stop path");
   const restartLine = lines.find((l) => l.step === "daemon_selfrestart_for_freshness");
   assert.ok(restartLine, "the stop is ledgered under the SAME distinct step a checkFreshness-driven restart uses");
   assert.equal(restartLine?.extra.old_sha, OLD_SHA);
   assert.equal(restartLine?.extra.new_sha, NEW_SHA);
+  // W1-T3691 (design iv): the FIRST couple of sightings must not have stopped anything — only
+  // the held marker, never a restart, until the streak crosses the floor.
+  const heldLines = lines.filter((l) => l.step === "review.stale_reviewer_held");
+  assert.ok(heldLines.length >= 1, "the recurrence was visible before it was acted on");
+  const requestedLine = lines.find((l) => l.step === "review.stale_reviewer_restart_requested");
+  assert.ok(requestedLine, "the eventual restart is ledgered under its own W1-T3691 marker too");
+});
+
+test("W1-T3691: a SINGLE stale reviewer sighting changes nothing — no stop, no held row, no restart marker", async () => {
+  const plan = fixturePlan();
+  const lines: Array<{ step: string }> = [];
+  let sweepCalls = 0;
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => true,
+    runOne: async (id) => okResult(id),
+    sleep: fakeClock().sleep,
+    log: (step) => lines.push({ step }),
+    // `checkStop` is consulted at the TOP of every tick, before `sweep` runs (W1-T1274) — so
+    // letting it through once (the first top-of-loop check) and only THEN stopping lets exactly
+    // one sweep pass run, a single sighting that never gets a chance to recur.
+    checkStop: () => (++sweepCalls >= 2 ? "test done after one sweep pass" : undefined),
+    sweep: async () => ({ reviewerCodeStale: { oldSha: OLD_SHA, newSha: NEW_SHA } }),
+  });
+
+  assert.equal(s.stopReason, "stopped", "a single sighting never itself ends the cycle for freshness");
+  assert.equal(lines.filter((l) => l.step === "daemon_selfrestart_for_freshness").length, 0);
+  assert.equal(lines.filter((l) => l.step === "review.stale_reviewer_held").length, 0);
+  assert.equal(lines.filter((l) => l.step === "review.stale_reviewer_restart_requested").length, 0);
 });
 
 test("W1-T3618: an ordinary sweep with no reviewer-code signal never triggers a freshness stop", async () => {

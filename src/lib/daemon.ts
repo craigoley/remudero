@@ -57,6 +57,15 @@ import type { UsageSnapshot } from "./headroom.js";
 // here; a value import would close a real cycle. This module never shells GitHub itself (W1-T372).
 import type { GhRateLimitBuckets } from "./daemon-health.js";
 import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
+// W1-T3691 — a value import (`trackStaleReviewerSkipRecurrence`, `renderHeldReviewQueueBlocker`)
+// alongside the type-only ones above: sweep.ts imports nothing from this module, so this closes
+// no cycle either, same as the value import just below.
+import {
+  trackStaleReviewerSkipRecurrence,
+  renderHeldReviewQueueBlocker,
+  type StaleReviewerRecurrenceState,
+  type StaleReviewerSkipObservation,
+} from "./sweep.js";
 // A value import, unlike the type-only line above. Safe: sweep.ts imports nothing from this
 // module, so this edge closes no cycle (W1-T2744).
 import {
@@ -353,6 +362,33 @@ export function priorUnrecognisedResetStrings(lines: ReadonlyArray<Record<string
     if (l.step === "daemon.usage_reset_unrecognised" && typeof l.window === "string") out.add(l.window);
   }
   return out;
+}
+
+/** W1-T3691 — reconstructs `StaleReviewerRecurrenceState` across a process restart from the
+ *  ledger's own history: the process that requested a freshness restart over a stale
+ *  reviewer-code sha is a NEW process by the time it boots again, and its own in-memory streak
+ *  went with it -- this is the only place that fact survives (design (v)'s falsifier: "restart
+ *  again on an unchanged sha and the fourth test fails"). Takes RAW lines, the same shape
+ *  `DaemonDeps.readLedgerLines` (W1-T3216) already threads, so no second ledger-reading contract
+ *  is needed. A torn/unparseable line is skipped, never fatal -- the same tolerance
+ *  `readLedgerLines` itself documents. Scans the WHOLE ledger, same cost profile as
+ *  `priorUnrecognisedResetStrings` above. */
+export function priorStaleReviewerRecurrenceState(rawLedgerLines: readonly string[]): StaleReviewerRecurrenceState | undefined {
+  let requestedForSha: string | undefined;
+  for (const raw of rawLedgerLines) {
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      // torn/malformed line — skip it, never take out the whole read (same discipline as
+      // readLedgerLines' own "torn" handling, run-task.ts's readQuestionsNdjson).
+      continue;
+    }
+    if (row.step === "review.stale_reviewer_restart_requested" && typeof row.code_sha === "string") {
+      requestedForSha = row.code_sha;
+    }
+  }
+  return requestedForSha === undefined ? undefined : { codeSha: requestedForSha, streak: 1, restartRequested: true };
 }
 
 export function parseResetInstant(raw: string, now: Date): Date | null {
@@ -830,6 +866,13 @@ export interface DaemonDeps {
    *  exactly: optional, same try/catch, fired from the same two sites, and on the edge rather than per
    *  tick, so a daemon never escalated stays silent and a long quiet stretch closes nothing repeatedly. */
   onStarvationCleared?: (info: StarvationClearedInfo) => void | Promise<void>;
+  /** W1-T3691 (design v) — called once per stuck sha, the FIRST tick a freshness restart already
+   *  requested for this exact code sha reports coming back unchanged: the target looks genuinely
+   *  pinned behind origin/main rather than transiently behind it, so this is a "needs a human"
+   *  notification, never another restart request. Optional; the real command wires an escalation
+   *  the same way `onStarvation` does. Omitted, this stays a ledger line only (`review.stale_
+   *  reviewer_needs_human`), never a throw. */
+  onStaleReviewerNeedsHuman?: (info: { codeSha: string; originMainSha: string; reason: string }) => void | Promise<void>;
   /** Fleet control: a defined return means a hard STOP is in effect, and the string is the ledger
    *  and summary detail. Checked first, every tick, so it takes precedence over PAUSE and wins the
    *  race if both flags are set (W1-T11, MASTER-PLAN §4A/§4B). */
@@ -1915,6 +1958,16 @@ export async function runDaemon(
   // every idle tick, so without this the hook would fire on every poll for as long as the queue stays
   // starved. Cleared the moment a tick is not starved.
   let starvationEscalated = false;
+  // Stale-reviewer-code recurrence (W1-T3691) — reconstructed from the ledger at boot (see
+  // `priorStaleReviewerRecurrenceState`'s own doc) so a restart already requested for a sha
+  // survives the very process replacement it caused (design v); updated once per tick below from
+  // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
+  let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(
+    deps.readLedgerLines?.() ?? [],
+  );
+  // Needs-human escalation dedup for the same recurrence, keyed on sha so a sustained pin notifies
+  // once rather than once per tick, mirroring `starvationEscalated`'s own discipline.
+  let staleReviewerNeedsHumanSha: string | undefined;
   const maxSpawnInfraBackoffMs = opts.maxSpawnInfraBackoffMs ?? DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS;
   const maxApiWindowHoldMs = opts.maxApiWindowHoldMs ?? DEFAULT_MAX_API_WINDOW_HOLD_MS;
   // Bounded degraded mode: recon R-7 measured the usage read unreadable about 78% of the time, so
@@ -2291,6 +2344,70 @@ export async function runDaemon(
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
       sweepCycleOutcome = await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }
+
+    // W1-T3691 — this pass's own recurrence verdict, computed ONCE per tick and consulted by both
+    // the idle branch and the pre-admission re-check below, so the two can never disagree about
+    // whether THIS tick's reading is a first sighting, a held repeat, a sustained recurrence
+    // asking for a restart, or a returned-on-the-same-sha needing a human. Does NOT itself commit
+    // `restartRequested` — see `requestStaleReviewerRestart` below for why that commit is deferred
+    // to the point a restart is genuinely acted on, never merely decided.
+    const staleReviewerObservation: StaleReviewerSkipObservation | undefined = sweepCycleOutcome?.reviewerCodeStale
+      ? { codeSha: sweepCycleOutcome.reviewerCodeStale.oldSha, originMainSha: sweepCycleOutcome.reviewerCodeStale.newSha }
+      : undefined;
+    const staleReviewerVerdict = trackStaleReviewerSkipRecurrence(staleReviewerObservation, staleReviewerRecurrence);
+    staleReviewerRecurrence = staleReviewerVerdict.state;
+    const staleReviewerAction = staleReviewerVerdict.action;
+    if (staleReviewerAction.kind === "held") {
+      // (design iii) visible before it is acted on: a repeat below the restart streak still
+      // renders, so the operator can read the cause without tailing the ledger.
+      log("review.stale_reviewer_held", {
+        code_sha: staleReviewerAction.codeSha,
+        origin_main_sha: staleReviewerAction.originMainSha,
+        streak: staleReviewerAction.streak,
+        description: renderHeldReviewQueueBlocker({
+          kind: "held_review_queue",
+          codeSha: staleReviewerAction.codeSha,
+          originMainSha: staleReviewerAction.originMainSha,
+          prNumbers: staleReviewerObservation?.prNumbers ?? [],
+          streak: staleReviewerAction.streak,
+        }),
+      });
+    } else if (staleReviewerAction.kind === "needs_human" && staleReviewerNeedsHumanSha !== staleReviewerAction.codeSha) {
+      staleReviewerNeedsHumanSha = staleReviewerAction.codeSha;
+      log("review.stale_reviewer_needs_human", {
+        code_sha: staleReviewerAction.codeSha,
+        origin_main_sha: staleReviewerAction.originMainSha,
+        reason: staleReviewerAction.reason,
+      });
+      // Same backstop discipline as `onStarvation`'s own catch: a failed notification costs one
+      // logged line, never the daemon's liveness.
+      try {
+        await deps.onStaleReviewerNeedsHuman?.({
+          codeSha: staleReviewerAction.codeSha,
+          originMainSha: staleReviewerAction.originMainSha,
+          reason: staleReviewerAction.reason,
+        });
+      } catch (e) {
+        log("daemon.escalation.failed", { task: "daemon", error: String((e as Error)?.message ?? e) });
+      }
+    }
+    // Marks `restartRequested` and ledgers `review.stale_reviewer_restart_requested` — the marker
+    // `priorStaleReviewerRecurrenceState` reads back at a future boot — ONLY when a caller below
+    // actually reaches this, i.e. only when the restart is genuinely about to be requested. Calling
+    // this to merely COMPUTE whether this tick is stale (as opposed to acting on it) would mark a
+    // restart that never happened, corrupting the very falsifier design (v) exists to hold.
+    const requestStaleReviewerRestart = (): Extract<DaemonFreshness, { stale: true }> | undefined => {
+      if (staleReviewerAction.kind !== "restart") return undefined;
+      staleReviewerRecurrence = staleReviewerRecurrence
+        ? { ...staleReviewerRecurrence, restartRequested: true }
+        : staleReviewerRecurrence;
+      log("review.stale_reviewer_restart_requested", {
+        code_sha: staleReviewerAction.codeSha,
+        origin_main_sha: staleReviewerAction.originMainSha,
+        streak: staleReviewerAction.streak,
+      });
+      return { stale: true, oldSha: staleReviewerAction.codeSha, newSha: staleReviewerAction.originMainSha };
+    };
 
     // The clock that spans the former gap. The full pass above owns its own ticker, so this starts only
     // after that await returns and the two restricted passes never overlap by construction. It stays
@@ -3223,13 +3340,12 @@ export async function runDaemon(
       // an idle tick (this branch always `continue`s first) — without this, a sweep's own
       // mid-pass discovery on an otherwise-idle daemon would be silently dropped every tick
       // instead of ever ending the cycle, and the entrypoint's re-sync would never run.
-      if (sweepCycleOutcome?.reviewerCodeStale) {
+      // W1-T3691: gated on SUSTAINED recurrence (`staleReviewerAction.kind === "restart"`), not on
+      // any single stale reading — a first sighting is ordinary and must change nothing (design iv).
+      const staleReviewerIdleFreshness = requestStaleReviewerRestart();
+      if (staleReviewerIdleFreshness) {
         await stopInterphaseReviewClock();
-        return stopForFreshness({
-          stale: true,
-          oldSha: sweepCycleOutcome.reviewerCodeStale.oldSha,
-          newSha: sweepCycleOutcome.reviewerCodeStale.newSha,
-        });
+        return stopForFreshness(staleReviewerIdleFreshness);
       }
       if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(pollIntervalMs);
@@ -3302,13 +3418,21 @@ export async function runDaemon(
     // different route, and only one of the two can ever have run this tick's sweep in time to see it.
     // Self-freshness wins when both are stale (it already carries `installNeeded`); the sweep's
     // reading is used only when self-freshness itself did not already fire.
+    // W1-T3691: the reviewer-code half is gated on sustained recurrence — see
+    // `requestStaleReviewerRestart`'s own doc for why marking `restartRequested` is deferred to
+    // exactly this branch (where a restart is genuinely about to be requested) rather than here,
+    // where `dispatchSet.length === 0` has not yet been checked.
     const selfFreshness = deps.checkFreshness?.();
-    const reviewerCodeStale = sweepCycleOutcome?.reviewerCodeStale;
+    const reviewerCodeStale = staleReviewerAction.kind === "restart" ? sweepCycleOutcome?.reviewerCodeStale : undefined;
     const refetchedFreshness: DaemonFreshness | undefined =
       selfFreshness?.stale || !reviewerCodeStale
         ? selfFreshness
         : { stale: true, oldSha: reviewerCodeStale.oldSha, newSha: reviewerCodeStale.newSha };
     if (refetchedFreshness?.stale && dispatchSet.length === 0) {
+      // Explicit `!== true` rather than `!selfFreshness?.stale`: the latter folds "no
+      // `checkFreshness` dep wired" and "checked and definitely fresh" into the same boolean,
+      // which test/catch-erasure-ratchet.test.ts's detector (b) exists to hold at zero.
+      if (selfFreshness?.stale !== true && reviewerCodeStale) requestStaleReviewerRestart();
       // This is the only freshness boundary reached while the interphase review clock exists. Close
       // admission before the shared final-pass and drain path; do not move the drain into the clock itself,
       // where W1-T2744 proved it can freeze ordinary phase transitions (W1-T2865).
