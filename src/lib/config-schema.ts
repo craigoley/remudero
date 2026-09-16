@@ -76,6 +76,12 @@ export interface Config {
      *  already-deployed host's config.json need not be hand-edited the moment this ships. Remove once no
      *  live host config carries it. */
     openweightEndpoint?: string;
+    /** W1-T3692: when the capacity auction finds NO subscription with usable headroom, dispatch
+     *  normally blocks. With this true, an eligible lane falls back to the cash provider instead of
+     *  stalling. DEFAULT FALSE and deliberately so: it spends real money, so it must be an
+     *  operator decision and must never arrive by upgrade. Bounded by `dailyCapUsd`, which the
+     *  cash adapter already refuses to run without. */
+    cashFallbackWhenBlocked?: boolean;
   };
   learningsHomes?: { userOverall?: string; global?: string };
 }
@@ -148,6 +154,15 @@ const workerProvidersShape: ValueSchema = {
     configField("codexModel", "string", true, undefined, "config.json", "Hard Codex model override.", stringShape),
     configField("codexModels", "object", true, undefined, "config.json", "Codex model preferences per mount tier.", codexModelsShape),
     configField("cashEndpoint", "string", true, undefined, "config.json", "Azure OpenAI-compatible endpoint for the cash (non-subscription) worker adapter.", stringShape),
+    configField(
+      "cashFallbackWhenBlocked",
+      "boolean",
+      true,
+      false,
+      "config.json",
+      "Fall back to the cash provider when no subscription has readable headroom, instead of blocking dispatch (W1-T3692).",
+      booleanShape,
+    ),
     configField(
       "openweightEndpoint",
       "string",
