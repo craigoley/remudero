@@ -1240,6 +1240,7 @@
     "test/service.test.ts": 4331,
     "test/session-limit-is-a-refusal-not-a-success.test.ts": 826,
     "test/settings.test.ts": 1586,
+    "test/shared-pause-unreachable-anchor.test.ts": 0,
     "test/ships-unwired-floor.test.ts": 1128,
     "test/sizing-inflates-when-a-slug-does-not-match-its-falsifier.test.ts": 1424,
     "test/skill-grounding-sources-resolve.test.ts": 460,
