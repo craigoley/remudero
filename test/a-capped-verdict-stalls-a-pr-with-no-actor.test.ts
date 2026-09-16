@@ -10,6 +10,8 @@ import {
   cappedProofDiscriminationFromLedger,
   DEFAULT_SWEEP_POLICY,
   decideSweepArm,
+  diagnoseCappedRoutingBlock,
+  proofDiscriminationEvidenceFromCriteria,
   runSweep,
   type OpenPrView,
   type ProofDiscriminationEvidence,
@@ -245,7 +247,7 @@ test("W1-T3306: malformed current verdict evidence fails closed", () => {
 // head" and "prose we must not act on". Both tests below drive it through its exported entry point;
 // neither reaches for an internal.
 
-test("W1-T3306: every declared proof_exec outcome is accepted, so a stored verdict is not silently dropped", () => {
+test("W1-T3306: every declared proof_exec outcome PARSES, so a stored verdict is not silently dropped", () => {
   // The guard is an alternation, and the LAST member is the one that forces every earlier
   // comparison to be evaluated — a value matching the first alternative proves nothing about the
   // rest. `stale_self_path` is that member. A verdict carrying a legitimate outcome the guard
@@ -262,12 +264,13 @@ test("W1-T3306: every declared proof_exec outcome is accepted, so a stored verdi
     "stale_self_path",
   ];
   // EACH OUTCOME IS PAIRED WITH A STALE CRITERION, and that pairing is the whole design of this
-  // test. Evidence is derived ONLY from `executed_stale`/`not_executable` criteria
-  // (proofDiscriminationEvidenceFromCriteria), so asserting "evidence exists" for a lone
-  // `executed_pass` conflates the PARSER with the FILTER and fails for the wrong reason — it did,
-  // on the first version of this test. With a stale sibling present, evidence appears iff the
-  // parser ACCEPTED both criteria; a rejected outcome makes criteriaFromLedgerValue return
-  // undefined and takes the sibling's evidence down with it.
+  // test: asserting "evidence exists" for a LONE non-executed outcome conflates the PARSER
+  // (criteriaFromLedgerValue, which must accept every declared outcome) with the FILTER
+  // (proofDiscriminationEvidenceFromCriteria, which W1-T3669 widened to every outcome except the
+  // two that mean "this DID execute" plus the always-unmet `stale_self_path`) and fails for the
+  // wrong reason — it did, on the first version of this test. With a stale sibling present,
+  // PARSING succeeded iff evidence is defined at all; a rejected outcome makes
+  // criteriaFromLedgerValue return undefined and takes the sibling's evidence down with it.
   for (const proof_exec of outcomes) {
     const line = cappedPosted();
     (line.decision_verdict as Record<string, unknown>).criteria = [
@@ -280,6 +283,44 @@ test("W1-T3306: every declared proof_exec outcome is accepted, so a stored verdi
       `a stored verdict carrying proof_exec "${proof_exec}" beside a stale criterion must parse; ` +
         "an unrecognised outcome would discard the whole row",
     );
+  }
+});
+
+test("W1-T3669: exec_error/base_unreadable/not_yet_built are CAPPED-REPAIRABLE, not silently dropped by the filter", () => {
+  // THE BUG THIS TASK DIAGNOSES: `capped` (review.ts) is `executedCount === 0` over ONLY
+  // `executed_pass`/`executed_fail`, so every OTHER proof_exec grade on a capped verdict means
+  // exactly the same thing — "never executed" — yet the pre-fix filter recognised only two of the
+  // six such grades (`executed_stale`, `not_executable`). #5683 (W1-T3610) posted `CAPPED — 0/2
+  // proofs executed; not certified` and never reached the fix rung because its two criteria
+  // carried a grade OUTSIDE that narrow pair. Unlike the sibling-paired test above, this one
+  // asserts the PROOFS LIST ITSELF names every criterion — a lone stale sibling can no longer mask
+  // a silently dropped one.
+  const nonExecuted: CriterionVerdict["proof_exec"][] = [
+    "executed_stale",
+    "not_executable",
+    "exec_error",
+    "base_unreadable",
+    "not_yet_built",
+  ];
+  for (const proof_exec of nonExecuted) {
+    const line = cappedPosted();
+    (line.decision_verdict as Record<string, unknown>).criteria = [cappedCriterion({ proof_exec })];
+    const evidence = cappedProofDiscriminationFromLedger({ taskId: TASK, prUrl: PR_URL, headSha: HEAD }, [line]);
+    assert.deepEqual(
+      evidence?.proofs.map((p) => p.proofExec),
+      [proof_exec],
+      `a lone criterion carrying proof_exec "${proof_exec}" must reach the proofs list — capped means ` +
+        "this outcome never executed, exactly like executed_stale/not_executable",
+    );
+  }
+  // The two outcomes that mean "this DID execute" and the always-unmet `stale_self_path` remain
+  // excluded — this filter must never launder a genuinely observed result into a body-text repair.
+  // Driven directly at proofDiscriminationEvidenceFromCriteria (never through the ledger reader),
+  // so `met` — irrelevant to this function — cannot mask the exclusion behind the reader's own
+  // separate met-bail (see the malformed-criterion test below).
+  for (const proof_exec of ["executed_pass", "executed_fail", "stale_self_path"] as const) {
+    const evidence = proofDiscriminationEvidenceFromCriteria([cappedCriterion({ proof_exec })]);
+    assert.equal(evidence, undefined, `proof_exec "${proof_exec}" must never surface as capped-repairable evidence`);
   }
 });
 
@@ -311,4 +352,126 @@ test("W1-T3306: a criterion missing a required field is refused, and clears the 
       `a criterion whose ${label} must yield NO evidence, never a partial read`,
     );
   }
+});
+
+// ── W1-T3669: the capped route shipped and had never once fired ────────────────────────────────
+// `runSweep`'s capped-routing block (the W1-T3306 fix above) has four preconditions, and until now
+// standing down on ANY of them looked identical to standing down on ALL of them: a `mergeable`
+// disposition and silence. `diagnoseCappedRoutingBlock` mirrors the block's own four reads, in the
+// same order, so a capped-green PR can be probed directly for WHICH gate refuses it — the
+// diagnosis this task's rationale calls "the deliverable". The live instance, #5683 (W1-T3610),
+// posted `CAPPED — 0/2 proofs executed; not certified` and was never dispatched a fix: MEASURED
+// above, its two criteria carried a proof_exec grade (`exec_error`/`base_unreadable`/
+// `not_yet_built`) the pre-fix filter silently dropped, so precondition 3
+// (cappedProofDiscriminationFromLedger) came back with no evidence to route on.
+
+const TASK_5683 = "W1-T3610";
+const PR_URL_5683 = "https://github.com/acme/remudero/pull/5683";
+const HEAD_5683 = "5683deadbeefcafefeed";
+
+function pr5683(over: Partial<OpenPrView> = {}): OpenPrView {
+  return {
+    prNumber: 5683,
+    prUrl: PR_URL_5683,
+    taskId: TASK_5683,
+    reviewState: "success",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: "2026-09-16T10:00:00.000Z",
+    headSha: HEAD_5683,
+    autoMergeArmed: false,
+    ...over,
+  };
+}
+
+/** The EXACT shape #5683's own posted verdict carried: `CAPPED — 0/2 proofs executed; not
+ *  certified`, both criteria met (a `state: "success"` capped verdict requires it), neither
+ *  criterion `executed_pass`/`executed_fail` — the excluded-until-this-task proof_exec grades. */
+function cappedPosted5683(proofExec: CriterionVerdict["proof_exec"] = "exec_error"): LedgerLine {
+  return {
+    run_id: "REVIEW-5683",
+    task_id: TASK_5683,
+    step: "review.posted",
+    pr_url: PR_URL_5683,
+    head_sha: HEAD_5683,
+    state: "success",
+    capped: true,
+    plan_only: false,
+    decision_verdict: {
+      state: "success",
+      capped: true,
+      planOnly: false,
+      criteria: [
+        { claim: "a", proof: "unit test: a title no test carries", met: true, reason: "matched on the keyword floor", proof_exec: proofExec },
+        { claim: "b", proof: "unit test: another such title", met: true, reason: "matched on the keyword floor", proof_exec: proofExec },
+      ],
+    },
+  };
+}
+
+test("W1-T3669: the capped routing block names which precondition blocked it — #5683's real shape, and confirms it now fires", () => {
+  // Precondition 1 — disposition. A refused-escalate PR never reads the capped route at all.
+  const notMergeable = diagnoseCappedRoutingBlock(pr5683(), "blocked-ambiguous", [cappedPosted5683()]);
+  assert.equal(notMergeable.blocked, true);
+  assert.equal(notMergeable.precondition, "not-mergeable");
+
+  // Precondition 2 — an operator hold. Engaged by a confirmed human authority, PR-scoped.
+  const held = diagnoseCappedRoutingBlock(pr5683(), "mergeable", [
+    cappedPosted5683(),
+    { step: "automerge.hold_engaged", pr_number: 5683, by: "operator", reason: "reviewing manually", authority: "console-confirmed" },
+  ]);
+  assert.equal(held.blocked, true);
+  assert.equal(held.precondition, "held");
+
+  // Precondition 3 — proof discrimination. No review.posted row binds to this exact head at all.
+  const noEvidence = diagnoseCappedRoutingBlock(pr5683(), "mergeable", []);
+  assert.equal(noEvidence.blocked, true);
+  assert.equal(noEvidence.precondition, "no-proof-discrimination");
+
+  // Precondition 4 — the arm predicate. An operator override makes decideSweepArm report arm:true,
+  // so the capped route correctly stands down (the override IS the human sign-off).
+  const armNotRefused = diagnoseCappedRoutingBlock(pr5683(), "mergeable", [
+    cappedPosted5683(),
+    { step: "automerge.capped_override_granted", task_id: TASK_5683, head_sha: HEAD_5683, by: "operator", reason: "reviewed manually" },
+  ]);
+  assert.equal(armNotRefused.blocked, true);
+  assert.equal(armNotRefused.precondition, "arm-not-refused");
+
+  // #5683's OWN shape, un-doctored: every precondition now holds, and the route fires. Before
+  // W1-T3669's fix to proofDiscriminationEvidenceFromCriteria, this fixture diagnosed exactly like
+  // `noEvidence` above (precondition 3, "no-proof-discrimination") for every one of the three
+  // excluded proof_exec grades — the 98-refusals/0-dispatches gap this task measured.
+  for (const proofExec of ["exec_error", "base_unreadable", "not_yet_built"] as const) {
+    const fires = diagnoseCappedRoutingBlock(pr5683(), "mergeable", [cappedPosted5683(proofExec)]);
+    assert.equal(fires.blocked, false, `proof_exec "${proofExec}" must no longer diagnose as blocked`);
+  }
+});
+
+test("W1-T3669: a capped green PR reaches a rung instead of standing down — #5683's exact shape, reaching the fix rung", async () => {
+  // ACCEPTANCE 3 — the count that was zero becomes non-zero: `runSweep` dispatches the existing fix
+  // rung for #5683's exact captured shape, never leaving it parked on `mergeable`.
+  for (const proofExec of ["exec_error", "base_unreadable", "not_yet_built"] as const) {
+    const path = ledgerPath();
+    appendLedger(path, cappedPosted5683(proofExec));
+    const observed = { armed: 0, fixed: [] as Array<ProofDiscriminationEvidence | undefined>, escalated: 0 };
+    const summary = await runSweep([pr5683()], sweepDeps(path, observed));
+    assert.equal(summary.byDisposition["blocked-fixable"], 1, `proof_exec "${proofExec}" must reach blocked-fixable`);
+    assert.equal(summary.byDisposition.mergeable, 0, `proof_exec "${proofExec}" must not stand parked on mergeable`);
+    assert.equal(observed.fixed.length, 1, `proof_exec "${proofExec}" must actually dispatch the fix rung`);
+    assert.equal(observed.fixed[0]?.proofs.length, 2, "both of #5683's criteria reach the dispatch, not just one");
+  }
+});
+
+test("W1-T3669: the arm refusal is unmoved — a capped verdict still refuses to arm after the capped route fires, in #5683's shape", async () => {
+  // ACCEPTANCE 2 — the control. A fixture that would redden if the capped-route fix ever relaxed
+  // the arm gate itself: `decideSweepArm` must still refuse, `deps.arm` must never be called, and
+  // disposition must never resolve to the armable `mergeable` lane.
+  const path = ledgerPath();
+  appendLedger(path, cappedPosted5683("exec_error"));
+  assert.equal(decideSweepArm(pr5683(), [cappedPosted5683("exec_error")]).arm, false, "the arm predicate itself is untouched by this task's fix");
+  const observed = { armed: 0, fixed: [] as Array<ProofDiscriminationEvidence | undefined>, escalated: 0 };
+  const summary = await runSweep([pr5683()], sweepDeps(path, observed));
+  assert.equal(observed.armed, 0, "auto-merge is never armed for a capped verdict, before or after this fix");
+  assert.equal(summary.byDisposition.mergeable, 0, "a capped-green PR never resolves to the armable mergeable lane");
 });
