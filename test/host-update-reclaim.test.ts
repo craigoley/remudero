@@ -288,7 +288,7 @@ function gcLogFixture(): string {
 
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-test("--reclaim-only clears a stranded gc.log and runs git gc, reporting bytes freed per checkout, NOT summed", () => {
+test("the reclaim reports bytes per volume — --reclaim-only clears a stranded gc.log, runs git gc, and never sums them", () => {
   const repoA = gcLogFixture();
   const repoB = gcLogFixture();
   assert.ok(existsSync(join(repoA, ".git", "gc.log")) && existsSync(join(repoB, ".git", "gc.log")));
@@ -304,7 +304,7 @@ test("--reclaim-only clears a stranded gc.log and runs git gc, reporting bytes f
   assert.match(run.stdout, new RegExp(`git reclaim — ${esc(repoB)}: freed`));
 });
 
-test("REFUSES the git reclaim while a fleet container is live, NAMING THE HOLDER — nothing is touched", () => {
+test("a live worker refuses the git reclaim and names the holder — a live fleet container, and nothing is touched", () => {
   const repo = gcLogFixture();
   const run = runHostUpdate("live-mount", ["--reclaim-only"], SCRIPT, { RMD_GIT_RECLAIM_DIRS: repo });
   assert.match(run.stderr, /REFUSING git object reclaim/);
