@@ -1,0 +1,70 @@
+- id: W1-T3680
+  title: "EVERY DEPENDABOT PR IS STRUCTURALLY UNMERGEABLE — head-identity-gate admits only a run-shaped branch, a Remudero-Task trailer, or a filing-shaped subject, and a dependency bump can carry none of the three"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 6.00
+  files:
+    - scripts/head-identity-gate.mjs
+  origin: "operator-session#dependabot-triage-2026-09-16"
+  plan_refs: ["W1-T1004"]
+  status: queued
+  priority: 3
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16 on the three dependabot PRs open at the time (#5757, #5758, #5759). All
+    three carried 47 checks with exactly ONE failure, the same one on each:
+
+      head-identity-gate: REFUSED — this head matches neither conforming form and carries no
+      valid Remudero-Task trailer.
+
+    This is not a property of what they bump. `evaluateHeadIdentityGate` admits exactly four
+    heads: a filing-shaped subject (W1-T1004, exempt outright), a Remudero-Task trailer, a
+    run-shaped head ref (`isDispatchedRunBranch`, /^run-.+-\d+$/), or both. A Dependabot head is
+    `dependabot/npm_and_yarn/...` with a `chore(deps): bump ...` subject and no trailer, so it can
+    satisfy none of them -- and never will, for any bump, on any schedule.
+  rationale: |
+    THE GATE IS NOT WRONG; ITS FORM LIST IS INCOMPLETE. head-identity-gate exists so a merged PR is
+    attributable -- the credit-surface incident's lesson. A dependency bump is the one legitimate
+    class with nothing to attribute: it builds no task, so a trailer would be a FALSE credit and a
+    run-shaped branch would be a lie about its origin. W1-T1004 already recognises exactly this
+    shape for plan filings and exempts them by name. Dependabot is the second instance of the same
+    category, and it has simply never been added.
+
+    THE COST IS SILENT AND RECURRING. A required check that no dependabot PR can ever pass means
+    security and dependency updates accumulate unmerged until a human merges each by hand, and the
+    reason looks like an ordinary red rather than a structural one. Nothing reports it.
+  design: |
+    Add a FOURTH exemption, deliberately narrower than W1-T1004's:
+
+      isDependencyBumpHead(headRef, subject, changedPaths) =
+        headRef starts with "dependabot/"
+        AND subject matches /^chore\(deps(-dev)?\)/
+        AND EVERY changed path is a dependency manifest
+            (package.json, package-lock.json, .github/workflows/**)
+
+    THE PATH CONSTRAINT IS THE POINT AND MUST NOT BE DROPPED. Branch name and subject are both
+    forgeable by any pusher, so name-only matching would turn this gate into a hole: a source
+    change on a `dependabot/`-prefixed branch would merge unattributed, which is precisely the
+    incident W1-T1004's comment warns against repeating. Requiring a manifest-only diff makes the
+    exemption self-limiting -- a head that touches src/ is refused however it is named.
+
+    Refusal text for every other head stays byte-identical: this adds an admitted form, it does
+    not relax the existing ones.
+
+    THE SUITE GOES IN test/a-dependabot-head-is-identified-without-a-task.test.ts. It is NOT in
+    files: on purpose: lint-plan's proof-unit-test-unresolvable rule requires every `unit test:`
+    proof to resolve in the HEAD TREE OF THE DIFF once files: names a test/ path, and a filing
+    ships no tests. Naming it here keeps the intent without making the filing unlintable; the
+    build adds the path to files: in the same commit that creates the file.
+  acceptance:
+    - claim: "a dependabot head whose diff touches only dependency manifests is admitted, so a bump can reach the merge queue without a false task credit"
+      proof: "unit test: a manifest-only dependabot head is admitted"
+    - claim: "a dependabot-NAMED head carrying a src/ change is still refused, so the exemption cannot become a credit hole"
+      proof: "unit test: a dependabot-named head touching src is still refused"
+    - claim: "the refusal text for a non-exempt head is unchanged, so this adds an admitted form rather than relaxing the gate"
+      proof: "grep: matches neither conforming form in scripts/head-identity-gate.mjs"
