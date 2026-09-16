@@ -1320,14 +1320,21 @@ import {
 export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdictUnchanged, classifyNoPrShape };
 
 /**
- * W1-T3618 — reads reviewer-code freshness ONCE and in FRONT of `next` (production:
- * `reviewCommand`), so a stale reading calls `next` zero times for every PR this gate sees this
- * pass: no worktree materializes, no proof executes, no reviewer spawns. Previously this read
- * happened LAST, inside `runReview`, after all of that had already run.
+ * W1-T3618 — reads reviewer-code freshness in FRONT of `next` (production: `reviewCommand`), so a
+ * stale reading calls `next` zero times for the PR it guards: no worktree materializes, no proof
+ * executes, no reviewer spawns. Previously this read happened LAST, inside `runReview`, after all
+ * of that had already run.
  *
- * TRAP: re-reading per PR would multiply a `git fetch` by the pass's own PR count for a fact that
- * cannot change mid-pass — cached on first use instead. `buildSweepEffects` builds a fresh gate
- * every call, and both sweep hooks call it fresh every poll, so a gate's lifetime is one cycle.
+ * W1-T3697 — READS ONCE PER `call()`, NOT ONCE PER PASS. The original shape cached the first read
+ * for the rest of the pass, on the reasoning that the fact "cannot change mid-pass" — but it can:
+ * origin/main advances while a pass is still working through its PR list, and a pass that BEGINS
+ * fresh and goes stale mid-flight is exactly the shape W1-T3618's own measurement recorded (four
+ * withholds inside one cycle that began fresh at its top). A once-per-pass cache can only ever see
+ * a pass that was ALREADY stale before its first PR — structurally rare — so the counter it drives
+ * stayed at zero while the late W1-T228 guard kept discarding full-price verdicts underneath it.
+ * Re-reading before every PR trades one `git fetch` per PR (cheap; `checkReviewerCodeFreshness`'s
+ * own network call) for catching the transition the cache was blind to — the transition is exactly
+ * what makes the expensive path (materialize + prove + spawn) worth skipping.
  *
  * `reviewCommand`'s own late guard (W1-T228, `reviewerCodePublicationRefusal`) is UNCHANGED and
  * stays the fail-closed floor for any PR this earlier gate misses; this is additive, not a
@@ -1339,17 +1346,20 @@ export function buildReviewerCodeFreshnessGate(
   next: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>,
 ): {
   call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
-  /** The sha pair the FIRST time this gate's (at most one) freshness read came back stale, or
-   *  `undefined` when it read fresh, was never read (no PR reached the gate this pass), or came
-   *  back unreadable. */
+  /** The sha pair the FIRST time THIS PASS'S freshness reads came back stale (there can be many,
+   *  one per `call()`), or `undefined` when every read so far came back fresh, no PR reached the
+   *  gate this pass, or every stale-looking read was actually unreadable. */
   staleThisPass: () => { oldSha: string; newSha: string } | undefined;
 } {
-  let cached: ReviewerCodeFreshness | undefined;
-  const once = (): ReviewerCodeFreshness => (cached ??= readFreshness());
+  let firstStale: { oldSha: string; newSha: string } | undefined;
   return {
     call: (prArg, rest, reviewDeps) => {
-      const freshness = once();
+      // Read fresh for THIS PR, immediately before the spend it guards — never cached across the
+      // pass (W1-T3697): a reading that changes between two PRs must be observed by the second PR
+      // even though the first already ran under the earlier reading.
+      const freshness = readFreshness();
       if (freshness.status === "stale") {
+        firstStale ??= { oldSha: freshness.codeSha, newSha: freshness.originMainSha };
         log("review.skipped_stale_reviewer_code", {
           pr: prArg,
           code_sha: freshness.codeSha,
@@ -1360,8 +1370,7 @@ export function buildReviewerCodeFreshnessGate(
       }
       return next(prArg, rest, reviewDeps);
     },
-    staleThisPass: () =>
-      cached?.status === "stale" ? { oldSha: cached.codeSha, newSha: cached.originMainSha } : undefined,
+    staleThisPass: () => firstStale,
   };
 }
 
@@ -1404,13 +1413,14 @@ export function buildSweepEffects(
   | "repairMissingTaskTrailer"
 > & {
   /**
-   * W1-T3618 — reviewer-code freshness for THIS call's own review effects, read at most once and
-   * cached for this call's whole lifetime (never per PR): see `buildReviewerCodeFreshnessGate`
-   * above for where the single read happens. Both `buildSweepHook` and `buildSweepLightHook`
-   * construct a fresh `buildSweepEffects(...)` every poll, so a cache scoped to one call is scoped
-   * to exactly one sweep cycle. Returns the sha pair the FIRST time this call's freshness read came
-   * back stale, or `undefined` when it read fresh, was never read (no review candidate reached the
-   * gate this pass), or came back unreadable (fails toward attempting the review, matching
+   * W1-T3618 — reviewer-code freshness for THIS call's own review effects. W1-T3697: read once PER
+   * PR reviewed this call, never cached across the whole call — see `buildReviewerCodeFreshnessGate`
+   * above for where each read happens, immediately before the spend it guards. Both `buildSweepHook`
+   * and `buildSweepLightHook` construct a fresh `buildSweepEffects(...)` every poll, so this call's
+   * reads are scoped to exactly one sweep cycle even though there can be many of them. Returns the
+   * sha pair the FIRST time any of this call's freshness reads came back stale, or `undefined` when
+   * every read so far came back fresh, no review candidate reached the gate this pass, or every
+   * stale-looking read was actually unreadable (fails toward attempting the review, matching
    * `checkReviewerCodeFreshness`'s own "unreadable never blocks" contract — this gate only ever
    * REFUSES to spend on a POSITIVELY confirmed stale reading).
    */
