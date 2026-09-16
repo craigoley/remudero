@@ -1,4 +1,5 @@
 import type { Escalation } from "./escalate.js";
+import { readFileSync } from "node:fs";
 import { REVIEW_CONTEXT } from "./review.js";
 
 /**
@@ -336,9 +337,23 @@ export function changedFilesInDiff(diff: string): string[] {
   return [...files];
 }
 
-/** Changed files that fall OUTSIDE the manifest/lockfile allowlist. `[]` ⇒ confined. */
-export function offendingFiles(diff: string): string[] {
-  return changedFilesInDiff(diff).filter((f) => !isManifestPath(f));
+/**
+ * Changed files that fall OUTSIDE the manifest/lockfile allowlist. `[]` ⇒ confined.
+ *
+ * SUPPLIES THE WORKSPACE DECLARATION. W1-T3707 made {@link isManifestPath} workspace-aware, but its
+ * reader is OPTIONAL and an omitted one means ROOT-ONLY — so this call site, left at one argument,
+ * kept refusing `apps/dashboard/package.json` after the predicate had been fixed. MEASURED: #5757
+ * was refused again at 21:07:31 with the fix already on the daemon's own tree, because the defect
+ * was here and not in the predicate.
+ *
+ * `readRootManifest` defaults to the real root manifest and is injectable so a test can declare its
+ * own workspaces; an unreadable one narrows to root-only inside the predicate, never widens.
+ */
+export function offendingFiles(
+  diff: string,
+  readRootManifest: () => string = () => readFileSync("package.json", "utf8"),
+): string[] {
+  return changedFilesInDiff(diff).filter((f) => !isManifestPath(f, readRootManifest));
 }
 
 // ── Required-check gate ──────────────────────────────────────────────────

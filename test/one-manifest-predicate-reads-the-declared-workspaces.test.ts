@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { declaredWorkspaceGlobs, isManifestPath } from "../src/lib/dep-review.js";
+import { declaredWorkspaceGlobs, isManifestPath, offendingFiles } from "../src/lib/dep-review.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const GATE = pathToFileURL(join(__dirname, "..", "scripts", "head-identity-gate.mjs")).href;
@@ -97,4 +97,51 @@ test("the yarn object form of workspaces is read", () => {
   const yarnish = () => JSON.stringify({ workspaces: { packages: ["apps/*"] } });
   assert.deepEqual(declaredWorkspaceGlobs(yarnish), ["apps/*"]);
   assert.equal(isManifestPath("apps/dashboard/package.json", yarnish), true);
+});
+
+// ── THE CALLER, NOT ONLY THE PREDICATE ──────────────────────────────────────────────────────────
+//
+// W1-T3707's first attempt (#5816) made isManifestPath workspace-aware and left `offendingFiles`
+// calling it with ONE argument. The reader is optional and an omitted one means ROOT-ONLY, so the
+// lane kept refusing `apps/dashboard/package.json` with the fixed predicate sitting right beside
+// it — MEASURED on #5757 at 21:07:31, after the fix had merged. A predicate test alone could not
+// have caught that; these drive the function the lane actually calls.
+
+/** A dependabot diff over the root lockfile and a DECLARED workspace manifest — #5757's shape. */
+const WORKSPACE_BUMP_DIFF = [
+  "diff --git a/package-lock.json b/package-lock.json",
+  "--- a/package-lock.json",
+  "+++ b/package-lock.json",
+  "diff --git a/apps/dashboard/package.json b/apps/dashboard/package.json",
+  "--- a/apps/dashboard/package.json",
+  "+++ b/apps/dashboard/package.json",
+].join("\n");
+
+test("offendingFiles confines a bump that touches a declared-workspace manifest", () => {
+  assert.deepEqual(offendingFiles(WORKSPACE_BUMP_DIFF, ROOT), [], "the lane must see what the predicate sees");
+});
+
+test("offendingFiles still reports a source file riding along with a bump", () => {
+  const withSource = WORKSPACE_BUMP_DIFF + [
+    "",
+    "diff --git a/src/run-task.ts b/src/run-task.ts",
+    "--- a/src/run-task.ts",
+    "+++ b/src/run-task.ts",
+  ].join("\n");
+  assert.deepEqual(offendingFiles(withSource, ROOT), ["src/run-task.ts"]);
+});
+
+test("offendingFiles reports a manifest outside every declared workspace", () => {
+  const fixtureBump = [
+    "diff --git a/test/fixtures/onboard/repo/package.json b/test/fixtures/onboard/repo/package.json",
+    "--- a/test/fixtures/onboard/repo/package.json",
+    "+++ b/test/fixtures/onboard/repo/package.json",
+  ].join("\n");
+  assert.deepEqual(offendingFiles(fixtureBump, ROOT), ["test/fixtures/onboard/repo/package.json"]);
+});
+
+test("offendingFiles narrows to root-only when the declaration cannot be read", () => {
+  const broken = () => { throw new Error("ENOENT"); };
+  assert.deepEqual(offendingFiles(WORKSPACE_BUMP_DIFF, broken), ["apps/dashboard/package.json"],
+    "an unreadable declaration must narrow, never widen");
 });
