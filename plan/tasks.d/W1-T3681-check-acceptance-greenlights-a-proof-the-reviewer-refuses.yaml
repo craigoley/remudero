@@ -10,7 +10,7 @@
   files:
     - src/run-task.ts
   origin: "operator-session#two-plan-prs-refused-on-the-same-proof-2026-09-16"
-  plan_refs: ["W1-T387", "W1-T273", "W1-T362", "W1-T2251"]
+  plan_refs: ["W1-T387", "W1-T273", "W1-T362", "W1-T2251", "W1-T1070"]
   status: queued
   priority: 2
   attempts: 0
@@ -55,6 +55,13 @@
     for the reviewer before a PR opens. Printing `OK` on a body the reviewer will refuse is the
     failure mode this repo names everywhere else: a check that passes while comparing nothing. The
     author reads OK as "the gate will accept this", because that is what the verb is for.
+
+    NOT THE SAME TASK AS W1-T1070, AND A BUILDER MUST NOT MERGE THEM. That task (queued since
+    2026-08-20) makes `lint-plan` refuse a self-path grep inside a SHARD, at plan-authoring time,
+    over plan/tasks.d. This one makes `check-acceptance` run the criteria of a PR BODY through the
+    discrimination executor, at PR-opening time, over any proof whatever its shape. Different input,
+    different verb, different moment. Both were needed on 2026-09-16: W1-T1070's rule would not have
+    caught remudero-site#39, whose refused proof was written in the PR body and never in a shard.
 
     NOT A SECOND IMPLEMENTATION. The fix must CALL the existing executor, not restate it. A second
     discrimination path that drifted from `checkProofCommand`'s would be strictly worse than none.
