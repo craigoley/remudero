@@ -19,7 +19,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { validateReserveArgs } from "../src/run-task.js";
+import { nextTaskIdCommand, validateReserveArgs } from "../src/run-task.js";
+import type { RemoteRefReserver, RemoteReserveOutcome } from "../src/lib/task-id-reservation.js";
 
 const CLI_SOURCE = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
 const DOCS = readFileSync(new URL("../docs/cli-reference.md", import.meta.url), "utf8");
@@ -83,4 +84,77 @@ test("the opt-out is named in the command's own syntax rather than only in prose
     "and it must appear in the SYNOPSIS, not only in the prose below it",
   );
   assert.match(CLI_SOURCE, /"--no-reserve"/, "the flag must be a known argument, or it errors as unknown");
+});
+
+// ── DRIVING THE REAL COMMAND ──────────────────────────────────────────────────────────────────
+// The assertions above read the committed source, which proves the DEFAULT is written as intended
+// but never EXECUTES the branch that applies it. These run `nextTaskIdCommand` itself with an
+// injected reserver, so "claims" and "claims nothing" are observed rather than inferred.
+
+function stubReserver(): RemoteRefReserver & { tried: string[] } {
+  const tried: string[] = [];
+  return {
+    tried,
+    mintAnchor: () => "ANCHOR",
+    attempt(taskId: string): RemoteReserveOutcome {
+      tried.push(taskId);
+      return "created";
+    },
+  };
+}
+
+function captureConsole(): { out: string[]; err: string[]; restore(): void } {
+  const out: string[] = [];
+  const err: string[] = [];
+  const log = console.log;
+  const error = console.error;
+  console.log = (...a: unknown[]) => void out.push(a.join(" "));
+  console.error = (...a: unknown[]) => void err.push(a.join(" "));
+  return { out, err, restore() { console.log = log; console.error = error; } };
+}
+
+async function run(rest: string[]): Promise<{ out: string; err: string; tried: string[]; code: number }> {
+  const reserver = stubReserver();
+  const cap = captureConsole();
+  let code = -1;
+  try {
+    code = await nextTaskIdCommand(rest, {}, { reserver, holderOf: () => "unknown", openPrTexts: () => [] });
+  } finally {
+    cap.restore();
+  }
+  return { out: cap.out.join("\n"), err: cap.err.join("\n"), tried: reserver.tried, code };
+}
+
+test("EXECUTED: a bare mint reaches the reserver, and --no-reserve does not", async () => {
+  const bare = await run([]);
+  assert.ok(bare.tried.length > 0, `a bare mint must ATTEMPT a claim; tried=${JSON.stringify(bare.tried)}`);
+  assert.match(bare.out, /RESERVED W1-T[0-9]+/, "and must report the id it actually holds");
+
+  const optOut = await run(["--no-reserve"]);
+  assert.deepEqual(optOut.tried, [], "--no-reserve must reach the reserver ZERO times");
+  assert.doesNotMatch(optOut.out, /RESERVED/, "and must not claim to have reserved anything");
+  assert.match(optOut.out, /W1-T[0-9]+/, "but must still PRINT an id — it is still a mint");
+
+  // THE DISCRIMINATING PAIR: same command, same stubs, opposite reserver traffic. Without the
+  // opt-out arm this would pass on an implementation that always reserved.
+  assert.notDeepEqual(bare.tried, optOut.tried);
+});
+
+test("EXECUTED: --offline mints without claiming and does not refuse", async () => {
+  const offline = await run(["--offline"]);
+  // NOT an exit-code-0 assertion: an offline mint legitimately exits 1 when a SOURCE IS DEGRADED
+  // (this checkout's plan half can be behind origin's), which is pre-existing behaviour and says
+  // so in its own output. The thing under test is that it is not REFUSED by argument validation,
+  // and a usage refusal is exit 2 with a message on stderr — so that is what this discriminates.
+  assert.notEqual(offline.code, 2, `--offline must not be refused as a usage error; stderr=${offline.err}`);
+  assert.doesNotMatch(offline.err, /contradictory/, "--offline alone is not a contradiction");
+  assert.deepEqual(offline.tried, [], "--offline cannot push to an origin it declines to read");
+  assert.match(offline.out, /W1-T[0-9]+/, "it still prints a floor");
+});
+
+test("EXECUTED: a named contradiction refuses before reaching the reserver", async () => {
+  const clash = await run(["--reserve", "--no-reserve"]);
+  assert.notEqual(clash.code, 0, "the contradiction must be refused");
+  assert.match(clash.err, /contradictory/);
+  assert.deepEqual(clash.tried, [], "and must refuse BEFORE any claim is attempted");
 });
