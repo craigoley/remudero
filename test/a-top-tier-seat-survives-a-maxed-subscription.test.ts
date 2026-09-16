@@ -6,7 +6,7 @@ import { architectModel, judgeModel } from "../src/lib/config.js";
 import { validateMounts } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config-schema.js";
 
-// W1-T3702. A seat that exists only while its subscription has headroom is a single point of
+// this change. A seat that exists only while its subscription has headroom is a single point of
 // failure. `squeeze_model` fills it when — and ONLY when — the ordinary provider has none.
 //
 // The ranks this exercises land in a sibling change; the fixtures add them locally so these tests
@@ -20,30 +20,30 @@ const table = (mut: (m: any) => void = () => {}) => {
   return m;
 };
 
-test("W1-T3702: SUBSCRIPTION FIRST — a declared fallback is not used while the primary can run", () => {
+test("SUBSCRIPTION FIRST — a declared fallback is not used while the primary can run", () => {
   const mounts = validateMounts(table((m) => { m.architect.squeeze_model = "gpt-5.6-terra"; }), {});
   assert.equal(architectModel(CFG, mounts), "claude-opus-5", "absent flag means the primary");
   assert.equal(architectModel(CFG, mounts, { squeezed: false }), "claude-opus-5");
 });
 
-test("W1-T3702: under squeeze the seat is FILLED rather than left empty", () => {
+test("under squeeze the seat is FILLED rather than left empty", () => {
   const mounts = validateMounts(table((m) => { m.architect.squeeze_model = "gpt-5.6-terra"; }), {});
   assert.equal(architectModel(CFG, mounts, { squeezed: true }), "gpt-5.6-terra");
 });
 
-test("W1-T3702: a table declaring NO fallback behaves exactly as before, squeezed or not", () => {
+test("a table declaring NO fallback behaves exactly as before, squeezed or not", () => {
   const mounts = validateMounts(table(), {});
   assert.equal(architectModel(CFG, mounts), "claude-opus-5");
   assert.equal(architectModel(CFG, mounts, { squeezed: true }), "claude-opus-5", "no fallback means no change in behaviour");
 });
 
-test("W1-T3702: the Judge seat follows the same subscription-first rule", () => {
+test("the Judge seat follows the same subscription-first rule", () => {
   const mounts = validateMounts(table((m) => { m.judge.squeeze_model = "gpt-5.6-terra"; }), {});
   assert.equal(judgeModel(mounts), "opus");
   assert.equal(judgeModel(mounts, { squeezed: true }), "gpt-5.6-terra");
 });
 
-test("W1-T3702: a fallback that does NOT dominate the workers cannot load at all", () => {
+test("a fallback that does NOT dominate the workers cannot load at all", () => {
   // luna ranks with sonnet (2), and workers ride sonnet — so a squeeze would put the Architect
   // level with the work it supervises. The table must refuse to LOAD, not discover this mid-squeeze.
   assert.throws(
@@ -53,7 +53,7 @@ test("W1-T3702: a fallback that does NOT dominate the workers cannot load at all
   );
 });
 
-test("W1-T3702: an UNRANKED fallback is refused, so it can never be selected", () => {
+test("an UNRANKED fallback is refused, so it can never be selected", () => {
   assert.throws(
     () => validateMounts(table((m) => { m.architect.squeeze_model = "gpt-5.6-sol"; }), {}),
     /'squeeze_model' must be one of/,

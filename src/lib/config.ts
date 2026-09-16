@@ -152,7 +152,7 @@ export function architectModel(
   mounts?: { architect: { model: string; squeezeModel?: string } },
   opts: { squeezed?: boolean } = {},
 ): string {
-  // W1-T3702: SUBSCRIPTION FIRST, ALWAYS. `squeezed` is true only when the seat's ordinary
+  // SUBSCRIPTION FIRST, ALWAYS. `squeezed` is true only when the seat's ordinary
   // provider has NO readable headroom, so the fallback is never preferred, never cheaper-first,
   // and never consulted while the primary can run. Absent a declared fallback this returns the
   // primary exactly as it always has, so a table that declares none behaves identically.
@@ -164,7 +164,7 @@ export function architectModel(
   return mounts?.architect.model ?? config.architectModel ?? "opus";
 }
 
-/** W1-T3702: the Judge's seat under the same rule as {@link architectModel}. Separate entity,
+/** the Judge's seat under the same rule as {@link architectModel}. Separate entity,
  *  separate mount, same subscription-first contract. */
 export function judgeModel(
   mounts: { judge: { model: string; squeezeModel?: string } },

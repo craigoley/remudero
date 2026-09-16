@@ -90,7 +90,7 @@ export interface Mount {
   contextBudget: number;
   provider?: WorkerProviderId;
   /**
-   * W1-T3702: the model this seat falls back to when its ordinary provider has NO readable
+   * the model this seat falls back to when its ordinary provider has NO readable
    * headroom. Parsed from `squeeze_model`. SUBSCRIPTION FIRST, ALWAYS -- this is never preferred,
    * never cheaper-first, and never consulted while the primary can run; it exists so a maxed
    * subscription leaves the seat filled instead of empty.
@@ -274,7 +274,7 @@ function capabilityRank(capabilities: CapabilityLadder, model: string): number {
 function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
   const architectTier = m.tiers[m.architect.model];
   const judgeTier = m.tiers[m.judge.model];
-  // W1-T3702: A SQUEEZE SEAT FACES THE SAME BAR. The fallback is reached exactly when the fleet is
+  // A SQUEEZE SEAT FACES THE SAME BAR. The fallback is reached exactly when the fleet is
   // most constrained, which is the worst moment to discover the Architect now ranks at or below
   // the workers it supervises. Taking the MINIMUM of the seat and its fallback means the table
   // cannot load unless BOTH dominate -- a squeeze can change which model holds a seat, never
