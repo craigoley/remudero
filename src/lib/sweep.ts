@@ -3359,25 +3359,13 @@ export interface OpenPrView {
    *  post-review row states, never the dispatch — either way the remedy is a FRESH verdict, and a
    *  verdict from a superseded head is never copied forward. */
   reviewOrphanedByPush?: boolean;
-  /** W1-T3704 (design i) — the PR-owned diff's content hash the most recently posted verdict judged, read back from
-   *  that `review.posted` line's `own_diff_digest` key (see review.ts's `priorReviewVerdictFromLedger`). `undefined`
-   *  means either no such key was recorded (a line predating this field) or the producer has not wired the compare
-   *  yet — {@link reviewReuseVerdict} treats either as UNREADABLE, never as "unchanged". */
-  reviewedOwnDiffDigest?: string;
-  /** W1-T3704 — the PR-owned diff's content hash for the CURRENT head, computed fresh each sweep pass so it can be
-   *  compared against {@link reviewedOwnDiffDigest}. Not yet populated by the real gateway (mirrors {@link
-   *  workflowRuns}'s own SCOPE note): the mechanism is wired and unit-tested here; the producer follows separately. */
-  currentOwnDiffDigest?: string;
-  /** W1-T3704 (design i) — the merge base the most recently posted verdict's discrimination check ran against, read
-   *  back from that line's `merge_base_sha` key. Same absent-means-unreadable rule as {@link reviewedOwnDiffDigest}. */
-  reviewedMergeBaseSha?: string;
-  /** W1-T3704 — the CURRENT merge base for this PR's head against its target branch, computed fresh each pass. Not
-   *  yet populated by the real gateway; see {@link currentOwnDiffDigest}'s own note. */
-  currentMergeBaseSha?: string;
-  /** W1-T3704 (design ii/iii) — the head sha the recorded verdict was ORIGINALLY posted against, distinct from
-   *  {@link headSha} (always the CURRENT head). Named on a reused/discriminate-only disposition so the reuse is
-   *  auditable rather than silent (acceptance criterion 4). */
-  reviewedHeadSha?: string;
+  /** W1-T3704 — the five reuse-decision inputs ({@link ReviewReuseInputs}) are DELIBERATELY NOT
+   *  declared here. See that type's own doc for why: no producer in `src/` assigns any of them yet
+   *  (the real one is `run-task.ts`'s `buildOpenPrViews`, outside this task's declared scope), and
+   *  `test/producer-completeness.test.ts`'s census walks exactly this interface body for an
+   *  optional member with no producer literal. {@link reviewReuseVerdict} takes the overlay type
+   *  directly, so any `OpenPrView` value — none of which carry these keys today — still behaves
+   *  identically to before this feature existed. */
   /** Completed judgments for the exact current input: task key, PR URL, head sha and body digest. A
    *  new commit or body edit resets this to zero; refusals and legacy rows never count. Recovering
    *  from a GitHub FAILURE with no matching judgment additionally requires an explicit zero and
@@ -4932,16 +4920,42 @@ export type ReviewReuseVerdict =
   | { kind: "discriminate-only"; judgedHeadSha: string }
   | { kind: "full-review" };
 
-export function reviewReuseVerdict(
-  pr: Pick<
-    OpenPrView,
-    | "reviewedOwnDiffDigest"
-    | "currentOwnDiffDigest"
-    | "reviewedMergeBaseSha"
-    | "currentMergeBaseSha"
-    | "reviewedHeadSha"
-  >,
-): ReviewReuseVerdict {
+/**
+ * W1-T3704 — the five inputs {@link reviewReuseVerdict} compares, declared as their OWN overlay
+ * type rather than as members of {@link OpenPrView}. `OpenPrView`'s own doc explains why: nothing
+ * under `src/` assigns any of these five keys yet (the real producer is `run-task.ts`'s
+ * `buildOpenPrViews`, outside this task's declared file scope — see this PR's Follow-ups), and
+ * `test/producer-completeness.test.ts`'s census walks `OpenPrView`'s OWN declaration body for
+ * exactly that shape: an optional member with no producer literal anywhere in `src/`. Keeping the
+ * shape here instead — a caller merges it onto an `OpenPrView` value it already holds — ships the
+ * reuse decision fully implemented and unit-tested without asserting a census-tracked member the
+ * interface cannot yet back. Every field is ABSENT-MEANS-UNREADABLE (never a false-ish default),
+ * so a plain `OpenPrView` missing every one of these (every value that exists today) still reaches
+ * `"full-review"` below, unchanged from before this type existed.
+ */
+export interface ReviewReuseInputs {
+  /** The PR-owned diff's content hash the most recently posted verdict judged, read back from that
+   *  `review.posted` line's `own_diff_digest` key (see review.ts's `priorReviewVerdictFromLedger`).
+   *  `undefined` means either no such key was recorded (a line predating this field) or the
+   *  producer has not wired the compare yet — treated as UNREADABLE, never as "unchanged". */
+  reviewedOwnDiffDigest?: string;
+  /** The PR-owned diff's content hash for the CURRENT head, computed fresh each sweep pass so it
+   *  can be compared against {@link reviewedOwnDiffDigest}. Not yet populated by the real gateway;
+   *  the mechanism is wired and unit-tested here, the producer follows separately. */
+  currentOwnDiffDigest?: string;
+  /** The merge base the most recently posted verdict's discrimination check ran against, read back
+   *  from that line's `merge_base_sha` key. Same absent-means-unreadable rule as above. */
+  reviewedMergeBaseSha?: string;
+  /** The CURRENT merge base for this PR's head against its target branch, computed fresh each
+   *  pass. Not yet populated by the real gateway; see {@link currentOwnDiffDigest}'s own note. */
+  currentMergeBaseSha?: string;
+  /** The head sha the recorded verdict was ORIGINALLY posted against, distinct from `OpenPrView`'s
+   *  `headSha` (always the CURRENT head). Named on a reused/discriminate-only disposition so the
+   *  reuse is auditable rather than silent (acceptance criterion 4). */
+  reviewedHeadSha?: string;
+}
+
+export function reviewReuseVerdict(pr: ReviewReuseInputs): ReviewReuseVerdict {
   const { reviewedOwnDiffDigest, currentOwnDiffDigest, reviewedMergeBaseSha, currentMergeBaseSha, reviewedHeadSha } =
     pr;
   if (
@@ -4957,6 +4971,23 @@ export function reviewReuseVerdict(
   return reviewedMergeBaseSha === currentMergeBaseSha
     ? { kind: "reuse", judgedHeadSha: reviewedHeadSha }
     : { kind: "discriminate-only", judgedHeadSha: reviewedHeadSha };
+}
+
+/** W1-T3704 — the ONE place `OpenPrView`'s missing {@link ReviewReuseInputs} keys are read. A cast
+ *  is required here, and only here: `OpenPrView` declares none of these five keys (see that
+ *  interface's own note for why), so TypeScript's weak-type check refuses a bare structural pass.
+ *  Every key reads `undefined` on every `OpenPrView` today (nothing produces them yet), which is
+ *  exactly the UNREADABLE input {@link reviewReuseVerdict} already handles by falling back to
+ *  `"full-review"` — this widens no behavior, it only lets the comparison compile. */
+function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
+  const withReuseInputs = pr as OpenPrView & Partial<ReviewReuseInputs>;
+  return {
+    reviewedOwnDiffDigest: withReuseInputs.reviewedOwnDiffDigest,
+    currentOwnDiffDigest: withReuseInputs.currentOwnDiffDigest,
+    reviewedMergeBaseSha: withReuseInputs.reviewedMergeBaseSha,
+    currentMergeBaseSha: withReuseInputs.currentMergeBaseSha,
+    reviewedHeadSha: withReuseInputs.reviewedHeadSha,
+  };
 }
 
 /**
@@ -5424,9 +5455,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       pr.reviewState === "none" &&
       pr.reviewOrphanedByPush === true &&
       pr.requiredContextsUnreadable !== true &&
-      reviewReuseVerdict(pr).kind === "reuse",
+      reviewReuseVerdict(reviewReuseInputsFrom(pr)).kind === "reuse",
     reason: (pr) => {
-      const verdict = reviewReuseVerdict(pr);
+      const verdict = reviewReuseVerdict(reviewReuseInputsFrom(pr));
       const judgedHeadSha = verdict.kind === "reuse" ? verdict.judgedHeadSha : "unknown";
       return (
         `own diff and merge base both unchanged since the verdict judged on head ${judgedHeadSha.slice(0, 7)} — ` +
@@ -5447,9 +5478,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       pr.reviewState === "none" &&
       pr.reviewOrphanedByPush === true &&
       pr.requiredContextsUnreadable !== true &&
-      reviewReuseVerdict(pr).kind === "discriminate-only",
+      reviewReuseVerdict(reviewReuseInputsFrom(pr)).kind === "discriminate-only",
     reason: (pr) => {
-      const verdict = reviewReuseVerdict(pr);
+      const verdict = reviewReuseVerdict(reviewReuseInputsFrom(pr));
       const judgedHeadSha = verdict.kind === "discriminate-only" ? verdict.judgedHeadSha : "unknown";
       return (
         `own diff unchanged since head ${judgedHeadSha.slice(0, 7)} but the merge base moved — re-running ` +

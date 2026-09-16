@@ -27,6 +27,7 @@ import {
   deriveDisposition,
   reviewReuseVerdict,
   type OpenPrView,
+  type ReviewReuseInputs,
 } from "../src/lib/sweep.js";
 import { priorReviewVerdictFromLedger, reviewLedgerLegibilityFields } from "../src/lib/review.js";
 
@@ -40,9 +41,14 @@ const OWN_DIFF_DIGEST = "sha256:own-diff-abc123";
 const MERGE_BASE = "0ldbase00ldbase00ldbase00ldbase00ldbase0";
 const NEW_MERGE_BASE = "newbase1newbase1newbase1newbase1newbase1";
 
+/** {@link ReviewReuseInputs} is declared OFF `OpenPrView` on purpose (see that type's own doc in
+ *  sweep.ts) — no producer assigns any of its five keys onto a real `OpenPrView` yet, so a fixture
+ *  here carries them as an overlay, the same shape `reviewReuseInputsFrom` reads off a real PR. */
+type OrphanedPrFixture = Partial<OpenPrView> & Partial<ReviewReuseInputs>;
+
 /** The exact shape a push-orphaned, checks-green review matches: `reviewState: "none"`,
  *  `checksState: "green"`, `reviewOrphanedByPush: true`, no unreadable required-contexts read. */
-function orphanedPr(over: Partial<OpenPrView> = {}): OpenPrView {
+function orphanedPr(over: OrphanedPrFixture = {}): OpenPrView & Partial<ReviewReuseInputs> {
   return {
     prNumber: 3704,
     prUrl: PR_URL,
@@ -62,7 +68,7 @@ function orphanedPr(over: Partial<OpenPrView> = {}): OpenPrView {
 
 /** The full set of identity inputs {@link reviewReuseVerdict} compares, both sides equal — the
  *  "nothing a review reads has changed" shape (design row 1). */
-function unchangedInputs(): Partial<OpenPrView> {
+function unchangedInputs(): Partial<ReviewReuseInputs> {
   return {
     reviewedOwnDiffDigest: OWN_DIFF_DIGEST,
     currentOwnDiffDigest: OWN_DIFF_DIGEST,
@@ -100,7 +106,7 @@ test("W1-T3704 (2): a push that only moves the merge base re-runs discrimination
 // ── acceptance 3: any change to the own diff is a full re-review, no threshold of smallness ────
 
 test("W1-T3704 (3): any change to the pull request's own diff still takes a full re-review, so no threshold of smallness exists", () => {
-  const changedDiffCases: Array<Partial<OpenPrView>> = [
+  const changedDiffCases: Array<OrphanedPrFixture> = [
     // own diff changed, merge base unchanged
     { ...unchangedInputs(), currentOwnDiffDigest: "sha256:own-diff-DIFFERENT" },
     // own diff changed AND merge base moved — still full review, never "discriminate-only"
@@ -144,7 +150,7 @@ test("W1-T3704 (4): a reused verdict names the head it originally judged, so reu
 // ── acceptance 5: unreadable evidence refuses to reuse, falling back to a full re-review ──────
 
 test("W1-T3704 (5): an unreadable diff or unresolvable merge base falls back to a full re-review rather than reusing on incomplete evidence", () => {
-  const missingOneField: Array<Partial<OpenPrView>> = [
+  const missingOneField: Array<OrphanedPrFixture> = [
     { ...unchangedInputs(), reviewedOwnDiffDigest: undefined },
     { ...unchangedInputs(), currentOwnDiffDigest: undefined },
     { ...unchangedInputs(), reviewedMergeBaseSha: undefined },
