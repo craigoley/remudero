@@ -1,25 +1,25 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-09-16T14:25:57.548Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-09-16T22:13:33.790Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-15 run(s) since the last retro marker. Verdicts: {"blocked_ci":1,"incomplete":9,"merged":5}.
+13 run(s) since the last retro marker. Verdicts: {"blocked_budget":1,"incomplete":7,"merged":5}.
 
 ### Shipped since marker
-- RETRO → https://github.com/craigoley/remudero/pull/5727 (gate-side merge; run ended incomplete)
-- W1-T3622 → https://github.com/craigoley/remudero/pull/5730 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3623 → https://github.com/craigoley/remudero/pull/5733 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3626 → https://github.com/craigoley/remudero/pull/5732 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3629 → https://github.com/craigoley/remudero/pull/5734 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
-- W1-T3639 → https://github.com/craigoley/remudero/pull/5736 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- RETRO → https://github.com/craigoley/remudero/pull/5769 (gate-side merge; run ended incomplete)
+- W1-T3640 → https://github.com/craigoley/remudero/pull/5777 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3665 → https://github.com/craigoley/remudero/pull/5768 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3669 → https://github.com/craigoley/remudero/pull/5770 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3697 → https://github.com/craigoley/remudero/pull/5794 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
+- W1-T3702 → https://github.com/craigoley/remudero/pull/5820 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed incomplete)
 
 ## Next runnable task
 
-**W1-T3669** — W1-T3306's CAPPED ROUTE SHIPPED AND HAS NEVER ONCE FIRED — 98 capped arm refusals and 0 capped dispatches across the whole ledger union, so a green PR still strands with no actor and an operator merged one by hand today
+**W1-T3241** — THE ONE ROW THAT WOULD HAVE SHOWN THE DAEMON'S CHECKOUT 34 COMMITS BEHIND READS `unknown` WHILE IT IS TRUE — `head vs origin/main` is gated on a LIVENESS SENSOR it does not need, and that sensor cannot answer on this host at all
 
 - risk: high · depends_on: (none)
 
