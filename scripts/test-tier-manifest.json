@@ -1399,6 +1399,7 @@
     "test/the-followup-rung-amplifies-the-ledger.test.ts": 0,
     "test/the-forward-reference-carve-out-is-asymmetric.test.ts": 0,
     "test/the-gate-fetches-the-base-it-diffs-against-by-name.test.ts": 1099,
+    "test/the-git-reclaim-warns-when-its-target-has-a-live-sibling.test.ts": 0,
     "test/the-golden-suite-has-every-piece-except-a-producer.test.ts": 1682,
     "test/the-harness-commits-a-workers-edits.test.ts": 0,
     "test/the-harness-commits-for-a-worker-with-no-shell.test.ts": 0,
