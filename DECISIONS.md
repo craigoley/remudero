@@ -2688,7 +2688,7 @@ it, and both prior rulings read as current again. No gate, predicate or build ch
 this entry records a decision, and the repository split it describes already exists independently
 of it.
 
-## 2026-09-16 — OPERATOR RULING: `app.remudero.com` is the console. The daemon's surface is a diagnostic, not a UI project.
+## 2026-09-16 — OPERATOR RULING: app.remudero.com is the console. The daemon's surface is a diagnostic, not a UI project.
 
 *Operator-authored, recorded at the operator's instruction on 2026-09-16, answering a question put
 with the measurement below: "app.remudero.com is canonical — retire or migrate the 34 daemon-shell
@@ -2714,7 +2714,7 @@ The duplication had already cost once. `W1-T159`'s acceptance — "the daemon-he
 poll, a next-poll countdown, disk free, and rate-limit remaining" — was built independently on the
 dedicated console in `remudero-console#44`, by a session that did not know `W1-T159` existed.
 
-**THE RULING.** `app.remudero.com` is the console. The daemon keeps `/v1/*` as the control gateway
+**THE RULING.** app.remudero.com is the console. The daemon keeps `/v1/*` as the control gateway
 and keeps a minimal diagnostic page at `GET /`; it stops being a place UI work is invested.
 
 **THE LINE THIS DRAWS, AND IT IS NOT "TOUCHES serve.ts".** `src/lib/serve.ts` hosts both the routes
