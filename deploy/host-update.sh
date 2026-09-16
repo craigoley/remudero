@@ -108,6 +108,13 @@ CODEX_MOUNT_DEST="/home/node/.codex"
 # deploy/runtime-env-vars.sh or the container environment.
 CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-${HOME:-/root}/.config/remudero-container}"
 CONTAINER_CONFIG_MOUNT_DEST="/home/node/.config/remudero"
+# W1-T3612: the operator's OWN checkout, alongside the daemon's own checkout under
+# ${STATE_DIR}/remudero — both are inputs to section 4a's git object reclaim, below. Derived the
+# same way CRED_DIR/CODEX_DIR are (env override, literal default) rather than hardcoded, so this one
+# name does not drift the way STATE_DIR's own default already has (see --print-daemon-run's sibling
+# check). RMD_GIT_RECLAIM_DIRS, read in section 4a, overrides the WHOLE pair when a host's fleet owns
+# a different set — this var only supplies the second half of that pair's default.
+RMD_OP_DIR="${RMD_OP_DIR:-${HOME:-/root}/rmd-op}"
 # The repo `rmd daemon` drains. It REFUSES without `--repo` (usage dump, exit 2), which is how a
 # containerised boot burned four restarts before anyone read the exit code — `daemon-plist` bakes
 # the same flag for the launchd path, and the printed invocation must not be weaker.
@@ -602,6 +609,15 @@ digest_of() {
 id_of() {
   docker image inspect --format '{{.Id}}' "$1" 2>/dev/null || true
 }
+# W1-T3612: the size (KB) of a checkout's `.git` directory, used by section 4a to report git object
+# reclaim PER CHECKOUT. `|| true` on the pipeline, and printf as the function's last command
+# regardless of outcome — the same guard digest_of/id_of use above, needed here because an unguarded
+# failing `du` inside a plain assignment (not an if/while) aborts the whole script under `set -e`.
+git_dir_kb() {
+  local kb
+  kb="$(du -sk "$1" 2>/dev/null | awk '{print $1}')" || true
+  [ -n "${kb}" ] && printf '%s' "${kb}" || printf '0'
+}
 
 BEFORE_DIGEST="$(digest_of "${REF}")"
 BEFORE_ID="$(id_of "${REF}")"
@@ -678,6 +694,77 @@ else
   fi
   docker image     prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
   docker builder   prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
+fi
+
+# ── 4a. GIT OBJECT RECLAIM (W1-T3612) — the OTHER filesystem the disk actually fills on ─────────
+# Everything above prunes docker, and docker lives on `/mnt/rmd`. The checkouts the fleet owns — the
+# daemon's own checkout and the operator's — live on the ROOT filesystem, and nothing above touches
+# it. MEASURED on the Azure host 2026-09-15, root at 85% (4.3G free of 29G): one checkout alone held
+# 985 MiB across 53,380 LOOSE objects, behind a `.git/gc.log` that git will never clear on its own —
+# per git-gc(1), once that file exists automatic gc declines FOREVER and does not retry.
+# `deploy/entrypoint.sh` already detects this on every boot and PRINTS the remedy without running it,
+# because (that file's own words) it "cannot tell a stale log from one a maintenance run is still
+# writing". This rung is the actor entrypoint.sh deliberately is not: it runs on the SAME schedule as
+# the docker reclaim above, not on every boot, so "is a maintenance run still writing this" reduces
+# to "is the fleet running at all" — which section 1 already answered, as `LIVE`.
+#
+# THIS IS GIT OBJECT RECLAIM, NOT STATE CLEANING — the header's "DO NOT ADD STATE CLEANING HERE" is
+# scoped to the ledger/state BIND MOUNT (${STATE_DIR}/state/...: ledger.ndjson, run locks,
+# service-tokens.json), which this section never reads, writes or measures. A checkout's `.git`
+# object store is a different thing entirely, and reclaiming it is this task's whole point.
+#
+# REFUSE OUTRIGHT WHILE THE FLEET IS UP, NAMING THE HOLDER. `git gc` repacks and can prune objects a
+# live lane still needs, which is a SHARPER hazard than the docker image/build prune above — that
+# prune cannot reach a running container's own image or cache at all, which is why it is allowed to
+# proceed under --reclaim-only. `git gc` has no such immunity: it operates on the checkout directly.
+# So this reuses section 1's `LIVE` detection rather than the docker prune's carve-out.
+#
+# EACH CHECKOUT IS REPORTED SEPARATELY, NEVER SUMMED. A single combined total makes "0B reclaimed"
+# ambiguous — nothing to do, or nothing to do on THIS volume while a gigabyte sits on another? That
+# ambiguity is exactly what let the docker-only reclaim above read as "disk attended to" while the
+# root filesystem — where this section runs — went untouched for a full 04:17 UTC cycle every night.
+#
+# THE CHECKOUT LIST IS OVERRIDABLE, NOT A GROWING SET OF LITERALS. The two defaults below are the
+# checkouts MEASURED on the live host; RMD_GIT_RECLAIM_DIRS (colon-separated) replaces the pair
+# entirely for a host whose fleet owns a different set, so a third checkout appearing later is a
+# configuration change here, never a code change.
+if [ "${RECLAIM_ONLY}" -eq 1 ]; then
+  echo
+  if [ -n "${LIVE}" ]; then
+    echo "host-update: REFUSING git object reclaim — a fleet container is RUNNING." >&2
+    printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
+    echo "  'git gc' can prune objects a live lane still needs, which the docker image/build prune" >&2
+    echo "  above cannot do even while up. No checkout below was touched." >&2
+  else
+    IFS=':' read -r -a GIT_RECLAIM_DIRS <<<"${RMD_GIT_RECLAIM_DIRS:-${STATE_DIR}/remudero:${RMD_OP_DIR}}"
+    for gdir in "${GIT_RECLAIM_DIRS[@]}"; do
+      [ -n "${gdir}" ] || continue
+      if [ ! -d "${gdir}/.git" ]; then
+        echo "host-update: git reclaim — ${gdir}: no .git here, skipping"
+        continue
+      fi
+      gc_log="${gdir}/.git/gc.log"
+      had_gc_log="(no gc.log)"
+      [ -f "${gc_log}" ] && had_gc_log="(gc.log present — auto-gc has been declining forever)"
+      if [ "${DRY_RUN}" -eq 1 ]; then
+        echo "host-update: git reclaim (DRY RUN) — ${gdir}: would remove gc.log and run 'git gc' ${had_gc_log}"
+        continue
+      fi
+      before_kb="$(git_dir_kb "${gdir}/.git")"
+      rm -f "${gc_log}"
+      gc_status=0
+      git -C "${gdir}" gc --quiet 2>&1 | sed 's/^/  /' || gc_status=1
+      after_kb="$(git_dir_kb "${gdir}/.git")"
+      freed_kb=$((before_kb - after_kb))
+      [ "${freed_kb}" -lt 0 ] && freed_kb=0
+      if [ "${gc_status}" -eq 0 ]; then
+        echo "host-update: git reclaim — ${gdir}: freed $(human_kb "${freed_kb}") ${had_gc_log}"
+      else
+        echo "host-update: git reclaim — ${gdir}: 'git gc' FAILED; gc.log was still removed so the" >&2
+        echo "  next auto-gc can retry on its own. ${had_gc_log}" >&2
+      fi
+    done
+  fi
 fi
 
 # ── 4b. RECLAIM-ONLY STOPS HERE (W1-T2725) ───────────────────────────────────────────────────
