@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -129,6 +129,11 @@ function bashCaseEchoLines(byMode: Record<string, string[]>, defaultLines: strin
  *   image-env-unknown — `docker image inspect` for the Config.Env format FAILS, so the
  *                        undeclared-variable check cannot run and must be SKIPPED, not assumed
  *                        clean and not treated as a refusal
+ *   dead-pid-live-container — W1-T3611: the target container (`{{.Id}}`) and an inflight lock's
+ *                        `host` both resolve to `376f1b205ffa`, which docker reports RUNNING, and
+ *                        the in-container `/proc/<pid>` probe reports the lock's pid ABSENT
+ *   live-pid-live-container — same host/target match as above, but the `/proc/<pid>` probe reports
+ *                        the pid PRESENT — the recycle must still refuse
  */
 function writeStubs(dir: string): void {
   const docker = [
@@ -173,6 +178,23 @@ function writeStubs(dir: string): void {
     "      *.Image}}*)",
     '        case "$STUB_MODE" in wrong-image) echo "sha256:WRONGID" ;; *) echo "sha256:PULLEDID" ;; esac',
     "        exit 0 ;;",
+    '      "{{.Id}}")',
+    // W1-T3611: the RUNNING target container's own resolved id, read once per reclaim sweep. Only
+    // the two dead/live-pid-in-live-container modes below give this a value; every other mode's
+    // call (there are none today, but a future one must not silently start matching) gets nothing,
+    // exactly as this format got nothing before this task.
+    '        case "$STUB_MODE" in',
+    '          dead-pid-live-container|live-pid-live-container) echo "376f1b205ffa" ;;',
+    "        esac",
+    "        exit 0 ;;",
+    '      "{{.State.Running}}")',
+    // Only the fixed host these two modes' lock fixtures name is ever reported running — every
+    // other host this suite ever probes (5efb86ede91b, b79658d95089, ...) gets nothing, matching
+    // this format's behaviour before this task (docker inspect succeeds, prints nothing).
+    '        case "$STUB_MODE" in',
+    '          dead-pid-live-container|live-pid-live-container) [ "$1" = "376f1b205ffa" ] && echo true ;;',
+    "        esac",
+    "        exit 0 ;;",
     "    esac",
     "    exit 0 ;;",
     "  pull)",
@@ -193,6 +215,15 @@ function writeStubs(dir: string): void {
     '          hung-plus-dispatch)',
     '            echo "  363439    8970 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/sweep-fix-settings-W1-T446-1787173796831.json"',
     '            echo "  501122     600 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/run-settings-W1-T999-1787173796831.json" ;;',
+    "        esac",
+    "        exit 0 ;;",
+    "      sh)",
+    // W1-T3611's `/proc/<pid>` probe: `docker exec "${host}" sh -c "[ -e /proc/${pid} ] && ..."`.
+    // The stub never actually inspects a `/proc` — it answers straight off STUB_MODE, same as the
+    // `ps)` branch just above answers off STUB_MODE rather than a real process table.
+    '        case "$STUB_MODE" in',
+    '          dead-pid-live-container) echo "ABSENT" ;;',
+    '          live-pid-live-container) echo "PRESENT" ;;',
     "        esac",
     "        exit 0 ;;",
     "    esac",
@@ -549,6 +580,56 @@ test("W1-T1046: a hung fix-rung worker alone is passed, printed before clearing,
   assert.equal(row.age_s, 8970);
   assert.equal(row.age_bound_s, 7200);
   assert.match(row.cleaned, /daemon-side owners/, "what it did NOT clean must be stated, not implied");
+});
+
+// ── W1-T3611: A DEAD PID IN THE STILL-RUNNING TARGET CONTAINER IS RECLAIMED, A LIVE ONE STILL
+//    REFUSES ─────────────────────────────────────────────────────────────────────────────────────
+//
+// W1-T2556 (test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts) covers the
+// container being GONE. This covers the daemon PROCESS restarting IN PLACE while its container
+// keeps running — `docker inspect` on `host` then reports RUNNING, so that reclaim never fires and
+// the orphaned lock blocks every recycle forever (the 2026-09-15 incident this task's own note
+// records). Both fixtures below name the SAME running host as the resolved target container id
+// (`376f1b205ffa`, per the docker stub's `dead-pid-live-container`/`live-pid-live-container`
+// modes) — only the in-container `/proc/<pid>` probe differs, which is the ONE thing that may
+// decide the outcome.
+
+test("W1-T3611: a dead pid in the live container is reclaimed, not refused — the lock names the running target container and its /proc lacks that pid", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  const inflightDir = join(state, "state", "inflight");
+  mkdirSync(inflightDir, { recursive: true });
+  const lockPath = join(inflightDir, "fix-branch--craigoley--remudero--run-W1-T3599.lock");
+  writeFileSync(lockPath, JSON.stringify({ pid: 73, host: "376f1b205ffa", startedAt: "2026-09-15T00:00:00Z" }));
+
+  const run = runRecycle("dead-pid-live-container", { stateDir: state });
+
+  assert.equal(run.status, 0, `expected the recycle to proceed, got status ${run.status}: ${run.stderr}`);
+  assert.equal(run.calls.filter(isRm).length, 1, "the old container must actually be replaced");
+  assert.equal(run.calls.filter(isRun).length, 1, "a replacement must start");
+  assert.match(run.stderr, /LIVE TARGET CONTAINER, DEAD PID \(docker exec 376f1b205ffa: \/proc\/73 ABSENT\)/);
+  assert.ok(!existsSync(lockPath), "the original lock path must no longer exist there — it was MOVED, never deleted");
+  const reclaimedDir = join(inflightDir, "reclaimed");
+  const entries = existsSync(reclaimedDir) ? readdirSync(reclaimedDir) : [];
+  assert.ok(
+    entries.some((e) => e.startsWith("fix-branch--craigoley--remudero--run-W1-T3599.lock") && !e.endsWith(".reason")),
+    `the moved lock must exist under ${reclaimedDir}, found: ${entries.join(", ")}`,
+  );
+});
+
+test("W1-T3611: a live pid in the live container still refuses the recycle — the same host/target match, but /proc still holds that pid", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  const inflightDir = join(state, "state", "inflight");
+  mkdirSync(inflightDir, { recursive: true });
+  const lockPath = join(inflightDir, "fix-branch--craigoley--remudero--run-W1-T3608.lock");
+  writeFileSync(lockPath, JSON.stringify({ pid: 73, host: "376f1b205ffa", startedAt: "2026-09-15T00:00:00Z" }));
+
+  const run = runRecycle("live-pid-live-container", { stateDir: state });
+
+  assert.notEqual(run.status, 0, "a lock whose pid is genuinely still alive must still refuse");
+  assert.match(run.stderr, /REFUSING — 1 lane-holding/);
+  assert.equal(run.calls.filter(isRm).length, 0, "the container must not be removed");
+  assert.equal(run.calls.filter(isRun).length, 0, "no replacement may start");
+  assert.ok(existsSync(lockPath), "a lock whose pid is still alive must never be moved");
 });
 
 // ── W1-T1069: `deploy/recycle-container.sh` NO LONGER RETYPES THE ENV BY HAND ───────────────────
