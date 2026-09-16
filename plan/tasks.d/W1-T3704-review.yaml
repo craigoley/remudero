@@ -1,0 +1,111 @@
+- id: W1-T3704
+  title: "A PUSH DISCARDS A COMPLETED REVIEW WHOLE, even when the pull request's own diff is byte-identical — orphaned reviews are the single largest sweep disposition, and at a measured 7 reviews per hour each one burns the fleet's scarcest resource to re-derive a verdict that did not change"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 14.00
+  files:
+    - src/lib/review.ts
+    - src/lib/sweep.ts
+    - test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts
+  origin: "operator-session#the-queue-is-losing-by-two-an-hour-2026-09-16"
+  plan_refs: ["W1-T3702", "W1-T3699", "W1-T273"]
+  status: queued
+  priority: 1
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16 over a 94-minute window (17:14 -> 18:48) and the merge record.
+
+    REVIEW IS THE CONSTRAINT, CONFIRMED TWO WAYS:
+
+      review.posted            11 in 94 min   ~= 7.0 / hour
+      pull requests merged     7.0 / hour  (7.0 over 2h, 6.3 over 4h)
+      pull requests opened     9.0 / hour  (9.0 over 2h)
+
+    Arrival exceeds service by about two per hour, which is why the board sits at 10-13 and does
+    not drain. Merge rate and review rate agree to the decimal, from independent sources.
+
+    ORPHANED REVIEWS ARE THE LARGEST SWEEP DISPOSITION IN THAT WINDOW:
+
+      6   checks green, review orphaned by a push (reviewed on an earlier head, ...)
+      3   dependabot PR -- dep-review lane (checks pending, review none)
+      2   checks pending 13m (< 60m ceiling) -- waiting, re-deriving next sweep
+
+    At ~7 reviews/hour a discarded review costs roughly 8.5 minutes of the only resource the queue
+    is short of, and the pull request re-enters the queue behind every other open one.
+
+    AND THE WORST CASE IS PAID IN FULL. PR #5771 carried six commits; two were `Merge branch
+    'main'` updates whose PR-OWNED diff was unchanged. Each still discarded a completed verdict.
+  rationale: |
+    ORPHANING IS CORRECT AS A DEFAULT AND MUST NOT BE REMOVED. A verdict names the head it judged;
+    honouring it against a different head is how a review certifies work it never saw. Nothing here
+    weakens that.
+
+    WHAT IS MISSING IS THE CHEAPER CASE. A verdict has two inputs: the pull request's OWN diff
+    (base...head) and the MERGE BASE the discrimination check runs against. A push can move one
+    without the other, and today all four combinations are treated identically -- as a total loss.
+
+      own diff same, merge base same    nothing a review reads has changed
+      own diff same, merge base moved   only discrimination can differ (W1-T273)
+      own diff changed                  a real re-review, correctly
+
+    The middle row is the common one, because "update branch" and a merge from main are exactly
+    that shape, and it is the row that currently costs the most for the least.
+
+    THIS IS NOT THE SAME TASK AS W1-T3702. That one reduces the NUMBER of pushes by giving filings
+    a fast local check. This one reduces the COST of a push that legitimately happens. Neither
+    subsumes the other: with W1-T3702 built, a branch update still orphans a verdict; with this
+    built, a defect found late still costs a CI round.
+
+    W1-T3699 IS THE THIRD LEG AND IS ALREADY FILED. `ci-gate` is a barrier whose ~20 minutes is set
+    by the slowest coverage shard at 16.3 min, and `remudero-review` + `ci-gate` are the ONLY two
+    required checks. So rebalancing the shards shortens every merge; this task shortens the review
+    half of the same gate.
+  design: |
+    (i) A VERDICT RECORDS WHAT IT JUDGED, not only the head sha: the PR-owned diff's content hash
+        and the merge base it discriminated against. Without both recorded there is nothing to
+        compare a later push to, which is why the whole verdict is discarded today.
+
+    (ii) AN UNCHANGED OWN-DIFF WITH AN UNCHANGED MERGE BASE REUSES THE VERDICT. This is the
+         no-op push -- a force-push of identical content, a rebase that changed nothing. The
+         reviewer re-posts the same conclusion and says it reused, naming the head it originally
+         judged, so the reuse is auditable rather than invisible.
+
+    (iii) AN UNCHANGED OWN-DIFF WITH A MOVED MERGE BASE RE-RUNS DISCRIMINATION ONLY. The acceptance
+          judgement over the PR's own work cannot have changed; what CAN change is whether each
+          proof still discriminates against the new base (W1-T273/W1-T362). Re-running that alone
+          is the graded response, and it is the whole saving -- this is the "update branch" shape.
+
+    (iv) ANY CHANGE TO THE OWN DIFF IS A FULL RE-REVIEW, unchanged from today. There is no
+         threshold of "small enough": one changed byte in the PR's own diff is a new verdict.
+
+    (v) REUSE IS REFUSED WHEN EITHER INPUT IS UNREADABLE. An unreadable diff or an unresolvable
+        merge base falls back to today's full re-review -- the safe direction -- rather than reusing
+        on incomplete evidence.
+
+    NO THRESHOLD AND NO CACHE EXPIRY. Reuse is keyed on identity of the inputs, never on age; a
+    verdict from an hour ago and one from a minute ago are equally valid if what they judged is
+    identical, and equally void if it is not.
+
+    THE BAND RECORDS WIDTH, NOT DANGER: the recorded verdict lives with the reviewer and the reuse
+    decision lives in the sweep, and the defect IS the edge between them.
+  acceptance:
+    - claim: "a push whose own diff and merge base are both unchanged reuses the verdict instead of discarding it"
+      proof: "unit test: test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts"
+    - claim: "a push that only moves the merge base re-runs discrimination alone rather than the whole review"
+      proof: "unit test: test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts"
+    - claim: "any change to the pull request's own diff still takes a full re-review, so no threshold of smallness exists"
+      proof: "unit test: test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts"
+    - claim: "a reused verdict names the head it originally judged, so reuse is auditable rather than silent"
+      proof: "unit test: test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts"
+    - claim: "an unreadable diff or unresolvable merge base falls back to a full re-review rather than reusing on incomplete evidence"
+      proof: "unit test: test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts"
+  falsifier: |
+    Discard a verdict whose inputs are identical and the first test fails. Re-run the whole review
+    for a base-only move and the second fails. Reuse across a changed own diff and the third fails.
+    Reuse without naming the judged head and the fourth fails. Reuse on unreadable evidence and the
+    fifth fails.
