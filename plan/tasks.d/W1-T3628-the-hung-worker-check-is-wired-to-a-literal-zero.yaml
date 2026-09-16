@@ -13,6 +13,8 @@
   plan_refs: ["W1-T3627", "W1-T2251"]
   status: queued
   attempts: 0
+  note: |
+    reservation hand-off: main -> chore/file-inert-worker-check-1789521545
   rationale: |
     THIS IS THE REPO'S OWN NAMED DEFECT, IN ITS OWN HEALTH COMMAND. CLAUDE.md states it directly:
     "A check that passes while comparing nothing is the most dangerous failure mode."
