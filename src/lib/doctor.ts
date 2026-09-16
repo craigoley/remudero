@@ -503,6 +503,10 @@ function defaultPs(): string {
   try {
     return execFileSync("ps", ["-eo", "pid=,ppid=,etimes=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
   } catch {
+    // BSD `ps` rejects the procps `etimes=` keyword outright rather than returning empty output,
+    // so this falls back to `etime=`, its own dialect. A REAL read failure (no `ps` binary at
+    // all, EACCES, etc.) surfaces from THIS second call instead -- into readWorkerProcesses's own
+    // catch below, never swallowed here.
     return execFileSync("ps", ["-eo", "pid=,ppid=,etime=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
   }
 }
@@ -513,6 +517,10 @@ export function readWorkerProcesses(
   try {
     return parseWorkerProcesses(run());
   } catch (error) {
+    // Neither `ps` dialect could run (missing binary, EACCES, ...) -- classifyReadFailure gives
+    // the same reason vocabulary judgeCheckoutDepth and judgeLockDivergence already read, carried
+    // in `unreadableReason` for judgeLaneLessWorkers to render as UNKNOWN rather than a healthy
+    // zero (W1-T3628 design note above).
     return { unreadableReason: classifyReadFailure(error).reason };
   }
 }
