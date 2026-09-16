@@ -814,8 +814,15 @@ export function renderReconPrompt(
   recordPath?: string,
 ): string {
   return [
+    // W1-T3656: NAME WHAT TO OBSERVE, NEVER WHICH BINARY TO RUN. This used to say "git remote
+    // -v, git log --oneline -5, ls" -- three shell commands by name -- which a worker holding
+    // the allowlisted check-runner instead of a shell cannot follow literally, and which
+    // therefore pinned this lane to Claude. The observations are identical; each provider
+    // satisfies them with the tools it has (a shell, or run_check plus Glob for the tree).
     "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
-      "repository read-only (git remote -v, git log --oneline -5, ls). Output one report:\n" +
+      "repository READ-ONLY and report what you observe: its remote, its recent commit " +
+      "history, and the shape of the working tree. Use whichever of your available tools " +
+      "does that — do not assume a shell. Output one report:\n" +
       "RECON REPORT\nOBSERVED: <commands + key output>\nINFERRED: <conclusions>\n" +
       "COULDN'T-VERIFY: <unconfirmed>\n" +
       // W1-T105: recon is read-only and out-of-scope by construction, so a genuine
