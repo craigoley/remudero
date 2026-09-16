@@ -52,6 +52,7 @@ import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
 import { openLedgerUnion } from "./ledger-union.js";
 import { systemClock, type Clock } from "./clock.js";
+import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -101,6 +102,60 @@ export interface AnalyticsSnapshot {
   /** Present iff no line anywhere carries `worker_duration_ms` — see
    *  {@link invocationsUnmeasuredBefore}'s doc for the same discipline applied here. */
   workerDurationsUnmeasuredBefore?: string;
+  /** W1-T3623: the console-v1 catalog projection, folded from the same accumulator pass as the
+   *  four questions above — see {@link ConsoleV1Projection}'s doc for the contract-gap this
+   *  closes. */
+  consoleV1: ConsoleV1Projection;
+}
+
+/** A console-v1 metric's provenance, carried explicitly because the console renders it and
+ *  cannot infer it from the number alone (W1-T3623 acceptance iii): `"observed"` is a direct
+ *  ledger count/measurement, `"provider_reported"` is copied off the SDK result envelope
+ *  untouched (worker.ts's `TokenUsage` doc), `"modeled"` is this projection's own arithmetic
+ *  over observed/provider-reported inputs (a ratio or a summed cost). */
+export type ConsoleV1MeasurementClass = "observed" | "provider_reported" | "modeled";
+
+/** The projection version BOTH sides must agree names the same metric set — see
+ *  {@link resolveConsoleV1Projection}. A bump here is a breaking-shape change. */
+export const CONSOLE_V1_PROJECTION_VERSION = "console-v1";
+
+/** THE CONSOLE-V1 CATALOG (W1-T3623): the exact metric keys the operator console's analytics
+ *  page asks `/v1/analytics` for — `runs.completed`, `tokens.total`, `cache.reuse`,
+ *  `cost.modeled.usd`, `duration.p50.ms`, `queue.pending`. Before this task the daemon answered
+ *  with a disjoint set (`invocationsByVerb`, `workersByLaneModel`, …) under the SAME version
+ *  string; this array is the one place both this module and its test import the catalog from, so
+ *  the two can never drift apart silently again. */
+export const CONSOLE_V1_METRIC_KEYS = [
+  "runs.completed",
+  "tokens.total",
+  "cache.reuse",
+  "cost.modeled.usd",
+  "duration.p50.ms",
+  "queue.pending",
+] as const;
+
+export type ConsoleV1MetricKey = (typeof CONSOLE_V1_METRIC_KEYS)[number];
+
+/** One console-v1 metric. `value` is `null` — NEVER `0` — when this instance genuinely has
+ *  nothing to report, mirroring this module's own UNMEASURED-BEFORE discipline (see the module
+ *  header); `notCollectedReason` is present iff `value` is `null`. */
+export interface ConsoleV1Metric {
+  key: ConsoleV1MetricKey;
+  class: ConsoleV1MeasurementClass;
+  value: number | null;
+  notCollectedReason?: string;
+}
+
+/** `GET /v1/analytics`'s console-v1 projection — the catalog the console's own analytics page
+ *  reads. `version` travels WITH the payload (design note, W1-T3623 acceptance iv) so a caller
+ *  naming a version this instance does not emit can be REFUSED by {@link
+ *  resolveConsoleV1Projection} instead of silently rendered an empty dashboard, which is exactly
+ *  how both sides drifted apart the first time: a version string incremented independently on
+ *  each side is not a contract. */
+export interface ConsoleV1Projection {
+  version: string;
+  asOf: string | null;
+  metrics: ConsoleV1Metric[];
 }
 
 /** Carried in the payload rather than hardcoded client-side — mirrors account-usage.ts's
@@ -127,6 +182,105 @@ function num(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
+/** Every raw number {@link buildConsoleV1Metrics} needs — every field here is already computed by
+ *  this module's own accumulator pass EXCEPT `queuePending`, which is `/v1/status`'s own live
+ *  `counts.queued` and genuinely outside a ledger-union read (this route reads PAST events, not
+ *  current daemon state). `queuePending` stays optional so a future task can thread it in as a
+ *  dep without reshaping this function; `undefined` here renders NOT COLLECTED, never a
+ *  fabricated `0` — see this module's header for why that distinction is load-bearing. */
+export interface ConsoleV1ProjectionInputs {
+  runsCompleted: number;
+  tokensTotal: number;
+  cacheReuseTokens: CacheHitTokens;
+  costModeledUsd: number;
+  taskDurationsMs: readonly number[];
+  queuePending?: number;
+}
+
+/** Nearest-rank p50 (`sorted[floor((n-1)/2)]`) — `undefined`, never `0`, on an empty sample: a
+ *  percentile of zero observations has no value, not a zero one. */
+function median(values: readonly number[]): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor((sorted.length - 1) / 2)];
+}
+
+/**
+ * THE CONSOLE-V1 CATALOG, EMITTED (W1-T3623): folds {@link ConsoleV1ProjectionInputs} into every
+ * key {@link CONSOLE_V1_METRIC_KEYS} names, each carrying its {@link ConsoleV1MeasurementClass}.
+ * `cache.reuse` reuses digest.ts's OWN {@link cacheHitRatio} — the sole cache-hit arithmetic in
+ * this codebase (W1-T929) — rather than re-deriving a second opinion of the same ratio, and
+ * inherits its `undefined`-on-zero-denominator discipline verbatim (NOT COLLECTED, never a
+ * fabricated 0% hit rate).
+ */
+export function buildConsoleV1Metrics(inputs: ConsoleV1ProjectionInputs): ConsoleV1Metric[] {
+  const cacheReuse = cacheHitRatio(inputs.cacheReuseTokens);
+  const durationP50 = median(inputs.taskDurationsMs);
+  return [
+    { key: "runs.completed", class: "observed", value: inputs.runsCompleted },
+    { key: "tokens.total", class: "provider_reported", value: inputs.tokensTotal },
+    cacheReuse === undefined
+      ? {
+          key: "cache.reuse",
+          class: "modeled",
+          value: null,
+          notCollectedReason: "no worker call in this corpus carries a usable token envelope yet",
+        }
+      : { key: "cache.reuse", class: "modeled", value: cacheReuse },
+    { key: "cost.modeled.usd", class: "modeled", value: inputs.costModeledUsd },
+    durationP50 === undefined
+      ? {
+          key: "duration.p50.ms",
+          class: "observed",
+          value: null,
+          notCollectedReason: "no run.start/verdict pair has resolved yet",
+        }
+      : { key: "duration.p50.ms", class: "observed", value: durationP50 },
+    inputs.queuePending === undefined
+      ? {
+          key: "queue.pending",
+          class: "observed",
+          value: null,
+          notCollectedReason: "queue depth is /v1/status's own live counter, not read by this projection",
+        }
+      : { key: "queue.pending", class: "observed", value: inputs.queuePending },
+  ];
+}
+
+/** Wraps {@link buildConsoleV1Metrics} with the version/asOf envelope the console's catalog
+ *  expects on the wire. */
+export function buildConsoleV1Projection(asOf: string | null, inputs: ConsoleV1ProjectionInputs): ConsoleV1Projection {
+  return { version: CONSOLE_V1_PROJECTION_VERSION, asOf, metrics: buildConsoleV1Metrics(inputs) };
+}
+
+export type ConsoleV1ProjectionResolution =
+  | { ok: true; projection: ConsoleV1Projection }
+  | { ok: false; error: "unsupported_projection_version"; requestedVersion: string; supportedVersion: string };
+
+/**
+ * VERSION REFUSAL (W1-T3623 acceptance iv): a caller naming a projection version this instance
+ * does not emit is REFUSED — never silently handed today's shape under that caller's version
+ * string. That silent mismatch is exactly the failure this task exists to close: two sides each
+ * called their own disjoint shape "console-v1" and neither found out. `requestedVersion`
+ * undefined (no opinion from the caller) resolves to THIS instance's own version, never a
+ * refusal.
+ */
+export function resolveConsoleV1Projection(
+  snapshot: Pick<AnalyticsSnapshot, "consoleV1">,
+  requestedVersion?: string,
+): ConsoleV1ProjectionResolution {
+  const version = requestedVersion ?? CONSOLE_V1_PROJECTION_VERSION;
+  if (version !== CONSOLE_V1_PROJECTION_VERSION) {
+    return {
+      ok: false,
+      error: "unsupported_projection_version",
+      requestedVersion: version,
+      supportedVersion: CONSOLE_V1_PROJECTION_VERSION,
+    };
+  }
+  return { ok: true, projection: snapshot.consoleV1 };
+}
+
 interface AnalyticsAccumulator {
   invocationsByVerb: Record<string, number>;
   invocationsMeasured: boolean;
@@ -135,6 +289,10 @@ interface AnalyticsAccumulator {
   verdictsByRun: Map<string, number>;
   workerDurationsByLane: Map<string, { count: number; totalMs: number }>;
   workerDurationsMeasured: boolean;
+  /** W1-T3623: token totals off every worker/brain-plane line's `tokens` envelope
+   *  (worker.ts's `workerLedgerFields`) — the SAME lines already discriminated by `model !==
+   *  undefined` above, so this adds no new pass over the corpus. */
+  tokensTotal: CacheHitTokens & { output: number };
 }
 
 function analyticsAccumulator(): AnalyticsAccumulator {
@@ -146,6 +304,7 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     verdictsByRun: new Map(),
     workerDurationsByLane: new Map(),
     workerDurationsMeasured: false,
+    tokensTotal: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
   };
 }
 
@@ -165,6 +324,16 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
     bucket.count += 1;
     bucket.totalCostUsd += num(line.total_cost_usd) ?? 0;
     acc.workersByKey.set(key, bucket);
+
+    // W1-T3623: `tokens` rides the SAME line as `model`/`total_cost_usd` (workerLedgerFields
+    // spreads all three together) — no new discriminator, just new fields read off it.
+    const tokens = line.tokens as Record<string, unknown> | undefined;
+    if (tokens && typeof tokens === "object") {
+      acc.tokensTotal.input += num(tokens.input) ?? 0;
+      acc.tokensTotal.output += num(tokens.output) ?? 0;
+      acc.tokensTotal.cacheRead += num(tokens.cacheRead) ?? 0;
+      acc.tokensTotal.cacheCreation += num(tokens.cacheCreation) ?? 0;
+    }
   }
 
   // W1-T2383 rank 3: only queue-dispatch `run.start` rows participate in this join; lane-specific
@@ -206,11 +375,16 @@ function snapshotFromAccumulator(acc: AnalyticsAccumulator, nowIso: string): Ana
     taskDurationsMs.push({ runId, taskId: start.taskId, durationMs: Math.max(0, verdictTs - start.ts) });
   }
 
+  const workersByLaneModel = [...acc.workersByKey.values()];
+  const costModeledUsd = workersByLaneModel.reduce((sum, bucket) => sum + bucket.totalCostUsd, 0);
+  const tokensTotal =
+    acc.tokensTotal.input + acc.tokensTotal.output + acc.tokensTotal.cacheRead + acc.tokensTotal.cacheCreation;
+
   const out: AnalyticsSnapshot = {
     asOf: nowIso,
     measures: ANALYTICS_SCOPE_NOTE,
     invocationsByVerb: acc.invocationsByVerb,
-    workersByLaneModel: [...acc.workersByKey.values()],
+    workersByLaneModel,
     taskDurationsMs,
     noTerminalTaskCount,
     workerDurationsByLane: [...acc.workerDurationsByLane.entries()].map(([lane, value]) => ({
@@ -219,6 +393,13 @@ function snapshotFromAccumulator(acc: AnalyticsAccumulator, nowIso: string): Ana
       totalDurationMs: value.totalMs,
       avgDurationMs: value.totalMs / value.count,
     })),
+    consoleV1: buildConsoleV1Projection(nowIso, {
+      runsCompleted: taskDurationsMs.length,
+      tokensTotal,
+      cacheReuseTokens: acc.tokensTotal,
+      costModeledUsd,
+      taskDurationsMs: taskDurationsMs.map((entry) => entry.durationMs),
+    }),
   };
   if (!acc.invocationsMeasured) out.invocationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
   if (!acc.workerDurationsMeasured) out.workerDurationsUnmeasuredBefore = ANALYTICS_COLLECTION_STARTED_AT;
@@ -313,6 +494,9 @@ function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
   Object.freeze(value.taskDurationsMs);
   for (const bucket of value.workerDurationsByLane) Object.freeze(bucket);
   Object.freeze(value.workerDurationsByLane);
+  for (const metric of value.consoleV1.metrics) Object.freeze(metric);
+  Object.freeze(value.consoleV1.metrics);
+  Object.freeze(value.consoleV1);
   return Object.freeze(value) as AnalyticsSnapshot;
 }
 
@@ -329,6 +513,13 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
     noTerminalTaskCount: 0,
     workerDurationsByLane: [],
     workerDurationsUnmeasuredBefore: ANALYTICS_COLLECTION_STARTED_AT,
+    consoleV1: buildConsoleV1Projection(null, {
+      runsCompleted: 0,
+      tokensTotal: 0,
+      cacheReuseTokens: { input: 0, cacheRead: 0, cacheCreation: 0 },
+      costModeledUsd: 0,
+      taskDurationsMs: [],
+    }),
   });
 }
 
@@ -468,6 +659,19 @@ export function buildAnalyticsRoute(deps: { currentSnapshot: () => AnalyticsSnap
     method: "GET",
     path: "/v1/analytics",
     scope: "read",
-    handler: (_req, res) => sendJson(res, 200, deps.currentSnapshot()),
+    handler: (req, res) => {
+      // `?projectionVersion=` is OPTIONAL (design note, W1-T3623 acceptance iv): omitted, it
+      // resolves to this instance's own version and the full snapshot is served exactly as
+      // before. Named and unrecognised, the request is REFUSED (409) rather than answered with
+      // today's shape under a version string the caller never asked for.
+      const requestedVersion = new URL(req.url ?? "/", "http://local").searchParams.get("projectionVersion") ?? undefined;
+      const snapshot = deps.currentSnapshot();
+      const resolution = resolveConsoleV1Projection(snapshot, requestedVersion);
+      if (!resolution.ok) {
+        sendJson(res, 409, resolution);
+        return;
+      }
+      sendJson(res, 200, snapshot);
+    },
   };
 }

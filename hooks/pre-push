@@ -128,6 +128,47 @@ fi
 # and its purpose as a report an author can run by hand.
 
 
+# W1-T3388 — BEGIN head-identity admission (ADVISORY)
+# MEASURED 2026-09-16: head-identity-gate is a REQUIRED check that no local route ran, so two PRs
+# opened within an hour (#5737, #5739) each burned a full CI round discovering it and then needed a
+# trailer-only repair commit. It is deterministic, needs no network, and already ships a local
+# entrypoint — every ingredient for naming it here instead of after a red board.
+#
+# ADVISORY, NOT BLOCKING, AND THAT IS THE DESIGN. An ad-hoc PR cites its own number
+# (`Remudero-Task: PR-<n>`), which does not exist until the PR does — so the FIRST push of such a
+# branch cannot satisfy the gate, and refusing it would make the ad-hoc route impossible rather
+# than early. This hook also reaches every worker worktree via core.hooksPath, where a wrong
+# refusal does not redden one PR, it stops the fleet pushing. So it reports and never sets `fail`.
+#
+# THE REF IS THE ONE BEING PUSHED, NOT THE CHECKED-OUT BRANCH. git hands pre-push
+# "<local ref> <local sha> <remote ref> <remote sha>" per line on stdin, and the gate judges the
+# REMOTE name: `git push origin HEAD:run-W1-T3618-...` carries a local branch that is not what the
+# PR will show. stdin is unused everywhere else in this hook, so consuming it here costs nothing;
+# when it is empty — run by hand, or by this repo's own tests — fall back to the checked-out branch.
+if [ -f scripts/head-identity-gate.mjs ]; then
+  head_ref=""
+  while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    case "$remote_ref" in
+      refs/heads/*) head_ref="${remote_ref#refs/heads/}"; break ;;
+    esac
+  done
+  if [ -z "$head_ref" ]; then
+    head_ref="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  fi
+  if [ -n "$head_ref" ] && [ "$head_ref" != "HEAD" ]; then
+    if ! node --import tsx scripts/head-identity-gate.mjs --head-ref "$head_ref"; then
+      echo "pre-push: head-identity-gate would REFUSE this head in CI — advisory here, so the push" >&2
+      echo "pre-push: continues. Fix it before CI does: add an anchored \`Remudero-Task: <id>\` trailer" >&2
+      echo "pre-push: to the head commit, or push a \`run-<taskId>-<epochMs>\` branch." >&2
+    fi
+  else
+    echo "pre-push: head-identity-gate — no pushable ref resolved, skipped, NOT passed" >&2
+  fi
+else
+  echo "pre-push: scripts/head-identity-gate.mjs absent — skipped, NOT passed" >&2
+fi
+# W1-T3388 — END head-identity admission
+
 if [ "$fail" -ne 0 ]; then
   echo "" >&2
   echo "pre-push REFUSED. These are checks CI runs on this diff; fixing them here costs one" >&2

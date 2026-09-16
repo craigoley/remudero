@@ -211,6 +211,35 @@ test("cold and failed refreshes never manufacture analytics evidence", async () 
     noTerminalTaskCount: 0,
     workerDurationsByLane: [],
     workerDurationsUnmeasuredBefore: "2026-08-14",
+    // W1-T3623: the console-v1 catalog projection, cold-derived off the same all-zero inputs —
+    // ratios/percentiles/live-state metrics render NOT COLLECTED, counts render real zeros.
+    consoleV1: {
+      version: "console-v1",
+      asOf: null,
+      metrics: [
+        { key: "runs.completed", class: "observed", value: 0 },
+        { key: "tokens.total", class: "provider_reported", value: 0 },
+        {
+          key: "cache.reuse",
+          class: "modeled",
+          value: null,
+          notCollectedReason: "no worker call in this corpus carries a usable token envelope yet",
+        },
+        { key: "cost.modeled.usd", class: "modeled", value: 0 },
+        {
+          key: "duration.p50.ms",
+          class: "observed",
+          value: null,
+          notCollectedReason: "no run.start/verdict pair has resolved yet",
+        },
+        {
+          key: "queue.pending",
+          class: "observed",
+          value: null,
+          notCollectedReason: "queue depth is /v1/status's own live counter, not read by this projection",
+        },
+      ],
+    },
   });
   assert.ok(Object.isFrozen(cold), "the process-owned value is immutable");
   await cache.refresh();

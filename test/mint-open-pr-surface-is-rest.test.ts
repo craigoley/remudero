@@ -204,7 +204,7 @@ test("W1-T2324 (Q2): the unflagged verb and the read-fine-but-uncorroborated arm
   const cap = capture();
   try {
     await nextTaskIdCommand(
-      [],
+      ["--no-reserve", ],
       {},
       {
         reserver,

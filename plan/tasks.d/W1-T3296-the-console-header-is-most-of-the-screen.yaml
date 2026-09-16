@@ -14,7 +14,8 @@
     - apps/dashboard/src/App.test.tsx
   origin: "operator-session#console-header-2026-09-09"
   plan_refs: ["W1-T3177", "W1-T3173", "W1-T159", "W1-T262", "W1-T153"]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: |
     BAND. `risk: high` with `band_meaning: span` is Rule 19 SIZING. The change is one screen's
