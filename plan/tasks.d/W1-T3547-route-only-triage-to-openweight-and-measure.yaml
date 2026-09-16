@@ -1,7 +1,7 @@
 - id: W1-T3547
   title: "ROUTE ONLY SYNTHESIS.TRIAGE TO GPT-OSS-120B AFTER THE MEASURED INBOX-DRAFT TRIAL — the WebSearch bridge remains deferred until the already tool-compatible 45%-of-spend lane proves accepted outputs per dollar"
   repo: remudero
-  depends_on: [W1-T3546, W1-T3549, W1-T3558]
+  depends_on: [W1-T3546, W1-T3549, W1-T3558, W1-T3570]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -16,6 +16,22 @@
   status: queued
   attempts: 0
   note: |
+    DEPENDENCY MADE DIRECT 2026-09-16: `W1-T3570` is now named in this task's own
+    `depends_on`, where before it was reached only THROUGH `W1-T3558`.
+
+    The 2026-09-14 note below reasoned that "W1-T3558 now depends on W1-T3570, so this
+    triage route cannot dispatch before the measured inbox-draft trial". That is true only
+    while W1-T3558 is INCOMPLETE. A transitive dependency stops constraining the moment the
+    intermediate node completes: once the bridge merges, this task's dependencies read
+    [W1-T3546 ok, W1-T3549 ok, W1-T3558 ok] and the selector makes it runnable, with the
+    measured trial still unrecorded. The protection was strongest while the bridge was
+    unbuilt and would have vanished at exactly the moment it was needed — on the merge that
+    makes routing physically possible.
+
+    Naming W1-T3570 here costs nothing while the chain holds and is the only form of the
+    rule that survives the bridge being built. W1-T3570 is `verify: human`, so an operator
+    still signs off the measured verdict before any triage run is billed to cash.
+
     RESEQUENCED 2026-09-14: W1-T3558 now depends on W1-T3570, so this
     triage route cannot dispatch before the measured inbox-draft trial. The old
     smallest-lane-first premise was superseded by the observed tool surfaces:
