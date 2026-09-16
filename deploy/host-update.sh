@@ -755,7 +755,69 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   fi
 fi
 
-# ── 4b. RECLAIM-ONLY STOPS HERE (W1-T2725) ───────────────────────────────────────────────────
+# ── 4b. AGENT HISTORY RECLAIM (W1-T3626) — the LARGER share of the disk this host fills on ────────
+# `~/.codex` and `~/.claude/projects` held 6.7 GiB with NO retention anywhere in this repo, growing
+# ~580 MiB/day — about seven times section 4a's own git object reclaim. Full measurement, the outage
+# it corroborates, and why this is not W1-T3612's problem: plan/tasks.d/W1-T3626-*.yaml.
+#
+# AGE-TIERED, NOT A FIXED CEILING (the trap a byte-size cap falls into: firing near-full silently
+# destroys the exact runs an incident review needs). Removes files strictly OLDER than
+# RMD_AGENT_HISTORY_MAX_AGE_DAYS (default 14) under the configured trees; an actively-growing file's
+# own mtime keeps it out of scope with no extra logic.
+#
+# OLDEST FIRST, and REPORT BYTES PER TREE — never one combined total, the same reason section 4a's
+# own report is never summed: one number cannot distinguish "nothing old on THIS tree" from
+# "nothing old here, and a gigabyte on the other one".
+#
+# INVARIANT: refuse outright while any fleet container is LIVE, naming the holder, reusing section
+# 1's `LIVE` detection exactly as section 4a does — a running lane may still be writing the very
+# session/thread file this would remove.
+#
+# NEVER STATE CLEANING: this reclaim never reads STATE_DIR state — it only ever walks ${CODEX_DIR}
+# and ${CRED_DIR}/projects (or RMD_AGENT_HISTORY_DIRS's override), never ${STATE_DIR}, so the
+# ledger, run locks and service tokens the file header protects are untouched by this rung too.
+#
+# FALSIFIER: remove the live-worker refusal and a fixture's old file is reclaimed beside a live
+# container; collapse the per-tree report into one total and the split assertion fails.
+if [ "${RECLAIM_ONLY}" -eq 1 ]; then
+  echo
+  if [ -n "${LIVE}" ]; then
+    echo "host-update: REFUSING agent history reclaim — a fleet container is RUNNING." >&2
+    printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
+    echo "  a running lane may still be writing the very session/thread file this would remove." >&2
+    echo "  No file under any configured tree was touched." >&2
+  else
+    AGENT_HISTORY_MAX_AGE_DAYS="${RMD_AGENT_HISTORY_MAX_AGE_DAYS:-14}"
+    IFS=':' read -r -a AGENT_HISTORY_DIRS <<<"${RMD_AGENT_HISTORY_DIRS:-${CODEX_DIR}:${CRED_DIR}/projects}"
+    for hdir in "${AGENT_HISTORY_DIRS[@]}"; do
+      [ -n "${hdir}" ] || continue
+      if [ ! -d "${hdir}" ]; then
+        echo "host-update: agent history reclaim — ${hdir}: no such directory, skipping"
+        continue
+      fi
+      if [ "${DRY_RUN}" -eq 1 ]; then
+        would_kb="$(find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -printf '%s\n' 2>/dev/null \
+          | awk '{s+=$1} END{printf "%d", s/1024}')"
+        echo "host-update: agent history reclaim (DRY RUN) — ${hdir}: would free $(human_kb "${would_kb:-0}") across files older than ${AGENT_HISTORY_MAX_AGE_DAYS}d; nothing removed"
+        continue
+      fi
+      freed_bytes=0
+      removed=0
+      while IFS=$'\t' read -r _mtime size path; do
+        [ -n "${path}" ] || continue
+        if rm -f -- "${path}"; then
+          freed_bytes=$((freed_bytes + size))
+          removed=$((removed + 1))
+          echo "  removed ${path}"
+        fi
+      done < <(find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -printf '%T@\t%s\t%p\n' 2>/dev/null | sort -n)
+      freed_kb=$((freed_bytes / 1024))
+      echo "host-update: agent history reclaim — ${hdir}: freed $(human_kb "${freed_kb}") across ${removed} file(s) older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, oldest first"
+    done
+  fi
+fi
+
+# ── 4c. RECLAIM-ONLY STOPS HERE (W1-T2725) ───────────────────────────────────────────────────
 # Everything below pulls an image and restarts a container. On a timer that is exactly wrong: it
 # would restart the daemon mid-run, on a cadence, with no operator watching. Reclaim alone is safe
 # to repeat — it removes only what no container references — so this mode returns after section 4
