@@ -67,6 +67,11 @@ export interface Config {
   headroom?: { enabled?: boolean };
   workerProviders?: {
     enabled?: WorkerProviderId[];
+    /** Operator consent for OUTBOUND WEB ACCESS on behalf of cash workers (W1-T3558). Default false,
+     * and deliberately separate from enabling the cash provider: enabling a provider authorises
+     * spending on inference, this authorises fetching arbitrary public pages on a worker's
+     * instruction. The search credential is environment-only, never a config field. */
+    cashWebSearch?: boolean;
     reservePercent?: number;
     capacityCacheMs?: number;
     codexBin?: string;
@@ -157,6 +162,7 @@ const workerProvidersShape: ValueSchema = {
       stringArrayShape,
     ),
     configField("reservePercent", "number", true, 5, "config.json", "Provider capacity held in reserve.", numberShape),
+    configField("cashWebSearch", "boolean", true, false, "config.json", "Consent for daemon-brokered web search on behalf of cash workers.", booleanShape),
     configField("capacityCacheMs", "number", true, 60_000, "config.json", "Provider capacity cache lifetime.", numberShape),
     configField("codexBin", "string", true, undefined, "config.json", "Absolute Codex CLI path.", stringShape),
     configField("codexHome", "string", true, undefined, "config.json", "Codex state/auth home.", stringShape),
