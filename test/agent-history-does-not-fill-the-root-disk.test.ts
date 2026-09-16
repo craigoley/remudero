@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { gitRepo } from "./helpers/git-repo.js";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -107,6 +108,17 @@ function runHostUpdate(mode: "good" | "live", extraEnv: NodeJS.ProcessEnv = {}, 
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-stub-`));
   const rec = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-rec-`));
   const state = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-state-`));
+  // THE DEFAULT GIT RECLAIM TARGET MUST EXIST. `${STATE_DIR}/remudero` is the first half of the
+  // default pair, and without a real `.git` there every fixture in this file trips the fail-closed
+  // refusal this change adds ("reached NONE of its named targets") and fails for a reason it is not
+  // about. The refusal is covered by the test that overrides RMD_GIT_RECLAIM_DIRS on purpose.
+  // A REAL GIT RECLAIM TARGET, built with the SHARED helper and NAMED through the env rather than
+  // shelling `git init` into the default path: test/fixture-copy-census.test.ts holds the
+  // population of files that init their own repos at a recorded ceiling, and one more copy is
+  // exactly what it exists to refuse. Without a target every fixture here trips the fail-closed
+  // refusal this change adds and fails for a reason it is not about; the test that EXERCISES that
+  // refusal overrides RMD_GIT_RECLAIM_DIRS itself, and `extraEnv` is spread last so it wins.
+  const gitTarget = gitRepo({ kind: "reclaim-target" });
   writeDockerStub(dir);
   const r = spawnSync("bash", [scriptPath, "--reclaim-only"], {
     encoding: "utf8",
@@ -117,6 +129,7 @@ function runHostUpdate(mode: "good" | "live", extraEnv: NodeJS.ProcessEnv = {}, 
       STUB_REC: rec,
       STUB_MODE: mode,
       RMD_STATE_DIR: state,
+      RMD_GIT_RECLAIM_DIRS: gitTarget.dir,
       ...extraEnv,
     },
   });
@@ -184,6 +197,17 @@ test("--dry-run reports what would free without removing anything", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-stub-`));
   const rec = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-rec-`));
   const state = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-state-`));
+  // THE DEFAULT GIT RECLAIM TARGET MUST EXIST. `${STATE_DIR}/remudero` is the first half of the
+  // default pair, and without a real `.git` there every fixture in this file trips the fail-closed
+  // refusal this change adds ("reached NONE of its named targets") and fails for a reason it is not
+  // about. The refusal is covered by the test that overrides RMD_GIT_RECLAIM_DIRS on purpose.
+  // A REAL GIT RECLAIM TARGET, built with the SHARED helper and NAMED through the env rather than
+  // shelling `git init` into the default path: test/fixture-copy-census.test.ts holds the
+  // population of files that init their own repos at a recorded ceiling, and one more copy is
+  // exactly what it exists to refuse. Without a target every fixture here trips the fail-closed
+  // refusal this change adds and fails for a reason it is not about; the test that EXERCISES that
+  // refusal overrides RMD_GIT_RECLAIM_DIRS itself, and `extraEnv` is spread last so it wins.
+  const gitTarget = gitRepo({ kind: "reclaim-target" });
   writeDockerStub(dir);
   const dryRun = spawnSync("bash", [SCRIPT, "--reclaim-only", "--dry-run"], {
     encoding: "utf8",
@@ -194,6 +218,7 @@ test("--dry-run reports what would free without removing anything", () => {
       STUB_REC: rec,
       STUB_MODE: "good",
       RMD_STATE_DIR: state,
+      RMD_GIT_RECLAIM_DIRS: gitTarget.dir,
       RMD_CODEX_DIR: codex.dir,
       RMD_CLAUDE_DIR: mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-claude-empty2-`)),
     },
@@ -244,6 +269,17 @@ test("the state volume's own files are untouched by a run that also reclaims age
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-stub-`));
   const rec = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-rec-`));
   const state = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-state-`));
+  // THE DEFAULT GIT RECLAIM TARGET MUST EXIST. `${STATE_DIR}/remudero` is the first half of the
+  // default pair, and without a real `.git` there every fixture in this file trips the fail-closed
+  // refusal this change adds ("reached NONE of its named targets") and fails for a reason it is not
+  // about. The refusal is covered by the test that overrides RMD_GIT_RECLAIM_DIRS on purpose.
+  // A REAL GIT RECLAIM TARGET, built with the SHARED helper and NAMED through the env rather than
+  // shelling `git init` into the default path: test/fixture-copy-census.test.ts holds the
+  // population of files that init their own repos at a recorded ceiling, and one more copy is
+  // exactly what it exists to refuse. Without a target every fixture here trips the fail-closed
+  // refusal this change adds and fails for a reason it is not about; the test that EXERCISES that
+  // refusal overrides RMD_GIT_RECLAIM_DIRS itself, and `extraEnv` is spread last so it wins.
+  const gitTarget = gitRepo({ kind: "reclaim-target" });
   mkdirSync(join(state, "state"), { recursive: true });
   const ledger = join(state, "state", "ledger.ndjson");
   writeFileSync(ledger, "old ledger row\n");
@@ -259,6 +295,7 @@ test("the state volume's own files are untouched by a run that also reclaims age
       STUB_REC: rec,
       STUB_MODE: "good",
       RMD_STATE_DIR: state,
+      RMD_GIT_RECLAIM_DIRS: gitTarget.dir,
       RMD_CODEX_DIR: codex.dir,
       RMD_CLAUDE_DIR: claude.dir,
     },
