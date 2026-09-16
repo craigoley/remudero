@@ -581,6 +581,18 @@ export type DaemonFreshness =
   | { stale: false }
   | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean };
 
+/** W1-T3618 — a sweep pass's OWN report of a freshness discovery {@link DaemonDeps.checkFreshness}
+ *  cannot see: reviewer-code freshness is read inside the sweep's review path, once per pass and
+ *  before the first PR's worktree materializes, never by this module. When that read is stale the
+ *  pass materializes and spends nothing on any review for the rest of its run and carries the sha
+ *  pair here so the tick's pre-admission freshness re-check (below) can end the cycle through the
+ *  SAME `stopForFreshness` path a `checkFreshness`-driven stale reading already uses — never a
+ *  second, independently-worded restart. Absent (or `reviewerCodeStale` omitted) is the ordinary
+ *  case and changes nothing: every existing caller that returns `void` still satisfies this type. */
+export interface SweepCycleOutcome {
+  reviewerCodeStale?: { oldSha: string; newSha: string };
+}
+
 /** The recoverable-class subset of an idle tick's dispatch-filter tally: the classes that could clear
  *  on their own, as opposed to already-merged, where the plan is done, or verify-not-auto, where
  *  waiting never helps. `retired` is carried but excluded from the starved verdict, since a retired
@@ -868,8 +880,10 @@ export interface DaemonDeps {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** The level-triggered PR-pipeline reconciler: the same entry point `rmd sweep` invokes, wired here so
    *  it runs once per poll iteration, re-deriving every open PR to a disposition and taking its gated
-   *  action. Best-effort, and called alongside dispatch, never instead of it (W1-T77, ratifies P22). */
-  sweep?: (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<void> | void;
+   *  action. Best-effort, and called alongside dispatch, never instead of it (W1-T77, ratifies P22).
+   *  W1-T3618: may resolve a {@link SweepCycleOutcome} naming a mid-pass reviewer-code freshness
+   *  discovery; `void` (every caller that predates that task) is unchanged and carries no signal. */
+  sweep?: (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> | SweepCycleOutcome | void;
   /** Run one security-alert poll. Best-effort by the same contract as the reconciler: a throw costs one logged tick.
    * Returns the poll's timestamp so the caller can persist the interval marker (W1-T462). */
   alertPoll?: () => Promise<string | undefined> | string | undefined;
@@ -1400,19 +1414,23 @@ async function runGatedSweep(
   // The shared liveness flag. Optional and trailing, so every existing caller behaves exactly as
   // before, which is what keeps the W1-T1044 bound tests meaningful (W1-T2582).
   liveness?: SweepLiveness,
-): Promise<void> {
+): Promise<SweepCycleOutcome | undefined> {
   // Decline, do not duplicate. Checked before the ticker starts, so a declined pass costs nothing at
   // all. This one gate closes both routes into a concurrent pass, because all three call sites pass
   // through it — including the retrigger, which the bound alone does not cover (W1-T2582).
   if (liveness?.inFlight) {
     log("daemon.sweep.skipped_concurrent", { reason: "a previous sweep pass is still executing" });
-    return;
+    return undefined;
   }
   // Claim a durable event wake only after the liveness gate accepts this pass. A marker received after an earlier
   // pass was abandoned-but-still-running belongs to the later pass that actually starts (W1-T2656).
   deps.acknowledgeSweepWake?.();
   if (liveness) liveness.inFlight = true;
   const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch, undefined, headroomSampler).stop;
+  // W1-T3618: the pass's own outcome, captured ONLY when it genuinely settles inside the race below —
+  // an abandoned pass's eventual value arrives after this function has already returned to its caller
+  // and must never be attributed to a LATER tick's cycle.
+  let outcome: SweepCycleOutcome | undefined;
   try {
     let reviewAdmissionsOpen = true;
     const continueReviewAdmissions = (() =>
@@ -1425,7 +1443,7 @@ async function runGatedSweep(
       return reason;
     };
     continueReviewAdmissions.workerAdmissionHold = workerAdmissionHold;
-    const sweepPromise: Promise<void | undefined> = Promise.resolve().then(() => deps.sweep!(continueReviewAdmissions));
+    const sweepPromise: Promise<SweepCycleOutcome | void | undefined> = Promise.resolve().then(() => deps.sweep!(continueReviewAdmissions));
     // Cleared on settle, never on abandon. Attaching this to the pass promise itself, rather than to the
     // `finally` below, which runs when the await ends, is what keeps the flag true through the
     // abandon-to-settle window every observed re-entry landed in. `then(onOk, onErr)` rather than
@@ -1449,6 +1467,8 @@ async function runGatedSweep(
         sweepPromise.catch((e) => {
           log("daemon.sweep.failed", { error: String((e as Error)?.message ?? e), after_abandon: true });
         });
+      } else {
+        outcome = winner ?? undefined;
       }
     } finally {
       if (timer) clearTimeout(timer);
@@ -1458,6 +1478,7 @@ async function runGatedSweep(
   } finally {
     await stopSweepTicker();
   }
+  return outcome;
 }
 
 /** The spawn-infra backoff ceiling (policy data, rule 2): consecutive failures double the poll interval up to this
@@ -2263,9 +2284,12 @@ export async function runDaemon(
     // and take its gated action, alongside dispatch rather than instead of it (W1-T77, ratifies P22).
     // Best-effort in code, not just prose: this loop's only try/catch wraps the dispatch below, so an
     // unreachable GitHub used to propagate out of the process (W1-T513). Forensics: docs/forensics/daemon.md.
+    // W1-T3618: captured so a mid-pass reviewer-code freshness discovery reaches the pre-admission
+    // re-check below — see that check's own comment for why THIS tick's sweep is the only one read.
+    let sweepCycleOutcome: SweepCycleOutcome | undefined;
     if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
-      await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
+      sweepCycleOutcome = await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }
 
     // The clock that spans the former gap. The full pass above owns its own ticker, so this starts only
@@ -3192,6 +3216,21 @@ export async function runDaemon(
         }
       }
 
+      // W1-T3618: this IS the idle branch — nothing was selected this tick, so ending the cycle
+      // here trades away no forward progress and never reaches the dispatch-preserving deferral
+      // below (which exists for the opposite case: a batch WAS selected). Checked here, rather
+      // than only at the pre-admission boundary below, because that boundary is unreachable from
+      // an idle tick (this branch always `continue`s first) — without this, a sweep's own
+      // mid-pass discovery on an otherwise-idle daemon would be silently dropped every tick
+      // instead of ever ending the cycle, and the entrypoint's re-sync would never run.
+      if (sweepCycleOutcome?.reviewerCodeStale) {
+        await stopInterphaseReviewClock();
+        return stopForFreshness({
+          stale: true,
+          oldSha: sweepCycleOutcome.reviewerCodeStale.oldSha,
+          newSha: sweepCycleOutcome.reviewerCodeStale.newSha,
+        });
+      }
       if (await stopInterphaseReviewClock()) continue;
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
@@ -3256,7 +3295,19 @@ export async function runDaemon(
     // Awaited reconciliation rungs (incl. auto-merge) can make the top-of-tick freshness result stale
     // before admission; re-read here, after both operator controls. Exit only if nothing was selected —
     // an unconditional exit fires on the tick's own auto-merge and starves dispatch (W1-T2960).
-    const refetchedFreshness = deps.checkFreshness?.();
+    //
+    // W1-T3618: a mid-pass reviewer-code freshness discovery reaches this SAME check — never a second,
+    // independently-gated exit — because `deps.checkFreshness` (this process's own boot sha vs
+    // origin/main) and the sweep's reviewer-code read answer the same underlying question by a
+    // different route, and only one of the two can ever have run this tick's sweep in time to see it.
+    // Self-freshness wins when both are stale (it already carries `installNeeded`); the sweep's
+    // reading is used only when self-freshness itself did not already fire.
+    const selfFreshness = deps.checkFreshness?.();
+    const reviewerCodeStale = sweepCycleOutcome?.reviewerCodeStale;
+    const refetchedFreshness: DaemonFreshness | undefined =
+      selfFreshness?.stale || !reviewerCodeStale
+        ? selfFreshness
+        : { stale: true, oldSha: reviewerCodeStale.oldSha, newSha: reviewerCodeStale.newSha };
     if (refetchedFreshness?.stale && dispatchSet.length === 0) {
       // This is the only freshness boundary reached while the interphase review clock exists. Close
       // admission before the shared final-pass and drain path; do not move the drain into the clock itself,
