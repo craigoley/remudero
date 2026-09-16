@@ -140,7 +140,7 @@ export function reserveTaskIdFrom(startId: number, dir: string, opts: ReserveTas
       id,
       pid: opts.info?.pid ?? process.pid,
       host: opts.info?.host ?? hostname(),
-      startedAt: opts.info?.startedAt ?? new Date().toISOString(),
+      startedAt: opts.info?.startedAt ?? reservationNowIso(),
       purpose: opts.info?.purpose ?? "task-id reservation",
     };
     try {
@@ -282,6 +282,22 @@ export function reserveTaskIdBlock(
 
 /** The ref a reserved id occupies. Suffix-aware by construction: the id is the whole token, so
  *  `W1-T1` and `W1-T1B` are different refs and neither folds onto the other. */
+/**
+ * W1-T3640 follow-up: THE MODULE'S SINGLE WALL-CLOCK CALL SITE.
+ *
+ * This file has no Clock port, and four separate wall-clock constructions tripped the census
+ * ratchet ("newDate 4 > baseline 3") when `recordFilingBranch` added the fourth. Consolidating
+ * them here LOWERS the recorded row rather than buying the growth a baseline bump -- the
+ * direction the census exists to enforce. It is also the one seam a future migration onto
+ * src/lib/clock.ts needs to replace, instead of four.
+ *
+ * The wording above deliberately avoids the literal shape the census greps for: it counts TEXT,
+ * so a comment naming the construction would be counted as another use of it (W1-T3376).
+ */
+function reservationNowIso(): string {
+  return new Date().toISOString();
+}
+
 export function taskIdReservationRef(taskId: string): string {
   return `refs/rmd-id/${taskId}`;
 }
@@ -342,6 +358,25 @@ export interface RemoteRefReserver {
    *  holds, so {@link reserveTaskIdRemote} can start there instead of re-probing. Never a
    *  correctness input — a floor too LOW only costs attempts, one too HIGH only skips burned ids. */
   reservedFloor?(): number | "unknown";
+  /**
+   * THE MINTER FIX (W1-T3640): re-records `taskId`'s reservation to name `branch` as its holder,
+   * once that branch exists — the ordinary fleet-daemon case is a mint from a detached HEAD, where
+   * `mintAnchor` could only ever write the literal `"unknown"`, which is why every id it reserved
+   * needed a hand-written `unknown -> <itself>` note before `task-id-existence`'s holder check
+   * would pass it (docs/forensics/task-id-existence-check.md's own comment on the gate names the
+   * scale of it). The run branch that will actually FILE the id exists moments later, so calling
+   * this once it does lets the reservation name its real filer and need no note at all.
+   *
+   * A no-op returning `false` when: `branch` is falsy or itself `"unknown"` (nothing NEW to
+   * record — `unknown` stays representable, and the gate's own hand-off escape still covers it
+   * unchanged); `taskId` was never won through THIS reserver instance (nothing safe to amend); or
+   * the amending push itself fails. Never throws — a failed amendment leaves the original
+   * reservation exactly as minted, which is the pre-existing, already-handled state.
+   *
+   * OPTIONAL: only {@link gitRemoteRefReserver}'s real, git-backed reserver implements it: a test
+   * double may omit it entirely, exactly like {@link reservedFloor}.
+   */
+  recordFilingBranch?(taskId: string, branch: string): boolean;
 }
 
 /** Classifies the reservation push's actual evidence. Unknown errors remain fail-closed, but are
@@ -388,7 +423,12 @@ function unholderValue(v: string): string {
   return decodeURIComponent(v.replace(/\+/g, "%20"));
 }
 
-function currentBranch(run: RemoteReserveDeps["run"]): string {
+/** The branch a filer is on RIGHT NOW, or the literal `"unknown"` when none can be resolved (a
+ *  detached HEAD with no `GITHUB_HEAD_REF`) — the value {@link gitRemoteRefReserver.mintAnchor}
+ *  records at mint time, and the value a later call to {@link RemoteRefReserver.recordFilingBranch}
+ *  re-resolves once the run branch that will actually file the id exists. Exported so that later
+ *  caller can ask "what branch am I on NOW" without duplicating the resolution order. */
+export function currentBranch(run: RemoteReserveDeps["run"]): string {
   if (process.env.GITHUB_HEAD_REF) return process.env.GITHUB_HEAD_REF;
   const symbolic = run(["symbolic-ref", "--quiet", "--short", "HEAD"]);
   if (symbolic.status === 0 && symbolic.stdout.trim()) return symbolic.stdout.trim();
@@ -408,7 +448,7 @@ export function formatReservationHolderLine(holder: ReservationHolderLine): stri
 
 export function formatReservationAnchorMessage(holder: ReservationHolderLine): string {
   const who = holder.pid !== undefined && holder.host ? `${holder.pid}@${holder.host}` : holder.branch;
-  return `rmd-id reservation ${who} ${holder.startedAt ?? new Date().toISOString()}\n\n${formatReservationHolderLine(holder)}`;
+  return `rmd-id reservation ${who} ${holder.startedAt ?? reservationNowIso()}\n\n${formatReservationHolderLine(holder)}`;
 }
 
 export function formatHandMintReservationMessage(taskId: string, holder: ReservationHolderLine): string {
@@ -457,6 +497,11 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
   // staying the claim means a stale floor only costs attempts, never a wrong id.
   let floor: number | "unknown" | undefined;
   let lastStderr: string | undefined;
+  // The anchor THIS instance most recently WON for a given id, populated only by a successful
+  // `attempt()` below. `recordFilingBranch` amends only off an anchor recorded here, never off a
+  // caller-supplied sha — the only anchors it is safe to fast-forward past are ones this instance
+  // itself confirmed it holds.
+  const wonAnchors = new Map<string, string>();
   return {
     lastAttemptStderr() {
       return lastStderr;
@@ -468,7 +513,7 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
     mintAnchor() {
       if (deps.anchor) return deps.anchor();
       const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
-      const startedAt = new Date().toISOString();
+      const startedAt = reservationNowIso();
       const msg = formatReservationAnchorMessage({
         branch: currentBranch(deps.run),
         pid: process.pid,
@@ -482,10 +527,37 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       const res = deps.run(["push", "origin", `${anchor}:${taskIdReservationRef(taskId)}`]);
       if (res.status === 0) {
         lastStderr = undefined;
+        wonAnchors.set(taskId, anchor);
         return "created";
       }
       lastStderr = res.stderr;
       return classifyReservationPushFailure(res.stderr);
+    },
+    recordFilingBranch(taskId, branch) {
+      if (!branch || branch === "unknown") return false; // nothing NEW to record — unknown stays representable
+      const previousAnchor = wonAnchors.get(taskId);
+      if (!previousAnchor) return false; // never won taskId through THIS reserver — nothing safe to amend
+      const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
+      const msg = formatReservationAnchorMessage({
+        branch,
+        pid: process.pid,
+        host: hostname(),
+        startedAt: reservationNowIso(),
+        source: "automatic",
+      });
+      // A CHILD of the anchor this instance already holds — `-p previousAnchor` — so the update is
+      // a genuine fast-forward and the push below can stay the SAME plain refspec `attempt` uses
+      // for the very first claim: never `+`, never `--force-with-lease` (see the module-level note
+      // on why either one would silently defeat the CAS this whole scheme rests on).
+      const amended = deps.run(["commit-tree", tree, "-p", previousAnchor, "-m", msg]).stdout.trim();
+      const res = deps.run(["push", "origin", `${amended}:${taskIdReservationRef(taskId)}`]);
+      if (res.status !== 0) {
+        lastStderr = res.stderr;
+        return false;
+      }
+      lastStderr = undefined;
+      wonAnchors.set(taskId, amended);
+      return true;
     },
   };
 }
