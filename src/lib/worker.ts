@@ -923,6 +923,17 @@ export interface SpawnWorkerArgs {
    * `sandboxReadRoots` is ignored outside that intent. Claude interprets only `tools`;
    * Codex also uses the intent to choose its sandbox permission profile. */
   tools?: string[];
+  /**
+   * The EQUIVALENT surface to retry with if this spawn's auction blocks and the work diverts to
+   * cash (W1-T3692 + W1-T3696).
+   *
+   * THE PROMPT IS BUILT BEFORE THE AUCTION RUNS, which is why this is declared rather than
+   * inferred. A worker told to `git push` cannot be handed a shell-less surface on retry. So a
+   * caller sets this ONLY when its prompt already said the harness owns git, making "may divert"
+   * and "was told the harness commits" one decision rather than two that can drift.
+   *
+   * Absent, the fallback judges `tools`, so an unbounded spawn stays ineligible. */
+  cashTools?: readonly string[];
   sandboxIntent?: "disposable-review";
   sandboxReadRoots?: string[];
   /** Override the toolchain-resolution cache and seams. Omitted means the shared per-process `claudeExecutableCache` and live
@@ -1081,6 +1092,37 @@ export const DISPATCH_LANE_TOOL_BOUNDS = {
   alert_fix: { claude: FIX_WORKER_TOOLS },
 } as const satisfies Record<string, { claude: readonly string[]; openweight?: readonly string[] }>;
 
+/**
+ * W1-T3696 step (2)/(3), PER PROVIDER — the surface an implement worker gets when a NON-SUBSCRIPTION
+ * provider runs it.
+ *
+ * SAME SHAPE AS EVERY ROW IN {@link DISPATCH_LANE_TOOL_BOUNDS}: a shell where a shell exists, the
+ * allowlisted check-runner where it does not. `RunCheck` is not a Claude Code tool and `Bash` is
+ * refused outright by the cash adapter, so the two cannot share one list.
+ *
+ * NOT DECLARED IN THAT TABLE YET because every entry there names a `claude` list, and implement's
+ * Claude surface is UNRESTRICTED by deliberate choice (W1-T2591/W1-T3573). Writing one would narrow
+ * the highest-risk lane on a guess: `Task`, `WebSearch` and `WebFetch` are reachable and unmeasured.
+ * Narrowing it later is a separate, evidence-led change.
+ *
+ * The forge verbs are absent and stay absent — the harness commits, pushes and opens the PR (see
+ * {@link harnessOwnsGitFor}), which is what runs this lane without granting a cheap model the
+ * authority W1-T3572 removed.
+ */
+export const IMPLEMENT_CASH_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"];
+
+/**
+ * Choose implement's tool surface from WHAT IS RUNNING IT (W1-T3696 step 2). A cash-billed mount
+ * gets the bounded shell-less surface; every other provider keeps what it has today, `undefined`
+ * for unrestricted included.
+ */
+export function implementToolBound(
+  provider: string | undefined,
+  fallback: readonly string[] | undefined,
+): readonly string[] | undefined {
+  return canonicalWorkerProviderId(provider ?? "") === "cash" ? IMPLEMENT_CASH_TOOLS : fallback;
+}
+
 export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
 
 /**
@@ -1094,6 +1136,21 @@ export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
  * the unrestricted surface, which includes Bash -- the one capability the check-runner deliberately
  * does not have (no git write, no forge). Absent bound => refuse, never "probably fine".
  */
+/**
+ * W1-T3696: does the HARNESS own git for a spawn with this tool surface?
+ *
+ * True exactly when the spawn declares a bound carrying no shell — the condition under which the
+ * worker cannot run `git commit`, and therefore the condition its output contract was built from.
+ * Both must read the SAME value or a worker is told one thing and judged by another.
+ *
+ * AN UNBOUNDED SPAWN IS FALSE, not "probably fine": undefined `tools` inherits the unrestricted
+ * surface, which includes Bash. Such a worker could have committed and chose not to.
+ */
+export function harnessOwnsGitFor(tools: readonly string[] | undefined): boolean {
+  if (tools === undefined) return false;
+  return !tools.includes("Bash");
+}
+
 export function cashCanServeToolSurface(tools: readonly string[] | undefined): boolean {
   if (tools === undefined || tools.length === 0) return false;
   return tools.every((tool) => OPENWEIGHT_FUNCTIONS[tool] !== undefined);
@@ -1713,19 +1770,27 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // it, and a spawn that already carries one never reached this auction in the first place --
       // so the fallback can fire at most once per spawn, by construction rather than by a counter.
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined) {
-        const refusal = cashFallbackRefusal(config, args.tools);
+        // The surface the DIVERTED spawn would actually run, which is what eligibility must be
+        // judged on -- asking about `tools` here would refuse a lane that declared a perfectly
+        // serveable cash equivalent, and admit one whose equivalent was never declared.
+        const divertTools = args.cashTools ?? args.tools;
+        const refusal = cashFallbackRefusal(config, divertTools);
         if (refusal === undefined) {
           console.error(JSON.stringify({
             event: "worker.provider.cash_fallback",
             reason: "no subscription had readable headroom",
-            tools: args.tools,
+            tools: divertTools,
             blocked: capacities.map((c) => `${c.provider}=${c.readable ? "readable" : c.detail ?? "unreadable"}`),
           }));
           // NO routing status is written here. The auction really did block, and there is no
           // ProviderSelection to report -- inventing one to satisfy the "selected" shape would be
           // the fabricated telemetry this whole design refuses. The cash spawn below publishes its
           // own status through the mount-affinity path.
-          return await spawnWorker({ ...args, mountProvider: "cash" as WorkerProviderId });
+          return await spawnWorker({
+            ...args,
+            mountProvider: "cash" as WorkerProviderId,
+            ...(divertTools === undefined ? {} : { tools: [...divertTools] }),
+          });
         }
         console.error(JSON.stringify({
           event: "worker.provider.cash_fallback_refused",
@@ -2703,6 +2768,10 @@ export interface ReconReport {
 export interface Report {
   raw: string;
   prUrl?: string;
+  /** The subject a SHELL-LESS worker asks the harness to commit its edits under. Present only when
+   *  the worker wrote an anchored `COMMIT_MESSAGE:` line; `undefined` is "it did not ask", never a
+   *  default the harness invents. See {@link anchoredCommitMessage}. */
+  commitMessage?: string;
 }
 
 export interface DecisionRequest {
@@ -2759,11 +2828,34 @@ function anchoredPrUrl(text: string): string | undefined {
   return matches.length ? matches[matches.length - 1][1] : undefined;
 }
 
+/**
+ * ANCHORED `COMMIT_MESSAGE` extraction, the same dialect and discipline as {@link anchoredPrUrl}:
+ * only a line matching `COMMIT_MESSAGE:` at its own start counts, and when the contract is honoured
+ * twice the LAST one wins.
+ *
+ * THE SUBJECT ONLY, AND DELIBERATELY. A worker with no shell cannot run `git commit`, so it names
+ * the subject and the harness commits under it — but the text travels as DATA into an argv array,
+ * never a command line, so a newline in it could not smuggle a second instruction anywhere. Taking
+ * one line keeps that obvious rather than merely true.
+ *
+ * `undefined` for a missing, empty, or over-long subject rather than a repaired one: an invented
+ * commit message would attribute work to a run that never asked for it, and commitlint's header
+ * ceiling is 100 CHARACTERS, so a longer subject must be refused here rather than fail at push.
+ */
+export function anchoredCommitMessage(text: string): string | undefined {
+  const matches = [...text.matchAll(/^[ \t]*COMMIT_MESSAGE:[ \t]*(.+)$/gim)];
+  if (matches.length === 0) return undefined;
+  const subject = matches[matches.length - 1][1].trim();
+  if (subject.length === 0 || subject.length > 100) return undefined;
+  return subject;
+}
+
 export function parseReport(text: string): Report | null {
   if (!/(^|\n)\s*REPORT/i.test(text) || /RECON REPORT/i.test(text)) {
-    if (!/PR_URL/i.test(text)) return null;
+    if (!/PR_URL/i.test(text) && !/COMMIT_MESSAGE/i.test(text)) return null;
   }
-  return { raw: text, prUrl: anchoredPrUrl(text) };
+  const commitMessage = anchoredCommitMessage(text);
+  return { raw: text, prUrl: anchoredPrUrl(text), ...(commitMessage === undefined ? {} : { commitMessage }) };
 }
 
 /** One id a worker's `LEARNINGS_USED` line named that was never injected into ITS run — refused
