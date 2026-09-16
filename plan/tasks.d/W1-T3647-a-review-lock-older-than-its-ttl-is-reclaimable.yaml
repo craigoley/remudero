@@ -1,0 +1,63 @@
+- id: W1-T3647
+  title: "A REVIEW LOCK FROM A DEAD RUN HOLDS A PULL REQUEST INDEFINITELY — the reviewer posts `review in progress (owned by run ...)` and nothing expires it, so a run that dies mid-review leaves a required status pending forever and only an unrelated new sha clears it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/lib/review.ts, test/a-review-lock-older-than-its-ttl-is-reclaimable.test.ts]
+  origin: oper#pr-queue-sweep-2026-09-16
+  plan_refs: ["W1-T3646"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON #5672. At 23:42 the reviewer posted:
+
+        remudero-review: review in progress (owned by run review-PR5672-1789515725734)
+
+    It was still pending at 01:42 -- two hours -- while the SAME reviewer was demonstrably alive and
+    had just started a fresh review of #5710 at 01:42. So this was not a busy reviewer working a
+    queue; it was a claim outliving the run that took it.
+
+    `remudero-review` is a REQUIRED status, so a pending claim is not cosmetic: the PR cannot merge.
+    CI was green on that head the whole time.
+
+    THE ONLY EXIT WAS INCIDENTAL. The lock cleared when a new sha was pushed -- and it was pushed to
+    merge main, not to break the lock. Nothing in the tree reclaims a stale claim, and nothing tells
+    a reader whether a pending claim is alive. A holder with no expiry and no heartbeat is
+    indistinguishable from a dead one, which is the same shape as the unreadable-vs-absent
+    distinction task-id-existence draws for reservation holders.
+  design: |
+    Give the claim an EXPIRY the reader can evaluate: record when it was taken and treat a lock
+    older than its TTL as reclaimable, so the next reviewer takes it over and posts its own holder
+    rather than deferring forever.
+
+    RECLAIM, DO NOT DELETE. The stale claim is evidence: a run died mid-review, and that is worth
+    seeing. Taking it over must say so in the new status, the same way a reservation hand-off names
+    what it took over from.
+
+    THE TTL MUST EXCEED THE SLOWEST HONEST REVIEW, and this is where this repo's recurring defect
+    lives -- a bound that fires on a healthy population. The reviewer EXECUTES proofs, so its
+    runtime is bounded by the suites it runs, not by a guess. Derive the number from observed review
+    durations and record what was measured; do not pick a round one. Too short converts a slow but
+    living review into a double-judged PR.
+
+    FAIL TOWARD HOLDING. If the age cannot be read, the claim is treated as LIVE -- the safe
+    direction here is to wait, because the alternative is two reviewers judging one head and posting
+    conflicting verdicts.
+  acceptance:
+    - claim: "a review claim records when it was taken, so a reader can tell a live claim from an abandoned one"
+      proof: "unit test: a review claim records when it was taken"
+    - claim: "a claim older than the TTL is reclaimable by the next reviewer, which posts itself as the new holder rather than deferring"
+      proof: "unit test: a claim older than the ttl is taken over by the next reviewer"
+    - claim: "a claim whose age cannot be read is treated as live, so an unreadable clock never causes two reviewers to judge one head"
+      proof: "unit test: a claim with an unreadable age is treated as live"
+    - claim: "the TTL is a NAMED CONSTANT derived from measured review durations rather than a round guess, so it cannot fire on a slow but living review"
+      proof: "grep: REVIEW_LOCK_TTL_MS in src/lib/review.ts"
+  falsifier: |
+    Reconstruct #5672's lock -- taken at 23:42, read at 01:42, holder's run gone -- and the next
+    reviewer must take it over. Set the age inside the TTL and it must defer, which is today's
+    behaviour and correct for a live review. Make the unreadable-age arm reclaim instead of hold and
+    the third test must fail, because that is the arm that produces two verdicts on one sha.

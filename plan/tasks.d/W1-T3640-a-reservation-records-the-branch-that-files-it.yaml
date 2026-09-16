@@ -1,0 +1,69 @@
+- id: W1-T3640
+  title: "EVERY DAEMON-MINTED ID DEMANDS A RUBBER-STAMP HAND-OFF NOTE — the minter runs on a detached HEAD so it records `branch=unknown`, which task-id-existence reads as an unreadable holder, so every filing must write a note whose only possible content is `unknown -> <itself>`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/lib/task-id-reservation.ts, test/a-reservation-records-the-branch-that-files-it.test.ts]
+  origin: oper#pr-queue-sweep-2026-09-16
+  plan_refs: ["W1-T278", "W1-T509"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED: on PR #5703 alone, EIGHT shards each needed the same note added by hand before
+    task-id-existence would pass:
+
+        W1-T3539 W1-T3540 W1-T3541 W1-T3586 W1-T3587 W1-T3588 W1-T3624 W1-T3625
+          -- every one recorded `branch=unknown`
+
+    THE NOTE CANNOT DISCRIMINATE, WHICH IS WHY IT IS CEREMONY. The gate grants its escape only when
+    the note names the reservation's recorded holder on the left-hand side. For a daemon-minted id
+    that value is ALWAYS the literal `unknown`, so the note any filer must write is the note every
+    filer can write. It rules nothing out. The check's own comment concedes the scale of it:
+
+        "the fleet daemon mints from a detached HEAD, recording `branch=unknown`, so EVERY id it
+         reserves was unfileable by anyone"
+
+    That comment is defending a repair to the gate -- granting the escape at all -- and the repair
+    was right. But it treats a MINTER defect as a gate policy question. The holder is unreadable
+    because nothing ever wrote it, not because the reservation was damaged.
+
+    THE COST IS NOT ONLY KEYSTROKES. A rubber stamp that everyone applies teaches every lane that
+    this gate is noise, which is the failure mode CLAUDE.md names for a bound that fires on a
+    healthy population. And it is fragile: the matcher is anchored at end-of-line, so a note written
+    the obvious way -- prepended to an existing one -- silently does not match, and the filer learns
+    that only from a second red CI run.
+  design: |
+    FIX THE MINTER, NOT THE GATE. `currentBranch` (src/lib/task-id-reservation.ts) writes `unknown`
+    when HEAD is detached. The branch exists moments later, at the first push of the run branch that
+    files the id. Record it then: an amend of the reservation anchor, or a second holder line the
+    reader prefers, so the holder names the branch that actually filed.
+
+    A detached HEAD is not the only case, so `unknown` must stay REPRESENTABLE and the gate's
+    existing escape must stay. What changes is that the ordinary path stops producing it.
+
+    THE ALTERNATIVE, IF THE MINTER CANNOT BE REACHED: have the holder check treat a recorded
+    `unknown` as UNOWNED rather than UNREADABLE. An unowned reservation has no holder to conflict
+    with, so no hand-off is owed and no note is written. That is a smaller change and strictly
+    weaker -- it drops the audit trail the note pretends to be -- so it is the fallback, not the
+    plan.
+
+    OUT OF SCOPE, AND NAMED SO IT IS NOT QUIETLY ADOPTED: minting from a lane that cannot push
+    `refs/rmd-id/*` at all. A container whose `send-pack` disconnects files ids with no reservation
+    behind them (W1-T3630 shipped that way). That is a transport problem, not this one.
+  acceptance:
+    - claim: "a reservation minted from a detached HEAD records the branch that files it once that branch exists, so its holder is readable without a note"
+      proof: "unit test: a detached-HEAD reservation records its filing branch"
+    - claim: "an id whose holder names the filing branch needs no hand-off note to pass the holder check"
+      proof: "unit test: a reservation naming its filer needs no hand-off note"
+    - claim: "`unknown` stays representable and the gate's existing escape still applies, so a holder that genuinely cannot be attributed is not newly refused"
+      proof: "unit test: an unattributable holder still accepts a recorded hand-off"
+  falsifier: |
+    File a task against a freshly minted id without writing any note: it must pass. Revert the
+    minter and the same filing must fail with "holder unreadable (missing branch)", which is the
+    state measured on all eight ids above. Then mint one whose branch genuinely cannot be
+    determined and confirm the hand-off escape still clears it -- if that case now refuses, the
+    change removed an exit rather than removing the need for it.

@@ -1,0 +1,68 @@
+- id: W1-T3648
+  title: "A GATE PRINTS A REMEDY ITS OWN MATCHER WOULD REJECT — task-id-existence tells the filer to write `note: \"reservation hand-off: X -> Y\"`, but its matcher is anchored at end-of-line, so that note added to an existing one silently does not match and the filer learns it only from a second red run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [scripts/task-id-existence-check.mjs, test/a-printed-remedy-satisfies-the-check-that-printed-it.test.ts]
+  origin: oper#pr-queue-sweep-2026-09-16
+  plan_refs: ["W1-T3640"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON PR #5703, and it cost a wrong fix that looked right.
+
+    The gate refused eight ids and printed, for each:
+
+        remedy: note: "reservation hand-off: unknown -> ci-learning-landing"
+
+    Applied the obvious way -- prepended to the note each shard already had -- it does not work. The
+    matcher is
+
+        /reservation hand-?off:\s*(.*?)\s*->\s*(.*?)\s*$/i
+
+    anchored at `$`, so the second capture swallows everything to END OF LINE. With the rest of the
+    note trailing on the same line it captured "ci-learning-landing. Filed by the ci-learning rung
+    from ..." and compared unequal. The remedy only works when the hand-off is ALONE on its line --
+    a requirement the message never states.
+
+    VERIFIED BOTH WAYS against the gate's own exported matcher rather than inferred:
+
+        inline, appended to an existing note  -> false
+        block scalar, hand-off on its own line -> true
+
+    THIS IS A FAMILY, NOT AN INCIDENT. The same shape cost a wrong reading elsewhere the same night:
+    `node --test --test-name-pattern` prints `# pass 1` when NOTHING matched, because the file
+    wrapper passes -- so a proof that resolves and a proof that resolves to nothing are
+    indistinguishable by the count, and only the `ok 1 - <label>` line tells them apart. In both
+    cases the tool's own output invites a confident wrong conclusion.
+  design: |
+    A gate that can state a remedy can CHECK it. The narrow, testable form: the refusal text this
+    script emits must itself satisfy the predicate it is a remedy for.
+
+    THE TEST IS THE DELIVERABLE. Feed the gate's own printed remedy line back through
+    `shardNoteRecordsReservationHandoff` and assert it matches. That single test would have caught
+    this, and it keeps catching it if either the message or the matcher is edited later -- which is
+    the real risk, since they live apart and neither knows about the other.
+
+    THEN FIX THE MESSAGE so the checked form is the printed one: emit the note as the block it must
+    be, with the hand-off on its own line, rather than a one-line fragment whose placement decides
+    whether it works.
+
+    SCOPED TO ONE SCRIPT ON PURPOSE. "Every gate should verify its remedies" is a rule nobody can
+    execute and no test can hold. One script, one round-trip test, a pattern the next gate can copy.
+  acceptance:
+    - claim: "the remedy text this gate prints satisfies the gate's own matcher, so following it literally clears the refusal"
+      proof: "unit test: the printed hand-off remedy satisfies the matcher that demanded it"
+    - claim: "the printed remedy shows the hand-off on its own line, because the matcher is end-of-line anchored and a trailing note silently defeats it"
+      proof: "unit test: the printed remedy puts the hand-off alone on its line"
+    - claim: "a hand-off with other text trailing on the same line is still rejected, so the round trip pins the matcher's real behaviour rather than relaxing it"
+      proof: "unit test: a hand-off with trailing text on its line is still rejected"
+  falsifier: |
+    Revert the message to the one-line fragment and the first test must fail, because that text run
+    back through the matcher returns false -- exactly what #5703 measured. Relax the matcher's `$`
+    anchor to make the fragment pass and the third test must fail instead, which is the point: the
+    fix is to print a form that works, not to widen what counts as a hand-off.
