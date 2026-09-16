@@ -1,0 +1,115 @@
+- id: W1-T3699
+  title: "CI rebuilds the test-duration manifest on EVERY run, uploads it as a 7-day artifact, and nothing has ever adopted it — so 300 of 1,566 test files stay at duration 0, the duration-balanced coverage sharding packs them blind, and the slowest shard runs 68% longer than the fastest"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 12.00
+  files:
+    - scripts/test-tier-manifest.mjs
+  origin: "operator-session#why-is-5771-taking-so-long-2026-09-16"
+  plan_refs: ["W1-T2904", "W1-T3311"]
+  status: queued
+  priority: 2
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16 over PR #5771's six CI suites and the committed manifest.
+
+    THE SHARDS ARE NOT BALANCED, AND THE SLOWEST ONE SETS THE ELAPSED TIME OF THE WHOLE SUITE:
+
+      coverage-shard (4/4)   16.3 min avg   20.1 max
+      coverage-shard (1/4)   11.2 min avg
+      coverage-shard (2/4)   11.2 min avg
+      coverage-shard (3/4)    9.7 min avg
+
+    Shard 4 runs 68% longer than shard 3. `ci-gate` -- a pure barrier job whose 19 of its 20
+    minutes is one "Aggregate sibling check results" step -- mirrors that number, so the coverage
+    shards ARE the suite's critical path. Every other job is under a minute (`ci-shard` is 0.6 min:
+    the same tests without coverage instrumentation).
+
+    THE BALANCER IS BALANCING ON DATA THAT IS ONE-FIFTH BLANK:
+
+      scripts/test-tier-manifest.json:  1,566 entries
+      duration 0 (unmeasured):            300  (19.2%)
+      summed known duration:             51.0 min across 1,266 measured files
+
+    A file at duration 0 is FREE to the selector, so 300 files are distributed as though
+    weightless. 51 min over 4 shards is 12.75 min balanced; observed is 16.3/11.2/11.2/9.7.
+
+    THE EVIDENCE IS PRODUCED AND THEN THROWN AWAY. ci.yml collects per-shard duration artifacts,
+    runs `test-tier-manifest.mjs --record-evidence` into `test-tier-manifest.next.json`, and
+    uploads it as artifact `test-tier-manifest-proposal` with `retention-days: 7`. Grepping the
+    whole tree for either name returns THE UPLOAD AND NOTHING ELSE:
+
+      .github/workflows/ci.yml:392   name: test-tier-manifest-proposal
+      .github/workflows/ci.yml:393   path: test-tier-manifest.next.json
+
+    Zero consumers. The proposal expires unread, every run, and has since W1-T2904 built it.
+  rationale: |
+    THIS IS A PRODUCER WITH NO CONSUMER -- the mirror of the W1-T126 shape. W1-T2904 was
+    deliberately careful: the step is `continue-on-error: true` and its own name says "never writes
+    the checkout ledger", which is CORRECT -- a CI job must not commit to the repository it is
+    testing. The producer is right. What was never built is the other half: something that takes
+    the proposal and opens a pull request.
+
+    THE GAP IS SELF-WIDENING, WHICH IS WHY IT DOES NOT HEAL. W1-T3311's pre-commit hook tiers each
+    NEW test file into the manifest "Seeded at duration 0 -- unmeasured, the fast tier -- which a
+    later --record-evidence pass replaces". That later pass runs, produces the corrected number,
+    and the number is discarded. Every new test file adds one more blank entry permanently, so the
+    balancer's blind spot grows monotonically with the suite.
+
+    THE COST IS PAID ON EVERY PULL REQUEST, NOT ONLY SLOW ONES. Balanced at the measured mean the
+    critical path would be about 12.1 min rather than 16.3 -- roughly 4 minutes per CI suite, about
+    26% of the coverage critical path. PR #5771 ran six suites.
+
+    WHY NOT JUST RAISE THE SHARD COUNT. More shards divides the same blind allocation into smaller
+    blind pieces; the variance stays and the per-job fixed cost (checkout, npm ci) is paid more
+    times. Fix the data first -- the shard count is a separate question that can be asked honestly
+    once the durations are real.
+  design: |
+    (i) THE PROPOSAL BECOMES A PULL REQUEST RATHER THAN AN ARTIFACT. A rung downloads the newest
+        `test-tier-manifest-proposal` from a completed main-branch CI run and, when it differs from
+        the committed manifest, opens an ordinary filing-shaped pull request updating
+        `scripts/test-tier-manifest.json`. It goes through review like any other change; nothing
+        commits to the checkout from inside CI, so W1-T2904's constraint is preserved exactly.
+
+    (ii) IT IS TIERED ON EVIDENCE, NOT ON A CLOCK. The rung proposes when the proposal differs
+         MATERIALLY from what is committed -- a blank entry gaining its first real measurement, or
+         a measured entry moving enough to change which shard it lands in. Re-proposing an
+         unchanged manifest, or churning on millisecond noise, is the failure to avoid; no fixed
+         cadence and no fixed byte threshold.
+
+    (iii) A BLANK ENTRY IS VISIBLE BEFORE IT IS FIXED. `test-tier-manifest.mjs` reports how many
+          entries carry duration 0 and what share of the suite that is, so the blind spot is a
+          number an operator can read rather than one derived from a JSON file by hand -- which is
+          how it was found.
+
+    (iv) THE SELECTOR STOPS TREATING UNMEASURED AS FREE. Until a file has a real duration it is
+         assigned the MEDIAN measured duration rather than zero. That is strictly better than zero
+         on every distribution and it bounds the damage between adoptions; it is not a substitute
+         for (i).
+
+    NOTHING HERE CHANGES WHAT THE TESTS DO, only how they are allocated across shards. A shard that
+    ends up slower than another is not a failure -- the goal is to stop the allocator being blind,
+    not to hit a target number.
+
+    THE SUITE GOES IN test/an-unmeasured-test-file-is-not-free-to-the-sharder.test.ts, kept out of
+    files: for the reason W1-T3680 records.
+  acceptance:
+    - claim: "an unmeasured test file is weighted at the median measured duration rather than zero, so the allocator is never blind to a fifth of the suite"
+      proof: "unit test: an unmeasured file is weighted at the median not zero"
+    - claim: "the tool reports how many entries carry no duration and what share of the suite they are, so the blind spot is readable rather than derived by hand"
+      proof: "unit test: the manifest tool reports its unmeasured count and share"
+    - claim: "a proposal identical to the committed manifest produces no pull request, so an adopted manifest does not churn"
+      proof: "unit test: an unchanged proposal opens no pull request"
+    - claim: "a proposal whose only change is below the noise that could move a file between shards produces no pull request"
+      proof: "unit test: a sub-shard-boundary change opens no pull request"
+    - claim: "a blank entry gaining its first real measurement does produce a proposal, so the self-widening gap closes"
+      proof: "unit test: a first real measurement produces a proposal"
+  falsifier: |
+    Weight an unmeasured file at zero and the first test fails. Report no unmeasured count and the
+    second fails. Propose on an identical manifest and the third fails. Propose on millisecond
+    noise and the fourth fails. Stay silent when a blank entry is first measured and the fifth
+    fails.
