@@ -2,9 +2,9 @@ import { execFileSync } from "node:child_process";
 import { closeSync, mkdirSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { validateConfigShape, WORKER_PROVIDER_IDS, type Config, type WorkerProviderId } from "./config-schema.js";
+import { canonicalWorkerProviderId, validateConfigShape, WORKER_PROVIDER_IDS, type Config, type WorkerProviderId } from "./config-schema.js";
 import { createOrReadExclusive } from "./fs-race-safe.js";
-export { WORKER_PROVIDER_IDS } from "./config-schema.js";
+export { canonicalWorkerProviderId, WORKER_PROVIDER_IDS } from "./config-schema.js";
 export type { Config, WorkerProviderId } from "./config-schema.js";
 
 /**
@@ -41,13 +41,17 @@ export function isWorkerProviderId(value: unknown): value is WorkerProviderId {
   return typeof value === "string" && (WORKER_PROVIDER_IDS as readonly string[]).includes(value);
 }
 
-/** Provider list with the backwards-compatible Claude-only default. */
+/** Provider list with the backwards-compatible Claude-only default. Normalises every entry through
+ *  {@link canonicalWorkerProviderId} (W1-T3607) — THE read boundary for a persisted config's provider
+ *  spelling, so every downstream caller sees only the canonical id even when a config.json on disk
+ *  still says "openweight". */
 export function enabledWorkerProviders(config: Pick<Config, "workerProviders">): WorkerProviderId[] {
-  return config.workerProviders?.enabled ?? ["claude"];
+  const raw = config.workerProviders?.enabled ?? ["claude"];
+  return raw.map((id) => canonicalWorkerProviderId(id) as WorkerProviderId);
 }
 
 /** True only when a subscription provider's local capacity routing replaces the Claude-only daemon gate.
- * The open-weight provider deliberately has no window and is selected only by mount affinity. */
+ * The cash (non-subscription) provider deliberately has no window and is selected only by mount affinity. */
 export function providerRoutingOwnsHeadroom(config: Pick<Config, "workerProviders">): boolean {
   return enabledWorkerProviders(config).includes("codex");
 }
@@ -75,10 +79,12 @@ export function validateConfig(config: Config): void {
         "hard-capped — §9 conditional cap guard); got daily_cap: none",
     );
   }
+  // `providers` is already normalised (enabledWorkerProviders), so this fires identically whether the
+  // config on disk spells the id "cash" (canonical) or the deprecated "openweight" alias (W1-T3607).
   const providers = enabledWorkerProviders(config);
-  if (providers.includes("openweight") && dailyCapIsNone) {
+  if (providers.includes("cash") && dailyCapIsNone) {
     throw new ConfigValidationError(
-      'invalid config: workerProviders.enabled includes "openweight" and requires a dailyCapUsd (cash-billed runs must be hard-capped)',
+      'invalid config: workerProviders.enabled includes "cash" (or its deprecated "openweight" spelling) and requires a dailyCapUsd (cash-billed runs must be hard-capped)',
     );
   }
   if (providers.length === 0) {

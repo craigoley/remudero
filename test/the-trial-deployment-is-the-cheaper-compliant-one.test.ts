@@ -43,10 +43,20 @@ const OSS = "gpt-oss-120b";
 
 function ladder(): Record<string, Record<string, string[]>> {
   const parsed = parseYaml(readFileSync(MOUNTS, "utf8")) as {
-    capabilities?: { openweight?: Record<string, Record<string, string[]>> };
+    capabilities?: {
+      cash?: Record<string, Record<string, string[]>>;
+      openweight?: Record<string, Record<string, string[]>>;
+    };
   };
-  const rows = parsed.capabilities?.openweight;
-  assert.ok(rows, ".remudero/mounts.yaml must declare capabilities.openweight");
+  // W1-T3607 renamed this table's key to `cash`. Resolved in the same order production does
+  // (`openWeightCandidatesForCapability`, worker-provider.ts): canonical first, the deprecated
+  // spelling as a fallback, so a table that has not been renamed yet still reads here.
+  const rows = parsed.capabilities?.cash ?? parsed.capabilities?.openweight;
+  assert.ok(rows, ".remudero/mounts.yaml must declare capabilities.cash (or the deprecated capabilities.openweight)");
+  // ... and this repo's OWN table must be the canonical spelling, not merely a readable one. The
+  // fallback above exists for a foreign or not-yet-migrated table; letting it quietly cover this
+  // checkout would leave the rename half-done with nothing reporting it.
+  assert.ok(parsed.capabilities?.cash, "this repo's mounts table must use the canonical `cash` key, not the deprecated alias");
   return rows;
 }
 
