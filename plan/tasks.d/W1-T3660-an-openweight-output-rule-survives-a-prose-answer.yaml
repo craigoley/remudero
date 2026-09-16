@@ -1,0 +1,51 @@
+- id: W1-T3660
+  title: "HALF OF EVERY ROUTED DRAFT IS THROWN AWAY BECAUSE THE ADAPTER CONTRACT HAS NO RULE FOR LITERAL OUTPUT MARKERS — 100 of 100 failures today are one reason, the worker answering in prose instead of emitting the fragment delimiters, and the 16.8x smaller prompt did not change it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  priority: 1
+  budget_usd: 15.00
+  files: [src/lib/worker-provider.ts, test/an-openweight-output-rule-survives-a-prose-answer.test.ts]
+  origin: oper#subscription-offload-2026-09-16
+  plan_refs: ["W1-T3567", "W1-T3621", "W1-T3350", "W1-T3569"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-16 over the deduped ledger union: 200 draft attempts, 100 errors, 50.0%. Every
+    one of the 100 carries the SAME reason -- not a mix, not a tail:
+
+        "the worker produced output carrying NEITHER marker — it answered in prose
+         instead of the fragment contract"
+
+    The lane wants `=== FRAGMENT START ===` / `=== FRAGMENT END ===` and a `STAMP:` line
+    (FRAGMENT_RE, STAMP_RE in inbox.ts). Half the time the model writes prose instead.
+
+    THE OBVIOUS EXPLANATION IS REFUTED, WHICH IS WHY THIS IS FILED RATHER THAN ASSUMED. W1-T3621
+    cut this prompt from ~257,877 tokens to ~15,326 -- 16.8x -- on the theory that a contract
+    buried under a megabyte of YAML was simply being lost. The rate AFTER that shipped is 50.0%,
+    the worst since 2026-09-12. Prompt size is not the cause.
+
+    THE ADAPTER OWNS THE OUTPUT CONTRACT AND HAS NO RULE FOR THIS. W1-T3567 put
+    OPENWEIGHT_OUTPUT_CONTRACT in the adapter precisely so a lane-shaped output rule is not
+    re-derived per caller, and it carries three conditional rules: double-quote a YAML value
+    containing a colon, pick a listed literal for a closed enum, emit no code fence when a raw
+    document is requested. NONE covers "when the request names literal delimiters, emit them
+    verbatim and PRINT the artifact rather than describing it" -- which is the failure in front of us.
+
+    WHY IT BELONGS IN THE ADAPTER, NOT THE LANE. W1-T3567's own measurement is the precedent: an
+    unquoted-proof failure moved between 0/5 and 3/5 depending only on surrounding prompt wording,
+    and the explicit rule took it to 5/5. A rule that must be restated by whoever writes the next
+    prompt is a rule that will be missed by the next prompt.
+
+    COST, SO THE PRIORITY IS NOT A GUESS: 100 wasted drafts today on the one lane the fleet has
+    actually routed. Every one is a paid request whose output is discarded, and the relint path
+    spends again on top.
+
+  acceptance:
+    - claim: "the adapter's output contract carries a rule for literal output markers, conditional like its siblings so a prose or code-review task is not turned into a delimiter-only task"
+      proof: "unit test: the openweight output contract requires literal markers when the request names them"
+    - claim: "every rule in the contract is conditional rather than unconditional, so adding this one cannot change a lane that names no markers"
+      proof: "unit test: every openweight output-contract rule is conditional"
