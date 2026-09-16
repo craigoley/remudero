@@ -1,0 +1,87 @@
+- id: W1-T3626
+  title: "AGENT CONVERSATION HISTORY FILLS THE ROOT DISK AND WEDGES THE WHOLE HOST — ~/.codex and ~/.claude hold 6.7 GiB with no retention of any kind, growing ~580 MiB/day, and on 2026-09-16 the host reached No space left on device, stopped forking sshd, dropped the tunnel and kernel-panicked"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 60.00
+  files: [deploy/host-update.sh, test/agent-history-does-not-fill-the-root-disk.test.ts]
+  origin: oper#host-wedged-2026-09-16
+  plan_refs: ["W1-T3612", "W1-T3611"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE INCIDENT, 2026-09-16. The host stopped answering ssh while still serving HTTP. Ordered
+    by the evidence:
+
+      21:16  Azure guest agent stops reporting metrics (memory was FINE -- 11.7 GiB free,
+             CPU 16%, so this was never load)
+      22:08  both daemons stop making progress; nothing merges
+      22:27  console daemon claims the review for remudero-console#42 and dies mid-flight
+      23:20  sshd accepts TCP but times out during banner exchange -- it cannot fork a session;
+             both VM extensions stuck Updating; a Run Command stuck in progress;
+             /v1/status returns 530 (tunnel origin unreachable)
+      23:37  kernel panic, automatic reboot (panic=-1), uptime 4h27m
+
+    The serial console names the cause directly, and NOT for the first time:
+
+      systemd-journald[147]: Failed to create new system journal: No space left on device
+      systemd-journald[148]: Failed to create new system journal: No space left on device
+      systemd-journald[180]: Failed to create new system journal: No space left on device
+
+    Those three are from THREE DIFFERENT BOOTS in the retained buffer. This host fills its root
+    disk, wedges, panics, reboots, and starts filling again. Tonight it took the fleet down for
+    89 minutes.
+
+    WHAT IS ACTUALLY ON THE DISK. Measured 2026-09-16 00:20, after the reboot, so these are
+    persistent bytes and not scratch:
+
+        /                     29G total, 20G used, 8.5G free (70%)
+        /home                 10G
+          .codex               5.3G
+            thread_history_1.sqlite   1.9G   (1,994,915,840 bytes)
+            state_5.sqlite            1.7G   (1,803,898,880 bytes, mtime 00:19 -- still growing)
+            sessions/                 1.6G   across 1,323 files
+          .claude              1.4G
+            projects/                 1.3G   (mtime 00:20 -- still growing)
+          rmd-site-state       1.2G
+          rmd-op               897M
+
+    6.7 GiB of agent conversation history, which is 23% of the entire root filesystem.
+
+    THE RATE, AND WHY THIS RECURS. Every one of those trees starts 2026-09-07 -- the oldest
+    session file and the oldest .claude/projects file are both that date, 9 days before the
+    incident. So 6.7 GiB accumulated in 9 days:
+
+        ~580 MiB/day, monotonic, with 8.5 GiB free
+        => the disk refills in ~15 days, unattended
+
+    `grep -rlE "retention|maxAge|cleanup|prune"` over the codex config finds NOTHING. There is no
+    retention policy, no rotation, no cap. Nothing in this repo reads or bounds these paths.
+
+    WHY W1-T3612 IS NOT THIS TASK. W1-T3612 (PR #5687) reclaims stranded git objects and measured
+    "985 MiB across 53,380 loose objects" behind a gc.log. That is real and worth landing -- and
+    it is one seventh of the problem. Agent history is 6.7 GiB. A nightly git gc would have
+    delayed tonight's wedge by about a day and a half.
+
+    WHAT THE FIX MUST NOT BE. Not a fixed ceiling that deletes at a threshold: the operator's
+    standing direction is tiered, self-healing responses rather than hard floors, and a hard cap
+    on transcripts silently destroys the record of exactly the runs an incident review needs. The
+    shape that fits is age-tiered reclaim on the rung that already exists -- host-update.sh's
+    nightly `--reclaim-only`, which W1-T3612 is extending for the same reason -- oldest-first,
+    reporting bytes freed per tree, and refusing while a fleet container is live, exactly as that
+    section already refuses for git gc.
+
+    AND IT MUST BE OBSERVABLE BEFORE IT IS URGENT. Tonight the first signal an operator could
+    have seen was ssh not answering. Free space on / is a number the daemon already has every
+    reason to publish, and the console has a place to put it.
+  acceptance:
+    - claim: "the nightly reclaim bounds agent conversation history by age, oldest first, and reports bytes freed per tree rather than one combined total"
+      proof: "unit test: agent history does not fill the root disk"
+    - claim: "reclaim refuses while a fleet container is live, because a running lane may still be writing the tree it would prune"
+      proof: "unit test: agent history reclaim refuses while a fleet container is live"
+    - claim: "nothing under the state directory is read, written or measured by this reclaim, so the ledger, run locks and service tokens are untouched"
+      proof: "grep: never reads STATE_DIR state in deploy/host-update.sh"
