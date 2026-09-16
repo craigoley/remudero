@@ -1047,12 +1047,38 @@ export type GenericRouteLane = keyof typeof GENERIC_ROUTE_TOOL_BOUNDS;
  * openweight-eligible today (`Bash` is not in OPENWEIGHT_FUNCTIONS) until W1-T3615's check-runner
  * replaces that use. Routing remains a separate decision (W1-T3616 design: "ROUTE NOTHING HERE").
  */
+/**
+ * THE SAME LANE, THE EQUIVALENT CAPABILITY ON EACH PROVIDER (W1-T3656).
+ *
+ * WHY THIS IS A PAIR AND NOT A LIST. There is NO overlap between the two adapters for "run a
+ * command": Claude implements `Bash` and no `RunCheck`; the open-weight adapter implements
+ * `RunCheck` and REFUSES a declared `Bash` outright -- `openWeightTools` throws rather than
+ * dropping it, deliberately, so a lane never silently loses a capability its prompt relies on.
+ *
+ * W1-T3616 gave every lane ONE FLAT LIST, and that pinned every command-running lane to the
+ * subscription BY ITS OWN BOUND. recon declares Bash because its prompt names three shell
+ * commands, and that declaration is honest -- but one list is one value, so the declaration that
+ * is correct for Claude makes the open-weight spawn throw. MEASURED on origin/main before this:
+ * `grep -rn '"RunCheck"' src/` outside the adapter returned ZERO. The check-runner W1-T3617 built
+ * and W1-T3572's ruling asked for was shipped, merged, and dead.
+ *
+ * THIS IS NOT W1-T3616's NARROWING, AND THE DISTINCTION IS THE DESIGN. Nothing here shrinks a
+ * lane to fit a cheaper provider; W1-T3616's guard stays and its test still reddens if recon loses
+ * Bash on the Claude path. Each provider gets the EQUIVALENT surface: a shell where a shell
+ * exists, the allowlisted check-runner where it does not.
+ *
+ * PRIMARY CONTROL (W1-T1266). This is what bounds each lane's tool surface on every spawn, not a
+ * backstop that fires after another guard failed: with no entry a lane inherits SpawnWorkerArgs'
+ * UNRESTRICTED default.
+ */
 export const DISPATCH_LANE_TOOL_BOUNDS = {
-  recon: ["Read", "Grep", "Glob", "Bash"],
-  diagnose: ["Read", "Grep", "Glob", "Bash"],
-  retro: ["Read", "Grep", "Glob", "Edit", "Bash"],
-  alert_fix: FIX_WORKER_TOOLS,
-} as const satisfies Record<string, readonly string[]>;
+  recon: { claude: ["Read", "Grep", "Glob", "Bash"], openweight: ["Read", "Grep", "Glob", "RunCheck"] },
+  diagnose: { claude: ["Read", "Grep", "Glob", "Bash"], openweight: ["Read", "Grep", "Glob", "RunCheck"] },
+  retro: { claude: ["Read", "Grep", "Glob", "Edit", "Bash"], openweight: ["Read", "Grep", "Glob", "Edit", "RunCheck"] },
+  // alert_fix commits and pushes, which the check-runner deliberately cannot do (no git write, no
+  // forge). It has no open-weight equivalent and stays Claude-only until one is ruled on.
+  alert_fix: { claude: FIX_WORKER_TOOLS },
+} as const satisfies Record<string, { claude: readonly string[]; openweight?: readonly string[] }>;
 
 export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
 
@@ -1071,11 +1097,23 @@ export function resolveGenericRouteToolBound(lane: string): readonly string[] {
  * generic route dispatches, while these are named rungs inside the pipeline. Merging them would
  * let a typo'd task type silently resolve a rung's bound.
  */
-export function resolveDispatchLaneToolBound(lane: string): readonly string[] {
-  const bound = (DISPATCH_LANE_TOOL_BOUNDS as Record<string, readonly string[]>)[lane];
+export function resolveDispatchLaneToolBound(lane: string, provider: string = "claude"): readonly string[] {
+  const byProvider = (DISPATCH_LANE_TOOL_BOUNDS as Record<string, Record<string, readonly string[] | undefined>>)[lane];
+  if (byProvider === undefined) {
+    throw new Error(
+      `no declared tool bound for dispatch lane '${lane}' — refusing rather than defaulting to unrestricted tools (W1-T3616)`,
+    );
+  }
+  const bound = byProvider[provider];
   if (bound !== undefined) return bound;
+  // FAIL CLOSED ON THE PROVIDER AXIS TOO (W1-T3656). A lane with no entry for this provider has
+  // not been ruled eligible for it -- alert_fix is the live example, since it commits and pushes
+  // and the check-runner deliberately cannot. Falling back to the Claude list would route a lane
+  // whose surface the adapter cannot honour, and the spawn would throw deeper in with a worse
+  // message; falling back to a SMALLER list would be W1-T3616's narrowing by the back door.
   throw new Error(
-    `no declared tool bound for dispatch lane '${lane}' — refusing rather than defaulting to unrestricted tools (W1-T3616)`,
+    `dispatch lane '${lane}' declares no tool bound for provider '${provider}' — refusing rather than ` +
+      `borrowing another provider's list (W1-T3656). Declare one, or do not route this lane there.`,
   );
 }
 

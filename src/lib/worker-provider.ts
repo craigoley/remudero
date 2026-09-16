@@ -2258,7 +2258,9 @@ export interface OpenWeightWorkerResult {
 type OpenWeightMessage = Record<string, unknown>;
 type OpenWeightToolCall = { id?: unknown; type?: unknown; function?: { name?: unknown; arguments?: unknown } };
 
-const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: string; required: string[] }> = {
+/** The tools this adapter actually implements. EXPORTED so a lane's declared bound can be
+ *  checked against it at test time rather than discovered as a throw at spawn (W1-T3656). */
+export const OPENWEIGHT_FUNCTIONS: Record<string, { name: string; description: string; required: string[] }> = {
   Read: { name: "read_file", description: "Read a UTF-8 file under the worker cwd.", required: ["path"] },
   Write: { name: "write_file", description: "Write a UTF-8 file under the worker cwd.", required: ["path", "content"] },
   Edit: { name: "edit_file", description: "Replace one exact UTF-8 string in a file under the worker cwd.", required: ["path", "old_string", "new_string"] },
