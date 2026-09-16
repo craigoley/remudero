@@ -1872,6 +1872,9 @@ export const OPENWEIGHT_OUTPUT_CONTRACT = [
   "- When emitting YAML, double-quote every scalar value containing a colon (`:`), especially a `proof:` value.",
   "- When the request names a closed enum, emit exactly one listed literal; choose the nearest listed value rather than inventing `unknown` or `ambiguous`.",
   "- When the request asks for a raw document, emit that document without Markdown fences.",
+  "- When the request names literal output markers or delimiters (for example a fixed START/END " +
+    "line or a STAMP line), emit those markers verbatim and print the requested artifact between " +
+    "or after them instead of describing it in prose.",
 ].join("\n");
 /**
  * PRICE IS A PROPERTY OF THE DEPLOYMENT, NOT OF THE PROVIDER.
