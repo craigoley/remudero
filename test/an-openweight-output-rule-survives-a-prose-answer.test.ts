@@ -24,7 +24,14 @@ test("the openweight output contract requires literal markers when the request n
 });
 
 test("every openweight output-contract rule is conditional", () => {
-  assert.ok(RULE_LINES.length > 0, "the contract must carry at least one rule beyond its preamble");
+  // >= 4, not > 0: the three pre-existing rules (W1-T3567) were ALREADY all conditional, so a
+  // bare "at least one rule" check would pass identically before and after this PR's literal-
+  // marker rule lands -- non-discriminating by proof-discrimination's own definition (it would
+  // pass at the merge base too). Requiring the post-PR count makes this test fail at that base.
+  assert.ok(
+    RULE_LINES.length >= 4,
+    `the contract must carry the new literal-marker rule alongside its three predecessors (found ${RULE_LINES.length})`,
+  );
   for (const line of RULE_LINES) {
     assert.match(
       line,
