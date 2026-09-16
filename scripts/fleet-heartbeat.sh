@@ -154,10 +154,12 @@ STATE_FILE="${RMD_ROOT}/state/heartbeat-last.txt"
 # memory FLAT at 0.9 GiB for an hour. Flat, not sawtoothing, because nothing ever completed and
 # released.
 #
-# THE GUARD LIVES HERE, NOT IN THE CRONTAB. A `flock` in the cron line works, but the crontab is
-# hand-maintained host state that no repo file provisions, so it is lost on the next host build
-# and protects only that one caller. Guarding the script protects EVERY invocation however it is
-# scheduled — cron, a systemd timer, an operator running it by hand — and ships with the repo.
+# THE GUARD IS IN THE SCRIPT, SO IT SURVIVES A HOST RE-PROVISION AND COVERS EVERY INVOCATION.
+# Not in the crontab: a `flock` in the cron line works, but the crontab is hand-maintained host
+# state that no repo file provisions, so a fresh host build (a re-provision) loses it, and it
+# protects only that one caller anyway. Guarding the script instead means the guard ships with the
+# repo and covers every invocation however it is scheduled — cron, a systemd timer, an operator
+# running it by hand.
 #
 # -n, NEVER -w: a late beat must SKIP, not queue. Queuing is what stacking is.
 #
