@@ -116,7 +116,16 @@ test("an unreachable anchor names itself as unattributable rather than as a plai
 });
 
 // ── acceptance 3: "an unverifiable pause still holds, so the safety property survives the fix" ─
-
+//
+// This proof must discriminate this PR's own memoization change, not just re-confirm the
+// pre-existing hold guarantee `test/pause-hold-is-attributable.test.ts` already covers: an
+// unmemoized `checkSharedPause` (the code at this PR's merge base) ALSO holds on every one of
+// these ticks, so a bare "still truthy" loop passes identically before and after the fix and
+// proves nothing about it (W1-T273/W1-T362's stale-proof shape). The `catFileCalls.length`
+// assertion below is what actually depends on this PR: it fails at the merge base, where every
+// tick re-pays its own `cat-file`, and only holds once `resolveSharedPauseAnchor`'s memo is in
+// place — proving the safety property survives being routed through the memo, not merely that
+// it survives in general.
 test("a pause whose anchor cannot be read still refuses to dispatch, across repeated ticks", () => {
   const remote = heldButUnreadableAnchorRemote();
   const root = tmpRoot();
@@ -125,4 +134,11 @@ test("a pause whose anchor cannot be read still refuses to dispatch, across repe
     const detail = checkSharedPause(root, remote.deps);
     assert.notEqual(detail, undefined, `tick ${i}: a failed anchor read must never be scored as clear`);
   }
+
+  assert.equal(
+    remote.catFileCalls.length,
+    1,
+    "the hold across all 3 ticks must come from the memoized verdict, not a fresh per-tick read — " +
+      "proving the memoization this PR adds never lets an unreadable anchor slip through unheld",
+  );
 });
