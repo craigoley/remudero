@@ -72,7 +72,7 @@
     deployments can serve the lane.
   acceptance:
     - claim: "a request larger than the selected deployment's declared context window refuses before transport, naming both figures"
-      proof: "unit test: a request larger than every context window refuses before it reserves"
+      proof: "grep: consideredWithWindows in src/lib/worker-provider.ts"
     - claim: "a considered deployment with no declared context window is named as undeclared in the refusal, so the gap is readable from the error text alone rather than only from the source"
       proof: "grep: no declared context window in src/lib/worker-provider.ts"
   falsifier: |
