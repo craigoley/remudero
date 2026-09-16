@@ -143,6 +143,40 @@ fi
 LEDGER="${RMD_ROOT}/state/ledger.ndjson"
 STATE_FILE="${RMD_ROOT}/state/heartbeat-last.txt"
 
+# ── ONE BEAT AT A TIME (W1-T3627) ─────────────────────────────────────────────────────────────
+# MEASURED 2026-09-15, on a fleet that was down 75 minutes: this script is the only zgrep caller
+# in the tree, it scans LEDGER_UNION_GLOB twice, and on the Azure host that union is 359 files and
+# 271 MB. One scan is 7.2s on an idle box — a 2.4% duty cycle at the 5-minute cron cadence, and
+# entirely fine. THE COST IS NOT THE DEFECT; THE FEEDBACK LOOP IS. Once anything slows the host a
+# scan passes five minutes, cron fires regardless, and two concurrent scans are slower than one,
+# so the next overlaps too. The process table at the collapse held 56 CONCURRENT zgreps — roughly
+# 28 instances alive at once, none of them finishing — with load 221 on 8 cores and available
+# memory FLAT at 0.9 GiB for an hour. Flat, not sawtoothing, because nothing ever completed and
+# released.
+#
+# THE GUARD LIVES HERE, NOT IN THE CRONTAB. A `flock` in the cron line works, but the crontab is
+# hand-maintained host state that no repo file provisions, so it is lost on the next host build
+# and protects only that one caller. Guarding the script protects EVERY invocation however it is
+# scheduled — cron, a systemd timer, an operator running it by hand — and ships with the repo.
+#
+# -n, NEVER -w: a late beat must SKIP, not queue. Queuing is what stacking is.
+#
+# flock is an FD LOCK, released by the kernel when the holder exits, so a lock FILE left on disk
+# never wedges a later beat and there is no stale-lock recovery to get wrong.
+#
+# RE-ENTRANCY IS READ FROM THE ENVIRONMENT, because `exec` replaces this process and the child has
+# no other way to know it already holds the lock. Without the guard this would exec itself forever.
+if [ -z "${RMD_HEARTBEAT_LOCK_HELD:-}" ]; then
+  HEARTBEAT_LOCK="${RMD_ROOT}/state/heartbeat.lock"
+  mkdir -p "${RMD_ROOT}/state" 2>/dev/null || true
+  # FAIL OPEN ON A HOST WITHOUT flock (macOS ships none): an unguarded beat is the behaviour that
+  # existed before this block, whereas refusing to beat at all would delete the signal entirely.
+  if command -v flock >/dev/null 2>&1; then
+    export RMD_HEARTBEAT_LOCK_HELD=1
+    exec flock -n "$HEARTBEAT_LOCK" "$0" "$@"
+  fi
+fi
+
 # ── portable time helpers ─────────────────────────────────────────────────────────────────────
 # The beat runs on macOS (BSD date); the watcher that reads it runs on ubuntu-latest (GNU date).
 # Try GNU first, fall back to BSD, and return empty rather than a wrong number if neither parses —
