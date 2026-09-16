@@ -213,14 +213,16 @@ export function readHeadCommitMessage(worktreePath) {
  * The workflow checks out with `fetch-depth: 0`, so the merge-base resolves without an API call.
  * @param {string} worktreePath
  * @param {string | undefined} baseRef
+ * @param {typeof git} [run] Seam for tests — defaults to the real runner, the same shape
+ *   `changedPathsAtRange` (scripts/acceptance-author-gate.mjs) already uses for its own `git`.
  */
-export function changedPathsAtHead(worktreePath, baseRef = process.env.GITHUB_BASE_REF) {
+export function changedPathsAtHead(worktreePath, baseRef = process.env.GITHUB_BASE_REF, run = git) {
   if (!baseRef || baseRef.length === 0) return undefined;
-  const mergeBase = git(["merge-base", `origin/${baseRef}`, "HEAD"], { cwd: worktreePath });
+  const mergeBase = run(["merge-base", `origin/${baseRef}`, "HEAD"], { cwd: worktreePath });
   if (mergeBase.error || mergeBase.status !== 0) return undefined;
   const base = mergeBase.stdout.trim();
   if (base === "") return undefined;
-  const diff = git(["diff", "--name-only", "-z", "--no-renames", `${base}...HEAD`], { cwd: worktreePath });
+  const diff = run(["diff", "--name-only", "-z", "--no-renames", `${base}...HEAD`], { cwd: worktreePath });
   if (diff.error || diff.status !== 0) return undefined;
   return [...new Set(diff.stdout.split("\0").filter(Boolean))];
 }

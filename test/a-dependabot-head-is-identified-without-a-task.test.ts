@@ -31,8 +31,24 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
     changedPaths: readonly string[] | undefined;
   }) => boolean;
   isDependencyManifestPath: (path: string) => boolean;
+  changedPathsAtHead: (
+    worktreePath: string,
+    baseRef: string | undefined,
+    run?: (args: string[], opts: { cwd: string }) => { error?: unknown; status: number; stdout: string },
+  ) => string[] | undefined;
 };
-const { evaluateHeadIdentityGate, isDependencyBumpHead, isDependencyManifestPath } = mod;
+const { evaluateHeadIdentityGate, isDependencyBumpHead, isDependencyManifestPath, changedPathsAtHead } = mod;
+
+/** A git runner that replays canned results in order, recording the argv it was asked for. */
+function fakeGit(results: { error?: unknown; status: number; stdout: string }[]) {
+  const calls: string[][] = [];
+  const run = (args: string[]) => {
+    calls.push(args);
+    return results[calls.length - 1] ?? { status: 1, stdout: "" };
+  };
+  return { run, calls };
+}
+const OK = (stdout: string) => ({ status: 0, stdout });
 
 const BUMP_SUBJECT = "chore(deps): bump the npm-minor-and-patch group with 6 updates";
 const BUMP_REF = "dependabot/npm_and_yarn/npm-minor-and-patch-4616289c19";
@@ -174,4 +190,66 @@ test("the three pre-existing admitted forms are untouched", () => {
   });
   assert.equal(filing.ok, true);
   assert.match(filing.message, /filing-shaped subject/);
+});
+
+// ── changedPathsAtHead: the impure reader, whose every failure arm must return undefined ───────
+//
+// undefined is the SAFE answer — isDependencyBumpHead treats it as "not a manifest-only diff" and
+// refuses — so each arm below is the exemption failing closed, not a cosmetic early return.
+
+test("changedPathsAtHead reads the merge-base diff and de-duplicates it", () => {
+  const { run, calls } = fakeGit([OK("abc123\n"), OK("package.json\0package-lock.json\0package.json\0")]);
+  const paths = changedPathsAtHead("/w", "main", run);
+  assert.deepEqual(paths, ["package.json", "package-lock.json"], "duplicates collapse");
+  assert.deepEqual(calls[0], ["merge-base", "origin/main", "HEAD"]);
+  assert.deepEqual(calls[1], ["diff", "--name-only", "-z", "--no-renames", "abc123...HEAD"]);
+});
+
+test("changedPathsAtHead returns undefined with no base ref, without running git", () => {
+  for (const baseRef of [undefined, ""]) {
+    const { run, calls } = fakeGit([]);
+    assert.equal(changedPathsAtHead("/w", baseRef, run), undefined);
+    assert.equal(calls.length, 0, "a missing base ref must not spawn git at all");
+  }
+});
+
+test("changedPathsAtHead returns undefined when merge-base fails", () => {
+  const nonZero = fakeGit([{ status: 128, stdout: "" }]);
+  assert.equal(changedPathsAtHead("/w", "main", nonZero.run), undefined);
+
+  const threw = fakeGit([{ error: new Error("spawn ENOENT"), status: 0, stdout: "" }]);
+  assert.equal(changedPathsAtHead("/w", "main", threw.run), undefined);
+});
+
+test("changedPathsAtHead returns undefined when the merge-base is empty", () => {
+  const { run, calls } = fakeGit([OK("   \n")]);
+  assert.equal(changedPathsAtHead("/w", "main", run), undefined);
+  assert.equal(calls.length, 1, "an empty base must not reach the diff");
+});
+
+test("changedPathsAtHead returns undefined when the diff fails", () => {
+  const nonZero = fakeGit([OK("abc123"), { status: 1, stdout: "" }]);
+  assert.equal(changedPathsAtHead("/w", "main", nonZero.run), undefined);
+
+  const threw = fakeGit([OK("abc123"), { error: new Error("boom"), status: 0, stdout: "" }]);
+  assert.equal(changedPathsAtHead("/w", "main", threw.run), undefined);
+});
+
+test("an unreadable diff and a manifest diff reach OPPOSITE gate verdicts", () => {
+  // The two halves joined: what the reader returns is what the exemption consumes.
+  const unreadable = fakeGit([{ status: 128, stdout: "" }]);
+  const refused = evaluateHeadIdentityGate({
+    headCommitMessage: `${BUMP_SUBJECT}\n`,
+    headRef: BUMP_REF,
+    changedPaths: changedPathsAtHead("/w", "main", unreadable.run),
+  });
+  assert.equal(refused.ok, false, "an unreadable diff must refuse");
+
+  const readable = fakeGit([OK("abc123"), OK("package.json\0package-lock.json\0")]);
+  const admitted = evaluateHeadIdentityGate({
+    headCommitMessage: `${BUMP_SUBJECT}\n`,
+    headRef: BUMP_REF,
+    changedPaths: changedPathsAtHead("/w", "main", readable.run),
+  });
+  assert.equal(admitted.ok, true, "a manifest-only diff must be admitted");
 });
