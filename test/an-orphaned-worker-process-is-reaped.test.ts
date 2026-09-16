@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { HUNG_WORKER_AGE_S, type WorkerProcess } from "../src/lib/doctor.js";
-import { reapOrphanedWorkerProcesses, type RunLockRead, type WorkerReapOpts } from "../src/lib/worker.js";
+import {
+  HUNG_WORKER_AGE_S,
+  reapOrphanedWorkerProcesses,
+  type RunLockRead,
+  type WorkerProcess,
+  type WorkerReapOpts,
+} from "../src/lib/worker.js";
 
 // ── W1-T3629: NOTHING REAPS AN ORPHANED WORKER PROCESS ──────────────────────────────
 //

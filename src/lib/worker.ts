@@ -43,10 +43,6 @@ import {
 } from "./compaction.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { pgrepFailureMeansZero } from "./deployer.js";
-// W1-T3629: HUNG_WORKER_AGE_S reused from doctor.ts, not re-derived (#2251's own derivation) — and
-// WorkerProcess is the SAME reading doctor.ts's judgeLaneLessWorkers judges, so this reaper acts on
-// exactly what the doctor reported rather than a second, possibly-diverging process-table read.
-import { HUNG_WORKER_AGE_S, type WorkerProcess } from "./doctor.js";
 import { isHolderStale, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
 import { secretBoundaryEnv, type SecretBoundaryHandles } from "./secret-boundary.js";
@@ -4474,6 +4470,29 @@ function defaultLaneListGit(args: string[], cwd: string): string {
 // — and age is only the SECOND condition: a worker is reapable only when no LIVE run lock's pid
 // names its parent AND it is past the age bound. A worker still held by a live lane is never a
 // candidate however old it is.
+//
+// NOT IMPORTED FROM doctor.ts, ON PURPOSE: doctor.ts -> daemon-health.ts -> status.ts ->
+// plan-architect.ts -> escalate.ts -> feedback.ts -> risk-judge.ts -> worker.ts is an existing
+// import chain, so a worker.ts -> doctor.ts edge closes a cycle `.dependency-cruiser.cjs`'s
+// `no-circular` rule holds at zero (W1-T2895) — depcruise caught exactly this on this task's first
+// round. `HUNG_WORKER_AGE_S` and the `WorkerProcess` shape below are therefore a deliberate,
+// by-hand mirror of doctor.ts's own (#2251's derivation), not a re-derivation: keep the value and
+// the four fields in sync with doctor.ts if either changes.
+
+/** #2251's own derivation, mirrored here (not imported — see the note above this section). */
+export const HUNG_WORKER_AGE_S = 7200;
+
+/** Mirrors doctor.ts's `WorkerProcess` shape exactly — the SAME reading doctor.ts's
+ *  judgeLaneLessWorkers judges, so this reaper acts on what the doctor reported rather than a
+ *  second, possibly-diverging process-table read (not imported — see the note above). */
+export interface WorkerProcess {
+  pid: number;
+  /** Parent pid. A worker whose parent is gone has been reparented to init — the ORPHAN test this
+   *  reaper uses, because age alone is evidence of duration and not of death. */
+  ppid: number;
+  etimeS: number;
+  args: string;
+}
 
 /** Why {@link reapOrphanedWorkerProcesses} left a worker running. */
 export type WorkerKeepReason =
