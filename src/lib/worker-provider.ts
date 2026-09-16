@@ -1931,6 +1931,60 @@ export const OPENWEIGHT_API_KEY_ENV = "RMD_OPENWEIGHT_API_KEY";
 /** PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the live probe. */
 export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 5_000;
 /**
+ * Wall-clock bound on ONE cash request. Generous on purpose: a reasoning model on a large prompt is
+ * legitimately slow, and a deadline that fires early would refuse work the cap already paid to
+ * reserve. Before this, the `fetch` carried no `signal` at all -- a hung Azure request stalled the
+ * tool loop for as long as the socket stayed open, holding a reservation the whole time.
+ */
+export const OPENWEIGHT_REQUEST_TIMEOUT_MS = 180_000;
+
+/** Raised when a reply was cut off by the completion budget rather than finished. */
+export class OpenWeightTruncatedReplyError extends RmdError {
+  readonly finishReason: string;
+  constructor(finishReason: string, completionTokens: number) {
+    super(
+      "usage",
+      1,
+      `openweight reply was TRUNCATED by the completion budget (finish_reason=${JSON.stringify(finishReason)}, ` +
+        `${completionTokens} completion tokens against OPENWEIGHT_MAX_COMPLETION_TOKENS=${OPENWEIGHT_MAX_COMPLETION_TOKENS}). ` +
+        `Refusing to return a partial answer as a whole one — shrink the request or raise the budget.`,
+      { finishReason, completionTokens },
+    );
+    this.finishReason = finishReason;
+  }
+}
+
+/** Raised when a request passed its deadline. Distinct from a transport error so a caller can tell
+ *  "we stopped waiting" from "the endpoint refused". */
+export class OpenWeightRequestTimeoutError extends RmdError {
+  constructor(readonly timeoutMs: number, readonly deployment: string) {
+    super(
+      "usage",
+      1,
+      `openweight request to ${JSON.stringify(deployment)} exceeded ${timeoutMs}ms and was abandoned. ` +
+        `Its reservation stays CHARGED: the request may have been served and billed, so returning the ` +
+        `allowance would let a timeout buy free authority.`,
+      { timeoutMs, deployment },
+    );
+  }
+}
+
+/**
+ * Is this reply complete, or did the budget cut it off?
+ *
+ * `finish_reason` was never read. `length` means the model stopped because it ran out of completion
+ * budget, and the content returned is a PREFIX -- indistinguishable, to every caller, from a
+ * genuinely short answer. OPENWEIGHT_MAX_COMPLETION_TOKENS's own comment records a shard already
+ * truncated mid-string at 1,500, so this is a measured failure mode rather than a hypothetical one.
+ *
+ * `stop` and `tool_calls` are the two complete outcomes. An ABSENT reason is treated as complete:
+ * not every OpenAI-compatible endpoint sets it, and inventing a refusal from a missing field would
+ * fail closed on deployments that work.
+ */
+export function openWeightReplyIsTruncated(finishReason: unknown): boolean {
+  return finishReason === "length";
+}
+/**
  * Adapter-owned output constraints for every OpenWeight lane. Each rule is conditional: the
  * adapter must not turn a code-review or prose task into a YAML-only task by accident.
  */
@@ -2865,16 +2919,30 @@ export async function spawnOpenWeightWorker(
         squeezed: args.cashSqueezed === true,
       });
       budgetReservedUsd += reservation.reservedUsd;
-      const response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
-        method: "POST",
-        headers: { "content-type": "application/json", "api-key": key },
-        body,
-      });
+      // THE DEADLINE IS ARMED AROUND THE REQUEST, AND THE RESERVATION IS ALREADY COMMITTED. An
+      // abandoned request keeps its charge on purpose: the endpoint may have served and billed it,
+      // so handing the allowance back would let a timeout buy free authority against `dailyCapUsd`.
+      const abort = new AbortController();
+      const deadline = setTimeout(() => abort.abort(), OPENWEIGHT_REQUEST_TIMEOUT_MS);
+      let response: Response;
+      try {
+        response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
+          method: "POST",
+          headers: { "content-type": "application/json", "api-key": key },
+          body,
+          signal: abort.signal,
+        });
+      } catch (error) {
+        if (abort.signal.aborted) throw new OpenWeightRequestTimeoutError(OPENWEIGHT_REQUEST_TIMEOUT_MS, selection.model);
+        throw error;
+      } finally {
+        clearTimeout(deadline);
+      }
       if (!response.ok) throw new Error(`openweight request failed with HTTP ${response.status}`);
       const payload = await response.json() as {
         id?: unknown;
         usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
-        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }>;
+        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
       const turnPromptTokens = typeof payload.usage?.prompt_tokens === "number" ? payload.usage.prompt_tokens : 0;
@@ -2893,6 +2961,12 @@ export async function spawnOpenWeightWorker(
       }
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
+      // A TRUNCATED REPLY IS A NAMED FAILURE, NOT A SHORT ANSWER. Checked AFTER settlement above so
+      // the turn is still billed honestly -- the tokens were spent whether or not the answer is
+      // usable -- and before the content can be returned or appended to the conversation.
+      if (openWeightReplyIsTruncated(payload.choices?.[0]?.finish_reason)) {
+        throw new OpenWeightTruncatedReplyError(String(payload.choices?.[0]?.finish_reason), turnCompletionTokens);
+      }
       const calls = Array.isArray(message.tool_calls) ? message.tool_calls as OpenWeightToolCall[] : [];
       // UNFENCED ONLY WHEN A STRUCTURED REPLY WAS ASKED FOR. A prose lane may legitimately contain a
       // fenced code block as part of its answer, and unwrapping that would corrupt it; a lane that
