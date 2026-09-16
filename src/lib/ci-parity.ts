@@ -2684,6 +2684,16 @@ export interface FastGateStep {
    * job's own failure (design note ii), never unconditionally.
    */
   remedyFiles?: readonly string[];
+  /**
+   * W1-T3702 — a repo-relative directory whose ABSENCE means this step is SKIPPED (`ok: true`)
+   * rather than run at all — never failed. The `lint-plan` entry below is the first user: a
+   * checkout with no `plan/` directory (the site/console repos this same table also runs in) has
+   * nothing for it to lint, and a missing input is not that checkout's defect (design note iv).
+   * Read ONLY by {@link runPreflightFast}, checked BEFORE the `scriptNames.has(script)` guard so
+   * an absent directory never even attempts the npm script; every other member leaves this
+   * undefined and runs exactly as before.
+   */
+  skipWhenAbsent?: string;
 }
 
 export const FAST_GATE_STEPS: FastGateStep[] = [
@@ -2745,6 +2755,22 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
       "W1-T3140: deliberately no `remedyFiles` — a red here means the base was unreadable or the measurement failed, " +
       "neither of which a baseline edit can repair, so this step must never enter the recordable-ratchet auto-repair rung. " +
       "The absence is a decision, not an omission",
+  },
+  {
+    job: "lint-plan",
+    script: "lint-plan:fast",
+    skipWhenAbsent: "plan",
+    reason:
+      "same-class (W1-T3702) — a plan/tasks.d/*.yaml filing is this repository's commonest PR shape, and " +
+      "ci.yml's required lint-plan job (npm run --silent lint-plan -- --base HEAD^1) was the ONLY gate that " +
+      "judges it, reachable only after a full CI round. `lint-plan:fast` (package.json) bakes `--base " +
+      "origin/main` — the same diff scope HEAD^1 resolves to on a PR branch — onto the already-shipped " +
+      "offline entrypoint (scripts/lint-plan-offline.mjs, deps.offline: true), so this step reads only the " +
+      "plan and the merge-base diff and never the network, measured ~12s cold (tsx loading src/run-task.ts, " +
+      "the same cold start `claims` above already pays at ~18s). `skipWhenAbsent: \"plan\"` lets a checkout " +
+      "with no plan/ directory (the site/console repos this same table also runs in) skip rather than fail " +
+      "— a missing input is not that checkout's defect (design note iv). Deliberately no `remedyFiles`: a " +
+      "lint-plan violation's remedy is the offending task's own shard, never one fixed baseline path",
   },
   // W1-T2643: the four census entries are no longer hand-written here — they are
   // CENSUS_ADMITTED_MEMBERS's own projection (see CENSUS_POPULATION above). Editing a census
@@ -3170,8 +3196,11 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // refused on cost here: the threshold is derived from the population, which is not complete
   // until the last entry has run.
   const censusCosts = new Map<number, number>();
-  const steps = gateSteps.map(({ job, script, boundMs, retainSuccessOutput }, i) =>
+  const steps = gateSteps.map(({ job, script, boundMs, retainSuccessOutput, skipWhenAbsent }, i) =>
     runStep(job, () => {
+      if (skipWhenAbsent !== undefined && !existsSync(join(repoRoot, skipWhenAbsent))) {
+        return { ok: true, detail: `SKIPPED — no ${skipWhenAbsent}/ directory in this checkout; nothing for ${job} to check here` };
+      }
       if (!scriptNames.has(script)) {
         return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
       }
