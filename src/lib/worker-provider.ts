@@ -613,11 +613,13 @@ export function codexCandidatesForCapability(
  * nothing would report the divergence. test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
  * asserts the two agree.
  *
- * FRONTIER STAYS ON gpt-oss-120b DELIBERATELY. A nano-class model is not a frontier substitute, and
- * before this every tier named one deployment — a ladder expressing no choice at all. gpt-oss-120b
- * TRAILS rather than being deleted from the rows nano now leads, the same shape the `codex` table
- * uses for a demoted model, so a deployment that stops answering falls back instead of failing the
- * lane.
+ * FRONTIER NO LONGER NAMES ONE DEPLOYMENT (W1-T3689). gpt-oss-120b alone left frontier
+ * single-candidate -- the same shape that had already gone wrong for `codex.balanced.low` -- so
+ * gpt-5-mini now LEADS it on capability (its 272,000-token ceiling clears gpt-oss-120b's 131,072,
+ * and it is the only cash deployment that answers `response_format: json_object` correctly), never
+ * on price: it is 5x gpt-5-nano on both cost axes. gpt-oss-120b TRAILS rather than being deleted,
+ * the same demotion shape the `codex` table uses for a demoted model, so a deployment that stops
+ * answering falls back instead of failing the lane.
  */
 // W1-T3614: economy leads with gpt-oss-120b and balanced with gpt-5-nano, MIRRORING
 // .remudero/mounts.yaml exactly -- a checkout with no mounts table must not silently prefer a
@@ -628,7 +630,7 @@ export function codexCandidatesForCapability(
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-oss-120b", "gpt-5-nano"],
   balanced: ["gpt-5-nano", "gpt-oss-120b"],
-  frontier: ["gpt-oss-120b"],
+  frontier: ["gpt-5-mini", "gpt-oss-120b"],
 };
 
 /** The provider-neutral Claude-model -> capability lookup is shared with Codex: both adapters
@@ -686,6 +688,10 @@ export interface OpenWeightContextWindow {
 export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightContextWindow>> = {
   "gpt-oss-120b": { totalTokens: 131_072, readAt: "2026-09-15" },
   "gpt-5-nano": { totalTokens: 272_000, readAt: "2026-09-15" },
+  // Same gpt-5 family shape as nano: 400,000 total context of which 272,000 may be INPUT. The
+  // recorded figure is the INPUT ceiling, not the total, which is the conservative direction --
+  // openWeightDeploymentHolds adds OPENWEIGHT_MAX_COMPLETION_TOKENS on top before comparing.
+  "gpt-5-mini": { totalTokens: 272_000, readAt: "2026-09-16" },
 };
 
 /**
@@ -1080,8 +1086,24 @@ interface CodexRuntimeReading {
 
 interface CodexRuntimeFailure extends ProviderCapacity {
   /** Internal retry classification; stripped before a capacity leaves this module. */
-  failureKind: "timeout" | "terminal";
+  failureKind: "timeout" | "terminal" | "starved";
 }
+
+/**
+ * How late a deadline may fire before it is read as THIS PROCESS stalling rather than the
+ * app-server being slow. A healthy loop delivers a timer within milliseconds of its deadline.
+ *
+ * WHY THE DISTINCTION IS LOAD-BEARING (W1-T3690). Node runs timers in the timers phase, which
+ * precedes the poll phase that delivers a child's stdout. If the main thread is blocked when the
+ * deadline passes, the timer callback runs on the NEXT free tick BEFORE any queued stdout is
+ * read -- so a child that answered in 300ms is recorded as "timed out after 10000ms; unfinished:
+ * initialize". MEASURED on the fleet 2026-09-16 inside the daemon's own container: a free loop
+ * replies in 366ms; a loop blocked 12s produces that exact string with a WALL TIME of 12000ms
+ * against a 10000ms deadline. The overrun is the only signal that separates the two, and the
+ * consequence of confusing them is severe: codex reads unreadable, the capacity auction gives it
+ * zero allocation, and every lane silently migrates onto the Claude subscription.
+ */
+const CODEX_DEADLINE_OVERRUN_MS = 1_000;
 
 type CodexRuntimeResult = CodexRuntimeReading | CodexRuntimeFailure;
 
@@ -1138,10 +1160,14 @@ export async function readCodexRuntime(
   deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & {
     signal?: AbortSignal;
     onHedgeEligibility?: (eligible: boolean) => void;
+    /** Real-time source for the deadline-overrun check. Injected ONLY by tests: a fake clock in
+     *  production would defeat the very stall this measurement exists to detect. */
+    monotonicNow?: () => number;
   },
 ): Promise<CodexRuntimeResult> {
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
   const timeoutMs = deps.timeoutMs ?? 10_000;
+  const monotonicNow = deps.monotonicNow ?? Date.now;
   let child: ChildProcessWithoutNullStreams;
   try {
     child = spawn(bin, ["app-server", "--listen", "stdio://"], { env: codexControlEnv(config) });
@@ -1176,8 +1202,21 @@ export async function readCodexRuntime(
       if (!modelsReceived) pending.push("model/list");
       return pending;
     };
+    const deadlineSetAt = monotonicNow();
     const timer = setTimeout(() => {
       const malformed = malformedStdoutLines > 0 ? `; malformed app-server stdout: ${malformedStdoutLines} line(s)` : "";
+      // THE DEADLINE OVERRAN => WE STALLED, NOT THE APP-SERVER. See CODEX_DEADLINE_OVERRUN_MS.
+      // The child's reply may be sitting unread in the poll queue right now; this exchange
+      // observed nothing about Codex and must not be reported as evidence against it.
+      const elapsedMs = monotonicNow() - deadlineSetAt;
+      if (malformedStdoutLines === 0 && elapsedMs >= timeoutMs + CODEX_DEADLINE_OVERRUN_MS) {
+        finish(codexRuntimeFailure(
+          `app-server deadline overran: ${timeoutMs}ms budget fired after ${elapsedMs}ms, so this process was stalled ` +
+            `and the child was never given a readable turn; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
+          "starved",
+        ));
+        return;
+      }
       finish(codexRuntimeFailure(
         `app-server timed out after ${timeoutMs}ms${malformed}; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
         // Protocol noise is not the fleet-observed transient RPC stall and must not be retried.
@@ -1427,9 +1466,15 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     }
   }
   if ("provider" in value) {
-    const { failureKind: _failureKind, ...capacity } = value;
+    const { failureKind, ...capacity } = value;
     codexCapacityCache.delete(cacheKey);
-    if (!deps.forceRefresh) codexCapacityFailureCache.set(cacheKey, { at: now(), value: capacity });
+    // A STARVED READ IS NOT EVIDENCE ABOUT CODEX, so it must not buy a failure backoff. Caching it
+    // would suppress the next read for up to CODEX_CAPACITY_FAILURE_BACKOFF_MAX_MS on the strength
+    // of an exchange that observed nothing -- turning one blocked tick into a window in which the
+    // provider is declared unreadable and every lane routes to the subscription instead.
+    if (!deps.forceRefresh && failureKind !== "starved") {
+      codexCapacityFailureCache.set(cacheKey, { at: now(), value: capacity });
+    }
     return capacity;
   }
   codexCapacityCache.set(cacheKey, { at: now(), value });
@@ -1881,6 +1926,9 @@ export const OPENWEIGHT_OUTPUT_CONTRACT = [
   "- When emitting YAML, double-quote every scalar value containing a colon (`:`), especially a `proof:` value.",
   "- When the request names a closed enum, emit exactly one listed literal; choose the nearest listed value rather than inventing `unknown` or `ambiguous`.",
   "- When the request asks for a raw document, emit that document without Markdown fences.",
+  "- When the request names literal output markers or delimiters (for example a fixed START/END " +
+    "line or a STAMP line), emit those markers verbatim and print the requested artifact between " +
+    "or after them instead of describing it in prose.",
 ].join("\n");
 /**
  * PRICE IS A PROPERTY OF THE DEPLOYMENT, NOT OF THE PROVIDER.
@@ -1915,6 +1963,12 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   // Azure-OpenAI-family deployment, so it rides `openWeightEndpoint`'s existing
   // `openai/deployments/...` route with no second endpoint shape.
   "gpt-5-nano": { inputUsdPerMillion: 0.05, outputUsdPerMillion: 0.4, readAt: "2026-09-15" },
+  // W1-T3689: DEARER THAN BOTH SIBLINGS ON BOTH AXES -- 5x nano on input and 5x on output. It is
+  // on this ladder for CAPABILITY, never for price: it is the only cash deployment that answers
+  // `response_format: {type:"json_object"}` correctly (measured below), and its 272,000-token
+  // input ceiling clears gpt-oss-120b's 131,072. Do not "optimise" a lane onto it to save money;
+  // there is no lane where it is the cheaper row.
+  "gpt-5-mini": { inputUsdPerMillion: 0.25, outputUsdPerMillion: 2.0, readAt: "2026-09-16" },
 };
 
 /**
@@ -1934,6 +1988,10 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
 export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
   "gpt-oss-120b": 0,
   "gpt-5-nano": null,
+  // MEASURED 2026-09-16 with the adapter's own URL and api-version: `temperature: 0` returns
+  // HTTP 400 ("does not support 0 with this model. Only the default (1) value is supported"),
+  // byte-identical to nano's refusal. So the field is OMITTED, never sent as 0.
+  "gpt-5-mini": null,
 };
 
 /** Raised INSTEAD of guessing a request shape. Thrown before the transport, like its pricing

@@ -1,0 +1,78 @@
+- id: W1-T3685
+  title: "No verb answers what is open across the fleet's three repositories, so the one question an operator asks first is the one thing the CLI cannot do and a hand-rolled script gets rewritten after every container restart"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 8.00
+  files:
+    - src/lib/pr-board.ts
+    - src/run-task.ts
+  origin: "operator-session#board-script-rewritten-three-times-2026-09-16"
+  plan_refs: ["W1-T3683"]
+  status: queued
+  priority: 4
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16. The fleet drains three repositories -- `remudero`, `remudero-site`,
+    `remudero-console` -- from three daemons. `rmd --help` declares 80 verbs and none of them
+    answers "what is open, and what is red" across those three.
+
+    The operator's substitute was a 20-line script calling `gh pr list --json
+    number,title,isDraft,statusCheckRollup` once per repo and printing red and pending check names.
+    It lives in a container scratch directory, so it was written from scratch THREE times on
+    2026-09-16 alone -- once after each container restart.
+
+    `rmd status` answers a different question (this daemon's own board), and `rmd ci-failures`
+    answers a narrower one (failures, one repo, by day).
+  rationale: |
+    THIS IS THE SMALLEST OF THE FILINGS IT SHIPS WITH AND IT IS FILED FOR A REASON. W1-T3683 makes
+    the hand-run census able to name a verb an operator keeps re-running. A census that can finally
+    see hand-running is worth little if the thing being hand-run has no verb to be routed to. This
+    is the one genuine ABSENCE found in that audit: every other hand-rolled helper on this host
+    duplicated a verb that already existed (`check-acceptance`, `check-proof`, `down`/`up`,
+    `ci-failures`).
+
+    IT MUST NOT BECOME A SECOND STATUS BOARD. `src/lib/status-board.ts` owns the daemon's own view
+    and is not being widened. This reads GitHub directly for a cross-repo question the daemon's
+    per-repo state cannot answer, which is why it is a new module rather than a flag on an old one.
+  design: |
+    (i) `rmd board [--repo <slug> ...]` prints, per repository: number, title, draft state, head
+        branch, the names of failing checks and the names of pending checks. Default repository set
+        comes from configuration, never a hardcoded list -- a fourth repo must need no code change.
+
+    (ii) ONE API CALL PER REPOSITORY. `gh pr list --json ... --limit N` already returns the check
+         rollup; per-PR follow-up calls are refused by design. The secondary-rate-limit hazard is
+         the reason: a burst of per-PR calls 403s even against a clean quota.
+
+    (iii) A REPOSITORY THAT CANNOT BE READ IS NAMED AS UNAVAILABLE, never rendered as zero open. An
+          empty queue and an unreachable queue are opposite facts and must not print the same.
+
+    (iv) EXIT CODE IS INFORMATIONAL ONLY -- 0 whenever every named repository was READ, whatever it
+         contained. This verb reports; it does not gate.
+
+    THE BAND RECORDS WIDTH, NOT DANGER. Two concerns are declared -- the new module and the registry
+    entry that reaches it -- because a module no verb dispatches is the unreached-module defect the
+    linter's own call-site rule names. W1-T3657 carries the identical (subsystem, run-task) pair.
+
+    THE SUITE GOES IN test/the-board-verb-distinguishes-empty-from-unreadable.test.ts, kept out of
+    files: for the reason W1-T3680 records.
+  acceptance:
+    - claim: "the survey covers every configured repository rather than a list written into the code"
+      proof: "unit test: the board surveys every configured repository"
+    - claim: "a repository that cannot be read is reported as unavailable rather than rendered as an empty queue"
+      proof: "unit test: an unreadable repository reads unavailable never empty"
+    - claim: "each repository costs one list call, so a wide board cannot trip the secondary rate limit"
+      proof: "unit test: a three-repository board makes three calls"
+    - claim: "a board containing failing pull requests still exits zero, so this verb reports and never gates"
+      proof: "unit test: a board with failures still exits zero"
+    - claim: "the CLI actually dispatches the survey, so the module is reached by the verb rather than only by its own tests"
+      proof: "grep: surveyPullRequestBoard( in src/run-task.ts"
+  falsifier: |
+    Hardcode the repository list and the first test must fail. Print zero open for an unreachable
+    repository and the second must fail. Add a per-pull-request call and the third must fail. Exit
+    non-zero on a red board and the fourth must fail. Leave the module undispatched and the fifth
+    must fail.
