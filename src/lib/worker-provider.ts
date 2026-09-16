@@ -615,7 +615,7 @@ export function codexCandidatesForCapability(
  *
  * FRONTIER NO LONGER NAMES ONE DEPLOYMENT (W1-T3689). gpt-oss-120b alone left frontier
  * single-candidate -- the same shape that had already gone wrong for `codex.balanced.low` -- so
- * gpt-5.6-luna now leads it (W1-T3699), taking gpt-5-mini's place outright: cheaper on both axes
+ * gpt-5.6-luna now leads it (measured 2026-09-16), taking gpt-5-mini's place outright: cheaper on both axes
  * and 0 reasoning tokens where mini spent 64 of 76. gpt-5.6-terra TRAILS as the escalation, at 10x
  * luna, reached only when luna is unavailable. ECONOMY AND BALANCED ARE UNTOUCHED: nano is cheaper
  * than luna per token, and W1-T3614 fixed those leads from measured PER-TASK cost, which luna has
@@ -690,7 +690,7 @@ export interface OpenWeightContextWindow {
 export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightContextWindow>> = {
   "gpt-oss-120b": { totalTokens: 131_072, readAt: "2026-09-15" },
   "gpt-5-nano": { totalTokens: 272_000, readAt: "2026-09-15" },
-  // W1-T3699: A DELIBERATE FLOOR, NOT A MEASURED CEILING. Microsoft's published gpt-5.6 rates are
+  // A DELIBERATE FLOOR, NOT A MEASURED CEILING. Microsoft's published gpt-5.6 rates are
   // labelled "short context" and disclose neither the window nor a long-context rate, and the
   // account's per-request TPM ceiling refuses an oversized probe before the model can answer one.
   // So the window is recorded LOW on purpose: a request above it refuses pre-transport rather than
@@ -1969,7 +1969,7 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   // Azure-OpenAI-family deployment, so it rides `openWeightEndpoint`'s existing
   // `openai/deployments/...` route with no second endpoint shape.
   "gpt-5-nano": { inputUsdPerMillion: 0.05, outputUsdPerMillion: 0.4, readAt: "2026-09-15" },
-  // W1-T3699: gpt-5-mini was REMOVED, not demoted. Luna is cheaper on BOTH axes ($0.20/$1.20 vs
+  // gpt-5-mini was REMOVED, not demoted. Luna is cheaper on BOTH axes ($0.20/$1.20 vs
   // $0.25/$2.00) and measurably more efficient -- on an identical trivial prompt Luna spent 0
   // reasoning tokens where mini spent 64 of 76 -- so mini had no lane left where it was the right
   // row. Keeping it trailing would have implied a fallback worth reaching; there is none.

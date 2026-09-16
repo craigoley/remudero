@@ -87,7 +87,7 @@ test("the openweight ladder leads each row with the deployment measured cheaper 
   // back to one lead everywhere — the exact regression the measurement above argues against.
   assert.notEqual(rows.economy?.low?.[0], rows.balanced?.low?.[0], "economy and balanced must not share a lead");
 
-  // FRONTIER (W1-T3699) LEADS WITH gpt-5.6-luna: it is on this row for capability alone
+  // FRONTIER (measured 2026-09-16) LEADS WITH gpt-5.6-luna: it is on this row for capability alone
   // (5x nano on both cost axes), and gpt-oss-120b trails as the fallback rather than being dropped
   // -- a single-candidate row is what this ladder is deliberately no longer allowed to have.
   for (const effort of ["low", "medium", "high"] as const) {
@@ -198,7 +198,7 @@ test("the code fallback and the mounts ladder name one leading deployment", () =
   // the DEARER deployment while the configured fleet routed the cheaper, and nothing would say so.
   // W1-T3614: economy's lead is gpt-oss (short prompts), balanced's is nano (large context). Both
   // are pinned here so a tableless checkout cannot quietly adopt a single lead for every capability.
-  // W1-T3699: frontier's lead is gpt-5.6-luna, which replaced gpt-5-mini outright (cheaper on both
+  // frontier's lead is gpt-5.6-luna, which replaced gpt-5-mini outright (cheaper on both
   // axes, 0 reasoning tokens where mini spent 64 of 76). gpt-5.6-terra is the ESCALATION behind it,
   // at 10x luna, reached only when luna is unavailable.
   assert.equal(openWeightCandidatesForCapability(undefined, "economy", "low")[0], OSS);

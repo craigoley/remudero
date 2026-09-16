@@ -52,7 +52,7 @@ test("W1-T3689: no cash ladder row is single-candidate", () => {
 
 // Terra earns its place on CAPABILITY, not price: it is 10x luna on both axes and may lead the
 // frontier band only. A test keeps the price table saying so.
-test("W1-T3699: terra is recorded as dearer than luna on both axes, so nothing routes to it to save money", () => {
+test("terra is recorded as dearer than luna on both axes, so nothing routes to it to save money", () => {
   const terra = OPENWEIGHT_PRICES["gpt-5.6-terra"]!;
   const luna = OPENWEIGHT_PRICES["gpt-5.6-luna"]!;
   assert.ok(terra.inputUsdPerMillion > luna.inputUsdPerMillion, "terra must be dearer on input");
@@ -60,7 +60,7 @@ test("W1-T3699: terra is recorded as dearer than luna on both axes, so nothing r
   assert.equal(OPENWEIGHT_PRICES["gpt-5-mini"], undefined, "gpt-5-mini is gone from the price table");
 });
 
-test("W1-T3699: terra leads NOTHING — it is the escalation behind luna, never a lane's first choice", () => {
+test("terra leads NOTHING — it is the escalation behind luna, never a lane's first choice", () => {
   const mounts = loadMounts(".remudero/mounts.yaml");
   const cash = (mounts.capabilities as unknown as Record<string, Record<string, Record<string, string[]>>>).cash;
   let frontierRows = 0;
