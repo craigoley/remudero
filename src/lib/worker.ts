@@ -1110,6 +1110,21 @@ export const DISPATCH_LANE_TOOL_BOUNDS = {
 export const IMPLEMENT_CASH_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"];
 
 /**
+ * W1-T3696 step (2) for the CLAUDE side: implement's declared surface, closing W1-T2591's
+ * unrestricted default on the highest-risk lane. Shape-identical to `alert_fix`/`FIX_WORKER_TOOLS`.
+ *
+ * MEASURED, NOT GUESSED — the three readings are in this change's PR body: implement's rendered
+ * prompt names npm/git/gh and zero web or subagent tools; every bounded BUILD lane already carries
+ * no web access (only review/manual, a different task type, were granted it); and W1-T210 bounded
+ * the fix rung for exactly this reason, so an untrusted prompt payload could not reach the network.
+ * `Task` is dropped deliberately: a subagent multiplies a run's cost with no ceiling.
+ *
+ * THE FALSIFIER NEEDS NO NEW CODE: `WorkerResult.permissionDenials` names a tool a worker asked for
+ * and was refused. Widen this list from a denial that actually happened, never from a worry.
+ */
+export const IMPLEMENT_CLAUDE_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"];
+
+/**
  * Choose implement's tool surface from WHAT IS RUNNING IT (W1-T3696 step 2). A cash-billed mount
  * gets the bounded shell-less surface; every other provider keeps what it has today, `undefined`
  * for unrestricted included.
@@ -1118,7 +1133,12 @@ export function implementToolBound(
   provider: string | undefined,
   fallback: readonly string[] | undefined,
 ): readonly string[] | undefined {
-  return canonicalWorkerProviderId(provider ?? "") === "cash" ? IMPLEMENT_CASH_TOOLS : fallback;
+  if (canonicalWorkerProviderId(provider ?? "") === "cash") return IMPLEMENT_CASH_TOOLS;
+  // `fallback` is the generic-route bound for `review`/`manual` -- a DIFFERENT task type that was
+  // deliberately granted WebSearch+WebFetch. Only the implement lane's own `undefined` (W1-T2591's
+  // unrestricted default) becomes the declared bound here; a lane that already names its tools
+  // keeps them.
+  return fallback ?? IMPLEMENT_CLAUDE_TOOLS;
 }
 
 export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
