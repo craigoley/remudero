@@ -18,6 +18,13 @@ import {
   type SweepPolicy,
 } from "../src/lib/sweep.js";
 
+// EVERY threshold comparison in this suite reads THIS constant, never the wall clock: `deps()`
+// below injects `now: () => NOW`, `selectUpdateBranchTarget` takes it as an explicit argument, and
+// `buildBehindMainByPr` has no clock at all. So the `lastActivityAt` stamps below are aged against
+// a frozen NOW and their age is fixed forever -- which is why each carries an expiring-fixture
+// exemption. MEASURED, not asserted: with the REAL clock forced to 2026-10-01 (past the census's
+// predicted 2026-09-23 red date) this file still runs 8/8, and a probe asserting the unforced date
+// FAILS under the same harness, so the forcing provably reaches the test child process.
 const NOW = Date.parse("2026-09-09T12:00:00Z");
 const RECENT = "2026-09-09T11:00:00Z";
 const POLICY: SweepPolicy = {
@@ -137,7 +144,9 @@ test("a PR at or inside the threshold is not selected", async () => {
 });
 
 test("distance refresh is still bounded to one oldest PR per pass", async () => {
+  // expiring-fixture: exempt -- aged against the frozen NOW above, never Date.now()
   const older = pr({ prNumber: 4804, headSha: "older", lastActivityAt: "2026-09-09T08:00:00Z" });
+  // expiring-fixture: exempt -- aged against the frozen NOW above, never Date.now()
   const younger = pr({ prNumber: 4805, headSha: "younger", lastActivityAt: "2026-09-09T10:00:00Z" });
   const behindMainByPr = new Map([
     [4804, 12],
@@ -242,9 +251,13 @@ test("the production distance reader compares a normalized-clean PR, rather than
 
 test("the production distance reader rotates its bounded direct-compare budget instead of starving later clean PRs", () => {
   const candidates = [
+    // expiring-fixture: exempt -- aged against the frozen NOW above, never Date.now()
     pr({ prNumber: 4820, headSha: "head4820", lastActivityAt: "2026-09-09T08:00:00Z" }),
+    // expiring-fixture: exempt -- aged against the frozen NOW above, never Date.now()
     pr({ prNumber: 4821, headSha: "head4821", lastActivityAt: "2026-09-09T09:00:00Z" }),
+    // expiring-fixture: exempt -- aged against the frozen NOW above, never Date.now()
     pr({ prNumber: 4822, headSha: "head4822", lastActivityAt: "2026-09-09T10:00:00Z" }),
+    // expiring-fixture: exempt -- aged against the frozen NOW above, never Date.now()
     pr({ prNumber: 4823, headSha: "head4823", lastActivityAt: "2026-09-09T11:00:00Z" }),
   ];
   const firstCalls: string[] = [];
