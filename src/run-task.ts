@@ -13,7 +13,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -535,6 +535,7 @@ import {
   type ConsumeSourceSizeFollowupResult,
 } from "./lib/source-size-followup.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
+import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import {
   buildReadyServeServer,
   currentBranch,
@@ -29254,6 +29255,63 @@ export async function upCommand(rest: string[], deps: UpDeps = {}): Promise<numb
 // renderGhBucketsSection) all moved to src/lib/report-commands.ts (W1-T2888) — imported/
 // re-exported below.
 
+/**
+ * W1-T3620 — MEASURED ON THE LIVE DAEMON: `rmd serve` binds its port, then the first
+ * `GET /v1/status` pays `computeBoardSnapshot`'s whole cold projection SYNCHRONOUSLY on the one
+ * event-loop thread (99s on a freshly recycled daemon) — so a just-recycled console accepts
+ * every connection and answers none, board route or otherwise, until that one call returns.
+ *
+ * This gate sits in front of the ALREADY-BUILT server's real request listeners (installed by
+ * {@link serveCommand}, never inside lib/serve.ts/lib/board.ts — this task's declared scope is
+ * `src/run-task.ts` alone). Before the daemon's first board projection has been attempted, a
+ * `GET` to `boardPath` gets an INSTANT, DATED refusal — never a snapshot it cannot date — instead
+ * of ever reaching the real (slow) handler. Every other request (the cheap routes: `/v1/version`,
+ * the GitHub webhook, …) is forwarded unconditionally and untouched, so it never depends on
+ * board readiness at all. `markReady()` is the caller's job (see `serveCommand`'s one-shot
+ * background precompute below) — this gate only decides what to answer while it waits.
+ */
+export interface BoardColdStartGate {
+  /** Wraps the server's real request listener(s): forwards everything except a pre-readiness
+   *  `GET boardPath`, which never reaches `real` at all. */
+  wrap(real: (req: IncomingMessage, res: ServerResponse) => void): (req: IncomingMessage, res: ServerResponse) => void;
+  /** Flips the gate open for good. Idempotent, and never reversed — a projection that existed
+   *  once stays "attempted" even if a later refresh fails (that failure is `github_unreachable`'s
+   *  job to report, not this gate's). */
+  markReady(): void;
+  isReady(): boolean;
+}
+
+export function boardColdStartGate(boardPath: string, now: () => string = () => new Date().toISOString()): BoardColdStartGate {
+  let ready = false;
+  const buildStartedAt = now();
+  return {
+    isReady: () => ready,
+    markReady() {
+      ready = true;
+    },
+    wrap(real) {
+      return (req, res) => {
+        const path = (req.url ?? "").split("?")[0];
+        if (ready || req.method !== "GET" || path !== boardPath) {
+          real(req, res);
+          return;
+        }
+        // NEVER an invented snapshot: explicit, dated, and cheap enough to answer synchronously
+        // without ever touching `computeBoardSnapshot`.
+        res.writeHead(503, { "content-type": "application/json; charset=utf-8", "retry-after": "5" });
+        res.end(
+          JSON.stringify({
+            error: "board_not_ready",
+            message: "the board's first projection has not finished building yet",
+            buildStartedAt,
+            checkedAt: now(),
+          }),
+        );
+      };
+    },
+  };
+}
+
 // ── rmd serve — the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B) ──
 //
 // Real business logic lives entirely in the four already-proven modules lib/serve.ts
@@ -29293,6 +29351,15 @@ export async function serveCommand(
     // W1-T2568: the wake's policy, injectable so a test drives the rung without a plan/policy.yaml
     // on disk — and so this read has a seam, which every other policy read in src/ already has.
     policy?: Policy;
+    // W1-T3620: the SAME injectable-seam shape as `buildBatchedGithub` above — real callers omit
+    // it and get the real (possibly-99s, synchronous) `computeBoardSnapshot`; a test supplies an
+    // async fake gated on a promise it controls, so the cold-start gate's refusal window is
+    // observed deterministically over a REAL bound port, never via a real 99s wait or a
+    // busy-block that would just move the same unobservability into the test. `void | Promise`
+    // (not `typeof computeBoardSnapshot`'s bare `void`) is deliberate: it is ALSO the seam a
+    // future worker-thread offload of the derivation itself (recon's own flagged follow-up) can
+    // fill without touching this call site again.
+    buildInitialBoardSnapshot?: (deps: BoardDeps) => void | Promise<void>;
   } = {},
 ): Promise<number> {
   // `--host` was documented in USAGE and read by resolveServeHosts, but was NOT in this
@@ -29447,20 +29514,31 @@ export async function serveCommand(
     log("serve.feedback_expander_unavailable", { error: String((e as Error)?.message ?? e) });
   }
 
+  // `inflightHolder` wires deriveStatus's THIRD liveness disjunct (lib/status.ts) to the real
+  // lock directory — the same `<config.root>/state/inflight` path `acquireInflightLock` writes
+  // and the sweep rung reaps, never a second notion of where locks live. Without this the
+  // console keeps the pre-existing two-disjunct behaviour, so this line IS the wiring: a
+  // genuinely-live run that has been quiet longer than the 30-minute ledger bound renders as
+  // running here and as nothing without it. `isPidAlive` is left to its `defaultIsPidAlive`
+  // default; only tests override it.
+  // W1-T3620: pulled out to a variable (byte-identical to the inline literal this replaces) so
+  // the SAME deps back both the real board route below AND the one-shot background precompute
+  // that this task adds — one `boardGithub`/`plan`/`ledgerPath` triple, never two independently
+  // constructed ones that could drift.
+  const boardDeps: BoardDeps = {
+    plan,
+    ledgerPath,
+    github: boardGithub,
+    inflightHolder: (taskId) => readInflightLock(join(config.root, "state", "inflight"), taskId),
+  };
+
   // W1-T2838: do not bind until Serve's OWN first App-token mint settles. The refresher's
   // `ready` promise is fail-open and always settles, so an exchange outage still starts the
   // console in an honestly degraded state instead of racing the first board read with an empty
   // GH_TOKEN.
   const server = await buildReadyServeServer({
     boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
-    // `inflightHolder` wires deriveStatus's THIRD liveness disjunct (lib/status.ts) to the real
-    // lock directory — the same `<config.root>/state/inflight` path `acquireInflightLock` writes
-    // and the sweep rung reaps, never a second notion of where locks live. Without this the
-    // console keeps the pre-existing two-disjunct behaviour, so this line IS the wiring: a
-    // genuinely-live run that has been quiet longer than the 30-minute ledger bound renders as
-    // running here and as nothing without it. `isPidAlive` is left to its `defaultIsPidAlive`
-    // default; only tests override it.
-    board: { plan, ledgerPath, github: boardGithub, inflightHolder: (taskId) => readInflightLock(join(config.root, "state", "inflight"), taskId) },
+    board: boardDeps,
     // panel-graph.ts reloads plan/tasks.yaml fresh on every GET /v1/trace (its own header) --
     // planPath alone is enough, no snapshot needed here the way board.ts's does.
     // `statusGithub` backs GET /v1/drain/preview's (W1-T140) merged-set derivation --
@@ -29517,6 +29595,20 @@ export async function serveCommand(
     },
   });
 
+  // W1-T3620: install the cold-start gate BEFORE any interface binds, so no request can reach
+  // the real (possibly 99s-cold) board handler ungated. `server.listeners("request")` is looked
+  // up fresh by the mirror-forwarding closures below on every request they receive, so replacing
+  // it here — before the bind loop — is enough for every bound interface, not just the primary.
+  const boardGate = boardColdStartGate("/v1/status");
+  const realRequestListeners = server.listeners("request") as Array<(req: IncomingMessage, res: ServerResponse) => void>;
+  server.removeAllListeners("request");
+  server.on(
+    "request",
+    boardGate.wrap((req, res) => {
+      for (const l of realRequestListeners) l(req, res);
+    }),
+  );
+
   // BIND EACH NAMED INTERFACE — never the wildcard. `listen(port)` alone defaults to `::`
   // (every interface) while the banner printed "localhost", so the surface was wide open and
   // the log said otherwise. But a SINGLE named host is not enough either: binding only the
@@ -29565,6 +29657,37 @@ export async function serveCommand(
   }
 
   log("serve.start", { port, hosts, repo: `${self.owner}/${self.repo}` });
+
+  // W1-T3620: THE ONE BACKGROUND BUILD, off the request path (design note (b)) — scheduled here,
+  // AFTER a successful bind, never before: this exact construction, scheduled unconditionally
+  // right after `buildReadyServeServer` returned, once cost a bind-FAILURE path (a held port,
+  // `listenWithReapWait` giving up above and returning 1 without ever accepting a connection) a
+  // full ~99s of wasted GitHub calls it had no reason to make — MEASURED, a "held port" test that
+  // finishes in <1s baseline took 114s with that ordering. Scheduled on the next tick so it never
+  // delays the banner below, and never re-run — a client's own request never triggers or waits on
+  // it (see `BoardColdStartGate`'s own doc). It shares `boardGithub` with the real route (board:
+  // boardDeps above), so the real route's OWN first call, once this unblocks it, reuses this
+  // call's warm gateway memos (index, changedFiles, reviewState) instead of re-paying the cold
+  // GitHub walk a second time.
+  // `finally` flips the gate open on EITHER outcome: W1-T3620's design note treats "attempted"
+  // (success OR failure) as "the projection existed" — a thrown/failed first pass must not wedge
+  // the board route in "not ready" forever when a real request would hit the identical failure
+  // and report it honestly (`github_unreachable`) instead.
+  const buildInitialBoardSnapshot = deps.buildInitialBoardSnapshot ?? ((d: BoardDeps) => void computeBoardSnapshot(d));
+  setImmediate(() => {
+    log("serve.board_precompute_started", {});
+    void (async () => {
+      try {
+        await buildInitialBoardSnapshot(boardDeps);
+        log("serve.board_precompute_done", {});
+      } catch (e) {
+        log("serve.board_precompute_failed", { error: String((e as Error)?.message ?? e) });
+      } finally {
+        boardGate.markReady();
+      }
+    })();
+  });
+
   // THE PRINTED URL CARRIES THE READ TOKEN ONLY, and the write token is never echoed at all.
   // These lines are the operator's console bookmark, and under the real launch stdout is
   // redirected to serve.log — so whatever is printed here is written to disk in the clear and
