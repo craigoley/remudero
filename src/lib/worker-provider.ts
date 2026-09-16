@@ -1086,8 +1086,24 @@ interface CodexRuntimeReading {
 
 interface CodexRuntimeFailure extends ProviderCapacity {
   /** Internal retry classification; stripped before a capacity leaves this module. */
-  failureKind: "timeout" | "terminal";
+  failureKind: "timeout" | "terminal" | "starved";
 }
+
+/**
+ * How late a deadline may fire before it is read as THIS PROCESS stalling rather than the
+ * app-server being slow. A healthy loop delivers a timer within milliseconds of its deadline.
+ *
+ * WHY THE DISTINCTION IS LOAD-BEARING (W1-T3690). Node runs timers in the timers phase, which
+ * precedes the poll phase that delivers a child's stdout. If the main thread is blocked when the
+ * deadline passes, the timer callback runs on the NEXT free tick BEFORE any queued stdout is
+ * read -- so a child that answered in 300ms is recorded as "timed out after 10000ms; unfinished:
+ * initialize". MEASURED on the fleet 2026-09-16 inside the daemon's own container: a free loop
+ * replies in 366ms; a loop blocked 12s produces that exact string with a WALL TIME of 12000ms
+ * against a 10000ms deadline. The overrun is the only signal that separates the two, and the
+ * consequence of confusing them is severe: codex reads unreadable, the capacity auction gives it
+ * zero allocation, and every lane silently migrates onto the Claude subscription.
+ */
+const CODEX_DEADLINE_OVERRUN_MS = 1_000;
 
 type CodexRuntimeResult = CodexRuntimeReading | CodexRuntimeFailure;
 
@@ -1144,10 +1160,14 @@ export async function readCodexRuntime(
   deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & {
     signal?: AbortSignal;
     onHedgeEligibility?: (eligible: boolean) => void;
+    /** Real-time source for the deadline-overrun check. Injected ONLY by tests: a fake clock in
+     *  production would defeat the very stall this measurement exists to detect. */
+    monotonicNow?: () => number;
   },
 ): Promise<CodexRuntimeResult> {
   const spawn = deps.spawn ?? ((command, args, options) => spawnChild(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
   const timeoutMs = deps.timeoutMs ?? 10_000;
+  const monotonicNow = deps.monotonicNow ?? Date.now;
   let child: ChildProcessWithoutNullStreams;
   try {
     child = spawn(bin, ["app-server", "--listen", "stdio://"], { env: codexControlEnv(config) });
@@ -1182,8 +1202,21 @@ export async function readCodexRuntime(
       if (!modelsReceived) pending.push("model/list");
       return pending;
     };
+    const deadlineSetAt = monotonicNow();
     const timer = setTimeout(() => {
       const malformed = malformedStdoutLines > 0 ? `; malformed app-server stdout: ${malformedStdoutLines} line(s)` : "";
+      // THE DEADLINE OVERRAN => WE STALLED, NOT THE APP-SERVER. See CODEX_DEADLINE_OVERRUN_MS.
+      // The child's reply may be sitting unread in the poll queue right now; this exchange
+      // observed nothing about Codex and must not be reported as evidence against it.
+      const elapsedMs = monotonicNow() - deadlineSetAt;
+      if (malformedStdoutLines === 0 && elapsedMs >= timeoutMs + CODEX_DEADLINE_OVERRUN_MS) {
+        finish(codexRuntimeFailure(
+          `app-server deadline overran: ${timeoutMs}ms budget fired after ${elapsedMs}ms, so this process was stalled ` +
+            `and the child was never given a readable turn; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
+          "starved",
+        ));
+        return;
+      }
       finish(codexRuntimeFailure(
         `app-server timed out after ${timeoutMs}ms${malformed}; unfinished: ${unfinishedPhases().join(", ") || "response validation"}`,
         // Protocol noise is not the fleet-observed transient RPC stall and must not be retried.
@@ -1433,9 +1466,15 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     }
   }
   if ("provider" in value) {
-    const { failureKind: _failureKind, ...capacity } = value;
+    const { failureKind, ...capacity } = value;
     codexCapacityCache.delete(cacheKey);
-    if (!deps.forceRefresh) codexCapacityFailureCache.set(cacheKey, { at: now(), value: capacity });
+    // A STARVED READ IS NOT EVIDENCE ABOUT CODEX, so it must not buy a failure backoff. Caching it
+    // would suppress the next read for up to CODEX_CAPACITY_FAILURE_BACKOFF_MAX_MS on the strength
+    // of an exchange that observed nothing -- turning one blocked tick into a window in which the
+    // provider is declared unreadable and every lane routes to the subscription instead.
+    if (!deps.forceRefresh && failureKind !== "starved") {
+      codexCapacityFailureCache.set(cacheKey, { at: now(), value: capacity });
+    }
     return capacity;
   }
   codexCapacityCache.set(cacheKey, { at: now(), value });
