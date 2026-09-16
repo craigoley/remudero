@@ -13,8 +13,8 @@
  * every PR's required `ci` failed until a human renumbered the loser. Second time in nine days.
  *
  * THE SUBJECT IS THE ARGUMENT CONTRACT, driven as a pure decision rather than by pushing refs to a
- * real origin: `reservingByDefault` is the predicate the command applies, and `validateReserveArgs`
- * is the refusal it applies first.
+ * real origin: `reservingFor` is the predicate the command applies, and `validateReserveArgs` is
+ * the refusal it applies first.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -22,33 +22,31 @@ import { test } from "node:test";
 import { nextTaskIdCommand, validateReserveArgs } from "../src/run-task.js";
 import type { RemoteRefReserver, RemoteReserveOutcome } from "../src/lib/task-id-reservation.js";
 
-const CLI_SOURCE = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
 const DOCS = readFileSync(new URL("../docs/cli-reference.md", import.meta.url), "utf8");
 
-/** The predicate the command computes, read from the committed source so the test cannot drift. */
+/** The predicate this file models the command by, for the cheap synchronous checks below. Every
+ *  claim it makes is also proven against the REAL command in the "DRIVING THE REAL COMMAND"
+ *  section further down — behaviour, not a second reading of the committed source (W1-T2905's
+ *  source-text-assertion census: a test that reads src/ as text passes on right prose and wrong
+ *  behaviour, so the model here is checked by calling the command, never by regexing its file). */
 function reservingFor(rest: string[]): boolean {
   return !rest.includes("--no-reserve") && !rest.includes("--offline") && !rest.includes("--audit");
 }
 
-test("a bare mint claims the id rather than printing a number anyone may take", () => {
+test("a bare mint claims the id rather than printing a number anyone may take", async () => {
   // THE WHOLE POINT. Before this task a bare invocation reserved nothing.
   assert.equal(reservingFor([]), true, "a bare mint must CLAIM");
 
-  // And the committed source must actually compute it that way — not merely this test's model.
-  assert.match(
-    CLI_SOURCE,
-    /const reserving = !rest\.includes\("--no-reserve"\) && !offline && !rest\.includes\("--audit"\);/,
-    "the command must reserve by default, with the opt-outs named",
-  );
-  assert.doesNotMatch(
-    CLI_SOURCE,
-    /const reserving = rest\.includes\("--reserve"\);/,
-    "the old opt-IN default must be gone, or a bare mint still claims nothing",
-  );
+  // And the REAL command must actually compute it that way — not merely this test's model. Driven
+  // rather than read as text: {@link run} below spawns `nextTaskIdCommand` itself.
+  const bare = await run([]);
+  assert.ok(bare.tried.length > 0, "the command must reserve by default: a bare mint reaches the reserver");
 
   // The opt-out works, and `--reserve` stays valid and redundant so existing callers are unbroken.
   assert.equal(reservingFor(["--no-reserve"]), false, "--no-reserve must opt out");
   assert.equal(reservingFor(["--reserve"]), true, "--reserve remains valid and redundant");
+  const optOut = await run(["--no-reserve"]);
+  assert.deepEqual(optOut.tried, [], "the old opt-IN default must be gone, or a bare mint still claims nothing");
 });
 
 test("an offline mint declines to claim rather than refusing the invocation", () => {
@@ -83,13 +81,16 @@ test("the opt-out is named in the command's own syntax rather than only in prose
     /rmd next-task-id \[--plan <path>\] \[--offline\] \[--no-reserve\]/,
     "and it must appear in the SYNOPSIS, not only in the prose below it",
   );
-  assert.match(CLI_SOURCE, /"--no-reserve"/, "the flag must be a known argument, or it errors as unknown");
+  // `--no-reserve` being a KNOWN argument (rather than erroring as unknown) is proven behaviourally
+  // by "EXECUTED: a bare mint reaches the reserver, and --no-reserve does not" below: an unknown
+  // flag would print the usage refusal instead of an id, which that test's own assertion excludes.
 });
 
 // ── DRIVING THE REAL COMMAND ──────────────────────────────────────────────────────────────────
-// The assertions above read the committed source, which proves the DEFAULT is written as intended
-// but never EXECUTES the branch that applies it. These run `nextTaskIdCommand` itself with an
-// injected reserver, so "claims" and "claims nothing" are observed rather than inferred.
+// The tests above model the argument contract and check it against the REAL command by calling
+// `run()` (defined below), never by reading the committed source as text. The tests below drive
+// `nextTaskIdCommand` itself with an injected reserver for the remaining arms, so "claims" and
+// "claims nothing" are observed rather than inferred.
 
 function stubReserver(): RemoteRefReserver & { tried: string[] } {
   const tried: string[] = [];
