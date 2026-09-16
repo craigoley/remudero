@@ -1464,6 +1464,7 @@ export function buildSweepEffects(
     reclaimWorkerImpl: (info) => reclaimAbandonedWorker(info, { log: deps.log }),
     registeredWorktreeOwnerImpl: registeredFixWorktreeOwner,
     reviewCommandImpl: reviewerCodeGate.call,
+    reviewerCodeStaleThisPassImpl: reviewerCodeGate.staleThisPass,
     stallNotice: escalatePostReviewStall,
     registeredOwnerRecovery: {
       capture: captureRegisteredFixOwnerSnapshot,
@@ -1504,10 +1505,10 @@ export function buildSweepEffects(
     defaultBudgetUsd: DEFAULT_BUDGET_USD,
     ...libDeps,
   });
-  return {
-    ...effects,
-    reviewerCodeStaleThisPass: reviewerCodeGate.staleThisPass,
-  };
+  // W1-T2890 holds this surface key-identical to the lib-built one, so the accessor is INJECTED
+  // above rather than bolted on here: returning the lib's object unchanged makes that identity
+  // structural instead of something a future edit has to remember to mirror.
+  return effects;
 }
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { applyCorrection } from "./lib/correct.js";

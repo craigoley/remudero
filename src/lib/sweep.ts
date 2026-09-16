@@ -653,6 +653,12 @@ export interface BuildSweepEffectsDeps {
    *  overriding `reviewRunner` replaces the default outright and leaves its opt-in untested, while
    *  this seam keeps the default arm itself — the one that names `executionMode: "semantic"` — as
    *  the code under test. Omitted, it is `reviewCommand`. */
+  /** W1-T3618 — reads back whether THIS build's reviewer-code freshness gate saw a stale reading
+   *  during the pass. The gate itself lives in the entrypoint adapter (it wraps `reviewCommandImpl`
+   *  above), so the reading is injected here rather than computed: the lib exposes it because
+   *  W1-T2890 holds the lib-built and entrypoint-built effect surfaces key-identical, and a member
+   *  present on one but not the other is exactly the drift that test exists to catch. */
+  reviewerCodeStaleThisPassImpl?: () => { oldSha: string; newSha: string } | undefined;
   reviewCommandImpl?: (
     pr: string,
     args: string[],
@@ -943,7 +949,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "rebaseDirtyFleetBranch"
   | "selectAdaptiveReviewWidth"
   | "repairMissingTaskTrailer"
-> {
+> & {
+  /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
+   *  this builder's own return, not an effect the sweep invokes. */
+  reviewerCodeStaleThisPass: () => { oldSha: string; newSha: string } | undefined;
+} {
   const {
     owner,
     repo,
@@ -974,6 +984,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fetchWorkflowRunObservationsImpl: fetchWorkflowRunObservationsForBuild = fetchWorkflowRunObservations,
     registeredWorktreeOwnerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["registeredWorktreeOwnerImpl"]>>("registeredWorktreeOwnerImpl"),
     reviewCommandImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reviewCommandImpl"]>>("reviewCommandImpl"),
+    reviewerCodeStaleThisPassImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reviewerCodeStaleThisPassImpl"]>>("reviewerCodeStaleThisPassImpl"),
     registeredOwnerRecovery = {
       capture: requiredSweepRuntime("registeredOwnerRecovery.capture"),
       remove: requiredSweepRuntime("registeredOwnerRecovery.remove"),
@@ -1137,6 +1148,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
 
   return {
+    // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
+    // effect surfaces stay key-identical (W1-T2890).
+    reviewerCodeStaleThisPass: reviewerCodeStaleThisPassImpl,
     // W1-T2853: one controller instance is retained per config root by review-capacity.ts, while
     // each pass supplies its already-read ledger snapshot. Host observation is local, provider
     // capacity comes only from the existing age-bounded status file, and all worker kinds count
