@@ -34,7 +34,8 @@ import {
   spawnWorker,
 } from "../src/lib/worker.js";
 import { outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
-import { commitWorkerEdits } from "../src/run-task.js";
+import { commitWorkerEdits, implementPromptParts, renderImplementPrompt, renderImplementPromptWithParts } from "../src/run-task.js";
+import type { Task } from "../src/lib/plan.js";
 // The SHARED builder, not a hand-rolled `git init`: test/fixture-copy-census.test.ts holds the
 // population of files that shell git themselves at a baseline, and one more copy of this fixture
 // is exactly what it exists to refuse.
@@ -71,6 +72,50 @@ test("a worker with no shell is told the harness commits, and told not to run gi
   const task = { id: "W1-T1", title: "t", prompt: "do it", acceptance: [] };
   assert.match(renderAnchorBlock(task, "run-1", "", true), /Do NOT run git or gh/);
   assert.doesNotMatch(renderAnchorBlock(task, "run-1", "", false), /Do NOT run git or gh/);
+});
+
+test("the flag reaches the rendered prompt through every layer between run-task.ts and outputContractLines", () => {
+  // BEHAVIOURAL, NOT A MENTION. `harnessCommits` is the LAST positional argument on all three of
+  // `implementPromptParts`, `renderImplementPromptWithParts` and `renderImplementPrompt` — proving
+  // it actually reaches `outputContractLines` (asserted directly above) requires driving those
+  // three call sites themselves, or a caller could add the parameter and forget to pass it down.
+  const task: Task = {
+    id: "W1-T3696",
+    title: "t",
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    risk: "high",
+    verify: "auto",
+    status: "queued",
+    attempts: 0,
+    prompt: "do it",
+  };
+
+  // implementPromptParts itself carries no NAMED context part for this flag — it exists only to
+  // steer the trailing contract lines — so the parts array must stay identical either way. A
+  // regression that added a part here (rather than plumbing the flag through) would show up as a
+  // deepEqual failure, not a silent extra row.
+  const partsShell = implementPromptParts(task, "recon", "run-1", "learnings", "notes");
+  const partsHarness = implementPromptParts(task, "recon", "run-1", "learnings", "notes", "", "", true);
+  assert.deepEqual(partsHarness, partsShell, "the flag steers the trailing contract, not the CONTEXT parts");
+
+  // renderImplementPromptWithParts: the SAME parts, a DIFFERENT trailing contract.
+  const withParts = renderImplementPromptWithParts(task, "recon", "run-1", "learnings", "notes", "", "", true);
+  assert.deepEqual(withParts.parts, partsHarness);
+  assert.match(withParts.prompt, /Do NOT run git or gh/);
+  assert.doesNotMatch(withParts.prompt, /LAST line is exactly: PR_URL/);
+
+  // renderImplementPrompt (the `.prompt`-only caller run-task.ts's initial spawn actually uses):
+  // the harness-owned contract only appears when the flag is true, and the two renders otherwise
+  // agree everywhere except that trailing contract.
+  const shellPrompt = renderImplementPrompt(task, "recon", "run-1", "learnings", "notes");
+  const harnessPrompt = renderImplementPrompt(task, "recon", "run-1", "learnings", "notes", "", "", true);
+  assert.notEqual(harnessPrompt, shellPrompt, "the flag must move at least one byte of the rendered prompt");
+  assert.doesNotMatch(shellPrompt, /Do NOT run git or gh/);
+  assert.match(shellPrompt, /LAST line is exactly: PR_URL/);
+  assert.match(harnessPrompt, /Do NOT run git or gh/);
+  assert.doesNotMatch(harnessPrompt, /LAST line is exactly: PR_URL/);
 });
 
 test("the commit subject is the worker's, and an unusable one is refused rather than invented", () => {
