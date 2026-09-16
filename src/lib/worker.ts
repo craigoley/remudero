@@ -1770,7 +1770,19 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }
     // This lookup is the provider's authority: a Claude mount model/effort resolves through the
     // capability table. No capacity record exists or is fabricated for a cash-billed endpoint.
-    const openWeight = selectOpenWeightModel(capabilities, args.model, args.effort);
+    //
+    // THE PROMPT'S SIZE IS PART OF THAT AUTHORITY (W1-T3619). Passing it here is what lets the
+    // selector skip a deployment whose context window cannot hold the request, instead of paying a
+    // full reservation to be told so by an HTTP 400. The prompt is the dominant term in the request
+    // body -- the tool schemas and the output contract add a bounded preamble -- and the estimate
+    // deliberately OVER-states tokens, so using it rather than the fully serialized body can only
+    // make the gate stricter.
+    const openWeight = selectOpenWeightModel(
+      capabilities,
+      args.model,
+      args.effort,
+      Buffer.byteLength(args.prompt ?? "", "utf8"),
+    );
     const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
       provider: "openweight",
       model: openWeight.model,

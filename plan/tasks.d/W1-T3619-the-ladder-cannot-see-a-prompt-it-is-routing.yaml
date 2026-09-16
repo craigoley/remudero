@@ -5,10 +5,11 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
   budget_usd: 25.00
   files: [src/lib/worker-provider.ts, test/an-open-weight-provider-rides-the-capability-ladder.test.ts]
   origin: oper#smart-routing-audit-2026-09-15
+  band_meaning: blast-radius
   plan_refs: ["W1-T3546", "W1-T3569", "W1-T3575", "W1-T3613"]
   status: queued
   attempts: 0
@@ -74,5 +75,5 @@
       proof: "unit test: openweight selection picks the cheapest deployment whose window holds the request"
     - claim: "a request no listed deployment can hold is refused BEFORE it reserves, so an impossible request costs nothing against the daily cap instead of a full inflated reservation"
       proof: "unit test: a request larger than every context window refuses before it reserves"
-    - claim: "the byte-length input bound is unchanged, because it is correct and must not be divided down"
-      proof: "grep: no tokenizer emits more tokens than the UTF-8 bytes in src/lib/worker-provider.ts"
+    - claim: "the reservation still prices input by BYTE length and is never computed from the router's token estimate, so the fit gate's approximation cannot leak into the cash cap"
+      proof: "unit test: the openweight reservation still bounds input by byte length"
