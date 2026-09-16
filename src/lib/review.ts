@@ -3149,6 +3149,20 @@ export function recognizeChangesetClaims(report: string, diffFiles: string[]): C
     // never anchored and fired six times in one day on prose whose subject was not the changeset: "This change
     // introduces no code duplication anywhere" produced `claim: "no code"` against any source-touching diff, in a
     // repo that runs a jscpd duplication gate.
+    // W1-T3708: THE QUOTATION CHECK COMES FIRST, exactly as the count arm's own comment says of
+    // itself -- "no amount of surrounding changeset context turns a quotation into an assertion".
+    // Arm (a) reaches this through claimsChangesetContext and the plan-only/data-only shorthands
+    // through shorthandIsAboutChangeset; THIS arm had only the forward anchor below, so a body
+    // that did exactly what the refusal text instructs ("backtick a mention to quote it") was
+    // refused again. MEASURED 2026-09-16: #5792 looped twice with its body edited to
+    // `no code changed` in between, and #5785 the same. `stripQuotedRegions` above removes FENCES
+    // and BLOCKQUOTES; this is the INLINE sibling (W1-T2534) and nothing else supplies it.
+    //
+    // A QUOTED MENTION IS NOT A RECOGNISED CLAIM, so this returns before `recognisedCount++`
+    // below: that counter separates "read a claim and it agreed" from "never read a claim", and a
+    // quotation is the second. An UNQUOTED absence claim is untouched -- the forward anchor still
+    // decides it, and W1-T274's refusal for #1025's "data-only: no code" over 8 files stands.
+    if (isInsideInlineQuote(scan, m.index ?? 0)) continue;
     if (!noClaimIsAboutChangeset(scan.slice((m.index ?? 0) + m[0].length))) continue;
     let violators: string[];
     if (token.toLowerCase() === "code") {
