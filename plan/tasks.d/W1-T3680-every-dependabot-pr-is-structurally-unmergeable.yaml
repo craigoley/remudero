@@ -10,6 +10,7 @@
   budget_usd: 6.00
   files:
     - scripts/head-identity-gate.mjs
+    - test/a-dependabot-head-is-identified-without-a-task.test.ts
   origin: "operator-session#dependabot-triage-2026-09-16"
   plan_refs: ["W1-T1004"]
   status: queued
