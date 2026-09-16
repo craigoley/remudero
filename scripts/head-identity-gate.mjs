@@ -216,9 +216,15 @@ export function readHeadCommitMessage(worktreePath) {
  * @param {typeof git} [run] Seam for tests — defaults to the real runner, the same shape
  *   `changedPathsAtRange` (scripts/acceptance-author-gate.mjs) already uses for its own `git`.
  */
-export function changedPathsAtHead(worktreePath, baseRef = process.env.GITHUB_BASE_REF, run = git) {
-  if (!baseRef || baseRef.length === 0) return undefined;
-  const mergeBase = run(["merge-base", `origin/${baseRef}`, "HEAD"], { cwd: worktreePath });
+export function changedPathsAtHead(worktreePath, baseRef, run = git, env = process.env) {
+  // THE ENV FALLBACK IS RESOLVED IN THE BODY, NOT IN A DEFAULT PARAMETER. A JS default fires on
+  // `undefined`, so `changedPathsAtHead(w, undefined, run)` silently picked up $GITHUB_BASE_REF --
+  // which is UNSET on a dev machine and SET on every pull_request runner. The no-base-ref test
+  // therefore passed locally and failed only in CI, which is the least useful place to find out.
+  // Injecting `env` lets a caller ask the question without the ambient answer.
+  const ref = baseRef ?? env.GITHUB_BASE_REF;
+  if (!ref || ref.length === 0) return undefined;
+  const mergeBase = run(["merge-base", `origin/${ref}`, "HEAD"], { cwd: worktreePath });
   if (mergeBase.error || mergeBase.status !== 0) return undefined;
   const base = mergeBase.stdout.trim();
   if (base === "") return undefined;

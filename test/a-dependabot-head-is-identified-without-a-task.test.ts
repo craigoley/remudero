@@ -208,7 +208,9 @@ test("changedPathsAtHead reads the merge-base diff and de-duplicates it", () => 
 test("changedPathsAtHead returns undefined with no base ref, without running git", () => {
   for (const baseRef of [undefined, ""]) {
     const { run, calls } = fakeGit([]);
-    assert.equal(changedPathsAtHead("/w", baseRef, run), undefined);
+    // `{}` for env: the point is that NO base ref is available, and a runner's ambient
+    // $GITHUB_BASE_REF must not answer the question on the caller's behalf.
+    assert.equal(changedPathsAtHead("/w", baseRef, run, {}), undefined);
     assert.equal(calls.length, 0, "a missing base ref must not spawn git at all");
   }
 });
