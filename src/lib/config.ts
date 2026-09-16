@@ -147,8 +147,31 @@ export function workerModel(config: Config): string {
  * `opus`. Retro/triage/inbox-draft each resolve through their own `synthesis.<role>` row
  * instead — see {@link synthesisModel}.
  */
-export function architectModel(config: Config, mounts?: { architect: { model: string } }): string {
+export function architectModel(
+  config: Config,
+  mounts?: { architect: { model: string; squeezeModel?: string } },
+  opts: { squeezed?: boolean } = {},
+): string {
+  // SUBSCRIPTION FIRST, ALWAYS. `squeezed` is true only when the seat's ordinary
+  // provider has NO readable headroom, so the fallback is never preferred, never cheaper-first,
+  // and never consulted while the primary can run. Absent a declared fallback this returns the
+  // primary exactly as it always has, so a table that declares none behaves identically.
+  //
+  // The fallback is safe to select because the table could not have LOADED unless it also cleared
+  // the Tier Invariant (mounts.ts takes the MINIMUM of a seat and its fallback): a squeeze may
+  // change which model holds the seat, never whether the seat outranks its workers.
+  if (opts.squeezed === true && mounts?.architect.squeezeModel !== undefined) return mounts.architect.squeezeModel;
   return mounts?.architect.model ?? config.architectModel ?? "opus";
+}
+
+/** the Judge's seat under the same rule as {@link architectModel}. Separate entity,
+ *  separate mount, same subscription-first contract. */
+export function judgeModel(
+  mounts: { judge: { model: string; squeezeModel?: string } },
+  opts: { squeezed?: boolean } = {},
+): string {
+  if (opts.squeezed === true && mounts.judge.squeezeModel !== undefined) return mounts.judge.squeezeModel;
+  return mounts.judge.model;
 }
 
 /** The three synthesis rungs (W1-T2559). Re-declared structurally here to avoid a config↔mounts
