@@ -41,7 +41,8 @@
   origin: architect
   plan_refs: ["§7"]
   files: [src/lib/board.ts, src/lib/console-freshness.ts, src/lib/serve.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: "The header's honesty is a TRUST surface — a console that contradicts itself teaches the operator to
     distrust ALL of it. The fix pushes each honesty decision to a place it can be unit-pinned (board.ts snapshot,

@@ -32,7 +32,8 @@
   origin: architect
   plan_refs: ["§7B", "§7"]
   files: [src/lib/serve.ts, test/serve.change-management.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: |
     Ratifies W1-T3186 clause (iii). Sibling of W1-T3395 — together they exhaust W1-T3394's classifier output
