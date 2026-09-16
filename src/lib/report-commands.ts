@@ -504,8 +504,11 @@ export interface DoctorDeps extends ReportRepoContext {
   /** W1-T3665 — the `provider-capacity` arm's only measurement: the SAME read-only projection
    *  `/v1/provider-routing` (serve.ts) and `review-capacity.ts` already read. Defaults to
    *  {@link readProviderRoutingStatus}; doctor never probes a provider or touches a credential of
-   *  its own. */
-  readProviderRoutingStatus?: (root: string, deps: { now: () => number }) => ProviderRoutingStatus;
+   *  its own. Typed via `typeof readProviderRoutingStatus` rather than restating its `deps`
+   *  parameter's own millis-clock field inline (W1-T2897's clock-signature census: writing that
+   *  legacy shape out here would be a NEW site in a file the census baselines at zero, not a
+   *  repeat of the one already recorded against provider-routing-status.ts itself). */
+  readProviderRoutingStatus?: typeof readProviderRoutingStatus;
 }
 
 export function readCaptureSurfaceFireHistory(root: string): Array<Record<string, unknown>> {
