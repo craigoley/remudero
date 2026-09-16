@@ -718,15 +718,24 @@ export function openWeightEstimatedTokens(requestBodyBytes: number): number {
 }
 
 /** Raised INSTEAD of selecting a deployment that cannot hold the request. Thrown before any
- *  reservation exists, so an impossible request costs nothing against the daily cap. */
+ *  reservation exists, so an impossible request costs nothing against the daily cap.
+ *
+ *  NAMES BOTH FIGURES (W1-T3613): the request's own estimated size, and every considered
+ *  deployment's declared context window. A message that named only "no deployment fits" would
+ *  send an operator back to the source to learn WHY -- the gap this refusal exists to surface
+ *  should be readable from the error text alone. */
 export class OpenWeightRequestTooLargeError extends RmdError {
   readonly estimatedTokens: number;
   constructor(detail: { estimatedTokens: number; capability: string; considered: readonly string[] }) {
+    const consideredWithWindows = detail.considered.map((id) => {
+      const window = OPENWEIGHT_CONTEXT_WINDOWS[id];
+      return window ? `${id} (context window ${window.totalTokens})` : `${id} (no declared context window)`;
+    });
     super(
       "usage",
       1,
       `openweight request is ~${detail.estimatedTokens} tokens and no '${detail.capability}' deployment can hold it ` +
-        `(considered: ${detail.considered.join(", ") || "none"}). Refusing before the request reserves, so it costs nothing. ` +
+        `(considered: ${consideredWithWindows.join(", ") || "none"}). Refusing before the request reserves, so it costs nothing. ` +
         `Shrink the prompt or declare a deployment with a larger context window.`,
       { estimatedTokens: detail.estimatedTokens, capability: detail.capability, considered: [...detail.considered] },
     );
