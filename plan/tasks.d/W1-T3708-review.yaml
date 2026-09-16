@@ -1,0 +1,105 @@
+- id: W1-T3708
+  title: "THE REFUSAL NAMES A REMEDY THAT DOES NOT WORK — 'backtick a mention to quote it' is honoured by the count arm and the house shorthands but NOT by the `no <path>` arm, so a body that does exactly what the message says is refused again, and two pull requests are looping on it right now"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 10.00
+  files:
+    - src/lib/review.ts
+    - test/an-inline-quoted-absence-claim-is-a-mention.test.ts
+  origin: "operator-session#two-prs-looping-on-a-remedy-that-does-not-work-2026-09-16"
+  plan_refs: ["W1-T2534", "W1-T274", "W1-T308"]
+  status: queued
+  priority: 1
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16 by calling the real recogniser on the real bodies, at origin/main:
+
+      recognizeChangesetClaims(#5792 body, its 3 files)  ->  contradictions: 1, claim "no code"
+      recognizeChangesetClaims(#5785 body, its 5 files)  ->  contradictions: 1, claim "no code"
+
+    AND THE ESCAPE SAYS THE OPPOSITE FOR THE SAME INDEX. #5792's only match sits inside a code span:
+
+      Reverted -- for that dead branch specifically, `no code changed`; the diff this PR ...
+                                                     ^ match, with ONE backtick before it on the line
+
+    `isInsideInlineQuote` counts delimiters from line start and returns TRUE (odd). The recogniser
+    fires anyway.
+
+    THE LOOP IS REAL AND IT IS ON THE BOARD:
+
+      20:36:56  FAIL -- body contradicts its own diff: claimed "No code" (backtick a mention to quote it)
+      20:42:31  body edited to `no code changed` -- EXACTLY what the refusal instructs
+      20:51:25  FAIL -- body contradicts its own diff: claimed "no code"
+
+    The operator then applied the same remedy to #5785 and reported it fixed; re-measuring shows it
+    was not. Each cycle spends a review, and review is the fleet's measured constraint (~7/hour).
+  rationale: |
+    THE ESCAPE EXISTS AND TWO OF THREE ARMS USE IT. `recognizeChangesetClaims` has three claim arms:
+
+      (a) "exactly N files"      -> claimsChangesetContext, which calls isInsideInlineQuote FIRST
+      (b) "no <path>" / "no code" -> noClaimIsAboutChangeset, a FORWARD anchor only
+      (c) plan-only / data-only   -> shorthandIsAboutChangeset
+
+    Only (b) never consults the inline-quote escape. `stripQuotedRegions` runs over all three, but
+    it strips FENCES AND BLOCKQUOTES; `isInsideInlineQuote` is the INLINE sibling W1-T2534 added
+    for exactly this, and arm (b) gets neither.
+
+    THE MESSAGE IS THE DEFECT'S AMPLIFIER, NOT MERELY ITS VICTIM. `failSummary`'s own comment says
+    the remedy rides in the status text because the 140-character cap makes anything longer
+    invisible, and that the escape "was discoverable only by reading this file". So the one hint an
+    author gets is correct for arms (a) and (c) and WRONG for (b) -- and (b) is the arm the house
+    style trips, because `data-only: no code.` is the documented shorthand (W1-T2549).
+
+    WHY QUOTING MUST SILENCE ARM (b) TOO. W1-T2534's own words: "a claim inside an inline quoted
+    span is a MENTION of someone else's claim, never this body's own". That reasoning is about
+    QUOTATION, not about which regex found the token. A body quoting a prior refusal, a ruling, or
+    its own earlier commit message is reporting, not asserting -- and arm (b) is the arm most likely
+    to quote, because absence claims are what refusals are written about.
+
+    NOT A WEAKENING. Arm (b)'s forward anchor stays: an UNQUOTED "no code" about the changeset still
+    refuses, which is the case W1-T274 filed and #1025 demonstrated. This adds the quotation
+    exemption its siblings already have.
+  design: |
+    (i) ARM (b) CONSULTS `isInsideInlineQuote` BEFORE ITS FORWARD ANCHOR, the same order arm (a)
+        uses -- "no amount of surrounding changeset context turns a quotation into an assertion"
+        is already the comment on `claimsChangesetContext`, and it is equally true here.
+
+    (ii) THE HELPER IS REUSED, NOT RESTATED. One `isInsideInlineQuote`, three call sites. A second
+         copy is how arm (b) drifted from its siblings in the first place.
+
+    (iii) AN UNQUOTED ABSENCE CLAIM STILL REFUSES, unchanged: the recogniser's counts, its
+          violator sets and the refusal text for that case stay byte-identical.
+
+    (iv) A HALF-OPEN SPAN DOES NOT SILENCE. An odd delimiter count before the match means INSIDE a
+         span; a body with an unbalanced backtick must not gain a blanket exemption for everything
+         after it on the line, so the existing line-scoped counting is kept rather than widened.
+
+    (v) `recognisedCount` STILL INCREMENTS FOR A QUOTED MENTION? NO -- a mention is not a claim, so
+        it must not be counted as one; that number exists to distinguish "read a claim and it
+        agreed" from "never read a claim", and a quotation is the second.
+
+    NO THRESHOLD. Quoted or not is a property of the text at the match index, not a score.
+
+    THE SUITE GOES IN test/an-inline-quoted-absence-claim-is-a-mention.test.ts, declared in files:
+    so its path-form proofs resolve through W1-T456's forward-reference carve-out.
+  acceptance:
+    - claim: "an absence claim inside an inline code span is treated as a mention and does not contradict the diff"
+      proof: "unit test: test/an-inline-quoted-absence-claim-is-a-mention.test.ts"
+    - claim: "an UNQUOTED absence claim about the changeset still refuses, so the quotation exemption is not a weakening"
+      proof: "unit test: test/an-inline-quoted-absence-claim-is-a-mention.test.ts"
+    - claim: "a quoted mention is not counted as a recognised claim, since a mention is not an assertion"
+      proof: "unit test: test/an-inline-quoted-absence-claim-is-a-mention.test.ts"
+    - claim: "the three claim arms agree about quotation, so a body cannot be silenced on one and refused on another"
+      proof: "unit test: test/an-inline-quoted-absence-claim-is-a-mention.test.ts"
+    - claim: "the inline-quote helper has one definition reached by every arm rather than a copy per arm"
+      proof: "grep: isInsideInlineQuote(scan in src/lib/review.ts"
+  falsifier: |
+    Refuse a backticked absence claim and the first test fails. Silence an unquoted one and the
+    second fails. Count a mention as a recognised claim and the third fails. Let two arms disagree
+    about the same quoted body and the fourth fails. Add a second copy of the helper and the fifth
+    fails.

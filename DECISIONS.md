@@ -2734,3 +2734,38 @@ Clerk does not. Nothing here asks for it to be removed or rebuilt.
 
 **Rollback:** revert this entry and re-open the retired tasks by clearing their `retirement:` key.
 No gate, predicate or build changes either way — this entry records a decision.
+
+## 2026-09-16 — OPERATOR RULING: the implement lane runs on ANY provider, per-provider, not Claude-only
+
+**Operator-authored.** An agent proposed the opposite ruling in this session and was overruled; this
+entry records the decision that was actually made, and why the agent's reasoning was wrong.
+
+**THE PROPOSAL, AND THE ERROR IN IT.** W1-T3696 asks to move git effects off the implement worker so
+the lane can run on any provider. Its falsifier says to close without implementing "if a Claude
+implement run cannot complete without a shell". An agent found that a Claude implement run genuinely
+cannot — implement is `principles: {tdd: strict}`, and `OPENWEIGHT_CHECKS` offers only `unit_test`
+and `typecheck` on fixed argv — and concluded the lane must stay Claude-only.
+
+That inference does not follow. **"A CLAUDE run needs a shell" does not imply "implement cannot run
+on cash."** `DISPATCH_LANE_TOOL_BOUNDS` already encodes exactly the per-provider answer for recon,
+diagnose and retro: a shell where a shell exists, the allowlisted check-runner where it does not. The
+falsifier invalidates W1-T3696's **step (2) as written** — one Bash-free bound shared by every
+provider — not the task's goal.
+
+The agent also leaned on `rmd preflight` as a binding requirement. It is not: CLAUDE.md's own header
+states that every rule in that file is UNENFORCED prose. **CI is the gate.**
+
+**THE RULING.** implement declares its tool bound PER PROVIDER. Claude keeps `Bash`; a cash-billed
+mount gets `[Read, Write, Edit, Grep, Glob, RunCheck]` and no forge verbs. The harness commits for a
+worker that has no shell, and the push and PR creation it already owned carry the run home. A blocked
+auction may divert implement to cash, and separately may bill it to API credits, each behind its own
+operator switch and a spend cap.
+
+**WHAT REMAINS TRUE FROM THE REJECTED ANALYSIS, and is worth keeping.** `RunCheck` is NOT a Claude
+Code tool, and `DISPATCH_LANE_TOOL_BOUNDS`' own header says so: "Claude implements `Bash` and no
+`RunCheck`". So a single Bash-free bound WOULD leave a Claude implement worker unable to run any
+test. That is the concrete reason the bound is per-provider rather than shared — the finding was
+right, only the conclusion drawn from it was wrong.
+
+**Rollback:** revert this entry and the PRs it describes. No gate or predicate changes with this
+entry alone — it records a decision.

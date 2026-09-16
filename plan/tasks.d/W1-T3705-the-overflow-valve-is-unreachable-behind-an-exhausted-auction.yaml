@@ -38,6 +38,15 @@
     overflow valve is therefore the one lever that keeps implement running with no subscription
     headroom -- and on a multi-provider host it does not get reached.
 
+    CRITERIA AMENDED 2026-09-16, BEFORE BUILD. The original two proofs named an implementation this
+    task then deliberately did NOT choose: they asked for `overflow` to appear in
+    worker-provider.ts (i.e. the AUCTION reading the valve) and for an `overflow_unreachable`
+    report. The delivered design is a SECOND FALLBACK ARM beside the cash fallback, in worker.ts,
+    for the reason the next paragraph already gives — so the auction's filter is untouched and the
+    spend sits behind a switch of the same shape. The proofs now name that design. Recorded here
+    rather than silently: a proof rewritten to match what was built is only honest when the change
+    of design is stated too.
+
     DO NOT "FIX" THIS BY WIDENING ELIGIBILITY SILENTLY. Making Claude eligible past its ceiling
     whenever the valve is armed converts a capacity bound into a SPEND decision, and the operator
     must be able to see and bound it. `dailyCapUsd` is already doing double duty as the cash cap
@@ -63,10 +72,12 @@
     and it adds no provider. Narrowing files: to dodge the warning would hide a real conflict
     risk from the dispatcher, which the warning text explicitly forbids.
   acceptance:
-    - claim: "the capacity auction can observe that the overflow valve is armed, rather than being written as if it did not exist"
-      proof: "grep: overflow in src/lib/worker-provider.ts"
-    - claim: "an exhausted auction reports whether an armed overflow valve would have served the spawn, so the condition is legible rather than silent"
-      proof: "grep: overflow_unreachable in src/lib/worker.ts"
+    - claim: "a blocked auction consults the armed overflow valve instead of refusing with it unread"
+      proof: "unit test: a blocked auction reaches the overflow valve"
+    - claim: "the valve refuses on any missing factor, so an armed switch alone never bills the fleet to API"
+      proof: "unit test: the overflow valve refuses on any missing factor"
+    - claim: "cash and overflow stay independent switches, so neither implies the other"
+      proof: "unit test: cash and overflow are independent switches"
   falsifier: |
     Set every enabled provider's window past the reserve ceiling with `config.overflow: "api_key"`
     armed and a `dailyCapUsd` set. Before this task, the spawn raises `ProviderCapacityBlockedError`
