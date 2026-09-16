@@ -1,4 +1,4 @@
-- id: W1-T3650
+- id: W1-T3658
   title: "A PULL REQUEST'S OWN ACCEPTANCE BLOCK AND ITS TASK'S DECLARED PROOFS CAN DIVERGE WITH NOTHING NOTICING — CONSOLE-T12 shipped and merged while all four of its declared proofs named unit tests that did not exist"
   repo: remudero
   depends_on: []
@@ -28,7 +28,7 @@
 
     IT ALSO COST A SECOND DEFECT. Because that PR carried an `## Acceptance` block INSTEAD of a
     `Remudero-Task: CONSOLE-T12` trailer, `findMergedByTrailer` never credited the task. The record
-    stayed `queued` and the console daemon re-attempted it 1,232 times in 10.4 hours (W1-T3649).
+    stayed `queued` and the console daemon re-attempted it 1,232 times in 10.4 hours (W1-T3657).
 
     WHY THE EXISTING GATES DO NOT CATCH THIS. `acceptance-author-gate` asks whether a body is
     JUDGEABLE — a header with parseable bullets, or a trailer resolving to a filed task. Both were
