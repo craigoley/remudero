@@ -421,6 +421,7 @@
     "test/ci-log-unavailable-is-named.test.ts": 1172,
     "test/ci-parity-contract.test.ts": 1589,
     "test/ci-parity-spawn-failure.test.ts": 1347,
+    "test/ci-parity.test.ts": 0,
     "test/ci-sharding.test.ts": 358,
     "test/ci-title-lint.test.ts": 1402,
     "test/citation-anchor-census.test.ts": 3573,

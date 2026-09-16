@@ -71,7 +71,12 @@ test("FAST_GATE_STEPS: exactly six census entries, each bound at the shared FAST
   for (const step of CENSUS_STEPS) {
     assert.equal(step.boundMs, FAST_GATE_CENSUS_BOUND_MS, `${step.job} must reference the shared PRIMARY CONTROL constant`);
   }
-  assert.equal(NON_CENSUS_STEPS.length, 10, "the seven pre-existing npm-script gates plus W1-T2491's branch-shape gate, W1-T2488's source-size-ratchet and the comment-load ratchet are untouched by this task");
+  assert.equal(
+    NON_CENSUS_STEPS.length,
+    11,
+    "the seven pre-existing npm-script gates plus W1-T2491's branch-shape gate, W1-T2488's source-size-ratchet, the " +
+      "comment-load ratchet and W1-T3702's lint-plan gate are untouched by this task",
+  );
 });
 
 test("runPreflightFast: run for real (unmocked, real spawn, real package.json) over ONLY the census entries, every one measures under the bound and passes on this HEAD", () => {
@@ -294,6 +299,6 @@ test("runPreflightFast: with the census entries removed from `steps`, a spawn th
     const call = calls.find((c) => c.args.includes(step.script));
     assert.equal(call, undefined, `${step.script} must never be spawned once the census steps are removed from the list`);
   }
-  assert.equal(result.steps.length, 10);
+  assert.equal(result.steps.length, 11);
   assert.equal(result.ok, true, "with every pre-existing step at its default clean PASS and no census step present, the run reads green — the exact blind spot #3304 fell through");
 });
