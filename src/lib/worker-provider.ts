@@ -1986,7 +1986,7 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
  * deployments with no guarantee of shared behaviour.
  */
 /**
- * W1-T3695: which structured-output modes each deployment can actually honour.
+ * Which structured-output modes each deployment can actually honour.
  *
  * MEASURED, NOT ASSUMED, with the adapter's own URL and api-version:
  *   gpt-5-mini     `response_format: {type:"json_object"}` -> HTTP 200, clean `{"ok":true,"n":7}`
@@ -2325,7 +2325,7 @@ export interface OpenWeightSpawnArgs {
   tools?: string[];
   runId?: string;
   taskId?: string;
-  /** W1-T3695: opt-in structured output, e.g. "json_object". Honoured only by a deployment that
+  /** Opt-in structured output, e.g. "json_object". Honoured only by a deployment that
    *  DECLARES it (OPENWEIGHT_RESPONSE_FORMATS); asking an undeclared one REFUSES before transport
    *  rather than sending a field it mishandles. Absent means prose, which is every lane's default
    *  and must stay so -- forcing JSON on a prose lane is the mistake OPENWEIGHT_OUTPUT_CONTRACT
@@ -2648,7 +2648,7 @@ function openWeightResult(input: {
 
 /** Run one bounded OpenAI-compatible Azure conversation.
  *
- * `response_format` is now PER DEPLOYMENT (W1-T3695), not forbidden outright. The original
+ * `response_format` is now PER DEPLOYMENT, not forbidden outright. The original
  * prohibition was measured against gpt-oss-120b, which returns malformed JSON under json_object --
  * that deployment still declares no support and still refuses. gpt-5-mini answers it correctly, so
  * it declares it and a caller may opt in through `args.responseFormat`. */
