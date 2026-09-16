@@ -104,13 +104,19 @@
     synchronous handler (the race is sound once nothing blocks for a minute, but the next blocking
     callee defeats it again); `CONSOLE_BLOCKING_REQUEST_PATH_BASELINE` scanning only a handler's own
     source; and `/v1/feedback` sitting at 5,031ms against a 5,000ms client timeout.
+  # THE TWO CORPUS INVARIANTS ARE IN THE SUITE BUT NOT HERE, deliberately. "still lints AGAINST the
+  # whole plan" and "answers identically to an unfiltered one" PASS AT THE MERGE BASE TOO, because
+  # without `only` a filtered lint and an unfiltered one are the same call. proof-discrimination
+  # refused them as `executed_stale` on the first push and was right to: a proof matching head and
+  # base discriminates nothing. They guard the WRONG fix (narrowing the corpus along with the
+  # output) and cannot witness the right one, so they stay as tests and never became criteria.
   acceptance:
     - claim: "lintPlan can be asked for a subset of task ids and computes only those"
       proof: "unit test: lintPlan's id filter computes only the asked-for tasks"
-    - claim: "a filtered lint still sees the whole plan as its duplicate-surface corpus, so narrowing the output never narrows the evidence"
-      proof: "unit test: lintPlan's id filter still lints AGAINST the whole plan, so a duplicate surface is still seen"
-    - claim: "a task lints identically whether or not it was reached through the filter"
-      proof: "unit test: a filtered lint answers identically to an unfiltered one, violation for violation"
+    - claim: "an absent filter still lints the whole plan, so every existing caller is unaffected"
+      proof: "unit test: an empty filter computes nothing, and an absent filter is the whole plan"
+    - claim: "the filter never invents a result for an id the plan does not carry"
+      proof: "unit test: the filter does not invent results for ids the plan does not carry"
     - claim: "the hot caller actually passes the filter, asking only for its fragment's ids rather than the merged plan's"
       proof: "unit test: blockingLintMessages asks only for the fragment's own ids, never the whole merged plan"
     - claim: "narrowing what the caller asks for does not change the messages it returns"
