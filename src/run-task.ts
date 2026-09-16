@@ -1541,6 +1541,9 @@ import {
   removeRunLock,
   renderWorkerSettings,
   resolveGenericRouteToolBound,
+  harnessOwnsGitFor,
+  IMPLEMENT_CASH_TOOLS,
+  implementToolBound,
   resolveDispatchLaneToolBound,
   resolveClaudeExecutable,
   claudeExecutableCache,
@@ -12817,6 +12820,21 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // lanes the table declares.
   const genericRouteTools =
     task.type === "review" || task.type === "manual" ? [...resolveGenericRouteToolBound(task.type)] : undefined;
+  // W1-T3696 step (2): implement's surface is chosen from WHAT IS RUNNING IT. A cash-billed mount
+  // gets the bounded, shell-less surface; Claude keeps exactly what it has today (unrestricted for
+  // implement, the declared bound for review/manual) — this is a per-provider equivalence, never a
+  // narrowing of the Claude lane to fit a cheaper one.
+  const implementTools = implementToolBound(implementMount.provider, genericRouteTools);
+  // Read from the SAME value the spawn is bounded with, so the contract a worker was given and the
+  // verdict it is judged by cannot disagree. True for the shell-less cash surface above, and ALSO
+  // when the operator has handed implement's git effects to the harness on every provider — the
+  // opt-in that makes a Claude implement run divertible, because its prompt then already says so.
+  const harnessOwnsGit = config.workerProviders?.harnessCommitsImplement === true
+    || harnessOwnsGitFor(implementTools);
+  // THE COHERENCE RULE, AND IT IS ONE LINE ON PURPOSE: a spawn may offer a shell-less divert
+  // surface ONLY if it was told the harness owns git. Offering one to a worker whose prompt said
+  // `git push` would hand it, on retry, a surface that cannot do what it was just asked to do.
+  const implementCashTools = harnessOwnsGit ? [...IMPLEMENT_CASH_TOOLS] : undefined;
 
   // W1-T2557: THE RUNAWAY BOUND — sized against THIS task's own class's OBSERVED turn-count
   // history (see `deriveRunawayTurnBound`'s own doc), read ONCE here rather than re-derived on
@@ -13519,6 +13537,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // manifest disagree with the prompt (see renderImplementPromptWithParts).
     const { prompt: renderedImplementPrompt, parts: implementParts } = renderImplementPromptWithParts(
       task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart,
+      harnessOwnsGit,
     );
     // This is an output-only contract, deliberately outside `# CONTEXT`; the provenance manifest
     // still hashes the exact prompt sent to the worker below. The companion anchor append keeps a
@@ -13555,7 +13574,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // drill will send. `ruleHeadlinesPart` is the SAME string the turn-0 prompt above just
     // carried (design (iii)) — never re-derived, so a compaction can never re-inject a
     // headline index that drifted from what turn 0 actually said.
-    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
+    const anchor = `${renderAnchorBlock(task, runId, ruleHeadlinesPart, harnessOwnsGit)}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}`;
     log("anchor.built", { anchor });
 
     // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
@@ -13594,7 +13613,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           config: implementConfig,
           // W1-T3573: `undefined` for `implement`/`diagnose`/`recon` — byte-identical
           // unrestricted behavior. Only `review`/`manual` carry a declared bound (above).
-          tools: genericRouteTools,
+          tools: implementTools === undefined ? undefined : [...implementTools],
+          ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
           // W1-T7B: a diagnose-informed attempt gets the SAME task prompt, plus the prior
           // DIAGNOSE worker's report appended verbatim — never paraphrased, never silently
           // re-issued as an identical blind prompt (acceptance #1's "never blind" falsifier).
@@ -13843,11 +13863,18 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           config: implementConfig,
           // W1-T3573: same declared bound as the initial spawn above — a resumed session is
           // still the SAME lane, so it must not regain unrestricted tools on resume.
-          tools: genericRouteTools,
-          prompt:
-            `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
-            `commit, \`git push origin HEAD\` (no -u), open the PR with \`gh pr create --fill --base main\`, ` +
-            `and end with a REPORT whose last line is exactly: PR_URL: <url>`,
+          tools: implementTools === undefined ? undefined : [...implementTools],
+          ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
+          // W1-T3696: the RESUMED turn must restate the SAME contract the initial spawn was given.
+          // A shell-less worker told here to `git push` would spend its remaining turns failing at
+          // a tool it does not have, which is the one place this lane cannot recover from.
+          prompt: harnessOwnsGit
+            ? `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
+              `save your edits to the files, run NO git or gh commands, and end with a REPORT carrying ` +
+              `a line \`COMMIT_MESSAGE: <type>(<scope>): <subject>\` — the harness commits, pushes and opens the PR.`
+            : `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
+              `commit, \`git push origin HEAD\` (no -u), open the PR with \`gh pr create --fill --base main\`, ` +
+              `and end with a REPORT whose last line is exactly: PR_URL: <url>`,
         }),
       );
       log("implement.resumed", {
@@ -13891,7 +13918,31 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // Computed ONCE and held in `commitCount` (W1-T407) rather than re-called inline: the guard's
     // predicate is unchanged (still `=== 0`), but the same value now also rides the `no_pr`
     // ledger row below instead of being thrown away after deciding the branch.
-    const commitCount = commitsAhead(worktreePath, "origin/main");
+    let commitCount = commitsAhead(worktreePath, "origin/main");
+
+    // W1-T3696 step (1), WIRED: a worker with no shell cannot commit its own edits, so the harness
+    // commits them here. This is the ONLY missing verb — the fallback push below and the
+    // orchestrator PR creation after it already exist, so once this produces a commit the rest of
+    // the run is the long-proven path, unchanged.
+    //
+    // GATED ON THE SPAWN'S OWN TOOL SURFACE, not on the provider. `harnessOwnsGit` is true exactly
+    // when this spawn was bounded without a shell, which is the condition under which the worker
+    // was TOLD the harness would commit (the same flag built its output contract). A shell-capable
+    // worker that committed nothing is left alone: it could have committed and chose not to, and
+    // turning that into a pull request would change a long-standing verdict rather than enable a
+    // new lane.
+    //
+    // THE MESSAGE IS THE WORKER'S, AND ONLY EVER DATA. It arrives as an anchored REPORT line and
+    // travels into an argv array; the harness never runs a command the worker composed. No message,
+    // no commit — an invented subject would attribute work to a run that never asked for it.
+    // CALLED UNCONDITIONALLY, and it owns its own precondition. Guarding here instead would put the
+    // decision on lines no test can reach without driving this entire dispatch — which is what
+    // `diff-coverage` refused, and rightly: the branch deciding whether a run produces a pull
+    // request must be exercised, not reasoned about from outside.
+    commitCount = harnessCommitForShellLessWorker({
+      harnessOwnsGit, commitCount, report: fullText(impl), worktreePath, declaredPaths: task.files ?? [], log, say,
+    });
+
     if (!prUrl && commitCount === 0) {
       // W1-T412: HARVEST BEFORE THIS BLOCK'S RETURNS, because every path out of it returns and
       // the implement phase's own harvest call sits far BELOW, after `gh pr create`/`pr.opened`
@@ -32205,6 +32256,50 @@ export function commitWorkerEdits(
   runGit(["add", "-A", "--", ...declared]);
   runGit(["commit", "-m", message]);
   return { committed: true, sha: runGit(["rev-parse", "HEAD"]).trim(), undeclared };
+}
+
+/**
+ * W1-T3696: the harness's own commit step for a worker that had no shell, extracted from the
+ * implement dispatch so it can be DRIVEN BY A TEST, and owning its own precondition so the caller
+ * is one unconditional line. Inline and guarded at the call site it was thirteen lines no test
+ * reached, and `diff-coverage` refused them by name.
+ *
+ * Returns the commits-ahead count the caller carries on with: unchanged when nothing was committed,
+ * re-read when something was — that re-read is what clears the `no_pr` guard and lets the existing
+ * fallback push and PR creation carry the run home. No message, no commit: an invented subject
+ * would attribute work to a run that never asked for it.
+ */
+export function harnessCommitForShellLessWorker(
+  input: {
+    /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
+     *  could have committed and chose not to keeps its long-standing `no_pr` verdict. */
+    harnessOwnsGit: boolean;
+    commitCount: number;
+    report: string;
+    worktreePath: string;
+    declaredPaths: readonly string[];
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+  },
+  deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
+): number {
+  if (!input.harnessOwnsGit || input.commitCount !== 0) return input.commitCount;
+  const commit = deps.commit ?? commitWorkerEdits;
+  const ahead = deps.ahead ?? commitsAhead;
+  const asked = parseReport(input.report)?.commitMessage;
+  if (asked === undefined) {
+    input.log("implement.harness_commit_refused", { reason: "no anchored COMMIT_MESSAGE line in the report" });
+    return input.commitCount;
+  }
+  const committed = commit(input.worktreePath, input.declaredPaths, asked);
+  input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
+    ...(committed.sha ? { sha: committed.sha } : {}),
+    ...(committed.reason ? { reason: committed.reason } : {}),
+    ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
+  });
+  if (!committed.committed) return input.commitCount;
+  input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
+  return ahead(input.worktreePath, "origin/main");
 }
 
 /** Paths from `git status --porcelain -z`. NUL-delimited so a path with a space or a quote is

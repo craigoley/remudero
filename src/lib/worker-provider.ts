@@ -20,6 +20,13 @@ import {
   type ContainedProcess,
   type ContainedSpawnOptions,
 } from "./worker-containment.js";
+import {
+  CASH_WEB_SEARCH_KEY_ENV,
+  CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
+  cashWebSearchEnabled,
+  cashWebSearchEndpoint,
+  performCashWebSearch,
+} from "./cash-web-bridge.js";
 
 interface CodexSpawnArgs {
   cwd: string;
@@ -1924,6 +1931,63 @@ export const OPENWEIGHT_API_KEY_ENV = "RMD_OPENWEIGHT_API_KEY";
 /** PRIMARY CONTROL: gpt-oss-120b is a reasoning model; 1,500 truncated a shard mid-string in the live probe. */
 export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 5_000;
 /**
+ * PRIMARY CONTROL (W1-T1266): the wall-clock bound on ONE cash request. Nothing else bounds a hung
+ * one -- before this the `fetch` carried no `signal` at all, so a stalled Azure request held the
+ * tool loop and its reservation for as long as the socket stayed open. It is not a backstop firing
+ * after some other guard failed; it IS the guard.
+ *
+ * Generous on purpose: a reasoning model on a large prompt is legitimately slow, and a deadline
+ * that fires early would refuse work the cap has already paid to reserve.
+ */
+export const OPENWEIGHT_REQUEST_TIMEOUT_MS = 180_000;
+
+/** Raised when a reply was cut off by the completion budget rather than finished. */
+export class OpenWeightTruncatedReplyError extends RmdError {
+  readonly finishReason: string;
+  constructor(finishReason: string, completionTokens: number) {
+    super(
+      "usage",
+      1,
+      `openweight reply was TRUNCATED by the completion budget (finish_reason=${JSON.stringify(finishReason)}, ` +
+        `${completionTokens} completion tokens against OPENWEIGHT_MAX_COMPLETION_TOKENS=${OPENWEIGHT_MAX_COMPLETION_TOKENS}). ` +
+        `Refusing to return a partial answer as a whole one — shrink the request or raise the budget.`,
+      { finishReason, completionTokens },
+    );
+    this.finishReason = finishReason;
+  }
+}
+
+/** Raised when a request passed its deadline. Distinct from a transport error so a caller can tell
+ *  "we stopped waiting" from "the endpoint refused". */
+export class OpenWeightRequestTimeoutError extends RmdError {
+  constructor(readonly timeoutMs: number, readonly deployment: string) {
+    super(
+      "usage",
+      1,
+      `openweight request to ${JSON.stringify(deployment)} exceeded ${timeoutMs}ms and was abandoned. ` +
+        `Its reservation stays CHARGED: the request may have been served and billed, so returning the ` +
+        `allowance would let a timeout buy free authority.`,
+      { timeoutMs, deployment },
+    );
+  }
+}
+
+/**
+ * Is this reply complete, or did the budget cut it off?
+ *
+ * `finish_reason` was never read. `length` means the model stopped because it ran out of completion
+ * budget, and the content returned is a PREFIX -- indistinguishable, to every caller, from a
+ * genuinely short answer. OPENWEIGHT_MAX_COMPLETION_TOKENS's own comment records a shard already
+ * truncated mid-string at 1,500, so this is a measured failure mode rather than a hypothetical one.
+ *
+ * `stop` and `tool_calls` are the two complete outcomes. An ABSENT reason is treated as complete:
+ * not every OpenAI-compatible endpoint sets it, and inventing a refusal from a missing field would
+ * fail closed on deployments that work.
+ */
+export function openWeightReplyIsTruncated(finishReason: unknown): boolean {
+  return finishReason === "length";
+}
+/**
  * Adapter-owned output constraints for every OpenWeight lane. Each rule is conditional: the
  * adapter must not turn a code-review or prose task into a YAML-only task by accident.
  */
@@ -2194,9 +2258,19 @@ export function openWeightCommittedUsd(state: OpenWeightAllowanceState): number 
  * over-estimate: no tokenizer emits more tokens than the UTF-8 bytes it consumed, so this can never
  * under-reserve. Over-reserving is the safe direction for a cap — settlement corrects it downward.
  */
-export function openWeightReservationUsd(deployment: string, requestBodyBytes: number): number {
+export function openWeightReservationUsd(
+  deployment: string,
+  requestBodyBytes: number,
+  extraInputTokens = 0,
+): number {
   const price = openWeightPriceFor(deployment);
-  return (requestBodyBytes * price.inputUsdPerMillion + OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
+  // `extraInputTokens` is input the request BODY does not contain, and it exists because the
+  // byte-bound argument above holds only while the body is the whole input. A server-side tool —
+  // `web_search` is the first — makes the provider fetch pages we never sent and bill them as
+  // input, so a caller that turns one on MUST declare a ceiling for what it may retrieve or the
+  // reservation silently stops being an upper bound. W1-T3558.
+  const inputTokenCeiling = requestBodyBytes + Math.max(0, extraInputTokens);
+  return (inputTokenCeiling * price.inputUsdPerMillion + OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
 }
 
 /** Raised INSTEAD of sending a paid request. It is thrown before the transport, never after, so a
@@ -2346,6 +2420,9 @@ export function reserveOpenWeightBudget(
     /** true when this request reached cash only because no subscription had readable
      *  headroom. Selects `dailyCapUsd.squeezed` over `.normal`; ignored for a plain-number cap. */
     squeezed?: boolean;
+    /** Input tokens this request may consume that its body does NOT carry — see
+     *  {@link openWeightReservationUsd}. Omitted for an ordinary chat turn. */
+    extraInputTokens?: number;
   },
 ): { reservedUsd: number; committedUsd: number; capUsd: number } {
   const capUsd = effectiveCashCapUsd(config.dailyCapUsd, { squeezed: input.squeezed });
@@ -2356,7 +2433,7 @@ export function reserveOpenWeightBudget(
     throw new Error("cash provider requires a dailyCapUsd before any paid request");
   }
   const utcDay = openWeightUtcDay(input.atIso);
-  const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes);
+  const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes, input.extraInputTokens ?? 0);
   return mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
     const committedUsd = openWeightCommittedUsd(state);
     if (committedUsd + wantUsd > capUsd) {
@@ -2417,6 +2494,11 @@ export interface OpenWeightSpawnArgs {
   responseFormat?: string;
   /** Test-only override; production uses the global fetch implementation. */
   fetchImpl?: typeof fetch;
+  /** The request deadline, defaulting to {@link OPENWEIGHT_REQUEST_TIMEOUT_MS}. A seam ONLY so a
+   *  test can reach the aborted arm of the catch below: with the real 180s bound, covering it means
+   *  a test that waits three minutes, and an uncovered catch arm is how a refusal quietly stops
+   *  refusing. Production passes nothing and gets the constant. */
+  requestTimeoutMs?: number;
   /** Test-only override; production reads the daemon process environment. */
   env?: NodeJS.ProcessEnv;
   /** Test-only clock port; production records duration from the system clock. `iso` rides beside
@@ -2454,6 +2536,14 @@ export interface OpenWeightWorkerResult {
   compactionConfigured: false;
   qualitySuspect: false;
   workerDurationMs: number;
+  /** Brokered web search, metered apart from conversation tokens (W1-T3558). `webSearchUsd` is
+   *  INCLUDED in `costUsd` and in `budgetSettledUsd` — it is a breakdown of the bill, not an
+   *  addition to it. A refused search still counts in `webSearchRefused` and still costs, because
+   *  the provider billed the attempt whatever we decided to do with its answer. */
+  webSearchAttempted: number;
+  webSearchAccepted: number;
+  webSearchRefused: number;
+  webSearchUsd: number;
   /** Attributable cash fields for the ledger. Money, not prompts: no request body, no response
    *  text and no credential is carried here. `budgetRefused` is true only when the daily allowance
    *  refused this run BEFORE any paid request was made. */
@@ -2542,14 +2632,32 @@ export function openWeightCheckArgv(check: unknown, paths: unknown): string[] {
   return [...OPENWEIGHT_CHECKS[check]];
 }
 
-function openWeightTools(declared: readonly string[] | undefined): Array<Record<string, unknown>> {
+/** The one tool the adapter does NOT execute itself: the daemon brokers it. Declared to the model
+ *  only when the operator has consented, so without consent `WebSearch` stays unimplemented and the
+ *  refusal below fires exactly as it did before W1-T3558. */
+export const CASH_WEB_SEARCH_FUNCTION = {
+  name: "web_search",
+  description:
+    "Search the public web for current information. The daemon performs the search; you never reach the network. " +
+    "A result is returned only when the search actually ran and produced at least one source URL, and every " +
+    "returned document carries its sources. If the search is refused, do not invent the answer — say what is unknown.",
+  required: ["query"],
+} as const;
+
+function openWeightTools(
+  declared: readonly string[] | undefined,
+  webSearch = false,
+): Array<Record<string, unknown>> {
   const requested = [...new Set(declared ?? [])];
-  const unsupported = requested.filter((tool) => OPENWEIGHT_FUNCTIONS[tool] === undefined);
+  const brokered: string[] = webSearch ? requested.filter((tool) => tool === "WebSearch") : [];
+  const unsupported = requested.filter(
+    (tool) => OPENWEIGHT_FUNCTIONS[tool] === undefined && !brokered.includes(tool),
+  );
   // Never silently drop a declared tool: the prompt may rely on it (for example triage's
   // WebSearch), and a partial capability set would make the model fabricate a missing result.
   if (unsupported.length > 0) throw new Error(`openweight adapter does not implement declared tool(s): ${unsupported.join(", ")}`);
   return requested
-    .map((tool) => OPENWEIGHT_FUNCTIONS[tool]!)
+    .map((tool) => (brokered.includes(tool) ? CASH_WEB_SEARCH_FUNCTION : OPENWEIGHT_FUNCTIONS[tool]!))
     .map((tool) => ({
       type: "function",
       function: {
@@ -2688,6 +2796,10 @@ function openWeightResult(input: {
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
   budgetRefused?: boolean;
+  webSearchAttempted?: number;
+  webSearchAccepted?: number;
+  webSearchRefused?: number;
+  webSearchUsd?: number;
 }): OpenWeightWorkerResult {
   const text = input.text ?? "";
   const error = input.error instanceof Error ? input.error.message : input.error === undefined ? undefined : String(input.error);
@@ -2702,9 +2814,12 @@ function openWeightResult(input: {
     // exists to hold. A run that never reached the transport has no tokens, hence no cost, and
     // saying so requires no rate.
     costUsd:
-      input.promptTokens === 0 && input.completionTokens === 0
+      (input.promptTokens === 0 && input.completionTokens === 0
         ? 0
-        : openWeightUsageUsd(input.model, input.promptTokens, input.completionTokens),
+        : openWeightUsageUsd(input.model, input.promptTokens, input.completionTokens)) +
+      // Brokered searches are billed on a DIFFERENT API than the conversation, so their tokens are
+      // not in `promptTokens`/`completionTokens` and pricing those alone would understate the run.
+      (input.webSearchUsd ?? 0),
     numTurns: input.turns,
     maxTurns: undefined,
     text,
@@ -2727,6 +2842,10 @@ function openWeightResult(input: {
     budgetReservedUsd: input.budgetReservedUsd ?? 0,
     budgetSettledUsd: input.budgetSettledUsd ?? 0,
     budgetRefused: input.budgetRefused ?? false,
+    webSearchAttempted: input.webSearchAttempted ?? 0,
+    webSearchAccepted: input.webSearchAccepted ?? 0,
+    webSearchRefused: input.webSearchRefused ?? 0,
+    webSearchUsd: input.webSearchUsd ?? 0,
   };
 }
 
@@ -2750,12 +2869,21 @@ export async function spawnOpenWeightWorker(
   let text = "";
   let budgetReservedUsd = 0;
   let budgetSettledUsd = 0;
+  // Metered SEPARATELY from conversation turns (W1-T3558). They share the day cap — one cap is the
+  // only way it bounds total Azure spend — but are counted apart so an operator can read what web
+  // access cost, and how often it was refused, without inferring it from a conversation total.
+  let webSearchAttempted = 0;
+  let webSearchAccepted = 0;
+  let webSearchRefused = 0;
+  let webSearchUsd = 0;
   // Identity for this run's reservations. The run id is not sufficient on its own: the tool loop
   // sends one paid request PER TURN, and each needs its own settleable row.
   const runRequestPrefix = `${args.runId ?? args.taskId ?? "openweight"}-${startedAt}-${Math.random().toString(36).slice(2, 10)}`;
   try {
-    const tools = openWeightTools(args.tools);
-    const key = (args.env ?? process.env)[OPENWEIGHT_API_KEY_ENV];
+    const env = args.env ?? process.env;
+    const webSearchConsented = cashWebSearchEnabled(config);
+    const tools = openWeightTools(args.tools, webSearchConsented);
+    const key = env[OPENWEIGHT_API_KEY_ENV];
     if (!key) throw new Error(`openweight provider requires ${OPENWEIGHT_API_KEY_ENV} in the daemon environment`);
     const declaredNames = new Set(tools.map((tool) => String((tool.function as { name?: unknown }).name)));
     const messages: OpenWeightMessage[] = [
@@ -2799,16 +2927,31 @@ export async function spawnOpenWeightWorker(
         squeezed: args.cashSqueezed === true,
       });
       budgetReservedUsd += reservation.reservedUsd;
-      const response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
-        method: "POST",
-        headers: { "content-type": "application/json", "api-key": key },
-        body,
-      });
+      // THE DEADLINE IS ARMED AROUND THE REQUEST, AND THE RESERVATION IS ALREADY COMMITTED. An
+      // abandoned request keeps its charge on purpose: the endpoint may have served and billed it,
+      // so handing the allowance back would let a timeout buy free authority against `dailyCapUsd`.
+      const abort = new AbortController();
+      const requestTimeoutMs = args.requestTimeoutMs ?? OPENWEIGHT_REQUEST_TIMEOUT_MS;
+      const deadline = setTimeout(() => abort.abort(), requestTimeoutMs);
+      let response: Response;
+      try {
+        response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
+          method: "POST",
+          headers: { "content-type": "application/json", "api-key": key },
+          body,
+          signal: abort.signal,
+        });
+      } catch (error) {
+        if (abort.signal.aborted) throw new OpenWeightRequestTimeoutError(requestTimeoutMs, selection.model);
+        throw error;
+      } finally {
+        clearTimeout(deadline);
+      }
       if (!response.ok) throw new Error(`openweight request failed with HTTP ${response.status}`);
       const payload = await response.json() as {
         id?: unknown;
         usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
-        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }>;
+        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
       const turnPromptTokens = typeof payload.usage?.prompt_tokens === "number" ? payload.usage.prompt_tokens : 0;
@@ -2827,6 +2970,12 @@ export async function spawnOpenWeightWorker(
       }
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
+      // A TRUNCATED REPLY IS A NAMED FAILURE, NOT A SHORT ANSWER. Checked AFTER settlement above so
+      // the turn is still billed honestly -- the tokens were spent whether or not the answer is
+      // usable -- and before the content can be returned or appended to the conversation.
+      if (openWeightReplyIsTruncated(payload.choices?.[0]?.finish_reason)) {
+        throw new OpenWeightTruncatedReplyError(String(payload.choices?.[0]?.finish_reason), turnCompletionTokens);
+      }
       const calls = Array.isArray(message.tool_calls) ? message.tool_calls as OpenWeightToolCall[] : [];
       // UNFENCED ONLY WHEN A STRUCTURED REPLY WAS ASKED FOR. A prose lane may legitimately contain a
       // fenced code block as part of its answer, and unwrapping that would corrupt it; a lane that
@@ -2835,7 +2984,7 @@ export async function spawnOpenWeightWorker(
       if (typeof message.content === "string") {
         text = args.responseFormat === undefined ? message.content : openWeightUnfence(message.content);
       }
-      if (calls.length === 0) return openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, budgetReservedUsd, budgetSettledUsd });
+      if (calls.length === 0) return openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd });
       if (turns >= maxTurns) throw new Error(`openweight tool loop exceeded maxTurns=${maxTurns}`);
       messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls });
       for (const call of calls) {
@@ -2846,7 +2995,32 @@ export async function spawnOpenWeightWorker(
         }
         let content: string;
         try {
-          content = JSON.stringify(executeOpenWeightTool(name, objectArguments(call.function?.arguments), args.cwd));
+          // `web_search` is the one declared tool this process does not execute: the daemon brokers
+          // it against a different API, with its own credential, and returns a document only when
+          // the provider actually searched and cited a source.
+          content = name === CASH_WEB_SEARCH_FUNCTION.name
+            ? JSON.stringify(
+                await brokerCashWebSearch({
+                  args: objectArguments(call.function?.arguments),
+                  config,
+                  env,
+                  model: selection.model,
+                  clock,
+                  requestId: `${runRequestPrefix}-${turns}-search-${webSearchAttempted + 1}`,
+                  fetchImpl: args.fetchImpl,
+                  onMetered: (metered) => {
+                    webSearchAttempted += 1;
+                    if (metered.accepted) webSearchAccepted += 1;
+                    else webSearchRefused += 1;
+                    // Folded into the run totals as well as reported apart: a caller reading only
+                    // `budget*Usd` must not see an understated bill.
+                    budgetReservedUsd += metered.reservedUsd;
+                    budgetSettledUsd += metered.settledUsd;
+                    webSearchUsd += metered.settledUsd;
+                  },
+                }),
+              )
+            : JSON.stringify(executeOpenWeightTool(name, objectArguments(call.function?.arguments), args.cwd));
         } catch (error) {
           content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
         }
@@ -2872,8 +3046,80 @@ export async function spawnOpenWeightWorker(
       // A refusal is a distinct outcome from a transport failure: no paid request was made, so the
       // operator reading the ledger can tell "we declined to spend" from "we spent and it failed".
       budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
+      webSearchAttempted,
+      webSearchAccepted,
+      webSearchRefused,
+      webSearchUsd,
     });
   }
+}
+
+/**
+ * Reserve, perform and settle ONE brokered web search. The reservation commits BEFORE the request,
+ * as a chat turn's does; what differs is the ceiling, since a search's input is not bounded by the
+ * bytes we send (see {@link CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS}).
+ *
+ * SETTLEMENT FOLLOWS THE RECEIPT, NOT THE VERDICT: a refused search settles from its usage block
+ * like an accepted one, because the provider billed it either way. Refusing an un-attributed
+ * document does not refund the search that produced it.
+ */
+async function brokerCashWebSearch(input: {
+  args: Record<string, unknown>;
+  config: Config;
+  env: NodeJS.ProcessEnv;
+  model: string;
+  clock: Pick<Clock, "now" | "iso">;
+  requestId: string;
+  fetchImpl?: typeof fetch;
+  onMetered: (metered: { accepted: boolean; reservedUsd: number; settledUsd: number }) => void;
+}): Promise<unknown> {
+  const query = input.args.query;
+  if (typeof query !== "string" || query.trim() === "") throw new Error("web_search query must be a non-empty string");
+  const searchKey = input.env[CASH_WEB_SEARCH_KEY_ENV];
+  // A declared-but-unusable tool must refuse loudly rather than return an empty result the model
+  // would read as "the web knows nothing about this".
+  if (!searchKey) throw new Error(`web_search requires ${CASH_WEB_SEARCH_KEY_ENV} in the daemon environment`);
+  const rawEndpoint = input.config.workerProviders?.cashEndpoint ?? input.config.workerProviders?.openweightEndpoint;
+  const endpoint = cashWebSearchEndpoint(typeof rawEndpoint === "string" ? rawEndpoint : "", input.model);
+  const body = JSON.stringify({ model: input.model, input: query, tools: [{ type: "web_search" }] });
+  let reservation: { reservedUsd: number; committedUsd: number; capUsd: number };
+  try {
+    reservation = reserveOpenWeightBudget(input.config, {
+      requestId: input.requestId,
+      deployment: input.model,
+      requestBodyBytes: Buffer.byteLength(body, "utf8"),
+      extraInputTokens: CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
+      atIso: input.clock.iso(),
+    });
+  } catch (error) {
+    // AN EXHAUSTED ALLOWANCE REFUSES THE SEARCH, NOT THE RUN, and it is metered as a refusal at
+    // zero cost: the model asked, we declined, and no request was sent. Letting the exhaustion
+    // escape would abort a worker that could still finish without the search, and leaving it
+    // uncounted would hide "we ran out of money" among the searches that merely failed.
+    if (!(error instanceof OpenWeightAllowanceExhaustedError)) throw error;
+    input.onMetered({ accepted: false, reservedUsd: 0, settledUsd: 0 });
+    return { error: `web_search refused (allowance): ${error.message}`, sources: [] };
+  }
+  const result = await performCashWebSearch({
+    query,
+    endpoint,
+    apiKey: searchKey,
+    model: input.model,
+    fetchImpl: input.fetchImpl,
+  });
+  let settledUsd = reservation.reservedUsd;
+  if (result.usageRead) {
+    settledUsd = Math.min(
+      openWeightUsageUsd(input.model, result.usage.promptTokens, result.usage.completionTokens),
+      reservation.reservedUsd,
+    );
+    settleOpenWeightBudget(input.config, { requestId: input.requestId, actualUsd: settledUsd, atIso: input.clock.iso() });
+  }
+  input.onMetered({ accepted: result.outcome === "accepted", reservedUsd: reservation.reservedUsd, settledUsd });
+  if (result.outcome === "refused") {
+    return { error: `web_search refused (${result.reason}): ${result.detail}`, sources: [] };
+  }
+  return { text: result.text, sources: result.citations };
 }
 
 async function spawnCodexWorkerInPrivateTemp(

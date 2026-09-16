@@ -1,0 +1,153 @@
+- id: W1-T3710
+  title: "GET /v1/inbox LINTS THE WHOLE 1,849-TASK PLAN ONCE PER PROPOSAL AND READS BACK TWO TASKS — 423 proposals x lintPlan(merged) is ~783,000 task lints per request, measured at 61.9s of BLOCKED event loop that starved a 296-byte /v1/daemon-health to 61.2s and put Board, Inbox and Analytics all at unavailable: pass the fragment's ids to lintPlan so it computes what is read back"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    OPERATOR REPORT 2026-09-16, verbatim: "Things are still showing unavailable on board, inbox,
+    and analytics." One cause, and it is not three.
+
+    (1) THE MEASUREMENT, ON THE LIVE FLEET. Timed from inside `remudero-serve` with the read token,
+    against 127.0.0.1:4317, warm (a second pass, so this is not cold-start):
+
+        /v1/status          374ms ... 6,861ms   (oscillates with its cache)
+        /v1/feedback      5,031ms              <- the console's client timeout is 5,000ms
+        /v1/recent           29ms
+        /v1/analytics        13ms ... 10,130ms
+        /v1/inbox        91,547ms
+        /v1/daemon-health   331ms
+
+    `lib/rmd-control.ts` in remudero-console sets `REQUEST_TIMEOUT_MS = 5000`. Everything at or over
+    that renders "unavailable", which is exactly the three surfaces reported and no others.
+
+    (2) IT IS HEAD-OF-LINE BLOCKING, PROVEN BY DISCRIMINATING PROBE. `/v1/inbox` issued in the
+    background, then four `/v1/daemon-health` calls -- 296 bytes each -- issued 3s later:
+
+        INBOX                       63,978ms
+        health (during inbox)       61,245ms   <- 296 bytes
+        health (after)                 250ms
+        health (after)                 237ms
+        health (after)                 204ms
+
+    A 296-byte read taking 61.2s and then 0.25s is not a slow endpoint. The event loop is blocked
+    solid, so every OTHER console read is starved by this one.
+
+    (3) THE BUDGET THAT EXISTS CANNOT FIRE. `boundConsoleReadRoute` (serve.ts) already implements
+    stale-while-revalidate for exactly this: `CONSOLE_READ_ROUTE_BUDGET_MS = 750`, a cached
+    response, and `fallbackBodyForCachedRead` per path including `/v1/inbox`. It bounds the response
+    by racing the refresh against `new Promise(resolve => setTimeout(resolve, budgetMs))`. A
+    `setTimeout` CANNOT FIRE ON A BLOCKED EVENT LOOP, so the race is lost by construction and the
+    mechanism the repo built for this never runs. `CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0` does
+    not catch it either: `consoleBlockingRequestPathViolations` scans a route handler's own source
+    for `readFileSync`/`execFileSync`/etc., and this blocks in a transitive callee.
+
+    (4) WHERE THE 61.9s ACTUALLY GOES -- and it is NOT where the surrounding code assumes.
+    `--cpu-prof` on a probe replaying the real handler against live state (423 proposals, the
+    1,849-task plan), top self-time:
+
+        8.91s  14.4%  surfaceOf                    src/lib/task-linter.ts
+        7.58s  12.2%  advisoryRoutingViolations    src/lib/task-linter.ts
+        7.29s  11.8%  duplicateSurfaceViolations   src/lib/task-linter.ts
+        4.06s   6.6%  (garbage collector)
+        3.74s   6.0%  RegExp (advisory-routing lexicon)
+        ...
+        0.64s   1.0%  spawnSync
+
+    Over 90% is `task-linter.ts`. The phase breakdown agrees: `loadPlan` 842ms, `projectPlan` 41ms,
+    `readLedgerLines` 16ms, 423 ledger scans 60ms, 85 `git grep` subprocesses 640ms -- and the
+    classify loop 61,862ms. THE SUBPROCESSES ARE 1% OF IT. A first pass at this filed the greps as
+    the cause on an arithmetic guess (325 anchors x a 1.14s cold grep); measured warm they are 10ms
+    each, and the guess was wrong by two orders of magnitude.
+
+    (5) THE DEFECT, IN FOUR LINES. `blockingLintMessages` (src/lib/inbox.ts):
+
+        const merged = mergedPlan(basePlan, fragmentPlan);
+        const results = lintPlan(merged, () => ({}));        // lints EVERY task in merged
+        for (const task of fragmentPlan.tasks) {              // reads back the FRAGMENT's only
+          const violations = results.get(task.id) ?? [];
+
+    It computes 1,849 task lints and discards all but the one or two it reads. `classifyProposal`
+    calls it once per proposal, so one GET /v1/inbox runs ~783,000 task lints. The discarded 1,847
+    are IDENTICAL on every one of the 423 calls -- the base plan does not change within a request.
+  design: |
+    (i) `lintPlan` GAINS AN OPTIONAL `only?: ReadonlySet<string>`, and `blockingLintMessages` passes
+        the fragment's own ids. Nothing else changes: every existing caller omits the argument and
+        gets the whole plan exactly as before.
+
+    (ii) THE CORPUS STAYS THE WHOLE PLAN, and this is the only subtle part. `surfaceCorpus` is built
+         from `plan.tasks` BEFORE the filter applies, because `duplicateSurfaceViolations` asks "does
+         any OTHER task already own this surface" -- narrowing the corpus to the tasks being linted
+         would make the filtered lint cheaper AND blind to the collisions it exists to find. `only`
+         narrows what is COMPUTED, never what it is computed AGAINST. The suite pins this with a
+         fixture whose two tasks genuinely collide, guarded by an assertion that they do.
+
+    (iii) THE CALLER IS TESTED, NOT JUST THE PREDICATE. `blockingLintMessages` takes its lint
+          function by injection so a test can assert WHAT IT ASKS FOR. #5816 in this repo is the
+          precedent and the reason: a predicate was widened correctly and its one caller left
+          invoking the old form, behind ten green predicate tests and none driving the caller.
+
+    (iv) VERIFIED BY REPLAY, NOT BY REASONING. The real `classifyProposal` was run over all 423 live
+         proposals under both trees and every classification compared field for field:
+
+             unpatched   60,500ms   423 classifications
+             patched      1,353ms   423 classifications
+             states: ready 140, declined 62, not_ready 154, retired 67
+             IDENTICAL across all 423 proposals
+
+         Four distinct states and 154 not_ready -- the ones whose lint messages are the output --
+         so the comparison is not vacuous.
+
+    NOT IN SCOPE, and each is its own item: the 750ms budget being unenforceable against any
+    synchronous handler (the race is sound once nothing blocks for a minute, but the next blocking
+    callee defeats it again); `CONSOLE_BLOCKING_REQUEST_PATH_BASELINE` scanning only a handler's own
+    source; and `/v1/feedback` sitting at 5,031ms against a 5,000ms client timeout.
+  # THE TWO CORPUS INVARIANTS ARE IN THE SUITE BUT NOT HERE, deliberately. "still lints AGAINST the
+  # whole plan" and "answers identically to an unfiltered one" PASS AT THE MERGE BASE TOO, because
+  # without `only` a filtered lint and an unfiltered one are the same call. proof-discrimination
+  # refused them as `executed_stale` on the first push and was right to: a proof matching head and
+  # base discriminates nothing. They guard the WRONG fix (narrowing the corpus along with the
+  # output) and cannot witness the right one, so they stay as tests and never became criteria.
+  acceptance:
+    - claim: "lintPlan can be asked for a subset of task ids and computes only those"
+      proof: "unit test: lintPlan's id filter computes only the asked-for tasks"
+    - claim: "an absent filter still lints the whole plan, so every existing caller is unaffected"
+      proof: "unit test: an empty filter computes nothing, and an absent filter is the whole plan"
+    - claim: "the filter never invents a result for an id the plan does not carry"
+      proof: "unit test: the filter does not invent results for ids the plan does not carry"
+    - claim: "the hot caller actually passes the filter, asking only for its fragment's ids rather than the merged plan's"
+      proof: "unit test: blockingLintMessages asks only for the fragment's own ids, never the whole merged plan"
+    - claim: "narrowing what the caller asks for does not change the messages it returns"
+      proof: "unit test: narrowing the caller does not change the messages it returns"
+  falsifier: |
+    Drop the `only` parameter from lintPlan and 5 of the 7 assertions go red. The two that stay
+    GREEN are the correctness invariants -- "a filtered lint answers identically" and "still sees
+    the whole corpus" -- which must hold in both directions and would be worthless if they moved.
+    Measured by stashing the change on 2026-09-16.
+
+    Narrow the corpus as well as the output -- build `surfaceCorpus` from the filtered tasks -- and
+    the duplicate-surface assertion goes red while every timing gain remains, which is the specific
+    wrong fix this suite exists to refuse.
+  risk: high
+  band_meaning: blast-radius
+  origin: human
+  # THE SUITE IS DELIBERATELY NOT LISTED HERE, and the omission is forced rather than sloppy.
+  # Standing rule 15 refuses a diff that files criteria alongside non-plan files, so this shard
+  # must ride alone -- and `declaresTestFile` (task-linter.ts) reads a test/ path in `files:` as
+  # "this diff ships the suite", which turns every `unit test:` proof below into
+  # proof-unit-test-unresolvable in a tree that by rule cannot carry the suite. The two checks bind
+  # in opposite directions on the same filing. The suite is
+  # test/lint-scope-narrows-output-not-corpus.test.ts and it lands in the implementation PR.
+  files: [src/lib/task-linter.ts, src/lib/inbox.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: inboxlint -> plan3710
+
+    W1-T3710 was minted by `rmd next-task-id` from the `inboxlint` working branch, before Standing
+    rule 15's pre-push check split that branch into this plan-only filing and its implementation.
+    The reservation ref therefore records a holder that is not the branch filing it, which is the
+    hand-off `task-id-existence` names as its own remedy. Same id, same author, same session -- no
+    renumber, because renumbering would burn a reserved id to paper over a branch rename.

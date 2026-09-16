@@ -24,6 +24,7 @@ import {
   alreadyProposedForSignature,
   HAND_RUN_CENSUS_PROPOSED_STEP,
   HAND_RUN_RECURRENCE_DAY_FLOOR,
+  HAND_RUN_SEQUENCE_SCHEMA_VERSION,
   HAND_RUN_SESSION_GAP_MS,
   type HandRunLedgerRow,
 } from "../src/lib/hand-run-census.js";
@@ -368,7 +369,13 @@ test("handRunCensus: a recurrence already proposed (its signature is in the ledg
     ledgerUnion: (_stateDir, pattern) => {
       const patternStr = String(pattern);
       if (patternStr.includes("census_proposed")) {
-        return MEASURED_UNION([JSON.stringify({ step: HAND_RUN_CENSUS_PROPOSED_STEP, signature: "status|triage" })]);
+        return MEASURED_UNION([
+          JSON.stringify({
+            step: HAND_RUN_CENSUS_PROPOSED_STEP,
+            signature: "status|triage",
+            sequence_schema_version: HAND_RUN_SEQUENCE_SCHEMA_VERSION,
+          }),
+        ]);
       }
       return MEASURED_UNION(twoDayRecurrenceRows());
     },
@@ -410,14 +417,18 @@ test("handRunCensus: the dedup union cannot confirm (ok:false) -> fails OPEN and
   assert.equal(captured, 1);
 });
 
-test("alreadyProposedForSignature: true only for an exact signature match, ignoring unrelated/malformed lines", () => {
+test("alreadyProposedForSignature: true only for an exact signature match filed under the current schema version, ignoring unrelated/malformed/stale-era lines", () => {
   const lines = [
-    JSON.stringify({ step: HAND_RUN_CENSUS_PROPOSED_STEP, signature: "a|b" }),
-    JSON.stringify({ step: "something.else", signature: "a|b" }),
+    JSON.stringify({ step: HAND_RUN_CENSUS_PROPOSED_STEP, signature: "a|b", sequence_schema_version: HAND_RUN_SEQUENCE_SCHEMA_VERSION }),
+    JSON.stringify({ step: "something.else", signature: "a|b", sequence_schema_version: HAND_RUN_SEQUENCE_SCHEMA_VERSION }),
     "not json",
   ];
   assert.equal(alreadyProposedForSignature(lines, "a|b"), true);
   assert.equal(alreadyProposedForSignature(lines, "c|d"), false);
+  // W1-T3683 design note iv: a same-text signature filed WITHOUT the current schema version
+  // (every row filed before this task) is a stale-era proposal — read as absent, never agreement.
+  const stale = [JSON.stringify({ step: HAND_RUN_CENSUS_PROPOSED_STEP, signature: "a|b" })];
+  assert.equal(alreadyProposedForSignature(stale, "a|b"), false);
 });
 
 // ── W1-T2697 claim 4 (measurement-cadence.ts side): grep: handRunCensus( in
