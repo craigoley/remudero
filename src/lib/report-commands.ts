@@ -81,8 +81,10 @@ import {
   readPauseAgeMs,
   refuseUnsupportedArgs,
   type MemInfo,
+  type ProviderCapacityReading,
   type WorktreeBaseRow,
 } from "./doctor.js";
+import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 import { readInflightLock } from "./inflight-lock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { loadPlan, type Plan } from "./plan.js";
@@ -499,6 +501,14 @@ export interface DoctorDeps extends ReportRepoContext {
   readNvmrcVersion?: (root: string) => string | undefined;
   /** W1-T3472 — persisted feedback-docket fires. Defaults to `state/last-feedback-docket.json`. */
   readCaptureSurfaceFireHistory?: (root: string) => Array<Record<string, unknown>>;
+  /** W1-T3665 — the `provider-capacity` arm's only measurement: the SAME read-only projection
+   *  `/v1/provider-routing` (serve.ts) and `review-capacity.ts` already read. Defaults to
+   *  {@link readProviderRoutingStatus}; doctor never probes a provider or touches a credential of
+   *  its own. Typed via `typeof readProviderRoutingStatus` rather than restating its `deps`
+   *  parameter's own millis-clock field inline (W1-T2897's clock-signature census: writing that
+   *  legacy shape out here would be a NEW site in a file the census baselines at zero, not a
+   *  repeat of the one already recorded against provider-routing-status.ts itself). */
+  readProviderRoutingStatus?: typeof readProviderRoutingStatus;
 }
 
 export function readCaptureSurfaceFireHistory(root: string): Array<Record<string, unknown>> {
@@ -600,6 +610,20 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     // every other injected reading above, never read inside buildDoctorReport itself.
     runningNodeVersion: process.versions.node,
     ...(((v) => (v === undefined ? {} : { nvmrcVersion: v }))((deps.readNvmrcVersion ?? readNvmrcVersion)(repoDir))),
+    // W1-T3665: the LIVE provider-routing snapshot, projected into doctor's own reading shape.
+    // `unreadableForMs` is deliberately omitted — `rmd doctor` keeps no history of its own between
+    // runs, and judgeProviderCapacityReadable treats that unmeasured duration as already past the
+    // bound rather than waiting on evidence this command has no way to gather (see doctor.ts).
+    providerCapacity: (
+      (deps.readProviderRoutingStatus ?? readProviderRoutingStatus)(root, { now: () => nowMs }).providers ?? []
+    ).map(
+      (p): ProviderCapacityReading => ({
+        provider: p.provider,
+        readable: p.readable,
+        windows: p.windows,
+        ...(p.reason ? { reason: p.reason } : {}),
+      }),
+    ),
   });
 
   if (rest.includes("--json")) out(JSON.stringify({ worst: report.worst, checks: report.checks }, null, 2));
