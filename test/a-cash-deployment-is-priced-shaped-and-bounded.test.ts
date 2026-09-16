@@ -14,12 +14,15 @@ import { loadMounts } from "../src/lib/mounts.js";
 // three is a deployment that fails at dispatch, not at review.
 test("W1-T3689: every deployment named in the cash ladder is priced, shaped and bounded", () => {
   const mounts = loadMounts(".remudero/mounts.yaml");
-  const cash = (mounts.capabilities as Record<string, Record<string, Record<string, string[]>>>).cash;
+  const cash = mounts.capabilities?.cash;
   assert.ok(cash, "the cash ladder must exist");
 
   const named = new Set<string>();
   for (const efforts of Object.values(cash)) for (const row of Object.values(efforts)) for (const id of row) named.add(id);
   assert.ok(named.size > 0, "the ladder must name at least one deployment");
+  // W1-T3689's OWN claim, not just the census: gpt-5-mini must actually be one of the named rows,
+  // so this proof cannot pass vacuously against a merge base where the ladder never named it at all.
+  assert.ok(named.has("gpt-5-mini"), "gpt-5-mini must be named in the cash ladder for this test to cover it");
 
   for (const id of named) {
     assert.ok(OPENWEIGHT_PRICES[id], `${id} is in the cash ladder with no PRICE row — dispatch would refuse it`);
@@ -34,7 +37,8 @@ test("W1-T3689: every deployment named in the cash ladder is priced, shaped and 
 // row has NOTHING, and readCodexCapacity's equivalent on this ladder is a hard dispatch failure.
 test("W1-T3689: no cash ladder row is single-candidate", () => {
   const mounts = loadMounts(".remudero/mounts.yaml");
-  const cash = (mounts.capabilities as Record<string, Record<string, Record<string, string[]>>>).cash;
+  const cash = mounts.capabilities?.cash;
+  assert.ok(cash, "the cash ladder must exist");
   for (const [capability, efforts] of Object.entries(cash)) {
     for (const [effort, row] of Object.entries(efforts)) {
       assert.ok(
