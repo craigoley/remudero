@@ -50,7 +50,7 @@ tiers:
   sonnet: 2
   opus: 3
   claude-opus-5: 4
-  # W1-T3701: THE TOP TIER IS NO LONGER CLAUDE-ONLY. An Architect that exists only while the Claude
+  # THE TOP TIER IS NO LONGER CLAUDE-ONLY. An Architect that exists only while the Claude
   # subscription has headroom is a single point of failure, not a fleet -- so the two Azure
   # deployments the fleet already trusts are rankable here and may hold a top-tier seat when
   # nothing else can. These are the SAME models the Codex subscription routes (they lead its
@@ -102,7 +102,7 @@ capabilities:
     # Despite the field name this is the MODEL -> CAPABILITY map for every model `tiers` ranks --
     # the loader refuses a `tiers` key with no entry here -- so a rankable Azure deployment is
     # declared alongside the Claude ones rather than in a parallel table that the invariant would
-    # not read (W1-T3701).
+    # not read (measured 2026-09-16).
     haiku: economy
     sonnet: balanced
     opus: frontier
