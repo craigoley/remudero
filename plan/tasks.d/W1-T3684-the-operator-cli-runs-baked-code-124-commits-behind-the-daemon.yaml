@@ -1,0 +1,104 @@
+- id: W1-T3684
+  title: "The operator CLI resolves to the BAKED /app snapshot while the daemon runs the live mount — rmd lint-plan is missing a refusal the daemon enforces at dispatch, so an operator can pre-flight clean and still be refused, and W1-T1021's drift detector excludes src/ by design"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 10.00
+  files:
+    - deploy/entrypoint.sh
+  origin: "operator-session#stale-cli-found-through-an-unrelated-assertion-2026-09-16"
+  plan_refs: ["W1-T1021", "W1-T3687"]
+  status: queued
+  priority: 2
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16 inside remudero-daemon. THREE VERSIONS IN ONE CONTAINER:
+
+      /etc/rmd-build-sha (what /app was baked from)   6549523aa  (#5550)
+      /home/node/Remudero/remudero (what runs)        2901044fe  (#5736)
+      origin/main                                     a64dc7ff5  (#5744)
+
+      $ git rev-list --count 6549523aa..HEAD
+      124
+
+    The daemon process confirms which tree is authoritative:
+
+      node .../Remudero/remudero/node_modules/.bin/tsx \
+           /home/node/Remudero/remudero/src/run-task.ts daemon --repo remudero
+
+    `/app/bin/rmd` resolves its package root from its OWN location, so it always loads `/app/src`.
+    THE DIVERGENCE IS NOT THEORETICAL:
+
+      $ grep -c proof-unit-test-unresolvable /app/src/lib/task-linter.ts                  0
+      $ grep -c proof-unit-test-unresolvable /home/node/Remudero/remudero/src/lib/task-linter.ts   3
+
+    So `rmd lint-plan` reports clean on a shard the daemon REFUSES at dispatch on a rule (#5736)
+    the baked CLI has never heard of.
+
+    HOW IT SURFACED, WHICH IS ITS OWN FINDING: by an assertion inside an unrelated verb.
+
+      $ rmd emissions --days 14
+      Error: assertVerbScanAgreesWithRegistry: the verb scan and the COMMANDS registry disagree
+      (scanned but not declared: feedback-reconcile)
+
+    That verb was declared 124 commits ago. Nothing reports the staleness directly.
+  rationale: |
+    W1-T1021 IS CORRECT AND IS NOT THE BUG. Its detector deliberately excludes `src/`, and
+    src/lib/image-drift.ts states exactly why: the entrypoint `cd`s into the mounted tree before
+    running anything, so `src/` is live and a change there "MUST NOT trigger this detector". That
+    reasoning is sound FOR THE DAEMON. It is stated in the same doc that `/app` is "inert rather
+    than authoritative" -- and that sentence is the defect, because `/app/bin/rmd` is the one thing
+    for which `/app` is NOT inert.
+
+    A DRIFT WARNING IS THE WRONG FIX AND WOULD MAKE W1-T1021 WRONG. Extending image-drift to `src/`
+    would fire on every boot of a correctly-operating daemon, which is precisely the false positive
+    that module was written to avoid. The CLI should not report that it is stale; it should not BE
+    stale.
+
+    WHY THIS COMPOUNDS EVERY OTHER PRE-FLIGHT TASK. W1-T3687 makes `check-acceptance` ask the
+    discrimination question; that improvement reaches an operator only if the operator's `rmd` is
+    the one carrying it. A fleet whose pre-flight verbs lag its gates by an unbounded number of
+    commits will keep producing PRs that pass locally and are refused at review, and the operator
+    has no way to tell which of the two is right.
+  design: |
+    (i) THE PATH `rmd` RESOLVES TO BECOMES THE TREE THE ENTRYPOINT ALREADY CHOSE. `deploy/entrypoint.sh`
+        already resolves `TREE="$CONFIG_ROOT/remudero"`, fetches it and `cd`s into it. It additionally
+        points the `rmd` on PATH at `${TREE}/bin/rmd`, so an interactive `rmd` and the daemon load
+        the same `src/`. `/app` stays exactly where it is and keeps serving as the bootstrap
+        snapshot -- nothing is deleted.
+
+    (ii) THE FALLBACK IS EXPLICIT AND STAYS SILENT ONLY WHEN IT IS CORRECT. When no live tree
+         exists (first boot, before the fetch), `rmd` resolves to `/app` as today. When a live tree
+         exists but its `bin/rmd` is missing or unexecutable, that is an ERROR on stderr, not a
+         silent fall back to a snapshot of unknown age.
+
+    (iii) `rmd --version` (or the existing boot banner if one already carries it) STATES WHICH TREE
+          IT LOADED and that tree's sha. An operator who suspects a verb is behind must be able to
+          answer it in one command rather than by diffing two checkouts by hand, which is how this
+          was found.
+
+    (iv) THE ASSERTION THAT CAUGHT THIS STAYS. `assertVerbScanAgreesWithRegistry` firing was the
+         only reason anyone looked; it must not be relaxed to accommodate a mixed-version container.
+
+    OUT OF SCOPE, DELIBERATELY: rebuilding the image on merge. `.github/workflows/acr-build.yml` is
+    `workflow_dispatch:`-only by design (W1-T1021's own note), and this task makes the baked image
+    matter LESS rather than making it fresher.
+
+    THE SUITE GOES IN test/the-cli-on-path-resolves-to-the-live-tree.test.ts, kept out of files: for
+    the reason W1-T3680 records.
+  acceptance:
+    - claim: "with a live tree present, the rmd on PATH loads that tree rather than the baked snapshot"
+      proof: "unit test: the cli on path loads the live tree"
+    - claim: "with no live tree present, resolution falls back to the baked snapshot exactly as it does today"
+      proof: "unit test: with no live tree the cli falls back to the snapshot"
+    - claim: "a live tree whose cli is missing or unexecutable is reported as an error rather than silently falling back to a snapshot of unknown age"
+      proof: "unit test: an unusable live tree cli is an error not a silent fallback"
+    - claim: "the cli states which tree it loaded and that tree's revision, so staleness is answerable in one command"
+      proof: "unit test: the cli states the tree it loaded and its revision"
+  falsifier: |
+    Keep resolving to /app when a live tree exists and the first test must fail. Error out on a
+    first boot with no tree and the second must fail. Fall back silently from a broken live tree and
+    the third must fail. Print no tree identity and the fourth must fail.

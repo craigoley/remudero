@@ -114,13 +114,34 @@ capabilities:
   # the medium/high rows already lead with — a same-capability primary, never a downgrade to terra.
   # MEASURED on the live daemon 2026-09-14: gpt-5.5 was 309 of 364 observed model selections, so
   # this is the single highest-traffic entry in the table, not a marginal one.
+  # MEASURED 2026-09-16 against this account's own `model/list` via the daemon container's
+  # app-server. THE ACCOUNT CAN RUN EXACTLY FOUR MODELS: gpt-5.6-sol, gpt-5.6-terra,
+  # gpt-5.6-luna, gpt-5.5. Three ids below were NOT in that list, and one of them is not merely
+  # absent -- `codex exec --model gpt-5.3-codex-spark` returns HTTP 400 "not supported when using
+  # Codex with a ChatGPT account". Spark's `rateLimitsByLimitId` bucket (0% short / 50% weekly)
+  # is therefore PHANTOM HEADROOM: the account is shown an allowance it cannot spend.
+  #
+  # `balanced.low: [gpt-5.4]` was the single-point dependency this block's own comment warns
+  # about, already realised: one candidate, not account-visible, so no candidate is eligible ->
+  # readCodexCapacity returns readable:false -> selectWorkerProviderForPolicy falls back to
+  # CLAUDE. That lane has been silently migrating onto the subscription this fleet is trying to
+  # spend less of. It now mirrors balanced.medium/high exactly -- a same-capability primary
+  # (terra), never a cross-band promotion (W1-T2842 forbids promoting beyond a band without
+  # measured task outcomes).
+  #
+  # EVERY ECONOMY ROW IS LEFT EXACTLY AS W1-T2842 RULED. Spark leading economy/low and /high is
+  # harmless precisely because the eligibility filter drops a model that is not account-visible
+  # with no edit here, so those rows already resolve to Luna today and will resolve to Spark again,
+  # with no further change, on the day the account is offered it. Reordering them would reverse a
+  # merged ruling to buy nothing. ONLY `balanced.low` changes here, because only it was BROKEN:
+  # a single non-visible candidate leaves the row with no eligible model at all.
   codex:
     economy:
       low:    [gpt-5.3-codex-spark, gpt-5.6-luna, gpt-5.4-mini]
       medium: [gpt-5.6-luna, gpt-5.3-codex-spark, gpt-5.4-mini]
       high:   [gpt-5.3-codex-spark, gpt-5.6-luna, gpt-5.4-mini]
     balanced:
-      low:    [gpt-5.4]
+      low:    [gpt-5.6-terra, gpt-5.4, gpt-5.5]
       medium: [gpt-5.6-terra, gpt-5.4, gpt-5.5]
       high:   [gpt-5.6-terra, gpt-5.4, gpt-5.5]
     frontier:
@@ -168,10 +189,16 @@ capabilities:
       low:    [gpt-5-nano, gpt-oss-120b]
       medium: [gpt-5-nano, gpt-oss-120b]
       high:   [gpt-5-nano, gpt-oss-120b]
+    # W1-T3689: `frontier` WAS [gpt-oss-120b] alone -- single-candidate, the same shape that had
+    # already gone wrong in `codex.balanced.low`. gpt-5-mini leads it now: the only cash deployment
+    # that answers json_object correctly, and a 272,000-token input ceiling against gpt-oss-120b's
+    # 131,072 -- the ceiling W1-T3613 showed inbox_draft (259,181 tokens) actually breaches.
+    # gpt-oss-120b TRAILS rather than being removed, the demotion shape this file uses throughout.
+    # It is DEARER on both axes ($0.25/$2.00 vs $0.15/$0.60); frontier is where that buys something.
     frontier:
-      low:    [gpt-oss-120b]
-      medium: [gpt-oss-120b]
-      high:   [gpt-oss-120b]
+      low:    [gpt-5-mini, gpt-oss-120b]
+      medium: [gpt-5-mini, gpt-oss-120b]
+      high:   [gpt-5-mini, gpt-oss-120b]
 
 # ── The Architect mount (the bookend: plan authorship, orchestration) ──────────
 # claude-opus-5/high — the sole top-tier mount; strictly above every worker below. Governs ONLY
