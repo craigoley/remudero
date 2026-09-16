@@ -236,6 +236,7 @@
     "test/a-union-read-of-an-unretained-step-is-refused.test.ts": 0,
     "test/a-unit-test-proof-that-resolves-to-no-test-is-refused.test.ts": 0,
     "test/a-verdict-class-is-not-a-failure-class-until-its-members-are-joined-to-merge-state.test.ts": 1115,
+    "test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts": 0,
     "test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts": 1313,
     "test/a-verify-human-shard-is-judged.test.ts": 0,
     "test/a-wake-is-not-consumed-by-a-sweep-that-never-ran.test.ts": 1844,
