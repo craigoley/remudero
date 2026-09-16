@@ -99,7 +99,7 @@ test("W1-T2685: --reserve recomputes the advisory line to the id it actually hol
 
 test("W1-T2685: a non-reserve advisory namespace failure leaves the mint printable", async (t) => {
   const cap = captureConsole(t);
-  const code = await nextTaskIdCommand(["--plan", planFixture(1)], {}, {
+  const code = await nextTaskIdCommand(["--no-reserve", "--plan", planFixture(1)], {}, {
     openPrTexts: NO_OPEN_PRS,
     runGit: () => {
       throw new Error("namespace unavailable");

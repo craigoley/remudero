@@ -1,0 +1,70 @@
+- id: W1-T3629
+  title: "NOTHING REAPS AN ORPHANED WORKER PROCESS — pruneStaleRuns reclaims the WORKTREE a dead run left behind and rmd-reap-stray reclaims stray CONTAINERS, but the PROCESS itself is reclaimed by nobody, so a worker whose run is long gone keeps its memory until the host dies"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 20.00
+  files: [src/lib/worker.ts, test/an-orphaned-worker-process-is-reaped.test.ts]
+  origin: oper#fleet-outage-2026-09-16
+  plan_refs: ["W1-T3628", "W1-T3627", "W1-T208", "W1-T2251"]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: main -> chore/file-orphan-worker-reaper-1789522145
+
+    The id was minted by the fleet's automatic reservation while checked out on `main`
+    (rmd-id holder branch=main, 2026-09-16T01:28:33Z) before this filing branch existed, so
+    task-id-existence's holder check sees a mismatch. This note is the recorded hand-off from
+    that holder to the branch that actually files the shard.
+  rationale: |
+    ORDERING, CARRIED IN PROSE BECAUSE depends_on CANNOT NAME IT YET. This must land AFTER
+    W1-T3628, which is the task that makes the worker reading exist at all -- until then there is
+    no list of worker processes to reap from. W1-T3628's own shard is filed but unmerged, so
+    `depends_on` would refuse against origin/main's plan; plan_refs carries the link instead and
+    this paragraph carries the order.
+
+    THREE RECLAIMERS EXIST AND NONE OF THEM OWNS THE PROCESS.
+
+        pruneStaleRuns (worker.ts)      force-removes a DEAD run's WORKTREE and branch
+        rmd-reap-stray.timer (host)     hourly sweep for stray rmd-* CONTAINERS
+        reclaimStaleLock (fs-race-safe) reclaims a LOCK whose holder is gone
+
+    Each reclaims the artefact beside the process. The process is reclaimed by nobody. HUNG_WORKER
+    _AGE_S exists but W1-T3628 shows it was only ever a doctor WARN, and doctor states its own
+    division in every neighbouring arm: "W1-T978 owns reclamation, doctor only reports".
+
+    MEASURED 2026-09-16. The host held two `npm ci` at ELAPSED 4846s and 4295s -- 80 and 71 minutes
+    -- at 527MB and 385MB RSS, next to 71 node and 66 git processes, while load ran 221 on 8 cores
+    and available memory sat flat at 0.9GiB for 75 minutes. Nothing killed them. The box was
+    recovered by an operator restarting the VM.
+
+    THE CONSTRAINT THAT SHAPES THIS TASK IS A SCAR IN THE NEIGHBOURING CODE. pruneStaleRuns carries
+    it in its own doc: "force-removing any `run-*` worktree once destroyed a successful 65-turn
+    implement mid-run (diag/drain-concurrency; W1-T208)". A reaper that kills by AGE ALONE repeats
+    that exactly -- `implement.high` runs at max_turns 400 and can legitimately exceed two hours, so
+    age is evidence of duration and NOT of death.
+
+    SO THE BOUND IS ORPHANHOOD, AND AGE IS ONLY THE SECOND CONDITION. A worker is reapable when its
+    OWNING RUN IS GONE -- no live run lock claims it -- AND it is past HUNG_WORKER_AGE_S. That is
+    what the doctor arm's own name, `lane-less-workers`, has meant since #2251: lane-LESS. A worker
+    still held by a live lane is never a candidate however old it is, which is the property that
+    keeps a long implement alive.
+
+    FAIL CLOSED ON AN UNREADABLE LOCK, the same way pruneStaleRuns already does: "A CORRUPT lock is
+    treated the SAME as an ABSENT one, never as proof of death". Inverted here, because the action
+    is destructive rather than reclaiming a directory -- an unreadable lock must count as POSSIBLY
+    LIVE and spare the process, never as proof the run is gone.
+
+  acceptance:
+    - claim: "a worker past the age bound whose owning run is gone is terminated, and the reap is ledgered with the pid, the age and the reason"
+      proof: "unit test: an orphaned worker past the age bound is reaped and ledgered"
+    - claim: "a worker held by a LIVE run is never reaped however old it is, so a long implement cannot be killed by its own duration"
+      proof: "unit test: a worker owned by a live run is never reaped however old it is"
+    - claim: "a worker inside the age bound is never reaped, so orphanhood alone is not sufficient"
+      proof: "unit test: an orphan inside the age bound is left alone"
+    - claim: "an unreadable owner reading spares the process rather than reaping it, because a destructive action must fail closed"
+      proof: "unit test: an unreadable run lock spares the worker rather than reaping it"

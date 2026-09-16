@@ -541,8 +541,10 @@ function setupFakeRetroFixture(
     preflightExercisesRepair?: boolean;
     /** Override only the resumed repair worker result; the initial Architect result stays valid. */
     repairWorkerResult?: Partial<WorkerResult>;
-    /** Simulate a future provider result reaching retro's historical provenance boundary. */
-    workerProvider?: "claude" | "codex" | "openweight";
+    /** Simulate a future provider result reaching retro's historical provenance boundary. Carries
+     *  BOTH open-weight spellings: W1-T3607 made `cash` canonical and kept `openweight` as a
+     *  deprecated alias, and `WorkerProviderId` still admits each, so each must be refused here. */
+    workerProvider?: "claude" | "codex" | "cash" | "openweight";
   } = {},
 ): FakeRetroFixture {
   const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-success-home-"));
@@ -807,18 +809,46 @@ test("retroCommand: a clean run reaches the REAL saveMarker call at the end of t
   });
 });
 
-test("retroCommand: an openweight worker result is omitted from the Claude/Codex-only prepublish provenance", async (t) => {
-  const fx = setupFakeRetroFixture(t, { workerProvider: "openweight" });
+// Driven for BOTH open-weight spellings, and W1-T3607 is why. This case existed to catch exactly
+// the leak that rename introduced, and it did not: it pinned the literal `openweight`, so when the
+// canonical id became `cash` the case went on guarding a spelling production normalises away and
+// passed while `cash` flowed straight into the provenance shape. A test that names one id guards
+// one id; `WorkerProviderId` admits both, so both are named here.
+for (const openWeightId of ["cash", "openweight"] as const) {
+  test(`retroCommand: a ${openWeightId} worker result is omitted from the Claude/Codex-only prepublish provenance`, async (t) => {
+    const fx = setupFakeRetroFixture(t, { workerProvider: openWeightId });
+    await fx.run(async () => {
+      const exitCode = await withLiveWritesAllowed(() => retroCommand([], {
+        spawn: fx.fakeSpawn,
+        github: offlineGh,
+        prepublishPreflight: fx.prepublishPreflight,
+      }));
+      assert.equal(exitCode, 1, "the fixture's red CI exits only after the prepublish boundary is crossed");
+      const rows = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      const preflight = rows.find((row) => row.step === "retro.preflight_passed");
+      assert.equal(
+        Object.hasOwn(preflight, "provider"),
+        false,
+        `${openWeightId} must not enter retro's historical Claude/Codex provenance shape`,
+      );
+    });
+  });
+}
+
+test("retroCommand: a claude worker result DOES reach the prepublish provenance", async (t) => {
+  // The positive control for the pair above. Without it the two cases are satisfied by a boundary
+  // that drops EVERY provider -- including the two it is supposed to keep -- and the assertion
+  // "provider is absent" cannot tell a working allow-list from a broken one.
+  const fx = setupFakeRetroFixture(t, { workerProvider: "claude" });
   await fx.run(async () => {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand([], {
+    await withLiveWritesAllowed(() => retroCommand([], {
       spawn: fx.fakeSpawn,
       github: offlineGh,
       prepublishPreflight: fx.prepublishPreflight,
     }));
-    assert.equal(exitCode, 1, "the fixture's red CI exits only after the prepublish boundary is crossed");
     const rows = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
     const preflight = rows.find((row) => row.step === "retro.preflight_passed");
-    assert.equal(Object.hasOwn(preflight, "provider"), false, "openweight must not enter retro's historical Claude/Codex provenance shape");
+    assert.equal(preflight.provider, "claude", "an allowed provider must still be recorded");
   });
 });
 

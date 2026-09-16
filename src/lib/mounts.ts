@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { isWorkerProviderId, WORKER_PROVIDER_IDS, type WorkerProviderId } from "./config.js";
+import { canonicalWorkerProviderId, isWorkerProviderId, WORKER_PROVIDER_IDS, type WorkerProviderId } from "./config.js";
 import { DEFAULT_TASK_CLASS } from "./task-class.js";
 
 /**
@@ -137,6 +137,10 @@ export interface CapabilityLadder {
   claudeCandidates?: Record<string, string[]>;
   /** capability -> effort -> ordered provider candidate model ids. */
   codex: Record<string, Record<string, string[]>>;
+  /** The cash (non-subscription) ladder (W1-T3546/W1-T3607) — canonical field. */
+  cash?: Record<string, Record<string, string[]>>;
+  /** DEPRECATED (W1-T3607): pre-rename spelling of {@link cash}, mirrored by {@link parseCapabilities}
+   *  so a caller reading this field directly (bypassing the loader) still resolves the same table. */
   openweight?: Record<string, Record<string, string[]>>;
 }
 
@@ -215,7 +219,11 @@ function parseMount(
   if (provider !== undefined && !isWorkerProviderId(provider)) {
     throw new MountsError(`mount ${where}: 'provider' must be one of ${JSON.stringify(WORKER_PROVIDER_IDS)}, got ${JSON.stringify(provider)}.`);
   }
-  return { model, effort, maxTurns: max_turns, contextBudget: context_budget, ...(provider === undefined ? {} : { provider }) };
+  // W1-T3607: normalise at THIS read boundary — a row written `provider: openweight` (wire surface
+  // 5 of the deprecation design) resolves to the canonical `cash` id here, once, so every consumer
+  // of a parsed Mount sees only the canonical spelling.
+  const normalizedProvider = provider === undefined ? undefined : (canonicalWorkerProviderId(provider) as WorkerProviderId);
+  return { model, effort, maxTurns: max_turns, contextBudget: context_budget, ...(normalizedProvider === undefined ? {} : { provider: normalizedProvider }) };
 }
 
 /**
@@ -406,31 +414,41 @@ function parseCapabilities(
     }
   }
 
-  let openweight: Record<string, Record<string, string[]>> | undefined;
-  if (raw.openweight !== undefined) {
-    if (!isObject(raw.openweight)) {
-      throw new MountsError("'capabilities.openweight' must be a mapping of capability -> effort -> model list.");
+  // W1-T3607: `cash` is the canonical key; `openweight` is read as a deprecated alias when `cash` is
+  // absent, so a still-old-spelled table (wire surface 4 of the deprecation design) keeps loading.
+  // Whichever key was actually present is used in error messages, so a refusal points at the row the
+  // table really carries rather than the name it might not have.
+  const cashKeyName = raw.cash !== undefined ? "cash" : "openweight";
+  const cashSource = raw.cash ?? raw.openweight;
+  let cash: Record<string, Record<string, string[]>> | undefined;
+  if (cashSource !== undefined) {
+    if (!isObject(cashSource)) {
+      throw new MountsError(`'capabilities.${cashKeyName}' must be a mapping of capability -> effort -> model list.`);
     }
-    openweight = {};
+    cash = {};
     for (const capability of Object.keys(ladder)) {
-      const byEffort = raw.openweight[capability];
+      const byEffort = cashSource[capability];
       if (!isObject(byEffort)) {
-        throw new MountsError(`'capabilities.openweight.${capability}' must be a mapping of effort -> model list.`);
+        throw new MountsError(`'capabilities.${cashKeyName}.${capability}' must be a mapping of effort -> model list.`);
       }
-      openweight[capability] = {};
+      cash[capability] = {};
       for (const effort of Object.keys(efforts)) {
         const models = byEffort[effort];
         if (!Array.isArray(models) || models.length === 0 || !models.every((entry) => typeof entry === "string" && entry.length > 0)) {
           throw new MountsError(
-            `'capabilities.openweight.${capability}.${effort}' must be a non-empty list of model ids, got ${JSON.stringify(models)}.`,
+            `'capabilities.${cashKeyName}.${capability}.${effort}' must be a non-empty list of model ids, got ${JSON.stringify(models)}.`,
           );
         }
-        openweight[capability][effort] = [...(models as string[])];
+        cash[capability][effort] = [...(models as string[])];
       }
     }
   }
 
-  return { ladder, claude, claudeCandidates, codex, ...(openweight ? { openweight } : {}) };
+  // Mirrored onto BOTH fields: `openWeightCandidatesForCapability` (worker-provider.ts) and any
+  // caller that constructs a CapabilityLadder-shaped object directly (bypassing this loader) may
+  // still read the deprecated `openweight` key — there is exactly one parsed source of truth here,
+  // so the two fields can never drift apart.
+  return { ladder, claude, claudeCandidates, codex, ...(cash ? { cash, openweight: cash } : {}) };
 }
 
 /**

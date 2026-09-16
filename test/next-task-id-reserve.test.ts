@@ -160,7 +160,15 @@ test("W1-T1055: an unreachable origin refuses instead of minting optimistically"
 
 // ── criterion 4 — the unflagged verb is unchanged and reserves nothing ─────────────────────────
 
-test("W1-T1055: the unflagged verb reserves nothing and its output is unchanged", async () => {
+test("W1-T3091: the unflagged verb CLAIMS, and --no-reserve is what reserves nothing", async () => {
+  // POLARITY REVERSED FROM W1-T1055, DELIBERATELY. That task shipped `--reserve` as an opt-in and
+  // this test asserted its other half: "without the flag the verb is byte-identical to before,
+  // reserving nothing". W1-T3091 reverses exactly that, and names the evidence -- five id
+  // incidents in one session on 2026-09-07, and on 2026-09-15 two shards on main under one id,
+  // `loadPlan` throwing, every PR's required `ci` failing until a human renumbered the loser.
+  //
+  // The SHAPE of the old test is kept, including its positive control, because the control is what
+  // made the original assertion trustworthy: a zero that is really an unwired stub proves nothing.
   const reserver = stubReserver(new Set());
   const cap = capture();
   try {
@@ -168,20 +176,22 @@ test("W1-T1055: the unflagged verb reserves nothing and its output is unchanged"
   } finally {
     cap.restore();
   }
-  assert.equal(reserver.tried.length, 0, "WITHOUT the flag nothing is claimed — not one attempt");
-  const text = cap.out.join("\n");
-  assert.equal(text.includes("RESERVED "), false);
-  assert.equal(text.includes("HELD BY ANOTHER CALLER"), false);
+  assert.equal(reserver.tried.length, 1, "a BARE mint must claim — exactly one attempt");
+  assert.match(cap.out.join("\n"), /RESERVED /, "and must say what it holds");
 
-  // POSITIVE CONTROL: the same stub DOES get used when the flag is present, so the zero above is
-  // the flag being absent and not a reserver that is never wired.
+  // THE OPT-OUT IS THE OTHER HALF, and the same stub carries it: a second call that opts out must
+  // add NO further attempt, so the count stays where the bare mint left it.
   const cap2 = capture();
   try {
-    await nextTaskIdCommand(["--reserve"], {}, { reserver, holderOf: () => "unknown", openPrTexts: NO_OPEN_PRS });
+    await nextTaskIdCommand(["--no-reserve"], {}, { reserver, holderOf: () => "unknown", openPrTexts: NO_OPEN_PRS });
   } finally {
     cap2.restore();
   }
-  assert.equal(reserver.tried.length, 1);
+  assert.equal(reserver.tried.length, 1, "--no-reserve must claim NOTHING — the count is unchanged");
+  const text = cap2.out.join("\n");
+  assert.equal(text.includes("RESERVED "), false);
+  assert.equal(text.includes("HELD BY ANOTHER CALLER"), false);
+  assert.match(text, /W1-T\d+/, "but it still PRINTS an id — it is a mint either way");
 });
 
 // ── the contradiction, refused rather than silently resolved ──────────────────────────────────
