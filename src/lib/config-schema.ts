@@ -50,7 +50,16 @@ export interface Config {
   accessAudience?: string;
   notifyRecipient?: string;
   overflow?: "none" | "api_key";
-  dailyCapUsd?: number | null;
+  /** W1-T3698: the cash (Azure) spend ceiling for one UTC day. A PLAIN NUMBER is the whole cap, as
+   *  before. A PAIR raises it only on a day the subscriptions are tapped out:
+   *
+   *      dailyCapUsd: { normal: 10, squeezed: 25 }
+   *
+   *  `normal` governs routine mount-affinity cash work; `squeezed` governs a request that only
+   *  reached cash because the capacity auction found NO subscription with readable headroom (the
+   *  W1-T3692 fallback). It is a CEILING on the day's committed total either way -- never a budget
+   *  the fleet is encouraged to spend. */
+  dailyCapUsd?: number | { normal: number; squeezed: number } | null;
   fixStrikeCap?: number;
   consoleUrl?: string;
   serve?: { host?: string; port?: number; identityCapability?: string; trustedProxy?: string };

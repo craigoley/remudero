@@ -2263,11 +2263,54 @@ function mutateOpenWeightAllowance<T>(
  * Called before the transport, never after. On refusal nothing is committed and {@link
  * OpenWeightAllowanceExhaustedError} is thrown by the caller, so no paid request is made.
  */
+/**
+ * W1-T3698: the cash ceiling for THIS request's UTC day.
+ *
+ * A plain number is the whole cap, exactly as before. A pair raises it only when the request
+ * reached cash because the capacity auction found NO subscription with readable headroom -- the
+ * W1-T3692 fallback -- so routine mount-affinity work stays on the lower figure and the higher one
+ * is reachable only on a day the subscriptions are genuinely tapped out.
+ *
+ * IT IS A CEILING, NOT A BUDGET. `squeezed` does not authorise spending more; it stops the cap
+ * refusing work on the one day cash is the only thing that can do it.
+ *
+ * REFUSES A PAIR THAT INVERTS. A `squeezed` below `normal` would mean the squeeze DAY buys less
+ * than an ordinary one, which is never what an operator means -- far likelier a transposition, and
+ * silently honouring it would cap the fleet hardest exactly when it is most constrained.
+ */
+export function effectiveCashCapUsd(
+  cap: number | { normal: number; squeezed: number } | null | undefined,
+  opts: { squeezed?: boolean } = {},
+): number | undefined {
+  if (cap === undefined || cap === null) return undefined;
+  if (typeof cap === "number") return cap;
+  const { normal, squeezed } = cap;
+  if (!Number.isFinite(normal) || !Number.isFinite(squeezed)) {
+    throw new Error(`dailyCapUsd pair must be two finite numbers, got normal=${String(normal)} squeezed=${String(squeezed)}`);
+  }
+  if (squeezed < normal) {
+    throw new Error(
+      `dailyCapUsd.squeezed ($${squeezed}) is below dailyCapUsd.normal ($${normal}) — refusing: a squeeze day must not buy ` +
+        `LESS than an ordinary one. If the two were transposed, swap them.`,
+    );
+  }
+  return opts.squeezed === true ? squeezed : normal;
+}
+
 export function reserveOpenWeightBudget(
   config: Config,
-  input: { requestId: string; deployment: string; requestBodyBytes: number; atIso: string; beforeCommit?: () => void },
+  input: {
+    requestId: string;
+    deployment: string;
+    requestBodyBytes: number;
+    atIso: string;
+    beforeCommit?: () => void;
+    /** W1-T3698: true when this request reached cash only because no subscription had readable
+     *  headroom. Selects `dailyCapUsd.squeezed` over `.normal`; ignored for a plain-number cap. */
+    squeezed?: boolean;
+  },
 ): { reservedUsd: number; committedUsd: number; capUsd: number } {
-  const capUsd = config.dailyCapUsd;
+  const capUsd = effectiveCashCapUsd(config.dailyCapUsd, { squeezed: input.squeezed });
   // validateConfig already refuses an enabled cash provider (W1-T3607: canonical id, "openweight"
   // accepted as a deprecated alias) with no dailyCapUsd. This is the runtime half of that same rule:
   // an absent cap here means the transport must not run at all, rather than defaulting to unlimited.
@@ -2317,6 +2360,9 @@ export function settleOpenWeightBudget(
 }
 
 export interface OpenWeightSpawnArgs {
+  /** W1-T3698: set ONLY by W1-T3692's blocked-auction fallback. Selects `dailyCapUsd.squeezed`
+   *  over `.normal` for every reservation this run makes. */
+  cashSqueezed?: boolean;
   cwd: string;
   prompt: string;
   workerHome: string;
@@ -2712,6 +2758,7 @@ export async function spawnOpenWeightWorker(
         deployment: selection.model,
         requestBodyBytes: Buffer.byteLength(body, "utf8"),
         atIso: clock.iso(),
+        squeezed: args.cashSqueezed === true,
       });
       budgetReservedUsd += reservation.reservedUsd;
       const response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
