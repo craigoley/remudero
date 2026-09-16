@@ -108,6 +108,13 @@ CODEX_MOUNT_DEST="/home/node/.codex"
 # deploy/runtime-env-vars.sh or the container environment.
 CONTAINER_CONFIG_DIR="${RMD_CONTAINER_CONFIG_DIR:-${HOME:-/root}/.config/remudero-container}"
 CONTAINER_CONFIG_MOUNT_DEST="/home/node/.config/remudero"
+# W1-T3612: the operator's OWN checkout, alongside the daemon's own checkout under
+# ${STATE_DIR}/remudero — both are inputs to section 4a's git object reclaim, below. Derived the
+# same way CRED_DIR/CODEX_DIR are (env override, literal default) rather than hardcoded, so this one
+# name does not drift the way STATE_DIR's own default already has (see --print-daemon-run's sibling
+# check). RMD_GIT_RECLAIM_DIRS, read in section 4a, overrides the WHOLE pair when a host's fleet owns
+# a different set — this var only supplies the second half of that pair's default.
+RMD_OP_DIR="${RMD_OP_DIR:-${HOME:-/root}/rmd-op}"
 # The repo `rmd daemon` drains. It REFUSES without `--repo` (usage dump, exit 2), which is how a
 # containerised boot burned four restarts before anyone read the exit code — `daemon-plist` bakes
 # the same flag for the launchd path, and the printed invocation must not be weaker.
@@ -602,6 +609,15 @@ digest_of() {
 id_of() {
   docker image inspect --format '{{.Id}}' "$1" 2>/dev/null || true
 }
+# W1-T3612: the size (KB) of a checkout's `.git` directory, used by section 4a to report git object
+# reclaim PER CHECKOUT. `|| true` on the pipeline, and printf as the function's last command
+# regardless of outcome — the same guard digest_of/id_of use above, needed here because an unguarded
+# failing `du` inside a plain assignment (not an if/while) aborts the whole script under `set -e`.
+git_dir_kb() {
+  local kb
+  kb="$(du -sk "$1" 2>/dev/null | awk '{print $1}')" || true
+  [ -n "${kb}" ] && printf '%s' "${kb}" || printf '0'
+}
 
 BEFORE_DIGEST="$(digest_of "${REF}")"
 BEFORE_ID="$(id_of "${REF}")"
@@ -680,7 +696,128 @@ else
   docker builder   prune -af 2>&1 | tail -1 | sed 's/^/  /' || true
 fi
 
-# ── 4b. RECLAIM-ONLY STOPS HERE (W1-T2725) ───────────────────────────────────────────────────
+# ── 4a. GIT OBJECT RECLAIM (W1-T3612) — the OTHER filesystem the disk actually fills on ─────────
+# Everything above prunes docker, which lives on `/mnt/rmd`. The checkouts the fleet owns live on the
+# ROOT filesystem and nothing above touches it.
+#
+# TRAP: a `.git/gc.log` makes git decline automatic gc FOREVER (git-gc(1)) — it never retries, so the
+# objects behind it are never reclaimed by anything except this rung.
+#
+# INVARIANT: refuse outright while any fleet container is LIVE, naming the holder. `git gc` can prune
+# objects a live lane still needs; the docker prune above has no such hazard, which is why it may run
+# while up and this may not. Report bytes per checkout, never one sum — a combined "0B" cannot
+# distinguish "nothing to do" from "nothing to do HERE, and a gigabyte elsewhere".
+#
+# NEVER STATE CLEANING: this reads, writes and measures nothing under `${STATE_DIR}/state` — the
+# ledger, run locks and service tokens the file header protects are untouched.
+#
+# FALSIFIER: remove the live-worker refusal and the fixture's gc.log is cleared beside a live
+# container; collapse the per-checkout report into one total and the split assertion fails.
+#
+# Why: docs/forensics/host-update.md — the 2026-09-15 measurement (985 MiB, 53,380 loose objects,
+# root at 85%), the 2026-09-16 outage it corroborates, and the rejected alternatives.
+if [ "${RECLAIM_ONLY}" -eq 1 ]; then
+  echo
+  if [ -n "${LIVE}" ]; then
+    echo "host-update: REFUSING git object reclaim — a fleet container is RUNNING." >&2
+    printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
+    echo "  'git gc' can prune objects a live lane still needs, which the docker image/build prune" >&2
+    echo "  above cannot do even while up. No checkout below was touched." >&2
+  else
+    IFS=':' read -r -a GIT_RECLAIM_DIRS <<<"${RMD_GIT_RECLAIM_DIRS:-${STATE_DIR}/remudero:${RMD_OP_DIR}}"
+    for gdir in "${GIT_RECLAIM_DIRS[@]}"; do
+      [ -n "${gdir}" ] || continue
+      if [ ! -d "${gdir}/.git" ]; then
+        echo "host-update: git reclaim — ${gdir}: no .git here, skipping"
+        continue
+      fi
+      gc_log="${gdir}/.git/gc.log"
+      had_gc_log="(no gc.log)"
+      [ -f "${gc_log}" ] && had_gc_log="(gc.log present — auto-gc has been declining forever)"
+      if [ "${DRY_RUN}" -eq 1 ]; then
+        echo "host-update: git reclaim (DRY RUN) — ${gdir}: would remove gc.log and run 'git gc' ${had_gc_log}"
+        continue
+      fi
+      before_kb="$(git_dir_kb "${gdir}/.git")"
+      rm -f "${gc_log}"
+      gc_status=0
+      git -C "${gdir}" gc --quiet 2>&1 | sed 's/^/  /' || gc_status=1
+      after_kb="$(git_dir_kb "${gdir}/.git")"
+      freed_kb=$((before_kb - after_kb))
+      [ "${freed_kb}" -lt 0 ] && freed_kb=0
+      if [ "${gc_status}" -eq 0 ]; then
+        echo "host-update: git reclaim — ${gdir}: freed $(human_kb "${freed_kb}") ${had_gc_log}"
+      else
+        echo "host-update: git reclaim — ${gdir}: 'git gc' FAILED; gc.log was still removed so the" >&2
+        echo "  next auto-gc can retry on its own. ${had_gc_log}" >&2
+      fi
+    done
+  fi
+fi
+
+# ── 4b. AGENT HISTORY RECLAIM (W1-T3626) — the LARGER share of the disk this host fills on ────────
+# `~/.codex` and `~/.claude/projects` held 6.7 GiB with NO retention anywhere in this repo, growing
+# ~580 MiB/day — about seven times section 4a's own git object reclaim. Full measurement, the outage
+# it corroborates, and why this is not W1-T3612's problem: plan/tasks.d/W1-T3626-*.yaml.
+#
+# AGE-TIERED, NOT A FIXED CEILING (the trap a byte-size cap falls into: firing near-full silently
+# destroys the exact runs an incident review needs). Removes files strictly OLDER than
+# RMD_AGENT_HISTORY_MAX_AGE_DAYS (default 14) under the configured trees; an actively-growing file's
+# own mtime keeps it out of scope with no extra logic.
+#
+# OLDEST FIRST, and REPORT BYTES PER TREE — never one combined total, the same reason section 4a's
+# own report is never summed: one number cannot distinguish "nothing old on THIS tree" from
+# "nothing old here, and a gigabyte on the other one".
+#
+# INVARIANT: refuse outright while any fleet container is LIVE, naming the holder, reusing section
+# 1's `LIVE` detection exactly as section 4a does — a running lane may still be writing the very
+# session/thread file this would remove.
+#
+# NEVER STATE CLEANING: this reclaim never reads STATE_DIR state — it only ever walks ${CODEX_DIR}
+# and ${CRED_DIR}/projects (or RMD_AGENT_HISTORY_DIRS's override), never ${STATE_DIR}, so the
+# ledger, run locks and service tokens the file header protects are untouched by this rung too.
+#
+# FALSIFIER: remove the live-worker refusal and a fixture's old file is reclaimed beside a live
+# container; collapse the per-tree report into one total and the split assertion fails.
+if [ "${RECLAIM_ONLY}" -eq 1 ]; then
+  echo
+  if [ -n "${LIVE}" ]; then
+    echo "host-update: REFUSING agent history reclaim — a fleet container is RUNNING." >&2
+    printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
+    echo "  a running lane may still be writing the very session/thread file this would remove." >&2
+    echo "  No file under any configured tree was touched." >&2
+  else
+    AGENT_HISTORY_MAX_AGE_DAYS="${RMD_AGENT_HISTORY_MAX_AGE_DAYS:-14}"
+    IFS=':' read -r -a AGENT_HISTORY_DIRS <<<"${RMD_AGENT_HISTORY_DIRS:-${CODEX_DIR}:${CRED_DIR}/projects}"
+    for hdir in "${AGENT_HISTORY_DIRS[@]}"; do
+      [ -n "${hdir}" ] || continue
+      if [ ! -d "${hdir}" ]; then
+        echo "host-update: agent history reclaim — ${hdir}: no such directory, skipping"
+        continue
+      fi
+      if [ "${DRY_RUN}" -eq 1 ]; then
+        would_kb="$(find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -printf '%s\n' 2>/dev/null \
+          | awk '{s+=$1} END{printf "%d", s/1024}')"
+        echo "host-update: agent history reclaim (DRY RUN) — ${hdir}: would free $(human_kb "${would_kb:-0}") across files older than ${AGENT_HISTORY_MAX_AGE_DAYS}d; nothing removed"
+        continue
+      fi
+      freed_bytes=0
+      removed=0
+      while IFS=$'\t' read -r _mtime size path; do
+        [ -n "${path}" ] || continue
+        if rm -f -- "${path}"; then
+          freed_bytes=$((freed_bytes + size))
+          removed=$((removed + 1))
+          echo "  removed ${path}"
+        fi
+      done < <(find "${hdir}" -type f -mtime "+${AGENT_HISTORY_MAX_AGE_DAYS}" -printf '%T@\t%s\t%p\n' 2>/dev/null | sort -n)
+      freed_kb=$((freed_bytes / 1024))
+      echo "host-update: agent history reclaim — ${hdir}: freed $(human_kb "${freed_kb}") across ${removed} file(s) older than ${AGENT_HISTORY_MAX_AGE_DAYS}d, oldest first"
+    done
+  fi
+fi
+
+# ── 4c. RECLAIM-ONLY STOPS HERE (W1-T2725) ───────────────────────────────────────────────────
 # Everything below pulls an image and restarts a container. On a timer that is exactly wrong: it
 # would restart the daemon mid-run, on a cadence, with no operator watching. Reclaim alone is safe
 # to repeat — it removes only what no container references — so this mode returns after section 4

@@ -75,6 +75,8 @@ import {
   readDiskTotalBytes,
   readGitLocks,
   readMemInfo,
+  readWorkerProcesses,
+  type WorkerProcessReading,
   readNvmrcVersion,
   readPauseAgeMs,
   refuseUnsupportedArgs,
@@ -484,6 +486,8 @@ export interface DoctorDeps extends ReportRepoContext {
   readWorktreeHead?: (worktreePath: string) => string | undefined;
   isWorktreeBaseAncestor?: (worktreePath: string, base: string, head: string) => boolean | undefined;
   readMemInfo?: () => MemInfo;
+  /** W1-T3628 — injected so the arm is testable without a real process table. */
+  readWorkerProcesses?: () => WorkerProcessReading | { unreadableReason: string };
   readDiskFreeBytes?: (path: string) => number | undefined;
   readDiskTotalBytes?: (path: string) => number | undefined;
   readPauseAgeMs?: (root: string, nowMs: number) => number | undefined;
@@ -581,7 +585,15 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     ...(lockRead.unreadableReason === undefined ? {} : { locksUnreadableReason: lockRead.unreadableReason }),
     deadLocks: dead,
     gitLocks: (deps.readGitLocks ?? readGitLocks)(repoDir, nowMs),
-    workerCount: 0,
+    // W1-T3628: a LIVE reading, not the literal 0 that stood here. The arm it feeds could not
+    // return anything but OK while this was a constant, and read "0 worker process(es)" on a host
+    // carrying two `npm ci` stuck 80 minutes during the 2026-09-16 outage.
+    ...(((r) =>
+      "unreadableReason" in r
+        ? { workerCount: 0, workersUnreadableReason: r.unreadableReason }
+        : { workerCount: r.count, ...(r.oldestEtimeS === undefined ? {} : { oldestWorkerEtimeS: r.oldestEtimeS }) })(
+      (deps.readWorkerProcesses ?? readWorkerProcesses)(),
+    )),
     ...(((v) => (v === undefined ? {} : { checkoutDepth: v }))((deps.readCheckoutDepth ?? readCheckoutDepth)(repoDir))),
     worktreeBases,
     // R-49: THIS process's own running interpreter, measured here — the caller — exactly like

@@ -1,0 +1,71 @@
+- id: W1-T3639
+  title: "A `unit test:` PROOF THAT RESOLVES TO NO TEST IS ACCEPTED — lint-plan refuses a `grep:` proof matching nothing, but a `unit test:` title matching nothing passes, so a task ships with proofs that only fail at review, one full build and CI round later"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 15.00
+  files: [src/lib/task-linter.ts, test/a-unit-test-proof-that-resolves-to-no-test-is-refused.test.ts]
+  origin: oper#pr-queue-sweep-2026-09-16
+  plan_refs: ["W1-T100", "W1-T101", "W1-T246", "W1-T2905"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED OVER ONE NIGHT'S PR BOARD: four pull requests were refused by remudero-review for the
+    SAME cause, and in every case the work was already built and already passing.
+
+        #5639  3 of 4 declared proofs resolved to no test
+        #5680  2 of 2
+        #5687  2 of 2  (both tests existed, under different titles)
+        #5683  CAPPED -- 0/2 proofs executed, "not certified"
+
+    Each cost a full dispatch, build, CI run and review cycle to discover something
+    `grep -rlF -- '<title>' test/` answers in milliseconds. In #5687 the drift was one hyphen and
+    one parenthetical: the record said "a run BRANCH", the test said "a run-BRANCH".
+
+    THE ASYMMETRY IS THE DEFECT, AND THIS FILE ALREADY NAMES IT. task-linter.ts refuses a `grep:`
+    proof that matches nothing (`proof-grep-unmatchable`, WARN) but accepts any `unit test:` body,
+    and its own comment says so:
+
+        // TRAP proofDialectViolations cannot close: parseTestTarget treats ANY non-path
+        // `unit test:` body as a valid name-filtered proof, so a prefix can promise
+        // executability with a payload resolving to zero real tests.
+
+    CLAUDE.md already carries the rule as prose -- "Require a verbatim `grep -rlF -- '<substring>'
+    test/` hit" -- and CLAUDE.md's own preamble says what to do when such a rule turns out to
+    matter: "the fix is to make something refuse it -- file the task; do not sharpen the wording and
+    call it closed". It mattered four times in one night.
+  design: |
+    A new check, `proof-unit-test-unresolvable`, beside `proof-grep-unmatchable` and reusing the
+    SAME seam: `LintOpts.readGrepProofFile` already gives the linter file reads under injection, so
+    this is a row in the existing engine, not a new capability.
+
+    WHEN IT FIRES IS THE WHOLE DESIGN. A declared title legitimately does not exist while the task
+    is only filed -- the test is written by the work. So this must NOT run in the full plan pass,
+    where every queued task would redden. It belongs in the CHANGED-TASKS pass (`--base`), on a PR
+    that ships the suite, where the title either resolves against the head tree or the proof is
+    theatre. A task whose files: name no test/ path is skipped entirely.
+
+    MATCH THE EXECUTOR, NOT AN APPROXIMATION. The reviewer matches a `unit test:` title as a
+    LITERAL SUBSTRING after escaping, the opposite of the `grep:` half's basic regex. This check
+    must use the same predicate, or it will disagree with the thing it is protecting -- and a
+    disagreeing gate is worse than none.
+
+    SEVERITY: block in the changed-tasks pass. `proof-grep-unmatchable` warns because a grep target
+    can legitimately be a file the diff has not written yet; a title that does not resolve on a head
+    that ships the suite has no such excuse, and review already refuses it -- later and dearer.
+  acceptance:
+    - claim: "a changed task whose `unit test:` proof names a title no test in the head tree carries is refused by lint-plan, before the push rather than at review"
+      proof: "unit test: a unit test proof naming a title no test carries is refused"
+    - claim: "the check matches the title the way the executor does, as a literal substring, so it never disagrees with the reviewer it protects"
+      proof: "unit test: the title predicate matches literally, not as a regex"
+    - claim: "a task that is only filed, whose suite is not written yet, is not refused, so the full plan pass stays green on queued work"
+      proof: "unit test: a filed task with no test file in scope is skipped"
+  falsifier: |
+    Point a task's `unit test:` proof at a title no test carries and lint-plan's changed-tasks pass
+    must refuse; restore the real title and it must pass. Replace the literal-substring predicate
+    with a regex match and the second test must fail on a title containing regex metacharacters.
+    Run the FULL plan pass over a queued task whose suite is unwritten and it must stay silent --
+    if that reddens, the check fired in the wrong pass and every filed task is now blocked.

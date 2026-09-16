@@ -132,7 +132,7 @@ export function assertFieldsStillAged(readFile = (p) => readFileSync(p, "utf8"))
  * Pure: callers supply the file list, the reader and the clock, so the suite drives it over a
  * fixture tree with a pinned clock and no repo state.
  */
-export function censusExpiringFixtures({ files, readFile, now, thresholdDays, marginDays = MARGIN_DAYS }) {
+export function censusExpiringFixtures({ files, readFile, now, thresholdDays, marginDays = MARGIN_DAYS, readBaseFile }) {
   const reported = [];
   const exempt = [];
   const alreadyExpired = [];
@@ -172,6 +172,28 @@ export function censusExpiringFixtures({ files, readFile, now, thresholdDays, ma
       }
     }
   }
+  // W1-T3388: ATTRIBUTE each crossing to the diff or to the base it was inherited from. Without
+  // this the gate cannot tell a bomb this branch PLANTED from one `origin/main` already carried, so
+  // a single stamp on main reddens every open PR at once and each author pays the same diagnosis
+  // (measured 2026-09-16: #5725, #5733, #5734, #5736, #5738 and #5739, all on one main-branch
+  // stamp). It is the same base attribution scripts/test-tier-manifest.mjs already performs, for
+  // the same reason: inherited debt is not charged to the branch that merely stands next to it.
+  const inheritedKeys = new Set();
+  if (readBaseFile) {
+    for (const file of new Set(reported.map((r) => r.file))) {
+      const baseText = readBaseFile(file);
+      if (baseText === undefined) continue; // absent at base ⇒ every stamp in it is this diff's
+      for (const line of baseText.split("\n")) {
+        for (const row of AGED_FIELDS) {
+          const m = new RegExp(`${row.field}\\s*:\\s*"(\\d{4}-\\d{2}-\\d{2}T[^"]*)"`).exec(line);
+          if (m) inheritedKeys.add(`${file}\u0000${row.field}\u0000${m[1]}`);
+        }
+      }
+    }
+  }
+  for (const r of reported) {
+    r.inherited = readBaseFile ? inheritedKeys.has(`${r.file}\u0000${r.field}\u0000${r.stamp}`) : undefined;
+  }
   return { population, populationByFile, reported, exempt, alreadyExpired };
 }
 
@@ -202,13 +224,25 @@ export function formatReport({ population, reported, exempt, alreadyExpired = []
   }
   if (reported.length > 0) {
     if (out.length > 0) out.push("");
-    out.push(`expiring-fixture-census: BLOCKED -- ${reported.length} fixture(s) CROSS their threshold within ${marginDays} day(s):`);
+    const introduced = reported.filter((r) => r.inherited !== true);
+    const inherited = reported.filter((r) => r.inherited === true);
+    const verdict = "BLOCKED";
+    out.push(`expiring-fixture-census: ${verdict} -- ${reported.length} fixture(s) CROSS their threshold within ${marginDays} day(s):`);
     for (const r of [...reported].sort((a, b) => a.daysLeft - b.daysLeft)) {
-      out.push(`  - ${r.file}:${r.line}  ${r.field}="${r.stamp}" vs ${r.threshold}  --  goes red ${expiryDay(r.expiresAt)} (${r.daysLeft.toFixed(1)}d)`);
+      const owner = r.inherited === true ? "  [inherited from the base -- NOT this diff]" : "";
+      out.push(`  - ${r.file}:${r.line}  ${r.field}="${r.stamp}" vs ${r.threshold}  --  goes red ${expiryDay(r.expiresAt)} (${r.daysLeft.toFixed(1)}d)${owner}`);
     }
-    out.push(`  TO FIX: stamp the fixture from the clock (see test/stale-ci-gate-wiring.test.ts), or, if it must`);
-    out.push(`  stay fixed, age it past the threshold, re-run, and if nothing fails say so: ${EXEMPT_MARKER} -- <why>.`);
-    out.push(`  Moving the constant forward only re-arms the same bomb on a later date.`);
+    if (introduced.length > 0) {
+      out.push(`  TO FIX: stamp the fixture from the clock (see test/stale-ci-gate-wiring.test.ts), or, if it must`);
+      out.push(`  stay fixed, age it past the threshold, re-run, and if nothing fails say so: ${EXEMPT_MARKER} -- <why>.`);
+      out.push(`  Moving the constant forward only re-arms the same bomb on a later date.`);
+    }
+    if (inherited.length > 0) {
+      const n = inherited.length;
+      out.push(`  ${n} of these ${n === 1 ? "is" : "are"} ALREADY crossing on the base ref, so this diff did not plant ${n === 1 ? "it" : "them"}.`);
+      out.push(`  Every open PR is seeing the same ${n === 1 ? "one" : n}, and each will pay this diagnosis separately until the`);
+      out.push(`  base is repaired -- so fix it THERE, in one change, rather than defusing it per branch.`);
+    }
   }
   if (populationDrop.length === 0 && reported.length === 0) {
     out.push(`expiring-fixture-census: OK -- ${population} fixture stamp(s) measured, none crossing within ${marginDays} day(s).`);
@@ -264,20 +298,46 @@ export function main({
   log = (message) => console.log(message),
   assertAged = assertFieldsStillAged,
   recordedPopulationByFile = RECORDED_POPULATION_BY_FILE,
+  baseRefOverride,
 } = {}) {
   assertAged();
   const files = execFile("git", ["ls-files", "test/*.test.ts"], { encoding: "utf8" }).split("\n").filter(Boolean);
   // The threshold comes from the policy the sweep actually loads, never a copy of the number here.
   const policy = JSON.parse(execFile("node", ["--import", "tsx", "-e", "import {loadDefaultPolicy} from './src/lib/policy.ts'; console.log(JSON.stringify(loadDefaultPolicy().values.sweep));"], { encoding: "utf8" }));
+  // Default to origin/main rather than requiring a workflow change to pass it: CI checks out with
+  // fetch-depth 0, so the ref is present. Unreadable (a shallow clone, a fresh local repo) leaves
+  // `readBaseFile` undefined and the gate behaves exactly as it did before attribution existed.
+  const baseRef = baseRefOverride ?? "origin/main";
+  let readBaseFile;
+  try {
+    execFile("git", ["rev-parse", "--verify", `${baseRef}^{commit}`], { encoding: "utf8", stdio: "pipe" });
+    readBaseFile = (path) => {
+      try {
+        return execFile("git", ["show", `${baseRef}:${path}`], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: "pipe" });
+      } catch {
+        return undefined; // absent at base ⇒ the file is this diff's own
+      }
+    };
+  } catch {
+    readBaseFile = undefined;
+  }
   const result = censusExpiringFixtures({
     files,
     readFile,
     now: now(),
     thresholdDays: policy.staleDays,
+    readBaseFile,
   });
   const populationDrop = refusePopulationDrop(result.populationByFile, recordedPopulationByFile);
   const report = formatReport({ ...result, populationDrop });
   log(report);
+  // ATTRIBUTION NAMES THE OWNER; IT DOES NOT MOVE THE GATE -- the same split W1-T2339 settled for
+  // lint-plan's "pre-existing on base" annotation. Letting an INHERITED crossing pass would be the
+  // obvious next step and is deliberately NOT taken here: this census runs on `pull_request` only
+  // (ci.yml's comment-load-ratchet job is event-guarded), so nothing else would ever observe a
+  // stamp sitting on main, and a warning no gate enforces is how the bomb reaches its own red date
+  // unfixed. Non-blocking inheritance needs a main-branch run to land WITH it, which is a separate,
+  // reviewed change to the workflow's job registration.
   const blocked = result.reported.length > 0 || populationDrop.length > 0;
   emitCiReport("expiring-fixture-census", report, { blocked });
   return blocked ? 1 : 0;
