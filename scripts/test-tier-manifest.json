@@ -459,6 +459,7 @@
     "test/config-schema.test.ts": 201,
     "test/config.test.ts": 221,
     "test/confirm-nonce-expiry.test.ts": 329,
+    "test/console-analytics-contract-gap.test.ts": 0,
     "test/console-blocked-pr-queue.test.ts": 1046,
     "test/console-freshness-wired.test.ts": 3598,
     "test/console-freshness.test.ts": 260,
