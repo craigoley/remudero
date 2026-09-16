@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { openWeightUnfence, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
+import {
+  OPENWEIGHT_PRICES,
+  OPENWEIGHT_RESPONSE_FORMATS,
+  openWeightUnfence,
+  spawnOpenWeightWorker,
+} from "../src/lib/worker-provider.js";
 import type { Config } from "../src/lib/config-schema.js";
 
 // OPENWEIGHT_OUTPUT_CONTRACT already tells the model to emit a raw document "without Markdown
@@ -70,9 +75,14 @@ async function replyWith(content: string, responseFormat?: string, model = "gpt-
 }
 
 test("a STRUCTURED request unwraps a fenced reply on the real spawn path", async () => {
-  // gpt-5-mini is the deployment that DECLARES json_object on this base; asking one that does
-  // not is refused by design (W1-T3695's per-deployment gate), which is a different test.
-  const result = await replyWith('```json\n{"ok":true}\n```', "json_object", "gpt-5-mini");
+  // THE DEPLOYMENT MUST BE BOTH PRICED AND json_object-DECLARING, or this refuses before reaching
+  // the unfencing it exists to check. It named gpt-5-mini, which #5791 REMOVED from
+  // OPENWEIGHT_PRICES on the same day this suite merged: each PR green alone, main red together.
+  // Resolved from the two tables rather than hardcoded, so the next ladder edit cannot silently
+  // re-break it — a deployment leaving either table now fails the assert, not the spawn.
+  const [deployment] = Object.keys(OPENWEIGHT_RESPONSE_FORMATS).filter((d) => d in OPENWEIGHT_PRICES);
+  assert.ok(deployment, "no deployment is both priced and json_object-declaring — this test cannot run");
+  const result = await replyWith('```json\n{"ok":true}\n```', "json_object", deployment);
   assert.equal(result.isError, false);
   assert.equal(result.text, '{"ok":true}', "the caller asked for a document and must receive one");
 });
