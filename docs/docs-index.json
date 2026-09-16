@@ -368,6 +368,12 @@
       "grepHint": "Forensics: src/lib/github-event-wake.ts"
     },
     {
+      "path": "docs/forensics/host-update.md",
+      "title": "Forensics: `deploy/host-update.sh` — section 4a, git object reclaim",
+      "summary": "The measured forensics and design arguments behind section 4a (W1-T3612), archived here when that",
+      "grepHint": "Forensics: `deploy/host-update.sh` — section 4a, git object reclaim"
+    },
+    {
       "path": "docs/forensics/inbox.md",
       "title": "Forensics — `src/lib/inbox.ts`",
       "summary": "`src/lib/inbox.ts` is the ratification inbox (MASTER-PLAN §7B): it tiers open proposals, drafts a",

@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "host-update.sh");
@@ -269,21 +270,20 @@ test("--dry-run ISSUES NOTHING: no prune, no pull, no registry login", () => {
 // `deploy/entrypoint.sh`'s boot-time detector, which deliberately only PRINTS the remedy.
 
 /** A real git checkout with one commit, and a stranded `.git/gc.log` the way a losing background
- *  gc leaves one — exactly the state section 4a exists to clear. */
+ *  gc leaves one — exactly the state section 4a exists to clear.
+ *
+ *  BUILT ON test/helpers/git-repo.ts, NOT a hand-rolled `git init`. The first version of this
+ *  fixture rolled its own mkdtemp/init/identity and `fixture-copy-census` refused it:
+ *  `gitInitFiles: 146 > baseline 145`. That census exists because the same missing-identity bug
+ *  had to be found TWICE (#1964, #1971) across copies of these three steps — the shared helper
+ *  carries an explicit identity on every invocation, so it cannot regress that way. */
 function gcLogFixture(): string {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-git-`));
-  const run = (...cmdArgs: string[]) => {
-    const r = spawnSync("git", cmdArgs, { cwd: dir, encoding: "utf8" });
-    assert.equal(r.status, 0, `git ${cmdArgs.join(" ")} failed: ${r.stderr}`);
-  };
-  run("init", "-q");
-  run("config", "user.email", "test@example.com");
-  run("config", "user.name", "Test");
-  writeFileSync(join(dir, "a.txt"), "x".repeat(4096));
-  run("add", "a.txt");
-  run("commit", "-q", "-m", "init");
-  writeFileSync(join(dir, ".git", "gc.log"), "warning: There are too many unreachable loose objects\n");
-  return dir;
+  const repo = gitRepo({ kind: "host-update-git" });
+  writeFileSync(join(repo.dir, "a.txt"), "x".repeat(4096));
+  repo.git("add", "a.txt");
+  repo.git("commit", "--quiet", "-m", "init");
+  writeFileSync(join(repo.dir, ".git", "gc.log"), "warning: There are too many unreachable loose objects\n");
+  return repo.dir;
 }
 
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

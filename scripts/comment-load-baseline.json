@@ -27,7 +27,7 @@
   "deploy/codex-requirements.toml": 3,
   "deploy/container-runtime-contract.sh": 13,
   "deploy/entrypoint.sh": 249,
-  "deploy/host-update.sh": 750,
+  "deploy/host-update.sh": 500,
   "deploy/install-container-runtime-mount-order.sh": 57,
   "deploy/install-host-units.sh": 250,
   "deploy/recycle-container.sh": 750,
