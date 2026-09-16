@@ -1,0 +1,80 @@
+- id: W1-T3703
+  title: "workflow-guard-mutation-ratchet has NO merge-base split and NO inherited-violation arm, so it blames a diff for debt it inherited — the last enforced ratchet still on the shape W1-T3701 is removing from repo-layout"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 8.00
+  files:
+    - scripts/workflow-guard-mutation-ratchet.mjs
+    - test/workflow-guard-mutation-ratchet.test.ts
+  origin: "operator-session#ratchet-sweep-2026-09-16"
+  plan_refs: ["W1-T3701"]
+  status: queued
+  priority: 3
+  attempts: 0
+  note: |
+    MEASURED 2026-09-16 across every enforced ratchet in the tree:
+
+      ratchet                          merge-base aware   inherited-split
+      comment-load-ratchet                    2                  17
+      source-size-ratchet                     3                   3
+      workflow-guard-mutation-ratchet         0                   0
+
+    (counts are `grep -cE` hits for `merge-base|mergeBase` and `inherited|atBase` in each script.)
+
+    The repository overwhelmingly uses the self-maintaining form -- 25 baseline ledgers record
+    per-file allowances, the largest being proof-discrimination (1,214 entries), comment-load (353)
+    and source-size (196). Two of the three ratchet SCRIPTS split caused from inherited against the
+    merge base. This one does neither.
+  rationale: |
+    IT HAS NOT BITTEN YET, AND THAT IS THE ONLY REASON IT LOOKS FINE. Its baseline carries a single
+    entry, so there is no accumulated debt to inherit and the missing split costs nothing today.
+    W1-T3701's subject -- three house-layout ceilings sitting at exactly their frozen number -- is
+    what this becomes once the guarded surface grows: a diff refused for what the repository
+    already was.
+
+    FILED SEPARATELY FROM W1-T3701 ON PURPOSE. They are the same defect in two places and the
+    operator considered folding them into one task. They are independent: different file, different
+    baseline, different guarded surface, and either can be built without the other. Folding them
+    would create a task spanning two subsystems for no reason beyond shared authorship.
+
+    THE PATTERN TO COPY IS IN-REPO AND PROVEN. `scripts/comment-load-ratchet.mjs` reports an
+    inherited violation as inherited and updates its own ledger rather than failing the diff
+    ("already carried N at the merge base -- inherited, not this diff's growth; the ledger is
+    updated"). Nothing here needs inventing.
+  design: |
+    (i) VIOLATIONS SPLIT INTO CAUSED AND INHERITED against the merge base, reusing
+        `comment-load-ratchet`'s existing split rather than restating it. A diff is refused only
+        for what IT added.
+
+    (ii) AN INHERITED VIOLATION UPDATES THE BASELINE AND SAYS SO, in the same words the sibling
+         already uses, so the ledger maintains itself and an operator reading the log can tell
+         repair from refusal.
+
+    (iii) THE GUARD'S DIRECTION IS UNCHANGED. A diff that adds a guarded mutation is still refused.
+          This changes WHO is blamed, never WHAT is guarded.
+
+    (iv) A BASELINE ENTRY THAT NO LONGER CORRESPONDS TO ANYTHING IS DROPPED when the ledger is
+         rewritten, so the file cannot accumulate rows for surfaces that are gone -- the failure
+         mode a self-updating ledger risks and a frozen one does not.
+
+    NO THRESHOLD. Every arm keys on what a diff changed relative to its own merge base.
+
+    THE SUITE IS DECLARED IN files: AND THE PROOFS USE THE PURE-PATH FORM, for the reason
+    W1-T1071 records.
+  acceptance:
+    - claim: "a violation present at the merge base is reported as inherited rather than failing the diff that did not add it"
+      proof: "unit test: test/workflow-guard-mutation-ratchet.test.ts"
+    - claim: "an inherited violation updates the baseline, so the ledger maintains itself"
+      proof: "unit test: test/workflow-guard-mutation-ratchet.test.ts"
+    - claim: "a diff that adds a guarded mutation is still refused, so the guard's direction is unchanged"
+      proof: "unit test: test/workflow-guard-mutation-ratchet.test.ts"
+    - claim: "a baseline row whose surface no longer exists is dropped when the ledger is rewritten"
+      proof: "unit test: test/workflow-guard-mutation-ratchet.test.ts"
+  falsifier: |
+    Fail a diff for an inherited violation and the first test fails. Leave the baseline unwritten
+    and the second fails. Admit a newly added guarded mutation and the third fails. Keep a stale
+    baseline row and the fourth fails.
