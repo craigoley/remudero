@@ -20,8 +20,17 @@ import {
   OPENWEIGHT_ALLOWANCE_FILENAME,
   OPENWEIGHT_MAX_COMPLETION_TOKENS,
   OPENWEIGHT_OUTPUT_CONTRACT,
+  OPENWEIGHT_CONTEXT_WINDOWS,
+  OPENWEIGHT_BYTES_PER_TOKEN,
   OPENWEIGHT_PRICES,
   OPENWEIGHT_TEMPERATURE,
+  OpenWeightRequestTooLargeError,
+  openWeightDeploymentHolds,
+  openWeightEstimatedTokens,
+  OPENWEIGHT_CHECKS,
+  OpenWeightUnlistedCheckError,
+  OPENWEIGHT_READONLY_GIT_SUBCOMMANDS,
+  openWeightCheckArgv,
   OpenWeightUnshapedDeploymentError,
   openWeightTemperatureField,
   OpenWeightAllowanceExhaustedError,
@@ -826,6 +835,138 @@ test("a failed openweight judge spawn fails open to deliver", async () => {
   assert.match(verdict.reason, /judge unavailable/, "the reason must name the failure rather than inventing a judgement");
 });
 
+test("an unlisted openweight check refuses before it executes", async () => {
+  // W1-T3617. The refusal must happen BEFORE a process is spawned, so a caller that sees it knows
+  // nothing ran. Driven through the REAL adapter tool loop rather than the pure builder alone,
+  // because "refuses before it executes" is a property of the executor, not of a helper.
+  const root = mkdtempSync(join(tmpdir(), "rmd-ow-check-"));
+  try {
+    let turn = 0;
+    const bodies: string[] = [];
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "wh"),
+        prompt: "run a check",
+        tools: ["Read", "RunCheck"],
+        maxTurns: 3,
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async (_input, init) => {
+          bodies.push(String(init?.body ?? ""));
+          turn += 1;
+          const body = turn === 1
+            ? { choices: [{ message: { tool_calls: [{ id: "c1", type: "function", function: { name: "run_check", arguments: JSON.stringify({ check: "git", paths: ["."] }) } }] } }] }
+            : { choices: [{ message: { content: "done" } }] };
+          return new Response(JSON.stringify(body), { status: 200 });
+        },
+      },
+      { claudeBin: "/unused/claude", root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+      { model: "gpt-oss-120b", effort: "low" },
+    );
+
+    // THE REFUSAL IS FED BACK AS A TOOL RESULT, so the evidence is the NEXT request's messages, not
+    // the final text. A refused tool is a result rather than a crash: the loop survives and the
+    // model's next turn can correct itself, which is why the message must name what IS permitted.
+    assert.equal(result.isError, false, "a refused check must not crash the worker loop");
+    assert.ok(bodies.length >= 2, "the loop must have taken a second turn carrying the tool result");
+    assert.match(bodies[1]!, /not permitted/, "the refusal must reach the model as a tool result");
+    assert.match(bodies[1]!, /unit_test/, "and must name the permitted checks so the next turn can correct itself");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // And the builder refuses the same name with the typed error, before any argv exists to spawn.
+  assert.throws(() => openWeightCheckArgv("git", undefined), OpenWeightUnlistedCheckError);
+  assert.throws(() => openWeightCheckArgv("curl", undefined), OpenWeightUnlistedCheckError);
+
+  // CALLER ARGUMENTS ARE REFUSED, NOT SANITIZED (W1-T3617). An escaping path was already
+  // impossible under containment, so asserting only that proves little. The LOAD-BEARING half is
+  // the second line: a perfectly legitimate in-cwd path is refused too. That is what makes the
+  // argv FIXED rather than merely contained, and it is what keeps model output off the command
+  // line entirely — the taint CodeQL flagged at the execFileSync call site.
+  assert.throws(() => openWeightCheckArgv("unit_test", ["../../etc/passwd"]), /FIXED argv/);
+  assert.throws(() => openWeightCheckArgv("unit_test", ["test/an-open-weight-provider-rides-the-capability-ladder.test.ts"]), /FIXED argv/);
+  assert.throws(() => openWeightCheckArgv("unit_test", []), /FIXED argv/);
+  // A bare permitted check still returns its constant argv, so the refusals above are not simply
+  // "this function always throws".
+  assert.deepEqual(openWeightCheckArgv("typecheck", undefined), [...OPENWEIGHT_CHECKS["typecheck"]!]);
+});
+
+test("a permitted openweight check that exits non-zero is fed back as a result, not a crash", async () => {
+  // W1-T3617. The refusal test above never spawns a process at all; this drives the OTHER branch
+  // of run_check's try/catch — a PERMITTED check whose own process exits non-zero. `git_log` run
+  // outside a git repository is a real, deterministic failure (git always exits 128 there), so this
+  // exercises execFileSync's actual throw path rather than a stand-in. "A FAILING CHECK IS A
+  // RESULT, NOT AN ERROR" — the loop must survive and hand the model the real exit code and output.
+  const root = mkdtempSync(join(tmpdir(), "rmd-ow-check-fail-"));
+  try {
+    let turn = 0;
+    const bodies: string[] = [];
+    const result = await spawnOpenWeightWorker(
+      {
+        cwd: root,
+        workerHome: join(root, "wh"),
+        prompt: "run a check",
+        tools: ["Read", "RunCheck"],
+        maxTurns: 3,
+        env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+        fetchImpl: async (_input, init) => {
+          bodies.push(String(init?.body ?? ""));
+          turn += 1;
+          const body = turn === 1
+            ? { choices: [{ message: { tool_calls: [{ id: "c1", type: "function", function: { name: "run_check", arguments: JSON.stringify({ check: "git_log" }) } }] } }] }
+            : { choices: [{ message: { content: "done" } }] };
+          return new Response(JSON.stringify(body), { status: 200 });
+        },
+      },
+      { claudeBin: "/unused/claude", root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } },
+      { model: "gpt-oss-120b", effort: "low" },
+    );
+
+    // THE NON-ZERO EXIT IS FED BACK AS A TOOL RESULT, so the evidence is the NEXT request's
+    // messages, same as the refusal test — but here the process actually ran and actually failed.
+    assert.equal(result.isError, false, "a failing check's own exit code must not crash the worker loop");
+    assert.ok(bodies.length >= 2, "the loop must have taken a second turn carrying the tool result");
+    assert.match(bodies[1]!, /\\"exitCode\\":128/, "the real, non-zero exit code must reach the model as data");
+    assert.match(bodies[1]!, /not a git repository/, "the process's own stderr must be carried through as output");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("no permitted openweight check can reach the network or the forge", () => {
+  // W1-T3617. ENUMERATES THE TABLE, never a sample: the failure this guards is someone ADDING a row,
+  // and a test that checked two known-good entries would pass identically after `git` was added.
+  const entries = Object.entries(OPENWEIGHT_CHECKS);
+  assert.ok(entries.length > 0, "the table must be non-empty, or this census compares nothing");
+
+  const forbidden = ["gh", "curl", "wget", "ssh", "scp", "npm", "npx", "pnpm", "yarn", "pip", "docker", "nc", "sh", "bash", "zsh", "env", "eval"];
+  let sawGit = false;
+  for (const [check, argv] of entries) {
+    assert.ok(Array.isArray(argv) && argv.length > 0, `${check} must declare a non-empty argv`);
+    const command = argv[0]!.split("/").pop()!;
+    assert.ok(!forbidden.includes(command), `${check} runs '${command}', which can reach the network, the forge or a shell`);
+    // `git` IS permitted, but only with a PINNED READ-ONLY SUBCOMMAND. The W1-T3572 ruling's "no
+    // git" meant no forge authority; `git log`/`status`/`diff`/`remote -v` carry no push and no
+    // network. This is the assertion that keeps `git push` absent rather than one entry away.
+    if (command === "git") {
+      sawGit = true;
+      assert.ok(
+        OPENWEIGHT_READONLY_GIT_SUBCOMMANDS.includes(argv[1] ?? ""),
+        `${check} runs 'git ${argv[1]}', which is not one of the read-only subcommands this table permits`,
+      );
+    }
+    for (const arg of argv) {
+      assert.doesNotMatch(arg, /:\/\/|^https?:|^git@/, `${check} must not carry a URL in its argv`);
+      // No shell metacharacters anywhere: the argv is spawned directly, and this keeps it true.
+      assert.doesNotMatch(arg, /[;&|`$><]/, `${check} must not carry shell metacharacters`);
+    }
+  }
+  // POSITIVE CONTROL for the git arm: if no entry used git at all, the subcommand assertion above
+  // would be vacuous and would keep passing after someone added `git push`.
+  assert.ok(sawGit, "the table must contain at least one git entry, or its subcommand check proves nothing");
+});
+
 test("openweight configuration requires a daily cash cap and keeps its key outside worker env", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-openweight-config-"));
   try {
@@ -1295,4 +1436,179 @@ test("openweight daily cap refuses rather than spending when compare-and-swap co
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("every priced openweight deployment declares a context window", () => {
+  // W1-T3619. THE CENSUS IS THE POINT: price, temperature and window are three rows of ONE table
+  // discipline, and the failure this guards is someone adding a deployment to the ladder with a
+  // price but no window -- which would route silently and fail only on the large requests.
+  const priced = Object.keys(OPENWEIGHT_PRICES);
+  assert.ok(priced.length > 0, "there must be priced deployments, or this census compares nothing");
+
+  for (const deployment of priced) {
+    const window = OPENWEIGHT_CONTEXT_WINDOWS[deployment];
+    assert.ok(window !== undefined, `${deployment} is priced but declares no context window`);
+    assert.ok(Number.isInteger(window.totalTokens) && window.totalTokens > 0, `${deployment} window must be a positive integer`);
+    // An as-of date, for the same reason a price carries one: a published limit moves, and a
+    // number with no reading date cannot be audited against the vendor's current page.
+    assert.match(window.readAt, /^\d{4}-\d{2}-\d{2}$/, `${deployment} window needs a readAt date`);
+    // The window must leave room for the completion the adapter itself puts on the wire, or no
+    // request could ever fit and the deployment is misconfigured rather than merely small.
+    assert.ok(window.totalTokens > OPENWEIGHT_MAX_COMPLETION_TOKENS, `${deployment} window cannot even hold its own completion ceiling`);
+  }
+
+  // And the reverse direction: a window row for a deployment nothing prices is dead data that would
+  // let an unpriced deployment look routable.
+  for (const deployment of Object.keys(OPENWEIGHT_CONTEXT_WINDOWS)) {
+    assert.ok(OPENWEIGHT_PRICES[deployment] !== undefined, `${deployment} declares a window but has no price row`);
+  }
+
+  // AN UNLISTED DEPLOYMENT HOLDS NOTHING. Without this, `openWeightDeploymentHolds` could return
+  // true for an absent row and every assertion above would still pass -- the census would prove the
+  // table's CONTENTS while the lookup silently admitted anything missing from it. (Caught by a
+  // falsifier: flipping that default to `true` reddened no test until this arm existed.)
+  assert.equal(OPENWEIGHT_CONTEXT_WINDOWS["gpt-9-imaginary"], undefined, "fixture guard: this id must not be a real row");
+  assert.equal(openWeightDeploymentHolds("gpt-9-imaginary", 1), false, "an undeclared deployment must never be assumed to hold a request");
+
+  // And selection must act on that: a ladder naming only an undeclared deployment refuses rather
+  // than routing to it and discovering the window on the wire.
+  const undeclaredLadder = {
+    ladder: { economy: 1, balanced: 2, frontier: 3 },
+    claude: { haiku: "economy" },
+    codex: { economy: { medium: ["codex-economy"] }, balanced: { medium: ["codex-balanced"] }, frontier: { medium: ["codex-frontier"] } },
+    openweight: {
+      economy: { medium: ["gpt-9-imaginary"] },
+      balanced: { medium: ["gpt-5-nano"] },
+      frontier: { medium: ["gpt-oss-120b"] },
+    },
+  };
+  assert.throws(
+    () => selectOpenWeightModel(undeclaredLadder, "haiku", "medium", 1_000),
+    OpenWeightRequestTooLargeError,
+    "a ladder of undeclared deployments must refuse, not route blind",
+  );
+});
+
+test("openweight selection picks the cheapest deployment whose window holds the request", () => {
+  // W1-T3619. "Cheapest" is the LADDER'S OWN ORDER, not a rate comparison re-derived here. The
+  // FALLBACK_OPENWEIGHT_MODELS comment records the operator's measurement -- a 259,181-token
+  // inbox_draft favours nano 2.83x, a 446-token escalation favours gpt-oss 2.40x -- so row order
+  // already encodes measured cost per tier. This test asserts selection never SKIPS a cheaper
+  // candidate that would have fitted, which is what makes "first surviving" mean "cheapest that fits".
+  const ladder = {
+    ladder: { economy: 1, balanced: 2, frontier: 3 },
+    claude: { haiku: "economy" },
+    codex: { economy: { medium: ["codex-economy"] }, balanced: { medium: ["codex-balanced"] }, frontier: { medium: ["codex-frontier"] } },
+    openweight: {
+      economy: { medium: ["gpt-oss-120b", "gpt-5-nano"] },
+      balanced: { medium: ["gpt-5-nano", "gpt-oss-120b"] },
+      frontier: { medium: ["gpt-oss-120b"] },
+    },
+  };
+
+  // A SMALL request: the economy lead holds it, so the lead is what routes. Without this arm the
+  // test would pass on an implementation that always picked the last candidate.
+  const small = selectOpenWeightModel(ladder, "haiku", "medium", 4_000);
+  assert.equal(small.model, "gpt-oss-120b", "a small request must take the tier's leading deployment");
+
+  // A LARGE one: the lead provably cannot hold it, so it is skipped rather than attempted.
+  const bigBytes = 1_054_000; // the measured inbox_draft body
+  const big = selectOpenWeightModel(ladder, "haiku", "medium", bigBytes);
+  assert.equal(big.model, "gpt-5-nano", "a request past the lead's window must fall to the next that fits");
+  assert.ok(!openWeightDeploymentHolds("gpt-oss-120b", openWeightEstimatedTokens(bigBytes)), "the skipped lead must genuinely not fit");
+
+  // THE INVARIANT, stated directly: nothing ordered BEFORE the selection could have held it.
+  const estimated = openWeightEstimatedTokens(bigBytes);
+  for (const candidate of ["gpt-oss-120b", "gpt-5-nano"]) {
+    if (candidate === big.model) break;
+    assert.ok(!openWeightDeploymentHolds(candidate, estimated), `${candidate} is cheaper and fitted, so selection skipped a cheaper option`);
+  }
+  assert.equal(big.estimatedTokens, estimated, "the selection must carry its estimate so a ledger row can show what was judged");
+
+  // THE GATE'S RELIABLE CLAIM IS COARSE SEPARATION, AND THIS IS THE ASSERTION THAT STATES IT.
+  // The exclusion of gpt-oss-120b for this body must not depend on the exact divisor we chose: it
+  // has to hold across the whole MEASURED band (3.71-4.32 bytes/token), or the routing decision is
+  // an artifact of one constant rather than a property of a 2x window gap.
+  const oss = OPENWEIGHT_CONTEXT_WINDOWS["gpt-oss-120b"]!.totalTokens;
+  for (const ratio of [3.5, 3.71, 4.0, 4.32, 4.5]) {
+    const tokensAtRatio = Math.ceil(bigBytes / ratio);
+    assert.ok(
+      tokensAtRatio + OPENWEIGHT_MAX_COMPLETION_TOKENS > oss,
+      `at ${ratio} bytes/token the measured inbox_draft body would look like it fits gpt-oss-120b, so the exclusion is a divisor artifact`,
+    );
+  }
+});
+
+test("a request larger than every context window refuses before it reserves", () => {
+  // W1-T3619. The refusal must cost NOTHING. Selection runs before spawnOpenWeightWorker, so the
+  // evidence is that no allowance file exists after the throw -- not merely that a throw happened.
+  const root = mkdtempSync(join(tmpdir(), "rmd-openweight-toolarge-"));
+  try {
+    const config = {
+      claudeBin: "/unused/claude",
+      root,
+      dailyCapUsd: 10,
+      workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+    } as unknown as Config;
+
+    const ladder = {
+      ladder: { economy: 1, balanced: 2, frontier: 3 },
+      claude: { haiku: "economy" },
+      codex: { economy: { medium: ["codex-economy"] }, balanced: { medium: ["codex-balanced"] }, frontier: { medium: ["codex-frontier"] } },
+      openweight: {
+        economy: { medium: ["gpt-oss-120b", "gpt-5-nano"] },
+        balanced: { medium: ["gpt-5-nano"] },
+        frontier: { medium: ["gpt-oss-120b"] },
+      },
+    };
+
+    // Larger than the biggest declared window, by construction rather than by a hard-coded number.
+    const biggest = Math.max(...Object.values(OPENWEIGHT_CONTEXT_WINDOWS).map((w) => w.totalTokens));
+    const tooManyBytes = Math.ceil((biggest + 1) * OPENWEIGHT_BYTES_PER_TOKEN) + 1;
+
+    assert.throws(
+      () => selectOpenWeightModel(ladder, "haiku", "medium", tooManyBytes),
+      OpenWeightRequestTooLargeError,
+      "a request no deployment can hold must refuse, not pick one and find out on the wire",
+    );
+
+    // THE COST ASSERTION. An allowance file written here would mean the refusal still charged the
+    // day -- the exact waste this task exists to remove (32 of 96 unsettled reservations).
+    assert.throws(
+      () => readFileSync(join(root, OPENWEIGHT_ALLOWANCE_FILENAME), "utf8"),
+      /ENOENT/,
+      "the refusal must not have reserved anything against the daily cap",
+    );
+    void config;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the openweight reservation still bounds input by byte length", () => {
+  // W1-T3619. THE ROUTER'S TOKEN ESTIMATE MUST NOT LEAK INTO THE RESERVATION. They answer different
+  // questions: `openWeightEstimatedTokens` decides which deployment can HOLD a request and is
+  // allowed to be approximate, while `openWeightReservationUsd` decides what the request may COST
+  // and must never under-reserve. Dividing the reservation by the same ratio would silently reopen
+  // the cap hole reserveOpenWeightBudget exists to close.
+  //
+  // Asserted as ARITHMETIC against the published rate, not by grepping the comment that explains
+  // it: a comment cannot fail, and "this bound is unchanged" is exactly the claim a grep cannot
+  // evidence, because the text it looks for is present before and after.
+  const bytes = 400_000;
+  const price = OPENWEIGHT_PRICES["gpt-5-nano"]!;
+  const expected = (bytes * price.inputUsdPerMillion + OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
+  assert.equal(openWeightReservationUsd("gpt-5-nano", bytes), expected, "the reservation must price input by BYTES");
+
+  // And the discriminating half: the estimate is meaningfully smaller than the byte count, so the
+  // equality above could not hold by accident if the two were wired together.
+  const estimated = openWeightEstimatedTokens(bytes);
+  assert.ok(estimated < bytes / 2, `the token estimate (${estimated}) must be far below the byte count (${bytes})`);
+  const ifEstimateLeaked =
+    (estimated * price.inputUsdPerMillion + OPENWEIGHT_MAX_COMPLETION_TOKENS * price.outputUsdPerMillion) / 1_000_000;
+  assert.notEqual(
+    openWeightReservationUsd("gpt-5-nano", bytes),
+    ifEstimateLeaked,
+    "the reservation must NOT be computed from the router's token estimate",
+  );
 });
