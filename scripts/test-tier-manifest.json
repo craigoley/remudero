@@ -1209,6 +1209,7 @@
     "test/self-sync-refusal-names-the-guard-env.test.ts": 1296,
     "test/self-sync.test.ts": 2294,
     "test/serve-access-jwt-wiring.test.ts": 1180,
+    "test/serve-answers-before-it-accepts.test.ts": 0,
     "test/serve-board-pacer-wiring.test.ts": 1248,
     "test/serve-browser-teardown.test.ts": 3043,
     "test/serve-command-boot.test.ts": 9042,
