@@ -205,3 +205,34 @@ test("recordFilingBranch is a no-op for a taskId this reserver never won", () =>
   );
   assert.equal(fake.calls.filter((c) => c[0] === "push").length, 0, "no push at all — never guess at an anchor to amend");
 });
+
+test("recordFilingBranch reports false and preserves the won anchor when the amend push loses its CAS", () => {
+  // A THIRD instance can win taskIdReservationRef(taskId) between this reserver's mint and its
+  // later recordFilingBranch call (another shard racing the same ref) — the amend push is a
+  // plain (non-forced) refspec specifically so a lost race is REJECTED by the remote rather than
+  // clobbering whatever now holds the ref. This drives that push to fail and asserts the method
+  // reports it honestly instead of pretending the amendment landed.
+  const { fake, anchor } = mintFromDetachedHead("W1-T9405");
+  const originalRun = fake.run;
+  let pushCount = 0;
+  const pushFailingRun = (args: string[]): { status: number; stdout: string; stderr: string } => {
+    if (args[0] === "push") {
+      pushCount += 1;
+      // The FIRST push is this instance's own re-win of the ref (must succeed, so
+      // recordFilingBranch below has an anchor it is safe to amend); only the SECOND — the
+      // amendment itself — loses the race.
+      if (pushCount === 1) return originalRun(args);
+      fake.calls.push(args);
+      return { status: 1, stdout: "", stderr: "stale info" };
+    }
+    return originalRun(args);
+  };
+  const racedReserver = gitRemoteRefReserver({ run: pushFailingRun });
+  // Re-win the same taskId through THIS instance so recordFilingBranch has an anchor it is safe
+  // to amend, then let the amend push itself lose the race.
+  assert.equal(racedReserver.attempt("W1-T9405", anchor), "created");
+
+  const result = racedReserver.recordFilingBranch!("W1-T9405", "run-W1-T9405-1789572123450");
+  assert.equal(result, false, "a lost CAS on the amend push must report false, never silently succeed");
+  assert.equal(racedReserver.lastAttemptStderr!(), "stale info", "the real push failure reason must be surfaced");
+});
