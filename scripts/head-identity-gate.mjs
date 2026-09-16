@@ -40,10 +40,16 @@
 // [--worktree-path <path>] (ref falls back to $GITHUB_HEAD_REF; path defaults to cwd).
 
 import { parseArgs } from "node:util";
+import { readFileSync } from "node:fs";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
 import { LINT_FILING_SUBJECT_RE, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, isDispatchedRunBranch } from "../src/run-task.ts";
 import { extractTaskTrailerId } from "../src/lib/review.ts";
+// W1-T3707: ONE manifest predicate, owned by the dependency-review lane. This script used to
+// keep its own BASENAME matcher, which admitted test/fixtures/onboard/repo/package.json while
+// dep-review's ROOT-ANCHORED list refused apps/dashboard/package.json -- two sources of truth
+// for one concept, disagreeing in opposite directions, with #5757 stuck between them.
+import { isManifestPath } from "../src/lib/dep-review.ts";
 
 // Re-exported so a caller/test can name these shapes without a second import of src/run-task.ts.
 export { LINT_FILING_SUBJECT_RE, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, isDispatchedRunBranch };
@@ -72,20 +78,15 @@ export function hasValidTaskTrailer(commitMessage) {
 }
 
 /**
- * Is `path` a dependency manifest — a file whose change is a version bump and nothing else?
- *
- * Matched by BASENAME for the two npm manifests rather than by a repo-root literal, because this
- * repository has workspaces under `apps/` whose own `package.json` a grouped npm bump touches;
- * a root-only test would refuse exactly the bumps it is meant to admit. The class is unchanged
- * either way — a manifest is a manifest at any depth — and nothing outside the class is added.
+ * Is this path a dependency manifest? Delegates to {@link isManifestPath}
+ * (src/lib/dep-review.ts) so this gate and the dependency-review lane can never disagree again
+ * (W1-T3707). The root manifest is supplied as the workspace declaration: a NESTED manifest is
+ * admitted only inside a DECLARED workspace, so a workspace bump passes and a fixture does not.
  * @param {string} path
+ * @param {() => string} [readRootManifest] Seam for tests; defaults to the real root manifest.
  */
-export function isDependencyManifestPath(path) {
-  const p = String(path ?? "");
-  if (p.length === 0) return false;
-  const base = p.slice(p.lastIndexOf("/") + 1);
-  if (base === "package.json" || base === "package-lock.json") return true;
-  return p.startsWith(".github/workflows/") && (p.endsWith(".yml") || p.endsWith(".yaml"));
+export function isDependencyManifestPath(path, readRootManifest = () => readFileSync("package.json", "utf8")) {
+  return isManifestPath(String(path ?? ""), readRootManifest);
 }
 
 /**

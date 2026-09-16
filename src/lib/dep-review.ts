@@ -258,8 +258,59 @@ const MANIFEST_PATTERNS: RegExp[] = [
   /^\.github\/workflows\/[^/]+\.ya?ml$/,
 ];
 
-export function isManifestPath(path: string): boolean {
-  return MANIFEST_PATTERNS.some((re) => re.test(path));
+/**
+ * The repository's own declaration of which NESTED manifests are real: the root `package.json`'s
+ * `workspaces` globs. Reading it is why this predicate needs no hand-maintained directory list and
+ * cannot go stale when a workspace is added or removed — the build notices first.
+ *
+ * `undefined` when the root manifest cannot be read or declares none. Both mean the same thing to
+ * {@link isManifestPath}: ROOT PATHS ONLY, which is this lane's behaviour before W1-T3707 and the
+ * safe direction when the declaration is unavailable.
+ */
+export function declaredWorkspaceGlobs(readRootManifest: () => string): string[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readRootManifest());
+  } catch {
+    return undefined;
+  }
+  const ws = (parsed as { workspaces?: unknown } | null)?.workspaces;
+  const globs = Array.isArray(ws) ? ws : Array.isArray((ws as { packages?: unknown })?.packages) ? (ws as { packages: unknown[] }).packages : undefined;
+  if (globs === undefined) return undefined;
+  const out = globs.filter((g): g is string => typeof g === "string" && g.length > 0);
+  return out.length > 0 ? out : undefined;
+}
+
+/** Does `dir` sit inside one of the declared workspace globs? Only the `<prefix>/*` and plain
+ *  `<dir>` forms npm actually supports are honoured — a glob this does not understand matches
+ *  nothing rather than everything, because the failure that matters here is admitting too much. */
+function dirIsDeclaredWorkspace(dir: string, globs: readonly string[]): boolean {
+  return globs.some((g) => {
+    if (g.endsWith("/*")) return dir.startsWith(g.slice(0, -1)) && !dir.slice(g.length - 1).includes("/");
+    return dir === g;
+  });
+}
+
+/**
+ * Is `path` a dependency manifest? ONE predicate, shared by this lane and
+ * `scripts/head-identity-gate.mjs` — W1-T3707: they used to keep separate lists that disagreed,
+ * dep-review refusing `apps/dashboard/package.json` (root-anchored) while the gate admitted
+ * `test/fixtures/onboard/repo/package.json` (basename). Each was wrong in the opposite direction.
+ *
+ * A ROOT path matches the patterns directly. A NESTED npm manifest matches only when its directory
+ * is a DECLARED workspace, which is what separates a real workspace from a fixture. Everything
+ * else — including a nested manifest with no workspaces declared — is refused.
+ */
+export function isManifestPath(path: string, readRootManifest?: () => string): boolean {
+  if (MANIFEST_PATTERNS.some((re) => re.test(path))) return true;
+  const slash = path.lastIndexOf("/");
+  if (slash < 0) return false;
+  const base = path.slice(slash + 1);
+  if (base !== "package.json" && base !== "package-lock.json") return false;
+  if (readRootManifest === undefined) return false;
+  const globs = declaredWorkspaceGlobs(readRootManifest);
+  if (globs === undefined) return false;
+  return dirIsDeclaredWorkspace(path.slice(0, slash), globs);
 }
 
 /**
