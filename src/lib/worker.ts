@@ -885,6 +885,11 @@ export interface SpawnWorkerArgs {
    * invented capacity telemetry.
    */
   mountProvider?: WorkerProviderId;
+  /** this spawn reached cash ONLY because the capacity auction found no subscription with
+   *  readable headroom (the W1-T3692 fallback). Selects `dailyCapUsd.squeezed` over `.normal`. Set
+   *  by that fallback alone -- routine mount-affinity cash work must never carry it, or the raised
+   *  ceiling becomes the everyday one. */
+  cashSqueezed?: boolean;
   /** Reasoning effort (mount-resolved, §9): 'low'|'medium'|'high'|'xhigh'|'max'. */
   effort?: string;
   maxTurns?: number;
@@ -1725,7 +1730,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           // ProviderSelection to report -- inventing one to satisfy the "selected" shape would be
           // the fabricated telemetry this whole design refuses. The cash spawn below publishes its
           // own status through the mount-affinity path.
-          return await spawnWorker({ ...args, mountProvider: "cash" as WorkerProviderId });
+          return await spawnWorker({
+            ...args,
+            mountProvider: "cash" as WorkerProviderId,
+            // this is the ONLY place the squeeze ceiling is claimed. Reaching cash here
+            // means every subscription was unreadable or exhausted, which is exactly the day the
+            // operator raised the cap for.
+            cashSqueezed: true,
+          });
         }
         console.error(JSON.stringify({
           event: "worker.provider.cash_fallback_refused",
