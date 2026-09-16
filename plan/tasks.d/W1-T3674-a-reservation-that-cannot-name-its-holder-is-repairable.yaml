@@ -40,6 +40,23 @@
          filer. Its commit names the trap: "rmd next-task-id records the CURRENT worktree branch as
          the holder, so reserve-then-rename silently invalidates the reservation."
 
+      5. MINTED WHILE CHECKED OUT ON `main`, WHICH NO FILER CAN EVER MATCH. Surveying every id
+         minted in one 40-minute window, while this very shard was refused for a collision:
+
+           W1-T3656  main       W1-T3663  main
+           W1-T3660  main       W1-T3664  chore/file-three-measured-defects-...
+           W1-T3661  main       W1-T3667  run-unfiled-1789559088000
+           W1-T3662  main       W1-T3670  run-unfiled-1789559945000
+
+         FIVE OF SEVENTEEN are held by `main`. Nothing files from main -- it is the base branch --
+         so the filer's branch can never equal the holder and the gate refuses, correctly, forever.
+         These are not stale claims that age out; they are dead on arrival, and they consume the id
+         space permanently. Measured cost the same day: they refused #5746 (three shards at once)
+         and #5748, and broke a renumber on #5718 that had swept W1-T3656 as free minutes earlier.
+
+         This is the case that earns the family ONE repair rather than five patches: a holder that
+         CANNOT EVER match a filer is decidable the moment it is written, and nothing decides it.
+
     THE COST IS RENUMBERING, REPEATEDLY, UNDER A GATE THAT IS RIGHT TO REFUSE. Each of these is a
     correct refusal of a genuinely unusable claim. What is missing is that nothing turns a detected
     unusable reservation back into a usable one, so the remedy is always manual and always a fresh
@@ -50,7 +67,7 @@
     Treat holder drift as one condition with one repair rather than four incidents:
 
       - a holder naming a branch that no longer exists, or a merged run, is ABANDONED;
-      - a holder recorded `unknown` is UNATTRIBUTABLE;
+      - a holder recorded `unknown`, or `main`, is UNATTRIBUTABLE -- neither can ever be a filer;
       - a holder naming a branch that exists but is not the filer is HELD;
       - no holder readable at all is UNREADABLE.
 
@@ -62,10 +79,12 @@
     decision; this reclaims only a claim whose holder is provably gone. That line is the whole
     safety story, and getting it wrong means one lane silently taking an id another is about to use.
 
-    FIX THE SOURCE OF (1) IN THE SAME CHANGE OR IT REFILLS: a test that mints must not reserve. The
-    default flipped in W1-T3091 and the suites were patched then, but the burned ids are still on
-    origin and still refusing filers, so the repair must cover the reservations already stranded,
-    not merely stop new ones.
+    FIX THE SOURCES OF (1) AND (5) IN THE SAME CHANGE OR THE SPACE REFILLS: a test that mints must
+    not reserve, and a mint from `main` must refuse rather than record a holder no filer can match.
+    The default flipped in W1-T3091 and the suites were patched then, but the burned ids are still
+    on origin and still refusing filers, so the repair must cover the reservations already
+    stranded, not merely stop new ones. A `main` holder is the cheapest of the five to refuse at
+    the point of minting, and the most expensive to leave: it consumes ids permanently.
 
     (3) IS NOT FIXABLE HERE and must not be pretended otherwise -- a container that cannot reach the
     ref namespace cannot claim anything. What this task CAN do is make the failure legible: a filer
