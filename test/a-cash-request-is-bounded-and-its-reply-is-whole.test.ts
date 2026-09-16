@@ -144,3 +144,49 @@ test("the request carries an abort signal, so a hung endpoint cannot stall the l
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the deadline's own catch arm names a TIMEOUT, and every other transport failure is rethrown untouched", async () => {
+  // BOTH ARMS OF THE CATCH, because they are the same two lines and they mean opposite things: one
+  // says "we ran out of time and the reservation stands", the other says "the network said no".
+  // A test that only injects a healthy `fetch` reaches neither, which is what `diff-coverage`
+  // refused by name.
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-catch-"));
+  try {
+    const cfg = {
+      claudeBin: "/unused/claude", root, dailyCapUsd: 5,
+      workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" },
+    } as Config;
+    const args = (fetchImpl: typeof fetch) => ({
+      cwd: root, workerHome: join(root, "worker-home"), prompt: "classify",
+      env: { RMD_OPENWEIGHT_API_KEY: "test-only-daemon-secret" },
+      clock: fixedClock(Date.parse("2026-09-16T12:00:00.000Z")),
+      fetchImpl,
+    });
+
+    // (a) ABORTED — the deadline fired. The refusal must name the timeout, not the raw abort, so a
+    //     reader of the ledger can tell a deadline from a dead network.
+    const timedOut = await spawnOpenWeightWorker(
+      { ...args(((_u: unknown, init?: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("The operation was aborted.")));
+        })) as unknown as typeof fetch), requestTimeoutMs: 25 } as never,
+      cfg,
+      { model: "gpt-5-nano", effort: "low" } as never,
+    );
+    assert.equal(timedOut.isError, true);
+    assert.match(timedOut.stderr, /timed out|timeout/i, `expected a timeout refusal, got: ${timedOut.stderr}`);
+
+    // (b) NOT ABORTED — an ordinary transport failure is rethrown UNCHANGED, so a DNS or TLS fault
+    //     is never mislabelled as "we ran out of time".
+    const refused = await spawnOpenWeightWorker(
+      args((async () => { throw new Error("ECONNREFUSED example.test"); }) as unknown as typeof fetch) as never,
+      cfg,
+      { model: "gpt-5-nano", effort: "low" } as never,
+    );
+    assert.equal(refused.isError, true);
+    assert.match(refused.stderr, /ECONNREFUSED/, "a non-deadline failure must survive with its own message");
+    assert.doesNotMatch(refused.stderr, /timed out/i, "and must not be relabelled as a timeout");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

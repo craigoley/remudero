@@ -2494,6 +2494,11 @@ export interface OpenWeightSpawnArgs {
   responseFormat?: string;
   /** Test-only override; production uses the global fetch implementation. */
   fetchImpl?: typeof fetch;
+  /** The request deadline, defaulting to {@link OPENWEIGHT_REQUEST_TIMEOUT_MS}. A seam ONLY so a
+   *  test can reach the aborted arm of the catch below: with the real 180s bound, covering it means
+   *  a test that waits three minutes, and an uncovered catch arm is how a refusal quietly stops
+   *  refusing. Production passes nothing and gets the constant. */
+  requestTimeoutMs?: number;
   /** Test-only override; production reads the daemon process environment. */
   env?: NodeJS.ProcessEnv;
   /** Test-only clock port; production records duration from the system clock. `iso` rides beside
@@ -2926,7 +2931,8 @@ export async function spawnOpenWeightWorker(
       // abandoned request keeps its charge on purpose: the endpoint may have served and billed it,
       // so handing the allowance back would let a timeout buy free authority against `dailyCapUsd`.
       const abort = new AbortController();
-      const deadline = setTimeout(() => abort.abort(), OPENWEIGHT_REQUEST_TIMEOUT_MS);
+      const requestTimeoutMs = args.requestTimeoutMs ?? OPENWEIGHT_REQUEST_TIMEOUT_MS;
+      const deadline = setTimeout(() => abort.abort(), requestTimeoutMs);
       let response: Response;
       try {
         response = await (args.fetchImpl ?? fetch)(openWeightEndpoint(config, selection.model), {
@@ -2936,7 +2942,7 @@ export async function spawnOpenWeightWorker(
           signal: abort.signal,
         });
       } catch (error) {
-        if (abort.signal.aborted) throw new OpenWeightRequestTimeoutError(OPENWEIGHT_REQUEST_TIMEOUT_MS, selection.model);
+        if (abort.signal.aborted) throw new OpenWeightRequestTimeoutError(requestTimeoutMs, selection.model);
         throw error;
       } finally {
         clearTimeout(deadline);
