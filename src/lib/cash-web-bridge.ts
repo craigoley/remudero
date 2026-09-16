@@ -21,17 +21,20 @@
  *  the fleet's inference down with it. Neither key is ever copied into a worker environment. */
 export const CASH_WEB_SEARCH_KEY_ENV = "RMD_CASH_WEB_SEARCH_API_KEY";
 
-/** A search is a foreground step inside a worker's turn, so its bound is far tighter than the
- *  180s request deadline: a model waiting on a hung search burns the run's wall clock for nothing. */
+/** PRIMARY CONTROL: this is what normally stops a hung search, not a fallback for something else
+ *  already having failed. A search is a foreground step inside a worker's turn, so its bound is far
+ *  tighter than the 180s request deadline: a model waiting on a hung search burns the run's wall
+ *  clock for nothing. */
 export const CASH_WEB_SEARCH_TIMEOUT_MS = 60_000;
 
-/** Hard ceiling on the response we will buffer, enforced WHILE READING rather than after. A
- *  content-length header is advisory and a hostile or broken upstream need not send one, so the
- *  cap has to be applied to bytes actually taken off the socket. */
+/** PRIMARY CONTROL: hard ceiling on the response we will buffer, enforced WHILE READING rather than
+ *  after. A content-length header is advisory and a hostile or broken upstream need not send one,
+ *  so the cap has to be applied to bytes actually taken off the socket. */
 export const CASH_WEB_SEARCH_MAX_RESPONSE_BYTES = 1_048_576;
 
 /**
- * Tokens of retrieved page content one search may add to the request, on TOP of the body we sent.
+ * PRIMARY CONTROL: tokens of retrieved page content one search may add to the request, on TOP of
+ * the body we sent.
  *
  * THIS CONSTANT EXISTS BECAUSE THE ORDINARY RESERVATION CANNOT BOUND A SEARCH. `openWeightReservationUsd`
  * is safe because of one specific argument: no tokenizer emits more tokens than the UTF-8 bytes it
@@ -181,7 +184,11 @@ async function readCappedText(response: Response, maxBytes: number): Promise<str
     if (!value) continue;
     total += value.byteLength;
     if (total > maxBytes) {
-      await reader.cancel().catch(() => {});
+      await reader.cancel().catch(() => {
+        // Best-effort only: whether the underlying stream accepts the cancellation or not, this
+        // function still returns `undefined` for the caller's oversize refusal below, so a failed
+        // cancel changes nothing this function reports — there is no reason left to carry.
+      });
       return undefined;
     }
     chunks.push(value);
