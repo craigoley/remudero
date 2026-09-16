@@ -13,6 +13,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   GENERIC_ROUTE_TOOL_BOUNDS,
+  IMPLEMENT_CLAUDE_TOOLS,
   resolveGenericRouteToolBound,
   resolveDispatchLaneToolBound,
   DISPATCH_LANE_TOOL_BOUNDS,
@@ -231,10 +232,22 @@ test("BEHAVIORAL: a real runTask manual dispatch's generic spawn carries the dec
   assert.deepEqual(spawnCalls[1]!.tools, [...GENERIC_ROUTE_TOOL_BOUNDS.manual]);
 });
 
-test("BEHAVIORAL: a real runTask implement dispatch's generic spawn is untouched — no tools bound, same as before this task", async () => {
+test("BEHAVIORAL: a real runTask implement dispatch carries implement's OWN declared bound, not review's", async () => {
+  // W1-T3573 left implement unrestricted and this test guarded that, so the review/manual bound
+  // could not "collateral-shrink" a lane nobody had ruled on. W1-T3696 rules on it: implement now
+  // declares its own bound, measured from its own prompt (shell-shaped, zero web references) and
+  // from every other build lane in the fleet carrying no web access.
+  //
+  // THE ANTI-COLLATERAL INTENT IS UNCHANGED AND IS NOW SHARPER, because the assertion names WHICH
+  // bound: implement must ride `IMPLEMENT_CLAUDE_TOOLS`, never `GENERIC_ROUTE_TOOL_BOUNDS.review`.
+  // Inheriting review's list would hand a build lane WebSearch+WebFetch it was never granted —
+  // collateral WIDENING, the same defect in the other direction.
   const spawnCalls = await runGenericRouteFixture("T-GENERIC-IMPLEMENT", "implement");
   assert.equal(spawnCalls.length, 2, "recon then the one generic implement spawn under test");
-  assert.equal(spawnCalls[1]!.tools, undefined, "implement keeps the unrestricted default — never collateral-shrunk by this task");
+  assert.deepEqual(spawnCalls[1]!.tools, [...IMPLEMENT_CLAUDE_TOOLS], "implement rides its own declared bound");
+  assert.notDeepEqual(spawnCalls[1]!.tools, [...GENERIC_ROUTE_TOOL_BOUNDS.review], "and never review's");
+  // It keeps its shell: this is a declaration, not a migration to the check-runner.
+  assert.ok(spawnCalls[1]!.tools!.includes("Bash"), "a Claude implement still runs the suite and the local gate");
 });
 
 // @source-text-subject — this test's SUBJECT genuinely IS src/run-task.ts's own text, not a stand-in
