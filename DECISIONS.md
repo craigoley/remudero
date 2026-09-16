@@ -2687,3 +2687,50 @@ own plan, and it is named here so this ruling cannot be read as blessing the dup
 it, and both prior rulings read as current again. No gate, predicate or build changes either way —
 this entry records a decision, and the repository split it describes already exists independently
 of it.
+
+## 2026-09-16 — OPERATOR RULING: app.remudero.com is the console. The daemon's surface is a diagnostic, not a UI project.
+
+*Operator-authored, recorded at the operator's instruction on 2026-09-16, answering a question put
+with the measurement below: "app.remudero.com is canonical — retire or migrate the 34 daemon-shell
+tasks the same way… The daemon keeps serving /v1/\* as the control gateway and a minimal diagnostic
+page, but stops being a UI project."*
+
+**WHAT THIS ADDS TO THE 2026-09-15 ENTRY.** That entry moved the console to its own repository and
+preserved `rmd serve`'s surface as "the daemon's LOCAL diagnostic". It did not say what should
+happen to the *plan* aimed at that surface, and the plan kept aiming.
+
+**MEASURED 2026-09-16, which is why this is a ruling and not a preference.** `GET /` on the daemon
+answers a complete HTML console — `<title>Remudero — the operator console</title>` — live behind
+Cloudflare Access at `console.remudero.com`. Beside it, `app.remudero.com` serves the Next.js
+console the operator actually uses. Two consoles, both real. And the core plan carried:
+
+    34 live tasks · $2,348 declared budget · 31 of them risk:high
+
+all building the daemon's shell: density and IA v2, proposal cards, inline detail cards, collapsed
+section summaries, a since-you-last-checked recap, skeleton lifecycles, PWA packaging. Every one
+dispatch-eligible.
+
+The duplication had already cost once. `W1-T159`'s acceptance — "the daemon-health widget shows last
+poll, a next-poll countdown, disk free, and rate-limit remaining" — was built independently on the
+dedicated console in `remudero-console#44`, by a session that did not know `W1-T159` existed.
+
+**THE RULING.** app.remudero.com is the console. The daemon keeps `/v1/*` as the control gateway
+and keeps a minimal diagnostic page at `GET /`; it stops being a place UI work is invested.
+
+**THE LINE THIS DRAWS, AND IT IS NOT "TOUCHES serve.ts".** `src/lib/serve.ts` hosts both the routes
+and the shell, so the file is not the test. The test is what a task *improves*:
+
+- **Kept** — anything that makes `/v1/*` more correct, faster, or richer, because the canonical
+  console is its consumer. `/v1/status` shipping 881,619 bytes per poll (`W1-T3193`), three reads
+  re-parsing 1,710 plan records every three seconds (`W1-T3415`), no surface naming which model ran
+  a task (`W1-T3158`), daemon-health carrying only scalars and no series (`W1-T3159`), the cold
+  first paint (`W1-T154`). Data and state defects too: lost updates on
+  `state/inbox-proposals.json` (`W1-T240`), feedback that renders pending forever (`W1-T257`).
+- **Retired** — anything whose deliverable is how the daemon's own page *looks or is arranged*.
+
+**WHAT IS EXPLICITLY NOT RULED.** The diagnostic page stays. It needs no external identity provider
+and no deploy step, which is exactly what makes it the surface that still answers when Vercel or
+Clerk does not. Nothing here asks for it to be removed or rebuilt.
+
+**Rollback:** revert this entry and re-open the retired tasks by clearing their `retirement:` key.
+No gate, predicate or build changes either way — this entry records a decision.
