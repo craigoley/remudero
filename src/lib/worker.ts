@@ -929,6 +929,14 @@ export interface SpawnWorkerArgs {
    * `sandboxReadRoots` is ignored outside that intent. Claude interprets only `tools`;
    * Codex also uses the intent to choose its sandbox permission profile. */
   tools?: string[];
+  /**
+   * The EQUIVALENT surface to retry with if this spawn's auction blocks and the work diverts to
+   * cash (W1-T3692 + W1-T3696).
+   *
+   * THE PROMPT IS BUILT BEFORE THE AUCTION RUNS, so this is declared rather than inferred: a worker
+   * told to `git push` cannot be handed a shell-less surface on retry. A caller sets it ONLY when
+   * its prompt already said the harness owns git. Absent, the fallback judges `tools`. */
+  cashTools?: readonly string[];
   sandboxIntent?: "disposable-review";
   sandboxReadRoots?: string[];
   /** Override the toolchain-resolution cache and seams. Omitted means the shared per-process `claudeExecutableCache` and live
@@ -1087,6 +1095,53 @@ export const DISPATCH_LANE_TOOL_BOUNDS = {
   alert_fix: { claude: FIX_WORKER_TOOLS },
 } as const satisfies Record<string, { claude: readonly string[]; openweight?: readonly string[] }>;
 
+/**
+ * W1-T3696 step (2)/(3), PER PROVIDER — the surface an implement worker gets when a NON-SUBSCRIPTION
+ * provider runs it.
+ *
+ * SAME SHAPE AS EVERY ROW IN {@link DISPATCH_LANE_TOOL_BOUNDS}: a shell where a shell exists, the
+ * check-runner where it does not. `RunCheck` is not a Claude tool and the cash adapter refuses
+ * `Bash`, so the two cannot share one list. Not declared in that table yet because every entry
+ * there names a `claude` list, and implement's Claude surface is UNRESTRICTED by deliberate choice
+ * (W1-T2591/W1-T3573) — narrowing it is separate, evidence-led work.
+ *
+ * The forge verbs are absent and stay absent: the harness commits, pushes and opens the PR (see
+ * {@link harnessOwnsGitFor}), which runs this lane without granting a cheap model the authority
+ * W1-T3572 removed. */
+export const IMPLEMENT_CASH_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"];
+
+/**
+ * W1-T3696 step (2) for the CLAUDE side: implement's declared surface, closing W1-T2591's
+ * unrestricted default on the highest-risk lane. Shape-identical to `alert_fix`/`FIX_WORKER_TOOLS`.
+ *
+ * MEASURED, NOT GUESSED — the three readings are in this change's PR body: implement's rendered
+ * prompt names npm/git/gh and zero web or subagent tools; every bounded BUILD lane already carries
+ * no web access (only review/manual, a different task type, were granted it); and W1-T210 bounded
+ * the fix rung for exactly this reason, so an untrusted prompt payload could not reach the network.
+ * `Task` is dropped deliberately: a subagent multiplies a run's cost with no ceiling.
+ *
+ * THE FALSIFIER NEEDS NO NEW CODE: `WorkerResult.permissionDenials` names a tool a worker asked for
+ * and was refused. Widen this list from a denial that actually happened, never from a worry.
+ */
+export const IMPLEMENT_CLAUDE_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"];
+
+/**
+ * Choose implement's tool surface from WHAT IS RUNNING IT (W1-T3696 step 2). A cash-billed mount
+ * gets the bounded shell-less surface; every other provider keeps what it has today, `undefined`
+ * for unrestricted included.
+ */
+export function implementToolBound(
+  provider: string | undefined,
+  fallback: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (canonicalWorkerProviderId(provider ?? "") === "cash") return IMPLEMENT_CASH_TOOLS;
+  // `fallback` is the generic-route bound for `review`/`manual` -- a DIFFERENT task type that was
+  // deliberately granted WebSearch+WebFetch. Only the implement lane's own `undefined` (W1-T2591's
+  // unrestricted default) becomes the declared bound here; a lane that already names its tools
+  // keeps them.
+  return fallback ?? IMPLEMENT_CLAUDE_TOOLS;
+}
+
 export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
 
 /**
@@ -1100,6 +1155,18 @@ export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
  * the unrestricted surface, which includes Bash -- the one capability the check-runner deliberately
  * does not have (no git write, no forge). Absent bound => refuse, never "probably fine".
  */
+/**
+ * W1-T3696: does the HARNESS own git for a spawn with this tool surface? True exactly when the
+ * spawn declares a bound carrying no shell — the condition its output contract was built from, so
+ * both read one value and a worker is never told one thing and judged by another.
+ *
+ * AN UNBOUNDED SPAWN IS FALSE, not "probably fine": undefined `tools` inherits the unrestricted
+ * surface, which includes Bash. Such a worker could have committed and chose not to. */
+export function harnessOwnsGitFor(tools: readonly string[] | undefined): boolean {
+  if (tools === undefined) return false;
+  return !tools.includes("Bash");
+}
+
 export function cashCanServeToolSurface(tools: readonly string[] | undefined): boolean {
   if (tools === undefined || tools.length === 0) return false;
   return tools.every((tool) => OPENWEIGHT_FUNCTIONS[tool] !== undefined);
@@ -1724,12 +1791,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // it, and a spawn that already carries one never reached this auction in the first place --
       // so the fallback can fire at most once per spawn, by construction rather than by a counter.
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined) {
-        const refusal = cashFallbackRefusal(config, args.tools);
+        // The surface the DIVERTED spawn would actually run, which is what eligibility must be
+        // judged on -- asking about `tools` here would refuse a lane that declared a perfectly
+        // serveable cash equivalent, and admit one whose equivalent was never declared.
+        const divertTools = args.cashTools ?? args.tools;
+        const refusal = cashFallbackRefusal(config, divertTools);
         if (refusal === undefined) {
           console.error(JSON.stringify({
             event: "worker.provider.cash_fallback",
             reason: "no subscription had readable headroom",
-            tools: args.tools,
+            tools: divertTools,
             blocked: capacities.map((c) => `${c.provider}=${c.readable ? "readable" : c.detail ?? "unreadable"}`),
           }));
           // NO routing status is written here. The auction really did block, and there is no
@@ -1743,6 +1814,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // means every subscription was unreadable or exhausted, which is exactly the day the
             // operator raised the cap for.
             cashSqueezed: true,
+            ...(divertTools === undefined ? {} : { tools: [...divertTools] }),
           });
         }
         console.error(JSON.stringify({
@@ -2742,6 +2814,10 @@ export interface ReconReport {
 export interface Report {
   raw: string;
   prUrl?: string;
+  /** The subject a SHELL-LESS worker asks the harness to commit its edits under. Present only when
+   *  the worker wrote an anchored `COMMIT_MESSAGE:` line; `undefined` is "it did not ask", never a
+   *  default the harness invents. See {@link anchoredCommitMessage}. */
+  commitMessage?: string;
 }
 
 export interface DecisionRequest {
@@ -2798,11 +2874,34 @@ function anchoredPrUrl(text: string): string | undefined {
   return matches.length ? matches[matches.length - 1][1] : undefined;
 }
 
+/**
+ * ANCHORED `COMMIT_MESSAGE` extraction, the same dialect and discipline as {@link anchoredPrUrl}:
+ * only a line matching `COMMIT_MESSAGE:` at its own start counts, and when the contract is honoured
+ * twice the LAST one wins.
+ *
+ * THE SUBJECT ONLY, AND DELIBERATELY. A worker with no shell cannot run `git commit`, so it names
+ * the subject and the harness commits under it — but the text travels as DATA into an argv array,
+ * never a command line, so a newline in it could not smuggle a second instruction anywhere. Taking
+ * one line keeps that obvious rather than merely true.
+ *
+ * `undefined` for a missing, empty, or over-long subject rather than a repaired one: an invented
+ * commit message would attribute work to a run that never asked for it, and commitlint's header
+ * ceiling is 100 CHARACTERS, so a longer subject must be refused here rather than fail at push.
+ */
+export function anchoredCommitMessage(text: string): string | undefined {
+  const matches = [...text.matchAll(/^[ \t]*COMMIT_MESSAGE:[ \t]*(.+)$/gim)];
+  if (matches.length === 0) return undefined;
+  const subject = matches[matches.length - 1][1].trim();
+  if (subject.length === 0 || subject.length > 100) return undefined;
+  return subject;
+}
+
 export function parseReport(text: string): Report | null {
   if (!/(^|\n)\s*REPORT/i.test(text) || /RECON REPORT/i.test(text)) {
-    if (!/PR_URL/i.test(text)) return null;
+    if (!/PR_URL/i.test(text) && !/COMMIT_MESSAGE/i.test(text)) return null;
   }
-  return { raw: text, prUrl: anchoredPrUrl(text) };
+  const commitMessage = anchoredCommitMessage(text);
+  return { raw: text, prUrl: anchoredPrUrl(text), ...(commitMessage === undefined ? {} : { commitMessage }) };
 }
 
 /** One id a worker's `LEARNINGS_USED` line named that was never injected into ITS run — refused
