@@ -122,6 +122,19 @@ export function recoverableCriteria(body: string): AcceptanceCriterion[] {
 
 export function ensureJudgeableBody(body: string, fallbackCriteria: AcceptanceCriterion[]): string {
   if (!bodyNeedsAcceptanceRepair(body)) return body;
+  return replaceAcceptanceBlock(body, fallbackCriteria);
+}
+
+/**
+ * The unconditional half of {@link ensureJudgeableBody} — demote any existing header and append a
+ * fresh block, with NO `bodyNeedsAcceptanceRepair` guard. Extracted (W1-T3066 class) so a caller that
+ * has ALREADY decided repair is warranted for a reason `bodyNeedsAcceptanceRepair` cannot see — e.g.
+ * `repairRetroAcceptanceBlock` (run-task.ts) detecting that a body's only criterion IS the generic
+ * PR-open-time fallback, which parses fine and carries a non-empty proof (so `bodyNeedsAcceptanceRepair`
+ * calls it healthy) but whose proof is stale by construction and REFUSED by `proof-discrimination` —
+ * can still replace it, rather than being silently no-op'd by `ensureJudgeableBody`'s own guard.
+ */
+export function replaceAcceptanceBlock(body: string, fallbackCriteria: AcceptanceCriterion[]): string {
   // The author's own criteria, where they are recoverable, ALWAYS beat a generic fallback: they say
   // something about this diff and the fallback says only that the body parses.
   const recovered = recoverableCriteria(body);

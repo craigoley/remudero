@@ -750,6 +750,7 @@ import {
   reconcileRetroChangesetClaim,
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
+  replaceAcceptanceBlock,
 } from "./lib/plan-pr-emitter.js";
 import {
   findTaskShard,
@@ -15340,6 +15341,29 @@ export async function withMaterializedWorktree<T>(
  * unchanged from before — the caller falls through to the PR body's `Acceptance:` block.
  */
 /**
+ * TRUE when the body's ONLY judgeable Acceptance block is the generic PR-open-time fallback
+ * ({@link PR_OPEN_TIME_ACCEPTANCE_FALLBACK} / {@link ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK} — both
+ * carry the SAME claim/proof pair, so one string comparison covers either origin).
+ *
+ * WHY THIS EXISTS: `ghPrCreateFillCommand` (the retro's own PR-creation call site) already installs
+ * that fallback whenever the commit-derived body carried no Acceptance block — BEFORE
+ * `repairRetroAcceptanceBlock` runs. Its proof, `grep: ^export function acceptanceAuthorTimeCheck in
+ * src/lib/review.ts`, greps a function that predates every PR that could ever reach this fallback,
+ * so `check-proof --base` reads it `executed_stale` on every retro that takes this path — measured
+ * live on #5769, which failed the REQUIRED `proof-discrimination` check for exactly this proof.
+ * `bodyNeedsAcceptanceRepair` alone does not see this: the fallback parses fine and its proof is
+ * non-empty, so it calls the body "healthy" — the retro's own non-dialect fallback below never gets
+ * a chance to replace it. This predicate closes that gap by recognising the ONE known-stale generic
+ * shape and routing it back into repair, without touching `bodyNeedsAcceptanceRepair` itself (which
+ * other callers, e.g. `acceptanceGateBodyRepair`, still need to read this same body as healthy).
+ */
+export function bodyCarriesGenericAcceptanceFallback(body: string): boolean {
+  const criteria = parseAcceptanceBlock(body);
+  if (criteria.length !== 1) return false;
+  return criteria[0].proof?.trim() === PR_OPEN_TIME_ACCEPTANCE_FALLBACK[0].proof;
+}
+
+/**
  * THE RETRO'S ACCEPTANCE-BLOCK REPAIR RUNG, extracted so the DECISION is reachable by a test.
  *
  * It was inline in `retroCommand`, which meant the trigger — the thing this change fixes — could
@@ -15371,16 +15395,23 @@ export function repairRetroAcceptanceBlock(
     // The SAME predicate ensureJudgeableBody itself uses (bodyNeedsAcceptanceRepair,
     // plan-pr-emitter.ts) — this call site used to carry its own `=== 0` copy, which meant widening
     // the repair would have left the duplicate here still declining to fire on a body that parses
-    // to one criterion with an empty proof. One definition, two consumers.
-    if (!bodyNeedsAcceptanceRepair(body)) return "healthy";
-    const repaired = ensureJudgeableBody(body, [
+    // to one criterion with an empty proof. One definition, two consumers. ALSO repair a body whose
+    // only criterion is the generic PR-open-time fallback: that proof is stale by construction
+    // (see bodyCarriesGenericAcceptanceFallback), so `proof-discrimination` REFUSES the retro
+    // otherwise, even though `bodyNeedsAcceptanceRepair` alone calls it healthy.
+    if (!bodyNeedsAcceptanceRepair(body) && !bodyCarriesGenericAcceptanceFallback(body)) return "healthy";
+    const fallback: AcceptanceCriterion[] = [
       {
         claim: "the retro's plan-only sync PR is gate-compliant",
         proof:
           "SHIPPED-log/NET-STATE/calibration-table updates and the COMPRESSION deletion are in this diff; " +
           "docs/ORIENTATION.md and plan/plan-index.json are harness-regenerated separately in this same PR",
       },
-    ]);
+    ];
+    // `ensureJudgeableBody` re-checks `bodyNeedsAcceptanceRepair` internally and no-ops when it reads
+    // healthy — exactly the generic-fallback case this function exists to catch. Use the unconditional
+    // half directly whenever THIS repair fired for a reason that predicate cannot see.
+    const repaired = bodyNeedsAcceptanceRepair(body) ? ensureJudgeableBody(body, fallback) : replaceAcceptanceBlock(body, fallback);
     editBody(prUrl, repaired);
     log("acceptance.repaired", { pr_url: prUrl });
     return "repaired";
