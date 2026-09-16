@@ -18,18 +18,28 @@
  *        ordered strictly before the existing orphan-cap/post-review rows so a push this task can
  *        cheapen never still falls through to the total-loss default.
  *
- * Five acceptance criteria, one test block each below.
+ * Five acceptance criteria, one test block each below, PLUS a `runSweep` end-to-end pair that
+ * drives the two new dispositions through the dedup switch itself (the `"review-reused"`/
+ * `"discriminate-only"` arm right beside `"wait"`/`"held-draft"` in that switch) — the ONLY way
+ * to exercise those lines, since `deriveDisposition` alone never reaches `runSweep`'s own dedup
+ * dispatch.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
   reviewReuseVerdict,
+  runSweep,
   type OpenPrView,
   type ReviewReuseInputs,
+  type SweepDeps,
 } from "../src/lib/sweep.js";
 import { priorReviewVerdictFromLedger, reviewLedgerLegibilityFields } from "../src/lib/review.js";
+import { readLedgerLines } from "../src/lib/status.js";
 
 const NOW = Date.parse("2026-09-16T19:00:00Z");
 const RECENT = "2026-09-16T18:50:00Z";
@@ -78,6 +88,34 @@ function unchangedInputs(): Partial<ReviewReuseInputs> {
   };
 }
 
+/** A fresh, empty ledger file per test — same pattern `test/sweep.test.ts`'s own `ledgerPath()`
+ *  uses, so `runSweep`'s prior-actions fold always starts with every dedup set empty. */
+function freshLedgerPath(): string {
+  return join(mkdtempSync(join(tmpdir(), "rmd-sweep-reuse-")), "ledger.ndjson");
+}
+
+/** The minimal recording fake `runSweep` needs for these two dispositions: both route through the
+ *  dedup switch's `"review-reused"`/`"discriminate-only"` arm, which forces `alreadyDone` true
+ *  BEFORE any effector is ever reached — so every one of these calls must stay at zero. */
+function minimalDeps(): SweepDeps & { armed: OpenPrView[]; closed: OpenPrView[]; fixed: OpenPrView[]; escalated: OpenPrView[] } {
+  const armed: OpenPrView[] = [];
+  const closed: OpenPrView[] = [];
+  const fixed: OpenPrView[] = [];
+  const escalated: OpenPrView[] = [];
+  return {
+    armed,
+    closed,
+    fixed,
+    escalated,
+    arm: (p) => { armed.push(p); },
+    close: (p) => { closed.push(p); },
+    dispatchFix: (p) => { fixed.push(p); },
+    escalate: (p) => { escalated.push(p); },
+    ledgerPath: freshLedgerPath(),
+    runId: "W1-T3704-REUSE",
+  };
+}
+
 // ── acceptance 1: own diff same, merge base same → reuse the verdict ──────────────────────────
 
 test("W1-T3704 (1): a push whose own diff and merge base are both unchanged reuses the verdict instead of discarding it", () => {
@@ -88,6 +126,43 @@ test("W1-T3704 (1): a push whose own diff and merge base are both unchanged reus
   const result = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(result.disposition, "review-reused", "reused, never routed to a full re-review");
   assert.notEqual(result.disposition, "post-review", "the discarded-verdict default must not fire here");
+});
+
+// ── acceptance 1 (runSweep, the dedup switch itself): a reused verdict fires no effect ─────────
+
+test("W1-T3704 (1, runSweep): a reused verdict takes NO gated action — every effector call stays at zero, ledgered acted:false", async () => {
+  const deps = minimalDeps();
+  const summary = await runSweep([orphanedPr(unchangedInputs())], deps);
+
+  assert.equal(summary.byDisposition["review-reused"], 1);
+  assert.equal(summary.actionsTaken, 0, "a reused verdict is never counted as an action taken");
+  assert.equal(deps.armed.length, 0, "no auto-merge arm");
+  assert.equal(deps.closed.length, 0, "no close");
+  assert.equal(deps.fixed.length, 0, "no fix/review re-dispatch — the point of reusing the verdict");
+  assert.equal(deps.escalated.length, 0, "no escalation");
+
+  const disposed = readLedgerLines(deps.ledgerPath).find((l) => l.step === "sweep.disposed");
+  assert.equal(disposed?.disposition, "review-reused");
+  assert.equal(disposed?.acted, false, "the disposition is ledgered, but nothing fired");
+  assert.match(String(disposed?.reason), /reusing that verdict/);
+});
+
+test("W1-T3704 (2, runSweep): a discriminate-only verdict likewise takes no gated action — the re-discrimination dispatch is a separate, not-yet-wired producer", async () => {
+  const deps = minimalDeps();
+  const pr = orphanedPr({ ...unchangedInputs(), currentMergeBaseSha: NEW_MERGE_BASE });
+  const summary = await runSweep([pr], deps);
+
+  assert.equal(summary.byDisposition["discriminate-only"], 1);
+  assert.equal(summary.actionsTaken, 0);
+  assert.equal(deps.armed.length, 0);
+  assert.equal(deps.closed.length, 0);
+  assert.equal(deps.fixed.length, 0);
+  assert.equal(deps.escalated.length, 0);
+
+  const disposed = readLedgerLines(deps.ledgerPath).find((l) => l.step === "sweep.disposed");
+  assert.equal(disposed?.disposition, "discriminate-only");
+  assert.equal(disposed?.acted, false);
+  assert.match(String(disposed?.reason), /discrimination alone/);
 });
 
 // ── acceptance 2: own diff same, merge base moved → discrimination only ───────────────────────
