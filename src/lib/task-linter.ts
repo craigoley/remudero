@@ -57,6 +57,7 @@ export type LintCheck =
   | "proof-engine-divergence"
   | "proof-scope"
   | "proof-name-resolution"
+  | "proof-unit-test-unresolvable"
   | "shared-proof"
   | "unbound-criterion"
   | "post-merge-amendment"
@@ -1397,6 +1398,71 @@ export function proofNameResolutionViolations(task: Task, opts: LintOpts = {}): 
           "confirm the breadth is intended.",
       });
     }
+  });
+  return violations;
+}
+
+// ── PROOF-UNIT-TEST-UNRESOLVABLE (W1-T3639 — the `unit test:` half of an asymmetry) ─────────
+// proofGrepUnmatchableViolations refuses (warns on) a `grep:` proof that cannot match; a
+// name-filtered `unit test:` proof had no equivalent at all — ANY title parsed, however wrong,
+// and review was the first thing to notice, one full build and CI round later (measured: 4 PRs
+// refused for exactly this in one night, #5639/#5680/#5687/#5683). This closes that half, reusing
+// the SAME injected resolver {@link proofNameResolutionViolations} already calls
+// (`opts.resolveNameFilteredCandidates`, the reviewer's OWN resolver, review.ts) so lint and
+// review cannot disagree about what a raw title resolves to — MATCH THE EXECUTOR, NOT AN
+// APPROXIMATION. `run-task.ts` wires that resolver ONLY in `--base` (changed-tasks) mode, so this
+// check is structurally silent on the whole-plan pass and at pre-dispatch — no second gate needed.
+//
+// UNLIKE proofNameResolutionViolations, THIS BLOCKS, UNCONDITIONALLY on "absent" — no metachar or
+// narrative narrowing. That check stays WARN-forever because a zero-match title is ordinarily a
+// task that has not written its test yet. This one ALSO requires the task's own `files:` to name a
+// test/ path — i.e., THIS diff ships the suite the title claims to name. On such a diff a title
+// that still resolves to nothing has no forward-reference excuse left: review already refuses it,
+// later and at the cost of a full build and CI round, which is the exact asymmetry this task
+// exists to close. Why: docs task-linter.ts (W1-T3639, W1-T488/W1-T497 for the shared resolver).
+
+/** Does this task's declared `files:` include a test/ path — i.e., is this diff shipping the
+ *  suite its `unit test:` proofs would resolve against? Absent/empty `files:` ⇒ false, and {@link
+ *  proofUnitTestUnresolvableViolations} skips the task entirely: a task that is only filed, whose
+ *  suite is not written yet, gets no opinion here. */
+function declaresTestFile(task: Task): boolean {
+  return (task.files ?? []).some((f) => f.startsWith("test/"));
+}
+
+/** Every name-filtered `unit test:` proof whose raw title resolves to ZERO tests, on a task whose
+ *  `files:` names a test/ path (this diff ships the suite). BLOCK, unconditionally — see the
+ *  section comment above for why this differs from {@link proofNameResolutionViolations}'s WARN.
+ *  Silent absent the injected resolver, which `run-task.ts` wires ONLY in `--base` mode, so the
+ *  whole-plan pass and pre-dispatch never see this check fire. */
+export function proofUnitTestUnresolvableViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const resolveNameFilteredCandidates = opts.resolveNameFilteredCandidates;
+  if (!resolveNameFilteredCandidates) return [];
+  if (!declaresTestFile(task)) return []; // suite not part of this diff — a legitimate forward reference
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to resolve
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted || whitelisted.kind !== "test" || !whitelisted.nameFiltered) return;
+    const rawName = whitelisted.label;
+    // The SAME literal-substring resolver `execWhitelistedProof` itself calls — this function
+    // does no matching of its own, so it cannot disagree with the reviewer over what "matches"
+    // means (the falsifier this check exists to satisfy: a regex re-interpretation here would
+    // read a metacharacter-bearing title differently than the reviewer does).
+    const resolution = resolveNameFilteredCandidates(rawName);
+    if (resolution.status !== "absent") return; // resolved, or unresolvable (not evidence — same contract as proof-name-resolution)
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    const head = rawName.slice(0, 70) + (rawName.length > 70 ? "…" : "");
+    violations.push({
+      check: "proof-unit-test-unresolvable",
+      severity: "block",
+      message:
+        `criterion ${i + 1} ("${claimHead}") \`unit test:\` proof "${head}" resolves to ZERO tests in the ` +
+        "head tree — refused. This task's own files: names a test/ path, so this diff ships the suite the " +
+        "title claims; a title that still resolves to nothing has no forward-reference excuse left, and " +
+        "review already refuses it (parseTestTarget, src/lib/review.ts) later, at the cost of a full build " +
+        "and CI round. The match is a LITERAL SUBSTRING against real test titles, never a regex — copy the " +
+        "test's exact title out of the file it lives in, with no reinterpretation.",
+    });
   });
   return violations;
 }
@@ -2956,7 +3022,9 @@ export interface LintOpts {
    *  target test is RED at base discriminates correctly and a blocking arm would refuse it wrongly. */
   proofBaseDiscrimination?: LintSeverity;
   /** The reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to a real checkout, so
-   *  lint and review cannot disagree. Absent ⇒ {@link proofNameResolutionViolations} is silent. */
+   *  lint and review cannot disagree. Absent ⇒ {@link proofNameResolutionViolations} AND {@link
+   *  proofUnitTestUnresolvableViolations} (W1-T3639, the block-severity sibling that also
+   *  requires the task's `files:` to name a test/ path) are both silent. */
   resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
   /** Other OPEN tasks' corpus entries for {@link duplicateTitleViolations} to compare this task
    *  against. Supplied by the caller, never fetched. Absent or empty ⇒ silent. */
@@ -3006,7 +3074,8 @@ export interface LintOpts {
 /** Lint one task, aggregating every check below. The hard checks — sizing, headless-fitness,
  *  proof-shape, proof-dialect, proof-resolvability, provenance, ruling-verify — always run. Each
  *  injected-predicate check is a no-op absent its own `opts` field: post-merge-amendment,
- *  blocked-disposition, budget-sanity, duplicate-title and its narrow arm, proof-name-resolution.
+ *  blocked-disposition, budget-sanity, duplicate-title and its narrow arm, proof-name-resolution,
+ *  proof-unit-test-unresolvable.
  *  Dispatch-priority, advisory-routing, deferred-follow-up and blocked-record-unruled always run
  *  with no `opts` field at all, and the last three can never block. */
 /** The checks whose SUBJECT is how a task will be verified WHEN IT IS BUILT — the proof families
@@ -3080,6 +3149,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofGrepSafetyViolations(task));
   violations.push(...proofScopeViolations(task, opts));
   violations.push(...proofNameResolutionViolations(task, opts));
+  violations.push(...proofUnitTestUnresolvableViolations(task, opts));
   violations.push(...sharedProofViolations(task));
   violations.push(...unboundCriterionViolations(task, opts));
   violations.push(...proofBaseDiscriminationViolations(task, opts));

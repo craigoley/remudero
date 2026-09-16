@@ -1,0 +1,51 @@
+- id: W1-T3667
+  title: "THE SINCE-YOU-LAST-CHECKED MARKER IS FIVE DAYS STALE AND NOTHING ADVANCES IT — /v1/status ships a 280-entry recap against sinceCheckpoint 2026-09-11T12:34:09Z, so every visit reports the same five days as new and no surface can say what changed since you looked"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 45.00
+  files: [src/lib/last-seen.ts, test/a-recap-checkpoint-advances-when-it-is-read.test.ts]
+  origin: oper#pizza-bot-comparison-2026-09-16
+  plan_refs: ["W1-T163"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-16 on the live daemon. `GET /v1/status` already carries both halves of a
+    since-you-last-checked surface:
+
+        recap             280 entries  [{kind, taskId, ts, detail, title}, ...]
+        sinceCheckpoint   "2026-09-11T12:34:09.274Z"   <- FIVE DAYS OLD
+
+    `src/lib/last-seen.ts` exists (105 lines), exports `createLastSeenStore`/`lastSeenPath`, and is
+    wired into the status route at serve.ts (`buildStatusRoute(deps.board, lastSeen)`). The read
+    path works. NOTHING ADVANCES THE MARKER, so the recap is not "what changed since you looked" —
+    it is "everything since the last time something happened to write this file", which was five
+    days ago. A 280-entry recap that never shrinks is indistinguishable from no recap at all.
+
+    THE COMPARISON THAT FOUND IT. AWS open-sourced Pizza Bot on 2026-09-13, an inbox for background
+    agents whose whole organising idea is three queues — All, Unread, Action — and whose stated
+    premise is that "the interface assumes you are not watching". Its Unread queue is exactly this
+    marker plus this recap. Remudero computes both and then cannot answer the question, because the
+    checkpoint never moves.
+
+    W1-T163 ("since-you-last-checked recap") filed this surface for the daemon's own HTML shell and
+    was retired 2026-09-16 with the rest of that surface. The DATA half is core and survives the
+    retirement; this task is that half, and the rendering half is the console's.
+
+    WHAT ADVANCING MUST NOT MEAN. Not "any read advances it" — the console polls every few seconds,
+    so a poll-advances-it rule marks everything read before an operator has seen anything, which is
+    strictly worse than a stale marker. The advance has to be an explicit act.
+  acceptance:
+    - claim: "the checkpoint advances only on an explicit acknowledgement, never as a side effect of a poll"
+      proof: "unit test: a poll does not advance the recap checkpoint"
+    - claim: "an explicit acknowledgement advances the checkpoint, so the next recap is smaller"
+      proof: "unit test: an acknowledgement advances the checkpoint and shrinks the next recap"
+    - claim: "the checkpoint is per operator token, so one reader acknowledging does not blank another's recap"
+      proof: "unit test: one token's acknowledgement leaves another token's recap intact"
+  falsifier: |
+    Advance the checkpoint inside the status read and the first test must fail with the recap
+    empty after one poll. Drop the advance entirely and the second fails with the recap unchanged.
+    Key the store globally rather than per token and the third fails.
