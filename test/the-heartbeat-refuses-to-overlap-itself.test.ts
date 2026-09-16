@@ -26,7 +26,22 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REAL_SCRIPT = join(REPO_ROOT, "scripts", "fleet-heartbeat.sh");
 
-const HAVE_FLOCK = spawnSync("sh", ["-c", "command -v flock"], { encoding: "utf8" }).status === 0;
+/**
+ * WHERE flock LIVES, because a SKIPPED proof is not a proof. The reviewer executes these titles as
+ * acceptance proofs; on a host where they skip, `rmd review` reports "0 proofs executed" and CAPS
+ * the verdict -- which is exactly what happened before this lookup existed. macOS ships no flock,
+ * but Homebrew's util-linux does and is not on the default PATH, so look there before giving up.
+ */
+const FLOCK_DIRS = ["/opt/homebrew/opt/util-linux/bin", "/usr/local/opt/util-linux/bin"];
+function flockPath(): string | undefined {
+  if (spawnSync("sh", ["-c", "command -v flock"], { encoding: "utf8" }).status === 0) return "flock";
+  for (const dir of FLOCK_DIRS) if (existsSync(join(dir, "flock"))) return join(dir, "flock");
+  return undefined;
+}
+const FLOCK = flockPath();
+const HAVE_FLOCK = FLOCK !== undefined;
+/** PATH the script and the holder both see, so `command -v flock` INSIDE the script succeeds too. */
+const FLOCK_PATH_PREFIX = FLOCK !== undefined && FLOCK !== "flock" ? `${dirname(FLOCK)}:` : "";
 
 /** A `git` stub that answers the plumbing the beat reaches and never touches a network. */
 const GIT_STUB = [
@@ -78,7 +93,7 @@ function makeBed(): Bed {
     lock: join(root, "state", "heartbeat.lock"),
     env: {
       ...process.env,
-      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      PATH: `${binDir}:${FLOCK_PATH_PREFIX}${process.env.PATH ?? ""}`,
       HOME: join(dir, "home"),
       RMD_ROOT: root,
       RMD_HEARTBEAT_BRANCH: "heartbeat-test",
@@ -96,10 +111,10 @@ test("a second heartbeat run refuses while the first still holds the lock", (t) 
   const bed = makeBed();
 
   // A beat is IN PROGRESS: hold the very lock path the script takes, the way a slow scan would.
-  const holder = spawn("flock", ["-x", bed.lock, "-c", "sleep 30"], { stdio: "ignore" });
+  const holder = spawn(FLOCK as string, ["-x", bed.lock, "-c", "sleep 30"], { stdio: "ignore" });
   try {
     // Give the holder a moment to actually acquire before the contender runs.
-    spawnSync("sh", ["-c", `for i in $(seq 1 50); do flock -n ${JSON.stringify(bed.lock)} -c true || exit 0; sleep 0.1; done; exit 1`]);
+    spawnSync("sh", ["-c", `for i in $(seq 1 50); do ${FLOCK} -n ${JSON.stringify(bed.lock)} -c true || exit 0; sleep 0.1; done; exit 1`]);
 
     const second = runBeat(bed);
 
