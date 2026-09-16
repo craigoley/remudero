@@ -44,6 +44,9 @@ const EFFECT_KEYS = [
   "rebaseDirtyFleetBranch",
   "repushAbsent",
   "requeueCheck",
+  // W1-T3618: injected by the entrypoint adapter, surfaced by BOTH builders so the key-identity
+  // this suite asserts holds structurally.
+  "reviewerCodeStaleThisPass",
   "runStaleRedLocalRoute",
   "selectAdaptiveReviewWidth",
   "terminalFixStandDown",

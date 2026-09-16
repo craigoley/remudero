@@ -1660,3 +1660,46 @@ test("the openweight reservation still bounds input by byte length", () => {
     "the reservation must NOT be computed from the router's token estimate",
   );
 });
+
+// W1-T3613 criterion 1. A SEPARATE test, deliberately: appending these assertions to
+// "a request larger than every context window refuses before it reserves" made the criterion
+// unfalsifiable -- proof-discrimination runs the BASE's copy of a modified test file, so the old
+// test ran at base and passed, and the proof established nothing. A new test name matches zero
+// tests at base, which is what makes this criterion discriminate.
+test("W1-T3613: an oversized refusal names the request size and every considered deployment's window", () => {
+  const ladder = {
+    ladder: { economy: 1, balanced: 2, frontier: 3 },
+    claude: { haiku: "economy" },
+    codex: { economy: { medium: ["codex-economy"] }, balanced: { medium: ["codex-balanced"] }, frontier: { medium: ["codex-frontier"] } },
+    openweight: {
+      economy: { medium: ["gpt-oss-120b", "gpt-5-nano"] },
+      balanced: { medium: ["gpt-5-nano"] },
+      frontier: { medium: ["gpt-oss-120b"] },
+    },
+  };
+  const biggest = Math.max(...Object.values(OPENWEIGHT_CONTEXT_WINDOWS).map((w) => w.totalTokens));
+  const tooManyBytes = Math.ceil((biggest + 1) * OPENWEIGHT_BYTES_PER_TOKEN) + 1;
+  const estimatedTokens = openWeightEstimatedTokens(tooManyBytes);
+
+  let caught: unknown;
+  try {
+    selectOpenWeightModel(ladder, "haiku", "medium", tooManyBytes);
+  } catch (err) {
+    caught = err;
+  }
+  assert.ok(caught instanceof OpenWeightRequestTooLargeError, "must throw the too-large error");
+  const message = (caught as OpenWeightRequestTooLargeError).message;
+
+  // BOTH figures: the request's own estimated size, and each considered deployment's window.
+  assert.match(message, new RegExp(`~${estimatedTokens} tokens`), "message must name the request's estimated size");
+  assert.match(
+    message,
+    new RegExp(String(OPENWEIGHT_CONTEXT_WINDOWS["gpt-oss-120b"]!.totalTokens)),
+    "message must name gpt-oss-120b's declared context window",
+  );
+  assert.match(
+    message,
+    new RegExp(String(OPENWEIGHT_CONTEXT_WINDOWS["gpt-5-nano"]!.totalTokens)),
+    "message must name gpt-5-nano's declared context window",
+  );
+});

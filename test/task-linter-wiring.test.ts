@@ -392,7 +392,13 @@ function probeShardYaml(): string {
     "  risk: low",
     "  status: queued",
     "  attempts: 0",
-    "  files: [test/task-linter-wiring.test.ts]",
+    // W1-T3639: NOT a test/ path. `proofUnitTestUnresolvableViolations` (task-linter.ts) now also
+    // fires — BLOCK — on a name-filtered `unit test:` proof resolving to zero when `files:` names a
+    // test/ path, which this fixture's zero-resolving PROBE_PROOF would otherwise satisfy too,
+    // turning this WARN-only wiring probe into an (unrelated, correct) BLOCK. This fixture's own
+    // concern is proof-name-resolution's WARN behavior, so it deliberately stays outside that new
+    // check's gate rather than asserting around a second check it was never written to cover.
+    "  files: [src/lib/task-linter.ts]",
     "  acceptance:",
     '    - claim: "a fixture claim naming a name-filtered proof that resolves to nothing"',
     `      proof: "${PROBE_PROOF}"`,

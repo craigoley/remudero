@@ -83,7 +83,13 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
 
   assert.equal(sha256(fix), "03e8002e6a838f5ec6adc3269815a208262f74d0493dd9acc54fcf0492552dda");
   assert.equal(sha256(prerequisite), "5c52a37d141fdb3048e692885a6c8b3ae1f9481dd0f4c2f845cde736bcffa239");
-  assert.equal(sha256(recon), "57c4b24a5e00c32427a27e09ff85a8744fbeced6b2585bec723f763e0f2622bb");
+  // W1-T3656 DELIBERATELY diverged this ONE template. renderReconPrompt no longer names shell
+  // binaries ("git remote -v, git log --oneline -5, ls"), because a worker holding the allowlisted
+  // check-runner instead of a shell cannot follow those literally -- which pinned the recon lane to
+  // Claude. The observations it asks for are unchanged; only the instruction to use a shell is gone.
+  // Re-baselined rather than reverted. The other four hashes are untouched, so this test still
+  // guards W1-T2886's move for every template that did NOT intentionally change.
+  assert.equal(sha256(recon), "45ccd6b3f8cf9ffbf89a5d7bbe0c5c946cfa9bb27a0faea04d1f920ccdde66ad");
   assert.equal(sha256(diagnose), "cc1209eecea9ef35572af1a184d1a90850f2ee6eed0139082b9f54ec2edb41bc");
   assert.equal(sha256(implement), "95e6d80b5168ff4c5efe4f538c54ef77800d919aa8bc94e20510960a4ac8590e");
 });

@@ -43,6 +43,10 @@ const EFFECT_KEYS = [
   // position is free — it is listed last because it is the newest, not because order matters.
   "repairMissingTaskTrailer",
   "rebaseDirtyFleetBranch",
+  // W1-T3618: the reviewer-code freshness reading, hoisted in FRONT of reviewCommand so a stale
+  // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
+  // buildSweepEffects caches the read once per sweep cycle rather than once per PR.
+  "reviewerCodeStaleThisPass",
 ] as const;
 
 test("buildSweepEffects takes one typed deps object and returns the sweep effects surface", () => {
