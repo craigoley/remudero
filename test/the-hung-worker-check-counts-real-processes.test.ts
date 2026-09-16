@@ -62,22 +62,22 @@ async function doctorLine(readWorkers: () => ReturnType<typeof readWorkerProcess
 test("the doctor collects worker processes instead of passing a literal zero", async () => {
   // THE WIRING IS THE SUBJECT. A reading of two workers must REACH the report. Before this task the
   // caller passed 0 and no injected reading could change the printed line at all.
-  const twoWorkers = await doctorLine(() => ({ count: 2, oldestEtimeS: 30 }));
+  const twoWorkers = await doctorLine(() => ({ count: 2, oldestEtimeS: 30, processes: [] }));
   assert.match(twoWorkers, /2 worker\(s\)/, "the injected count must reach the printed report");
 
   // And the discriminating half: a DIFFERENT reading must print a DIFFERENT line, or the arm could
   // still be ignoring its input and merely happen to match above.
-  const none = await doctorLine(() => ({ count: 0 }));
+  const none = await doctorLine(() => ({ count: 0, processes: [] }));
   assert.match(none, /0 worker process\(es\)/);
   assert.notEqual(twoWorkers, none, "the printed line must vary with the reading — otherwise it is still a constant");
 });
 
 test("a worker past the hung-worker age makes lane-less-workers WARN", async () => {
   // The verdict the arm could never reach while its input was a literal zero.
-  const old = await doctorLine(() => ({ count: 1, oldestEtimeS: HUNG_WORKER_AGE_S + 60 }));
+  const old = await doctorLine(() => ({ count: 1, oldestEtimeS: HUNG_WORKER_AGE_S + 60, processes: [] }));
   assert.match(old, /WARN/, "a worker past HUNG_WORKER_AGE_S must WARN");
 
-  const young = await doctorLine(() => ({ count: 1, oldestEtimeS: HUNG_WORKER_AGE_S - 60 }));
+  const young = await doctorLine(() => ({ count: 1, oldestEtimeS: HUNG_WORKER_AGE_S - 60, processes: [] }));
   assert.match(young, /OK/, "a worker inside the bound must not warn — the threshold must discriminate");
 
   // Boundary, in both directions, on the pure judge.
@@ -99,14 +99,19 @@ test("a dispatched worker is counted but an operator's own claude session is not
   // MEASURED WHILE WRITING THIS: matching `claude` alone returned `oldest 11.5 days` on the
   // developer machine — the editor running the change. The daemon spawns workers with
   // `--output-format stream-json`; an interactive session never does.
-  const fleet = parseWorkerProcesses("  8884 /usr/local/bin/claude --output-format stream-json --verbose --effort high");
+  const fleet = parseWorkerProcesses("  4242  8884 /usr/local/bin/claude --output-format stream-json --verbose --effort high");
   assert.equal(fleet.count, 1, "a dispatched worker must be counted");
   assert.equal(fleet.oldestEtimeS, 8884);
+  // The PID reaches the reading, because the reaper (W1-T3629) must act on the SAME reading the
+  // doctor judges rather than shelling out to `ps` a second time and racing it.
+  assert.deepEqual(fleet.processes, [
+    { pid: 4242, etimeS: 8884, args: "/usr/local/bin/claude --output-format stream-json --verbose --effort high" },
+  ]);
 
-  const interactive = parseWorkerProcesses("  999254 /usr/local/bin/claude");
+  const interactive = parseWorkerProcesses("  4243  999254 /usr/local/bin/claude");
   assert.equal(interactive.count, 0, "an operator's own session is not a hung worker");
 
-  const install = parseWorkerProcesses("  4846 npm ci");
+  const install = parseWorkerProcesses("  4244  4846 npm ci");
   assert.equal(install.count, 1, "the worktree install is the shape that actually wedged");
 });
 

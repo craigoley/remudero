@@ -403,9 +403,17 @@ export const HUNG_WORKER_AGE_S = 7200;
  * `undefined` means the table COULD NOT BE READ, which the judge renders as UNKNOWN rather than as
  * zero — a failed read must never look like a healthy host.
  */
+export interface WorkerProcess {
+  pid: number;
+  etimeS: number;
+  args: string;
+}
+
 export interface WorkerProcessReading {
   count: number;
   oldestEtimeS?: number;
+  /** The processes themselves, so a reaper acts on the SAME reading the doctor judges (W1-T3629). */
+  processes: WorkerProcess[];
 }
 
 /**
@@ -440,32 +448,34 @@ export function parseEtime(field: string): number | undefined {
 }
 
 export function parseWorkerProcesses(psOutput: string): WorkerProcessReading {
-  let count = 0;
+  const processes: WorkerProcess[] = [];
   let oldest: number | undefined;
   for (const line of psOutput.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
-    const match = /^(\S+)\s+(.*)$/.exec(trimmed);
+    const match = /^(\d+)\s+(\S+)\s+(.*)$/.exec(trimmed);
     if (!match) continue;
-    const etime = parseEtime(match[1] ?? "");
-    const args = match[2] ?? "";
-    if (etime === undefined) continue;
+    const pid = Number(match[1]);
+    const etime = parseEtime(match[2] ?? "");
+    const args = match[3] ?? "";
+    if (!Number.isFinite(pid) || etime === undefined) continue;
     if (!WORKER_PROCESS_PATTERNS.some((all) => all.every((needle) => args.includes(needle)))) continue;
     // `ps` lists this very `ps`, and a grep for the pattern would match its own argv.
     if (args.includes("ps -eo")) continue;
-    count += 1;
+    processes.push({ pid, etimeS: etime, args });
     if (oldest === undefined || etime > oldest) oldest = etime;
   }
-  return oldest === undefined ? { count } : { count, oldestEtimeS: oldest };
+  const count = processes.length;
+  return oldest === undefined ? { count, processes } : { count, oldestEtimeS: oldest, processes };
 }
 
 /** procps first, BSD second. A keyword error is not a read failure — only BOTH failing is. */
 function defaultPs(): string {
   const opts = { encoding: "utf8" as const, maxBuffer: 8 * 1024 * 1024 };
   try {
-    return execFileSync("ps", ["-eo", "etimes=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
+    return execFileSync("ps", ["-eo", "pid=,etimes=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
   } catch {
-    return execFileSync("ps", ["-eo", "etime=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
+    return execFileSync("ps", ["-eo", "pid=,etime=,args="], { ...opts, stdio: ["ignore", "pipe", "ignore"] });
   }
 }
 
