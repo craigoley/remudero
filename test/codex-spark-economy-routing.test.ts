@@ -85,8 +85,15 @@ test("Spark stays in economy and every non-economy candidate row remains unchang
   // leads none. `frontier.low` no longer names it alone: a single-candidate row whose only model
   // stops being offered makes Codex read `readable:false`, which silently migrates that lane onto
   // Claude rather than failing loudly. Spark's economy containment below is unchanged.
+  // `balanced.low` WAS ["gpt-5.4"] -- the very shape the comment above describes, one row over and
+  // already realised. MEASURED 2026-09-16 against this account's own app-server `model/list`: the
+  // account is offered exactly gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna and gpt-5.5. gpt-5.4 is
+  // NOT among them, so that row had no eligible candidate at all and Codex read `readable:false`
+  // -> the lane migrated silently onto Claude. It now mirrors medium/high: terra leads (a
+  // same-capability primary, never a cross-band promotion -- W1-T2842 forbids promoting beyond a
+  // band without measured task outcomes) with the same trailing fallbacks.
   assert.deepEqual(CAPABILITIES.codex.balanced, {
-    low: ["gpt-5.4"],
+    low: ["gpt-5.6-terra", "gpt-5.4", "gpt-5.5"],
     medium: ["gpt-5.6-terra", "gpt-5.4", "gpt-5.5"],
     high: ["gpt-5.6-terra", "gpt-5.4", "gpt-5.5"],
   });
@@ -100,6 +107,10 @@ test("Spark stays in economy and every non-economy candidate row remains unchang
     for (const [effort, models] of Object.entries(rows)) {
       assert.notEqual(models[0], "gpt-5.5", `gpt-5.5 must not lead ${effort}`);
       if (models.includes("gpt-5.5")) assert.ok(models.length > 1, `${effort} needs a non-5.5 candidate`);
+      // THE GAP THIS GUARD USED TO HAVE. "No row may be single-candidate" was only ENFORCED for
+      // rows naming gpt-5.5, so `balanced.low: ["gpt-5.4"]` sat single-candidate and unflagged
+      // until its one model stopped being offered. The rule is about the ROW, not about 5.5.
+      assert.ok(models.length > 1, `${effort} is single-candidate: one withdrawn model empties it`);
     }
   }
   for (const rows of [CAPABILITIES.codex.balanced, CAPABILITIES.codex.frontier]) {
