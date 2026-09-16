@@ -24,6 +24,8 @@ import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
+import { parse as parseYaml } from "yaml";
+import { RmdError } from "./errors.js";
 
 /**
  * `rmd inbox` — the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110).
@@ -1053,6 +1055,62 @@ const SCOPE_HINT = "files: — the repo-relative paths this task will touch";
  */
 export const INBOX_DRAFT_DISALLOWED_TOOLS: readonly string[] = ["Write", "Edit", "NotebookEdit", "Bash"];
 
+/** Raised instead of silently pasting the whole plan back into the prompt when it cannot be
+ *  projected. Falling back to the full file would restore the 258K-token request this exists to
+ *  remove, and it would do it invisibly. */
+export class PlanProjectionError extends RmdError {
+  constructor(reason: string) {
+    super("usage", 1, `cannot project plan/tasks.yaml for depends_on grounding: ${reason}`, { reason });
+  }
+}
+
+/** The fields a `depends_on` choice actually reads. Everything else in a task record -- rationale,
+ *  design, acceptance, files, note, plan_refs -- is 94% of the bytes and answers a different
+ *  question. The worker keeps Read/Grep/Glob, so a task it wants in full is one tool call away. */
+export const PLAN_PROJECTION_FIELDS = ["title", "status", "type", "depends_on"] as const;
+
+/**
+ * Project plan/tasks.yaml down to what grounds a `depends_on` field.
+ *
+ * MEASURED 2026-09-15 over 269 tasks on origin/main: the full file is 1,031,510 bytes (~257,877
+ * tokens) and was 97.9% of every inbox_draft request. This projection is 61,303 bytes (~15,325
+ * tokens, 5.9%), which fits gpt-oss-120b's 131,072 window with ~8x headroom -- the lane could not
+ * reach that deployment AT ALL before, and was pinned to gpt-5-nano by prompt size rather than by
+ * preference.
+ *
+ * TITLES ARE EMITTED WHOLE -- never a clipped title. In this repo a title IS the finding, a long
+ * sentence carrying the defect rather than a label, so clipping one to save a further 1% would
+ * degrade exactly the signal a dependency choice reads.
+ *
+ * EVERY TASK APPEARS. A projection that dropped rows would make a real dependency unnameable, which
+ * is a worse failure than a large prompt: the worker would invent an id or omit the edge.
+ */
+export function planProjectionForDependsOn(planText: string): string {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(planText);
+  } catch (error) {
+    throw new PlanProjectionError(`the plan is not parseable YAML (${error instanceof Error ? error.message : String(error)})`);
+  }
+  if (!Array.isArray(parsed)) throw new PlanProjectionError("the plan did not parse to a list of tasks");
+  const rows: string[] = [];
+  for (const task of parsed) {
+    if (typeof task !== "object" || task === null) throw new PlanProjectionError("a plan entry is not a mapping");
+    const record = task as Record<string, unknown>;
+    const id = record["id"];
+    if (typeof id !== "string" || id.length === 0) throw new PlanProjectionError("a plan entry has no string id");
+    const lines = [`- id: ${id}`];
+    for (const field of PLAN_PROJECTION_FIELDS) {
+      const value = record[field];
+      if (value === undefined || value === null || value === "") continue;
+      lines.push(`  ${field}: ${Array.isArray(value) ? value.join(", ") : String(value)}`);
+    }
+    rows.push(lines.join("\n"));
+  }
+  if (rows.length === 0) throw new PlanProjectionError("the plan projected to zero tasks");
+  return rows.join("\n");
+}
+
 export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, runId: string): string {
   // W1-T194: retraction is STRUCTURAL — a retracted round is omitted entirely, never summarised. Numbering stays
   // POSITIONAL against the FULL history, so "round N" always means the same round.
@@ -1087,11 +1145,14 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "",
     ...feedbackBlock,
     "=== GROUND ===",
-    "Grep/Read MASTER-PLAN.md, LEARNINGS.md, and DECISIONS.md for what is already decided; the",
-    "current plan/tasks.yaml is pasted below so you cite REAL existing task ids in depends_on.",
+    "Grep/Read MASTER-PLAN.md, LEARNINGS.md, and DECISIONS.md for what is already decided; an",
+    "INDEX of the current plan/tasks.yaml is pasted below so you cite REAL existing task ids in",
+    "depends_on. It is an index, NOT the whole plan: each task shows only id, title, status, type",
+    "and depends_on. If you need a task's rationale, design or acceptance, Read plan/tasks.yaml —",
+    "you have Read/Grep/Glob and the file is in this worktree. Do not assume a field you cannot see.",
     "",
-    "=== plan/tasks.yaml (current, for depends_on grounding) ===",
-    currentPlanText,
+    "=== plan/tasks.yaml INDEX (id, title, status, type, depends_on — for depends_on grounding) ===",
+    planProjectionForDependsOn(currentPlanText),
     "",
     "=== TASK IDS — PLACEHOLDERS ONLY, never a real W1-Tnnn id (feedback#fb-1784766965325-c7b673) ===",
     "Every task you draft gets its `id:` from a PLACEHOLDER, not a guess: NEW-1, NEW-2, NEW-3, ...",

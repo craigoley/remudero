@@ -123,6 +123,7 @@ import {
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
+import { FIX_WORKER_TOOLS } from "./fix-fence.js";
 
 /** Aggregate token usage off the SDK result envelope's `usage` field (SDK 0.3.209 `sdk.d.ts`: `NonNullableUsage`, snake_case
  * Anthropic-API names, all fields non-nullable). Zeroed when no result envelope was ever seen — a genuine transport failure. */
@@ -1024,12 +1025,54 @@ export const GENERIC_ROUTE_TOOL_BOUNDS = {
 
 export type GenericRouteLane = keyof typeof GENERIC_ROUTE_TOOL_BOUNDS;
 
+/**
+ * W1-T3616, PRIMARY CONTROL (test/bound-kind-declared.test.ts): the declaration below IS what
+ * stops recon/diagnose/retro/alert_fix from reaching the SDK unrestricted — the same shape
+ * GENERIC_ROUTE_TOOL_BOUNDS above carries for review/manual. With no entry here a lane inherits
+ * SpawnWorkerArgs' UNRESTRICTED default, which is the defect this closes; the container remains
+ * the containment, this is the declared boundary a reviewer can read.
+ *
+ * Each list is DERIVED FROM THAT LANE'S OWN PROMPT, never narrowed to fit a cheaper provider (the
+ * task forbids that):
+ *
+ *   recon      read-only inspect (`git remote -v`, `git log --oneline -5`, `ls`). No Write/Edit.
+ *   diagnose   read-only investigation (`git diff`/`git status`, re-runs the failure). No Write/Edit.
+ *   retro      retroPrompt edits ONE existing plan file, then commits. Edit (never Write) plus Bash.
+ *   alert_fix  commits and pushes (`git push origin HEAD`); takes the fix lane's own list.
+ *
+ * EVERY ONE DECLARES `Bash`, which IS the measurement, not a concession: none of the four is
+ * openweight-eligible today (`Bash` is not in OPENWEIGHT_FUNCTIONS) until W1-T3615's check-runner
+ * replaces that use. Routing remains a separate decision (W1-T3616 design: "ROUTE NOTHING HERE").
+ */
+export const DISPATCH_LANE_TOOL_BOUNDS = {
+  recon: ["Read", "Grep", "Glob", "Bash"],
+  diagnose: ["Read", "Grep", "Glob", "Bash"],
+  retro: ["Read", "Grep", "Glob", "Edit", "Bash"],
+  alert_fix: FIX_WORKER_TOOLS,
+} as const satisfies Record<string, readonly string[]>;
+
+export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
+
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
  * deleting a declared bound must make its own lookup refuse, not silently resume unrestricted). */
 export function resolveGenericRouteToolBound(lane: string): readonly string[] {
   if (lane === "review" || lane === "manual") return GENERIC_ROUTE_TOOL_BOUNDS[lane];
   throw new Error(
     `no declared tool bound for generic route '${lane}' — refusing rather than defaulting to unrestricted tools (W1-T3573)`,
+  );
+}
+
+/**
+ * The same fail-closed contract for the dispatch lanes, and deliberately a SECOND resolver rather
+ * than a widened first one: `resolveGenericRouteToolBound` answers for `task.type` values the
+ * generic route dispatches, while these are named rungs inside the pipeline. Merging them would
+ * let a typo'd task type silently resolve a rung's bound.
+ */
+export function resolveDispatchLaneToolBound(lane: string): readonly string[] {
+  const bound = (DISPATCH_LANE_TOOL_BOUNDS as Record<string, readonly string[]>)[lane];
+  if (bound !== undefined) return bound;
+  throw new Error(
+    `no declared tool bound for dispatch lane '${lane}' — refusing rather than defaulting to unrestricted tools (W1-T3616)`,
   );
 }
 
@@ -1727,7 +1770,19 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }
     // This lookup is the provider's authority: a Claude mount model/effort resolves through the
     // capability table. No capacity record exists or is fabricated for a cash-billed endpoint.
-    const openWeight = selectOpenWeightModel(capabilities, args.model, args.effort);
+    //
+    // THE PROMPT'S SIZE IS PART OF THAT AUTHORITY (W1-T3619). Passing it here is what lets the
+    // selector skip a deployment whose context window cannot hold the request, instead of paying a
+    // full reservation to be told so by an HTTP 400. The prompt is the dominant term in the request
+    // body -- the tool schemas and the output contract add a bounded preamble -- and the estimate
+    // deliberately OVER-states tokens, so using it rather than the fully serialized body can only
+    // make the gate stricter.
+    const openWeight = selectOpenWeightModel(
+      capabilities,
+      args.model,
+      args.effort,
+      Buffer.byteLength(args.prompt ?? "", "utf8"),
+    );
     const selectionAssignmentId = emitWorkerSelectionAssignment(args, {
       provider: "openweight",
       model: openWeight.model,

@@ -227,7 +227,7 @@ test("runDraftRung labels a refused draft by its cause, not as malformed output"
   const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const outcomes = await runDraftRung(
     [proposal],
-    "plan text",
+    "- id: W1-T1\n",
     {
       spawn: async () => await collectWorkerResult(refusedStream(), { childEnvKeys: [] }),
       log: (step, extra) => logs.push({ step, extra: extra as Record<string, unknown> }),
@@ -257,7 +257,7 @@ test("runDraftRung labels a refused draft by its cause, not as malformed output"
 test("runDraftRung still reports genuinely malformed output as malformed — the relabel is refusal-only", async () => {
   const outcomes = await runDraftRung(
     [{ id: "p", summary: "s", evidenceAnchors: [] }],
-    "plan text",
+    "- id: W1-T1\n",
     {
       spawn: async () =>
         ({ ...refusedResult({ isError: false, subtype: "success", usageRefusal: undefined }), text: "no markers here", blocks: [] }) as never,

@@ -1005,7 +1005,7 @@ test("runDraftRung: malformed worker output (no FRAGMENT/STAMP markers) is logge
   const proposal: Proposal = { id: "P1", summary: "s", evidenceAnchors: [] };
   const spawn: DraftSpawn = async () => fakeWorkerResult("no markers in this output at all");
 
-  const outcomes = await runDraftRung([proposal], "plan text", { spawn, log: () => {} }, "run-1");
+  const outcomes = await runDraftRung([proposal], "- id: W1-T1\n", { spawn, log: () => {} }, "run-1");
 
   assert.equal(outcomes.length, 1);
   assert.equal(outcomes[0].ok, false);
@@ -1097,7 +1097,7 @@ test("runDraftRung: one proposal's spawn THROWING never strands the rest of the 
     return fakeWorkerResult(VALID_DRAFT_TEXT);
   };
 
-  const outcomes = await runDraftRung([bad, good], "plan text", { spawn, log: (step, extra) => logLines.push({ step, extra }) }, "run-1");
+  const outcomes = await runDraftRung([bad, good], "- id: W1-T1\n", { spawn, log: (step, extra) => logLines.push({ step, extra }) }, "run-1");
 
   assert.equal(outcomes.length, 2, "BOTH proposals were attempted — one throwing did not abort the batch");
   const badOutcome = outcomes.find((o) => o.proposalId === "P-BAD")!;
@@ -1125,7 +1125,7 @@ test("runDraftRung: independent proposals fill but never exceed the draft concur
     return fakeWorkerResult(VALID_DRAFT_TEXT);
   };
 
-  const run = runDraftRung(proposals, "plan text", { spawn, log: () => {} }, "run-parallel");
+  const run = runDraftRung(proposals, "- id: W1-T1\n", { spawn, log: () => {} }, "run-parallel");
   await Promise.resolve();
   await Promise.resolve();
   try {
@@ -1190,7 +1190,7 @@ test("three consecutive daemon polls over the SAME invalidated proposal spawn th
   for (let poll = 0; poll < 3; poll++) {
     const due = draftsDueOnDaemon([proposal], drafts, attempts);
     if (due.length === 0) continue;
-    const outcomes = await runDraftRung(due, "plan text", { spawn, log: () => {} }, `POLL-${poll}`);
+    const outcomes = await runDraftRung(due, "- id: W1-T1\n", { spawn, log: () => {} }, `POLL-${poll}`);
     for (const outcome of outcomes) {
       attempts = { ...attempts, [outcome.proposalId]: draftAttemptKey(due.find((p) => p.id === outcome.proposalId)!) };
       if (outcome.ok) drafts = { ...drafts, [outcome.proposalId]: outcome.candidate };
@@ -1214,7 +1214,7 @@ test("a FAILED daemon draft attempt is throttled too — a stuck cause does not 
   for (let poll = 0; poll < 3; poll++) {
     const due = draftsDueOnDaemon([proposal], drafts, attempts);
     if (due.length === 0) continue;
-    const outcomes = await runDraftRung(due, "plan text", { spawn, log: () => {} }, `POLL-${poll}`);
+    const outcomes = await runDraftRung(due, "- id: W1-T1\n", { spawn, log: () => {} }, `POLL-${poll}`);
     for (const outcome of outcomes) {
       attempts = { ...attempts, [outcome.proposalId]: draftAttemptKey(due.find((p) => p.id === outcome.proposalId)!) };
       if (outcome.ok) drafts = { ...drafts, [outcome.proposalId]: outcome.candidate };
@@ -1257,7 +1257,7 @@ test("three consecutive polls over the same invalidated proposal spawn the Archi
   for (let poll = 0; poll < 3; poll++) {
     const due = draftsDueOnDaemon([proposal], drafts, attempts);
     if (due.length === 0) continue;
-    const outcomes = await runDraftRung(due, "plan text", { spawn, log: () => {} }, `POLL-${poll}`);
+    const outcomes = await runDraftRung(due, "- id: W1-T1\n", { spawn, log: () => {} }, `POLL-${poll}`);
     for (const outcome of outcomes) {
       attempts = { ...attempts, [outcome.proposalId]: draftAttemptKey(due.find((p) => p.id === outcome.proposalId)!) };
       if (outcome.ok) drafts = { ...drafts, [outcome.proposalId]: outcome.candidate };
@@ -1283,7 +1283,7 @@ test("a seeded draft-spawn failure leaves the sweep and daemon loop running and 
   let threw = false;
   let outcomes: Awaited<ReturnType<typeof runDraftRung>> = [];
   try {
-    outcomes = await runDraftRung([bad, good], "plan text", { spawn, log: (step, extra) => logLines.push({ step, extra }) }, "run-1");
+    outcomes = await runDraftRung([bad, good], "- id: W1-T1\n", { spawn, log: (step, extra) => logLines.push({ step, extra }) }, "run-1");
   } catch {
     threw = true;
   }
@@ -1301,6 +1301,6 @@ test("a seeded draft-spawn failure leaves the sweep and daemon loop running and 
 
   // A LATER poll after the failure must still run normally — the daemon loop is not stuck.
   const anotherProposal: Proposal = { id: "P-ANOTHER", summary: "s", evidenceAnchors: [anchor] };
-  const secondPollOutcomes = await runDraftRung([anotherProposal], "plan text", { spawn, log: () => {} }, "run-2");
+  const secondPollOutcomes = await runDraftRung([anotherProposal], "- id: W1-T1\n", { spawn, log: () => {} }, "run-2");
   assert.equal(secondPollOutcomes[0].ok, true, "a subsequent poll still runs normally — the daemon loop was never halted by the earlier seeded failure");
 });

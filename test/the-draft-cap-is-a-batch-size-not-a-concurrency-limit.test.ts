@@ -58,7 +58,7 @@ test("W1-T2591: a batch of N drafts finishes in about the time of one draft rath
   const started = Date.now();
   await runDraftRung(
     Array.from({ length: n }, (_, i) => proposal(`P${i}`)),
-    "tasks: []",
+    "- id: W1-T1\n",
     { spawn: rec.spawn as never, log: () => {} } as never,
     "RUN",
   );
@@ -73,7 +73,7 @@ test("W1-T2591: concurrency never exceeds the shipped cap, so the cap still boun
   const n = DAEMON_DRAFT_BATCH_CAP + 3;
   await runDraftRung(
     Array.from({ length: n }, (_, i) => proposal(`P${i}`)),
-    "tasks: []",
+    "- id: W1-T1\n",
     { spawn: rec.spawn as never, log: () => {} } as never,
     "RUN",
   );
@@ -174,7 +174,7 @@ test("W1-T2591: the batch stays within the sweep wall-clock bound at the shipped
   const started = Date.now();
   await runDraftRung(
     Array.from({ length: DAEMON_DRAFT_BATCH_CAP }, (_, i) => proposal(`P${i}`)),
-    "tasks: []",
+    "- id: W1-T1\n",
     { spawn: rec.spawn as never, log: () => {} } as never,
     "RUN",
   );
