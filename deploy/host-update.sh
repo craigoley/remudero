@@ -756,40 +756,29 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
 fi
 
 # ── 4b. AGENT HISTORY RECLAIM (W1-T3626) — the LARGER share of the disk this host fills on ────────
-# Measured 2026-09-16, the night the host wedged: `~/.codex` (thread_history_1.sqlite, state_5.sqlite,
-# sessions/) and `~/.claude/projects` together held 6.7 GiB of agent conversation history with NO
-# retention anywhere in this repo (`grep -rlE "retention|maxAge|cleanup|prune"` over the codex config
-# found nothing), growing ~580 MiB/day since 2026-09-07 — about seven times what section 4a's git
-# object reclaim (985 MiB) accounts for. `systemd-journald: Failed to create new system journal: No
-# space left on device` appeared across three separate boots before this rung existed.
+# `~/.codex` and `~/.claude/projects` held 6.7 GiB with NO retention anywhere in this repo, growing
+# ~580 MiB/day — about seven times section 4a's own git object reclaim. Full measurement, the outage
+# it corroborates, and why this is not W1-T3612's problem: plan/tasks.d/W1-T3626-*.yaml.
 #
-# AGE-TIERED, NOT A FIXED CEILING. A byte-size cap that only fires near-full silently destroys the
-# exact runs an incident review needs, and the operator's standing direction is tiered, self-healing
-# responses rather than hard floors. So this removes files strictly OLDER than
-# RMD_AGENT_HISTORY_MAX_AGE_DAYS (default 14) under the configured trees. An actively-growing file's
-# own mtime keeps it out of scope with no extra logic — `state_5.sqlite`, "still growing" the night of
-# the incident, would never have been touched by this rung even at the moment it fired.
+# AGE-TIERED, NOT A FIXED CEILING (the trap a byte-size cap falls into: firing near-full silently
+# destroys the exact runs an incident review needs). Removes files strictly OLDER than
+# RMD_AGENT_HISTORY_MAX_AGE_DAYS (default 14) under the configured trees; an actively-growing file's
+# own mtime keeps it out of scope with no extra logic.
 #
-# OLDEST FIRST, so a run interrupted partway still made forward progress on the longest-standing
-# growth first, and each removal's own already-known size becomes the report — no separate `du` pass
-# needed. REPORT BYTES PER TREE, never one combined total, for the identical reason section 4a's own
-# report is never summed: a single number cannot distinguish "nothing old on THIS tree" from "nothing
-# old here, and a gigabyte on the other one".
+# OLDEST FIRST, and REPORT BYTES PER TREE — never one combined total, the same reason section 4a's
+# own report is never summed: one number cannot distinguish "nothing old on THIS tree" from
+# "nothing old here, and a gigabyte on the other one".
 #
-# INVARIANT: refuse outright while any fleet container is LIVE, naming the holder, reusing section 1's
-# `LIVE` detection exactly as section 4a does — a running lane may still be writing the very
-# session/thread file this would remove, and there is no way to tell "still growing" from "abandoned"
-# from outside the process.
+# INVARIANT: refuse outright while any fleet container is LIVE, naming the holder, reusing section
+# 1's `LIVE` detection exactly as section 4a does — a running lane may still be writing the very
+# session/thread file this would remove.
 #
-# NEVER STATE CLEANING: this reclaim never reads STATE_DIR state — it only ever walks ${CODEX_DIR} and
-# ${CRED_DIR}/projects (or RMD_AGENT_HISTORY_DIRS's override), never anything under ${STATE_DIR}, so
-# the ledger, run locks and service tokens the file header protects are untouched by this rung too.
+# NEVER STATE CLEANING: this reclaim never reads STATE_DIR state — it only ever walks ${CODEX_DIR}
+# and ${CRED_DIR}/projects (or RMD_AGENT_HISTORY_DIRS's override), never ${STATE_DIR}, so the
+# ledger, run locks and service tokens the file header protects are untouched by this rung too.
 #
 # FALSIFIER: remove the live-worker refusal and a fixture's old file is reclaimed beside a live
 # container; collapse the per-tree report into one total and the split assertion fails.
-#
-# Why: plan/tasks.d/W1-T3626-agent-history-fills-the-root-disk.yaml — the full incident measurement,
-# the outage it corroborates, and why this is not the same problem as W1-T3612's git object reclaim.
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
   if [ -n "${LIVE}" ]; then

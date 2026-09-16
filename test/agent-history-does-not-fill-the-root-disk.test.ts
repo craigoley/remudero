@@ -218,9 +218,24 @@ test("agent history reclaim refuses while a fleet container is live", () => {
 
 // ── ACCEPTANCE 3: never reads STATE_DIR state ───────────────────────────────────────────────────
 
-test("grep: the agent history section never reads STATE_DIR state, in source", () => {
+// A test asserting the invariant SENTENCE appears in the script proves only that someone wrote it
+// down — the sentence sits in section 4b's own header comment (deploy/host-update.sh:784) and
+// would stay green even if the code beneath it started reading STATE_DIR, since a comment is not
+// the mechanism (docs/forensics/assertion-discrimination-check.md). So this asserts on the actual
+// CODE instead: strip every `#`-comment line from section 4b in isolation and check the executable
+// text that remains — not the prose above it — never spells STATE_DIR at all.
+test("grep: the agent history section's CODE, comments stripped, never mentions STATE_DIR", () => {
   const src = readFileSync(SCRIPT, "utf8");
-  assert.match(src, /never reads STATE_DIR state/, "the literal invariant statement must be present");
+  const start = src.indexOf("# ── 4b. AGENT HISTORY RECLAIM");
+  const end = src.indexOf("# ── 4c. RECLAIM-ONLY STOPS HERE");
+  assert.ok(start >= 0 && end > start, "section 4b must be locatable between its own markers, or this proves nothing");
+  const codeOnly = src
+    .slice(start, end)
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("#"))
+    .join("\n");
+  assert.ok(codeOnly.trim().length > 0, "the stripped section must still contain executable lines, or this proves nothing");
+  assert.doesNotMatch(codeOnly, /STATE_DIR/, "the reclaim's own executable code must never reference STATE_DIR");
 });
 
 test("the state volume's own files are untouched by a run that also reclaims agent history", () => {
