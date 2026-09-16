@@ -3418,10 +3418,15 @@ export async function runDaemon(
     // different route, and only one of the two can ever have run this tick's sweep in time to see it.
     // Self-freshness wins when both are stale (it already carries `installNeeded`); the sweep's
     // reading is used only when self-freshness itself did not already fire.
-    // W1-T3691: the reviewer-code half is gated on sustained recurrence — see
-    // `requestStaleReviewerRestart`'s own doc for why marking `restartRequested` is deferred to
-    // exactly this branch (where a restart is genuinely about to be requested) rather than here,
-    // where `dispatchSet.length === 0` has not yet been checked.
+    // W1-T3691: the reviewer-code half is gated on sustained recurrence — `reviewerCodeStale`
+    // below is undefined outside `staleReviewerAction.kind === "restart"`, so a first sighting or
+    // a held repeat changes nothing about this re-check. The `restartRequested` commit itself
+    // happens ONLY from the idle branch's own `requestStaleReviewerRestart()` call above: reaching
+    // this line at all already proves `dispatchSet.length > 0` (the idle branch above is
+    // exhaustive — every path through it `continue`s or `return`s — so a tick that reached here
+    // never took it), which makes this branch's own `dispatchSet.length === 0` conjunct always
+    // false. `reviewerCodeStale` is still computed here because `refetchedFreshness` (and the
+    // `daemon.freshness_deferred` log below, which IS reached) reads it.
     const selfFreshness = deps.checkFreshness?.();
     const reviewerCodeStale = staleReviewerAction.kind === "restart" ? sweepCycleOutcome?.reviewerCodeStale : undefined;
     const refetchedFreshness: DaemonFreshness | undefined =
@@ -3429,10 +3434,6 @@ export async function runDaemon(
         ? selfFreshness
         : { stale: true, oldSha: reviewerCodeStale.oldSha, newSha: reviewerCodeStale.newSha };
     if (refetchedFreshness?.stale && dispatchSet.length === 0) {
-      // Explicit `!== true` rather than `!selfFreshness?.stale`: the latter folds "no
-      // `checkFreshness` dep wired" and "checked and definitely fresh" into the same boolean,
-      // which test/catch-erasure-ratchet.test.ts's detector (b) exists to hold at zero.
-      if (selfFreshness?.stale !== true && reviewerCodeStale) requestStaleReviewerRestart();
       // This is the only freshness boundary reached while the interphase review clock exists. Close
       // admission before the shared final-pass and drain path; do not move the drain into the clock itself,
       // where W1-T2744 proved it can freeze ordinary phase transitions (W1-T2865).
