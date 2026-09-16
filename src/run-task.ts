@@ -352,6 +352,7 @@ import {
   type ReviewAdmissionGate,
   type StarvationCensus,
   type StarvationClearedInfo,
+  type SweepCycleOutcome,
   priorUnrecognisedResetStrings,
 } from "./lib/daemon.js";
 import { sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
@@ -1316,7 +1317,62 @@ import {
 } from "./lib/fix-rung-classify.js";
 export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdictUnchanged, classifyNoPrShape };
 
-export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
+/**
+ * W1-T3618 — reads reviewer-code freshness ONCE and in FRONT of `next` (production:
+ * `reviewCommand`), so a stale reading calls `next` zero times for every PR this gate sees this
+ * pass: no worktree materializes, no proof executes, no reviewer spawns. Previously this read
+ * happened LAST, inside `runReview`, after all of that had already run.
+ *
+ * TRAP: re-reading per PR would multiply a `git fetch` by the pass's own PR count for a fact that
+ * cannot change mid-pass — cached on first use instead. `buildSweepEffects` builds a fresh gate
+ * every call, and both sweep hooks call it fresh every poll, so a gate's lifetime is one cycle.
+ *
+ * `reviewCommand`'s own late guard (W1-T228, `reviewerCodePublicationRefusal`) is UNCHANGED and
+ * stays the fail-closed floor for any PR this earlier gate misses; this is additive, not a
+ * replacement. Extracted so a test can drive it against a counting fake, never a real `gh`/git call.
+ */
+export function buildReviewerCodeFreshnessGate(
+  readFreshness: () => ReviewerCodeFreshness,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  next: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>,
+): {
+  call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
+  /** The sha pair the FIRST time this gate's (at most one) freshness read came back stale, or
+   *  `undefined` when it read fresh, was never read (no PR reached the gate this pass), or came
+   *  back unreadable. */
+  staleThisPass: () => { oldSha: string; newSha: string } | undefined;
+} {
+  let cached: ReviewerCodeFreshness | undefined;
+  const once = (): ReviewerCodeFreshness => (cached ??= readFreshness());
+  return {
+    call: (prArg, rest, reviewDeps) => {
+      const freshness = once();
+      if (freshness.status === "stale") {
+        log("review.skipped_stale_reviewer_code", {
+          pr: prArg,
+          code_sha: freshness.codeSha,
+          origin_main_sha: freshness.originMainSha,
+          changed_paths: freshness.changedPaths?.length,
+        });
+        return Promise.resolve(0);
+      }
+      return next(prArg, rest, reviewDeps);
+    },
+    staleThisPass: () =>
+      cached?.status === "stale" ? { oldSha: cached.codeSha, newSha: cached.originMainSha } : undefined,
+  };
+}
+
+export function buildSweepEffects(
+  deps: BuildSweepEffectsDeps & {
+    /** W1-T3618 test seam: override the reviewer-code freshness read the review gate below uses.
+     *  Omitted ⇒ the real `checkReviewerCodeFreshness(repoRoot, process.env)`, exactly the
+     *  production wiring. Destructured out before the rest of `deps` reaches
+     *  `buildSweepEffectsFromLib`, so `sweep.ts`'s own `BuildSweepEffectsDeps` never has to know
+     *  this field exists. */
+    reviewerCodeFreshnessImpl?: () => ReviewerCodeFreshness;
+  },
+): Pick<
   SweepDeps,
   | "arm"
   | "close"
@@ -1344,7 +1400,20 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "releaseBaseCausedStandDown"
   | "selectAdaptiveReviewWidth"
   | "repairMissingTaskTrailer"
-> {
+> & {
+  /**
+   * W1-T3618 — reviewer-code freshness for THIS call's own review effects, read at most once and
+   * cached for this call's whole lifetime (never per PR): see `buildReviewerCodeFreshnessGate`
+   * above for where the single read happens. Both `buildSweepHook` and `buildSweepLightHook`
+   * construct a fresh `buildSweepEffects(...)` every poll, so a cache scoped to one call is scoped
+   * to exactly one sweep cycle. Returns the sha pair the FIRST time this call's freshness read came
+   * back stale, or `undefined` when it read fresh, was never read (no review candidate reached the
+   * gate this pass), or came back unreadable (fails toward attempting the review, matching
+   * `checkReviewerCodeFreshness`'s own "unreadable never blocks" contract — this gate only ever
+   * REFUSES to spend on a POSITIVELY confirmed stale reading).
+   */
+  reviewerCodeStaleThisPass: () => { oldSha: string; newSha: string } | undefined;
+} {
   /*
   Source-text compatibility for legacy tests whose subject is the pre-extraction sweep wiring.
   W1-T2890 moved the live orchestration into src/lib/sweep.ts; this block keeps the old audit
@@ -1380,7 +1449,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
   export function fixRungTaskFor(
   */
-  return buildSweepEffectsFromLib({
+  const { reviewerCodeFreshnessImpl, ...libDeps } = deps;
+  const reviewerCodeGate = buildReviewerCodeFreshnessGate(
+    reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshness(repoRoot, process.env)),
+    deps.log,
+    reviewCommand,
+  );
+  const effects = buildSweepEffectsFromLib({
     repoRoot,
     localRepoName: resolveOwnerRepo().repo,
     nowMsImpl: Date.now,
@@ -1388,7 +1463,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log),
     reclaimWorkerImpl: (info) => reclaimAbandonedWorker(info, { log: deps.log }),
     registeredWorktreeOwnerImpl: registeredFixWorktreeOwner,
-    reviewCommandImpl: reviewCommand,
+    reviewCommandImpl: reviewerCodeGate.call,
+    reviewerCodeStaleThisPassImpl: reviewerCodeGate.staleThisPass,
     stallNotice: escalatePostReviewStall,
     registeredOwnerRecovery: {
       capture: captureRegisteredFixOwnerSnapshot,
@@ -1427,8 +1503,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     decideRegisteredFixOwnerRecoveryImpl: decideRegisteredFixOwnerRecovery,
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError,
     defaultBudgetUsd: DEFAULT_BUDGET_USD,
-    ...deps,
+    ...libDeps,
   });
+  // W1-T2890 holds this surface key-identical to the lib-built one, so the accessor is INJECTED
+  // above rather than bolted on here: returning the lib's object unchanged makes that identity
+  // structural instead of something a future edit has to remember to mirror.
+  return effects;
 }
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { applyCorrection } from "./lib/correct.js";
@@ -33194,7 +33274,7 @@ export function buildSweepHook(
   reviewerCodeRecoveryOrIsMerged?: SweepDeps["reviewerCodeRecovery"] | MergedResolver,
   isMergedOrReadMainPlan?: MergedResolver | ((root: string) => Plan),
   readMainPlan?: (root: string) => Plan,
-): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<void> {
+): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
   const isMerged = legacyResequenceShape
@@ -33249,6 +33329,11 @@ export function buildSweepHook(
     } catch (e) {
       log("main.health.error", { error: String((e as Error)?.message ?? e) });
     }
+    // W1-T3618: this pass's own reviewer-code freshness discovery, if any — read by `effects`
+    // (`buildSweepEffects`'s own once-per-call cache) below and surfaced here so the daemon's tick
+    // loop can end the cycle through its EXISTING pre-admission freshness re-check rather than
+    // idling on code that already paid for a verdict it could never publish.
+    let reviewerCodeStale: { oldSha: string; newSha: string } | undefined;
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
         pacer,
@@ -33310,6 +33395,7 @@ export function buildSweepHook(
         }),
         DEFAULT_SWEEP_POLICY,
       );
+      reviewerCodeStale = effects.reviewerCodeStaleThisPass();
       // fb-1784756088300-6a481e: the escalation-lifecycle reconciler rung — closes stale
       // needs-human issues whose referenced task has since resolved, on the daemon's own
       // cadence. The missing third leg of the escalation lifecycle (creation W1-T8, dedup
@@ -33353,6 +33439,7 @@ export function buildSweepHook(
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
     await draftHook();
+    return reviewerCodeStale ? { reviewerCodeStale } : undefined;
   };
 }
 
