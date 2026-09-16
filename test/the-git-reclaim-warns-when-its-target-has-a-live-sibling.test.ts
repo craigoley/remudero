@@ -133,11 +133,21 @@ test("a reclaim reaching no target exits non-zero", () => {
 
 // ── Acceptance 3: reaching a real checkout and freeing nothing still succeeds ───────────────────
 
+// Listed BESIDE a target that misses entirely (no sibling either), so this proof actually
+// discriminates: a real checkout alone already succeeded before W1-T3682 (that half is not new),
+// but the OLD script also reported the miss on stdout as "no .git here, skipping" and never
+// refused — indistinguishable, by exit code, from reaching nothing at all. This run's status
+// staying 0 alongside the NEW stderr WARNING (and the old stdout note staying gone) is what only
+// holds true once section 4a asks per-target whether it was REACHED rather than just iterating.
 test("a reclaim freeing nothing from a real checkout succeeds", () => {
   const repo = gitRepo({ kind: "host-update-sib-real" });
-  const run = runHostUpdate(["--reclaim-only"], { RMD_GIT_RECLAIM_DIRS: repo.dir });
-  assert.equal(run.status, 0, "a real checkout with nothing to free is a normal outcome, not a failure");
+  const miss = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-sib-miss-`));
+  const missTarget = join(miss, "remudero"); // no .git, and no sibling of `miss` holds one either
+  const run = runHostUpdate(["--reclaim-only"], { RMD_GIT_RECLAIM_DIRS: `${repo.dir}:${missTarget}` });
+  assert.equal(run.status, 0, "one real checkout reached is enough to succeed, even beside a missed target");
   assert.match(run.stdout, new RegExp(`git reclaim — ${esc(repo.dir)}: freed`));
+  assert.match(run.stderr, new RegExp(`WARNING — git reclaim target ${esc(missTarget)} has no \\.git; skipping\\.`));
+  assert.doesNotMatch(run.stdout, /no \.git here, skipping/, "the old silent stdout note must be gone even beside a reached target");
 });
 
 // ── Acceptance 4: an accidental sudo invocation, no override, is refused ───────────────────────
