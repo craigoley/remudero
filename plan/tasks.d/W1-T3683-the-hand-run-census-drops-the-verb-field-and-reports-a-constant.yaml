@@ -10,7 +10,7 @@
   files:
     - src/lib/hand-run-census.ts
   origin: "operator-session#why-did-nothing-notice-the-hand-rolling-2026-09-16"
-  plan_refs: ["W1-T3681"]
+  plan_refs: ["W1-T3687"]
   status: queued
   priority: 2
   attempts: 0

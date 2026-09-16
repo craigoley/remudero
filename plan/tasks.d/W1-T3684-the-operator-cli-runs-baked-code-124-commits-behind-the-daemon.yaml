@@ -10,7 +10,7 @@
   files:
     - deploy/entrypoint.sh
   origin: "operator-session#stale-cli-found-through-an-unrelated-assertion-2026-09-16"
-  plan_refs: ["W1-T1021", "W1-T3681"]
+  plan_refs: ["W1-T1021", "W1-T3687"]
   status: queued
   priority: 2
   attempts: 0
@@ -58,7 +58,7 @@
     that module was written to avoid. The CLI should not report that it is stale; it should not BE
     stale.
 
-    WHY THIS COMPOUNDS EVERY OTHER PRE-FLIGHT TASK. W1-T3681 makes `check-acceptance` ask the
+    WHY THIS COMPOUNDS EVERY OTHER PRE-FLIGHT TASK. W1-T3687 makes `check-acceptance` ask the
     discrimination question; that improvement reaches an operator only if the operator's `rmd` is
     the one carrying it. A fleet whose pre-flight verbs lag its gates by an unbounded number of
     commits will keep producing PRs that pass locally and are refused at review, and the operator

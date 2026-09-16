@@ -1,4 +1,4 @@
-- id: W1-T3681
+- id: W1-T3687
   title: "rmd check-acceptance reports OK on a proof the reviewer REFUSES — the one pre-flight verb an author runs before opening a PR never asks the discrimination question, and check-proof --base already answers it"
   repo: remudero
   depends_on: []
