@@ -250,6 +250,7 @@
     "test/adhoc-lane-root.test.ts": 920,
     "test/adoption-debt-becomes-a-proposal.test.ts": 1211,
     "test/adoption-report-has-a-producer.test.ts": 109774,
+    "test/agent-history-does-not-fill-the-root-disk.test.ts": 0,
     "test/alert-lane.test.ts": 959,
     "test/already-satisfied-exit.test.ts": 2252,
     "test/already-satisfied-unverifiable.test.ts": 1303,
