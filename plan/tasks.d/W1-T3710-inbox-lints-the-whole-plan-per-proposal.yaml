@@ -127,6 +127,21 @@
   risk: high
   band_meaning: blast-radius
   origin: human
-  files: [src/lib/task-linter.ts, src/lib/inbox.ts, test/lint-scope-narrows-output-not-corpus.test.ts]
+  # THE SUITE IS DELIBERATELY NOT LISTED HERE, and the omission is forced rather than sloppy.
+  # Standing rule 15 refuses a diff that files criteria alongside non-plan files, so this shard
+  # must ride alone -- and `declaresTestFile` (task-linter.ts) reads a test/ path in `files:` as
+  # "this diff ships the suite", which turns every `unit test:` proof below into
+  # proof-unit-test-unresolvable in a tree that by rule cannot carry the suite. The two checks bind
+  # in opposite directions on the same filing. The suite is
+  # test/lint-scope-narrows-output-not-corpus.test.ts and it lands in the implementation PR.
+  files: [src/lib/task-linter.ts, src/lib/inbox.ts]
   status: queued
   attempts: 0
+  note: |
+    reservation hand-off: inboxlint -> plan3710
+
+    W1-T3710 was minted by `rmd next-task-id` from the `inboxlint` working branch, before Standing
+    rule 15's pre-push check split that branch into this plan-only filing and its implementation.
+    The reservation ref therefore records a holder that is not the branch filing it, which is the
+    hand-off `task-id-existence` names as its own remedy. Same id, same author, same session -- no
+    renumber, because renumbering would burn a reserved id to paper over a branch rename.
