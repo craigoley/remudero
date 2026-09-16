@@ -12,6 +12,9 @@
   origin: oper#queue-throughput-2026-09-15
   plan_refs: ["W1-T228", "W1-T2965", "W1-T126", "W1-T2964"]
   note: "reservation hand-off: main -> chore/file-review-freshness-waste-1789496306"
+  # W1-T3091: absent priority sorts LAST (drain.ts compareDispatch: `priority ?? +Infinity`),
+  # so an incident-causing task queues behind every other. the reviewer discards a verdict it paid in full for: 8 terminal verdicts computed and thrown away in one 4-hour window, 6 of them success
+  priority: 1
   status: queued
   attempts: 0
   rationale: |
