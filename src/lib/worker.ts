@@ -1109,6 +1109,40 @@ export function cashCanServeToolSurface(tools: readonly string[] | undefined): b
  * REASON rather than a bare boolean so the ledger can say which condition failed -- a silent
  * `false` here reads, in the logs, exactly like the stall it was meant to explain.
  */
+/**
+ * W1-T3705: why a blocked auction may (or may not) RETRY this spawn on Claude billed to API credits.
+ *
+ * THE VALVE EXISTS FOR THIS MOMENT AND COULD NOT REACH IT. `config.overflow: "api_key"` is there to
+ * keep working when the subscription is exhausted, but the auction refuses ON an exhausted
+ * subscription and had no knowledge the valve was armed — measured on origin/main, `overflow`
+ * appeared nowhere in worker-provider.ts or provider-routing-policy.ts. Armed and unreachable at the
+ * one moment it exists for, on any host with more than one provider enabled.
+ *
+ * A SECOND FALLBACK ARM, NOT WIDER AUCTION ELIGIBILITY. The auction allocates SUBSCRIPTION headroom
+ * and an API-billed spawn is not competing for it; loosening its filter would quietly turn a
+ * capacity bound into a spend decision. A sibling arm beside the cash fallback keeps the auction's
+ * meaning intact and puts the spend behind the same shape of switch.
+ *
+ * Returns the REASON, like {@link cashFallbackRefusal}: a bare `false` reads, in the logs, exactly
+ * like the stall it is meant to explain.
+ */
+export function overflowFallbackRefusal(
+  config: Config,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  if (config.overflow !== "api_key") return 'operator has not set config.overflow to "api_key"';
+  // BOTH FACTORS, the two-factor rule `buildWorkerEnv` already enforces: the config switch alone
+  // must not bill the fleet to API, and a key sitting in a shell must not either.
+  if (!env.ANTHROPIC_API_KEY) return "ANTHROPIC_API_KEY is absent from the daemon environment";
+  if (config.dailyCapUsd === undefined || config.dailyCapUsd === null) {
+    return "dailyCapUsd is unset, so API-billed spend would be unbounded";
+  }
+  // The retry rides the claude mount-affinity path, which throws on a provider the committed host
+  // config does not enable. Naming it here reports the cause instead of throwing out of the retry.
+  if (!enabledWorkerProviders(config).includes("claude")) return "claude is not an enabled worker provider";
+  return undefined;
+}
+
 export function cashFallbackRefusal(
   config: Config,
   tools: readonly string[] | undefined,
@@ -1742,6 +1776,27 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         console.error(JSON.stringify({
           event: "worker.provider.cash_fallback_refused",
           refusal,
+        }));
+        // THE SECOND ARM, AND THE ORDER IS THE DECISION. Cash goes first because it is far cheaper
+        // and, where it can serve the surface, strictly better. API-billed Claude is the answer when
+        // cash CANNOT -- a lane needing a shell most of all -- so it is reached only after cash has
+        // refused, never instead of it.
+        const overflowRefusal = overflowFallbackRefusal(config, args.env ?? process.env);
+        if (overflowRefusal === undefined) {
+          console.error(JSON.stringify({
+            event: "worker.provider.overflow_fallback",
+            reason: "no subscription had readable headroom; billing this spawn to API credits",
+            cash_refusal: refusal,
+            blocked: capacities.map((c) => `${c.provider}=${c.readable ? "readable" : c.detail ?? "unreadable"}`),
+          }));
+          // Setting `mountProvider` makes the retry SKIP the auction rather than re-enter it, and it
+          // is the SAME structural recursion bound the cash arm relies on: the outer guard requires
+          // `args.mountProvider === undefined`, so neither arm can fire twice.
+          return await spawnWorker({ ...args, mountProvider: "claude" as WorkerProviderId });
+        }
+        console.error(JSON.stringify({
+          event: "worker.provider.overflow_fallback_refused",
+          refusal: overflowRefusal,
         }));
       }
       publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });

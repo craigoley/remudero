@@ -1420,6 +1420,7 @@
     "test/the-offline-plan-lint-names-its-omissions.test.ts": 0,
     "test/the-one-concern-arm-never-adopted-the-shared-table.test.ts": 1101,
     "test/the-one-failure-corpus-with-a-fix-attached-is-never-mined.test.ts": 1791,
+    "test/the-overflow-valve-is-reachable-from-a-blocked-auction.test.ts": 0,
     "test/the-overrun-gate-does-not-read-the-generated-ledger-table.test.ts": 788,
     "test/the-plan-reconciler-runs-on-a-cadence.test.ts": 0,
     "test/the-pre-admission-freshness-check-starves-dispatch.test.ts": 1120,
