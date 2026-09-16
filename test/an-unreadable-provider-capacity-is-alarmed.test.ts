@@ -11,6 +11,14 @@
 // log line nobody greps. These three tests pin the arm this task adds: it raises when a provider
 // is unreadable beyond a stated bound, it stays quiet for a readable provider, and it never prints
 // a bare percentage — the same "95%" an operator read as 95% REMAINING during the incident.
+//
+// The final test below covers the OTHER half of this task: `judgeProviderCapacityReadable` alone
+// proves the arm's judgement is right, but `report-commands.ts`'s `doctorCommand` is what actually
+// feeds it a live `readProviderRoutingStatus` read (via `DoctorDeps.readProviderRoutingStatus`) and
+// maps each `ProviderRoutingProviderStatus` into the `ProviderCapacityReading` shape above — a
+// real, separately-executed line range no other suite exercises (every other `doctorCommand` test
+// in this repo leaves that dep at its default, which reads an absent file and returns an empty
+// provider list, so the mapping callback itself never runs).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -82,4 +90,44 @@ test("no provider capacity read observed is OK, not a finding — an unconfigure
   const check = judgeProviderCapacityReadable([]);
   assert.equal(check.verdict, "OK");
   assert.match(check.measured, /no provider capacity read observed/);
+});
+
+// ── the doctorCommand wiring (report-commands.ts) ──────────────────────────────────────────────
+
+test("doctorCommand feeds the live provider-routing read into the provider-capacity arm, unreadable and reasoned", async () => {
+  const { doctorCommand } = await import("../src/run-task.js");
+  const lines: string[] = [];
+  const code = await doctorCommand([], {
+    out: (l) => lines.push(l),
+    err: (l) => lines.push(l),
+    loadConfig: () => ({ root: "/nonexistent-doctor-root" }) as never,
+    nowMs: Date.parse("2026-09-16T12:00:00Z"),
+    readLedgerLines: () => [],
+    readMemInfo: () => ({ availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 }),
+    readDiskFreeBytes: () => 40 * 1024 ** 3,
+    readPauseAgeMs: () => undefined,
+    readGitLocks: () => [],
+    readCheckoutDepth: () => ({ shallow: false, commitCount: 980 }),
+    readNvmrcVersion: () => process.versions.node,
+    // The live projection doctorCommand actually reads from (provider-routing-status.ts), stood
+    // up here as a fixture rather than a real file — the exact read this arm feeds through
+    // unchanged, mapped into ProviderCapacityReading by the wiring under test.
+    readProviderRoutingStatus: () =>
+      ({
+        version: 1,
+        state: "blocked",
+        freshness: "fresh",
+        providers: [
+          { provider: "codex", readable: false, windows: [], reason: "capacity-unreadable" },
+          { provider: "claude", readable: true, windows: [{ name: "5h", usedPercent: 10 }] },
+        ],
+      }) as never,
+  });
+  const rendered = lines.join("\n");
+  assert.equal(code, 2, "an unreadable provider with no measured duration breaches the bound and fails the report");
+  assert.match(rendered, /provider-capacity/);
+  const detailLine = rendered.split("\n").find((l) => l.includes("unreadable beyond"));
+  assert.ok(detailLine, "the provider-capacity FAIL detail line is present, proving the wiring reached the arm");
+  assert.match(detailLine!, /codex/);
+  assert.doesNotMatch(detailLine!, /claude/, "the readable provider must not be named as a breach");
 });
