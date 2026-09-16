@@ -313,11 +313,15 @@ test("a live worker refuses the git reclaim and names the holder — a live flee
   assert.doesNotMatch(run.stdout, /git reclaim —.*: freed/, "no checkout may report a reclaim while live");
 });
 
-test("a checkout with no .git is skipped, not an error", () => {
+// W1-T3682: a target with no .git used to print "no .git here, skipping" to STDOUT and exit 0 —
+// indistinguishable from a clean run that had nothing to free. It is now a WARNING on stderr, and
+// since this is the ONLY configured target, the reclaim reached none of them and the run fails.
+test("a checkout with no .git and no sibling WARNS on stderr and the reclaim exits non-zero", () => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}host-update-nogit-`));
   const run = runHostUpdate("good", ["--reclaim-only"], SCRIPT, { RMD_GIT_RECLAIM_DIRS: dir });
-  assert.equal(run.status, 0);
-  assert.match(run.stdout, /no \.git here, skipping/);
+  assert.notEqual(run.status, 0, "reaching none of its named targets must not report success");
+  assert.doesNotMatch(run.stdout, /no \.git here, skipping/, "the old silent stdout note must be gone");
+  assert.match(run.stderr, new RegExp(`WARNING — git reclaim target ${esc(dir)} has no \\.git; skipping`));
 });
 
 test("--dry-run --reclaim-only reports what it would do without touching the gc.log", () => {
