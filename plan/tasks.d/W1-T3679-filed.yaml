@@ -1,4 +1,4 @@
-- id: W1-T3672
+- id: W1-T3679
   title: "THE DAEMONS EMIT A `gh: Not Found (HTTP 404)` EVERY POLL AND IT DROWNS STDOUT — 177 lines in 30 minutes on console, 66 on site, zero on core, while every ledger step reports ok; the noise is benign and it is why 1,232 dispatch refusals went unnoticed for ten hours"
   repo: remudero
   depends_on: []

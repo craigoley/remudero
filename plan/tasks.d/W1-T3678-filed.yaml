@@ -1,4 +1,4 @@
-- id: W1-T3671
+- id: W1-T3678
   title: "SITE AND CONSOLE HAVE NO CONTROL GATEWAY, SO THE BOARD CAN ONLY EVER SHOW CORE — three daemons run, one rmd serve exists and it is mounted on core's state alone, while the console's analytics side already carries a full multi-instance model nobody can populate"
   repo: remudero
   depends_on: []
