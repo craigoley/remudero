@@ -62,6 +62,7 @@
     "test/a-drafted-skill-is-selectable-for-its-own-task-type.test.ts": 0,
     "test/a-failed-probe-is-not-a-parse-failure.test.ts": 1020,
     "test/a-failing-retro-can-never-shrink-its-own-scope.test.ts": 1038,
+    "test/a-fenced-structured-reply-is-unwrapped-not-rejected.test.ts": 0,
     "test/a-filing-credit-must-never-close-a-build.test.ts": 1441,
     "test/a-filing-is-not-a-build.test.ts": 226,
     "test/a-filing-pr-is-judged-against-criteria-it-cannot-satisfy.test.ts": 0,

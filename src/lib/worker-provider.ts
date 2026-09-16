@@ -1927,6 +1927,26 @@ export const OPENWEIGHT_MAX_COMPLETION_TOKENS = 5_000;
  * Adapter-owned output constraints for every OpenWeight lane. Each rule is conditional: the
  * adapter must not turn a code-review or prose task into a YAML-only task by accident.
  */
+/**
+ * Strip a Markdown fence a model wrapped a structured reply in, and return the payload.
+ *
+ * ASK AND STRIP, NOT ASK ALONE. OPENWEIGHT_OUTPUT_CONTRACT already tells the model to emit a raw
+ * document "without Markdown fences", and that instruction is correct -- but an instruction is not
+ * a guarantee, and this adapter has less margin than most: it deliberately cannot lean on
+ * `response_format` for every deployment (gpt-oss-120b returns malformed JSON under json_object),
+ * so for those the prompt is the ONLY defence there is. synthwatch's production adapter asks AND
+ * strips; this closes the gap on the stripping half.
+ *
+ * DELIBERATELY NARROW. It removes ONE wrapping fence and nothing else: no trimming of prose around
+ * an unfenced reply, no outermost-brace slice, no JSON parse. A reply that is already raw comes
+ * back byte-identical, because the failure this fixes is a wrapper, not malformed content -- and a
+ * cleverer extractor would start silently editing answers rather than unwrapping them.
+ */
+export function openWeightUnfence(text: string): string {
+  const match = /^\s*```[A-Za-z0-9_-]*\r?\n([\s\S]*?)\r?\n?```\s*$/.exec(text);
+  return match?.[1] ?? text;
+}
+
 export const OPENWEIGHT_OUTPUT_CONTRACT = [
   "Apply each output rule below only when its condition is true:",
   "- When emitting YAML, double-quote every scalar value containing a colon (`:`), especially a `proof:` value.",
@@ -2761,7 +2781,13 @@ export async function spawnOpenWeightWorker(
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
       const calls = Array.isArray(message.tool_calls) ? message.tool_calls as OpenWeightToolCall[] : [];
-      text = typeof message.content === "string" ? message.content : text;
+      // UNFENCED ONLY WHEN A STRUCTURED REPLY WAS ASKED FOR. A prose lane may legitimately contain a
+      // fenced code block as part of its answer, and unwrapping that would corrupt it; a lane that
+      // requested `responseFormat` asked for a document, so a fence around the whole reply is a
+      // wrapper rather than content.
+      if (typeof message.content === "string") {
+        text = args.responseFormat === undefined ? message.content : openWeightUnfence(message.content);
+      }
       if (calls.length === 0) return openWeightResult({ model: selection.model, effort: selection.effort, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, budgetReservedUsd, budgetSettledUsd });
       if (turns >= maxTurns) throw new Error(`openweight tool loop exceeded maxTurns=${maxTurns}`);
       messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls });
