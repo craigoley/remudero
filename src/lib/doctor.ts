@@ -921,6 +921,10 @@ export interface DoctorInputs {
   /** R-49 — `.nvmrc`'s declared pin, via {@link readNvmrcVersion}. `undefined` means the read
    *  failed; {@link judgeNodeVersionPin} reports that as unreadable, never a healthy match. */
   nvmrcVersion?: string;
+  /** W1-T3665 — every provider `provider-routing-status.ts` has a capacity reading for. Defaults
+   *  to `[]`, which {@link judgeProviderCapacityReadable} reads as "no provider capacity read
+   *  observed" — never a finding. */
+  providerCapacity?: readonly ProviderCapacityReading[];
 }
 
 
@@ -1061,6 +1065,99 @@ export function judgeCaptureSurfaceLiveness(fireHistory: ReadonlyArray<Record<st
   };
 }
 
+// ── Provider capacity readability (W1-T3665) ──────────────────────────────────────────────────
+
+/** One provider window, in the shape both `provider-routing-status.ts` and `account-usage.ts`
+ *  already use — restated here, never imported, so this arm stays testable with no daemon, no
+ *  credentials and no capacity probe of its own (the same discipline every `judge*` in this file
+ *  keeps). */
+export interface ProviderCapacityWindowReading {
+  name: string;
+  usedPercent: number;
+  resetsAt?: string;
+}
+
+/** One provider's capacity reading, as doctor sees it. */
+export interface ProviderCapacityReading {
+  provider: string;
+  readable: boolean;
+  /** How long this provider has read `readable: false` with no intervening readable read, in ms,
+   *  ending now. `undefined` means the duration itself is unmeasured — `rmd doctor` keeps no
+   *  history of its own between runs — and is judged as WORSE than a known long duration, never
+   *  better: a health check that stays quiet until it can prove how long a fault has run recreates
+   *  the five days of silence this arm exists to end. */
+  unreadableForMs?: number;
+  windows: readonly ProviderCapacityWindowReading[];
+  reason?: string;
+}
+
+/** PRIMARY CONTROL: how long a provider's capacity read may report unreadable before doctor
+ *  alarms it, for a caller that DOES track the duration (`rmd doctor` itself does not — see
+ *  {@link ProviderCapacityReading.unreadableForMs}, whose own missing-duration default is the
+ *  actual backstop for doctor's own read). MEASURED (W1-T3665): codex's `auth.json` `id_token`
+ *  expired about an hour after a 2026-09-11 refresh, and every capacity read returned
+ *  `readable: false` for the next FIVE DAYS with nothing saying so — the fleet routed 100% of
+ *  balanced work to Claude and Claude's weekly reached 44%. Bounded above one bad poll (a network
+ *  blip the next poll clears on its own) and far below even one day. */
+export const PROVIDER_CAPACITY_UNREADABLE_BOUND_MS = 15 * 60 * 1000; // 15 minutes
+
+/** A window's usage, NAMED WITH ITS DIRECTION, never a bare percentage (W1-T3665): an operator
+ *  reading `used_percent: 95` cold took it for 95% REMAINING and acted on that during the
+ *  2026-09-16 incident. Every rendering of a provider window below states consumed, remaining,
+ *  AND the reset together, so the same misreading cannot happen from this arm's own output. */
+function formatCapacityWindow(w: ProviderCapacityWindowReading): string {
+  const consumed = Math.max(0, Math.min(100, w.usedPercent));
+  const remaining = Math.max(0, 100 - consumed);
+  const reset = w.resetsAt ? `, resets ${w.resetsAt}` : ", reset unknown";
+  return `${w.name}: ${consumed}% consumed, ${remaining}% remaining${reset}`;
+}
+
+/**
+ * W1-T3665 — does the fleet's routing auction still see this provider's capacity? `rmd doctor` had
+ * NO arm for this at all: codex's capacity reads returned `readable: false` for five straight days
+ * while `codex login status` kept printing "Logged in", so the routing auction gave codex no
+ * headroom and 100% of balanced work went to Claude — visible only in a daemon log line nobody
+ * greps, never in `rmd doctor` or the fleet's heartbeat.
+ *
+ * REPORT ONLY, the same division every neighbouring arm in this file states: this names the
+ * condition, re-authentication (the actual repair, an interactive device-auth flow) stays the
+ * operator's.
+ *
+ * A READABLE provider never raises this arm, however tight its remaining headroom — that is
+ * `worker-provider.ts`'s auction to judge, not doctor's; this arm discriminates on readability
+ * alone.
+ */
+export function judgeProviderCapacityReadable(
+  providers: readonly ProviderCapacityReading[],
+  boundMs: number = PROVIDER_CAPACITY_UNREADABLE_BOUND_MS,
+): Check {
+  const name = "provider-capacity";
+  const threshold = `readable, or unreadable no longer than ${humanMs(boundMs)} (an unmeasured duration counts as breached)`;
+  if (providers.length === 0) {
+    return { name, verdict: "OK", measured: "no provider capacity read observed", threshold };
+  }
+  const readings = providers.map((p) =>
+    p.readable
+      ? `${p.provider}: ${p.windows.length > 0 ? p.windows.map(formatCapacityWindow).join("; ") : "readable, no windows reported"}`
+      : `${p.provider}: unreadable for ${p.unreadableForMs === undefined ? "an unmeasured duration" : humanMs(p.unreadableForMs)}${p.reason ? ` (${p.reason})` : ""}`,
+  );
+  const measured = readings.join(" | ");
+  const breaches = providers.filter((p) => !p.readable && (p.unreadableForMs ?? Number.POSITIVE_INFINITY) >= boundMs);
+  if (breaches.length === 0) {
+    return { name, verdict: "OK", measured, threshold };
+  }
+  return {
+    name,
+    verdict: "FAIL",
+    measured,
+    threshold,
+    detail:
+      `${breaches.map((b) => b.provider).join(", ")} unreadable beyond ${humanMs(boundMs)} — the routing auction sees ` +
+      `no headroom for ${breaches.length === 1 ? "it" : "them"} and silently shifts every balanced request to whichever ` +
+      "provider still reads. Re-authentication is the operator's, same division as every neighbouring arm.",
+  };
+}
+
 /** Assemble every check from already-measured inputs. Pure — no I/O — so the whole check list,
  *  every verdict combination and the exit-code mapping are testable with no filesystem or daemon. */
 export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
@@ -1083,6 +1180,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     judgeMemory(inputs.mem.availableBytes, inputs.mem.totalBytes, inputs.mem.swapTotalBytes),
     judgeNodeVersionPin(inputs.runningNodeVersion, inputs.nvmrcVersion),
     judgeCaptureSurfaceLiveness(inputs.captureSurfaceFires ?? inputs.ledgerLines),
+    judgeProviderCapacityReadable(inputs.providerCapacity ?? []),
   ];
   const worst = worstVerdict(checks);
   return { checks, worst, exitCode: exitCodeFor(worst), text: renderDoctor(checks) };

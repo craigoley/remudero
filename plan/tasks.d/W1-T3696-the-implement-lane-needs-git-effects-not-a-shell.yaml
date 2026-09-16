@@ -1,0 +1,98 @@
+- id: W1-T3696
+  title: "THE IMPLEMENT LANE NEEDS GIT EFFECTS, NOT A SHELL — the harness already owns the branch and the push, so moving commit/push/PR off the worker makes implement provider-agnostic instead of granting a cheap model forge authority"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 25.00
+  files:
+    - src/run-task.ts
+    - src/lib/worker.ts
+  origin: "operator-session#implement-on-cash-2026-09-16"
+  plan_refs: ["W1-T3572", "W1-T3692", "W1-T3656", "W1-T2591"]
+  status: queued
+  priority: 1
+  attempts: 0
+  note: |
+    OPERATOR QUESTION, 2026-09-16: can Azure AI models run the implement lane, given they have no
+    command line, by having the daemon run commands on their behalf?
+
+    THREE GAPS MEASURED ON origin/main, not one:
+
+      1. TOOL SURFACE. `cash` implements Read, Write, Edit, Grep, Glob, RunCheck. It has no Bash,
+         and `OPENWEIGHT_CHECKS` is READ-ONLY git by a deliberate ruling -- its own comment says
+         "W1-T3572's 'no git' meant no FORGE authority; these carry no push and no network ...
+         `git push` is absent, not one entry away."
+      2. THE IMPLEMENT LANE HAS NO TOOL BOUND AT ALL. Every `tools:` at a spawn site names a lane
+         (recon, diagnose, retro, alert_fix, triage, review) except implement, which runs
+         UNRESTRICTED and therefore inherits Bash (W1-T2591). W1-T3692's eligibility gate refuses
+         an unbounded spawn by construction, so implement is ineligible before tools are argued.
+      3. THE TURN CEILING. `spawnOpenWeightWorker` reads `args.maxTurns ?? 1`. The tool loop exists
+         but DEFAULTS TO A SINGLE TURN -- an agentic edit/test/fix cycle cannot run until a caller
+         raises it. This is the gap least likely to be noticed, because the loop is there.
+
+    AND WHAT THE WORKER ACTUALLY USES A SHELL FOR IS SMALL. Across the prompts it is
+    `git push origin HEAD`, `gh pr create`, and `gh pr checks` -- forge plumbing at the END of a
+    run. Everything before it is Read/Write/Edit plus tests and typecheck, all of which cash has.
+  rationale: |
+    THE OBVIOUS DESIGN IS THE WORSE ONE. "Let the model request a command and the daemon runs it"
+    can be made injection-safe -- the model supplies DATA, the daemon supplies the VERB, the argv
+    is an array and no shell is involved. But it GRANTS FORGE AUTHORITY TO A CHEAP MODEL and
+    reverses W1-T3572 by name. It also adds a second, model-shaped path to the credit surface the
+    head-identity and squash-trailer gates exist to police.
+
+    THE BETTER DESIGN REMOVES THE NEED INSTEAD OF GRANTING IT, and the harness is already most of
+    the way there. It names the branch (`run-<taskId>-<epochMs>`), it owns the worktree the worker
+    edits, and it ALREADY PUSHES -- `publishAbandonedFixOwnerAhead` runs
+    `git push origin <sha>:<ref>` behind a compare-and-swap on the remote head. It already builds
+    pull requests over REST. The ONLY missing piece is committing the worker's edits.
+
+    SO: THE WORKER EDITS FILES AND REPORTS. THE HARNESS COMMITS, PUSHES AND OPENS THE PR.
+
+    THAT IS A SECURITY WIN, NOT A NEW GRANT. Forge authority leaves EVERY worker, not just cash
+    ones -- a Claude worker stops needing `git push` in its prompt too. And it retires a measured
+    incident class: a worker running `git reset --soft origin/main` on a stale branch silently
+    REVERTED newer merged PRs by forging a merge-base. A harness that commits a known worktree
+    against a known parent cannot produce that shape.
+
+    IT ALSO MAKES THE LANE PROVIDER-AGNOSTIC. Once implement declares a tool bound with no Bash in
+    it, W1-T3692's gate admits it on cash with no further change, and the same bound constrains a
+    Claude worker identically -- one rule, not a per-provider exception.
+  design: |
+    FOUR STEPS, IN THIS ORDER. Each is separately valuable; stopping after any of them leaves the
+    tree better than it found it.
+
+    (1) HARNESS-SIDE COMMIT. Add the one missing verb beside the existing push: stage the worktree's
+        changes and commit them with a message the worker RETURNS IN ITS REPORT (data, never a
+        command). Reuse the existing CAS-guarded push. The PR already builds over REST.
+    (2) DECLARE THE IMPLEMENT LANE'S TOOL BOUND, Claude first, with Bash REMOVED now that the
+        harness owns git. This alone fixes W1-T2591's unrestricted default for the highest-risk
+        lane, independent of any provider work.
+    (3) ADD THE OPENWEIGHT ROW for that bound once (2) proves a Claude implement run completes
+        without a shell. Not before: an openweight row on an unproven bound is a fallback that
+        passes W1-T3692's gate and then fails on the wire.
+    (4) RAISE `maxTurns` for cash implement spawns and size the context budget against the
+        deployment's window (`openWeightDeploymentHolds` already refuses an oversized prompt).
+
+    WHAT REMAINS GENUINELY SHELL-SHAPED, and is NOT in scope here: project scripts a build may need
+    (codegen, `npm run` targets). Those belong in `OPENWEIGHT_CHECKS` as NAMED, FIXED argvs -- the
+    existing closed-enum shape, chosen because CodeQL flagged the earlier revision that appended
+    model-supplied paths to a command line. A named script is data; a command line is not.
+
+    DO NOT: add `git push`/`gh` to OPENWEIGHT_CHECKS, widen OPENWEIGHT_FUNCTIONS with Bash, or let
+    a model supply any part of an argv.
+  acceptance:
+    - claim: "the harness commits a worker's edits itself, so a completed run needs no git tool in the worker"
+      proof: "unit test: the harness commits a worker worktree without a worker-run git command"
+    - claim: "the implement lane declares a tool bound, so it is no longer unrestricted-by-default"
+      proof: "unit test: the implement lane declares a tool bound rather than inheriting unrestricted tools"
+    - claim: "the declared implement bound contains no shell, so the same rule constrains every provider"
+      proof: "unit test: the implement tool bound contains no shell tool"
+  falsifier: |
+    Close without implementing if a Claude implement run cannot complete without a shell -- that
+    would mean the lane's real shell use is broader than the prompts' push/pr-create plumbing, and
+    the honest answer becomes that implement stays Claude-only rather than that cash should be
+    granted forge authority to reach it.
