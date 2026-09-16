@@ -1,0 +1,94 @@
+- id: W1-T3697
+  title: "THE EARLY FRESHNESS GATE CANNOT SEE THE CASE IT WAS BUILT FOR — it reads once per sweep pass, so a cycle that starts fresh and goes stale mid-flight still pays in full for every PR, which is the shape W1-T3618's own measurement recorded"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: blast-radius
+  budget_usd: 10.00
+  files:
+    - src/run-task.ts
+  origin: "operator-session#i1-early-gate-2026-09-16"
+  plan_refs: ["W1-T3618", "W1-T228", "W1-T2965"]
+  status: queued
+  priority: 1
+  attempts: 0
+  note: |
+    MEASURED on the Azure fleet 2026-09-16, AFTER W1-T3618 merged and with the daemon confirmed
+    running code that contains the gate (`grep -c buildReviewerCodeFreshnessGate src/run-task.ts`
+    = 3 in the daemon's own install):
+
+        review.skipped_stale_reviewer_code   0   (the EARLY gate, 12h)
+        WITHHELD to ...                      3   (the LATE W1-T228 guard, same 12h)
+        review.post_refused                  4
+
+    THE GATE IS NOT SHIPPED-UNWIRED. It is defined at run-task.ts:1336, called at :1455, its
+    `staleThisPass` is exported at :1469 as `reviewerCodeStaleThisPassImpl`, and daemon.ts consumes
+    `sweepCycleOutcome.reviewerCodeStale` at :3226 and :3306. The chain is intact end to end. It
+    simply never observes the condition it tests.
+  rationale: |
+    ITS PRECONDITION IS STRUCTURALLY RARE. `buildReviewerCodeFreshnessGate` reads freshness ONCE
+    and caches it for the whole pass (`const once = () => (cached ??= readFreshness())`). So it can
+    only skip work when the pass ALREADY BEGAN stale. But the entrypoint re-syncs on every
+    stale-stop, so a new pass almost always begins FRESH -- which is why the counter is zero rather
+    than small.
+
+    THE COMMON CASE IS THE ONE IT CANNOT SEE, and W1-T3618's own record measured it: "All four of
+    the 17:45-18:04 withholds are inside ONE cycle that began at 17:19:22 on a checkout that WAS
+    origin/main at that moment." A cycle that is fresh at the top and goes stale mid-flight still
+    materializes a worktree, executes every whitelisted proof and spawns a reviewer for every
+    remaining PR, and the LATE guard then discards each verdict. That is the full-price waste
+    W1-T3618 exists to remove, and it is untouched.
+
+    THE CACHE OPTIMISES THE WRONG SIDE OF THE TRADE. Its justification is explicit -- "cached once
+    per buildSweepEffects call so it is read once per sweep cycle rather than once per PR" -- and
+    the read really does cost something: `checkServiceFreshness` runs `git fetch --quiet origin`,
+    a network call. But weigh the two:
+
+        the read the cache avoids        one warm-repo `git fetch`, order of a second
+        the work the cache permits       a materialized worktree + every proof executed +
+                                         a reviewer worker spawned, per PR, in dollars
+
+    A fetch per PR is cheap precisely BECAUSE the thing it prevents is expensive. The cache spends
+    the expensive resource to save the cheap one.
+
+    NOT A DEFECT IN W1-T228, AND NOT A REASON TO WEAKEN IT. The late publication guard is correct
+    and must keep refusing to publish a verdict from stale code. This is about paying for that
+    verdict before discovering it cannot be published.
+  design: |
+    RE-READ BEFORE THE EXPENSIVE PHASE, NOT ONCE PER PASS.
+
+    Keep the gate's shape and its `staleThisPass` contract; replace the one-shot cache with a read
+    that can be refreshed. Two admissible forms, either acceptable:
+
+      (a) read once per PR, immediately before the review that would materialize a worktree; or
+      (b) read at most once per N seconds (a short TTL), so a pass with many PRs does not fetch
+          per PR while still noticing a mid-flight advance.
+
+    (b) is preferred if a pass routinely carries many PRs; (a) is simpler and its cost is bounded
+    by the very work it prevents.
+
+    PRESERVE, EXPLICITLY:
+      - W1-T2965 forward progress: a stale reading must still let an already-selected batch run,
+        and must stop only a review-only, otherwise-idle cycle.
+      - The fail-toward-attempting direction: an UNREADABLE reading still attempts the review.
+      - W1-T228's late guard, byte for byte. This changes WHEN freshness is read, never what the
+        publication guard does with it.
+
+    The falsifier below is what proves the change worked, and it is a COUNTER, not a proof: after
+    this lands, `review.skipped_stale_reviewer_code` must become non-zero on a fleet that is still
+    producing WITHHELDs. Zero after the change means the same non-observation with more code.
+  acceptance:
+    - claim: "a cycle that begins fresh and goes stale mid-pass skips the remaining PRs instead of paying for verdicts that cannot be published"
+      proof: "unit test: a reading that goes stale mid-pass skips the remaining PRs"
+    - claim: "a fresh pass still reaches every PR, so the gate does not over-fire"
+      proof: "unit test: a pass that stays fresh still reaches every PR"
+    - claim: "an unreadable reading still attempts the review, preserving the fail-open direction"
+      proof: "unit test: an unreadable reading still attempts the review"
+  falsifier: |
+    Close without implementing if a fleet measurement shows passes do NOT go stale mid-flight --
+    i.e. if withholds only ever appear in passes that began stale. That would mean the once-per-pass
+    read is sufficient and the zero counter has some other cause. The measurement above says
+    otherwise, but it is one 12-hour window and should be re-read before building.
