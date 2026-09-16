@@ -52,6 +52,14 @@
 #                      in task/recon text rank ahead of symbol and file-only matches.
 #   fact:              one line — the thing a worker inherits
 #   src:               provenance of the fact (recorded lineage)
+#   evidence:          (W1-T3709, optional) the measurement, run or PR that EARNED the fact.
+#                      NEVER INJECTED — `renderLearningLine` renders `fact` alone, so this costs a
+#                      worker nothing and is invisible to the corpus ratchet. It is RETRIEVED, not
+#                      injected: `[src: learnings#<id>]` already tells a reader where to look, and
+#                      this is what they find. Same two-tier model CLAUDE.md has with doctrine/ and
+#                      MASTER-PLAN has with plan-index.json (W1-T2282, "RETRIEVED, not INJECTED").
+#                      KEEP `fact` ACTIONABLE ALONE: a fact that cannot be obeyed without opening
+#                      `evidence` has been split in the wrong place.
 #   cited:             optional ISO date last cited (recent entries win a budget tie)
 
 - id: shell-isolation
