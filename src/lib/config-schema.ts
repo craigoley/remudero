@@ -50,7 +50,7 @@ export interface Config {
   accessAudience?: string;
   notifyRecipient?: string;
   overflow?: "none" | "api_key";
-  /** W1-T3698: the cash (Azure) spend ceiling for one UTC day. A PLAIN NUMBER is the whole cap, as
+  /** the cash (Azure) spend ceiling for one UTC day. A PLAIN NUMBER is the whole cap, as
    *  before. A PAIR raises it only on a day the subscriptions are tapped out:
    *
    *      dailyCapUsd: { normal: 10, squeezed: 25 }

@@ -2264,7 +2264,7 @@ function mutateOpenWeightAllowance<T>(
  * OpenWeightAllowanceExhaustedError} is thrown by the caller, so no paid request is made.
  */
 /**
- * W1-T3698: the cash ceiling for THIS request's UTC day.
+ * the cash ceiling for THIS request's UTC day.
  *
  * A plain number is the whole cap, exactly as before. A pair raises it only when the request
  * reached cash because the capacity auction found NO subscription with readable headroom -- the
@@ -2305,7 +2305,7 @@ export function reserveOpenWeightBudget(
     requestBodyBytes: number;
     atIso: string;
     beforeCommit?: () => void;
-    /** W1-T3698: true when this request reached cash only because no subscription had readable
+    /** true when this request reached cash only because no subscription had readable
      *  headroom. Selects `dailyCapUsd.squeezed` over `.normal`; ignored for a plain-number cap. */
     squeezed?: boolean;
   },
@@ -2360,7 +2360,7 @@ export function settleOpenWeightBudget(
 }
 
 export interface OpenWeightSpawnArgs {
-  /** W1-T3698: set ONLY by W1-T3692's blocked-auction fallback. Selects `dailyCapUsd.squeezed`
+  /** set ONLY by W1-T3692's blocked-auction fallback. Selects `dailyCapUsd.squeezed`
    *  over `.normal` for every reservation this run makes. */
   cashSqueezed?: boolean;
   cwd: string;
