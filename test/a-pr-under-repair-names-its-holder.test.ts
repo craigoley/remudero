@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -164,6 +164,81 @@ test("W1-T3646 criterion 3: a lease on a stale sha does not hold the new head", 
     );
     assert.equal(holderOnNewShaAfter?.runId, "run-lane-b");
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── the real (uninjected) `defaultPostRepairLeaseStatus` wrapper ───────────
+// Every test above supplies its own `post` stub, so `postRepairLease`'s real default
+// (`defaultPostRepairLeaseStatus`, which builds the `gh api` args and calls the shared
+// `execGhStatusPost`) never ran behind them. PATH-stubbed exactly like
+// review-status-gate.test.ts's `execGhStatusPost` coverage probes, so this one real
+// invocation earns its own DA: hits instead of staying diff-coverage dead code.
+
+test("postRepairLease: with no injected `post`, the real default wrapper posts through a PATH-stubbed gh", async () => {
+  const dir = tmpDir();
+  const bin = mkdtempSync(join(tmpdir(), "gh-repair-lease-stub-ok-"));
+  const oldPath = process.env.PATH;
+  try {
+    writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    process.env.PATH = `${bin}:${oldPath}`;
+    const ledgerPath = join(dir, "ledger.ndjson");
+
+    const result = await postRepairLease({
+      owner: "o",
+      repo: "r",
+      sha: "realpost1",
+      taskId: "W1-T3646",
+      runId: "run-real-gh",
+      ledgerPath,
+    });
+
+    assert.equal(result.posted, true);
+    const lines = readLedgerLines(ledgerPath);
+    const leaseLine = lines.find((l) => l.step === "repair.lease_posted");
+    assert.ok(leaseLine, "the real wrapper's success path must still ledger the lease");
+    assert.equal(leaseLine?.head_sha, "realpost1");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("postRepairLease: a failing gh stub is swallowed by the real default wrapper — the courtesy post never blocks the repair it narrates", async () => {
+  const dir = tmpDir();
+  const bin = mkdtempSync(join(tmpdir(), "gh-repair-lease-stub-fail-"));
+  const oldPath = process.env.PATH;
+  try {
+    writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "gh: Service Unavailable (HTTP 503)" >&2\nexit 1\n', {
+      mode: 0o755,
+    });
+    process.env.PATH = `${bin}:${oldPath}`;
+    const ledgerPath = join(dir, "ledger.ndjson");
+
+    let threw = false;
+    let result: { posted: boolean } | undefined;
+    try {
+      result = await postRepairLease({
+        owner: "o",
+        repo: "r",
+        sha: "realpost2",
+        taskId: "W1-T3646",
+        runId: "run-real-gh-fail",
+        ledgerPath,
+      });
+    } catch {
+      threw = true;
+    }
+
+    assert.equal(threw, false, "a failing real gh post must never throw out of postRepairLease");
+    assert.equal(result?.posted, true, "the ledger write and result still happen after the courtesy post fails");
+    const lines = readLedgerLines(ledgerPath);
+    const leaseLine = lines.find((l) => l.step === "repair.lease_posted");
+    assert.ok(leaseLine, "the lease is still ledgered even though the real status post failed");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 });
