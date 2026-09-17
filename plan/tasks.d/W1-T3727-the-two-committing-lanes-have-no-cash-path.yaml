@@ -50,3 +50,7 @@
       proof: "grep: harnessCommitForShellLessWorker in test/a-committing-lane-diverts-once-the-harness-owns-git.test.ts"
     - claim: "alert_fix without harness git still offers nothing, so the exclusion cannot lapse by accident"
       proof: "grep: alert_fix in test/a-committing-lane-diverts-once-the-harness-owns-git.test.ts"
+  note: |
+    reservation hand-off: main -> plan/file-the-squeeze-readiness-gaps-1789647960
+
+    Minted on `main` by the audit lane; recorded because the filing branch is not that ref.

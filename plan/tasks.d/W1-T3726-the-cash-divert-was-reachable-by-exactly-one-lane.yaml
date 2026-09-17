@@ -47,3 +47,7 @@
       satisfied_by: "PR #5899 — cashTools passed at the recon and diagnose dispatches"
     - claim: "a lane that commits offers no divert, so a cheap model is never handed authority it cannot exercise"
       satisfied_by: "PR #5899 — alert_fix returns undefined, pinned by test"
+  note: |
+    reservation hand-off: main -> plan/file-the-squeeze-readiness-gaps-1789647960
+
+    Minted on `main` by the audit lane; recorded because the filing branch is not that ref.

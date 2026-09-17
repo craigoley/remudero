@@ -56,3 +56,7 @@
       proof: "grep: unspendable in test/the-cash-lane-reports-whether-it-can-spend.test.ts"
     - claim: "the reported state cannot be produced without actually consulting the key, so a green reading means a real one"
       proof: "grep: key is absent in test/the-cash-lane-reports-whether-it-can-spend.test.ts"
+  note: |
+    reservation hand-off: main -> plan/file-the-squeeze-readiness-gaps-1789647960
+
+    Minted on `main` by the audit lane; recorded because the filing branch is not that ref.
