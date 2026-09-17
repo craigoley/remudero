@@ -16,9 +16,15 @@
  * already computed (FACT 2) — and the skip line said "up-to-date" through both.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { decideDeployTrigger, runDeployCycle, type DeployDeps, type IdleProbe } from "../src/lib/deployer.js";
+import { main } from "../src/run-task.js";
+import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 
 // ── claim 1: an unobserved liveness tick does not report up-to-date ─────────────────────────
 
@@ -71,6 +77,28 @@ test("the watchdog tick names an ignored runningStale instead of omitting it", (
   assert.match(d.reason, /running stale code/, "the ignored runningStale is named, not folded away");
   assert.match(d.reason, /stale-boot-sha/, "the actual running sha is named, not just the fact");
   assert.equal(d.satisfied, undefined, "a request must not be consumed while the daemon runs old code");
+});
+
+test("the watchdog tick names an ignored-but-UNRECORDED runningStale distinctly from a named sha", () => {
+  // `runningHead` omitted ⇒ undefined ⇒ `sameCommit` reads it as NOT matching (fail-eager, this
+  // module's own header) — so `runningStaleIgnoredByTick` is still true, but there is no sha to
+  // name, and the reason text must say so rather than interpolating "undefined".
+  const d = decideDeployTrigger({
+    markerPresent: false,
+    autoMode: true,
+    installHead: "current",
+    originMain: "current",
+    // runningHead intentionally omitted
+    daemonAlive: true,
+    imageDriftOnly: true,
+  });
+  assert.equal(d.deploy, false);
+  assert.doesNotMatch(d.reason, /up-to-date/, "an unrecorded running head is not up-to-date either");
+  assert.doesNotMatch(d.reason, /undefined/, "never interpolate the literal string \"undefined\" into an operator-facing reason");
+  assert.match(d.reason, /running head not recorded/, "the reason names WHY no sha could be named");
+  assert.match(d.reason, /mount staleness cannot be ruled out/, "and that the tick still declines to act on it either way");
+  assert.equal(d.satisfied, undefined);
+  assert.equal(d.blocker, undefined, "no sha to name means no blocker DATA either — the reason's prose carries this one alone");
 });
 
 test("the SAME inputs outside the watchdog tick's imageDriftOnly reading restart instead of skip", () => {
@@ -202,4 +230,110 @@ test("runDeployCycle carries the blocker through to its result and the ledger ro
   const skipRow = logs.find((l) => l.step === "deploy.skip");
   assert.ok(skipRow, "the skip is still ledgered");
   assert.deepEqual(skipRow!.data?.blocker, result.blocker, "the ledger row and the return value never disagree");
+});
+
+// ── claim 6: `rmd deploy-run` itself — the CLI entry, not just decideDeployTrigger's pure
+// function — wires a REAL daemonAlive producer and prints the blocker line ─────────────────
+//
+// Every test above drives `decideDeployTrigger`/`runDeployCycle` directly with injected
+// `DeployDeps`. Nothing yet drove `deployRunCommand` (run-task.ts) itself, which is the one
+// place FACT 1 actually lived: no caller anywhere in src/ ever supplied `daemonAlive`. This
+// exercises the REAL wiring end to end — a real git install root, the real `queryLaunchdServiceSensed`
+// / `queryProcessServiceSensed` sensor chain, and the real stdout the operator reads.
+
+function git(dir: string, args: string[]): string {
+  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
+}
+
+/** A real bare origin + a clone on `main`, HEAD == origin/main — "healthy" per
+ *  `inspectInstallRoot`, the same real-git discipline test/install-root.test.ts's own
+ *  `buildOrigin`/`cloneFrom` use (not imported from there — that file is outside this task's
+ *  declared scope, so this is a small local duplicate, not a shared helper). */
+function healthyInstallRoot(dir: string): { installDir: string; headSha: string } {
+  const originDir = join(dir, "origin.git");
+  const seedDir = join(dir, "seed");
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", originDir]);
+  execFileSync("git", ["init", "--quiet", "-b", "main", seedDir]);
+  git(seedDir, ["config", "user.email", "t@example.invalid"]);
+  git(seedDir, ["config", "user.name", "Test"]);
+  git(seedDir, ["remote", "add", "origin", originDir]);
+  writeFileSync(join(seedDir, "marker.txt"), "v1\n");
+  git(seedDir, ["add", "."]);
+  git(seedDir, ["commit", "--quiet", "-m", "v1"]);
+  git(seedDir, ["push", "--quiet", "origin", "main"]);
+
+  const installDir = join(dir, "install");
+  execFileSync("git", ["clone", "--quiet", originDir, installDir]);
+  const headSha = git(installDir, ["rev-parse", "HEAD"]);
+  return { installDir, headSha };
+}
+
+class ProcessExitCalled extends Error {
+  constructor(public code: number | undefined) {
+    super(`process.exit(${code})`);
+  }
+}
+
+/** Mirrors test/w1-t143-diff-coverage.test.ts's own callMain(): process.exit mocked to throw
+ *  (never a real exit), console silenced but recorded. */
+async function callMain(t: import("node:test").TestContext, argv: string[]): Promise<{ code: number | undefined; logs: string[] }> {
+  const logs: string[] = [];
+  const exitMock = ((code?: number): never => {
+    throw new ProcessExitCalled(code);
+  }) as typeof process.exit;
+  t.mock.method(process, "exit", exitMock);
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "log", (...args: unknown[]) => { logs.push(args.map(String).join(" ")); });
+  t.mock.method(console, "warn", () => {});
+
+  const originalArgv = process.argv;
+  process.argv = argv;
+  const originalGuardEnv = process.env[SELF_SYNC_GUARD_ENV];
+  process.env[SELF_SYNC_GUARD_ENV] = "1";
+  try {
+    let caught: unknown;
+    await main().catch((e) => { caught = e; });
+    assert.ok(caught instanceof ProcessExitCalled, `main() must reach process.exit, not some other throw: ${String(caught)}`);
+    return { code: (caught as ProcessExitCalled).code, logs };
+  } finally {
+    process.argv = originalArgv;
+    if (originalGuardEnv === undefined) delete process.env[SELF_SYNC_GUARD_ENV];
+    else process.env[SELF_SYNC_GUARD_ENV] = originalGuardEnv;
+  }
+}
+
+test("`rmd deploy-run --image-drift-only`, against a real install root, reaches the real daemonAlive producer and prints the blocker line", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t3694-deployrun-"));
+  const { installDir, headSha } = healthyInstallRoot(dir);
+  const home = join(dir, "home");
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(
+    join(home, ".config", "remudero", "config.json"),
+    JSON.stringify({ claudeBin: "/bin/true", root, installRoot: installDir }),
+  );
+  // A STOP marker present sidesteps the SEPARATE "daemon not running, no STOP set" restart arm
+  // (decideDeployTrigger's own first branch) — this test's claim is about the BLOCKER branch,
+  // not that unrelated one, and a real (un-faked) daemonAlive() reads false with no daemon
+  // process actually running under this test.
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "STOP"), "");
+  // A stale `daemon.boot` line — the running daemon's own last-recorded sha, deliberately NOT
+  // `headSha`, so runningHead != installHead == originMain: the checkout is current but the
+  // daemon is not, exactly the standing state W1-T3694 exists to surface as a blocker.
+  const staleSha = "b".repeat(40);
+  writeFileSync(join(root, "state", "ledger.ndjson"), `{"step":"daemon.boot","head_sha":"${staleSha}"}\n`);
+
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const { code, logs } = await callMain(t, ["node", "run-task.js", "deploy-run", "--image-drift-only"]);
+    assert.equal(code, 0, "a skip (never a dirty-tree-conflict/rollback) exits 0");
+    const blockerLine = logs.find((l) => l.includes("BLOCKER:"));
+    assert.ok(blockerLine, `expected a BLOCKER line in stdout, saw:\n${logs.join("\n")}`);
+    assert.match(blockerLine!, new RegExp(staleSha), "the blocker names the actual running sha");
+    assert.match(blockerLine!, new RegExp(headSha), "the blocker names the actual origin/main sha");
+  } finally {
+    process.env.HOME = oldHome;
+  }
 });
