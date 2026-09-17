@@ -205,6 +205,51 @@ test("acceptance 4 (--seed): a stale baseline row does not survive a --seed rewr
   assert.ok(!("j#9: long-gone" in guards), "--seed rewrites the ledger too, and must not keep a stale row either");
 });
 
+// ── merge-base resolution failure: fails closed, naming the ref, not silently CAUSED ───────────
+
+test("main: a merge-base resolution failure blocks the diff and names the ref it could not resolve, rather than silently treating every guard as caused or clean", () => {
+  const errs: string[] = [];
+  const code = main([], {
+    readCi: () => "jobs:\n  j:\n    steps:\n      - run: |\n          if [ \"$A\" ]; then\n            exit 0\n          fi\n",
+    readBaseline: () => ({ guards: {} }),
+    suites: () => ["test/a.test.ts"],
+    redCorpus: () => [],
+    classify: () => ({ covered: false, by: undefined }),
+    resolveMergeBase: () => {
+      throw new Error("no such ref");
+    },
+    readCiAtBase: () => assert.fail("readCiAtBase must never run once resolveMergeBase has thrown"),
+    writeBaseline: () => assert.fail("a resolution failure must never be recorded as if it were a real split"),
+    log: () => {},
+    err: (m: string) => void errs.push(m),
+  });
+  assert.equal(code, 1, "an unresolvable merge base must fail the run, not fall through as clean");
+  assert.ok(
+    errs.some((e) => e.includes("could not resolve the merge base against origin/main") && e.includes("no such ref")),
+    `expected the ref and the underlying error to both be named, got ${JSON.stringify(errs)}`,
+  );
+});
+
+test("main: a --base ref that fails to resolve is named in the error, not the default", () => {
+  const errs: string[] = [];
+  const code = main(["--base", "refs/remotes/origin/release"], {
+    readCi: () => "jobs:\n  j:\n    steps:\n      - run: |\n          if [ \"$A\" ]; then\n            exit 0\n          fi\n",
+    readBaseline: () => ({ guards: {} }),
+    suites: () => ["test/a.test.ts"],
+    redCorpus: () => [],
+    classify: () => ({ covered: false, by: undefined }),
+    resolveMergeBase: () => {
+      throw new Error("unknown revision");
+    },
+    readCiAtBase: () => assert.fail("readCiAtBase must never run once resolveMergeBase has thrown"),
+    writeBaseline: () => assert.fail("a resolution failure must never be recorded as if it were a real split"),
+    log: () => {},
+    err: (m: string) => void errs.push(m),
+  });
+  assert.equal(code, 1);
+  assert.ok(errs.some((e) => e.includes("refs/remotes/origin/release") && e.includes("unknown revision")));
+});
+
 // ── ci.yml did not exist at the base: nothing to inherit ────────────────────────────────────────
 
 test("a ci.yml the base never had at all yields no inherited guards — everything is CAUSED", () => {
