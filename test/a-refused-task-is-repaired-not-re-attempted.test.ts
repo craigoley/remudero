@@ -55,7 +55,7 @@ function fakeEffects(prior: PriorRefusal | undefined) {
 
 // ── ACCEPTANCE 1: a refused task dispatches ONE repair lane, not another attempt ──────────
 
-test("ACCEPTANCE 1: a first refusal dispatches exactly one repair lane, never an escalation", () => {
+test("ACCEPTANCE 1: a refused task dispatches one repair lane, not another attempt", () => {
   const { dispatched, escalated, readPrior, writePrior, dispatchRepairLane, escalate } = fakeEffects(undefined);
   const action = repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, dispatchRepairLane, escalate);
 
@@ -77,7 +77,7 @@ test("FALSIFIER of acceptance 1: removing the dispatch call leaves the task re-a
 
 // ── ACCEPTANCE 2: the repair lane carries the refusal verdict VERBATIM ────────────────────
 
-test("ACCEPTANCE 2: the repair lane carries the linter's own refusal verdict text verbatim", () => {
+test("ACCEPTANCE 2: the repair lane carries the refusal verdict verbatim", () => {
   const { dispatched, readPrior, writePrior, dispatchRepairLane, escalate } = fakeEffects(undefined);
   repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, dispatchRepairLane, escalate);
 
@@ -97,7 +97,7 @@ test("FALSIFIER of acceptance 2: a generic prompt instead of the verdict does no
 
 // ── ACCEPTANCE 3: an unchanged verdict escalates rather than re-reconning ─────────────────
 
-test("ACCEPTANCE 3: a second refusal carrying the SAME verdict escalates instead of dispatching a second repair lane", () => {
+test("ACCEPTANCE 3: an unchanged verdict escalates rather than re-reconning", () => {
   const verdict = refusalVerdictText(VIOLATIONS);
   const { dispatched, escalated, readPrior, writePrior, dispatchRepairLane, escalate } = fakeEffects({ verdict, attempts: 1 });
   const action = repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, dispatchRepairLane, escalate);
@@ -119,7 +119,7 @@ test("FALSIFIER of acceptance 3: an unchanged verdict that starts a second recon
 
 // ── ACCEPTANCE 4: a changed verdict is PROGRESS, not a repeat ─────────────────────────────
 
-test("ACCEPTANCE 4: a changed verdict is treated as progress and dispatches a repair lane, not an escalation", () => {
+test("ACCEPTANCE 4: a changed verdict is progress, not a repeat", () => {
   const priorVerdict = refusalVerdictText(OTHER_VIOLATIONS);
   const { dispatched, escalated, readPrior, writePrior, dispatchRepairLane, escalate } = fakeEffects({ verdict: priorVerdict, attempts: 1 });
   const action = repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, dispatchRepairLane, escalate);
