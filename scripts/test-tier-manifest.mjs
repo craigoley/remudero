@@ -297,7 +297,30 @@ export function inheritedUntieredFiles(missing, baseRef, root, spawn = spawnSync
 /** Pure merge: every path in `measured` overwrites (or adds) that entry in a NEW manifest object;
  *  every other recorded file is left byte-for-byte untouched. Never mutates `manifest`. */
 export function mergeDurations(manifest, measured) {
-  return { thresholdMs: manifest.thresholdMs, files: { ...manifest.files, ...measured } };
+  // W1-T3724 — A REAL MEASUREMENT IS NEVER REPLACED BY THE PLACEHOLDER.
+  //
+  // `--seed` writes `0` for a new test file so its PR is not born red (W1-T3205), and
+  // `readDurationEvidence` accepts a `0` reading (it rejects only `< 0`). A plain spread therefore
+  // lets a run that failed to time a file reset a number an earlier run measured -- and a file back
+  // at `0` packs as FREE, which is how 338 of 1,604 files came to shard as costless.
+  //
+  // NOT A RATCHET. A duration may legitimately FALL -- a suite genuinely got faster -- so any real
+  // number replaces any other real number, in either direction. Only `0` is refused, and only
+  // against an existing real value: a file with no measurement yet still takes the placeholder.
+  const files = { ...manifest.files };
+  for (const [file, duration] of Object.entries(measured)) {
+    const existing = files[file];
+    if (duration === 0 && typeof existing === "number" && existing > 0) continue;
+    files[file] = duration;
+  }
+  return { thresholdMs: manifest.thresholdMs, files };
+}
+
+/** W1-T3724 — how many files still carry the `0` placeholder, and of how many. THE MEASURE OF
+ *  SUCCESS for adopting duration evidence at all: if this number does not fall, nothing landed. */
+export function placeholderPopulation(manifest) {
+  const files = Object.values(manifest.files ?? {});
+  return { zero: files.filter((d) => d === 0).length, total: files.length };
 }
 
 /** Merge trusted, versioned reporter documents. Repeated observations keep the slowest value so
@@ -461,6 +484,30 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     console.log(
       `test-tier-manifest: wrote ${Object.keys(measured).length} measured file(s) to ${output}; ` +
         "the tracked manifest was not modified.",
+    );
+    return 0;
+  }
+
+  if (argv.includes("--adopt")) {
+    // W1-T3724 — THE CONSUMER THE PROPOSAL NEVER HAD. `--record-evidence` has built a corrected
+    // manifest on every run since W1-T2904 and uploaded it as a 7-day artifact nothing reads, so
+    // the durations that would balance the shards expire instead of landing.
+    const proposalPath = getFlagValue(argv, "--adopt");
+    if (!proposalPath) {
+      console.error("test-tier-manifest: --adopt requires <proposal path>");
+      return 2;
+    }
+    const proposal = loadManifest(resolve(root, proposalPath));
+    const before = placeholderPopulation(manifest);
+    // PARTIAL EVIDENCE IS PARTIAL, NOT WRONG (design iv): a run where one shard died produces
+    // evidence for three, and those three still land. Refusing the whole update is what keeps a
+    // fifth of the corpus at zero.
+    const adopted = mergeDurations(manifest, proposal.files ?? {});
+    const after = placeholderPopulation(adopted);
+    writeManifest(manifestPath, adopted);
+    console.log(
+      `test-tier-manifest: adopted ${Object.keys(proposal.files ?? {}).length} measured file(s); ` +
+        `placeholder population ${before.zero} -> ${after.zero} of ${after.total}.`,
     );
     return 0;
   }

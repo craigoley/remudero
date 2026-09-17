@@ -1,0 +1,83 @@
+- id: W1-T3736
+  title: "THE SITE AND CONSOLE DEPLOY SUPERVISORS RECORD NOTHING IN THEIR OWN STATE — every `deploy.` row in this fleet's history lives in core's ledger, so the one signal that says whether a daemon's code is being kept current is missing for two of the three"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: |
+    MEASURED ON THE LIVE HOST 2026-09-17:
+
+      grep -c '"step":"deploy\.' /home/craigoleyagent/rmd-site-state/state/ledger.ndjson      -> 0
+      grep -c '"step":"deploy\.' /mnt/rmd/remudero-console-state/state/ledger.ndjson          -> 0
+      grep -c '"step":"deploy\.' /home/craigoleyagent/rmd-state2/state/ledger.ndjson          -> many
+
+    Zero, across every ledger those two instances have ever written — and their DAEMONS write to
+    those same files constantly (the site ledger carries 7 `daemon.image_drift` rows, the console
+    one carries 1). So the file is right and reachable; nothing deploy-shaped is landing in it.
+
+    (1) EACH INSTANCE RUNS ITS OWN SUPERVISOR. `rmd-site-relaunch.sh` and its console twin each
+        invoke `"$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only` on the 5-minute
+        watchdog timer, with `STATE_DIR` set to that instance's own root — and neither exports
+        `RMD_ROOT`, so where the resulting ledger rows go is left to whatever the CLI resolves.
+
+    (2) THE ROW IS THE ONLY SIGNAL THIS DECISION HAS. A tick that declines is indistinguishable
+        from a tick that never ran, except through `deploy.skip` / `deploy.not_idle` /
+        `deploy.restart_refused`. `scripts/fleet-heartbeat.sh` says so itself: its supervisor
+        liveness probe is "the max ts over the `deploy.` prefix", because the supervisor "has no
+        single ledger step that fires unconditionally" otherwise. With no rows, that probe cannot
+        answer the question for site or console at all.
+
+    (3) IT HID A REAL FAULT FOR A DAY. W1-T3733 measured site and console running a 24-hour-old
+        image, one baked-path commit behind, while their recycle ticks declined every five minutes.
+        Had those declines been recorded where that instance's own status board reads, the stale
+        image would have been visible rather than found by hand.
+
+    (4) AND IT MAY BE WORSE THAN MISSING. At 13:32:36 UTC core's ledger took THREE `deploy.skip`
+        rows within 0.5s, from three different pids, all naming core's `runningHead` — consistent
+        with three supervisors reporting against one instance's state. This task must establish
+        which it is before changing anything: rows landing in the wrong ledger and rows landing
+        nowhere need different fixes, and guessing between them is how a second wrong reading gets
+        written.
+  design: |
+    (i) MEASURE FIRST, AND MAKE THE MEASUREMENT THE FIRST DELIVERABLE. Run each instance's own
+        `deploy-run --image-drift-only` invocation exactly as its relaunch script does and observe
+        which ledger takes the row. Everything below is conditional on that reading; it is stated
+        here so the build cannot skip it and reason from the symptom.
+
+    (ii) THE LEDGER PATH FOLLOWS THE STATE ROOT, WHATEVER THE CLI RESOLVES TODAY. The supervisor
+         writes where the instance it is deploying keeps its state — the same root its relaunch
+         script already names — never a default that happens to be core's.
+
+    (iii) A ROW THAT CANNOT BE PLACED IS NOT SILENTLY DROPPED. If the state root cannot be resolved,
+          the invocation refuses and says so, rather than writing to a fallback: a deploy decision
+          recorded against the wrong daemon is worse than one an operator is told was not recorded.
+
+    NOT IN SCOPE: the image-sha read those supervisors make (W1-T3733) and the `--instance` refusal
+    on their restarts (W1-T3732) — both already filed, both about the DECISION rather than its
+    record.
+  acceptance:
+    - claim: "a deploy cycle records its rows against the state root it was given, not a default"
+      proof: "unit test: the deploy cycle writes its ledger rows under the state root it was given"
+    - claim: "a state root that cannot be resolved refuses rather than writing the row somewhere else"
+      proof: "unit test: an unresolvable state root refuses instead of falling back"
+    - claim: "the core instance's own rows are unchanged, so the one supervisor that was recording correctly still does"
+      proof: "unit test: the default state root still records where it always did"
+  falsifier: |
+    Write the rows to both the instance's ledger AND the old location and the third assertion still
+    passes while core's ledger keeps taking three rows a tick — so the test asserts WHERE the row
+    landed, never merely that one did. Make an unresolvable root fall back to a default and the
+    second goes red, which is the arm that turns a missing record into a wrong one.
+  risk: medium
+  band_meaning: blast-radius
+  origin: human
+  plan_refs: [W1-T3733, W1-T3732, W1-T3596]
+  files: [src/lib/deployer.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t3734-6-three-findings
+
+    `files:` names no test path, deliberately: `proof-unit-test-unresolvable` refuses a filing that
+    declares one (W1-T3730). The build adds it back.

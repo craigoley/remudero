@@ -2020,6 +2020,26 @@ export const OPENWEIGHT_OUTPUT_CONTRACT = [
     "line or a STAMP line), emit those markers verbatim and print the requested artifact between " +
     "or after them instead of describing it in prose.",
 ].join("\n");
+
+/**
+ * W1-T3693(d) — THE GROUNDING/CITATION CONTRACT — DELIBERATELY NOT BUILT HERE.
+ *
+ * The task's own falsifier: "Close (d) without implementing if no lane wants a grounding
+ * contract -- it is machinery for a judgement lane, and building it before one exists would be
+ * the shipped-unwired shape." CHECKED 2026-09-17: `ruling-judge.ts` and `verify-human-judge.ts`
+ * carry no reference to this provider at all, and the one judgement lane that CAN route through
+ * `cash` -- `Mounts.escalation_judge` (escalate.ts) -- is ROUTING-ONLY: it parses a single
+ * `ESCALATION_JUDGE_DECISION`/`ESCALATION_JUDGE_REASON` pair, not a list of asserted, citable
+ * items. No lane asserts observed facts through this adapter today, so there is nothing for a
+ * citation validator to guard, and imposing one unconditionally would be the "turn every task
+ * into a YAML task" mistake this same file's output contract already warns against.
+ *
+ * (a) the request deadline ({@link OPENWEIGHT_REQUEST_TIMEOUT_MS}/{@link
+ * OpenWeightRequestTimeoutError}), (b) the truncation refusal ({@link openWeightReplyIsTruncated}/
+ * {@link OpenWeightTruncatedReplyError}) and (c) the fence-tolerant extractor ({@link
+ * openWeightUnfence}) above are the transport fixes the falsifier says "stand regardless": they
+ * are correctness on the transport, not a feature gated on a consumer wanting it.
+ */
 /**
  * PRICE IS A PROPERTY OF THE DEPLOYMENT, NOT OF THE PROVIDER.
  *
@@ -2772,6 +2792,31 @@ function executeOpenWeightTool(name: string, args: Record<string, unknown>, cwd:
   }
 }
 
+/**
+ * A NON-OPENAI DEPLOYMENT NEEDS NO SECOND SHAPE HERE. W1-T3598 ruled the wider catalog out on the
+ * premise that its cheapest non-OpenAI candidate "sits behind the Azure AI Model Inference
+ * `/models` route instead and would need an endpoint branch". W1-T3695 re-probed BOTH routes
+ * against a live DeepSeek-V4-Flash deployment (non-OpenAI family) on the same account:
+ *
+ *   POST {endpoint}/models/chat/completions                   -> HTTP 200
+ *   POST {endpoint}/openai/deployments/DeepSeek-V4-Flash/...  -> HTTP 200
+ *
+ * The second IS this function's own path. The deployment answered it unchanged -- tool calls
+ * (`finish_reason: tool_calls`), `temperature: 0` (HTTP 200, unlike the gpt-5 family's 400) and
+ * `response_format: json_object` all measured clean against it. So this class rides the adapter's existing route
+ * with no second endpoint shape required, and the branch W1-T3598 deferred is not needed for it
+ * at all.
+ *
+ * IT IS STILL NOT WIRED INTO {@link OPENWEIGHT_PRICES}, deliberately. No published rate for
+ * DeepSeek-V4-Flash could be confirmed (absent from the pricing page, the retail prices API and
+ * the catalog's `cost` field), and its billing is publicly disputed -- Microsoft Q&A threads
+ * report ~357x the published rate on cached tokens and 4.5x on V4 Pro. `OPENWEIGHT_PRICES`'s own
+ * contract is that a deployment with no row is refused rather than priced by a neighbour (see
+ * {@link openWeightPriceFor}), so naming this deployment in the cash ladder before a bill
+ * confirms its real rate would convert a disputed page number into an under-reservation. The
+ * route is proven here; the price is not, and only an OBSERVED bill (not this recon) closes that
+ * gap (W1-T3695).
+ */
 function openWeightEndpoint(config: Config, model: string): string {
   // W1-T3607: canonical `cashEndpoint` first, falling back to the deprecated `openweightEndpoint`
   // spelling so an already-deployed host's config.json need not be hand-edited the moment this ships.
