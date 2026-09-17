@@ -1481,6 +1481,7 @@
     "test/the-scheduled-learning-rung-drafts-and-discards.test.ts": 0,
     "test/the-served-model-is-not-the-model-that-was-requested.test.ts": 665,
     "test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts": 455,
+    "test/the-supervisor-names-the-daemon-it-is-restarting.test.ts": 0,
     "test/the-sweep-fan-out-respects-the-host-budget.test.ts": 1247,
     "test/the-temp-sweep-cannot-see-the-debris-it-was-built-for.test.ts": 328,
     "test/the-top-of-tick-freshness-exit-precedes-every-dispatch.test.ts": 771,
