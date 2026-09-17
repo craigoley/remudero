@@ -98,7 +98,6 @@ export interface Mount {
    * Held to the SAME Tier Invariant as `model`: a squeeze must not silently demote a seat below
    * the workers it supervises, which would be a worse outcome than stalling.
    */
-  squeezeModel?: string;
 }
 
 /** The three synthesis rungs (W1-T2559), exempt from the Tier Invariant — see this file's header. */
@@ -226,11 +225,28 @@ function parseMount(
   if (typeof context_budget !== "number" || !Number.isInteger(context_budget) || context_budget <= 0) {
     throw new MountsError(`mount ${where}: 'context_budget' must be a positive integer, got ${JSON.stringify(context_budget)}.`);
   }
-  // Same membership rule as `model`: a squeeze seat must be a RANKED model, so the invariant below
-  // can compare it. An unranked fallback would be a seat nobody can prove dominates its workers.
-  if (squeeze_model !== undefined && (typeof squeeze_model !== "string" || !(squeeze_model in tiers))) {
+  // W1-T3711: REFUSED, BECAUSE NOTHING SELECTS FROM IT. The field parses, validates against `tiers:`
+  // and folds into the Tier Invariant below — and then no dispatch reads it. MEASURED on origin/main:
+  // `judgeModel(` has ZERO callers outside config.ts, `architectModel(`'s only live site passes ONE
+  // argument (pinned there by fb-1784921980488-44b355 §4, where passing `mountsTable` is a MODEL
+  // CHANGE for that lane, not a cleanup), and `squeezeModel` is read nowhere but config.ts itself.
+  //
+  // SO AN OPERATOR COULD SET THE SEAT MEANT TO SURVIVE A MAXED SUBSCRIPTION AND GET A GREEN LOAD, A
+  // SATISFIED INVARIANT, AND THE SUBSCRIPTION MODEL ANYWAY. Silent dead config is worse than absent
+  // config: absent config fails the moment someone looks for it, this one looks configured. A load
+  // error that names the missing half is the honest state until a seat exists to select from.
+  //
+  // This refuses rather than deletes on purpose: whether the right answer is to WIRE a seat or to
+  // REMOVE the two unreachable resolvers is an operator ruling (W1-T3711's falsifier), and refusing
+  // keeps both open while making the gap loud. No host sets the field today — verified against
+  // .remudero/mounts.yaml on origin/main — so nothing breaks by refusing it now.
+  if (squeeze_model !== undefined) {
     throw new MountsError(
-      `mount ${where}: 'squeeze_model' must be one of ${Object.keys(tiers).join(", ")}, got ${JSON.stringify(squeeze_model)}.`,
+      `mount ${where}: 'squeeze_model' is set but NOTHING READS IT — no dispatch selects a squeeze ` +
+        `seat, so this row would silently keep using '${String(model)}' under a maxed subscription. ` +
+        `Remove the field, or wire a seat first (W1-T3711). The subscription-exhaustion path that ` +
+        `DOES work today is config.overflow: "api_key" (W1-T3705) and the cash fallback ` +
+        `(workerProviders.cashFallbackWhenBlocked, W1-T3692).`,
     );
   }
   if (provider !== undefined && !isWorkerProviderId(provider)) {
@@ -245,8 +261,7 @@ function parseMount(
     effort,
     maxTurns: max_turns,
     contextBudget: context_budget,
-    ...(squeeze_model === undefined ? {} : { squeezeModel: squeeze_model as string }),
-    ...(normalizedProvider === undefined ? {} : { provider: normalizedProvider }),
+      ...(normalizedProvider === undefined ? {} : { provider: normalizedProvider }),
   };
 }
 
@@ -279,10 +294,11 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
   // the workers it supervises. Taking the MINIMUM of the seat and its fallback means the table
   // cannot load unless BOTH dominate -- a squeeze can change which model holds a seat, never
   // whether that seat outranks the floor beneath it.
-  const architectSqueezeTier = m.architect.squeezeModel === undefined ? undefined : m.tiers[m.architect.squeezeModel];
-  const judgeSqueezeTier = m.judge.squeezeModel === undefined ? undefined : m.tiers[m.judge.squeezeModel];
-  const architectFloor = architectSqueezeTier === undefined ? architectTier : Math.min(architectTier, architectSqueezeTier);
-  const judgeFloor = judgeSqueezeTier === undefined ? judgeTier : Math.min(judgeTier, judgeSqueezeTier);
+  // W1-T3711: the seat/fallback MINIMUM is gone with the squeeze seat it guarded. `parseMount`
+  // refuses `squeeze_model`, so no row can carry a second model for these seats and the floor is
+  // simply the seat's own tier again.
+  const architectFloor = architectTier;
+  const judgeFloor = judgeTier;
   // W1-T2573: when the table declares a `capabilities` axis, the SAME invariant is ALSO
   // enforced on capability RANK — the provider-neutral generalisation (rationale point 3):
   // capability rank is what a worker riding a different vendor would be compared on, since

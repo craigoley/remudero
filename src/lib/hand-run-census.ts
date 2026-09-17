@@ -7,13 +7,14 @@
  * Invariant: over the ledger union (never the live file alone — W1-T1013), operator rows group
  * into SESSIONS by writing process (`actor_pid`) and a gap under {@link HAND_RUN_SESSION_GAP_MS}
  * (guards OS pid reuse across unrelated invocations days apart), each session reduces to its
- * ordered STEP SEQUENCE, and a sequence recurring on at least
+ * ordered VERB SEQUENCE (W1-T3683: a `cli.invoked` row's element is its `verb`, the actual
+ * command that was typed — every other step names itself), and a sequence recurring on at least
  * {@link HAND_RUN_RECURRENCE_DAY_FLOOR} DISTINCT DAYS (never raw session count) is a RECURRENCE.
  * Trap: a recurrence becomes exactly ONE `plan/feedback/` entry via `captureFeedback`, deduped by
  * signature against the ledger union first (the W1-T470 discipline coverage-improvement.ts's
  * `alreadyFiledForSignature` established) — never a rung, never a behaviour change.
  *
- * Falsifier: test/hand-run-census.test.ts.
+ * Falsifier: test/hand-run-census.test.ts, test/the-hand-run-census-names-the-verb-not-the-step.test.ts.
  */
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionResult } from "./ledger-grep.js";
@@ -27,18 +28,28 @@ import { captureFeedback, type CaptureFeedbackOptions, type FeedbackEntry } from
  *  field itself, never a bare value — a bare `operator` would also match unrelated prose. */
 const HAND_RUN_OPERATOR_LEDGER_PATTERN = /"actor":"operator"/;
 
-/** One operator-authored ledger row, narrowed to the three fields session-mining needs. */
+/** One operator-authored ledger row, narrowed to the fields session-mining needs. `verb` is the
+ *  actual command name `logCliInvocation` (src/run-task.ts) stamps onto every `cli.invoked` row
+ *  — present ONLY when `step === "cli.invoked"` (design note i); every other step names itself
+ *  and needs no separate verb field. */
 export interface HandRunLedgerRow {
   ts: string;
   actorPid: number;
   step: string;
+  verb?: string;
 }
+
+/** The step every hand-typed CLI invocation is ledgered under (`logCliInvocation`,
+ *  src/run-task.ts) — a CONSTANT, never itself the verb sequence element (design note ii). */
+const CLI_INVOKED_STEP = "cli.invoked";
 
 /** Parse every operator row out of a set of raw {@link resolveLedgerUnion} match lines. A
  *  malformed line, or one missing `ts`/`actor_pid`/`step`, is skipped rather than guessed at —
  *  the same discipline `coverage-improvement.ts`'s `parseFiledCoverageImprovementLines` applies
  *  to a possibly-torn line. `actor` is re-checked here (not just trusted from the pre-filter
- *  pattern) since a pattern match is a substring hit, not a parse. */
+ *  pattern) since a pattern match is a substring hit, not a parse. A `cli.invoked` row carrying
+ *  no `verb` string is likewise skipped (design note i) — the constant step alone can never
+ *  stand in for the verb it was meant to carry, and this module never guesses one. */
 export function parseOperatorLedgerRows(rawLines: readonly string[]): HandRunLedgerRow[] {
   const out: HandRunLedgerRow[] = [];
   for (const raw of rawLines) {
@@ -51,11 +62,17 @@ export function parseOperatorLedgerRows(rawLines: readonly string[]): HandRunLed
       continue;
     }
     if (parsed === null || typeof parsed !== "object") continue;
-    const line = parsed as { actor?: unknown; actor_pid?: unknown; step?: unknown; ts?: unknown };
+    const line = parsed as { actor?: unknown; actor_pid?: unknown; step?: unknown; ts?: unknown; verb?: unknown };
     if (line.actor !== "operator") continue;
     if (typeof line.actor_pid !== "number" || typeof line.step !== "string" || typeof line.ts !== "string") continue;
     if (!Number.isFinite(Date.parse(line.ts))) continue; // unparseable ts — never guessed into a session
-    out.push({ ts: line.ts, actorPid: line.actor_pid, step: line.step });
+    if (line.step === CLI_INVOKED_STEP && typeof line.verb !== "string") continue; // no verb — SKIPPED, never guessed
+    out.push({
+      ts: line.ts,
+      actorPid: line.actor_pid,
+      step: line.step,
+      verb: typeof line.verb === "string" ? line.verb : undefined,
+    });
   }
   return out;
 }
@@ -73,9 +90,21 @@ export interface HandRunSession {
   actorPid: number;
   /** UTC calendar date (`YYYY-MM-DD`) of the session's first row. */
   day: string;
-  /** The session's rows' `step` values, IN ORDER, duplicates kept — this IS the verb sequence. */
+  /** The session's rows' VERB SEQUENCE, IN ORDER, duplicates kept (design note ii): for a
+   *  `cli.invoked` row this is the row's `verb` (the actual command that was typed), and for
+   *  every other step it stays that step, unchanged — so a mixed session names each half rather
+   *  than collapsing the `cli.invoked` half into a repeated constant. */
   sequence: string[];
   rows: HandRunLedgerRow[];
+}
+
+/** The one sequence element for `row` (design note ii): the verb where `row.step` is the
+ *  constant `cli.invoked` row every hand-typed invocation shares, the step itself otherwise.
+ *  `parseOperatorLedgerRows` already guarantees a `cli.invoked` row here carries a string
+ *  `verb` (design note i); the `row.step` fallback only guards a row built by hand (a test, or
+ *  a future caller) that skipped that invariant, and still never throws. */
+function handRunSequenceElement(row: HandRunLedgerRow): string {
+  return row.step === CLI_INVOKED_STEP && row.verb !== undefined ? row.verb : row.step;
 }
 
 /** Group `rows` into sessions: same `actorPid`, sorted by `ts`, split wherever a gap exceeds
@@ -99,7 +128,7 @@ export function buildHandRunSessions(rows: readonly HandRunLedgerRow[]): HandRun
       sessions.push({
         actorPid,
         day: current[0].ts.slice(0, 10),
-        sequence: current.map((r) => r.step),
+        sequence: current.map(handRunSequenceElement),
         rows: current,
       });
       current = [];
@@ -217,10 +246,23 @@ export const HAND_RUN_CENSUS_PROPOSED_STEP = "hand_run.census_proposed";
 
 const HAND_RUN_CENSUS_PROPOSED_LEDGER_PATTERN = /"step":"hand_run\.census_proposed"/;
 
+/** Bumped whenever a sequence ELEMENT'S SHAPE changes in a way that makes an old `signature`
+ *  incomparable to a new one (design note iv). This task moves a `cli.invoked` row's element
+ *  from the constant step to its `verb` — a text-identical `signature` computed before and
+ *  after that change can name entirely different routines, so it must never be read as the
+ *  same proposal. Recorded onto every `hand_run.census_proposed` row alongside `signature`; a
+ *  prior row missing it (every row filed before this task) or carrying an older number is a
+ *  STALE-ERA proposal and is treated as absent, never as agreement with a same-text signature
+ *  from the current era. */
+export const HAND_RUN_SEQUENCE_SCHEMA_VERSION = 2;
+
 /** One PRIOR proposal this module's own dedupe marker recorded. */
 export interface FiledHandRunProposalRecord {
   signature: string;
   ts?: string;
+  /** {@link HAND_RUN_SEQUENCE_SCHEMA_VERSION} the row was filed under; `undefined` for every row
+   *  filed before that marker existed — a pre-change (stale-era) proposal, design note iv. */
+  schemaVersion?: number;
 }
 
 /** Parse every {@link HAND_RUN_CENSUS_PROPOSED_STEP} line out of a set of raw ledger match
@@ -237,18 +279,26 @@ export function parseFiledHandRunProposalLines(rawLines: readonly string[]): Fil
       continue;
     }
     if (parsed === null || typeof parsed !== "object") continue;
-    const line = parsed as { step?: unknown; signature?: unknown; ts?: unknown };
+    const line = parsed as { step?: unknown; signature?: unknown; ts?: unknown; sequence_schema_version?: unknown };
     if (line.step === HAND_RUN_CENSUS_PROPOSED_STEP && typeof line.signature === "string") {
-      out.push({ signature: line.signature, ts: typeof line.ts === "string" ? line.ts : undefined });
+      out.push({
+        signature: line.signature,
+        ts: typeof line.ts === "string" ? line.ts : undefined,
+        schemaVersion: typeof line.sequence_schema_version === "number" ? line.sequence_schema_version : undefined,
+      });
     }
   }
   return out;
 }
 
 /** True iff `rawLines` (a {@link resolveLedgerUnion} match set) already recorded a proposal for
- *  the EXACT same sequence `signature`. */
+ *  the EXACT same sequence `signature`, filed under the CURRENT {@link
+ *  HAND_RUN_SEQUENCE_SCHEMA_VERSION} — a same-text signature filed under an earlier version is a
+ *  different routine wearing the same string (design note iv) and is never read as a match. */
 export function alreadyProposedForSignature(rawLines: readonly string[], signature: string): boolean {
-  return parseFiledHandRunProposalLines(rawLines).some((r) => r.signature === signature);
+  return parseFiledHandRunProposalLines(rawLines).some(
+    (r) => r.signature === signature && r.schemaVersion === HAND_RUN_SEQUENCE_SCHEMA_VERSION,
+  );
 }
 
 /** The raw `plan/feedback/` text for one recurrence — names the sequence, the days it recurred,
@@ -333,6 +383,7 @@ export function handRunCensus(deps: HandRunCensusCadenceOpts): HandRunCensusCade
       task_id: "hand-run-census",
       step: HAND_RUN_CENSUS_PROPOSED_STEP,
       signature: r.signature,
+      sequence_schema_version: HAND_RUN_SEQUENCE_SCHEMA_VERSION,
       feedback_id: entry.id,
       distinct_days: r.distinctDays,
       sequence: r.sequence,
