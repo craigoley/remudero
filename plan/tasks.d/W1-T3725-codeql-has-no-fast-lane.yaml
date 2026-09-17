@@ -1,0 +1,91 @@
+- id: W1-T3725
+  title: "A PLAN-ONLY FILING PAYS 3.8 MINUTES OF CodeQL ON A DIFF WITH NO CODE, AND CodeQL IS THE CRITICAL PATH — ci.yml's fast-lane class never reached the separate codeql.yml workflow, which is not even a required check: give it the same paths gate the classifier already computes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    OPERATOR REPORT 2026-09-17: "Plans are supposed to have a fast lane. Even the few minutes 5891
+    has been going seems a bit long. Plan only changes are just filing tasks which seem like are
+    almost always risk safe."
+
+    (1) THE FAST LANE WORKS, AND IS NOT THE WHOLE STORY. MEASURED on #5891, a PLAN_ONLY diff
+        touching one file under `plan/tasks.d/`:
+
+          WALL CLOCK 3.8 min
+            3.8  Analyze (javascript-typescript)   <- CodeQL, the critical path
+            2.9  ci-shard (3/4)
+            2.1  ci-shard (4/4)
+            1.5  Scan
+            0.9  Analyze (actions)
+
+        Against 20.3 min for a code PR, so W1-T2428's classifier is doing real work: the coverage
+        shards correctly skip. What remains is 3.8 minutes of static analysis of JavaScript and
+        TypeScript on a diff that contains no JavaScript or TypeScript.
+
+    (2) THE CLASSIFIER CANNOT REACH IT. `ci.yml` computes the fast-lane class and gates its own
+        jobs on it (`PLAN_ONLY|DOCS_ONLY|SOURCE`, W1-T2428). `codeql.yml` is a SEPARATE workflow
+        with `on: pull_request: branches: [main]` and no `paths` filter and no class read. It was
+        written before the classifier and never learned about it; nothing is wrong with either file
+        in isolation.
+
+    (3) IT IS NOT EVEN REQUIRED. Branch protection's required contexts are exactly
+        `remudero-review, ci-gate`. So CodeQL is advisory — it gates nothing — and still sets the
+        wall clock for every plan filing on the board.
+
+    (4) WHY THIS MATTERS MORE THAN 3.8 MINUTES. Filings are how this fleet records findings, and a
+        session files many. Every one pays the same toll, serially, while an operator waits to see
+        whether the board moved. The cost is not the minutes; it is that the queue looks stuck when
+        it is only analysing prose.
+  design: |
+    (i) GATE ON PATHS, NOT ON A CLASS RE-DERIVATION. `codeql.yml` cannot cheaply read ci.yml's
+        computed class, and a second implementation of "what is a plan-only diff" is exactly the
+        drift this repo refuses elsewhere. GitHub's own `paths-ignore` on the `pull_request`
+        trigger is declarative, needs no job, and costs nothing to evaluate.
+
+    (ii) IGNORE ONLY WHAT CANNOT CARRY CODE. `plan/**`, `docs/**`, `learnings/**` and `*.md` are
+         the surfaces a CodeQL JavaScript/TypeScript analysis has nothing to say about. Anything
+         else — including every `scripts/**` and `.github/**` path — keeps analysing, because a
+         workflow or a script IS code CodeQL reads.
+
+    (iii) THE SCHEDULED AND PUSH RUNS ARE UNTOUCHED. A weekly full scan and every push to main
+          still analyse the whole tree, so nothing stops being covered; only a PR that cannot
+          contain code stops being asked about code. THIS IS THE SAFETY ARGUMENT AND IT MUST HOLD:
+          skipping a PR analysis is only sound because the same commit is analysed on push to main.
+
+    (iv) A SKIPPED REQUIRED CHECK IS A DIFFERENT PROBLEM AND THIS ONE DOES NOT HAVE IT. CodeQL is
+         not in branch protection's required contexts, so a `paths-ignore` skip cannot leave a PR
+         unmergeable the way it would for `ci-gate`. Pinned by test, because that fact is what
+         makes the whole change safe and a future operator could add the context without knowing.
+
+    NOT IN SCOPE: the `ci-shard` cost on a plan-only diff (2.9 min — W1-T2428 already narrows the
+    suite selection; narrowing it further is its own measurement), and `Scan`/`Analyze (actions)`.
+  acceptance:
+    - claim: "a pull request touching only plan, docs, learnings or markdown does not trigger the CodeQL analysis"
+      proof: "unit test: a plan-only pull request does not trigger CodeQL"
+    - claim: "a pull request touching any code surface, including scripts and workflows, still triggers it"
+      proof: "unit test: a diff touching scripts or workflows still triggers CodeQL"
+    - claim: "the scheduled and push-to-main runs still analyse the whole tree, so nothing stops being covered"
+      proof: "unit test: the push and schedule triggers carry no paths filter"
+    - claim: "CodeQL is not a required status check, so a skipped analysis cannot leave a pull request unmergeable"
+      proof: "unit test: CodeQL is not in the required contexts a skip could strand"
+  falsifier: |
+    Add `scripts/**` or `.github/**` to the ignore list and the second assertion goes red -- that is
+    the mistake this shape invites, because both LOOK like configuration and both are code CodeQL
+    reads. Put the filter on the `push` trigger too and the third goes red, which is the one that
+    makes skipping a PR sound at all: the same commit must still be analysed somewhere. Add CodeQL
+    to branch protection's required contexts and the fourth goes red.
+  risk: medium
+  band_meaning: blast-radius
+  origin: human
+  plan_refs: [W1-T2428]
+  files: [.github/workflows/codeql.yml]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: planfast -> planfast
+
+    Minted by `rmd next-task-id` from the branch that files it; recorded because the branch is not
+    `run-` shaped.
