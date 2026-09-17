@@ -142,6 +142,7 @@
     "test/a-pr-names-the-lane-that-owns-it.test.ts": 0,
     "test/a-pr-opens-with-a-judgeable-body.test.ts": 1988,
     "test/a-pr-repair-in-flight-is-invisible-to-the-next-repairer.test.ts": 1486,
+    "test/a-pr-under-repair-names-its-holder.test.ts": 0,
     "test/a-printed-remedy-is-never-applied.test.ts": 1407,
     "test/a-printed-remedy-satisfies-the-check-that-printed-it.test.ts": 0,
     "test/a-prompt-surface-edit-carries-its-own-fixture.test.ts": 0,
