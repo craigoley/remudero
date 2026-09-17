@@ -1734,6 +1734,7 @@ import {
   queryLaunchdServiceSensed,
   queryLaunchdListStatus,
   queryLaunchdListStatusSensed,
+  queryProcessServiceSensed,
   type LaunchdServiceState,
   type LaunchdListStatus,
   realUid,
@@ -28755,19 +28756,34 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     return 0;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  const deps = realDeps().deployFor({
-    installPath: assessment.installRoot,
-    stateRoot: config.root,
-    daemonLabel: DAEMON_LABEL,
-    // The console is restarted by the SAME cycle, after the daemon verifies healthy: `rmd serve`
-    // loads its code once via tsx, so a deploy it is not restarted for is inert in it. The port is
-    // resolved the same way `rmd serve-plist` resolves it, so the probe watches the port the unit
-    // actually listens on.
-    serveLabel: SERVE_LABEL,
-    servePort: resolveServePort([], config.serve?.port),
-    uid,
-    ledgerPath: ledgerPathFor(config),
-  });
+  const deps = {
+    ...realDeps().deployFor({
+      installPath: assessment.installRoot,
+      stateRoot: config.root,
+      daemonLabel: DAEMON_LABEL,
+      // The console is restarted by the SAME cycle, after the daemon verifies healthy: `rmd serve`
+      // loads its code once via tsx, so a deploy it is not restarted for is inert in it. The port is
+      // resolved the same way `rmd serve-plist` resolves it, so the probe watches the port the unit
+      // actually listens on.
+      serveLabel: SERVE_LABEL,
+      servePort: resolveServePort([], config.serve?.port),
+      uid,
+      ledgerPath: ledgerPathFor(config),
+    }),
+    // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
+    // `launchctl list`, which throws on every call on the fleet's only host (Linux has no
+    // launchctl — see deployer.ts's file header), so it read "not observed" on every tick,
+    // permanently. This override reads the SAME sensor chain `rmd status`'s LIVENESS section
+    // already falls back to (`statusCommand`'s own `queryService`, report-commands.ts): launchd
+    // when it can sense it, the process table (`queryProcessServiceSensed`) when it cannot — so
+    // the watchdog tick and `rmd status` can never disagree about whether the daemon is alive.
+    daemonAlive: (): boolean | undefined => {
+      const launchd = queryLaunchdServiceSensed(DAEMON_LABEL, uid, defaultLifecycleExec);
+      if (launchd.sensed) return launchd.pid !== null;
+      const processTable = queryProcessServiceSensed("daemon", defaultLifecycleExec);
+      return processTable.sensed ? processTable.running : undefined;
+    },
+  };
   // W1-T3245: `--image-drift-only` is the WATCHDOG TICK's reading — recycle for a new image,
   // never restart for mount staleness, which the daemon's own freshness exit already owns.
   const result = runDeployCycle(deps, {
@@ -28775,6 +28791,14 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
+  if (result.blocker) {
+    // W1-T3694 — legible without tailing a ledger: a stale-running daemon the tick declined to
+    // act on names both shas right here, in the one place an operator or an alarm already reads.
+    console.log(
+      `### rmd deploy-run — BLOCKER: ${result.blocker.note} ` +
+        `(running ${result.blocker.runningHead}, origin/main ${result.blocker.originMain})`,
+    );
+  }
   return result.reason.startsWith("dirty-tree-conflict") || result.rolledBackTo ? 1 : 0;
 }
 
