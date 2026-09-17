@@ -64,9 +64,9 @@
     rather than by a second edit.
   acceptance:
     - claim: "no dispatchable task declares a file under a surface that is unreachable, and the check names the surface rather than a list of ids"
-      proof: "unit test: a retired surface keeps no dispatchable task"
+      proof: "grep: function dispatchableTasksUnderUnreachableSurfaces in test/a-retired-surface-keeps-no-dispatchable-task.test.ts"
     - claim: "returning any one of the retired tasks to a dispatchable status is caught, so the check is load-bearing rather than a snapshot of today"
-      proof: "unit test: a task returned to queued against an unreachable surface is caught"
+      proof: "grep: test(\"a task returned to queued against an unreachable surface is caught\" in test/a-retired-surface-keeps-no-dispatchable-task.test.ts"
   falsifier: |
     Return any one of the seven to `status: queued` and the first test must fail, naming that id and
     the unreachable surface. Point the check at an ids list instead of at the surface and it passes
