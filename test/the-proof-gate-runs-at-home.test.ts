@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { CHECK_PROOF_EXIT, preflightSummarySentence, runPreflightProofs, type PreflightTier } from "../src/run-task.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 // ── W1-T3738 — THE PROOF GATE HAS NO LOCAL TIER ──────────────────────────────────────────────
 //
@@ -126,14 +122,14 @@ test("the passing summary names the proof tier when it did not run", () => {
 // unreachable" shape this repo has paid for (#978). This test runs the real seam once, on the one
 // input that stays offline and fast: a repository with no `origin/main` to resolve against.
 test("a repo with no origin/main is SKIPPED, not refused — through the real git seam", () => {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}proof-tier-real-git-`));
-  const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
-  git("init", "-q", "-b", "main");
-  git("config", "user.email", "t@example.com");
-  git("config", "user.name", "T");
-  writeFileSync(join(dir, "a.txt"), "a\n");
-  git("add", "a.txt");
-  git("commit", "-qm", "chore: a commit carrying no task trailer");
+  // THE SHARED FIXTURE, not a seventh hand-rolled `git init`: `gitRepo()` already builds exactly
+  // this shape — a repo on `main`, one seeded commit, and no remote — with the fixture's own git
+  // identity rather than the host's. Hand-rolling it here grew `fixture-copy-census`'s
+  // `gitInitFiles` past its baseline, which is precisely the duplication that census exists to
+  // refuse. The commit's message is irrelevant to this test: what it asserts is the SKIP taken
+  // when there is no `origin/main` to resolve a merge base against.
+  const repo = gitRepo({ kind: "proof-tier-real-git" });
+  const dir = repo.dir;
 
   // No `git` and no `spawn` injected: this is the production wiring.
   const out = runPreflightProofs(dir);
@@ -144,5 +140,5 @@ test("a repo with no origin/main is SKIPPED, not refused — through the real gi
   assert.equal(out.steps.length, 1);
   assert.match(out.steps[0]!.detail ?? "", /proofs: SKIPPED/);
   assert.match(out.steps[0]!.detail ?? "", /merge-base/);
-  rmSync(dir, { recursive: true, force: true });
+  repo.cleanup();
 });
