@@ -170,6 +170,43 @@ test("a four-criterion body builds one base worktree", () => {
   }
 });
 
+// ── `--base` given with no ref token: the same guard `check-proof --base` uses ────────────────────
+
+test("--base with no following ref value refuses with exit 2, the same shape as a missing body file", () => {
+  const head = headFixture(`this line carries ${NEEDLE}\n`);
+  try {
+    bodyFile(head, 1);
+    const { code } = runCheckAcceptance(["body.md", "--base"], head);
+
+    assert.equal(code, 2, "a dangling --base must refuse rather than silently treating the next token as the ref");
+  } finally {
+    rmSync(head, { recursive: true, force: true });
+  }
+});
+
+// ── A proof that cannot even be attempted at head is skipped, never counted stale ──────────────────
+
+test("a proof that cannot be executed at head is skipped, not reported stale", () => {
+  const head = headFixture(`this line carries ${NEEDLE}\n`);
+  try {
+    // A grep target whose final path segment carries a `.` parses as a plausible FILE (W1-T219's
+    // shape check has no cwd to consult), but a DIRECTORY actually named that way refuses at
+    // execution — the exact `exec_error`-shaped throw checkAcceptanceCommand's head-side try/catch
+    // exists to absorb (never crash the whole body over one criterion).
+    mkdirSync(join(head, "fake.dir"));
+    const path = join(head, "body.md");
+    writeFileSync(path, `## Acceptance\n- claim: criterion 1\n  proof: grep: ${NEEDLE} in fake.dir\n`);
+    const { code, out } = runCheckAcceptance(["body.md", "--base", FAKE_BASE_REF], head, {
+      baseBlobDeps: { showBlob: () => `${NEEDLE} already here\n` },
+    });
+
+    assert.doesNotMatch(out, /discrimination:/, "a proof that never reached a head verdict cannot be graded stale");
+    assert.equal(code, 0, "no stale criterion was ever established, so the body still reports OK");
+  } finally {
+    rmSync(head, { recursive: true, force: true });
+  }
+});
+
 // ── Falsifier, both directions: a real discriminator and a real non-discriminator must disagree ──
 
 test("FALSIFIER: a head-only match and a both-trees match resolve to genuinely different verdicts", () => {
