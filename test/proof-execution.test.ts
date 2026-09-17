@@ -40,6 +40,21 @@ test("ACCEPTANCE #1: dialect-prefixed proofs in the real plan/tasks.yaml corpus 
   let executableCount = 0;
   for (const t of plan.tasks) {
     for (const c of t.acceptance ?? []) {
+      // A `satisfied_by` criterion carries NO proof text at all — `plan.ts`'s own validator returns
+      // early for it ("satisfied_by stands IN PLACE OF a proof"), so `c.proof` is `undefined` and
+      // `isDialectPrefixed` throws on `.trim()`. MEASURED on #5901, which files W1-T3726 in exactly
+      // that shape: this whole-corpus walk died with "Cannot read properties of undefined", taking
+      // a required `ci-shard` job with it, for a shape the schema explicitly allows.
+      //
+      // Skipping it is also the RIGHT reading, not merely the safe one: this test measures what
+      // fraction of written proofs are executable, and a criterion with no proof text is not a
+      // proof that failed to parse. It is the same set `review.ts`'s own `executableCriteria`
+      // (`criteria.filter((c) => !c.satisfied_by)`) excludes.
+      //
+      // The deeper hole is that `AcceptanceCriterion.proof` is typed `string` while the loader
+      // permits it absent — 54 tsc errors surface the moment that type is made honest. Filed
+      // separately; this skip is correct on its own terms either way.
+      if (c.satisfied_by !== undefined) continue;
       if (!isDialectPrefixed(c.proof)) continue;
       dialectCount++;
       if (parseWhitelistedProof(c.proof)) executableCount++;
