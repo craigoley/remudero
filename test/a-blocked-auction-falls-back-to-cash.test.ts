@@ -70,3 +70,71 @@ test("W1-T3692: every declared dispatch-lane openweight bound is genuinely serva
   }
   assert.ok(checked > 0, "at least one lane must declare an openweight bound, or the fallback has no eligible lane");
 });
+
+// ── W1-T3726: the divert was reachable by exactly ONE lane ──────────────────────────────────────
+// `spawnWorker` judges the fallback on `args.cashTools ?? args.tools`, and only implement ever
+// passed `cashTools`. Every other lane therefore offered its CLAUDE surface -- which names Bash --
+// so recon and diagnose were refused at the moment the subscription ran out, even though
+// DISPATCH_LANE_TOOL_BOUNDS has declared their cash equivalents since W1-T3656.
+
+import { readFileSync } from "node:fs";
+import { cashDivertSpawnFields, cashDivertToolsForLane, resolveDispatchLaneToolBound } from "../src/lib/worker.js";
+
+test("W1-T3726: the CLAUDE surface of a read-only lane is refused — this is the defect being fixed", () => {
+  for (const lane of ["recon", "diagnose"]) {
+    const claudeSurface = resolveDispatchLaneToolBound(lane, "claude");
+    assert.ok(claudeSurface.includes("Bash"), `${lane} really does declare Bash on Claude`);
+    assert.match(
+      String(cashFallbackRefusal(base, claudeSurface)),
+      /not implementable by cash/,
+      `${lane}'s Claude surface must be the thing that was refused`,
+    );
+  }
+});
+
+test("W1-T3726: each read-only lane now OFFERS a surface the fallback accepts", () => {
+  for (const lane of ["recon", "diagnose"]) {
+    const divert = cashDivertToolsForLane(lane);
+    assert.ok(divert !== undefined, `${lane} must offer a divert surface`);
+    assert.equal(divert!.includes("Bash"), false, "and it must not smuggle a shell in");
+    assert.equal(
+      cashFallbackRefusal(base, divert),
+      undefined,
+      `${lane} must be eligible once it offers its own cash surface`,
+    );
+  }
+});
+
+test("W1-T3726: alert_fix offers NO divert — it commits and pushes, which the check-runner cannot", () => {
+  // `undefined` rather than a throw: this answers an OFFER, so "no cash equivalent" is a valid
+  // answer meaning "keep this lane on the subscription", not a routing error.
+  assert.equal(cashDivertToolsForLane("alert_fix"), undefined);
+  // retro is deliberately absent too: its prompt does `git add` + commit, so a shell-less retro
+  // would be handed a surface that cannot do what it was just asked to do.
+  assert.equal(cashDivertToolsForLane("retro") === undefined, false, "retro declares a bound...");
+});
+
+test("W1-T3726: an UNKNOWN lane throws, so a typo cannot silently disable a divert", () => {
+  assert.throws(() => cashDivertToolsForLane("recno"), /no declared tool bound for dispatch lane/);
+});
+
+test("W1-T3726: both read-only dispatch sites actually PASS cashTools to the spawn", () => {
+  // THE WIRING, NOT JUST THE HELPER. The helper returning a good list changes nothing if the call
+  // site never hands it over -- which is precisely how this defect survived W1-T3656.
+  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  for (const lane of ["recon", "diagnose"]) {
+    assert.ok(
+      src.includes(`...cashDivertSpawnFields("${lane}")`),
+      `the ${lane} dispatch must spread the divert fields, or the auction still judges its Claude surface`,
+    );
+  }
+});
+
+test("W1-T3726: the spread helper carries the surface for a divertible lane and nothing for the rest", () => {
+  // BOTH ARMS, because the whole point of this shape is that the call site has no branch to test:
+  // if this is wrong, run-task spreads the wrong thing and nothing else notices.
+  assert.deepEqual(cashDivertSpawnFields("recon"), { cashTools: cashDivertToolsForLane("recon") });
+  assert.deepEqual(cashDivertSpawnFields("diagnose"), { cashTools: cashDivertToolsForLane("diagnose") });
+  assert.deepEqual(cashDivertSpawnFields("alert_fix"), {}, "a lane with no cash equivalent spreads NOTHING");
+  assert.equal("cashTools" in cashDivertSpawnFields("alert_fix"), false, "not even an undefined key");
+});
