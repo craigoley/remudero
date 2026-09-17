@@ -17,7 +17,16 @@
 // `--record-evidence` merges that evidence into a separate proposal artifact. Applying that
 // proposal remains a reviewed baseline change; a running job never dirties its checkout.
 //
-// Why: recon-2026-09-05 R-40 — plan/tasks.d/W1-T2904-*.yaml.
+// W1-T3699: the proposal artifact had zero consumers, so 300 of 1,566 files stayed at duration 0
+// forever and the SHARD ALLOCATOR (not `tierForDuration`) treated each as free. Three additions,
+// scoped to this file: (a) `weightedDurationMs`/`medianMeasuredDurationMs` make the allocator
+// weigh an unmeasured file at the ledger's measured median rather than zero; (b) `unmeasuredSummary`
+// and the default summary line make the blind spot readable instead of hand-derived; (c)
+// `proposalIsMaterial` (wired to `--propose`) decides whether a proposal actually differs enough
+// from what is committed to be worth a pull request — the gating a future "open the PR" rung needs.
+// That rung itself (downloading CI's proposal artifact and calling it) is not part of this change.
+//
+// Why: recon-2026-09-05 R-40 — plan/tasks.d/W1-T2904-*.yaml; plan/tasks.d/W1-T3699-*.yaml.
 
 import { readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -90,6 +99,38 @@ export function tierForDuration(durationMs, thresholdMs) {
   return durationMs >= thresholdMs ? "slow" : "fast";
 }
 
+/** The median across every RECORDED, MEASURED (> 0) duration in `manifest` — the seed placeholder
+ *  and any absent entry are excluded, so one unmeasured file cannot drag its own stand-in down.
+ *  Zero when nothing has been measured yet, which only matters before the very first evidence pass. */
+export function medianMeasuredDurationMs(manifest) {
+  const measured = Object.values(manifest.files ?? {})
+    .filter((d) => typeof d === "number" && d > 0)
+    .sort((a, b) => a - b);
+  if (measured.length === 0) return 0;
+  const mid = Math.floor(measured.length / 2);
+  return measured.length % 2 === 0 ? (measured[mid - 1] + measured[mid]) / 2 : measured[mid];
+}
+
+/** The duration the SHARD ALLOCATOR weighs `file` at: its own recorded duration when that is a
+ *  real measurement, or the ledger-wide measured median when the file is unmeasured (no entry, or
+ *  the explicit 0 seed placeholder — see the file header) — never zero. A recorded zero is not a
+ *  claim that a file is free; weighting it as such is exactly the blind spot W1-T3699 measured (300
+ *  of 1,566 files distributed as though weightless). The median is strictly better than zero on
+ *  every distribution without inventing a per-file estimate. */
+export function weightedDurationMs(file, manifest, medianMs = medianMeasuredDurationMs(manifest)) {
+  const recorded = manifest.files[file];
+  return typeof recorded === "number" && recorded > 0 ? recorded : medianMs;
+}
+
+/** How many of `testFiles` carry NO real measurement (absent, or the explicit 0 seed placeholder)
+ *  and what share of the suite that is — the number recon-2026-09-16 could only get by hand-deriving
+ *  it from the manifest JSON. `share` is 0 when `testFiles` is empty rather than NaN. */
+export function unmeasuredSummary(testFiles, manifest) {
+  const unmeasuredCount = testFiles.filter((f) => !(manifest.files[f] > 0)).length;
+  const total = testFiles.length;
+  return { unmeasuredCount, total, share: total === 0 ? 0 : unmeasuredCount / total };
+}
+
 /** Test files present on disk (`testFiles`) that `manifest` records NO ENTRY for at all — order
  *  preserved from `testFiles`. This is the refusal W1-T2904's acceptance names: "a test file
  *  absent from the tier manifest is refused." A file recorded at duration 0 (§ file header) is
@@ -116,17 +157,17 @@ export function tierFiles(testFiles, manifest) {
  * shard index, so zero-duration placeholders still spread evenly. */
 export function balanceFilesByDuration(testFiles, manifest, shardCount) {
   if (!Number.isInteger(shardCount) || shardCount < 1) throw new RangeError("shardCount must be a positive integer");
+  const medianMs = medianMeasuredDurationMs(manifest);
+  const weight = (file) => weightedDurationMs(file, manifest, medianMs);
   const shards = Array.from({ length: shardCount }, () => ({ files: [], durationMs: 0 }));
-  const ordered = [...testFiles].sort(
-    (a, b) => (manifest.files[b] ?? 0) - (manifest.files[a] ?? 0) || a.localeCompare(b),
-  );
+  const ordered = [...testFiles].sort((a, b) => weight(b) - weight(a) || a.localeCompare(b));
   for (const file of ordered) {
     const target = shards.reduce((best, shard) => {
       if (shard.durationMs !== best.durationMs) return shard.durationMs < best.durationMs ? shard : best;
       return shard.files.length < best.files.length ? shard : best;
     });
     target.files.push(file);
-    target.durationMs += manifest.files[file] ?? 0;
+    target.durationMs += weight(file);
   }
   return shards.map((shard) => shard.files);
 }
@@ -141,13 +182,13 @@ function splitFilesByCount(testFiles, shardCount) {
   });
 }
 
-function shardDurationMs(files, manifest) {
-  return files.reduce((sum, file) => sum + (manifest.files[file] ?? 0), 0);
+function shardDurationMs(files, manifest, medianMs) {
+  return files.reduce((sum, file) => sum + weightedDurationMs(file, manifest, medianMs), 0);
 }
 
-function maxDurationFile(files, manifest) {
+function maxDurationFile(files, manifest, medianMs) {
   return files.reduce((best, file) => {
-    const durationMs = manifest.files[file] ?? 0;
+    const durationMs = weightedDurationMs(file, manifest, medianMs);
     if (durationMs !== best.durationMs) return durationMs > best.durationMs ? { file, durationMs } : best;
     return file < best.file ? { file, durationMs } : best;
   }, { file: "", durationMs: 0 });
@@ -155,14 +196,15 @@ function maxDurationFile(files, manifest) {
 
 export function summarizeShardBalance(testFiles, manifest, shardCount, balancedShards) {
   if (!Number.isInteger(shardCount) || shardCount < 1) throw new RangeError("shardCount must be a positive integer");
-  const selectedDurationMs = testFiles.reduce((sum, file) => sum + (manifest.files[file] ?? 0), 0);
+  const medianMs = medianMeasuredDurationMs(manifest);
+  const selectedDurationMs = testFiles.reduce((sum, file) => sum + weightedDurationMs(file, manifest, medianMs), 0);
   const selectedMeanDurationMs = selectedDurationMs / shardCount;
-  const balancedDurations = balancedShards.map((files) => shardDurationMs(files, manifest));
-  const countSplitDurations = splitFilesByCount(testFiles, shardCount).map((files) => shardDurationMs(files, manifest));
+  const balancedDurations = balancedShards.map((files) => shardDurationMs(files, manifest, medianMs));
+  const countSplitDurations = splitFilesByCount(testFiles, shardCount).map((files) => shardDurationMs(files, manifest, medianMs));
   const slowestShardDurationMs = Math.max(...balancedDurations, 0);
   const fastestShardDurationMs = balancedDurations.length === 0 ? 0 : Math.min(...balancedDurations);
   const countSplitSlowestDurationMs = Math.max(...countSplitDurations, 0);
-  const longestFile = maxDurationFile(testFiles, manifest);
+  const longestFile = maxDurationFile(testFiles, manifest, medianMs);
   const bindingFloor = longestFile.durationMs > selectedMeanDurationMs
     ? {
         file: longestFile.file,
@@ -231,7 +273,7 @@ export function selectPlanReadingShard(candidateText, testFiles, manifest, shard
   return {
     candidates,
     files,
-    predictedDurationMs: files.reduce((sum, file) => sum + manifest.files[file], 0),
+    predictedDurationMs: files.reduce((sum, file) => sum + weightedDurationMs(file, manifest), 0),
     balance,
   };
 }
@@ -318,6 +360,37 @@ export function durationStalenessWarnings(manifest, measured, factor = DURATION_
   return warnings;
 }
 
+/**
+ * Whether adopting `proposed` in place of `committed` is worth a pull request (W1-T3699 design
+ * ii): MATERIAL when a previously-unmeasured file (absent, or the explicit 0 seed placeholder —
+ * file header) gains its first real measurement, OR when a measured entry moves enough to change
+ * which shard `balanceFilesByDuration` assigns it to at `shardCount`. An unchanged manifest, or a
+ * measured value nudged by millisecond noise that lands every file on the same shard as before,
+ * is NOT material — no fixed cadence, no fixed byte threshold; the balancer's own assignment is
+ * the only test. `shardCount` should match the real coverage matrix; this function does not guess it.
+ */
+export function proposalIsMaterial(committed, proposed, shardCount = 4) {
+  const files = [...new Set([...Object.keys(committed.files ?? {}), ...Object.keys(proposed.files ?? {})])].sort();
+  if (files.length === 0) return false;
+
+  const firstRealMeasurement = files.some((file) => {
+    const before = committed.files?.[file];
+    const after = proposed.files?.[file];
+    return !(typeof before === "number" && before > 0) && typeof after === "number" && after > 0;
+  });
+  if (firstRealMeasurement) return true;
+
+  const effectiveShardCount = Math.max(1, Math.min(shardCount, files.length));
+  const shardOf = (shards) => {
+    const map = new Map();
+    shards.forEach((shardFiles, index) => shardFiles.forEach((file) => map.set(file, index)));
+    return map;
+  };
+  const before = shardOf(balanceFilesByDuration(files, committed, effectiveShardCount));
+  const after = shardOf(balanceFilesByDuration(files, proposed, effectiveShardCount));
+  return files.some((file) => before.get(file) !== after.get(file));
+}
+
 /** Writes `manifest` to `path` as stable, sorted-key JSON — a deterministic diff on every
  *  recording pass, never a hash-order-dependent one. */
 export function writeManifest(path, manifest) {
@@ -390,6 +463,25 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
         "the tracked manifest was not modified.",
     );
     return 0;
+  }
+
+  if (argv.includes("--propose")) {
+    const proposedPath = getFlagValue(argv, "--proposed");
+    if (!proposedPath) {
+      console.error("test-tier-manifest: --propose requires --proposed <path> (--committed defaults to --manifest)");
+      return 2;
+    }
+    const committedPath = getFlagValue(argv, "--committed") ?? manifestPath;
+    const shardCountRaw = getFlagValue(argv, "--shard-count");
+    const shardCount = shardCountRaw ? Number(shardCountRaw) : 4;
+    const committed = loadManifest(resolve(root, committedPath));
+    const proposed = loadManifest(resolve(root, proposedPath));
+    if (proposalIsMaterial(committed, proposed, shardCount)) {
+      console.log("test-tier-manifest: proposal is material — open a pull request adopting it.");
+      return 0;
+    }
+    console.log("test-tier-manifest: proposal is not material — no pull request needed.");
+    return 1;
   }
 
   const classifyMissing = () => {
@@ -531,7 +623,7 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     const balance = summarizeShardBalance(testFiles, manifest, shard.count, balanced);
     console.error(
       "test-tier-manifest: coverage shard summary " +
-        `assigned_count=${files.length} predicted_duration_ms=${files.reduce((sum, file) => sum + (manifest.files[file] ?? 0), 0)} ` +
+        `assigned_count=${files.length} predicted_duration_ms=${files.reduce((sum, file) => sum + weightedDurationMs(file, manifest), 0)} ` +
         `selected_total_duration_ms=${balance.selectedDurationMs} selected_mean_duration_ms=${balance.selectedMeanDurationMs} ` +
         `slowest_shard_excess_ms=${balance.slowestShardExcessMs} binding_floor_file=${balance.bindingFloor?.file ?? "none"} ` +
         `binding_floor_duration_ms=${balance.bindingFloor?.durationMs ?? 0} shard=${shard.index}/${shard.count}`,
@@ -569,9 +661,11 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
   }
 
   const { fast, slow } = tierFiles(testFiles, manifest);
+  const unmeasured = unmeasuredSummary(testFiles, manifest);
   console.log(
     `test-tier-manifest: ${testFiles.length} test file(s) — ${fast.length} fast, ${slow.length} slow ` +
-      `(threshold ${manifest.thresholdMs}ms).`,
+      `(threshold ${manifest.thresholdMs}ms); ${unmeasured.unmeasuredCount} unmeasured ` +
+      `(${(unmeasured.share * 100).toFixed(1)}% of the suite).`,
   );
   return 0;
 }

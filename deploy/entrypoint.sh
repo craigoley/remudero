@@ -295,6 +295,28 @@ sync_tree() {
   fi
 }
 
+# ── W1-T3684: the PATH `rmd` resolves to becomes the tree this script just chose ─────────────
+# Invariant: an operator's bare `rmd` and the daemon this script execs must load the SAME src/,
+# never the `/app` snapshot the image bakes, which can sit arbitrarily many commits behind by the
+# time anyone runs it. Prepending `$TREE/bin` to PATH makes any later lookup of the word `rmd`
+# resolve there first.
+# Trap: `bin/rmd` resolves its own package root from its OWN on-disk location, so a PATH hit on
+# `/app/bin/rmd` stays pinned to `/app` no matter how it was found — `src/lib/image-drift.ts`
+# (W1-T1021) rightly calls `/app` "inert", but that is false for its own `bin/rmd`.
+# The fallback stays silent only under `RMD_SKIP_BOOTSTRAP=1`, where this function is never
+# called (no tree exists yet). Every OTHER call site runs after a real checkout, so a live tree
+# with no usable `bin/rmd` is a loud ERROR, never a silent fall back to code of unknown age.
+# Falsifier: test/the-cli-on-path-resolves-to-the-live-tree.test.ts.
+resolve_rmd_on_path() {
+  if [ -x "$TREE/bin/rmd" ]; then
+    PATH="$TREE/bin:$PATH"
+    export PATH
+    log "rmd on PATH -> $TREE/bin/rmd (tree $TREE, $(git -C "$TREE" rev-parse --short HEAD))"
+  else
+    die "live tree at $TREE has no usable bin/rmd (missing or not executable) — refusing to silently fall back to a snapshot of unknown age"
+  fi
+}
+
 # ── CLONE, OR SYNC WHAT IS ALREADY THERE ─────────────────────────────────────────────────────
 if [ ! -e "$TREE/.git" ]; then
   log "no work tree at $TREE — cloning $REPO_URL"
@@ -306,8 +328,9 @@ else
 fi
 
 # Print the resolved commit unconditionally — the pin is worthless if "which code ran" cannot be
-# answered after the fact.
+# answered after the fact. `resolve_rmd_on_path` answers "which tree" right beside it.
 log "checkout: $(git -C "$TREE" rev-parse HEAD) ($REF)"
+resolve_rmd_on_path
 
 # ── The bootstrap install, and only that ─────────────────────────────────────────────────────
 # Invariant: `ensureInstallFresh` (src/run-task.ts) already decides "should I reinstall" for every
@@ -529,6 +552,7 @@ while :; do
     sleep "$FRESHNESS_RESTART_PAUSE_S"
     sync_tree
     log "checkout: $(git -C "$TREE" rev-parse HEAD) ($REF)"
+    resolve_rmd_on_path
     continue
   fi
 
@@ -542,6 +566,7 @@ while :; do
     sleep "$BLOCKED_RESTART_PAUSE_S"
     sync_tree
     log "checkout: $(git -C "$TREE" rev-parse HEAD) ($REF)"
+    resolve_rmd_on_path
     continue
   fi
 
@@ -557,6 +582,7 @@ while :; do
     sleep "$ENVIRONMENTAL_RESTART_PAUSE_S"
     sync_tree
     log "checkout: $(git -C "$TREE" rev-parse HEAD) ($REF)"
+    resolve_rmd_on_path
     continue
   fi
 

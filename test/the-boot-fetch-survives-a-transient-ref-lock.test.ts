@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -69,6 +69,11 @@ function makeOrigin(): string {
   git(origin, ["init", "-q", "-b", "main"]);
   writeFileSync(join(origin, "package.json"), '{"name":"fixture","version":"1.0.0"}\n');
   writeFileSync(join(origin, "first.txt"), "one\n");
+  // W1-T3684: `resolve_rmd_on_path` refuses the boot when the checked-out tree has no usable
+  // `bin/rmd` — exactly as a real checkout of this repo never would.
+  mkdirSync(join(origin, "bin"), { recursive: true });
+  writeFileSync(join(origin, "bin", "rmd"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+  chmodSync(join(origin, "bin", "rmd"), 0o755);
   git(origin, ["add", "-A"]);
   commit(origin, "c1");
   return origin;

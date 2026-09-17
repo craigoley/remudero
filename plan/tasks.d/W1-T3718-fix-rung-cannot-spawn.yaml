@@ -103,3 +103,20 @@
     the literal `unknown`, which is the remedy the check names for exactly that case. Same id,
     same author, same session -- renumbering would burn a reserved id to paper over a checkout
     state.
+    CORRECTION, MEASURED 2026-09-17 ~02:20Z, about 90 minutes after this was filed.
+
+    THE STALL IS TRANSIENT, NOT A STANDING OUTAGE, and the title overstates it. The fix rung is
+    spawning again with NO config change: 6 `fix.dispatch` and 8 `run.start` in the last 90
+    minutes of ledger, and ZERO `fix.spawn_infra_blocked`. The provider capacity that read
+    "unreadable" recovered on its own.
+
+    THE TASK STANDS, AND ITS POINT IS SHARPER FOR IT. The defect was never "the fleet is
+    permanently dead" -- it is that a stall of the repair ladder is INVISIBLE while it lasts, and
+    recovers or does not without anyone knowing either way. An outage nobody can see costs the
+    same whether it lasts ninety minutes or a day, and the operator symptom is identical: red PRs
+    stop moving and a human works the queue.
+
+    READ (1)-(5) AS A MEASUREMENT OF ONE STALL, not as the fleet's steady state. Design (i)'s
+    durable state with a first-seen instant and (iii)'s priced switch are what turn a stall like
+    this one into something an operator can see and decide about; neither is an argument that a
+    paid fallback is needed today.

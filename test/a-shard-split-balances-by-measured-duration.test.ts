@@ -68,12 +68,15 @@ test("selected-set duration balancing shrinks the slowest shard's excess against
   const first = selectPlanReadingShard(candidates(selected), selected, manifest, { index: 1, count: 2 });
   const second = selectPlanReadingShard(candidates(selected), selected, manifest, { index: 2, count: 2 });
 
-  assert.equal(first.balance.selectedDurationMs, 200);
-  assert.equal(first.balance.selectedMeanDurationMs, 100);
-  assert.equal(first.balance.slowestShardExcessMs, 0);
-  assert.equal(first.balance.countSplitSlowestExcessMs, 90);
+  // W1-T3699: `test/d.test.ts`'s recorded 0 is the unmeasured placeholder, so the allocator now
+  // weighs it at the manifest's measured median (95, from 10/90/100/10_000) rather than 0 — these
+  // numbers moved from the pre-W1-T3699 zero-weighted 200/100/0/90/[100,100] for that reason.
+  assert.equal(first.balance.selectedDurationMs, 295);
+  assert.equal(first.balance.selectedMeanDurationMs, 147.5);
+  assert.equal(first.balance.slowestShardExcessMs, 37.5);
+  assert.equal(first.balance.countSplitSlowestExcessMs, 42.5);
   assert.ok(first.balance.slowestShardExcessMs < first.balance.countSplitSlowestExcessMs);
-  assert.deepEqual([first.predictedDurationMs, second.predictedDurationMs], [100, 100]);
+  assert.deepEqual([first.predictedDurationMs, second.predictedDurationMs], [110, 185]);
 });
 
 test("a selected file above the balanced mean is named as the binding floor in the report", () => {

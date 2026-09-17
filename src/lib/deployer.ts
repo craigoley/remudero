@@ -102,6 +102,24 @@ export interface Decision {
    *  so a dead-or-stopped daemon's marker is never silently discarded; see runDeployCycle's
    *  skip branch. */
   satisfied?: boolean;
+  /** W1-T3694 — present when the WATCHDOG TICK (`imageDriftOnly`) observed a stale-running
+   *  daemon (its boot sha behind the checkout) and, per W1-T3245's separation of actors,
+   *  deliberately did not restart on it. Named here as DATA — not only folded into `reason`'s
+   *  prose — so a caller (the ledger row, a future status row) can render it as a standing
+   *  blocker naming both shas without re-parsing text. */
+  blocker?: StaleRunningDaemonBlocker;
+}
+
+/** W1-T3694's own blocker shape — see {@link Decision.blocker}. */
+export interface StaleRunningDaemonBlocker {
+  kind: "stale_running_daemon";
+  /** The sha the DAEMON PROCESS actually booted on — {@link TriggerInputs.runningHead}. */
+  runningHead: string;
+  /** origin/main's sha at comparison time — the checkout is already current with this; only the
+   *  daemon process is not. */
+  originMain: string;
+  /** Why the tick did not act — names W1-T3245 so a reader is not left to guess. */
+  note: string;
 }
 
 /** Same commit, tolerating a short-vs-full sha on either side — a format mismatch would read
@@ -185,6 +203,23 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   // Having the tick also act on `behind`/`runningStale` would put a second actor on the daemon's
   // own job and race it. The operator's `rmd deploy` keeps today's full reading.
   const restartReasons = i.imageDriftOnly === true ? false : behind || runningStale;
+  // W1-T3694 — THE TICK'S OWN BLOCKER. `restartReasons` above DISCARDS `runningStale` whenever
+  // `imageDriftOnly` is true; that discard is correct (W1-T3245) but must not be reported as
+  // "up-to-date" below, which is what let a stale-running daemon read healthy for over an hour on
+  // 2026-09-16. `undefined` `runningHead` still reads STALE (fail-eager, per this function's own
+  // header) but there is no sha to name in a blocker, so that case is left to the reason text alone.
+  const runningStaleIgnoredByTick = i.imageDriftOnly === true && runningStale;
+  const staleDaemonBlocker: StaleRunningDaemonBlocker | undefined =
+    runningStaleIgnoredByTick && i.runningHead !== undefined
+      ? {
+          kind: "stale_running_daemon",
+          runningHead: i.runningHead,
+          originMain: i.originMain,
+          note:
+            "the recycle tick does not restart on mount staleness — that is the daemon's own " +
+            "freshness check's job (W1-T3245)",
+        }
+      : undefined;
   const alreadyFailed = i.lastFailedHead !== undefined && i.originMain === i.lastFailedHead;
   // W1-T3245: in the tick's reading the REASON must name the image too. `behind` can be true while
   // the tick is deliberately ignoring it, and reporting "install behind origin/main" for a recycle
@@ -209,13 +244,33 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
     return { deploy: true, reason: "daemon is not running and no STOP is set — restarting it" };
   }
   if (!restartReasons && !imageStale) {
-    // Claim the daemon is running it only when liveness was actually OBSERVED.
+    // W1-T3694: the tick computed `runningStale` and is deliberately ignoring it (W1-T3245) —
+    // that is NOT "up-to-date", it is a daemon known to be running old code. Name it, and never
+    // consume an operator's request over a fleet that is not actually current.
+    if (runningStaleIgnoredByTick) {
+      return {
+        deploy: false,
+        reason:
+          i.runningHead !== undefined
+            ? `daemon running stale code (install HEAD == origin/main; running head ${i.runningHead} ` +
+              "predates it) — the recycle tick does not restart on mount staleness, which is the " +
+              "daemon's own freshness check's job (W1-T3245)"
+            : "daemon running head not recorded (install HEAD == origin/main) — mount staleness " +
+              "cannot be ruled out, and the recycle tick does not restart on it either way (W1-T3245)",
+        satisfied: undefined,
+        ...(staleDaemonBlocker ? { blocker: staleDaemonBlocker } : {}),
+      };
+    }
+    // Claim the daemon is running it only when liveness was actually OBSERVED — an unmeasured
+    // quantity is never reported "up-to-date" (W1-T3694): that word is reserved for the one case
+    // both the checkout AND the daemon's liveness were actually confirmed.
     return {
       deploy: false,
       reason:
         i.daemonAlive === true
           ? "up-to-date (install HEAD == origin/main, daemon alive and running it)"
-          : "up-to-date (install HEAD == origin/main; daemon liveness not observed)",
+          : "daemon liveness not observed (install HEAD == origin/main) — cannot confirm the " +
+            "running code is actually current",
       // Only `daemonAlive === true` counts as OBSERVED — `false`/`undefined` both mean "not
       // observed" (see the reason wording above) and must not consume a request out from under a
       // fleet that might not even be running.
@@ -650,6 +705,10 @@ export interface DeployResult {
   consoleRestarted?: boolean;
   /** The console returned to listening within its window. `false` = loud failure, NOT a rollback. */
   consoleHealthy?: boolean;
+  /** W1-T3694 — carried through unchanged from {@link Decision.blocker} on a skip, so a caller
+   *  (the ledger row, `rmd deploy-run`'s own stdout) can render the standing state without
+   *  re-parsing `reason`'s prose. */
+  blocker?: StaleRunningDaemonBlocker;
 }
 
 /**
@@ -792,8 +851,16 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
         ? "consumed"
         : "retained";
     if (request === "consumed") deps.clearMarker();
-    deps.log("deploy.skip", { reason: decision.reason, install: short(fromHead), origin: short(origin), request });
-    return { deployed: false, reason: decision.reason, fromHead };
+    // W1-T3694: the blocker rides the SAME skip row as `reason` — a stale-running daemon is
+    // legible off this one line, naming both shas, rather than requiring a second read.
+    deps.log("deploy.skip", {
+      reason: decision.reason,
+      install: short(fromHead),
+      origin: short(origin),
+      request,
+      ...(decision.blocker ? { blocker: decision.blocker } : {}),
+    });
+    return { deployed: false, reason: decision.reason, fromHead, ...(decision.blocker ? { blocker: decision.blocker } : {}) };
   }
 
   // Clean-tree guard — abort (never force) on a conflicting dirty tree.

@@ -133,7 +133,9 @@ test("a no-op cycle restarts nothing — the console is not bounced every 120s",
   const result = runDeployCycle(r.deps);
 
   assert.equal(result.deployed, false);
-  assert.match(result.reason, /up-to-date/);
+  // W1-T3694: daemonAlive is not wired in this fixture — liveness is unobserved, so the reason
+  // says so rather than claiming "up-to-date" over a quantity it never measured.
+  assert.match(result.reason, /liveness not observed/);
   assert.ok(!r.calls.includes("kickstart:console"), "no deploy, no console restart");
   assert.ok(!r.calls.includes("kickstart:daemon"), "and no daemon restart either");
 });

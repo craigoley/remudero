@@ -284,11 +284,16 @@ test("criterion 7: over a mixed plan, ONLY blockedRecordUnruledViolations's own 
   // What `blocked-record-unruled` alone names, over the whole plan.
   const namedByThisCheck = new Set<string>();
   // What every OTHER check combined names (by task id) among violations that even mention
-  // "retirement" or "disposition" — the only way an unrelated check could be doing this job.
+  // "retirement" or "disposition" — the only way an UNRELATED check could be doing this job.
+  // `blocked-without-disposition` (W1-T3686) is excluded from "unrelated": it is this check's
+  // declared, deliberate sibling, which narrows the SAME population by additionally requiring no
+  // unmet `depends_on` entry — see its own suite (a-blocked-task-with-no-disposition-is-reported)
+  // for that check's full contract. Co-firing on `depends_on: []` is the intended overlap, not an
+  // incidental duplicate this criterion exists to catch.
   const namedByAnyOtherCheck = new Set<string>();
   for (const [id, result] of results) {
     for (const v of result.violations) {
-      if (v.check === "blocked-record-unruled") {
+      if (v.check === "blocked-record-unruled" || v.check === "blocked-without-disposition") {
         namedByThisCheck.add(id);
       } else if (/retirement|disposition/i.test(v.message)) {
         namedByAnyOtherCheck.add(id);

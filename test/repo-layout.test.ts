@@ -1,14 +1,34 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
 import { RepoLayoutError, resolveRepoLayout } from "../src/lib/repo-layout.js";
 import { loadPlanForLayout } from "../src/lib/plan.js";
 import { loadLearningsCorpus, projectLearningsHome } from "../src/lib/learnings.js";
 import { loadAlertPolicyForRepo } from "../src/lib/alert-lane.js";
+
+// `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import is a TS7016 (same reason
+// test/comment-load-ratchet.test.ts loads it this way). W1-T3701 reuses this REAL module's split
+// between a ceiling and a measured count rather than restating it (see the ratchet below).
+const { evaluateCommentLoadRatchet } = (await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "comment-load-ratchet.mjs")).href
+)) as {
+  evaluateCommentLoadRatchet: (
+    current: Record<string, number>,
+    baseline: Record<string, number>,
+  ) => {
+    ok: boolean;
+    violations: Array<{ path: string; comments: number; baseline: number; overage: number }>;
+    shrunk: Array<{ path: string; from: number; to: number }>;
+    added: Array<{ path: string; comments: number }>;
+    removed: string[];
+    nextBaseline: Record<string, number>;
+  };
+};
 
 /**
  * test/repo-layout.test.ts — W1-T2922's own falsifier.
@@ -30,6 +50,16 @@ import { loadAlertPolicyForRepo } from "../src/lib/alert-lane.js";
  * count"). Its subject genuinely IS the source text, not a snapshot standing in for behaviour, so
  * it declares itself here (test/source-text-assertion-census.test.ts's own exemption) rather than
  * pass through that census silently.
+ *
+ * W1-T3701: the ratchet's CEILING used to be a hand-frozen literal per house-layout string, which
+ * sits at zero headroom the day it is measured and refuses the NEXT file to mention any of them
+ * regardless of whether THIS diff is the one that added it. The ceiling below is now the MERGE
+ * BASE's own count, read fresh each run via `git ls-tree`/`git show` — never a stored number — and
+ * compared through `evaluateCommentLoadRatchet` (scripts/comment-load-ratchet.mjs), the same split
+ * between a diff's OWN growth and what it merely inherited that gate already implements. See
+ * test/a-house-layout-site-is-judged-against-the-merge-base.test.ts for the tiered response (a
+ * site a file can resolve through `resolveRepoLayout` right now is refused; one that cannot yet is
+ * recorded as a conversion task and admits the diff) and the caller-vs-inliner adoption ratio.
  */
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -181,45 +211,74 @@ function listSrcFiles(root: string): string[] {
 
 const HOUSE_LITERALS = ["plan/tasks.d", "MASTER-PLAN.md", ".remudero/", "learnings/"] as const;
 
-/**
- * Frozen at THIS diff's own post-change count (measured against this same head): centralizing the
- * house defaults in repo-location.ts is the one deliberate new site this diff itself adds (it now
- * carries `"MASTER-PLAN.md"`, `"plan"` + `"tasks.yaml"`, `".remudero"` + `"principles.yaml"` and
- * `"learnings"` as the ONE place a foreign target overrides). Every OTHER non-test src file's count
- * is unchanged by this diff. A future file assuming the house shape inline, instead of resolving
- * it through {@link resolveRepoLayout}, pushes a count past its own literal here and this test
- * reddens — the ratchet the task record calls for.
- */
-//
-// RE-FROZEN ONCE, AND ONLY WHERE MAIN MOVED. `plan/tasks.d` went 23 -> 24 while this branch was
-// open, and the growth is not this diff's: MEASURED on origin/main ALONE the count is already 24,
-// and on the merged branch it is also 24 — this PR adds no site. The ceiling is re-frozen at the
-// inherited number rather than the branch being blamed for it, which is the same distinction
-// comment-load-ratchet draws in as many words ("already carried N at the merge base — inherited,
-// not this diff's growth"). The ratchet keeps its direction: a 25th site still reddens.
-const HOUSE_LITERAL_CEILING: Record<(typeof HOUSE_LITERALS)[number], number> = {
-  "plan/tasks.d": 24,
-  "MASTER-PLAN.md": 19,
-  ".remudero/": 18,
-  "learnings/": 16,
-};
-
-test("W1-T2922 ratchet: non-test src's house-layout literal count cannot grow past this diff's own count", () => {
-  const files = listSrcFiles(REPO_ROOT);
+/** Per-literal file-presence counts over a fixed set of already-read file contents (never re-reads
+ *  anything — the caller decides whether that content came from the working tree or a git ref). */
+function houseLiteralCounts(contents: readonly string[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const literal of HOUSE_LITERALS) counts[literal] = 0;
-  for (const file of files) {
-    const content = readFileSync(file, "utf8");
-    for (const literal of HOUSE_LITERALS) {
-      if (content.includes(literal)) counts[literal] += 1;
-    }
+  for (const content of contents) {
+    for (const literal of HOUSE_LITERALS) if (content.includes(literal)) counts[literal] += 1;
   }
-  for (const literal of HOUSE_LITERALS) {
-    assert.ok(
-      counts[literal] <= HOUSE_LITERAL_CEILING[literal],
-      `'${literal}' now appears in ${counts[literal]} non-test src files, exceeding the frozen ` +
-        `ceiling of ${HOUSE_LITERAL_CEILING[literal]} — a new file assumed the house layout ` +
-        `inline instead of resolving it through resolveRepoLayout (src/lib/repo-layout.ts)`,
-    );
-  }
+  return counts;
+}
+
+/** The merge base's own commit, resolved fresh every run — never a stored number (design note i).
+ *  Mirrors scripts/comment-load-ratchet.mjs's `readBaseDiff`: a non-hex result means git could not
+ *  name a commit for `baseRef`, which must fail loud rather than silently comparing against "". */
+function resolveMergeBase(root: string, baseRef = "origin/main"): string {
+  const base = execFileSync("git", ["-C", root, "merge-base", baseRef, "HEAD"], { encoding: "utf8" }).trim();
+  assert.match(base, /^[0-9a-f]{40}$/i, `git did not return a commit identity for ${baseRef}`);
+  return base;
+}
+
+/** Every non-test `src/*.ts` path tracked at `ref` (repo-relative), the git-backed counterpart of
+ *  {@link listSrcFiles} for a ref that is not the working tree. */
+function listSrcFilesAtRef(root: string, ref: string): string[] {
+  return execFileSync("git", ["-C", root, "ls-tree", "-r", "--name-only", ref, "--", "src"], { encoding: "utf8" })
+    .split("\n")
+    .map((p) => p.trim())
+    .filter((p) => p.endsWith(".ts"));
+}
+
+/** `path`'s content at `ref`, or `undefined` when it did not exist there — a brand-new file is not
+ *  an error, it simply contributes nothing to the base count. `maxBuffer` is raised past node's
+ *  1 MiB default (matching scripts/lib/git.mjs's own 64 MiB) — src/run-task.ts alone is over
+ *  2 MiB, and a silently truncated `git show` used to read back as ENOBUFS (`status: null`) and
+ *  get counted here as "did not exist at the base", manufacturing a phantom new site on every
+ *  literal in that one file every single run. */
+function readFileAtRef(root: string, ref: string, relPath: string): string | undefined {
+  const res = spawnSync("git", ["-C", root, "show", `${ref}:${relPath}`], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return res.status === 0 ? res.stdout : undefined;
+}
+
+test("W1-T3701 ratchet: non-test src's house-layout literal count is judged against the merge base's own count, never a frozen ceiling", () => {
+  const currentCounts = houseLiteralCounts(listSrcFiles(REPO_ROOT).map((f) => readFileSync(f, "utf8")));
+
+  const base = resolveMergeBase(REPO_ROOT);
+  const baseContents = listSrcFilesAtRef(REPO_ROOT, base)
+    .map((p) => readFileAtRef(REPO_ROOT, base, p))
+    .filter((c): c is string => c !== undefined);
+  const baseCounts = houseLiteralCounts(baseContents);
+
+  // Reuses comment-load-ratchet's OWN caused-vs-ceiling split (design note i): a literal's count is
+  // a violation only when THIS tree carries more sites than the merge base already did — a diff
+  // that inherits an already-at-ceiling count, or adds nothing, is never blamed for what the
+  // repository already was.
+  const verdict = evaluateCommentLoadRatchet(currentCounts, baseCounts);
+  assert.deepEqual(
+    verdict.violations,
+    [],
+    verdict.violations
+      .map(
+        (v) =>
+          `'${v.path}' now appears in ${v.comments} non-test src files, up from ${v.baseline} at the merge ` +
+          `base (${base.slice(0, 12)}) — a new file assumed the house layout inline instead of resolving it ` +
+          `through resolveRepoLayout (src/lib/repo-layout.ts); see ` +
+          `test/a-house-layout-site-is-judged-against-the-merge-base.test.ts for the graded response`,
+      )
+      .join("\n"),
+  );
 });

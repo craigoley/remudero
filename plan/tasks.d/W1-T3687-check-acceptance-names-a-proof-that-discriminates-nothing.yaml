@@ -9,6 +9,7 @@
   budget_usd: 8.00
   files:
     - src/run-task.ts
+    - test/check-acceptance-names-a-proof-that-discriminates-nothing.test.ts
   origin: "operator-session#two-plan-prs-refused-on-the-same-proof-2026-09-16"
   plan_refs: ["W1-T387", "W1-T273", "W1-T362", "W1-T2251", "W1-T1070"]
   status: queued
