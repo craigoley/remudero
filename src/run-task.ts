@@ -1365,27 +1365,20 @@ export type FreshTreeReviewSeams = {
 /**
  * W1-T3723 — RUN THE REVIEW FROM A TREE AT origin/main, WITHOUT RESTARTING ANYTHING.
  *
- * THE LOOP THIS BREAKS. The reviewer refuses to judge while its loaded code is behind origin/main
- * (W1-T228, and rightly — a stale judge is worse than a late one). Its checkout is DETACHED by the
- * entrypoint's pin semantics, and self-sync refuses to fast-forward a detached HEAD (W1-T445, also
- * rightly). So the only recovery was a process restart — and on a host whose instance registry
- * declares instances, `deploy/recycle-container.sh` refuses a restart that names none. Merging a
- * change to `src/lib/review.ts` therefore STOPPED THE REVIEWER, and nothing could start it again.
- * Measured incident: learnings/failures.yaml#stale-reviewer-code-had-no-recovery-but-a-restart.
+ * The reviewer refuses to judge while its loaded code is behind origin/main (W1-T228); its
+ * checkout is detached, so self-sync refuses to fast-forward it (W1-T445); and the restart that
+ * would close the gap is refused on a host whose instance registry names none (W1-T3596). Merging
+ * a change to src/lib/review.ts therefore STOPPED the reviewer with no way to start it again.
  *
- * WHY A WORKTREE RATHER THAN A SYNC. Nothing here moves a ref. `git worktree add --detach` cuts a
- * NEW tree at origin/main and leaves the daemon's own pinned HEAD exactly where it was, so
- * W1-T445's concern — that advancing a detached HEAD turns a base-vs-head diff into head-vs-head —
- * cannot arise. It is the same `--detach` worktree the review path already cuts to execute proofs
- * (composition-root.ts's `realReviewWorktree`); this one is cut at the BASE rather than at the PR.
+ * Stale reviewer code is a property of the LOADED MODULE, and a review needs fresh modules, not
+ * THIS process's. So the work moves instead: a subprocess out of a worktree at origin/main.
  *
- * ONE WORKTREE PER CODE SHA, reused: a pass reviewing six PRs behind the same lag pays one
- * worktree, not six. The sha is in the path, so a later, different lag cannot silently reuse a
- * tree cut for an earlier one.
+ * NOTHING MOVES AN EXISTING REF — a new detached tree is cut through the review path's own
+ * worktree helper, so W1-T445 concern cannot arise. One tree per code sha, reused.
  *
- * FAILURE IS `undefined`, NEVER A VERDICT. Every failure mode — fetch, worktree, spawn — returns
- * `undefined` so the caller falls back to the ordinary skip. This can make a stale reviewer review
- * with FRESH code or not at all; it can never make it judge with stale code.
+ * FAILURE IS `undefined`, NEVER A VERDICT. Every failure falls back to the ordinary skip, so this
+ * reviews with FRESH code or not at all — never with stale code — and W1-T3691's ladder still
+ * sees that skip and still escalates.
  */
 export function buildFreshTreeReviewRunner(
   repoDir: string,
