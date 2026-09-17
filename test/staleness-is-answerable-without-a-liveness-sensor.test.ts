@@ -23,7 +23,7 @@ function tmpRoot(): string {
   return root;
 }
 
-function ledgerWithBoot(headSha: string): string {
+function writeBootRecord(headSha: string): string {
   const ledgerPath = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}status-board-ledger-`)), "ledger.ndjson");
   writeFileSync(
     ledgerPath,
@@ -61,7 +61,7 @@ function positivelyStoppedDaemon(): StatusBoardDeps["queryService"] {
 // ── ACCEPTANCE 1: unsensed daemon, both shas resolvable ⇒ a real verdict, not `unknown` ────────
 
 test("buildStatusBoard: head vs origin/main — an UNSENSED daemon (no launchd sensor on this host) still compares boot sha vs origin/main, reading STALE when they differ", () => {
-  const ledgerPath = ledgerWithBoot(HEAD_SHA);
+  const ledgerPath = writeBootRecord(HEAD_SHA);
   const model = buildStatusBoard(
     tmpRoot(),
     ledgerPath,
@@ -72,7 +72,7 @@ test("buildStatusBoard: head vs origin/main — an UNSENSED daemon (no launchd s
 });
 
 test("buildStatusBoard: head vs origin/main — an UNSENSED daemon reads FRESH when its boot sha matches origin/main", () => {
-  const ledgerPath = ledgerWithBoot(HEAD_SHA);
+  const ledgerPath = writeBootRecord(HEAD_SHA);
   const model = buildStatusBoard(
     tmpRoot(),
     ledgerPath,
@@ -86,7 +86,7 @@ test("buildStatusBoard: head vs origin/main — an UNSENSED daemon reads FRESH w
 // this is what distinguishes the fix from simply deleting the gate ─────────────────────────────
 
 test("buildStatusBoard: head vs origin/main — a daemon POSITIVELY OBSERVED stopped (sensor answered, running: false) still reads unknown, never a verdict from a dead process's boot sha", () => {
-  const ledgerPath = ledgerWithBoot(HEAD_SHA);
+  const ledgerPath = writeBootRecord(HEAD_SHA);
   const model = buildStatusBoard(
     tmpRoot(),
     ledgerPath,
@@ -97,7 +97,7 @@ test("buildStatusBoard: head vs origin/main — a daemon POSITIVELY OBSERVED sto
 });
 
 test("buildStatusBoard: head vs origin/main — the default (no sensed override, matching pre-W1-T2450 callers) still means 'sensor answered, not running' ⇒ unknown", () => {
-  const ledgerPath = ledgerWithBoot(HEAD_SHA);
+  const ledgerPath = writeBootRecord(HEAD_SHA);
   const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ resolveOriginMainSha: () => ORIGIN_SHA }));
 
   assert.deepEqual(model.liveness.headVsOriginMain, { status: "unknown" });
@@ -107,7 +107,7 @@ test("buildStatusBoard: head vs origin/main — the default (no sensed override,
 // the fix must never fabricate a verdict from missing data ─────────────────────────────────────
 
 test("buildStatusBoard: head vs origin/main — an UNSENSED daemon with an unresolvable origin/main sha still reads unknown", () => {
-  const ledgerPath = ledgerWithBoot(HEAD_SHA);
+  const ledgerPath = writeBootRecord(HEAD_SHA);
   const model = buildStatusBoard(
     tmpRoot(),
     ledgerPath,
