@@ -77,4 +77,11 @@ test("CodeQL is not in the required contexts a skip could strand", () => {
   const names = contexts.split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
   assert.ok(names.length > 0, "the recorded required contexts must be readable — a vacuous pass proves nothing");
   assert.ok(!names.some((n) => /codeql/i.test(n)), `CodeQL must not be a required context, got ${JSON.stringify(names)}`);
+
+  // THE CONTROL'S OTHER HALF. "CodeQL is not required" is also true of a tree where nothing skips
+  // it — it was true before this change and would be true after a revert, which is exactly why
+  // `check-proof --base` graded this proof `executed_stale` on its own. The claim it actually
+  // supports is conditional: a skip cannot strand a pull request BECAUSE there is a skip and it is
+  // not required. Both halves, or the assertion establishes nothing about this PR.
+  assert.ok(ignored.length > 0, "there must BE a skip for the not-required fact to matter");
 });
