@@ -5181,17 +5181,36 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `task ${pr.taskId ?? "(unknown)"} is explicitly ${pr.taskRetirement ?? "unclassified"} in the current main plan — closing the leftover implementation PR`,
   },
   {
-    // W1-T932 — LETS THIS ROW YIELD, NEVER DISABLES IT: a guard that works for ordinary duplicate
-    // PRs must keep working, and an ordinary duplicate carries no verdict at all, so the added
-    // clause is false for it and this row matches as it always has. Gated behind
-    // `conceptCoexistenceEnabled`, a SEPARATE flag from row 0's. Reads ONLY `status === "unique"`,
-    // never `"indeterminate"` or an absent verdict — fail CLOSED to today's arithmetic.
+    // W1-T3731 — CLOSE ONLY ON POSITIVE EVIDENCE. This row used to fire on the BARE ARITHMETIC
+    // (`supersededBy != null` — "a higher-numbered open PR shares this task") and consult the
+    // verdict only to carve two exceptions out of it, one of them behind a flag that is off by
+    // default. Closing an unmerged pull request is the most destructive act the sweep can take
+    // (authority.ts:248), and it was the one taking the weakest evidence the system holds.
+    //
+    // MEASURED 2026-09-17: #5861 — the whole `rmd board` verb, 12 files, every check green but a
+    // still-pending review — was closed as "superseded-by #5886", a TWO-FILE prerequisite split
+    // that Standing rule 25 had demanded and whose own body said the src/ changes stay with #5861.
+    // The producer was right: 2 of 12 shared paths is a partial overlap and
+    // `fetchSupersessionVerdict` returned `"indeterminate"` — "supports neither finding". This row
+    // closed it anyway. Reopened by hand, and closed AGAIN sixteen minutes later.
+    //
+    // SO THE TEST IS NOW THE POSITIVE ONE: `superseded` means every one of this PR's changed paths
+    // is also changed by the newer one. `indeterminate`, `unique`, `complementary` and NO VERDICT
+    // AT ALL (a hydration that threw) all leave the pull request open. A genuine duplicate still
+    // closes, which is the case this row exists for and the one it keeps.
+    //
+    // `unique` STOPS NEEDING `conceptCoexistenceEnabled`. Sharing not one changed path is the
+    // strongest evidence of NOT being superseded that this system can produce, and it sat behind an
+    // off-by-default flag — W1-T3535 measured that twice ("#5632 ... sharing NOT ONE changed path —
+    // closed #5630 and #5631"). The flag is untouched and still read by row 0; it simply stops
+    // being what stands between a pull request and deletion.
     disposition: "stale",
-    when: (pr, policy) =>
-      pr.supersededBy != null &&
-      pr.supersessionVerdict?.status !== "complementary" &&
-      !(policy.conceptCoexistenceEnabled === true && pr.supersessionVerdict?.status === "unique"),
-    reason: (pr) => `superseded-by #${pr.supersededBy}`,
+    when: (pr) => pr.supersededBy != null && pr.supersessionVerdict?.status === "superseded",
+    reason: (pr) =>
+      `superseded-by #${pr.supersededBy}` +
+      (pr.supersessionVerdict?.evidence
+        ? ` — every one of its ${pr.supersessionVerdict.evidence.diff.matchedHunks} changed path(s) is also changed there`
+        : ""),
   },
   {
     disposition: "stale",

@@ -40,12 +40,19 @@ function supersededView(over: Partial<OpenPrView> = {}): OpenPrView {
   } as unknown as OpenPrView;
 }
 
-test("W1-T2384: with both policy flags at their defaults a POPULATED verdict moves no disposition", () => {
-  for (const [label, verdict] of [["superseded", SUPERSEDED], ["unique", UNIQUE], ["indeterminate", INDETERMINATE]] as const) {
-    const without = deriveDisposition(supersededView(), DEFAULT_SWEEP_POLICY, Date.now());
-    const with_ = deriveDisposition(supersededView({ supersessionVerdict: verdict }), DEFAULT_SWEEP_POLICY, Date.now());
-    assert.deepEqual(with_, without, `a "${label}" verdict must change nothing while both flags are off`);
+test("W1-T3731 (reverses W1-T2384): the verdict is what decides, and it decides at the defaults", () => {
+  // W1-T2384 deliberately made a populated verdict inert at the shipped defaults, so wiring the
+  // detector could not move any disposition. That conservatism is what left the arithmetic in
+  // charge, and the arithmetic destroyed #5861 (and, per W1-T3535, #5630/#5631 before it). The
+  // verdict now decides at the defaults: only "superseded" closes.
+  const closed = deriveDisposition(supersededView({ supersessionVerdict: SUPERSEDED }), DEFAULT_SWEEP_POLICY, Date.now());
+  assert.equal(closed.disposition, "stale", "a positive verdict closes");
+  for (const [label, verdict] of [["unique", UNIQUE], ["indeterminate", INDETERMINATE]] as const) {
+    const spared = deriveDisposition(supersededView({ supersessionVerdict: verdict }), DEFAULT_SWEEP_POLICY, Date.now());
+    assert.notEqual(spared.disposition, "stale", `a "${label}" verdict must not close a pull request`);
   }
+  const noVerdict = deriveDisposition(supersededView(), DEFAULT_SWEEP_POLICY, Date.now());
+  assert.notEqual(noVerdict.disposition, "stale", "and neither does no verdict at all");
 });
 
 test("W1-T2384: the DEFAULTS this rests on are actually off — a precondition, not an assumption", () => {
