@@ -45,7 +45,7 @@ function capture(): { lines: string[]; restore: () => void } {
 //    code. Hardcoding the repo list inside surveyPullRequestBoard would make this fail — the
 //    repos surveyed would not match the (arbitrary, non-default) list this test passes in.
 
-test("the survey covers exactly the repositories it is given, never a list baked into the module", () => {
+test("the board surveys every configured repository", () => {
   const repos = ["acme/widgets", "acme/gadgets", "acme/gizmos"];
   const calledWith: string[][] = [];
   const board = surveyPullRequestBoard(repos, (args) => {
@@ -68,7 +68,7 @@ test("the survey covers exactly the repositories it is given, never a list baked
 // ── acceptance 2: a repository that cannot be read is reported unavailable, never rendered as an
 //    empty queue — an empty board and an unreachable one are opposite facts.
 
-test("an unreadable repository reads unavailable, never rendered as an empty queue", () => {
+test("an unreadable repository reads unavailable never empty", () => {
   const board = surveyPullRequestBoard(["acme/unreadable", "acme/empty"], (args) => {
     if (args.includes("acme/unreadable")) throw new Error("gh: could not resolve to a Repository");
     return [];
@@ -86,7 +86,7 @@ test("an unreadable repository reads unavailable, never rendered as an empty que
 
 // ── acceptance 3: one gh call per repository — a wide board cannot trip the secondary rate limit.
 
-test("a three-repository board makes exactly three gh calls, never a per-PR follow-up", () => {
+test("a three-repository board makes three calls", () => {
   let calls = 0;
   surveyPullRequestBoard(["a/one", "a/two", "a/three"], () => {
     calls++;
@@ -97,7 +97,7 @@ test("a three-repository board makes exactly three gh calls, never a per-PR foll
 
 // ── acceptance 4: a board containing failing pull requests still exits zero — report, never gate.
 
-test("a board with failing checks still exits zero from boardCommand", () => {
+test("a board with failures still exits zero", () => {
   const failingBoard: PullRequestBoard = {
     repos: [
       {
