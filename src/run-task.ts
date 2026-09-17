@@ -1345,8 +1345,15 @@ export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdict
  *  `scripts/deps-interface-baseline.json`'s census can only shrink, and another `*Deps` shape is
  *  exactly what it exists to discourage. This is a seam, not a wiring root. */
 export type FreshTreeReviewSeams = {
-  /** `git -C <repoDir> …`, returning stdout. Throws on a non-zero exit, like `execFileSync`. */
+  /** `git -C <repoDir> …`, returning stdout. Throws on a non-zero exit, like `execFileSync`.
+   *  Used for the FETCH only — the worktree itself is cut by {@link addWorktree} below. */
   git: (args: string[]) => string;
+  /** THE REVIEW PATH'S OWN DETACHED-WORKTREE HELPER (`ReviewWorktreeDeps.addWorktree`,
+   *  composition-root.ts), reused rather than re-spelled. `worktree-sites.ts` pins EXACTLY four
+   *  raw `git worktree add` sites and refuses a fifth, correctly: this needs the same throwaway
+   *  detached tree that helper already cuts for proof execution, just at the BASE revision instead
+   *  of the PR head. One helper, two revisions — not a new hole in the census. */
+  addWorktree: (repoDir: string, worktreePath: string, revision: string) => void;
   /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code. */
   spawnReview: (worktree: string, args: string[]) => Promise<number>;
   /** Where worktrees are cut. One per code sha, reused across PRs in the same pass. */
@@ -1394,7 +1401,7 @@ export function buildFreshTreeReviewRunner(
         // The fetch is what makes origin/main resolvable here at all; the daemon's own freshness
         // read already fetched, but this must not DEPEND on that having happened.
         deps.git(["-C", repoDir, "fetch", "--quiet", "origin", "main"]);
-        deps.git(["-C", repoDir, "worktree", "add", "--detach", worktree, sha]);
+        deps.addWorktree(repoDir, worktree, sha);
         prepared.set(sha, worktree);
       }
       // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is
@@ -1562,6 +1569,9 @@ export function buildSweepEffects(
     reviewCommand,
     buildFreshTreeReviewRunner(repoRoot, {
       git: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString(),
+      // THE REVIEW PATH'S OWN HELPER, not a fifth raw site. worktree-sites.ts pins exactly four
+      // and refuses another; this needs the same throwaway detached tree, at the base revision.
+      addWorktree: realDeps().reviewWorktree.addWorktree,
       worktreeRoot: join(repoRoot, "..", "worktrees"),
       spawnReview: (worktree, args) =>
         new Promise<number>((resolve, reject) => {

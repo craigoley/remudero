@@ -75,11 +75,14 @@ test("the stale pass is still reported, so a fresh-tree review does not hide the
 
 // ── The runner ───────────────────────────────────────────────────────────────────────────────
 
-function runnerWith(over: { git?: (a: string[]) => string; spawn?: (w: string, a: string[]) => Promise<number> } = {}) {
+function runnerWith(over: { git?: (a: string[]) => string; spawn?: (w: string, a: string[]) => Promise<number>; addWorktree?: (d: string, p: string, r: string) => void } = {}) {
   const gitCalls: string[][] = [];
   const spawns: Array<{ worktree: string; args: string[] }> = [];
   const runner = buildFreshTreeReviewRunner("/repo", {
     git: over.git ?? ((a) => { gitCalls.push(a); return ""; }),
+    // Recorded through the SAME channel as the git calls, so the "no ref is moved" assertion sees
+    // the worktree creation too rather than going blind to it.
+    addWorktree: over.addWorktree ?? ((d, p, r) => { gitCalls.push(["-C", d, "worktree", "add", "--detach", p, r]); }),
     spawnReview: over.spawn ?? (async (worktree, args) => { spawns.push({ worktree, args }); return 0; }),
     worktreeRoot: "/wt",
   });
