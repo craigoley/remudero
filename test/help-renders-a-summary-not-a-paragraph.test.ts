@@ -132,7 +132,7 @@ test("commandHelp(spec) contains that command's full detail verbatim, for every 
 // this task changes the SHAPE of the record and the top-level rendering, never the set of
 // commands themselves.
 const BASELINE_COMMAND_NAMES = [
-  "alert-fix", "approve", "authority", "autonomy-rate", "away", "bundle", "caller-sweep", "check-acceptance", "check-proof",
+  "alert-fix", "approve", "authority", "autonomy-rate", "away", "board", "bundle", "caller-sweep", "check-acceptance", "check-proof",
   "census-membership", "ci-failures", "ci-learning", "console-url", "correct", "coverage-improve", "daemon", "daemon-plist", "dep-review",
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
   "emissions", "escalate", "feedback", "feedback-reconcile", "fix", "hand-runs", "inbox", "init", "install-checkout", "issues",
@@ -156,10 +156,11 @@ const BASELINE_COMMAND_NAMES = [
 // W1-T3281: `pr-owner` — local ledger-backed PR fix-lane ownership read — joins the registry.
 // W1-T3562: `feedback-reconcile` — the cross-root feedback reconciliation manifest and repair
 // verb — joins the registry.
+// W1-T3685: `board` — surveys the fleet's open pull-request queues across repos — joins the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // ONE literal, deliberately: this is the reviewed count, and a verb joining the registry should
   // cost exactly one considered edit here beside its line above.
-  assert.equal(BASELINE_COMMAND_NAMES.length, 80);
+  assert.equal(BASELINE_COMMAND_NAMES.length, 81);
   assert.deepEqual([...COMMANDS.map((c) => c.name)].sort(), BASELINE_COMMAND_NAMES);
   // DERIVED from that list, not a second literal. Two copies of the same number meant a new verb
   // reddened this twice and reported "expected 71, got 72", which names nothing about what changed;
