@@ -409,6 +409,38 @@ export function trailerBodyProofDivergenceRefusal({ body, taskAcceptanceForId })
   };
 }
 
+
+/**
+ * W1-T3739 — RENDER a pull request's `## Acceptance` block FROM the task's own criteria, so the
+ * two cannot disagree.
+ *
+ * `trailerBodyProofDivergenceRefusal` above refuses a body whose proofs differ from the shard's —
+ * the CONSOLE-T12 shape, and it refused FIVE pull requests in one session on 2026-09-17. Every one
+ * of those bodies was authored by hand beside a shard that already held the answer.
+ *
+ * Rendering makes the divergence UNREACHABLE rather than refused: only one of the two documents is
+ * authored. The output is deliberately in the dialect {@link parseAcceptanceBlock} reads, and the
+ * test for this round-trips through THAT parser rather than comparing strings — a renderer checked
+ * against a hand-written expectation would drift from the parser exactly the way the bodies did.
+ */
+export function renderAcceptanceBlock(criteria) {
+  const rows = (criteria ?? []).filter((c) => typeof c?.claim === "string" && c.claim.trim().length > 0);
+  if (rows.length === 0) return "";
+  return [
+    "## Acceptance",
+    "",
+    ...rows.map((c) =>
+      c.satisfied_by && !c.proof
+        ? // A criterion the plan credits to an earlier merge carries no proof text at all
+          // (plan.ts: "satisfied_by stands IN PLACE OF a proof"), so rendering a `proof:` line for
+          // it would invent one — and `proof-discrimination` would then try to execute it.
+          `- claim: ${c.claim.trim()}\n  satisfied_by: ${String(c.satisfied_by).trim()}`
+        : `- claim: ${c.claim.trim()}\n  proof: ${String(c.proof ?? "").trim()}`,
+    ),
+    "",
+  ].join("\n");
+}
+
 /**
  * W1-T3414 — a branch commit can add a trailer after the PR author deliberately opened a
  * plan-only filing without one. Squash merge preserves commit bodies, so inspect every reachable
