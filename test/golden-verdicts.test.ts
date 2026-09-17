@@ -193,3 +193,14 @@ test("GOLDEN — HEALTHY CONTROL: a correct PR with no planted violation arms �
   assert.equal(golden.violation, "none");
   assertGolden(verdict, golden);
 });
+
+test("GOLDEN — ANNOUNCED SCOPE DEVIATION: a report that names and justifies an out-of-scope edit still gets only the advisory, and still arms", () => {
+  const { verdict, golden } = judgeCase("announced-scope-deviation");
+  assert.equal(golden.violation, "announced-scope-deviation");
+  assertGolden(verdict, golden);
+
+  // The advisory fires on the diff/declared path sets alone — the report's justification prose
+  // must never suppress it (nor escalate it into a refusal). Both would be `scopeViolationFiles`
+  // silently growing eyes for prose it is documented never to read.
+  assert.match(readFileSync(join(FIXTURES_ROOT, "announced-scope-deviation", "report.md"), "utf8"), /ANNOUNCED/);
+});

@@ -43,6 +43,7 @@ One case per documented judgment class, plus the control every catch-only suite 
 | `tampered-criterion/`   | a diff that appends/edits its own task's `claim:`/`proof:` (W1-T400)   |
 | `dead-proof/`           | a name-filtered proof matching no real test (W1-T387 no-match class)   |
 | `healthy-control/`      | **must arm** — no violation planted; proves the suite rewards correct acceptance, not blanket refusal |
+| `announced-scope-deviation/` | a report that names and justifies an out-of-scope edit still gets only the `scope_violation` advisory, and still arms |
 
 ## Growth rule
 

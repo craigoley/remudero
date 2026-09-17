@@ -1,0 +1,3 @@
+# ReviewEvidence.taskDeclaredFiles — the task's declared `files:` scope. learnings/architecture.yaml
+# is touched by the diff but never declared here: the planted (and announced-in-report) widening.
+- src/lib/a.ts

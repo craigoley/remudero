@@ -1,0 +1,18 @@
+diff --git a/src/lib/a.ts b/src/lib/a.ts
+index 1111111..2222222 100644
+--- a/src/lib/a.ts
++++ b/src/lib/a.ts
+@@
+-export const a = 0;
++export const a = 1;
+diff --git a/learnings/architecture.yaml b/learnings/architecture.yaml
+index 4444444..5555555 100644
+--- a/learnings/architecture.yaml
++++ b/learnings/architecture.yaml
+@@
+-  fact: >-
+-    Old rule text, plus a wall of forensic measurement kept inline with it.
++  fact: >-
++    Old rule text, alone.
++  evidence: >-
++    The forensic measurement, moved here so it stops costing every task that never needed it.

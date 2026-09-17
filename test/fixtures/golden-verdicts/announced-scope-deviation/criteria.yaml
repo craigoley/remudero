@@ -1,0 +1,4 @@
+# A real, mechanically-executed grep proof run for real against this case's own checkout/
+# directory, matching the healthy-control/scope-creep idiom.
+- claim: "a.ts exports the corrected constant"
+  proof: "grep: export const a in src/lib/a.ts"

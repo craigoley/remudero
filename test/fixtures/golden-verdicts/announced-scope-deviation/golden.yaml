@@ -1,0 +1,21 @@
+violation: announced-scope-deviation
+rule: >
+  W1-T401 (scope_violation review-time advisory): a report that NAMES and JUSTIFIES why its diff
+  touches a file outside the task's declared `files:` scope -- because the extra edit is a genuine
+  prerequisite (here, curating learnings/architecture.yaml's own `fact` weight so a corpus-budget
+  cap the task could not otherwise clear has headroom) -- still receives exactly the same
+  advisory-only treatment as an unexplained widening: `scopeViolationFiles` (src/lib/review.ts)
+  compares diff paths against declared paths alone and never parses the report's prose. An
+  announcement buys neither silence nor a harder refusal -- the advisory still fires, and the PR
+  still arms.
+verdict:
+  state: success
+  floorState: success
+  capped: false
+arm: true
+unwiredAdvisories:
+  - reasonCode: scope_violation
+    symbols: ["learnings/architecture.yaml"]
+criteria:
+  - met: true
+    proof_exec: executed_pass
