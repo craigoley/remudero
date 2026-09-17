@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { readDiskFreeBytes, readDiskTotalBytes, deriveLastPoll } from "./daemon-health.js";
 import { pauseFilePath } from "./fleet-control.js";
+import type { CashActuals } from "./cash-actuals.js";
 import { execFileSync } from "node:child_process";
 
 // Why: the day-long outage and ninety-minute API lockout behind these constraints — docs/forensics/doctor.md#module-header.
@@ -40,6 +41,42 @@ export function worstVerdict(checks: readonly Check[]): Verdict {
 /** Doctor's own bad-argument exit code, distinct from `statusCommand`'s 2: exit 2 then always
  *  means "a check FAILED", never "you typed the flag wrong". */
 export const DOCTOR_USAGE_EXIT = 64;
+
+/**
+ * W1-T3729: is the day's cash spend near the cap, judged from WHAT AZURE BILLED rather than from
+ * our own reservations?
+ *
+ * PURE, AND THE NETWORK STAYS OUT OF THIS FILE. `readCashActuals` (src/lib/cash-actuals.ts) does
+ * the ARM read; this takes its RESULT. That split is not tidiness -- this module's own header
+ * refuses network reads by name, a refusal earned by a measured ninety-minute API lockout, and a
+ * health command that can hang on someone else's endpoint is the thing that refusal exists to
+ * prevent. A caller that wants this check fetches first and passes the value in.
+ *
+ * AN UNAVAILABLE READING IS `WARN`, NEVER `OK`. "We could not find out" and "there is nothing
+ * wrong" are different states, and collapsing them is exactly how a dead cash lane ran for two
+ * days without alarming anyone (W1-T3728).
+ */
+export const CASH_SPEND_WARN_FRACTION = 0.8;
+
+export function judgeCashSpend(actuals: CashActuals, capUsd: number | undefined): Check {
+  const name = "cash-spend";
+  if (capUsd === undefined || !Number.isFinite(capUsd) || capUsd <= 0) {
+    return { name, verdict: "WARN", measured: "no cap configured", threshold: "dailyCapUsd > 0" };
+  }
+  const threshold = `WARN >= ${(CASH_SPEND_WARN_FRACTION * 100).toFixed(0)}% of $${capUsd.toFixed(2)}, FAIL >= $${capUsd.toFixed(2)}`;
+  if (actuals.kind === "unavailable") {
+    return { name, verdict: "WARN", measured: "unreadable", threshold, detail: actuals.reason };
+  }
+  const verdict: Verdict =
+    actuals.usd >= capUsd ? "FAIL" : actuals.usd >= capUsd * CASH_SPEND_WARN_FRACTION ? "WARN" : "OK";
+  const share = ((actuals.usd / capUsd) * 100).toFixed(1);
+  // A deployment Azure billed that this fleet cannot price makes the total READ LOW, so it is
+  // surfaced beside the number rather than dropped -- never a silent undercount.
+  const detail = actuals.unpriced.length > 0
+    ? `billed by ${actuals.unpriced.length} unpriced deployment(s), so this total reads LOW: ${actuals.unpriced.join(", ")}`
+    : undefined;
+  return { name, verdict, measured: `$${actuals.usd.toFixed(4)} (${share}% of cap)`, threshold, ...(detail ? { detail } : {}) };
+}
 
 export function exitCodeFor(worst: Verdict): number {
   return worst === "FAIL" ? 2 : worst === "WARN" ? 1 : 0;
