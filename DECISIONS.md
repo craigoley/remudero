@@ -2769,3 +2769,68 @@ right, only the conclusion drawn from it was wrong.
 
 **Rollback:** revert this entry and the PRs it describes. No gate or predicate changes with this
 entry alone — it records a decision.
+
+## 2026-09-16 — OPERATOR RULING: a session lesson is LANDED, not harvested; and the squeeze seats are deleted
+
+**Operator-authored** (ruling on an agent recommendation, same session). Two decisions the shift-left
+audit forced, both closing filed questions rather than leaving them open.
+
+### 1. `W1-T3711` — DELETE the squeeze seats; do not wire them
+
+`squeeze_model` on the `architect:` and `judge:` rows is removed, and so are the two resolvers that
+read it (`architectModel`'s `squeezed` option and `judgeModel` entirely). `parseMount` refuses the
+field by name so an old config fails loudly.
+
+**NOT because they were unreachable — because they were REDUNDANT.** Measured:
+
+    architect row model: claude-opus-5 -> capability: frontier
+    judge row model:     opus          -> capability: frontier
+    frontier cash candidates (low/medium/high): [gpt-5.6-luna, gpt-5.6-terra]
+
+When a spawn diverts to cash, `selectOpenWeightModel` already maps the requested Claude model onto a
+cash capability through `capabilities.claude`. That is the same choice a squeeze seat would make —
+and the one the operator asked for ("leverage Luna or Terra if absolutely necessary in that tier") —
+decided ONCE for every seat instead of per row. Wiring `squeeze_model` would have added a second,
+competing answer to a solved question, which is this repo's recurring defect.
+
+`judgeModel` had no seat to wire at all: `resolveRiskJudgeMount` walks `mounts.routes` for the
+cheapest worker mount and never reads `mounts.judge`, which is the Tier Invariant's CEILING.
+
+**The squeeze goal is already met**, by three live mechanisms: the capability ladder (WHICH cash
+model), `workerProviders.cashFallbackWhenBlocked` (WHEN to divert), and `config.overflow: "api_key"`
+(full Claude capability on API credits when cash cannot serve the tool surface).
+
+### 2. `W1-T3712` — a session lesson is LANDED at discovery, not harvested later
+
+Close `W1-T3712` without building a session intake. **Land a lesson in `plan/feedback/` the moment it
+is found**, before the session can lose it.
+
+THERE ARE ALREADY THREE INTAKES, and a fourth would not fix the gap:
+
+    retro            ledger / dispatched runs      69 shards, 65 of 68 built (96%)
+    rmd ci-learning  repaired CI failures          ~19 shards
+    feedback lane    operator + agent records      204 records, landed by landFeedback
+
+The four traps that prompted this were authored BY the session that hit them. A harvester would have
+automated a write that was already being done. What actually failed was different, and both halves
+are now fixed or ruled:
+
+  (a) NO ROOM — the learnings corpus sat at 41,714 of a 42,000 cap. W1-T3709's two-tier split
+      restores headroom (measured 41,714 -> 34,908 on the ten heaviest entries).
+  (b) NO DURABLE WRITE AT DISCOVERY — the session kept its findings in scratch, which was wiped
+      three times. `plan/feedback/` already solves this: tracked, and `landFeedback`
+      (`src/lib/feedback-landing.ts`) rebuilds from origin/main and pushes, so a record survives the
+      container by construction.
+
+**WHAT THIS COSTS, STATED PLAINLY.** Retro's gather stays run-scoped, so the loop still will not
+discover a session lesson on its own — a human or agent must write it. Given retro authored 3 of 63
+guardrails while operators authored 57, that is the status quo working rather than a regression. The
+ruling prefers making the manual write cheap and reliable over automating a step whose bottleneck was
+never the authoring.
+
+**Reopen this if** the feedback lane stops being used for session lessons for a sustained period —
+that would be evidence the write is still too expensive and a harvester is the cheaper answer after
+all. The measurement is `ls plan/feedback | wc -l` against its 204 baseline.
+
+**Rollback:** revert this entry and re-open both tasks by clearing their `retirement:` key. Entry (1)
+also describes shipped code (#5837); reverting the ruling does not revert that PR.
