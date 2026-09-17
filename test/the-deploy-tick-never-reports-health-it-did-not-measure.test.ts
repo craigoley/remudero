@@ -130,6 +130,12 @@ test("W1-T3245's separation is preserved — the tick does not restart on runnin
       imageDriftOnly: true,
     });
     assert.equal(d.deploy, false, `imageDriftOnly must decline to restart on runningStale alone (daemonAlive=${daemonAlive})`);
+    // The separation is TWO independent facts, not one: declining to restart must not also mean
+    // going quiet about it. A blocker still renders here regardless of daemonAlive, so "declines
+    // to act" and "reports what it declined to act on" hold together under every liveness reading.
+    assert.ok(d.blocker, `declining to restart must still render the standing blocker (daemonAlive=${daemonAlive})`);
+    assert.equal(d.blocker!.kind, "stale_running_daemon");
+    assert.equal(d.blocker!.runningHead, "stale-boot-sha");
   }
   // Image drift is a DIFFERENT event, and the tick's own business: it must still act on it even
   // while runningStale is present and ignored — the two questions stay independent.
