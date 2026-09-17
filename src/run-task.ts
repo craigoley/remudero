@@ -9,7 +9,7 @@ import {
   readDiskFreeBytes,
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
@@ -1340,10 +1340,95 @@ export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdict
  * stays the fail-closed floor for any PR this earlier gate misses; this is additive, not a
  * replacement. Extracted so a test can drive it against a counting fake, never a real `gh`/git call.
  */
+/** W1-T3723 — what {@link buildFreshTreeReviewRunner} needs, all injected so a test drives it
+ *  without git, a worktree or a spawn. A `type` whose name does NOT end in `Deps`, deliberately:
+ *  `scripts/deps-interface-baseline.json`'s census can only shrink, and another `*Deps` shape is
+ *  exactly what it exists to discourage. This is a seam, not a wiring root. */
+export type FreshTreeReviewSeams = {
+  /** `git -C <repoDir> …`, returning stdout. Throws on a non-zero exit, like `execFileSync`. */
+  git: (args: string[]) => string;
+  /** Run `rmd review <pr> …` with `cwd` at the fresh worktree. Resolves to the exit code. */
+  spawnReview: (worktree: string, args: string[]) => Promise<number>;
+  /** Where worktrees are cut. One per code sha, reused across PRs in the same pass. */
+  worktreeRoot: string;
+  /** Present so a test can assert the path shape without a clock. */
+  now?: () => number;
+}
+
+/**
+ * W1-T3723 — RUN THE REVIEW FROM A TREE AT origin/main, WITHOUT RESTARTING ANYTHING.
+ *
+ * THE LOOP THIS BREAKS. The reviewer refuses to judge while its loaded code is behind origin/main
+ * (W1-T228, and rightly — a stale judge is worse than a late one). Its checkout is DETACHED by the
+ * entrypoint's pin semantics, and self-sync refuses to fast-forward a detached HEAD (W1-T445, also
+ * rightly). So the only recovery was a process restart — and on a host whose instance registry
+ * declares instances, `deploy/recycle-container.sh` refuses a restart that names none. Merging a
+ * change to `src/lib/review.ts` therefore STOPPED THE REVIEWER, and nothing could start it again.
+ * MEASURED 2026-09-17: #5873 merged, seven `review.skipped_stale_reviewer_code` rows in 45
+ * minutes naming #5883 and #5876, a `deploy.restart_refused`, and an hour of no reviews.
+ *
+ * WHY A WORKTREE RATHER THAN A SYNC. Nothing here moves a ref. `git worktree add --detach` cuts a
+ * NEW tree at origin/main and leaves the daemon's own pinned HEAD exactly where it was, so
+ * W1-T445's concern — that advancing a detached HEAD turns a base-vs-head diff into head-vs-head —
+ * cannot arise. It is the same `--detach` worktree the review path already cuts to execute proofs
+ * (composition-root.ts's `realReviewWorktree`); this one is cut at the BASE rather than at the PR.
+ *
+ * ONE WORKTREE PER CODE SHA, reused: a pass reviewing six PRs behind the same lag pays one
+ * worktree, not six. The sha is in the path, so a later, different lag cannot silently reuse a
+ * tree cut for an earlier one.
+ *
+ * FAILURE IS `undefined`, NEVER A VERDICT. Every failure mode — fetch, worktree, spawn — returns
+ * `undefined` so the caller falls back to the ordinary skip. This can make a stale reviewer review
+ * with FRESH code or not at all; it can never make it judge with stale code.
+ */
+export function buildFreshTreeReviewRunner(
+  repoDir: string,
+  deps: FreshTreeReviewSeams,
+): (prArg: string, rest: string[], freshness: { originMainSha: string }) => Promise<number | undefined> {
+  const prepared = new Map<string, string>();
+  return async (prArg, rest, freshness) => {
+    const sha = freshness.originMainSha;
+    try {
+      let worktree = prepared.get(sha);
+      if (worktree === undefined) {
+        worktree = `${deps.worktreeRoot}/reviewer-${sha.slice(0, 12)}`;
+        // The fetch is what makes origin/main resolvable here at all; the daemon's own freshness
+        // read already fetched, but this must not DEPEND on that having happened.
+        deps.git(["-C", repoDir, "fetch", "--quiet", "origin", "main"]);
+        deps.git(["-C", repoDir, "worktree", "add", "--detach", worktree, sha]);
+        prepared.set(sha, worktree);
+      }
+      // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is
+      // already AT origin/main, and a self-sync attempt there is a refusal and a wasted fetch.
+      return await deps.spawnReview(worktree, [prArg, ...rest]);
+    } catch {
+      return undefined;
+    }
+  };
+}
+
 export function buildReviewerCodeFreshnessGate(
   readFreshness: () => ReviewerCodeFreshness,
   log: (step: string, extra?: Record<string, unknown>) => void,
   next: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>,
+  /** W1-T3723 — REVIEW FROM FRESH CODE INSTEAD OF SKIPPING. Stale reviewer code is a property of
+   *  the LOADED MODULE, not of the pull request, and a process cannot hot-swap the module judging
+   *  the PR. So the work moves instead of the code: this runs `rmd review` as a SUBPROCESS out of
+   *  a detached worktree pinned at origin/main, which loads fresh code by construction.
+   *
+   *  THE DAEMON'S OWN CHECKOUT NEVER MOVES. W1-T445 refuses self-sync on a detached HEAD for a
+   *  real reason — this repo cuts one for base-side comparisons and advancing it would turn a
+   *  base-vs-head diff into head-vs-head — and that guard is untouched here. A NEW worktree is
+   *  added; no existing ref moves.
+   *
+   *  Returns `undefined` when it could not run at all (no runner wired, worktree refused, spawn
+   *  failed). The caller then falls back to the original skip, so W1-T3691's recurrence ladder
+   *  stays the floor and nothing this adds can make a stale reviewer judge anyway. */
+  reviewFromFreshTree?: (
+    prArg: string,
+    rest: string[],
+    freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
+  ) => Promise<number | undefined>,
 ): {
   call: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>;
   /** The sha pair the FIRST time THIS PASS'S freshness reads came back stale (there can be many,
@@ -1360,12 +1445,24 @@ export function buildReviewerCodeFreshnessGate(
       const freshness = readFreshness();
       if (freshness.status === "stale") {
         firstStale ??= { oldSha: freshness.codeSha, newSha: freshness.originMainSha };
-        log("review.skipped_stale_reviewer_code", {
-          pr: prArg,
-          code_sha: freshness.codeSha,
-          origin_main_sha: freshness.originMainSha,
-          changed_paths: freshness.changedPaths?.length,
-        });
+        const stale = { pr: prArg, code_sha: freshness.codeSha, origin_main_sha: freshness.originMainSha, changed_paths: freshness.changedPaths?.length };
+        // MOVE THE WORK, NOT THE CODE. Six pull requests once sat unreviewed for over an hour
+        // behind a one-commit lag, and the only recovery was a process restart that a
+        // multi-instance host then refused. A review does not need this process's modules — it
+        // needs FRESH ones, and a subprocess out of a worktree at origin/main has them.
+        if (reviewFromFreshTree) {
+          return reviewFromFreshTree(prArg, rest, freshness).then((code) => {
+            if (code !== undefined) {
+              log("review.ran_from_fresh_tree", { ...stale, exit_code: code });
+              return code;
+            }
+            // COULD NOT RUN — fall through to the original skip rather than judging with stale
+            // code. W1-T3691's recurrence ladder still sees the skip and still escalates.
+            log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable" });
+            return 0;
+          });
+        }
+        log("review.skipped_stale_reviewer_code", stale);
         return Promise.resolve(0);
       }
       return next(prArg, rest, reviewDeps);
@@ -1462,10 +1559,28 @@ export function buildSweepEffects(
   export function fixRungTaskFor(
   */
   const { reviewerCodeFreshnessImpl, ...libDeps } = deps;
+  // W1-T3723: WIRED, not merely exported. A fresh-tree runner nothing passes is the
+  // shipped-unwired shape this repo refuses, and the whole point is that a stale reviewer stops
+  // needing a restart — which only happens if production actually gets one.
   const reviewerCodeGate = buildReviewerCodeFreshnessGate(
     reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshness(repoRoot, process.env)),
     deps.log,
     reviewCommand,
+    buildFreshTreeReviewRunner(repoRoot, {
+      git: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString(),
+      worktreeRoot: join(repoRoot, "..", "worktrees"),
+      spawnReview: (worktree, args) =>
+        new Promise<number>((resolve, reject) => {
+          const child = spawn(process.execPath, [join(worktree, "bin", "rmd"), "review", ...args], {
+            cwd: worktree,
+            stdio: "inherit",
+            // The child IS at origin/main, so a self-sync there is a refusal and a wasted fetch.
+            env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
+          });
+          child.on("error", reject);
+          child.on("exit", (code: number | null) => resolve(code ?? 1));
+        }),
+    }),
   );
   const effects = buildSweepEffectsFromLib({
     repoRoot,
