@@ -1400,7 +1400,11 @@ export function buildFreshTreeReviewRunner(
       // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is
       // already AT origin/main, and a self-sync attempt there is a refusal and a wasted fetch.
       return await deps.spawnReview(worktree, [prArg, ...rest]);
-    } catch {
+    } catch (err) {
+      // Never a verdict (see the doc above): swallow the failure, but carry WHY so a reader of
+      // stderr — not just the caller's silent `undefined` — can tell a fetch/worktree/spawn
+      // refusal from the ordinary "no runner wired" case.
+      process.stderr.write(`buildFreshTreeReviewRunner: falling back to the ordinary skip: ${String(err)}\n`);
       return undefined;
     }
   };
