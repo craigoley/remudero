@@ -62,6 +62,11 @@ export interface Config {
   dailyCapUsd?: number | { normal: number; squeezed: number } | null;
   fixStrikeCap?: number;
   consoleUrl?: string;
+  /** `rmd board`'s default repository set (W1-T3685) — `owner/repo` strings, read when no
+   *  `--repo` flag is given. A fourth repository needs an edit HERE, never a `pr-board.ts` code
+   *  change: this is the one field that makes "configuration, never a hardcoded list" true for
+   *  the survey's default. Absent ⇒ the CLI's own three-repository fallback (run-task.ts). */
+  fleetRepos?: string[];
   serve?: { host?: string; port?: number; identityCapability?: string; trustedProxy?: string };
   relay?: { url?: string; token?: string };
   headroom?: { enabled?: boolean };
@@ -229,6 +234,15 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
   }),
   configField("fixStrikeCap", "number", true, 2, "config.json", "Blocked-review fix rung strike cap.", numberShape),
   configField("consoleUrl", "string", true, "http://localhost:4317", "config.json", "Operator console base URL.", stringShape),
+  configField(
+    "fleetRepos",
+    "string[]",
+    true,
+    ["craigoley/remudero", "craigoley/remudero-site", "craigoley/remudero-console"],
+    "config.json",
+    "rmd board's default repository set, as owner/repo strings.",
+    stringArrayShape,
+  ),
   configField("serve", "object", true, undefined, "config.json", "Operator console bind and identity settings.", {
     kind: "object",
     fields: [
