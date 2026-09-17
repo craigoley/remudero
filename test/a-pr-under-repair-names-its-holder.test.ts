@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import {
   currentRepairLeaseHolder,
   postRepairLease,
@@ -178,11 +179,14 @@ test("W1-T3646 criterion 3: a lease on a stale sha does not hold the new head", 
 
 test("postRepairLease: with no injected `post`, the real default wrapper posts through a PATH-stubbed gh", async () => {
   const dir = tmpDir();
-  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-repair-lease-stub-ok-`));
+  // THE SHARED BUILDER, not an 87th hand-rolled gh shim. fixture-copy-census ratchets how many
+  // test files write their own `gh` onto PATH, and this file was one over
+  // (ghPathShimFiles: 87 > baseline 86). `ghShim` builds the same stub in its own directory under
+  // the same RMD_TMP_PREFIX; with no routes it exits 0, exactly as this one did.
+  const shim = ghShim();
   const oldPath = process.env.PATH;
   try {
-    writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    process.env.PATH = `${bin}:${oldPath}`;
+    process.env.PATH = `${shim.dir}:${oldPath}`;
     const ledgerPath = join(dir, "ledger.ndjson");
 
     const result = await postRepairLease({
@@ -201,20 +205,18 @@ test("postRepairLease: with no injected `post`, the real default wrapper posts t
     assert.equal(leaseLine?.head_sha, "realpost1");
   } finally {
     process.env.PATH = oldPath;
-    rmSync(bin, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("postRepairLease: a failing gh stub is swallowed by the real default wrapper — the courtesy post never blocks the repair it narrates", async () => {
   const dir = tmpDir();
-  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-repair-lease-stub-fail-`));
+  // Same shared builder, with the route that makes `gh` fail the way this test needs.
+  const shim = ghShim([{ when: "api", stderr: "gh: Service Unavailable (HTTP 503)", exit: 1 }]);
   const oldPath = process.env.PATH;
   try {
-    writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "gh: Service Unavailable (HTTP 503)" >&2\nexit 1\n', {
-      mode: 0o755,
-    });
-    process.env.PATH = `${bin}:${oldPath}`;
+    process.env.PATH = `${shim.dir}:${oldPath}`;
     const ledgerPath = join(dir, "ledger.ndjson");
 
     let threw = false;
@@ -239,7 +241,7 @@ test("postRepairLease: a failing gh stub is swallowed by the real default wrappe
     assert.ok(leaseLine, "the lease is still ledgered even though the real status post failed");
   } finally {
     process.env.PATH = oldPath;
-    rmSync(bin, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 });

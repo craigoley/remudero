@@ -9,6 +9,7 @@ import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
+import { systemClock } from "./clock.js";
 import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
@@ -8407,7 +8408,7 @@ export async function postRepairLease(opts: PostRepairLeaseOpts): Promise<PostRe
     step: "repair.lease_posted",
     head_sha: opts.sha,
   });
-  return { posted: true, holder: { headSha: opts.sha, runId: opts.runId, postedAt: new Date().toISOString() } };
+  return { posted: true, holder: { headSha: opts.sha, runId: opts.runId, postedAt: systemClock.iso() } };
 }
 
 async function defaultPostRepairLeaseStatus(o: { owner: string; repo: string; sha: string; description?: string }): Promise<void> {
