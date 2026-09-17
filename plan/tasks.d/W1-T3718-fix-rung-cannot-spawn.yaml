@@ -95,3 +95,11 @@
   files: [src/lib/worker-provider.ts, src/lib/sweep.ts, src/lib/serve.ts]
   status: queued
   attempts: 0
+  note: |
+    reservation hand-off: unknown -> throughput
+
+    Minted by `rmd next-task-id` from a DETACHED HEAD, so the reservation recorded no readable
+    holder and task-id-existence reads it as `holder unreadable (missing branch)`. Handed off from
+    the literal `unknown`, which is the remedy the check names for exactly that case. Same id,
+    same author, same session -- renumbering would burn a reserved id to paper over a checkout
+    state.
