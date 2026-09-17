@@ -49,6 +49,7 @@ test("a plan-only pull request does not trigger CodeQL", () => {
 test("a diff touching scripts or workflows still triggers CodeQL", () => {
   // THE MISTAKE THIS SHAPE INVITES, and the reason `scripts/**` and `.github/**` are absent from
   // the ignore list: both LOOK like configuration, and both are code CodeQL reads.
+  assert.ok(ignored.includes("plan/**"), "the plan-only fast lane must exist before this boundary proves anything about it");
   assert.equal(wouldSkip(["scripts/diff-coverage.mjs"]), false, "a script is code");
   assert.equal(wouldSkip([".github/workflows/ci.yml"]), false, "a workflow is code");
   assert.equal(wouldSkip(["src/lib/review.ts"]), false);
