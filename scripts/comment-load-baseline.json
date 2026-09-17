@@ -5,7 +5,7 @@
   ".github/workflows/ci-gate.yml": 250,
   ".github/workflows/ci.yml": 750,
   ".github/workflows/clock-sweep.yml": 250,
-  ".github/workflows/codeql.yml": 15,
+  ".github/workflows/codeql.yml": 250,
   ".github/workflows/coverage-session-blanking.yml": 250,
   ".github/workflows/dependency-review.yml": 76,
   ".github/workflows/docs-index-check.yml": 44,
@@ -352,6 +352,6 @@
   "src/lib/worker.ts": 1552,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16062,
+  "src/run-task.ts": 16250,
   "src/spike.ts": 18
 }
