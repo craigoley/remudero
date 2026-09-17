@@ -448,7 +448,7 @@ import {
   prStateFromRest,
   rollupFor,
   singlePrRestArgs,
-  // W1-T3732: the ONE producer of the review-reuse pair, called from both sides of the comparison
+  // review-reuse-producer: the ONE producer of the review-reuse pair, called from both sides of the comparison
   // — the review records it, a later sweep pass asks what is true now. See its own header doc for
   // why two representations would be a silent, permanent bug.
   tryFetchReviewReuseFacts,
@@ -5342,7 +5342,7 @@ async function runReview(args: {
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
   task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
-  /** W1-T3732 — injectable producer for the review-reuse pair recorded on this verdict's
+  /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
    *  network, the same seam discipline `reviewerQueryFn` and `reviewerSpawnWorker` already use
@@ -5736,7 +5736,7 @@ async function runReview(args: {
     : undefined;
   let { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
 
-  // W1-T3732 — RECORD WHAT THIS VERDICT ACTUALLY JUDGED, so a LATER push can be compared against
+  // W1-T3704 (completed here) — RECORD WHAT THIS VERDICT ACTUALLY JUDGED, so a LATER push can be compared against
   // it instead of re-deriving a verdict that did not change. `ReviewVerdict.ownDiffDigest` and
   // `mergeBaseSha` have existed since W1-T3704 and NOTHING EVER SET EITHER — which is why
   // `reviewReuseVerdict` (lib/sweep.ts) returned `full-review` unconditionally and an orphaned
@@ -31610,7 +31610,7 @@ export function buildOpenPrViews(
   }
   const supersessionVerdicts = hydrateSupersessionVerdicts(owner, repo, supersededPrs, fetch, isInPlanScope);
 
-  // W1-T3732 — THE CURRENT SIDE OF THE REVIEW-REUSE COMPARISON, hydrated ONCE for a bounded set.
+  // W1-T3704 (completed here) — THE CURRENT SIDE OF THE REVIEW-REUSE COMPARISON, hydrated ONCE for a bounded set.
   //
   // SCOPED TO ALREADY-ORPHANED PRs, and the scoping is the cost argument, not an optimisation. A
   // compare per open PR per pass is exactly the fan-out GitHub's SECONDARY limit punishes — it
@@ -31675,7 +31675,7 @@ export function buildOpenPrViews(
     // Historical heads explain why a status is absent. The separate exact-input scan below owns
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
     const reviewOrphans = reviewOrphansFor(ledger, taskId, pr.headRefOid);
-    // W1-T3732 — the REVIEWED side of the reuse comparison, off the SAME ledger already in hand.
+    // W1-T3704 (completed here) — the REVIEWED side of the reuse comparison, off the SAME ledger already in hand.
     // `priorReviewVerdictFromLedger` takes the LAST `review.posted` row for this task, which for a
     // PR that IS orphaned is by definition a row at some earlier head — and `reviewedHeadSha`
     // carries that sha so the disposition's reason names the head the reused verdict judged,
@@ -31823,7 +31823,7 @@ export function buildOpenPrViews(
       // producer-completeness test anchors on an object literal assigning every required
       // OpenPrView field, so an assignment made anywhere else would still read as unwired.
       reviewOrphanedByPush: reviewOrphans.orphanedByPush,
-      // W1-T3732 — THE FIVE REVIEW-REUSE INPUTS, ASSIGNED HERE AS TOP-LEVEL KEYS. W1-T3704 shipped
+      // W1-T3704 (completed here) — THE FIVE REVIEW-REUSE INPUTS, ASSIGNED HERE AS TOP-LEVEL KEYS. W1-T3704 shipped
       // `reviewReuseVerdict` and both disposition rows that call it, and NOTHING EVER PRODUCED ANY
       // OF THESE — the function's own comment said "Not yet populated by the real gateway", so its
       // five-way absence guard returned `full-review` on every call and every orphaned review was

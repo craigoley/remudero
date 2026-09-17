@@ -1193,7 +1193,7 @@ export function hydrateMergeConflictEvidence(
 }
 
 
-// ── W1-T3732: THE REVIEW-REUSE PRODUCER ─────────────────────────────────────────────────────────
+// ── review-reuse-producer: THE REVIEW-REUSE PRODUCER ─────────────────────────────────────────────────────────
 //
 // W1-T3704 shipped the whole review-reuse MECHANISM — `reviewReuseVerdict` (lib/sweep.ts), the
 // `review-reused`/`discriminate-only` disposition rows that call it, `ReviewVerdict.ownDiffDigest`/

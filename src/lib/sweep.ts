@@ -3230,10 +3230,10 @@ export function usableInstrumentEntanglementPaths(value: unknown): value is Inst
  *  gateway builds this from `gh pr list --state open --json …` plus the review/CI derivation
  *  status.ts already does; tests inject fixtures. */
 export interface OpenPrView {
-  /** W1-T3704/W1-T3732 — the five review-reuse inputs. DECLARED IN THIS BODY, NOT INHERITED, and
+  /** W1-T3704/W1-T3704 (completed here) — the five review-reuse inputs. DECLARED IN THIS BODY, NOT INHERITED, and
    *  that is a deliberate, load-bearing choice rather than a style one:
    *  `test/producer-completeness.test.ts`'s census walks `OpenPrView`'s OWN declaration body, so a
-   *  member reached through `extends` is INVISIBLE to it. Measured while building W1-T3732 —
+   *  member reached through `extends` is INVISIBLE to it. Measured while building W1-T3704 (completed here) —
    *  with these five inherited from `ReviewReuseInputs`, deleting all five producer assignments
    *  from `buildOpenPrViews` left the census green (11/11). Declared here, the gate that already
    *  exists refuses the regression by name, which is the only kind of rule this repo trusts.
@@ -5052,9 +5052,9 @@ export type ReviewReuseVerdict =
  * hid: with the fields off the interface, `reviewReuseInputsFrom` reached them through an `as`
  * cast, so "no producer exists" and "a producer exists and works" were indistinguishable at the
  * type level — and the mechanism sat fully built, fully tested, and completely inert from
- * 2026-09-16 until W1-T3732 measured it on #5941.
+ * 2026-09-16 until it was measured on #5941.
  *
- * W1-T3732 wired that producer (`buildOpenPrViews`, run-task.ts), so `OpenPrView` now EXTENDS this
+ * W1-T3704's producer wired that producer (`buildOpenPrViews`, run-task.ts), so `OpenPrView` now EXTENDS this
  * type, the cast is gone, and the census asserts all five the way it asserts every other board
  * field. The overlay survives as the argument type of the pure decision below, which is the one
  * thing it was always good for: `reviewReuseVerdict` takes exactly what it reads.
@@ -5097,7 +5097,7 @@ export function reviewReuseVerdict(pr: ReviewReuseInputs): ReviewReuseVerdict {
  *  exactly the UNREADABLE input {@link reviewReuseVerdict} already handles by falling back to
  *  `"full-review"` — this widens no behavior, it only lets the comparison compile. */
 function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
-  // W1-T3732: THE CAST IS GONE. `OpenPrView` now extends `ReviewReuseInputs` and
+  // review-reuse-producer: THE CAST IS GONE. `OpenPrView` now extends `ReviewReuseInputs` and
   // `buildOpenPrViews` assigns all five as top-level keys, so this reads declared members rather
   // than smuggling undeclared ones through `as`. That cast was load-bearing evidence of the defect
   // this task fixed: it existed precisely because nothing produced the fields, and it would have

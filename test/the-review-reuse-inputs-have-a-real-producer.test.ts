@@ -1,5 +1,5 @@
 /**
- * W1-T3732 — THE REVIEW-REUSE MECHANISM HAD NO PRODUCER, FOR ANY OF ITS FIVE INPUTS.
+ * W1-T3704 (completed here) — THE REVIEW-REUSE MECHANISM HAD NO PRODUCER, FOR ANY OF ITS FIVE INPUTS.
  *
  * W1-T3704 shipped all of it: `reviewReuseVerdict`, the `review-reused` and `discriminate-only`
  * disposition rows that call it, `ReviewVerdict.ownDiffDigest`/`mergeBaseSha`, the
@@ -37,7 +37,7 @@ const FILES_A = [
   { filename: "test/a.test.ts", status: "added", sha: "blob2222" },
 ];
 
-test("W1-T3732: the own-diff digest is stable under reordering, and blind to commit history", () => {
+test("review-reuse-producer: the own-diff digest is stable under reordering, and blind to commit history", () => {
   // THE FALSE-NEGATIVE GUARD. The compare endpoint promises no file order. An order-sensitive
   // digest would differ between two passes over an unchanged PR, so the reuse path would read
   // "changed" forever — indistinguishable, in production, from the no-producer bug being fixed.
@@ -50,7 +50,7 @@ test("W1-T3732: the own-diff digest is stable under reordering, and blind to com
   assert.equal(ownDiffDigestFromCompareFiles([{ ...FILES_A[0] }, { ...FILES_A[1] }]), forward);
 });
 
-test("W1-T3732: the own-diff digest moves when the PR's own content moves", () => {
+test("review-reuse-producer: the own-diff digest moves when the PR's own content moves", () => {
   // THE FALSE-POSITIVE GUARD, and the one that actually matters: a digest too coarse to notice a
   // change would reuse a verdict over a diff nobody judged. Each field is varied on its own.
   const base = ownDiffDigestFromCompareFiles(FILES_A);
@@ -72,7 +72,7 @@ test("W1-T3732: the own-diff digest moves when the PR's own content moves", () =
   assert.equal(ownDiffDigestFromCompareFiles([]), ownDiffDigestFromCompareFiles(undefined));
 });
 
-test("W1-T3732: a malformed file entry degrades toward DIFFERENT, never toward same", () => {
+test("review-reuse-producer: a malformed file entry degrades toward DIFFERENT, never toward same", () => {
   // The safety asymmetry the whole feature rests on: a false "changed" wastes a review, a false
   // "unchanged" ships an unjudged diff. A nameless entry therefore contributes a marker rather
   // than being skipped — skipping it would let two genuinely different diffs digest identically.
@@ -80,7 +80,7 @@ test("W1-T3732: a malformed file entry degrades toward DIFFERENT, never toward s
   assert.notEqual(withNameless, ownDiffDigestFromCompareFiles([FILES_A[0]]));
 });
 
-test("W1-T3732: the compare producer refuses a half-answer, and the try-variant swallows it", () => {
+test("review-reuse-producer: the compare producer refuses a half-answer, and the try-variant swallows it", () => {
   const good = fetchReviewReuseFacts("o", "r", "main", "head1", (() => ({
     merge_base_commit: { sha: "base777" },
     files: FILES_A,
@@ -103,7 +103,7 @@ test("W1-T3732: the compare producer refuses a half-answer, and the try-variant 
   );
 });
 
-test("W1-T3732: the hydrator is BOUNDED, and an unreadable PR simply stays absent", () => {
+test("review-reuse-producer: the hydrator is BOUNDED, and an unreadable PR simply stays absent", () => {
   // The bound is the cost argument, not an optimisation: GitHub's secondary limit counts request
   // CADENCE, so an unbounded per-pass fan-out is exactly the shape that trips it.
   const asked: string[] = [];
@@ -130,7 +130,7 @@ test("W1-T3732: the hydrator is BOUNDED, and an unreadable PR simply stays absen
   assert.equal(asked.length, 0);
 });
 
-test("W1-T3732: END TO END — a recorded verdict plus an unchanged diff yields reuse, not full-review", () => {
+test("review-reuse-producer: END TO END — a recorded verdict plus an unchanged diff yields reuse, not full-review", () => {
   // This is the test that would have failed every day since W1-T3704 shipped.
   const facts = fetchReviewReuseFacts("o", "r", "main", "OLDHEAD", (() => ({
     merge_base_commit: { sha: "base777" },
@@ -184,7 +184,7 @@ test("W1-T3732: END TO END — a recorded verdict plus an unchanged diff yields 
   assert.deepEqual(realChange, { kind: "full-review" });
 });
 
-test("W1-T3732: ONE REPRESENTATION — both sides of the comparison fold through the same function", () => {
+test("review-reuse-producer: ONE REPRESENTATION — both sides of the comparison fold through the same function", () => {
   // THE CORRECTNESS ARGUMENT, asserted rather than assumed. The recorded side is computed during a
   // review and the current side during a later sweep pass, in different modules. If those two ever
   // folded a digest differently — local git on one side, this compare on the other — the equality
