@@ -3263,8 +3263,22 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
  *  for the same reason: it is the only check in this file that needs the WHOLE `Plan` (to resolve
  *  `depends_on` against every other task's status), and `lintTask` takes a single `Task` and never
  *  a `Plan` — a contract worth keeping so every other check stays testable in isolation. Appending
- *  its (always warn-only) violations here and re-deriving `ok` cannot turn a passing task failing. */
-export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => ({})): Map<string, LintResult> {
+ *  its (always warn-only) violations here and re-deriving `ok` cannot turn a passing task failing.
+ *
+ *  `only` (W1-T3710) narrows which task ids get a `LintResult` COMPUTED -- omitted, it lints the
+ *  whole plan exactly as before every caller here was written. It never narrows the corpus a
+ *  narrowed task is linted AGAINST: `surfaceCorpus` below is always built from every task in
+ *  `plan.tasks`, so a filtered call still sees a duplicate surface owned by a task outside `only`.
+ *  An id in `only` that the plan does not carry is silently skipped, never invented. */
+export function lintPlan(
+  plan: Plan,
+  optsFor: (task: Task) => LintOpts = () => ({}),
+  only?: ReadonlySet<string>,
+): Map<string, LintResult> {
+  // THE CORPUS IS ALWAYS THE WHOLE PLAN, never the filtered subset — `duplicateSurfaceViolations`
+  // asks "does any OTHER task already own this surface", so narrowing the corpus to the tasks being
+  // linted would stop it seeing the tasks a duplicate collides with. `only` narrows which results
+  // are COMPUTED; it must never narrow what they are computed AGAINST.
   const surfaceCorpus: DuplicateSurfaceCorpusEntry[] = plan.tasks.map((t) => ({
     id: t.id,
     files: t.files,
@@ -3272,6 +3286,7 @@ export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => (
   }));
   const out = new Map<string, LintResult>();
   for (const task of plan.tasks) {
+    if (only !== undefined && !only.has(task.id)) continue;
     const opts = optsFor(task);
     const withSurfaces = opts.openTaskSurfaces !== undefined ? opts : { ...opts, openTaskSurfaces: surfaceCorpus };
     const base = lintTask(task, withSurfaces);

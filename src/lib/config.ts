@@ -211,30 +211,20 @@ export function workerModel(config: Config): string {
  */
 export function architectModel(
   config: Config,
-  mounts?: { architect: { model: string; squeezeModel?: string } },
-  opts: { squeezed?: boolean } = {},
+  mounts?: { architect: { model: string } },
 ): string {
-  // SUBSCRIPTION FIRST, ALWAYS. `squeezed` is true only when the seat's ordinary
-  // provider has NO readable headroom, so the fallback is never preferred, never cheaper-first,
-  // and never consulted while the primary can run. Absent a declared fallback this returns the
-  // primary exactly as it always has, so a table that declares none behaves identically.
-  //
-  // The fallback is safe to select because the table could not have LOADED unless it also cleared
-  // the Tier Invariant (mounts.ts takes the MINIMUM of a seat and its fallback): a squeeze may
-  // change which model holds the seat, never whether the seat outranks its workers.
-  if (opts.squeezed === true && mounts?.architect.squeezeModel !== undefined) return mounts.architect.squeezeModel;
   return mounts?.architect.model ?? config.architectModel ?? "opus";
 }
 
-/** the Judge's seat under the same rule as {@link architectModel}. Separate entity,
- *  separate mount, same subscription-first contract. */
-export function judgeModel(
-  mounts: { judge: { model: string; squeezeModel?: string } },
-  opts: { squeezed?: boolean } = {},
-): string {
-  if (opts.squeezed === true && mounts.judge.squeezeModel !== undefined) return mounts.judge.squeezeModel;
-  return mounts.judge.model;
-}
+// W1-T3711: THE SQUEEZE-SEAT RESOLVERS ARE GONE, `judgeModel` INCLUDED — deleted rather than wired
+// because they were REDUNDANT, not merely unreachable. `selectOpenWeightModel` already maps a
+// requested Claude model onto a cash capability: MEASURED, `claude-opus-5` and `opus` both resolve
+// `frontier`, whose candidates are `[gpt-5.6-luna, gpt-5.6-terra]` at every effort — the same choice
+// a squeeze seat would make, decided once for every seat instead of per row. `judgeModel` had no
+// seat at all: `resolveRiskJudgeMount` reads `mounts.routes`, never `mounts.judge` (the Tier
+// Invariant's ceiling). The paths that DO carry work when the subscription is gone are
+// `cashFallbackWhenBlocked` (W1-T3692) and `config.overflow: "api_key"` (W1-T3705); `parseMount`
+// refuses a `squeeze_model` row by name so an old config fails loudly instead of silently.
 
 /** The three synthesis rungs (W1-T2559). Re-declared structurally here to avoid a config↔mounts
  *  import; `src/lib/mounts.ts` exports the canonical `SynthesisRole`. */
