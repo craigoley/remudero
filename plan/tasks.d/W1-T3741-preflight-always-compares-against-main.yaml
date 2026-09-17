@@ -1,0 +1,72 @@
+- id: W1-T3741
+  title: "PREFLIGHT ALWAYS COMPARES AGAINST origin/main, SO A STACKED PULL REQUEST GETS A FALSE RED — the gates it mirrors take `--base`, the command that drives them does not pass one, and a builder who trusts the red rebases work that was never wrong"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: |
+    MEASURED 2026-09-17 on #5940, whose base is another open pull request's branch rather than main:
+
+      $ rmd preflight
+      worker-branch-shape: FAIL — this branch claims W1-T3737 … but its head ref
+        "run-W1-T3738-1789664000000" does not carry the shape …
+
+      $ node --import tsx scripts/worker-branch-shape.mjs \
+          --base origin/run-W1-T3737-1789663000000 --head-ref run-W1-T3738-1789664000000
+      worker-branch-shape: OK — head ref … carries the run-<taskId>-<epochMs> shape
+
+    Same tree, same second, opposite verdicts. The only difference is the base.
+
+    (1) THE GATE ALREADY TAKES ONE, AND DEFAULTS HONESTLY. `worker-branch-shape.mjs`'s own usage:
+        "--base defaults to origin/main". That default is right for an ordinary branch and wrong
+        for a stacked one, and the script cannot know which it is — only the caller can.
+
+    (2) `preflight` NEVER PASSES IT. It has `--from`/`--to` for its own commit range and forwards
+        neither to the mirrored gates, so every gate that resolves a merge base resolves the wrong
+        one on a stacked branch.
+
+    (3) THE FAILURE MODE IS THE EXPENSIVE DIRECTION. A false GREEN gets caught by CI. A false RED
+        is acted on: the obvious response is to rebase onto main, which on a stacked branch
+        DESTROYS the dependency and — measured on #5921 the same day — can drop the commit
+        entirely. The tool that exists to save a CI round can cost a rebuild instead.
+
+    (4) IT ARRIVED WITH THE DEFAULT TIER. W1-T3737 made the mirror the default, so this reaches
+        every builder rather than the few who passed `--fast`. Filed by the author of that change.
+  design: |
+    (i) ONE FLAG, FORWARDED. `preflight --base <ref>` passes the ref to every mirrored gate that
+        accepts one, and changes nothing else. Absent, today's `origin/main` default stands
+        byte-for-byte — this widens no behaviour for an ordinary branch.
+
+    (ii) THE COVERAGE LINE SAYS WHICH BASE IT USED. W1-T3737 made a passing preflight name the
+         tiers it did not run; a green measured against the wrong base is the same class of lie,
+         and the base is the one input a reader cannot infer from the output.
+
+    (iii) DO NOT INFER THE BASE FROM THE BRANCH. A stacked branch is not distinguishable from an
+          ordinary one by name, and guessing would replace a knowable wrong answer with an
+          unknowable one. The caller states it or gets the default.
+
+    NOT IN SCOPE: gates that take no base, and reading the base from an open pull request — that
+    needs a network read on a path whose whole value is being offline.
+  acceptance:
+    - claim: "a base passed to preflight reaches the mirrored gates that accept one"
+      proof: "unit test: the base flag reaches a mirrored gate"
+    - claim: "absent a base, every gate is invoked exactly as it is today"
+      proof: "unit test: no base leaves the invocation unchanged"
+    - claim: "the summary states which base the run was measured against, because a reader cannot infer it"
+      proof: "unit test: the summary names the base it used"
+  falsifier: |
+    Infer the base from the branch name and the third assertion still passes while the answer
+    becomes unknowable — so the test asserts the FORWARDED value, not that some base was used.
+    Forward it only to the gate that motivated this and the first goes red for the others. Default
+    it to anything but origin/main and the second goes red, which is the compatibility this rests on.
+  risk: low
+  band_meaning: blast-radius
+  origin: human
+  plan_refs: [W1-T3737, W1-T3388]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t3741-43-the-last-three
