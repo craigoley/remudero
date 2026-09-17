@@ -1060,6 +1060,9 @@ import {
   cappedAnnotation,
   automergeHoldFromLedger,
   cappedOverrideFromLedger,
+  // W1-T3733: the SAME reader `decideSweepArm` uses, so the board's terminal-refusal verdict and
+  // the arming path's refusal can never be derived from different facts.
+  postedArmFactsFromLedger,
   cappedWordingApplies,
   decideAutoMergeArm,
   decideArmFromLedgerVerdict,
@@ -30605,6 +30608,41 @@ interface ReviewOrphanFacts {
  * already-orphaned PRs). Until that wiring lands, every prior head still counts individually in
  * this diagnostic result. That limitation no longer affects retry/backoff behavior.
  */
+/**
+ * W1-T3733 — is the arm refusal for this exact head TERMINAL?
+ *
+ * PURE, AND EXPORTED SO A TEST CAN REACH IT. The board producer that calls this
+ * (`buildOpenPrViews`) is not evaluated by any unit test in this repo, so a branch written inline
+ * there would be untestable added lines — the same reason `cashDivertSpawnFields` and
+ * `harnessCommitForShellLessWorker` live where they do.
+ *
+ * DERIVED FROM THE SAME TWO READS `decideSweepArm` (lib/sweep.ts) MAKES, deliberately: this value
+ * exists to warn that arming will refuse, so deriving it from different facts than the refusal
+ * itself would let the warning and the behaviour drift apart — and a warning that is wrong in
+ * either direction is worse than none.
+ *
+ * THE THREE ANSWERS, and why the middle one is not a boolean:
+ *   - `true`   a capped, non-plan-only verdict with no override recorded for this head. Nothing
+ *              re-judges a fixed head into an uncapped verdict, so this refusal is permanent until
+ *              a new head or an override arrives. This is the one that escalates.
+ *   - `false`  a verdict IS recoverable and it will arm — uncapped, or plan-only (the W1-T205
+ *              carve-out arms with no override), or already overridden.
+ *   - `undefined` NO verdict recoverable for this head at all. Not "fine" and not "terminal": the
+ *              ledger cannot say. `decideSweepArm` arms on this absence ("no evidence to refuse
+ *              on"), so there is nothing to warn about, and an unreadable or rotated ledger must
+ *              never be able to manufacture an escalation.
+ */
+export function terminalArmRefusal(
+  ledger: Array<Record<string, unknown>>,
+  taskId: string | undefined,
+  headSha: string | undefined,
+): boolean | undefined {
+  const facts = postedArmFactsFromLedger(ledger, taskId, headSha);
+  if (!facts) return undefined;
+  if (!facts.capped || facts.planOnly) return false;
+  return cappedOverrideFromLedger(ledger, taskId!, headSha!) === undefined;
+}
+
 export function reviewOrphansFor(
   ledger: Array<Record<string, unknown>>,
   taskId: string | undefined,
@@ -31762,6 +31800,15 @@ export function buildOpenPrViews(
       // producer-completeness test anchors on an object literal assigning every required
       // OpenPrView field, so an assignment made anywhere else would still read as unwired.
       reviewOrphanedByPush: reviewOrphans.orphanedByPush,
+      // W1-T3733 — CAN THE VERDICT LEDGERED FOR THIS EXACT HEAD EVER ARM? Derived from the SAME
+      // two ledger reads `decideSweepArm` makes, over the SAME lines already in hand — no extra
+      // request, and no second opinion that could disagree with the arming path it warns about.
+      //
+      // TERMINAL means capped, NOT plan-only (that carve-out arms without an override, W1-T205),
+      // and no override recorded for this head. `undefined` whenever the facts are unrecoverable,
+      // which leaves the escalation row unmatched — an unreadable ledger must never manufacture a
+      // question, only fail to ask one.
+      armRefusalIsTerminal: terminalArmRefusal(ledger, taskId, pr.headRefOid),
       priorReviewAttemptsForInput: reviewAttempts.attempts,
       // Exact-input elapsed-time-backoff clock; see `reviewInputBackoffElapsed`.
       reviewInputLastAttemptAt: reviewAttempts.lastAttemptAt,

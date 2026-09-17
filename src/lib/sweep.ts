@@ -3230,6 +3230,19 @@ export function usableInstrumentEntanglementPaths(value: unknown): value is Inst
  *  gateway builds this from `gh pr list --state open --json …` plus the review/CI derivation
  *  status.ts already does; tests inject fixtures. */
 export interface OpenPrView {
+  /** W1-T3733 — TRUE when the verdict ledgered for THIS EXACT head can never arm auto-merge, and
+   *  only a NEW HEAD or an operator override can change that. Produced by `buildOpenPrViews`
+   *  (run-task.ts) from the same two ledger reads `decideSweepArm` makes — `postedArmFactsFromLedger`
+   *  and `cappedOverrideFromLedger` — so the board and the arming path can never disagree about it.
+   *
+   *  WHY IT IS A FIELD AND NOT A COUNT. A capped, non-plan-only verdict at a FIXED head is terminal
+   *  by construction: nothing re-judges the same head into an uncapped verdict, so the first pass
+   *  already knows the refusal will repeat forever. Counting repeats would only delay telling
+   *  somebody.
+   *
+   *  ABSENT MEANS UNKNOWN, NEVER "FINE". Undefined leaves the escalation row unmatched and the PR on
+   *  exactly today's stand-down path, so an unreadable ledger can never manufacture an escalation. */
+  armRefusalIsTerminal?: boolean;
   prNumber: number;
   prUrl: string;
   /** The task this PR credits (its `Remudero-Task:` trailer), if resolved. */
@@ -5543,6 +5556,45 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: () =>
       "open pull request is a draft — GitHub refuses auto-merge on a draft; held until marked " +
       "ready for review",
+  },
+  {
+    // W1-T3733 — THE GREEN PR THAT CAN NEVER MERGE, AND USED TO SAY SO TO NOBODY.
+    //
+    // A CAPPED verdict posts `state: "success"` on purpose (CAPPED IS NOT FAIL, W1-T185 criterion
+    // 3 forbids reddening a PR for an unparseable proof), and `decideAutoMergeArm` refuses to arm
+    // it. Both halves are correct. Their COMBINATION is the defect: GitHub renders the PR fully
+    // green with every required check passing, the `mergeable` row below matches, the act arm
+    // stands down on `decideSweepArm`, and the pass records `acted: false` with a stand-down
+    // reason nobody reads. Next pass, identically. Forever.
+    //
+    // That stand-down is deliberate and is NOT changed here — see the act arm's own comment: no
+    // dedup key is seeded, so the PR re-derives and arms the instant executed proof or a ledgered
+    // override lands. The bug was never that it stood down. It was that standing down was the
+    // WHOLE response, so a PR whose proofs are structurally broken — a task record naming a test
+    // file that does not exist, the shape measured on #5941 — sits green and unmergeable with no
+    // human ever told, and the operator eventually merges it by hand and asks why the fleet did
+    // not. A stuck PR that LOOKS fine is worse than one that looks broken.
+    //
+    // ORDERED STRICTLY BEFORE `mergeable`, matching that row's own checks-green/review-success
+    // predicate plus a POSITIVE `armRefusalIsTerminal === true` read — never inferred from the
+    // absence of `false`, the same discipline the draft row above and `mergeable` itself use. An
+    // unreadable ledger leaves the field undefined, this row unmatched, and the PR exactly where
+    // it is today.
+    //
+    // AN EARLIER STOP, NEVER A LONGER LEASH — the same shape as W1-T1269 and W1-T225 above. It
+    // does not merge anything, does not weaken the CAPPED floor, and grants no override. It asks a
+    // human, once: `blocked-ambiguous` escalations are deduped per `pr@sha` (see `prior.escalated`),
+    // so a NEW head re-earns its own question and an override landing on this one stops this row
+    // matching at all — at which point `mergeable` below claims the PR and arms it, unchanged.
+    disposition: "blocked-ambiguous",
+    when: (pr) => pr.checksState === "green" && pr.reviewState === "success" && pr.armRefusalIsTerminal === true,
+    reason: () =>
+      "every required check is green and remudero-review reports success, but the verdict ledgered " +
+      "for this head is CAPPED (zero proofs executed) with no operator override — so auto-merge " +
+      "refuses and no future pass at this head can decide differently. Escalating once rather than " +
+      "standing down silently forever: this PR looks mergeable on GitHub and is not. Resolve it by " +
+      "repairing the proofs so they execute (a new head re-earns the arm automatically), or by " +
+      "recording an explicit override with `rmd review <pr> --override-capped-by`",
   },
   {
     // POSITIVE MATCH ONLY (W1-T93): mergeable is NEVER inferred from the mere absence of a
