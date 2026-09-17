@@ -332,6 +332,84 @@ export function planOnlyImplementationTrailerRefusal({ body, changedPaths, taskF
 }
 
 /**
+ * Read declared ACCEPTANCE CRITERIA from the checked-out plan — the proof-comparison sibling of
+ * {@link planTaskFilesResolver}. Same authoritative/fail-closed contract: a bad plan (or a task
+ * with no `acceptance:` of its own) supplies no structural evidence and therefore no additional
+ * refusal, never a resolver that answers "nothing" for everything.
+ * @param {string} root
+ * @returns {((taskId: string) => readonly { claim: string, proof: string }[] | undefined) | undefined}
+ */
+export function planTaskAcceptanceResolver(root = REPO_ROOT) {
+  try {
+    const plan = loadPlan(join(root, "plan", "tasks.yaml"));
+    return (taskId) => plan.byId.get(taskId)?.acceptance;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * W1-T3658 — DOES THIS PULL REQUEST'S OWN `## Acceptance` BLOCK NAME DIFFERENT PROOFS THAN THE
+ * TASK IT CREDITS?
+ *
+ * CONSOLE-T12 shipped and merged carrying BOTH a `Remudero-Task:` trailer (the shape review
+ * resolves criteria from) AND its own body-level `## Acceptance` block naming four proofs — unit
+ * tests that did not exist. Review judged the trailer's shard; a human reading the PR read the
+ * body's block; nothing compared the two, so the mismatch shipped.
+ *
+ * NOT A BAN ON EITHER SHAPE (the task's rationale). A body-only PR (no trailer) and a
+ * trailer-only PR (no body block) are BOTH unaffected — this returns `undefined` for either, the
+ * same "nothing to compare" contract every structural predicate in this file keeps.
+ *
+ * COMPARES THE PROOF TEXT ITSELF, NEVER A COUNT (the task's own falsifier: two proof sets of
+ * equal size naming entirely different tests must still refuse). Proofs are compared as sets of
+ * trimmed strings so reordering the bullets — the plan and the body need not list them in the
+ * same sequence — is never mistaken for a divergence.
+ *
+ * FAILS OPEN on everything it cannot read: no `taskAcceptanceForId` resolver, no trailer, an id
+ * the plan does not declare, or a task with no `acceptance:` of its own all return `undefined`.
+ * @param {{ body: string, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined }} input
+ */
+export function trailerBodyProofDivergenceRefusal({ body, taskAcceptanceForId }) {
+  if (taskAcceptanceForId === undefined) return undefined;
+  const trailerId = extractTaskTrailerId(body ?? "");
+  if (trailerId === undefined) return undefined;
+  let declared;
+  try {
+    declared = taskAcceptanceForId(trailerId);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(declared) || declared.length === 0) return undefined;
+
+  const bodyCriteria = parseAcceptanceBlock(body ?? "");
+  if (bodyCriteria.length === 0) return undefined; // trailer-only shape — unaffected, task acceptance criterion 2
+
+  const taskProofs = declared.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0);
+  const bodyProofs = bodyCriteria.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0);
+  const taskSet = new Set(taskProofs);
+  const bodySet = new Set(bodyProofs);
+  const onlyInBody = [...new Set(bodyProofs.filter((p) => !taskSet.has(p)))];
+  const onlyInTask = [...new Set(taskProofs.filter((p) => !bodySet.has(p)))];
+  if (onlyInBody.length === 0 && onlyInTask.length === 0) return undefined; // identical proof sets — no divergence
+
+  return {
+    ok: false,
+    defect: "trailer-body-proof-divergence",
+    message:
+      `Remudero-Task: ${trailerId} trailer present AND this pull request carries its own ` +
+      "`## Acceptance` block, but the two name DIFFERENT proofs — review resolves criteria from " +
+      `${trailerId}'s plan record, so a proof only in this PR's body is never executed, and a proof ` +
+      `only in ${trailerId}'s declared acceptance is never seen by a human reading this PR's body ` +
+      "(the CONSOLE-T12 shape). " +
+      `Proof(s) only in this PR's own block: ${onlyInBody.length ? onlyInBody.map((p) => JSON.stringify(p)).join(", ") : "(none)"}. ` +
+      `Proof(s) only in ${trailerId}'s declared acceptance: ${onlyInTask.length ? onlyInTask.map((p) => JSON.stringify(p)).join(", ") : "(none)"}. ` +
+      `Remove this PR's own \`## Acceptance\` block (criteria already resolve from ${trailerId}), or make ` +
+      "the two proof sets agree.",
+  };
+}
+
+/**
  * W1-T3414 — a branch commit can add a trailer after the PR author deliberately opened a
  * plan-only filing without one. Squash merge preserves commit bodies, so inspect every reachable
  * branch commit before accepting the PR. This is deliberately an extension of the existing
@@ -363,17 +441,19 @@ export function followupCommitImplementationTrailerRefusal({ trailerCommits, cha
 }
 
 /**
- * The gate's own verdict: the bot exemption first, then Rule 15 and the two structural refusals, then
- * `acceptanceAuthorTimeCheck` (no `expectedTaskId` — this job has no PR-to-task binding of its
- * own, the same general-case call shape `rmd check-acceptance` itself uses), then proof shape.
+ * The gate's own verdict: the bot exemption first, then Rule 15 and the three structural refusals
+ * (plan-only-implementation, follow-up-commit-implementation, and W1-T3658's trailer/body proof
+ * divergence), then `acceptanceAuthorTimeCheck` (no `expectedTaskId` — this job has no PR-to-task
+ * binding of its own, the same general-case call shape `rmd check-acceptance` itself uses), then
+ * proof shape.
  *
  * W1-T2297's OTHER HALF. The predicate has taken an optional `trailerResolves` since #2934; this
  * caller is what supplies it, so a `Remudero-Task:` trailer naming an id the plan does not declare
  * stops buying an exemption. `trailerResolves` OMITTED — which is what a caller with an unreadable
  * plan passes — leaves the verdict byte for byte what it was before this wiring.
- * @param {{ body: string, authorLogin?: string, trailerResolves?: (taskId: string) => boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict }} input
+ * @param {{ body: string, authorLogin?: string, trailerResolves?: (taskId: string) => boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict }} input
  */
-export function evaluateGate({ body, authorLogin, trailerResolves, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, rule15Verdict }) {
+export function evaluateGate({ body, authorLogin, trailerResolves, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, taskAcceptanceForId, rule15Verdict }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
@@ -396,6 +476,8 @@ export function evaluateGate({ body, authorLogin, trailerResolves, introducedTas
   if (structuralRefusal !== undefined) return structuralRefusal;
   const followupRefusal = followupCommitImplementationTrailerRefusal({ trailerCommits, changedPaths, taskFilesForId });
   if (followupRefusal !== undefined) return followupRefusal;
+  const proofDivergence = trailerBodyProofDivergenceRefusal({ body, taskAcceptanceForId });
+  if (proofDivergence !== undefined) return proofDivergence;
   const result = acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
   // JUDGE THE SOURCE THE CRITERIA ACTUALLY CAME FROM. The predicate above returns OK early on the
   // trailer arm precisely because "criteria come from the plan record rather than the body" — and
@@ -506,6 +588,7 @@ export function main(argv) {
     trailerCommits: commitTaskTrailersAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
     changedPaths: changedPathsAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
     taskFilesForId: planTaskFilesResolver(),
+    taskAcceptanceForId: planTaskAcceptanceResolver(),
     rule15Verdict: rule15SplitAtRange({ baseSha: payload.baseSha, headSha: payload.headSha }),
   });
   if (!result.ok) {
