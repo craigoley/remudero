@@ -488,6 +488,7 @@ import {
 } from "./lib/alert-lane.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { loadManagedRepos, ManagedReposError, type ManagedRepo } from "./lib/managed-repos.js";
+import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
   feedbackEntryPath,
@@ -19971,6 +19972,84 @@ export function ciFailuresCommand(rest: string[], deps: CiFailuresCommandDeps = 
     const green = pair.greenSha ? ` green=${pair.greenSha.slice(0, 8)}` : "";
     const files = pair.repairFiles?.length ? `  repair=${pair.repairFiles.join(",")}` : "";
     console.log(`  ${pair.state === "repaired" ? "REPAIRED" : "OPEN    "} #${pair.pr} ${pair.gate}  red=${pair.redSha.slice(0, 8)}${green}${files}`);
+  }
+  return 0;
+}
+
+/** `rmd board`'s three-repository fallback (W1-T3685) — read ONLY when `config.fleetRepos` is
+ *  absent (an untouched, pre-upgrade config.json) AND no `--repo` flag was given. The genuinely
+ *  configured default lives in `config.fleetRepos` (src/lib/config-schema.ts); this is the last
+ *  resort, not the source of truth. */
+const DEFAULT_FLEET_REPOS: readonly string[] = ["craigoley/remudero", "craigoley/remudero-site", "craigoley/remudero-console"];
+
+/** Injectable seam for {@link boardCommand} — real callers pass none of it. */
+export interface BoardCommandDeps {
+  survey?: (repos: readonly string[]) => PullRequestBoard;
+  loadConfig?: () => Pick<Config, "fleetRepos">;
+}
+
+/** The repository set `rmd board` surveys when no `--repo` flag narrows it: `config.fleetRepos`
+ *  when the operator configured one (design (i) — "a fourth repo must need no code change"),
+ *  else {@link DEFAULT_FLEET_REPOS}. An unreadable config (the empty-checkout CI shape every
+ *  other diagnostic verb here already guards — see `handRunsCommand`'s own note) is not a fleet
+ *  with no repos; it falls back the same as an absent field, never crashing a report-only verb. */
+function defaultFleetRepos(deps: BoardCommandDeps): readonly string[] {
+  try {
+    const configured = (deps.loadConfig ?? loadConfig)().fleetRepos;
+    if (Array.isArray(configured) && configured.length > 0) return configured;
+  } catch {
+    // Unreadable config falls through to DEFAULT_FLEET_REPOS below, exactly like an absent field.
+  }
+  return DEFAULT_FLEET_REPOS;
+}
+
+/**
+ * `rmd board [--repo <owner/repo> ...]` — W1-T3685: the one question an operator asks first
+ * ("what is open across the fleet, and what is red") and no other verb answers. `rmd status`
+ * renders this daemon's own board from local state; `rmd ci-failures` answers a narrower
+ * question, one repo by day. This reads GitHub directly, cross-repo, via
+ * {@link surveyPullRequestBoard} (src/lib/pr-board.ts) — ONE `gh pr list` call per repository,
+ * never a per-PR follow-up (the secondary-rate-limit guard that module's own doc names).
+ *
+ * `--repo` may repeat; every occurrence is collected, and repos.length narrows the default set
+ * rather than adding to it. With none given, the survey covers {@link defaultFleetRepos}.
+ *
+ * EXIT CODE IS INFORMATIONAL ONLY: always 0, whatever the board contains, including every
+ * repository red or unavailable. This verb reports; it does not gate (design iv) — mirroring
+ * `ciFailuresCommand`'s own report-only contract just above.
+ */
+export function boardCommand(rest: string[], deps: BoardCommandDeps = {}): number {
+  const badArg = unknownArgError("board", rest, ["--repo"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const requested: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] !== "--repo") continue;
+    const value = rest[i + 1];
+    if (value) requested.push(value);
+    i++;
+  }
+  const repos = requested.length > 0 ? requested : defaultFleetRepos(deps);
+  const board = deps.survey ? deps.survey(repos) : surveyPullRequestBoard(repos);
+  console.log(`rmd board — ${repos.length} repositor${repos.length === 1 ? "y" : "ies"}`);
+  for (const r of board.repos) {
+    if (!r.available) {
+      console.log(`  ${r.repo}: UNAVAILABLE (${r.error})`);
+      continue;
+    }
+    if (r.pullRequests.length === 0) {
+      console.log(`  ${r.repo}: no open pull requests`);
+      continue;
+    }
+    console.log(`  ${r.repo}: ${r.pullRequests.length} open`);
+    for (const pr of r.pullRequests) {
+      const draft = pr.isDraft ? " [draft]" : "";
+      const failing = pr.failingChecks.length > 0 ? `  failing=${pr.failingChecks.join(",")}` : "";
+      const pending = pr.pendingChecks.length > 0 ? `  pending=${pr.pendingChecks.join(",")}` : "";
+      console.log(`    #${pr.number} ${pr.title}${draft} (${pr.headRefName})${failing}${pending}`);
+    }
   }
   return 0;
 }
@@ -43043,6 +43122,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2957: the one failure corpus that arrives with its own fix. For every pull request touched in the window, reads the gate rollup at each commit as the UNION of check runs and commit STATUSES (never /check-runs alone, which cannot see remudero-review) and pairs each red gate with the LATER commit on the SAME pull request that turned that SAME gate green, retaining the repair delta. A red with no observed repair is kept OPEN, never dropped and never reported repaired; a rollup that could not be read is named UNREADABLE, never counted as green, so an empty window and a blind one are distinguishable. Deduped per sha by latest attempt, so a superseded CANCELLED entry never outvotes its own SUCCESS successor. REPORT-ONLY: files nothing, mints no id, writes no guidance (Law 5).",
   },
   {
+    name: "board",
+    syntax: "rmd board [--repo <owner/repo> ...]",
+    summary: "Print what is open, and what is red, across every fleet repository.",
+    detail: "W1-T3685: the one question an operator asks first and no other verb answered — `rmd status` renders this daemon's OWN board from local state, `rmd ci-failures` answers a narrower one (failures, one repo, by day). Surveys every repository named by `--repo` (repeatable), or `config.fleetRepos` when none is given, or a three-repository fallback when that is unset too — never a list written into `pr-board.ts` itself. ONE `gh pr list --json ...` call per repository (surveyPullRequestBoard, src/lib/pr-board.ts): a per-PR follow-up read is refused by design, the secondary-rate-limit hazard. A repository that cannot be read prints UNAVAILABLE with the read error, never rendered as zero open — an empty queue and an unreachable one are opposite facts. Each open pull request prints its number, title, draft state, head branch, and the NAMES of its failing and pending checks. REPORT-ONLY: exit code is always 0, whatever the board contains — this verb reports, it does not gate.",
+  },
+  {
     name: "census-membership",
     syntax: "rmd census-membership [--base <ref>] [--files]",
     summary: "Name the population-walking census suites this diff enters.",
@@ -43944,6 +44029,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
   ["hand-runs", (rest) => handRunsCommand(rest)],
   ["ci-failures", (rest) => ciFailuresCommand(rest)],
+  ["board", (rest) => boardCommand(rest)],
   ["census-membership", (rest) => censusMembershipCommand(rest)],
   ["caller-sweep", (rest) => callerSweepCommand(rest)],
   ["ci-learning", (rest) => ciLearningCommand(rest)],
