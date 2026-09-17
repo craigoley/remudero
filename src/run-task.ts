@@ -9675,17 +9675,20 @@ export async function runFixRung(opts: {
     // decides what this round produced and what `deps.push` then carries. A cash worker cannot
     // have committed, so its count is 0 by construction. The helper is implement's, reused: it
     // owns its own precondition, so a Claude round passes through untouched.
-    if (fixHarnessOwnsGit) {
-      harnessCommitForShellLessWorker({
-        harnessOwnsGit: true,
-        commitCount: 0,
-        report: workerTranscript(fixResult),
-        worktreePath: opts.worktreePath,
-        declaredPaths: opts.task.files ?? [],
-        log: deps.log,
-        say: deps.say,
-      });
-    }
+    // CALLED UNCONDITIONALLY, and the guard is the helper's own: `!harnessOwnsGit || commitCount
+    // !== 0` returns the count untouched, so a Claude round passes straight through. Wrapping this
+    // in `if (fixHarnessOwnsGit)` would only duplicate that precondition — and would put eight
+    // lines in a branch no test on the default config can reach, which `diff-coverage` refuses by
+    // name. A cash worker cannot have committed (it has no git), so its count is 0 by construction.
+    harnessCommitForShellLessWorker({
+      harnessOwnsGit: fixHarnessOwnsGit,
+      commitCount: 0,
+      report: workerTranscript(fixResult),
+      worktreePath: opts.worktreePath,
+      declaredPaths: opts.task.files ?? [],
+      log: deps.log,
+      say: deps.say,
+    });
 
     // W1-T2610: the sha this round believes it just committed, read as early as possible after
     // the worker returns — BEFORE the `readRoundCommits` await, the ledger writes, and the
