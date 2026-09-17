@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { readLedgerLines } from "../src/lib/status.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   currentRepairLeaseHolder,
   postRepairLease,
@@ -177,7 +178,7 @@ test("W1-T3646 criterion 3: a lease on a stale sha does not hold the new head", 
 
 test("postRepairLease: with no injected `post`, the real default wrapper posts through a PATH-stubbed gh", async () => {
   const dir = tmpDir();
-  const bin = mkdtempSync(join(tmpdir(), "gh-repair-lease-stub-ok-"));
+  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-repair-lease-stub-ok-`));
   const oldPath = process.env.PATH;
   try {
     writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
@@ -207,7 +208,7 @@ test("postRepairLease: with no injected `post`, the real default wrapper posts t
 
 test("postRepairLease: a failing gh stub is swallowed by the real default wrapper — the courtesy post never blocks the repair it narrates", async () => {
   const dir = tmpDir();
-  const bin = mkdtempSync(join(tmpdir(), "gh-repair-lease-stub-fail-"));
+  const bin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-repair-lease-stub-fail-`));
   const oldPath = process.env.PATH;
   try {
     writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "gh: Service Unavailable (HTTP 503)" >&2\nexit 1\n', {
