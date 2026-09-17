@@ -3645,6 +3645,59 @@ export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): Cancell
   };
 }
 
+/** W1-T3652 — the verdict {@link cancelledRunCheckOutcome} returns: whether one check run's
+ *  conclusion should be trusted as a real CI failure, plus a stated reason. `isFailure: false`
+ *  is NOT a suppression — the caller still sees the check name and its own conclusion, only the
+ *  failure verdict is withheld — see that function's own doc. */
+export interface CancelledRunCheckOutcome {
+  isFailure: boolean;
+  reason: string;
+}
+
+/** W1-T3652 — ci.yml's `cancel-in-progress: true` kills every push's predecessor mid-flight, and
+ *  the jobs killed that way publish their OWN `conclusion` as `failure`, never `cancelled` — only
+ *  the PARENT workflow run says `cancelled`. Read alone, a killed job is indistinguishable from a
+ *  genuine one (MEASURED 2026-09-16: #5737/#5739 head-identity-gate and coverage-ratchet, each a
+ *  real-sounding "failure" that was purely an artifact of cancellation — this function's own
+ *  rationale, the plan's own W1-T3652 task record).
+ *
+ *  `checkConclusion` is judged EXACTLY as {@link REQUIRED_CHECK_FAIL} judges it today; the only
+ *  change is that a failing conclusion is DOWNGRADED when `parentRunConclusion` is the literal
+ *  string `CANCELLED` (case-insensitive) — the check was killed by its own successor, not a
+ *  verdict on anything.
+ *
+ *  FAILS TOWARD TREATING IT AS REAL: an unreadable `parentRunConclusion` (`undefined`, or any
+ *  value other than `CANCELLED`) leaves a failing check counted as a failure exactly as before
+ *  this function existed. The cost of wrongly keeping a stale-looking red is one wasted log read;
+ *  the cost of wrongly discarding a real one is a PR that merges broken.
+ *
+ *  NOT A SUPPRESSION: the check stays VISIBLE to every caller under its own name and conclusion —
+ *  it is how an operator notices a PR whose runs are being cancelled faster than they finish,
+ *  which is its own pathology. Only the "this is evidence of a defect" verdict is withheld. */
+export function cancelledRunCheckOutcome(
+  checkConclusion: string | undefined,
+  parentRunConclusion: string | undefined,
+): CancelledRunCheckOutcome {
+  const own = (checkConclusion ?? "").toUpperCase();
+  if (!REQUIRED_CHECK_FAIL.has(own)) {
+    return { isFailure: false, reason: "check's own conclusion is not in the failing set" };
+  }
+  const parent = (parentRunConclusion ?? "").toUpperCase();
+  if (parent === "CANCELLED") {
+    return {
+      isFailure: false,
+      reason: "parent workflow run concluded cancelled — killed by its own successor, not a verdict",
+    };
+  }
+  return {
+    isFailure: true,
+    reason:
+      parent === ""
+        ? "parent run conclusion unreadable — failing toward treating this check as real"
+        : "parent run concluded normally — this failure is real",
+  };
+}
+
 /** The ledger step {@link requeuedCheckKeysFromLedger} reads back — one row per re-queue attempt. */
 export const CHECK_REQUEUE_STEP = "sweep.check_requeued";
 
