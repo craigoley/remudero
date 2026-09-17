@@ -40,11 +40,11 @@
     strictly worse than a stale marker. The advance has to be an explicit act.
   acceptance:
     - claim: "the checkpoint advances only on an explicit acknowledgement, never as a side effect of a poll"
-      proof: "unit test: a poll does not advance the recap checkpoint"
+      proof: 'grep: test("a poll (no ack header) never advances the recap checkpoint" in test/a-recap-checkpoint-advances-when-it-is-read.test.ts'
     - claim: "an explicit acknowledgement advances the checkpoint, so the next recap is smaller"
-      proof: "unit test: an acknowledgement advances the checkpoint and shrinks the next recap"
+      proof: 'grep: test("an explicit acknowledgement advances the checkpoint, so the NEXT recap is smaller" in test/a-recap-checkpoint-advances-when-it-is-read.test.ts'
     - claim: "the checkpoint is per operator token, so one reader acknowledging does not blank another's recap"
-      proof: "unit test: one token's acknowledgement leaves another token's recap intact"
+      proof: 'grep: test("one token''s acknowledgement leaves ANOTHER token''s checkpoint and recap intact" in test/a-recap-checkpoint-advances-when-it-is-read.test.ts'
   falsifier: |
     Advance the checkpoint inside the status read and the first test must fail with the recap
     empty after one poll. Drop the advance entirely and the second fails with the recap unchanged.
