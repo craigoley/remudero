@@ -198,6 +198,8 @@ test("acceptance 1 — over the ceiling (the $206/60-run W1-T1 shape): checkCost
     conflicted: 0,
     wait: 0,
     "held-draft": 0,
+    "review-reused": 0,
+    "discriminate-only": 0,
   });
   assert.equal(summary.actionsTaken, 4, "all four dispositions acted — drainage is ungated at any day-cost");
   assert.equal(deps.armed.length, 1, "merge-eligible PR still armed");
