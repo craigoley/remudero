@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
+import { ghShim } from "./helpers/gh-shim.js";
 import {
   decideRepairDispatch,
   refusalVerdictText,
@@ -208,11 +209,13 @@ test("BEHAVIORAL: the next real runTask reads that refusal and escalates without
   const first = await runTask("TST-REPAIR-BAD", { skipGitSync: true, planPath, config, github: OFFLINE_GITHUB, spawn });
   assert.equal(first.verdict, "blocked_illformed");
 
-  const fakeGhDir = mkdtempSync(join(tmpdir(), "rmd-repair-no-gh-"));
-  const fakeGh = join(fakeGhDir, "gh");
-  writeFileSync(fakeGh, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  // SHARED HELPER, NOT A HAND-ROLLED SHIM. `fixture-copy-census` caps how many test files write a
+  // `gh` executable and prepend it onto PATH, and pushes the shape into test/helpers (which it does
+  // not count) so one contract is maintained instead of eighty-seven. `gh` failing outright is
+  // exactly a route with a non-zero exit.
+  const gh = ghShim([{ when: "", exit: 1 }], { kind: "repair-no-gh" });
   const priorPath = process.env.PATH;
-  process.env.PATH = `${fakeGhDir}${delimiter}${priorPath ?? ""}`;
+  process.env.PATH = `${gh.dir}${delimiter}${priorPath ?? ""}`;
   try {
     const repeated = await runTask("TST-REPAIR-BAD", { skipGitSync: true, planPath, config, github: OFFLINE_GITHUB, spawn });
     assert.equal(repeated.verdict, "blocked_illformed");
