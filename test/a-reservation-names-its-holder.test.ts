@@ -475,12 +475,15 @@ test("W1-T3100 (gate copy): main reports differing and unreadable reservation ho
   assert.match(r.err, /W1-T9100 -- reserved by run-W1-T3100-holder, while this filing is run-W1-T3100-filer/);
   assert.match(r.err, /W1-T9101 -- holder unreadable \(malformed value for branch\)/);
   assert.match(r.err, /W1-T9102 -- holder unreadable \(missing branch\)/);
-  // The detached-mint row prints the line that CLEARS it, verbatim and pasteable. The other two
-  // rows must not: W1-T9100 has a real holder branch (so the generic remedy below already names
-  // it), and W1-T9101's holder could not be read at all, so there is nothing to hand off FROM.
-  assert.match(r.err, /remedy: note: "reservation hand-off: unknown -> run-W1-T3100-filer"/);
+  // The detached-mint row prints the line that CLEARS it, verbatim and pasteable, as a block --
+  // hand-off ALONE on its own line (W1-T3648: a one-line fragment silently failed the matcher
+  // once merged with an existing note). The other two rows must not: W1-T9100 has a real holder
+  // branch (so the generic remedy below already names it), and W1-T9101's holder could not be
+  // read at all, so there is nothing to hand off FROM.
+  assert.match(r.err, /note: \|/);
+  assert.match(r.err, /reservation hand-off: unknown -> run-W1-T3100-filer/);
   assert.equal(
-    (r.err.match(/remedy: note:/g) ?? []).length,
+    (r.err.match(/note: \|/g) ?? []).length,
     1,
     "exactly one row earns a pasteable remedy — the one whose reservation recorded a value",
   );
