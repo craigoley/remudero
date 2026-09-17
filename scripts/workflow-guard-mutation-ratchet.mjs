@@ -21,10 +21,15 @@
 //   node scripts/workflow-guard-mutation-ratchet.mjs --all      # measure every guard, report only, exit 0
 //   node scripts/workflow-guard-mutation-ratchet.mjs --list     # enumerate the guards and exit
 //   node scripts/workflow-guard-mutation-ratchet.mjs --seed     # record every currently-UNCOVERED guard
+//   node scripts/workflow-guard-mutation-ratchet.mjs --base <ref>  # judge inherited-vs-caused against <ref> (default origin/main)
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+// W1-T3703: reuses comment-load-ratchet's own caused-vs-inherited rule (see
+// splitCoverageViolations below) rather than restating it, the way W1-T3701 reused it for
+// repo-layout's house-literal counts.
+import { splitBaseInheritedViolations as splitCommentLoadViolations } from "./comment-load-ratchet.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CI_YML = join(REPO_ROOT, ".github", "workflows", "ci.yml");
@@ -214,6 +219,51 @@ export function classifyGuard(guard, original, suites, runSuite = suiteFails, ap
 }
 
 /**
+ * W1-T3703 — split UNCOVERED, non-baselined guards into ones THIS DIFF CAUSED and ones it
+ * INHERITED from the merge base, built on comment-load-ratchet's own caused-vs-inherited rule
+ * (design note i) instead of restating it. A guard's boolean verdict is modelled as the same
+ * "count" shape that rule already compares: uncovered is `comments: 1`, covered is `0`, so "this
+ * diff's count is no worse than the merge base already carried" decides both gates identically.
+ *
+ * A guard absent from `baseGuardsByKey` is unconditionally CAUSED — design note iii, the guard's
+ * direction never changes, a genuinely new guarded mutation is still refused. `classifyAtBase` is
+ * injected so this is testable with no real mutation run; the real caller re-runs `classifyGuard`
+ * against the merge base's own ci.yml text, and only for a guard whose key matches something
+ * already there, mirroring the sibling's "only breaching entries pay for the base read".
+ */
+export function splitCoverageViolations(uncovered, baseGuardsByKey, classifyAtBase) {
+  const violations = uncovered.map((guard) => ({ path: guard.key, comments: 1, baseline: 0, guard }));
+  const baseComments = {};
+  for (const v of violations) {
+    const baseGuard = baseGuardsByKey.get(v.path);
+    if (baseGuard !== undefined) baseComments[v.path] = classifyAtBase(baseGuard).covered ? 0 : 1;
+  }
+  const split = splitCommentLoadViolations(violations, baseComments);
+  return { caused: split.caused.map((v) => v.guard), inherited: split.inherited.map((v) => v.guard) };
+}
+
+/** Design note iv: a recorded exemption whose guard key no longer names a live guard in ci.yml is
+ *  dropped whenever the ledger is REWRITTEN — a renamed job or a removed guard must not leave a
+ *  permanent, unreachable exemption sitting in the file forever. */
+export function pruneStaleBaselineGuards(guards, liveKeys) {
+  const out = {};
+  for (const [key, entry] of Object.entries(guards)) {
+    if (liveKeys.has(key)) out[key] = entry;
+  }
+  return out;
+}
+
+/** The reason recorded for a guard the merge-base split found ALREADY uncovered there — worded
+ *  like comment-load-ratchet's own inherited-growth line (design note ii) so a reader who already
+ *  knows that phrase reads this one the same way. */
+export function inheritedGuardReason(mergeBase) {
+  return (
+    `RECORDED by the merge-base split: this guard was already UNCOVERED at ${mergeBase.slice(0, 12)} -- ` +
+    "inherited, not this diff's growth; the ledger is updated. Replace this reason once someone covers it."
+  );
+}
+
+/**
  * `io` EXISTS SO THIS FUNCTION IS TESTABLE, and that is not a courtesy: every refusal below is a
  * verdict about the tree, and a verdict nothing can drive is a verdict nobody has shown works —
  * the same argument git-push.ts's own leaf makes for its `exec` seam. Omitted, every field is the
@@ -226,17 +276,31 @@ export function main(argv, io = {}) {
   const classify = io.classify ?? classifyGuard;
   const corpusCheck = io.redCorpus ?? redCorpus;
   const writeBaseline = io.writeBaseline ?? ((text) => writeFileSync(BASELINE, text));
+  // W1-T3703: the merge-base a "caused vs inherited" split is judged against, resolved fresh each
+  // run (never a stored number) — same shape as comment-load-ratchet's own readBaseDiff.
+  const resolveMergeBase = io.resolveMergeBase ?? ((ref) => {
+    const out = execFileSync("git", ["-C", REPO_ROOT, "merge-base", ref, "HEAD"], { encoding: "utf8" }).trim();
+    if (!/^[0-9a-f]{40}$/i.test(out)) throw new Error(`git did not return a commit identity for ${ref}`);
+    return out;
+  });
+  const readCiAtBase = io.readCiAtBase ?? ((base) => {
+    const res = spawnSync("git", ["-C", REPO_ROOT, "show", `${base}:.github/workflows/ci.yml`], { encoding: "utf8" });
+    return res.status === 0 ? res.stdout : undefined;
+  });
   const log = io.log ?? console.log;
   const err = io.err ?? console.error;
   const list = argv.includes("--list");
   const all = argv.includes("--all");
   const seed = argv.includes("--seed");
+  const baseFlagIndex = argv.indexOf("--base");
+  const mergeBaseRef = baseFlagIndex !== -1 && argv[baseFlagIndex + 1] !== undefined ? argv[baseFlagIndex + 1] : "origin/main";
   const original = readCi();
   const guards = enumerateSkipGuards(original);
   if (guards.length === 0) {
     err("workflow-guard-mutation: NO skip-shaped guards found in ci.yml - the enumerator sees nothing, which is a defect in this script, not a clean tree. FAILING.");
     return 1;
   }
+  const currentKeys = new Set(guards.map((g) => g.key));
   if (list) {
     for (const g of guards) log(`${String(g.line).padStart(5)}  ${g.key}`);
     log(`\nworkflow-guard-mutation: ${guards.length} skip-shaped guard(s).`);
@@ -277,7 +341,8 @@ export function main(argv, io = {}) {
     }
   }
   if (seed) {
-    const guardsOut = { ...(baseline.guards ?? {}) };
+    // Design note iv: prune a stale exemption here too — --seed is also "the ledger is rewritten".
+    const guardsOut = pruneStaleBaselineGuards(baseline.guards ?? {}, currentKeys);
     for (const g of uncovered) {
       guardsOut[g.key] = guardsOut[g.key] ?? {
         reason: "RECORDED UNMEASURED by --seed: no test distinguishes this skip firing unconditionally. Replace this line with why that is acceptable, or cover it.",
@@ -287,14 +352,51 @@ export function main(argv, io = {}) {
     log(`\nworkflow-guard-mutation: recorded ${uncovered.length} uncovered guard(s) in ${BASELINE}.`);
     return 0;
   }
+
+  // W1-T3703: a diff is refused only for what IT added — design note i. Only the violating guards
+  // pay for a read of the merge base, so a clean run (the common case) costs nothing extra.
+  let caused = uncovered;
+  let inherited = [];
+  if (!all && uncovered.length > 0) {
+    let mergeBase;
+    let baseText;
+    try {
+      mergeBase = resolveMergeBase(mergeBaseRef);
+      baseText = readCiAtBase(mergeBase);
+    } catch (e) {
+      err(
+        `workflow-guard-mutation: could not resolve the merge base against ${mergeBaseRef} to split caused-vs-inherited violations: ${String(e.message ?? e)}`,
+      );
+      return 1;
+    }
+    // ci.yml did not exist at the base at all (a brand-new workflow): nothing to inherit, so every
+    // guard is CAUSED — the empty map falls through splitCoverageViolations' own "absent" arm.
+    const baseGuardsByKey = baseText === undefined
+      ? new Map()
+      : new Map(enumerateSkipGuards(baseText).map((bg) => [bg.key, bg]));
+    const split = splitCoverageViolations(uncovered, baseGuardsByKey, (bg) => classify(bg, baseText, suites));
+    caused = split.caused;
+    inherited = split.inherited;
+    if (inherited.length > 0) {
+      const guardsOut = pruneStaleBaselineGuards(baseline.guards ?? {}, currentKeys);
+      for (const g of inherited) guardsOut[g.key] = { reason: inheritedGuardReason(mergeBase) };
+      writeBaseline(`${JSON.stringify({ guards: guardsOut }, null, 2)}\n`);
+      for (const g of inherited) {
+        log(
+          `${g.key} is UNCOVERED, but was already UNCOVERED at the merge base -- inherited, not this diff's growth; the ledger is updated.`,
+        );
+      }
+    }
+  }
+
   log(
-    `\nworkflow-guard-mutation: ${measured.filter((m) => m.covered).length} covered, ${uncovered.length} uncovered, ` +
-      `${guards.length - measured.length} baselined, across ${guards.length} guard(s) and ${suites.length} ci.yml-reading suite(s).`,
+    `\nworkflow-guard-mutation: ${measured.filter((m) => m.covered).length} covered, ${caused.length} uncovered, ` +
+      `${inherited.length} inherited, ${guards.length - measured.length} baselined, across ${guards.length} guard(s) and ${suites.length} ci.yml-reading suite(s).`,
   );
-  if (uncovered.length > 0 && !all) {
+  if (caused.length > 0 && !all) {
     err(
-      `workflow-guard-mutation: BLOCKED -- ${uncovered.length} skip guard(s) can fire UNCONDITIONALLY with every test still green:\n` +
-        uncovered.map((g) => `  - ci.yml:${g.line}  ${g.key}`).join("\n") +
+      `workflow-guard-mutation: BLOCKED -- ${caused.length} skip guard(s) can fire UNCONDITIONALLY with every test still green:\n` +
+        caused.map((g) => `  - ci.yml:${g.line}  ${g.key}`).join("\n") +
         "\nA guard no test can distinguish turns a required check into a green no-op. Add a case that\n" +
         `asserts the skip does NOT fire on the other side, or record it in ${BASELINE} with the reason.`,
     );

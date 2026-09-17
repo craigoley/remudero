@@ -43,6 +43,17 @@ const MS_PER_DAY = 86_400_000;
 export const EXEMPT_MARKER = "expiring-fixture: exempt";
 
 /**
+ * Set (to any truthy string) by ci.yml ONLY on the `ci` job's push-to-main lane (W1-T3655), never
+ * on a `pull_request` run. On that lane `origin/main` IS the commit under test -- the run has no
+ * earlier base to inherit a crossing FROM, so treating it as one would let a stamp sitting on main
+ * excuse itself as "inherited" and go green on the one run that exists to catch it. This is the
+ * arm the task's own falsifier calls "the one most likely to be got wrong, since it fails open and
+ * looks green": an explicit flag set by the caller who KNOWS which lane it is beats inferring it
+ * from a `rev-parse` comparison a coincidental match could satisfy by accident.
+ */
+export const CENSUS_MAIN_BRANCH_RUN = "CENSUS_MAIN_BRANCH_RUN";
+
+/**
  * The fields a live threshold ages against `Date.now()`, and where that happens.
  *
  * This table is the one thing that can silently go stale, so {@link assertFieldsStillAged} pins
@@ -299,6 +310,7 @@ export function main({
   assertAged = assertFieldsStillAged,
   recordedPopulationByFile = RECORDED_POPULATION_BY_FILE,
   baseRefOverride,
+  env = process.env,
 } = {}) {
   assertAged();
   const files = execFile("git", ["ls-files", "test/*.test.ts"], { encoding: "utf8" }).split("\n").filter(Boolean);
@@ -309,17 +321,25 @@ export function main({
   // `readBaseFile` undefined and the gate behaves exactly as it did before attribution existed.
   const baseRef = baseRefOverride ?? "origin/main";
   let readBaseFile;
-  try {
-    execFile("git", ["rev-parse", "--verify", `${baseRef}^{commit}`], { encoding: "utf8", stdio: "pipe" });
-    readBaseFile = (path) => {
-      try {
-        return execFile("git", ["show", `${baseRef}:${path}`], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: "pipe" });
-      } catch {
-        return undefined; // absent at base ⇒ the file is this diff's own
-      }
-    };
-  } catch {
+  // W1-T3655: on the base's own run there is no earlier base to inherit FROM -- see
+  // CENSUS_MAIN_BRANCH_RUN's own comment for why this is checked BEFORE the rev-parse probe
+  // rather than folded into it. `readBaseFile` stays undefined, so every crossing reads exactly as
+  // strict as it would with no base readable at all.
+  if (env[CENSUS_MAIN_BRANCH_RUN]) {
     readBaseFile = undefined;
+  } else {
+    try {
+      execFile("git", ["rev-parse", "--verify", `${baseRef}^{commit}`], { encoding: "utf8", stdio: "pipe" });
+      readBaseFile = (path) => {
+        try {
+          return execFile("git", ["show", `${baseRef}:${path}`], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: "pipe" });
+        } catch {
+          return undefined; // absent at base ⇒ the file is this diff's own
+        }
+      };
+    } catch {
+      readBaseFile = undefined;
+    }
   }
   const result = censusExpiringFixtures({
     files,
@@ -331,14 +351,16 @@ export function main({
   const populationDrop = refusePopulationDrop(result.populationByFile, recordedPopulationByFile);
   const report = formatReport({ ...result, populationDrop });
   log(report);
-  // ATTRIBUTION NAMES THE OWNER; IT DOES NOT MOVE THE GATE -- the same split W1-T2339 settled for
-  // lint-plan's "pre-existing on base" annotation. Letting an INHERITED crossing pass would be the
-  // obvious next step and is deliberately NOT taken here: this census runs on `pull_request` only
-  // (ci.yml's comment-load-ratchet job is event-guarded), so nothing else would ever observe a
-  // stamp sitting on main, and a warning no gate enforces is how the bomb reaches its own red date
-  // unfixed. Non-blocking inheritance needs a main-branch run to land WITH it, which is a separate,
-  // reviewed change to the workflow's job registration.
-  const blocked = result.reported.length > 0 || populationDrop.length > 0;
+  // ATTRIBUTION NAMES THE OWNER, AND NOW DOES MOVE THE GATE FOR THE HALF IT CAN PROVE IS NOT THIS
+  // DIFF'S (W1-T3655). W1-T3388 deliberately left every crossing blocking, inherited or not,
+  // because nothing observed `main` -- a non-blocking inherited crossing would have been a warning
+  // no gate enforced, and the bomb would still reach its own red date unfixed. ci.yml's `ci` job
+  // now runs this census on its push-to-main lane too (CENSUS_MAIN_BRANCH_RUN, see above), so a
+  // stamp sitting on main is caught by the run that owns it. With that run in place, a crossing
+  // marked `inherited === true` is reported -- never hidden -- but no longer charged to a PR that
+  // did not plant it; only a crossing this diff itself introduced, or a population drop, blocks.
+  const introduced = result.reported.filter((r) => r.inherited !== true);
+  const blocked = introduced.length > 0 || populationDrop.length > 0;
   emitCiReport("expiring-fixture-census", report, { blocked });
   return blocked ? 1 : 0;
 }

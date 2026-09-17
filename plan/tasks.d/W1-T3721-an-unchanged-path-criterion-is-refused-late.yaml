@@ -91,3 +91,27 @@
     execution design (ii) requires. Not a hard `depends_on`: if that PR does not land, this one
     must still refuse the shape, and would then have to build the base comparison itself rather
     than invent a wording heuristic.
+
+    SECOND VARIANT, MEASURED 2026-09-17 on #5852 — THE WORK LANDED ELSEWHERE AND THE SHARD NEVER
+    LEARNED. W1-T3693 declared four `unit test:` proofs. ALL FOUR resolved to ZERO tests, on main
+    and on the PR branch alike, so remudero-review reported four unmet criteria. But three of them
+    were BUILT AND TESTED in an earlier PR for the same task, under different titles:
+
+      declared: an openweight request abandoned at its deadline settles its reservation
+      actual:   the request carries an abort signal, so a hung endpoint cannot stall the loop forever
+      declared: a length-truncated openweight reply is refused rather than returned
+      actual:   a budget-truncated reply is REFUSED by the adapter, not returned as an answer
+      declared: a fenced openweight reply is extracted rather than rejected
+      actual:   a STRUCTURED request unwraps a fenced reply on the real spawn path
+
+    `OPENWEIGHT_REQUEST_TIMEOUT_MS`, `OpenWeightTruncatedReplyError` and `openWeightUnfence` were
+    all on main the whole time. The criteria were written once, at filing, and never re-pointed
+    when the implementation chose its own test names.
+
+    SAME ROOT CAUSE, SAME FIX. A criterion is checked against the tree only in CI, so a proof that
+    names no test survives until a reviewer reports it as unmet WORK. Design (ii) already requires
+    the author-time check to EXECUTE against the base rather than pattern-match the prose; a proof
+    resolving to zero tests is the cheaper half of that same question and must refuse at the same
+    moment. Note this variant fails in the OPPOSITE direction to the first: an unchanged-path
+    criterion passes at head and base, this one resolves nowhere at all -- and both reach a human
+    as "the reviewer refused my PR" rather than "your criterion does not track your code".

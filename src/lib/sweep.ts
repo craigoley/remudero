@@ -1060,6 +1060,61 @@ export function rebaseDirtyFleetBranchViaGit(
   }
 }
 
+/**
+ * W1-T3654 — the ONE recorded member list for {@link buildSweepEffects}' return surface. Both
+ * `test/build-sweep-effects-takes-one-deps-object.test.ts` (the entrypoint-only suite) and
+ * `test/sweep-orchestration-lives-in-lib.test.ts` (the lib-vs-entrypoint suite) import this array
+ * rather than transcribing their own copy of it.
+ *
+ * THE INCIDENT THIS CLOSES: PR #5725 added `reviewerCodeStaleThisPass` to this surface and
+ * updated only one of the two hand-copied `EFFECT_KEYS` constants those suites used to carry. The
+ * failing job named the one that went green; the other stayed red for the REAL reason — W1-T2890's
+ * lib-vs-entrypoint invariant had genuinely broken — and was found only by a sweep of every suite,
+ * not by the failure report. A census whose population is transcribed by hand in two places is two
+ * censuses that can disagree, and the disagreement is exactly what neither copy could detect.
+ *
+ * Order is free — every reader sorts before comparing — so new members are appended rather than
+ * inserted in some canonical position.
+ */
+export const SWEEP_EFFECT_SURFACE = [
+  "arm",
+  "close",
+  "dispatchFix",
+  // W1-T3390 — the plan-only shard-repair rung, dispatched once the body-repair budget above is
+  // spent and the caller has wired it (see planCappedRepair, classify.ts).
+  "dispatchPlanOnlyRepair",
+  "escalate",
+  "readLiveState",
+  "terminalFixStandDown",
+  "readRedBaseRefreshFacts",
+  "depReview",
+  "postReview",
+  "repushAbsent",
+  "updateBranch",
+  "captureRepairFeedback",
+  "disarmAutoMerge",
+  "requeueCheck",
+  "escalateCancelledCheck",
+  "escalateInfrastructureCheck",
+  "readCiGateRollup",
+  "reaggregateCiGate",
+  "readMainTip",
+  "readMainRepair",
+  "readStaleRedWorkflowRuns",
+  "runStaleRedLocalRoute",
+  "releaseStaleRed",
+  "releaseBaseCausedStandDown",
+  "selectAdaptiveReviewWidth",
+  // W1-T3283: the sweep's trailer-repair effect. The assertion sorts both sides, so this entry's
+  // position is free — it is listed last because it is the newest, not because order matters.
+  "repairMissingTaskTrailer",
+  "rebaseDirtyFleetBranch",
+  // W1-T3618: the reviewer-code freshness reading, hoisted in FRONT of reviewCommand so a stale
+  // daemon never pays for a review it cannot publish. It is an effect, not a plain value, because
+  // buildSweepEffects caches the read once per sweep cycle rather than once per PR.
+  "reviewerCodeStaleThisPass",
+] as const;
+
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "arm"
