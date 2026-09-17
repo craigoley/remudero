@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
-import { buildFreshTreeReviewRunner, buildReviewerCodeFreshnessGate } from "../src/run-task.js";
+import {
+  buildFreshTreeReviewRunner,
+  buildReviewerCodeFreshnessGate,
+  spawnRmdReviewForFreshTree,
+} from "../src/run-task.js";
+import { makeTempDir } from "../src/lib/tmp.js";
 
 // ── W1-T3723 — A STALE REVIEWER REVIEWS FROM A FRESH TREE INSTEAD OF WAITING FOR A RESTART ────
 //
@@ -127,4 +134,17 @@ test("a spawn failure is undefined too, so the caller falls back rather than inv
 test("the child's exit code is returned verbatim, so a real review failure still fails", async () => {
   const { runner } = runnerWith({ spawn: async () => 1 });
   assert.equal(await runner("5883", [], { originMainSha: "bbbbbbbbbbbb" }), 1);
+});
+
+// ── The real spawnReview seam (W1-T3723) — the fake above stands in for this in every test up to
+// here; this drives the PRODUCTION wiring itself so it is not left an uncalled construction-only
+// closure (the shape diff-coverage.mjs flags on an added line lcov never sees hit).
+
+test("spawnRmdReviewForFreshTree runs a real child process and resolves to its exit code", async () => {
+  const dir = makeTempDir("t3723-fresh-tree-spawn");
+  mkdirSync(join(dir, "bin"), { recursive: true });
+  // argv: [node, <bin/rmd>, "review", "5883", "7"] — "review" is fixed by spawnRmdReviewForFreshTree.
+  writeFileSync(join(dir, "bin", "rmd"), "process.exit(Number(process.argv[4]));\n");
+  const code = await spawnRmdReviewForFreshTree(dir, ["5883", "7"]);
+  assert.equal(code, 7, "the child's own exit code must come back verbatim");
 });

@@ -1410,6 +1410,19 @@ export function buildFreshTreeReviewRunner(
   };
 }
 
+export function spawnRmdReviewForFreshTree(worktree: string, args: string[]): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const child = spawn(process.execPath, [join(worktree, "bin", "rmd"), "review", ...args], {
+      cwd: worktree,
+      stdio: "inherit",
+      // The child IS at origin/main, so a self-sync there is a refusal and a wasted fetch.
+      env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
+    });
+    child.on("error", reject);
+    child.on("exit", (code: number | null) => resolve(code ?? 1));
+  });
+}
+
 export function buildReviewerCodeFreshnessGate(
   readFreshness: () => ReviewerCodeFreshness,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -1566,17 +1579,7 @@ export function buildSweepEffects(
       // and refuses another; this needs the same throwaway detached tree, at the base revision.
       addWorktree: realDeps().reviewWorktree.addWorktree,
       worktreeRoot: join(repoRoot, "..", "worktrees"),
-      spawnReview: (worktree, args) =>
-        new Promise<number>((resolve, reject) => {
-          const child = spawn(process.execPath, [join(worktree, "bin", "rmd"), "review", ...args], {
-            cwd: worktree,
-            stdio: "inherit",
-            // The child IS at origin/main, so a self-sync there is a refusal and a wasted fetch.
-            env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
-          });
-          child.on("error", reject);
-          child.on("exit", (code: number | null) => resolve(code ?? 1));
-        }),
+      spawnReview: spawnRmdReviewForFreshTree,
     }),
   );
   const effects = buildSweepEffectsFromLib({
