@@ -166,7 +166,22 @@ export function daemonInstanceRegistryPath(installPath: string): string {
  * empty map and an unreadable file identically (see {@link instanceForStateRoot}).
  */
 export function daemonInstanceStateDirs(text: string): Map<string, string> {
-  const out = new Map<string, string>();
+  return new Map([...daemonInstanceRows(text)].map(([name, row]) => [name, row.stateDir]));
+}
+
+/** W1-T3733 — the two fields the deploy path needs from one instance's registry row. */
+export interface DaemonInstanceRow {
+  stateDir: string;
+  /** The container that instance runs, as `docker inspect` reported it when the registry was written. */
+  containerName?: string;
+}
+
+/** W1-T3733 — every declared instance's `state_dir` AND `container_name`, from one pass. See
+ *  {@link daemonInstanceStateDirs} for why this is not a YAML parser. */
+export function daemonInstanceRows(text: string): Map<string, DaemonInstanceRow> {
+  const out = new Map<string, DaemonInstanceRow>();
+  /** Fields seen before this instance's `state_dir`, folded in when that arrives. */
+  const partial = new Map<string, Omit<DaemonInstanceRow, "stateDir">>();
   let inInstances = false;
   let current: string | undefined;
   for (const raw of text.split(/\r?\n/)) {
@@ -184,9 +199,21 @@ export function daemonInstanceStateDirs(text: string): Map<string, string> {
       current = name[1];
       continue;
     }
+    if (current === undefined) continue;
+    // ACCUMULATE BOTH FIELDS REGARDLESS OF ORDER. The live registry writes `container_name` BEFORE
+    // `state_dir`, and an earlier draft dropped the container whenever it arrived first — a
+    // field-order dependency is exactly the silent widening a hand-rolled reader invites.
     const stateDir = /^ {4}state_dir:\s*(\S+)\s*$/.exec(raw);
-    if (stateDir && current !== undefined) out.set(current, stateDir[1]);
+    if (stateDir) out.set(current, { ...partial.get(current), ...out.get(current), stateDir: stateDir[1] });
+    const container = /^ {4}container_name:\s*(\S+)\s*$/.exec(raw);
+    if (container) {
+      const row = out.get(current);
+      if (row) out.set(current, { ...row, containerName: container[1] });
+      else partial.set(current, { containerName: container[1] });
+    }
   }
+  // A row that never named a `state_dir` is an instance this deployment can never match, so it is
+  // dropped rather than carried with an empty directory that could compare equal to something.
   return out;
 }
 
@@ -204,6 +231,23 @@ function normalisedDir(dir: string): string {
  * mount. `undefined` on no match AND on an ambiguous one — the caller then invokes the script
  * exactly as it does today, and the registry's refusal stands unchanged.
  */
+/**
+ * W1-T3733 — the container whose `/etc/rmd-build-sha` this deployment's image drift must be read
+ * from. MEASURED 2026-09-17: `IMAGE_SHA_CONTAINER` was the literal `remudero-daemon` at its only
+ * call site, so the site and console recycle ticks read CORE's image, saw its 0 baked-path commits
+ * behind, and declined — while their own images sat 24 hours and one baked-path commit stale.
+ *
+ * Resolved through the SAME state-root match `--instance` uses, so one lookup answers both and
+ * they cannot disagree about which daemon is being deployed. No match, no recorded
+ * `container_name`, or an unreadable registry all fall back to {@link IMAGE_SHA_CONTAINER} — the
+ * literal this replaces — so the core deployment is byte-for-byte unchanged and no fault can point
+ * the read at nothing.
+ */
+export function imageShaContainerFor(registryText: string, stateRoot: string): string {
+  const name = instanceForStateRoot(registryText, stateRoot);
+  return (name !== undefined ? daemonInstanceRows(registryText).get(name)?.containerName : undefined) ?? IMAGE_SHA_CONTAINER;
+}
+
 export function instanceForStateRoot(registryText: string, stateRoot: string): string | undefined {
   const want = normalisedDir(stateRoot);
   const matches = [...daemonInstanceStateDirs(registryText)].filter(([, dir]) => normalisedDir(dir) === want);
@@ -1289,11 +1333,20 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   // An unreadable or absent registry is NOT a match — it leaves `recycleInstance` undefined and the
   // invocation byte-identical to before this task, which is the fail-closed direction: a fault must
   // never select a daemon, and must never restore the unscoped default the registry exists to forbid.
+  // W1-T3733: read ONCE, and reused for both the `--instance` flag and the image-sha container.
+  const registryText = (() => {
+    try {
+      return readFileSync(daemonInstanceRegistryPath(o.installPath), "utf8");
+    } catch {
+      return undefined; // absent or unreadable — every consumer below keeps its pre-registry default
+    }
+  })();
+  const imageShaContainer = registryText === undefined ? IMAGE_SHA_CONTAINER : imageShaContainerFor(registryText, o.stateRoot);
   const recycleInstance =
     o.instance ??
     (() => {
       try {
-        return instanceForStateRoot(readFileSync(daemonInstanceRegistryPath(o.installPath), "utf8"), o.stateRoot);
+        return registryText === undefined ? undefined : instanceForStateRoot(registryText, o.stateRoot);
       } catch {
         // An absent or unreadable registry does not name an instance; preserve the script's
         // fail-closed unscoped refusal instead of inferring one from unrelated host state.
@@ -1398,7 +1451,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     imageBakedCommitsBehind: () => {
       let sha: string | undefined;
       try {
-        sha = exec("docker", ["exec", IMAGE_SHA_CONTAINER, "cat", IMAGE_BUILD_SHA_PATH]).trim();
+        sha = exec("docker", ["exec", imageShaContainer, "cat", IMAGE_BUILD_SHA_PATH]).trim();
       } catch {
         return undefined; // container down / no docker — UNKNOWN, never "current"
       }
