@@ -26,9 +26,6 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
@@ -40,6 +37,7 @@ import {
 } from "../src/lib/sweep.js";
 import { priorReviewVerdictFromLedger, reviewLedgerLegibilityFields } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const NOW = Date.parse("2026-09-16T19:00:00Z");
 const RECENT = "2026-09-16T18:50:00Z";
@@ -88,12 +86,6 @@ function unchangedInputs(): Partial<ReviewReuseInputs> {
   };
 }
 
-/** A fresh, empty ledger file per test — same pattern `test/sweep.test.ts`'s own `ledgerPath()`
- *  uses, so `runSweep`'s prior-actions fold always starts with every dedup set empty. */
-function freshLedgerPath(): string {
-  return join(mkdtempSync(join(tmpdir(), "rmd-sweep-reuse-")), "ledger.ndjson");
-}
-
 /** The minimal recording fake `runSweep` needs for these two dispositions: both route through the
  *  dedup switch's `"review-reused"`/`"discriminate-only"` arm, which forces `alreadyDone` true
  *  BEFORE any effector is ever reached — so every one of these calls must stay at zero. */
@@ -111,7 +103,12 @@ function minimalDeps(): SweepDeps & { armed: OpenPrView[]; closed: OpenPrView[];
     close: (p) => { closed.push(p); },
     dispatchFix: (p) => { fixed.push(p); },
     escalate: (p) => { escalated.push(p); },
-    ledgerPath: freshLedgerPath(),
+    // THE SHARED BUILDER, not a 52nd ledger helper. `fixture-copy-census.test.ts` ratchets the
+    // number of distinct ledger-helper names across test/, and this file's own `freshLedgerPath`
+    // was one over (ledgerHelperNames: 52 > baseline 51). `writeLedger()` with no rows is the
+    // same thing — a fresh tmp dir holding an empty `ledger.ndjson` — so `runSweep`'s
+    // prior-actions fold still starts with every dedup set empty.
+    ledgerPath: writeLedger().path,
     runId: "W1-T3704-REUSE",
   };
 }
