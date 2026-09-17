@@ -403,6 +403,7 @@
     "test/changed-tasks-raw-text.test.ts": 1872,
     "test/changelog-generation.test.ts": 992,
     "test/changeset-shorthand-anchor.test.ts": 1184,
+    "test/check-acceptance-names-a-proof-that-discriminates-nothing.test.ts": 0,
     "test/check-conclusion-taxonomy.test.ts": 1165,
     "test/check-conclusion-vocabulary.test.ts": 1604,
     "test/check-proof-base.test.ts": 2779,
