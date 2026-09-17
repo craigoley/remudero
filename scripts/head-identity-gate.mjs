@@ -36,6 +36,21 @@
 // exemption self-limiting: a head that touches src/ is refused however it is named. An UNREADABLE
 // diff is not a manifest-only diff, so it refuses too — the exemption fails closed.
 //
+// A FIFTH ADMITTED FORM IS KEYED ON THE DIFF, NOT THE SUBJECT (W1-T3706). The first three forms
+// above enumerate a FORGEABLE, FREE-FORM subject spelling one incident at a time (plan filings,
+// then `chore(deps)` bumps) — a `chore(docs):` ruling that would have been admitted as `docs:`
+// was refused only for how it was worded (PR #5809). A plan filing, a dependency bump and a
+// documentation ruling all share ONE property, and it is not the subject: each BUILDS NO TASK, so
+// a `Remudero-Task` trailer would be a false credit and a run-shaped branch a lie about origin.
+// What makes them safe to admit is that their diffs touch no code — a fact about the DIFF, which
+// no author can misspell and no pusher can forge by renaming a branch. A head whose changed paths
+// are ALL non-code (`isNonCodePath` / `NON_CODE_PATH_PATTERNS`, `src/run-task.ts`, imported rather
+// than re-spelled here — see this file's own filing-subject import above for the same discipline)
+// is admitted whatever its subject says. Asked LAST, exactly like the dependency-bump form, so it
+// can only ever admit a head every earlier form already refused; one path outside the list (or an
+// unreadable diff, `changedPathsAtHead`'s own `undefined`) refuses the whole head, the same
+// self-limiting shape the bump exemption already proved.
+//
 // Usage: node --import tsx scripts/head-identity-gate.mjs --head-ref <ref>
 // [--worktree-path <path>] (ref falls back to $GITHUB_HEAD_REF; path defaults to cwd).
 
@@ -43,7 +58,13 @@ import { parseArgs } from "node:util";
 import { readFileSync } from "node:fs";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
-import { LINT_FILING_SUBJECT_RE, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, isDispatchedRunBranch } from "../src/run-task.ts";
+import {
+  LINT_FILING_SUBJECT_RE,
+  RUN_BRANCH_FILED_FORM,
+  RUN_BRANCH_UNFILED_FORM,
+  isDispatchedRunBranch,
+  isNonCodePath,
+} from "../src/run-task.ts";
 import { extractTaskTrailerId } from "../src/lib/review.ts";
 // W1-T3707: ONE manifest predicate, owned by the dependency-review lane. This script used to
 // keep its own BASENAME matcher, which admitted test/fixtures/onboard/repo/package.json while
@@ -52,7 +73,7 @@ import { extractTaskTrailerId } from "../src/lib/review.ts";
 import { isManifestPath } from "../src/lib/dep-review.ts";
 
 // Re-exported so a caller/test can name these shapes without a second import of src/run-task.ts.
-export { LINT_FILING_SUBJECT_RE, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, isDispatchedRunBranch };
+export { LINT_FILING_SUBJECT_RE, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, isDispatchedRunBranch, isNonCodePath };
 
 /**
  * Is `subject` (a commit's first line) filing-shaped — citing a task rather than building it?
@@ -106,6 +127,22 @@ export function isDependencyBumpHead({ headRef, subject, changedPaths }) {
 }
 
 /**
+ * Is this head's ENTIRE diff non-code (W1-T3706)? Unlike {@link isDependencyBumpHead} it asks
+ * nothing of the head ref or subject — a documentation/plan ruling carries neither a `dependabot/`
+ * ref nor a `chore(deps)` subject, and asking for either would just be a fourth spelling instead
+ * of a fifth incident.
+ *
+ * `changedPaths` absent or EMPTY returns `false`, the same fail-closed direction
+ * {@link isDependencyBumpHead} already takes: an unreadable diff is not a non-code diff, and a
+ * head with literally nothing changed has nothing to admit on this route either.
+ * @param {{ changedPaths: readonly string[] | undefined }} input
+ */
+export function isNonCodeHead({ changedPaths }) {
+  if (!Array.isArray(changedPaths) || changedPaths.length === 0) return false;
+  return changedPaths.every((path) => isNonCodePath(path));
+}
+
+/**
  * The gate's predicate: a filing-shaped subject is exempt outright; otherwise a conforming
  * identity requires the run-branch shape (either named form) or the trailer — either is enough —
  * and a refusal names BOTH conforming forms plus the trailer route.
@@ -145,6 +182,18 @@ export function evaluateHeadIdentityGate({ headCommitMessage, headRef, changedPa
       message:
         `dependency-bump head (${headRef}) whose diff touches only dependency manifests — admitted ` +
         "without a task credit, because a bump builds no task to credit (W1-T3680)",
+    };
+  }
+
+  // W1-T3706: asked LAST OF ALL, so it can only ever ADMIT a head every form above already
+  // refused. Keyed on the diff, not the subject, so no spelling of a documentation or plan
+  // ruling needs its own entry on this allowlist ever again.
+  if (isNonCodeHead({ changedPaths })) {
+    return {
+      ok: true,
+      message:
+        "non-code head whose entire diff is documentation or plan — admitted whatever its subject " +
+        "spelling, because a diff with nothing to attribute has nothing to credit (W1-T3706)",
     };
   }
 
