@@ -1713,7 +1713,7 @@ import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 // turns instead of dollars (this task's own declared `files:` list does not include
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
-import { gitPushRunBranch, gitPushEmptyCommit, LanePushForeignHeadError } from "./lib/git-push.js";
+import { defaultGitCapture, gitPushRunBranch, gitPushEmptyCommit, LanePushForeignHeadError } from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
   materializeWorkerHome,
@@ -22310,12 +22310,13 @@ export function runPreflightProofs(
   repoRoot: string,
   deps: PreflightProofsDeps = {},
 ): { ok: boolean; steps: CiParityStepResult[] } {
-  const git =
-    deps.git ?? ((args: string[]) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8" }).toString());
-  const spawn = deps.spawn ?? ((file: string, args: string[], opts?: { cwd?: string }) => {
-    const r = spawnSync(file, args, { encoding: "utf8", cwd: opts?.cwd, maxBuffer: 1 << 26 });
-    return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-  });
+  // BOTH DEFAULTS ARE THE REPO'S EXISTING ONES, NOT NEW ONES. `diff-coverage` refused the
+  // hand-written pair these replace, and it was right twice over: their bodies were unreachable
+  // whenever a test injected a seam, and a second spawn default is a second set of environment
+  // rules for child processes to drift from (`defaultPreflightSpawn` scrubs the self-sync guard;
+  // a local `spawnSync` does not). One default, already covered, already correct.
+  const git = deps.git ?? ((args: string[]) => defaultGitCapture("git", ["-C", repoRoot, ...args]));
+  const spawn = deps.spawn ?? defaultPreflightSpawn;
   let headSha: string;
   let mergeBase: string;
   let body: string;
