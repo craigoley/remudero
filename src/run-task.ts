@@ -1364,8 +1364,7 @@ export type FreshTreeReviewSeams = {
  * rightly). So the only recovery was a process restart — and on a host whose instance registry
  * declares instances, `deploy/recycle-container.sh` refuses a restart that names none. Merging a
  * change to `src/lib/review.ts` therefore STOPPED THE REVIEWER, and nothing could start it again.
- * MEASURED 2026-09-17: #5873 merged, seven `review.skipped_stale_reviewer_code` rows in 45
- * minutes naming #5883 and #5876, a `deploy.restart_refused`, and an hour of no reviews.
+ * Measured incident: learnings/failures.yaml#stale-reviewer-code-had-no-recovery-but-a-restart.
  *
  * WHY A WORKTREE RATHER THAN A SYNC. Nothing here moves a ref. `git worktree add --detach` cuts a
  * NEW tree at origin/main and leaves the daemon's own pinned HEAD exactly where it was, so
@@ -1411,19 +1410,10 @@ export function buildReviewerCodeFreshnessGate(
   readFreshness: () => ReviewerCodeFreshness,
   log: (step: string, extra?: Record<string, unknown>) => void,
   next: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>,
-  /** W1-T3723 — REVIEW FROM FRESH CODE INSTEAD OF SKIPPING. Stale reviewer code is a property of
-   *  the LOADED MODULE, not of the pull request, and a process cannot hot-swap the module judging
-   *  the PR. So the work moves instead of the code: this runs `rmd review` as a SUBPROCESS out of
-   *  a detached worktree pinned at origin/main, which loads fresh code by construction.
-   *
-   *  THE DAEMON'S OWN CHECKOUT NEVER MOVES. W1-T445 refuses self-sync on a detached HEAD for a
-   *  real reason — this repo cuts one for base-side comparisons and advancing it would turn a
-   *  base-vs-head diff into head-vs-head — and that guard is untouched here. A NEW worktree is
-   *  added; no existing ref moves.
-   *
-   *  Returns `undefined` when it could not run at all (no runner wired, worktree refused, spawn
-   *  failed). The caller then falls back to the original skip, so W1-T3691's recurrence ladder
-   *  stays the floor and nothing this adds can make a stale reviewer judge anyway. */
+  /** W1-T3723 — runs `rmd review` from a fresh worktree instead of skipping a stale-code PR; see
+   *  {@link buildFreshTreeReviewRunner} for why the daemon's own checkout never moves. Returns
+   *  `undefined` when it could not run at all, so the caller falls back to the original skip and
+   *  W1-T3691's recurrence ladder stays the floor. */
   reviewFromFreshTree?: (
     prArg: string,
     rest: string[],

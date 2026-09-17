@@ -209,3 +209,17 @@
   assertion: 'git show-ref --head | head -1 | grep -qE "^[0-9a-f]{40} "'
   src: operator-session sweep false-positive 2026-09-04; format re-derived 2026-09-06
   cited: "2026-09-06"
+- id: stale-reviewer-code-had-no-recovery-but-a-restart
+  subsystem: reviewer
+  lifecycle: active
+  operator_impact: true
+  files: [src/run-task.ts]
+  fact: >-
+    The reviewer refuses to judge with loaded code behind origin/main (W1-T228) and its detached
+    checkout refuses self-sync (W1-T445), so the only recovery was a process restart -- refused by
+    `deploy/recycle-container.sh` on a host whose instance registry names none. #5873 merged, then
+    seven `review.skipped_stale_reviewer_code` rows in 45 minutes naming #5883 and #5876, a
+    `deploy.restart_refused`, and an hour of no reviews. Fixed by running the review out of a
+    fresh `--detach` worktree at origin/main instead (buildFreshTreeReviewRunner, W1-T3723).
+  src: W1-T3723
+  cited: "2026-09-17"
