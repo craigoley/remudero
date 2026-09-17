@@ -569,6 +569,65 @@ export function entryBudgetWeight(entry: LearningEntry): number {
 /** id -> {@link entryBudgetWeight} plus 1 for the joining newline (W1-T941). A `learnings.injected`
  *  ledger row carries dropped ids but never their weight; this is the lookup digest.ts's
  *  `measureKnowledgeBudgetPressure` joins them against without importing the corpus loaders. */
+/**
+ * W1-T3733: how much MATCHED knowledge the per-task budget actually costs a plan, measured with
+ * the production selector rather than inferred from corpus size.
+ *
+ * THE NUMBER THE RATCHET GUARDS IS NOT THE NUMBER A RUN PAYS, and this repo already says so --
+ * scripts/learnings-budget-baseline.json's own note calls the corpus-wide cap "orthogonal to
+ * DEFAULT_KNOWLEDGE_BUDGET_CHARS, which caps what any ONE task's matched selection actually
+ * injects". True and deliberate: {@link selectLearnings} keeps only entries whose files, symbols or
+ * errors MATCH, then fills to the budget, so an unmatched entry costs a run zero. What was missing
+ * is that nothing measured the per-task side at all.
+ *
+ * MEASURED 2026-09-17 over plan/tasks.yaml against the live corpus: 1,816 tasks declare files, 79
+ * entries are active, and 634 TASKS (35%) already drop at least one MATCHED entry -- 9,730 dropped
+ * matches, worst case W1-T2896 matching 48 and injecting 8,097 of 8,148 chars.
+ *
+ * DROPPING IS NOT AUTOMATICALLY HARM, so this reports rather than forbids. `selectLearnings` RANKS
+ * before it fills (error hits, then symbol, then file count, then layer, then recency), so a task
+ * matching 48 and injecting the best 17 may have lost nothing it needed. The TREND is what matters:
+ * a plan where more tasks lose more matches than before is losing knowledge it used to carry.
+ */
+export interface TaskDropPressure {
+  /** Tasks whose declared files were considered at all. */
+  tasksMeasured: number;
+  /** Tasks that matched more knowledge than the budget could carry. */
+  tasksLosingMatches: number;
+  /** Total matched-but-dropped entries across every measured task. */
+  droppedMatches: number;
+  /** The single worst task, so a message can name something actionable. */
+  worst?: { taskId: string; matched: number; dropped: number; injectedChars: number };
+}
+
+export function measureTaskDropPressure(
+  entries: LearningEntry[],
+  tasks: ReadonlyArray<{ id?: string; files?: readonly string[] }>,
+  budgetChars: number = DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+): TaskDropPressure {
+  const out: TaskDropPressure = { tasksMeasured: 0, tasksLosingMatches: 0, droppedMatches: 0 };
+  for (const task of tasks) {
+    // A files-less task has no declared surface to measure against; counting it would invent a
+    // denominator. (selectLearnings can still admit such a task on a symbol or error hit at
+    // dispatch -- that is a different question from "what does this plan record cost".)
+    if (task?.files === undefined || task.files.length === 0) continue;
+    out.tasksMeasured += 1;
+    const { selected, dropped } = selectLearnings(entries, [...task.files], budgetChars);
+    if (dropped.length === 0) continue;
+    out.tasksLosingMatches += 1;
+    out.droppedMatches += dropped.length;
+    if (out.worst === undefined || dropped.length > out.worst.dropped) {
+      out.worst = {
+        taskId: task.id ?? "<unnamed>",
+        matched: selected.length + dropped.length,
+        dropped: dropped.length,
+        injectedChars: selected.reduce((sum, e) => sum + entryBudgetWeight(e), 0),
+      };
+    }
+  }
+  return out;
+}
+
 export function buildEntryWeightIndex(entries: LearningEntry[]): Record<string, number> {
   const index: Record<string, number> = {};
   for (const entry of entries) {

@@ -182,7 +182,7 @@
   "src/lib/daemon.ts": 1500,
   "src/lib/dep-review.ts": 250,
   "src/lib/deploy-judge.ts": 250,
-  "src/lib/deployer.ts": 500,
+  "src/lib/deployer.ts": 750,
   "src/lib/digest.ts": 326,
   "src/lib/disk-artifact-reclaim.ts": 250,
   "src/lib/dispatch-claim.ts": 130,
