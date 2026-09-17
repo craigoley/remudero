@@ -1,0 +1,96 @@
+- id: W1-T3732
+  title: "THE DEPLOY SUPERVISOR CANNOT RESTART ANY DAEMON — it invokes `recycle-container.sh` with no `--instance`, which the instance registry made a hard refusal, so every automated restart has been a one-line ledger row and the fleet runs whatever code it booted with"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    MEASURED FROM THE LIVE LEDGER 2026-09-17T13:07:36Z, one row, verbatim:
+
+      {"step":"deploy.restart_refused","to":"a90f7ea53","backend":"recycle-container",
+       "message":"recycle-container: REFUSING -- no --instance given while
+        .../daemon-instances.yaml declares instances.\n  Declared: core site console"}
+
+    The supervisor had already pulled the new image (`deploy.pulled`, same pass). It then tried to
+    replace the container and was refused, so the core daemon stayed on the code it booted with.
+
+    (1) THE CALL SITE PASSES NOTHING. `realDeployDeps`, src/lib/deployer.ts:
+
+          restart: () => { exec("bash", [recycleContainerScript]); }
+
+        No `--instance`, and `RealDeployOpts` has no field that could supply one — the option
+        does not exist anywhere on the automated path.
+
+    (2) THE REFUSAL IS CORRECT AND MUST STAY. W1-T3596 added `.remudero/daemon-instances.yaml`
+        because THREE daemons now share a host (core, site, console) and the unscoped default
+        targets `remudero-daemon` with `STATE_DIR ${HOME}/rmd-state` — not even core's own state
+        directory (core runs on `rmd-state2`). An operator meaning to recycle console would have
+        recycled core, against the wrong state. That guard is right.
+
+    (3) WHAT IT DID NOT NOTICE IS THAT IT ALSO GUARDS A ROBOT. The refusal was written for a human
+        typing the command; the deploy supervisor invokes the same script on a timer and has no way
+        to answer it. A safety change for the operator path silently disarmed the automated path
+        for all three daemons, and the only symptom is one ledger row nobody reads.
+
+    (4) MEASURED CONSEQUENCE, TODAY. #5888 — the fix that lets a stale reviewer review from a fresh
+        worktree instead of waiting for a restart — merged at 13:02. The supervisor tried to load it
+        at 13:07 and was refused. At 13:13 the daemon was still 3 commits behind with
+        `src/run-task.ts` among the changes, so `checkReviewerCodeFreshness` read STALE and the
+        reviewer skipped every pull request. Two PRs sat green and unreviewed. An operator ran
+        `recycle-container.sh --instance core` by hand and the fleet caught up in 90 seconds.
+
+    (5) SO THE RESTART PATH IS DEAD FOR EVERY OTHER PURPOSE TOO — a rollback, a security fix, a
+        deploy of any kind. The reviewer half now has its own answer (W1-T3723); nothing else does.
+  design: |
+    (i) DERIVE THE INSTANCE FROM THE REGISTRY, DO NOT CONFIGURE IT TWICE. The registry already
+        records each instance's state directory (measured from live `docker inspect` mounts, per
+        its own header). `realDeployDeps` holds `stateRoot`. Matching the two names the instance
+        without a second source of truth that could drift from the first — and a registry that
+        gains a fourth daemon is answered without touching this code.
+
+    (ii) NO MATCH MEANS THE REFUSAL STANDS, UNCHANGED. If the registry is absent, unreadable, or
+         names no instance for this state root, the script is invoked exactly as it is today and
+         refuses exactly as it does today. This adds an answer where one exists; it never invents
+         one, and it never restores the unscoped default the registry exists to forbid.
+
+    (iii) A REFUSED RESTART MUST STOP READING AS A ROUTINE ROW. `deploy.restart_refused` is the
+          most consequential outcome this supervisor has — the deploy did not happen — and it is
+          recorded at the same weight as every other step. It gets a distinct, alertable shape so a
+          fleet running stale code is visible without reading the ledger by hand.
+
+    NOT IN SCOPE: whether the supervisor should recycle the site and console daemons too (it is
+    configured per-instance and this task changes no scheduling), and the ~74-minute container
+    lifecycle observed separately on this host.
+  acceptance:
+    - claim: "the supervisor names the instance whose state directory it is deploying, so the registry's refusal has an answer"
+      proof: "unit test: the recycle invocation carries the instance matching this deployment's state root"
+    - claim: "a state root the registry does not name leaves the invocation exactly as it is today, so the guard is never bypassed"
+      proof: "unit test: an unmatched state root invokes the script unchanged"
+    - claim: "an unreadable or absent registry is not treated as a match, so a fault cannot select the wrong daemon"
+      proof: "unit test: an unreadable registry names no instance"
+    - claim: "a refused restart is recorded distinctly enough to alert on, because it means the deploy did not happen"
+      proof: "unit test: a refused restart is reported as a failed deploy, not a routine step"
+  falsifier: |
+    Hardcode `--instance core` and the second assertion goes red — that is the tempting one-line
+    fix, and it silently recycles core whenever the site or console supervisor runs. Match on the
+    container NAME instead of the state root and the wrong-state failure W1-T3596 was written for
+    comes back, because two instances can be renamed onto one container but never onto one state
+    mount. Treat an unreadable registry as "no instances declared" and the third goes red: the
+    script would then be invoked unscoped, which is the pre-W1-T3596 default and the exact hazard.
+  risk: high
+  band_meaning: blast-radius
+  origin: human
+  plan_refs: [W1-T3596, W1-T3200, W1-T3723]
+  files: [src/lib/deployer.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t3732-the-supervisor-cannot-restart-a-daemon
+
+    `files:` names no test path, deliberately: `proof-unit-test-unresolvable` refuses a filing that
+    declares one (W1-T3730). The build adds it back.
+
+    Minted by `rmd next-task-id` from the daemon lane's detached HEAD, which records the holder as
+    `unknown`; recorded here because the filing branch is not `run-` shaped.
