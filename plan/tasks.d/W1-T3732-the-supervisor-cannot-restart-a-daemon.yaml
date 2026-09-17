@@ -55,10 +55,13 @@
          refuses exactly as it does today. This adds an answer where one exists; it never invents
          one, and it never restores the unscoped default the registry exists to forbid.
 
-    (iii) A REFUSED RESTART MUST STOP READING AS A ROUTINE ROW. `deploy.restart_refused` is the
-          most consequential outcome this supervisor has — the deploy did not happen — and it is
-          recorded at the same weight as every other step. It gets a distinct, alertable shape so a
-          fleet running stale code is visible without reading the ledger by hand.
+    (iii) THE REFUSED-RESTART REPORT IS ALREADY BUILT AND IS NOT IN SCOPE. Checked on main before
+          writing this: `runDeployCycle` already calls `deps.alert(..., "restart-refused")` beside
+          the `deploy.restart_refused` row, and test/the-restart-seam-adapts-to-its-host.test.ts
+          already asserts BOTH (the alert's kind at :184/:215, the ledger step at :217). A criterion
+          for it would name behaviour this task does not change — test theater, and
+          `proof-discrimination` would grade it `executed_stale` on sight. It is recorded here so a
+          reader knows the question was asked and answered, not skipped.
 
     NOT IN SCOPE: whether the supervisor should recycle the site and console daemons too (it is
     configured per-instance and this task changes no scheduling), and the ~74-minute container
@@ -70,8 +73,6 @@
       proof: "unit test: an unmatched state root invokes the script unchanged"
     - claim: "an unreadable or absent registry is not treated as a match, so a fault cannot select the wrong daemon"
       proof: "unit test: an unreadable registry names no instance"
-    - claim: "a refused restart is recorded distinctly enough to alert on, because it means the deploy did not happen"
-      proof: "unit test: a refused restart is reported as a failed deploy, not a routine step"
   falsifier: |
     Hardcode `--instance core` and the second assertion goes red — that is the tempting one-line
     fix, and it silently recycles core whenever the site or console supervisor runs. Match on the
