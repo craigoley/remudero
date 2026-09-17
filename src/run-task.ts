@@ -22196,7 +22196,43 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  *  test/preflight-help-is-derived-not-retyped.test.ts) to gate directly: a flag added to one
  *  list and not the printed signature is now a test failure, not a reader's omission. */
 export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file"] as const;
-export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage"] as const;
+export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast"] as const;
+
+/** W1-T3737 — one tier of a preflight run, for the summary sentence below. */
+export interface PreflightTier {
+  readonly name: string;
+  /** How to make this tier RUN — printed only when it did not. */
+  readonly enableWith: string;
+  readonly ran: boolean;
+}
+
+/**
+ * W1-T3737 — the PASS/FAIL sentence, COMPOSED from what actually ran.
+ *
+ * The line this replaces was hand-written beside the run and read, verbatim, "commitlint,
+ * typecheck, and emitter checks are all clean; the push may proceed" — after `--fast` had run
+ * TWENTY checks. So it under-reported the flagged path and over-reported the default one, which is
+ * this repo's own "a check that reports its own success" hazard inside the tool builders trust
+ * most. Composing it from `steps` makes naming fewer checks than were performed unreachable.
+ *
+ * A PASS also names the tiers it did NOT run. A green that does not say what it skipped is read as
+ * "CI will pass", and it never meant that.
+ */
+export function preflightSummarySentence(
+  ok: boolean,
+  steps: readonly { readonly name: string }[],
+  tiers: readonly PreflightTier[],
+): string {
+  if (!ok) return "### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes";
+  const ran = tiers.filter((t) => t.ran).map((t) => t.name);
+  const skipped = tiers.filter((t) => !t.ran);
+  return (
+    `### rmd preflight: PASS — ${steps.length} check(s) clean across ${ran.join(" + ")}; the push may proceed` +
+    (skipped.length > 0
+      ? `\n### not checked here: ${skipped.map((t) => `${t.name} (${t.enableWith})`).join(", ")} — CI runs more than this run did`
+      : "")
+  );
+}
 
 /** W1-T2646: renders `FAST_GATE_STEPS`' own script names — SCRIPT NAMES ONLY, never each
  *  entry's `reason` (which runs to paragraphs and would flood the printed usage) — for
@@ -22243,7 +22279,12 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
 
   const result = runPreflight(repoRoot, { ...deps, range });
-  const fast = rest.includes("--fast") ? runPreflightFast(repoRoot, { spawn: deps.spawn }) : undefined;
+  // W1-T3737 — THE FAST TIER IS THE DEFAULT. MEASURED on origin/main: it runs twenty checks in
+  // 29s with no false reds, and the three-step default passed a diff CI then refused (the #5928
+  // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
+  // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
+  // no escape is a wall and an operator on a slow host must still be able to push.
+  const fast = rest.includes("--no-fast") ? undefined : runPreflightFast(repoRoot, { spawn: deps.spawn });
   const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn }) : undefined;
   const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn }) : undefined;
 
@@ -22294,10 +22335,15 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   });
   const steps = [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])];
   const treeAdvisory = runTreeAdvisoryLine(runContext, steps);
+  const tiers: PreflightTier[] = [
+    { name: "commitlint/typecheck/emitter", enableWith: "always runs", ran: true },
+    { name: "the fast gate", enableWith: "drop --no-fast", ran: fast !== undefined },
+    { name: "ci-parity", enableWith: "--ci-parity", ran: ciParity !== undefined },
+    { name: "coverage", enableWith: "--coverage", ran: coverage !== undefined },
+  ];
   console.log(
-    (ok
-      ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
-      : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes") +
+    "\n" +
+      preflightSummarySentence(ok, steps, tiers) +
       `\n### ${runContextLine(runContext)}` +
       (treeAdvisory ? `\n### ${treeAdvisory}` : ""),
   );
