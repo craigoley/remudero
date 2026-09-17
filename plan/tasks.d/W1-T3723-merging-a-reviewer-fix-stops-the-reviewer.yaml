@@ -92,7 +92,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: freshreview -> freshreview
+    reservation hand-off: freshreview -> plan3723
 
     Minted by `rmd next-task-id` from the branch that files it; recorded because the branch is not
     a `run-` shaped one.
