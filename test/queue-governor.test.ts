@@ -75,8 +75,21 @@ function blockedFixablePr(): OpenPrView {
     reviewSummary: "one criterion unmet",
   });
 }
+  // W1-T3731: the supersession row closes only on a POSITIVE `superseded` verdict now, so a
+  // fixture that means "this one really is a duplicate" states it. This suite's subject is
+  // the queue governor, not the evidence rule, and its assertions are unchanged.
 function supersededPr(): OpenPrView {
-  return pr({ prNumber: 12, prUrl: "url/12", taskId: "W1-C", supersededBy: 99 });
+  return pr({
+    prNumber: 12,
+    prUrl: "url/12",
+    taskId: "W1-C",
+    supersededBy: 99,
+    supersessionVerdict: {
+      status: "superseded",
+      evidence: { supersedingPrNumber: 99, taskId: "W1-C", diff: { rawLineCount: 40, matchedHunks: 3 } },
+      detail: "every changed path is also changed by #99",
+    },
+  });
 }
 function blockedAmbiguousPr(): OpenPrView {
   return pr({ prNumber: 13, prUrl: "url/13", taskId: "W1-D", reviewState: "pending", checksState: "pending" });

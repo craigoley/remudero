@@ -1495,6 +1495,15 @@ function declaresTestFile(task: Task): boolean {
 export function proofUnitTestUnresolvableViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const resolveNameFilteredCandidates = opts.resolveNameFilteredCandidates;
   if (!resolveNameFilteredCandidates) return [];
+  // W1-T3730 — A FILING SHIPS NO SUITE, WHATEVER ITS `files:` DECLARES. This check's whole premise
+  // is "this diff ships the suite the title claims", derived from the TASK's `files:`. On a build
+  // those are the same statement; on a FILING they are not — `files:` is what the future build will
+  // touch. MEASURED on #5901, a diff of three files all under `plan/tasks.d/`: five criteria across
+  // two shards were refused for "shipping" a suite the diff did not contain, and the only exits were
+  // to omit the test path (making the shard lie about its scope) or renumber.
+  //
+  // The premise is checkable against the diff the caller is already holding, so it is checked.
+  if (opts.planOnlyFiling === true) return [];
   if (!declaresTestFile(task)) return []; // suite not part of this diff — a legitimate forward reference
   const violations: LintViolation[] = [];
   (task.acceptance ?? []).forEach((c, i) => {
@@ -3198,6 +3207,13 @@ export interface LintOpts {
   /** Severity for {@link proofScopeViolations}. Default "warn" — see that check's section comment
    *  for the measured retrofit count driving the default. */
   proofScope?: LintSeverity;
+  /** W1-T3730 — is THIS diff a filing (plan-only) rather than a build? Supplied only by
+   *  `lint-plan --base`, the one caller holding the diff; absent ⇒ {@link
+   *  proofUnitTestUnresolvableViolations} behaves exactly as it did before this field existed, so
+   *  the whole-plan pass and pre-dispatch are untouched. Derived from `planOnlyDiff` (review.ts),
+   *  the SAME predicate Standing rule 15 uses to tell a filing from a build — never a second
+   *  notion of it, which could disagree with rule 15 about what a filing is. */
+  planOnlyFiling?: boolean;
   /** W1-T2835 — did this repo-relative path exist at the BASE ref? The base-tree counterpart of
    *  {@link LintOpts.moduleExists}, and the only way the base fact reaches this pure module: the
    *  linter never reads disk and never shells git. ABSENT ⇒ {@link proofBaseDiscriminationViolations}

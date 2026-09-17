@@ -335,7 +335,21 @@ test("runSweep: one due surface's capture throwing does not stop a DIFFERENT due
   });
   const fixable = Array.from({ length: THRESHOLD }, (_, i) => blockedFixablePrN(800 + i));
   const stale = Array.from({ length: THRESHOLD }, (_, i) =>
-    pr({ prNumber: 900 + i, prUrl: `url/${900 + i}`, taskId: `W1-STALE${i}`, headSha: `sha-stale-${i}`, supersededBy: 999, lastActivityAt: RECENT }),
+    // W1-T3731: these stand in for CLOSED-as-superseded PRs, which now requires a positive
+    // verdict. The subject here is that one surface's capture throwing does not stop another's.
+    pr({
+      prNumber: 900 + i,
+      prUrl: `url/${900 + i}`,
+      taskId: `W1-STALE${i}`,
+      headSha: `sha-stale-${i}`,
+      supersededBy: 999,
+      supersessionVerdict: {
+        status: "superseded",
+        evidence: { supersedingPrNumber: 999, taskId: `W1-STALE${i}`, diff: { rawLineCount: 10, matchedHunks: 1 } },
+        detail: "every changed path is also changed by #999",
+      },
+      lastActivityAt: RECENT,
+    }),
   );
   await runSweep([...fixable, ...stale], deps, { ...DEFAULT_SWEEP_POLICY, ...POLICY });
   assert.deepEqual(seen.sort(), ["repair#blocked-fixable", "repair#stale"], "both surfaces were attempted despite the first one throwing");
