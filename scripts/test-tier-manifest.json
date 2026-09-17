@@ -236,6 +236,7 @@
     "test/a-test-outside-strykers-command-is-invisible.test.ts": 484,
     "test/a-test-that-writes-the-tracked-tree-is-observed-by-every-other-worker.test.ts": 638,
     "test/a-timed-spawn-cannot-be-outlived-by-its-child.test.ts": 0,
+    "test/a-title-proof-that-passes-on-an-empty-base-is-refused.test.ts": 0,
     "test/a-tool-bound-resolves-per-provider.test.ts": 0,
     "test/a-top-tier-seat-survives-a-maxed-subscription.test.ts": 0,
     "test/a-union-read-of-an-unretained-step-is-refused.test.ts": 0,
