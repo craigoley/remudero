@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { dirname } from "node:path";
@@ -29,6 +29,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const idGate = (await import(pathToFileURL(join(ROOT, "scripts", "task-id-existence-check.mjs")).href)) as {
   scaffoldShardStub: (o: Record<string, unknown>) => string;
   writeScaffoldedShard: (o: Record<string, unknown>, fs?: unknown) => string | undefined;
+  scaffoldCli: (argv: string[], deps?: Record<string, unknown>) => { ok: boolean; message: string; path?: string };
   reservationHandoffNoteLine: (holder: string, filer: string) => string;
   shardNoteRecordsReservationHandoff: (text: string, holder: string, filer: string) => boolean;
 };
@@ -109,4 +110,45 @@ test("--no-scaffold writes nothing", () => {
     () => idGate.writeScaffoldedShard({ planDir: dir, id: "W1-T9999", slug: "a-defect", holderBranch: "unknown", filerBranch: "f" }),
     /refusing to overwrite/,
   );
+});
+
+test("the generator is reachable from a filer's own flow", () => {
+  // A generator nothing invokes is one more correct thing nobody runs — the dormancy this task
+  // exists to fix, one layer up. The CLI arm is what puts it in a filer's hands.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-scaffold-cli-"));
+  const wrote = idGate.scaffoldCli(
+    ["--scaffold", "W1-T9999", "--slug", "a-defect", "--holder", "unknown", "--for-branch", "file-a-defect"],
+    { planDir: dir },
+  );
+  assert.equal(wrote.ok, true, wrote.message);
+  assert.match(wrote.message, /^scaffold: wrote /);
+  const written = readFileSync(wrote.path as string, "utf8");
+  assert.ok(written.split("\n").map((l) => l.trim()).includes(idGate.reservationHandoffNoteLine("unknown", "file-a-defect")));
+
+  // The escape reaches the CLI too, and still writes nothing.
+  const declined = idGate.scaffoldCli(["--scaffold", "W1-T9998", "--slug", "x", "--no-scaffold"], { planDir: dir });
+  assert.equal(declined.ok, true);
+  assert.match(declined.message, /declined/);
+  assert.deepEqual(readdirSync(dir), ["W1-T9999-a-defect.yaml"]);
+
+  // A missing id is a usage error, not a silent no-op.
+  assert.equal(idGate.scaffoldCli(["--scaffold"], { planDir: dir }).ok, false);
+});
+
+test("a slug that would escape the plan directory is refused", () => {
+  // THE SLUG BECOMES A PATH SEGMENT. Refused by shape rather than sanitised: a silently-rewritten
+  // filename is a shard nobody can find.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-scaffold-esc-"));
+  for (const slug of ["../../etc/passwd", "has/slash", "Has-Caps", "trailing-"]) {
+    assert.throws(
+      () => idGate.writeScaffoldedShard({ planDir: dir, id: "W1-T9999", slug, holderBranch: "unknown", filerBranch: "f" }),
+      /not a kebab-case slug/,
+      `'${slug}' must be refused`,
+    );
+  }
+  assert.deepEqual(readdirSync(dir), [], "nothing escaped and nothing landed");
+
+  // THE CONTROL: an ordinary slug still writes, or the refusal above proves nothing.
+  const ok = idGate.writeScaffoldedShard({ planDir: dir, id: "W1-T9999", slug: "a-real-slug", holderBranch: "unknown", filerBranch: "f" });
+  assert.equal(ok, join(dir, "W1-T9999-a-real-slug.yaml"));
 });

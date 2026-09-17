@@ -299,10 +299,24 @@ export function scaffoldShardStub({ id, slug, title, holderBranch, filerBranch }
  */
 export function writeScaffoldedShard({ planDir, id, slug, title, holderBranch, filerBranch, scaffold = true }, fs = nodeFs) {
   if (scaffold === false) return undefined;
-  const name = `${id}-${slug ?? "todo-name-the-defect"}.yaml`;
-  const path = join(planDir, name);
-  if (fs.existsSync(path)) throw new Error(`writeScaffoldedShard: ${path} already exists — refusing to overwrite a filing`);
-  fs.writeFileSync(path, scaffoldShardStub({ id, slug, title, holderBranch, filerBranch }), "utf8");
+  const safeSlug = slug ?? "todo-name-the-defect";
+  // THE SLUG BECOMES A PATH SEGMENT. Anything but a bare kebab name escapes `planDir` through
+  // `join` — `--slug ../../something` would write outside the plan entirely. Refused by shape
+  // rather than sanitised, because a silently-rewritten filename is a shard nobody can find.
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(safeSlug)) {
+    throw new Error(`writeScaffoldedShard: '${safeSlug}' is not a kebab-case slug — it becomes a path segment`);
+  }
+  const path = join(planDir, `${id}-${safeSlug}.yaml`);
+  // ATOMIC, NOT CHECK-THEN-WRITE. An `existsSync` guard ahead of the write is a race CodeQL
+  // flagged on this very function (high severity, "the file may have changed since it was
+  // checked"): between the two calls a real shard can appear and be silently destroyed. The `wx`
+  // flag makes the create itself the exclusion, so there is no window to lose.
+  try {
+    fs.writeFileSync(path, scaffoldShardStub({ id, slug: safeSlug, title, holderBranch, filerBranch }), { encoding: "utf8", flag: "wx" });
+  } catch (err) {
+    if (err && err.code === "EEXIST") throw new Error(`writeScaffoldedShard: ${path} already exists — refusing to overwrite a filing`);
+    throw err;
+  }
   return path;
 }
 
