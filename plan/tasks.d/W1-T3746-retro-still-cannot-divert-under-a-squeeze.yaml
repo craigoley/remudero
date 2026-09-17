@@ -62,3 +62,8 @@
       proof: "grep: harnessCommitForShellLessWorker in src/run-task.ts"
     - claim: "a retro spawn told the harness owns git is coherent with the surface it is offered"
       proof: "unit test: W1-T3746"
+  note: |
+    reservation hand-off: main -> plan/file-squeeze-findings-1789677997
+
+    Minted on `main` from the operator checkout; recorded here because the filing branch is not
+    that ref.

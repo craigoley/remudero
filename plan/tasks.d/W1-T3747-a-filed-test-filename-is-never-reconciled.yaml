@@ -72,3 +72,8 @@
       proof: "unit test: W1-T3747: a credited build whose declared test path shipped passes"
     - claim: "a plan-only filing is untouched, so the forward reference stays legal pre-dispatch"
       proof: "unit test: W1-T3747: a plan-only filing is exempt"
+  note: |
+    reservation hand-off: main -> plan/file-squeeze-findings-1789677997
+
+    Minted on `main` from the operator checkout; recorded here because the filing branch is not
+    that ref.

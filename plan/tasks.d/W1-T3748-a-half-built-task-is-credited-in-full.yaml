@@ -62,3 +62,8 @@
       proof: "unit test: W1-T3748: full coverage reports nothing"
     - claim: "the check ships advisory, never as a refusal, until the population is measured"
       proof: "unit test: W1-T3748: under-coverage is advisory"
+  note: |
+    reservation hand-off: main -> plan/file-squeeze-findings-1789677997
+
+    Minted on `main` from the operator checkout; recorded here because the filing branch is not
+    that ref.
