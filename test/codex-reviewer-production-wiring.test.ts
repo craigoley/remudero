@@ -145,6 +145,17 @@ esac
     assert.equal(reviewerCwdWasGit, true, "the reviewer cwd must be a real Git checkout");
     assert.equal(reviewerHead, headSha, "the reviewer must inspect the exact PR head");
     assert.deepEqual(observedTools, ["Read", "Grep", "Glob", "Bash"], "the production call site must preserve inspection while excluding write tools");
+    // REVIEW-CASH-DIVERT — THE PRODUCTION CALL SITE MUST ALSO OFFER THE CASH SURFACE. This is the assertion
+    // that makes `cashDivertSpawnFields("review")` load-bearing at the spawn itself rather than
+    // only in the lane table: the table can be perfectly correct while nothing reads it, which is
+    // the exact shape of the outage measured on 2026-09-17 (the auction refused this spawn for
+    // naming Bash, `remudero-review` never posted, and every PR on the board stayed unmergeable).
+    // `observedTools` above stays UNCHANGED — the Claude surface is not narrowed, only paired.
+    assert.deepEqual(
+      observedSpawn?.cashTools === undefined ? undefined : [...observedSpawn.cashTools],
+      ["Read", "Grep", "Glob", "RunCheck"],
+      "the reviewer spawn must carry a shell-less cash surface, or a blocked auction refuses it outright",
+    );
     assert.equal(observedSpawn?.sandboxIntent, "disposable-review");
     assert.deepEqual(observedSpawn?.sandboxReadRoots, [physicalDependencyRoot]);
     assert.equal(reviewerNodeModulesLink, physicalDependencyRoot, "the reviewer link must not traverse a denied intermediate checkout");

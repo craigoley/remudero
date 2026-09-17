@@ -1090,6 +1090,21 @@ export const DISPATCH_LANE_TOOL_BOUNDS = {
   recon: { claude: ["Read", "Grep", "Glob", "Bash"], openweight: ["Read", "Grep", "Glob", "RunCheck"] },
   diagnose: { claude: ["Read", "Grep", "Glob", "Bash"], openweight: ["Read", "Grep", "Glob", "RunCheck"] },
   retro: { claude: ["Read", "Grep", "Glob", "Edit", "Bash"], openweight: ["Read", "Grep", "Glob", "Edit", "RunCheck"] },
+  // `review` — the acceptance reviewer (`runReview`'s spawn, run-task.ts). Same shape as
+  // `recon`/`diagnose` above; never added to this table until W1-T3726's successor. Its claude row
+  // is `SPECIALIST_TOOLS` verbatim, pinned by
+  // test/the-review-lane-diverts-to-cash-under-a-squeeze.test.ts, not by an import — specialist-
+  // panel.ts imports this module, so the reverse edge would close a cycle.
+  //
+  // Bash buys this lane only a read-only git query and the project's checks, both covered by
+  // `OPENWEIGHT_CHECKS`. Proof execution is the HARNESS's (`ProofExecContext.exec`, lib/review.ts),
+  // so a shell-less reviewer loses none of it, and the coherence rule has nothing to reconcile: a
+  // read-only lane commits nothing, so no prompt of its ever promised it would.
+  //
+  // MEASURED 2026-09-17, claude weekly exhausted: "not implementable by cash (Read, Grep, Glob,
+  // Bash)" -> spawn_error. `remudero-review` is REQUIRED, so this one refusal held the whole board
+  // unmergeable for the squeeze window.
+  review: { claude: ["Read", "Grep", "Glob", "Bash"], openweight: ["Read", "Grep", "Glob", "RunCheck"] },
   // alert_fix commits and pushes, which the check-runner deliberately cannot do (no git write, no
   // forge). It has no open-weight equivalent and stays Claude-only until one is ruled on.
   alert_fix: { claude: FIX_WORKER_TOOLS },
