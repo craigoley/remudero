@@ -77,24 +77,28 @@
   # tests -- so remudero-review reported four unmet criteria for work three of which were done.
   # Each replacement was read, not matched by name: the assertion behind it was checked to prove
   # the claim beside it.
+  # CORRECTED AGAIN 2026-09-17, and the first correction was half-right. #5868 re-pointed these at
+  # the tests that exist, which fixed the reviewer's "unmet" — and GUARANTEED proof-discrimination
+  # would refuse them, because a test that lives on main passes on main. Re-pointing cannot help a
+  # criterion whose work landed in an EARLIER PR; `satisfied_by` is the field for exactly that,
+  # and it is what should have been used the first time.
+  #
+  # (a)(b)(c) shipped in #5797 and #5798. This task's remaining diff is the docblock recording why
+  # (d) stays unbuilt, so no proof it can write will discriminate for it.
   acceptance:
     - claim: "a request that never answers cannot hang the tool loop, because every cash request is abortable"
       proof: "unit test: the request carries an abort signal, so a hung endpoint cannot stall the loop forever"
+      satisfied_by: "https://github.com/craigoley/remudero/pull/5797"
     - claim: "the reservation for an abandoned request is settled rather than silently returned, and the refusal says why"
       proof: "unit test: the timeout refusal states that the reservation STAYS CHARGED, and why"
+      satisfied_by: "https://github.com/craigoley/remudero/pull/5797"
     - claim: "a reply truncated by the completion budget is a named failure, not a short answer"
       proof: "unit test: a budget-truncated reply is REFUSED by the adapter, not returned as an answer"
+      satisfied_by: "https://github.com/craigoley/remudero/pull/5797"
     - claim: "a fenced structured reply is still parsed on the real spawn path, so the prompt rule is not the only defence"
       proof: "unit test: a STRUCTURED request unwraps a fenced reply on the real spawn path"
-  # (d) WITHDRAWN AS A CRITERION BY THIS TASK'S OWN FALSIFIER, which reads: "Close (d) without
-  # implementing if no lane wants a grounding contract -- it is machinery for a judgement lane, and
-  # building it before one exists would be the shipped-unwired shape." CHECKED 2026-09-17 and
-  # recorded in src/lib/worker-provider.ts: ruling-judge.ts and verify-human-judge.ts carry no
-  # reference to this provider, and Mounts.escalation_judge (escalate.ts) is ROUTING-ONLY -- it
-  # parses one DECISION/REASON pair, not a list of citable asserted items. No lane asserts observed
-  # facts through this adapter, so a citation validator would guard nothing. The withdrawn criterion
-  # was: "an asserted item with no resolvable citation discards the generation and falls back",
-  # proof "unit test: an ungrounded openweight claim discards the generation".
+      satisfied_by: "https://github.com/craigoley/remudero/pull/5798"
+  # (d) WITHDRAWN BY THIS TASK'S OWN FALSIFIER — see the note below and src/lib/worker-provider.ts.
   falsifier: |
     Close (d) without implementing if no lane wants a grounding contract -- it is machinery for a
     judgement lane, and building it before one exists would be the shipped-unwired shape. (a) and
