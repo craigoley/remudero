@@ -917,6 +917,12 @@ import {
   type LintOpts,
   type DuplicateSurfaceCorpusEntry,
 } from "./lib/task-linter.js";
+import {
+  readPriorRefusal,
+  writePriorRefusal,
+  repairRefusedTask,
+  type RefusalViolation,
+} from "./lib/dispatch-repair.js";
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn } from "./lib/replay-harness.js";
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
@@ -1714,7 +1720,7 @@ import {
   sweepStaleWorkerHomes,
   workerKeychainPaths,
 } from "./lib/worker-home.js";
-import { FIX_WORKER_TOOLS } from "./lib/fix-fence.js";
+import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import {
   checkCliFreshness,
@@ -9554,8 +9560,12 @@ export async function runFixRung(opts: {
             constraint: opts.constraint,
           };
     const fixMode = deriveFixMode(evidence);
+    // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
+    // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
+    const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
     const prompt = [
       renderFixPrompt({
+        harnessCommits: fixHarnessOwnsGit,
         task: opts.task,
         round: attempt,
         branch: opts.branch,
@@ -9604,6 +9614,10 @@ export async function runFixRung(opts: {
       // prompt-injection payload riding in that log can't reach the
       // network via WebFetch/WebSearch.
       tools: FIX_WORKER_TOOLS,
+      // W1-T3727: the surface a BLOCKED auction would divert this round to. Offered only when the
+      // prompt above already said the harness commits — otherwise a retry hands a shell-less
+      // worker a contract asking for `git push`.
+      ...(fixCashTools === undefined ? {} : { cashTools: fixCashTools }),
       // W1-T2261: the attribution markers `reclaimAbandonedWorker` later matches an abandoned
       // spawn's live process against (worker.ts's `workerMarkerEnv` merges these into the
       // child's env as REMUDERO_RUN_ID/REMUDERO_TASK_ID). Omitting them — the defect this
@@ -9662,6 +9676,25 @@ export async function runFixRung(opts: {
     }
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
+
+    // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, and HERE — before `readRoundCommits`
+    // decides what this round produced and what `deps.push` then carries. A cash worker cannot
+    // have committed, so its count is 0 by construction. The helper is implement's, reused: it
+    // owns its own precondition, so a Claude round passes through untouched.
+    // CALLED UNCONDITIONALLY, and the guard is the helper's own: `!harnessOwnsGit || commitCount
+    // !== 0` returns the count untouched, so a Claude round passes straight through. Wrapping this
+    // in `if (fixHarnessOwnsGit)` would only duplicate that precondition — and would put eight
+    // lines in a branch no test on the default config can reach, which `diff-coverage` refuses by
+    // name. A cash worker cannot have committed (it has no git), so its count is 0 by construction.
+    harnessCommitForShellLessWorker({
+      harnessOwnsGit: fixHarnessOwnsGit,
+      commitCount: 0,
+      report: workerTranscript(fixResult),
+      worktreePath: opts.worktreePath,
+      declaredPaths: opts.task.files ?? [],
+      log: deps.log,
+      say: deps.say,
+    });
 
     // W1-T2610: the sha this round believes it just committed, read as early as possible after
     // the worker returns — BEFORE the `readRoundCommits` await, the ledger writes, and the
@@ -12809,6 +12842,52 @@ async function runTask(
       say(
         `REFUSED: task ${taskId} failed the pre-dispatch linter — ${e.violations.length} violation(s):\n` +
           e.violations.map((v) => `  • [${v.check}] ${v.message}`).join("\n"),
+      );
+      // W1-T3657: A TASK THE LINTER REFUSES IS REPAIRED, NOT RE-ATTEMPTED FOREVER. Deterministic
+      // re-attempts of the SAME task reach the IDENTICAL verdict every tick (measured: 1,232
+      // refusals of one already-shipped task in 10.4h) — no strike spent, no escalation, nothing
+      // touched. `repairRefusedTask` (src/lib/dispatch-repair.ts) spends the decision instead:
+      // dispatch ONE repair lane carrying `e.violations` VERBATIM, or, on a SECOND refusal
+      // carrying the SAME verdict, escalate to the operator rather than re-reconning. NEVER
+      // spawns (`dispatchRepairLaneDefault` below only logs+says) — the "no spawn on a
+      // linter-failing task" invariant (W1-T20c criterion 5, test/task-linter-wiring.test.ts)
+      // holds exactly as it did before this task.
+      const dispatchRepairLaneDefault = (input: { taskId: string; verdict: string; progress: boolean }) => {
+        log("dispatch.repair.dispatched", input);
+        say(
+          `REPAIR: dispatching one repair lane for ${input.taskId} (${input.progress ? "verdict changed — progress" : "first refusal"}) ` +
+            `carrying the linter's own verdict:\n${input.verdict}`,
+        );
+      };
+      const escalateDefault = (input: { taskId: string; verdict: string; attempts: number }) => {
+        const escalation: Escalation = {
+          class: "BLOCKED",
+          taskId: input.taskId,
+          runId,
+          summary: `pre-dispatch linter refused ${input.taskId} again with the SAME verdict (${input.attempts}x) — repair lane made no progress`,
+          detail:
+            `A repair lane already ran once for this exact verdict and the task still refuses to dispatch:\n\n${input.verdict}\n\n` +
+            `A second automatic repair lane would only repeat it — this is why the loop stops here instead of re-reconning.`,
+          options: [
+            {
+              label: "restructure-task",
+              detail: "edit the task's plan record to resolve the named linter violation(s), then re-dispatch.",
+            },
+          ],
+          recommendation: "restructure-task",
+        };
+        const issueUrl = escalate(escalation, { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId });
+        log("dispatch.repair.escalated", { ...input, issue_url: issueUrl });
+      };
+      const violations: RefusalViolation[] = e.violations.map((v) => ({ check: v.check, message: v.message }));
+      const refusalStateRoot = join(config.root, "state");
+      repairRefusedTask(
+        taskId,
+        violations,
+        (id) => readPriorRefusal(refusalStateRoot, id),
+        (id, prior) => writePriorRefusal(refusalStateRoot, id, prior),
+        dispatchRepairLaneDefault,
+        escalateDefault,
       );
       return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_illformed" };
     }
@@ -22143,7 +22222,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
 }
 
 /**
- * `rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]` —
+ * `rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--summary-file <path>]` —
  * W1-T221's hand-route commit gate. Runs {@link runPreflight}'s three independent steps (commitlint, `tsc --noEmit`,
  * and lib/commit-message.ts's own header/body checks) over the commit range not yet on
  * `origin/main`, prints every step's own pass/fail line UNCONDITIONALLY (never only on
@@ -22196,7 +22275,43 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  *  test/preflight-help-is-derived-not-retyped.test.ts) to gate directly: a flag added to one
  *  list and not the printed signature is now a test failure, not a reader's omission. */
 export const PREFLIGHT_VALUE_FLAGS = ["--from", "--to", "--summary-file"] as const;
-export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage"] as const;
+export const PREFLIGHT_BOOL_FLAGS = ["--ci-parity", "--fast", "--coverage", "--no-fast"] as const;
+
+/** W1-T3737 — one tier of a preflight run, for the summary sentence below. */
+export interface PreflightTier {
+  readonly name: string;
+  /** How to make this tier RUN — printed only when it did not. */
+  readonly enableWith: string;
+  readonly ran: boolean;
+}
+
+/**
+ * W1-T3737 — the PASS/FAIL sentence, COMPOSED from what actually ran.
+ *
+ * The line this replaces was hand-written beside the run and read, verbatim, "commitlint,
+ * typecheck, and emitter checks are all clean; the push may proceed" — after `--fast` had run
+ * TWENTY checks. So it under-reported the flagged path and over-reported the default one, which is
+ * this repo's own "a check that reports its own success" hazard inside the tool builders trust
+ * most. Composing it from `steps` makes naming fewer checks than were performed unreachable.
+ *
+ * A PASS also names the tiers it did NOT run. A green that does not say what it skipped is read as
+ * "CI will pass", and it never meant that.
+ */
+export function preflightSummarySentence(
+  ok: boolean,
+  steps: readonly { readonly name: string }[],
+  tiers: readonly PreflightTier[],
+): string {
+  if (!ok) return "### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes";
+  const ran = tiers.filter((t) => t.ran).map((t) => t.name);
+  const skipped = tiers.filter((t) => !t.ran);
+  return (
+    `### rmd preflight: PASS — ${steps.length} check(s) clean across ${ran.join(" + ")}; the push may proceed` +
+    (skipped.length > 0
+      ? `\n### not checked here: ${skipped.map((t) => `${t.name} (${t.enableWith})`).join(", ")} — CI runs more than this run did`
+      : "")
+  );
+}
 
 /** W1-T2646: renders `FAST_GATE_STEPS`' own script names — SCRIPT NAMES ONLY, never each
  *  entry's `reason` (which runs to paragraphs and would flood the printed usage) — for
@@ -22243,7 +22358,12 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
 
   const result = runPreflight(repoRoot, { ...deps, range });
-  const fast = rest.includes("--fast") ? runPreflightFast(repoRoot, { spawn: deps.spawn }) : undefined;
+  // W1-T3737 — THE FAST TIER IS THE DEFAULT. MEASURED on origin/main: it runs twenty checks in
+  // 29s with no false reds, and the three-step default passed a diff CI then refused (the #5928
+  // comment-load shape, 12s green). `--fast` stays accepted and is now a no-op, so every existing
+  // call site and worker prompt is byte-identical; `--no-fast` is the escape, because a bound with
+  // no escape is a wall and an operator on a slow host must still be able to push.
+  const fast = rest.includes("--no-fast") ? undefined : runPreflightFast(repoRoot, { spawn: deps.spawn });
   const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn }) : undefined;
   const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn }) : undefined;
 
@@ -22294,10 +22414,15 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   });
   const steps = [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])];
   const treeAdvisory = runTreeAdvisoryLine(runContext, steps);
+  const tiers: PreflightTier[] = [
+    { name: "commitlint/typecheck/emitter", enableWith: "always runs", ran: true },
+    { name: "the fast gate", enableWith: "drop --no-fast", ran: fast !== undefined },
+    { name: "ci-parity", enableWith: "--ci-parity", ran: ciParity !== undefined },
+    { name: "coverage", enableWith: "--coverage", ran: coverage !== undefined },
+  ];
   console.log(
-    (ok
-      ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
-      : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes") +
+    "\n" +
+      preflightSummarySentence(ok, steps, tiers) +
       `\n### ${runContextLine(runContext)}` +
       (treeAdvisory ? `\n### ${treeAdvisory}` : ""),
   );
@@ -32575,6 +32700,23 @@ export function commitWorkerEdits(
  * fallback push and PR creation carry the run home. No message, no commit: an invented subject
  * would attribute work to a run that never asked for it.
  */
+/**
+ * W1-T3727: WHO HOLDS A FIX ROUND'S GIT, as one value both the prompt and the tool bound read.
+ *
+ * EXPORTED SO IT CAN BE ASSERTED BY CALLING IT. The two facts worth testing — that the shell-less
+ * surface is offered only where the prompt already said the harness commits, and that nothing is
+ * offered otherwise — were first written as tests that read `run-task.ts` AS TEXT, which
+ * `source-text-assertion-census` refuses for good reason: such a test passes when the prose is
+ * right and the behaviour is wrong. Returning the pair from one function makes the coherence rule
+ * a property of the value rather than of two call sites that must be kept in step.
+ */
+export function fixRoundGitOwnership(
+  config: Pick<Config, "workerProviders">,
+): { harnessCommits: boolean; cashTools: string[] | undefined } {
+  const harnessCommits = config.workerProviders?.harnessCommitsFix === true;
+  return { harnessCommits, cashTools: harnessCommits ? [...FIX_CASH_TOOLS] : undefined };
+}
+
 export function harnessCommitForShellLessWorker(
   input: {
     /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
@@ -40111,7 +40253,7 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "preflight",
-    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--coverage] [--summary-file <path>]",
+    syntax: "rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--summary-file <path>]",
     summary: "The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.",
     detail:
       "W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: " +

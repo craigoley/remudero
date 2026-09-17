@@ -1,0 +1,66 @@
+- id: W1-T3742
+  title: "THE SHARD SCAFFOLDER IS REACHABLE ONLY BY TYPING ITS SCRIPT PATH — `next-task-id` mints the id, knows the recorded holder, and hands the filer nothing, so the generator that makes the hand-off line unmisspellable sits one command away from the moment it is needed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: |
+    W1-T3739 built the generator and its CLI: `task-id-existence-check.mjs --scaffold <id> --slug
+    <s>` writes a shard whose hand-off line is produced by `reservationHandoffNoteLine` rather than
+    typed. What it did NOT do is put it in the one flow that needs it.
+
+    (1) THE MINT IS THE MOMENT. `rmd next-task-id` reserves the id and writes the reservation ref
+        that records the holder — it holds both inputs the generator needs, at exactly the instant
+        a filer is about to hand-write the note. It prints neither.
+
+    (2) SO THE GENERATOR IS OPT-IN BY MEMORY, which is the failure W1-T3739 exists to remove one
+        layer down. `reservationHandoffNoteLine` was unreachable from the filing flow and the line
+        was wrong three times in one day (#5894, #5901 twice); a scaffolder nobody is told about at
+        mint time is the same shape with an extra step.
+
+    (3) THE BOUNDARY IS WHY IT WAS DEFERRED, AND IT IS A REAL ONE. No `src/` file imports a
+        `scripts/*.mjs` today. W1-T3739 deliberately did not become the first, in the same change
+        that introduced the generators — that is a decision worth making on its own evidence rather
+        than as a side effect.
+  design: |
+    (i) DECIDE THE BOUNDARY FIRST, AND STATE THE DECISION. Either `src/` may import a
+        `scripts/*.mjs` (and depcruise records that it may), or the shared producer moves to
+        `src/lib/` and the script imports it — the direction that already exists, since
+        `proof-discrimination-gate.mjs` imports from `src/`. THE ONE OPTION THAT IS NOT AVAILABLE
+        is re-spelling `reservationHandoffNoteLine` on the other side: two producers of one matched
+        line is the defect W1-T3739 closed, reopened.
+
+    (ii) THE MINT PRINTS THE PASTE-READY LINE WHATEVER ELSE IT DOES. Even with no scaffolding, a
+         filer who sees the exact generated note beside the id they just reserved cannot write
+         `planfast -> planfast` — #5894's whole defect was inferring the holder from the branch
+         they were on, and the reservation's own recorded value is right there.
+
+    (iii) SCAFFOLDING STAYS DECLINABLE. `--no-scaffold` is W1-T3739's escape and it survives.
+
+    NOT IN SCOPE: rendering the pull request body's acceptance block at mint time — the criteria do
+    not exist yet when the id is minted.
+  acceptance:
+    - claim: "the mint prints the hand-off line produced for the id it just reserved, naming the holder the reservation recorded"
+      proof: "unit test: the mint prints the generated hand-off line"
+    - claim: "the printed line is the producer's own output, not a second spelling of it"
+      proof: "unit test: the mint's line is the producer's output"
+    - claim: "a mint that cannot read its own reservation prints no line rather than a guessed one"
+      proof: "unit test: an unreadable reservation prints no hand-off line"
+  falsifier: |
+    Build the line with a template string on the src/ side and the second assertion goes red — two
+    producers of one matched line is exactly what W1-T3739 closed. Print the CURRENT branch as the
+    holder and the first goes red, because the holder is what the reservation recorded and #5894
+    proved the difference. Print a placeholder when the reservation is unreadable and the third
+    goes red: a guessed hand-off is worse than none, since the gate will accept it and the
+    reservation will not.
+  risk: medium
+  band_meaning: blast-radius
+  origin: human
+  plan_refs: [W1-T3739, W1-T3648]
+  files: [src/lib/task-id-reservation.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t3741-43-the-last-three

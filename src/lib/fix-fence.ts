@@ -50,3 +50,19 @@ export function neutralizeFenceMarkers(text: string): string {
  * the rung, not just the injection.
  */
 export const FIX_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"];
+
+/**
+ * W1-T3727: the fix rung's surface when a NON-SUBSCRIPTION provider runs it.
+ *
+ * SHELL-LESS, AND THE RUNG SURVIVES IT. {@link FIX_WORKER_TOOLS}'s own doc gives two reasons Bash
+ * is in the set — git commit/push, and running the project's test commands. `RunCheck` covers the
+ * second, and the caller ALREADY pushes (`deps.push`/`gitPushRunBranch`), so only the COMMIT was
+ * the worker's; `harnessCommitForShellLessWorker` already does that for implement.
+ *
+ * MEASURED on the first live squeeze, 2026-09-17: with claude weekly at 100% and codex unreadable,
+ * this rung logged "fix rung: strike 1/2 REFUSED -- spawn infrastructure blocked" on every attempt.
+ * Repair of red pull requests was dead for the whole window.
+ *
+ * NOT A NARROWING: `FIX_WORKER_TOOLS` is unchanged and still what Claude gets.
+ */
+export const FIX_CASH_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"];

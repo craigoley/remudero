@@ -110,6 +110,101 @@ export interface CiFailureCorpus {
  * {@link dedupeRollupByLatestAttempt} is reused rather than re-derived so this reader cannot drift
  * from the two that already have it.
  */
+
+// ── W1-T3740: COULD WE HAVE CAUGHT THIS AT HOME? ─────────────────────────────────────────────
+
+/**
+ * W1-T3740 — where a CI refusal sits relative to the LOCAL mirror.
+ *
+ * `unknown-job` is deliberately NOT collapsed into `unmirrored`: a job the parity registry does
+ * not name is registry DRIFT, which `ci-parity:drift` exists to refuse, and reporting it as "not
+ * mirrored" would absorb a drift signal into a backlog nobody re-reads.
+ */
+export type RefusalLocality =
+  | "in-default-tier"
+  | "mirrored-not-default"
+  | "excluded-with-reason"
+  | "unmirrored"
+  | "unknown-job";
+
+/** The registry rows this join reads — the shape `CI_PARITY_TABLE` and its PR-workflow sibling
+ *  already carry, narrowed to what the classification needs. */
+export interface ParityRow {
+  readonly job: string;
+  readonly mirrored?: boolean;
+  readonly reason?: string;
+}
+
+/**
+ * W1-T3740 — classify ONE refusal by REGISTRY LOOKUP, never by a heuristic on the job name.
+ *
+ * `in-default-tier` and `mirrored-not-default` are indistinguishable from a name, and the whole
+ * value of the join is that the registry has already made every one of these calls. A heuristic
+ * here would be a second, quieter opinion about what the local mirror covers.
+ */
+export function classifyRefusalLocality(
+  job: string,
+  registry: readonly ParityRow[],
+  defaultTierJobs: ReadonlySet<string>,
+): RefusalLocality {
+  if (defaultTierJobs.has(job)) return "in-default-tier";
+  const row = registry.find((r) => r.job === job);
+  if (row === undefined) return "unknown-job";
+  if (row.mirrored === true) return "mirrored-not-default";
+  // `mirrored: false` WITHOUT a reason is what ci-parity:drift refuses — an exclusion nobody
+  // recorded. It is not the same statement as a considered one, and must not read as one here.
+  return typeof row.reason === "string" && row.reason.trim().length > 0 ? "excluded-with-reason" : "unmirrored";
+}
+
+/** {@link refusalLocalityReport}'s counts, plus the one number the retro is actually for. */
+export interface RefusalLocalityReport {
+  readonly counts: Readonly<Record<RefusalLocality, number>>;
+  /**
+   * Refusals the fleet ALREADY had the ability to catch at home and did not — `in-default-tier`
+   * plus `mirrored-not-default`. Named rather than left to a reader's arithmetic, because a TOTAL
+   * falls whenever CI gets quieter for any reason, while this falls only when the mirror grows or
+   * a failure class stops happening. It cannot be lowered by writing a better comment.
+   */
+  readonly alreadyCatchable: number;
+  readonly total: number;
+  readonly lines: readonly string[];
+}
+
+/**
+ * W1-T3740 — REPORT, never gate. A measurement that can refuse a pull request acquires an
+ * incentive to be wrong, and this one's whole job is to be uncomfortable.
+ */
+export function refusalLocalityReport(
+  jobs: readonly string[],
+  registry: readonly ParityRow[],
+  defaultTierJobs: ReadonlySet<string>,
+): RefusalLocalityReport {
+  const counts: Record<RefusalLocality, number> = {
+    "in-default-tier": 0,
+    "mirrored-not-default": 0,
+    "excluded-with-reason": 0,
+    unmirrored: 0,
+    "unknown-job": 0,
+  };
+  const byClass = new Map<RefusalLocality, string[]>();
+  for (const job of jobs) {
+    const where = classifyRefusalLocality(job, registry, defaultTierJobs);
+    counts[where] += 1;
+    byClass.set(where, [...(byClass.get(where) ?? []), job]);
+  }
+  const alreadyCatchable = counts["in-default-tier"] + counts["mirrored-not-default"];
+  const lines = [
+    `refusal-locality: ${alreadyCatchable} of ${jobs.length} refusal(s) were already catchable at home`,
+    ...(["in-default-tier", "mirrored-not-default", "excluded-with-reason", "unmirrored", "unknown-job"] as const)
+      .filter((k) => counts[k] > 0)
+      .map((k) => `  ${k}: ${counts[k]} — ${[...new Set(byClass.get(k) ?? [])].join(", ")}`),
+    ...(counts["unknown-job"] > 0
+      ? ["  NOTE: an unknown job is registry DRIFT, not a backlog entry — ci-parity:drift refuses exactly that."]
+      : []),
+  ];
+  return { counts, alreadyCatchable, total: jobs.length, lines };
+}
+
 export function collectCiFailureCorpus(input: CiFailureCorpusInput): CiFailureCorpus {
   const pairs: CiFailurePair[] = [];
   const unreadableShas: string[] = [];

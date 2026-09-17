@@ -395,6 +395,9 @@ export function renderFixPrompt(opts: {
   // simply undefined, matching that guard's own fail-OPEN contract for an unreadable baseline)
   // means no inherited-scope line renders at all, never a guessed baseline.
   baselineDiffFiles?: readonly string[];
+  /** W1-T3727: the harness owns this round's COMMIT, so the prompt must not ask for git. True only
+   *  where the spawn was also bounded without a shell — see FIX_CASH_TOOLS. */
+  harnessCommits?: boolean;
   // W1-T2653: the declared remedy file(s) of the check(s) THIS strike is addressing — the SAME
   // list the caller passed {@link fixRungScopeStandDownReason}'s 4th parameter, so instruction and
   // enforcement can never name a different set. Omitted (or empty) renders no GATE REMEDY line —
@@ -505,7 +508,21 @@ export function renderFixPrompt(opts: {
     // branch, no early return), so the ~15-17 minute step was paid on every fix round without
     // ever blocking one. Removed from BOTH prompts together (see lib/compaction.ts); the verb
     // itself (`rmd preflight --ci-parity`) is untouched and remains the hand route's own gate.
-    `Then: \`git push origin HEAD\` (no -u) — never force-push. Your PR body`,
+    // W1-T3727: WHAT THE WORKER IS TOLD TO DO WITH GIT IS CHOSEN BY WHO HOLDS IT. A shell-less
+    // (cash) round has no `git` at all, and telling it to push would hand it, on retry, a surface
+    // that cannot do what it was just asked to do — the same coherence rule W1-T3696 states for
+    // implement. The harness's own push (`deps.push`/`gitPushRunBranch`) is unchanged and runs
+    // either way; only the COMMIT moves, and only when the caller says so.
+    ...(opts.harnessCommits
+      ? [
+        `Do NOT run git or gh — you have no shell on this round. SAVE YOUR EDITS TO THE FILES; the`,
+        `harness commits them onto ${opts.branch} and pushes. Name the commit subject on its own`,
+        "line, anchored exactly like PR_URL: `COMMIT_MESSAGE: <type>(<scope>): <subject>` —",
+        "Conventional Commits, lower-case subject, at most 100 CHARACTERS total. A longer or",
+        "missing line is refused and your edits are NOT committed, so the round produces nothing.",
+        `Your PR body`,
+      ]
+      : [`Then: \`git push origin HEAD\` (no -u) — never force-push. Your PR body`]),
     ...WORKER_PR_AUTHORITY_LINES,
     `must substantiate EVERY task acceptance`,
     `criterion, not only the ones fixed here — the review floor judges the body against the`,

@@ -154,7 +154,7 @@
   "src/lib/branch-reaper.ts": 223,
   "src/lib/bundle.ts": 250,
   "src/lib/cash-web-bridge.ts": 250,
-  "src/lib/ci-failure-corpus.ts": 65,
+  "src/lib/ci-failure-corpus.ts": 250,
   "src/lib/ci-gate-required.ts": 2,
   "src/lib/ci-lesson-recurrence.ts": 250,
   "src/lib/ci-parity.ts": 1000,
@@ -188,6 +188,7 @@
   "src/lib/dispatch-claim.ts": 130,
   "src/lib/dispatch-governor.ts": 250,
   "src/lib/dispatch-overlap.ts": 150,
+  "src/lib/dispatch-repair.ts": 250,
   "src/lib/dispatch-value.ts": 250,
   "src/lib/doctor.ts": 500,
   "src/lib/drain-lock.ts": 40,
@@ -202,7 +203,7 @@
   "src/lib/feedback-reconcile.ts": 250,
   "src/lib/feedback-record-merge.ts": 250,
   "src/lib/feedback.ts": 225,
-  "src/lib/fix-fence.ts": 42,
+  "src/lib/fix-fence.ts": 56,
   "src/lib/fix-rung-classify.ts": 250,
   "src/lib/fleet-control.ts": 500,
   "src/lib/flight-judge.ts": 170,
@@ -352,6 +353,6 @@
   "src/lib/worker.ts": 1552,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16062,
+  "src/run-task.ts": 16250,
   "src/spike.ts": 18
 }

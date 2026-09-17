@@ -103,6 +103,11 @@ export interface Config {
      * also the security direction W1-T3572 asked for — forge authority leaves every worker, not
      * only the cheap ones. */
     harnessCommitsImplement?: boolean;
+    /** W1-T3727: the same opt-in for the CI-log fix rung. Its caller already pushes through
+     *  `deps.push`; only the commit was the worker's, so handing that to the harness makes the
+     *  rung divertible to cash — which is what a squeeze needs most, since a red pull request is
+     *  exactly what cannot be repaired while every subscription is exhausted. */
+    harnessCommitsFix?: boolean;
   };
   learningsHomes?: { userOverall?: string; global?: string };
 }
@@ -183,6 +188,15 @@ const workerProvidersShape: ValueSchema = {
       false,
       "config.json",
       "Harness owns implement's git effects on every provider, which is what makes the lane divertible to cash (W1-T3696).",
+      booleanShape,
+    ),
+    configField(
+      "harnessCommitsFix",
+      "boolean",
+      true,
+      false,
+      "config.json",
+      "Harness owns the CI-log fix rung's commit, which is what makes that lane divertible to cash (W1-T3727).",
       booleanShape,
     ),
     configField(
