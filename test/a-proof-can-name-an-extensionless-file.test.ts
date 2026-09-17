@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -28,21 +28,28 @@ import type { Task } from "../src/lib/plan.js";
 
 const REPO_ROOT = process.cwd();
 
-/** A REAL, git-backed reader — `git ls-files --error-unmatch` is exactly the read the task's own
- *  design names. A directory pathspec also satisfies `--error-unmatch` (files exist beneath it), so
- *  a real `stat` breaks that tie, mirroring `assertGrepTargetIsFile` (review.ts) at run time. */
+/** A REAL, git-backed reader — `git cat-file -t HEAD:<path>` is the "cat-file type read" the
+ *  task's own design text names as blob-vs-tree's other equally exact form (the alternative it
+ *  offers beside asking the index directly, which a directory pathspec also satisfies, forcing a
+ *  second `stat` call to break that tie). One object-type read settles the exact same three-way
+ *  verdict directly from git's own model — `blob` is a real file, `tree` is a real directory, and
+ *  anything else (git's own diagnostic on stderr, not a type word) is nothing at this path in this
+ *  checkout. */
 function realGrepProofTargetKind(): (repoRelPath: string) => GrepProofTargetKind | undefined {
   return (repoRelPath: string) => {
+    let kind: string;
     try {
-      execFileSync("git", ["ls-files", "--error-unmatch", "--", repoRelPath], { cwd: REPO_ROOT, stdio: "ignore" });
+      kind = execFileSync("git", ["cat-file", "-t", `HEAD:${repoRelPath}`], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
     } catch {
       return "absent";
     }
-    try {
-      return statSync(join(REPO_ROOT, repoRelPath)).isDirectory() ? "directory" : "file";
-    } catch {
-      return "absent";
-    }
+    if (kind === "blob") return "file";
+    if (kind === "tree") return "directory";
+    return "absent";
   };
 }
 
