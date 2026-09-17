@@ -77,7 +77,6 @@ test("W1-T3692: every declared dispatch-lane openweight bound is genuinely serva
 // so recon and diagnose were refused at the moment the subscription ran out, even though
 // DISPATCH_LANE_TOOL_BOUNDS has declared their cash equivalents since W1-T3656.
 
-import { readFileSync } from "node:fs";
 import { cashDivertSpawnFields, cashDivertToolsForLane, resolveDispatchLaneToolBound } from "../src/lib/worker.js";
 
 test("W1-T3726: the CLAUDE surface of a read-only lane is refused — this is the defect being fixed", () => {
@@ -118,17 +117,20 @@ test("W1-T3726: an UNKNOWN lane throws, so a typo cannot silently disable a dive
   assert.throws(() => cashDivertToolsForLane("recno"), /no declared tool bound for dispatch lane/);
 });
 
-test("W1-T3726: both read-only dispatch sites actually PASS cashTools to the spawn", () => {
-  // THE WIRING, NOT JUST THE HELPER. The helper returning a good list changes nothing if the call
-  // site never hands it over -- which is precisely how this defect survived W1-T3656.
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  for (const lane of ["recon", "diagnose"]) {
-    assert.ok(
-      src.includes(`...cashDivertSpawnFields("${lane}")`),
-      `the ${lane} dispatch must spread the divert fields, or the auction still judges its Claude surface`,
-    );
-  }
-});
+// W1-T3726 / W1-T2905: THE WIRING, NOT JUST THE HELPER, used to be checked here by reading
+// src/run-task.ts as text and grepping for the `...cashDivertSpawnFields("<lane>")` spread --
+// exactly the shape the source-text-assertion-census ratchet exists to stop growing (it passes
+// when the prose is right and the behaviour is wrong, and breaks on a refactor that moves the
+// prose and nothing else). The wiring the read was standing in for is instead driven for real,
+// through a live runTask() dispatch with an injected spawn that CAPTURES the args object:
+//   - recon: test/recon-degrade.test.ts, "BEHAVIORAL: the healthy path names the record even
+//     when recon's OBSERVED section is EMPTY" asserts spawnCalls[0].cashTools against
+//     cashDivertToolsForLane("recon").
+//   - diagnose: test/run-task.test.ts, "BEHAVIORAL (W1-T7B): two real implement strikes
+//     dispatch a DIAGNOSE worker..." asserts spawnCalls[3].cashTools against
+//     cashDivertToolsForLane("diagnose").
+// Both call sites therefore have a falsifier that fails if the `...cashDivertSpawnFields(lane)`
+// spread is ever dropped from src/run-task.ts, with zero source-text reads.
 
 test("W1-T3726: the spread helper carries the surface for a divertible lane and nothing for the rest", () => {
   // BOTH ARMS, because the whole point of this shape is that the call site has no branch to test:

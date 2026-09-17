@@ -130,7 +130,7 @@ import {
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { feedbackEntryPath, readFeedbackEntry } from "../src/lib/feedback.js";
-import { worktreesDir } from "../src/lib/worker.js";
+import { cashDivertToolsForLane, worktreesDir } from "../src/lib/worker.js";
 import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment, spawnWorker } from "../src/lib/worker.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
@@ -1370,6 +1370,17 @@ test("BEHAVIORAL (W1-T7B): two real implement strikes dispatch a DIAGNOSE worker
     const thirdAttemptPrompt = String(spawnCalls[4]?.prompt ?? "");
     assert.match(thirdAttemptPrompt, /DIAGNOSE FINDINGS/, "3rd attempt must be diagnose-informed");
     assert.match(thirdAttemptPrompt, /ROOT CAUSE: the assertion expects a 1-indexed count/, "carrying the report VERBATIM");
+
+    // W1-T3726 / W1-T2905: the diagnose dispatch's `...cashDivertSpawnFields("diagnose")` spread
+    // must actually reach the spawn args — the wiring, not just the helper (test/a-blocked-
+    // auction-falls-back-to-cash.test.ts documents this as its behavioral proof, so a dropped
+    // spread here fails a REAL dispatch instead of a text grep). spawnCalls[3] is the evidence-
+    // only diagnose worker: recon, strike 1, strike 2, diagnose, diagnose-informed retry.
+    assert.deepEqual(
+      spawnCalls[3]?.cashTools,
+      cashDivertToolsForLane("diagnose"),
+      "the diagnose spawn must carry diagnose's own cash divert surface, or the auction fallback still judges its Claude tools",
+    );
 
     // "a seeded double-failure produces a diagnose run in the ledger" (acceptance #1's proof) —
     // classify.js's runDiagnoseThenRetry ledgers diagnose.spawn/diagnose.done itself; this run's

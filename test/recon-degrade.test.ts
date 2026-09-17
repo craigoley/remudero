@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { runTask, taskRecordContextLine, workerVisibleRecordPath } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
+import { cashDivertToolsForLane } from "../src/lib/worker.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
@@ -464,6 +465,15 @@ test("BEHAVIORAL: the healthy path names the record even when recon's OBSERVED s
 
   assert.equal(spawnCalls.length, 2, "recon 'succeeded' — no degrade, so the healthy arm rendered");
   assert.equal(ledger.filter((l) => l.step === "recon.degraded").length, 0, "nothing degraded");
+  // W1-T3726 / W1-T2905: the recon dispatch's `...cashDivertSpawnFields("recon")` spread must
+  // actually reach the spawn args — the wiring, not just the helper (test/a-blocked-auction-
+  // falls-back-to-cash.test.ts documents this as its behavioral proof, so a dropped spread here
+  // fails a REAL dispatch instead of a text grep).
+  assert.deepEqual(
+    spawnCalls[0].cashTools,
+    cashDivertToolsForLane("recon"),
+    "the recon spawn must carry recon's own cash divert surface, or the auction fallback still judges its Claude tools",
+  );
   const relRecord = relative(dirname(dirname(planPath)), planPath);
   assert.ok(String(spawnCalls[1].prompt).includes(relRecord), "the pointer is there even with no OBSERVED lines");
   assert.ok(!String(spawnCalls[1].prompt).includes(planPath), "and still tree-relative (W1-T501)");
