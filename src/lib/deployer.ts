@@ -1295,6 +1295,8 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       try {
         return instanceForStateRoot(readFileSync(daemonInstanceRegistryPath(o.installPath), "utf8"), o.stateRoot);
       } catch {
+        // An absent or unreadable registry does not name an instance; preserve the script's
+        // fail-closed unscoped refusal instead of inferring one from unrelated host state.
         return undefined;
       }
     })();
