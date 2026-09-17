@@ -161,7 +161,17 @@ function checksRedReviewSuccessPr(): OpenPrView {
   });
 }
 function supersededOrphanPr(): OpenPrView {
-  return pr({ prNumber: 12, prUrl: "url/12", taskId: "W1-C", reviewState: "pending", supersededBy: 99 });
+  // W1-T3731: the supersession row now closes only on a POSITIVE `superseded` verdict, so a
+  // fixture that means "this PR really is a duplicate" has to say so. The assertions that read
+  // this fixture are unchanged — only the evidence they stand on is now explicit.
+  return pr({
+    prNumber: 12,
+    prUrl: "url/12",
+    taskId: "W1-C",
+    reviewState: "pending",
+    supersededBy: 99,
+    supersessionVerdict: supersededVerdict({ evidence: { supersedingPrNumber: 99, taskId: "W1-C", diff: { rawLineCount: 40, matchedHunks: 3 } } }),
+  });
 }
 function strikesExhaustedPr(): OpenPrView {
   return pr({
@@ -348,7 +358,13 @@ test("deriveDisposition: a dependabot PR routes dep-review even with checks red 
 });
 
 test("deriveDisposition: a superseded dependabot PR still closes first — stale precedes the dep-review row", () => {
-  assert.equal(deriveDisposition(dependabotPr({ supersededBy: 600 }), DEFAULT_SWEEP_POLICY, NOW).disposition, "stale");
+  // W1-T3731: row precedence is what this asserts, and it is unchanged. The fixture now carries the
+  // positive verdict the row requires, so it is still testing precedence rather than the evidence rule.
+  const superseded = dependabotPr({
+    supersededBy: 600,
+    supersessionVerdict: supersededVerdict({ evidence: { supersedingPrNumber: 600, taskId: "deps", diff: { rawLineCount: 12, matchedHunks: 1 } } }),
+  });
+  assert.equal(deriveDisposition(superseded, DEFAULT_SWEEP_POLICY, NOW).disposition, "stale");
 });
 
 test("runSweep: the depReview dep is invoked and its DECISION rides the disposed ledger line", async () => {
@@ -490,7 +506,12 @@ test("W1-T2779: two implementation peers and two plan-only peers keep ordinary s
   assert.equal(twoPlans.disposition, "stale");
 });
 
-test("W1-T2779: complementary is narrow — absent and indeterminate evidence keep ordinary duplicate disposal", () => {
+test("W1-T3731 (reverses W1-T2779): absent and indeterminate evidence no longer close an open pull request", () => {
+  // W1-T2779 ruled that absent and indeterminate evidence "keep ordinary duplicate disposal" — the
+  // conservative choice while the detector was new. MEASURED 2026-09-17, that ruling destroyed
+  // #5861: 12 files, every check green but a pending review, closed as "superseded-by #5886" — a
+  // two-file prerequisite Standing rule 25 had demanded. The verdict was `indeterminate` (2 of 12
+  // shared paths, "supports neither finding") and this row closed it anyway. Twice.
   const absent = deriveDisposition(pr({ prNumber: 10, supersededBy: 11 }), DEFAULT_SWEEP_POLICY, NOW);
   const indeterminate = deriveDisposition(
     pr({
@@ -501,8 +522,8 @@ test("W1-T2779: complementary is narrow — absent and indeterminate evidence ke
     DEFAULT_SWEEP_POLICY,
     NOW,
   );
-  assert.equal(absent.disposition, "stale");
-  assert.equal(indeterminate.disposition, "stale");
+  assert.notEqual(absent.disposition, "stale", "no verdict is not evidence of supersession");
+  assert.notEqual(indeterminate.disposition, "stale", "a read that could not decide is not a finding");
 });
 
 test("W1-T920: the disposition is inert while its policy flag is off", () => {
@@ -598,16 +619,27 @@ test("W1-T932: a sibling concept survives a higher numbered peer", () => {
   assert.doesNotMatch(result.reason, /superseded-by/);
 });
 
-test("W1-T932: an ordinary duplicate is still disposed stale", () => {
-  // Design note ii, verbatim: "a guard that works for ordinary duplicate PRs must keep working."
-  // An ordinary duplicate carries NO supersessionVerdict at all (no detector ever argued it is a
-  // distinct concept) — so even with the coexistence gate ON, the bare-number row must still
-  // fire exactly as it does today.
+test("W1-T3731 (reverses W1-T932): a duplicate the detector never spoke about is not closed on the arithmetic alone", () => {
+  // W1-T932 kept the bare-number row firing whenever no verdict was present, so "a guard that works
+  // for ordinary duplicate PRs must keep working". The cost is that a hydration which THREW is
+  // indistinguishable from a duplicate, and the sweep's most destructive act then runs on the
+  // weakest evidence it holds. It now requires the positive verdict; a real duplicate still closes
+  // (see the assertion immediately below), and an unproven one waits for the staleness row instead.
   const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, conceptCoexistenceEnabled: true };
-  const ordinaryDuplicate = pr({ prNumber: 100, supersededBy: 102 });
-  const result = deriveDisposition(ordinaryDuplicate, on, NOW);
-  assert.equal(result.disposition, "stale", "no verdict at all: the gate has nothing to act on, arithmetic still wins");
-  assert.match(result.reason, /superseded-by #102/);
+  const unproven = deriveDisposition(pr({ prNumber: 100, supersededBy: 102 }), on, NOW);
+  assert.notEqual(unproven.disposition, "stale", "no verdict at all is not a finding of supersession");
+
+  const proven = deriveDisposition(
+    pr({
+      prNumber: 100,
+      supersededBy: 102,
+      supersessionVerdict: supersededVerdict({ evidence: { supersedingPrNumber: 102, taskId: "W1-X", diff: { rawLineCount: 20, matchedHunks: 2 } } }),
+    }),
+    on,
+    NOW,
+  );
+  assert.equal(proven.disposition, "stale", "a positive verdict still closes — the row is narrowed, not disabled");
+  assert.match(proven.reason, /superseded-by #102/);
 });
 
 test("W1-T932: an unreadable verdict changes no disposition", () => {
@@ -620,7 +652,10 @@ test("W1-T932: an unreadable verdict changes no disposition", () => {
     supersessionVerdict: { status: "indeterminate", detail: "diff query errored — rate limited" },
   });
   const withIndeterminate = deriveDisposition(indeterminate, on, NOW);
-  assert.equal(withIndeterminate.disposition, "stale", "indeterminate never lets the bare-number row yield");
+  // W1-T3731 reverses this: "indeterminate" is still NOT a finding of coexistence, and it is not a
+  // finding of supersession either. It is the detector saying it could not tell, which is now a
+  // reason to leave the pull request alone rather than to close it.
+  assert.notEqual(withIndeterminate.disposition, "stale", "a read that could not decide closes nothing");
 
   // A malformed verdict (present but not literally "unique") behaves the same as absent — fail
   // CLOSED, never guessing a finding the read cannot support.
@@ -647,9 +682,12 @@ test("W1-T932: concept coexistence is off by default", () => {
     supersessionVerdict: { status: "unique", detail: "argued distinct concept — not a duplicate" },
   });
   const withVerdict = deriveDisposition(siblingConcept, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(withVerdict.disposition, "stale", "flag off: a verdict alone never spares anything");
-  const withoutVerdict = deriveDisposition(pr({ prNumber: 100, supersededBy: 102 }), DEFAULT_SWEEP_POLICY, NOW);
-  assert.deepEqual(withVerdict, withoutVerdict, "flag off: a verdict must derive the identical disposition as no verdict at all");
+  // W1-T3731 reverses this. Sharing NOT ONE changed path is the strongest evidence of not being
+  // superseded this system can produce, and it sat behind an off-by-default flag — W1-T3535
+  // measured the cost twice ("#5632 ... sharing NOT ONE changed path — closed #5630 and #5631").
+  // The flag still exists and row 0 still reads it; it is simply no longer what stands between a
+  // pull request and deletion.
+  assert.notEqual(withVerdict.disposition, "stale", "a unique verdict spares the PR without any flag");
 });
 
 test("deriveDisposition: failing review with strikes exhausted -> blocked-ambiguous", () => {
@@ -1396,7 +1434,14 @@ test("deriveDisposition regression lock (design iii): genuinely red checks still
 });
 
 test("deriveDisposition is TOTAL — superseded takes precedence over a failing review", () => {
-  const p = pr({ reviewState: "failure", unmetCriteria: [criterion()], supersededBy: 42 });
+  // W1-T3731: row precedence is the subject and it is unchanged; the fixture now carries the
+  // positive verdict the supersession row requires.
+  const p = pr({
+    reviewState: "failure",
+    unmetCriteria: [criterion()],
+    supersededBy: 42,
+    supersessionVerdict: supersededVerdict({ evidence: { supersedingPrNumber: 42, taskId: "W1-A", diff: { rawLineCount: 8, matchedHunks: 1 } } }),
+  });
   assert.equal(deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW).disposition, "stale");
 });
 
