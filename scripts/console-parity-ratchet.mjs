@@ -85,6 +85,13 @@ export const CLI_ONLY = {
       // client cannot do. Its `--apply` then goes through the ordinary gated PR path, so there is
       // nothing for a console route to trigger that a PR does not already carry.
       "feedback-reconcile",
+      // W1-T3685: reads GitHub's pull-request queues DIRECTLY across every enrolled repo, which is
+      // a different corpus from the console's board (that renders the fleet's TASK state out of
+      // /v1/status, through the control gateway). A console route would either duplicate a surface
+      // that already exists or put raw cross-repo GitHub reads behind the gateway, and neither is
+      // this verb's job. NOTE FOR THE AUTHOR: if the intent is for an operator to read this in the
+      // console rather than a terminal, a route is the better answer and this entry should go.
+      "board",
       "proof-queue-audit",
       "preflight",
       "next-task-id",
