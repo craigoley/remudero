@@ -448,6 +448,12 @@ import {
   prStateFromRest,
   rollupFor,
   singlePrRestArgs,
+  // review-reuse-producer: the ONE producer of the review-reuse pair, called from both sides of the comparison
+  // — the review records it, a later sweep pass asks what is true now. See its own header doc for
+  // why two representations would be a silent, permanent bug.
+  tryFetchReviewReuseFacts,
+  hydrateReviewReuseFacts,
+  type ReviewReuseFacts,
   type GhApiFetcher,
   type GhCallPacer,
   createPlanFilingFileCache,
@@ -5336,6 +5342,13 @@ async function runReview(args: {
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
   task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
+  /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
+   *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
+   *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
+   *  network, the same seam discipline `reviewerQueryFn` and `reviewerSpawnWorker` already use
+   *  here. Returning `undefined` is a FIRST-CLASS answer, not an error: it means "unreadable",
+   *  and every reader of the pair treats absence as "re-review in full". */
+  readReviewReuseFacts?: () => ReviewReuseFacts | undefined;
   report: string;
   /** The implementation worker's complete final report. Kept separate from `report`, which must
    * remain the PR body for body/diff integrity. `judgeReview` reads this only for the strict,
@@ -5722,6 +5735,24 @@ async function runReview(args: {
     ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id)
     : undefined;
   let { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
+
+  // W1-T3704 (completed here) — RECORD WHAT THIS VERDICT ACTUALLY JUDGED, so a LATER push can be compared against
+  // it instead of re-deriving a verdict that did not change. `ReviewVerdict.ownDiffDigest` and
+  // `mergeBaseSha` have existed since W1-T3704 and NOTHING EVER SET EITHER — which is why
+  // `reviewReuseVerdict` (lib/sweep.ts) returned `full-review` unconditionally and an orphaned
+  // review was always re-run from scratch.
+  //
+  // ATTACHED HERE, AFTER `applyVerdictStability`, ON PURPOSE. These two values describe the PR
+  // this pass looked at; they are not an input to the pass/fail judgment and must not be able to
+  // influence it. Everything above this line — `computed`, the stability suppression, the floor —
+  // is byte-identical with this block deleted, which is the falsifier the PR body reports.
+  //
+  // BEST-EFFORT, AND ITS FAILURE DIRECTION IS THE SAFE ONE: an unreadable compare leaves both
+  // fields absent, the ledger line omits them, and every reader treats absence as "re-review in
+  // full". The reuse path can only ever be *skipped* by a failure here, never wrongly taken.
+  const reuseFacts = (args.readReviewReuseFacts ?? (() => tryFetchReviewReuseFacts(owner, repo, "main", headSha, ghJson)))();
+  if (reuseFacts) verdict = { ...verdict, ...reuseFacts };
+
   let decisionDisposition: "computed" | "conflict" = "computed";
   if (suppressed) {
     // VISIBLE, not silently swallowed: names the sha + both verdicts + the
@@ -31579,6 +31610,30 @@ export function buildOpenPrViews(
   }
   const supersessionVerdicts = hydrateSupersessionVerdicts(owner, repo, supersededPrs, fetch, isInPlanScope);
 
+  // W1-T3704 (completed here) — THE CURRENT SIDE OF THE REVIEW-REUSE COMPARISON, hydrated ONCE for a bounded set.
+  //
+  // SCOPED TO ALREADY-ORPHANED PRs, and the scoping is the cost argument, not an optimisation. A
+  // compare per open PR per pass is exactly the fan-out GitHub's SECONDARY limit punishes — it
+  // counts request CADENCE, not volume, so it trips while `rate_limit` still reads full. Only a PR
+  // whose review was orphaned by a push can reach the `review-reused`/`discriminate-only` rows at
+  // all, so only those are asked about. On a healthy board that set is empty and this costs zero
+  // requests; `hydrateReviewReuseFacts` caps it either way.
+  //
+  // The orphan test is `reviewOrphansFor` — the SAME call the per-PR walk below makes for
+  // `reviewOrphanedByPush`, over the SAME ledger already in hand, so this adds no read and cannot
+  // disagree with the field the disposition rows gate on.
+  const reviewOrphanedPrs = raw
+    .filter(
+      (pr) =>
+        reviewOrphansFor(
+          ledger,
+          resolveOpenPrTaskId(pr, planFilingClassifications.get(pr.number)?.isPlanFiling ?? false),
+          pr.headRefOid,
+        ).orphanedByPush,
+    )
+    .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid }));
+  const reviewReuseCurrent = hydrateReviewReuseFacts(owner, repo, "main", reviewOrphanedPrs, fetch);
+
   return raw.map((pr) => {
     const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
     // W1-T3505: thread the SAME classification this view stamps below into task-identity
@@ -31620,6 +31675,12 @@ export function buildOpenPrViews(
     // Historical heads explain why a status is absent. The separate exact-input scan below owns
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
     const reviewOrphans = reviewOrphansFor(ledger, taskId, pr.headRefOid);
+    // W1-T3704 (completed here) — the REVIEWED side of the reuse comparison, off the SAME ledger already in hand.
+    // `priorReviewVerdictFromLedger` takes the LAST `review.posted` row for this task, which for a
+    // PR that IS orphaned is by definition a row at some earlier head — and `reviewedHeadSha`
+    // carries that sha so the disposition's reason names the head the reused verdict judged,
+    // rather than asserting a reuse no reader can audit.
+    const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, taskId) : undefined;
     const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
     // Every task-id-less review is written under `PR-<n>` by reviewCommand/runReview, and the
     // escalation + synthetic fix-task paths use that exact identity too. W1-T456 originally
@@ -31762,6 +31823,27 @@ export function buildOpenPrViews(
       // producer-completeness test anchors on an object literal assigning every required
       // OpenPrView field, so an assignment made anywhere else would still read as unwired.
       reviewOrphanedByPush: reviewOrphans.orphanedByPush,
+      // W1-T3704 (completed here) — THE FIVE REVIEW-REUSE INPUTS, ASSIGNED HERE AS TOP-LEVEL KEYS. W1-T3704 shipped
+      // `reviewReuseVerdict` and both disposition rows that call it, and NOTHING EVER PRODUCED ANY
+      // OF THESE — the function's own comment said "Not yet populated by the real gateway", so its
+      // five-way absence guard returned `full-review` on every call and every orphaned review was
+      // re-derived from scratch. That is the "why does it want ANOTHER review?" #5941 hit.
+      //
+      // ASSIGNED DIRECTLY, NOT THROUGH A CONDITIONAL SPREAD, for the reason the `requiredContexts-
+      // ReadFailure` comment below states at length: `producerAssignedKeys`
+      // (lib/producer-completeness.ts) resolves an object literal's keys STATICALLY, so a field
+      // written inside `...(cond ? {f} : {})` reads as having NO PRODUCER — which is the exact
+      // census result these five fields have carried since they were declared.
+      //
+      // The `reviewed*` three come from the ledger line the review itself wrote; the `current*` two
+      // from the bounded compare hydrated above. `undefined` on any of them is a FIRST-CLASS answer
+      // meaning "unreadable", and `reviewReuseVerdict` refuses to reuse on it — absence degrades
+      // toward a full re-review, never toward reusing a verdict on evidence nobody recorded.
+      reviewedOwnDiffDigest: priorReviewForReuse?.ownDiffDigest,
+      reviewedMergeBaseSha: priorReviewForReuse?.mergeBaseSha,
+      reviewedHeadSha: priorReviewForReuse?.headSha,
+      currentOwnDiffDigest: reviewReuseCurrent.get(pr.number)?.ownDiffDigest,
+      currentMergeBaseSha: reviewReuseCurrent.get(pr.number)?.mergeBaseSha,
       priorReviewAttemptsForInput: reviewAttempts.attempts,
       // Exact-input elapsed-time-backoff clock; see `reviewInputBackoffElapsed`.
       reviewInputLastAttemptAt: reviewAttempts.lastAttemptAt,
