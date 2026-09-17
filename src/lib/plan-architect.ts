@@ -554,6 +554,75 @@ export function applyPlanProposalCommit(
   } catch (e) {
     log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
   }
-  execFileSync("git", ["-C", cwd, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
-  execFileSync("git", ["-C", cwd, "commit", "-m", commitMessage], { stdio: "inherit" });
+  gitAddAndCommitWithRollback(cwd, ["-A", "--", "plan/", "MASTER-PLAN.md"], commitMessage, {
+    stdio: "inherit",
+    log,
+    stepPrefix: "plan_commit",
+  });
+}
+
+// ── Add-then-commit with index rollback (W1-T3243) ───────────────────────────
+
+/**
+ * W1-T3243: `git add <addArgs>` then `git commit -m <commitMessage>`, restoring the index to
+ * exactly what it held ON ENTRY when the commit is refused (e.g. by `hooks/pre-commit`) — the
+ * shared shape behind THIS module's {@link applyPlanProposalCommit} and `run-task.ts`'s
+ * `commitGeneratorOutputViaGit` (design (iv): "the pair is the unit of repair").
+ *
+ * (i)/(ii) LEAVE THE TREE AS THE CALLER FOUND IT, PRECISELY. `git write-tree` captures a tree
+ * object for the CURRENT index before this function stages anything — it touches neither the
+ * index nor the working tree, so taking the snapshot is always safe. On a refused commit,
+ * `git read-tree <preTree>` rewrites ONLY the index back to that snapshot: content the CALLER
+ * had already staged before this call survives untouched, content this call staged is undone,
+ * and the working tree — files this function never owned — is never touched. `git reset --hard`
+ * / `git checkout -- .` are deliberately never used here: both would also blow away
+ * working-tree content this function has no business touching (design's own falsifier).
+ *
+ * (iii) THE COMMIT'S OWN REFUSAL ALWAYS REACHES THE CALLER — the rollback runs, then the
+ * original `commit` error is rethrown unchanged; nothing here swallows it.
+ *
+ * (v) A ROLLBACK THAT ITSELF FAILS SAYS SO, via `log`, rather than failing silently and
+ * reproducing the exact invisibility this task exists to close — it still rethrows the
+ * ORIGINAL commit error, never the rollback's own, so the actionable message is not lost.
+ */
+export function gitAddAndCommitWithRollback(
+  cwd: string,
+  addArgs: string[],
+  commitMessage: string,
+  opts: {
+    stdio: "inherit" | "pipe";
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    stepPrefix: string;
+  },
+): void {
+  const { stdio, log, stepPrefix } = opts;
+  let preTree: string | null = null;
+  try {
+    preTree = execFileSync("git", ["-C", cwd, "write-tree"], { encoding: "utf8" }).trim();
+  } catch (e) {
+    // No pre-add snapshot to roll back to (e.g. an unmerged index) — record it; the add/commit
+    // below still runs, but a refused commit can only log-and-skip its rollback, not restore.
+    log(`${stepPrefix}.snapshot.error`, { error: String((e as Error)?.message ?? e) });
+  }
+  execFileSync("git", ["-C", cwd, "add", ...addArgs], { stdio });
+  try {
+    execFileSync("git", ["-C", cwd, "commit", "-m", commitMessage], { stdio });
+  } catch (commitError) {
+    if (preTree !== null) {
+      try {
+        execFileSync("git", ["-C", cwd, "read-tree", preTree], { stdio });
+      } catch (rollbackError) {
+        // (v): the rollback itself failed — this is the exact condition the task exists to
+        // surface, so it is recorded rather than left silent. The ORIGINAL commit error is
+        // still what gets rethrown below, never this one.
+        log(`${stepPrefix}.rollback.error`, {
+          error: String((rollbackError as Error)?.message ?? rollbackError),
+        });
+      }
+    } else {
+      log(`${stepPrefix}.rollback.skipped`, { reason: "no pre-add index snapshot available" });
+    }
+    // (iii): rethrow the commit's OWN refusal, unmodified — never swallowed to look clean.
+    throw commitError;
+  }
 }
