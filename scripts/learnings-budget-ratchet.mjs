@@ -153,10 +153,26 @@ export function evaluateRatchet(actualChars, baseline) {
   if (baseline.capChars !== undefined && baseline.capChars !== null && typeof baseline.capChars !== "number") {
     throw new Error(`'capChars' must be a number, got ${JSON.stringify(baseline.capChars)}`);
   }
-  if (typeof baseline.capChars === "number" && actualChars > baseline.capChars) {
-    violations.push(`active learnings corpus ${actualChars} chars > cap ${baseline.capChars} chars`);
+  if (baseline.hardCapChars !== undefined && baseline.hardCapChars !== null && typeof baseline.hardCapChars !== "number") {
+    throw new Error(`'hardCapChars' must be a number, got ${JSON.stringify(baseline.hardCapChars)}`);
+  }
+  // W1-T3734: `capChars` IS A CURATION TARGET AND NO LONGER BLOCKS -- it never described what a run
+  // pays, and blocking on it stalled every corpus-growing PR until a human hand-curated. The
+  // blocking threshold is `hardCapChars`, a runaway cliff set WAY above real growth. The measured
+  // rationale is in scripts/learnings-budget-baseline.json's `hardCapRationale`.
+  if (typeof baseline.hardCapChars === "number" && actualChars > baseline.hardCapChars) {
+    violations.push(
+      `active learnings corpus ${actualChars} chars > HARD cap ${baseline.hardCapChars} chars — ` +
+        `this is the runaway tripwire, not the curation target, so something has dumped knowledge unreviewed`,
+    );
   }
   return violations;
+}
+
+/** W1-T3734: is the corpus over its CURATION target? Advisory — never a violation, always printed.
+ *  Separate from {@link evaluateRatchet} so a caller cannot accidentally treat it as one. */
+export function exceedsCurationTarget(actualChars, baseline) {
+  return typeof baseline.capChars === "number" && actualChars > baseline.capChars;
 }
 
 // ── Naming the compression candidates (W1-T419 design iii) ─────────────────
@@ -254,12 +270,24 @@ function main(argv) {
       `${activeCount} active / ${totalCount} total entries across ${values.dir}/*.yaml`,
   );
 
+  if (exceedsCurationTarget(chars, baseline)) {
+    // ADVISORY, and loud: a signal to compress, never a reason to stop a PR (W1-T3734).
+    console.warn(
+      `learnings-budget-ratchet: ADVISORY -- active corpus ${chars} chars is over the curation target ` +
+        `${baseline.capChars}. This does NOT block: no task pays the corpus total (selectLearnings ` +
+        `injects only MATCHED entries, filled to DEFAULT_KNOWLEDGE_BUDGET_CHARS). Compress when convenient; ` +
+        `the least-evidenced active entries are named below.`,
+    );
+    for (const c of compressionCandidates(entries)) console.warn(`    - ${c}`);
+  }
+
   if (violations.length > 0) {
-    console.error("learnings-budget-ratchet: BLOCKED -- active learnings corpus is over the recorded knowledge budget:");
+    console.error("learnings-budget-ratchet: BLOCKED -- active learnings corpus is over the RUNAWAY hard cap:");
     for (const v of violations) console.error(`  - ${v}`);
     console.error(
-      "  Compress or supersede entries to bring the active corpus back under the cap, or -- if the growth is " +
-        "deliberate and reviewed -- raise scripts/learnings-budget-baseline.json's capChars.",
+      "  This is the RUNAWAY tripwire, not the curation target: reaching it means a bulk dump, not ordinary " +
+        "growth. Find what added it and supersede, or -- if the dump is deliberate and reviewed -- raise " +
+        "scripts/learnings-budget-baseline.json's hardCapChars.",
     );
     // W1-T419: name the least-evidenced entries so compression rides measured use instead of
     // whoever's judgment is nearest -- an entry with no citation evidence (`never-cited`) sorts
@@ -273,7 +301,10 @@ function main(argv) {
     return;
   }
 
-  console.log("learnings-budget-ratchet: OK -- active corpus is at or under the knowledge budget cap.");
+  console.log(
+    `learnings-budget-ratchet: OK -- active corpus ${chars} chars is under the runaway hard cap ` +
+      `${baseline.hardCapChars ?? "unset"}${exceedsCurationTarget(chars, baseline) ? " (over the curation target, advisory above)" : ""}.`,
+  );
   process.exitCode = 0;
 }
 

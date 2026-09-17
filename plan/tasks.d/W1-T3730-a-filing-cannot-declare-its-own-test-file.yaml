@@ -80,7 +80,7 @@
     - claim: "absent the injected filing fact the check behaves exactly as it does today, so the whole-plan pass and pre-dispatch are untouched"
       proof: "unit test: no filing fact means no change in behaviour"
     - claim: "the filing fact reaches the linter from the command that holds the diff, so the fix is not shipped dormant"
-      proof: "grep: planOnlyDiff in src/run-task.ts"
+      proof: "grep: planOnlyFilingDiff in src/run-task.ts"
   falsifier: |
     Derive "is this a filing" from the TASK (its `files:`, or its `status`) rather than from the
     DIFF and the second assertion goes red: a build PR for a task whose files are all under plan/

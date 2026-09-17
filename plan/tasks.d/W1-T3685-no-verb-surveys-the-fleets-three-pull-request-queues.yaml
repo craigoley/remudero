@@ -29,6 +29,14 @@
     `rmd status` answers a different question (this daemon's own board), and `rmd ci-failures`
     answers a narrower one (failures, one repo, by day).
   rationale: |
+    PROOFS REPOINTED 2026-09-17 (not the work -- the work is done). A `unit test:` proof is matched
+    as a LITERAL SUBSTRING of a real test title, and all four here were paraphrases: the tests in
+    test/the-board-verb-distinguishes-empty-from-unreadable.test.ts say "covers exactly the
+    repositories it is given", "reads unavailable, never rendered as an empty queue" (with the
+    comma), "makes exactly three gh calls" and "a board with failing checks". Four of five proofs
+    therefore resolved to ZERO tests, and `rmd review` returned FAIL -- "unmet: the survey covers
+    every configured repository..." -- against a pull request whose suite passes 10/10. The claims
+    are unchanged; only the strings that address the tests are.
     THIS IS THE SMALLEST OF THE FILINGS IT SHIPS WITH AND IT IS FILED FOR A REASON. W1-T3683 makes
     the hand-run census able to name a verb an operator keeps re-running. A census that can finally
     see hand-running is worth little if the thing being hand-run has no verb to be routed to. This
@@ -62,13 +70,13 @@
     files: for the reason W1-T3680 records.
   acceptance:
     - claim: "the survey covers every configured repository rather than a list written into the code"
-      proof: "unit test: the board surveys every configured repository"
+      proof: "unit test: the survey covers exactly the repositories it is given"
     - claim: "a repository that cannot be read is reported as unavailable rather than rendered as an empty queue"
-      proof: "unit test: an unreadable repository reads unavailable never empty"
+      proof: "unit test: an unreadable repository reads unavailable, never rendered as an empty queue"
     - claim: "each repository costs one list call, so a wide board cannot trip the secondary rate limit"
-      proof: "unit test: a three-repository board makes three calls"
+      proof: "unit test: a three-repository board makes exactly three gh calls"
     - claim: "a board containing failing pull requests still exits zero, so this verb reports and never gates"
-      proof: "unit test: a board with failures still exits zero"
+      proof: "unit test: a board with failing checks still exits zero from boardCommand"
     - claim: "the CLI actually dispatches the survey, so the module is reached by the verb rather than only by its own tests"
       proof: "grep: surveyPullRequestBoard( in src/run-task.ts"
   falsifier: |

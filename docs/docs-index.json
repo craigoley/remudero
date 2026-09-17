@@ -656,6 +656,12 @@
       "grepHint": "Openweight triage WebSearch authority"
     },
     {
+      "path": "docs/recon/per-tool-approval.md",
+      "title": "Recon: per-tool approval (W1-T3668)",
+      "summary": "Measured 2026-09-17 against this repo's HEAD (`3b8a5765b`). Compares the current two-grain",
+      "grepHint": "Recon: per-tool approval (W1-T3668)"
+    },
+    {
       "path": "docs/research/README.md",
       "title": "Recovered research artefacts",
       "summary": "Four agent-written reports, recovered and committed verbatim. They are dated artefacts: each records",

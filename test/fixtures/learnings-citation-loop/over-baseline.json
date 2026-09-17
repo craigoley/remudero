@@ -1,4 +1,5 @@
 {
-  "_comment": "alpha-cited (73 chars) + beta-never-cited (77 chars) = 150 -- over this cap, so the ratchet must BLOCK and name compression candidates.",
-  "capChars": 100
+  "_comment": "alpha-cited (73 chars) + beta-never-cited (77 chars) = 150 -- over this cap, so the ratchet must BLOCK and name compression candidates. W1-T3734 moved blocking from capChars (now advisory) to hardCapChars, so this fixture declares the cliff at the same figure to keep the test's intent exactly.",
+  "capChars": 100,
+  "hardCapChars": 100
 }

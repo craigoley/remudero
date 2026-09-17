@@ -545,10 +545,53 @@ function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFr
   } catch (error) {
     return { status: "unreadable", reason: `could not inspect reviewer code advance: ${String(error)}` };
   }
-  if (advanceIsMaterial(changedPaths)) {
+  if (reviewAdvanceIsMaterial(changedPaths)) {
     return { status: "stale", codeSha, originMainSha, changedPaths };
   }
   return { status: "fresh", codeSha, originMainSha, advance: "immaterial" };
+}
+
+/**
+ * W1-T3735: what an advance must touch before a REVIEWER's computed verdict stops being trustworthy.
+ *
+ * NARROWER THAN {@link MATERIAL_ADVANCE_PATHS} ON PURPOSE — the two answer different questions.
+ * That list asks "would a restart load a different module graph?", for which "any `src/` change" is
+ * right. This asks "could main's advance have changed this VERDICT?", and a change to, say,
+ * `src/lib/cash-actuals.ts` provably could not: nothing on the review path loads it.
+ *
+ * THE CONFLATION COST EVERYTHING. Measured on the live fleet 2026-09-17, `review.post_refused` held
+ * 200 rows, every one `attempted_state: "success"` and `evidence: "executed"` — the daemon computed
+ * a PASS and discarded it, because main touches `src/` in 23 of any 60 commits while these paths
+ * take 9. Nothing could post a verdict, so nothing merged.
+ *
+ * STILL FAILS TOWARD REFUSING: empty, blank and unreadable are all material. Narrowing WHICH paths
+ * count must never narrow what "I cannot tell" means.
+ * FALSIFIER: test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts.
+ */
+export const REVIEW_MATERIAL_ADVANCE_PATHS = [
+  // the verdict itself: rubric, keyword floor, proof parsing and execution
+  "src/lib/review.ts",
+  // runReview's own call path, and where criteria are resolved from a trailer
+  "src/run-task.ts",
+  // criteria come from the plan; a loader change can change what is judged
+  "src/lib/plan.ts",
+  // the proof dialect the review and the linter share
+  "src/lib/task-linter.ts",
+  // the toolchain a proof executes under
+  "package.json",
+  "package-lock.json",
+] as const;
+
+/** Review-scoped sibling of {@link advanceIsMaterial}. Same fail-toward-refusing contract. */
+export function reviewAdvanceIsMaterial(changedPaths: readonly string[] | undefined): boolean {
+  if (!changedPaths || changedPaths.length === 0) return true;
+  return changedPaths.some((raw) => {
+    const path = raw.trim();
+    if (path.length === 0) return true;
+    return REVIEW_MATERIAL_ADVANCE_PATHS.some((prefix) =>
+      prefix.endsWith("/") ? path.startsWith(prefix) : path === prefix,
+    );
+  });
 }
 
 export function checkReviewerCodeFreshness(
@@ -565,7 +608,7 @@ export function checkReviewerCodeFreshness(
 
   if (service.behind) {
     const { oldSha, newSha, changedPaths, diffUnreadable } = service.behind;
-    if (advanceIsMaterial(changedPaths)) {
+    if (reviewAdvanceIsMaterial(changedPaths)) {
       return { status: "stale", codeSha: oldSha, originMainSha: newSha, changedPaths, diffUnreadable };
     }
     return { status: "fresh", codeSha: oldSha, originMainSha: newSha, advance: "immaterial" };

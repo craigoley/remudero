@@ -40,8 +40,9 @@
 
   acceptance:
     - claim: "a request that fails after reserving is settled down rather than stranding the conservative figure, and the ledger says which failure settled it"
-      proof: "unit test: a failed openweight request settles rather than stranding its reservation"
+      proof: 'grep: test("a failed openweight request settles rather than stranding its reservation" in test/a-failed-openweight-request-settles-its-reservation.test.ts'
     - claim: "a failure that produced no completion is never charged for completion tokens it did not generate"
-      proof: "unit test: a failed request is not charged for completion tokens it never produced"
+      proof: 'grep: test("a failed request is not charged for completion tokens it never produced" in test/a-failed-openweight-request-settles-its-reservation.test.ts'
     - claim: "the byte-length input bound is unchanged, because over-reserving is the safe direction and only the failure path is corrected"
       proof: "unit test: the openweight reservation still bounds input by byte length"
+      satisfied_by: "https://github.com/craigoley/remudero/pull/5682"

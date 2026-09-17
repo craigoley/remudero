@@ -27,6 +27,7 @@
 // Why: the full design rationale and every measured incident this module was built to
 // fix — docs/forensics/deployer.md#file-header
 
+import { resolveRepoLayout } from "./repo-layout.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -140,6 +141,118 @@ export function sameCommit(a: string | undefined, b: string | undefined): boolea
  *  day and train an operator to ignore the signal. Mirrors `acr-build.yml`'s own `paths:` filter,
  *  which is what decides whether a new image is even built. */
 export const IMAGE_BAKED_PATHS: readonly string[] = ["deploy/Dockerfile", "deploy/entrypoint.sh"];
+
+/** W1-T3732 — the instance registry's BASENAME. Its directory comes from
+ *  `resolveRepoLayout(root).stateDir`, never an inline state-directory literal: `repo-layout.test.ts`
+ *  ratchets how many non-test src files assume the house layout inline, and one more would be one
+ *  more place a repo that overrides its layout silently reads the wrong file.
+ *  `recycle-container.sh` resolves the SAME path from its own `${SCRIPT_DIR%/deploy}`, so the
+ *  script and its only automated caller cannot disagree about which registry is in force. */
+export const DAEMON_INSTANCE_REGISTRY_BASENAME = "daemon-instances.yaml";
+
+/** The registry on a given deploy checkout, resolved through the house layout. */
+export function daemonInstanceRegistryPath(installPath: string): string {
+  return join(resolveRepoLayout(installPath).stateDir, DAEMON_INSTANCE_REGISTRY_BASENAME);
+}
+
+/**
+ * W1-T3732 — each declared instance mapped to the `state_dir` the registry records for it.
+ *
+ * DELIBERATELY NOT A YAML PARSER. It reads the two lines it needs out of the `instances:` block —
+ * the instance name and its `state_dir` — exactly as `recycle-container.sh`'s own
+ * `read_instance_registry` does with shell. A general parser would accept shapes the script
+ * refuses, and the two must agree about what is declared or the supervisor names an instance the
+ * script then rejects. Anything it cannot read is simply absent from the map: the caller treats an
+ * empty map and an unreadable file identically (see {@link instanceForStateRoot}).
+ */
+export function daemonInstanceStateDirs(text: string): Map<string, string> {
+  return new Map([...daemonInstanceRows(text)].map(([name, row]) => [name, row.stateDir]));
+}
+
+/** W1-T3733 — the two fields the deploy path needs from one instance's registry row. */
+export interface DaemonInstanceRow {
+  stateDir: string;
+  /** The container that instance runs, as `docker inspect` reported it when the registry was written. */
+  containerName?: string;
+}
+
+/** W1-T3733 — every declared instance's `state_dir` AND `container_name`, from one pass. See
+ *  {@link daemonInstanceStateDirs} for why this is not a YAML parser. */
+export function daemonInstanceRows(text: string): Map<string, DaemonInstanceRow> {
+  const out = new Map<string, DaemonInstanceRow>();
+  /** Fields seen before this instance's `state_dir`, folded in when that arrives. */
+  const partial = new Map<string, Omit<DaemonInstanceRow, "stateDir">>();
+  let inInstances = false;
+  let current: string | undefined;
+  for (const raw of text.split(/\r?\n/)) {
+    if (/^\s*(#|$)/.test(raw)) continue;
+    if (/^instances:\s*$/.test(raw)) {
+      inInstances = true;
+      continue;
+    }
+    if (!inInstances) continue;
+    // Any further top-level key ends the block — never read a sibling section's fields as an
+    // instance's, which is how a hand-rolled reader silently widens.
+    if (/^\S/.test(raw)) break;
+    const name = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(raw);
+    if (name) {
+      current = name[1];
+      continue;
+    }
+    if (current === undefined) continue;
+    // ACCUMULATE BOTH FIELDS REGARDLESS OF ORDER. The live registry writes `container_name` BEFORE
+    // `state_dir`, and an earlier draft dropped the container whenever it arrived first — a
+    // field-order dependency is exactly the silent widening a hand-rolled reader invites.
+    const stateDir = /^ {4}state_dir:\s*(\S+)\s*$/.exec(raw);
+    if (stateDir) out.set(current, { ...partial.get(current), ...out.get(current), stateDir: stateDir[1] });
+    const container = /^ {4}container_name:\s*(\S+)\s*$/.exec(raw);
+    if (container) {
+      const row = out.get(current);
+      if (row) out.set(current, { ...row, containerName: container[1] });
+      else partial.set(current, { containerName: container[1] });
+    }
+  }
+  // A row that never named a `state_dir` is an instance this deployment can never match, so it is
+  // dropped rather than carried with an empty directory that could compare equal to something.
+  return out;
+}
+
+/** Trailing separators are not identity: `/a/b` and `/a/b/` are one directory. */
+function normalisedDir(dir: string): string {
+  return dir.replace(/\/+$/, "");
+}
+
+/**
+ * W1-T3732 — the instance whose recorded `state_dir` IS this deployment's state root.
+ *
+ * MATCHED ON THE STATE DIRECTORY, NOT THE CONTAINER NAME, and that is the whole safety argument:
+ * W1-T3596 exists because the unscoped default recycled core against a state directory that was
+ * not core's own. Two instances can be renamed onto one container; they cannot share one state
+ * mount. `undefined` on no match AND on an ambiguous one — the caller then invokes the script
+ * exactly as it does today, and the registry's refusal stands unchanged.
+ */
+/**
+ * W1-T3733 — the container whose `/etc/rmd-build-sha` this deployment's image drift must be read
+ * from. MEASURED 2026-09-17: `IMAGE_SHA_CONTAINER` was the literal `remudero-daemon` at its only
+ * call site, so the site and console recycle ticks read CORE's image, saw its 0 baked-path commits
+ * behind, and declined — while their own images sat 24 hours and one baked-path commit stale.
+ *
+ * Resolved through the SAME state-root match `--instance` uses, so one lookup answers both and
+ * they cannot disagree about which daemon is being deployed. No match, no recorded
+ * `container_name`, or an unreadable registry all fall back to {@link IMAGE_SHA_CONTAINER} — the
+ * literal this replaces — so the core deployment is byte-for-byte unchanged and no fault can point
+ * the read at nothing.
+ */
+export function imageShaContainerFor(registryText: string, stateRoot: string): string {
+  const name = instanceForStateRoot(registryText, stateRoot);
+  return (name !== undefined ? daemonInstanceRows(registryText).get(name)?.containerName : undefined) ?? IMAGE_SHA_CONTAINER;
+}
+
+export function instanceForStateRoot(registryText: string, stateRoot: string): string | undefined {
+  const want = normalisedDir(stateRoot);
+  const matches = [...daemonInstanceStateDirs(registryText)].filter(([, dir]) => normalisedDir(dir) === want);
+  return matches.length === 1 ? matches[0][0] : undefined;
+}
 
 /** Where the image writes its own build sha. The SAME file `scripts/fleet-heartbeat.sh` reads to
  *  publish `image_build_sha` (W1-T496) — one path, so the beat and the deploy trigger can never
@@ -1109,6 +1222,11 @@ export interface RealDeployOpts {
   healthPollMs?: number;
   /** Injected blocking sleep (tests fake it; real = a busy-wait-free sleep). */
   sleep?: (ms: number) => void;
+  /** W1-T3732 — the daemon instance this deployment is for, passed to `recycle-container.sh` as
+   *  `--instance`. OMITTED ⇒ derived from the registry by matching {@link RealDeployOpts.stateRoot}
+   *  against each declared `state_dir` ({@link instanceForStateRoot}); still undefined ⇒ the script
+   *  is invoked exactly as before this field existed, and refuses exactly as it does today. */
+  instance?: string;
   /** Injected subprocess runner (tests fake it; default = execFileSync, utf8, RAW — callers
    *  trim, since `git status --porcelain`'s leading status column is significant). Throws on
    *  a non-zero exit, like execFileSync — callers catch where that is expected (e.g. `pgrep`
@@ -1211,6 +1329,30 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     restart: kickstartDaemon,
   };
   const recycleContainerScript = join(o.installPath, "deploy", "recycle-container.sh");
+  // W1-T3732: resolved ONCE per deps object, from the registry on the checkout being deployed.
+  // An unreadable or absent registry is NOT a match — it leaves `recycleInstance` undefined and the
+  // invocation byte-identical to before this task, which is the fail-closed direction: a fault must
+  // never select a daemon, and must never restore the unscoped default the registry exists to forbid.
+  // W1-T3733: read ONCE, and reused for both the `--instance` flag and the image-sha container.
+  const registryText = (() => {
+    try {
+      return readFileSync(daemonInstanceRegistryPath(o.installPath), "utf8");
+    } catch {
+      return undefined; // absent or unreadable — every consumer below keeps its pre-registry default
+    }
+  })();
+  const imageShaContainer = registryText === undefined ? IMAGE_SHA_CONTAINER : imageShaContainerFor(registryText, o.stateRoot);
+  const recycleInstance =
+    o.instance ??
+    (() => {
+      try {
+        return registryText === undefined ? undefined : instanceForStateRoot(registryText, o.stateRoot);
+      } catch {
+        // An absent or unreadable registry does not name an instance; preserve the script's
+        // fail-closed unscoped refusal instead of inferring one from unrelated host state.
+        return undefined;
+      }
+    })();
   const recycleContainerBackend: RestartBackend = {
     name: "recycle-container",
     // Usable only when the SCRIPT is on this checkout AND a docker client is on PATH — everything
@@ -1226,9 +1368,17 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         return false; // docker absent, or unreachable — the script needs a working docker to run
       }
     },
-    describe: () => `${recycleContainerScript} (pause, drain, pull and replace the ${o.daemonLabel} container)`,
+    describe: () =>
+      `${recycleContainerScript}${recycleInstance ? ` --instance ${recycleInstance}` : ""} ` +
+      `(pause, drain, pull and replace the ${o.daemonLabel} container)`,
     restart: () => {
-      exec("bash", [recycleContainerScript]);
+      // W1-T3732 — NAME THE INSTANCE. `recycle-container.sh` REFUSES an unscoped invocation whenever
+      // the registry declares instances (W1-T3596), and this call site passed nothing — so every
+      // automated restart on this fleet was a refusal. MEASURED 2026-09-17T13:07:36Z:
+      // `deploy.restart_refused`, "Declared: core site console", after the image had already been
+      // pulled. An unresolved instance still invokes the script bare, so the refusal stands wherever
+      // there is no answer rather than being replaced by a guess.
+      exec("bash", recycleInstance ? [recycleContainerScript, "--instance", recycleInstance] : [recycleContainerScript]);
     },
   };
 
@@ -1301,7 +1451,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     imageBakedCommitsBehind: () => {
       let sha: string | undefined;
       try {
-        sha = exec("docker", ["exec", IMAGE_SHA_CONTAINER, "cat", IMAGE_BUILD_SHA_PATH]).trim();
+        sha = exec("docker", ["exec", imageShaContainer, "cat", IMAGE_BUILD_SHA_PATH]).trim();
       } catch {
         return undefined; // container down / no docker — UNKNOWN, never "current"
       }
