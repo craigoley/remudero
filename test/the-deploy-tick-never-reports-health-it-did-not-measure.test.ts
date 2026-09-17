@@ -28,7 +28,7 @@ import { gitRepo } from "./helpers/git-repo.js";
 
 // ── claim 1: an unobserved liveness tick does not report up-to-date ─────────────────────────
 
-test("an unobserved-liveness tick does not report up-to-date, so an unmeasured quantity is never rendered healthy", () => {
+test("an unobserved liveness tick does not report up-to-date, so an unmeasured quantity is never rendered healthy", () => {
   // daemonAlive omitted ⇒ undefined ⇒ never observed. Checkout and daemon boot sha both match, so
   // the OLD code took this straight into the "up-to-date" branch.
   const d = decideDeployTrigger({
@@ -60,7 +60,7 @@ test("an OBSERVED-alive, fully current tick still reports up-to-date — the one
 
 // ── claim 2: an ignored runningStale is named in the skip reason ────────────────────────────
 
-test("the watchdog tick names an ignored runningStale instead of omitting it", () => {
+test("an ignored runningStale is named in the skip reason, not omitted", () => {
   // imageDriftOnly discards `behind`/`runningStale` from `restartReasons` by design (W1-T3245) —
   // but the running daemon really is on old code here, and the tick must say so.
   const d = decideDeployTrigger({
@@ -117,7 +117,7 @@ test("the SAME inputs outside the watchdog tick's imageDriftOnly reading restart
 
 // ── claim 4: the tick still does not restart on runningStale alone ──────────────────────────
 
-test("W1-T3245's separation is preserved: the tick never restarts on runningStale by itself", () => {
+test("W1-T3245's separation is preserved — the tick does not restart on runningStale alone", () => {
   for (const daemonAlive of [true, false, undefined] as const) {
     const d = decideDeployTrigger({
       markerPresent: false,
@@ -148,7 +148,7 @@ test("W1-T3245's separation is preserved: the tick never restarts on runningStal
 
 // ── claim 5: a stale-running daemon renders as a blocker naming both shas ───────────────────
 
-test("a stale-running daemon the tick declines to act on renders as a blocker naming both shas", () => {
+test("a stale-running daemon renders as a blocker with both shas, undisturbed by the tick", () => {
   const d = decideDeployTrigger({
     markerPresent: false,
     autoMode: true,
