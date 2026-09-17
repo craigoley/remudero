@@ -85,7 +85,7 @@
   status: queued
   attempts: 0
   note: |
-    reservation hand-off: planfast -> planfast
+    reservation hand-off: unknown -> planfast
 
     Minted by `rmd next-task-id` from the branch that files it; recorded because the branch is not
     `run-` shaped.
