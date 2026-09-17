@@ -77,7 +77,6 @@ test("W1-T3692: every declared dispatch-lane openweight bound is genuinely serva
 // so recon and diagnose were refused at the moment the subscription ran out, even though
 // DISPATCH_LANE_TOOL_BOUNDS has declared their cash equivalents since W1-T3656.
 
-import { readFileSync } from "node:fs";
 import { cashDivertSpawnFields, cashDivertToolsForLane, resolveDispatchLaneToolBound } from "../src/lib/worker.js";
 
 test("W1-T3726: the CLAUDE surface of a read-only lane is refused — this is the defect being fixed", () => {
@@ -118,17 +117,10 @@ test("W1-T3726: an UNKNOWN lane throws, so a typo cannot silently disable a dive
   assert.throws(() => cashDivertToolsForLane("recno"), /no declared tool bound for dispatch lane/);
 });
 
-test("W1-T3726: both read-only dispatch sites actually PASS cashTools to the spawn", () => {
-  // THE WIRING, NOT JUST THE HELPER. The helper returning a good list changes nothing if the call
-  // site never hands it over -- which is precisely how this defect survived W1-T3656.
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  for (const lane of ["recon", "diagnose"]) {
-    assert.ok(
-      src.includes(`...cashDivertSpawnFields("${lane}")`),
-      `the ${lane} dispatch must spread the divert fields, or the auction still judges its Claude surface`,
-    );
-  }
-});
+// W1-T3726: "both read-only dispatch sites actually PASS cashTools to the spawn" — THE WIRING, NOT
+// JUST THE HELPER — is asserted in test/the-divert-fields-reach-run-tasks-dispatch-sites.test.ts,
+// split out because it can only be checked by reading src/run-task.ts as text (see that file's own
+// header for why), and this file's other tests are genuinely behavioural.
 
 test("W1-T3726: the spread helper carries the surface for a divertible lane and nothing for the rest", () => {
   // BOTH ARMS, because the whole point of this shape is that the call site has no branch to test:
