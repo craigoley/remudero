@@ -267,6 +267,45 @@ test("--record-evidence writes a separate deterministic proposal and never mutat
   assert.equal(readFileSync(join(root, "scripts", "test-tier-manifest.json"), "utf8"), before);
 });
 
+// ── --propose: gates a future "open the PR" rung on whether the proposal differs materially ────
+
+test("--propose without --proposed REFUSES with exit 2 rather than guessing a proposal file", () => {
+  const root = newFixtureRoot();
+  writeFixtureTestFile(root, "a.test.ts");
+  writeFixtureManifest(root, { thresholdMs: 5000, files: { "test/a.test.ts": 100 } });
+  const result = runCli(["--propose"], root);
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /--propose requires --proposed <path>/);
+});
+
+test("--propose exits 0 and says so when the proposal is material, against the default --manifest as committed", () => {
+  const root = newFixtureRoot();
+  writeFixtureTestFile(root, "a.test.ts");
+  writeFixtureTestFile(root, "b.test.ts");
+  // No --committed given: --propose must fall back to reading the tracked manifest at --manifest.
+  writeFixtureManifest(root, { thresholdMs: 5000, files: { "test/a.test.ts": 100, "test/b.test.ts": 0 } });
+  const proposal = join(root, "proposal.json");
+  writeFileSync(proposal, JSON.stringify({ thresholdMs: 5000, files: { "test/a.test.ts": 100, "test/b.test.ts": 5 } }));
+  // No --shard-count given: must fall back to the default of 4 rather than throwing on `undefined`.
+  const result = runCli(["--propose", "--proposed", proposal], root);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /proposal is material — open a pull request adopting it/);
+});
+
+test("--propose exits 1 and says so when the proposal is NOT material, against an explicit --committed and --shard-count", () => {
+  const root = newFixtureRoot();
+  writeFixtureTestFile(root, "a.test.ts");
+  writeFixtureTestFile(root, "b.test.ts");
+  const committed = join(root, "committed.json");
+  writeFileSync(committed, JSON.stringify({ thresholdMs: 5000, files: { "test/a.test.ts": 1000, "test/b.test.ts": 10 } }));
+  const proposal = join(root, "proposal.json");
+  // A few ms of measurement noise on an already-measured file: no shard membership change.
+  writeFileSync(proposal, JSON.stringify({ thresholdMs: 5000, files: { "test/a.test.ts": 1003, "test/b.test.ts": 11 } }));
+  const result = runCli(["--propose", "--proposed", proposal, "--committed", committed, "--shard-count", "2"], root);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /proposal is not material — no pull request needed/);
+});
+
 test("loadManifest: a missing manifest file reads as empty (default threshold, no files), not a crash", () => {
   const root = newFixtureRoot();
   const manifest = loadManifest(join(root, "scripts", "test-tier-manifest.json"));
