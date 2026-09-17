@@ -49,48 +49,68 @@
         on this verdict — the most destructive act the sweep can take, on the weakest evidence it
         holds.
   design: |
-    (i) CLASSIFY THE RULE-25 SPLIT WITH RULE 25'S OWN PREDICATES. `isInstrumentPath` and
-        `isProductPath` (review.ts, W1-T297) already decide what rule 25 means; the
-        `complementary` arm gets a second positive case built from them, exactly as the existing
-        case is built from `isInPlanScope`. A local re-derivation of "what is an instrument" could
-        disagree with the rule that forced the split, which is the whole defect repeating.
+    READ THE PRODUCER BEFORE WRITING THE FIX — and it changes the fix. `fetchSupersessionVerdict`
+    (open-prs-rest.ts) ALREADY answers this case correctly: #5861 shares 2 of its 12 changed paths
+    with #5886, which is a partial overlap, and it returns `"indeterminate"` with the detail "a
+    partial overlap supports neither finding". The producer was right. The DISPOSITION closed the
+    PR anyway:
 
-    (ii) POSITIVE EVIDENCE, NOT A WEAKENING. `complementary` already requires BOTH diffs read and
-         BOTH roles non-empty, and carries counts as its corpus control. The new case keeps that
-         contract: one side wholly instrument paths, the other containing product paths, both
-         non-empty, both read. A read that could not decide stays `indeterminate`, which never
-         saves a PR the arithmetic condemned.
+      sweep.ts:5191   when: (pr, policy) =>
+                        pr.supersededBy != null &&
+                        pr.supersessionVerdict?.status !== "complementary" &&
+                        !(policy.conceptCoexistenceEnabled === true &&
+                          pr.supersessionVerdict?.status === "unique"),
 
-    (iii) THE SUBSET CASE IS THE TELL AND IS WORTH ITS OWN ASSERTION. #5886's changed paths are a
-          strict subset of #5861's. A "supersession" in which the superseding PR changes strictly
-          fewer files than the one it replaces is the shape that should never be acted on, and it
-          is cheap to state.
+    So the row closes on the BARE ARITHMETIC and consults the verdict only to carve two exceptions
+    out of it — one of which needs a policy flag that is OFF by default.
 
-    NOT IN SCOPE: the ordering the two halves then need (the instrument row must land before the
-    verb reaches COMMANDS, or `console-parity` reads the cli-only set as grown) — a real sequencing
-    question, but a different one from refusing to destroy the work.
+    (i) INVERT IT: CLOSE ONLY ON POSITIVE EVIDENCE. The row requires
+        `supersessionVerdict?.status === "superseded"` — the verdict that means every one of this
+        PR's changed paths is also changed by the newer one. Everything else — `indeterminate`,
+        `unique`, `complementary`, or no verdict at all — leaves the PR open. This is the most
+        destructive act the sweep can take (`authority.ts:248`), and it should need the strongest
+        evidence the system holds, not the weakest.
+
+    (ii) `unique` STOPS NEEDING A FLAG, which is the case W1-T3535 already recorded and could not
+         close: "#5632 — a /v1/status change sharing NOT ONE changed path — closed #5630 and
+         #5631." Sharing no path is the strongest possible evidence of NOT being superseded, and it
+         was gated behind `conceptCoexistenceEnabled`, off by default. `policy` keeps the flag; it
+         simply stops being what stands between a PR and deletion.
+
+    (iii) THIS COVERS THE RULE-25 SPLIT WITHOUT NAMING IT, which is why it is the right altitude. A
+          split that still shares the instrument files reads `indeterminate` (the #5861 shape); a
+          split done properly, with the instrument files REMOVED from the product PR, reads
+          `unique` — and today that one closes too, which would punish the correct split harder
+          than the incomplete one. Both stay open here, and so does every future shape, without a
+          predicate per incident.
+
+    (iv) A GENUINE DUPLICATE IS STILL CLOSED. `superseded` is unchanged and still fires: every
+         changed path also changed by the newer PR. That is the case the row exists for and it is
+         not weakened by one PR.
+
+    NOT IN SCOPE: `fetchSupersessionVerdict` itself, which was already correct here, and the
+    separate `supersessionDisposalEnabled` row at sweep.ts:5121.
   acceptance:
-    - claim: "an instrument-only pull request and a product pull request sharing one task are read as complementary stages, so neither closes the other"
-      proof: "unit test: an instrument split and its product half are complementary, not duplicates"
-    - claim: "a genuine duplicate sharing a task is still superseded, so the disposition that exists is not weakened"
-      proof: "unit test: two product pull requests sharing a task still supersede by number"
-    - claim: "a supersession whose superseding pull request changes strictly fewer files is refused rather than acted on"
-      proof: "unit test: a strict subset never supersedes the larger diff"
-    - claim: "a diff that could not be read stays indeterminate rather than being admitted as complementary"
-      proof: "unit test: an unreadable diff is indeterminate, never complementary"
+    - claim: "a pull request is closed as superseded only on a verdict that positively found it superseded, never on the bare higher-number arithmetic"
+      proof: "unit test: only a positive superseded verdict closes a pull request"
+    - claim: "a verdict that could not decide leaves the pull request open, because the most destructive act needs the strongest evidence"
+      proof: "unit test: an indeterminate verdict never closes"
+    - claim: "a pull request sharing no changed path with its supposed superseder is left open without needing a policy flag"
+      proof: "unit test: a unique verdict never closes without a flag"
+    - claim: "a genuine duplicate, every changed path of which the newer pull request also changes, is still closed"
+      proof: "unit test: a genuine duplicate is still closed"
   falsifier: |
-    Classify on the PR TITLE or branch prefix (`prereq-`) rather than on the diff and the first
-    assertion still passes while the guard becomes forgeable by renaming a branch — so the test
-    drives changed PATHS only, and the second assertion is what refuses a blanket exemption. Drop
-    the both-roles-non-empty requirement and two product PRs start reading complementary, reddening
-    the second. Make the subset rule the ONLY rule and the first goes red, since an instrument split
-    is not always smaller. Treat an unreadable diff as complementary and the fourth goes red: that
-    is the fail-open direction, and it would save PRs the arithmetic correctly condemned.
+    Keep the bare-arithmetic clause and merely ADD `indeterminate` to the exception list and the
+    first assertion goes red — the row would still close a PR carrying NO verdict at all, which is
+    what a failed hydration produces and is the fail-open direction that matters. Drop the
+    `superseded` arm entirely and the fourth goes red: a real duplicate must still be closed or
+    this is not a fix, it is a disabling. Leave `unique` behind `conceptCoexistenceEnabled` and the
+    third goes red, which is the case W1-T3535 already measured twice.
   risk: high
   band_meaning: blast-radius
   origin: human
   plan_refs: [W1-T2779, W1-T3535, W1-T297, W1-T920]
-  files: [src/lib/open-prs-rest.ts]
+  files: [src/lib/sweep.ts]
   status: queued
   attempts: 0
   note: |
