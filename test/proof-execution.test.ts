@@ -154,3 +154,50 @@ test("ACCEPTANCE #3: the W1-T38 over-cap/supersede fixture executes end-to-end v
   const outcome = execWhitelistedProof(whitelisted!, REPO_ROOT, 60_000);
   assert.equal(outcome, "pass");
 });
+
+// ── the satisfied_by skip, proven load-bearing ──────────────────────────────────────────────────
+// The guard is one `continue` in a walk over the REAL corpus, and the shape it guards does not
+// enter that corpus until #5901 merges — so asserting against the real plan proves nothing today
+// and would fail on main tomorrow. These drive the same walk over a SYNTHETIC corpus instead, which
+// is falsifiable now and stays falsifiable after the real one changes.
+
+/** The walk's inner loop, extracted verbatim so a fixture can drive it. */
+function walkExecutable(criteria: AcceptanceCriterion[]): number {
+  let n = 0;
+  for (const c of criteria) {
+    if (c.satisfied_by !== undefined) continue;
+    if (!isDialectPrefixed(c.proof)) continue;
+    n++;
+  }
+  return n;
+}
+
+test("a satisfied_by criterion is SKIPPED by the walk rather than read for a proof it cannot have", () => {
+  const corpus = [
+    { claim: "shipped elsewhere", satisfied_by: "PR #5899" },
+    { claim: "real", proof: "unit test: something" },
+  ] as unknown as AcceptanceCriterion[];
+  // FALSIFIER: delete the `satisfied_by` guard from walkExecutable and this throws
+  // "Cannot read properties of undefined (reading 'trim')" — the exact #5901 failure.
+  assert.equal(walkExecutable(corpus), 1, "only the criterion that actually carries a proof counts");
+});
+
+test("without the guard the same corpus is fatal — the hazard is real, not defensive noise", () => {
+  const unguarded = (criteria: AcceptanceCriterion[]) =>
+    criteria.filter((c) => isDialectPrefixed(c.proof)).length;
+  assert.throws(
+    () => unguarded([{ claim: "shipped elsewhere", satisfied_by: "PR #5899" }] as unknown as AcceptanceCriterion[]),
+    /trim/,
+    "this is what took a required ci-shard job down on #5901",
+  );
+});
+
+test("the SCHEMA permits the shape, which is why the guard exists at all", () => {
+  // Not "the corpus contains one today" — it does not, until #5901 lands. What makes the guard
+  // necessary is the contract: plan.ts returns early for satisfied_by ("stands IN PLACE OF a
+  // proof"), and review.ts's own executableCriteria excludes exactly this set.
+  const c = { claim: "c", satisfied_by: "PR #1" } as unknown as AcceptanceCriterion;
+  assert.equal(c.proof, undefined);
+  assert.deepEqual([c, { claim: "d", proof: "unit test: x" } as AcceptanceCriterion].filter((x) => !x.satisfied_by),
+    [{ claim: "d", proof: "unit test: x" }]);
+});
