@@ -188,6 +188,12 @@
       "grepHint": "board.ts comment forensics"
     },
     {
+      "path": "docs/forensics/cash-actuals.md",
+      "title": "src/lib/cash-actuals.ts forensics",
+      "summary": "The measured forensics removed from the module header of `src/lib/cash-actuals.ts` when it was",
+      "grepHint": "src/lib/cash-actuals.ts forensics"
+    },
+    {
       "path": "docs/forensics/ci-gate-yml.md",
       "title": "ci-gate.yml forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",

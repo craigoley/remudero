@@ -180,6 +180,9 @@ test("no cap configured WARNs rather than passing — an unbounded cash lane is 
   }
 });
 
+// @source-text-subject: the next test's SUBJECT genuinely is doctor.ts's source text -- it asserts
+// an ABSENCE (no call, no value-import) that only the text can show; there is no runtime behaviour
+// to invoke in place of it, so the source-text-assertion-census exemption applies (W1-T2905).
 test("doctor keeps its no-network refusal: the judge takes a VALUE, never fetches", () => {
   // THE CONTRACT, PINNED. doctor.ts's header refuses network reads by name, earned by a measured
   // ninety-minute API lockout. If someone moves the ARM call into the judge, this reddens.

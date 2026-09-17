@@ -2,29 +2,20 @@
  * W1-T3729 — WHAT AZURE ACTUALLY BILLED, read from Azure rather than inferred from our own
  * reservations.
  *
- * WHY THIS EXISTS. `openWeightCommittedUsd` charges `settledUsd ?? reservedUsd`, so a request that
- * never settles counts at its conservative CEILING for the rest of the UTC day. MEASURED on the
- * live fleet allowance for 2026-09-15, against Azure's own token counters for the same day:
+ * INVARIANT: `openWeightCommittedUsd` charges `settledUsd ?? reservedUsd`, so a request that never
+ * settles counts at its conservative CEILING for the rest of the UTC day, which can read as ~3x the
+ * amount Azure actually billed. This module reads Azure Monitor's per-deployment token counters
+ * (not Cost Management -- that reports dollars, lags hours, and is heavily throttled) via the
+ * host's SystemAssigned managed identity over IMDS, so no secret is ever written to disk.
  *
- *     Azure truth (InputTokens/OutputTokens x OPENWEIGHT_PRICES)   $0.9646
- *     local settled sum                                            $0.9270   -4%
- *     local charge against dailyCapUsd                             $2.6771  +189%
+ * TRAP: a refusal is not a zero. Returning `0` for "could not reach Azure" would authorise the
+ * entire day's budget the moment the network blinked, so {@link CashActuals} forces callers to
+ * handle "unavailable" separately from a real reading.
  *
- * So the local ledger is not vaguely wrong, it is wrong in exactly one place -- and Azure can say
- * what it actually billed to within 4%. A `dailyCapUsd` of $25 was refusing work at roughly a third
- * of the figure it names.
+ * Why: docs/forensics/cash-actuals.md (the $0.96 vs $2.68 measurement, the Cost Management
+ * throttling numbers, and the IMDS/managed-identity rationale).
  *
- * WHY THE METRICS API AND NOT COST MANAGEMENT. Cost Management reports DOLLARS, which would need no
- * price table at all -- and is the wrong instrument twice over: its ActualCost data lags hours, and
- * it is aggressively throttled (MEASURED 2026-09-17: HTTP 429 on three of five attempts, spaced
- * over minutes). Azure Monitor's per-deployment token counters lag MINUTES and are not throttled
- * that way, so they are the only reading a same-day cap can act on.
- *
- * WHY THERE IS NO SECRET HERE. The reading is authorised by the host's SystemAssigned MANAGED
- * IDENTITY via IMDS, which mints a short-lived ARM token in-process and writes nothing to disk --
- * deliberately unlike {@link OPENWEIGHT_API_KEY_ENV}, whose only copy lives in the running
- * container's environment and was lost by a container replacement on 2026-09-15, taking the whole
- * cash lane down for two days (W1-T3728).
+ * FALSIFIER: test/the-cash-cap-can-read-what-azure-billed.test.ts. Citations: W1-T3729, W1-T3728.
  */
 import type { Config } from "./config-schema.js";
 import { OPENWEIGHT_PRICES } from "./worker-provider.js";
