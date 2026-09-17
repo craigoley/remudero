@@ -774,8 +774,13 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // sites, still omitting `ledgerLines` while supplying `arm`; only their coordinates moved.
   const expectedKeys = [
     "armIfVerdictPermits:test/arm-ordering.test.ts:63:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6053:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6114:ledgerLines",
+  // W1-T3726 then added ELEVEN lines ahead of both (a behaviour-driven wiring test for the
+  // cash-divert spread, replacing a source-text assertion) and they moved by exactly eleven,
+  // to :6064/:6125 — the SEVENTH re-derivation, and the same lesson each time: these numbers
+  // are a QUERY over the current tree, not a constant, so any diff inserting above the
+  // witnesses moves them and the list must be re-derived rather than the test weakened.
+    "armIfVerdictPermits:test/run-task.test.ts:6064:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6125:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(

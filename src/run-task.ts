@@ -1664,6 +1664,7 @@ import {
   IMPLEMENT_CASH_TOOLS,
   implementToolBound,
   resolveDispatchLaneToolBound,
+  cashDivertSpawnFields,
   resolveClaudeExecutable,
   claudeExecutableCache,
   runAdhocLaneReapRung,
@@ -13447,6 +13448,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // W1-T3616: recon's prompt names `git remote -v`, `git log --oneline -5` and `ls`, so its
         // honest bound includes Bash. Read-only, so no Write/Edit.
         tools: [...resolveDispatchLaneToolBound("recon", reconMount?.provider ?? "claude")],
+        // W1-T3726: plus the surface to use if the auction BLOCKS — see cashDivertSpawnFields.
+        ...cashDivertSpawnFields("recon"),
         settingsFile,
         model: reconMount?.model,
         mountProvider: reconMount?.provider,
@@ -13879,6 +13882,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T3616: diagnose inspects `git diff`/`git status` and re-runs whatever failed, so it
           // declares Bash. "Do NOT modify, commit, or push ANYTHING" — hence no Write/Edit.
           tools: [...resolveDispatchLaneToolBound("diagnose", diagnoseMount.provider ?? "claude")],
+          // W1-T3726: plus the surface to use if the auction BLOCKS — see cashDivertSpawnFields.
+          ...cashDivertSpawnFields("diagnose"),
           model: diagnoseMount.model,
           mountProvider: diagnoseMount.provider,
           effort: diagnoseMount.effort,
@@ -21924,6 +21929,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // already resolved above (`plan.tasks`, and `projectPlan`'s batched `statusByTaskId`).
   const surfaceCorpus = surfaceCorpusFrom(plan);
   const creditedMergedIds = creditedMergedIdsFrom(statusByTaskId);
+  // W1-T3730: computed at most once per pass, not per task — the diff does not change between tasks.
+  let planOnlyFilingDiff: boolean | undefined;
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
@@ -21997,6 +22004,31 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // PR actually touches. Never reimplemented, so lint and review can never disagree about what
     // a proof's raw title resolves to.
     if (scope) {
+      // W1-T3730: THE FILING FACT, from the diff this pass is already scoped to. `planOnlyDiff` is
+      // review.ts's own predicate — the one Standing rule 15 uses for exactly this filing/build
+      // distinction — so the linter and rule 15 can never disagree about what a filing is. Read
+      // once per pass, not per task. An unreadable diff leaves it undefined, which is today's
+      // behaviour: this only ever ADMITS a forward reference, never refuses one.
+      if (planOnlyFilingDiff === undefined) {
+        try {
+          planOnlyFilingDiff = planOnlyDiff(
+            execFileSync("git", ["-C", checkoutRoot, "diff", "--no-ext-diff", `${baseRef}...HEAD`], {
+              encoding: "utf8",
+              maxBuffer: 1 << 26,
+            }),
+          );
+        } catch (error) {
+          // NOT A BARE CATCH, and not only to satisfy the census: an unreadable diff here silently
+          // widens what the linter admits (a forward reference is ADMITTED, never refused), so the
+          // one thing a reader needs is WHY it could not be read.
+          planOnlyFilingDiff = undefined;
+          console.error(JSON.stringify({
+            event: "lint_plan.plan_only_diff_unreadable",
+            reason: String((error as Error)?.message ?? error),
+          }));
+        }
+      }
+      if (planOnlyFilingDiff !== undefined) opts.planOnlyFiling = planOnlyFilingDiff;
       opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(checkoutRoot, rawName);
       // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
       // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and
