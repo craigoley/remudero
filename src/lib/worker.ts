@@ -1145,6 +1145,50 @@ export function implementToolBound(
 export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
 
 /**
+ * W1-T3726: the surface a dispatch lane would run on if a BLOCKED AUCTION diverted it to cash --
+ * or `undefined` where the lane has no cash equivalent and must not be diverted at all.
+ *
+ * THE DIVERT WAS REACHABLE BY EXACTLY ONE LANE BEFORE THIS. `spawnWorker`'s fallback judges
+ * eligibility on `args.cashTools ?? args.tools`, and only implement ever passed `cashTools`. Every
+ * other lane therefore offered the auction its CLAUDE surface, which names `Bash` -- a tool
+ * `cashCanServeToolSurface` refuses by construction -- so recon and diagnose could not divert even
+ * though {@link DISPATCH_LANE_TOOL_BOUNDS} has declared their open-weight equivalents since
+ * W1-T3656. The table was right; nothing read it on this path.
+ *
+ * DELIBERATELY `undefined` RATHER THAN A THROW for a lane with no cash row. This answers an
+ * OFFER ("may this be diverted?"), not a dispatch ("run it on this provider") -- the question
+ * {@link resolveDispatchLaneToolBound} answers, where a missing row is a routing error worth
+ * refusing loudly. Here `undefined` means "keep the subscription-only behaviour this lane has
+ * today", which is the correct answer for `alert_fix`: it commits and pushes, and the check-runner
+ * deliberately cannot. An UNKNOWN lane still throws, so a typo cannot silently disable a divert.
+ */
+export function cashDivertToolsForLane(lane: string): readonly string[] | undefined {
+  const byProvider = (DISPATCH_LANE_TOOL_BOUNDS as Record<string, Record<string, readonly string[] | undefined>>)[lane];
+  if (byProvider === undefined) {
+    throw new Error(
+      `no declared tool bound for dispatch lane '${lane}' — refusing rather than silently offering no divert (W1-T3726)`,
+    );
+  }
+  return byProvider.openweight;
+}
+
+/**
+ * The same answer as {@link cashDivertToolsForLane}, shaped for a spawn's argument object so the
+ * CALL SITE carries no branch.
+ *
+ * WHY THE SHAPE MATTERS AND NOT JUST THE ANSWER: the recon and diagnose dispatches live in a region
+ * of `run-task.ts` that no unit test evaluates, and `diff-coverage` flags ADDED lines -- so a
+ * three-line conditional at each call site is three uncovered added lines, while the branch sitting
+ * here is covered by this module's own tests. Same rule the repo already applies to
+ * `harnessCommitForShellLessWorker`: put the decision where a test can reach it, and leave one
+ * unconditional line behind.
+ */
+export function cashDivertSpawnFields(lane: string): { cashTools?: readonly string[] } {
+  const tools = cashDivertToolsForLane(lane);
+  return tools === undefined ? {} : { cashTools: tools };
+}
+
+/**
  * W1-T3692: can the cash adapter actually RUN this spawn's tool surface?
  *
  * THE PREDICATE IS THE REAL CONSTRAINT, NOT A PROXY FOR IT. `openWeightTools` THROWS on a tool it
