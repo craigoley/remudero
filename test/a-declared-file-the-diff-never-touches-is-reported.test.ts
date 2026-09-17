@@ -39,8 +39,11 @@ diff --git a/test/inbox.test.ts b/test/inbox.test.ts
 // ── ACCEPTANCE #1 ──────────────────────────────────────────────────────────────────────────
 // "a PR whose task declares a file the diff never touches is reported in the reviewer's
 // declared-scope block, the direction that is silent today"
+// Title carries the proof's `unit test:` label VERBATIM (house dialect, W1-T72/W1-T362): the
+// reviewer's floor compiles the bare label into a `--test-name-pattern`, so the label must be a
+// literal substring of an actual test's title or it resolves zero matches and fails as theater.
 
-test("ACCEPTANCE #1: reconstructing W1-T3621's declaration against #5689's diff names src/run-task.ts, and narrowing files: falls silent", () => {
+test("a declared file the diff never touches is reported", () => {
   const declaredFiles = ["src/lib/inbox.ts", "src/run-task.ts", "test/inbox.test.ts"];
   const v = judgeReview(SIMPLE_CRITERIA, { diff: W1_T3621_DIFF, report: SIMPLE_REPORT, taskDeclaredFiles: declaredFiles });
   const section = inverseScopeAdvisorySection(v.unwiredAdvisories);
@@ -60,7 +63,7 @@ test("ACCEPTANCE #1: reconstructing W1-T3621's declaration against #5689's diff 
 // "the report names the consequence, so a reader sees that the phantom path is what supplies
 // the task's extra concern rather than merely that it is unused"
 
-test("ACCEPTANCE #2: the over-declaration report names the concern it inflates, not merely that the path is unused", () => {
+test("the over-declaration report names the concern it inflates", () => {
   const task: Task = {
     id: "W1-T3621",
     title: "t",
@@ -92,7 +95,7 @@ test("ACCEPTANCE #2: the over-declaration report names the concern it inflates, 
 // "it stays advisory and never blocks, because a legitimate widening and a phantom path are
 // indistinguishable from the diff alone"
 
-test("ACCEPTANCE #3: an over-declared file never changes the review verdict", () => {
+test("an over-declared file does not change the review verdict", () => {
   const declaredFiles = ["src/lib/inbox.ts", "src/run-task.ts", "test/inbox.test.ts"];
   const v = judgeReview(SIMPLE_CRITERIA, { diff: W1_T3621_DIFF, report: SIMPLE_REPORT, taskDeclaredFiles: declaredFiles });
 
