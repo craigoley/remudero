@@ -1,0 +1,107 @@
+- id: W1-T3731
+  title: "THE SWEEP CLOSED A COMPLETE IMPLEMENTATION AS SUPERSEDED BY ITS OWN PREREQUISITE — `supersededBy` is 'the highest-numbered open peer sharing a task', and the `complementary` arm that exists to stop it only knows the rule-15 split, not the rule-25 one it ALSO forces"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    MEASURED 2026-09-17, and recovered by hand.
+
+      #5861  feat(cli): add rmd board to survey open pull requests across the fleet
+             12 files: src/lib/pr-board.ts, src/run-task.ts, src/lib/config-schema.ts,
+             3 test files, 2 docs, 4 baselines.  CLOSED 10:56 UTC.
+             "Closed by rmd sweep: superseded-by #5886"
+             Every check green at the moment of closing EXCEPT remudero-review, still PENDING.
+
+      #5886  feat(console-parity): pre-register the board verb's cli-only reason
+             2 files: scripts/console-parity-baseline.json, console-parity-ratchet.mjs
+             Opened 10:51 UTC — FIVE MINUTES EARLIER. Its own body: "The src/lib/config-schema.ts,
+             src/lib/pr-board.ts, and src/run-task.ts changes STAY WITH THE ORIGINAL PR (#5861)."
+
+    #5886's two files are a SUBSET of #5861's twelve. The prerequisite closed the work.
+
+    (1) THE ARITHMETIC IS "HIGHER NUMBER WINS" AND NOTHING ELSE. `run-task.ts:31278`: "supersededBy:
+        the HIGHEST-numbered other open PR crediting the same task." Both PRs carried
+        `Remudero-Task: W1-T3685`; #5886 was opened later; the sweep's `stale` row closed #5861
+        (sweep.ts:5191-5194).
+
+    (2) THE GUARD EXISTS AND DOES NOT COVER THIS SPLIT. `hydrateSupersessionVerdicts`
+        (open-prs-rest.ts:1097) already refuses to let one stage erase another — but only for
+        W1-T2779's shape: "one side wholly in plan scope while the other holds non-plan work". Here
+        BOTH sides are non-plan (`scripts/**` against `src/**`), so the arm never fires.
+
+    (3) THE SPLIT THE GUARD MISSES IS ONE THIS REPO MANDATES. Standing rule 25 (W1-T297) refuses a
+        measurement-instrument path riding with a `src/` product path, and the `blocked_review` fix
+        rung says so in as many words (prompt-render.ts:777). #5886 EXISTS because rule 25 demanded
+        it. So the fleet instructs a worker to split, and then closes the half with the work in it.
+
+    (4) THIS IS THE FOURTH RECORDED INSTANCE OF THE SAME ARITHMETIC. W1-T3535's own comment:
+        "#5411 closed by #5412 (2026-09-13) and again on 2026-09-15, when #5632 — a /v1/status
+        change sharing NOT ONE changed path — closed #5630 and #5631. The two gates contradicted
+        each other: one mandates the name, the other punishes it." That task narrowed ONE symptom
+        (the `unfiled` branch sentinel). The rule now bites through the trailer instead.
+
+    (5) WHAT IT COSTS. #5861 was one pending review away from merging. Its branch survived, so this
+        one was recoverable by reopening; nothing in the system noticed, and nothing would have.
+        `authority.ts:248` grants `sweep-close-superseded-pr` the authority to close an unmerged PR
+        on this verdict — the most destructive act the sweep can take, on the weakest evidence it
+        holds.
+  design: |
+    (i) CLASSIFY THE RULE-25 SPLIT WITH RULE 25'S OWN PREDICATES. `isInstrumentPath` and
+        `isProductPath` (review.ts, W1-T297) already decide what rule 25 means; the
+        `complementary` arm gets a second positive case built from them, exactly as the existing
+        case is built from `isInPlanScope`. A local re-derivation of "what is an instrument" could
+        disagree with the rule that forced the split, which is the whole defect repeating.
+
+    (ii) POSITIVE EVIDENCE, NOT A WEAKENING. `complementary` already requires BOTH diffs read and
+         BOTH roles non-empty, and carries counts as its corpus control. The new case keeps that
+         contract: one side wholly instrument paths, the other containing product paths, both
+         non-empty, both read. A read that could not decide stays `indeterminate`, which never
+         saves a PR the arithmetic condemned.
+
+    (iii) THE SUBSET CASE IS THE TELL AND IS WORTH ITS OWN ASSERTION. #5886's changed paths are a
+          strict subset of #5861's. A "supersession" in which the superseding PR changes strictly
+          fewer files than the one it replaces is the shape that should never be acted on, and it
+          is cheap to state.
+
+    NOT IN SCOPE: the ordering the two halves then need (the instrument row must land before the
+    verb reaches COMMANDS, or `console-parity` reads the cli-only set as grown) — a real sequencing
+    question, but a different one from refusing to destroy the work.
+  acceptance:
+    - claim: "an instrument-only pull request and a product pull request sharing one task are read as complementary stages, so neither closes the other"
+      proof: "unit test: an instrument split and its product half are complementary, not duplicates"
+    - claim: "a genuine duplicate sharing a task is still superseded, so the disposition that exists is not weakened"
+      proof: "unit test: two product pull requests sharing a task still supersede by number"
+    - claim: "a supersession whose superseding pull request changes strictly fewer files is refused rather than acted on"
+      proof: "unit test: a strict subset never supersedes the larger diff"
+    - claim: "a diff that could not be read stays indeterminate rather than being admitted as complementary"
+      proof: "unit test: an unreadable diff is indeterminate, never complementary"
+  falsifier: |
+    Classify on the PR TITLE or branch prefix (`prereq-`) rather than on the diff and the first
+    assertion still passes while the guard becomes forgeable by renaming a branch — so the test
+    drives changed PATHS only, and the second assertion is what refuses a blanket exemption. Drop
+    the both-roles-non-empty requirement and two product PRs start reading complementary, reddening
+    the second. Make the subset rule the ONLY rule and the first goes red, since an instrument split
+    is not always smaller. Treat an unreadable diff as complementary and the fourth goes red: that
+    is the fail-open direction, and it would save PRs the arithmetic correctly condemned.
+  risk: high
+  band_meaning: blast-radius
+  origin: human
+  plan_refs: [W1-T2779, W1-T3535, W1-T297, W1-T920]
+  files: [src/lib/open-prs-rest.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t3731-a-prerequisite-is-not-a-supersession
+
+    RECOVERED BY HAND 2026-09-17: #5861 was reopened and #5886's body rewritten to declare its own
+    criteria, so the two no longer share a resolvable trailer and the arithmetic no longer groups
+    them. That is a repair of one instance, not of the rule — this task is the rule.
+
+    `files:` names no test path, deliberately: `proof-unit-test-unresolvable` refuses a filing that
+    declares one (W1-T3730). The build adds it back.
+
+    Minted by `rmd next-task-id` from the daemon lane's detached HEAD, which records the holder as
+    `unknown`; recorded here because the filing branch is not `run-` shaped.
