@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
 
 // ── W1-T3739 — THE FILING PROTOCOL IS TYPED WHEN A FUNCTION ALREADY PRODUCES IT ──────────────
@@ -151,4 +152,46 @@ test("a slug that would escape the plan directory is refused", () => {
   // THE CONTROL: an ordinary slug still writes, or the refusal above proves nothing.
   const ok = idGate.writeScaffoldedShard({ planDir: dir, id: "W1-T9999", slug: "a-real-slug", holderBranch: "unknown", filerBranch: "f" });
   assert.equal(ok, join(dir, "W1-T9999-a-real-slug.yaml"));
+});
+
+// ── W1-T3739 follow-up: THE FAILURE PATHS, WHICH ARE THE ONLY REASON THE CATCH EXISTS ─────────
+//
+// `diff-coverage` refused this PR naming five added lines, and it was right to. The `wx` create
+// CodeQL made us write has TWO failure branches and only the EEXIST one was exercised; an untested
+// re-throw is how a write error becomes a silent success, which is the exact class of bug the
+// atomic create was introduced to prevent.
+test("a write failure that is not a collision propagates as itself", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}scaffold-enoent-`));
+  // A planDir that does not exist: writeFileSync fails ENOENT, which is NOT the collision case.
+  assert.throws(
+    () =>
+      idGate.writeScaffoldedShard({
+        planDir: join(dir, "no-such-directory"),
+        id: "W1-T9001",
+        slug: "a-real-slug",
+        holderBranch: "unknown",
+        filerBranch: "f",
+      }),
+    (err: NodeJS.ErrnoException) => {
+      // It must arrive AS ITSELF. Reporting an ENOENT as "already exists" would send the author to
+      // pick a new id when the actual defect is a missing directory.
+      assert.equal(err.code, "ENOENT");
+      assert.doesNotMatch(String(err.message), /already exists/);
+      return true;
+    },
+  );
+});
+
+test("scaffoldCli reports a write failure as a refusal instead of throwing through the CLI", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}scaffold-cli-fail-`));
+  const out = idGate.scaffoldCli(["--scaffold", "W1-T9002", "--slug", "a-real-slug"], {
+    planDir: join(dir, "no-such-directory"),
+    currentBranch: () => "f",
+    readHolder: () => ({ recordedBranch: "unknown" }),
+  });
+  // ok:false, not a throw — this CLI's contract is an exit code and one line, and a stack trace on
+  // stderr is neither.
+  assert.equal(out.ok, false);
+  assert.match(out.message, /^scaffold: /);
+  assert.match(out.message, /ENOENT/);
 });

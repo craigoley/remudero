@@ -1028,6 +1028,10 @@ export function scaffoldCli(argv, deps = {}) {
     return { ok: false, message: `scaffold: ${String(err.message ?? err)}` };
   }
 }
+// diff-cov: process-boundary -- the CLI shell. Every DECISION is a pure function tested above
+// (scaffoldShardStub, writeScaffoldedShard, scaffoldCli, including both of scaffoldCli's failure
+// returns); what is left is argv routing and the `process.exitCode` that IS the verdict, which a
+// test cannot observe without spawning a second process.
 if (isMainModule(import.meta.url) && process.argv.includes('--scaffold')) {
   const out = scaffoldCli(process.argv.slice(2));
   (out.ok ? console.log : console.error)(out.message);
