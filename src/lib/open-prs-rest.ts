@@ -11,6 +11,7 @@
  * — 7-21 core a pass, from the budget that was never exhausted (docs/forensics/open-prs-rest.md).
  */
 
+import { createHash } from "node:crypto";
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState, RedundantRefixEvidence } from "./merge-state.js";
 import type { WorkflowRunObservation } from "./workflow-run.js";
 // W1-T2384: from the LEAF, never from sweep.js. dependency-cruiser reads a type-only import as
@@ -780,10 +781,19 @@ export function compareRestArgs(owner: string, repo: string, base: string, head:
   return ["api", `repos/${owner}/${repo}/compare/${base}...${head}`];
 }
 
-/** One file entry in a compare response — the wire shape, never {@link ConflictFileDiff}. */
+/** One file entry in a compare response — the wire shape, never {@link ConflictFileDiff}.
+ *
+ *  `status`/`sha`/`previous_filename` are read ONLY by {@link ownDiffDigestFromCompareFiles}; the
+ *  conflict-evidence producer above ignores them. `sha` is the BLOB sha of the file at the head of
+ *  the compare, which is what makes the digest a statement about CONTENT rather than about commit
+ *  history: a rebase, a force-push of identical bytes, or a merge of the base branch all leave
+ *  every blob sha unchanged. */
 interface RestCompareFile {
   filename?: string;
   deletions?: number;
+  status?: string;
+  sha?: string;
+  previous_filename?: string;
 }
 
 /** One commit entry in a compare response — enough to build a `git log`-shaped one-liner. */
@@ -1178,6 +1188,152 @@ export function hydrateMergeConflictEvidence(
     } catch {
       /* best-effort: this PR keeps the pre-existing undefined mergeConflict, the pass continues */
     }
+  }
+  return out;
+}
+
+
+// ── W1-T3732: THE REVIEW-REUSE PRODUCER ─────────────────────────────────────────────────────────
+//
+// W1-T3704 shipped the whole review-reuse MECHANISM — `reviewReuseVerdict` (lib/sweep.ts), the
+// `review-reused`/`discriminate-only` disposition rows that call it, `ReviewVerdict.ownDiffDigest`/
+// `mergeBaseSha`, the `own_diff_digest`/`merge_base_sha` ledger fields, and
+// `priorReviewVerdictFromLedger` reading them back. All of it tested, all of it wired.
+//
+// AND NOTHING EVER PRODUCED A SINGLE ONE OF THE FIVE INPUTS. `reviewReuseVerdict`'s own comment
+// said so out loud ("Not yet populated by the real gateway"), so every call returned `full-review`
+// unconditionally and every orphaned review was re-derived from scratch. That is the "why does it
+// need ANOTHER review?" the operator hit on #5941 — the machinery to answer "nothing changed"
+// existed and was never fed.
+//
+// ── ONE REPRESENTATION, OR THE COMPARISON IS MEANINGLESS ──────────────────────────────────────
+// The two sides of that comparison are computed in different places: the REVIEW records what it
+// judged, and a LATER SWEEP PASS asks what is true now. The review runs beside a materialised head
+// checkout; the sweep has no checkout at all. It is therefore tempting to compute the review side
+// from local git and the sweep side from this REST compare — and that would be a silent, permanent
+// bug: two representations of "the PR's own diff" that never produce equal digests, so the reuse
+// path reads "changed" forever and looks exactly like the pre-fix behaviour it replaced.
+//
+// So BOTH sides call THIS function. It is the only producer of either value, which is what makes
+// `reviewedOwnDiffDigest === currentOwnDiffDigest` a question about the PR rather than a question
+// about which code path asked.
+
+/** What a review judged, or what is true now — the pair {@link reviewReuseVerdict} (lib/sweep.ts)
+ *  compares. Both fields are REQUIRED here: a partial read is returned as `undefined` by the
+ *  callers below rather than as a half-filled object, because an absent digest and an absent merge
+ *  base mean the same thing to every reader ("unreadable — re-review") and a shape that can express
+ *  "one of the two" only invites a caller to treat the other as authoritative. */
+export interface ReviewReuseFacts {
+  ownDiffDigest: string;
+  mergeBaseSha: string;
+}
+
+/** A content hash of the pull request's OWN diff, folded from a compare response's file list.
+ *
+ *  WHAT IT IS A STATEMENT ABOUT: the bytes this PR contributes, and nothing else. Each entry
+ *  contributes its path, its change status, its blob sha at head, and — for a rename — the path it
+ *  came from. Commit shas, commit messages, authorship, ordering and timestamps are all deliberately
+ *  excluded, which is exactly what makes the digest survive the three pushes that change nothing
+ *  reviewable: a rebase, a force-push of identical content, and a merge of the base branch.
+ *
+ *  SORTED BEFORE HASHING, because the compare endpoint does not promise an order and an unstable
+ *  digest would read as "the diff changed" on every second pass — a false negative that costs a
+ *  full re-review rather than a wrong reuse, but a defect either way.
+ *
+ *  A FILE WITH NO `filename` IS NOT SKIPPED. It contributes a fixed marker instead, so a malformed
+ *  entry can never make two genuinely different diffs digest identically; the digest degrades
+ *  toward "different", never toward "same". The whole safety argument for reuse rests on that
+ *  asymmetry: a false "changed" wastes a review, a false "unchanged" ships an unjudged diff. */
+export function ownDiffDigestFromCompareFiles(files: readonly RestCompareFile[] | undefined): string {
+  const rows = (files ?? []).map((f) =>
+    [
+      f.filename ?? "\u0000unnamed",
+      f.status ?? "\u0000unknown",
+      f.sha ?? "\u0000noblob",
+      f.previous_filename ?? "",
+    ].join("\u0000"),
+  );
+  rows.sort();
+  // The COUNT is hashed alongside the rows so a list that folds to the same concatenation by a
+  // different partition cannot collide — belt and braces on a value whose whole job is to be
+  // trusted when it matches.
+  return createHash("sha256").update(`${rows.length}\n${rows.join("\n")}`).digest("hex");
+}
+
+/** One PR's {@link ReviewReuseFacts}, over REST. Throws on a failed or malformed read — the same
+ *  no-retry discipline as {@link fetchMergeConflictEvidence}, whose compare call this mirrors
+ *  exactly (`compare/<targetBranch>...<headSha>`, one request).
+ *
+ *  A COMPARE CARRYING NO `merge_base_commit.sha` THROWS rather than returning a digest alone: the
+ *  reuse decision needs both, and the half-answer would otherwise be recorded as authoritative. */
+export function fetchReviewReuseFacts(
+  owner: string,
+  repo: string,
+  targetBranch: string,
+  headSha: string,
+  fetch: GhApiFetcher,
+): ReviewReuseFacts {
+  const compare = fetch(compareRestArgs(owner, repo, targetBranch, headSha)) as RestCompareResponse;
+  const mergeBaseSha = compare.merge_base_commit?.sha;
+  if (!mergeBaseSha) throw new Error("review-reuse compare carried no merge_base_commit.sha");
+  return { ownDiffDigest: ownDiffDigestFromCompareFiles(compare.files), mergeBaseSha };
+}
+
+/** {@link fetchReviewReuseFacts}, best-effort — `undefined` on any failure, which every reader
+ *  treats as "unreadable, re-review in full" (see `reviewReuseVerdict`'s five-way absence guard).
+ *  This is the shape both call sites want: neither the review nor the sweep may fail because a
+ *  compare did not answer. */
+export function tryFetchReviewReuseFacts(
+  owner: string,
+  repo: string,
+  targetBranch: string,
+  headSha: string,
+  fetch: GhApiFetcher,
+  /** Called with the failure's message when the read does not answer. NOT optional decoration:
+   *  this repo has learned repeatedly that an unrecorded failed read is byte-indistinguishable
+   *  from a genuine absence, and here the two have opposite meanings — "GitHub declined" versus
+   *  "this PR has no recorded verdict". Callers that have a logger pass one; the reason is never
+   *  simply swallowed. */
+  onUnreadable?: (reason: string) => void,
+): ReviewReuseFacts | undefined {
+  try {
+    return fetchReviewReuseFacts(owner, repo, targetBranch, headSha, fetch);
+  } catch (err) {
+    // NOT AN ERASURE: the reason is handed to `onUnreadable` before the value collapses, and the
+    // `undefined` is a MEANINGFUL answer here rather than a lost one — "unreadable" is exactly what
+    // `reviewReuseVerdict` needs to hear to fall back to a full review.
+    onUnreadable?.(err instanceof Error ? err.message : String(err));
+    return undefined;
+  }
+}
+
+/** Current-head {@link ReviewReuseFacts} for a BOUNDED set of PRs, mirroring
+ *  {@link hydrateSupersessionVerdicts} in shape, cap and failure direction.
+ *
+ *  SCOPED TO ALREADY-ORPHANED PRs, and that scoping is the whole cost argument. The sweep must not
+ *  spend a compare on every open PR every pass — GitHub's SECONDARY limit counts request CADENCE,
+ *  not volume, so a per-pass fan-out over the full board is precisely the shape that trips it while
+ *  `rate_limit` still reads full. Only a PR whose review was orphaned by a push can reach the reuse
+ *  rows at all, so only those are asked about, and the cap bounds even that. */
+export function hydrateReviewReuseFacts(
+  owner: string,
+  repo: string,
+  targetBranch: string,
+  orphanedPrs: readonly { number: number; headRefOid: string }[],
+  fetch: GhApiFetcher,
+  cap: number = MERGE_STATE_HYDRATION_CAP,
+  /** Per-PR failure reason, forwarded from {@link tryFetchReviewReuseFacts}. */
+  onUnreadable?: (prNumber: number, reason: string) => void,
+): Map<number, ReviewReuseFacts> {
+  const out = new Map<number, ReviewReuseFacts>();
+  for (const p of orphanedPrs.slice(0, cap)) {
+    // Best-effort per PR: an unreadable compare leaves this PR out of the map entirely, so its
+    // `currentOwnDiffDigest` stays `undefined` and the reuse decision falls back to a full review.
+    // The reason is handed to `onUnreadable` rather than dropped — see that parameter's own doc.
+    const facts = tryFetchReviewReuseFacts(owner, repo, targetBranch, p.headRefOid, fetch, (reason) =>
+      onUnreadable?.(p.number, reason),
+    );
+    if (facts) out.set(p.number, facts);
   }
   return out;
 }
