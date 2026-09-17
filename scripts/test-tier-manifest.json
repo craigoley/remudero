@@ -1377,6 +1377,7 @@
     "test/the-capacity-read-cannot-say-which-account-it-measured.test.ts": 725,
     "test/the-capacity-row-cannot-explain-its-own-telemetry-verdict.test.ts": 235,
     "test/the-capture-surface-gate-reads-a-file-that-cannot-hold-its-evidence.test.ts": 0,
+    "test/the-cash-cap-can-read-what-azure-billed.test.ts": 0,
     "test/the-cash-cap-rises-only-on-a-squeeze-day.test.ts": 0,
     "test/the-census-admission-set-is-derived-not-enumerated.test.ts": 11465,
     "test/the-census-bound-ejects-the-suites-it-admitted.test.ts": 1346,
