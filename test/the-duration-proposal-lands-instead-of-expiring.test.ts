@@ -97,6 +97,15 @@ test("partial shard evidence lands for the shards that reported", () => {
   assert.equal(written.files["test/c.test.ts"], 700, "and an untouched real number is untouched");
 });
 
+test("--adopt with no proposal path is refused before any file is touched", () => {
+  // The branch that guards a bare `--adopt` (no path after it) was previously reached only by
+  // inspection, not by a test — diff-coverage flagged it as two source lines with zero covering
+  // tests. `main` must reject it (exit 2) rather than resolve `undefined` into a path and crash.
+  const { root } = adoptFixture({ thresholdMs: 5000, files: { "test/a.test.ts": 900 } }, { files: {} });
+  const exitCode = main(["--root", root, "--manifest", "manifest.json", "--adopt"]);
+  assert.equal(exitCode, 2, "a missing proposal path is refused, not defaulted");
+});
+
 test("the zero-duration population is reported on every update", () => {
   // If this number does not fall, nothing landed — and nobody can tell without it.
   assert.deepEqual(placeholderPopulation({ files: { a: 0, b: 0, c: 900 } }), { zero: 2, total: 3 });
