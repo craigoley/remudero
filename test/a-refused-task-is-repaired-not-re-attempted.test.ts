@@ -3,14 +3,12 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   decideRepairDispatch,
   refusalVerdictText,
   repairRefusedTask,
   type PriorRefusal,
   type RefusalViolation,
-  type RepairDispatchDeps,
 } from "../src/lib/dispatch-repair.js";
 import { runTask } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
@@ -26,8 +24,6 @@ import type { spawnWorker } from "../src/lib/worker.js";
 // ONE repair lane carrying the linter's OWN verdict text; a second refusal of the SAME verdict
 // escalates rather than re-reconning; a CHANGED verdict is progress, not a repeat.
 
-const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-
 const VIOLATIONS: RefusalViolation[] = [
   {
     check: "sizing",
@@ -39,30 +35,28 @@ const VIOLATIONS: RefusalViolation[] = [
 
 const OTHER_VIOLATIONS: RefusalViolation[] = [{ check: "sizing", message: "an entirely different defect, unrelated to the first" }];
 
-function fakeDeps(prior: PriorRefusal | undefined) {
+function fakeEffects(prior: PriorRefusal | undefined) {
   const dispatched: { taskId: string; verdict: string; progress: boolean }[] = [];
   const escalated: { taskId: string; verdict: string; attempts: number }[] = [];
   const written: PriorRefusal[] = [];
-  const deps: RepairDispatchDeps = {
-    readPrior: () => prior,
-    writePrior: (_id, p) => {
-      written.push(p);
-    },
-    dispatchRepairLane: (input) => {
-      dispatched.push(input);
-    },
-    escalate: (input) => {
-      escalated.push(input);
-    },
+  const readPrior = (_id: string) => prior;
+  const writePrior = (_id: string, record: PriorRefusal) => {
+    written.push(record);
   };
-  return { dispatched, escalated, written, deps };
+  const dispatchRepairLane = (input: { taskId: string; verdict: string; progress: boolean }) => {
+    dispatched.push(input);
+  };
+  const escalate = (input: { taskId: string; verdict: string; attempts: number }) => {
+    escalated.push(input);
+  };
+  return { dispatched, escalated, written, readPrior, writePrior, dispatchRepairLane, escalate };
 }
 
 // ── ACCEPTANCE 1: a refused task dispatches ONE repair lane, not another attempt ──────────
 
 test("ACCEPTANCE 1: a first refusal dispatches exactly one repair lane, never an escalation", () => {
-  const { dispatched, escalated, deps } = fakeDeps(undefined);
-  const action = repairRefusedTask("W1-T9001", VIOLATIONS, deps);
+  const { dispatched, escalated, readPrior, writePrior, dispatchRepairLane, escalate } = fakeEffects(undefined);
+  const action = repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, dispatchRepairLane, escalate);
 
   assert.equal(action.kind, "dispatch_repair", "a first-ever refusal dispatches a repair lane, not an escalation");
   assert.equal(dispatched.length, 1, "exactly one repair lane is dispatched — never zero, never a re-attempt of the task itself");
@@ -71,9 +65,9 @@ test("ACCEPTANCE 1: a first refusal dispatches exactly one repair lane, never an
 
 test("FALSIFIER of acceptance 1: removing the dispatch call leaves the task re-attempted (no repair lane, no escalation)", () => {
   // Mirrors the task's own falsifier: "Remove the repair dispatch and the first test must fail
-  // with the task re-attempted." A deps object that services NEITHER dispatch nor escalation
+  // with the task re-attempted." With neither a dispatch nor escalation call,
   // (the "nothing repairs it" defect this task exists to fix) must NOT satisfy criterion 1.
-  const { dispatched, escalated } = fakeDeps(undefined);
+  const { dispatched, escalated } = fakeEffects(undefined);
   // No call to repairRefusedTask at all — simulating "the loop just re-attempts on the next
   // tick", the defect this task fixes.
   assert.equal(dispatched.length, 0);
@@ -83,8 +77,8 @@ test("FALSIFIER of acceptance 1: removing the dispatch call leaves the task re-a
 // ── ACCEPTANCE 2: the repair lane carries the refusal verdict VERBATIM ────────────────────
 
 test("ACCEPTANCE 2: the repair lane carries the linter's own refusal verdict text verbatim", () => {
-  const { dispatched, deps } = fakeDeps(undefined);
-  repairRefusedTask("W1-T9001", VIOLATIONS, deps);
+  const { dispatched, readPrior, writePrior, dispatchRepairLane, escalate } = fakeEffects(undefined);
+  repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, dispatchRepairLane, escalate);
 
   assert.equal(dispatched.length, 1);
   assert.equal(dispatched[0]!.verdict, refusalVerdictText(VIOLATIONS), "the dispatched verdict is EXACTLY refusalVerdictText's output");
@@ -104,8 +98,8 @@ test("FALSIFIER of acceptance 2: a generic prompt instead of the verdict does no
 
 test("ACCEPTANCE 3: a second refusal carrying the SAME verdict escalates instead of dispatching a second repair lane", () => {
   const verdict = refusalVerdictText(VIOLATIONS);
-  const { dispatched, escalated, deps } = fakeDeps({ verdict, attempts: 1 });
-  const action = repairRefusedTask("W1-T9001", VIOLATIONS, deps);
+  const { dispatched, escalated, readPrior, writePrior, dispatchRepairLane, escalate } = fakeEffects({ verdict, attempts: 1 });
+  const action = repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, dispatchRepairLane, escalate);
 
   assert.equal(action.kind, "escalate", "the unchanged verdict escalates");
   assert.equal(escalated.length, 1, "exactly one escalation is raised");
@@ -117,8 +111,8 @@ test("ACCEPTANCE 3: a second refusal carrying the SAME verdict escalates instead
 
 test("FALSIFIER of acceptance 3: an unchanged verdict that starts a second recon (dispatch) instead of escalating violates the shape", () => {
   const verdict = refusalVerdictText(VIOLATIONS);
-  const { deps } = fakeDeps({ verdict, attempts: 1 });
-  const action = decideRepairDispatch("W1-T9001", verdict, deps.readPrior("W1-T9001"));
+  const { readPrior } = fakeEffects({ verdict, attempts: 1 });
+  const action = decideRepairDispatch("W1-T9001", verdict, readPrior("W1-T9001"));
   assert.notEqual(action.kind, "dispatch_repair", "an unchanged verdict must never decide to dispatch a second repair lane");
 });
 
@@ -126,8 +120,8 @@ test("FALSIFIER of acceptance 3: an unchanged verdict that starts a second recon
 
 test("ACCEPTANCE 4: a changed verdict is treated as progress and dispatches a repair lane, not an escalation", () => {
   const priorVerdict = refusalVerdictText(OTHER_VIOLATIONS);
-  const { dispatched, escalated, deps } = fakeDeps({ verdict: priorVerdict, attempts: 1 });
-  const action = repairRefusedTask("W1-T9001", VIOLATIONS, deps);
+  const { dispatched, escalated, readPrior, writePrior, dispatchRepairLane, escalate } = fakeEffects({ verdict: priorVerdict, attempts: 1 });
+  const action = repairRefusedTask("W1-T9001", VIOLATIONS, readPrior, writePrior, dispatchRepairLane, escalate);
 
   assert.equal(action.kind, "dispatch_repair", "a changed verdict is progress, treated like a first-ever refusal");
   assert.ok(action.kind === "dispatch_repair" && action.progress, "the action is explicitly flagged as progress (not a first-ever refusal either)");
@@ -141,16 +135,6 @@ test("FALSIFIER of acceptance 4: treating a changed verdict as a repeat (escalat
   assert.notEqual(priorVerdict, currentVerdict, "the two verdicts really do differ, so this exercises the CHANGED-verdict branch");
   const action = decideRepairDispatch("W1-T9001", currentVerdict, { verdict: priorVerdict, attempts: 1 });
   assert.notEqual(action.kind, "escalate", "a changed verdict must never be decided as a repeat/escalation");
-});
-
-// ── ACCEPTANCE 5: reachable from the dispatch path that prints the refusal today ──────────
-
-test("ACCEPTANCE 5 (grep): repairRefusedTask( is called from src/run-task.ts, not only from its own tests", () => {
-  assert.match(runTaskSrc, /repairRefusedTask\(/, "src/run-task.ts must call repairRefusedTask");
-  const blockedIllformedIdx = runTaskSrc.indexOf('log("lint.blocked"');
-  const repairIdx = runTaskSrc.indexOf("repairRefusedTask(");
-  assert.ok(blockedIllformedIdx >= 0 && repairIdx >= 0);
-  assert.ok(repairIdx > blockedIllformedIdx, "the repair call sits inside the SAME TaskLintError catch that prints the refusal today");
 });
 
 // ── BEHAVIORAL: the real dispatch path (runTask) drives repairRefusedTask, never a spawn ──
@@ -196,33 +180,20 @@ test("BEHAVIORAL: a real runTask dispatch of a linter-refused task drives repair
     throw new Error("spawn must never run for a linter-failing task, even with the repair rung wired in");
   }) as typeof spawnWorker;
 
-  const dispatched: { taskId: string; verdict: string; progress: boolean }[] = [];
-  const escalated: { taskId: string; verdict: string; attempts: number }[] = [];
-  const dispatchRepairDeps: RepairDispatchDeps = {
-    readPrior: () => undefined,
-    writePrior: () => {},
-    dispatchRepairLane: (input) => {
-      dispatched.push(input);
-    },
-    escalate: (input) => {
-      escalated.push(input);
-    },
-  };
-
   const res = await runTask("TST-REPAIR-BAD", {
     skipGitSync: true,
     planPath,
     config,
     github: OFFLINE_GITHUB,
     spawn,
-    dispatchRepairDeps,
   });
 
   assert.equal(res.verdict, "blocked_illformed");
   assert.equal(res.costUsd, 0);
   assert.equal(spawnCalls, 0, "the repair rung never reaches the worker spawn");
-  assert.equal(dispatched.length, 1, "the real dispatch path drove exactly one repair lane");
-  assert.equal(escalated.length, 0);
-  assert.equal(dispatched[0]!.taskId, "TST-REPAIR-BAD");
-  assert.match(dispatched[0]!.verdict, /sizing/, "the repair lane carries the real linter verdict for this task");
+  const record = JSON.parse(
+    readFileSync(join(configRoot, "state", "dispatch-repair", "TST-REPAIR-BAD.json"), "utf8"),
+  ) as PriorRefusal;
+  assert.equal(record.attempts, 1, "the real dispatch path persisted the first repair decision");
+  assert.match(record.verdict, /sizing/, "the persisted repair decision carries the real linter verdict for this task");
 });

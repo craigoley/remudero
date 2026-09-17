@@ -922,7 +922,6 @@ import {
   writePriorRefusal,
   repairRefusedTask,
   type RefusalViolation,
-  type RepairDispatchDeps,
 } from "./lib/dispatch-repair.js";
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn } from "./lib/replay-harness.js";
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
@@ -12421,13 +12420,6 @@ async function runTask(
     /** Injectable worker-spawn — behavioral tests (W1-T20c criterion 5) count calls to prove
      *  a linter-failing task NEVER reaches a spawn. Default: the real {@link spawnWorker}. */
     spawn?: typeof spawnWorker;
-    /** Injectable {@link RepairDispatchDeps} for the §5C `blocked_illformed` catch (W1-T3657) —
-     *  lets a behavioral test drive `repairRefusedTask` without a real persisted refusal file,
-     *  a real GitHub issue, or a real recon dispatch. Default: reads/writes
-     *  `state/dispatch-repair/<taskId>.json` under `config.root` and logs (never spawns —
-     *  W1-T20c criterion 5's "no spawn on a linter-failing task" invariant holds unchanged) a
-     *  `dispatch.repair.dispatched`/`dispatch.repair.escalated` ledger line. */
-    dispatchRepairDeps?: RepairDispatchDeps;
     /** Injectable GitHub gateway for the status projection — lets a behavioral test drive the
      *  dispatch path without a network round-trip. Default: the real {@link ghGateway}. */
     github?: GitHub;
@@ -12859,16 +12851,16 @@ async function runTask(
         const issueUrl = escalate(escalation, { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId });
         log("dispatch.repair.escalated", { ...input, issue_url: issueUrl });
       };
-      const dispatchRepairDeps: RepairDispatchDeps =
-        opts.dispatchRepairDeps ??
-        ({
-          readPrior: (id) => readPriorRefusal(join(config.root, "state"), id),
-          writePrior: (id, prior) => writePriorRefusal(join(config.root, "state"), id, prior),
-          dispatchRepairLane: dispatchRepairLaneDefault,
-          escalate: escalateDefault,
-        } satisfies RepairDispatchDeps);
       const violations: RefusalViolation[] = e.violations.map((v) => ({ check: v.check, message: v.message }));
-      repairRefusedTask(taskId, violations, dispatchRepairDeps);
+      const refusalStateRoot = join(config.root, "state");
+      repairRefusedTask(
+        taskId,
+        violations,
+        (id) => readPriorRefusal(refusalStateRoot, id),
+        (id, prior) => writePriorRefusal(refusalStateRoot, id, prior),
+        dispatchRepairLaneDefault,
+        escalateDefault,
+      );
       return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_illformed" };
     }
     throw e;

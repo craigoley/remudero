@@ -19,9 +19,8 @@ import { writeAtomic } from "./fs-race-safe.js";
  *
  * THIS MODULE IS DELIBERATELY PURE AT ITS CORE ({@link decideRepairDispatch}): no spawn, no
  * ledger write, no GitHub call. The one entry point real callers reach for
- * ({@link repairRefusedTask}) drives the decision through injected `deps`, mirroring every
- * other seam `run-task.ts` already uses (`spawn`, `github`, `containmentExec`) — so a unit
- * test can assert on CALLS without a real worker or a real issue, and `src/run-task.ts`'s
+ * ({@link repairRefusedTask}) receives its callbacks from `run-task.ts`'s composition root, so a
+ * unit test can assert on calls without a real worker or a real issue, and `src/run-task.ts`'s
  * §5C pre-dispatch guard (the ONE call site that prints the refusal today, MASTER-PLAN §5C)
  * can drive the real thing through the same function.
  */
@@ -112,38 +111,32 @@ export function writePriorRefusal(stateRoot: string, taskId: string, prior: Prio
 }
 
 /**
- * Injectable side effects {@link repairRefusedTask} drives once it has decided what to do —
- * kept separate from the pure {@link decideRepairDispatch} so a unit test can assert on CALLS
- * without a real ledger, a real GitHub issue, or a real recon worker.
- */
-export interface RepairDispatchDeps {
-  readPrior: (taskId: string) => PriorRefusal | undefined;
-  writePrior: (taskId: string, prior: PriorRefusal) => void;
-  /** Dispatch the ONE repair lane, carrying the refusal's verdict text VERBATIM — never the
-   *  task itself, and never a generic/paraphrased prompt (falsifier: rationale). */
-  dispatchRepairLane: (input: { taskId: string; verdict: string; progress: boolean }) => void;
-  /** Escalate to the operator, naming the task, the verdict, and how many refusals in a row
-   *  have now carried that exact verdict. */
-  escalate: (input: { taskId: string; verdict: string; attempts: number }) => void;
-}
-
-/**
  * THE ONE ENTRY POINT the §5C pre-dispatch guard's `blocked_illformed` catch calls
  * (`src/run-task.ts`, reachable from the dispatch path that prints the refusal today —
- * acceptance criterion 5). Reads this task's prior refusal, decides, drives exactly ONE of
- * `dispatchRepairLane`/`escalate` — never both, never neither — and persists the decision as
- * the next prior record so the NEXT refusal of this task is judged against it.
+ * acceptance criterion 5). The run-task composition root supplies the four side effects; this
+ * module owns only the refusal decision. That keeps the repair path on the existing runTask
+ * boundary instead of adding a second `*Deps` seam solely for this feature. It reads this task's
+ * prior refusal, drives exactly ONE of `dispatchRepairLane`/`escalate` — never both, never
+ * neither — and persists the decision as the next prior record so the NEXT refusal is judged
+ * against it.
  */
-export function repairRefusedTask(taskId: string, violations: readonly RefusalViolation[], deps: RepairDispatchDeps): RepairDispatchAction {
+export function repairRefusedTask(
+  taskId: string,
+  violations: readonly RefusalViolation[],
+  readPrior: (taskId: string) => PriorRefusal | undefined,
+  writePrior: (taskId: string, prior: PriorRefusal) => void,
+  dispatchRepairLane: (input: { taskId: string; verdict: string; progress: boolean }) => void,
+  escalate: (input: { taskId: string; verdict: string; attempts: number }) => void,
+): RepairDispatchAction {
   const verdict = refusalVerdictText(violations);
-  const prior = deps.readPrior(taskId);
+  const prior = readPrior(taskId);
   const action = decideRepairDispatch(taskId, verdict, prior);
   if (action.kind === "dispatch_repair") {
-    deps.dispatchRepairLane({ taskId, verdict, progress: action.progress });
-    deps.writePrior(taskId, { verdict, attempts: 1 });
+    dispatchRepairLane({ taskId, verdict, progress: action.progress });
+    writePrior(taskId, { verdict, attempts: 1 });
   } else {
-    deps.escalate({ taskId, verdict, attempts: action.attempts });
-    deps.writePrior(taskId, { verdict, attempts: action.attempts });
+    escalate({ taskId, verdict, attempts: action.attempts });
+    writePrior(taskId, { verdict, attempts: action.attempts });
   }
   return action;
 }
