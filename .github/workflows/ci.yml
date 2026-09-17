@@ -400,6 +400,20 @@ jobs:
           else
             node scripts/test-tier-manifest.mjs --record-evidence "${DURATION_FILES[@]}" --output test-tier-manifest.next.json
             echo "- W1-T2904: attached a deterministic next-manifest proposal from ${#DURATION_FILES[@]} shard artifact(s)." >> "$GITHUB_STEP_SUMMARY"
+            # W1-T3724: SAY WHETHER THE PROPOSAL IS WORTH LANDING, AND BY HOW MUCH. The proposal
+            # has been built on every run since W1-T2904 and read by nobody, so the placeholder
+            # population never fell and the shards packed 338 files as free. `--propose` exits 0
+            # when the proposal would change a shard assignment or give a file its first real
+            # measurement; the adopt below runs against a COPY, so this step reports the shift
+            # without touching the tracked manifest — landing it is the gated PR this names.
+            if node scripts/test-tier-manifest.mjs --propose --proposed test-tier-manifest.next.json >/dev/null 2>&1; then
+              cp scripts/test-tier-manifest.json /tmp/manifest-before.json
+              ADOPTED="$(node scripts/test-tier-manifest.mjs --adopt test-tier-manifest.next.json 2>&1 || true)"
+              cp /tmp/manifest-before.json scripts/test-tier-manifest.json
+              echo "- W1-T3724: the proposal is MATERIAL — ${ADOPTED}" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- W1-T3724: the proposal is not material; no shard assignment would change." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
       - name: Publish the next duration manifest proposal
         continue-on-error: true

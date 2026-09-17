@@ -1,0 +1,113 @@
+- id: W1-T3730
+  title: "A FILING CANNOT DECLARE ITS OWN TEST FILE — `proof-unit-test-unresolvable` reads `files:` as a claim about THIS diff, so on a plan-only filing it refuses every forward-referencing proof title while the diff in front of it contains no test at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    REPRODUCED LOCALLY 2026-09-17 on #5901's branch, a diff containing THREE FILES, all under
+    `plan/tasks.d/`:
+
+      $ git diff --name-only origin/main...HEAD
+      plan/tasks.d/W1-T3726-....yaml
+      plan/tasks.d/W1-T3727-....yaml
+      plan/tasks.d/W1-T3728-....yaml
+
+      $ rmd lint-plan --base origin/main
+      ✗ W1-T3727: 3 violation(s) (0 pre-existing on base origin/main)
+          [proof-unit-test-unresolvable] criterion 1 ... resolves to ZERO tests in the head tree —
+          refused. This task's own files: names a test/ path, SO THIS DIFF SHIPS THE SUITE the
+          title claims ...
+      ✗ W1-T3728: 2 violation(s)
+      3 task(s) checked — 3 failing
+
+    (1) THE PREMISE IS CONTRADICTED BY THE DIFF THE CHECK IS LOOKING AT. `declaresTestFile`
+        (task-linter.ts) asks whether the TASK declares a `test/` path, and the message converts
+        that into "this diff ships the suite". For a BUILD diff those are the same statement. For
+        a FILING they are not: `files:` is what the future build will touch, and the filing ships
+        no test at all. Five criteria across two shards were refused on that reading.
+
+    (2) SO A FILING MAY NOT NAME ITS OWN TEST FILE, which is the opposite of what every other
+        rule here wants. `files:` is the contract `acceptance-author-gate` resolves against and
+        what the dispatcher hands a worker; omitting the test path to get a filing through makes
+        the shard lie about its scope. THIS SHARD IS ITSELF THE EVIDENCE: its own `files:` omits
+        the test file the build will add, for no reason but to get past the check it is filing.
+
+    (3) THE CHECK'S OWN JUSTIFICATION IS SOUND AND IS NOT IN QUESTION. On a diff that really does
+        ship the suite, a title resolving to zero tests has no forward-reference excuse left and
+        review refuses it later at the cost of a full CI round. That is exactly right, and this
+        task does not weaken it by one case.
+
+    (4) THE SIBLING CHECK ALREADY KNOWS. `LintOpts.proofResolvability`'s own comment: "a queued
+        task's proof legitimately forward-references the test its own PR will create, and
+        pre-dispatch cannot tell that from a dead reference." `lint-plan --base` CAN tell — it is
+        holding the diff.
+
+    (5) THE COST IS A WALL WITH NO HONEST EXIT, and it lands on filings specifically — the cheap,
+        fast-lane PRs this fleet files constantly to record findings. The operator report driving
+        it: "We spend way too much time manually working the queue."
+  design: |
+    (i) CONSUME THE REPO'S EXISTING FILING PREDICATE, DO NOT INVENT A SECOND. `planOnlyDiff`
+        (review.ts:3512) already decides "this diff is a filing" and Standing rule 15 already
+        relies on it for exactly this filing/build distinction (`rule15SplitViolation`,
+        ci-parity.ts). A local re-derivation could disagree with rule 15 about what a filing is,
+        which is the drift this repo refuses everywhere else.
+
+    (ii) THE LINTER STAYS PURE. The predicate arrives as an injected `LintOpts` boolean, the same
+         contract `moduleExists`, `pathExistsAtBase` and `addedExports` already use: absent ⇒ the
+         check behaves exactly as it does today. The whole-plan pass and pre-dispatch never supply
+         it and never see a behaviour change, because the check is already silent there absent
+         `resolveNameFilteredCandidates`.
+
+    (iii) THE WIRING IS THE DELIVERABLE, not the predicate. `run-task.ts`'s `--base` arm is the
+          one place holding both the checkout and the diff; a check fixed in the linter and left
+          unwired ships dormant, which this repo has paid for three times (W1-T488/W1-T497/
+          W1-T1053, cited at the `proofGrepUnmatchableViolations` call site).
+
+    (iv) A BUILD DIFF IS UNCHANGED, AND THAT IS THE ASSERTION THAT MATTERS. Anything touching a
+         non-plan path is not plan-only, so every diff the check was written for still gets it.
+
+    NOT IN SCOPE: `[sizing]` firing on a `retirement: withdrawn` record (seen on W1-T3726 in the
+    same run, while `proof-shape` correctly downgrades for the same record) — a different check
+    with a different cause, filed separately.
+  acceptance:
+    - claim: "a plan-only filing whose task declares a future test file is not refused for a proof title that has nothing to resolve against yet"
+      proof: "unit test: a plan-only filing may forward-reference the test its build will write"
+    - claim: "a diff that actually ships the suite is refused exactly as before, so the check the task keeps is not weakened"
+      proof: "unit test: a diff carrying a test file still refuses an unresolvable title"
+    - claim: "absent the injected filing fact the check behaves exactly as it does today, so the whole-plan pass and pre-dispatch are untouched"
+      proof: "unit test: no filing fact means no change in behaviour"
+    - claim: "the filing fact reaches the linter from the command that holds the diff, so the fix is not shipped dormant"
+      proof: "grep: planOnlyDiff in src/run-task.ts"
+  falsifier: |
+    Derive "is this a filing" from the TASK (its `files:`, or its `status`) rather than from the
+    DIFF and the second assertion goes red: a build PR for a task whose files are all under plan/
+    would start being exempted, and worse, the linter would disagree with rule 15 about what a
+    filing is. Apply the exemption unconditionally rather than only when the injected fact says
+    plan-only and the second goes red too. Fix `declaresTestFile` in the linter and skip the
+    `run-task.ts` wiring and the fourth goes red — the check would be correct and never consulted.
+    Widen the predicate to "no test/ file in the diff" instead of plan-only and a diff touching
+    src/ with no test would silently gain the exemption, which is the shape the check exists for.
+  # Rule 19: TWO concerns (the pure predicate in task-linter.ts, its wiring in run-task.ts)
+  # deliberately in ONE task — design (iii) makes the wiring the deliverable, so splitting them
+  # would ship the linter half dormant, the exact failure W1-T488/W1-T497/W1-T1053 each paid for.
+  risk: high
+  band_meaning: span
+  origin: human
+  plan_refs: [W1-T3639, W1-T3099]
+  files: [src/lib/task-linter.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t3730-a-filing-cannot-declare-its-own-test
+
+    `files:` DELIBERATELY OMITS the test file this build will add
+    (`test/a-filing-may-forward-reference-the-test-its-build-will-write.test.ts`), because
+    declaring it would trip the very check this task exists to fix and this filing would be
+    refused. That omission is rationale point (2), demonstrated rather than described; the build
+    adds the test path back to `files:` in the same PR that makes doing so possible.
+
+    Minted by `rmd next-task-id` from the daemon lane's detached HEAD, which records the holder as
+    `unknown`; recorded here because the filing branch is not `run-` shaped.
