@@ -13,6 +13,12 @@
   status: queued
   attempts: 0
   rationale: |
+    PROOFS REPOINTED 2026-09-17 (the work is unchanged; #5913 passes 3/3). All three `unit test:`
+    proofs were PARAPHRASES of the titles #5913 ships -- "a poll does not advance" against "a poll
+    (no ack header) NEVER advances"; "shrinks the next recap" against "so the NEXT recap is
+    smaller"; "another token's recap" against "ANOTHER token's CHECKPOINT AND recap". A proof is
+    matched as a LITERAL SUBSTRING, so each resolved to ZERO tests and `rmd review` returned FAIL
+    against a green branch. Claims unchanged; each new proof matches exactly one real title.
     MEASURED 2026-09-16 on the live daemon. `GET /v1/status` already carries both halves of a
     since-you-last-checked surface:
 
@@ -40,11 +46,11 @@
     strictly worse than a stale marker. The advance has to be an explicit act.
   acceptance:
     - claim: "the checkpoint advances only on an explicit acknowledgement, never as a side effect of a poll"
-      proof: "unit test: a poll does not advance the recap checkpoint"
+      proof: "unit test: never advances the recap checkpoint"
     - claim: "an explicit acknowledgement advances the checkpoint, so the next recap is smaller"
-      proof: "unit test: an acknowledgement advances the checkpoint and shrinks the next recap"
+      proof: "unit test: an explicit acknowledgement advances the checkpoint"
     - claim: "the checkpoint is per operator token, so one reader acknowledging does not blank another's recap"
-      proof: "unit test: one token's acknowledgement leaves another token's recap intact"
+      proof: "unit test: one token's acknowledgement leaves ANOTHER token's checkpoint"
   falsifier: |
     Advance the checkpoint inside the status read and the first test must fail with the recap
     empty after one poll. Drop the advance entirely and the second fails with the recap unchanged.
