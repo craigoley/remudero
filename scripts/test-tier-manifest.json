@@ -72,6 +72,7 @@
     "test/a-fenced-structured-reply-is-unwrapped-not-rejected.test.ts": 0,
     "test/a-filing-credit-must-never-close-a-build.test.ts": 1441,
     "test/a-filing-is-not-a-build.test.ts": 226,
+    "test/a-filing-may-forward-reference-its-test.test.ts": 0,
     "test/a-filing-pr-is-judged-against-criteria-it-cannot-satisfy.test.ts": 0,
     "test/a-filing-time-ruling-nothing-produces.test.ts": 0,
     "test/a-fired-retro-must-not-hold-the-dispatch-rung.test.ts": 1403,
