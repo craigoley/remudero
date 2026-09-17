@@ -9554,9 +9554,8 @@ export async function runFixRung(opts: {
             constraint: opts.constraint,
           };
     const fixMode = deriveFixMode(evidence);
-    // W1-T3727: WHO HOLDS THIS ROUND'S GIT, decided once and read by BOTH the prompt and the
-    // tool bound, so the contract a worker was given and the surface it is handed cannot disagree.
-    // The caller already pushes (`deps.push`/`gitPushRunBranch`); only the commit moves.
+    // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
+    // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const fixHarnessOwnsGit = opts.config.workerProviders?.harnessCommitsFix === true;
     const fixCashTools = fixHarnessOwnsGit ? [...FIX_CASH_TOOLS] : undefined;
     const prompt = [
@@ -9673,14 +9672,10 @@ export async function runFixRung(opts: {
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
 
-    // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, and it must happen HERE — before
-    // `readRoundCommits` below, which is what decides whether this round produced anything and
-    // what the existing `deps.push` then carries. A cash worker cannot have committed (it has no
-    // git), so the count it starts from is 0 by construction rather than by measurement.
-    //
-    // The helper is the implement lane's, reused rather than re-spelled: it owns its own
-    // precondition (`!harnessOwnsGit || commitCount !== 0` returns untouched), so a Claude round
-    // passes through it unchanged and keeps committing for itself exactly as before.
+    // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, and HERE — before `readRoundCommits`
+    // decides what this round produced and what `deps.push` then carries. A cash worker cannot
+    // have committed, so its count is 0 by construction. The helper is implement's, reused: it
+    // owns its own precondition, so a Claude round passes through untouched.
     if (fixHarnessOwnsGit) {
       harnessCommitForShellLessWorker({
         harnessOwnsGit: true,

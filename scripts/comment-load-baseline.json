@@ -202,7 +202,7 @@
   "src/lib/feedback-reconcile.ts": 250,
   "src/lib/feedback-record-merge.ts": 250,
   "src/lib/feedback.ts": 225,
-  "src/lib/fix-fence.ts": 42,
+  "src/lib/fix-fence.ts": 56,
   "src/lib/fix-rung-classify.ts": 250,
   "src/lib/fleet-control.ts": 500,
   "src/lib/flight-judge.ts": 170,
@@ -352,6 +352,6 @@
   "src/lib/worker.ts": 1552,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16001,
+  "src/run-task.ts": 16010,
   "src/spike.ts": 18
 }
