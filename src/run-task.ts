@@ -1358,8 +1358,6 @@ export type FreshTreeReviewSeams = {
   spawnReview: (worktree: string, args: string[]) => Promise<number>;
   /** Where worktrees are cut. One per code sha, reused across PRs in the same pass. */
   worktreeRoot: string;
-  /** Present so a test can assert the path shape without a clock. */
-  now?: () => number;
 }
 
 /**
