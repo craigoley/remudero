@@ -1747,11 +1747,15 @@ export function interpolatedTitleStaticChunks(sourceLine: string): string[] {
 function couldBeInterpolatedTitle(cwd: string, rawName: string): boolean {
   let stdout: string;
   try {
-    stdout = execFileSync("grep", ["-rhE", "--include=*.test.ts", "--", INTERPOLATED_TITLE_RE, "test"], {
-      cwd,
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8",
-    });
+    stdout = execFileSync(
+      "grep",
+      ["-rhE", "--include=*.test.ts", "--exclude-dir=mutants-*", "--", INTERPOLATED_TITLE_RE, "test"],
+      {
+        cwd,
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8",
+      },
+    );
   } catch {
     // Only reached AFTER the corpus probe has established that grep runs and the test tree is readable, so a throw
     // here can only be grep's "no lines matched" — a real answer ("no"), not a failed lookup.
@@ -1762,14 +1766,29 @@ function couldBeInterpolatedTitle(cwd: string, rawName: string): boolean {
 
 /** `grep -rl -F` over the checkout's test files as a plain list, or `null` when grep produced none. TRAP: it does NOT
  *  interpret the exit code — BSD grep exits 1 with EMPTY stderr both for "searched, found nothing" and for "the
- *  directory does not exist", so {@link resolveNameFilteredCandidates} draws that line with a control probe. */
+ *  directory does not exist", so {@link resolveNameFilteredCandidates} draws that line with a control probe.
+ *
+ *  `--exclude-dir=mutants-*` (W1-T3734 round): `test/helpers/mutant-module.ts`'s own header documents
+ *  `test/mutants-XXXXXX/` as a DELIBERATE throwaway shadow checkout of the whole tracked tree, written inside
+ *  `test/` on purpose (moving it under `os.tmpdir()` reintroduces a MEASURED coverage-attribution collapse —
+ *  see that file). This raw filesystem `grep`, unlike `ci.yml`'s own `test/**` patterns, is not git-aware and
+ *  has no notion of "throwaway": while such a shadow checkout is alive, it silently doubles every candidate a
+ *  concurrently-running name-filtered proof resolves for any fixture file the copy happens to contain — MEASURED
+ *  live: `test/check-proof-executor-parity.test.ts`'s pinned candidate-set assertion reddened on a JOINED set
+ *  naming `test/mutants-<random>/test/...`, with zero relation to the diff running alongside it. The shadow dirs
+ *  are already gitignored (`test/mutants-*` dirs) and never real committed content, so excluding them here changes
+ *  nothing a real proof could legitimately resolve to. */
 function grepFilesContaining(cwd: string, fixedPattern: string): string[] | null {
   try {
-    const stdout = execFileSync("grep", ["-rl", "-F", "--include=*.test.ts", "--", fixedPattern, "test"], {
-      cwd,
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8",
-    });
+    const stdout = execFileSync(
+      "grep",
+      ["-rl", "-F", "--include=*.test.ts", "--exclude-dir=mutants-*", "--", fixedPattern, "test"],
+      {
+        cwd,
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8",
+      },
+    );
     return stdout
       .split("\n")
       .map((line) => line.trim())

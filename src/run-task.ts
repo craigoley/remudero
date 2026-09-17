@@ -1658,6 +1658,7 @@ import {
   IMPLEMENT_CASH_TOOLS,
   implementToolBound,
   resolveDispatchLaneToolBound,
+  cashDivertSpawnFields,
   resolveClaudeExecutable,
   claudeExecutableCache,
   runAdhocLaneReapRung,
@@ -13395,6 +13396,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         // W1-T3616: recon's prompt names `git remote -v`, `git log --oneline -5` and `ls`, so its
         // honest bound includes Bash. Read-only, so no Write/Edit.
         tools: [...resolveDispatchLaneToolBound("recon", reconMount?.provider ?? "claude")],
+        // W1-T3726: plus the surface to use if the auction BLOCKS — see cashDivertSpawnFields.
+        ...cashDivertSpawnFields("recon"),
         settingsFile,
         model: reconMount?.model,
         mountProvider: reconMount?.provider,
@@ -13827,6 +13830,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // W1-T3616: diagnose inspects `git diff`/`git status` and re-runs whatever failed, so it
           // declares Bash. "Do NOT modify, commit, or push ANYTHING" — hence no Write/Edit.
           tools: [...resolveDispatchLaneToolBound("diagnose", diagnoseMount.provider ?? "claude")],
+          // W1-T3726: plus the surface to use if the auction BLOCKS — see cashDivertSpawnFields.
+          ...cashDivertSpawnFields("diagnose"),
           model: diagnoseMount.model,
           mountProvider: diagnoseMount.provider,
           effort: diagnoseMount.effort,
