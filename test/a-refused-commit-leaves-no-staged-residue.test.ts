@@ -42,7 +42,7 @@ import { test } from "node:test";
 
 import { applyPlanProposalCommit } from "../src/lib/plan-architect.js";
 import { commitGeneratorOutputViaGit } from "../src/run-task.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
 /** Always refuses, on stderr, with the same "pre-commit refused" phrase the real hook uses
  *  (recon: `hooks/pre-commit` prints it) — so a test asserting on that text is asserting on the
@@ -51,9 +51,23 @@ const REFUSING_HOOK = ["#!/bin/sh", 'echo "pre-commit refused: synthetic test ho
 
 /** A throwaway repo with `plan/tasks.yaml` + `MASTER-PLAN.md` committed, and — when `hook` is
  *  given — a synthetic `hooks/pre-commit` wired via `core.hooksPath` (never the real hook: see
- *  the file header). Mirrors `test/plan-architect.test.ts`'s `seedPlanRepo`. */
+ *  the file header). Mirrors `test/plan-architect.test.ts`'s `seedPlanRepo`.
+ *
+ * A REPO-LOCAL identity (`git config user.name`/`user.email`, written into this repo's OWN
+ * `.git/config`) is set here — not just carried on `repo.git()`'s env (see git-repo.ts's own
+ * `GIT_ENV`). `gitAddAndCommitWithRollback` (the function under test, in both
+ * `applyPlanProposalCommit` and `commitGeneratorOutputViaGit`) runs its OWN `git commit` via a
+ * bare `execFileSync` with no explicit `env`, so it inherits whatever `process.env` the test
+ * process happens to have — which a real CI runner never populates with a committer identity
+ * (`actions/checkout` configures neither repo nor global `user.name`/`user.email`; see
+ * git-repo.ts's own module doc, W1-T2903 origin #1971/#1964). Without a REPO-LOCAL config entry,
+ * every test below would fail on CI with git's own "Author identity unknown" before the function
+ * under test's commit ever reaches the arm being driven (pre-commit hook or otherwise) — a
+ * fixture gap, not a fact about the rollback logic itself. */
 function seedRepo(hook?: string): GitRepo {
   const repo = gitRepo({ kind: "t3243-commit-rollback" });
+  repo.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
+  repo.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
   mkdirSync(join(repo.dir, "plan"), { recursive: true });
   writeFileSync(join(repo.dir, "plan", "tasks.yaml"), "tasks: []\n", "utf8");
   writeFileSync(join(repo.dir, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
