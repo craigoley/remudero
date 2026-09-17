@@ -129,7 +129,7 @@ function freshHome(): string {
 
 // ── CLAIM 1: a live tree present -> `rmd` on PATH loads THAT tree, not the baked snapshot ─────
 
-test("with a live tree present, the rmd on PATH loads that tree rather than the baked snapshot", () => {
+test("the cli on path loads the live tree", () => {
   const home = freshHome();
   const origin = makeOrigin("executable");
 
@@ -149,7 +149,7 @@ test("with a live tree present, the rmd on PATH loads that tree rather than the 
 
 // ── CLAIM 2: no live tree -> resolution falls back exactly as it does today (untouched) ───────
 
-test("with no live tree present, resolution falls back to the baked snapshot exactly as it does today", () => {
+test("with no live tree the cli falls back to the snapshot", () => {
   const home = freshHome();
   const origin = makeOrigin("executable");
 
