@@ -1720,7 +1720,7 @@ import {
   sweepStaleWorkerHomes,
   workerKeychainPaths,
 } from "./lib/worker-home.js";
-import { FIX_WORKER_TOOLS } from "./lib/fix-fence.js";
+import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import {
   checkCliFreshness,
@@ -9560,8 +9560,12 @@ export async function runFixRung(opts: {
             constraint: opts.constraint,
           };
     const fixMode = deriveFixMode(evidence);
+    // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
+    // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
+    const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
     const prompt = [
       renderFixPrompt({
+        harnessCommits: fixHarnessOwnsGit,
         task: opts.task,
         round: attempt,
         branch: opts.branch,
@@ -9610,6 +9614,10 @@ export async function runFixRung(opts: {
       // prompt-injection payload riding in that log can't reach the
       // network via WebFetch/WebSearch.
       tools: FIX_WORKER_TOOLS,
+      // W1-T3727: the surface a BLOCKED auction would divert this round to. Offered only when the
+      // prompt above already said the harness commits — otherwise a retry hands a shell-less
+      // worker a contract asking for `git push`.
+      ...(fixCashTools === undefined ? {} : { cashTools: fixCashTools }),
       // W1-T2261: the attribution markers `reclaimAbandonedWorker` later matches an abandoned
       // spawn's live process against (worker.ts's `workerMarkerEnv` merges these into the
       // child's env as REMUDERO_RUN_ID/REMUDERO_TASK_ID). Omitting them — the defect this
@@ -9668,6 +9676,25 @@ export async function runFixRung(opts: {
     }
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath, workerHeadReflogBefore);
+
+    // W1-T3727: THE HARNESS COMMITS FOR A SHELL-LESS ROUND, and HERE — before `readRoundCommits`
+    // decides what this round produced and what `deps.push` then carries. A cash worker cannot
+    // have committed, so its count is 0 by construction. The helper is implement's, reused: it
+    // owns its own precondition, so a Claude round passes through untouched.
+    // CALLED UNCONDITIONALLY, and the guard is the helper's own: `!harnessOwnsGit || commitCount
+    // !== 0` returns the count untouched, so a Claude round passes straight through. Wrapping this
+    // in `if (fixHarnessOwnsGit)` would only duplicate that precondition — and would put eight
+    // lines in a branch no test on the default config can reach, which `diff-coverage` refuses by
+    // name. A cash worker cannot have committed (it has no git), so its count is 0 by construction.
+    harnessCommitForShellLessWorker({
+      harnessOwnsGit: fixHarnessOwnsGit,
+      commitCount: 0,
+      report: workerTranscript(fixResult),
+      worktreePath: opts.worktreePath,
+      declaredPaths: opts.task.files ?? [],
+      log: deps.log,
+      say: deps.say,
+    });
 
     // W1-T2610: the sha this round believes it just committed, read as early as possible after
     // the worker returns — BEFORE the `readRoundCommits` await, the ledger writes, and the
@@ -32673,6 +32700,23 @@ export function commitWorkerEdits(
  * fallback push and PR creation carry the run home. No message, no commit: an invented subject
  * would attribute work to a run that never asked for it.
  */
+/**
+ * W1-T3727: WHO HOLDS A FIX ROUND'S GIT, as one value both the prompt and the tool bound read.
+ *
+ * EXPORTED SO IT CAN BE ASSERTED BY CALLING IT. The two facts worth testing — that the shell-less
+ * surface is offered only where the prompt already said the harness commits, and that nothing is
+ * offered otherwise — were first written as tests that read `run-task.ts` AS TEXT, which
+ * `source-text-assertion-census` refuses for good reason: such a test passes when the prose is
+ * right and the behaviour is wrong. Returning the pair from one function makes the coherence rule
+ * a property of the value rather than of two call sites that must be kept in step.
+ */
+export function fixRoundGitOwnership(
+  config: Pick<Config, "workerProviders">,
+): { harnessCommits: boolean; cashTools: string[] | undefined } {
+  const harnessCommits = config.workerProviders?.harnessCommitsFix === true;
+  return { harnessCommits, cashTools: harnessCommits ? [...FIX_CASH_TOOLS] : undefined };
+}
+
 export function harnessCommitForShellLessWorker(
   input: {
     /** Was this spawn bounded WITHOUT a shell? False leaves the count untouched: a worker that
