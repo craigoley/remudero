@@ -65,6 +65,7 @@
     "test/a-draft-failure-names-which-marker-was-missing.test.ts": 0,
     "test/a-draft-nobody-files-is-a-report-nobody-reads.test.ts": 2093,
     "test/a-drafted-skill-is-selectable-for-its-own-task-type.test.ts": 0,
+    "test/a-failed-openweight-request-settles-its-reservation.test.ts": 0,
     "test/a-failed-probe-is-not-a-parse-failure.test.ts": 1020,
     "test/a-failing-retro-can-never-shrink-its-own-scope.test.ts": 1038,
     "test/a-fenced-structured-reply-is-unwrapped-not-rejected.test.ts": 0,
