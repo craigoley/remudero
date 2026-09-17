@@ -2972,7 +2972,26 @@ export async function spawnOpenWeightWorker(
       } finally {
         clearTimeout(deadline);
       }
-      if (!response.ok) throw new Error(`openweight request failed with HTTP ${response.status}`);
+      if (!response.ok) {
+        // A 4xx IS REFUSED AT VALIDATION AND NEVER METERED, so holding its ceiling spends the
+        // day's cap on money nobody charged. Left standing a row counts at `reservedUsd` for the
+        // rest of the UTC day (`openWeightCommittedUsd` reads `settledUsd ?? reservedUsd`), which
+        // is how a $25 cap came to refuse work after far less than $25 of real spend -- MEASURED
+        // on the live fleet allowance for 2026-09-15: $2.6771 committed against $0.9270 actually
+        // spent, 32 of 104 rows never settled. The 429 case is the one that bites hardest: rate
+        // limiting arrives exactly when the fleet is busiest, and every refusal used to shrink the
+        // budget for the work that had not run yet.
+        //
+        // 5xx IS DELIBERATELY LEFT CHARGED, and so is the deadline above. Both are cases where the
+        // request may have been served and billed where we cannot see it -- a truth the existing
+        // ruling states as "the request was sent and Azure may well have billed it"
+        // (`openweight daily reservation remains charged across restart`, which pins a 500). Only
+        // a CLIENT refusal is a receipt proving nothing was metered, so only it is released.
+        if (response.status >= 400 && response.status < 500) {
+          settleOpenWeightBudget(config, { requestId, actualUsd: 0, atIso: clock.iso() });
+        }
+        throw new Error(`openweight request failed with HTTP ${response.status}`);
+      }
       const payload = await response.json() as {
         id?: unknown;
         usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };

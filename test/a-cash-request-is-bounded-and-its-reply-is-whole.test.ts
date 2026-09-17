@@ -190,3 +190,103 @@ test("the deadline's own catch arm names a TIMEOUT, and every other transport fa
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ── the allowance a REFUSED request leaves behind (the $25-is-not-$25 defect) ───────────────────
+// `openWeightCommittedUsd` charges `settledUsd ?? reservedUsd`, so a row that never settles counts
+// at its conservative CEILING for the rest of the UTC day. Measured on the live fleet allowance for
+// 2026-09-15: $2.6771 committed against $0.9270 actually spent, 32 of 104 rows never settled — a
+// cap that refused work after roughly a third of the money it names.
+
+import { readFileSync } from "node:fs";
+import { openWeightAllowancePath, openWeightCommittedUsd } from "../src/lib/worker-provider.js";
+
+function committedAfter(config: Config): number {
+  return openWeightCommittedUsd(JSON.parse(readFileSync(openWeightAllowancePath(config), "utf8")));
+}
+
+test("an HTTP-REFUSED request releases its reservation — the day's cap is not spent on an unbilled call", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-429-"));
+  try {
+    const [args, config, selection] = harness(root, {});
+    const refused = await spawnOpenWeightWorker(
+      { ...args, fetchImpl: async () => new Response("rate limited", { status: 429 }) } as never,
+      config,
+      selection as never,
+    );
+    assert.equal(refused.isError, true, "a 429 is still a failed run");
+
+    // THE ASSERTION THAT MATTERS is the money, not the message: Azure meters nothing for a 429, so
+    // the ceiling reserved before the send must be handed back in full.
+    assert.equal(committedAfter(config), 0, "a refused request must commit $0 against dailyCapUsd");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the released row is SETTLED to zero, never deleted — a refusal stays auditable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-audit-"));
+  try {
+    const [args, config, selection] = harness(root, {});
+    await spawnOpenWeightWorker(
+      { ...args, fetchImpl: async () => new Response("bad request", { status: 400 }) } as never,
+      config,
+      selection as never,
+    );
+    const state = JSON.parse(readFileSync(openWeightAllowancePath(config), "utf8")) as {
+      reservations: Record<string, { reservedUsd: number; settledUsd: number | null }>;
+    };
+    const rows = Object.values(state.reservations);
+    assert.equal(rows.length, 1, "the attempt is still on the record");
+    assert.ok(rows[0].reservedUsd > 0, "and still names what it had reserved, so the release is visible");
+    assert.equal(rows[0].settledUsd, 0, "settled to zero, which is what makes it free");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a 5xx KEEPS its charge, so only a client refusal is released", async () => {
+  // THE BOUNDARY, AND IT IS THE REASON THIS FIX IS NARROW. A 500 may have been served and billed
+  // before the server fell over, which is the ruling `an-open-weight-provider-rides-the-capability-
+  // ladder` already pins. A 429 cannot have been: it is refused before the model runs. Releasing
+  // both would hand a flapping endpoint free authority against the cap.
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-5xx-"));
+  try {
+    const [args, config, selection] = harness(root, {});
+    const failed = await spawnOpenWeightWorker(
+      { ...args, fetchImpl: async () => new Response("upstream exploded", { status: 500 }) } as never,
+      config,
+      selection as never,
+    );
+    assert.equal(failed.isError, true);
+    assert.ok(committedAfter(config) > 0, "a server fault keeps its conservative charge");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a TIMEOUT still keeps its charge — the asymmetry with a refusal is deliberate", async () => {
+  // THE CONTROL FOR THE TWO ABOVE. An abandoned request may have been served and billed where we
+  // cannot see it; a 400/429 is a receipt that says nothing was. Releasing BOTH would let a hung
+  // endpoint buy unlimited free authority against the cap, so this must stay red if anyone
+  // "consistently" applies the release to the deadline path.
+  const root = mkdtempSync(join(tmpdir(), "rmd-cash-timeout-charge-"));
+  try {
+    const [args, config, selection] = harness(root, {});
+    const timedOut = await spawnOpenWeightWorker(
+      {
+        ...args,
+        requestTimeoutMs: 25,
+        fetchImpl: ((_u: unknown, init?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("The operation was aborted.")));
+          })) as unknown as typeof fetch,
+      } as never,
+      config,
+      selection as never,
+    );
+    assert.equal(timedOut.isError, true);
+    assert.ok(committedAfter(config) > 0, "an abandoned request keeps its conservative charge");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
