@@ -61,6 +61,15 @@ test("a diff carrying a test file still refuses an unresolvable title", () => {
   assert.equal(v.length, 1, "a build diff still gets the check");
   assert.equal(v[0].check, "proof-unit-test-unresolvable");
   assert.equal(v[0].severity, "block");
+
+  // THE CONTROL'S OTHER HALF, and why this test discriminates rather than passing on any tree:
+  // "a build diff is still refused" is also true of a linter that has never heard of a filing.
+  // The same task, the same resolver, the same absent title — and the filing is exempt.
+  assert.deepEqual(
+    proofUnitTestUnresolvableViolations(task(), { resolveNameFilteredCandidates: absent, planOnlyFiling: true }),
+    [],
+    "the two diffs must be told apart, not merely both refused",
+  );
 });
 
 test("no filing fact means no change in behaviour", () => {
@@ -70,6 +79,14 @@ test("no filing fact means no change in behaviour", () => {
   const asBuild = proofUnitTestUnresolvableViolations(task(), { resolveNameFilteredCandidates: absent, planOnlyFiling: false });
   assert.deepEqual(withoutFact, asBuild, "absent must behave exactly as an explicit build");
   assert.equal(withoutFact.length, 1);
+
+  // Same corpus control: "absent behaves like a build" is trivially true where neither value
+  // means anything. The filing value must MOVE the result, or this asserts nothing.
+  assert.notDeepEqual(
+    proofUnitTestUnresolvableViolations(task(), { resolveNameFilteredCandidates: absent, planOnlyFiling: true }),
+    withoutFact,
+    "the filing value must change the answer, or the absent-behaves-like-a-build claim is vacuous",
+  );
 
   // And the check stays silent without the injected resolver, on every value of the new field.
   for (const planOnlyFiling of [undefined, true, false]) {
@@ -84,4 +101,11 @@ test("a task declaring no test file is unaffected, whatever the diff is", () => 
   for (const planOnlyFiling of [undefined, true, false]) {
     assert.deepEqual(proofUnitTestUnresolvableViolations(noSuite, { resolveNameFilteredCandidates: absent, planOnlyFiling }), []);
   }
+  // And the carve-out is not the whole story — a task that DOES declare a suite is still judged,
+  // which is what keeps the loop above from passing vacuously on a linter that refuses nothing.
+  assert.equal(
+    proofUnitTestUnresolvableViolations(task(), { resolveNameFilteredCandidates: absent, planOnlyFiling: false }).length,
+    1,
+  );
+  assert.deepEqual(proofUnitTestUnresolvableViolations(task(), { resolveNameFilteredCandidates: absent, planOnlyFiling: true }), []);
 });
