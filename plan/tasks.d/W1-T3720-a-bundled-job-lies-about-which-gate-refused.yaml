@@ -1,0 +1,77 @@
+- id: W1-T3720
+  title: "A FAILING CHECK REPORTS UNDER ANOTHER CHECK'S NAME BECAUSE FOUR GATES SHARE ONE JOB — the board said comment-load-ratchet on five PRs while comment-load-ratchet itself printed OK and expiring-fixture-census was the failure: every diagnosis pays a log dig to learn which gate actually refused"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-09-17, the same job log on five PRs:
+
+      comment-load-ratchet: OK -- 354 measured file(s), 71142 comment lines against 143033 code
+      lines (33.2%); none over its ceiling, no added block over 25 lines.
+      ##[error]expiring-fixture-census: BLOCKED -- 1 fixture(s) CROSS their threshold within 7 day(s)
+
+    The check-run reported to the board is named `comment-load-ratchet`, and the gate that actually
+    refused is `expiring-fixture-census`. The ci.yml job bundles four gates -- comment-load,
+    expiring-fixture-census, contract-coverage-ratchet and console-parity -- under the first one's
+    name.
+
+    WHAT IT COSTS. A reader sees `comment-load-ratchet` red, opens the comment-load baseline,
+    finds nothing wrong, then has to fetch the raw job log to discover a different gate refused.
+    That happened five times in one session, and it is pure waste: the failing line already names
+    its own gate in its own first token.
+
+    IT ALSO MISLEADS AUTOMATION, not only people. `failingTestFilesFromCiFailures` (src/lib/sweep.ts)
+    keys a fix rung's evidence off the check name; a fix lane dispatched against
+    `comment-load-ratchet` is being pointed at the wrong gate's remedy surface.
+  design: |
+    (i) THE ANNOTATION ALREADY CARRIES THE TRUTH. Every one of these gates emits
+        `<gate>: BLOCKED|OK ...` as its first token via the shared `emitCiReport` encoder, so the
+        owning gate is derivable from the report itself -- no new convention, no per-gate table.
+
+    (ii) NAME THE FAILING GATE ON THE CHECK-RUN, not the job that hosted it. A bundled job reports
+         under the name of whichever gate refused; a job where several refuse names all of them.
+         Nothing is renamed when the job passes, so a green board reads exactly as it does today.
+
+    (iii) THE REQUIRED-CHECK CONTRACT DOES NOT MOVE. `ci-gate` aggregates and branch protection
+          names `ci-gate`, so changing what a bundled job calls itself in its annotation cannot
+          change what is required. Pinned, because a rename that silently dropped a required
+          context would be a far worse failure than the one this fixes.
+
+    NOT IN SCOPE: splitting the four gates into four jobs. That buys clearer names at the cost of
+    four checkouts and four npm installs, which is the trade the bundling already decided; this
+    task only stops the bundle from lying about which gate refused.
+  acceptance:
+    - claim: "a bundled job that fails names the gate that actually refused, taken from the gate's own report"
+      proof: "unit test: a bundled job names the gate that refused, not the job"
+    - claim: "a job where two bundled gates refuse names both rather than picking one"
+      proof: "unit test: two refusing gates are both named"
+    - claim: "a passing job's reported name is unchanged, so a green board reads as it does today"
+      proof: "unit test: a passing bundled job keeps its job name"
+    - claim: "the required-check contract is untouched, so branch protection still resolves ci-gate"
+      proof: "unit test: renaming a bundled report never moves a required context"
+  falsifier: |
+    Key the name off a hand-written gate-to-job table instead of the report's own first token and
+    the first assertion still passes while the table goes stale on the next gate added -- so the
+    test asserts the DERIVATION, feeding it a report from a gate the table would not know. Rename
+    on success and the third fails. Touch the required contexts and the fourth fails.
+  risk: high
+  band_meaning: span
+  # BREADTH, NOT BLAST RADIUS. Rule 19 counts two concerns (expiring-fixture-census, sweep) because
+  # the fix touches the gate that emits a report and the reader that keys off its name -- which is
+  # one concern, "the name a bundled job reports", spread across the emitter and its consumer.
+  # Decomposing leaves the consumer reading a name the emitter no longer sends.
+  origin: human
+  files: [scripts/expiring-fixture-census.mjs, src/lib/sweep.ts]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> throughput
+
+    Minted by `rmd next-task-id` from a DETACHED HEAD, so the reservation recorded no readable
+    holder and task-id-existence reads it as `holder unreadable (missing branch)`. Handed off from
+    the literal `unknown`, which is the remedy the check names for exactly that case. Same id,
+    same author, same session -- renumbering would burn a reserved id to paper over a checkout
+    state.
