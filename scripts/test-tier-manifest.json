@@ -1424,6 +1424,7 @@
     "test/the-draft-cap-is-a-batch-size-not-a-concurrency-limit.test.ts": 831,
     "test/the-duration-proposal-lands-instead-of-expiring.test.ts": 0,
     "test/the-fast-lane-cannot-see-a-suite-that-joins-its-docs-path.test.ts": 1279,
+    "test/the-filing-protocol-is-generated.test.ts": 0,
     "test/the-first-board-read-waits-for-the-first-mint.test.ts": 292,
     "test/the-fix-rung-strike-cap-does-not-bind.test.ts": 1436,
     "test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts": 807,
