@@ -35,14 +35,14 @@ test("learnings-budget-ratchet CLI: active corpus UNDER the cap -> zero exit (th
   const result = run("basic", "under-baseline.json");
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /active corpus 41 chars \(cap 100 chars\)/);
-  assert.match(result.stdout, /OK -- active corpus is at or under the knowledge budget cap/);
+  assert.match(result.stdout, /OK -- active corpus \d+ chars is under the runaway hard cap/);
 });
 
 test("learnings-budget-ratchet CLI: active corpus OVER the cap -> non-zero exit, names the measured size vs cap (the gate BLOCKS)", () => {
   const result = run("basic", "over-baseline.json");
   assert.notEqual(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stderr, /BLOCKED/);
-  assert.match(result.stderr, /active learnings corpus 41 chars > cap 40 chars/);
+  assert.match(result.stderr, /active learnings corpus 41 chars > HARD cap 40 chars/);
 });
 
 test("learnings-budget-ratchet CLI: baseline with no capChars at all -> no crash, no false block", () => {
@@ -101,7 +101,7 @@ test("learnings-budget-ratchet CLI: a CONTESTED entry (W1-T88/P14) contributes Z
 test("learnings-budget-ratchet CLI: the COUNTERFACTUAL -- the identical beta bytes, but ACTIVE -- blows the same cap the superseded/quarantined fixtures passed", () => {
   const result = run("lifecycle-both-active", "tight-baseline.json");
   assert.notEqual(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stderr, /active learnings corpus 168 chars > cap 41 chars/);
+  assert.match(result.stderr, /active learnings corpus 168 chars > HARD cap 41 chars/);
   assert.match(result.stderr, /BLOCKED/);
 });
 
@@ -115,7 +115,7 @@ test("learnings-budget-ratchet CLI: sums active weight ACROSS shard files, not j
 
   const overCap = run("multi-shard", "multi-shard-baseline-over.json");
   assert.notEqual(overCap.status, 0, overCap.stdout + overCap.stderr);
-  assert.match(overCap.stderr, /active learnings corpus 82 chars > cap 81 chars/);
+  assert.match(overCap.stderr, /active learnings corpus 82 chars > HARD cap 81 chars/);
 });
 
 // ── loadCorpus / loadShardEntries validation: every malformed-shard branch names the failure ─────
@@ -172,7 +172,7 @@ test("a missing corpus directory is zero entries, not an error", () => {
 test("the REAL committed learnings/ corpus is currently within the recorded knowledge budget cap", () => {
   const result = spawnSync(process.execPath, [SCRIPT], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /OK -- active corpus is at or under the knowledge budget cap/);
+  assert.match(result.stdout, /OK -- active corpus \d+ chars is under the runaway hard cap/);
 });
 
 test("the real corpus carries at least one SUPERSEDED entry (zdotdir-alone-isolates-shells, W1-T33) proving the exclusion is exercised on real data, not only fixtures", () => {
@@ -197,4 +197,48 @@ test("learnings-budget-ratchet module: importing (not spawning as the entry scri
   ]);
   assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
   assert.match(result.stdout.toString(), /imported-without-main-invocation/);
+});
+
+// ── W1-T3734: the curation target advises, the runaway cliff refuses ────────────────────────────
+// `capChars` blocked every corpus-growing PR on a number no run pays — this file's own baseline
+// records it as "orthogonal to DEFAULT_KNOWLEDGE_BUDGET_CHARS". These pin the new split, including
+// the part that matters most: the gate must still be able to FAIL.
+
+// The rest of this file drives the CLI with fixtures; these five need the predicates directly, so
+// they load the .mjs the same way the script itself is run. No .d.ts exists for it by design.
+const gateMod = await import("../scripts/learnings-budget-ratchet.mjs" as string) as {
+  evaluateRatchet: (chars: number, baseline: Record<string, unknown>) => string[];
+  exceedsCurationTarget: (chars: number, baseline: Record<string, unknown>) => boolean;
+};
+const evalRatchet2 = gateMod.evaluateRatchet;
+const exceedsCurationTarget = gateMod.exceedsCurationTarget;
+
+test("W1-T3734: over the curation target is ADVISORY — it must not block a pull request", () => {
+  const baseline = { capChars: 42_000, hardCapChars: 126_000 };
+  assert.equal(exceedsCurationTarget(50_000, baseline), true, "the advisory still fires");
+  assert.deepEqual(evalRatchet2(50_000, baseline), [], "but produces NO violation");
+});
+
+test("W1-T3734: over the RUNAWAY hard cap still refuses — the gate is not vacuous", () => {
+  // THE LOAD-BEARING HALF. Demoting a ceiling to advisory is only safe if something can still fail;
+  // a check that can never go red is the more dangerous failure mode.
+  const v = evalRatchet2(126_001, { capChars: 42_000, hardCapChars: 126_000 });
+  assert.equal(v.length, 1);
+  assert.match(v[0], /HARD cap/);
+  assert.match(v[0], /runaway tripwire/, "and says what reaching it means");
+});
+
+test("W1-T3734: exactly at the hard cap is under it — the cliff is an upper bound, not a fence", () => {
+  assert.deepEqual(evalRatchet2(126_000, { capChars: 1, hardCapChars: 126_000 }), []);
+});
+
+test("W1-T3734: a hardCapChars that is not a number REFUSES rather than silently not enforcing", () => {
+  // Same distinction the file already draws for capChars: a declared threshold that cannot be
+  // compared against is a config defect, not a satisfied budget.
+  assert.throws(() => evalRatchet2(1, { hardCapChars: "126000" }), /'hardCapChars' must be a number/);
+});
+
+test("W1-T3734: an absent hardCapChars enforces nothing, and says nothing about the corpus", () => {
+  assert.deepEqual(evalRatchet2(9_999_999, { capChars: 42_000 }), [], "no declared cliff, no refusal");
+  assert.equal(exceedsCurationTarget(9_999_999, { capChars: 42_000 }), true, "the advisory still speaks");
 });
