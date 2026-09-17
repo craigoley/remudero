@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CHECK_PROOF_EXIT, preflightSummarySentence, runPreflightProofs, type PreflightTier } from "../src/run-task.js";
+import { CHECK_PROOF_EXIT, preflightCommand, preflightSummarySentence, runPreflightProofs, type PreflightTier } from "../src/run-task.js";
+import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 // ── W1-T3738 — THE PROOF GATE HAS NO LOCAL TIER ──────────────────────────────────────────────
@@ -141,4 +142,63 @@ test("a repo with no origin/main is SKIPPED, not refused — through the real gi
   assert.match(out.steps[0]!.detail ?? "", /proofs: SKIPPED/);
   assert.match(out.steps[0]!.detail ?? "", /merge-base/);
   repo.cleanup();
+});
+
+// ── THE TWO REMAINING UNINJECTED LINES, which `diff-coverage` named by number ─────────────────
+//
+// The test above runs the real git seam, but only through its FAILING arm: a repo with no
+// `origin/main` throws at `merge-base` and returns the SKIPPED step before reaching anything else.
+// So the default CRITERIA RESOLVER below it stayed dead to the instrument, and so did the
+// preflight command's proofs-rendering loop. Both are covered here, each by the smallest real
+// thing that reaches it.
+
+test("the default criteria resolver runs when git SUCCEEDS and nothing is injected", () => {
+  // The seam-default shape this repo has paid for before (#978): every other test here injects
+  // `resolveCriteria`, so `resolvePlanCriteriaAtHead` — the whole point of the tier, since it is
+  // what makes the local answer agree with the gate's — was never once executed.
+  //
+  // Reaching it needs git to SUCCEED, which needs a real `origin/main` to resolve a merge base
+  // against. A bare repo plus a clone of it is that, using the shared fixture rather than another
+  // hand-rolled init.
+  const origin = gitRepo({ bare: true, kind: "proof-tier-origin" });
+  const clone = gitRepo({ cloneFrom: origin.dir, kind: "proof-tier-clone" });
+  clone.git("commit", "--allow-empty", "-qm", "chore: a commit carrying no task trailer");
+  clone.git("push", "-q", "origin", "HEAD:main");
+  clone.git("fetch", "-q", "origin");
+
+  // `spawn` is injected so no proof actually shells out; `git` and `resolveCriteria` are NOT, which
+  // is the entire point — this exercises the real resolver against a tree with no plan/tasks.yaml.
+  const out = runPreflightProofs(clone.dir, { spawn: () => ({ status: 0, stdout: "", stderr: "" }) });
+
+  // NO TRAILER, NO OPINION — the contract stated in runPreflightProofs's own doc. A commit with no
+  // `Remudero-Task:` trailer resolves nothing from the plan, falls through to the body's
+  // `## Acceptance` block, finds nothing there either, and PASSES rather than inventing a finding.
+  assert.equal(out.ok, true, "a branch with no criteria must pass, never refuse");
+  assert.equal(out.steps.length, 1);
+  assert.match(out.steps[0]!.detail ?? "", /^proofs: /);
+
+  clone.cleanup();
+  origin.cleanup();
+});
+
+test("preflight --proofs RENDERS the tier's steps, not just computes them", () => {
+  // The `if (proofs)` loop in `preflightCommand` had no covering test: every preflight test drives
+  // the default tiers. A tier whose output is computed and never printed is indistinguishable, to
+  // the operator this feature exists for, from a tier that never ran.
+  const lines: string[] = [];
+  const originalLog = console.log;
+  const spawn: PreflightSpawn = () => ({ status: 0, stdout: "", stderr: "" });
+  return (async () => {
+    try {
+      console.log = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
+      // `--no-fast` keeps this to the tier under test. Whether this checkout can resolve
+      // `origin/main` decides SKIPPED vs a real answer, and the assertion deliberately does not
+      // care: either way exactly one `proofs:` line must reach stdout, which is what the loop does.
+      await preflightCommand(["--proofs", "--no-fast"], { spawn });
+    } finally {
+      console.log = originalLog;
+    }
+    const proofLines = lines.filter((l) => l.startsWith("proofs:"));
+    assert.equal(proofLines.length, 1, `exactly one proofs line must be printed, got: ${JSON.stringify(proofLines)}`);
+  })();
 });
