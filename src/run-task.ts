@@ -17334,6 +17334,19 @@ export interface CheckAcceptanceDeps {
    * treats a throw as "cannot tell" and stays silent.
    */
   changedFiles?: () => string[];
+  /**
+   * (W1-T3687) `--base <ref>`'s merge-base worktree seam — IDENTICAL shape to
+   * `checkProofCommand`'s own `baseBlobDeps` (same field names, same defaults via
+   * {@link buildBaseProofDir}), injectable ONLY for tests. Real callers (the CLI dispatch below)
+   * omit it and get `buildBaseProofDir`'s own `git worktree add`/`git show` defaults — see that
+   * function's doc for why that is the right default.
+   */
+  baseBlobDeps?: {
+    showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
+    makeDir?: () => string;
+    addWorktree?: (repoDir: string, worktreePath: string, revision: string) => void;
+    removeWorktree?: (repoDir: string, worktreePath: string) => void;
+  };
 }
 
 /**
@@ -17495,8 +17508,20 @@ export async function replayGoldensCommand(rest: string[], deps: ReplayGoldensDe
 }
 
 export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps = {}): number {
-  const file = rest.find((a) => !a.startsWith("--"));
+  // design (i): `--base <ref>`, the same spelling/semantics as `check-proof --base`. Matched and
+  // its value token excluded BEFORE the body-file scan below — the identical guard
+  // `checkProofCommand` uses to keep an omitted `--base` from ever eating argv[0] (baseFlagIdx is
+  // -1, +1 is 0, and index 0 is never the flag's own value) — so a ref token can never be
+  // mistaken for the body-file argument.
+  const baseFlagIdx = rest.indexOf("--base");
+  const baseRef = baseFlagIdx >= 0 ? rest[baseFlagIdx + 1] : undefined;
+  if (baseFlagIdx >= 0 && baseRef === undefined) {
+    console.error("rmd check-acceptance: --base needs a <ref> argument, e.g. `--base origin/main`\n" + USAGE);
+    return 2;
+  }
+  const file = rest.find((a, i) => !a.startsWith("--") && !(baseFlagIdx >= 0 && i === baseFlagIdx + 1));
   if (!file) {
+    // Acceptance criterion 3: byte-identical to before this task when --base is never mentioned.
     console.error("usage: rmd check-acceptance <body-file>");
     return 2;
   }
@@ -17551,10 +17576,74 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
   if (unrelated) console.log(`WARNING:         ${unrelated}`);
   console.log(`criteria parsed: ${criteria.length}`);
   console.log(`empty proofs:    ${emptyProofs}`);
-  criteria.forEach((c, i) => {
-    console.log(`  [${i + 1}] claim: ${c.claim.slice(0, 88)}`);
-    console.log(`      proof: ${c.proof ? c.proof.slice(0, 88) : "(EMPTY — nothing will execute)"}`);
-  });
+
+  // design (i)-(ii): --base ABSENT ⇒ `built` stays undefined and nothing below ever runs a
+  // proof — acceptance criterion 3, every line and the exit code stay byte-identical to before
+  // this task. --base PRESENT ⇒ ONE call to {@link buildBaseProofDir} for the WHOLE body
+  // (acceptance criterion 4: never once per criterion), the SAME builder `rmd check-proof --base`
+  // and `rmd review` both use — never a second, hand-rolled comparison (this task's own
+  // rationale: "must CALL the existing executor, not restate it").
+  const { removeWorktree: baseRemoveWorktree, ...baseBuilderDeps } = deps.baseBlobDeps ?? {};
+  const built =
+    baseRef !== undefined
+      ? buildBaseProofDir(criteria, process.cwd(), { mergeBase: () => baseRef, ...baseBuilderDeps })
+      : undefined;
+  let staleCount = 0;
+  try {
+    criteria.forEach((c, i) => {
+      console.log(`  [${i + 1}] claim: ${c.claim.slice(0, 88)}`);
+      console.log(`      proof: ${c.proof ? c.proof.slice(0, 88) : "(EMPTY — nothing will execute)"}`);
+      if (!built || !c.proof) return;
+      const w = parseWhitelistedProof(c.proof);
+      if (!w) return; // prose/unparseable — nothing executes, so nothing can discriminate either way
+      let headOutcome: "pass" | "fail" | "no-match";
+      try {
+        headOutcome = execWhitelistedProof(w, process.cwd(), checkProofTimeoutMs());
+      } catch {
+        return; // exec_error is never evidence either way (W1-T219) — same posture check-proof takes
+      }
+      // Only a criterion that already passes on THIS tree can be "stale" — a failing/no-match
+      // proof is already unmet on its own terms, and staleness is a question about a PASS.
+      if (headOutcome !== "pass" || built.baseCheckoutDir === undefined) return;
+      const grepTargetPath = w.kind === "grep" && w.args.length >= 1 ? w.args[w.args.length - 1] : undefined;
+      // (W1-T3190) A target this diff itself ADDS discriminates by construction — grepping the
+      // copy `buildBaseProofDir` placed in the base tree only to re-run added unit tests would
+      // otherwise read as a false "matches base too".
+      if (w.kind === "grep" && grepTargetPath !== undefined && built.addedTestFiles.has(grepTargetPath)) return;
+      let baseOutcome: "pass" | "fail" | "no-match";
+      try {
+        baseOutcome = execWhitelistedProof(w, built.baseCheckoutDir, checkProofTimeoutMs());
+      } catch {
+        return; // base couldn't even execute — an environment gap, never counted as discrimination
+      }
+      if (baseOutcome !== "pass") return;
+      staleCount++;
+      // design (iii): the reviewer's OWN verdict word for this shape (W1-T273/W1-T362).
+      console.log(
+        "      discrimination: executed_stale — this proof matches BOTH head and base, so it " +
+          "discriminates NOTHING; the reviewer downgrades exactly this shape and this criterion " +
+          "counts for nothing in review",
+      );
+    });
+  } finally {
+    if (built?.baseIsCheckout && built.baseCheckoutDir !== undefined) {
+      removeBaseProofWorktree(process.cwd(), built.baseCheckoutDir, baseRemoveWorktree);
+    }
+  }
+
+  // design (iv)/(v): a stale criterion ends the "OK" verdict — the summary states how many of N
+  // still discriminate instead, and the exit code follows non-zero, the gate's own contract.
+  const okOrStale = (okLine: string): number => {
+    if (staleCount === 0) {
+      console.log(okLine);
+      return 0;
+    }
+    console.log(
+      `NOT OK — ${criteria.length - staleCount} of ${criteria.length} criteria discriminate a done state ` +
+        `from not-done; ${staleCount} report executed_stale and count for nothing in review (W1-T273/W1-T362).`,
+    );
+    return 1;
+  };
 
   if (trailerResolved) {
     // design (iii): once the trailer resolves, the body's OWN block is not what the gate reads —
@@ -17569,15 +17658,13 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
           `but UNUSED — the gate reads ${taskId}'s shard, never this body's block, once the trailer resolves.`,
       );
     }
-    console.log(`OK — the gate would judge this PR from ${taskId}'s shard, not this body's block.`);
-    return 0;
+    return okOrStale(`OK — the gate would judge this PR from ${taskId}'s shard, not this body's block.`);
   }
 
   // Untrailered (or trailer present but unresolved to any criteria): judged exactly as before —
   // acceptance criterion 4, no change in verdict or exit code.
   if (!d.defective) {
-    console.log("OK — the parser resolves exactly what was written, and every proof is non-empty.");
-    return 0;
+    return okOrStale("OK — the parser resolves exactly what was written, and every proof is non-empty.");
   }
   if (!d.headerFound) {
     console.error(
@@ -20751,6 +20838,20 @@ export function duplicateCorpusOpts(
  *  filing commits predating the scoped convention read as implementation evidence. */
 export const LINT_FILING_SUBJECT_RE =
   /^(?:chore\(plan\)|fix\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/i;
+
+/** Path shapes this repository already treats as non-implementing — documentation and plan
+ *  surfaces, never source (W1-T3706). ONE exported list so `scripts/head-identity-gate.mjs`'s
+ *  diff-shaped admitted form matches these paths without re-spelling them per caller, the same
+ *  discipline {@link LINT_FILING_SUBJECT_RE} already holds for the subject-shaped form it sits
+ *  beside: `*.md` at any depth, plus everything under `plan/`, `docs/`, or `learnings/`. */
+export const NON_CODE_PATH_PATTERNS: RegExp[] = [/\.md$/i, /^plan\//, /^docs\//, /^learnings\//];
+
+/** Is `path` a non-code (documentation/plan) path per {@link NON_CODE_PATH_PATTERNS}? A path
+ *  matching NONE of the patterns is code (or at least not provably non-code), and the caller
+ *  must treat that as refusing the whole head — see the gate's own `isNonCodeHead`. */
+export function isNonCodePath(path: string): boolean {
+  return NON_CODE_PATH_PATTERNS.some((re) => re.test(path));
+}
 
 /** Splits lint-plan's failing tasks by MERGE EVIDENCE in a `git log` dump (`%s%x00%b%x01`
  *  format): a task "has a merged implementation" when any non-filing commit carries its id as a

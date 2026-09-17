@@ -9,6 +9,7 @@
   budget_usd: 8.00
   files:
     - src/run-task.ts
+    - test/check-acceptance-names-a-proof-that-discriminates-nothing.test.ts
   origin: "operator-session#two-plan-prs-refused-on-the-same-proof-2026-09-16"
   plan_refs: ["W1-T387", "W1-T273", "W1-T362", "W1-T2251", "W1-T1070"]
   status: queued
@@ -101,8 +102,13 @@
       proof: "unit test: a criterion matching base too is named as discriminating nothing"
     - claim: "a body carrying any stale criterion exits non-zero, so a script gating on this verb cannot green-light a PR the reviewer will refuse"
       proof: "unit test: a body with a stale criterion exits non-zero"
-    - claim: "omitting the base ref leaves every line and exit code as they are today, so no existing caller changes behaviour"
-      proof: "unit test: check-acceptance without a base ref is unchanged"
+    # WITHDRAWN AS A CRITERION, KEPT AS A TEST. "omitting the base ref leaves every line and exit
+    # code as they are today" was a criterion here, proven by
+    # `unit test: check-acceptance without a base ref is unchanged`. proof-discrimination refused
+    # it as `executed_stale` on #5844 and was right: a proof whose whole claim is that the path
+    # this task does NOT touch still behaves as before passes at head and base by construction, so
+    # it can never be evidence of the change. The test stays in the suite, where a
+    # backward-compatibility guard belongs. See W1-T3721, which refuses this shape at author time.
     - claim: "the merge-base worktree is built once for the whole body rather than once per criterion"
       proof: "unit test: a four-criterion body builds one base worktree"
   falsifier: |

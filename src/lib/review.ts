@@ -528,6 +528,17 @@ export interface ReviewVerdict {
   /** W1-T305: how many criteria COULD have executed (every criterion except `satisfied_by`) — the SAME set `capped`
    *  counts against, exposed here so `passSummary`'s partial annotation reads it rather than re-deriving it. */
   executableProofCount?: number;
+  /** W1-T3704 (design i) — a content hash of the pull request's OWN diff (base...head) at the moment this verdict was
+   *  judged. Recorded on the `review.posted` ledger line as `own_diff_digest` so a LATER push can compare against it
+   *  without re-deriving a verdict that did not change. `undefined` when the caller could not compute one (an
+   *  unreadable diff) — absence is never treated as identity by any reader; that is what forces the reuse decision
+   *  in lib/sweep.ts toward a full re-review (design v) rather than a guess. */
+  ownDiffDigest?: string;
+  /** W1-T3704 (design i) — the merge base this verdict's discrimination check ran against. Recorded alongside {@link
+   *  ownDiffDigest} as `merge_base_sha` so a push that moves ONLY the merge base (design iii, the "update branch"
+   *  shape) is distinguishable from one that changes nothing (design ii) or changes the PR's own work (design iv).
+   *  Same absent-means-unreadable rule as {@link ownDiffDigest}. */
+  mergeBaseSha?: string;
 }
 
 // ── Tokenisation (deterministic, dependency-free) ──────────────────────────
@@ -3868,6 +3879,13 @@ export interface PriorReviewVerdict {
    *  judges the fact the review posted rather than the always-false default it silently took. Written unconditionally,
    *  so ABSENT MEANS NOT PARTIAL. Optional purely so fixtures predating the field keep compiling. */
   partiallyExecuted?: boolean;
+  /** W1-T3704 (design i) — the recorded `own_diff_digest`, read back UNLIKE `capped`/`planOnly`: absence here means
+   *  UNREADABLE, never a false-ish default, because {@link ReviewReuseVerdict} (lib/sweep.ts) must be able to tell
+   *  "this line predates the field" apart from "the diff really did not change" — collapsing the two would reuse a
+   *  verdict on evidence nobody actually recorded (design v forbids exactly that). */
+  ownDiffDigest?: string;
+  /** W1-T3704 (design i) — the recorded `merge_base_sha`, same absent-means-unreadable rule as {@link ownDiffDigest}. */
+  mergeBaseSha?: string;
 }
 
 /** Result of applying the W1-T178 verdict-stability rule to a freshly computed verdict. */
@@ -3903,6 +3921,10 @@ export function priorReviewVerdictFromLedger(
       // the key, so an older line reconstructs a byte-identical object rather than gaining a `partiallyExecuted:
       // false` key nobody asked for.
       ...(typeof line.partially_executed === "boolean" ? { partiallyExecuted: line.partially_executed } : {}),
+      // W1-T3704: spread in ONLY when present, same shape as above — but UNLIKE those booleans, absence here is
+      // read downstream as "unreadable", never coerced to a default value (see the field's own doc).
+      ...(typeof line.own_diff_digest === "string" ? { ownDiffDigest: line.own_diff_digest } : {}),
+      ...(typeof line.merge_base_sha === "string" ? { mergeBaseSha: line.merge_base_sha } : {}),
     };
   }
   return prior;
@@ -4562,6 +4584,8 @@ export function reviewLedgerLegibilityFields(
         | "partiallyExecuted"
         | "proofUniqueRuns"
         | "proofReuses"
+        | "ownDiffDigest"
+        | "mergeBaseSha"
       >
     >,
 ): {
@@ -4577,6 +4601,8 @@ export function reviewLedgerLegibilityFields(
   proof_reuses?: number;
   failure_class?: string;
   failure_reason?: string;
+  own_diff_digest?: string;
+  merge_base_sha?: string;
 } {
   // `capped_reason` rides alongside `capped` rather than in its own line, so the ONE record that says a verdict was
   // capped also says why. Absent (never null/"") on an uncapped verdict, so the shape is byte-identical when healthy.
@@ -4601,6 +4627,11 @@ export function reviewLedgerLegibilityFields(
     // Bounded by construction: counts only, never the commands or keys they were derived from.
     ...(verdict.proofUniqueRuns === undefined ? {} : { proof_unique_runs: verdict.proofUniqueRuns }),
     ...(verdict.proofReuses === undefined ? {} : { proof_reuses: verdict.proofReuses }),
+    // W1-T3704 (design i): riding conditionally, like the pair above — a verdict computed by a
+    // caller that has not wired the compare yet must reconstruct a byte-identical line, never gain
+    // an `own_diff_digest: undefined`/`merge_base_sha: undefined` key nobody asked for.
+    ...(verdict.ownDiffDigest === undefined ? {} : { own_diff_digest: verdict.ownDiffDigest }),
+    ...(verdict.mergeBaseSha === undefined ? {} : { merge_base_sha: verdict.mergeBaseSha }),
     ...(failed
       ? {
           failure_class: reviewFailureClass({

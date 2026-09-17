@@ -1609,6 +1609,8 @@ test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), 
     conflicted: 0,
     wait: 0,
     "held-draft": 0,
+    "review-reused": 0,
+    "discriminate-only": 0,
   });
   assert.equal(summary.total, 4);
   assert.equal(summary.actionsTaken, 4);
@@ -2206,6 +2208,8 @@ test("renderSweepSummary is a single legible line", () => {
       conflicted: 0,
       wait: 0,
       "held-draft": 0,
+      "review-reused": 0,
+      "discriminate-only": 0,
     },
     actionsTaken: 4,
     actionsFailed: 0,
@@ -2229,6 +2233,8 @@ test("renderSweepSummary calls out failed actions distinctly (W1-T99)", () => {
       conflicted: 0,
       wait: 0,
       "held-draft": 0,
+      "review-reused": 0,
+      "discriminate-only": 0,
     },
     actionsTaken: 2,
     actionsFailed: 1,
@@ -4754,6 +4760,8 @@ test("W1-T3027: the summary names every disposition, so the counts sum to the op
         "post-review": 9,
         wait: 0,
         "held-draft": 0,
+        "review-reused": 0,
+        "discriminate-only": 0,
       },
       11,
     ),
@@ -4781,6 +4789,8 @@ test("W1-T3027: a residual is called out rather than left for the reader to subt
         "post-review": 0,
         wait: 0,
         "held-draft": 0,
+        "review-reused": 0,
+        "discriminate-only": 0,
       },
       11,
     ),
@@ -4938,4 +4948,76 @@ test("W1-T2998 (falsifier): nothing to record is not a repair — empty and dirt
     recordableRatchetRepairFor({ redRequiredChecks: ["comment-load-ratchet"], mergeState: "dirty" } as never),
     undefined,
   );
+});
+
+// ── W1-T3704's sweep arm, not just its verdict ──────────────────────────────────────────────────
+//
+// `reviewReuseVerdict` is pinned in its own suite, but the switch arm that CONSUMES it inside
+// `runSweep` was uncovered — `diff-coverage` refused src/lib/sweep.ts:8377-8389 by name. That arm is
+// where a decision becomes behaviour: it forces `alreadyDone` so `acted` stays false and NO dedup key
+// is seeded, which is what keeps a reused verdict re-derived every pass instead of silently marked
+// acted-on for an effector that does not exist yet. A test of the predicate alone cannot reach it.
+
+/** A PR whose review was orphaned by a push that changed NOTHING the verdict judged. */
+function noOpPushPr(over: Record<string, unknown> = {}): OpenPrView {
+  // The five reuse inputs are NOT declared on OpenPrView — `reviewReuseInputsFrom` reads them off
+  // the object as a runtime extension (`pr as OpenPrView & Partial<ReviewReuseInputs>`), which is
+  // exactly what "move the five inputs off OpenPrView's census" means. So the fixture carries them
+  // the same way the producer does, rather than widening the view type for a test.
+  return pr({
+    prNumber: 77,
+    prUrl: "url/77",
+    taskId: "W1-REUSE",
+    reviewState: "none",
+    checksState: "green",
+    headSha: "newhead1",
+    reviewOrphanedByPush: true,
+    // The five inputs the verdict reads: identical own-diff AND identical merge base => REUSE.
+    reviewedOwnDiffDigest: "digest-same",
+    currentOwnDiffDigest: "digest-same",
+    reviewedMergeBaseSha: "base1",
+    currentMergeBaseSha: "base1",
+    reviewedHeadSha: "oldhead0",
+    ...over,
+  } as Partial<OpenPrView>) as OpenPrView;
+}
+
+test("W1-T3704: the sweep disposes a no-op push as review-reused and takes no action for it", async () => {
+  const deps = fakeDeps();
+  const summary = await runSweep([noOpPushPr()], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(summary.byDisposition["review-reused"], 1, "a no-op push must reach the reuse arm");
+  assert.equal(summary.noneCount, 0, "and must not fall through to disposition=none");
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 1);
+  assert.equal(disposed[0].disposition, "review-reused");
+  // The reason must NAME the head the verdict actually judged, or the reuse is unauditable. It
+  // ABBREVIATES to 7 chars (`judgedHeadSha.slice(0, 7)`), so the assertion matches the prefix the
+  // row really emits rather than the full sha the fixture set.
+  assert.match(String(disposed[0].reason), /oldhead/, "the reason names the judged head");
+  assert.match(String(disposed[0].reason), /reusing that verdict/, "and says it is reusing rather than re-deriving");
+});
+
+test("W1-T3704: a reused verdict seeds NO dedup key, so it is re-derived on the next pass", async () => {
+  // THE LOAD-BEARING HALF. `alreadyDone = true` with no effector call means `acted` stays false and
+  // nothing is dedup-keyed — if a key WERE seeded, the second pass would skip the PR and a
+  // green-again review would never be re-derived. Two passes over ONE ledger prove it.
+  const first = fakeDeps();
+  await runSweep([noOpPushPr()], first, DEFAULT_SWEEP_POLICY);
+  const second = fakeDeps({ ledgerPath: first.ledgerPath });
+  const again = await runSweep([noOpPushPr()], second, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(again.byDisposition["review-reused"], 1, "the SECOND pass must dispose it again, not skip it");
+  assert.equal(again.actionsTaken, 0, "and take no action — there is no effector to run");
+});
+
+test("W1-T3704: a no-op push whose MERGE BASE moved disposes discriminate-only, not reuse", async () => {
+  // The sibling arm, and the discrimination that makes the test above mean something: the same
+  // identical own-diff, but a moved merge base means the recorded verdict cannot just be re-posted.
+  const deps = fakeDeps();
+  const summary = await runSweep([noOpPushPr({ currentMergeBaseSha: "base2" })], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(summary.byDisposition["discriminate-only"], 1, "a moved base routes to discriminate-only");
+  assert.equal(summary.byDisposition["review-reused"], 0, "and must NOT be reused");
+  assert.equal(summary.actionsTaken, 0);
 });

@@ -1,0 +1,93 @@
+- id: W1-T3721
+  title: "EVERY WORKER WRITES A 'THE UNCHANGED PATH STILL WORKS' ACCEPTANCE CRITERION AND proof-discrimination REFUSES IT EVERY TIME — three of six open PRs failed on exactly that shape in ONE board pass, each costing a body edit, a push and a full CI cycle: teach the body emitter that a backward-compatibility guard is a test, never a criterion"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: |
+    MEASURED 2026-09-17 in a single pass over the open board. Three PRs, three different authors,
+    three different subsystems, one identical failure:
+
+      #5844  "check-acceptance without a base ref is unchanged"
+             -- asserts the no-base-ref path behaves as it does today
+      #5840  "with no live tree the cli falls back to the snapshot"
+             -- asserts PATH is untouched when there is no live tree
+      #5843  all four criteria, on a test-only PR proving existing behaviour
+
+    Every one drew the same verdict:
+
+      discrimination: executed_stale -- this proof matches BOTH head and base, so it
+                      discriminates NOTHING
+
+    AND THE GATE IS RIGHT EVERY TIME. A criterion whose whole claim is "the path this PR does not
+    touch still behaves as before" passes at head and base BY CONSTRUCTION. It is a valuable test
+    and it is not evidence of a change. The two are being conflated at the point the body is
+    written.
+
+    THE COST IS PAID LATE AND IN FULL. The conflict is only discovered in CI, after a build, and
+    the repair is a body edit plus a PUSH -- a body edit alone does not re-run the gate, because
+    `rerun-failed-jobs` replays the `pull_request` payload frozen at the original trigger and
+    re-reads the old criteria. So each instance costs: one full CI cycle to fail, one human
+    diagnosis, one body edit, one empty commit, one more full CI cycle. Three times in one pass.
+
+    IT IS NOT THE AUTHORS' CARELESSNESS. "State what else you did not break" is good engineering
+    prose and exactly what a careful worker writes. Nothing at authoring time tells them that this
+    particular sentence belongs in the suite rather than in the acceptance block.
+  design: |
+    (i) THE EMITTER REFUSES THE SHAPE AT AUTHOR TIME, where it costs one line instead of two CI
+        cycles. A criterion is unfalsifiable-by-construction when its own claim is that behaviour
+        is UNCHANGED, and the body emitter already owns the acceptance block it writes
+        (`src/lib/plan-pr-emitter.ts`, `body-repair.ts`).
+
+    (ii) THE PREDICATE IS THE GATE'S OWN, NOT A SECOND NOTION OF IT. `rmd check-acceptance --base`
+         (W1-T3687, #5844) already executes a criterion against the base and reports
+         `executed_stale`. Author time should ASK THAT, not re-implement a guess from the claim's
+         wording -- a local regex that disagreed with the gate would be worse than no check, and a
+         wording heuristic cannot see that "#5843's four criteria" are stale while their prose
+         reads like ordinary behaviour claims.
+
+    (iii) THE REMEDY IS OFFERED, NOT JUST THE REFUSAL. The guard is a real test and must not be
+          deleted to clear the gate -- the refusal says: keep the test, withdraw the criterion,
+          and name in the body why it was withdrawn. That is what a human did by hand on #5840 and
+          #5844 in this pass, three times, identically.
+
+    (iv) A TEST-ONLY PR IS ITS OWN CASE AND IS NOT SOLVED BY THIS. #5843 adds coverage for
+         behaviour that already works, so NO criterion it can write will discriminate. That PR
+         needs a human ruling on whether its task is stale, and this task must not paper over it
+         by inventing an exemption -- it only stops the two-cycle cost for the ordinary case.
+
+    NOT IN SCOPE: changing proof-discrimination's verdicts or its grandfather baseline. The gate is
+    correct; the cost is that nothing says so until CI does.
+  acceptance:
+    - claim: "an acceptance criterion whose proof passes at the base too is refused when the body is written, not after a build"
+      proof: "unit test: a criterion that passes at base is refused at author time"
+    - claim: "the author-time refusal consults the same base execution the gate uses rather than guessing from the claim's wording"
+      proof: "unit test: the author-time refusal executes against base, never a wording heuristic"
+    - claim: "the refusal tells the author to keep the test and withdraw the criterion, never to delete the test"
+      proof: "unit test: the remedy keeps the test and withdraws the criterion"
+    - claim: "a criterion that genuinely discriminates is written through untouched"
+      proof: "unit test: a discriminating criterion is written through untouched"
+    - claim: "a diff that can produce no discriminating criterion at all is reported as needing a human, not silently emptied"
+      proof: "unit test: a body with no discriminating criterion asks for a human"
+  falsifier: |
+    Implement the predicate as a regex over the claim's prose and the second assertion goes red --
+    which is the specific wrong fix here, because #5843's criteria read like ordinary behaviour
+    claims and are stale anyway, while a claim containing the word "unchanged" can still
+    discriminate. Have the remedy delete the offending test and the third fails. Empty the
+    acceptance block when nothing discriminates and the fifth fails.
+  risk: high
+  band_meaning: span
+  # BREADTH, NOT BLAST RADIUS. The emitter that writes a body and the verb that judges a criterion
+  # against the base are two files for one concern: what may be written into an acceptance block.
+  # Splitting leaves an emitter asking a question no verb answers.
+  origin: human
+  files: [src/lib/plan-pr-emitter.ts, src/lib/body-repair.ts]
+  status: queued
+  attempts: 0
+  note: |
+    Depends in spirit on W1-T3687 (#5844), which adds `rmd check-acceptance --base` -- the base
+    execution design (ii) requires. Not a hard `depends_on`: if that PR does not land, this one
+    must still refuse the shape, and would then have to build the base comparison itself rather
+    than invent a wording heuristic.
