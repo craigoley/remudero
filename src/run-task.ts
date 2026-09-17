@@ -21960,8 +21960,15 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
               maxBuffer: 1 << 26,
             }),
           );
-        } catch {
+        } catch (error) {
+          // NOT A BARE CATCH, and not only to satisfy the census: an unreadable diff here silently
+          // widens what the linter admits (a forward reference is ADMITTED, never refused), so the
+          // one thing a reader needs is WHY it could not be read.
           planOnlyFilingDiff = undefined;
+          console.error(JSON.stringify({
+            event: "lint_plan.plan_only_diff_unreadable",
+            reason: String((error as Error)?.message ?? error),
+          }));
         }
       }
       if (planOnlyFilingDiff !== undefined) opts.planOnlyFiling = planOnlyFilingDiff;
