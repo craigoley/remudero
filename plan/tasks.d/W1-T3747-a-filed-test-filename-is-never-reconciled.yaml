@@ -1,0 +1,79 @@
+- id: W1-T3747
+  title: "A TASK'S DECLARED TEST FILENAME IS A FORWARD REFERENCE NOTHING EVER RECONCILES — the build ships its suite under a different name, passes on its OWN body's proofs, merges, credits the task by branch name, and the task record's proofs are left permanently dead"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files: [src/lib/task-linter.ts]
+  origin: oper#squeeze-session-2026-09-17
+  plan_refs: ["W1-T3730", "W1-T3727"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED ON #5941, and it is the direct cause of an operator merging a PR by hand.
+
+    W1-T3727 declared `files: [..., test/a-committing-lane-diverts-once-the-harness-owns-git.test.ts]`
+    and three `grep:` proofs naming that path. The build shipped its suite as
+    `test/the-fix-rung-survives-an-exhausted-subscription.test.ts`. Nothing reconciled the two. The
+    review resolved criteria from the TASK RECORD (via the trailer/branch), every proof errored
+    against a path that does not exist, and the verdict capped:
+
+        capped = True          capped_reason = exec-error:3
+        unexecutable_count = 3
+        floor_state = success
+
+    A CAPPED verdict posts `state: "success"`, so the PR rendered fully green — and auto-merge
+    refused it, silently, forever (the stall W1-T3733 escalates). The operator merged it by hand
+    and asked why the fleet had not.
+
+    WHY NO EXISTING GATE CATCHES IT. Each one is individually right and the gap is between them:
+      - `lint-plan` runs PRE-dispatch, where the forward reference is legitimate and unresolvable
+        by construction (`LintOpts.proofResolvability`'s own comment says exactly this).
+      - W1-T3730 is fixing the OPPOSITE failure — the linter wrongly refusing a forward reference
+        on a plan-only FILING diff. It makes filings MORE able to name a test file; it does not
+        make the build honour the name.
+      - The build's own review passes, because a PR body's `## Acceptance` block names the file
+        that really shipped. The task record's dead proofs are never in front of it.
+      - Merging credits the task, so it is never dispatched again and the dead proofs are never
+        evaluated by anything, ever.
+
+    THE ASYMMETRY THAT MAKES IT WORTH A GATE: the failure is INVISIBLE AND PERMANENT. The task
+    reads "shipped", its proofs read as executable, and both are false. This is the sixth instance
+    of the paraphrase/forward-reference class this fleet has repaired by hand (W1-T3685, W1-T3659,
+    W1-T3666, W1-T3657, W1-T3667), and per CLAUDE.md a rule stated only in prose "can be violated
+    silently and repeatedly, which is why several of these bullets exist at all" — so the
+    deliverable is a gate that REFUSES, not a convention.
+
+    THE CHECK, stated as the thing that must go red: on a diff that CREDITS a task (a
+    `Remudero-Task:` trailer or a `run-<id>-<epoch>` head), every `test/` path in that task's
+    `files:` must EXIST in the head tree, and every `grep:`/`unit test:` proof naming a `test/`
+    path must resolve there. It has the diff, the task record and the head tree — all three — which
+    is precisely what pre-dispatch lacks. The remedy it names is the cheap one: repoint the task
+    record's proofs at the file that shipped, in the same PR.
+
+    DO NOT IMPLEMENT THIS AS A REVIEW DOWNGRADE. Capping is already what happens and it is the
+    behaviour being fixed: a cap posts success and stalls invisibly. This must fail LOUDLY, at a
+    point where the remedy is one edit to the shard.
+
+    FILES NOTE (W1-T3730): this shard's `files:` deliberately OMITS the test file the build will
+    add. That is not an understatement of scope — it is the only way past `lint-plan`'s
+    `proof-unit-test-unresolvable` check, which reads a `test/` path in `files:` as "this diff
+    ships the suite" and then refuses every forward-referencing proof title. On a plan-only filing
+    that premise is false, which is exactly the defect W1-T3730 is filed to fix. The build MUST
+    add the test file named in the acceptance proofs below and add it to `files:` at that point.
+
+  acceptance:
+    - claim: "a build crediting a task is refused when the task's declared test path is absent from the head tree"
+      proof: "unit test: W1-T3747: a credited build with an absent declared test path is refused"
+    - claim: "a build whose declared test path really shipped passes unchanged"
+      proof: "unit test: W1-T3747: a credited build whose declared test path shipped passes"
+    - claim: "a plan-only filing is untouched, so the forward reference stays legal pre-dispatch"
+      proof: "unit test: W1-T3747: a plan-only filing is exempt"
+  note: |
+    reservation hand-off: main -> plan/file-squeeze-findings-1789677997
+
+    Minted on `main` from the operator checkout; recorded here because the filing branch is not
+    that ref.

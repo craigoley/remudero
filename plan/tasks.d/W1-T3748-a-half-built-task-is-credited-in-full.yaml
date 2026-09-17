@@ -1,0 +1,69 @@
+- id: W1-T3748
+  title: "A TASK DECLARING TWO SURFACES IS CREDITED IN FULL WHEN ONE SHIPS — the branch-name credit path asks only which task a PR belongs to, never whether the diff covered the scope the record declared"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files: [src/lib/task-linter.ts]
+  origin: oper#squeeze-session-2026-09-17
+  plan_refs: ["W1-T3746", "W1-T3747"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED, same session as W1-T3747 and a DIFFERENT defect — that one is about a proof naming a
+    file that does not exist, this one about a declared file nobody touched.
+
+    W1-T3727's title names both committing lanes ("RETRO AND alert_fix STOP DEAD UNDER A
+    SQUEEZE"), its rationale sizes the work as both, and its `files:` declares
+    `src/lib/worker.ts` and `src/run-task.ts`. PR #5941 built the alert_fix half alone. It merged
+    on branch `run-W1-T3727-1789667671000`, and the branch-name credit path marked W1-T3727 done.
+    The retro half is refiled as W1-T3746 only because a human happened to re-read the shard.
+
+    THE CREDIT PATH ASKS THE WRONG QUESTION. `ownsBranch` (status.ts) asks "which task does this PR
+    belong to". That is the right question for ATTRIBUTION and the wrong one for COMPLETION — and
+    the fleet uses one answer for both. A task can therefore be credited by a diff that touched a
+    strict subset of what it declared, with no signal anywhere.
+
+    WHY THE EXISTING GATES DO NOT SEE IT:
+      - `rule15-filing` polices which paths may ride together in one PR, never whether the declared
+        set was COVERED.
+      - The review resolves acceptance criteria, and a half-built task's criteria can be fully met:
+        W1-T3727's three proofs all named the ONE test file the alert_fix half was going to add.
+        Criteria describe evidence, not scope.
+      - `duplicate-surface` is advisory and fires on OVERLAP between tasks, not under-coverage
+        within one.
+
+    THE CHECK: on a diff crediting a task, every non-`plan/` path in that task's `files:` must
+    appear in the diff, or the PR must say which ones it deliberately left and why. Under-coverage
+    is then a stated decision rather than a silent one. That last clause matters — splitting a task
+    mid-build is legitimate and common; what must not stay possible is doing it by accident and
+    having the plan record the opposite.
+
+    SIZING NOTE: `files:` is advisory in several other places by design, so this must NOT become a
+    hard refusal on first landing. Ship it as a LOUD, named warning carrying the uncovered paths,
+    measure how often it fires across recent merged PRs, and let that measurement decide whether it
+    ratchets. A bound that fires on a healthy condition is this repo's recurring defect (CLAUDE.md,
+    investigation discipline) — so the population it separates must be observed before it refuses.
+
+    FILES NOTE (W1-T3730): this shard's `files:` deliberately OMITS the test file the build will
+    add. That is not an understatement of scope — it is the only way past `lint-plan`'s
+    `proof-unit-test-unresolvable` check, which reads a `test/` path in `files:` as "this diff
+    ships the suite" and then refuses every forward-referencing proof title. On a plan-only filing
+    that premise is false, which is exactly the defect W1-T3730 is filed to fix. The build MUST
+    add the test file named in the acceptance proofs below and add it to `files:` at that point.
+
+  acceptance:
+    - claim: "a diff crediting a task reports the declared files it did not touch"
+      proof: "unit test: W1-T3748: a credited diff reports its uncovered declared files"
+    - claim: "a diff covering every declared file reports nothing"
+      proof: "unit test: W1-T3748: full coverage reports nothing"
+    - claim: "the check ships advisory, never as a refusal, until the population is measured"
+      proof: "unit test: W1-T3748: under-coverage is advisory"
+  note: |
+    reservation hand-off: main -> plan/file-squeeze-findings-1789677997
+
+    Minted on `main` from the operator checkout; recorded here because the filing branch is not
+    that ref.
