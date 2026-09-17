@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse } from "yaml";
+import { buildProjectInit } from "../src/lib/project-init.js";
 
 // ── W1-T3725 — A PLAN-ONLY FILING PAID 3.8 MINUTES OF CodeQL ON A DIFF WITH NO CODE ──────────
 //
@@ -23,6 +24,8 @@ import { parse } from "yaml";
 // WHAT IS REAL HERE: the committed workflow file, parsed. No fixture stands in for it.
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const FIXED_NOW = () => new Date("2026-07-18T12:00:00.000Z");
+const REAL_BASELINES = { coveragePct: 73.4, branchesPct: 68.9, mutationScorePct: 61.2, dupPct: 4.2 };
 const codeql = parse(readFileSync(join(ROOT, ".github", "workflows", "codeql.yml"), "utf8")) as {
   on: { pull_request?: { "paths-ignore"?: string[] }; push?: Record<string, unknown>; schedule?: unknown };
 };
@@ -72,11 +75,18 @@ test("CodeQL is not in the required contexts a skip could strand", () => {
   // A skipped REQUIRED check leaves a PR permanently unmergeable. This one is not required — which
   // is what makes the whole change safe, and a future operator could add the context without ever
   // knowing that. Asserted against the repo's own recorded protection, not against prose.
-  const initSrc = readFileSync(join(ROOT, "src", "lib", "project-init.ts"), "utf8");
-  const contexts = /required_status_checks:\s*\{[^}]*contexts:\s*\[([^\]]*)\]/.exec(initSrc)?.[1] ?? "";
-  const names = contexts.split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
-  assert.ok(names.length > 0, "the recorded required contexts must be readable — a vacuous pass proves nothing");
-  assert.ok(!names.some((n) => /codeql/i.test(n)), `CodeQL must not be a required context, got ${JSON.stringify(names)}`);
+  // BEHAVIOUR, NOT SOURCE TEXT (W1-T2905). Reading project-init.ts as text and regexing its
+  // `contexts:` array passes when the prose is right and the payload is wrong, and breaks on an
+  // innocent reformat. `buildProjectInit` returns the very payload that is PUT to GitHub, so ask it.
+  const contexts = buildProjectInit({
+    owner: "acme-corp",
+    repo: "widget-service",
+    profile: "ts-node",
+    baselines: REAL_BASELINES,
+    now: FIXED_NOW,
+  }).branchProtection.required_status_checks.contexts;
+  assert.ok(contexts.length > 0, "the required contexts must be readable — a vacuous pass proves nothing");
+  assert.ok(!contexts.some((n) => /codeql/i.test(n)), `CodeQL must not be a required context, got ${JSON.stringify(contexts)}`);
 
   // THE CONTROL'S OTHER HALF. "CodeQL is not required" is also true of a tree where nothing skips
   // it — it was true before this change and would be true after a revert, which is exactly why
