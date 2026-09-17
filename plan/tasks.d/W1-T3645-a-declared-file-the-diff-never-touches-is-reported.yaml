@@ -7,7 +7,11 @@
   principles: {tdd: strict}
   risk: medium
   budget_usd: 15.00
-  files: [src/lib/review.ts, test/a-declared-file-the-diff-never-touches-is-reported.test.ts]
+  # THE SUITE IS DELIBERATELY NOT LISTED. Standing rule 15 makes this filing ride alone, and a
+  # test/ path here reads as "this diff ships the suite", which turns the `unit test:` proof below
+  # into proof-unit-test-unresolvable in a tree that by rule cannot carry one. It is
+  # test/a-declared-file-the-diff-never-touches-is-reported.test.ts, and it lands with #5865.
+  files: [src/lib/review.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T3646", "W1-T3647", "W1-T2525"]
   status: queued
@@ -52,13 +56,23 @@
     concern count it inflated and the Rule 19 band it forced. "src/run-task.ts is declared but
     unchanged" is a shrug; "declared but unchanged, and it is the whole of this task's second
     concern" is a ruling.
+  # RE-POINTED 2026-09-17. THIS TASK'S PREMISE WAS PARTLY WRONG. It says the over-declaration
+  # direction "is silent today"; MEASURED against base ae3395b0adce, it was not --
+  # `inverseScopeAdvisorySection` and `unwiredAdvisories` both already lived in src/lib/review.ts,
+  # and the head suite's own tests for reporting and for staying advisory PASS against base source
+  # (3 tests: 2 pass, 1 fail). The one thing that was genuinely missing is the CONSEQUENCE naming,
+  # and that is the single test that fails on base. So this is one criterion, not three.
   acceptance:
-    - claim: "a PR whose task declares a file the diff never touches is reported in the reviewer's declared-scope block, the direction that is silent today"
-      proof: "unit test: a declared file the diff never touches is reported"
-    - claim: "the report names the consequence, so a reader sees that the phantom path is what supplies the task's extra concern rather than merely that it is unused"
+    - claim: "the over-declaration report names the consequence, so a reader sees that the phantom path is what supplies the task's extra concern rather than merely that it is unused"
       proof: "unit test: the over-declaration report names the concern it inflates"
-    - claim: "it stays advisory and never blocks, because a legitimate widening and a phantom path are indistinguishable from the diff alone"
-      proof: "unit test: an over-declared file does not change the review verdict"
+  # WITHDRAWN AS CRITERIA, KEPT AS TESTS — both characterise behaviour that already shipped:
+  #   "a PR whose task declares a file the diff never touches is reported in the reviewer's
+  #    declared-scope block"  / proof "unit test: a declared file the diff never touches is reported"
+  #   "it stays advisory and never blocks"
+  #    / proof "unit test: an over-declared file does not change the review verdict"
+  # Both pass against base source, so neither can witness this diff. They are worth keeping as
+  # regression cover on a reporting path that had little. See W1-T3721, which refuses a criterion
+  # that does not track its code at author time rather than after a build.
   falsifier: |
     Reconstruct W1-T3621's declaration against #5689's merged diff: the report must name
     src/run-task.ts. Remove that path from files: and the report must fall silent. Make the check

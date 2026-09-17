@@ -267,6 +267,22 @@ jobs:
               run_main_ceiling_gate learnings-budget-ratchet learnings-budget-ratchet
               run_main_ceiling_gate claude-md-budget-ratchet claude-md-budget-ratchet
               run_main_ceiling_gate comment-load-signal comment-load-signal -- --base HEAD^
+              # W1-T3655: THE CENSUS WATCHES ITS OWN BASE. expiring-fixture-census otherwise only
+              # rides `comment-load-ratchet`, a `pull_request`-only job (W1-T1033) -- so a fixture
+              # stamp already sitting on `main` reddened every open PR beside it while no run was
+              # ever charged with fixing it (MEASURED 2026-09-16: one main-branch stamp took
+              # #5725, #5733, #5734, #5736, #5738 and #5739 red at once, each paying the same
+              # diagnosis separately). It is not an `npm run` script, so it is invoked directly
+              # rather than through `run_main_ceiling_gate` above. `CENSUS_MAIN_BRANCH_RUN=1`
+              # forces the STRICT reading: on this lane `origin/main` IS the commit under test, so
+              # reading it as an earlier base to inherit a crossing from would let a main-branch
+              # bomb excuse itself on the one run that exists to catch it.
+              echo "::group::main-ceiling-drift:expiring-fixture-census"
+              CENSUS_MAIN_BRANCH_RUN=1 RMD_CI_REPORT=1 node scripts/expiring-fixture-census.mjs || {
+                CODE=1
+                echo "main-ceiling-drift: expiring-fixture-census BLOCKED on main itself"
+              }
+              echo "::endgroup::"
               if [ "$CODE" -ne 0 ]; then
                 echo "main-ceiling-drift: main may be past a recorded ceiling or the test shard failed."
                 echo "If a grouped ceiling above is BLOCKED, no pull request is wrong — main is."
@@ -1829,6 +1845,11 @@ jobs:
       # identical reason the coverage job's two gate steps above are scoped the same way —
       # test/expiring-fixture-census.test.ts spawns this script over BLOCKING fixture trees with no
       # env override, and a job-wide flag would publish those as real check-run annotations.
+      #
+      # W1-T3655: this PR-side run no longer charges a crossing that is already on `origin/main` to
+      # the branch beside it — the `ci` job's push-to-main lane above now runs this same script
+      # (CENSUS_MAIN_BRANCH_RUN=1) as the run that OWNS main, so an inherited crossing is reported
+      # here but does not decide this step's exit code (scripts/expiring-fixture-census.mjs).
       - name: Expiring-fixture census (no fixture crosses its threshold inside the margin)
         env:
           RMD_CI_REPORT: "1"

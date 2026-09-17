@@ -2061,13 +2061,18 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   });
 
   // "the sha the LIVE process booted at" presupposes a live process — a stopped daemon has no running HEAD to compare,
-  // however recent its last boot. Gated on `running`, so this never reports fresh or stale for a daemon that is down.
+  // however recent its last boot. But W1-T3241: "cannot sense the process" is not "observed it stopped" — the boot sha
+  // and origin/main sha are a git question, not a liveness question, so an unsensed daemon (`sensed === false`, the
+  // ONLY state on a host with no launchd sensor) must not suppress this comparison the way a POSITIVELY stopped daemon
+  // still should. `canCompareHeadVsOrigin` is true when the daemon is running OR the sensor could not be asked at all;
+  // it is false only when the sensor answered and said "not running" — that is the one case a boot sha proves nothing.
   const daemonRow = services.find((s) => s.service === "daemon")!;
-  // HOISTED out of the `running` branch below — one resolution, two consumers. LATCHES needs origin/main to judge a
+  const canCompareHeadVsOrigin = daemonRow.running || daemonRow.sensed === false;
+  // HOISTED out of the branch below — one resolution, two consumers. LATCHES needs origin/main to judge a
   // DEPLOY_FAILED alert, independently of whether a daemon is up; resolving twice would be two git calls for one fact.
   const originSha = resolveOriginMainSha(deps.repoDir);
   let headVsOriginMain: StaleFlag = { status: "unknown" };
-  if (daemonRow.running && boots.headSha && originSha) {
+  if (canCompareHeadVsOrigin && boots.headSha && originSha) {
     headVsOriginMain = sameCommit(boots.headSha, originSha) ? { status: "fresh" } : { status: "stale", headSha: boots.headSha, originSha };
   }
 
