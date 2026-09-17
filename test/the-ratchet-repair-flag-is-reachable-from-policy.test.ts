@@ -36,7 +36,7 @@ function ratchetPr(over: Partial<OpenPrView> = {}): OpenPrView {
     ciFailures: checks.map((name) => ({ name, logTail: `${name}: record it in the baseline` })),
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-10T00:00:00.000Z",
+    lastActivityAt: "2026-09-10T00:00:00.000Z", // expiring-fixture: exempt -- this suite pins its own clock (`now: () => NOW`) at the SAME instant as this stamp, so the age it exercises is always 0 and never the wall clock; PROVEN by shifting both NOW and this stamp back 18 months, where all 4 tests still pass
     headSha: "ratchet-policy-head",
     autoMergeArmed: false,
     ...over,
