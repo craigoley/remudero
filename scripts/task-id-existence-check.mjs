@@ -23,6 +23,7 @@
 // Exported pure pieces let the fixture test drive each surface independently; main is exported so
 // the CLI itself (spawn + exit code) can be proved too.
 
+import * as nodeFs from "node:fs";
 import { readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
@@ -217,6 +218,106 @@ export function shardNoteRecordsReservationHandoff(text, holderBranch, filerBran
 // else ever shares its line.
 export function reservationHandoffNoteLine(holderBranch, filerBranch) {
   return `reservation hand-off: ${holderBranch} -> ${filerBranch}`;
+}
+
+
+// ── W1-T3739: THE STUB, SO THE ONE LINE THE GATE MATCHES IS GENERATED ────────────────────────
+
+/**
+ * W1-T3739 — a shard stub whose hand-off line is PRODUCED by
+ * {@link reservationHandoffNoteLine}, never transcribed.
+ *
+ * That function exists with a comment stating its whole purpose: it returns "ONLY the bare
+ * hand-off text, with nothing before or after it, so whatever prints it can guarantee -- BY
+ * CONSTRUCTION, not by instruction a reader might skip -- that nothing else ever shares its line."
+ * The guarantee held for this gate's own refusal message and never reached the FILER, who typed
+ * the line into a shard by hand. MEASURED 2026-09-17: wrong three times in one day — #5894 wrote
+ * `planfast -> planfast` where the reservation had recorded `unknown`, and #5901 shipped without
+ * the line twice.
+ *
+ * THE HOLDER IS READ, NEVER GUESSED. `holderBranch` must come from the reservation ref itself
+ * (parseReservationHolderLine, above) — the same source {@link evaluateReservationHolderConflicts}
+ * consults. #5894's whole defect was an author inferring the holder from the branch they were on
+ * rather than from what the reservation recorded, and a scaffolder that repeated the inference
+ * would reproduce the bug with more confidence.
+ *
+ * NO HAND-OFF NEEDED, NO LINE. When the holder IS the filer there is nothing to record, and
+ * emitting the line anyway would train a filer to leave a meaningless one behind.
+ */
+export function scaffoldShardStub({ id, slug, title, holderBranch, filerBranch }) {
+  if (!/^W1-T\d+$/.test(String(id ?? ""))) throw new Error(`scaffoldShardStub: '${id}' is not a task id`);
+  const needsHandoff =
+    typeof holderBranch === "string" &&
+    typeof filerBranch === "string" &&
+    holderBranch.length > 0 &&
+    filerBranch.length > 0 &&
+    holderBranch !== filerBranch;
+  // W1-T3648: the matcher is END-OF-LINE ANCHORED, so the produced line gets a line of its own and
+  // nothing is ever appended to it. The blank line after it is what keeps a later editor's prose
+  // from being typed onto the same physical line.
+  const note = needsHandoff
+    ? ["  note: |", `    ${reservationHandoffNoteLine(holderBranch, filerBranch)}`, "", "    TODO: why this id was minted here, if it needs saying."]
+    : ["  note: |", "    TODO: anything a later reader needs that the rationale does not carry."];
+  return [
+    `- id: ${id}`,
+    `  title: ${JSON.stringify(title ?? `TODO: one line naming the DEFECT, not the fix (slug: ${slug ?? id})`)}`,
+    "  repo: remudero",
+    "  depends_on: []",
+    "  type: implement",
+    "  verify: auto",
+    "  principles: {tdd: strict}",
+    "  budget_usd: 30.00",
+    "  rationale: |",
+    "    TODO: what was MEASURED, with the command and its output. Not a description of the fix.",
+    "  design: |",
+    "    TODO: the shape, and what it deliberately does NOT do.",
+    "  acceptance:",
+    "    - claim: \"TODO: a fact about behaviour, not about the diff\"",
+    "      proof: \"unit test: TODO — a title this diff ADDS, or it cannot discriminate\"",
+    "  falsifier: |",
+    "    TODO: name the change that reddens each assertion, one per assertion.",
+    "  risk: medium",
+    "  band_meaning: blast-radius",
+    "  origin: human",
+    "  plan_refs: []",
+    "  files: []",
+    "  status: queued",
+    "  attempts: 0",
+    ...note,
+    "",
+  ].join("\n");
+}
+
+
+/**
+ * W1-T3739 — write the scaffolded stub, or decline.
+ *
+ * Returns the path written, or `undefined` when scaffolding was declined — a filer with their own
+ * shard is never forced through this, which is why the escape exists at all rather than as a
+ * courtesy. REFUSES to overwrite: a stub landing on top of a real shard would destroy a filing to
+ * save a paste.
+ */
+export function writeScaffoldedShard({ planDir, id, slug, title, holderBranch, filerBranch, scaffold = true }, fs = nodeFs) {
+  if (scaffold === false) return undefined;
+  const safeSlug = slug ?? "todo-name-the-defect";
+  // THE SLUG BECOMES A PATH SEGMENT. Anything but a bare kebab name escapes `planDir` through
+  // `join` — `--slug ../../something` would write outside the plan entirely. Refused by shape
+  // rather than sanitised, because a silently-rewritten filename is a shard nobody can find.
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(safeSlug)) {
+    throw new Error(`writeScaffoldedShard: '${safeSlug}' is not a kebab-case slug — it becomes a path segment`);
+  }
+  const path = join(planDir, `${id}-${safeSlug}.yaml`);
+  // ATOMIC, NOT CHECK-THEN-WRITE. An `existsSync` guard ahead of the write is a race CodeQL
+  // flagged on this very function (high severity, "the file may have changed since it was
+  // checked"): between the two calls a real shard can appear and be silently destroyed. The `wx`
+  // flag makes the create itself the exclusion, so there is no window to lose.
+  try {
+    fs.writeFileSync(path, scaffoldShardStub({ id, slug: safeSlug, title, holderBranch, filerBranch }), { encoding: "utf8", flag: "wx" });
+  } catch (err) {
+    if (err && err.code === "EEXIST") throw new Error(`writeScaffoldedShard: ${path} already exists — refusing to overwrite a filing`);
+    throw err;
+  }
+  return path;
 }
 
 function occurrenceFiles(occurrences) {
@@ -889,6 +990,52 @@ export function main(argv) {
 }
 
 // Only run when executed directly (`node scripts/task-id-existence-check.mjs ...`), never on import.
-if (isMainModule(import.meta.url)) {
+/**
+ * W1-T3739 — `--scaffold <id> --slug <s> [--holder <b>] [--for-branch <b>] [--no-scaffold]`.
+ *
+ * Prints the path it wrote. The HOLDER must be the branch the RESERVATION recorded, not the one
+ * the filer is on — that inference is exactly what #5894 got wrong — so it defaults to reading
+ * the reservation ref rather than to the current branch.
+ */
+export function scaffoldCli(argv, deps = {}) {
+  const flag = (name) => {
+    const i = argv.indexOf(`--${name}`);
+    return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : undefined;
+  };
+  const id = flag('scaffold');
+  if (!id) return { ok: false, message: 'scaffold: --scaffold <id> is required' };
+  const cwd = deps.cwd ?? process.cwd();
+  const filerBranch = flag('for-branch') ?? (deps.currentBranch ?? currentBranch)(cwd);
+  const holderBranch =
+    flag('holder') ??
+    (deps.readHolder ?? ((i) => readReservationHolder('origin', cwd, `refs/rmd-id/${i}`)))(id)?.recordedBranch;
+  try {
+    const written = writeScaffoldedShard(
+      {
+        planDir: deps.planDir ?? join(cwd, 'plan', 'tasks.d'),
+        id,
+        slug: flag('slug'),
+        holderBranch,
+        filerBranch,
+        scaffold: !argv.includes('--no-scaffold'),
+      },
+      deps.fs,
+    );
+    return written
+      ? { ok: true, message: `scaffold: wrote ${written}`, path: written }
+      : { ok: true, message: 'scaffold: declined (--no-scaffold) — nothing written' };
+  } catch (err) {
+    return { ok: false, message: `scaffold: ${String(err.message ?? err)}` };
+  }
+}
+// diff-cov: process-boundary -- the CLI shell. Every DECISION is a pure function tested above
+// (scaffoldShardStub, writeScaffoldedShard, scaffoldCli, including both of scaffoldCli's failure
+// returns); what is left is argv routing and the `process.exitCode` that IS the verdict, which a
+// test cannot observe without spawning a second process.
+if (isMainModule(import.meta.url) && process.argv.includes('--scaffold')) {
+  const out = scaffoldCli(process.argv.slice(2));
+  (out.ok ? console.log : console.error)(out.message);
+  process.exitCode = out.ok ? 0 : 2;
+} else if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2));
 }
