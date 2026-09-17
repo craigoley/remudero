@@ -20838,6 +20838,20 @@ export function duplicateCorpusOpts(
 export const LINT_FILING_SUBJECT_RE =
   /^(?:chore\(plan\)|fix\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/i;
 
+/** Path shapes this repository already treats as non-implementing — documentation and plan
+ *  surfaces, never source (W1-T3706). ONE exported list so `scripts/head-identity-gate.mjs`'s
+ *  diff-shaped admitted form matches these paths without re-spelling them per caller, the same
+ *  discipline {@link LINT_FILING_SUBJECT_RE} already holds for the subject-shaped form it sits
+ *  beside: `*.md` at any depth, plus everything under `plan/`, `docs/`, or `learnings/`. */
+export const NON_CODE_PATH_PATTERNS: RegExp[] = [/\.md$/i, /^plan\//, /^docs\//, /^learnings\//];
+
+/** Is `path` a non-code (documentation/plan) path per {@link NON_CODE_PATH_PATTERNS}? A path
+ *  matching NONE of the patterns is code (or at least not provably non-code), and the caller
+ *  must treat that as refusing the whole head — see the gate's own `isNonCodeHead`. */
+export function isNonCodePath(path: string): boolean {
+  return NON_CODE_PATH_PATTERNS.some((re) => re.test(path));
+}
+
 /** Splits lint-plan's failing tasks by MERGE EVIDENCE in a `git log` dump (`%s%x00%b%x01`
  *  format): a task "has a merged implementation" when any non-filing commit carries its id as a
  *  `Remudero-Task:` trailer or cites it in the subject. Pure over its inputs — the impure read
