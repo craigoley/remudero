@@ -82,7 +82,8 @@ export type LintCheck =
   | "declared-scope"
   | "advisory-routing"
   | "deferred-follow-up"
-  | "proof-base-discrimination";
+  | "proof-base-discrimination"
+  | "proof-unit-test-base-wrapper";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -1463,6 +1464,71 @@ export function proofUnitTestUnresolvableViolations(task: Task, opts: LintOpts =
         "review already refuses it (parseTestTarget, src/lib/review.ts) later, at the cost of a full build " +
         "and CI round. The match is a LITERAL SUBSTRING against real test titles, never a regex — copy the " +
         "test's exact title out of the file it lives in, with no reinterpretation.",
+    });
+  });
+  return violations;
+}
+
+// ── PROOF-UNIT-TEST-BASE-WRAPPER (W1-T3651 — a title proof that reads pass on an empty base) ──
+// `proofBaseDiscriminationViolations` (W1-T2835) judges only the PATH form; a name-filtered
+// (TITLE-form) `unit test:` proof stays silent there because its base outcome turns on whether
+// the title matches SOMETHING at base, not on one file's presence. TRAP, reproduced directly
+// (#5739, this task's own rationale): at base a title's file is absent, `node --test
+// --test-name-pattern` matches zero tests, and node STILL exits 0 (`ok 1 - <file>`) — the proof
+// reads pass on a base with none of the behaviour it claims, and `classifyBaseProofOutcome`
+// (review.ts) grades it `executed_stale` a CI round later, silently.
+//
+// SHAPE, NOT EXECUTION: reuses the SAME injected `resolveNameFilteredCandidates` {@link
+// proofUnitTestUnresolvableViolations} already calls, only to learn WHICH file a title resolves
+// into TODAY — never running a test itself. When that resolution is unambiguous, the file is a
+// member of THIS task's own `files:` (the diff holds it), and {@link LintOpts.pathExistsAtBase}
+// reports it absent, the base reading is structurally dishonest: no tree makes it true.
+//
+// BLOCK, unlike proof-base-discrimination's WARN: that check's false positive is a legitimate
+// REPAIR of an already-existing test; this one names a file absent at base ENTIRELY, so there is
+// no honest reading to protect. Silent absent either injected predicate, same as its sibling.
+
+/** W1-T3651 — every name-filtered `unit test:` proof whose raw title resolves, UNAMBIGUOUSLY, into
+ *  a file this task's own `files:` declares, when that file is ABSENT at the base ref. BLOCK,
+ *  unconditionally: see the section comment above for why this differs from {@link
+ *  proofBaseDiscriminationViolations}'s WARN. Silent absent either injected predicate. */
+export function proofUnitTestBaseWrapperViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const resolveNameFilteredCandidates = opts.resolveNameFilteredCandidates;
+  const pathExistsAtBase = opts.pathExistsAtBase;
+  if (!resolveNameFilteredCandidates || !pathExistsAtBase) return [];
+  const declared = new Set(task.files ?? []);
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to resolve
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted || whitelisted.kind !== "test" || !whitelisted.nameFiltered) return;
+    const rawName = whitelisted.label;
+    // The SAME resolver `execWhitelistedProof` itself calls — this reads WHERE the title lives at
+    // HEAD, never runs a test, and can never disagree with the reviewer over what "resolves" means.
+    const resolution = resolveNameFilteredCandidates(rawName);
+    // Zero matches is proof-unit-test-unresolvable's own concern (or a legitimate forward
+    // reference); more than one match means this title is not uniquely THIS file's, so "only
+    // home" cannot be claimed. Neither shape licenses a refusal here.
+    if (resolution.status !== "resolved" || resolution.files.length !== 1) return;
+    const path = resolution.files[0]!;
+    if (!declared.has(path)) return; // not THIS diff's own file — some other task's concern
+    if (pathExistsAtBase(path)) return; // already present at base — the legitimate repair case
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    const head = rawName.slice(0, 70) + (rawName.length > 70 ? "…" : "");
+    violations.push({
+      check: "proof-unit-test-base-wrapper",
+      severity: "block",
+      message:
+        `criterion ${i + 1} ("${claimHead}") \`unit test:\` proof "${head}" resolves ONLY into ` +
+        `"${path}" today, a file this task's own files: declares and which does NOT exist at the ` +
+        "base ref. A zero-name-pattern match still prints `ok 1 - <file>` and exits 0 (node's own " +
+        "TAP wrapper, load-bearing elsewhere per CLAUDE.md's ledger section), so this proof reads " +
+        "PASS on a base that has none of the behaviour it claims, and classifyBaseProofOutcome " +
+        "(review.ts) grades it executed_stale one CI round later, degrading the criterion to the " +
+        `keyword floor SILENTLY. Unlike a pure-path reference, there is no tree on which this ` +
+        `TITLE reading is honest — rewrite it as the PATH form (\`unit test: ${path}\`), whose ` +
+        "absence at base exits non-zero and genuinely discriminates, or as a `grep:` proof on a " +
+        "line this diff introduces.",
     });
   });
   return violations;
@@ -3079,17 +3145,20 @@ export interface LintOpts {
   /** W1-T2835 — did this repo-relative path exist at the BASE ref? The base-tree counterpart of
    *  {@link LintOpts.moduleExists}, and the only way the base fact reaches this pure module: the
    *  linter never reads disk and never shells git. ABSENT ⇒ {@link proofBaseDiscriminationViolations}
-   *  is SILENT, the same contract `blockedDisposition` and `newMonolithIds` already follow, and for
-   *  the same reason — a whole-plan run has no base and must not report the standing population. */
+   *  AND {@link proofUnitTestBaseWrapperViolations} (W1-T3651, its BLOCK-severity title-form sibling)
+   *  are both SILENT, the same contract `blockedDisposition` and `newMonolithIds` already follow, and
+   *  for the same reason — a whole-plan run has no base and must not report the standing population. */
   pathExistsAtBase?: (repoRelPath: string) => boolean;
   /** Severity for {@link proofBaseDiscriminationViolations}. Default "warn", and NO call site wires
    *  "block": path-presence at base is a HEURISTIC for "the proof passes at base", so a repair whose
    *  target test is RED at base discriminates correctly and a blocking arm would refuse it wrongly. */
   proofBaseDiscrimination?: LintSeverity;
   /** The reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to a real checkout, so
-   *  lint and review cannot disagree. Absent ⇒ {@link proofNameResolutionViolations} AND {@link
+   *  lint and review cannot disagree. Absent ⇒ {@link proofNameResolutionViolations}, {@link
    *  proofUnitTestUnresolvableViolations} (W1-T3639, the block-severity sibling that also
-   *  requires the task's `files:` to name a test/ path) are both silent. */
+   *  requires the task's `files:` to name a test/ path), and {@link
+   *  proofUnitTestBaseWrapperViolations} (W1-T3651, which also needs {@link
+   *  LintOpts.pathExistsAtBase}) are all silent. */
   resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
   /** Other OPEN tasks' corpus entries for {@link duplicateTitleViolations} to compare this task
    *  against. Supplied by the caller, never fetched. Absent or empty ⇒ silent. */
@@ -3162,6 +3231,7 @@ const BUILD_VERIFICATION_CHECKS = new Set<LintCheck>([
   "proof-scope",
   "proof-name-resolution",
   "proof-base-discrimination",
+  "proof-unit-test-base-wrapper",
   "shared-proof",
   "unbound-criterion",
 ]);
@@ -3218,6 +3288,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...sharedProofViolations(task));
   violations.push(...unboundCriterionViolations(task, opts));
   violations.push(...proofBaseDiscriminationViolations(task, opts));
+  violations.push(...proofUnitTestBaseWrapperViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));
