@@ -1735,6 +1735,7 @@ import {
   queryLaunchdServiceSensed,
   queryLaunchdListStatus,
   queryLaunchdListStatusSensed,
+  queryProcessServiceSensed,
   type LaunchdServiceState,
   type LaunchdListStatus,
   realUid,
@@ -7898,12 +7899,48 @@ export function runNpmScriptViaSpawn(script: string, cwd: string): { status: num
  * makes to the worktree beyond whatever the generator itself already wrote (acceptance criterion
  * 5: the rung commits the generator's OWN output, never a hand-composed edit). `changed: false`,
  * no commit made, when `git add -A` staged nothing.
+ *
+ * W1-T3243: a REFUSED commit (e.g. `hooks/pre-commit` rejecting the generator's own output) must
+ * not leave `git add -A`'s staging behind — the same shape and same fix as this file's sibling
+ * plan-write path, `lib/plan-architect.ts`'s `applyPlanProposalCommit` (design (iv): "the pair is
+ * the unit of repair"). `git write-tree` snapshots the index BEFORE this function's own `add`
+ * (touches neither index nor working tree); on a refused commit, `git read-tree <preTree>`
+ * restores ONLY the index to that snapshot — content the caller staged before this call survives,
+ * content this call staged is undone, and the working tree is never touched (never `git reset
+ * --hard` / `git checkout -- .`, which would also destroy working-tree content this function
+ * never staged). The commit's own refusal is always rethrown unchanged.
  */
 export function commitGeneratorOutputViaGit(opts: { cwd: string; message: string }): { sha: string; changed: boolean } {
+  let preTree: string | null = null;
+  try {
+    preTree = execFileSync("git", ["-C", opts.cwd, "write-tree"], { encoding: "utf8" }).trim();
+  } catch (e) {
+    // No pre-add index snapshot to roll back to (e.g. an unmerged index) — record it; a refused
+    // commit below can then only log-and-skip its rollback, not restore. See (v) below.
+    process.stderr.write(
+      `commitGeneratorOutputViaGit: snapshot.error ${String((e as Error)?.message ?? e)}\n`,
+    );
+  }
   execFileSync("git", ["-C", opts.cwd, "add", "-A"], { stdio: "pipe" });
   const staged = execFileSync("git", ["-C", opts.cwd, "status", "--porcelain=v1"], { encoding: "utf8" });
   if (staged.trim().length === 0) return { sha: "", changed: false };
-  execFileSync("git", ["-C", opts.cwd, "commit", "-m", opts.message], { stdio: "pipe" });
+  try {
+    execFileSync("git", ["-C", opts.cwd, "commit", "-m", opts.message], { stdio: "pipe" });
+  } catch (commitError) {
+    if (preTree !== null) {
+      try {
+        execFileSync("git", ["-C", opts.cwd, "read-tree", preTree], { stdio: "pipe" });
+      } catch (rollbackError) {
+        // (v): a rollback that itself fails must say so, not fail silently — but the ORIGINAL
+        // commit error is still what gets rethrown below, never this one.
+        process.stderr.write(
+          `commitGeneratorOutputViaGit: rollback.error ${String((rollbackError as Error)?.message ?? rollbackError)}\n`,
+        );
+      }
+    }
+    // (iii): the commit's own refusal text must still reach the caller, unmodified.
+    throw commitError;
+  }
   const sha = execFileSync("git", ["-C", opts.cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   return { sha, changed: true };
 }
@@ -20921,6 +20958,20 @@ export function duplicateCorpusOpts(
 export const LINT_FILING_SUBJECT_RE =
   /^(?:chore\(plan\)|fix\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/i;
 
+/** Path shapes this repository already treats as non-implementing — documentation and plan
+ *  surfaces, never source (W1-T3706). ONE exported list so `scripts/head-identity-gate.mjs`'s
+ *  diff-shaped admitted form matches these paths without re-spelling them per caller, the same
+ *  discipline {@link LINT_FILING_SUBJECT_RE} already holds for the subject-shaped form it sits
+ *  beside: `*.md` at any depth, plus everything under `plan/`, `docs/`, or `learnings/`. */
+export const NON_CODE_PATH_PATTERNS: RegExp[] = [/\.md$/i, /^plan\//, /^docs\//, /^learnings\//];
+
+/** Is `path` a non-code (documentation/plan) path per {@link NON_CODE_PATH_PATTERNS}? A path
+ *  matching NONE of the patterns is code (or at least not provably non-code), and the caller
+ *  must treat that as refusing the whole head — see the gate's own `isNonCodeHead`. */
+export function isNonCodePath(path: string): boolean {
+  return NON_CODE_PATH_PATTERNS.some((re) => re.test(path));
+}
+
 /** Splits lint-plan's failing tasks by MERGE EVIDENCE in a `git log` dump (`%s%x00%b%x01`
  *  format): a task "has a merged implementation" when any non-filing commit carries its id as a
  *  `Remudero-Task:` trailer or cites it in the subject. Pure over its inputs — the impure read
@@ -28824,19 +28875,34 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     return 0;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  const deps = realDeps().deployFor({
-    installPath: assessment.installRoot,
-    stateRoot: config.root,
-    daemonLabel: DAEMON_LABEL,
-    // The console is restarted by the SAME cycle, after the daemon verifies healthy: `rmd serve`
-    // loads its code once via tsx, so a deploy it is not restarted for is inert in it. The port is
-    // resolved the same way `rmd serve-plist` resolves it, so the probe watches the port the unit
-    // actually listens on.
-    serveLabel: SERVE_LABEL,
-    servePort: resolveServePort([], config.serve?.port),
-    uid,
-    ledgerPath: ledgerPathFor(config),
-  });
+  const deps = {
+    ...realDeps().deployFor({
+      installPath: assessment.installRoot,
+      stateRoot: config.root,
+      daemonLabel: DAEMON_LABEL,
+      // The console is restarted by the SAME cycle, after the daemon verifies healthy: `rmd serve`
+      // loads its code once via tsx, so a deploy it is not restarted for is inert in it. The port is
+      // resolved the same way `rmd serve-plist` resolves it, so the probe watches the port the unit
+      // actually listens on.
+      serveLabel: SERVE_LABEL,
+      servePort: resolveServePort([], config.serve?.port),
+      uid,
+      ledgerPath: ledgerPathFor(config),
+    }),
+    // W1-T3694 — THE PRODUCER, WIRED. `realDeployDeps`'s own `daemonAlive` reads ONLY
+    // `launchctl list`, which throws on every call on the fleet's only host (Linux has no
+    // launchctl — see deployer.ts's file header), so it read "not observed" on every tick,
+    // permanently. This override reads the SAME sensor chain `rmd status`'s LIVENESS section
+    // already falls back to (`statusCommand`'s own `queryService`, report-commands.ts): launchd
+    // when it can sense it, the process table (`queryProcessServiceSensed`) when it cannot — so
+    // the watchdog tick and `rmd status` can never disagree about whether the daemon is alive.
+    daemonAlive: (): boolean | undefined => {
+      const launchd = queryLaunchdServiceSensed(DAEMON_LABEL, uid, defaultLifecycleExec);
+      if (launchd.sensed) return launchd.pid !== null;
+      const processTable = queryProcessServiceSensed("daemon", defaultLifecycleExec);
+      return processTable.sensed ? processTable.running : undefined;
+    },
+  };
   // W1-T3245: `--image-drift-only` is the WATCHDOG TICK's reading — recycle for a new image,
   // never restart for mount staleness, which the daemon's own freshness exit already owns.
   const result = runDeployCycle(deps, {
@@ -28844,6 +28910,14 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
+  if (result.blocker) {
+    // W1-T3694 — legible without tailing a ledger: a stale-running daemon the tick declined to
+    // act on names both shas right here, in the one place an operator or an alarm already reads.
+    console.log(
+      `### rmd deploy-run — BLOCKER: ${result.blocker.note} ` +
+        `(running ${result.blocker.runningHead}, origin/main ${result.blocker.originMain})`,
+    );
+  }
   return result.reason.startsWith("dirty-tree-conflict") || result.rolledBackTo ? 1 : 0;
 }
 

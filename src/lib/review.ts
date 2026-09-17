@@ -9,6 +9,7 @@ import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
+import { systemClock, type Clock } from "./clock.js";
 import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
@@ -8187,6 +8188,25 @@ export async function postReviewStatusGuarded(
 
 // ── W1-T913: post remudero-review=pending at DETECTION, before judging ──────
 
+/** W1-T3647: the TTL beyond which a `remudero-review=pending` claim is RECLAIMABLE rather than
+ *  deferred to forever (see {@link postReviewPending}'s idempotent-no-op guard, below). #5672
+ *  measured the failure this closes: a claim taken at 23:42 was still pending at 01:42 (2h) while
+ *  its owning run was demonstrably dead — busy on a different PR.
+ *
+ *  DERIVED, NOT A ROUND GUESS, from two numbers already measured and checked into this repo:
+ *  (1) 14 — the WIDEST acceptance-criteria count across the whole live plan, measured 2026-09-17
+ *  over every `plan/tasks.d/*.yaml` (1,613 criteria total; max 14 in one task file). A review
+ *  posts pending BEFORE it runs a single proof, then executes its criteria's proofs serially, so
+ *  this is a real, checked-in bound on how many proof-runs ONE review may need to finish — not a
+ *  guessed multiplier. (2) `proofTimeoutMs` (plan/policy.yaml) — this repo's own MEASURED per-proof
+ *  ceiling, 180_000ms; see that file's "THE 30000 REGRESSION" comment for the measurement (a real,
+ *  passing suite timed at 52.9s on a dev host and still over 60s on the reviewer host) that set it.
+ *
+ *  14 * 180_000ms = 2_520_000ms (42m): comfortably above a real review's serial proof-execution
+ *  time, and comfortably inside #5672's observed 2h-stale window, which the falsifier requires
+ *  this constant to treat as reclaimable. */
+export const REVIEW_LOCK_TTL_MS = 14 * 180_000;
+
 export interface PostReviewPendingOpts {
   owner: string;
   repo: string;
@@ -8204,6 +8224,11 @@ export interface PostReviewPendingOpts {
   lockOpts?: AcquireReviewStatusLockOpts;
   /** Injectable only so the durable owner record is deterministic in tests. */
   ownerIdentity?: { pid: number; startedAt: string };
+  /** The wall clock the TTL is measured against. Defaults to {@link systemClock}, so production
+   *  reads real time and nothing is handed a frozen instant it did not ask for — this is a CLOCK,
+   *  not the fixed `now` field the comment below rules out. Present so the TTL boundary is
+   *  testable, the same reason `ownerIdentity` above is injectable. */
+  clock?: Clock;
 }
 
 export interface PostReviewPendingResult {
@@ -8218,10 +8243,13 @@ export interface PostReviewPendingResult {
  * HERE before touching the lock or network. (1) NEVER REGRESS A TERMINAL VERDICT FOR THE SAME REVIEW INPUT TO PENDING:
  * {@link decideReviewStatusPost}'s precedence only refuses `executed -> no_evidence`, and a pending attempt is always
  * `no_evidence`, so a prior `no_evidence` TERMINAL verdict for this head would sail through; a changed body is a fresh
- * input and may post again. (2) IDEMPOTENT PER INPUT: a `review.pending_posted` line for this exact head+body digest
- * is a no-op, and a dead owner's stuck pending is re-driven by the sweep recognising staleness rather than by racing.
- * The posted status carries the posting `run_id`, which is what sweep.ts's `OpenPrView.reviewPendingSince` producer
- * derives its staleness clock from. */
+ * input and may post again. (2) IDEMPOTENT PER INPUT, BUT ONLY INSIDE {@link REVIEW_LOCK_TTL_MS} (W1-T3647): a
+ * `review.pending_posted` line for this exact head+body digest is a no-op while its own `ts` reads younger than the
+ * TTL, OR while its age cannot be read at all — an unreadable clock FAILS TOWARD HOLDING, never toward reclaim, since
+ * the alternative is two reviewers judging the same head. Only a READABLE age at or past the TTL reclaims: this call
+ * posts itself as the new holder and names the run it took over from, rather than deferring forever to a claim its
+ * own owning run may already be dead. The posted status carries the posting `run_id`, which is what sweep.ts's
+ * `OpenPrView.reviewPendingSince` producer derives its staleness clock from. */
 export async function postReviewPending(opts: PostReviewPendingOpts): Promise<PostReviewPendingResult> {
   const lines = readLiveLedgerRecords(opts.ledgerPath);
   const hasInputIdentity = opts.prUrl !== undefined && opts.reviewInputDigest !== undefined;
@@ -8253,15 +8281,35 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       break;
     }
   }
+  // W1-T3647: a same-sha claim is a no-op ONLY while it is inside the TTL. Age is read off the
+  // claim's OWN ledger `ts` (`priorPending.postedAt`) against the wall clock right now — never a
+  // fixed field on the OPTS, so nothing here can be handed a stale "now" by a caller.
+  let takenOverFrom: PendingReviewStatusRecord | undefined;
   if (priorPending && priorPending.headSha === opts.sha) {
-    return {
-      posted: false,
-      reason:
-        `remudero-review is already pending for ${opts.sha.slice(0, 7)} (owned by run ${priorPending.runId}) ` +
-        "— no-op (W1-T913 idempotent-per-input)",
-    };
+    const claimedAtMs = Date.parse(priorPending.postedAt);
+    const ageMs = Number.isNaN(claimedAtMs) ? undefined : (opts.clock ?? systemClock).now() - claimedAtMs;
+    // FAIL TOWARD HOLDING (design (c)): an age this process cannot read (missing/garbled `ts`) is
+    // treated exactly like a FRESH, live claim — never like a stale one — because the alternative
+    // is two reviewers judging the same head and posting conflicting verdicts.
+    if (ageMs === undefined || ageMs < REVIEW_LOCK_TTL_MS) {
+      return {
+        posted: false,
+        reason:
+          `remudero-review is already pending for ${opts.sha.slice(0, 7)} (owned by run ${priorPending.runId}) ` +
+          "— no-op (W1-T913 idempotent-per-input)",
+      };
+    }
+    // RECLAIM, DO NOT DELETE (design (b)): the stale claim is evidence a run died mid-review, so
+    // fall through and post a fresh pending as the NEW holder, naming what it took over from
+    // rather than silently overwriting it.
+    takenOverFrom = priorPending;
   }
-  const description = `remudero-review: review in progress (owned by run ${opts.runId})`.slice(0, 140);
+  const description = (
+    takenOverFrom
+      ? `remudero-review: review in progress (owned by run ${opts.runId}) — took over a stale claim ` +
+        `(>= ${Math.round(REVIEW_LOCK_TTL_MS / 60_000)}m old) from run ${takenOverFrom.runId} (W1-T3647)`
+      : `remudero-review: review in progress (owned by run ${opts.runId})`
+  ).slice(0, 140);
   const ownerIdentity = opts.ownerIdentity ?? { pid: process.pid, startedAt: new Date().toISOString() };
   const result = await postReviewStatusGuarded({
     owner: opts.owner,
