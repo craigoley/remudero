@@ -1,0 +1,80 @@
+- id: W1-T3739
+  title: "THE FILING PROTOCOL IS TYPED BY HAND WHEN A FUNCTION ALREADY PRODUCES IT — `reservationHandoffNoteLine` exists so the note cannot be misspelled, nothing calls it at filing time, and it was misspelled three times in one day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-09-17. Three separate filings were refused by `task-id-existence` for a
+    malformed or missing hand-off note: #5894 (wrote `planfast -> planfast` where the reservation
+    recorded `unknown`), and #5901 twice (the line absent, then lost to a branch rewrite).
+
+    (1) THE REPO ALREADY SOLVED THE SPELLING, AND THE SOLUTION IS UNREACHABLE AT THE MOMENT IT IS
+        NEEDED. `reservationHandoffNoteLine(holder, filer)` exists in
+        `scripts/task-id-existence-check.mjs` with a comment stating its whole purpose: it returns
+        "ONLY the bare hand-off text, with nothing before or after it, so whatever prints it can
+        guarantee -- BY CONSTRUCTION, not by instruction a reader might skip -- that nothing else
+        ever shares its line." The guarantee holds for the gate's own message. It does not reach the
+        filer, who types the line into a shard by hand.
+
+    (2) THE SAME SHAPE, THREE MORE TIMES, THE SAME DAY. #5915 wrote its acceptance bullets as
+        `claim | proof` instead of the `- claim:` / `  proof:` dialect the reviewer's parser reads.
+        Five pull requests carried a body `## Acceptance` block that diverged from the shard the
+        trailer resolves, which `acceptance-author-gate` refuses as the CONSOLE-T12 shape. Both are
+        renderable from data that already exists.
+
+    (3) THE FIX FOR A TYPED PROTOCOL IS NOT A BETTER INSTRUCTION. `spawnWorker` passes
+        `settingSources: []`, so no dispatched worker reads CLAUDE.md — this repo already ruled on
+        that. Published work on agentic coding puts it from the other side: agents "follow the
+        permissiveness of your design rather than unstated conventions", and recommends
+        constructor-enforced invariants over documentation precisely because an agent cannot be
+        relied on to remember one. A hand-typed protocol line is a permissive design.
+
+    (4) THE OPERATOR REPORT THIS SITS UNDER: "We spend way too much time manually working the
+        queue." Every refusal above is a full CI round spent on a string.
+  design: |
+    (i) `rmd next-task-id` SCAFFOLDS THE SHARD IT RESERVES. It already knows the id, the recorded
+        holder and the filing branch — the three inputs `reservationHandoffNoteLine` needs. It
+        emits a shard stub with the note written BY THAT FUNCTION, so the one line the gate matches
+        on is generated, never transcribed. The verb keeps printing what it prints today; the stub
+        is additive and `--no-scaffold` declines it.
+
+    (ii) THE ACCEPTANCE BLOCK IS RENDERED FROM THE SHARD, NOT RETYPED. A verb renders a pull
+         request body's `## Acceptance` from the trailer's plan record, in the reviewer's own
+         dialect. That makes trailer/body divergence unreachable rather than refused: the two
+         cannot disagree because only one of them is authored.
+
+    (iii) EVERY GENERATOR CONSUMES THE PRODUCTION FUNCTION, NEVER A COPY OF ITS OUTPUT SHAPE.
+          `reservationHandoffNoteLine` for the note, `parseAcceptanceBlock`'s own dialect for the
+          block. A generator that re-spells either is the same defect one layer up, and it would be
+          harder to see.
+
+    NOT IN SCOPE: `files:` scaffolding, which needs a task's design to be known and is a judgement
+    rather than a rendering.
+  acceptance:
+    - claim: "a scaffolded shard carries the hand-off line produced by the function the gate matches with, not a transcription"
+      proof: "unit test: the scaffolded note is the function's own output"
+    - claim: "the scaffolded shard passes the gate that refused those three filings"
+      proof: "unit test: a scaffolded shard satisfies the reservation-holder check"
+    - claim: "an acceptance block rendered from a task cannot diverge from that task's own proofs"
+      proof: "unit test: a rendered block round-trips through the reviewer's parser"
+    - claim: "scaffolding can be declined, so a filer with their own shard is never forced through it"
+      proof: "unit test: --no-scaffold writes nothing"
+  falsifier: |
+    Build the note with a template string in the scaffolder rather than calling
+    `reservationHandoffNoteLine` and the first assertion goes red — that is the exact defect being
+    fixed, one layer up and harder to see. Render the acceptance block with a hand-written format
+    and the third goes red, because it round-trips through `parseAcceptanceBlock` rather than
+    through a string comparison. Emit the note fused onto an existing `note:` value and the second
+    goes red: the matcher is end-of-line anchored and W1-T3648 already paid for that once.
+  risk: medium
+  band_meaning: blast-radius
+  origin: human
+  plan_refs: [W1-T3648, W1-T3658, W1-T3737]
+  files: [scripts/task-id-existence-check.mjs]
+  status: queued
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> file-t3738-40-the-cycle

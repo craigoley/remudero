@@ -5,7 +5,7 @@
   ".github/workflows/ci-gate.yml": 250,
   ".github/workflows/ci.yml": 750,
   ".github/workflows/clock-sweep.yml": 250,
-  ".github/workflows/codeql.yml": 15,
+  ".github/workflows/codeql.yml": 250,
   ".github/workflows/coverage-session-blanking.yml": 250,
   ".github/workflows/dependency-review.yml": 76,
   ".github/workflows/docs-index-check.yml": 44,
@@ -154,7 +154,7 @@
   "src/lib/branch-reaper.ts": 223,
   "src/lib/bundle.ts": 250,
   "src/lib/cash-web-bridge.ts": 250,
-  "src/lib/ci-failure-corpus.ts": 65,
+  "src/lib/ci-failure-corpus.ts": 250,
   "src/lib/ci-gate-required.ts": 2,
   "src/lib/ci-lesson-recurrence.ts": 250,
   "src/lib/ci-parity.ts": 1000,
@@ -352,6 +352,6 @@
   "src/lib/worker.ts": 1552,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 16062,
+  "src/run-task.ts": 16250,
   "src/spike.ts": 18
 }

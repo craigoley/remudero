@@ -1,0 +1,56 @@
+- id: W1-T3727
+  title: "RETRO AND alert_fix STOP DEAD UNDER A SQUEEZE — both commit, so neither can take the shell-less cash surface, and the harness-owns-git pattern that unblocked implement was never extended to them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 15.00
+  files: [src/lib/worker.ts, src/run-task.ts, test/a-committing-lane-diverts-once-the-harness-owns-git.test.ts]
+  origin: oper#squeeze-readiness-audit-2026-09-17
+  plan_refs: ["W1-T3696", "W1-T3726", "W1-T3692"]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3726 gave recon and diagnose a divert surface and DELIBERATELY STOPPED THERE. The two
+    remaining lanes are excluded for one shared reason: they perform git effects, and the
+    check-runner cannot.
+
+        retro       prompt: "edits ONLY MASTER-PLAN.md then `git add` + commits it"
+        alert_fix   DISPATCH_LANE_TOOL_BOUNDS declares NO openweight row at all (W1-T3656)
+
+    THE COHERENCE RULE IS WHY THIS IS NOT A ONE-LINE TABLE EDIT. The prompt is built BEFORE the
+    auction runs, so offering a shell-less surface to a worker whose prompt said `git commit` hands
+    it, on retry, a surface that cannot do what it was just asked to do. W1-T3696 solved exactly
+    this for implement -- `harnessOwnsGitFor`, `harnessCommitForShellLessWorker`, and the
+    `implementCashTools` guard that offers the cash surface ONLY when the spawn was told the harness
+    owns git. The machinery exists and is tested; it has one consumer.
+
+    WHAT STOPS IF THIS IS NOT BUILT. At the 95% auction ceiling (claude weekly was 86% on
+    2026-09-17, resetting 2026-09-22) the build loop survives on cash, but:
+      - alert_fix: CI-failure repair stops, so a red PR stays red and the sweep's fix rung no-ops.
+      - retro: plan authorship and the learning flywheel stop.
+    Neither is fleet-stopping on its own, which is why this is filed rather than hot-fixed.
+
+    DO NOT SOLVE THIS BY WIDENING OPENWEIGHT_CHECKS. `git push` is absent from that table by
+    construction, not by oversight: W1-T3572 removed forge authority from cheap models on purpose.
+    The answer is the harness performing the effect, exactly as implement does.
+
+    RULE 19 SIZING: risk:high, not a decomposition. The linter counts run-task + worker as two
+    concerns and it is right that this crosses them -- but it is ONE change (grant a lane the
+    harness-git contract), and splitting it would leave a helper with no caller on one side and a
+    caller with no helper on the other. The risk band is raised because that is what the change
+    actually is: it hands git effects to a lane running on a cheap model.
+
+  acceptance:
+    - claim: "a committing lane offers a cash divert surface only when the spawn was told the harness owns its git effects"
+      proof: "grep: harness owns its git in test/a-committing-lane-diverts-once-the-harness-owns-git.test.ts"
+    - claim: "the harness performs the commit for a shell-less worker on a lane other than implement"
+      proof: "grep: harnessCommitForShellLessWorker in test/a-committing-lane-diverts-once-the-harness-owns-git.test.ts"
+    - claim: "alert_fix without harness git still offers nothing, so the exclusion cannot lapse by accident"
+      proof: "grep: alert_fix in test/a-committing-lane-diverts-once-the-harness-owns-git.test.ts"
+  note: |
+    reservation hand-off: main -> plan/file-the-squeeze-readiness-gaps-1789647960
+
+    Minted on `main` by the audit lane; recorded because the filing branch is not that ref.

@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # W1-T3725. Editing this list: scripts/** and .github/** stay OUT (both look like config,
+    # both are code CodeQL reads), and push/schedule stay UNFILTERED (a skipped PR analysis is
+    # sound only because the same commit is analysed on push to main). Both pinned by
+    # test/a-plan-filing-does-not-pay-for-codeql.test.ts.
+    paths-ignore:
+      - "plan/**"
+      - "docs/**"
+      - "learnings/**"
+      - "**/*.md"
   schedule:
     # Weekly, off-peak (Mondays 04:17 UTC — deliberately not on :00/:30).
     - cron: "17 4 * * 1"

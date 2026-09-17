@@ -402,7 +402,14 @@ test("preflightCommand: WITHOUT --ci-parity, none of the ci-parity steps run or 
     console.log = originalLog;
   }
   assert.equal(code, 0);
-  assert.equal(lines.some((l) => l.includes("ci-parity")), false, "no ci-parity output at all without the flag");
+  // W1-T3737: the STEP lines, not any mention. The PASS summary now names ci-parity among the
+  // tiers it did NOT run — a disclosure, not output from a step — and a substring match cannot
+  // tell those apart. What this test is about is that no ci-parity step executed.
+  assert.equal(
+    lines.some((l) => /^ci-parity[:\s]/.test(l) || /^ci:/.test(l)),
+    false,
+    "no ci-parity STEP output at all without the flag",
+  );
   assert.deepEqual(
     lines.filter((l) => /^(commitlint|typecheck|emitter-checks):/.test(l)).length,
     3,

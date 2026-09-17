@@ -195,7 +195,7 @@ test("preflightCommand: --fast ADDS the fast-mode steps after the three hand-rou
   assert.equal(lines.some((l) => l.includes("ci-parity")), false, "no --ci-parity output when only --fast was passed");
 });
 
-test("preflightCommand: WITHOUT --fast, no fast-mode step runs or prints — the shipped hand route (and --ci-parity mode) is untouched", async () => {
+test("preflightCommand (W1-T3737, reverses the --fast opt-in): the fast gate runs by DEFAULT, and only --no-fast declines it", async () => {
   const spawn: PreflightSpawn = () => ({ status: 0, stdout: "\0feat(x): fine\n", stderr: "" });
   const originalLog = console.log;
   const lines: string[] = [];
@@ -209,11 +209,15 @@ test("preflightCommand: WITHOUT --fast, no fast-mode step runs or prints — the
     console.log = originalLog;
   }
   assert.equal(code, 0);
+  // W1-T3737 REVERSES THIS. It used to assert that no fast step printed without the flag, which
+  // was true and was the problem: MEASURED on origin/main, the default passed in 12s on a diff CI
+  // then refused, while --fast caught it in 35s running twenty checks with no false reds. The
+  // checks were built; nobody passed the flag. They now run by default.
   for (const { job } of FAST_GATE_STEPS) {
     assert.equal(
       lines.some((l) => l.startsWith(`${job}:`)),
-      false,
-      `'${job}' must not print without --fast`,
+      true,
+      `'${job}' must print by default now`,
     );
   }
 });
