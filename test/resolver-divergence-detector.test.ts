@@ -207,15 +207,33 @@ test("resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — t
   // `resolvePlanCriteriaAtHead` assertion below) and this suite exercises it directly instead.
   const callSites = runTaskSrc.split("resolvePlanCriteriaForReview(").length - 1;
   assert.equal(callSites, 1, "exactly one definition and no call site; any second occurrence means it was wired somewhere new");
-  // `resolvePlanCriteriaAtHead` (imported from lib/review.ts) has exactly TWO intentional call
-  // sites: `reviewCommand`'s own `if (taskId)` branch and W1-T3557's dedicated fix-rung helper.
-  // A merged-PR sweep or retro path must not gain a third.
+  // `resolvePlanCriteriaAtHead` (imported from lib/review.ts) has exactly THREE intentional call
+  // sites: `reviewCommand`'s own `if (taskId)` branch, W1-T3557's dedicated fix-rung helper, and
+  // W1-T3738's local proof tier.
+  //
+  // THE THIRD IS THE POINT OF THAT TIER, NOT AN EROSION OF THIS ONE. What this census exists to
+  // refuse is a MERGED-ADJACENT path (a sweep, a retro) resolving head-bound criteria; the
+  // preflight tier is the opposite — it runs before a push exists, and it calls THIS resolver
+  // precisely so a local verdict cannot disagree with the gate about WHICH criteria a branch is
+  // judged on. A tier with its own parser would be worse than no tier. So the count rises by one
+  // and each site is still named below: a FOURTH is still refused, and so is moving any of the
+  // three somewhere new.
   const atHeadCallSites = runTaskSrc.split("resolvePlanCriteriaAtHead(").length - 1;
-  assert.equal(atHeadCallSites, 2, "exactly the review-command and fix-rung-head-contract resolver call sites are permitted");
+  assert.equal(
+    atHeadCallSites,
+    3,
+    "exactly the review-command, fix-rung-head-contract and preflight-proofs resolver call sites are permitted",
+  );
   assert.match(
     runTaskSrc,
     /export function resolveFixRungTaskContractAtHead[\s\S]*?return resolvePlanCriteriaAtHead\(`Remudero-Task: \$\{taskId\}`/,
     "the second resolver call is confined to the W1-T3557 fix-rung contract helper",
+  );
+  // The third, pinned the same way: it lives inside runPreflightProofs and nowhere else.
+  assert.match(
+    runTaskSrc,
+    /export function runPreflightProofs[\s\S]*?resolvePlanCriteriaAtHead\(body, repoRoot, "plan\/tasks\.yaml", headSha\)/,
+    "the third resolver call is confined to W1-T3738's local proof tier",
   );
   // Neither retroCommand nor a merged-PR sweep (which DO touch merged-adjacent state) gained a
   // reference to either resolver.

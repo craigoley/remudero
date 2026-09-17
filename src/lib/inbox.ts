@@ -2459,13 +2459,6 @@ export interface RatifyBatchGateway {
   openPlanPr(branch: string, proposalIds: string[]): string;
 }
 
-export interface RatifyBatchLedgerDeps {
-  ledgerPath: string;
-  runId: string;
-  /** Same contract as {@link RatifyLedgerDeps.duplicateCorpus} — omitted/empty fails open. */
-  duplicateCorpus?: readonly DuplicateCorpusEntry[];
-}
-
 export type BatchApproveResult =
   | {
       ok: true;
@@ -2491,7 +2484,7 @@ export function approveBatch(
   classifications: readonly InboxClassification[],
   masterPlanMd: string,
   gateway: RatifyBatchGateway,
-  deps: RatifyBatchLedgerDeps,
+  deps: RatifyLedgerDeps,
 ): BatchApproveResult {
   const plan = planRatificationBatch(classifications, masterPlanMd, { duplicateCorpus: deps.duplicateCorpus });
 
