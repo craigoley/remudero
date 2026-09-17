@@ -62,12 +62,23 @@ interface Boot {
  */
 const BOOT_SPAWN_TIMEOUT_MS = 60_000;
 
-/** A git origin with one commit, plus the package files a real clone would carry. */
+/** A git origin with one commit, plus the package files a real clone would carry.
+ *
+ * W1-T3684: `bin/rmd` is included because `resolve_rmd_on_path` (the entrypoint's own PATH-
+ * pointing step, run after every successful checkout) now refuses the boot when the checked-out
+ * tree has no usable `bin/rmd` — exactly as a real checkout of this repo never would. Every other
+ * test in this file is about boot mechanics unrelated to that step, so the fixture carries a
+ * trivial, always-executable stub rather than leaving each of them to fail on a check they were
+ * never testing.
+ */
 function makeOrigin(): string {
   const origin = mkdtempSync(join(tmpdir(), "entrypoint-origin-"));
   git(origin, ["init", "-q", "-b", "main"]);
   writeFileSync(join(origin, "package.json"), '{"name":"fixture","version":"1.0.0"}\n');
   writeFileSync(join(origin, "first.txt"), "one\n");
+  mkdirSync(join(origin, "bin"), { recursive: true });
+  writeFileSync(join(origin, "bin", "rmd"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+  chmodSync(join(origin, "bin", "rmd"), 0o755);
   git(origin, ["add", "-A"]);
   commit(origin, "c1");
   return origin;
