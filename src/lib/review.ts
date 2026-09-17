@@ -8296,3 +8296,131 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
   }
   return result;
 }
+
+// ── W1-T3646: a repair lease names its holder on the head sha ──────────────
+// {@link postReviewPending}, above, is the REVIEW half of a PR's lifecycle: a lane about to judge
+// posts a named claim before it does. Nothing held the REPAIR half — the longer, more
+// collision-prone one — so independent lanes rediscovered one defect and wrote the same remedy
+// twice (see the task's own rationale, #5684/#5673/#5697-8/#5699-704). This reuses the review
+// lock's SHAPE (a status naming the holder, keyed to the head sha it was taken against) but
+// deliberately NOT its mutex: this is a LEASE, advisory and time-scoped to a sha, never a
+// permission check on pushing (design notes, W1-T3646). W1-T3647 supplies its TTL.
+
+/** The commit-status context a repair lease posts under — distinct from {@link REVIEW_CONTEXT} so
+ *  a repair claim can never be mistaken for a review verdict, and never a required check, so it
+ *  cannot block a merge the way `remudero-review` does. */
+export const REPAIR_LEASE_CONTEXT = "remudero-repair-lease";
+
+export interface RepairLeaseRecord {
+  headSha: string;
+  runId: string;
+  postedAt: string;
+}
+
+function repairLeaseRecord(line: Record<string, unknown>): RepairLeaseRecord | undefined {
+  if (typeof line.head_sha !== "string") return undefined;
+  return {
+    headSha: line.head_sha,
+    runId: typeof line.run_id === "string" ? line.run_id : "",
+    postedAt: typeof line.ts === "string" ? line.ts : "",
+  };
+}
+
+/** The current holder of a repair lease on `sha`, or `undefined` when no lane holds one for
+ *  `taskId` — INCLUDING when the most recent lease line names an OLDER sha. The claim dies with
+ *  the sha it was taken against by construction: a pushed fix changes the head sha, so the next
+ *  read here simply finds nothing, releasing the claim rather than letting it outlive the code it
+ *  was protecting (criterion 3, the design's "lease, not a mutex" requirement). */
+export function currentRepairLeaseHolder(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string | undefined,
+  sha: string,
+): RepairLeaseRecord | undefined {
+  if (!taskId) return undefined;
+  let prior: RepairLeaseRecord | undefined;
+  for (const line of lines) {
+    if (line.step !== "repair.lease_posted" || line.task_id !== taskId) continue;
+    prior = repairLeaseRecord(line) ?? prior;
+  }
+  return prior && prior.headSha === sha ? prior : undefined;
+}
+
+/** ADVISORY, NOT A MUTEX (W1-T3646 design: "must not block a human, and never gate CI... it is
+ *  not a permission check on pushing"). The answer is unconditionally `true` regardless of
+ *  `holder`, so nothing that calls this before letting a push through can accidentally turn a
+ *  visible claim into a refusal — a claimed PR stays repairable by anyone who decides to
+ *  (criterion 2). Exported so an integration point has one obvious call to make instead of
+ *  inventing its own (wrong) check against the holder. */
+export function repairLeaseAllowsPush(_holder: RepairLeaseRecord | undefined): true {
+  return true;
+}
+
+export interface PostRepairLeaseOpts {
+  owner: string;
+  repo: string;
+  sha: string;
+  /** The PR the ledger keys off — same convention as {@link PostReviewPendingOpts.taskId}. */
+  taskId: string;
+  runId: string;
+  ledgerPath: string;
+  /** Injected raw poster (tests). Defaults to a real `gh api` status POST under {@link
+   *  REPAIR_LEASE_CONTEXT}, reusing {@link execGhStatusPost} unchanged. */
+  post?: (o: { owner: string; repo: string; sha: string; description?: string }) => void | Promise<void>;
+}
+
+export interface PostRepairLeaseResult {
+  posted: boolean;
+  holder?: RepairLeaseRecord;
+  reason?: string;
+}
+
+/** Posts `remudero-repair-lease: repair in progress (owned by run <runId>)` on `opts.sha` and
+ *  ledgers `repair.lease_posted`, so a second lane calling {@link currentRepairLeaseHolder} with
+ *  the SAME sha sees who is already repairing it (criterion 1). Idempotent per sha, like {@link
+ *  postReviewPending}: a lane that finds a live holder on this exact sha does not re-post over it
+ *  — but unlike that reviewer path, this NEVER acquires a lock, NEVER retries, and a failed
+ *  courtesy post is swallowed rather than thrown, because a `gh` hiccup must not interrupt the
+ *  repair it only narrates (criterion 2's advisory guarantee, made concrete: this can never block
+ *  the caller on network I/O the way a mutex-backed poster could). */
+export async function postRepairLease(opts: PostRepairLeaseOpts): Promise<PostRepairLeaseResult> {
+  const lines = readLiveLedgerRecords(opts.ledgerPath);
+  const holder = currentRepairLeaseHolder(lines, opts.taskId, opts.sha);
+  if (holder) {
+    return {
+      posted: false,
+      holder,
+      reason:
+        `a repair lease is already held for ${opts.sha.slice(0, 7)} (owned by run ${holder.runId}) ` +
+        "— visible, not enforced (W1-T3646)",
+    };
+  }
+  const description = `${REPAIR_LEASE_CONTEXT}: repair in progress (owned by run ${opts.runId})`.slice(0, 140);
+  const post = opts.post ?? defaultPostRepairLeaseStatus;
+  try {
+    await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, description });
+  } catch {
+    // Advisory only: a failed courtesy post never blocks the repair it is narrating.
+  }
+  appendLedger(opts.ledgerPath, {
+    run_id: opts.runId,
+    task_id: opts.taskId,
+    step: "repair.lease_posted",
+    head_sha: opts.sha,
+  });
+  return { posted: true, holder: { headSha: opts.sha, runId: opts.runId, postedAt: new Date().toISOString() } };
+}
+
+async function defaultPostRepairLeaseStatus(o: { owner: string; repo: string; sha: string; description?: string }): Promise<void> {
+  const args = [
+    "api",
+    "-X",
+    "POST",
+    `repos/${o.owner}/${o.repo}/statuses/${o.sha}`,
+    "-f",
+    `context=${REPAIR_LEASE_CONTEXT}`,
+    "-f",
+    "state=success",
+  ];
+  if (o.description) args.push("-f", `description=${o.description.slice(0, 140)}`);
+  execGhStatusPost(args, process.env);
+}
