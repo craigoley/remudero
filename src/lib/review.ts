@@ -9,6 +9,7 @@ import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
+import { systemClock, type Clock } from "./clock.js";
 import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
@@ -8223,6 +8224,11 @@ export interface PostReviewPendingOpts {
   lockOpts?: AcquireReviewStatusLockOpts;
   /** Injectable only so the durable owner record is deterministic in tests. */
   ownerIdentity?: { pid: number; startedAt: string };
+  /** The wall clock the TTL is measured against. Defaults to {@link systemClock}, so production
+   *  reads real time and nothing is handed a frozen instant it did not ask for — this is a CLOCK,
+   *  not the fixed `now` field the comment below rules out. Present so the TTL boundary is
+   *  testable, the same reason `ownerIdentity` above is injectable. */
+  clock?: Clock;
 }
 
 export interface PostReviewPendingResult {
@@ -8281,7 +8287,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
   let takenOverFrom: PendingReviewStatusRecord | undefined;
   if (priorPending && priorPending.headSha === opts.sha) {
     const claimedAtMs = Date.parse(priorPending.postedAt);
-    const ageMs = Number.isNaN(claimedAtMs) ? undefined : Date.now() - claimedAtMs;
+    const ageMs = Number.isNaN(claimedAtMs) ? undefined : (opts.clock ?? systemClock).now() - claimedAtMs;
     // FAIL TOWARD HOLDING (design (c)): an age this process cannot read (missing/garbled `ts`) is
     // treated exactly like a FRESH, live claim — never like a stale one — because the alternative
     // is two reviewers judging the same head and posting conflicting verdicts.
