@@ -48,8 +48,10 @@ function checkFor(violations: LintViolation[]): LintViolation[] {
 }
 
 // ── ACCEPTANCE 1: a task blocked by nothing is reported by name ────────────────────────────────
+// Test name below is the task's own `proof:` string verbatim (minus the "unit test: " prefix) —
+// the review floor matches proof to a literal test name, not a paraphrase.
 
-test("criterion 1a: a status:blocked task with `depends_on: []` and no `retirement:` is reported by name", () => {
+test("a task blocked by nothing is reported by name", () => {
   const t = task("W1-PARKED-BY-NOTHING", { status: "blocked", depends_on: [] });
   const plan = planOf([t]);
   const violations = checkFor(blockedWithoutDispositionViolations(t, plan));
@@ -88,8 +90,9 @@ test("criterion 1b: measured over the LOADED plan (loadPlanFromYaml), matching t
 });
 
 // ── ACCEPTANCE 2: a blocked task with an unmet dependency is not reported ───────────────────────
+// Test name below is the task's own `proof:` string verbatim (minus the "unit test: " prefix).
 
-test("criterion 2a: a blocked task whose depends_on names a task that is neither merged nor retired is NOT reported — an unmet dependency explains ordinary blocking", () => {
+test("a blocked task with an unmet dependency is not reported", () => {
   const blocker = task("W1-BLOCKER", { status: "queued" });
   const t = task("W1-ORDINARILY-BLOCKED", { status: "blocked", depends_on: ["W1-BLOCKER"] });
   const plan = planOf([blocker, t]);
@@ -111,8 +114,9 @@ test("criterion 2c: a blocked task whose depends_on names a RETIRED task is repo
 });
 
 // ── ACCEPTANCE 3: a retired blocked task is not reported ───────────────────────────────────────
+// Test name below is the task's own `proof:` string verbatim (minus the "unit test: " prefix).
 
-test("criterion 3: a blocked task naming any of the three legal RETIREMENT_REASONS emits zero violations, with or without depends_on", () => {
+test("a retired blocked task is not reported", () => {
   assert.deepEqual([...RETIREMENT_REASONS], ["retired", "closed", "withdrawn"], "sanity: exactly three legal values, unchanged");
   for (const reason of RETIREMENT_REASONS) {
     const t = task("W1-RULED", { status: "blocked", retirement: reason, depends_on: [] } as Partial<Task>);
@@ -122,8 +126,9 @@ test("criterion 3: a blocked task naming any of the three legal RETIREMENT_REASO
 });
 
 // ── ACCEPTANCE 4: a prose-only retirement is reported as unreadable ─────────────────────────────
+// Test name below is the task's own `proof:` string verbatim (minus the "unit test: " prefix).
 
-test("criterion 4a: a blocked task retired only in prose (no structured `retirement:` field) is STILL reported — the migration W1-T1287 began stays finishable", () => {
+test("a prose-only retirement is reported as unreadable", () => {
   const t = task("W1-PROSE-ONLY", {
     status: "blocked",
     depends_on: [],
@@ -151,8 +156,9 @@ test("criterion 4b: the prose-only message reads distinctly as UNREADABLE, not a
 });
 
 // ── ACCEPTANCE 5: the rule warns and never refuses ──────────────────────────────────────────────
+// Test name below is the task's own `proof:` string verbatim (minus the "unit test: " prefix).
 
-test("criterion 5a: every violation this rule produces is severity: warn, never block", () => {
+test("the blocked-without-disposition rule warns and does not refuse", () => {
   const cases: Task[] = [
     task("W1-WARN-1", { status: "blocked", depends_on: [] }),
     task("W1-WARN-2", { status: "blocked", depends_on: [], rationale: "retired per operator note" } as Partial<Task>),
